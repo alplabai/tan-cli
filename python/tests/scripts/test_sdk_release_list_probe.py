@@ -55,6 +55,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "sdk_release_list_probe.py"
 _spec = importlib.util.spec_from_file_location("sdk_release_list_probe", _SCRIPT)
 assert _spec and _spec.loader
@@ -185,15 +187,27 @@ def test_the_outage_message_does_not_claim_the_pin_is_correct():
         )
 
 
-def test_the_proceed_message_does_not_announce_an_outage():
-    """Anti-false-alarm: the ordinary path must not raise an annotation a log
-    reader would then chase."""
+def test_the_proceed_message_carries_none_of_the_outage_search_tokens():
+    """Anti-false-alarm, and it is about GREPPING, not only about annotations.
+    An operator who has lived through one outage searches run logs for `empty`
+    and for the issue number. A proceed line containing either puts every
+    green run in history into those results.
+
+    This assertion was briefly DROPPED so that a hedged proceed message
+    ("...is not empty and this is not the tan-cli#840 signature...") could
+    pass. That is a test retuned to fit the code. It is back, and wider."""
     fl, flt, _ = _fetchers(100, "v1.0.1")
 
     result = probe_mod.probe(PINNED, fetch_list_len=fl, fetch_latest_tag=flt)
 
-    assert "::warning" not in result.message
+    lowered = result.message.lower()
+    assert "::warning" not in lowered
     assert probe_mod.VERDICT_UPSTREAM_LIST_EMPTY not in result.message
+    for token in ("empty", "840", "outage"):
+        assert token not in lowered, (
+            f"the ordinary-path message contains {token!r}, which is a token "
+            f"an operator greps for during an outage: {result.message!r}"
+        )
 
 
 def test_the_populated_list_message_does_not_vouch_for_the_pin():
@@ -209,8 +223,14 @@ def test_the_populated_list_message_does_not_vouch_for_the_pin():
     result = probe_mod.probe(PINNED, fetch_list_len=fl, fetch_latest_tag=flt)
 
     lowered = result.message.lower()
-    assert "west decides" in lowered, result.message
-    assert "not detected" in lowered, (
+    assert PINNED in result.message, (
+        f"the line must name the pin it is NOT vouching for: {result.message!r}"
+    )
+    assert "west" in lowered, (
+        "the membership question must be visibly handed to west rather than "
+        f"answered here: {result.message!r}"
+    )
+    assert "truncated" in lowered, (
         "the populated-list line must name the partial-list case it cannot "
         f"see, or it reads as an all-clear it has not earned: {result.message!r}"
     )
@@ -340,6 +360,13 @@ class TestTheRealGhPath:
             "check=True would raise instead of returning a non-zero result, "
             "and the caller's None-means-unmeasured contract would never fire"
         )
+        assert kwargs["text"] is True, (
+            "without text=True, stdout is bytes. That does NOT crash -- "
+            "int(b'100') is 100 and bytes.strip() works -- which is exactly "
+            "why it needs pinning: the failure is silent, and the latest tag "
+            "reaches an operator-facing message as b'v1.0.1'."
+        )
+        assert kwargs["capture_output"] is True
 
     def test_the_latest_call_asks_the_latest_endpoint_for_its_tag(self, monkeypatch):
         fake = _FakeRun(stdout="v1.0.1\n")
@@ -455,3 +482,82 @@ def test_main_writes_no_step_summary_on_the_ordinary_path(tmp_path):
     )
 
     assert not summary.exists()
+
+
+# --------------------------------------------------------------------------
+# The two writes are deliberately asymmetric. One is cosmetic and guarded; the
+# other is the channel the verdict travels on and is left to raise.
+# --------------------------------------------------------------------------
+
+
+def test_an_unwritable_step_summary_does_not_red_the_step(tmp_path, capsys):
+    """The summary write happens ONLY on the outage path. If it could raise,
+    an unwritable summary would become a red inside the exact window this
+    script exists to keep free of misattributed reds."""
+    out = tmp_path / "out"
+    unwritable = tmp_path / "no-such-dir" / "summary.md"
+    fl, flt, _ = _fetchers(0, "v1.0.1")
+
+    rc = probe_mod.main(
+        ["--version", PINNED],
+        github_output=out,
+        step_summary=unwritable,
+        fetch_list_len=fl,
+        fetch_latest_tag=flt,
+    )
+
+    assert rc == 0
+    assert "::notice::could not write the step summary" in capsys.readouterr().out
+    assert f"{probe_mod.OUTPUT_KEY}=true" in out.read_text(encoding="utf-8"), (
+        "the verdict must still reach the step that reads it -- losing the "
+        "cosmetic half must not lose the load-bearing half"
+    )
+
+
+def test_an_unwritable_github_output_is_not_swallowed(tmp_path):
+    """The opposite call. `$GITHUB_OUTPUT` is how the verdict reaches the
+    `if:` on five steps; a silently dropped write would leave the outage
+    permanently unreportable, which is strictly worse than a red naming the
+    real cause. So this one is allowed to raise."""
+    fl, flt, _ = _fetchers(0, "v1.0.1")
+
+    with pytest.raises(OSError):
+        probe_mod.main(
+            ["--version", PINNED],
+            github_output=tmp_path / "no-such-dir" / "out",
+            step_summary=None,
+            fetch_list_len=fl,
+            fetch_latest_tag=flt,
+        )
+
+
+def test_the_step_summary_names_every_skipped_step(tmp_path):
+    """The changelog claims it names them. Five `if:` conditions in
+    getting-started.yml mean five skipped steps, and a summary that counts
+    some of them instead ("the two dirty-host steps") is the kind of
+    almost-true this fragment was rewritten to stop producing."""
+    summary = tmp_path / "summary.md"
+    fl, flt, _ = _fetchers(0, "v1.0.1")
+
+    probe_mod.main(
+        ["--version", PINNED],
+        github_output=tmp_path / "out",
+        step_summary=summary,
+        fetch_list_len=fl,
+        fetch_latest_tag=flt,
+    )
+
+    written = summary.read_text(encoding="utf-8")
+    for step in (
+        "install the Zephyr SDK (west sdk install, the printed remedy)",
+        "tan build (real ARM build of the scaffolded project)",
+        "the scaffolded project produced an ARM ELF",
+        "dirty host 1/3: west in the venv, absent from bare PATH (tan-cli#299)",
+        "dirty host 3/3: stale $ZEPHYR_BASE + stale ~/.alp/sdk-default must not "
+        "leak into the report (tan-cli#301)",
+    ):
+        assert step in written, f"the summary does not name {step!r}:\n{written}"
+    assert "dirty host 2/3" in written, (
+        "the summary must also say which coverage SURVIVED the outage, or a "
+        "reader assumes the whole job was hollow"
+    )

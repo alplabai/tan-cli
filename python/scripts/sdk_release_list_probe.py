@@ -17,8 +17,16 @@ Zephyr revision at every run. The measured incident cost one full
 investigation to reach "not ours"; this script exists so the next one costs a
 line of log.
 
-It is a PROBE, not a gate. It never exits non-zero -- it measures, writes a
-verdict to `$GITHUB_OUTPUT`, and lets the step decide.
+It is a PROBE, not a gate: no MEASUREMENT outcome makes it exit non-zero. It
+measures, writes a verdict to `$GITHUB_OUTPUT`, and lets the step decide.
+
+That is not the same as "it can never fail". The `$GITHUB_OUTPUT` write is
+left unguarded on purpose -- that file is the channel the verdict travels on,
+and swallowing a failed write would leave the outage silently unreportable
+forever, which is strictly worse than a red naming the real cause. The
+`$GITHUB_STEP_SUMMARY` write IS guarded: it is cosmetic, and it happens only
+on the outage path, so an unwritable summary must not become the misattributed
+red this whole file exists to prevent.
 
 WHY OVER-CLAIMING IS THE DANGEROUS DIRECTION
 ---------------------------------------------
@@ -47,20 +55,39 @@ The third row is the one worth defending. `api.github.com` being wholly
 unreachable would otherwise satisfy "the list is empty" and disable the ARM
 build on every PR for the duration.
 
-WHAT THIS DOES NOT DETECT, ON PURPOSE
---------------------------------------
+WHAT THIS DOES NOT DETECT, AND WHY DECLINING IT IS A CHOICE
+------------------------------------------------------------
 
 A PARTIAL list -- non-empty, but stale or truncated so that it omits the
 pinned version -- lands in row 2 and proceeds, and west then prints the same
-`Unavailable SDK version` message this file exists to explain. That case is
-NOT covered, and it cannot be covered by counting: "the list is short and the
-pin is absent" and "the pin is genuinely wrong" are the same observation from
-here, and only the second one should ever be reported as a pin problem.
-Telling them apart needs a source of truth for the pin, which is
-`metadata/toolchains.json` in the PINNED alp-sdk -- a different measurement
-than this probe makes, and the reason row 2's message below is careful to
-claim only that the list is not empty, and to hand the "is the pin among
-them" question to west rather than implying an answer.
+`Unavailable SDK version` message this file exists to explain.
+
+It would be false to say that measurement is out of reach. This script is
+HANDED the pin (`--version`, which the caller reads from the pinned alp-sdk's
+`metadata/toolchains.json`), so asking whether the pin's tag is among the
+listed ones costs a `--jq` change on a call already being made. Two things
+make it a worse trade than it looks, and they are the reason it is declined
+rather than merely deferred:
+
+  * `per_page=100` fetches the 100 most recent releases, so a pin older than
+    those is legitimately absent from page 1. "The pin is not in the list" is
+    therefore not evidence of a truncated list -- it would raise a false
+    alarm on exactly the long-lived pin this repository is most likely to
+    carry, which is the failure direction this whole file is organised
+    against.
+  * The pagination-proof version of the question is a different one:
+    `releases/latest` is by definition a member of the release set, so a
+    non-empty list omitting ITS tag is provably inconsistent whatever the pin
+    says. That check is sound and carries no false-outage risk. It does need
+    the `latest` call on a path that currently spends nothing, and it turns a
+    four-row verdict into a diagnosis with more shapes than fit in an
+    annotation someone reads mid-incident.
+
+So row 2's message below claims only that the list answered, hands the
+membership question to west, and says the short-list case is not something
+this probe can see. If that case ever shows up in the wild, the
+`latest`-membership check is the shape to reach for: annotate the proceed
+line with it, and never let it move the verdict.
 
 WHY THE FETCHERS ARE INJECTED
 ------------------------------
@@ -172,10 +199,11 @@ def probe(
     populated list already settles the question, and this repository has
     already been rate-limited against this API once -- see the `GH_TOKEN`
     comment on `getting-started.yml`'s "install the Zephyr SDK" step. Cited by
-    step name rather than by line: an earlier draft of this file cited
-    `getting-started.yml:490-501`, and the change that added the probe step
-    pushed those lines down by 57, so the citation was stale in the same
-    commit that wrote it (tan-cli#899).
+    step NAME and deliberately with no line number: an earlier draft of this
+    file cited that comment by line, and the same change that added the probe
+    step pushed it down the file, so the citation was stale in the commit that
+    wrote it. tan-cli#899 is the same rot one file over. A citation that
+    survives its own commit is the only kind worth writing here.
     """
     # Resolved here, at call time -- see the module docstring.
     if fetch_list_len is None:
@@ -200,11 +228,10 @@ def probe(
             VERDICT_PROCEED,
             list_len,
             None,
-            f"{SDK_NG_REPO} lists {list_len} releases, so the list endpoint "
-            f"is not empty and this is not the tan-cli#840 signature. "
-            f"Proceeding: west decides whether {pinned_version} is among "
-            f"them. A short or stale list that omits it is NOT detected here "
-            f"-- see the module docstring.",
+            f"{SDK_NG_REPO} answered with {list_len} releases. Whether "
+            f"{pinned_version} is among them is west's to decide; a "
+            f"truncated or stale list that omits it is not something this "
+            f"probe can see.",
         )
 
     latest_tag = fetch_latest_tag()
@@ -282,23 +309,48 @@ def main(
     # else's outage.
     step_summary = _resolve_env_path(step_summary, "GITHUB_STEP_SUMMARY")
     if result.is_outage and step_summary is not None:
-        with step_summary.open("a", encoding="utf-8") as handle:
-            handle.write(
+        try:
+            _write_outage_summary(step_summary, result)
+        except OSError as exc:
+            # Cosmetic, and outage-path-only. Letting this raise would turn an
+            # unwritable summary into a red inside the one window this script
+            # exists to keep free of misattributed reds.
+            print(f"::notice::could not write the step summary: {exc}")
+
+    # Always 0. This is a measurement; the step decides what to do with it,
+    # and a probe that could red the job would be a second way for an upstream
+    # hiccup to fail a PR about something else.
+    return 0
+
+
+def _write_outage_summary(step_summary: Path, result: ProbeResult) -> None:
+    """The outage run goes GREEN having skipped the ARM build, and the
+    commit-status surface cannot tell it from a run that built. This is where
+    a human landing on the run page sees that, without knowing to go looking
+    for annotations."""
+    with step_summary.open("a", encoding="utf-8") as handle:
+        handle.write(
                 "### Zephyr SDK install skipped -- upstream release list "
                 "outage (tan-cli#840)\n\n"
                 f"`{SDK_NG_REPO}` returned an empty release list while "
                 f"`releases/latest` still resolved to `{result.latest_tag}`.\n\n"
-                "**This run did NOT perform the ARM build.** `west sdk "
-                "install`, `tan build`, the ARM-ELF assertion and the two "
-                "SDK-dependent dirty-host steps were all skipped. A green "
-                "conclusion here does not mean the toolchain path was "
-                "exercised -- re-run the job once upstream recovers.\n"
+                "**This run did NOT perform the ARM build.** These five "
+                "steps were skipped:\n\n"
+                "- install the Zephyr SDK (west sdk install, the printed "
+                "remedy)\n"
+                "- tan build (real ARM build of the scaffolded project)\n"
+                "- the scaffolded project produced an ARM ELF\n"
+                "- dirty host 1/3: west in the venv, absent from bare PATH "
+                "(tan-cli#299)\n"
+                "- dirty host 3/3: stale $ZEPHYR_BASE + stale "
+                "~/.alp/sdk-default must not leak into the report "
+                "(tan-cli#301)\n\n"
+                "`dirty host 2/3` still ran: it asserts `tan doctor` exits 4 "
+                "with west absent everywhere, which a missing SDK cannot "
+                "change. A green conclusion here does not mean the toolchain "
+                "path was exercised -- re-run the job once upstream "
+                "recovers.\n"
             )
-
-    # Always 0. This is a measurement; the step decides what to do with it,
-    # and a probe that could red the job would be a second way for an
-    # upstream hiccup to fail a PR about something else.
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

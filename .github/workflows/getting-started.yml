@@ -487,9 +487,11 @@ jobs:
       # The blank line after that colon is the entire tell. Measured 2026-08-17
       # on run 32039026116: the list endpoint answered `[]` while
       # `releases/latest` still resolved to v1.0.1 and both release assets
-      # served HTTP 200 by direct URL. The pin was never wrong -- it is
-      # re-derived upstream by check_toolchain_lock.py at every run -- and
-      # reaching that conclusion cost one full investigation.
+      # served HTTP 200 by direct URL. The pin was not the cause. (alp-sdk's
+      # own scripts/check_toolchain_lock.py re-derives it from the Zephyr
+      # revision; that script is in the OTHER repository, so nothing here
+      # leans on it -- the probe below claims only what it measures.) Reaching
+      # that conclusion cost one full investigation.
       #
       # THE DECISION LIVES IN A FILE, NOT HERE. The dangerous direction is a
       # FALSE outage: it skips the real ARM build this job exists for while

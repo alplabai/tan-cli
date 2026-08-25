@@ -4,8 +4,10 @@
 tan-cli#840. `getting-started.yml` runs `west sdk install` because it is the
 remedy `tan doctor` PRINTS. When `GET /repos/zephyrproject-rtos/sdk-ng/releases`
 answers `[]`, west reports the empty list as `Unavailable SDK version: 1.0.1`
--- indistinguishable from a wrong pin, and the pin is re-derived upstream by
-`check_toolchain_lock.py` at every run. `scripts/sdk_release_list_probe.py`
+-- indistinguishable from a wrong pin. (The pin is re-derived from the Zephyr
+revision by alp-sdk's `scripts/check_toolchain_lock.py`, which is in the OTHER
+repository and unverifiable from here -- nothing this gate asserts depends on
+it.) `scripts/sdk_release_list_probe.py`
 measures that signature; this gate holds the WORKFLOW half of the contract.
 
 WHY SKIPPING ONE STEP IS NOT ENOUGH
@@ -158,10 +160,17 @@ def test_the_probe_step_carries_the_token_that_keeps_it_measuring():
         "unauthenticated per-IP quota and the probe silently degrades to "
         f"'proceed' whenever that quota is exhausted. Step env: {env!r}"
     )
-    assert "secrets.GITHUB_TOKEN" in str(env["GH_TOKEN"]), (
-        f"GH_TOKEN is {env['GH_TOKEN']!r}; expected the workflow's own "
-        f"GITHUB_TOKEN, which `permissions: contents: read` already covers "
-        f"for listing public releases -- no new secret is needed here."
+    # Equality, not a substring. `"secrets.GITHUB_TOKEN" in value` also
+    # passes for `${{ secrets.GITHUB_TOKEN_OLD }}` and for a conditional such
+    # as `${{ github.event_name != 'pull_request' && secrets.GITHUB_TOKEN
+    # || '' }}` -- which would strip the token from exactly the pull-request
+    # runs this probe mostly serves, degrading it to `proceed` in the silent
+    # way the docstring above warns about.
+    assert env["GH_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}", (
+        f"GH_TOKEN is {env['GH_TOKEN']!r}; expected the literal "
+        f"`${{{{ secrets.GITHUB_TOKEN }}}}`, which `permissions: contents: "
+        f"read` already covers for listing public releases -- no new secret "
+        f"is needed here."
     )
 
 
