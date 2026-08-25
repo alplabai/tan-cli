@@ -55,7 +55,7 @@
     "tests/conftest.py": 850,
     "tests/core/test_scaffold.py": 1250,
     "tests/gates/test_every_issue_code_is_registered.py": 1729,
-    "tests/gates/test_planner_relocation_freshness.py": 1240,
+    "tests/gates/test_planner_relocation_freshness.py": 1256,
     "tests/installers/test_installer_release_layout.py": 2598,
     "tests/parity/test_planner_emit_parity.py": 1881,
     "tests/scripts/test_pin_move_verify.py": 942
