@@ -628,6 +628,14 @@ env:
   # these goldens were captured from; the two must name the same commit, and
   # `test_planner_oracle_regression.py` fails loudly rather than quietly if the
   # bound checkout is not that one.
+  #
+  # WHOEVER LANDS #270: this pin's lockstep with `PINNED_SDK_TAG` is ALSO
+  # enforced by `python/tests/gates/test_planner_oracle_ref_tracks_pinned_
+  # sdk_tag.py` (tan-cli#895/#897) -- do not try to satisfy it by re-running
+  # `capture_planner_oracle.py` against a post-#270 ref (there is no planner
+  # left to capture). Flip `POST_270_RETIRED = True` in that file instead;
+  # its own `test_the_retirement_marker_is_still_armed` will fail until you
+  # update it alongside the flip, on purpose.
   PINNED_PLANNER_ORACLE_SDK_REF: eb96112ba7d1cc3b4084c985962ea31772177d74
 
 permissions:

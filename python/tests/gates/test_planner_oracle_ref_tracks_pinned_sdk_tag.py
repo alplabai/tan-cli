@@ -71,6 +71,62 @@ files. A gate that only fires in a specially-provisioned CI job is not the
 "local pytest bar at author time" #895 promised; it is the exact merge-ref-CI
 timing #895's postmortem blamed. Fixed by running the comparison always.
 
+## The tag-name blind spot -- a HARD failure, not a warning, not a resolve
+
+`PINNED_SDK_TAG` legitimately holds a release name rather than a 40-hex commit
+(historically `v0.13.0`/`v0.14.0`/`v0.15.0-rc1`), and `_pinned_sdk_tag_state`
+above must not report that as an absent pin. But tan-cli#897's review found a
+second-order bug this fix round introduced: when `PINNED_SDK_TAG` is a release
+name, `PINNED_PLANNER_ORACLE_SDK_REF` and `PROVENANCE.txt`'s own recorded ref
+CAN still agree with each other while BOTH are stale relative to the commit
+the tag actually names -- `capture_planner_oracle.py` writes both together, so
+internal agreement between them proves nothing about the tag. Replayed
+verbatim against `6a826434~1`'s tree (the real #884 incident state) with only
+`PINNED_SDK_TAG` changed from `eb96112b` to its own tag name `v0.16.0`: **19
+passed**, silently. That is the exact incident this whole module exists to
+close, wearing the one disguise the first cut of this fix didn't check for.
+
+Three ways to close it were weighed:
+
+1. **Resolve the tag name to a commit** (e.g. shell out to `git ls-remote` or
+   the GitHub API) so the three-way comparison can run for real. Rejected:
+   it would make this test's "no alp-sdk checkout, no network" property
+   (the whole point of the #895/#897 fix -- see the section above) conditional
+   on network access or a bound checkout with the right tag fetched, which is
+   exactly the "only correct when a specific checkout happens to be bound"
+   failure mode #897 just removed from the OTHER half of this same gate. Not
+   workable without giving back the property that makes this gate fire on an
+   ordinary local `pytest tests -q`.
+2. **A loud, non-fatal warning** (the `tests/conftest.py` tan-cli#691 shape --
+   printed once per session via the terminal reporter, never failing the
+   run). Rejected as insufficient here, specifically: #691's shape exists for
+   a genuinely different kind of fact (which alp-sdk tree happens to be bound
+   to THIS session -- environment-dependent, not a property of the committed
+   files). This gate's whole three-way comparison is over files already
+   checked into this repository; nothing about it depends on the session. A
+   warning that doesn't fail the run is invisible to a merge gate, and #884's
+   own postmortem is that a PR merged clean through two human sign-offs with
+   the drift sitting there in plain text -- a state a human can read past is
+   exactly what #895/#897 built an assertion instead of a comment to stop
+   relying on. This module's own docstring already rejects a written-down
+   exemption for this pin (see "Deliberately a HARD failure" above); "the
+   comparison happens to be unresolvable right now" is not a stronger case
+   for an exemption than "the comparison legitimately differs right now" --
+   if anything it is weaker, since an unresolvable comparison hides its own
+   risk rather than displaying it.
+3. **A hard problem, appended to `find_problems`'s return, unconditionally,
+   in this state** -- the choice implemented below. It costs a real thing:
+   `PINNED_SDK_TAG` cannot be re-pinned to a release name without this one
+   gate going red until either it moves back to a 40-hex commit, or a
+   maintainer resolves the tag by hand (`git rev-parse <tag>` against any
+   alp-sdk checkout, which is not an unusual thing to have open while doing
+   the re-pin) and re-pins `PINNED_SDK_TAG` to that resolved 40-hex form
+   instead. That cost is deliberate: this gate exists to make "the oracle
+   moved out of lockstep and nothing said so" impossible, and a state that
+   cannot be verified is treated the same as a state proven to have drifted,
+   because from this gate's vantage point they are indistinguishable in risk
+   -- only in whether the bad case has been observed yet.
+
 ## The post-#270 retirement -- an in-repo marker, not a bound-checkout probe
 
 tan-cli#270 deletes `scripts/alp_orchestrate/` from alp-sdk. After that
@@ -244,6 +300,18 @@ def _provenance_ref(text: str) -> tuple[str | None, str | None]:
     if not candidates:
         return None, "has no 'alp-sdk ref' line"
     malformed = candidates[0].split()[-1] if candidates[0].split() else candidates[0]
+    if re.fullmatch(r"[0-9a-f]{40}", malformed):
+        # A genuine 40-hex value WAS extracted -- the value itself is not the
+        # problem, the shape around it is (extra prose words before/after the
+        # "alp-sdk ref" phrase, e.g. "alp-sdk refs are recorded below as
+        # <sha>"). Naming the value "not a full 40-character commit" here
+        # would be wrong: it plainly is one, in isolation.
+        return None, (
+            f"'alp-sdk ref' line {candidates[0]!r} has a 40-hex-looking last "
+            f"token ({malformed!r}) but does not match the required "
+            "'alp-sdk ref <40-hex>' shape exactly -- extra surrounding words "
+            "make the line unparseable, not the value itself"
+        )
     return None, (
         f"'alp-sdk ref' line names {malformed!r}, not a full 40-character commit -- "
         "an abbreviated or malformed ref cannot be compared unambiguously"
@@ -252,7 +320,13 @@ def _provenance_ref(text: str) -> tuple[str | None, str | None]:
 
 def find_problems(parity_yml_text: str, provenance_text: str | None) -> list[str]:
     """Every way the three-way pin above disagrees, as ready-to-print lines.
-    Empty means agreement.
+    Empty means agreement -- which requires `PINNED_SDK_TAG` to be a 40-hex
+    commit this gate can actually verify, not merely that the other two facts
+    happen to agree with each other. A release-name `PINNED_SDK_TAG` NEVER
+    returns empty, even when `PINNED_PLANNER_ORACLE_SDK_REF` and
+    `PROVENANCE.txt`'s recorded ref agree with each other (see the module
+    docstring's "The tag-name blind spot" section for why that internal
+    agreement is not proof of lockstep).
 
     A pure function of its two text arguments, deliberately: no filesystem
     read and no pytest fixture inside it, so the tests below can plant every
@@ -268,9 +342,14 @@ def find_problems(parity_yml_text: str, provenance_text: str | None) -> list[str
     if tag_problem is not None:
         problems.append(tag_problem)
     # `tag is None and tag_problem is None` is the legitimate tag-name state
-    # (see `_pinned_sdk_tag_state`): not an error, but also not silently
-    # treated as "nothing to check" -- the oracle-ref-vs-PROVENANCE.txt
-    # comparison below still runs regardless of whether `tag` resolved.
+    # (see `_pinned_sdk_tag_state`): PINNED_SDK_TAG holding a release name is
+    # not itself an error -- it is a real, repeated historical shape
+    # (v0.13.0/v0.14.0/v0.15.0-rc1). But the LOCKSTEP COMPARISON this module
+    # exists to make is a hard failure in this state too (see below): this
+    # gate has no checkout and no network with which to resolve a tag name to
+    # the commit it names, so it cannot verify the one invariant it exists to
+    # enforce, and reporting that as clean is the tan-cli#884 incident itself
+    # (see `find_problems`'s docstring).
     tag_is_unresolvable_tag_name = tag is None and tag_problem is None
 
     oracle_ref, oracle_problem = _sole_match(
@@ -304,7 +383,13 @@ def find_problems(parity_yml_text: str, provenance_text: str | None) -> list[str
             "this is the tan-cli#509 incident recurring: PR #884's merge-ref CI "
             "failed 19 cases across 19 boards on all three OSes after two review "
             "sign-offs, because GitHub tests the merge ref and tan/planner's LIVE "
-            "code had already moved past the frozen goldens."
+            "code had already moved past the frozen goldens. NOTE for whoever lands "
+            "tan-cli#270 (deletes scripts/alp_orchestrate/ from alp-sdk): if THAT "
+            "is why this fired, the fix is not to chase PINNED_SDK_TAG with a "
+            "capture_planner_oracle.py run against a ref that no longer ships a "
+            "planner -- it is to flip POST_270_RETIRED to True in this file "
+            "(test_planner_oracle_ref_tracks_pinned_sdk_tag.py) instead, which "
+            "retires this specific lockstep check for good."
         )
 
     if tag is not None and provenance_ref is not None and tag != provenance_ref:
@@ -315,25 +400,54 @@ def find_problems(parity_yml_text: str, provenance_text: str | None) -> list[str
             "alp-sdk commit the frozen oracle bytes were captured from."
         )
 
-    if (
-        tag_is_unresolvable_tag_name
-        and oracle_ref is not None
-        and provenance_ref is not None
-        and oracle_ref != provenance_ref
-    ):
+    if tag_is_unresolvable_tag_name and oracle_ref is not None and provenance_ref is not None:
         # PINNED_SDK_TAG is currently a release name, not a commit, so it
-        # cannot be compared directly -- but this is not a free pass: the
-        # workflow's own oracle pin and the fixture's own recorded capture
-        # ref are both still 40-hex, and are still checkable against EACH
-        # OTHER regardless of what PINNED_SDK_TAG holds right now.
-        problems.append(
-            "parity.yml's PINNED_SDK_TAG is not currently a 40-hex commit (a release "
-            "name, e.g. v0.16.0), so it cannot be lockstep-compared directly -- but "
-            f"PINNED_PLANNER_ORACLE_SDK_REF ({oracle_ref}) and "
-            f"tests/fixtures/planner_oracle/PROVENANCE.txt's recorded alp-sdk ref "
-            f"({provenance_ref}) still disagree with EACH OTHER, which is checkable "
-            "independent of PINNED_SDK_TAG's current form."
-        )
+        # cannot be compared directly. Two sub-cases, both a HARD problem --
+        # not a free pass, and not a warn-only bypass either (tan-cli#897's
+        # review): a gate that goes quiet in the one state it cannot check is
+        # decoration, and this module's own stated design already rejects a
+        # written-down exemption for this pin (see the module docstring).
+        if oracle_ref != provenance_ref:
+            # The workflow's own oracle pin and the fixture's own recorded
+            # capture ref are both still 40-hex, and are still checkable
+            # against EACH OTHER regardless of what PINNED_SDK_TAG holds
+            # right now.
+            problems.append(
+                "parity.yml's PINNED_SDK_TAG is not currently a 40-hex commit (a release "
+                "name, e.g. v0.16.0), so it cannot be lockstep-compared directly -- but "
+                f"PINNED_PLANNER_ORACLE_SDK_REF ({oracle_ref}) and "
+                f"tests/fixtures/planner_oracle/PROVENANCE.txt's recorded alp-sdk ref "
+                f"({provenance_ref}) still disagree with EACH OTHER, which is checkable "
+                "independent of PINNED_SDK_TAG's current form."
+            )
+        else:
+            # The blind spot tan-cli#897's review found: oracle_ref and
+            # provenance_ref AGREE, but that agreement proves nothing here --
+            # scripts/capture_planner_oracle.py writes both together, so they
+            # always agree even when BOTH are stale relative to the commit
+            # PINNED_SDK_TAG now names. This is the exact #884 incident shape,
+            # reproduced verbatim against 6a826434~1's tree: re-pinning
+            # PINNED_SDK_TAG from eb96112b to its own tag name v0.16.0, with
+            # PINNED_PLANNER_ORACLE_SDK_REF and PROVENANCE.txt both left at
+            # the stale 94378a05, passed clean before this branch. The
+            # lockstep invariant this gate exists to enforce is simply
+            # UNVERIFIABLE in this state, and an unverifiable state is
+            # reported as a problem, not silently accepted as one.
+            problems.append(
+                "parity.yml's PINNED_SDK_TAG is a release name (e.g. v0.16.0), not a "
+                "40-hex commit -- this gate has no alp-sdk checkout and makes no network "
+                "call, so it cannot resolve the tag to a commit and cannot verify that "
+                f"PINNED_PLANNER_ORACLE_SDK_REF ({oracle_ref}) actually matches what "
+                "PINNED_SDK_TAG names. PINNED_PLANNER_ORACLE_SDK_REF and "
+                "tests/fixtures/planner_oracle/PROVENANCE.txt's recorded alp-sdk ref "
+                "agree with EACH OTHER, but that alone does not prove lockstep: "
+                "scripts/capture_planner_oracle.py writes both together, so they agree "
+                "even when BOTH are stale relative to the commit PINNED_SDK_TAG now names "
+                "(the tan-cli#884 incident shape -- see this module's docstring). Resolve "
+                "PINNED_SDK_TAG to the 40-hex commit it names (e.g. `git rev-parse "
+                "v0.16.0` against an alp-sdk checkout) so this gate can actually make the "
+                "comparison."
+            )
 
     return problems
 
@@ -436,6 +550,18 @@ def test_provenance_ref_malformed_is_caught() -> None:
     assert "not a full 40-character commit" in problems[0], problems
 
 
+def test_provenance_ref_line_wraps_a_valid_sha_in_prose_names_the_real_cause() -> None:
+    """A sole candidate line that STARTS WITH 'alp-sdk ref' but wraps a
+    genuinely valid 40-hex value in surrounding prose (no well-formed line
+    exists anywhere else in the text) must not be told its value "is not a
+    full 40-character commit" -- the extracted value plainly IS one, in
+    isolation. The real defect is the line's SHAPE, not its value."""
+    problems = find_problems(_parity_text(_A, _A), f"alp-sdk refs are recorded below as {_A}\n")
+    assert len(problems) == 1, problems
+    assert "not a full 40-character commit" not in problems[0], problems
+    assert "does not match the required" in problems[0] and _A in problems[0], problems
+
+
 def test_provenance_prose_mention_does_not_shadow_the_real_ref_line() -> None:
     """A prose sentence that happens to START WITH the literal words
     'alp-sdk ref' (summarising something else, embedding a DIFFERENT sha as
@@ -498,9 +624,36 @@ def test_pinned_sdk_tag_as_a_release_name_still_catches_oracle_provenance_drift(
     assert _A in joined and _B in joined, problems
 
 
-def test_pinned_sdk_tag_as_a_release_name_is_clean_when_oracle_and_provenance_agree() -> None:
+def test_pinned_sdk_tag_as_a_release_name_cannot_bypass_the_gate_via_internal_agreement() -> None:
+    """tan-cli#897's review finding, replayed exactly: PINNED_SDK_TAG is a
+    release name, and PINNED_PLANNER_ORACLE_SDK_REF happens to agree with
+    PROVENANCE.txt's own recorded ref -- but that internal agreement proves
+    NOTHING, because `capture_planner_oracle.py` writes both together, so
+    they agree even when BOTH are stale relative to the commit the tag now
+    names. This exact state -- replayed against the real `6a826434~1` #884
+    incident tree with only `PINNED_SDK_TAG` changed from `eb96112b` to its
+    own tag name `v0.16.0` -- used to pass clean (`19 passed`); that was the
+    silent bypass this test now closes. Must be a hard problem, not a free
+    pass: a gate that goes quiet in the one state it cannot check is
+    decoration."""
     text = "env:\n  PINNED_SDK_TAG: v0.16.0\n  PINNED_PLANNER_ORACLE_SDK_REF: " + _A + "\n"
-    assert find_problems(text, _provenance_text(_A)) == []
+    problems = find_problems(text, _provenance_text(_A))
+    assert problems, (
+        "a tag-name PINNED_SDK_TAG with internally-agreeing "
+        "PINNED_PLANNER_ORACLE_SDK_REF/PROVENANCE.txt silently bypassed the gate -- "
+        "this is the tan-cli#884 incident shape"
+    )
+    joined = "\n".join(problems)
+    assert "PINNED_SDK_TAG" in joined and "release name" in joined, problems
+    assert _A in joined, problems
+
+
+def test_pinned_sdk_tag_as_a_40hex_with_genuinely_agreeing_refs_stays_clean() -> None:
+    """The ordinary green case is unaffected by the fix above: when
+    PINNED_SDK_TAG IS a 40-hex commit and all three facts agree, the gate
+    stays clean -- the new hard-failure branch is scoped to the
+    tag-name-not-a-commit state only, never fired for an ordinary pin."""
+    assert find_problems(_parity_text(_A, _A), _provenance_text(_A)) == []
 
 
 def test_pinned_planner_oracle_ref_absent_is_caught() -> None:
