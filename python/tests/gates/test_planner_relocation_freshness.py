@@ -891,8 +891,8 @@ HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-
 #: taken directly from the `d00dbdc1` checkout this HAND_PORT_PINNED_SDK_COMMIT
 #: already names, so pinning it here re-freezes nothing unaudited either.
 #:
-#: The seven `scripts/alp_cli/{diagnostic_format,validate,new_som,doctor,
-#: explain,monitor,validator}.py` entries below close the same blind
+#: The eight `scripts/alp_cli/{diagnostic_format,validate,new_som,doctor,
+#: explain,monitor,model,validator}.py` entries below close the same blind
 #: spot (tan-cli#560 review, minor 2): each is named as a hand-port source in
 #: a comment somewhere under `python/tan/` --
 #: `tan/output_format.py`/`tan/commands/validate_cmd.py`
@@ -900,7 +900,8 @@ HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-
 #: `tan/commands/new_som_cmd.py` (`new_som.py`),
 #: `tan/commands/doctor_cmd.py`/`tan/core/doctor_libraries.py` (`doctor.py`),
 #: `tan/core/error_catalog.py`/`tan/commands/explain_cmd.py` (`explain.py`),
-#: `tan/commands/monitor_cmd.py` (`monitor.py`). `scripts/alp_cli/validator.py`'s
+#: `tan/commands/monitor_cmd.py` (`monitor.py`), and
+#: `tan/commands/model_cmd.py` (`model.py`). `scripts/alp_cli/validator.py`'s
 #: `load_board_schema`/`iter_schema_errors` are hand-ported into
 #: `tan/planner/loader.py` (that file's own docstring: "RELOCATED from
 #: alp-sdk's scripts/alp_cli/validator.py, the last module-scope import this
@@ -909,7 +910,7 @@ HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-
 #: `scripts/alp_orchestrate/loader.py`), so this is the SAME split-heritage
 #: shape `sentinels.py` set the precedent for: a hand-port INTO an
 #: already-tracked file still needs its own SDK-side source hashed. None of
-#: these seven sources live under `tan/planner/` themselves, so like
+#: these eight sources live under `tan/planner/` themselves, so like
 #: `faultdecode.py` they are deliberately NOT added to `HAND_PORT_SOURCES`
 #: either. sha256 taken directly from the `d00dbdc1` checkout
 #: HAND_PORT_PINNED_SDK_COMMIT already names, and each verified unchanged
