@@ -165,9 +165,18 @@ jobs:
     # expressions or it will red on this line.
     timeout-minutes: ${{ inputs.sdk_parity && 60 || 30 }}
     steps:
+      # `fetch-depth: 0` (tan-cli#906 fix round, blocker 1): the default
+      # depth-1 checkout leaves `dev`/`origin/dev`/`HEAD^1`/`HEAD^2` all
+      # unresolvable against the shallow `refs/pull/N/merge` commit this job
+      # actually checks out on a PR -- `python/tests/gates/
+      # test_ledger_append_only.py`'s live gate SKIPPED on every run of THIS
+      # PR for exactly that reason (run 98131014524). Full history costs
+      # seconds on a repo this size and is what makes `merge-base(HEAD, dev)`
+      # resolvable at all.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12" # pyproject's requires-python floor

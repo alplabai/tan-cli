@@ -114,8 +114,20 @@ class Verdict(NamedTuple):
 
 
 def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    # `encoding="utf-8"` explicitly: `text=True` alone decodes with the
+    # LOCALE's codec (cp1252 on a Windows runner), not UTF-8, and
+    # `_working_tree_lines` below reads the same file with
+    # `read_text(encoding="utf-8")` -- a mismatch is latent today (the
+    # ledger has been pure ASCII across every sampled revision) but a single
+    # em dash or curly quote would make `git show` and the working-tree read
+    # disagree on a Windows runner alone.
     return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
     )
 
 
@@ -126,7 +138,7 @@ def _ref_exists(repo: Path, ref: str) -> bool:
 def _resolve(repo: Path, ref: str) -> str | None:
     """`ref`'s commit sha, or `None` if `ref` does not resolve in `repo`."""
     result = _run_git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"], repo)
-    return result.stdout.strip() or None if result.returncode == 0 else None
+    return (result.stdout.strip() or None) if result.returncode == 0 else None
 
 
 def _candidate_dev_refs(repo: Path) -> list[str]:
@@ -182,7 +194,7 @@ def _merge_base(repo: Path, refs: list[str]) -> str | None:
         args.append("--octopus")
     args.extend(refs)
     result = _run_git(args, repo)
-    return result.stdout.strip() or None if result.returncode == 0 else None
+    return (result.stdout.strip() or None) if result.returncode == 0 else None
 
 
 def _first_missing(needle: list[str], haystack: list[str]) -> str | None:
@@ -201,8 +213,24 @@ def _first_missing(needle: list[str], haystack: list[str]) -> str | None:
     return None
 
 
+def _parents_of(repo: Path, commit: str) -> list[str]:
+    """Every parent of `commit`, via `commit^1`, `commit^2`, ... until one
+    stops resolving. `[]` if `commit` has fewer than two parents (an
+    ordinary commit is not a merge, from this check's standpoint)."""
+    parents: list[str] = []
+    i = 1
+    while True:
+        parent = _resolve(repo, f"{commit}^{i}")
+        if parent is None:
+            break
+        parents.append(parent)
+        i += 1
+    return parents if len(parents) >= 2 else []
+
+
 def _merge_parents(repo: Path) -> list[str]:
-    """The commit shas this check must protect as separate sides:
+    """The commit shas this check must protect as separate sides, for a
+    merge that is HEAD itself:
 
     * an IN-PROGRESS merge (`MERGE_HEAD` resolves, conflict just resolved
       but not yet committed) -- `HEAD` plus every `MERGE_HEAD` (usually one;
@@ -212,24 +240,45 @@ def _merge_parents(repo: Path) -> list[str]:
       history (47 merge commits on `dev`, all two-parent) does not warrant
       more than the common two-parent shape).
     * an ALREADY-COMMITTED merge at HEAD (`HEAD^2` resolves) -- every parent,
-      via `HEAD^1`, `HEAD^2`, ... until one stops resolving.
+      via `_parents_of`.
 
     Empty when HEAD is an ordinary, single-parent commit -- the caller falls
-    back to the single-base form in that case."""
+    back to `_most_recent_merge_in_range` (a merge further back in HEAD's
+    history) and then the single-base form."""
     merge_head = _resolve(repo, "MERGE_HEAD")
     if merge_head is not None:
         head = _resolve(repo, "HEAD")
         return [head, merge_head] if head else []
 
-    parents: list[str] = []
-    i = 1
-    while True:
-        parent = _resolve(repo, f"HEAD^{i}")
-        if parent is None:
-            break
-        parents.append(parent)
-        i += 1
-    return parents if len(parents) >= 2 else []
+    return _parents_of(repo, "HEAD")
+
+
+def _most_recent_merge_in_range(repo: Path, base: str, head: str) -> str | None:
+    """The merge commit closest to `head` among the commits in `base..head`
+    (i.e. reachable from `head`, not reachable from `base`), or `None` if
+    that range contains no merge at all.
+
+    tan-cli#906 fix round, blocker 3: inspecting only `HEAD`'s own parents
+    (`_merge_parents`) is blind to a merge that is not HEAD itself -- the
+    everyday "merge, keep working, push" shape, which is exactly how the
+    real tan-cli#902 incident's own history reads: the restore commit
+    (`1a2c9970`) that fixed the dropped entry is a CHILD of the merge
+    (`303ba5533`), not the merge itself. One commit deep is already enough
+    to make `_merge_parents(repo)` return `[]` and fall through to the
+    single-base check, which -- per this module's own docstring -- is
+    exactly the naive form that passes tan-cli#902's shape by construction.
+    Walking the range instead of only HEAD finds the merge regardless of how
+    many ordinary commits followed it, and the two-sided check that runs
+    against it still compares each parent's delta against the CURRENT
+    working tree (via `_check_merge_parents`), so later, legitimate appends
+    on top of the merge are unaffected."""
+    result = _run_git(
+        ["rev-list", "--merges", "--max-count=1", f"{base}..{head}"], repo
+    )
+    if result.returncode != 0:
+        return None
+    sha = result.stdout.strip()
+    return sha or None
 
 
 def _check_single_base(repo: Path, rel_path: str, base_ref: str) -> Verdict:
@@ -299,10 +348,13 @@ def _check_merge_parents(repo: Path, rel_path: str, parents: list[str]) -> Verdi
         if missing is not None:
             problems.append(
                 f"{rel_path}: a line unique to {parent[:12]} did not survive "
-                f"this merge -- first missing: {missing!r}. This is the "
-                "tan-cli#902 shape: a wholesale `git checkout --theirs`/"
-                "`--ours` resolution silently drops one side's own entry "
-                "instead of keeping both."
+                f"this merge -- first missing: {missing!r}. Either a "
+                "wholesale `git checkout --theirs`/`--ours` resolution "
+                "dropped one side's own entry instead of keeping both (the "
+                "tan-cli#902 shape), or that side's entry was reworded or "
+                "reordered during the resolution -- either way, the line "
+                "this side contributed no longer appears verbatim, in "
+                "order, after the merge."
             )
     return Verdict(True, None, problems)
 
@@ -312,20 +364,52 @@ def find_problems(repo: Path, rel_path: str = LEDGER_REL_PATH) -> Verdict:
 
     Dispatches on whether HEAD is (part of) a merge: two or more parents
     (in progress or already committed) get the multi-sided check that
-    protects each side's own unique tail; anything else gets the simple
-    single-base check against the dev integration branch."""
+    protects each side's own unique tail. Otherwise, this looks for the most
+    recent merge commit BETWEEN the resolved base and HEAD (tan-cli#906 fix
+    round, blocker 3 -- a merge one or more ordinary commits back, not HEAD
+    itself) and runs the same multi-sided check against that merge's
+    parents; only when no merge exists anywhere in the range does this fall
+    back to the plain single-base check against the dev integration
+    branch."""
     parents = _merge_parents(repo)
     if parents:
         return _check_merge_parents(repo, rel_path, parents)
 
+    head = _resolve(repo, "HEAD") or "HEAD"
     for ref in _candidate_dev_refs(repo):
-        if _ref_exists(repo, ref):
-            verdict = _check_single_base(repo, rel_path, ref)
-            if verdict.determinable:
-                return verdict
+        if not _ref_exists(repo, ref):
+            continue
+        ancestor = _merge_base(repo, [head, ref])
+        if ancestor is None:
             # That candidate resolved as a ref but merge-base still failed
             # (e.g. unrelated histories) -- fall through to the next one
             # rather than giving up on the first attempt.
+            continue
+        if ref == "@{u}" and ancestor == head:
+            # tan-cli#906 fix round, blocker 2: `@{u}` is the checked-out
+            # branch's OWN remote-tracking ref. For any branch pushed with
+            # `git push -u`, `@{u}` resolves to HEAD itself (or a descendant
+            # of it), so `merge-base(HEAD, @{u})` collapses to HEAD -- the
+            # ledger's content at "the base" IS its current content, and the
+            # comparison is vacuous: a confident, silent PASS on a branch
+            # that has already committed a real violation, with no other ref
+            # (no `dev`, no `origin/dev`) to catch it. Refuse this candidate
+            # rather than report that false pass; the earlier candidates
+            # (`origin/$GITHUB_BASE_REF`, `origin/dev`, `dev`) are the ones
+            # actually named `dev` and do not collapse this way in the
+            # ordinary case, so this only gives up the rare fork-with-a-
+            # differently-named-integration-branch case `@{u}` was added to
+            # cover -- see this candidate's own comment in
+            # `_candidate_dev_refs`.
+            continue
+
+        recent_merge = _most_recent_merge_in_range(repo, ancestor, head)
+        if recent_merge is not None:
+            merge_parents = _parents_of(repo, recent_merge)
+            if merge_parents:
+                return _check_merge_parents(repo, rel_path, merge_parents)
+
+        return _check_single_base(repo, rel_path, ref)
 
     return Verdict(
         False,

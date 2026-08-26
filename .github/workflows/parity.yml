@@ -700,6 +700,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # tan-cli#906 fix round, blocker 1: this job's `tests/gates` step
+          # further down runs `python/tests/gates/test_ledger_append_only.py`,
+          # whose live gate needs `dev`/`origin/dev`/`HEAD^1`/`HEAD^2` to
+          # resolve. The default depth-1 checkout of a `pull_request`'s
+          # shallow `refs/pull/N/merge` commit leaves every one of those
+          # unresolvable (measured: all rc=1) -- this PR's own run
+          # (98131014524) SKIPPED that test for exactly that reason. Same fix
+          # as `ci.yml`'s `python` job; `merge_group` needs it too (no
+          # `GITHUB_BASE_REF`, same shallow shape).
+          fetch-depth: 0
           # On a `repository_dispatch` the workflow FILE has to come from the
           # DEFAULT branch -- that is GitHub's rule and why #195 put the trigger
           # on `main`. But what we CHECK OUT and test is a separate choice, and
@@ -1124,7 +1134,15 @@ jobs:
           ALP_SDK_STRICT_LOADERS_ROOT: ${{ github.workspace }}/alp-sdk-strict-loaders-audit
         run: |
           set -euo pipefail
-          python3 -m pytest tests/gates -v --deselect tests/gates/test_jlink_aen_device_freshness.py | tee /tmp/gates.log
+          # `-rs`, added for tan-cli#906 fix round blocker 4: `-v` alone
+          # prints only the bare word SKIPPED per test, not why -- the
+          # ledger gate's own skip reason (naming which base refs it tried)
+          # never reached this log without it. The ledger gate itself is now
+          # a hard `pytest.fail` in CI rather than a skip (see
+          # `test_ledger_append_only.py`), but this step runs the whole
+          # `tests/gates` directory, and any OTHER gate's skip reason is
+          # equally worth having in this log for the same reason.
+          python3 -m pytest tests/gates -v -rs --deselect tests/gates/test_jlink_aen_device_freshness.py | tee /tmp/gates.log
           # Both roots above are bound in THIS job -- the one place this whole
           # workflow arms them -- so neither freshness test in
           # test_planner_relocation_freshness.py has an excuse to skip here. A

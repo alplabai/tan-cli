@@ -23,6 +23,7 @@ failure cases.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -39,14 +40,47 @@ LEDGER_NAME = "LEDGER.md"
 
 
 def test_the_real_ledger_is_append_only():
-    """The actual gate. `pytest.skip`s -- loudly, naming what is missing --
+    """The actual gate.
+
+    A local developer run `pytest.skip`s -- loudly, naming what is missing --
     when no base is determinable (a detached checkout, a clone with no `dev`
     fetched); a skip is visible in `-rs` output and is never mistaken for a
-    pass, unlike the silent "nothing checked" this gate exists to replace."""
+    pass, unlike the silent "nothing checked" this gate exists to replace.
+
+    A CI run (`GITHUB_ACTIONS` set, per GitHub's own documented convention)
+    does NOT get that leniency: it is a hard `pytest.fail`, not a skip.
+    tan-cli#906 fix round, blocker 1 -- a skip is invisible in the default
+    `pytest tests -q` summary line CI actually reads (no `-rs`), so "no base
+    determinable" and "the ledger is fine" were indistinguishable from the CI
+    log alone. Worse, every CI checkout at the time this was found WAS
+    undeterminable (the default `actions/checkout` depth-1 shallow clone
+    cannot resolve `dev`/`HEAD^1`/`HEAD^2` at all), so this gate had never
+    once actually run in CI -- a `pytest.skip` here is not a fallback for a
+    rare local edge case, it is the everyday CI shape, and a gate that
+    degrades to green on its own everyday shape is not armed. The checkout
+    steps that feed this test now fetch full history precisely so this
+    branch should never be reached in CI; if it is, that regressed and must
+    fail loudly, not quietly resume skipping."""
     verdict = core.find_problems(core.REPO, core.LEDGER_REL_PATH)
     if not verdict.determinable:
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(
+                "base not determinable while running in CI (GITHUB_ACTIONS "
+                f"is set) -- this must never silently pass or skip: {verdict.skip_reason}"
+            )
         pytest.skip(verdict.skip_reason)
     assert verdict.problems == [], "\n".join(verdict.problems)
+
+
+def test_the_ledger_file_still_exists_at_its_pinned_path():
+    """Guard against `LEDGER_REL_PATH` drifting from a real file -- e.g. a
+    rename that forgot to update the constant. `_file_lines_at` and
+    `_working_tree_lines` both return `[]` for a path that resolves nowhere,
+    so a stale `LEDGER_REL_PATH` makes `find_problems` compare `[] == []` on
+    every side, forever: `determinable=True, problems=[]`, indistinguishable
+    from a real pass. This assertion is what turns that into a real failure
+    instead of a silently-green gate that has stopped checking anything."""
+    assert (core.REPO / core.LEDGER_REL_PATH).is_file()
 
 
 def test_the_repo_root_is_a_git_checkout():
@@ -229,6 +263,62 @@ def test_a_plain_append_passes(tmp_path):
     assert verdict.problems == []
 
 
+# --- (5) tan-cli#906 fix round, blocker 3: a commit ON TOP of the merge ---
+
+
+def test_a_commit_on_top_of_an_already_committed_merge_still_gets_the_two_sided_check(
+    tmp_path,
+):
+    """The real tan-cli#902 history did NOT fix the drop in the merge commit
+    itself: the restore (`1a2c9970`) is a CHILD of the merge (`303ba5533`),
+    i.e. the ordinary "merge, keep working, push" shape. Before the
+    blocker-3 fix, `_merge_parents(repo)` only ever looked at HEAD's own
+    parents -- one commit on top of the merge makes `HEAD^2` stop resolving,
+    `_merge_parents` returns `[]`, and `find_problems` fell back to the
+    single-base check against `dev`. That check's ancestor collapses to
+    `dev`'s own tip (dev is an ancestor of the merge, hence of HEAD too), so
+    the working tree (still the wholesale `--theirs` content) reads as an
+    exact match of "the base" -- `determinable=True, problems=[]`, a
+    confident false pass on the very incident this gate exists to catch."""
+    repo = _seed_repo_with_dev_and_feature(tmp_path)
+
+    _write_ledger(repo, _SEED + "- 2026-08-10 -- tan-cli#896: our reasoned entry\n")
+    _commit(repo, "feature: reasoned entry")
+
+    _git(["checkout", "-q", "dev"], repo)
+    _write_ledger(repo, _SEED + "- 2026-08-11 -- dev: an unrelated entry\n")
+    _commit(repo, "dev: unrelated entry")
+
+    _git(["checkout", "-q", "feature"], repo)
+    merge = _git(["merge", "--no-ff", "--no-commit", "dev"], repo)
+    assert merge.returncode != 0, "expected a real tail-append conflict"
+
+    theirs = _git(["checkout", "--theirs", "--", LEDGER_NAME], repo)
+    assert theirs.returncode == 0, theirs.stderr
+    _git(["add", LEDGER_NAME], repo)
+    commit = _git(["commit", "-q", "--no-edit"], repo)
+    assert commit.returncode == 0, commit.stderr
+
+    # The one line this test adds over the #902 reconstruction above: keep
+    # working AFTER the merge, without touching the ledger, exactly like the
+    # real history's `1a2c9970` sits one commit downstream of `303ba5533`.
+    on_top = _git(
+        ["commit", "-q", "--allow-empty", "-m", "feature: unrelated follow-up"],
+        repo,
+    )
+    assert on_top.returncode == 0, on_top.stderr
+
+    verdict = core.find_problems(repo, LEDGER_NAME)
+    assert verdict.determinable, verdict.skip_reason
+    assert verdict.problems != [], (
+        "a commit sitting on top of an already-committed --theirs merge "
+        "resolution hid the dropped entry from the gate -- HEAD is not the "
+        "merge itself, so the two-sided check must still find that merge "
+        "further back in HEAD's history, not silently fall back to the "
+        "single-base form"
+    )
+
+
 # ---------------------------------------------------------------------------
 # degradation -- no PR, no determinable base
 # ---------------------------------------------------------------------------
@@ -286,6 +376,54 @@ def test_a_detached_checkout_with_no_dev_ref_skips_loudly_rather_than_passing(
     assert verdict.problems == []
     assert verdict.skip_reason
     assert "dev" in verdict.skip_reason
+
+
+def test_at_u_self_tracking_after_push_does_not_produce_a_false_pass(tmp_path):
+    """tan-cli#906 fix round, blocker 2: for a branch pushed with `git push
+    -u` and no `dev`/`origin/dev` ref present at all, `@{u}` is that
+    branch's OWN remote-tracking ref -- `merge-base(HEAD, @{u})` collapses to
+    HEAD itself, so the ledger's content is compared against its own current
+    content. Reconstructed with a REAL `git remote` (a local bare repo, not a
+    hand-typed stand-in for one -- `_init_repo`'s other hermetic tests never
+    add one, which is why this hole shipped uncaught), carrying a genuine
+    commit shaped exactly like tan-cli#878 (an entry inserted above the
+    existing tail). The base-ref candidate order tries
+    `origin/$GITHUB_BASE_REF`, `origin/dev`, and `dev` before `@{u}`, and
+    none of those exist here, so this isolates `@{u}` alone."""
+    remote = tmp_path / "remote.git"
+    bare_init = _git(["init", "-q", "--bare", str(remote)], tmp_path)
+    assert bare_init.returncode == 0, bare_init.stderr
+
+    repo = tmp_path / "pushed"
+    repo.mkdir()
+    _git(["init", "-q", "-b", "feature"], repo)
+    _git(["config", "user.email", "test@example.invalid"], repo)
+    _git(["config", "user.name", "Test"], repo)
+    _git(["remote", "add", "origin", str(remote)], repo)
+
+    _write_ledger(repo, _SEED)
+    _commit(repo, "seed")
+
+    lines = _SEED.splitlines()
+    lines.insert(len(lines) - 1, "- 2026-08-10 -- misplaced insertion")
+    _write_ledger(repo, "\n".join(lines) + "\n")
+    _commit(repo, "feature: misplaced insertion")
+
+    push = _git(["push", "-q", "-u", "origin", "feature"], repo)
+    assert push.returncode == 0, push.stderr
+
+    verdict = core.find_problems(repo, LEDGER_NAME)
+    assert not (verdict.determinable and verdict.problems == []), (
+        "@{u} -- this branch's own remote-tracking ref, right after `git "
+        "push -u` -- let the gate compare the ledger to its own current "
+        "content and report a confident PASS on a real tan-cli#878-shaped "
+        "violation, with no dev ref anywhere that could have caught it "
+        "honestly"
+    )
+    # The correct outcome is a loud, honest skip -- not a fabricated
+    # problem report either.
+    assert verdict.determinable is False
+    assert verdict.problems == []
 
 
 def test_a_committed_merge_with_no_conflict_still_gets_the_two_sided_check(tmp_path):
