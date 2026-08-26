@@ -17,8 +17,8 @@ planner-venv Python and the toolchain root exactly ONCE and hands them in as
 
 A plan without `planPathMode: "tokened"` is untouched by
 `substitute_plan_tokens`: a byte-identical no-op ONLY when the key is ABSENT
-(`plan_path_mode is None`, `:438`) -- present-but-other raises
-`UnknownPlanPathMode` (`:443-444`) instead. Reachable via `--plan-from`
+(`plan_path_mode is None`, `:440`) -- present-but-other raises
+`UnknownPlanPathMode` (`:445-446`) instead. Reachable via `--plan-from`
 handing in an older plan with no `planPathMode` key at all -- tan's own
 in-process planner (`tan.planner.buildplan.emit_build_plan`) tags every
 plan it renders `planPathMode: "tokened"` unconditionally (tan-cli#853), so
