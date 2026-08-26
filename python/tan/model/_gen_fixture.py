@@ -19,10 +19,9 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from ..core.shapes import SDK_MARKER as _SDK_MARKER
 from .manifest import Manifest, Tensor, Target, Coverage
 from .package import write_package
-
-_SDK_MARKER = ("scripts", "alp_project.py")
 
 
 def _manifest() -> Manifest:

@@ -44,8 +44,6 @@ import hashlib
 from dataclasses import replace
 from pathlib import Path
 
-import yaml
-
 from .analyze import BackendReport, OpVerdict
 from .perf import PerfPoint, coverage_from_placement, find_perf_points
 from .targets import TargetSpec
@@ -144,6 +142,8 @@ def _resolve_hw_rev(sku: str, metadata_root: Path, declared: str | None) -> str 
     preset_path = Path(metadata_root) / "e1m_modules" / f"{sku}.yaml"
     if not preset_path.is_file():
         return None
+    import yaml  # noqa: PLC0415 -- deferred (tan-cli#810); see sdk_cmd's `_releases_opener`
+
     try:
         preset = yaml.safe_load(preset_path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):
@@ -238,6 +238,8 @@ def _topology_core_ids(sku: str, metadata_root: Path) -> set[str]:
     (`PerfPoint.hw_rev` is REQUIRED and non-empty, so it can never equal an
     unresolvable query value either)."""
     preset_path = Path(metadata_root) / "e1m_modules" / f"{sku}.yaml"
+    import yaml  # noqa: PLC0415 -- deferred (tan-cli#810); see sdk_cmd's `_releases_opener`
+
     try:
         preset = yaml.safe_load(preset_path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):

@@ -12,8 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
-import yaml
-
 from tan.soc_ref import resolve_soc_path
 
 
@@ -236,6 +234,8 @@ def resolve_targets(sku: str, *, metadata_root: Path) -> list[TargetSpec]:
     preset_path = metadata_root / "e1m_modules" / f"{sku}.yaml"
     if not preset_path.is_file():
         raise FileNotFoundError(f"no SoM preset for SKU {sku} at {preset_path}")
+    import yaml  # noqa: PLC0415 -- deferred (tan-cli#810); see sdk_cmd's `_releases_opener`
+
     preset = yaml.safe_load(preset_path.read_text(encoding="utf-8"))
 
     silicon = preset["silicon"]                                 # host SoC, e.g. "alif:ensemble:e7"

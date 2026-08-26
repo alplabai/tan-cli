@@ -36,8 +36,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
-
 from .adapters import CompilerAdapter
 from .adapters.cpu import CpuAdapter
 from .adapters.deepx import DeepxAdapter
@@ -191,6 +189,8 @@ def resolve_ethos_u_variant(sku: str, *, metadata_root: Path) -> str | None:
     preset_path = Path(metadata_root) / "e1m_modules" / f"{sku}.yaml"
     if not preset_path.is_file():
         return None
+    import yaml  # noqa: PLC0415 -- deferred (tan-cli#810); see sdk_cmd's `_releases_opener`
+
     preset = yaml.safe_load(preset_path.read_text(encoding="utf-8")) or {}
     # `or {}`, not a `.get(..., {})` default: a preset carrying an explicit
     # but EMPTY `inference:` block parses to `{"inference": None}`, and the
