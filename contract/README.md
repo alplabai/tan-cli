@@ -2,7 +2,7 @@
 # `contract/` — the JSON envelope drift gate
 
 The vscode extension drives `tan <cmd> --format json` and hard-depends on
-five things that nothing else in this repo pins:
+six things that nothing else in this repo pins:
 
 - the top-level envelope shape, `{ command, ok, exitCode, project, data,
   issues }` (`python/tan/envelope.py`);
@@ -10,7 +10,11 @@ five things that nothing else in this repo pins:
   doctor, 5 internal (`python/tan/exit_codes.py`);
 - `tan --version`'s first stdout line, `tan MAJOR.MINOR.PATCH`;
 - the **frozen issue codes** it matches with `===` (`issue-codes.json`, below);
-- the **`data` field names** it reads with `?? []` fallbacks (below).
+- the **`data` field names** it reads with `?? []` fallbacks (below);
+- the **`(inert:KIND)` marker** in `--help`, which it records into its own
+  `test/golden/tan-surface/surface.json` (below). Not an envelope field — the
+  extension reads `--help` text for its option surface — but a wire fact all
+  the same, and the one thing on this list a consumer used to have to INFER.
 
 `python/tests/conformance/test_contract_envelopes.py` runs every committed
 fixture against `python -m tan`, the implementation that release assets ship,
@@ -322,6 +326,58 @@ frozen oracle (`xfail`'d, tan-cli#498), so that one entry advertises an exit-0
 `validate.schema-violation`. The rule for telling them apart: a golden with a
 `PROVENANCE.txt` beside it is a re-recording against the shipping CLI; a golden
 named in `DELIBERATE_DIVERGENCE` is not.
+
+## Inert options and their kind (`--help`, tan-cli#886)
+
+`tan` accepts a number of options it does not read. **Every one of them ends
+its `--help` text with a marker naming WHICH KIND of inert it is**, rendered by
+`python/tan/core/inert.py` and nothing else:
+
+```
+--plan        Accepted by other commands; not implemented for `build` yet.
+              (inert:deferred:tan-cli#427)
+--build       Accepted for compatibility: ... (inert:compatibility:tan-cli#290)
+--project     Project root. Not read: ... (inert:not-applicable)
+```
+
+Read it back with, after collapsing runs of whitespace:
+
+```
+\(inert:(?<kind>[a-z-]+)(?::(?<ref>[^)\s]+))?\)
+```
+
+| Kind | Means | Will it ever act? |
+|---|---|---|
+| `deferred` | An upstream issue tracks its arrival. **Always carries a ref** — `inert_help` refuses to render one without it. | Yes, eventually |
+| `compatibility` | Kept so an existing caller's command line keeps parsing, after the behaviour it used to select stopped being conditional. | **No** |
+| `parity` | Accepted only because a sibling surface accepts it — the v0.4.1 oracle's clap `GlobalArgs` are `global = true`, so every verb parses all ten (tan-cli#261, `tan.core.global_flags`). Hidden on every command today. | **No** |
+| `not-applicable` | Structurally meaningless for this command, whatever tan implements later. | **No** |
+
+**`deferred` is the only non-permanent kind, and the KIND is what says so —
+never the presence of a ref.** `compatibility` and `parity` both name the issue
+that explains their history; a consumer that keys "will this arrive?" off
+`ref != null` gets `doctor --build` wrong, which is the exact customer-visible
+defect tan-cli#886 was filed about ("not implemented yet, see tan-cli#427" told
+about a flag that is never going to act).
+
+**The vocabulary is closed.** An unrecognised kind is a tan bug, not a value to
+fall back on; renaming or dropping one is the same breaking wire change the
+frozen-issue-code rule describes — bump the CLI MAJOR/MINOR, record it in
+`CHANGELOG.md`, and open the matching alp-sdk-vscode issue.
+
+**Why parentheses and not `[inert:…]`.** Typer runs this app with
+`rich_markup_mode="rich"`, so help text is rich MARKUP: a square-bracketed
+marker parses as a style tag and renders as *nothing at all* — measured, the
+token vanishes from `tan build --help` entirely. The token also carries no
+whitespace, so rich's wrapping can never split it across two lines.
+
+**What keeps it true:** `python/tests/gates/test_inert_option_markers.py`,
+which walks the built Click tree (not the source) and fails on an unknown
+kind, a `deferred` with no ref, a hidden inert option of a non-`parity` kind,
+an option that reads as inert in prose but carries no marker, and — the pin
+that matters to this repo's consumer — any change at all to the census of
+**visible** inert options. That census is 15 rows today: the twelve `build`
+deferrals, `doctor --build`, and `faultdecode`'s `--project`/`--sdk-root`.
 
 ## Fixture shape (`envelopes/<case>/`)
 
