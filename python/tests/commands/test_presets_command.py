@@ -386,6 +386,10 @@ def test_soc_lookups_resolves_a_synthetic_checkout_end_to_end(tmp_path):
     assert core_type_lookup("not-a-triple") == {}
     assert core_type_lookup("vendor:family:nonexistent") == {}
     assert core_type_lookup(None) == {}
+    # Too MANY colon-separated parts is also not-a-triple -- a `!=3` guard
+    # covers both directions; a `<3` guard (caught nowhere else in this
+    # suite) would let `a:b:c:d` silently resolve to `socs/a/b/c.json`.
+    assert core_type_lookup("a:b:c:d") == {}
 
 
 def test_soc_lookups_degrades_when_the_checkout_has_no_schema(tmp_path):
@@ -403,6 +407,34 @@ def test_soc_lookups_degrades_when_the_checkout_has_no_schema(tmp_path):
 
 def test_soc_lookups_is_none_none_when_the_metadata_tree_is_missing(tmp_path):
     assert _soc_lookups(str(tmp_path / "no-such-sdk")) == (None, None)
+
+
+def test_allowed_os_lookup_degrades_to_empty_for_an_unresolved_core_type(tmp_path):
+    """A `board.schema.json` IS present (so `_os_choices()` resolves), but the
+    core's `type` is the unresolved sentinel `""` -- the shape a SoM whose
+    `silicon:` names no on-disk SoC JSON (or a core id absent from it) hits in
+    `read_soms` via `core_types.get(c.id, "")`.
+
+    Before this guard, `cross_class_os("")` subtracted BOTH class runtimes and
+    handed back a plausible, populated list (`["baremetal", "off"]`) with no
+    way for a consumer to tell the answer was degraded -- offering Bare-metal
+    for what may be a Cortex-M core, the exact alp-sdk-vscode#538 defect #870
+    exists to close. `allowedOs` must degrade to `[]`, exactly like `type`
+    degrades to `""`, not to a plausible-looking subset.
+
+    Mutation-proven: deleting the `if not core_type: return []` guard in
+    `allowed_os_lookup` turns this RED (`["baremetal", "off"]` != `[]`);
+    restoring it turns it GREEN. Verified by hand while writing this test.
+    """
+    write(
+        tmp_path / "metadata" / "schemas" / "board.schema.json",
+        json.dumps({"$defs": {"core_entry": {"properties": {
+            "os": {"enum": ["zephyr", "yocto", "baremetal", "off"]}
+        }}}}),
+    )
+    _, allowed_os_lookup = _soc_lookups(str(tmp_path))
+    assert allowed_os_lookup is not None
+    assert allowed_os_lookup("") == []
 
 
 @pytestmark_soc
@@ -587,7 +619,7 @@ def test_json_reports_the_som_and_stdout_carries_nothing_else(tmp_path, monkeypa
     # `type`/`allowedOs` (tan-cli#870) degrade to `""`/`[]`: this fixture SDK
     # carries no `metadata/socs/**` and no `metadata/schemas/board.schema.json`
     # for either the SoC-type lookup or `_allowed_os_for_core` to resolve
-    # against -- see `test_core_type_and_allowed_os_are_resolved_from_the_soc_json`
+    # against -- see `test_read_soms_reports_e8s_three_cores_with_type_and_allowed_os`
     # below for the populated case.
     assert doc["data"]["soms"][0]["cores"] == [
         {"id": "a55_cluster", "os": "yocto", "type": "", "allowedOs": []},

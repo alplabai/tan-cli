@@ -21,10 +21,18 @@ values come back on one SoM, so a consumer cannot read the field as a choice.
 
 **`cores[].type` and `cores[].allowedOs` (tan-cli#870).** The default `os` above
 answers "what does this core run today"; a picker also needs "what MAY this core
-run" -- and re-deriving that from the core id with a regex is exactly the
-duplicated-truth defect #870 exists to close (a VS Code wizard's own regex
-offered Bare-metal for a Cortex-M core that `alp_project.py` then refused at
-configure time). Both fields are read from the checkout, never invented here:
+run" -- and re-deriving that from the core id with a regex is the duplicated-truth
+defect #870 exists to close: `alp-sdk-vscode@dev`'s
+`packages/alp-webview/src/shared/coreRuntime.ts` re-derives the cortex-a/cortex-m
+class from the core id with its own `/(^|[_-])m\\d/` heuristic, independently of
+whatever this checkout's own SoC metadata says, and two independently-maintained
+copies of the same rule are one edit away from disagreeing. (`alp-sdk-vscode#538`
+itself was a different bug in the same wizard -- Bare-metal was offered for
+every Cortex-M core and the scaffolder wrote it a Zephyr app anyway, which
+`alp_project.py` then refused because `os: baremetal` needs `cmake-args`, not
+because a Cortex-M was offered Bare-metal -- so these fields would not, by
+themselves, have prevented #538; the duplicated-truth argument above is the
+motivation that stands.) Both fields are read from the checkout, never invented here:
 `type` is the raw `metadata/socs/<vendor>/<family>/<part>.json` `cores[].type`
 string (`cortex-a32`, `cortex-m55`, ...), resolved via the SoM preset's own
 `silicon:` key; `allowedOs` is that type's cross-class OS subtracted from the
@@ -487,6 +495,12 @@ def _resolve_soc_path(silicon: str | None, metadata_root: Path) -> Path | None:
     arithmetic exactly (deliberately NOT imported from there: see
     `_soc_lookups`'s docstring for why nothing in this file imports
     `tan.planner`). Returns `None` for a falsy or not-exactly-3-part `silicon`.
+
+    Known duplication, tracked rather than fixed here: this is a verbatim
+    second copy of `som_metadata.resolve_soc_path`'s arithmetic, not just its
+    contract -- see tan-cli#917 (`som_metadata.py` is held by another in-flight
+    change as of this writing, so the extraction is scoped as its own
+    follow-up).
     """
     if not silicon:
         return None
@@ -568,6 +582,17 @@ def _soc_lookups(
             return None
 
     def allowed_os_lookup(core_type: str) -> list[str]:
+        # `core_type == ""` is this file's own sentinel for "unresolved" (the
+        # SoC JSON was missing, unreadable, or had no entry for this core id
+        # -- see `core_type_lookup` above and `read_soms`'s `.get(c.id, "")`).
+        # `cross_class_os("")` would otherwise subtract BOTH class runtimes
+        # and hand back a plausible-looking list (e.g. `["baremetal", "off"]`)
+        # with no way for a consumer to tell it is degraded -- offering
+        # Bare-metal for what may be a Cortex-M core, the exact defect #870
+        # exists to close. An unresolved type gets an unresolved (empty)
+        # answer instead, matching every other degrade path in this file.
+        if not core_type:
+            return []
         choices = _os_choices()
         if choices is None:
             return []

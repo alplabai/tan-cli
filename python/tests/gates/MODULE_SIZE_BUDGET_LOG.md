@@ -250,3 +250,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_count_budget: 258 -> 260
 - 2026-08-26 -- tan-cli#870 follow-up: _soc_lookups reworked to stop importing tan.planner (its process-global SDK-root bind poisoned 292 unrelated parity tests when exercised from presets_cmd's many per-test synthetic checkouts) -- now reads tan.core.os_class + inlines the board-schema-enum/SoC-JSON reads directly
     - tan/commands/presets_cmd.py: 844 -> 887
+- 2026-08-26 -- tan-cli#914 fix round: allowed_os_lookup guards the unresolved-core-type sentinel (Major -- degrade to [] instead of a plausible cross-class subset) with a mutation-proof test, module-docstring corrections attributing the duplicated-truth motivation to alp-sdk-vscode's coreRuntime.ts regex rather than alp-sdk-vscode#538 (Minor 1), and a tan-cli#917 follow-up pointer on _resolve_soc_path's known duplication (Minor 4)
+    - tan/commands/presets_cmd.py: 887 -> 912
+- 2026-08-26 -- correction, no number changed: the 2026-08-26 tan-cli#870 entry above ("new entry at 844") describes the design `_soc_lookups` was rewritten OUT of one entry later that same day ("follow-up") -- it names the abandoned `tan.planner.topology._allowed_os_for_core` reuse, not the shipped `tan.core.os_class` one. Append-only, so this stands as a correction rather than an edit to that line.
