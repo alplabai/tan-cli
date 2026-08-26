@@ -12,6 +12,7 @@ invented examples.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -23,6 +24,15 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 import bump_dev_version as bdv  # noqa: E402
 import version_check as vc  # noqa: E402
+
+_ASSEMBLE_SCRIPT = SCRIPT_DIR / "assemble_changelog.py"
+_assemble_spec = importlib.util.spec_from_file_location(
+    "assemble_changelog", _ASSEMBLE_SCRIPT
+)
+assert _assemble_spec and _assemble_spec.loader
+ac = importlib.util.module_from_spec(_assemble_spec)
+sys.modules["assemble_changelog"] = ac
+_assemble_spec.loader.exec_module(ac)
 
 
 # ---------------------------------------------------------------------------
@@ -282,3 +292,56 @@ def test_the_final_tag_bullet_never_splits_the_issue_reference(tmp_path, monkeyp
     ), "textwrap split `tan-cli#770` across the wrap -- pass break_on_hyphens=False"
     assert "tan-cli#770" in "\n".join(bullet_lines)
     assert all(len(line) <= 78 for line in bullet_lines)
+
+
+def test_the_created_fixed_heading_lets_a_later_fragment_append_not_duplicate(
+    tmp_path, monkeypatch
+) -> None:
+    """Prove the review's claim (tan-cli#880), don't just assert it in a comment.
+
+    `_insert_changelog_section` opens the fresh `## [<target>] — Unreleased`
+    section with a `### Fixed` heading rather than a bare bullet, specifically
+    so a later `changelog.d/*.fixed.md` fragment folded in by
+    `assemble_changelog.splice()` lands UNDER that same heading instead of
+    creating a second, duplicate `### Fixed` a few lines below it. Feed the
+    real output of one script into the real entry point of the other and
+    check the heading count, rather than trusting either script's docstring.
+    """
+    root = _synthetic_repo(tmp_path, monkeypatch)
+    plan = bdv.build_plan("0.6.0-rc1", today="2026-08-20")
+    bdv.apply_plan(plan)
+
+    # A same-target, same-category fragment lands the way a normal PR would
+    # add one after the release-prep bump already opened the section.
+    frag_dir = root / "changelog.d"
+    frag_dir.mkdir()
+    (frag_dir / "999.fixed.md").write_text(
+        "- **A later, unrelated fix folded into the same section.**",
+        encoding="utf-8",
+    )
+
+    assert ac.main(["--root", str(root)]) == 0
+    text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    unreleased_start = text.index("## [0.6.0] — Unreleased")
+    next_heading = text.index("## [0.6.0-rc1]")
+    unreleased_section = text[unreleased_start:next_heading]
+
+    assert unreleased_section.count("### Fixed") == 1, (
+        "a later fragment duplicated the ### Fixed heading instead of "
+        "appending into the one bump_dev_version.py already created:\n"
+        f"{unreleased_section}"
+    )
+    assert "`TAN_VERSION` moved to" in unreleased_section
+    assert "A later, unrelated fix folded into the same section." in (
+        unreleased_section
+    )
+    # Not just "one heading exists somewhere" -- the auto-created bullet must
+    # actually sit UNDER it. If `_insert_changelog_section` regressed to a
+    # bare bullet with no heading, `splice()` would still only create one
+    # `### Fixed` (there being none to duplicate), but the auto bullet would
+    # then float ABOVE it instead of being folded in alongside the later
+    # fragment -- a heading-count check alone would miss that regression.
+    assert unreleased_section.index("### Fixed") < unreleased_section.index(
+        "`TAN_VERSION` moved to"
+    ), "the auto-created bullet is not nested under the ### Fixed heading"
