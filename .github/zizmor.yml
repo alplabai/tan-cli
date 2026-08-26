@@ -1,9 +1,14 @@
 # zizmor policy (tan-cli#435).
 #
 # THE POLICY IS ONE LINE: the gate runs `zizmor --min-severity medium`, and
-# this file is its reviewed baseline. It is deliberately ONE entry long.
-# Anything added here is a decision someone defends in review, not a way to
-# turn a red run green.
+# this file is its reviewed baseline. Growth IS permitted -- but only as
+# another line-scoped `artipacked.ignore` entry of the exact same shape as
+# the two below (a checkout that must keep its credential because it pushes
+# through the remote the checkout leaves configured, commented in place at
+# the site), each one a decision someone defends in review. It is currently
+# TWO entries long. Anything added here is a decision someone defends in
+# review, not a way to turn a red run green -- never widen an entry to a
+# whole rule or a whole file.
 #
 # WHY SEVERITY AND NOT CONFIDENCE. The obvious tightening --
 # `--min-confidence medium` on top -- was measured and REJECTED: all 26
@@ -22,16 +27,24 @@
 #                            26 artipacked
 #
 # NOT IGNORED, ON PURPOSE. The informational/low findings that survive are
-# left visible rather than suppressed: eight low-confidence
-# `template-injection` hits on step outputs this repository produces itself
-# (`steps.floor.outputs.version` from pyproject, `steps.ref.outputs.sha` from
-# `git rev-parse`, `steps.gate.outputs.verdict` from `planner_resync.py`), one
-# `artipacked` on the single checkout that must keep its credential because it
-# pushes (`planner-resync.yml`, commented in place), and `superfluous-actions`
-# on the release publisher. `--min-severity medium` already keeps them out of
-# the verdict, so listing them here would only hide them from a human reading
-# the full report -- `zizmor .github/workflows/` with no flags still shows all
-# 52.
+# left visible rather than suppressed: eleven low-confidence
+# `template-injection` hits on step outputs this repository produces itself.
+# The count is measured (re-run the gate for the current one, don't trust a
+# stale enumeration -- `dev`'s own "eight" was already two short of the real
+# ten before this PR added the eleventh); as of tan-cli#880 the eleven are
+# `steps.floor.outputs.version` (ci.yml, from pyproject),
+# `steps.sdk_ref.outputs.ref` (parity.yml, x3, from `git rev-parse`),
+# `steps.ref.outputs.sha` (planner-resync.yml, from `git rev-parse`),
+# `steps.resync.outputs.rc`, `steps.pr.outputs.url`,
+# `steps.pr.outputs.opened`, and `steps.gate.outputs.verdict` (x2, five
+# between them, all planner-resync.yml, from `planner_resync.py`), and
+# `steps.bump.outputs.status` (release.yml, from `bump_dev_version.py`), the
+# TWO `artipacked` findings (below) on the checkouts that must keep their
+# credential because they push (commented in place at each site), and
+# `superfluous-actions` on the release publisher. `--min-severity medium`
+# already keeps them out of the verdict, so listing them here would only hide
+# them from a human reading the full report -- `zizmor .github/workflows/`
+# with no flags still shows all of them.
 #
 # ONE MORE THING A REVIEWER SHOULD KNOW: these ignores are LINE-SCOPED, so
 # they rot when the lines move. They rot LOUDLY -- the finding comes back and
@@ -53,4 +66,12 @@ rules:
       # medium while a networked run does not, so without the entry the gate's
       # verdict would depend on whether the GitHub API answered -- and a gate
       # that goes red on someone else's rate limit gets ignored, then removed.
-      - planner-resync.yml:140:9
+      - planner-resync.yml:151:9
+
+      # release.yml's `propose-dev-version-bump` job (tan-cli#770), the same
+      # shape for the same reason: its `dev` checkout must keep its
+      # credential because the job's own later step pushes
+      # `auto/dev-version-bump-<tag>` through the remote this checkout
+      # leaves configured, and nothing downstream sets up a token remote of
+      # its own. The step carries the same explanation inline.
+      - release.yml:1225:9

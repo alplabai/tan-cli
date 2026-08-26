@@ -40,18 +40,24 @@ the [repo README](../README.md).
   verifies its SHA-256 against the pinned digest, and only then installs it.
 - `bin/tan.js` forwards `tan …` invocations to `tan-cli-lib/tan[.exe]`.
 
-**From v0.5.0 — the transition tag, not cut yet — the asset becomes an
-archive of a PyInstaller `--onedir` freeze**, not a raw binary
+**From v0.5.0 (shipped 2026-08-04) the asset is an archive of a PyInstaller
+`--onedir` freeze**, not a raw binary
 ([#349](https://github.com/alplabai/tan-cli/issues/349)). Every tag published
-so far, including `v0.5.0-rc4`, still ships the raw binary this shim asks for
-as a fallback; asking for the archive name unconditionally was
-[#362](https://github.com/alplabai/tan-cli/issues/362) — a name no published
-tag carries yet, so it 404'd, including at this shim's own pinned version.
-`postinstall.js`'s `selectRelease` decides which shape a given tag actually
-published from its `checksums.txt` (the same rule `install.sh` /
-`install.ps1` follow, [#356](https://github.com/alplabai/tan-cli/issues/356)),
-never from the version number, so both shapes install correctly for as long as
-raw tags remain installable.
+since ships only that archive shape; the raw `tan-<target>[.exe]` name this
+shim also asks for is a legacy fallback reachable only on `v0.4.1` and
+earlier. (This package is unpublished — see the note at the top — so
+`package.json`'s own version, an `-rc1.dev0`-suffixed pre-release string that
+moves ahead of the last real tag, names no tag that has actually shipped
+either shape; the claim above is about what real tags publish, not about
+this shim's own pin.) Asking for the archive name
+unconditionally, before any tag published it, was
+[#362](https://github.com/alplabai/tan-cli/issues/362) — it 404'd on every tag
+that existed at the time. `postinstall.js`'s `selectRelease` decides which
+shape a given tag actually published from its `checksums.txt` (the same rule
+`install.sh` / `install.ps1` follow,
+[#356](https://github.com/alplabai/tan-cli/issues/356)), never from the
+version number, so both shapes still install correctly if an old tag is ever
+requested by `--version`.
 
 The archive's one top-level entry is `tan/`, holding `tan` (`tan.exe` on
 Windows) plus `_internal/`, the runtime — **the executable does not run
@@ -98,10 +104,11 @@ swap restores the previous install rather than losing it.
    `version` to match it exactly. This is enforced, not just documented:
    `python/scripts/version_check.py --selftest --tag` (run by `release.yml`'s
    `verify-version` job) fails the tag if they disagree — `postinstall.js`
-   resolves its download TAG from `package.json`'s version alone
-   (`npm-shim/postinstall.js:49`), so a stale shim version silently fetches
-   from the wrong release. Which ASSET SHAPE it asks for at that tag is not
-   version-derived, though — `selectRelease` decides that from the tag's own
+   resolves its download TAG from `package.json`'s version alone (the
+   ``const TAG = `v${pkg.version}`;`` line in `npm-shim/postinstall.js`), so a
+   stale shim version silently fetches from the wrong release. Which ASSET
+   SHAPE it asks for at that tag is not version-derived, though —
+   `selectRelease` decides that from the tag's own
    `checksums.txt` (see [How it works](#how-it-works)), which is what lets this
    shim install correctly at both a raw-asset tag and an archive tag without
    caring which one `package.json`'s version happens to be. `Cargo.toml` is

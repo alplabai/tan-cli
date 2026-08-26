@@ -4,44 +4,53 @@
 # `python/tests`, `ALP_SDK_ROOT`-gated via `sdk_parity`), the npm-shim
 # platform-mapping check, and the sdist/wheel build-floor proof.
 #
-# BRANCH PROTECTION MUST BE REPOINTED (tan-cli#392, tan-cli#269)
-# ==============================================================
-# Measured 2026-08-02, `gh api
-# repos/alplabai/tan-cli/branches/<b>/protection` -- `main` and `dev` carried
-# the IDENTICAL six required contexts (strict: true, enforce_admins: true):
+# BRANCH PROTECTION (tan-cli#392, tan-cli#269 -- DONE; tan-cli#439)
+# =================================================================
+# The repoint this block used to demand has happened. Do not act on an older
+# copy of it: it named six contexts, five of which (`lint`, the three
+# `test (*)` legs, `msrv`) were cargo jobs on `crates/` that tan-cli#269
+# deleted, and it listed the replacements as work still to do.
 #
-#     lint | test (ubuntu-latest) | test (windows-latest)
-#     test (macos-latest) | msrv | seam1 -- plan-shape parity
+# Re-measured 2026-08-18, `gh api
+# repos/alplabai/tan-cli/branches/<b>/protection`. `main` and `dev` require the
+# IDENTICAL FIVE contexts, all of which run today:
 #
-# FIVE OF THOSE SIX NO LONGER EXIST. `lint`, the three `test (*)` legs and
-# `msrv` were cargo jobs on `crates/`, which tan-cli#269 deleted; they are
-# gone from this file. A required context that never reports does not fail --
-# it sits PENDING forever and blocks the merge, so protection has to be edited
-# before anything can land after this change. Branch protection is a repo
-# SETTING, not a file, and cannot be fixed from here.
+#     seam1 -- plan-shape parity
+#     python -- pytest across python/ (ubuntu-latest)
+#     python -- pytest across python/ (windows-latest)
+#     python -- pytest across python/ (macos-latest)
+#     zizmor · workflow security
 #
-# The exact context strings to require INSTEAD, all of which run today:
+# Four come from parity.yml; `zizmor · workflow security` is THIS file's
+# `workflow-security` job. `enforce_admins` is true on both.
 #
-#   `python`
-#       this file's own job below. One OS, whole suite INCLUDING tests/gates --
-#       but `sdk_parity` is false on a `pull_request`, so it runs with no
-#       alp-sdk bound and the SDK-gated modules are not even collected. Measure
-#       the gap rather than trusting a number written here: `python -m pytest
-#       --collect-only -q` from `python/`, with and without `ALP_SDK_ROOT`.
-#       Requiring this ALONE gates merges on the weaker half of the suite.
+# ONE INTENTIONAL DIFFERENCE, and it is not cosmetic: `strict` is **true on
+# `main`, false on `dev`**. On `main` a PR must be up to date with the base
+# before it can merge, so each merge sends the others back for a rebase and a
+# full re-run; on `dev` it does not, which is what makes several open PRs
+# workable there. Anyone quoting "strict: true" for this repo is quoting
+# `main`.
 #
-#   `python -- pytest across python/ (ubuntu-latest)`
-#   `python -- pytest across python/ (windows-latest)`
-#   `python -- pytest across python/ (macos-latest)`
-#       parity.yml's `python-tests` matrix. Binds `ALP_SDK_ROOT` on every run,
-#       on all three platforms tan ships assets for, and skips only
-#       `tests/gates` -- which `seam1 -- plan-shape parity`, already required,
-#       runs against the refs that make each gate's verdict mean something.
-#       This is the trio worth requiring.
+# `python` -- this file's own job below -- is deliberately NOT required. It is
+# one OS and, on a `pull_request`, `sdk_parity` is false, so it runs with no
+# alp-sdk bound and the SDK-gated modules are not even collected. Requiring it
+# would gate merges on the weaker half of the suite; the parity.yml trio binds
+# `ALP_SDK_ROOT` on all three platforms tan ships assets for. Measure the gap
+# rather than trusting a number written here: `python -m pytest --collect-only
+# -q` from `python/`, with and without `ALP_SDK_ROOT`.
 #
-# Those strings are each job's EVALUATED `name:`; `python` has none, so its
-# context is its job id. Renaming either job changes the required context and
-# blocks every merge until protection is edited to match -- treat both as API.
+# Re-measure rather than trusting this block; it is a snapshot and this is the
+# second time it went stale:
+#
+#     gh api repos/alplabai/tan-cli/branches/main/protection \
+#       --jq '.required_status_checks | {strict, contexts}'
+#     gh api repos/alplabai/tan-cli/branches/dev/protection \
+#       --jq '.required_status_checks | {strict, contexts}'
+#
+# Those strings are each job's EVALUATED `name:`; a job with no `name:` reports
+# under its job id. Renaming a required job changes the required context and
+# blocks every merge until protection is edited to match -- treat them as API.
+# Branch protection is a repo SETTING, not a file, and cannot be fixed here.
 name: ci
 on:
   push:
@@ -124,6 +133,37 @@ jobs:
   # widening of this job.
   python:
     runs-on: ubuntu-latest
+    # Two numbers, because this job has two workloads and one flat cap has to
+    # be wrong for one of them.
+    #
+    # `sdk_parity` (declared above, `type: boolean, default: false`) is the
+    # whole difference: it switches on the planner byte-parity and
+    # planner-binding suites, which SKIP without an alp-sdk checkout -- 282 of
+    # 1163 tests. `release.yml:235` passes true; nothing else does.
+    #
+    #   PR / merge_group  6-11 min   measured across the last 25 successful
+    #                                runs (min 6m; p100 11m, run 32174278683)
+    #   release tag         23 min   run 31834718564, `v0.6.0-rc1`
+    #                                (1422s = 23.7m)
+    #
+    # A flat cap taken from the PR measurement passes every PR and then fails
+    # the tag, which is the most expensive place in this repo to be wrong. A
+    # flat 60 avoids that but leaves the >99% of runs that are PRs held for an
+    # hour against an 11-minute p100. The expression gets both: `inputs` is
+    # null on `pull_request`/`push`/`merge_group`, so `inputs.sdk_parity` is
+    # falsy there and this reads 30; on the `workflow_call` from release.yml it
+    # reads 60.
+    #
+    # 30 rather than 20 on the PR leg: p100 is 11m and trending up (the same
+    # trend visible on the release leg, 633s -> 1422s), so 20 is 1.8x headroom
+    # on a number that has moved. Both legs stay far under GitHub's own
+    # 360-minute default, which is what a hang catcher has to beat.
+    #
+    # NOTE for tan-cli#854, which generalises `parity.yml`'s timeout gate to
+    # every PR-triggered workflow: this value is a STRING expression, not an
+    # int. That gate's `isinstance(timeout, int)` assertion has to learn about
+    # expressions or it will red on this line.
+    timeout-minutes: ${{ inputs.sdk_parity && 60 || 30 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -141,8 +181,8 @@ jobs:
       - name: ensure zsh is on PATH (zsh-driven completion tests)
         run: |
           if ! command -v zsh >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends zsh
+            bash scripts/ci/apt-bounded.sh update
+            bash scripts/ci/apt-bounded.sh install -y --no-install-recommends zsh
           fi
       # `pip install -e ./python` and NOT a hand-listed dependency set: this job
       # must fail when the DECLARED dependencies are wrong, which is the defect
@@ -312,17 +352,66 @@ jobs:
       # what was ported into `tan/planner/loader.py` / `manifest.py` /
       # `models.py` / `orchestrator.py`.
       #
-      # OWED MOVE, NOT YET MAKEABLE (tan-cli#791). This pin also predates every
-      # artefact ADR-0028 publishes on the alp-sdk side -- `npu_toolchain.vela`
-      # in `metadata/socs/**` (alp-sdk `fff41087`), the `metadata/npu_ops/**`
-      # op-support tables, the deletion of `scripts/alp_model/` with the
-      # regenerated C fixtures that names (`ab6968e2`), and the public
-      # `tests/fixtures/models/person_detect_int8.tflite` real-model fixture
-      # (`4fd5fab5`). All four land together in alplabai/alp-sdk#1470, which is
-      # still OPEN, so there is no post-merge SHA to move this `ref:` to yet.
-      # Until there is, twelve tests under `python/tests/model/` SKIP against
-      # this checkout instead of failing against it, each naming the one
-      # artefact it is missing (`python/tests/conftest.py`'s capability
+      # `88318e75` -> `94378a05` for tan-cli#846, again in the SAME change as
+      # `parity.yml`'s `PINNED_SDK_TAG` and `PINNED_SDK_COMMIT`. It carries
+      # alp-sdk#1535, which is the RETIREMENT CONDITION the `88318e75` hold
+      # was written against: that hold existed only because a pin past the
+      # `v0.16.0` version bump made the scaffold emit
+      # `https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/...` links
+      # while no `v0.16.0` tag exists. #1535 makes `_docs_ref()` require the
+      # tag to RESOLVE before pinning to it, so those links degrade to `main`
+      # instead of 404ing, and the hold has nothing left to protect. The seven
+      # scaffold READMEs the hold's own comment named are re-vendored in this
+      # same change. `HAND_PORT_PINNED_SDK_COMMIT` deliberately does NOT move
+      # with it -- see that pin's own comment (alp-sdk#1471's
+      # `scripts/alp_cli/doctor.py` delta is unported).
+      #
+      # `94378a05` -> `ac38a069` for tan-cli#868, in the SAME change as
+      # `parity.yml`'s `PINNED_SDK_TAG` and `test_planner_relocation_
+      # freshness.py`'s `PINNED_SDK_COMMIT` -- the three MUST be bumped
+      # together, and `tests/conftest.py`'s tan-cli#691 warning fires when
+      # they are not. What moved is an AUDIT: alp-sdk#1485/#1484/#1556 are
+      # ported into `tan/planner/` and alp-sdk#1487's chip -> subsystem
+      # entries into `slugs.py` (that last one is `HAND_PORT_HASHES`
+      # territory, which is why nothing here caught it -- see
+      # `PINNED_SDK_COMMIT`'s comment). `HAND_PORT_PINNED_SDK_COMMIT` still
+      # does not move.
+      #
+      # `ac38a069` -> `eb96112b` (tan-cli#891): NOT an audit move this time --
+      # the vendored fixtures (`contract/fixtures/toolchains/toolchains.json`,
+      # re-vendored from alp-sdk `v0.16.0` by tan-cli#888) and this checkout
+      # have to name the same commit, and `eb96112b` is the `v0.16.0` release
+      # merge itself. See `parity.yml`'s `PINNED_SDK_TAG` comment for the full
+      # per-fixture re-measurement (toolchain-lock/kconfig/bootstrap/scaffold)
+      # and the `scripts/alp_orchestrate/**` byte-identity check that keeps
+      # this a non-behavioural move for `PINNED_HASHES`.
+      # `fetch-tags: true`, not the default no-tags checkout -- same trap and
+      # same fix as `parity.yml`'s `clone alp-sdk` step (see that step's
+      # comment for the full measurement). This checkout feeds `pytest tests
+      # -q` under `ALP_SDK_ROOT`, and any test that reaches
+      # `tan.planner.template._docs_ref()` against this bound root sees a
+      # `blob/main/`/`tree/main/` degrade instead of `blob/v0.16.0/`/
+      # `tree/v0.16.0/` unless the checkout can resolve the `v0.16.0` tag from
+      # its LOCAL refs -- `_tag_resolves()` (issue #1508 / alp-sdk#1535) makes
+      # no network call, by design, so a tagless clone here silently disagrees
+      # with the vendored scaffold tree `parity.yml` already proved matches a
+      # tagged one. `fetch-depth: 0` is not needed for the same reason it
+      # is not needed there: `git fetch --tags` pulls every tag regardless of
+      # depth, and `v0.16.0` points AT this commit.
+      #
+      # OWED MOVE, STILL NOT MAKEABLE (tan-cli#791). None of the three bumps
+      # above carry ADR-0028's artefacts -- they moved this pin for reasons
+      # unrelated to the model-engine relocation. This checkout still predates
+      # every artefact ADR-0028 publishes on the alp-sdk side -- `npu_toolchain.
+      # vela` in `metadata/socs/**` (alp-sdk `fff41087`), the `metadata/
+      # npu_ops/**` op-support tables, the deletion of `scripts/alp_model/`
+      # with the regenerated C fixtures that names (`ab6968e2`), and the
+      # public `tests/fixtures/models/person_detect_int8.tflite` real-model
+      # fixture (`4fd5fab5`). All four land together in alplabai/alp-sdk#1470,
+      # which is still OPEN, so there is no post-merge SHA to move this `ref:`
+      # to yet. Until there is, twelve tests under `python/tests/model/` SKIP
+      # against this checkout instead of failing against it, each naming the
+      # one artefact it is missing (`python/tests/conftest.py`'s capability
       # predicates). Move this `ref:` -- in the same change as `parity.yml`'s
       # `PINNED_SDK_TAG` and both freshness pins, as always -- onto an alp-sdk
       # commit carrying `npu_toolchain.vela`, in the SAME merge window as
@@ -334,7 +423,8 @@ jobs:
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: 88318e759958529fbbd8fe9d481373681c0fa78d
+          ref: eb96112ba7d1cc3b4084c985962ea31772177d74
+          fetch-tags: true
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a
@@ -382,6 +472,9 @@ jobs:
   # Node's own test runner, so there is nothing to install.
   shim:
     runs-on: ubuntu-latest
+    # Under a minute on every run sampled, PR and release tag alike. 10 is a
+    # hang catcher for the pip install, not a budget.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -410,6 +503,8 @@ jobs:
   # measures.
   wheel-floor:
     runs-on: ubuntu-latest
+    # Under a minute on every run sampled. Same reasoning as `shim` above.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -483,6 +578,12 @@ jobs:
   workflow-security:
     name: zizmor · workflow security
     runs-on: ubuntu-latest
+    # This job's `name:` IS the fifth required context, and it was the one
+    # tan-cli#812 left unbounded while closing the other four (all of which
+    # come from parity.yml). A wedged run here holds the PR for GitHub's
+    # 360-minute default. Measured under a minute: pip install plus a
+    # hermetic `--no-online-audits` pass over .github/workflows/.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

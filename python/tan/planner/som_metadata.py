@@ -39,8 +39,6 @@ from typing import Any
 
 from tan.soc_ref import resolve_soc_path  # noqa: F401  (re-export: see below)
 
-from .paths import METADATA_ROOT
-
 # ---------------------------------------------------------------------
 # SKU-family mapping
 # ---------------------------------------------------------------------
@@ -67,27 +65,36 @@ def _sku_family(sku: str) -> str:
 # This is NOT a hand-maintained table: the symbol is computed from the
 # ref, and the single source of the allowlist is the versioned registry
 # at metadata/registries/silicon-kconfig.json.
-SILICON_KCONFIG_REGISTRY = METADATA_ROOT / "registries" / "silicon-kconfig.json"
 
 
-@functools.lru_cache(maxsize=1)
-def _load_silicon_kconfig() -> tuple[str, frozenset[str]]:
-    """Load (socSymbolPrefix, knownSilicon) from the versioned registry."""
-    data = json.loads(SILICON_KCONFIG_REGISTRY.read_text(encoding="utf-8"))
+@functools.lru_cache(maxsize=None)
+def _load_silicon_kconfig(metadata_root: Path) -> tuple[str, frozenset[str]]:
+    """Load (socSymbolPrefix, knownSilicon) from *metadata_root*'s versioned
+    registry. Cache is keyed on *metadata_root* so a second root in the
+    same process doesn't silently reuse the first root's table (#1485)."""
+    registry = Path(metadata_root) / "registries" / "silicon-kconfig.json"
+    data = json.loads(registry.read_text(encoding="utf-8"))
     return data["socSymbolPrefix"], frozenset(data["knownSilicon"])
 
 
-def silicon_to_kconfig(silicon: str | None) -> str | None:
+def silicon_to_kconfig(silicon: str | None, metadata_root: Path) -> str | None:
     """Return the Zephyr Kconfig symbol that selects *silicon*, or ``None``.
 
     The symbol is computed as ``socSymbolPrefix + ref.upper().replace(':','_')``;
     e.g. ``alif:ensemble:e7`` -> ``ALP_SOC_ALIF_ENSEMBLE_E7``.  ``None`` is
     returned for any ref not in the registry allowlist (so an accelerator
     such as ``deepx:dx:m1`` -- or an unknown ref -- emits no CONFIG line).
+
+    *metadata_root* is REQUIRED -- callers must pass the project's own
+    ``project.effective_metadata_root()``, never a module default: a
+    silent fall-through to the SDK's own in-tree registry regardless of a
+    project's `--metadata-root` override was alp-sdk#1485's exact defect,
+    and the module-level `SILICON_KCONFIG_REGISTRY` constant this replaces
+    was the last site in tan's planner still shaped that way (tan-cli#868).
     """
     if silicon is None:
         return None
-    prefix, known = _load_silicon_kconfig()
+    prefix, known = _load_silicon_kconfig(metadata_root)
     if silicon not in known:
         return None
     return prefix + silicon.upper().replace(":", "_")

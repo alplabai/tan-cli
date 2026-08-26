@@ -39,14 +39,21 @@ The stable line and the current opt-in pre-release line:
 
 | Component | Stable | Opt-in / pre-release |
 |---|---|---|
-| alp-sdk | **v0.15.0** | none live; tan parity may pin a newer exact commit than the latest tag |
-| tan | **v0.5.1** — shipping Python port | none live |
+| alp-sdk | **v0.16.0** | none live |
+| tan | **v0.6.0** | none live |
 | Alp IDE | **v0.4.0** | **v0.5.x** pre-release channel |
 
 The Python `tan` line is now stable: `v0.5.0` shipped general availability and
-`SUPPORTED_CLI_VERSION` has already moved to it (now `0.5.1`) in
-`alp-sdk-vscode`'s default branch. Alp IDE's own stable cutover to consume it
-by default remains `v0.6.x`.
+`SUPPORTED_CLI_VERSION` moved to it (now `0.5.1`) on `alp-sdk-vscode`'s `main`
+branch — but `main` is not that repo's default branch; `dev` is
+(`alp-sdk-vscode`'s own default-branch setting), and `dev` has already moved
+past it to `SUPPORTED_CLI_VERSION = "0.6.0-rc1"` (`src/alpCli/service.ts:91`
+on `dev`; see `docs/release-contract.md` for the live authority on both).
+`v0.6.0` (2026-08-24) is the newest tagged release — and, as of that tag,
+GitHub's `latest` — and installs by hand the same way `v0.5.0-rc1` did before
+it graduated. `main`'s stable pin has not moved onto it yet, so a default
+(non-pre-release) IDE install still downloads `v0.5.1`. Alp IDE's own stable
+cutover to consume it by default remains `v0.6.x`.
 
 ### How to tell a beta from a stable Alp IDE build
 
@@ -108,22 +115,59 @@ Gated on Target 1 green on silicon.
 ### tan — `v0.5.0` · general availability — SHIPPED (2026-08-04)
 
 `SUPPORTED_CLI_VERSION` moved; the Python `tan` is what customers get.
-`v0.5.1` (2026-08-05) followed as a patch on the same GA line and is today's
-`latest`; `alp-sdk-vscode`'s default branch already pins
-`SUPPORTED_CLI_VERSION = "0.5.1"`.
+`v0.5.1` (2026-08-05) followed as a patch on the same GA line and remains
+`alp-sdk-vscode`'s `main`-branch (stable) pin, `SUPPORTED_CLI_VERSION =
+"0.5.1"` — but is no longer GitHub's `latest`, and `main` is not
+`alp-sdk-vscode`'s default branch; see the `v0.6.0` entry below and
+`docs/release-contract.md` for both.
 
-### tan — `v0.6.0` · retire the oracle, and the known divergences
+### tan — `v0.6.0` · retire the oracle, and the known divergences — SHIPPED (2026-08-24)
 
 The command-surface work once planned for this milestone SHIPPED AS `0.5.0`
-and its issues moved to that milestone, so `v0.6.0` names the next release
-and nothing already delivered. The full command surface landed inside the
-`v0.5.0` RC cycle instead of waiting for a later one: the seven verbs that shipped as stubs at rc1
-(`scaffold`, `completion`, `diff`, `pinmux`, `inspect`, `trace`,
-`support-bundle` — tan-cli#260, #257), `model` (#253), `new-som` (#254),
-`monitor` (#255), `faultdecode` (#256), and `renode --sim-mode` (#77) are all
-real by `v0.5.0-rc4`. What is still deferred to `v0.6.0` is narrower — the
-known oracle divergences filed during the port (see the `deferred` label) —
-and the oracle's own retirement, which landed here rather than at `v0.7.0`.
+and its issues moved to that milestone — all but #253, which moved to
+`v0.7.0` instead. So `v0.6.0` carried a narrower remainder: the known
+oracle divergences filed during the port (see the `deferred` label) and the
+oracle's own retirement, which landed here rather than at `v0.7.0`. Most of
+the full command surface had already landed inside the `v0.5.0` RC cycle
+instead of waiting for a later one — but it landed on three different
+schedules, not one, so no single ref covers all of it:
+
+- **Eight verbs went from stub to real between rc4 and GA.** The seven that
+  shipped as uniform stubs at rc1 (`scaffold`, `completion`, `diff`,
+  `pinmux`, `inspect`, `trace`, `support-bundle` — tan-cli#260, #257) plus
+  `renode --sim-mode` (#77) were first ported by `ac79d4c7` (#352), which
+  landed 2026-08-03T14:55:04Z — after rc4 published (2026-08-02T22:58:11Z)
+  and before GA published (2026-08-04T18:50:19Z). `git ls-tree` at
+  `v0.5.0-rc4:python/tan/commands` still has none of the seven verb modules,
+  and rc4's own `deferred_cmd.py` docstring enumerates exactly those seven.
+- **`new-som`, `monitor`, `faultdecode` were already real at rc1**, ported by
+  `729234ad`, which `git tag --contains` places inside `v0.5.0-rc1`. Run
+  against the rc4 binary: `tan faultdecode --cfsr 0x00000082 --hfsr
+  0x40000000` returns a real DACCVIOL/MMARVALID/FORCED decode, and `tan
+  monitor --help` / `tan new-som --help` print full option sets (`Usage: tan
+  monitor [OPTIONS]`), not the stubs' `[OPTIONS] [ARGS...]` shape.
+  `ac79d4c7` touched these three files too (`new_som_cmd.py` 69 lines,
+  `faultdecode_cmd.py` 24, `monitor_cmd.py` 528) but only to close
+  #254/#255/#256 — gap-closure issues ("oracle parity, test coverage… Must
+  keep existing and not error in 0.5.0", the same shape as #253) — not to
+  port them.
+- **`tan model build` was also real at rc1**, ported by the same `729234ad`.
+  #253 (tracking its oracle-parity and test-coverage gap-closure) stayed
+  open and moved to `v0.7.0` rather than closing with #254/#255/#256; the
+  eight `model` lifecycle subcommands beyond `build` remain unported (#674,
+  `v0.8.0`).
+
+**`tan renode` is removed.** The verb, `tan/core/renode_plan.py`,
+`tan/core/renode_sim.py` and the 27 published `renode.*` issue codes are all
+gone (verified: none of the three files exist on disk, `tan` registers 31
+commands, not 32); `renode --sim-mode` (#77) shipped in the `v0.5.0` RC cycle
+and did not survive into `v0.6.0`. Renode is retired repo-wide, not paused:
+alp-sdk#1539 re-instated and widened ADR-0022's retirement, deleting its four
+`pr-renode-*` workflows and the `examples/aen/aen-sim-vision` example, and
+`parity.yml`'s `seam2` job now stops at the ARM-ELF assertion instead of
+booting the artefact. Dropping registered codes shrank the
+`envelope-contract.json` release asset, so this was a breaking CLI-surface
+change carried by `v0.6.0`, not an additive one.
 
 Deferred is not a bug backlog — the `deferred` label means *chosen*, and each
 issue records what the oracle does so the choice can be re-read later.

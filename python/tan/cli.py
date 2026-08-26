@@ -21,7 +21,6 @@ import io
 import sys
 
 import typer
-from click.testing import CliRunner
 from typer.core import TyperCommand
 from typer.main import get_command, get_command_name
 
@@ -50,7 +49,6 @@ from tan.commands.model_cmd import model
 from tan.commands.monitor_cmd import monitor
 from tan.commands.new_som_cmd import new_som
 from tan.commands.presets_cmd import presets
-from tan.commands.renode_cmd import renode
 from tan.commands.run_cmd import run
 from tan.commands.sdk_cmd import sdk
 from tan.commands.size_cmd import size
@@ -170,7 +168,6 @@ app.command("presets", rich_help_panel="Start a project")(presets)
 app.command(
     "quality", context_settings=FORWARD_CONTEXT_SETTINGS, rich_help_panel="Configure"
 )(quality)
-app.command("renode", rich_help_panel="Build & run")(renode)
 app.command("run", rich_help_panel="Build & run")(run)
 app.command("scaffold", rich_help_panel="Start a project")(scaffold)
 app.command("sdk", rich_help_panel="Setup")(sdk)
@@ -477,7 +474,14 @@ def _emit_help_envelope(argv: list[str]) -> int:
     `sys.exit` it: `tan --format json badcmd --help` renders help for an
     unknown command, which Click (and the oracle) both exit 2 for, and a
     process exit of 0 there would contradict the very envelope on stdout.
+
+    tan-cli#810: `CliRunner` is imported HERE, not at module scope. It is the
+    only use of `click.testing` in the package -- a TEST helper reached on one
+    production path -- and `cli.py` is imported by every `tan` invocation,
+    `tan --version` included, for a branch almost none of them take.
     """
+    from click.testing import CliRunner  # noqa: PLC0415
+
     result = CliRunner().invoke(get_command(app), argv, prog_name="tan")
     message = result.output.strip()
     code = result.exit_code
@@ -865,8 +869,17 @@ def main() -> None:
 
     Text mode (the default) lets Click run standalone: it already prints its
     own errors/help to stderr and exits with the right code, which is exactly
-    the contract there -- stderr carries no promises of its own (see
-    ``tests/parity/oracle.py``'s module docstring).
+    the contract there -- Click's exact RENDERING of a usage error carries no
+    promises of its own. That rule outlived its statement of record:
+    ``tests/parity/oracle.py`` declared it, scoped to the Rust-vs-Python diff,
+    and went with the oracle axis in tan-cli#269, so THIS docstring is where it
+    lives now. Read it narrowly. What is unpinned is Click/rich's wording and
+    box-drawing, because nothing diffs it against the retired binary's clap
+    renderer. tan's stderr as a CHANNEL is pinned hard -- ~500 assertions under
+    ``python/tests/`` take it as their subject, ``contract/envelopes``' goldens
+    require it EMPTY under ``--format json``, and
+    ``tests/test_stdout_bytes.py::test_stderr_also_has_no_cr`` forbids ``\r``
+    in it.
 
     ``--format json`` cannot be handled that way: Click's default dispatch
     prints straight to stdout/stderr and calls `sys.exit` itself for a usage

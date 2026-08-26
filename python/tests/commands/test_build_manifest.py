@@ -244,8 +244,8 @@ def test_ladder_sdk_root_flag_is_terminal_and_unvalidated(tmp_path):
 
 # --------------------------------------------------------- resolve_sdk_root_wide
 #
-# The SAME layouts against the OTHER ladder -- the one `init`, `generate`,
-# `examples` and `renode` take, whose discovery tier is the wide walk. The oracle
+# The SAME layouts against the OTHER ladder -- the one `init`, `generate`
+# and `examples` take, whose discovery tier is the wide walk. The oracle
 # resolves the child in every layout where the narrow ladder above resolves the
 # lateral or enclosing checkout; the two blocks are therefore expected to
 # DISAGREE, and a change that makes them agree has broken one of them.

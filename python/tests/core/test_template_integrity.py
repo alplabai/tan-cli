@@ -91,6 +91,26 @@ _SDK_LINK_REF = re.compile(r"https://github\.com/alplabai/alp-sdk/(?:blob|tree)/
 #: this tree came from. Keep that line's shape if the manifest is reworded.
 _MANIFEST_REF = re.compile(r"^- Ref: `([^`]+)`", re.M)
 
+#: `MANIFEST.md`'s `- Commit:` line -- where the vendored BYTES came from, as
+#: distinct from `- Ref:`, which is the ref the rendered LINKS name. Nothing
+#: read this line until tan-cli#821: it had asserted since 2026-08-09 that its
+#: commit was "the same commit `parity.yml`'s `PINNED_SDK_TAG` now names",
+#: which stopped being true four days later when the vendor point moved and
+#: this line did not. Unread provenance is provenance that drifts.
+#: Anchored to the FIRST `- Commit:` after `## Source`, not to the first in
+#: the file: MANIFEST.md is an append-only re-vendor log, tan-cli#851 already
+#: demonstrated inserting a bullet above the live one, and a bare `re.search`
+#: would silently read a historical entry the day someone adds one higher up.
+_MANIFEST_COMMIT = re.compile(r"^- Commit: \*\*`([0-9a-f]{7,40})`\*\*", re.M)
+
+#: The same fact, stated a second time in the `## Source` summary -- short sha
+#: on one line, full sha in the parenthetical below it.
+_MANIFEST_VENDOR_POINT = re.compile(
+    r"^- \*\*Current vendor point \(all templates\):\*\* \*\*`([0-9a-f]{7,40})`\*\*\s*\n"
+    r"\s*\(`([0-9a-f]{40})`",
+    re.M,
+)
+
 #: A ref that must NEVER exist as an alp-sdk tag, hardcoded rather than
 #: derived from the live vendor ref. The original control derived it by
 #: stripping `ref`'s pre-release suffix (`v0.15.0-rc1` -> `v0.15.0`) -- exactly
@@ -115,8 +135,14 @@ _DEAD_CONTROL_REF = "v0.15"
 
 
 #: GitHub's **exact**-ref endpoint. Singular `ref`, and that is the entire
-#: point -- see `_tag_exists`.
-_TAG_API = "https://api.github.com/repos/alplabai/alp-sdk/git/ref/tags/{ref}"
+#: point -- see `_tag_exists`. `{qualified}` is a full `tags/<name>` or
+#: `heads/<name>`: since alp-sdk#1535 the vendored ref can legitimately be the
+#: `main` BRANCH (see `_ref_exists`), which the tags path would 404 on.
+_REF_API = "https://api.github.com/repos/alplabai/alp-sdk/git/ref/{qualified}"
+
+#: The one non-tag ref this tree may be vendored at -- alp-sdk#1535's
+#: degradation target when the SDK's declared `v<version>` tag is not cut.
+_MAIN_REF = "main"
 
 
 def _vendor_ref() -> str:
@@ -127,6 +153,50 @@ def _vendor_ref() -> str:
     match = _MANIFEST_REF.search(manifest)
     assert match, f"no '- Ref: `<ref>`' line in {VENDORED_ROOT / 'MANIFEST.md'}"
     return match.group(1)
+
+
+def test_the_manifest_states_one_vendor_point_not_two():
+    """tan-cli#821(b): `MANIFEST.md` records the vendor commit TWICE -- once as
+    the `## Source` summary's "Current vendor point" bullet, once as the
+    `- Commit:` line in the re-vendor log. Nothing compared them, so they
+    disagreed for six days: `- Commit:` still named `f30f4d4b` after
+    tan-cli#714 moved the tree to `d00dbdc1`. The same line also asserted an
+    identity with `parity.yml`'s `PINNED_SDK_TAG` which had already broken the
+    day the line was written -- tan-cli#593 moved the pin 21h44m later -- so
+    the two halves went stale independently and neither had a reader.
+
+    Worst case is bounded -- a maintainer re-runs `--emit scaffold` against the
+    wrong checkout, gets a bogus byte diff, and `scaffold_byte_parity.py` says
+    so within one round -- but the cost is a wasted round every time, and the
+    file is the only record of where these bytes came from.
+    """
+    manifest = (VENDORED_ROOT / "MANIFEST.md").read_text(encoding="utf-8")
+
+    source = manifest[manifest.index("## Source") :]
+    commit_match = _MANIFEST_COMMIT.search(source)
+    assert commit_match, (
+        "no '- Commit: **`<sha>`**' line in MANIFEST.md. If the line was "
+        "reworded, keep its shape or update _MANIFEST_COMMIT in the same "
+        "change -- this is the only reader it has."
+    )
+    point_match = _MANIFEST_VENDOR_POINT.search(manifest)
+    assert point_match, (
+        "no '- **Current vendor point (all templates):** **`<short>`**' bullet "
+        "followed by its full sha in MANIFEST.md; same rule as above."
+    )
+
+    commit, short, full = commit_match.group(1), point_match.group(1), point_match.group(2)
+    assert commit == short, (
+        f"MANIFEST.md disagrees with itself about where the vendored bytes came "
+        f"from: '- Commit:' says {commit!r}, 'Current vendor point' says "
+        f"{short!r}. Re-vendoring moves BOTH, or the next person emits against "
+        f"the wrong checkout and spends a round on a byte diff that was never "
+        f"a real divergence (tan-cli#821)."
+    )
+    assert full.startswith(short), (
+        f"the vendor-point bullet's short sha {short!r} is not a prefix of the "
+        f"full sha {full!r} on the line below it."
+    )
 
 
 def _tag_exists(ref: str) -> bool | None:
@@ -149,8 +219,17 @@ def _tag_exists(ref: str) -> bool | None:
     present by default in Actions; a workflow still has to pass it through to
     the step for this to take effect.
     """
+    return _exact_ref_exists(f"tags/{ref}")
+
+
+def _exact_ref_exists(qualified: str) -> bool | None:
+    """`_tag_exists`'s transport, with the `tags/`/`heads/` prefix left to the
+    caller. Split out for `_ref_exists`; every note on `_tag_exists` about the
+    singular endpoint, the 404-vs-rate-limit distinction and opportunistic
+    auth applies here unchanged, because this IS that code."""
     request = urllib.request.Request(
-        _TAG_API.format(ref=ref), headers={"Accept": "application/vnd.github+json"}
+        _REF_API.format(qualified=qualified),
+        headers={"Accept": "application/vnd.github+json"},
     )
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if token:
@@ -164,6 +243,20 @@ def _tag_exists(ref: str) -> bool | None:
         return False if e.code == 404 else None
     except (urllib.error.URLError, OSError):
         return None
+
+
+def _ref_exists(ref: str) -> bool | None:
+    """Does `ref` resolve in alp-sdk at all -- as a tag, or as `main`?
+
+    alp-sdk#1535 made the scaffold emit degrade to `main` when the SDK's
+    declared `v<version>` tag has not actually been cut, so `main` is now a
+    ref this tree can legitimately be vendored at and it is NOT a tag. It is
+    answered through the same singular exact-ref endpoint against `heads/`
+    rather than exempted from the check -- an exemption would be a hole
+    exactly where tan-cli#384's 40 dead links came through."""
+    if ref == _MAIN_REF:
+        return _exact_ref_exists(f"heads/{ref}")
+    return _tag_exists(ref)
 
 
 def _skus_for(template_id: str) -> tuple[str, ...]:
@@ -300,7 +393,13 @@ def test_every_alp_sdk_link_pins_the_ref_the_tree_is_vendored_from(template_id, 
 
     Pinning at the vendor ref rather than a floating `main` is deliberate: the
     scaffold's prose describes the API at the commit it was captured from, and
-    `main` moves out from under it.
+    `main` moves out from under it. That preference is the EMIT's to express,
+    not this gate's -- alp-sdk#1535 makes `_docs_ref()` fall back to `main`
+    when the declared `v<version>` tag has not been cut, and since
+    tan-cli#846's pin bump this tree is vendored in exactly that state. So the
+    ref checked here is whatever `MANIFEST.md` records, tag or `main`; what
+    this gate enforces is that all 40 links agree with it, which is the half
+    that catches a half-finished re-vendor.
     """
     expected = _vendor_ref()
     wrong = sorted(
@@ -317,7 +416,7 @@ def test_every_alp_sdk_link_pins_the_ref_the_tree_is_vendored_from(template_id, 
     )
 
 
-def test_the_vendored_ref_is_a_tag_alp_sdk_actually_has():
+def test_the_vendored_ref_is_one_alp_sdk_actually_has():
     """tan-cli#384's acceptance criterion 2, and the half consistency cannot
     reach: the ref every shipped link is pinned at has to EXIST.
 
@@ -337,10 +436,10 @@ def test_the_vendored_ref_is_a_tag_alp_sdk_actually_has():
     proving the gate can still fail for a ref that does not exist.
     """
     ref = _vendor_ref()
-    exists = _tag_exists(ref)
+    exists = _ref_exists(ref)
     if exists is None:
         pytest.skip(
-            f"GitHub could not be asked whether alp-sdk has tag {ref!r} (offline, "
+            f"GitHub could not be asked whether alp-sdk has ref {ref!r} (offline, "
             f"rate-limited, or 5xx). This is a SKIP about reachability, not a pass: "
             f"the shipped templates' 40 version-pinned links were NOT verified."
         )
@@ -364,6 +463,8 @@ def test_the_vendored_ref_is_a_tag_alp_sdk_actually_has():
     assert exists, (
         f"vendored/MANIFEST.md pins this tree at {ref!r}, and every version-pinned "
         f"link in the shipped template READMEs points there, but alp-sdk has no such "
-        f"tag -- so those links 404 in every scaffolded project. Re-pin the links AND "
-        f"the manifest at a ref that exists (an rc tag, or the final tag once cut)."
+        f"ref -- so those links 404 in every scaffolded project. Re-pin the links AND "
+        f"the manifest at a ref that exists (an rc tag, the final tag once cut, or "
+        f"`{_MAIN_REF}`, which is what alp-sdk#1535's emit degrades to when the "
+        f"declared tag is not cut)."
     )

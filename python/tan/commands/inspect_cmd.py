@@ -25,7 +25,7 @@ RUNNING catches and reading `crates/` alone would not.
 **Which SDK ladder.** `inspect`/`trace` are two of the thirteen commands
 `build_cmd.resolve_sdk_root_ladder`'s own docstring names -- measured against
 the oracle -- as resolving the LATERAL/narrow ladder (the same one
-`doctor_cmd.doctor` uses), not the wide `init`/`generate`/`examples`/`renode`
+`doctor_cmd.doctor` uses), not the wide `init`/`generate`/`examples`
 one. This file calls `resolve_sdk_root_ladder` directly for that reason,
 rather than `build_output.resolve_project_context`'s narrower
 `resolve_sdk_tiered` (no positional-walk tail) that `size`/`image`/

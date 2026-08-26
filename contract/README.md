@@ -138,11 +138,18 @@ create a second list that immediately drifts.
 | `data.checks[].scope` | `doctor` (both invocations); also the `support-bundle` FILE's `doctor.checks[]`, not that command's envelope | `python/tests/gates/test_doctor_check_scope.py` + `test_every_check_on_the_wire_carries_a_scope` — see "`doctor` check scope" below |
 | `data.written` | `build --materialise` | **NOT COVERED.** Reaching it needs a resolvable alp-sdk checkout and a Python spawn; nothing in this suite is allowed either. |
 | `data.releases` | `sdk list` | **NOT COVERED.** Hits the GitHub releases API. |
+| `data.sku`, `.boardYaml`, `.slices[].{coreId,backend,buildDir,env,command,configArtefacts[].{path,contents}}`, `.sharedArtefacts[].{path,contents}`, `.warnings[].{code,coreId,message}` | `build --plan` | **NOT COVERED, and unreachable.** The flag refuses today: `tan build --plan --format json` answers `ok:false`, `exitCode:1`, `cli.command-deferred` (tan-cli#427), so there is no plan `data` to freeze -- the refusal envelope's `data` carries only the deferral `message`. (`--plan-from` echoes a plan handed to it at exit 0, but that is a passthrough of the caller's own file, not this emitter, so it freezes nothing here -- tan-cli#853.) When #427 lands it inherits `data.written`'s blocker too (a resolvable alp-sdk checkout + a Python spawn). Read by `src/ideHub/buildPlanPanel.ts` (tan-cli#200). |
+| `data.slices[].{core_id,os,status,flash_method,build_dir,board,machine,image,app,reason,output_artefact,log_path}`, `.ipc[].{name,kind,endpoints[],status,reason}`, `.helper_mcus[].{name,chip,flash_method,firmware_path}` | `build --manifest`, `build --manifest-from <path>` | **NOT COVERED, and unreachable.** Same refusal: `cli.command-deferred`, exit 1 (tan-cli#427). Note for whoever freezes it: the extension matches the literal `"TBD"` on `slices[].flash_method`, `helper_mcus.flash_method` and `helper_mcus.firmware_path` to gate its Flash button, and matches `slices[].os === "off"` to decide whether a core participates -- both are load-bearing wire VALUES, not placeholders tan may change freely. |
+| `data.slices[]` keyed by `.core_id`; `.status`, `.flash`, `.ram` (each `{used,total,pct}`, any member `null`), `.budget_note` | `size` | **NOT COVERED.** The command is reachable but needs a built ELF and a manifest -- a bare run answers `ok:false`, `exitCode:1`, `size.manifest-unavailable`. `slices[].status` is matched BY VALUE (`not-built`, `n/a`, `over`, `warn`, `no-budget`; anything else renders as "in budget"), so those strings are wire content. |
 | `data.configuration` (the `launch.json` entry alp-sdk-vscode#342 writes verbatim) | `debug-config` | goldens `debug-config-preview-{zephyr-mcu,zephyr-mcu-sdk-identity,baremetal-mcu,native-host,yocto-userspace}` — one per `--target-kind`, re-recorded against the shipping CLI under tan-cli#502 and no longer `xfail`'d, so an added key or a changed `program`/`executable` reds here. Oracle-parity fixtures additionally covered the bare `zephyr-mcu` invocation (all three servers) and `native-host`, but they consumed `crates/` and were deleted with it in tan-cli#269; these goldens are what survived. |
 
-The `build --materialise` and `sdk list` rows are stated rather than quietly
-omitted: an uncovered field that reads as covered is worse than one everybody
-knows about.
+The five NOT COVERED rows -- `build --materialise`, `sdk list`, `build --plan`,
+`build --manifest*` and `size` -- are stated rather than quietly omitted: an
+uncovered field that reads as covered is worse than one everybody knows about.
+The last three were in neither list until tan-cli#200 found them, which is the
+failure mode this paragraph exists to prevent, so it is worth saying plainly
+that the rule needs applying when a command family is ADDED, not only when
+coverage is dropped.
 
 ### `doctor` check scope, and why `--build` needs no second spawn (#549)
 

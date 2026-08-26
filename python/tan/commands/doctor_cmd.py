@@ -174,6 +174,7 @@ from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
 from tan.core.probe import PROBE_TIMEOUT_S, probe, probe_status
+from tan.core.sdk_default_registry import registry_path
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.timestamp import generated_at_iso
 from tan.core.tool_lookup import resolve_tool
@@ -1162,11 +1163,11 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
     disbelieved a diagnostic that was actually correct.
 
     Paired with `seven_zip_check` on Windows (`_collect`, gated `os.name ==
-    "nt" and not detected` -- mirroring `crate::build_readiness`'s exact
-    `probe.is_windows && !probe.zephyr_sdk` gate, tan-cli#204): the `west sdk
-    install` this Fail's fix names cannot complete on native Windows without
-    7-Zip on PATH (`tan.core.bootstrap`'s `manual_install_windows` prose), so
-    this Fail's advice is only actionable together with that check.
+    "nt"` and nothing else -- tan-cli#736 dropped the `!probe.zephyr_sdk` term
+    the Rust sibling had, since the host WITH an SDK and no 7-Zip is precisely
+    what the pairing is for; tan-cli#204 covers that check's SEVERITY, not its
+    gate): the `west sdk install` this Fail's fix names cannot complete on
+    native Windows without 7-Zip on PATH (`manual_install_windows` prose).
     """
     if detected:
         return Check("zephyrSdk", "pass", "Zephyr SDK toolchain detected.", scope="host")
@@ -1212,8 +1213,8 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
 
 
 def seven_zip_check(found: bool) -> Check:
-    """`sevenZip` -- Windows-only, and only while `zephyrSdk` is failing (see
-    `_collect`'s gate). Ports the Rust oracle's sibling check (`crate::
+    """`sevenZip` -- Windows-only, unconditionally (tan-cli#736 dropped the
+    `zephyrSdk`-is-failing half). Ports the Rust oracle's sibling (`crate::
     build_readiness`, tan-cli#204): `west sdk install`, the remedy
     `zephyr_sdk_check` names, extracts the `.7z` toolchain archive by
     delegating to `patoolib`, which shells out to one of `SEVEN_ZIP_PROGRAMS`
@@ -1912,8 +1913,8 @@ def sdk_check(
             # `alp-sdk at {sdk_root}` above, which keeps this host's native
             # separators and is left byte-identical. The reason is the CODE:
             # this branch's detail becomes an `issues[].message` under
-            # `sdk.discovery-divergent`, which five other commands also emit
-            # -- and all five build it from `_abs_posix`. A consumer
+            # `sdk.discovery-divergent`, which four other commands also emit
+            # -- and all four build it from `_abs_posix`. A consumer
             # correlating two envelopes would otherwise match a code across a
             # message spelled `C:/...` on one side and `C:\...` on the other.
             # The envelope is the contract; normalise the filesystem side to
@@ -1925,8 +1926,8 @@ def sdk_check(
             return Check(
                 "sdk",
                 "warn",
-                f"{posix_root}; `tan init`, `tan generate`, `tan examples` "
-                f"and `tan renode` resolve a DIFFERENT checkout from this "
+                f"{posix_root}; `tan init`, `tan generate` and "
+                f"`tan examples` resolve a DIFFERENT checkout from this "
                 f"directory ({_abs_posix(divergent_candidate)}) and report "
                 f'the same sourceTier "discovery", so generated files and '
                 f"the build plan can come from different SDK versions.",
@@ -1939,7 +1940,8 @@ def sdk_check(
         return Check("sdk", "pass", detail, scope="project")
     scope_note = f" for --project {project_scope}" if project_scope is not None else ""
     if broken_global_default is not None:
-        pointer = str(_home_alp_dir() / "sdk-default")
+        home = _home_alp_dir()
+        pointer = str(home / "sdk-default")
         return Check(
             "sdk",
             "fail",
@@ -1947,8 +1949,8 @@ def sdk_check(
             f'({pointer}) names "{broken_global_default}", which is not a '
             f"valid alp-sdk checkout, so tan fell through past it and found "
             f"nothing else either.",
-            f"{global_default_pointer_fix_hint(pointer)}, or pass "
-            f"--sdk-root <path> directly.",
+            f"{global_default_pointer_fix_hint(pointer, str(registry_path(home)))}, or "
+            f"pass --sdk-root <path> directly.",
             scope="project",
         )
     return Check(
@@ -3748,11 +3750,14 @@ def doctor(
         False,
         "--fix",
         help="Run the manifest's own install command (ADR 0021) for any "
-        "hostPrerequisites tool this host is missing, when it needs no "
-        "elevation. A command that needs `sudo` is printed, never run -- tan "
-        "never spawns sudo. Only in an interactive, non-CI, text-mode run "
-        "(--non-interactive/--ci/--format json all disable it): a repair a "
-        "human did not watch happen is not consent.",
+        "hostPrerequisites tool this host is missing. A command needing no "
+        "elevation runs for any caller; a `sudo`-prefixed one runs too, but "
+        "only when this process is already root, with the literal `sudo` "
+        "word stripped first -- tan itself never spawns the `sudo` program. "
+        "A non-root caller instead gets that command printed to run by hand. "
+        "Only in an interactive, non-CI, text-mode run (a real terminal on "
+        "both stdin and stderr; --non-interactive/--ci/--format json all "
+        "disable it): a repair a human did not watch happen is not consent.",
     ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     non_interactive: bool = typer.Option(

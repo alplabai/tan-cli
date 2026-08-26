@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A durable atomic-write helper for a text file more than one process or SDK
-checkout can share -- fsync'd before the rename, not just atomic-in-naming.
+"""A durable atomic-write helper (`atomic_write_text`, plus the byte-exact
+`atomic_write_bytes`) for a file more than one process or SDK checkout can
+share -- fsync'd before the rename, not just atomic-in-naming.
 
 tan-cli#516: `bootstrap_cmd.reconcile_west_manifest_path` wrote its temp
 sibling with `Path.write_text` and a bare `os.replace`, with no `os.fsync` on
@@ -79,6 +80,38 @@ def atomic_write_text(path: str, content: str, *, encoding: str = "utf-8") -> No
       rename, so both must unlink it too, or it leaks into the caller's
       directory un-unlinked.
     """
+    # `content.encode(encoding)` raises `UnicodeEncodeError` (a `ValueError`)
+    # on unencodable content, or `LookupError` on an unknown `encoding=` --
+    # both used to surface later, from inside `os.fdopen`/`handle.write`,
+    # strictly between `mkstemp` creating the temp and the rename, which is
+    # why the old single-function version needed its own cleanup `except`
+    # for them. Encoding FIRST means either error now raises before any temp
+    # file exists at all, so there is nothing here left to clean up.
+    encoded = content.encode(encoding)
+    _atomic_write_bytes(path, encoded)
+
+
+def atomic_write_bytes(path: str, data: bytes) -> None:
+    """`atomic_write_text`'s byte-exact sibling -- same symlink-safety,
+    durability and mode-preservation, with no text encode/decode round trip
+    in between.
+
+    **The one caller that needs this over `atomic_write_text`
+    (`bootstrap_cmd._undo_relocation`'s registry rollback, review #904 third
+    round, nit) is restoring a BYTE snapshot taken before this run's own
+    write** (`_read_global_sdk_registry_bytes`), not producing fresh
+    content -- and that snapshot is not guaranteed UTF-8: this registry
+    tolerates a hand-edited or pre-this-fix file (`parse_registry`'s own
+    "never raises on malformed content" contract), so decoding it to `str`
+    and back through `atomic_write_text` could raise on exactly the
+    corrupted-but-was-there-before content a rollback exists to put back
+    unchanged. Restoring the literal bytes, atomically, is the only shape
+    that can't fail on its own input.
+    """
+    _atomic_write_bytes(path, data)
+
+
+def _atomic_write_bytes(path: str, data: bytes) -> None:
     resolved = os.path.realpath(path)
     directory = os.path.dirname(resolved)
     existing_mode: int | None = None
@@ -89,31 +122,23 @@ def atomic_write_text(path: str, content: str, *, encoding: str = "utf-8") -> No
     fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tan-tmp")
     try:
         try:
-            handle = os.fdopen(fd, "w", encoding=encoding, newline="")
-        except (OSError, LookupError):
+            handle = os.fdopen(fd, "wb")
+        except OSError:
             # `fdopen` failing before a file object takes ownership of `fd`
-            # would otherwise leak the raw descriptor `mkstemp` opened -- an
-            # unknown `encoding=` fails here, as a `LookupError`. But `io.
-            # open`'s OWN construction sequence (`_pyio.open`) wraps the raw
-            # `FileIO` in a `try/except: result.close(); raise` the moment
-            # that raw layer exists -- so a `LookupError` from encoding
-            # validation, which happens strictly AFTER that wrapping, has
-            # already had `fd` closed by `io.open` itself before it ever
-            # reaches us. Closing it again unconditionally then raises a
-            # spurious `OSError: Bad file descriptor` that REPLACES the
-            # `LookupError` the caller needs to see (measured). Best-effort:
-            # close if `fd` is still ours to close, ignore if it is not.
+            # would otherwise leak the raw descriptor `mkstemp` opened.
+            # Best-effort: close if `fd` is still ours to close, ignore if
+            # not.
             try:
                 os.close(fd)
             except OSError:
                 pass
             raise
         with handle:
-            handle.write(content)
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_path, resolved)
-    except (OSError, ValueError, LookupError):
+    except OSError:
         try:
             os.unlink(tmp_path)
         except OSError:

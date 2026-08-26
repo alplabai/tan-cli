@@ -199,7 +199,7 @@ class SliceOutcome:
     exit_code: int | None
     message: str | None
     #: Real on-disk `zephyr.elf` path after a successful build (absolute),
-    #: fed into the post-build manifest so `size`/`renode`/`flash`/`run` find
+    #: fed into the post-build manifest so `size`/`flash`/`run` find
     #: the artefact west actually produced. `None` for every other status.
     output_artefact: str | None = None
     #: Real on-disk build directory (west's nested `<cwd>/build`, absolute).

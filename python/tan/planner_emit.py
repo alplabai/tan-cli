@@ -416,6 +416,7 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
         shaped, project.som_preset, project.board_preset,
         v2_libraries=v2_libraries,
         v2_project_libraries=sorted(project.libraries),
+        metadata_root=project.effective_metadata_root(),
     )
 
 
@@ -434,7 +435,7 @@ def _render_per_core(planner, project, mode: str, *, core: str | None,
         # traceback from the middle of a slice render.
         from tan.planner.libraries import resolve_selection  # noqa: PLC0415
 
-        resolve_selection(project)
+        resolve_selection(project, project.effective_metadata_root())
 
     allowed_os = _os_classes(sdk_root).get(mode)
     slice_renderer = getattr(planner, _SLICE_RENDERER[mode])
