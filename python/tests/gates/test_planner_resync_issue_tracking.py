@@ -13,11 +13,27 @@ unhandled `planner_resync.py` traceback (rc=1, no markdown written) killed
 the step under `set -euo pipefail` before it could open anything -- the
 house answer (`test_planner_resync_workflow_errexit.py`) is to read the YAML
 and assert the shape, not to run the workflow.
+
+tan-cli#920 round 3: the round-2 gate above guarded the `cat` fallback and
+the shared `env:`, but not the thing round 2 was actually FOR -- the
+lookup's own exit-code check. Mutation-proved (patching both lookups back to
+`--jq "..." || true` left the round-2 gate at "2 passed" while the same
+mutant, driven under a stubbed `gh`, reproduced the fail-open `gh issue
+create` duplicate tan-cli#911 exists to prevent). `test_the_final_attempt...`
+in `test_getting_started_west_sdk_install_retries.py` is the prior art for
+this shape: `assert "|| true" not in body`. Round 3 also found `gh issue
+list` was called with no `--limit`, capping the page at 30 items,
+newest-created-first -- an old tracking issue can age off page 1 and the
+lookup returns empty with rc=0, indistinguishable from "no match", which
+re-opens the exact "must not create 40 issues" hazard through pagination
+instead of a `gh` error. All three properties are asserted below so none of
+the three can silently regress again.
 """
 
 from __future__ import annotations
 
 import functools
+import re
 from pathlib import Path
 
 import yaml
@@ -100,3 +116,74 @@ def test_every_cat_of_resync_md_has_a_fallback():
         "or the read was removed (drop this gate), but it must not "
         "silently pass having found nothing"
     )
+
+
+def _gh_issue_list_lines(run: str) -> list[str]:
+    """The actual invocation lines only -- not a comment or an `::error::`
+    string that happens to mention "gh issue list" in prose."""
+    return [line for line in _logical_lines(run) if "gh issue list --repo" in line]
+
+
+def test_gh_issue_list_lookups_fail_closed_with_a_limit_and_a_checked_exit_code():
+    """The de-dup lookup in both "Surface..." and "Close..." must, all three:
+
+    (a) never be muted with `\\`\\|\\| true\\`` -- tan-cli#920's headline fix.
+        A lookup failure must not look identical to "no match", or the step
+        falls through to `gh issue create` and opens a silent duplicate --
+        the exact "must not create 40 issues" guarantee tan-cli#911 was filed
+        for. (Prior art for this exact assertion shape:
+        `test_getting_started_west_sdk_install_retries.py`'s
+        `assert "|| true" not in body`.)
+    (b) capture the lookup's own exit code in `lookup_rc` and test it (`-ne
+        0`) before deciding "no match" -- the mechanism (a) actually relies
+        on; `set +e; existing=$(...); lookup_rc=$?; set -e` is required
+        because a `var=$(cmd)` assignment does not reliably trip `set -e`
+        the way a bare command does.
+    (c) carry `--limit 100` -- `gh issue list` with no `--limit` caps at 30
+        items, newest-created-first (measured live against this repo: `gh
+        issue list --state open --json number --jq length` -> 30, `--limit
+        500` -> 49). Past 30 open issues the tracking issue this lookup
+        exists to find ages off page 1 and `existing` comes back empty with
+        rc=0 -- the same "indistinguishable from no match" fail-open as (a)
+        and (b) guard, arriving through pagination instead of a `gh` error.
+    """
+    for name in (_ISSUE_STEP, _CLOSE_STEP):
+        step = _step(name)
+        assert step is not None, f"step {name!r} not found -- update this gate"
+        run = step["run"]
+
+        assert "|| true" not in run, (
+            f"{name!r} mutes a command with `|| true` -- a lookup failure "
+            f"must not look identical to \"no match\" (tan-cli#920):\n{run}"
+        )
+
+        assert re.search(r"lookup_rc\s*=\s*\$\?", run), (
+            f"{name!r} does not capture its `gh issue list` lookup's own "
+            f"exit code into `lookup_rc` -- without this a failed lookup "
+            f"can silently fall through to `gh issue create` and open a "
+            f"duplicate (tan-cli#920's headline fix):\n{run}"
+        )
+        assert re.search(r'"\$\{lookup_rc\}"\s*-ne\s*0', run), (
+            f"{name!r} captures `lookup_rc` but never tests it (`-ne 0`) "
+            f"before deciding \"no match\" -- capturing the exit code alone "
+            f"does nothing without the check that acts on it "
+            f"(tan-cli#920):\n{run}"
+        )
+
+        list_lines = _gh_issue_list_lines(run)
+        assert list_lines, (
+            f"{name!r} no longer calls `gh issue list` -- either the shape "
+            f"changed (update this gate) or the read was removed (drop "
+            f"this gate), but it must not silently pass having found "
+            f"nothing"
+        )
+        for line in list_lines:
+            assert "--limit" in line, (
+                f"{name!r}'s `gh issue list` lookup has no `--limit` -- it "
+                f"defaults to a 30-item, newest-created-first page, so an "
+                f"older tracking issue can age off page 1 and look "
+                f"identical to \"no match\", opening a silent duplicate "
+                f"(tan-cli#920 round 3, measured live: `gh issue list "
+                f"--state open --json number --jq length` -> 30, `--limit "
+                f"500` -> 49):\n{line}"
+            )

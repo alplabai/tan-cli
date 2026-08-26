@@ -405,9 +405,12 @@ jobs:
       # step found nothing to commit it prints "Nothing to propose" and sets
       # `opened=false` WITHOUT opening anything -- so on rc=1 the finding
       # would otherwise live only in this red run's job summary, which is
-      # what happened for 60 consecutive runs before this fix (measured
-      # `gh run list --workflow planner-resync.yml --limit 100`,
-      # `31621375705` through `32936003033`).
+      # what happened for an unbroken streak (measured `gh run list
+      # --workflow planner-resync.yml --limit 100`) starting at run
+      # `31621375705` (last success before it: `31601765469`) and STILL
+      # GROWING as of `32936003033` -- a bare count pinned here would already
+      # be stale against a workflow that keeps failing until this fix lands;
+      # re-run the same `gh run list` for the current number.
       #
       # `steps.pr.outputs.opened == 'false'` is deliberately narrower than
       # "the PR step didn't open a PR": that output is UNSET (not 'false')
@@ -431,9 +434,9 @@ jobs:
       # is an odd artifact (nothing to review, and it can confuse merge-queue
       # automation that expects a PR to carry a change), and a fixed,
       # marker-based match lets repeated cron hits refresh ONE issue instead
-      # of opening one per day -- the 60-run streak measured above is what
-      # daily duplicate-opens would have compounded into, had this been the
-      # shape from the start. (It also happens to sidestep the policy failure
+      # of opening one per day -- the still-growing streak measured above is
+      # what daily duplicate-opens would have compounded into, had this been
+      # the shape from the start. (It also happens to sidestep the policy failure
       # above for this path specifically, since issue creation isn't gated by
       # "create or approve pull requests" -- a footnote, not the reason: that
       # policy looks resolved already, and the primary argument holds
@@ -507,9 +510,11 @@ jobs:
             echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
             echo "This issue is REFRESHED (not recreated) by \`planner-resync.yml\` on"
-            echo "every run that lands in this state, and is closed automatically the"
-            echo "next time a run reports nothing owed (\`rc=0\`) or a PR ends up"
-            echo "covering this delta after all."
+            echo "every run that lands in this state -- the body above is replaced with"
+            echo "the latest report and a new status comment is posted below noting the"
+            echo "run that refreshed it -- and is closed automatically the next time a"
+            echo "run reports nothing owed (\`rc=0\`) or a PR ends up covering this delta"
+            echo "after all."
             echo
             echo "Refs alplabai/alp-sdk#855 (ADR-0020's cross-repo remediation)."
           } > "${RUNNER_TEMP}/issue-body.md"
@@ -518,16 +523,35 @@ jobs:
           # not close today, but `gh issue create`/`edit` fail HARD on an
           # overrun rather than truncating, which would turn a real finding
           # into a red step with no issue at all. Truncate defensively.
+          # `head -c 60000` is a byte cut, not a character cut -- measured, byte
+          # 59999 of a real oversized body lands mid-character (`0xe2`, the
+          # lead byte of a U+2014 em dash), so a bare `head -c` can hand `gh`
+          # a body ending in a partial UTF-8 sequence. `gh` doesn't reject
+          # that (Go's json encoder just emits one mojibake replacement
+          # character), so this is cosmetic, not a failure mode -- but
+          # dropping the possibly-partial last line via `sed '$d'` lands on a
+          # line boundary at effectively no cost and avoids it anyway.
           if [ "$(wc -c < "${RUNNER_TEMP}/issue-body.md")" -gt 60000 ]; then
-            { head -c 60000 "${RUNNER_TEMP}/issue-body.md"
+            { head -c 60000 "${RUNNER_TEMP}/issue-body.md" | sed '$d'
               printf '\n\n_(truncated: the full report exceeded a safe margin under GitHub'"'"'s issue-body limit -- see this run'"'"'s job summary for the complete markdown)_\n'
             } > "${RUNNER_TEMP}/issue-body.trunc.md"
             mv "${RUNNER_TEMP}/issue-body.trunc.md" "${RUNNER_TEMP}/issue-body.md"
           fi
 
+          # `--limit 100`: `gh issue list` with no `--limit` caps at 30,
+          # newest-created-first (measured live on this repo: `gh issue list
+          # --state open --json number --jq length` -> 30, `--limit 500` ->
+          # 49, with 12 open `ci` issues on top of that on an ordinary day).
+          # Past 30 open issues the tracking issue this lookup exists to find
+          # ages off page 1, `existing` comes back empty with rc=0 --
+          # indistinguishable from "no match" -- and the branch below opens a
+          # silent duplicate, which then becomes the new de-dup target and
+          # orphans the original open forever. The same fail-open the
+          # `lookup_rc` check right below closes for a `gh` error, arriving
+          # instead through pagination.
           set +e
           existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open \
-                        --label ci --json number,body \
+                        --limit 100 --label ci --json number,body \
                         --jq "[.[] | select(.body | contains(\"${RESYNC_ISSUE_MARKER}\"))][0].number")"
           lookup_rc=$?
           set -e
@@ -536,8 +560,13 @@ jobs:
             exit 1
           fi
           if [ -n "${existing}" ]; then
+            # Title deliberately not reset here: `gh issue edit --title` on
+            # every refresh would clobber a maintainer-reworded title, the
+            # exact case de-dup moved off the title (see the block comment
+            # above this step) to stop being sensitive to. The title is set
+            # once, on create, below.
             gh issue edit "${existing}" --repo "${GITHUB_REPOSITORY}" \
-              --title "${RESYNC_ISSUE_TITLE}" --body-file "${RUNNER_TEMP}/issue-body.md"
+              --body-file "${RUNNER_TEMP}/issue-body.md"
             gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" \
               --body "Refreshed by run ${{ github.run_id }} (alp-sdk \`${SDK_SHA}\`), still nothing to propose."
             echo "url=$(gh issue view "${existing}" --repo "${GITHUB_REPOSITORY}" --json url -q .url)" >> "$GITHUB_OUTPUT"
@@ -565,9 +594,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # --limit 100: same fail-open as the "Surface..." step's own lookup
+          # above (`gh issue list` defaults to a 30-item, newest-first page;
+          # see that step's comment for the measured numbers) -- without it,
+          # an old tracking issue can age off page 1 and this step silently
+          # does nothing instead of closing it.
           set +e
           existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open \
-                        --label ci --json number,body \
+                        --limit 100 --label ci --json number,body \
                         --jq "[.[] | select(.body | contains(\"${RESYNC_ISSUE_MARKER}\"))][0].number")"
           lookup_rc=$?
           set -e
@@ -590,24 +624,32 @@ jobs:
       # reported as success -- but the proposal is more useful than the red
       # X, so it lands first.
       #
-      # `if: always()` (tan-cli#920): every other step's `if` gets an implicit
-      # `&& success()`, so if ANY upstream step in this job fails -- most
-      # reachably "Surface the owed work..." above, on its own `gh` call --
-      # this step used to be skipped along with it, and the job still went
+      # `if: !cancelled()` (tan-cli#920): every other step's `if` gets an
+      # implicit `&& success()`, so if ANY upstream step in this job fails --
+      # most reachably "Surface the owed work..." above, on its own `gh` call
+      # -- this step used to be skipped along with it, and the job still went
       # red but WITHOUT the `::error::` annotation that names which of rc 1/2
-      # it was and where to look. `always()` means Verdict still runs (and
+      # it was and where to look. `!cancelled()` means Verdict still runs (and
       # still reports correctly: `steps.resync.outputs.rc` etc. are set by
       # steps that ran before the point of failure) even when a later,
-      # informational step breaks.
+      # informational step breaks -- but, unlike `always()`, still skips on a
+      # cancelled run. `always()` would also fire when an earlier step (the
+      # checkout, the SDK clone) fails before `planner_resync.py` ever ran:
+      # driven with every step output unset, this step's own `rc=''` falls
+      # into the `*)` branch and prints `::error::planner_resync.py did not
+      # report an exit code` -- right direction (still red), wrong cause
+      # named, since `planner_resync.py` never got the chance to run at all.
+      # `${{ }}` expands to a literal empty string before bash sees it, so
+      # `set -u` does not additionally trip on the unset outputs here.
       - name: Verdict
-        if: always()
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
           rc='${{ steps.resync.outputs.rc }}'
           case "${rc}" in
             0) echo "Re-sync clean (or nothing owed)." ;;
-            1) echo "::error::a re-sync is owed and part of it needs a human -- see ${{ steps.pr.outputs.url || 'the job summary' }}. The pins covering the unresolved half did NOT move, so the freshness gate stays red until someone ports it."; exit 1 ;;
+            1) echo "::error::a re-sync is owed and part of it needs a human -- see ${{ steps.pr.outputs.url || steps.issue.outputs.url || 'the job summary' }}. The pins covering the unresolved half did NOT move, so the freshness gate stays red until someone ports it."; exit 1 ;;
             2) echo "::error::planner_resync.py REFUSED to propose anything (a pin disagrees with its own hash table, or the alp-sdk checkout is unusable) -- see the job summary."; exit 1 ;;
             *) echo "::error::planner_resync.py did not report an exit code"; exit 1 ;;
           esac

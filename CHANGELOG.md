@@ -27,7 +27,9 @@ All notable changes to `tan` are documented here. Format follows
   ONCE, not daily -- re-derived against `gh run list --workflow
   planner-resync.yml` while fixing tan-cli#911: the daily-repeating failure
   over that window was an unrelated empty-diff case never surfacing its own
-  finding (60 consecutive runs, fixed separately), and conflating the two is
+  finding (an unbroken streak starting at run `31621375705`, last success
+  `31601765469`, still growing at the time of writing -- fixed separately,
+  see tan-cli#920), and conflating the two is
   exactly the mistake tan-cli#911's own fix asks readers not to make. The
   policy block itself hit exactly once, in run `32660981604`
   (2026-08-23T19:21:33Z), refused with `GitHub Actions is not permitted to
