@@ -282,3 +282,7 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/model_cmd.py: new entry at 1059
     - tan/model/adapters/ethos_u.py: new entry at 886
     - function_count_budget: 258 -> 270
+- 2026-08-26 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/model_cmd.py: new entry at 1059
+    - tan/model/adapters/ethos_u.py: new entry at 886
+    - function_count_budget: 258 -> 270
