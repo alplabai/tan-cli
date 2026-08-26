@@ -547,14 +547,21 @@ jobs:
   # to look.
   #
   # THE VERDICT IS FALSIFIABLE, which is the part worth checking before
-  # trusting it. Same invocation, zizmor 1.29.0:
+  # trusting it. Same rule set, zizmor 1.29.0, `--no-config` (NOT this job's
+  # own `run:` invocation below -- that one loads `.github/zizmor.yml` and,
+  # since tan-cli#899, its inline ignores; `--no-config` strips both so a
+  # `dev` snapshot from before those suppressions existed is comparable):
   #
   #   this tree      rc=0    no finding at or above medium
   #   dev @ 01374d4  rc=14   63 unpinned-uses, 26 artipacked,
   #                          12 excessive-permissions, 6 template-injection
   #
   # So it fails on every class the PR that introduced it fixed, not merely on
-  # nothing.
+  # nothing. This is `.github/zizmor.yml`'s own NON-VACUITY measurement, not
+  # a second one taken here -- and it is NOT the recipe for checking whether
+  # THIS file's own suppressions (the `run:` step below, with its config and
+  # inline ignores loaded) are still catching something real. For that,
+  # `.github/zizmor.yml`'s header names `--no-ignores`.
   workflow-security:
     name: zizmor · workflow security
     runs-on: ubuntu-latest
@@ -584,16 +591,27 @@ jobs:
       #
       # `--no-online-audits` keeps the gate hermetic: no token, no API, no
       # rate limit deciding whether CI is green. Verified to reach the same
-      # verdict as a networked run on this tree, including at the two
-      # `artipacked` sites this gate must still catch if their suppression
-      # ever slipped: `planner-resync.yml`'s and `release.yml`'s `dev`
-      # checkouts, each carrying its own inline
-      # `# zizmor: ignore[artipacked]` comment (tan-cli#899).
+      # verdict as a networked run on this tree.
+      #
+      # That agreement does NOT extend to the two `artipacked` sites this
+      # gate must still catch if their suppression ever slipped --
+      # `planner-resync.yml`'s and `release.yml`'s `dev` checkouts, each
+      # carrying its own inline `# zizmor: ignore[artipacked]` comment
+      # (tan-cli#899). Measured, with both comments removed:
+      # `--no-online-audits` reports `rc=13` (the two now-unsuppressed
+      # `artipacked` findings, at medium), while a real networked run reports
+      # `rc=0` -- opposite verdicts at exactly those sites, not the same one.
+      # Offline being the STRICTER direction there is the safe way for a
+      # hermetic gate to err, so it does not undermine this job running
+      # without a token; it does mean "same verdict as networked" is a
+      # property of the reviewed, suppressed tree, not a guarantee that
+      # survives a suppression going missing.
       #
       # The baseline is `.github/zizmor.yml`, picked up automatically. Since
       # tan-cli#899 it holds no `rules.*.ignore` entries of its own -- `rules:
       # {}` is a required stub, not policy. Both suppressions now live inline,
-      # at the steps they excuse; the reviewed count is kept current in this
-      # file's own header, under INVENTORY.
+      # at the steps they excuse; the reviewed count is kept current in
+      # `.github/zizmor.yml`'s own header, under INVENTORY (not this file's --
+      # this job only runs the audit `.github/zizmor.yml` configures).
       - name: audit .github/workflows
         run: zizmor --min-severity medium --no-online-audits .github/workflows/

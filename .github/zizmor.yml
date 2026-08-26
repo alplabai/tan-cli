@@ -65,27 +65,40 @@
 # INLINE, NOT LINE-PINNED (tan-cli#899). This file used to carry the two
 # `artipacked` suppressions below as `rules.artipacked.ignore` entries of the
 # shape `release.yml:1225:9` -- a byte offset into a file this config does
-# not otherwise touch. That pin rotted TWICE on the tan-cli#770/#880 branch,
-# PRE-MERGE -- it never rotted on `dev` itself. Full history, re-derived
-# (an earlier draft of this note cited "+49, 1202:9 -> 1223:9" and that
-# arithmetic did not reconcile -- this is the corrected derivation):
-# the pin was created at `release.yml:1202:9` on the branch (tan-cli#770,
-# commit a4e676ea) before either rotation. `dev` then landed BOTH
+# not otherwise touch. `release.yml`'s pin rotted TWICE on the
+# tan-cli#770/#880 branch, PRE-MERGE. `planner-resync.yml`'s pin rotted a
+# THIRD time, separately, straight on `dev` -- an earlier draft of this note
+# claimed it held without moving; it did not. Full history, re-derived (an
+# earlier-earlier draft also cited "+49, `release.yml` 1202:9 -> 1223:9" and
+# that arithmetic did not reconcile either -- this is the corrected
+# derivation for both files):
+#
+# `release.yml`'s pin was created at `1202:9` on the branch (tan-cli#770,
+# commit a4e676ea) before either of its rotations. `dev` then landed BOTH
 # tan-cli#876 (+49 lines, five hunks, all above line 1041) AND tan-cli#883
-# (-28 lines net, one hunk above line 471) the same day; merging `dev` into
-# the branch (commit cdc1bc43) shifted the checkout to line 1223 -- the net
-# of both, +49-28=+21, not #876 alone -- and the merge commit's own re-pin
-# to `1223:9` was in fact correct. A further +2 from tan-cli#880's own later
-# comment edit moved it to `1225:9`, also correct. Both re-pins happened
-# on the branch, before it merged: at the point `dev` itself picked up
-# tan-cli#880 (commit c629b3ea), the pin landed already-correct at
-# `1225:9`, and `planner-resync.yml`'s pin held at `151:9` across
-# tan-cli#876 without needing to move at all (tan-cli#876's `release.yml`
-# hunks never touch `planner-resync.yml`). Both rotations failed loudly (the
-# finding came back, the gate went red) -- the failure mode this policy
-# actually guards against is the quiet direction: a drifted pin lands on a
-# *different* `actions/checkout` step that genuinely needs suppressing, and
-# nothing says so. `release.yml` alone has five `actions/checkout` steps.
+# (-28 lines net, one hunk straddling line 471) the same day; merging `dev`
+# into the branch (commit cdc1bc43) shifted the checkout to line 1223 -- the
+# net of both, +49-28=+21, not #876 alone -- and the merge commit's own
+# re-pin to `1223:9` was in fact correct. A further +2 from tan-cli#880's own
+# later comment edit moved it to `1225:9`, also correct. Both re-pins
+# happened on the branch, before it merged: at the point `dev` itself picked
+# up tan-cli#880 (commit c629b3ea), `release.yml`'s pin landed
+# already-correct at `1225:9`.
+#
+# `planner-resync.yml`'s pin is a DIFFERENT rotation, landed on `dev` itself
+# rather than pre-merge on a branch: created at `140:9` (tan-cli#435), it
+# held there until tan-cli#876 (`dev` commit `fc15a1d0`) inserted an 11-line
+# `timeout-minutes` block directly above the checkout step -- and re-pinned
+# `140:9 -> 151:9` in that SAME commit (`.github/zizmor.yml`'s own hunk in
+# that PR shows both the workflow insertion and the re-pin together, not two
+# separate changes). It then held at `151:9` unchanged through tan-cli#880
+# and into tan-cli#899.
+#
+# All three rotations failed loudly (the finding came back, the gate went
+# red) -- the failure mode this policy actually guards against is the quiet
+# direction: a drifted pin lands on a *different* `actions/checkout` step
+# that genuinely needs suppressing, and nothing says so. `release.yml` alone
+# has five `actions/checkout` steps.
 #
 # The suppressions now live as a `# zizmor: ignore[artipacked]` comment
 # appended to each step's `uses:` line, the same pattern already used for
@@ -140,7 +153,7 @@
 # other half: renaming step 1 or step 2 above so this INVENTORY names a
 # step that no longer exists. Closing that needs the inventory rewritten
 # in a machine-parseable form (workflow file + step name, not prose), which
-# is a bigger lift than this count check -- filed as a follow-up rather
+# is a bigger lift than this count check -- filed as tan-cli#929 rather
 # than built here.
 #
 # Growth beyond these two is still a decision someone defends in review, in

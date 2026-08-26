@@ -1224,8 +1224,11 @@ jobs:
       #
       # The `artipacked` ignore travels with this step (tan-cli#899): it used
       # to be a `<file>:<line>` pin in `.github/zizmor.yml`, which rotted
-      # twice in two days when unrelated edits above it moved the line
-      # (+49 from tan-cli#876, +2 more from tan-cli#880's own comment edit).
+      # twice on the tan-cli#770/#880 branch, pre-merge, when unrelated edits
+      # above it moved the line -- net +21 from tan-cli#876 (+49) and
+      # tan-cli#883 (-28) landing on `dev` the same day, then +2 more from
+      # tan-cli#880's own comment edit. `.github/zizmor.yml`'s header carries
+      # the full re-derived history; do not requote the arithmetic here.
       # Inline, it cannot rot.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
         with:
