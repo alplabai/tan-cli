@@ -129,7 +129,7 @@ create a second list that immediately drifts.
 
 | Field the extension reads | Command family | Gated by |
 |---|---|---|
-| `data.soms[]`, `.sku`, `.displayName`, `.family`, `.cores[].{id,os}` | `presets` | golden `presets-heterogeneous-som` (a55/yocto + m33/zephyr) |
+| `data.soms[]`, `.sku`, `.displayName`, `.family`, `.cores[].{id,os,type,allowedOs}` | `presets` | golden `presets-heterogeneous-som` (a55/yocto + m33/zephyr). `type`/`allowedOs` are tan-cli#870, additive at `schemaVersion` `"1"`: `type` is the raw `metadata/socs/**/*.json` `cores[].type` string, `allowedOs` is that type's excluded cross-class OS subtracted from the checkout's own `board.schema.json` enum via `tan.core.os_class` -- the same cortex-a/cortex-m convention `tan.planner.validate` gates a build on -- so a consumer no longer re-derives it with its own regex. Both degrade to `""` / `[]` rather than fail the command when the checkout carries no `board.schema.json` — exactly the `presets-heterogeneous-som` fixture's own shape, which pins the degraded values as much as the golden's populated ones. |
 | `data.sdkRoot`, `.skus`, `.libraries`, `.boardLibraries`, … | `presets` | goldens `presets-no-sdk` + `presets-heterogeneous-som` |
 | `data.available.projectTemplates` (+ `moduleTemplates`, `generationTargets`), `data.summary`, `data.details` | `explain` | golden `explain-overview` |
 | `data.examples[].{id,sourceDir,title,description}` | `examples` | golden `examples-catalog` |

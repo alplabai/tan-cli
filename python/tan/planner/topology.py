@@ -3,12 +3,20 @@
 """Per-core OS-class taxonomy + the topology view (issue #95).
 
 A core's runtime is fixed by its Cortex class -- Cortex-A -> Yocto (Linux),
-Cortex-M -> Zephyr (RTOS) -- not chosen freely. This module owns that taxonomy
-(the default-OS rule, the runtime class, the allowed-OS set read from the board
-schema) plus `core_os_topology` / `emit_os_topology`, the per-core OS facts an
-IDE/tool renders. Extracted from alp_orchestrate as the #285 topology seam and
-re-exported from the package __init__, so callers + alp_project.py keep importing
-the same names unchanged.
+Cortex-M -> Zephyr (RTOS) -- not chosen freely. This module owns the
+allowed-OS set read from the board schema, plus `core_os_topology` /
+`emit_os_topology`, the per-core OS facts an IDE/tool renders. Extracted from
+alp_orchestrate as the #285 topology seam and re-exported from the package
+__init__, so callers + alp_project.py keep importing the same names unchanged.
+
+The default-OS rule itself (`_default_os_from_core_type` / `CLASS_RUNTIMES` /
+`_cross_class_os` below) is IMPORTED, not defined here, as of tan-cli#870:
+`tan.core.os_class` now owns it, re-exported under these same names so every
+caller and test that already imports them from this module is unaffected. See
+that module's docstring for why the rule moved somewhere `tan.planner`'s
+process-global SDK-root binding cannot reach -- `tan presets`' `allowedOs`
+field needs the identical convention without paying this package's bind-first
+import cost.
 """
 
 from __future__ import annotations
@@ -18,31 +26,15 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from tan.core.os_class import CLASS_RUNTIMES  # noqa: F401  (re-export: unchanged public name)
+from tan.core.os_class import cross_class_os as _cross_class_os
+from tan.core.os_class import default_os_from_core_type as _default_os_from_core_type
+
 from .models import OrchestratorError
 from .paths import BOARD_SCHEMA
 
 if TYPE_CHECKING:
     from .models import BoardProject
-
-
-def _default_os_from_core_type(core_type: str) -> str:
-    """Infer default OS from a SoC's `cores[].type`.
-
-    Convention (codified across the SoM presets pre-2026-05-18):
-        cortex-a*  ->  yocto
-        cortex-m*  ->  zephyr
-        anything else ->  off
-
-    Used as the fallback when a SoM preset's `topology.<core>.os` is
-    omitted (the field is now optional in som-preset-v1.schema.json --
-    M-class cores default to Zephyr, A-class to Yocto).
-    """
-    t = (core_type or "").lower()
-    if t.startswith("cortex-a"):
-        return "yocto"
-    if t.startswith("cortex-m"):
-        return "zephyr"
-    return "off"
 
 
 @functools.lru_cache(maxsize=None)
@@ -70,13 +62,6 @@ def _core_os_choices(metadata_root: Path) -> tuple[str, ...]:
     return tuple(schema["$defs"]["core_entry"]["properties"]["os"]["enum"])
 
 
-# The two class-determined OS runtimes (issue #95): Cortex-A -> Yocto (Linux),
-# Cortex-M -> Zephyr (RTOS).  These follow the core class and are NOT
-# user-selectable (see _default_os_from_core_type); `baremetal` (no-OS) and
-# `off` (disabled) are the only values a board.yaml may set explicitly.
-CLASS_RUNTIMES = ("yocto", "zephyr")
-
-
 def _runtime_class(core_type: str) -> str:
     """`linux` for Cortex-A, `rtos` for Cortex-M, else `other`."""
     t = (core_type or "").lower()
@@ -85,12 +70,6 @@ def _runtime_class(core_type: str) -> str:
     if t.startswith("cortex-m"):
         return "rtos"
     return "other"
-
-
-def _cross_class_os(core_type: str) -> set[str]:
-    """The class runtime a core may NOT be set to -- the OS of the *other*
-    class.  A Cortex-A can't run Zephyr; a Cortex-M can't run Yocto."""
-    return set(CLASS_RUNTIMES) - {_default_os_from_core_type(core_type)}
 
 
 def _allowed_os_for_core(core_type: str, metadata_root: Path) -> list[str]:
