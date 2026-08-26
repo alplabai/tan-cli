@@ -115,8 +115,7 @@
 # hand, before either was ever pushed. Either way, the failure mode this
 # policy actually guards against is the quiet direction: a drifted pin lands
 # on a *different* `actions/checkout` step that genuinely needs suppressing,
-# and nothing says so. `release.yml` alone
-# has five `actions/checkout` steps.
+# and nothing says so. `release.yml` alone has five `actions/checkout` steps.
 #
 # The suppressions now live as a `# zizmor: ignore[artipacked]` comment
 # appended to each step's `uses:` line, the same pattern already used for
