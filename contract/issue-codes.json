@@ -1107,6 +1107,14 @@
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "init.example-som-unsupported",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "note": "Registered by tan-cli#890. `--from-example` retargets --som onto the copied board.yaml without consulting the SDK scaffold catalog's supported.som_skus, so tan answered ok:true for pairs `alp_project.py --emit scaffold` refuses outright (measured: sku 'E1M-AEN301' on multicore-mailbox, rc=1 there, exitCode 0 here). A WARNING rather than a refusal, matching this path's own precedent -- refusing an example outright once made --from-example unusable for nearly the whole AEN family. Emitted only when a catalog record exists for the example AND --som is outside its declared set; every 'cannot tell' (no catalog, no record, unreadable) is silent. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "kconfig.emit-failed",
       "status": "reserved",
       "severity": "error",
