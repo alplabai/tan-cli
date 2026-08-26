@@ -784,7 +784,14 @@ def splice_companion_cores(board_yaml: str, cores: list[tuple[str, str]]) -> str
             ),
             None,
         )
-        if companion is not None:
+        # tan-cli#925: never append over a board that already declares
+        # `ipc:`. PyYAML accepts a duplicate top-level key and keeps the
+        # LAST, so an unconditional append does not fail -- it silently
+        # discards the project's own channel. alp-sdk's multicore-mailbox
+        # scaffold declares `alp_shmem0`, and both its `src/main.c` and
+        # `peer/main.c` `#define SHMEM_REGION_NAME "alp_shmem0"`.
+        declares_ipc = any(line.startswith("ipc:") for line in _rust_lines(board_yaml))
+        if companion is not None and not declares_ipc:
             result += (
                 "\nipc:\n"
                 "  - kind: rpmsg\n"
