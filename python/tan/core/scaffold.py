@@ -61,6 +61,7 @@ TEMPLATE_IDS = (
     "iot-starter",
     "edge-ai-starter",
     "board-diagnostics",
+    "multicore-mailbox",
 )
 
 #: The template a non-interactive `tan init` with no `--template` gets.
@@ -89,17 +90,34 @@ _VENDORED_TEMPLATE_DIR = {
     "iot-starter": "iot",
     "edge-ai-starter": "edge-ai",
     "board-diagnostics": "diagnostics",
+    # The only id that matches its SDK catalog id verbatim (tan-cli#864).
+    "multicore-mailbox": "multicore-mailbox",
 }
 
 #: The SKU assumed when `--som` is absent (`tan_core::DEFAULT_SOM_SKU`).
 DEFAULT_SOM_SKU = "E1M-AEN801"
 
-#: `iot-starter`'s only supported SKU. Its Wi-Fi transport is the CC3501E
-#: bridge, silicon-validated on this SKU alone, so the SDK catalog's `iot`
-#: entry gates `supported.som_skus` to exactly this one-item set and only ONE
-#: family tree was vendored. Any other `--som` is refused up front rather than
-#: silently rendered against it.
-IOT_STARTER_SUPPORTED_SKU = "E1M-AEN801"
+#: Templates whose SDK catalog entry gates `supported.som_skus` to fewer SKUs
+#: than tan vendors family trees for. Consulted BEFORE anything is planned, so
+#: an unsupported `--som` is refused rather than quietly rendered against the
+#: wrong tree.
+#:
+#: Was a single `IOT_STARTER_SUPPORTED_SKU` constant plus one hard-coded `if`
+#: in `init_cmd`. tan-cli#864 added a second such template and measured both
+#: ways the one-off failed to generalise: `--som E1M-AEN301` rendered the
+#: AEN801 tree at `exitCode 0` (`_family_bucket` maps every unrecognised AEN
+#: prefix onto the default family), and `--som E1M-V2N101` surfaced as
+#: `init.template-unreadable` exit 5 -- "your tan installation is broken" for
+#: a user whose `--som` was simply wrong.
+#:
+#: `iot-starter`: the CC3501E Wi-Fi transport is silicon-validated on this SKU
+#: alone. `multicore-mailbox`: the SDK refuses to emit it for anything else --
+#: `alp_project: multicore-mailbox: sku 'E1M-AEN301' is not supported
+#: (supported: ['E1M-AEN801'])`, rc=1.
+TEMPLATE_SUPPORTED_SKUS: dict[str, tuple[str, ...]] = {
+    "iot-starter": ("E1M-AEN801",),
+    "multicore-mailbox": ("E1M-AEN801",),
+}
 
 #: Vendored directory name per SoM family, `(alif_ensemble, renesas_v2n)` --
 #: the two representative SKUs the SDK catalog declares.
@@ -422,7 +440,7 @@ def retarget_board_yaml_som(content: str, sku: str) -> str:
     (the vendored `iot` scaffold's `sku:` line has one) survives, and passing a
     tree its OWN vendored SKU is a byte-exact no-op (`--template
     iot-starter` always does: its `--som` is validated equal to
-    `IOT_STARTER_SUPPORTED_SKU` before this ever runs). Reconstructing the tail
+    `TEMPLATE_SUPPORTED_SKUS` before this ever runs). Reconstructing the tail
     as a fixed two-space gap silently collapsed that alignment even in the
     no-op case.
 
@@ -835,7 +853,8 @@ def _vendored_family(template_id: str, sku: str) -> str:
     """
     # `iot` has exactly one vendored tree, no family split (its caller rejects
     # any other SKU first); every other template has two.
-    family = IOT_STARTER_SUPPORTED_SKU if template_id == "iot-starter" else _family_bucket(sku)
+    restricted = TEMPLATE_SUPPORTED_SKUS.get(template_id)
+    family = restricted[0] if restricted else _family_bucket(sku)
     if family is None:
         raise UnsupportedSomError(template_id, sku)
     return family

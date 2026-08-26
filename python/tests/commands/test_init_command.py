@@ -340,6 +340,72 @@ def test_iot_starter_rejects_an_unsupported_som_before_planning(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_multicore_mailbox_rejects_a_som_the_sdk_itself_refuses_to_emit_for(tmp_path):
+    """tan-cli#864. The SDK gates this template's `supported.som_skus` to
+    `['E1M-AEN801']` and refuses everything else outright:
+
+        $ alp_project.py --emit scaffold --template multicore-mailbox --sku E1M-AEN301
+        alp_project: multicore-mailbox: sku 'E1M-AEN301' is not supported
+                     (supported: ['E1M-AEN801'])          rc=1
+
+    Before the per-template table, tan rendered the AEN801 tree anyway --
+    `exitCode 0`, a written project claiming `sku: E1M-AEN301` -- because
+    `_family_bucket` maps every unrecognised AEN prefix onto the default
+    family. That is tan generating a project the SDK would not, silently.
+
+    E1M-AEN301 does carry both `m55_hp` and `m55_he` (measured in its
+    `topology:`), so the scaffold might even build; the defect is the silent
+    divergence from the SDK's own support matrix, not a missing core."""
+    proc = run_tan(
+        "init", "--template", "multicore-mailbox", "--som", "E1M-AEN301",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.invalid-som"
+    assert "E1M-AEN801" in issue(env)["message"]
+    assert list(tmp_path.iterdir()) == [], "a refused --som must write nothing"
+
+
+def test_multicore_mailbox_refuses_another_family_without_blaming_the_install(tmp_path):
+    """The failure mode this replaces told the customer the wrong thing.
+    `--som E1M-V2N101` fell through to `_family_bucket`'s V2N tree, which
+    this template does not vendor, and surfaced as:
+
+        exitCode 5  init.template-unreadable
+        "tan's vendored template tree for 'multicore-mailbox' is empty at ..."
+
+    i.e. "your tan installation is broken" for a user whose `--som` was
+    simply wrong. Asserting the CODE, not just a non-zero exit: an exit 5
+    here would still be a refusal, and still be the wrong story."""
+    proc = run_tan(
+        "init", "--template", "multicore-mailbox", "--som", "E1M-V2N101",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert issue(env)["code"] == "init.invalid-som", (
+        "a wrong --som must not be reported as an unreadable vendored tree"
+    )
+    assert proc.returncode == 2, env
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_template_with_no_sku_restriction_still_takes_a_non_default_sku(tmp_path):
+    """Anti-over-reach: the table must gate only the templates whose catalog
+    entry restricts them. `zephyr-app` vendors both family trees and is
+    unaffected -- measured `exitCode 0` on E1M-AEN301 before and after."""
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--som", "E1M-AEN301",
+        "--name", "unrestricted", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert (tmp_path / "unrestricted" / "board.yaml").is_file()
+
+
 # ---------------------------------------------------------------------------
 # --cores: heterogeneous scaffolding
 # ---------------------------------------------------------------------------

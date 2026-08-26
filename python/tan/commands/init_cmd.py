@@ -54,7 +54,8 @@ templates, five of which map onto five entries of the broader SDK catalog
 (`metadata/templates/catalog-v1.json`, alp-sdk) under DIFFERENT ids (its
 `minimal`/`sensor`/`iot`/`edge-ai`/`diagnostics` are this file's
 `zephyr-app`/`sensor-starter`/`iot-starter`/`edge-ai-starter`/
-`board-diagnostics`); `minimal-app` has no catalog counterpart at all, and the
+`board-diagnostics`). `multicore-mailbox` (tan-cli#864) is the one id spelled
+the SAME on both sides; `minimal-app` has no catalog counterpart at all, and the
 catalog's `peripheral`/`multicore-rpmsg`/`gateway` entries have no `--template`
 counterpart here -- reach them (and any other SDK example) with
 `--from-example` instead, which copies the example's own tree verbatim
@@ -102,7 +103,7 @@ from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     DEFAULT_TEMPLATE_ID,
-    IOT_STARTER_SUPPORTED_SKU,
+    TEMPLATE_SUPPORTED_SKUS,
     TEMPLATE_IDS,
     CoresError,
     ExampleReadError,
@@ -579,14 +580,19 @@ def _plan_from_template(
 ) -> tuple[str, list[PlannedFile]]:
     template_id = _resolve_template(template)
     sku = som or DEFAULT_SOM_SKU
-    # Checked BEFORE anything is planned: `iot-starter` vendors exactly one SoM
-    # family (its Wi-Fi transport is silicon-validated on that SKU alone), so
-    # any other `--som` must be refused, never quietly rendered against it.
-    if template_id == "iot-starter" and sku != IOT_STARTER_SUPPORTED_SKU:
+    # Checked BEFORE anything is planned. A template whose SDK catalog entry
+    # restricts `supported.som_skus` must refuse every other `--som` here --
+    # never render it against the wrong family tree (silent, `exitCode 0`) and
+    # never let it fall through to `init.template-unreadable` (which blames
+    # the installation for a wrong argument). See TEMPLATE_SUPPORTED_SKUS.
+    supported = TEMPLATE_SUPPORTED_SKUS.get(template_id)
+    if supported is not None and sku not in supported:
+        plural = "s" if len(supported) > 1 else ""
+        allowed = ", ".join(f"'{s}'" for s in supported)
         raise InitError(
             "init.invalid-som",
-            f"Template 'iot-starter' supports only SoM SKU "
-            f"'{IOT_STARTER_SUPPORTED_SKU}'; got '{sku}'.",
+            f"Template '{template_id}' supports only SoM SKU{plural} "
+            f"{allowed}; got '{sku}'.",
             ExitCode.VALIDATION_FAILURE,
         )
     try:

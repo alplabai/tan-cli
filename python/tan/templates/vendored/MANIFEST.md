@@ -530,6 +530,7 @@ strictness exists to catch.
 | `edge-ai-starter` | `edge-ai` | `E1M-AEN801`, `E1M-V2N101` | `examples/ai/cold-chain-monitor` | 8 |
 | `board-diagnostics` | `diagnostics` | `E1M-AEN801`, `E1M-V2N101` | `examples/bringup/board-selftest` | 8 |
 | `iot-starter` | `iot` | `E1M-AEN801` only (`status: preview`) | `examples/connectivity/mqtt-telemetry` | 7 |
+| `multicore-mailbox` | `multicore-mailbox` | `E1M-AEN801` only (`status: stable`) | `examples/multicore/mproc-mailbox` | 11 |
 
 Layout: `vendored/<sdk-template-id>/<sku>/<path>`, e.g.
 `vendored/minimal/E1M-AEN801/CMakeLists.txt`. Four templates ship past the
@@ -537,6 +538,15 @@ common six: `edge-ai` adds `src/cold_chain.c` + `src/cold_chain.h` (the
 cold-chain-metrics core the app links against); `sensor` and `diagnostics`
 each add `boards/native_sim_native_64.{conf,overlay}` (tan-cli#501 — a
 board-dir pair Zephyr auto-discovers with no CMakeLists wiring at all); and
+`multicore-mailbox` adds a whole second build slice — `peer/CMakeLists.txt`,
+`peer/prj.conf`, `peer/main.c` — plus `peer/testcase.yaml` and
+`boards/native_sim_native_64.overlay`; the overlay is load-bearing rather than
+decorative, since both `src/main.c` and `peer/main.c` carry
+`#define SHMEM_REGION_NAME "alp_shmem0"` and only that overlay declares the
+`alp-shmem0` alias the README's own `west build -b native_sim/native/64 .`
+depends on. `peer/testcase.yaml` is the first NESTED
+`NON_ENVELOPE_EXTRAS` entry (tan-cli#864); it is a literal path rather than a
+suffix match, and `scaffold_byte_parity.py` says why. And
 `iot` adds `native_sim.conf` at the project root (tan-cli#379 — NOT
 auto-discovered the same way: its own README build line passes it explicitly
 via `-DEXTRA_CONF_FILE=native_sim.conf`; see the non-envelope-extras section
@@ -715,9 +725,17 @@ scope) is **retired entirely** (tan-cli#14): its `WizardTemplateId` variant,
 generator (`c_project.rs`'s old `gen_host_tooling_files`), and registry entry
 are gone, not just left unvendored.
 
-Reverse gap (informational, no tan-side action): the SDK catalog also ships
-`peripheral`, `multicore-rpmsg`, and `gateway`, none of which has a tan wizard
-counterpart today.
+Reverse gap (informational): the SDK catalog also ships `peripheral`,
+`multicore-rpmsg`, and `gateway`, none of which has a tan wizard counterpart
+today. `multicore-mailbox` was in that list until tan-cli#864 vendored it.
+
+`multicore-rpmsg` is NOT merely unvendored -- it cannot be vendored as it
+stands. Its catalog `files.user_owned` omits a root `CMakeLists.txt` and
+`prj.conf` while its own emitted `README.md:22` diagrams one, so
+`_require_complete_tree` refuses the tree (`init.template-unreadable`, exit 5);
+`linux/CMakeLists.txt:24` builds `src/main.c`, which the envelope never emits;
+and `linux/CMakeLists.txt:21` points its generated dir at the project's PARENT.
+Filed upstream as alplabai/alp-sdk#1712; vendoring it is blocked on that.
 
 ## SKU-family gap: NXP is not in the SDK catalog
 
