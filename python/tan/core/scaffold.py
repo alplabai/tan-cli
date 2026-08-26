@@ -790,7 +790,7 @@ def splice_companion_cores(board_yaml: str, cores: list[tuple[str, str]]) -> str
                 "  - kind: rpmsg\n"
                 "    name: alp_default_rpmsg\n"
                 f"    endpoints: [{app_core}, {companion}]\n"
-                "    carve_out_kb: 512\n"
+                "    carve_out_kb: 256\n"
             )
     return result
 
