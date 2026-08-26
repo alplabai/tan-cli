@@ -386,14 +386,17 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **nine** live entries: the
-`iot` CMakeLists edit, six `edge-ai` entries for the `## Model`/`## Tests`
-pointers (tan-cli#821(a), see entry 4 below) — two `README.md` entries plus
-two entries PER `src/main.c` (one per comment rewrite, declared separately so
-healing one comment without the other still reds; see
-`scaffold_byte_parity.py`'s `DELIBERATE_EDITS` docstring) — and two more
+The `DELIBERATE_EDITS` table below currently carries **thirteen** live entries
+(counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS` dict, not by
+hand): the `iot` CMakeLists edit, six `edge-ai` entries for the
+`## Model`/`## Tests` pointers (tan-cli#821(a), see entry 4 below) — two
+`README.md` entries plus two entries PER `src/main.c` (one per comment
+rewrite, declared separately so healing one comment without the other still
+reds; see `scaffold_byte_parity.py`'s `DELIBERATE_EDITS` docstring) — two more
 `edge-ai`/`E1M-AEN801` entries for the DEEPX retarget sentence (tan-cli#814,
-see entries 5 and 6 below). tan-cli#384's seven `README.md` doc-link entries
+see entries 5 and 6 below), and four more for `diagnostics`/`sensor`'s bare
+cross-repo pointers (tan-cli#912, see entry 7 below) — two SKUs each, one
+`README.md` entry per SKU. tan-cli#384's seven `README.md` doc-link entries
 are NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0`
 tag (see "Current vendor point" above); listed here only as history, not as
 a current exception. tan-cli#501's four `sensor`/`diagnostics` CMakeLists
@@ -471,7 +474,8 @@ strictness exists to catch.
    `scripts/program_eeprom.py` and `sensor`'s a bare
    `examples/peripheral-io/i2c-scanner`, the same defect class, on both
    SKUs, shipping to every `tan init` of those two templates. Tracked
-   separately, filed as tan-cli#912, and NOT fixed here. Rewritten to a
+   separately as tan-cli#912 and fixed there — see entry 7 below, not here
+   (this entry is (a) of tan-cli#821 only). Rewritten to a
    real link (`README.md`, pinned at `v0.16.0` per the current vendor point's
    `- Ref:`) or a named alp-sdk path (`src/main.c`, a C comment — no markdown
    rewriter applies there either way), each noting the referent is not part
@@ -520,6 +524,41 @@ strictness exists to catch.
    sentence (tan-cli#814).** "Same source targets the V2N DEEPX path when
    som.sku is flipped" is the comment-form of entry 5's defect, one file
    over. Reworded to point at the re-scaffold instead.
+7. **`diagnostics`'s README `program_eeprom.py` bullet and `sensor`'s README
+   `i2c-scanner` bullet, both SKUs (tan-cli#912).** Entry 4 above named these
+   two as the same defect class as `edge-ai`'s bare pointers, tracked
+   separately (same `- Ref:` coupling as entry 4 — no new coupling created;
+   both trees already carried v0.16.0-pinned links): `diagnostics`'s
+   Troubleshooting section names a bare `scripts/program_eeprom.py`, and
+   `sensor`'s names a bare `examples/peripheral-io/i2c-scanner` in one bullet
+   (the SAME README already carries two real markdown links to that identical
+   referent elsewhere — this is the only bare instance in this README, not a
+   novel shape; the wider `sensor` scaffold still ships several more bare
+   `i2c-scanner` referents outside this README — `src/main.c`, `board.yaml`,
+   `testcase.yaml` — out of scope for this entry and tracked upstream as part
+   of extending alp-sdk#1705). Both scripts/examples are real in the alp-sdk
+   checkout the text was captured from, never emitted into any scaffolded
+   project (`_vendored_files` in `tan/core/scaffold.py` reaches nothing
+   outside `vendored/<template>/<sku>/`). Each is a bare inline code span, so
+   the emit's own doc-link rewriter never touches it, same as entry 4's
+   `edge-ai` pair. Byte-identical between the two SKUs for `sensor` (only the
+   `west build`/`west flash` block elsewhere in the README differs by SKU);
+   for `diagnostics` the two SKUs also differ in the "Real hardware" heading
+   and the `[selftest] SoM identity` line elsewhere in the README, in
+   addition to the build/flash block — none of that touches the matched
+   region here, so each template's two SKU entries still share one
+   `un_edit`. Rewritten to a real link, pinned at `v0.16.0` per the current
+   vendor point's `- Ref:`, each noting the referent is not part of this
+   scaffolded project; verified the replacement text holds with no alp-sdk
+   checkout present at all (`alplabai/alp-sdk` is public, `isPrivate: false`,
+   and both blob/tree URLs return HTTP 200 at this ref — checked directly,
+   not assumed, after a prior PR in this same series asserted the opposite of
+   a link and was corrected in review). Fix belongs upstream, in alp-sdk's
+   `examples/bringup/board-selftest/README.md` and
+   `examples/peripheral-io/i2c-master/README.md` (the latter's `src/main.c`,
+   `board.yaml`, and `testcase.yaml` too, per the extended alp-sdk#1705);
+   filed as alp-sdk#1705, and this entry retires the moment that lands and
+   this tree is re-vendored.
 
 ## Template x SKU matrix vendored
 

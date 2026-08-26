@@ -261,6 +261,72 @@ def un_edit_edge_ai_aen801_readme_deepx_note(text: str) -> str:
     )
 
 
+#: tan-cli#912: `diagnostics`'s README names a bare
+#: `scripts/program_eeprom.py` -- real only in the alp-sdk checkout the text
+#: was captured from, never emitted into any scaffolded project
+#: (`_vendored_files` in `tan/core/scaffold.py` never reaches outside
+#: `vendored/diagnostics/<sku>/`). A bare inline code span, not a markdown
+#: link, so the emit's own doc-link rewriter never touches it -- the same
+#: shape as tan-cli#821(a)'s `edge-ai` pointers above. Byte-identical between
+#: the two SKUs at this bullet (the two SKUs also differ at the `west
+#: build`/`west flash` block and, for `diagnostics`, the "Real hardware"
+#: heading and `[selftest] SoM identity` line above it -- none of that
+#: touches the matched region here), so both entries below share this one
+#: `un_edit`.
+_DIAGNOSTICS_README_EEPROM_SCRIPT_EDITED = (
+    "* **SoM identity `ALP_ERR_NOT_PROVISIONED`.** The on-module EEPROM\n"
+    "  reads back blank -- the module was never run through alp-sdk's\n"
+    "  [`scripts/program_eeprom.py`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/scripts/program_eeprom.py)\n"
+    "  at production test -- not part of this scaffolded project; the path\n"
+    "  lives only in an alp-sdk checkout, though the link above works\n"
+    "  without one. On a factory-fresh board this is expected; on a\n"
+    "  shipped SoM it is a real fault.\n"
+)
+_DIAGNOSTICS_README_EEPROM_SCRIPT_EMITTED = (
+    "* **SoM identity `ALP_ERR_NOT_PROVISIONED`.** The on-module EEPROM\n"
+    "  reads back blank -- the module was never run through\n"
+    "  `scripts/program_eeprom.py` at production test. On a factory-fresh\n"
+    "  board this is expected; on a shipped SoM it is a real fault.\n"
+)
+
+
+def un_edit_diagnostics_readme_eeprom_script(text: str) -> str:
+    """tan-cli#912: reverse the README `program_eeprom.py` rewrite above to
+    recover the emit's own (dead-pointer) bytes."""
+    return text.replace(
+        _DIAGNOSTICS_README_EEPROM_SCRIPT_EDITED,
+        _DIAGNOSTICS_README_EEPROM_SCRIPT_EMITTED,
+    )
+
+
+#: tan-cli#912: `sensor`'s README names a bare
+#: `examples/peripheral-io/i2c-scanner` in one Troubleshooting bullet -- the
+#: same referent this file links TWICE elsewhere as a real markdown link
+#: (the emit's own doc-link rewriter already covers those two), so this is
+#: the only bare instance in this README, not a novel defect shape. (The
+#: wider `sensor` scaffold still ships several more bare `i2c-scanner`
+#: referents outside this README -- `src/main.c`, `board.yaml`,
+#: `testcase.yaml` -- out of scope for this entry.) Byte-identical between
+#: the two SKUs, so both entries below share this one `un_edit`.
+_SENSOR_README_I2C_SCANNER_BULLET_EDITED = (
+    "  slave).  Run alp-sdk's\n"
+    "  [`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner)\n"
+    "  to confirm what ACKs -- not part of this scaffolded project.\n"
+)
+_SENSOR_README_I2C_SCANNER_BULLET_EMITTED = (
+    "  slave).  Run `examples/peripheral-io/i2c-scanner` to confirm what ACKs.\n"
+)
+
+
+def un_edit_sensor_readme_i2c_scanner_bullet(text: str) -> str:
+    """tan-cli#912: reverse the README `i2c-scanner` bullet rewrite above to
+    recover the emit's own (dead-pointer) bytes."""
+    return text.replace(
+        _SENSOR_README_I2C_SCANNER_BULLET_EDITED,
+        _SENSOR_README_I2C_SCANNER_BULLET_EMITTED,
+    )
+
+
 #: Same tan-cli#814 defect, the `board.yaml` comment that reinforces the bad
 #: README instruction one file over.
 _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE = (
@@ -368,6 +434,27 @@ DELIBERATE_EDITS: dict[
         "tan-cli#814: same defect as the README entry above, the comment "
         "one file over that reinforces it",
         un_edit_edge_ai_aen801_board_yaml_deepx_note,
+    ),
+    ("diagnostics", "E1M-AEN801", "README.md", "eeprom_script_pointer"): (
+        "tan-cli#912: the Troubleshooting section pointed at "
+        "scripts/program_eeprom.py, not emitted into any scaffolded "
+        "project -- turned into a real link to the alp-sdk path",
+        un_edit_diagnostics_readme_eeprom_script,
+    ),
+    ("diagnostics", "E1M-V2N101", "README.md", "eeprom_script_pointer"): (
+        "tan-cli#912: same as diagnostics/E1M-AEN801/README.md above",
+        un_edit_diagnostics_readme_eeprom_script,
+    ),
+    ("sensor", "E1M-AEN801", "README.md", "i2c_scanner_bullet"): (
+        "tan-cli#912: a Troubleshooting bullet pointed at a bare "
+        "examples/peripheral-io/i2c-scanner, not emitted into any "
+        "scaffolded project -- turned into a real link, matching the two "
+        "real links this same README already carries for the same path",
+        un_edit_sensor_readme_i2c_scanner_bullet,
+    ),
+    ("sensor", "E1M-V2N101", "README.md", "i2c_scanner_bullet"): (
+        "tan-cli#912: same as sensor/E1M-AEN801/README.md above",
+        un_edit_sensor_readme_i2c_scanner_bullet,
     ),
     # tan-cli#501 review finding 1: a matching PREPEND was added to the four
     # `sensor`/`diagnostics` CMakeLists.txt files under the same
@@ -639,6 +726,47 @@ def self_check() -> None:
         un_edit_edge_ai_aen801_board_yaml_deepx_note(_EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE)
         == _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE_EMITTED
     )
+
+    # tan-cli#912's four entries (diagnostics x2, sensor x2): each un_edit
+    # must round-trip the corrected README bullet back onto the emit's own
+    # (still-wrong) bytes, and be registered under the exact
+    # (template, sku, path, edit_id) key.
+    for sku in ("E1M-AEN801", "E1M-V2N101"):
+        assert (
+            "diagnostics", sku, "README.md", "eeprom_script_pointer"
+        ) in DELIBERATE_EDITS
+        assert (
+            un_edit_diagnostics_readme_eeprom_script(
+                _DIAGNOSTICS_README_EEPROM_SCRIPT_EDITED
+            )
+            == _DIAGNOSTICS_README_EEPROM_SCRIPT_EMITTED
+        )
+        assert ("sensor", sku, "README.md", "i2c_scanner_bullet") in DELIBERATE_EDITS
+        assert (
+            un_edit_sensor_readme_i2c_scanner_bullet(
+                _SENSOR_README_I2C_SCANNER_BULLET_EDITED
+            )
+            == _SENSOR_README_I2C_SCANNER_BULLET_EMITTED
+        )
+
+    # ...and each is the strict half too: feeding the un_edit its OWN emitted
+    # (already-healed) bytes finds nothing to undo -- `undo_declared_edits`
+    # must surface that as a hard failure, not a quiet pass, for all four.
+    for template, sku, path, edit_id, emitted in (
+        ("diagnostics", "E1M-AEN801", "README.md", "eeprom_script_pointer",
+         _DIAGNOSTICS_README_EEPROM_SCRIPT_EMITTED),
+        ("diagnostics", "E1M-V2N101", "README.md", "eeprom_script_pointer",
+         _DIAGNOSTICS_README_EEPROM_SCRIPT_EMITTED),
+        ("sensor", "E1M-AEN801", "README.md", "i2c_scanner_bullet",
+         _SENSOR_README_I2C_SCANNER_BULLET_EMITTED),
+        ("sensor", "E1M-V2N101", "README.md", "i2c_scanner_bullet",
+         _SENSOR_README_I2C_SCANNER_BULLET_EMITTED),
+    ):
+        _, mut_failures = undo_declared_edits(template, sku, {path: emitted})
+        assert [
+            f for f in mut_failures
+            if f.startswith(f"{path}: DELIBERATE_EDITS declares an edit that is no longer")
+        ], (template, sku, path, edit_id, mut_failures)
 
     # `missing_extras` needs a real SDK checkout (a live example directory) to
     # say anything -- `resolve_example_dir` returning `None` (no SDK bound) is
