@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -118,6 +119,186 @@ def _bound_sdk_root(environ: Mapping[str, str] | None = None) -> tuple[str, Path
 #: `_scrub_sdk_discovery_env` has by then already repointed `HOME`/
 #: `USERPROFILE` at a pytest tmp dir and deleted `ALP_SDK_ROOT`.
 REAL_ENVIRON: dict[str, str] = dict(os.environ)
+
+
+# ---------------------------------------------------------------------------
+# COLLECTION-TIME PRE-FLIGHT: does a SPAWNED `tan` subprocess survive the
+# `HOME`/`USERPROFILE` repoint `_scrub_sdk_discovery_env` applies to every
+# test in this tree? (tan-cli#903)
+#
+# That fixture is correct and deliberate -- see the module docstring -- but it
+# has a side effect nothing here used to check for: every test that spawns
+# `[sys.executable, "-m", "tan", ...]` builds that child's environment from
+# `os.environ` AFTER the scrub has already repointed `HOME`, so a dependency
+# (`typer`, at the time this was filed) that is importable only via a
+# user-site install under the developer's REAL `HOME` (`~/.local`) vanishes
+# for every one of those children. The result is not one clear error -- it is
+# several hundred unrelated-looking failures deep in the suite, each a
+# crashed subprocess with empty stdout, because the ACTUAL cause (a missing
+# import in a *different* process) never surfaces as a message at all.
+# Measured on the incident that opened this issue: 678 and 679 failures on
+# two independent runs, and a THIRD collection (both SDK roots bound) at
+# 1127 failed / 4228 passed / 768 skipped / 1 xfailed / 17 errors -- every
+# one of them "typer"-shaped or a downstream symptom of a subprocess that
+# crashed before writing anything.
+#
+# `tan_under_test` below already spawns this same probe -- but as a
+# session-scoped AUTOUSE FIXTURE, which pytest sets up for the first test
+# BEFORE that test's function-scoped `_scrub_sdk_discovery_env` runs (broader
+# scopes set up first; verified empirically, not merely assumed). So it
+# always probes under the REAL, unscrubbed `HOME`, which is precisely the one
+# environment this bug does NOT reproduce in. It is a good check for
+# tan-cli#423/#665 (wrong tan under test) and it is USELESS for tan-cli#903
+# by construction -- it was never wired to see the environment the bug lives
+# in.
+#
+# So this runs earlier still, from `pytest_configure` -- before collection,
+# before ANY fixture, session-scoped or not, has executed -- and builds its
+# OWN scrubbed-HOME environment by hand from `REAL_ENVIRON` rather than
+# waiting for `_scrub_sdk_discovery_env` to produce one. That is the single
+# most important property here: a check that let the real fixture do the
+# scrubbing for it, or that read `os.environ` after collection had begun,
+# would inherit the bug it exists to catch and pass in exactly the case that
+# matters. Building the equivalent scrub independently, from the untouched
+# capture, is what keeps the two decoupled.
+#
+# What is probed is deliberately NOT a hardcoded package name. `typer` was
+# this incident's proximate cause, but it is not the only runtime dependency
+# `tan.__main__` pulls in (`pyproject.toml`'s `dependencies` also names rich,
+# pyyaml, jsonschema, click, truststore, certifi, and that list can grow).
+# Spawning the exact command every one of the 26 subprocess-based test files
+# spawns -- `sys.executable -m tan --version` -- exercises the real import
+# chain as it stands today, whatever it is, without this file needing to know
+# its contents. Under-probing (missing the next instance) and over-probing
+# (false-failing on an unrelated absence) both come from hand-picking a
+# module name; running the actual entry point avoids both failure modes at
+# once.
+# ---------------------------------------------------------------------------
+
+#: Escape hatch, named in the failure message itself so it is discoverable
+#: without reading this file. A hard collection failure is the right default
+#: -- "a run that cannot produce a meaningful result should not produce 678
+#: meaningless ones" (tan-cli#903) -- but it is a big hammer: a developer who
+#: already knows their interpreter is unusual (deliberately probing a broken
+#: install, say) must be able to say so and get the real suite instead of a
+#: refusal.
+TAN_TEST_SKIP_HOME_PREFLIGHT = "TAN_TEST_SKIP_HOME_PREFLIGHT"
+
+
+def _home_scrubbed_environ(home: Path) -> dict[str, str]:
+    """`REAL_ENVIRON` with `HOME`/`USERPROFILE` repointed at `home` and
+    `ALP_SDK_ROOT` removed -- the same transformation
+    `_scrub_sdk_discovery_env` applies via `monkeypatch`, reproduced here as a
+    pure function so the pre-flight below can apply it BEFORE that fixture,
+    or any fixture, has run.
+
+    Deliberately built from `REAL_ENVIRON`, the capture taken at import before
+    anything scrubs it, and not from live `os.environ` -- see the block
+    comment above this function for why that ordering is load-bearing rather
+    than incidental.
+    """
+    env = dict(REAL_ENVIRON)
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env.pop("ALP_SDK_ROOT", None)
+    return env
+
+
+def _home_preflight_failure() -> str | None:
+    """`None` when `sys.executable -m tan --version` still works once `HOME`/
+    `USERPROFILE` are repointed at a throwaway directory; otherwise a
+    ready-to-print diagnostic naming the cause and the fix.
+
+    `-m tan`, not `-c "import tan"`: `tan/__init__.py` is empty (see
+    `tan_under_test` below), so a bare import proves nothing about whether
+    the dependencies `tan.__main__` actually needs are reachable. `--version`
+    is the cheapest subcommand that still forces that full import chain.
+
+    A pure function of `REAL_ENVIRON` and this host's filesystem -- no
+    fixture, no pytest state -- so `pytest_configure` below can call it before
+    collection has even started.
+    """
+    with tempfile.TemporaryDirectory(prefix="tan-home-preflight-") as scratch_home:
+        env = _home_scrubbed_environ(Path(scratch_home))
+        repo_python = str(Path(__file__).resolve().parents[1])
+        existing = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
+        if repo_python not in existing:
+            env["PYTHONPATH"] = os.pathsep.join([repo_python, *existing])
+        try:
+            probe = subprocess.run(
+                [sys.executable, "-m", "tan", "--version"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return (
+                f"could not even SPAWN `{sys.executable} -m tan --version` "
+                f"under a scrubbed HOME to pre-flight this suite: {exc}"
+            )
+    if probe.returncode == 0:
+        return None
+    return (
+        f"`{sys.executable} -m tan --version` fails (exit {probe.returncode}) "
+        "once HOME/USERPROFILE are repointed at a throwaway directory -- "
+        "exactly what THIS SUITE's own `_scrub_sdk_discovery_env` fixture "
+        "does to every test's subprocess environment (python/tests/"
+        "conftest.py). Left uncaught, that produces several hundred "
+        "unrelated-looking test failures (crashed subprocesses returning "
+        "empty stdout) instead of this one message (tan-cli#903).\n\n"
+        f"stderr from the probe:\n{probe.stderr.strip()}\n\n"
+        "The usual cause: this interpreter's runtime dependencies (typer, "
+        "pydantic, ...) are importable only via a user-site install under "
+        "your REAL HOME (e.g. `~/.local`), which a scrubbed-HOME subprocess "
+        "cannot see. Fix it the documented way (README.md, \"New "
+        "implementation work belongs under python/\"):\n"
+        "    python3.12 -m venv .venv\n"
+        '    .venv/bin/python -m pip install -e "./python[monitor]"\n'
+        "    .venv/bin/python -m pip install pytest\n"
+        "    (cd python && ../.venv/bin/python -m pytest tests -q)\n\n"
+        f"To bypass this check and run the suite anyway (NOT recommended --"
+        " every test that spawns a subprocess will fail with its own"
+        " unrelated-looking error instead), set"
+        f" {TAN_TEST_SKIP_HOME_PREFLIGHT}=1."
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Fail collection ONCE, with one clear diagnostic, rather than letting
+    hundreds of individually-spawned subprocesses fail for a reason none of
+    them can name (tan-cli#903).
+
+    `pytest_configure` fires before collection starts and therefore before
+    ANY fixture -- session-scoped or function-scoped -- has touched `HOME`;
+    `_home_preflight_failure` builds its own scrubbed-HOME environment rather
+    than relying on `_scrub_sdk_discovery_env` to have already produced one,
+    which is what lets this check observe the failure mode instead of
+    inheriting the scrub that hides it (see the block comment above).
+
+    Skipped on xdist WORKER processes (`config.workerinput` is only set
+    there): the controller process runs this exact hook first and would have
+    already aborted the whole session via `UsageError` before any worker is
+    spawned, so a worker re-running the same subprocess probe is pure
+    duplicated cost, not additional coverage.
+
+    FAILS rather than warns -- deliberately, per tan-cli#903's own framing:
+    "a run that cannot produce a meaningful result should not produce 678
+    meaningless ones." A warning here is exactly as easy to miss as the 678
+    failures it would otherwise sit above; a `pytest.UsageError` stops the
+    run immediately, before a single test executes, with nothing else to
+    scroll past. `TAN_TEST_SKIP_HOME_PREFLIGHT=1` is the escape hatch for a
+    developer who already knows their interpreter is unusual on purpose --
+    named in the failure message itself, so it is discoverable without
+    reading this file.
+    """
+    if getattr(config, "workerinput", None) is not None:
+        return
+    if os.environ.get(TAN_TEST_SKIP_HOME_PREFLIGHT):
+        return
+    problem = _home_preflight_failure()
+    if problem is not None:
+        raise pytest.UsageError(problem)
 
 
 # ---------------------------------------------------------------------------
