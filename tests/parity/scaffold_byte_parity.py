@@ -268,8 +268,11 @@ def un_edit_edge_ai_aen801_readme_deepx_note(text: str) -> str:
 #: `vendored/diagnostics/<sku>/`). A bare inline code span, not a markdown
 #: link, so the emit's own doc-link rewriter never touches it -- the same
 #: shape as tan-cli#821(a)'s `edge-ai` pointers above. Byte-identical between
-#: the two SKUs (only the `west build`/`west flash` block above it differs),
-#: so both entries below share this one `un_edit`.
+#: the two SKUs at this bullet (the two SKUs also differ at the `west
+#: build`/`west flash` block and, for `diagnostics`, the "Real hardware"
+#: heading and `[selftest] SoM identity` line above it -- none of that
+#: touches the matched region here), so both entries below share this one
+#: `un_edit`.
 _DIAGNOSTICS_README_EEPROM_SCRIPT_EDITED = (
     "* **SoM identity `ALP_ERR_NOT_PROVISIONED`.** The on-module EEPROM\n"
     "  reads back blank -- the module was never run through alp-sdk's\n"
@@ -299,10 +302,12 @@ def un_edit_diagnostics_readme_eeprom_script(text: str) -> str:
 #: tan-cli#912: `sensor`'s README names a bare
 #: `examples/peripheral-io/i2c-scanner` in one Troubleshooting bullet -- the
 #: same referent this file links TWICE elsewhere as a real markdown link
-#: (the emit's own doc-link rewriter already covers those two), so this bare
-#: third instance is the odd one out rather than a novel defect shape.
-#: Byte-identical between the two SKUs, so both entries below share this one
-#: `un_edit`.
+#: (the emit's own doc-link rewriter already covers those two), so this is
+#: the only bare instance in this README, not a novel defect shape. (The
+#: wider `sensor` scaffold still ships several more bare `i2c-scanner`
+#: referents outside this README -- `src/main.c`, `board.yaml`,
+#: `testcase.yaml` -- out of scope for this entry.) Byte-identical between
+#: the two SKUs, so both entries below share this one `un_edit`.
 _SENSOR_README_I2C_SCANNER_BULLET_EDITED = (
     "  slave).  Run alp-sdk's\n"
     "  [`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner)\n"
