@@ -73,8 +73,8 @@
 # file. `planner_resync.py` exits 1 when part of the re-sync needs a human (a
 # 3-way conflict, a changed hand-port source, a new/removed upstream module)
 # and 2 when the inputs are not fit to reason over (a pin disagreeing with its
-# own hash table). Either way the PR is still opened WITH the blockers named,
-# the pins covering them stay put, and this job goes red.
+# own hash table). Either way this job goes red (tan-cli#911: see "Surface
+# the owed work..." below for the case that once had no visible output at all).
 #
 # TOKEN + THE RECURSION GUARD, stated plainly
 # -------------------------------------------
@@ -120,9 +120,9 @@ concurrency:
   group: planner-resync
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  pull-requests: write
+# tan-cli#911: workflow-level `permissions:` usually lives right here --
+# it now sits at the end of this file instead. See the comment down
+# there for why (a zizmor line-scoped ignore this move avoids disturbing).
 
 jobs:
   propose:
@@ -392,9 +392,127 @@ jobs:
           fi
           echo "opened=true" >> "$GITHUB_OUTPUT"
 
-      # Last, so the PR exists before this job goes red. A re-sync that needs a
-      # human is a REAL finding and must not be reported as success -- but the
-      # proposal is more useful than the red X, so it lands first.
+      # tan-cli#911: the step above's own gate ("is there a mirror diff to
+      # commit") is not the same question as "does a human need to act", and
+      # rc=1 means the second is true regardless of the first. When the PR
+      # step found nothing to commit it prints "Nothing to propose" and sets
+      # `opened=false` WITHOUT opening anything -- so on rc=1 the finding
+      # would otherwise live only in this red run's job summary, which is
+      # what happened for 60 consecutive runs before this fix (measured
+      # `gh run list --workflow planner-resync.yml --limit 100`,
+      # `31621375705` through `32936003033`).
+      #
+      # `steps.pr.outputs.opened == 'false'` is deliberately narrower than
+      # "the PR step didn't open a PR": that output is UNSET (not 'false')
+      # both when the PR step was skipped (`open_pr: false` on a
+      # `workflow_dispatch` dry run -- this step honours the same flag below
+      # so a dry run stays a dry run) and when the PR step FAILED before
+      # reaching its own `opened=true` line (e.g. run `32660981604`, where
+      # `gh pr create` itself was refused by a repo/org policy on a run that
+      # DID have a diff -- see the header comment). Neither of those is "an
+      # empty diff", so this step only fires for the one case tan-cli#911
+      # names.
+      #
+      # A tracking ISSUE rather than a second, code-less PR: an empty-diff PR
+      # is an odd artifact (nothing to review, and it can confuse merge-queue
+      # automation that expects a PR to carry a change), and issue creation
+      # is not subject to the "GitHub Actions is not permitted to create or
+      # approve pull requests" policy that can block the PR path above --
+      # narrower failure surface for this fallback specifically. Refreshed by
+      # a FIXED title match (`env.RESYNC_ISSUE_TITLE`, no sha in it) rather
+      # than opened fresh, so the daily cron converges on one issue.
+      - name: Surface the owed work when there is nothing to propose
+        id: issue
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.open_pr) && steps.resync.outputs.rc == '1' && steps.pr.outputs.opened == 'false' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDK_SHA: ${{ steps.ref.outputs.sha }}
+          GATE_VERDICT: ${{ steps.gate.outputs.verdict }}
+          # Fixed, deliberately sha-free: the search key that finds the SAME
+          # issue every run, so daily cron does not open one issue per day
+          # (tan-cli#911: "must not create 40 issues"). Duplicated verbatim
+          # in "Close the tracking issue..." below -- there is no job-level
+          # `env:` here to share it from without adding a line ahead of the
+          # `Check out tan-cli dev` step's zizmor line-scoped ignore
+          # (`.github/zizmor.yml`); keep the two copies identical.
+          RESYNC_ISSUE_TITLE: "planner-resync: a re-sync is owed and needs a human (no diff to propose)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            cat "${RUNNER_TEMP}/resync.md"
+            echo
+            echo "---"
+            echo
+            echo "### Why this is an issue and not a PR"
+            echo
+            echo "\`planner_resync.py\` computed an EMPTY diff against \`python/\`"
+            echo "for alp-sdk \`${SDK_SHA}\` -- there is nothing to merge -- but its"
+            echo "verdict was still \`partial\` (exit 1): part of the re-sync needs a"
+            echo "human (a hand-port source changed upstream, a blocked mirror file,"
+            echo "or similar -- see \"What a human must do\" above). A PR with no code"
+            echo "change would be an odd artifact, so this finding is surfaced here"
+            echo "instead."
+            echo
+            echo "| check | result |"
+            echo "| --- | --- |"
+            echo "| \`planner_resync.py\` exit | \`1\` (needs a human) |"
+            echo "| freshness gate + resync tests, run in the proposing job | ${GATE_VERDICT:-not run} |"
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "This issue is REFRESHED (not recreated) by \`planner-resync.yml\` on"
+            echo "every run that lands in this state, and is closed automatically the"
+            echo "next time a run reports nothing owed (\`rc=0\`)."
+            echo
+            echo "Refs alplabai/alp-sdk#855 (ADR-0020's cross-repo remediation)."
+          } > "${RUNNER_TEMP}/issue-body.md"
+
+          existing="$(gh issue list --search "in:title \"${RESYNC_ISSUE_TITLE}\"" \
+                        --state open --json number,title \
+                        --jq "[.[] | select(.title == \"${RESYNC_ISSUE_TITLE}\")][0].number" \
+                        || true)"
+          if [ -n "${existing}" ]; then
+            gh issue edit "${existing}" --body-file "${RUNNER_TEMP}/issue-body.md"
+            gh issue comment "${existing}" \
+              --body "Refreshed by run ${{ github.run_id }} (alp-sdk \`${SDK_SHA}\`), still nothing to propose."
+            echo "url=$(gh issue view "${existing}" --json url -q .url)" >> "$GITHUB_OUTPUT"
+          else
+            url="$(gh issue create --title "${RESYNC_ISSUE_TITLE}" --label ci \
+                     --body-file "${RUNNER_TEMP}/issue-body.md")"
+            echo "url=${url}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Companion to the step above: once a run reports nothing owed, any
+      # tracking issue a PRIOR rc=1/empty-diff run opened is stale by
+      # definition -- close it rather than let it sit open forever (the
+      # "can go stale" risk tan-cli#911 named for the tracking-issue shape).
+      # Same title match, so it only ever touches the one issue this
+      # workflow owns.
+      - name: Close the tracking issue once nothing is owed
+        if: ${{ (github.event_name != 'workflow_dispatch' || inputs.open_pr) && steps.resync.outputs.rc == '0' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Must match "Surface the owed work..." above verbatim -- see its
+          # comment for why this is duplicated rather than shared.
+          RESYNC_ISSUE_TITLE: "planner-resync: a re-sync is owed and needs a human (no diff to propose)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing="$(gh issue list --search "in:title \"${RESYNC_ISSUE_TITLE}\"" \
+                        --state open --json number,title \
+                        --jq "[.[] | select(.title == \"${RESYNC_ISSUE_TITLE}\")][0].number" \
+                        || true)"
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" \
+              --body "Nothing owed as of run ${{ github.run_id }} -- \`planner_resync.py\` reported \`rc=0\`. Closing."
+            gh issue close "${existing}"
+          fi
+
+      # Last, so the PR (or tracking issue) exists before this job goes red.
+      # A re-sync that needs a human is a REAL finding and must not be
+      # reported as success -- but the proposal is more useful than the red
+      # X, so it lands first.
       - name: Verdict
         shell: bash
         run: |
@@ -410,3 +528,21 @@ jobs:
             echo "::error::the re-sync applied cleanly but the freshness gate did not pass against it (${{ steps.gate.outputs.verdict }}) -- do not merge the proposal on the strength of a clean apply."
             exit 1
           fi
+
+# Deliberately placed here rather than near the top (where a workflow-level
+# `permissions:` block conventionally sits): `.github/zizmor.yml` pins the
+# "Check out tan-cli dev" step's credential-persistence ignore to an exact
+# `planner-resync.yml:151:9` (tan-cli#435), and that file is under parallel
+# edit for tan-cli#899 -- coordinate by reporting a conflict there rather than
+# editing it (this PR's own instructions). Any line added ABOVE that step
+# shifts the ignore stale and reddens `zizmor --min-severity medium`, so
+# `issues: write` (tan-cli#911: the tracking-issue fallback below the PR step
+# needs it; neither `contents` nor `pull-requests` covers `gh issue
+# create`/`edit`/`close`) lives down here instead, after every step, where it
+# cannot move that line. Workflow-level `permissions:` is a top-level YAML key
+# like `on:`/`jobs:`/`concurrency:` above -- its position in the file has no
+# effect on what it grants.
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
