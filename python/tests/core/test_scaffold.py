@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import pytest
+
 import yaml
 
 from tan.core import scaffold as scaffold_module
@@ -532,6 +533,45 @@ def test_splice_adds_a_companion_and_a_default_rpmsg_channel():
     assert "endpoints: [m55_hp, a55_cluster]" in out
     # The companion lands inside the `cores:` block, before the next top-level key.
     assert out.index("a55_cluster:") < out.index("libraries:")
+
+
+def test_the_default_rpmsg_carve_out_is_256_not_the_whole_ocram_low():
+    """tan-cli#921. The injected default was `512`, copied from alp-sdk's
+    commented `metadata/templates/board.yaml` stanza. alp-sdk#1613 then
+    measured that number and found it wrong in a way that only shows up on
+    the Renesas parts: `resolve_carve_outs()` prefers the non-cacheable
+    region smaller-first, and on V2N/V2M the only non-cacheable region
+    reachable from both `a55_cluster` and `m33_sm` is `ocram_low`, which
+    `metadata/socs/renesas/rzv2n/n44.json` gives as exactly `size_kib: 512`.
+    A 512 KiB carve-out therefore consumed that region ENTIRELY, leaving
+    nothing for a second channel.
+
+    alp-sdk#1694 settled on 256 from evidence, not preference:
+    `examples/multicore/rpmsg-aen/board.yaml:68` already used it against
+    `E1M-AEN801`'s `mram_main` (5632 KiB, under 5%), and it is half rather
+    than all of `ocram_low`.
+
+    The derivation lives HERE rather than beside the literal on purpose.
+    `tan/core/scaffold.py` sits at exactly its recorded ratchet (1512 lines,
+    against a nominal 800 cap) and tan-cli#408 is open about that whole
+    module class, so paying a permanent ceiling raise for a comment is the
+    wrong trade -- the value change itself is one token and zero lines. Test
+    files are measured but not gated (tan-cli#817), which makes this the
+    cheapest durable home for the reasoning. `changelog.d/921.fixed.md`
+    carries the same derivation for anyone reading the shipped notes.
+
+    Pinned as an integer through `yaml.safe_load`, not only as a substring:
+    a value written as `"256"` would satisfy a text match while giving the
+    schema a string where it wants a number."""
+    board = "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
+    out = splice_companion_cores(board, [("a55_cluster", "yocto")])
+
+    parsed = yaml.safe_load(out)
+    assert parsed["ipc"][0]["carve_out_kb"] == 256, out
+    assert "carve_out_kb: 512" not in out, (
+        "512 is exactly the whole of ocram_low on V2N/V2M -- a carve-out that "
+        f"size leaves nothing for a second channel:\n{out}"
+    )
 
 
 def test_splice_quotes_a_newly_added_off_companion_so_yaml_parses_it_as_a_string():
