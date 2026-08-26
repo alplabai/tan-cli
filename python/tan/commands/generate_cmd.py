@@ -67,15 +67,21 @@ forever; ours is content-aware) -- but SUCCESS (0), dropped with a warning
 instead, when it only rides along in the bare/`--all` default set (tan-cli#501).
 
 **`--output` exists because CMake, not tan, decides where a Zephyr build reads
-from.** alp-sdk's `cmake/alp.cmake` -- the one helper all 96 Zephyr examples
-call at configure time -- writes to `${CMAKE_BINARY_DIR}/generated/alp.conf`,
-and `CMAKE_BINARY_DIR` is NOT the project directory (an in-tree `west build
-examples/<...>` puts it under the repo root). Without `--output`, `tan` would
-emit into `<project>/build/generated/` and that build would read nothing; the
-helper accordingly PROBES `generate --help` for `--output` and falls back to
-shelling `scripts/alp_project.py` when it is absent. So the flag is what makes
-`tan` the emitter for every example, and its default is exactly the previous
-hardcoded path -- nothing that already worked changes.
+from.** Today, 98 of alp-sdk's example `CMakeLists.txt` files (of 167 total)
+shell `${ALP_SDK_ROOT}/scripts/alp_project.py --input <board.yaml> --emit
+zephyr-conf` directly at configure time, and 86 of those 98 read the result
+from `${CMAKE_BINARY_DIR}/generated/alp.conf` (the other 12 read it from a
+`CMAKE_CURRENT_BINARY_DIR`-relative path instead); `CMAKE_BINARY_DIR` is NOT the
+project directory (an in-tree `west build examples/<...>` puts it under the
+repo root). Without `--output`, `tan` would emit into
+`<project>/build/generated/` and that build would read nothing. PLANNED, not
+yet merged into any released alp-sdk or its `dev`/`main` (tan-cli#825): a
+shared `cmake/alp.cmake` helper that replaces the 98 copy-pasted calls and
+PROBES `generate --help` for `--output`, falling back to shelling
+`scripts/alp_project.py` when it is absent. So the flag is what will make
+`tan` the emitter for every example once that helper ships, without changing
+anything that already works -- and it is already useful today for pointing
+`tan generate` at a build dir that is not `<project>/build/`.
 
 `--output` writes a FILE. It never puts the file's contents on stdout: stdout
 carries the envelope and nothing else, in both formats.
@@ -119,9 +125,10 @@ from tan.output_format import FORMAT_HELP, OutputFormat
 DATA_SCHEMA_VERSION = "1"
 
 #: Pin the engine instead of letting `auto` decide. An env var, not a flag:
-#: `cmake/alp.cmake` builds one argv that must stay accepted verbatim, and this
-#: is an escape hatch for a host where the in-process path misbehaves plus the
-#: seam the parity suite uses to compare both engines against the same oracle.
+#: the PLANNED `cmake/alp.cmake` (unmerged, tan-cli#825) will build one argv
+#: that must stay accepted verbatim, and this is an escape hatch for a host
+#: where the in-process path misbehaves plus the seam the parity suite uses
+#: to compare both engines against the same oracle.
 #:
 #: `subprocess` spawns alp-sdk for every target (the pre-relocation behaviour).
 #: `in-process` refuses instead of falling back, so a run cannot quietly measure
@@ -165,8 +172,9 @@ _OUTPUT_RELATIVE_PATH = {
     # set for the same reason, so a bare `tan generate` never runs a full
     # pad-route composition.
     "composed-route-table": "build/generated/composed-route-table.json",
-    # `alp_sdk_ipc_contract_header()` in alp-sdk's `cmake/alp.cmake` names
-    # exactly this one: `${CMAKE_BINARY_DIR}/generated/alp/system_ipc.h`.
+    # `alp_sdk_ipc_contract_header()`, a helper PLANNED for alp-sdk's
+    # `cmake/alp.cmake` (unmerged, tan-cli#825), names exactly this one:
+    # `${CMAKE_BINARY_DIR}/generated/alp/system_ipc.h`.
     "ipc-contract-h": "build/generated/alp/system_ipc.h",
 }
 
@@ -441,7 +449,9 @@ def _ensure_writable(output: Path, target: str) -> bool:
     Done HERE rather than discovered when the spawned emitter trips over it, for
     two reasons: a `PermissionError` traceback on the SDK's stderr is a terrible
     issue message, and the parent directory has to be created either way --
-    `alp_sdk_zephyr_conf()` asks for `${CMAKE_BINARY_DIR}/generated/alp.conf` in
+    real example `CMakeLists.txt` today ask for
+    `${CMAKE_BINARY_DIR}/generated/alp.conf` (and the PLANNED
+    `alp_sdk_zephyr_conf()`, unmerged, tan-cli#825, would do the same) in
     a build tree where `generated/` does not exist yet.
 
     **The unlink is tan-cli#498 defect 4's fix, and it is structural.** The
@@ -506,8 +516,10 @@ def _discard_probe_file(output: Path) -> None:
     The envelope was always honest about this -- exit 3, `data.written == []`,
     `generate.emit-failed` -- so what is fixed here is the DISK, not the
     report. The file that survives a refused run is a zero-byte
-    `build/generated/alp.conf`, and `cmake/alp.cmake` hands exactly that path
-    to Zephyr as `EXTRA_CONF_FILE`. Zephyr does not treat an empty conf file
+    `build/generated/alp.conf`, and the real example `CMakeLists.txt` hands
+    exactly that path to Zephyr as `EXTRA_CONF_FILE` (the PLANNED
+    `cmake/alp.cmake`, unmerged, tan-cli#825, would do the same once it
+    ships). Zephyr does not treat an empty conf file
     as an error: it applies no configuration and says nothing. So the stray
     turns a loud failure into a later build that silently carries none of the
     project's alp config.
@@ -994,8 +1006,8 @@ def _finish(
         # `--quiet` silences the summary only -- never the issues. A CMake
         # `execute_process` shows this stderr verbatim when the emit fails, and
         # a quiet flag that swallowed the reason would leave the caller with a
-        # bare `rv=1` again, which is the exact defect `cmake/alp.cmake` was
-        # written to fix.
+        # bare `rv=1` again -- the exact defect the PLANNED `cmake/alp.cmake`
+        # (unmerged, tan-cli#825) is meant to fix.
         if targets and not quiet:
             tail = f"; failed: {', '.join(failed)}" if failed else " targets"
             print(
@@ -1062,9 +1074,10 @@ def generate(
 ) -> None:
     """Generate board-derived output files via the SDK's emitters."""
     # `generate` never prompts, so `--non-interactive` is accepted and ignored:
-    # it exists because alp-sdk's `cmake/alp.cmake` passes it on every configure
-    # (as it does to every `tan` invocation), and an unknown flag there is a
-    # Click usage error that fails the whole CMake configure.
+    # it exists for the PLANNED alp-sdk `cmake/alp.cmake` (unmerged,
+    # tan-cli#825), which is meant to pass it on every configure (as it will
+    # to every `tan` invocation), and an unknown flag there would be a Click
+    # usage error that fails the whole CMake configure.
     del non_interactive
     json_mode = output_format == "json"
 

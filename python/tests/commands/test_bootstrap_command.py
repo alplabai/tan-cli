@@ -48,6 +48,7 @@ from tan.commands.bootstrap_cmd import (
     workspace_orphan_refusal,
 )
 from tan.core import atomic_write as atomic_write_mod
+from tan.core.sdk_default_registry import registry_path
 from tan.core.bootstrap import (
     INCOMPATIBLE,
     LINUX,
@@ -840,6 +841,29 @@ def test_the_workspace_parent_guard_relocates_into_alp_workspace_automatically(t
     message = next(i["message"] for i in env["issues"] if i["code"] == "bootstrap.workspace-relocated")
     assert bootstrap_cmd._native(str(sdk)) in message
     assert bootstrap_cmd._native(str(new_sdk)) in message
+    # tan-cli#466: the "to change later" fix hint names BOTH the legacy
+    # pointer AND the registry, so deleting either (or both) by hand remains
+    # a safe, complete recovery -- naming only one would leave a reader
+    # editing the file that was not the one that actually answered.
+    #
+    # A bare `"sdk-default" in message` / `"sdk-defaults.json" in message`
+    # pair (the pre-#904-review shape) is VACUOUS here even with the full
+    # native path prepended: "sdk-default" is a literal PREFIX of
+    # "sdk-defaults.json", so ".../sdk-default" is already a substring of
+    # ".../sdk-defaults.json" -- the first assert cannot fail while the
+    # second passes, no matter how much identical directory prefix is added
+    # to both (measured: `test_sdk_command.py`'s own sibling avoids this only
+    # by using two NON-overlapping fake names, which this real, same-`.alp`-
+    # directory pair can't). Asserted instead on the exact compound substring
+    # `global_default_pointer_fix_hint` actually emits -- both full native
+    # paths, in the "X and/or Y" order the hint joins them in -- which cannot
+    # be satisfied by the registry path alone (mutation-confirmed: rewriting
+    # the hint to name only the registry breaks this exact assertion, where
+    # the old bare-substring pair stayed green).
+    home_alp = tmp_path / "fake-home" / ".alp"
+    pointer_native = bootstrap_cmd._native(home_alp / "sdk-default")
+    registry_native = bootstrap_cmd._native(registry_path(home_alp))
+    assert f"delete {pointer_native} and/or {registry_native} (tan falls" in message
     # The checkout really moved: gone from the old location, present (with its
     # own content) at the new one; `unrelated.txt` is untouched, still the
     # only other thing in the original parent.
@@ -865,6 +889,48 @@ def test_the_workspace_parent_guard_relocates_into_alp_workspace_automatically(t
     assert global_doc["sdkPath"] == str(new_sdk)
     assert global_doc["writtenFor"] == str(sdk.parent).replace("\\", "/")
     assert not (sdk.parent / ".alp" / "sdk-path").exists()  # not a project pin
+    # tan-cli#466: the origin-keyed sibling, written ALONGSIDE the legacy
+    # pointer, keyed by the same `written_for` origin (the workspace parent
+    # bootstrap ran in).
+    registry = tmp_path / "fake-home" / ".alp" / "sdk-defaults.json"
+    assert registry.exists()
+    registry_doc = json.loads(registry.read_text(encoding="utf-8"))
+    # `.replace("\\", "/")` on the RHS too (review, #904 second round, blocker
+    # 2): the registry's `sdkPath` is now written through `_to_posix` at
+    # `bootstrap_cmd._write_global_sdk_registry`, forward-slashed on every
+    # platform -- unlike the LEGACY pointer's `sdkPath` two lines up, which
+    # keeps storing `sdk_root` native (pre-existing #464 behaviour, untouched
+    # here). A bare `str(new_sdk)` on the right compared native-vs-posix and
+    # only failed on the Windows shard.
+    assert registry_doc[str(sdk.parent).replace("\\", "/")]["sdkPath"] == str(new_sdk).replace(
+        "\\", "/"
+    )
+
+
+def test_write_global_sdk_registry_normalises_a_native_sdk_root_to_posix(tmp_path, monkeypatch):
+    """Review, #904 second round, blocker 2, proved DIRECTLY and
+    deterministically on every platform (not just reproduced on Windows CI):
+    `_write_global_sdk_registry`'s `sdk_root` argument is exactly
+    `str(new_root)` at its one production call site -- NATIVE rendering,
+    backslashes on Windows. `_to_posix`'s own replace is a plain string
+    operation with no OS dependency (`str(path).replace("\\\\", "/")`), so
+    passing a Windows-shaped, backslash-laden string here reproduces the
+    blocker on Linux too: pre-fix, this stored `sdk_root` byte-for-byte
+    (backslashes and all); post-fix, it always renders forward-slashed,
+    matching the origin KEY it sits beside in the same file.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    bootstrap_cmd._write_global_sdk_registry(
+        "C:\\Users\\dev\\alp-sdk", origin="/home/u/proj"
+    )
+
+    registry_doc = json.loads(
+        (home / ".alp" / "sdk-defaults.json").read_text(encoding="utf-8")
+    )
+    assert registry_doc["/home/u/proj"]["sdkPath"] == "C:/Users/dev/alp-sdk"
 
 
 def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_path):
@@ -907,31 +973,49 @@ def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_p
     assert doctor_env["sdk"]["sourceTier"] == "globalDefault"
 
 
-def test_a_second_projects_relocation_does_not_silently_repoint_the_first(tmp_path):
-    """tan-cli#464, the maintainer's own repro shape, driven through real,
-    independent subprocesses (never by inspecting pointer bytes -- that
-    coverage already existed and did not catch this):
+def test_a_second_projects_relocation_no_longer_repoints_the_first(tmp_path):
+    """tan-cli#464's own repro, now closed by tan-cli#466 (stage 2 of the same
+    issue), driven through real, independent subprocesses (never by
+    inspecting pointer bytes):
 
         A, right after A       sdk.root=<A's own checkout> tier=globalDefault
         (project B bootstraps and relocates)
-        A (the earlier one)    sdk.root=<B's checkout!>     tier=globalDefault
+        A (the earlier one)    sdk.root=<A's own checkout, STILL> tier=globalDefault
 
-    `~/.alp/sdk-default` is machine-global and last-writer-wins, so before
-    this fix project A silently started resolving project B's checkout the
-    moment B bootstrapped -- `ok: true`, `issues: []`, identical to the
-    correct case.
+    Before tan-cli#464, project A silently started resolving project B's
+    checkout the moment B bootstrapped -- `ok: true`, `issues: []`, because
+    `~/.alp/sdk-default` is one machine-global, last-writer-wins file. #464
+    (stage 1) made that DISCLOSED (`sdk.global-default-foreign-project`) but
+    left the ANSWER wrong: A still resolved B's SDK, just with a warning
+    attached. This test used to pin exactly that -- `current_a2` resolving
+    `new_sdk_b` -- as the correct, if disclosed, outcome.
+
+    #466 (stage 2) makes the answer correct instead: `tan bootstrap` now also
+    keys `origin -> sdkPath` into `~/.alp/sdk-defaults.json`, and
+    `resolve_sdk_tiered`'s `globalDefault` tier picks the DEEPEST registry key
+    that CONTAINS the caller's workspace before ever consulting the shared
+    single pointer. A's own bootstrap already wrote `proj_a -> new_sdk_a`
+    into that registry, so A queried from `proj_a` resolves ITS OWN checkout
+    no matter which project bootstrapped last -- `sourceTier` stays
+    `"globalDefault"` (a registry hit IS the machine-default mechanism, keyed,
+    not a new tier), but the root is A's, and the foreign warning does not
+    fire, because a caller a registry entry was written FOR is by
+    construction not reading someone else's answer.
+
+    The genuinely-foreign case -- a caller no registry entry covers at all --
+    still falls through to the legacy pointer and still discloses; that path
+    is `test_foreign_global_default_coverage.py`'s `two_projects` fixture,
+    which now queries from a location outside every registered origin for
+    exactly this reason.
 
     A per-project pin at bootstrap time (`.alp/sdk-path` written in the
-    directory bootstrap ran in) was tried and reverted on review: that
+    directory bootstrap ran in) was tried and reverted on review of #464: that
     directory is bootstrap's cwd, the workspace PARENT in the quickstart, not
     a project -- a bootstrap run from `$HOME` would have pinned inside tan's
-    OWN machine-global config dir, silencing this exact warning for
-    essentially every project the user owns. The fix that ships is
-    disclosure, not prevention: A's `sdk current` STILL resolves B's checkout
-    after B relocates -- that is what "last-writer-wins" means and stays true
-    -- but it now carries `sdk.global-default-foreign-project` naming whose
-    bootstrap actually decided the answer, closing the `issues: []` silence
-    without touching resolution.
+    OWN machine-global config dir. The registry keeps that same "cwd is not
+    necessarily a project" shape (an origin is just a directory bootstrap ran
+    in, not asserted to be a project root) but escapes the single-pointer
+    contention by keying on it instead of overwriting one shared slot.
 
     ONE shared HOME across the whole sequence (tan-cli#463's own lesson: an
     "isolated HOME" control that resets between calls never lets the
@@ -992,12 +1076,11 @@ def test_a_second_projects_relocation_does_not_silently_repoint_the_first(tmp_pa
     pointer = home / ".alp" / "sdk-default"
     print(f"  pointer now: {pointer.read_text(encoding='utf-8').strip()}")
 
-    # A, queried again from the SAME directory: the shared global default now
-    # points at B, so A DOES resolve B's checkout -- the defect this test
-    # pins is not that resolution changed (it did not, and should not: layer
-    # 2 is a disclosure fix, not a prevention one), but that this is no
-    # longer SILENT. Pre-fix code has no `sdk.global-default-foreign-project`
-    # code at all, so this assertion fails against it.
+    # A, queried again from the SAME directory: tan-cli#466's whole point is
+    # that this STILL resolves A's own checkout, not B's -- the shared
+    # `~/.alp/sdk-default` pointer now names B, but A's own registry entry
+    # (`proj_a -> new_sdk_a`, written by A's own bootstrap above) is the
+    # deepest key covering `proj_a` and answers first.
     current_a2 = envelope(
         run_tan("sdk", "current", "--format", "json", cwd=proj_a, env_extra=env_extra)
     )
@@ -1005,16 +1088,27 @@ def test_a_second_projects_relocation_does_not_silently_repoint_the_first(tmp_pa
         f"  A (the earlier one)    sdk.root={current_a2['sdk']['root']!r} "
         f"tier={current_a2['data']['sourceTier']}"
     )
-    assert current_a2["sdk"]["root"] == str(new_sdk_b).replace("\\", "/")
+    assert current_a2["sdk"]["root"] == str(new_sdk_a).replace("\\", "/"), (
+        "DEFECT (tan-cli#466): project A stopped resolving its OWN SDK after "
+        "an unrelated project B relocated its checkout"
+    )
     assert current_a2["data"]["sourceTier"] == "globalDefault"
-    assert "sdk.global-default-foreign-project" in codes(current_a2), (
-        "DEFECT: project A silently resolved project B's SDK with no warning"
+    assert "sdk.global-default-foreign-project" not in codes(current_a2), (
+        "a registry entry written FOR this workspace must never be reported "
+        "as a foreign global default"
     )
-    message = next(
-        i["message"] for i in current_a2["issues"]
-        if i["code"] == "sdk.global-default-foreign-project"
+
+    # And the registry FILE itself carries both origins, each naming its own
+    # relocated checkout -- the mechanism, not just the outcome.
+    registry_doc = json.loads(
+        (home / ".alp" / "sdk-defaults.json").read_text(encoding="utf-8")
     )
-    assert str(proj_b).replace("\\", "/") in message
+    assert registry_doc[str(proj_a).replace("\\", "/")]["sdkPath"] == str(
+        new_sdk_a
+    ).replace("\\", "/")
+    assert registry_doc[str(proj_b).replace("\\", "/")]["sdkPath"] == str(
+        new_sdk_b
+    ).replace("\\", "/")
 
 
 def test_a_relocating_bootstrap_updates_the_project_pin_it_resolved_through(tmp_path):
@@ -1585,6 +1679,11 @@ def test_a_relocation_is_rolled_back_when_a_later_step_fails(tmp_path):
     # before this run).
     pointer = tmp_path / "fake-home" / ".alp" / "sdk-default"
     assert not pointer.exists()
+    # tan-cli#466: the origin-keyed registry sibling this same relocation
+    # would have written is restored to "absent" too -- `_undo_relocation`'s
+    # `previous_registry` branch, otherwise untested (review round, #904).
+    registry = tmp_path / "fake-home" / ".alp" / "sdk-defaults.json"
+    assert not registry.exists()
     # tan-cli#284 majors: nothing reported in the envelope may still name the
     # vacated `elsewhere` location once the rollback succeeded -- `data.*`
     # paths and `project.root` must agree with where the checkout actually
@@ -1669,6 +1768,51 @@ def test_a_successful_move_back_with_a_failed_pointer_restore_is_not_reported_as
     assert old_root.is_dir()
     assert (old_root / "marker").exists()
     assert not moved_to.exists()
+
+
+def test_a_registry_rollback_restores_the_previous_bytes_exactly(tmp_path, monkeypatch):
+    """tan-cli#904 third round, nit: the registry rollback branch of
+    `_undo_relocation` now writes via `atomic_write_bytes`
+    (`tan.core.atomic_write`), matching the forward write's own
+    `atomic_write_text` -- same file, same N-project blast radius, so both
+    must be crash-safe, not just the forward one.
+
+    `atomic_write_bytes`, not `atomic_write_text`, because the snapshot being
+    restored is a raw byte capture (`_read_global_sdk_registry_bytes`) that
+    `parse_registry` never required to be valid UTF-8 -- deliberately
+    non-UTF-8 here (an invalid continuation byte) to prove the rollback can
+    restore content `atomic_write_text` would raise `UnicodeDecodeError`
+    reconstructing a `str` from. Restored byte-for-byte, and via the temp-
+    sibling-then-`os.replace` shape, not a bare truncate-then-write."""
+    old_root = tmp_path / "ws" / "alp-sdk"
+    old_root.parent.mkdir(parents=True)
+    moved_to = tmp_path / "elsewhere" / "alp-sdk"
+    moved_to.parent.mkdir(parents=True)
+    moved_to.mkdir()
+    home_alp = tmp_path / "fake-home" / ".alp"
+    # Realistic precondition: `~/.alp` only ever has something to roll BACK
+    # to because an earlier write in the SAME run (`_write_global_sdk_
+    # registry`, which itself `mkdir(parents=True)`s this directory) already
+    # created it -- this rollback branch, unlike the forward write, does not
+    # create the directory itself.
+    home_alp.mkdir(parents=True)
+    monkeypatch.setattr(bootstrap_cmd, "_home_alp_dir", lambda: home_alp)
+
+    non_utf8_registry = b'{"/proj": {"sdkPath": "/sdk"}}\xff\xfe'
+    with pytest.raises(UnicodeDecodeError):
+        non_utf8_registry.decode("utf-8")  # the repro's own precondition
+
+    result = bootstrap_cmd._undo_relocation(
+        str(old_root), moved_to, None, previous_registry=non_utf8_registry
+    )
+
+    assert result.moved_back is True
+    assert result.detail is None, f"the registry restore itself must not fail: {result.detail}"
+    registry_file = registry_path(home_alp)
+    assert registry_file.read_bytes() == non_utf8_registry
+    # No leftover `.tan-tmp` sibling -- the atomic write's temp file was
+    # renamed into place, not left behind.
+    assert list(home_alp.glob("*.tan-tmp")) == []
 
 
 def test_a_yocto_only_project_is_refused_off_linux_and_a_mixed_one_only_warns(tmp_path):

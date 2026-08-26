@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The port's ONE `generatedAt`/`updatedAt` timestamp helper. It NEVER raises,
-and it renders the SAME stamp on every platform.
+"""The port's `generatedAt`/`updatedAt` timestamp helpers. Both NEVER raise,
+and both render the SAME stamp on every platform.
 
-`SOURCE_DATE_EPOCH` wins over the clock, so a captured envelope -- or a written
-`.alp/sdk-path` -- is reproducible. Counterpart of `crate::util::
-generated_at_iso` + `tan_core::clock::format_iso8601_utc`.
+`generated_at_iso` lets `SOURCE_DATE_EPOCH` win over the clock, so a captured
+envelope -- or a written `.alp/sdk-path` -- is reproducible. Counterpart of
+`crate::util::generated_at_iso` + `tan_core::clock::format_iso8601_utc`.
+`wall_clock_iso` (below `generated_at_iso`) deliberately does NOT: it is for
+the one field whose job is to order two REAL writes against each other on one
+host, where `SOURCE_DATE_EPOCH` reproducibility would defeat the field
+instead of serving it. See its docstring before reaching for it, or before
+"fixing" a stamp that looks non-reproducible back onto `generated_at_iso`.
 
 Shared rather than per-command because three commands each carried their own
 copy of these four lines, ONE copy was hardened against an out-of-range epoch,
@@ -64,6 +69,13 @@ _FALLBACK = "1970-01-01T00:00:00"
 _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
+def _render(moment: datetime, *, millis: bool) -> str:
+    return (
+        moment.replace(tzinfo=None).isoformat(timespec="milliseconds" if millis else "seconds")
+        + "Z"
+    )
+
+
 def generated_at_iso(*, millis: bool = False) -> str:
     """`SOURCE_DATE_EPOCH` when set and usable, else the wall clock, as
     `YYYY-MM-DDTHH:MM:SSZ` -- or `YYYY-MM-DDTHH:MM:SS.mmmZ` with `millis=True`.
@@ -76,6 +88,11 @@ def generated_at_iso(*, millis: bool = False) -> str:
 
     An unparseable OR out-of-range value is the clock -- never an error,
     because no caller of a timestamp is in a position to report one.
+
+    **For a field that ORDERS two writes against each other on ONE host,
+    use `wall_clock_iso` instead** -- this function's entire point is that a
+    captured envelope is reproducible, which is exactly wrong for a field
+    whose job is to tell two REAL writes apart.
     """
     seconds: float | int = time.time()
     raw = os.environ.get("SOURCE_DATE_EPOCH")
@@ -91,11 +108,75 @@ def generated_at_iso(*, millis: bool = False) -> str:
             moment = _UNIX_EPOCH + timedelta(seconds=candidate)
         except (OverflowError, OSError, ValueError):
             continue  # outside year [1; 9999] -- try the clock
-        return (
-            moment.replace(tzinfo=None).isoformat(
-                timespec="milliseconds" if millis else "seconds"
-            )
-            + "Z"
-        )
+        return _render(moment, millis=millis)
     # The supplied stamp AND the wall clock are both unusable: still no throw.
     return f"{_FALLBACK}.000Z" if millis else f"{_FALLBACK}Z"
+
+
+def wall_clock_iso(*, millis: bool = False) -> str:
+    """The literal wall clock, `SOURCE_DATE_EPOCH` deliberately NOT included --
+    same two wire shapes as `generated_at_iso`, same promise that it never
+    raises, but reproducibility is the WRONG promise for this one caller.
+
+    **The one caller is `tan.core.sdk_default_registry.with_entry`'s
+    `updated_at`**, via `bootstrap_cmd._write_global_sdk_registry`. That field
+    orders two REAL `tan bootstrap` runs against each other on ONE host's
+    mutable `~/.alp/sdk-defaults.json` -- it is machine-local runtime state,
+    never a build artefact, and nothing about it is meant to be byte-
+    reproducible across machines or CI runs. `SOURCE_DATE_EPOCH` winning here
+    would silently defeat the very field it stamps: every `tan bootstrap` run
+    inside one `SOURCE_DATE_EPOCH`-pinned shell -- exactly what CI and
+    reproducible-build setups export, see `generated_at_iso` above -- would
+    carry the IDENTICAL `updatedAt`, so `entry_updated_at > best_updated_at`
+    in `deepest_covering_entry` would never fire and resolution would fall
+    back to whichever raw origin string `dict`/`sort_keys=True` visits first
+    -- the exact accident-of-spelling tie tan-cli#904 second round fixed,
+    silently reopened by the one environment variable whose entire purpose is
+    determinism. Measured pre-fix, with `SOURCE_DATE_EPOCH` exported: two
+    bootstraps of DIFFERENT projects stamp the identical `updatedAt` and the
+    STALE alias entry answers every time, and lowering the variable BETWEEN
+    two runs makes the chronologically LATER bootstrap lose outright.
+
+    Wall-clock ordering is itself non-monotonic (an NTP step-back, a VM
+    snapshot restore) -- inherent, since this registry has no cross-process
+    monotonic key to use instead, so a clock that moves backward between two
+    real bootstraps can still tie-break the wrong way (review, #904 final
+    round, nit).
+
+    Every OTHER `generatedAt`/`updatedAt` field in this codebase -- all
+    EIGHT `generated_at_iso` call sites, enumerated (review, #904 final
+    round, nit -- an earlier revision of this list named 4 of the 8 and
+    called it exhaustive): `tan doctor` (`doctor_cmd.py`), `tan
+    debug-config` (`debug_config_cmd.py`), `.alp/sdk-path`
+    (`scaffold.sdk_pointer_json`), `<topdir>/.west/tan-workspace-sdk`
+    (`bootstrap.workspace_sdk_record_json`), the legacy
+    `~/.alp/sdk-default` pointer (`bootstrap_cmd.py`, the one sharing this
+    module's own resolution ladder), `tan inspect` (`inspect_cmd.py`), `tan
+    trace` (`trace_cmd.py`), and `tan support-bundle`'s two fields
+    (`support_bundle_cmd.py`) -- is informational display of a SINGLE
+    write, never compared against a sibling write, so `SOURCE_DATE_EPOCH`
+    reproducibility is exactly the right behaviour there -- this function
+    exists for the one field that is a comparison key, not a display
+    value. `sdk_cmd._pointer_target` reads `sdkPath` only, never
+    `updatedAt`; `bootstrap.parse_workspace_sdk_record` never reads
+    `updatedAt` either; and no mtime comparison exists anywhere in the
+    resolution ladder -- so none of the eight is secretly a second
+    comparison key this function should also be serving. If a future field
+    needs the same thing, it belongs here, not on `generated_at_iso`.
+
+    Never raises, but not for the reason an earlier revision of this
+    docstring gave (review, #904 final round, major): `time.time()` reads
+    the SYSTEM clock, which a host can set to any value a user or a faulty
+    RTC/NTP step chooses, including one past `datetime`'s year-9999 ceiling
+    -- "cannot land outside" was true of `SOURCE_DATE_EPOCH`'s validated
+    range in `generated_at_iso`, never of the raw wall clock. This function
+    now defends the same way: an out-of-range wall clock degrades to the
+    shared `_FALLBACK` epoch rather than raising, keeping the module
+    header's "Both NEVER raise" promise for this caller too, not just for
+    `generated_at_iso`'s env-var-supplied value.
+    """
+    try:
+        moment = _UNIX_EPOCH + timedelta(seconds=time.time())
+    except (OverflowError, OSError, ValueError):
+        return f"{_FALLBACK}.000Z" if millis else f"{_FALLBACK}Z"
+    return _render(moment, millis=millis)
