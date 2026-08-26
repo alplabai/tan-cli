@@ -82,11 +82,25 @@ VENDORED_ROOT = Path(__file__).resolve().parent.parent.parent / (
 # not match either README's own "Expected output" block. `edge-ai` ships the
 # same missing pair but is UNAFFECTED (measured identical native_sim output
 # with and without it) and is deliberately not vendored here.
+#
+# `peer/testcase.yaml` (tan-cli#864) is the first NESTED entry, and it is a
+# literal path rather than a suffix match on purpose. `multicore-mailbox` is
+# the first vendored template with a second build slice, so it is the first
+# with a per-slice twister harness; vendoring the root `testcase.yaml` and not
+# the peer's would ship a scaffold whose main slice has a twister scenario and
+# whose peer slice does not, which is an asymmetry a reader would take for a
+# mistake. Matching `testcase.yaml` by SUFFIX would cover this and any future
+# `<slice>/testcase.yaml` in one line, and was rejected: it silently widens
+# what counts as a non-envelope extra for every template in the tree, and this
+# tuple's whole job is to be an exact, reviewed list. A per-template mapping
+# is the right shape once a THIRD nested extra appears; one entry does not pay
+# for it.
 NON_ENVELOPE_EXTRAS = (
     "testcase.yaml",
     "native_sim.conf",
     "boards/native_sim_native_64.overlay",
     "boards/native_sim_native_64.conf",
+    "peer/testcase.yaml",
 )
 
 
@@ -386,9 +400,36 @@ def un_edit_edge_ai_aen801_board_yaml_deepx_note(text: str) -> str:
 # tan-cli#891 pin bump -- see `MANIFEST.md`'s "Current vendor point").
 # `un_edit_doc_link_ref` is kept: it is the only record of the transform, and
 # the next pre-release vendor point will need it again.
+#: tan-cli#864 (Q5): the vendored multicore-mailbox README gains a leading
+#: caveat that the scaffold's own IPC carve-out resolves `blocked` on
+#: E1M-AEN801 -- measured, `memory_map.base is TBD for region 'mram_main'`.
+#: The emit says nothing about it, and a customer whose first run silently
+#: does nothing is the failure this section exists to prevent. Undo it to
+#: recover the emit's own bytes.
+#: `\n+` on purpose: the caveat is appended after the emit's own trailing
+#: newline, so the vendored file carries a blank line the emit does not.
+#: Matching a single `\n` leaves that blank line behind and the byte-diff
+#: still fails -- measured, `'...ahead.\n\n'` against the emit's
+#: `'...ahead.\n'`.
+_MAILBOX_BLOCKED_CAVEAT = re.compile(
+    r"\n+## Before you run this: the channel is not allocated yet\n.*\Z", re.S
+)
+
+
+def un_edit_mailbox_blocked_caveat(text: str) -> str:
+    return _MAILBOX_BLOCKED_CAVEAT.sub("\n", text)
+
+
 DELIBERATE_EDITS: dict[
     tuple[str, str, str, str], tuple[str, Callable[[str], str]]
 ] = {
+    ("multicore-mailbox", "E1M-AEN801", "README.md", "blocked_caveat"): (
+        "tan-cli#864: the scaffold's own alp_shmem0 carve-out resolves "
+        "`status: blocked` on E1M-AEN801 (memory_map.base is TBD for "
+        "'mram_main'), so the roundtrip it teaches compiles and does nothing "
+        "-- the emit says so nowhere",
+        un_edit_mailbox_blocked_caveat,
+    ),
     ("iot", "E1M-AEN801", "CMakeLists.txt", "extra_conf_order"): (
         "tan-cli#379: list(PREPEND EXTRA_CONF_FILE ...) so a caller's own "
         "-DEXTRA_CONF_FILE=native_sim.conf wins over the generated alp.conf",

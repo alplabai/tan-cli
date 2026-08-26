@@ -58,7 +58,7 @@ ALLOWED: dict[str, str] = {
     ),
     "bootstrap.py": "OK: guidance prose naming the bridge a customer may build",
     "scaffold.py": (
-        "DEBT (largest): DEFAULT_SOM_SKU, IOT_STARTER_SUPPORTED_SKU, _FAMILY_TREES "
+        "DEBT (largest): DEFAULT_SOM_SKU, TEMPLATE_SUPPORTED_SKUS, _FAMILY_TREES "
         "and sku.startswith(('E1M-V2N','E1M-V2M')) branching -- tan picks a template "
         "tree by SKU FAMILY, which is the vendor branching I-26 forbids. Retires when "
         "the template catalogue declares its family mapping in metadata."
