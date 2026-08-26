@@ -407,20 +407,28 @@ jobs:
       # both when the PR step was skipped (`open_pr: false` on a
       # `workflow_dispatch` dry run -- this step honours the same flag below
       # so a dry run stays a dry run) and when the PR step FAILED before
-      # reaching its own `opened=true` line (e.g. run `32660981604`, where
-      # `gh pr create` itself was refused by a repo/org policy on a run that
-      # DID have a diff -- see the header comment). Neither of those is "an
-      # empty diff", so this step only fires for the one case tan-cli#911
-      # names.
+      # reaching its own `opened=true` line. The latter happened for real on
+      # run `32660981604` (2026-08-23T19:21:33Z): that run DID have a mirror
+      # diff, and `gh pr create` was refused with "GitHub Actions is not
+      # permitted to create or approve pull requests" -- an org-level policy,
+      # since flipped (repo-level `can_approve_pull_request_reviews` read
+      # `false` then, reads `true` as of 2026-08-25; no run since has had a
+      # diff to prove the PR path clean again). That is a DIFFERENT failure
+      # from the one tan-cli#911 is about -- a real diff blocked by policy,
+      # not an empty diff nobody surfaced -- so this step does not attempt to
+      # cover it; a recurrence is its own issue, not this one. Either way
+      # neither case is "an empty diff", so this step only fires for the one
+      # case tan-cli#911 names.
       #
       # A tracking ISSUE rather than a second, code-less PR: an empty-diff PR
       # is an odd artifact (nothing to review, and it can confuse merge-queue
-      # automation that expects a PR to carry a change), and issue creation
-      # is not subject to the "GitHub Actions is not permitted to create or
-      # approve pull requests" policy that can block the PR path above --
-      # narrower failure surface for this fallback specifically. Refreshed by
-      # a FIXED title match (`env.RESYNC_ISSUE_TITLE`, no sha in it) rather
-      # than opened fresh, so the daily cron converges on one issue.
+      # automation that expects a PR to carry a change), and a fixed,
+      # sha-free title lets 60-and-counting daily cron hits refresh ONE issue
+      # instead of opening one PR per day. (It also happens to sidestep the
+      # policy failure above for this path specifically, since issue creation
+      # isn't gated by "create or approve pull requests" -- a footnote, not
+      # the reason: that policy looks resolved already, and the primary
+      # argument holds regardless of it.)
       - name: Surface the owed work when there is nothing to propose
         id: issue
         if: ${{ (github.event_name != 'workflow_dispatch' || inputs.open_pr) && steps.resync.outputs.rc == '1' && steps.pr.outputs.opened == 'false' }}
@@ -542,6 +550,14 @@ jobs:
 # cannot move that line. Workflow-level `permissions:` is a top-level YAML key
 # like `on:`/`jobs:`/`concurrency:` above -- its position in the file has no
 # effect on what it grants.
+#
+# NOT PERMANENT: this placement exists only because of the line-pinned ignore
+# above. tan-cli#899 (PR #919) moves that same ignore to an inline `# zizmor:
+# ignore[artipacked]` comment on the checkout step itself, which removes the
+# line-number dependency entirely -- once that lands, `permissions:` can move
+# back to its conventional spot (or stay here) on its own merits, not because
+# a stray line above line 151 would redden the gate. Don't take this comment
+# as an argument for keeping it here.
 permissions:
   contents: write
   pull-requests: write
