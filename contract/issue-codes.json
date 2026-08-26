@@ -491,12 +491,13 @@
     },
     {
       "code": "cli.parse-error",
-      "status": "reserved",
+      "status": "frozen",
       "severity": "error",
-      "consumer": "none",
+      "consumer": "alp-sdk-vscode src/alpCli/service.ts :: cliUsageErrorDump",
       "emittedBy": "crates/tan-cli/src/main.rs",
       "literal": "code: \"cli.parse-error\"",
-      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Registered by tan-cli#219; promoted reserved -> frozen by tan-cli#885. The old note said \"pre-consumer -- nothing in alp-sdk-vscode matches this code\"; alp-sdk-vscode#575 ended that. cliUsageErrorDump matches the exact spelling, classifyOutcome raises severity on it (exit 2 alone cannot separate a rejected argv from a real validate failure), and planCliOutcome routes the WHOLE notification on it -- customer sentence, Update CLI / Run Doctor actions, and output-channel-vs-toast. The match FAILS OPEN, so a rename is silent on both sides. Frozen with the narrow meaning it now has: \"the command line was not accepted\", NOT \"a generic failure with no better code\" -- this registry's own history records new-som and faultdecode refusals reaching consumers under this code before tan-cli#399, and interrupted runs before cli.interrupted existed. emittedBy still names the deleted crates/ path, as every other frozen entry does: test_frozen_issue_codes.py carries the real Python site in FROZEN_LOCATIONS, and repointing all 70 crates/-owned entries is that gate's own documented follow-up, not this change.",
+      "consumerEffect": "Reports \"this build of the tan CLI doesn't accept the command the extension sent\", raises the outcome to error severity (exit 2 alone reads as a board.yaml validation warning), routes the usage dump to the output channel and offers Update CLI. Renamed, the customer sees the raw click usage dump in a warning toast again."
     },
     {
       "code": "completion.shell-unsupported",
