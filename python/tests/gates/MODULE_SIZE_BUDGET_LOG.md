@@ -254,3 +254,6 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - function_count_budget: 258 -> 259
 - 2026-08-26 -- tan-cli#890: --from-example now consults the SDK scaffold catalog's supported.som_skus and warns when --som is outside it. The +24 in init_cmd.py is the guard and its Issue construction, not prose -- the reasoning lives in the new tan/core/example_catalog.py, and the in-place comment was cut to five lines pointing there. Contrast #921, where a ratchet was DECLINED because the growth was purely a comment.
     - tan/commands/init_cmd.py: 1264 -> 1288
+- 2026-08-26 -- tan-cli#886: every inert option's help is rendered by tan.core.inert.inert_help, which costs build_cmd.py 3 lines and doctor_cmd.py 5 (one import each, plus the call's own wrapping).
+    - tan/commands/build_cmd.py: 2175 -> 2178
+    - tan/commands/doctor_cmd.py: 4040 -> 4045
