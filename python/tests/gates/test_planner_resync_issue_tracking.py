@@ -127,7 +127,7 @@ def _gh_issue_list_lines(run: str) -> list[str]:
 def test_gh_issue_list_lookups_fail_closed_with_a_limit_and_a_checked_exit_code():
     """The de-dup lookup in both "Surface..." and "Close..." must, all three:
 
-    (a) never be muted with `\\`\\|\\| true\\`` -- tan-cli#920's headline fix.
+    (a) never be muted with `|| true` -- tan-cli#920's headline fix.
         A lookup failure must not look identical to "no match", or the step
         falls through to `gh issue create` and opens a silent duplicate --
         the exact "must not create 40 issues" guarantee tan-cli#911 was filed
