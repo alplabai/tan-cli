@@ -27,7 +27,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from tan.core.os_class import CLASS_RUNTIMES  # noqa: F401  (re-export: unchanged public name)
-from tan.core.os_class import cross_class_os as _cross_class_os
+from tan.core.os_class import allowed_os_for_core as _allowed_os_for_core_shared
+from tan.core.os_class import cross_class_os as _cross_class_os  # noqa: F401  (re-export: validate.py's `from .topology import ... _cross_class_os`)
 from tan.core.os_class import default_os_from_core_type as _default_os_from_core_type
 
 from .models import OrchestratorError
@@ -75,9 +76,17 @@ def _runtime_class(core_type: str) -> str:
 def _allowed_os_for_core(core_type: str, metadata_root: Path) -> list[str]:
     """The os: values valid for this core: every runtime minus the other
     class's OS -- e.g. Cortex-A -> [yocto, baremetal, off], Cortex-M ->
-    [zephyr, baremetal, off]."""
-    cross = _cross_class_os(core_type)
-    return [o for o in _core_os_choices(metadata_root) if o not in cross]
+    [zephyr, baremetal, off].
+
+    Delegates to `tan.core.os_class.allowed_os_for_core` (tan-cli#914) rather
+    than open-coding the same subtraction `_cross_class_os` performs: an
+    unresolved `core_type` (`""` -- `core_os_topology`'s own
+    `soc_types.get(core_id, "")`) degrades to `[]` there rather than the
+    plausible-but-wrong cross-class subtraction, the SAME degrade
+    `presets_cmd.allowed_os_lookup` needs -- see that function's docstring for
+    why the two must never drift apart on this again.
+    """
+    return _allowed_os_for_core_shared(core_type, _core_os_choices(metadata_root))
 
 
 def core_os_topology(project: "BoardProject") -> dict[str, Any]:

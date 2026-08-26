@@ -103,7 +103,7 @@ from tan.commands.sdk_cmd import (
     project_pin_issue,
     resolve_sdk_tiered,
 )
-from tan.core.os_class import cross_class_os
+from tan.core.os_class import allowed_os_for_core
 from tan.core.shapes import SDK_MARKER, rejected_sdk_root_message
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -582,22 +582,15 @@ def _soc_lookups(
             return None
 
     def allowed_os_lookup(core_type: str) -> list[str]:
-        # `core_type == ""` is this file's own sentinel for "unresolved" (the
-        # SoC JSON was missing, unreadable, or had no entry for this core id
-        # -- see `core_type_lookup` above and `read_soms`'s `.get(c.id, "")`).
-        # `cross_class_os("")` would otherwise subtract BOTH class runtimes
-        # and hand back a plausible-looking list (e.g. `["baremetal", "off"]`)
-        # with no way for a consumer to tell it is degraded -- offering
-        # Bare-metal for what may be a Cortex-M core, the exact defect #870
-        # exists to close. An unresolved type gets an unresolved (empty)
-        # answer instead, matching every other degrade path in this file.
-        if not core_type:
-            return []
         choices = _os_choices()
         if choices is None:
             return []
-        cross = cross_class_os(core_type)
-        return [o for o in choices if o not in cross]
+        # `allowed_os_for_core` (tan.core.os_class) is the single place the
+        # "" == unresolved sentinel -> [] degrade lives, shared with
+        # `tan.planner.topology._allowed_os_for_core` -- see its own
+        # docstring for why (tan-cli#914: the two must never drift apart on
+        # this, the same reason this file reuses `tan.core.os_class` at all).
+        return allowed_os_for_core(core_type, choices)
 
     return core_type_lookup, allowed_os_lookup
 

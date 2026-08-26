@@ -43,6 +43,8 @@ both call this module.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 #: The two class-determined OS runtimes (issue #95): Cortex-A -> Yocto
 #: (Linux), Cortex-M -> Zephyr (RTOS). These follow the core class and are NOT
 #: user-selectable (see `default_os_from_core_type`); `baremetal` (no-OS) and
@@ -74,3 +76,31 @@ def cross_class_os(core_type: str) -> set[str]:
     """The class runtime a core may NOT be set to -- the OS of the *other*
     class. A Cortex-A can't run Zephyr; a Cortex-M can't run Yocto."""
     return set(CLASS_RUNTIMES) - {default_os_from_core_type(core_type)}
+
+
+def allowed_os_for_core(core_type: str, choices: Iterable[str]) -> list[str]:
+    """The `os:` values valid for a core: *choices* (the checkout's own `os:`
+    enum) minus the cross-class OS -- e.g. Cortex-A -> `[yocto, baremetal,
+    off]`, Cortex-M -> `[zephyr, baremetal, off]`.
+
+    `core_type == ""` is the shared UNRESOLVED sentinel both callers of this
+    function use when a core's `type` could not be determined (no matching
+    SoC JSON on disk, no entry for this core id in it, a synthetic/partial
+    checkout, ...) -- `tan.planner.topology.core_os_topology`'s
+    `soc_types.get(core_id, "")` and `tan.commands.presets_cmd.read_soms`'s
+    `core_types.get(c.id, "")` both feed it here unchanged. Degrades to `[]`
+    rather than the plausible-but-wrong cross-class subtraction `cross_class_os("")`
+    would otherwise produce (tan-cli#914): `default_os_from_core_type("")`
+    falls through to `"off"`, so an UNRESOLVED type and a genuinely
+    off-class core type were indistinguishable at this call, and the
+    unresolved case silently offered Bare-metal for what may be a Cortex-M
+    core -- the exact defect #870 exists to close, reproduced by the very
+    field meant to prevent it. An unresolved type gets an unresolved (empty)
+    answer instead, for both the wizard's `presets_cmd.allowed_os_lookup` and
+    the build-time `topology._allowed_os_for_core` -- the one call this
+    module exists to share, so the two can never drift back apart on this.
+    """
+    if not core_type:
+        return []
+    cross = cross_class_os(core_type)
+    return [o for o in choices if o not in cross]
