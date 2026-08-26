@@ -584,10 +584,16 @@ jobs:
       #
       # `--no-online-audits` keeps the gate hermetic: no token, no API, no
       # rate limit deciding whether CI is green. Verified to reach the same
-      # verdict as a networked run on this tree, which is what the
-      # `planner-resync.yml` entry in `.github/zizmor.yml` is for.
+      # verdict as a networked run on this tree, including at the two
+      # `artipacked` sites this gate must still catch if their suppression
+      # ever slipped: `planner-resync.yml`'s and `release.yml`'s `dev`
+      # checkouts, each carrying its own inline
+      # `# zizmor: ignore[artipacked]` comment (tan-cli#899).
       #
-      # The baseline is `.github/zizmor.yml`, picked up automatically. It has
-      # two entries and both carry their argument in full.
+      # The baseline is `.github/zizmor.yml`, picked up automatically. Since
+      # tan-cli#899 it holds no `rules.*.ignore` entries of its own -- `rules:
+      # {}` is a required stub, not policy. Both suppressions now live inline,
+      # at the steps they excuse; the reviewed count is kept current in this
+      # file's own header, under INVENTORY.
       - name: audit .github/workflows
         run: zizmor --min-severity medium --no-online-audits .github/workflows/
