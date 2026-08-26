@@ -923,12 +923,18 @@ HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-
 #: source path, not by the consuming `tan` file, so a second key for the same
 #: path would be a no-op duplicate, not a new audit.
 #:
-#: `scripts/alp_cli/model.py` was originally an eighth member of the group
-#: above (the tan-cli#560 review's total was nine, counting "the ninth
-#: source" above alongside it). ADR-0028 relocated the engine it hand-ported
-#: (`tan.model`) into tan and deleted the alp-sdk original, so it left
-#: `HAND_PORT_HASHES` -- see the comment at its former table entry, a few
-#: lines below, for why that is a correct removal and not drift.
+#: `scripts/alp_cli/model.py` is the eighth member of the group above (the
+#: tan-cli#560 review's total was nine, counting "the ninth source" above
+#: alongside it). tan-cli#791 briefly retired this entry on the premise that
+#: ADR-0028 had deleted the alp-sdk original -- checked against the actual
+#: pinned commits and found premature: ADR-0028's deletion (alp-sdk
+#: `ab6968e22`, "delete the host-side model engine, relocated to tan") lives
+#: only on alp-sdk PR #1470 (`feat/model-edge-ai-foundation`, OPEN, not
+#: merged to `dev` or `main` as of this check), and `scripts/alp_cli/model.py`
+#: is still present, byte-identical, at both PINNED_SDK_COMMIT (`eb96112b`,
+#: v0.16.0) and HAND_PORT_PINNED_SDK_COMMIT (`88318e75`, v0.15.0+88) -- the
+#: same hash `origin/dev` still carries for this key. Re-pinned rather than
+#: left retired.
 HAND_PORT_HASHES: dict[str, str] = {
     "scripts/gen_zephyr_board.py": "30ab1b52835d77f226bf4ed07185cd5a91f2c374ea8b8576edb00699627ea8a7",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
@@ -947,9 +953,7 @@ HAND_PORT_HASHES: dict[str, str] = {
     "scripts/alp_cli/doctor.py": "f2faa07cecbbffc1bcfb510210e3f24d96a3ad6864eef8f3fe92f93886ddacd5",
     "scripts/alp_cli/explain.py": "b9e05d32896d1e0855f1c040b581b3e77869b4b03b15371c125757be1e0e09fe",
     "scripts/alp_cli/monitor.py": "1f67ee1372c73e2bd76b5c9338c141e31accdef1e206b7a64806cf8eb691c0e2",
-    # `scripts/alp_cli/model.py` was here. ADR-0028 relocated the engine into
-    # `tan/model/` and deleted the alp-sdk original, so there is no upstream
-    # file left to pin -- this is the entry LEAVING the table, not drifting.
+    "scripts/alp_cli/model.py": "a51be0a8d3a16bd408bb57d01f049175406b73cc48ab9346d39555c3aa5b1925",
     "scripts/alp_cli/validator.py": "8dac2e4d3799fe67feceb74e587f23b5e8b44a40df2805220632f8edae26a421",
 }
 
