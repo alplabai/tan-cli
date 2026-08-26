@@ -477,7 +477,18 @@ def test_pytest_configure_skips_the_check_on_an_xdist_worker(pytester, tmp_path)
     failure` -- the worker's own call must be skipped via `config.workerinput`
     being set. Mutation-proved: replacing that guard with `if False:` in
     `tests/conftest.py::pytest_configure` turns this from `1` recorded call
-    into `2` (controller AND worker both call through)."""
+    into `2` (controller AND worker both call through).
+
+    Requires `pytest-xdist` on the interpreter running THIS test (it is what
+    the nested `-n 1` session below needs to spawn a worker at all) --
+    installed for the sharded `pytest -n 4` jobs, but not for `ci.yml`'s
+    `python` job, which runs `tests/gates` under a bare `pip install pytest`.
+    `importorskip` rather than a hard dependency: this is the one test in the
+    suite that specifically needs xdist PRESENT to prove anything, and it
+    would be the wrong fix to make the whole suite depend on it just for
+    this.
+    """
+    pytest.importorskip("xdist")
     calls_path = tmp_path / "calls.log"
     pytester.makeconftest(
         _RECORDING_CONFTEST.format(repo_python=_repo_python(), calls_path=str(calls_path))
