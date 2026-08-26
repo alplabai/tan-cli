@@ -29,12 +29,15 @@
 # nothing named -- it would even if a suppression were hiding a real
 # finding. The flag that actually strips inline ignores too is
 # `--no-ignores`: measured, `--min-severity medium --no-online-audits
-# --no-ignores .github/workflows/` surfaces all three live sites --
-# `planner-resync.yml:156:9` and `release.yml:1230:9` (`artipacked`) plus
-# `release.yml:945:9` (`cache-poisoning`, pre-dates tan-cli#899) -- and
-# exits 14. That is the recipe to reach for when checking whether this
-# file's suppressions (inline or otherwise) are still catching something
-# real, not `--no-config`.
+# --no-ignores .github/workflows/` surfaces all three live sites -- the
+# `planner-resync.yml` `Check out tan-cli dev` step and the `release.yml`
+# `propose-dev-version-bump` job's `dev` checkout (both `artipacked`, both
+# named again under INVENTORY below -- deliberately by step name, not
+# `<file>:<line>`, for the same reason the suppressions themselves moved
+# off line pins) plus `release.yml:945:9` (`cache-poisoning`, pre-dates
+# tan-cli#899) -- and exits 14. That is the recipe to reach for when
+# checking whether this file's suppressions (inline or otherwise) are
+# still catching something real, not `--no-config`.
 #
 # NOT IGNORED, ON PURPOSE. The informational/low findings below medium are
 # left visible in a full report rather than suppressed by config: eleven
@@ -65,13 +68,17 @@
 # INLINE, NOT LINE-PINNED (tan-cli#899). This file used to carry the two
 # `artipacked` suppressions below as `rules.artipacked.ignore` entries of the
 # shape `release.yml:1225:9` -- a byte offset into a file this config does
-# not otherwise touch. `release.yml`'s pin rotted TWICE on the
-# tan-cli#770/#880 branch, PRE-MERGE. `planner-resync.yml`'s pin rotted a
-# THIRD time, separately, straight on `dev` -- an earlier draft of this note
-# claimed it held without moving; it did not. Full history, re-derived (an
-# earlier-earlier draft also cited "+49, `release.yml` 1202:9 -> 1223:9" and
-# that arithmetic did not reconcile either -- this is the corrected
-# derivation for both files):
+# not otherwise touch. Both pins rotted, pre-merge, on their own feature
+# branches, three times between them: `release.yml`'s twice on the
+# tan-cli#770/#880 branch, `planner-resync.yml`'s once on the
+# tan-cli#854/#855 branch. Full history, re-derived (an earlier draft of
+# this note got the `planner-resync.yml` rotation backwards -- claiming it
+# landed straight on `dev`, insertion and re-pin in the same commit; it did
+# not, see below -- and an earlier-earlier draft also cited "+49,
+# `release.yml` 1202:9 -> 1223:9" for the other file, and that arithmetic
+# did not reconcile either. Both errors came from reading a SQUASHED merge
+# commit instead of the real branch history; this is the corrected
+# derivation for both files, from the real commits):
 #
 # `release.yml`'s pin was created at `1202:9` on the branch (tan-cli#770,
 # commit a4e676ea) before either of its rotations. `dev` then landed BOTH
@@ -83,21 +90,32 @@
 # later comment edit moved it to `1225:9`, also correct. Both re-pins
 # happened on the branch, before it merged: at the point `dev` itself picked
 # up tan-cli#880 (commit c629b3ea), `release.yml`'s pin landed
-# already-correct at `1225:9`.
+# already-correct at `1225:9`. Both fixes were folded into the very commit
+# that caused the drift, caught locally by hand before either commit was
+# ever pushed -- CI never saw a red run for either.
 #
-# `planner-resync.yml`'s pin is a DIFFERENT rotation, landed on `dev` itself
-# rather than pre-merge on a branch: created at `140:9` (tan-cli#435), it
-# held there until tan-cli#876 (`dev` commit `fc15a1d0`) inserted an 11-line
-# `timeout-minutes` block directly above the checkout step -- and re-pinned
-# `140:9 -> 151:9` in that SAME commit (`.github/zizmor.yml`'s own hunk in
-# that PR shows both the workflow insertion and the re-pin together, not two
-# separate changes). It then held at `151:9` unchanged through tan-cli#880
-# and into tan-cli#899.
+# `planner-resync.yml`'s pin rotted once, on `fix/854-855-workflow-timeout-
+# coverage`, pre-merge -- the SAME shape as `release.yml`'s two, not a
+# different one. It happened in TWO separate commits on that branch, not
+# one, which is the detail an earlier draft of this note got wrong by
+# reading the squashed `dev` merge (`fc15a1d0`) instead of the branch's real
+# commits: `58299bfd` inserted the 11-line `timeout-minutes` block directly
+# above the checkout step WITH NO re-pin, and THAT landed in CI -- the
+# successor run records `warning[artipacked] -->
+# .github/workflows/planner-resync.yml:151:9`, `66 findings (12 ignored, 53
+# suppressed)`, exit code 13, run `32492554338` (job `96803362613`).
+# `a0ff41d3` then re-pinned `140:9 -> 151:9` as a later, separate commit on
+# the same branch, still pre-merge. It then held at `151:9` unchanged
+# through tan-cli#880 and into tan-cli#899.
 #
-# All three rotations failed loudly (the finding came back, the gate went
-# red) -- the failure mode this policy actually guards against is the quiet
-# direction: a drifted pin lands on a *different* `actions/checkout` step
-# that genuinely needs suppressing, and nothing says so. `release.yml` alone
+# All three rotations demonstrate the same property: a moved pin makes the
+# suppressed finding reappear and the gate goes red, never silently green.
+# Only `planner-resync.yml`'s reached an actual CI run to prove it, though
+# (run `32492554338` above) -- `release.yml`'s two were caught locally, by
+# hand, before either was ever pushed. Either way, the failure mode this
+# policy actually guards against is the quiet direction: a drifted pin lands
+# on a *different* `actions/checkout` step that genuinely needs suppressing,
+# and nothing says so. `release.yml` alone
 # has five `actions/checkout` steps.
 #
 # The suppressions now live as a `# zizmor: ignore[artipacked]` comment
@@ -143,13 +161,19 @@
 #        tan-cli#770).
 #
 # DRIFT THIS INVENTORY CANNOT CATCH BY ITSELF, ON PURPOSE, FOR NOW.
-# `python/tests/gates/test_zizmor_inventory_count.py` closes the dangerous
-# half -- it counts every inline `# zizmor: ignore[artipacked]` comment
-# under `.github/workflows/` and fails if that count disagrees with the
-# two numbered rows above, so a THIRD inline ignore landing anywhere no
-# longer escapes this reviewed baseline silently (measured: it does escape
-# without the gate -- `rc=0, 15 ignored, 54 suppressed`, unchanged, with a
-# planted third ignore on a duplicated checkout). It does NOT catch the
+# `ci.yml`'s `workflow-security` job (this file's own audit job, the one
+# genuinely running zizmor) closes the dangerous half -- a step there asks
+# zizmor directly, with `--no-ignores`, how many real `artipacked` findings
+# it would surface with every inline suppression stripped, and fails if
+# that count disagrees with the two numbered rows above, in EITHER
+# direction. This used to be a `python/tests/gates` regex re-implementing
+# zizmor's own inline-ignore-to-step association; round after round it kept
+# disagreeing with zizmor, in both directions, because it modelled a step
+# by YAML indentation while zizmor actually associates an ignore comment
+# with the finding's LINE RANGE (the whole step, indentation irrelevant) --
+# closing three shapes a round only opened five more. Deleted in favour of
+# asking the real tool (tan-cli#919 round 4): it cannot disagree with
+# zizmor's verdict because it is zizmor's verdict. It does NOT catch the
 # other half: renaming step 1 or step 2 above so this INVENTORY names a
 # step that no longer exists. Closing that needs the inventory rewritten
 # in a machine-parseable form (workflow file + step name, not prose), which
