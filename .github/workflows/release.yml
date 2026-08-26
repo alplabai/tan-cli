@@ -1220,9 +1220,14 @@ jobs:
       # through the remote it leaves configured, and no later step sets up a
       # token remote of its own. `planner-resync.yml`'s own `dev` checkout
       # carries the identical exception for the identical reason (see its
-      # comment, and `.github/zizmor.yml`'s matching `artipacked` entry --
-      # this file needs its own line-scoped entry for the same finding).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # comment -- both are inventoried in `.github/zizmor.yml`'s header).
+      #
+      # The `artipacked` ignore travels with this step (tan-cli#899): it used
+      # to be a `<file>:<line>` pin in `.github/zizmor.yml`, which rotted
+      # twice in two days when unrelated edits above it moved the line
+      # (+49 from tan-cli#876, +2 more from tan-cli#880's own comment edit).
+      # Inline, it cannot rot.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
         with:
           ref: dev
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

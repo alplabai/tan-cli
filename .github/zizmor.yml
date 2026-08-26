@@ -1,14 +1,7 @@
-# zizmor policy (tan-cli#435).
+# zizmor policy (tan-cli#435, revised tan-cli#899).
 #
 # THE POLICY IS ONE LINE: the gate runs `zizmor --min-severity medium`, and
-# this file is its reviewed baseline. Growth IS permitted -- but only as
-# another line-scoped `artipacked.ignore` entry of the exact same shape as
-# the two below (a checkout that must keep its credential because it pushes
-# through the remote the checkout leaves configured, commented in place at
-# the site), each one a decision someone defends in review. It is currently
-# TWO entries long. Anything added here is a decision someone defends in
-# review, not a way to turn a red run green -- never widen an entry to a
-# whole rule or a whole file.
+# this file is its reviewed configuration.
 #
 # WHY SEVERITY AND NOT CONFIDENCE. The obvious tightening --
 # `--min-confidence medium` on top -- was measured and REJECTED: all 26
@@ -39,39 +32,60 @@
 # `steps.pr.outputs.opened`, and `steps.gate.outputs.verdict` (x2, five
 # between them, all planner-resync.yml, from `planner_resync.py`), and
 # `steps.bump.outputs.status` (release.yml, from `bump_dev_version.py`), the
-# TWO `artipacked` findings (below) on the checkouts that must keep their
-# credential because they push (commented in place at each site), and
-# `superfluous-actions` on the release publisher. `--min-severity medium`
-# already keeps them out of the verdict, so listing them here would only hide
-# them from a human reading the full report -- `zizmor .github/workflows/`
-# with no flags still shows all of them.
+# TWO `artipacked` suppressions (see INVENTORY below) on the checkouts that
+# must keep their credential because they push (commented in place at each
+# site), and `superfluous-actions` on the release publisher.
+# `--min-severity medium` already keeps them out of the verdict, so listing
+# them here would only hide them from a human reading the full report --
+# `zizmor .github/workflows/` with no flags still shows all of them.
 #
-# ONE MORE THING A REVIEWER SHOULD KNOW: these ignores are LINE-SCOPED, so
-# they rot when the lines move. They rot LOUDLY -- the finding comes back and
-# the gate goes red -- which is the failure direction to prefer, but it does
-# mean a rebase that shifts `release.yml` or `planner-resync.yml` may need the
-# numbers re-derived. Re-derive them by running the gate, never by widening an
-# entry to the whole file.
-rules:
-  artipacked:
-    ignore:
-      # The tan-cli `dev` checkout in `planner-resync.yml`, which MUST keep its
-      # credential: the `propose` step runs `git push -q -f origin` through the
-      # remote this checkout leaves configured, and no later step sets up a
-      # token remote of its own. The step carries the same explanation inline,
-      # so a reader hits it from either direction.
-      #
-      # This entry also makes the gate answer the same offline as online.
-      # Measured with zizmor 1.29.0: `--no-online-audits` reports this site at
-      # medium while a networked run does not, so without the entry the gate's
-      # verdict would depend on whether the GitHub API answered -- and a gate
-      # that goes red on someone else's rate limit gets ignored, then removed.
-      - planner-resync.yml:151:9
-
-      # release.yml's `propose-dev-version-bump` job (tan-cli#770), the same
-      # shape for the same reason: its `dev` checkout must keep its
-      # credential because the job's own later step pushes
-      # `auto/dev-version-bump-<tag>` through the remote this checkout
-      # leaves configured, and nothing downstream sets up a token remote of
-      # its own. The step carries the same explanation inline.
-      - release.yml:1225:9
+# INLINE, NOT LINE-PINNED (tan-cli#899). This file used to carry the two
+# `artipacked` suppressions below as `rules.artipacked.ignore` entries of the
+# shape `release.yml:1225:9` -- a byte offset into a file this config does
+# not otherwise touch. That pin rotted TWICE IN TWO DAYS: +49 lines when
+# tan-cli#876 landed elsewhere in `release.yml`, then +2 more from
+# tan-cli#880's own comment edit. Both rotations failed loudly (the finding
+# came back, the gate went red) -- the failure mode this policy actually
+# guards against is the quiet direction: a drifted pin lands on a
+# *different* `actions/checkout` step that genuinely needs suppressing, and
+# nothing says so. `release.yml` alone has five `actions/checkout` steps.
+#
+# The suppressions now live as a `# zizmor: ignore[artipacked]` comment
+# appended to each step's `uses:` line, the same pattern already used for
+# `release.yml`'s `cache-poisoning` ignore on `actions/setup-node`. Inline,
+# a suppression travels with the step it excuses -- it cannot land on the
+# wrong one, because there is no line number to drift.
+#
+# THE COST, AND IT IS REAL: moving the suppressions out of this file breaks
+# the "one reviewed baseline in one file" property tan-cli#435 built this
+# file around -- a reviewer auditing `artipacked` exceptions no longer finds
+# both in one place by reading just this file. The mitigation is this
+# INVENTORY, kept current by hand and re-derived (never widened to a whole
+# rule or file) whenever an inline ignore is added or removed:
+#
+#   INVENTORY -- two `artipacked` ignores, both `actions/checkout` steps
+#   that must keep their credential because a later step in the same job
+#   pushes through the remote the checkout leaves configured, and nothing
+#   downstream sets up a token remote of its own:
+#
+#     1. `planner-resync.yml`, the `Check out tan-cli dev` step (the job's
+#        `propose` step pushes `auto/planner-resync` through it).
+#     2. `release.yml`, the `propose-dev-version-bump` job's `dev` checkout
+#        (a later step pushes `auto/dev-version-bump-<tag>` through it,
+#        tan-cli#770).
+#
+# Growth beyond these two is still a decision someone defends in review, in
+# the same shape (a checkout that must keep its credential because it
+# pushes, explained inline at the site AND added to this inventory) -- never
+# a way to turn a red run green, and never widened to a whole rule or file.
+#
+# NON-VACUITY of the inline form, MEASURED: zizmor 1.29.0, same invocation,
+# with each ignore comment temporarily removed one at a time -- the gate
+# reports the `artipacked` finding at the now-unsuppressed step and exits 13,
+# confirming the inline form still catches a real finding rather than
+# suppressing indiscriminately.
+#
+# `rules: {}` below is not vestigial: this file has no more
+# `rules.*.ignore` entries to carry now that both suppressions moved
+# inline, but zizmor requires the key to be present in a config it loads.
+rules: {}
