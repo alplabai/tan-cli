@@ -80,6 +80,17 @@ RAW_TAGS = ("v0.4.1", "v0.5.0-rc4")
 #: `RELEASES`/`_build_release`, so those stay a pure mirror of real published tags.
 BAD_PAYLOAD_TAG = "v9.9.9-badpayload"
 
+#: Archive-shaped counterpart to `BAD_PAYLOAD_TAG` (tan-cli#803): a real,
+#: well-formed `.tar.gz`/`.zip` (so extraction succeeds) whose packaged
+#: `tan`/`tan.exe` is `_write_garbage_executable` output instead of a working
+#: payload. `BAD_PAYLOAD_TAG` cannot exercise install.sh's ARCHIVE branch at
+#: all -- its assets are the RAW-shaped `v0.4.1` names, so install.sh takes the
+#: `else` arm (`payload="$tmp"`) that reuses an already-trapped temp path --
+#: so it can never catch a leak in the archive arm's OWN
+#: `payload="$(mktemp)"` launcher file, which is exactly what this tag exists
+#: to reach.
+BAD_PAYLOAD_ARCHIVE_TAG = "v9.9.9-badarchive"
+
 #: tag -> the asset names that tag really publishes, verbatim. ``checksums.txt``
 #: and ``envelope-contract.json`` are omitted from the values: the first is
 #: generated below from these names, and the second is never fetched by either
@@ -243,6 +254,37 @@ def _build_bad_release(tag_dir: Path, assets: tuple[str, ...]) -> None:
     (tag_dir / "checksums.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
+def _build_bad_archive_release(tag_dir: Path, assets: tuple[str, ...], staging: Path) -> None:
+    """Archive-shaped counterpart to `_build_bad_release` -- see
+    `BAD_PAYLOAD_ARCHIVE_TAG`. Each asset is a REAL archive (extraction must
+    succeed, so the archive-only code path is actually reached) whose packaged
+    `tan`/`tan.exe` is `_write_garbage_executable` output, so the post-extract
+    health check still refuses.
+    """
+    tag_dir.mkdir(parents=True)
+    lines = []
+    for name in assets:
+        asset = tag_dir / name
+        work = staging / tag_dir.name / name
+        root = work / "tan"
+        (root / "_internal").mkdir(parents=True)
+        (root / "_internal" / "fixture-runtime.txt").write_text(
+            "stands in for the PyInstaller runtime\n", encoding="utf-8", newline="\n"
+        )
+        exe_name = "tan.exe" if name.endswith(".zip") else "tan"
+        _write_garbage_executable(root / exe_name)
+        if name.endswith(".zip"):
+            with zipfile.ZipFile(asset, "w", zipfile.ZIP_DEFLATED) as zf:
+                for item in sorted(root.rglob("*")):
+                    zf.write(item, item.relative_to(root.parent).as_posix())
+        else:
+            with tarfile.open(asset, "w:gz") as tf:
+                tf.add(root, arcname="tan")
+        digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+        lines.append(f"{digest}  {name}")
+    (tag_dir / "checksums.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+
+
 def _build_release(tag_dir: Path, assets: tuple[str, ...], staging: Path) -> None:
     tag_dir.mkdir(parents=True)
     lines = []
@@ -279,6 +321,10 @@ def release_server(tmp_path_factory):
     # platform triple -- so BAD_PAYLOAD_TAG resolves on whichever host/arch
     # this suite happens to run on -- but every one of them is garbage bytes.
     _build_bad_release(root / BAD_PAYLOAD_TAG, RELEASES["v0.4.1"])
+    # Same asset names FIRST_ARCHIVE_TAG really publishes -- see
+    # BAD_PAYLOAD_ARCHIVE_TAG -- but every one of them is a real archive
+    # wrapping a garbage `tan`/`tan.exe`.
+    _build_bad_archive_release(root / BAD_PAYLOAD_ARCHIVE_TAG, RELEASES[FIRST_ARCHIVE_TAG], staging)
 
     handler = functools.partial(_QuietHandler, directory=str(root))
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -394,6 +440,72 @@ def _fake_uname(tmp_path: Path, os_name: str, arch: str) -> Path:
         f'  -m) echo "{arch}" ;;\n'
         f'  *) echo "{os_name}" ;;\n'
         "esac\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    script.chmod(0o755)
+    return bin_dir
+
+
+def _fake_mktemp_honouring_tmpdir(tmp_path: Path, calls_log: Path) -> Path:
+    """A minimal ``mktemp`` stub staged ahead of the real one on PATH.
+
+    BSD/macOS ``mktemp`` -- unlike GNU ``mktemp`` -- ignores ``$TMPDIR`` when
+    invoked with no template (measured: ``TMPDIR=/x mktemp`` on macOS still
+    returns a path under ``/var/folders/.../T``, never ``/x``). A test that
+    redirects ``$TMPDIR`` to observe install.sh's temp-file hygiene is
+    therefore asserting on a directory the real ``macos-latest`` runner's
+    ``mktemp`` never puts anything in, REGARDLESS of whether install.sh is
+    fixed -- exactly the vacuous-on-macOS gap this stub exists to close. It
+    makes ``$TMPDIR`` authoritative on every platform (GNU semantics), and
+    logs every path it hands out to ``calls_log`` so a test can assert it was
+    actually exercised rather than merely that an always-empty directory
+    stayed empty.
+    """
+    bin_dir = tmp_path / "fake-mktemp-bin"
+    bin_dir.mkdir(exist_ok=True)
+    script = bin_dir / "mktemp"
+    script.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        # Only a bare invocation or a lone `-d` is supported -- anything else
+        # (notably a TEMPLATE argument, as install.sh:558's noexec-retry path
+        # uses: `mktemp -d "$INSTALL_DIR/.tan-install-retry.XXXXXX"`) would
+        # otherwise be silently ignored and re-rooted under $TMPDIR instead of
+        # honoured, inverting what a caller of THAT form asserts. Refusing
+        # loudly means the next reuse of this stub against a templated call
+        # fails fast instead of silently misdirecting it.
+        'if [ "$#" -eq 0 ]; then\n'
+        '\twant_dir=0\n'
+        'elif [ "$#" -eq 1 ] && [ "$1" = "-d" ]; then\n'
+        '\twant_dir=1\n'
+        'else\n'
+        '\techo "fake mktemp stub: only a bare or lone -d invocation is supported (got: $*)" >&2\n'
+        '\texit 1\n'
+        'fi\n'
+        'base="${TMPDIR:-/tmp}"\n'
+        'mkdir -p "$base" 2>/dev/null || true\n'
+        'n=0\n'
+        'candidate=""\n'
+        # Bounded, not `while :;` forever: a $base this stub cannot write into
+        # (e.g. a permissions problem in the test's own fixture) must fail
+        # fast and readably rather than spin until _run's 180s subprocess
+        # timeout with no diagnostic at all.
+        'while [ "$n" -lt 100 ] && [ -z "$candidate" ]; do\n'
+        '\tn=$((n + 1))\n'
+        '\ttry="$base/tmp.stub$$.$n"\n'
+        '\tif [ "$want_dir" = "1" ]; then\n'
+        '\t\tmkdir "$try" 2>/dev/null && candidate="$try"\n'
+        '\telse\n'
+        '\t\t(umask 077; : > "$try") 2>/dev/null && candidate="$try"\n'
+        '\tfi\n'
+        'done\n'
+        'if [ -z "$candidate" ]; then\n'
+        '\techo "fake mktemp stub: could not create a temp path under $base after 100 attempts" >&2\n'
+        '\texit 1\n'
+        'fi\n'
+        f'printf \'%s\\n\' "$candidate" >> "{calls_log}"\n'
+        'printf \'%s\\n\' "$candidate"\n',
         encoding="utf-8",
         newline="\n",
     )
@@ -625,12 +737,21 @@ def test_ps1_refuses_when_the_checksums_cannot_be_fetched(release_server, tmp_pa
     name (tan-cli#356 adversarial review, item 2). See
     `test_ps1_refuses_a_release_with_no_asset_for_this_platform` below for real
     Outcome-2 coverage.
+
+    tan-cli#803: tightened from the permissive
+    ``assert not dest.exists() or list(dest.iterdir()) == []`` to a strict
+    ``assert not dest.exists()``. That permissive form passes on an EMPTY
+    orphan directory -- exactly what install.ps1 used to leave behind here
+    pre-fix (`New-Item -ItemType Directory -Force -Path $Dir` ran before
+    checksums.txt was ever fetched), so this assertion could never have caught
+    the defect it was meant to guard. Since the fix defers that creation past
+    the health check, `$Dir` must now not exist AT ALL after this refusal.
     """
     dest = tmp_path / "prog"
     result = _install_ps1(release_server, dest, tmp_path, "-Version", "v9.9.9-does-not-exist")
 
     assert result.returncode != 0
-    assert not dest.exists() or list(dest.iterdir()) == []
+    assert not dest.exists(), "tan-cli#803: a refused install must not create $Dir at all"
     assert "could not fetch" in (result.stdout + result.stderr)
 
 
@@ -648,6 +769,9 @@ def test_ps1_refuses_a_release_with_no_asset_for_this_platform(release_server, t
     wording -- the defect this test exists to catch -- would leave this test
     (and its install.sh sibling) failing, unlike the misnamed test above,
     which stayed green either way.
+
+    tan-cli#803: strict ``not dest.exists()``, same reasoning as the sibling
+    test above -- the permissive form never proved $Dir stayed uncreated.
     """
     dest = tmp_path / "prog"
     result = _install_ps1(
@@ -656,12 +780,45 @@ def test_ps1_refuses_a_release_with_no_asset_for_this_platform(release_server, t
     )
 
     assert result.returncode != 0
-    assert not dest.exists() or list(dest.iterdir()) == []
+    assert not dest.exists(), "tan-cli#803: a refused install must not create $Dir at all"
     combined = result.stdout + result.stderr
     assert "lists no asset for aarch64-pc-windows-msvc" in combined
     assert "tan-aarch64-pc-windows-msvc.zip" in combined
     assert "tan-aarch64-pc-windows-msvc.exe" in combined
     assert "there is no prebuilt Windows arm64 asset from v0.5.0 onward" in combined
+
+
+@windows_only
+def test_ps1_refused_install_before_download_leaves_no_orphaned_intermediate_parents(release_server, tmp_path):
+    """tan-cli#803: install.ps1 used to run
+    ``New-Item -ItemType Directory -Force -Path $Dir`` as the very FIRST thing
+    it touched on disk (pre-fix install.ps1:169) -- before ``checksums.txt``
+    was even fetched. ``-Force`` makes that the ps1 equivalent of ``mkdir -p``,
+    so it created every missing PARENT directory too, and NONE of the cleanup
+    logic further down (which only runs inside the health-check-failure
+    branch) ever ran for a refusal this early -- checksums-fetch failure, no
+    asset for this platform, download failure, sha256 mismatch, and bad
+    archive layout all left the whole chain behind.
+
+    MEASURED pre-fix (this is the issue's own repro, reproduced by hand against
+    the real script before writing this test): ``-Dir <scratch>\\a\\deep\\new\\
+    path`` against an unreachable release left all four of ``a``, ``a\\deep``,
+    ``a\\deep\\new``, ``a\\deep\\new\\path`` on disk after a
+    ``could not fetch checksums.txt`` refusal, despite nothing having been
+    downloaded. install.sh never had this defect (tan-cli#490 review already
+    deferred its own ``mkdir -p`` this way); this is the ps1 parity fix -- and
+    ``-Dir`` is nested three levels deep here so the fix has to have created
+    NOTHING, not just correctly clean up one level.
+    """
+    dest = tmp_path / "a" / "deep" / "new" / "path"  # none of these must exist before this run
+    result = _install_ps1(release_server, dest, tmp_path, "-Version", "v9.9.9-does-not-exist")
+
+    assert result.returncode != 0
+    assert "could not fetch" in (result.stdout + result.stderr)
+    assert not (tmp_path / "a").exists(), (
+        "a refused install must not leave any intermediate parent directory behind, "
+        "not just the immediate -Dir leaf"
+    )
 
 
 @windows_only
@@ -823,6 +980,13 @@ def test_ps1_temp_execute_denied_distinguishes_from_a_broken_binary(release_serv
     is a host security policy, not the generic "missing runtime dependency /
     security software altered it" wording install.ps1 gives for an
     actually-corrupt payload.
+
+    tan-cli#803 regression coverage: this is also the one scenario that
+    exercises the noexec-retry's OWN `$Dir` creation (`$dirCreatedForRetry`,
+    since `$Dir`'s real creation is now deferred out of the top of the
+    script) -- the retry has to create `-Dir` itself to have anywhere to
+    stage a copy, and since the retry then ALSO fails here, that freshly
+    created `-Dir` must be cleaned up, not left as an empty orphan.
     """
     denied_root = tmp_path / "denied"
     denied_root.mkdir()
@@ -844,6 +1008,9 @@ def test_ps1_temp_execute_denied_distinguishes_from_a_broken_binary(release_serv
     assert "security policy" in combined
     # Must not misattribute a host security policy to a missing dependency.
     assert "may be missing a runtime dependency" not in combined
+    # tan-cli#803: the retry creates `-Dir` (there is nowhere else exec-able to
+    # stage a copy into) but must clean it back up once it too fails.
+    assert not dest.exists(), "the noexec-retry's own $Dir creation must be cleaned up on failure"
 
 
 @pwsh_only
@@ -1202,7 +1369,7 @@ def test_sh_refuses_when_the_checksums_cannot_be_fetched(release_server, tmp_pat
     result = _install_sh(release_server, dest, tmp_path, "--version", "v9.9.9-does-not-exist")
 
     assert result.returncode != 0
-    assert not dest.exists() or list(dest.iterdir()) == []
+    assert not dest.exists()  # tan-cli#803: strict -- install.sh creates $INSTALL_DIR only after the health check, so a refusal must leave nothing at all
     assert "could not fetch" in (result.stdout + result.stderr)
 
 
@@ -1229,7 +1396,7 @@ def test_sh_refuses_a_release_with_no_asset_for_this_platform(release_server, tm
     )
 
     assert result.returncode != 0
-    assert not dest.exists() or list(dest.iterdir()) == []
+    assert not dest.exists()  # tan-cli#803: strict -- install.sh creates $INSTALL_DIR only after the health check, so a refusal must leave nothing at all
     combined = result.stdout + result.stderr
     assert "lists no asset for aarch64-unknown-linux-gnu" in combined
     assert "tan-aarch64-unknown-linux-gnu.tar.gz" in combined
@@ -1295,7 +1462,7 @@ def test_sh_bad_payload_on_fresh_host_leaves_nothing_behind(release_server, tmp_
     result = _install_sh_modify_path(release_server, dest, home, "--version", BAD_PAYLOAD_TAG)
 
     assert result.returncode != 0
-    assert not dest.exists() or list(dest.iterdir()) == []
+    assert not dest.exists()  # tan-cli#803: strict -- install.sh creates $INSTALL_DIR only after the health check, so a refusal must leave nothing at all
     combined = result.stdout + result.stderr
     assert "newly downloaded binary failed to run" in combined
     assert "no previous installation existed" in combined
@@ -1336,6 +1503,56 @@ def test_sh_bad_payload_on_upgrade_leaves_previous_install_working(release_serve
     combined = result.stdout + result.stderr
     assert "your existing installation" in combined
     assert "was never touched" in combined
+
+
+@posix_only
+def test_sh_bad_archive_payload_leaves_no_launcher_temp_file(release_server, tmp_path):
+    """tan-cli#803: the archive-layout launcher (`$payload` -- the "Generated
+    by tan install.sh (tan-cli#349)" heredoc) is allocated by its OWN
+    `mktemp` call, made well AFTER `trap ... EXIT` was installed, and was
+    never added to it. `BAD_PAYLOAD_TAG` cannot catch this: its assets are
+    RAW-shaped, so install.sh takes the `else` arm (`payload="$tmp"`) that
+    reuses a path the trap already covers -- `BAD_PAYLOAD_ARCHIVE_TAG` is the
+    archive-shaped counterpart this leak actually needs to be reached at all.
+
+    A dedicated, EMPTY `$TMPDIR` (matching the issue's own repro) makes any
+    leaked file trivially visible: nothing but this script's own three trapped
+    temp paths (`$tmp`/`$sums`/`$stage`) should ever be created there, on any
+    exit path -- success or refusal.
+
+    `$TMPDIR` alone is not enough on macOS: BSD `mktemp` (unlike GNU) ignores
+    it when called with no template, so on `macos-latest` the directory this
+    test asserts against is ALWAYS empty regardless of whether install.sh
+    leaks -- this test would pass against the unfixed script there, guarding
+    the regression on Linux only while reading as cross-platform coverage.
+    `_fake_mktemp_honouring_tmpdir` makes `$TMPDIR` authoritative on every
+    platform and records every path it hands out, so the positive assertion
+    below proves this run actually exercised it rather than just finding an
+    untouched directory clean.
+    """
+    tmpdir = tmp_path / "tmpdir"
+    tmpdir.mkdir()
+    dest = tmp_path / "bin"
+    mktemp_log = tmp_path / "mktemp-calls.log"
+    fake_mktemp_dir = _fake_mktemp_honouring_tmpdir(tmp_path, mktemp_log)
+    env_path = f"{fake_mktemp_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+    result = _install_sh(
+        release_server, dest, tmp_path, "--version", BAD_PAYLOAD_ARCHIVE_TAG,
+        extra_env={"TMPDIR": str(tmpdir), "PATH": env_path},
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "newly downloaded binary failed to run" in combined
+    # Positive assertion: prove $TMPDIR was actually exercised, so an
+    # untouched directory can never again read as "no leak".
+    assert mktemp_log.is_file() and mktemp_log.read_text(encoding="utf-8").strip(), (
+        "the mktemp stub was never invoked -- this test would be checking a "
+        "directory install.sh never touched, not a real regression guard"
+    )
+    leftover = list(tmpdir.iterdir())
+    assert leftover == [], f"install.sh leaked temp file(s) in $TMPDIR: {leftover}"
 
 
 @posix_only
@@ -1996,6 +2213,77 @@ def test_sh_relative_install_dir_rc_file_gets_an_absolute_path(release_server, t
     rc_text = rc.read_text(encoding="utf-8")
     assert "./mybin" not in rc_text
     assert str((workdir / "mybin").resolve()) in rc_text
+
+
+@posix_only
+def test_sh_rc_append_failure_does_not_turn_a_successful_install_into_a_failure(release_server, tmp_path):
+    """tan-cli#803: the rc-file PATH append (install.sh:938, pre-fix) was
+    reached only AFTER the commit above had already succeeded and printed its
+    "installed tan -> ..." line (tan-cli#434's rollback boundary is well
+    behind this point) -- yet it was an UNGUARDED `printf ... >>"$rc"` under
+    `set -eu`. `printf` is not a POSIX special builtin, so its own redirect
+    failure is what `set -e` aborts the script on, turning an install that
+    had ALREADY succeeded into a nonzero exit.
+
+    Reproduced exactly as the issue itself measured it: `$HOME/.profile` is a
+    DIRECTORY, not a file, so the `>>` redirect can never succeed. `SHELL=/bin/sh`
+    pins the rc file to `~/.profile` deterministically (`_install_sh_modify_path`'s
+    own convention).
+
+    Also covers the review finding that a bare `printf ... >>"$rc" 2>/dev/null`
+    is inert: the shell's own diagnostic from failing to open `>>"$rc"` is
+    written before `2>/dev/null` takes effect, so a raw `install.sh: line N:
+    cannot create ...` would reach the terminal right ahead of the friendly
+    "could not update" message. Asserted by absence below.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".profile").mkdir()  # a directory here, not a file -- the append can never succeed
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", FIRST_ARCHIVE_TAG,
+        extra_env={"SHELL": "/bin/sh"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    combined = result.stdout + result.stderr
+    assert "installed tan ->" in combined
+    assert "could not update" in combined
+    assert (dest / "tan").is_file(), "the install itself must still have landed despite the rc-append failure"
+    # The shell's own open-failure diagnostic must not leak ahead of the
+    # friendly message -- it would read as the install itself having broken.
+    assert "cannot create" not in result.stderr, result.stderr
+
+
+@posix_only
+def test_sh_rc_update_is_skipped_gracefully_when_home_is_unset(release_server, tmp_path):
+    """tan-cli#803, folded into the same fix: every rc path the MODIFY_PATH
+    block's `case "$(basename "${SHELL:-/bin/sh}")" in ... esac` picks is
+    `$HOME/<dotfile>`. Under `set -eu`, dereferencing `$HOME` while it is
+    unset would abort the script right there -- again, well past the point
+    the install already committed.
+
+    This precondition is real, not hypothetical: `INSTALL_DIR`'s own
+    `"${TAN_INSTALL_DIR:-$HOME/.local/bin}"` fallback (install.sh:36) only
+    evaluates `$HOME` when `TAN_INSTALL_DIR` is UNSET -- so setting
+    `TAN_INSTALL_DIR` explicitly (as this test does, matching a container
+    running as an arbitrary UID with no `/etc/passwd` entry and `$HOME`
+    unset) sails straight past that earlier reference and only meets the
+    unset `$HOME` here, after the point of no return.
+    """
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, tmp_path, "--version", FIRST_ARCHIVE_TAG,
+        extra_env={"SHELL": "/bin/sh", "HOME": None, "TAN_INSTALL_DIR": str(dest)},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    combined = result.stdout + result.stderr
+    assert "installed tan ->" in combined
+    assert "HOME is not set" in combined
+    assert (dest / "tan").is_file()
 
 
 @posix_only

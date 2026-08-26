@@ -15,8 +15,14 @@ planner-venv Python and the toolchain root exactly ONCE and hands them in as
 `TokenValues`; it also owns invoking `git` for the `sdkCommit` check
 (`sdk_commit_mismatches` here only compares strings).
 
-A plan without `planPathMode: "tokened"` -- every plan the SDK emits today --
-is untouched by `substitute_plan_tokens`: a byte-identical no-op.
+A plan without `planPathMode: "tokened"` is untouched by
+`substitute_plan_tokens`: a byte-identical no-op ONLY when the key is ABSENT
+(`plan_path_mode is None`, `:440`) -- present-but-other raises
+`UnknownPlanPathMode` (`:445-446`) instead. Reachable via `--plan-from`
+handing in an older plan with no `planPathMode` key at all -- tan's own
+in-process planner (`tan.planner.buildplan.emit_build_plan`) tags every
+plan it renders `planPathMode: "tokened"` unconditionally (tan-cli#853), so
+an ABSENT `planPathMode` is no longer "every plan the SDK emits today".
 
 tan-cli #89: an unresolved `${TOOLCHAIN_ROOT}` splits into two outcomes
 depending on WHERE it survives substitution. `boardYaml` and
