@@ -172,12 +172,17 @@ REAL_ENVIRON: dict[str, str] = dict(os.environ)
 # So this runs earlier still, from `pytest_configure` -- before collection,
 # before ANY fixture, session-scoped or not, has executed -- and builds its
 # OWN scrubbed-HOME environment by hand from `REAL_ENVIRON` rather than
-# waiting for `_scrub_sdk_discovery_env` to produce one. That is the single
-# most important property here: a check that let the real fixture do the
-# scrubbing for it, or that read `os.environ` after collection had begun,
-# would inherit the bug it exists to catch and pass in exactly the case that
-# matters. Building the equivalent scrub independently, from the untouched
-# capture, is what keeps the two decoupled.
+# waiting for `_scrub_sdk_discovery_env` to produce one. The single most
+# important property here is that HOOK ORDERING: a check that let the real
+# fixture do the scrubbing for it, or that read the live environment after
+# collection had begun, would inherit the bug it exists to catch and pass in
+# exactly the case that matters. Reading from `REAL_ENVIRON` rather than
+# `os.environ` is what makes that independent of a future change nearby --
+# AT pytest_configure time the two are still equal (no fixture has run yet
+# to diverge them), so today the ordering alone is what protects this check;
+# building the scrub from the untouched capture, rather than the live
+# environment, is what keeps that true even if something earlier in
+# collection someday starts mutating `os.environ` directly.
 #
 # What is probed is deliberately NOT a hardcoded package name. `typer` was
 # this incident's proximate cause, but it is not the only runtime dependency
@@ -343,14 +348,26 @@ def _home_preflight_failure() -> str | None:
     nothing to do with HOME (a `SyntaxError` in `tan/cli.py`, say), and
     printing this function's venv-repair recipe in that case sends a
     developer chasing a cause that isn't there. So a scrubbed-HOME failure
-    triggers a CONTROL: the identical probe run again under
-    `REAL_ENVIRON`, completely untouched -- the two runs differ in HOME and
-    nothing else, which is what lets the diagnostic tell "HOME did this"
+    triggers a CONTROL: the identical probe run again under `REAL_ENVIRON`,
+    with only `ALP_SDK_ROOT` also popped (matching `_home_scrubbed_environ`,
+    so a variable neither probe's subject reads today cannot later become an
+    unnoticed second difference) -- the two runs differ in HOME/USERPROFILE
+    and nothing else, which is what lets the diagnostic tell "HOME did this"
     from "tan is just broken here" apart, and print the right one.
 
     A pure function of `REAL_ENVIRON` and this host's filesystem -- no
     fixture, no pytest state -- so `pytest_configure` below can call it before
     collection has even started.
+
+    This is a TWO-SAMPLE comparison, once each, with no retry and no stderr
+    diffing between the two runs -- it cannot, on its own, distinguish "the
+    scrubbed probe failed because of HOME" from "the scrubbed probe hit a
+    one-off flake (a transient fork failure, a momentarily-full disk, a slow
+    CI neighbour) that the control's later, unrelated run simply didn't
+    repeat." A flaky scrubbed-probe failure paired with a healthy control
+    still prints the venv recipe and blames HOME, wrongly, on exactly that
+    scenario. Treat a report from this function as a strong lead, not a
+    proof, if the failure doesn't reproduce on a second run.
     """
     with tempfile.TemporaryDirectory(prefix="tan-home-preflight-") as scratch_home:
         scrubbed_env = _with_repo_pythonpath(_home_scrubbed_environ(Path(scratch_home)))
@@ -360,7 +377,17 @@ def _home_preflight_failure() -> str | None:
     if probe.returncode == 0:
         return None
 
-    control_env = _with_repo_pythonpath(REAL_ENVIRON)
+    # `ALP_SDK_ROOT` popped here too, matching `_home_scrubbed_environ` --
+    # otherwise the two probes would differ in HOME/USERPROFILE AND in
+    # whether `ALP_SDK_ROOT` is bound, which is exactly the two-variable
+    # confound the "differ ONLY in HOME" claim below (and in
+    # `_with_repo_pythonpath`'s own docstring) exists to rule out. `tan
+    # --version` does not read `ALP_SDK_ROOT` today, so this is inert now --
+    # but a control that could pass or fail on ALP_SDK_ROOT alone would stop
+    # being a control the moment that stops being true.
+    control_env = dict(REAL_ENVIRON)
+    control_env.pop("ALP_SDK_ROOT", None)
+    control_env = _with_repo_pythonpath(control_env)
     control = _run_version_probe(
         control_env, "under this interpreter's own, REAL, unmodified HOME (the control probe)"
     )
@@ -468,6 +495,19 @@ def pytest_configure(config: pytest.Config) -> None:
         return
     problem = _home_preflight_failure()
     if problem is not None:
+        raw_value = os.environ.get(TAN_TEST_SKIP_HOME_PREFLIGHT)
+        if raw_value:
+            # The var IS set, just not to a recognised value (fail-safe:
+            # `y`/`t`/`enabled` and similar near-misses don't skip the
+            # check) -- say so explicitly, or a developer who already tried
+            # to bypass this sees only "set X=1" and has no reason to
+            # suspect their existing `X=y` was the reason it didn't work.
+            problem += (
+                f"\n\n(note: {TAN_TEST_SKIP_HOME_PREFLIGHT} is already set to "
+                f"{raw_value!r}, which is not one of the recognised bypass "
+                f"values -- {sorted(_SKIP_HOME_PREFLIGHT_TRUE_VALUES)!r}, "
+                "case-insensitively.)"
+            )
         raise pytest.UsageError(problem)
 
 
@@ -1029,6 +1069,15 @@ def tan_under_test() -> None:
 
     Session-scoped and autouse from the tree root, so it nets every consumer
     -- in-process import and spawned child alike -- present and future.
+
+    Before deleting this because it looks "USELESS for tan-cli#903
+    SPECIFICALLY" (it is -- see the long block comment ~870 lines above,
+    right before `TAN_TEST_SKIP_HOME_PREFLIGHT` is defined): read that
+    comment first. It stays the only spawn-probe still armed on the two
+    paths that skip `pytest_configure`'s check entirely (an xdist WORKER
+    process, and a session run with `TAN_TEST_SKIP_HOME_PREFLIGHT` set), and
+    it is the only thing guarding tan-cli#423/#665 (wrong `tan` under test)
+    on those two paths.
     """
     repo_python = Path(__file__).resolve().parents[1]
 

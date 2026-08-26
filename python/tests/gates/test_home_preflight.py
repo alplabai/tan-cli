@@ -211,7 +211,8 @@ def _stub_run(*, scrubbed_returncode: int, control_returncode: int):
     `REAL_ENVIRON["HOME"]`, and answers each with its own returncode.
 
     `HOME` only, deliberately -- `_home_preflight_failure`'s control call
-    passes `REAL_ENVIRON` through UNMODIFIED, and on POSIX that dict has no
+    passes `REAL_ENVIRON` through with `HOME` untouched (only `ALP_SDK_ROOT`
+    also popped, matching the scrubbed probe), and on POSIX that dict has no
     `USERPROFILE` key at all (`_home_scrubbed_environ` is what INTRODUCES
     `USERPROFILE`, only for the scrubbed probe); requiring both to match
     would make the control probe indistinguishable from itself.
@@ -355,9 +356,22 @@ def _repo_python() -> str:
     return str(Path(conftest_module.__file__).resolve().parents[1])
 
 
-def test_pytest_configure_aborts_the_session_with_a_usage_error(pytester):
+def test_pytest_configure_aborts_the_session_with_a_usage_error(pytester, monkeypatch):
     """The core of tan-cli#903: a non-`None` diagnostic must stop collection
-    ENTIRELY, before any test runs -- not warn, not run a degraded suite."""
+    ENTIRELY, before any test runs -- not warn, not run a degraded suite.
+
+    Neutralises an ambient `TAN_TEST_SKIP_HOME_PREFLIGHT` before spawning the
+    nested session: `pytester.runpytest_subprocess` inherits the parent
+    process's environment, so a developer who followed this very PR's own
+    failure-message advice and exported the escape hatch to work around an
+    unrelated failure would have it silently bypass the forced failure here
+    too, and this test would pass for the wrong reason (the abort never
+    fires, but nothing runs to prove it either) -- exactly the shape Major 1
+    of the #916 review found. The two sibling tests below don't need this:
+    they `setenv` the same var themselves, which already wins over anything
+    ambient.
+    """
+    monkeypatch.delenv(TAN_TEST_SKIP_HOME_PREFLIGHT, raising=False)
     pytester.makeconftest(
         _FORWARDING_CONFTEST.format(
             repo_python=_repo_python(), answer="FORCED PROBLEM (tan-cli#903 gate)"
@@ -413,3 +427,70 @@ def test_pytest_configure_bypass_rejects_zero(pytester, monkeypatch):
         f"TAN_TEST_SKIP_HOME_PREFLIGHT=0 bypassed the pre-flight -- outcome: {result.outlines}"
     )
     result.stderr.fnmatch_lines(["*FORCED PROBLEM (=0 must not bypass)*"])
+
+
+# ---------------------------------------------------------------------------
+# `pytest_configure` on an xdist WORKER -- the module docstring's claim that
+# this is "proven", made true (#916 review, Major 2). `config.workerinput` is
+# only set inside a worker process, so the ordinary forced-failure conftest
+# above cannot exercise this branch in isolation: forcing a non-`None` answer
+# aborts the CONTROLLER before it ever spawns a worker (the controller's own
+# `config.workerinput` is `None`, so it runs the real check first), and the
+# session never gets far enough to prove anything about the worker's copy of
+# the hook at all.
+#
+# So this conftest instead RECORDS every call to `_home_preflight_failure`
+# (into a file both the controller and any worker process can see) and always
+# answers `None` -- no abort, in either process, so both get a chance to run.
+# Under `-n 1` that is one controller process plus one worker process, each
+# with its OWN `pytest_configure` invocation: if the `workerinput` guard is
+# doing its job, only the controller's call is ever recorded. If it were
+# disabled (`if False:` in place of the guard), the worker would call it too
+# and the file would carry two records instead of one.
+# ---------------------------------------------------------------------------
+
+_RECORDING_CONFTEST = """
+import sys
+sys.path.insert(0, {repo_python!r})
+
+from pathlib import Path
+
+import tests.conftest as _tan_conftest
+
+_calls_path = Path({calls_path!r})
+
+def _recording_preflight():
+    with _calls_path.open("a", encoding="utf-8") as fh:
+        fh.write("call\\n")
+    return None
+
+_tan_conftest._home_preflight_failure = _recording_preflight
+
+def pytest_configure(config):
+    _tan_conftest.pytest_configure(config)
+"""
+
+
+def test_pytest_configure_skips_the_check_on_an_xdist_worker(pytester, tmp_path):
+    """A worker process must not re-run the probe: only the CONTROLLER's
+    invocation of `pytest_configure` should ever reach `_home_preflight_
+    failure` -- the worker's own call must be skipped via `config.workerinput`
+    being set. Mutation-proved: replacing that guard with `if False:` in
+    `tests/conftest.py::pytest_configure` turns this from `1` recorded call
+    into `2` (controller AND worker both call through)."""
+    calls_path = tmp_path / "calls.log"
+    pytester.makeconftest(
+        _RECORDING_CONFTEST.format(repo_python=_repo_python(), calls_path=str(calls_path))
+    )
+    pytester.makepyfile(test_runs_fine="def test_runs_fine():\n    assert True\n")
+
+    result = pytester.runpytest_subprocess("-n", "1", "-p", "xdist")
+
+    result.assert_outcomes(passed=1)
+    calls = calls_path.read_text(encoding="utf-8").splitlines() if calls_path.exists() else []
+    assert calls == ["call"], (
+        "expected exactly ONE recorded call to _home_preflight_failure (the "
+        "controller's) -- a worker process that also called through means "
+        "the `config.workerinput` skip in pytest_configure is not doing its "
+        f"job: {calls!r}"
+    )
