@@ -68,10 +68,9 @@ import sys
 from pathlib import Path
 
 import typer
-import yaml
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, resolve_sdk_tiered, sdk_resolution_issues
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.venv import west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkDisclosure, SdkInfo, emit
@@ -161,6 +160,10 @@ def _resolve_core(core_arg: str | None, board_yaml: str) -> str:
             "kconfig.board-yaml-missing",
             f"failed to read board.yaml at `{board_yaml}`: {err}",
         ) from err
+    import yaml  # noqa: PLC0415 -- deferred (tan-cli#810); see `new_som_cmd`'s
+    #                                 `_yaml_scalar` for why this file must not
+    #                                 import PyYAML at module scope.
+
     try:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as err:
@@ -403,32 +406,25 @@ def _run_kconfig(
     # resolution so every setup-class failure here is uniformly one shape,
     # never a spawn attempt with half-resolved inputs (mirrors kconfig.rs).
     sdk = resolve_sdk(sdk_root, root)
-    if sdk is None:
+    if sdk.path is None:
         # tan-cli#497 defect 2, the branch #578 explicitly left open (its own
         # comment here used to read "there is nothing resolved to report").
-        # `presets_cmd.resolve_sdk` deliberately collapses to a bare `None`
-        # whenever nothing resolves to a USABLE checkout, and its docstring
-        # documents that this drops `broken_project_pin`/
-        # `foreign_global_default_for` on the floor -- so a workspace whose
-        # own `.alp/sdk-path` pin is broken, with no OTHER tier resolving
-        # anything either, answered `kconfig.no-sdk-root` alone: the ladder
-        # had already computed the pin warning and this branch threw it away
-        # a second time. `resolve_sdk_tiered` is called again here, directly
-        # -- NOT through `resolve_sdk`, which is what discards the facts --
-        # to recover them: it is a pure four-tier filesystem walk with no
-        # side effects, so a second call costs a few stats, not a changed
-        # return contract for `presets_cmd`/`clean_cmd`, the other two
-        # callers of `resolve_sdk` that still share its `None`-collapsing
-        # shape and are unaffected by this fix.
+        # tan-cli#468 closed the gap this branch used to work around:
+        # `presets_cmd.resolve_sdk` now always returns an `ActiveSdk` (never a
+        # bare `None`) and carries `broken_project_pin`/
+        # `foreign_global_default_for` through even when `.path` stays
+        # unresolved -- so a workspace whose own `.alp/sdk-path` pin is
+        # broken, with no OTHER tier resolving anything either, no longer has
+        # to re-run the ladder a second time to recover them; `sdk` already
+        # has them.
         #
         # Still no `sdk=` -- there is genuinely no root to report, matching
-        # the oracle -- but `sdk_issues` now carries whatever the ladder
-        # found before giving up, in both JSON and text (`_fail` prepends
-        # and prints them), so the workspace's own diagnosis reaches the
-        # user instead of being computed and silently discarded.
-        active = resolve_sdk_tiered(sdk_root, Path(root))
+        # the oracle -- but `sdk_issues` carries whatever the ladder found
+        # before giving up, in both JSON and text (`_fail` prepends and
+        # prints them), so the workspace's own diagnosis reaches the user
+        # instead of being computed and silently discarded.
         sdk_issues = sdk_resolution_issues(
-            active.broken_project_pin, active.tier, active.foreign_global_default_for
+            sdk.broken_project_pin, sdk.tier, sdk.foreign_global_default_for
         )
         _fail(
             root=root,
@@ -461,15 +457,10 @@ def _run_kconfig(
     # ONCE here, threaded into all seven `_fail` sites below and into the
     # success emit -- and, via `disclosure` just below, into the eighth site
     # this function cannot reach: `kconfig`'s own `kconfig.internal-failure`
-    # catch-all. Ten `_fail` calls exist; the tenth is the `sdk is None` branch
-    # above, which now recovers the same two facts through a second,
-    # independent `resolve_sdk_tiered` call rather than through `resolve_sdk`
-    # (see that branch for why).
-    #
-    # `presets_cmd.resolve_sdk`'s OWN return contract is unchanged by that --
-    # it still collapses to a bare `None` and still drops both facts for its
-    # other two callers, `presets_cmd.py`'s own `presets()` and
-    # `clean_cmd._run`, which is theirs to fix, not this module's.
+    # catch-all. Ten `_fail` calls exist; the tenth is the `sdk.path is None`
+    # branch above, which reads the same two facts straight off `sdk` now
+    # (tan-cli#468 -- `resolve_sdk` carries them even when unresolved, so no
+    # second `resolve_sdk_tiered` call is needed any more).
     #
     # Kept alongside #504's envelope-seam advisory rather than deleted in
     # favour of it: the seam appends its pair at the END and dedupes BY CODE

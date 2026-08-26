@@ -106,7 +106,13 @@ from tan.commands.sdk_cmd import (
     resolve_sdk_tiered,
 )
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
-from tan.core.plan_exec import CROSS_DRIVE_MSG, PolicyAction, normalize_path, resolve_action
+from tan.core.plan_exec import (
+    CROSS_DRIVE_MSG,
+    MISSING_TOOL_RE,
+    PolicyAction,
+    normalize_path,
+    resolve_action,
+)
 from tan.core.plan_tokens import TOKEN_TOOLCHAIN_ROOT
 from tan.core.shapes import SDK_MARKER, is_sdk_root
 from tan.core.venv import venv_python
@@ -378,9 +384,9 @@ def _abs_posix(path: str) -> str:
     return os.path.abspath(path).replace("\\", "/")
 
 
-#: tan-cli#408: one implementation, in `tan.core.shapes`. Three modules
-#: carried a private copy of this and they had already drifted in TYPE --
-#: this one took a `Path`, `flash_cmd`'s and `renode_cmd`'s took a `str`.
+#: tan-cli#408: one implementation, in `tan.core.shapes`. The modules that
+#: carried a private copy of this had already drifted in TYPE --
+#: this one took a `Path`, `flash_cmd`'s took a `str`.
 #: Imported under the same private name so no call site here moves.
 _is_sdk_root = is_sdk_root
 
@@ -453,9 +459,9 @@ def resolve_sdk_root_ladder(sdk_root_arg: str | None, workspace_root: Path) -> S
     """The NARROW of this port's TWO discovery ladders,
     shared by the thirteen commands the oracle resolves narrowly (`build`,
     `doctor`, `clean`, `run`, `flash`, `size`, `image`, `kconfig`, `validate`,
-    `presets`, `inspect`, `trace`, `sdk current`). The other four -- `init`,
-    `generate`, `examples`, `renode` -- take [`resolve_sdk_root_wide`], below.
-    The measurement that splits 13 from 4 is the last paragraph here, and is
+    `presets`, `inspect`, `trace`, `sdk current`). The other three -- `init`,
+    `generate` and `examples` -- take [`resolve_sdk_root_wide`], below.
+    The measurement that splits 13 from 3 is the last paragraph here, and is
     deliberately not repeated there.
 
     `--sdk-root` (terminal, I-31) > the project's own pin (`.alp/sdk-path`,
@@ -494,13 +500,13 @@ def resolve_sdk_root_ladder(sdk_root_arg: str | None, workspace_root: Path) -> S
     -- `build`, `doctor`, `clean`, `run`, `flash`, `size`, `image`, `kconfig`,
     `validate`, `presets`, `inspect`, `trace`, `sdk current` -- resolve the
     LATERAL one there, i.e. the narrow order this ladder already has; only
-    `init`, `generate`, `examples` and `renode` take the child. The oracle
+    `init`, `generate` and `examples` take the child. The oracle
     carries two resolutions, not one, and this ladder mirrors the majority
     (narrow) one plus the wide walk as its tail. Inverting it to match the
-    other four would move the SDK root under thirteen commands, and a moved
+    other three would move the SDK root under thirteen commands, and a moved
     root is what `plan_exec.sdk_stamp_action` reads as a switch: every existing
     such workspace would take the `build.sdk-switch-pristine` branch on its
-    next build and lose every slice's build dir. The four wide commands were
+    next build and lose every slice's build dir. The three wide commands were
     the real gap; they now have their own helper below, which is why this one
     stays exactly as it is.
 
@@ -537,8 +543,8 @@ def resolve_sdk_root_ladder(sdk_root_arg: str | None, workspace_root: Path) -> S
 
 
 def resolve_sdk_root_wide(sdk_root_arg: str | None, workspace_root: Path) -> SdkRootResolution:
-    """The WIDE ladder, for the four commands the oracle routes through
-    `util.rs`'s `resolve_sdk_root`: `init`, `generate`, `examples`, `renode`.
+    """The WIDE ladder, for the three commands the oracle routes through
+    `util.rs`'s `resolve_sdk_root`: `init`, `generate`, `examples`.
     Same [`SdkRootResolution`] shape as [`resolve_sdk_root_ladder`], same
     field meanings.
 
@@ -598,7 +604,7 @@ _NARROW_COMMANDS = (
     "build, doctor, clean, run, flash, size, image, kconfig, validate, "
     "presets, inspect, trace and sdk current"
 )
-_WIDE_COMMANDS = "init, generate, examples and renode"
+_WIDE_COMMANDS = "init, generate and examples"
 
 
 def sdk_ladder_divergence_issue(
@@ -731,8 +737,11 @@ def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
     IN-PROCESS, always. `tan.planner_root.emit` binds the SDK root -- which is
     where `metadata/**` and the fact-reader modules still live (ADR-0017) -- and
     renders through the same `emit_artefact` dispatch `python -m tan.planner`
-    uses. No interpreter on PATH, no PYTHONPATH, no process, and nothing under
-    `<sdk>/scripts` imported or spawned.
+    uses. No interpreter on PATH, no PYTHONPATH, and nothing under
+    `<sdk>/scripts` imported or spawned -- but NOT "no process" full stop:
+    `emit_build_plan` still spawns a short-lived `git rev-parse` (a stamped
+    `sdkCommit`, `buildplan.py:339-372`) whenever `git` resolves on PATH; with
+    none, it returns `None` first and the plan carries `sdkCommit: null`.
 
     **The `<python> -m alp_orchestrate --emit build-plan` fallback was RETIRED
     here, deliberately.** It fired when this build of `tan` could not import the
@@ -1295,15 +1304,22 @@ def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[
     failed) slice could not find on this host.
 
     Matched on `outcome.message` rather than re-probing PATH a second time:
-    `execute_slices`' missing-tool branch (`build/execute.py`) is the ONLY
-    skip/fail reason that STARTS `` tool `{tool}` not found `` -- a
-    null-command skip reads `` has no command `` (and its reason already
+    every missing-tool refusal `execute_slices` (`build/execute.py`) can
+    produce carries [`MISSING_TOOL_RE`]'s shape somewhere in the message --
+    a null-command skip reads `` has no command `` (and its reason already
     lives in `plan.warnings`, I-11), and an unknown-backend one is caught
     structurally by `_backend_issues` above -- so this recovers exactly the
-    missing-tool cases and nothing else. `startswith` only, not also
-    `endswith` (tan-cli#510 dropped that half): the message now carries a
-    `-- searched ...` tail naming what `_resolve_tool` walked, so it no
-    longer ends on the literal `` not found ``.
+    missing-tool cases and nothing else.
+
+    tan-cli#801: this used to require the marker at the message's START
+    (`message.startswith("tool `")`), which matched only the slice's own
+    `command` precheck. The #550 post-build-step refusal
+    (`_missing_post_tool`) puts the SAME phrase after a `` slice `{core_id}`
+    post-build step N of M (`{label}`) cannot run: `` lead-in, so it never
+    started with the marker and this promoter silently dropped it -- the
+    exact silence tan-cli#283 was filed to close, just for a different
+    refusal site. `.search`, not `startswith`: the marker's position is not
+    part of the contract, only whether the message carries it at all.
 
     tan-cli#283: without this, `tan build` on a host missing `west`/`bitbake`
     reported each slice's specific reason only in `data.slices[].reason` --
@@ -1312,9 +1328,7 @@ def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[
     issues = []
     for sl, outcome in zip(plan.slices, outcomes, strict=True):
         message = outcome.message
-        if message is None or not message.startswith("tool `"):
-            continue
-        if "` not found" not in message:
+        if message is None or not MISSING_TOOL_RE.search(message):
             continue
         failed = outcome.status == "failed"
         issues.append(
@@ -1484,8 +1498,8 @@ def _build(
 
     # Substitution runs on the in-memory plan BEFORE materialise writes
     # anything and before any command is assembled, so an unresolvable token
-    # can never reach disk or an argv. A no-op on an untokened plan (every
-    # plan the SDK emits today).
+    # can never reach disk or an argv. A no-op on an untokened plan -- e.g. an
+    # old `--plan-from` file (the planner itself now tags every plan tokened).
     toolchain = _toolchain_for_plan(text)
     try:
         plan, demotions = apply_plan_token_substitution(
@@ -1531,7 +1545,7 @@ def _build(
         raise BuildError(
             "build.unsupported-build-root",
             f"plan buildRoot `{plan.build_root}` is not `{CONSUMER_BUILD_ROOT}`; "
-            "tan's flash/size/image/renode read "
+            "tan's flash/size/image read "
             "`<project>/build/system-manifest.yaml`, so building elsewhere "
             "would leave them reading a stale or missing manifest",
             ExitCode.RUNTIME_FAILURE,

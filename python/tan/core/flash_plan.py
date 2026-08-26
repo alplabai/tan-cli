@@ -1151,8 +1151,9 @@ def openocd_program_word(text: str) -> str:
     never preserved the parity it was written to protect. So the two cases
     that exercise this ("multi-segment-interface-is-allowed",
     "openocd-forced-bin-appends-base") moved OUT of the byte-diff oracle
-    table entirely -- see `tests/parity/test_flash_oracle_parity.py`'s
-    `CASES` for the standing divergence note -- into a bounded
+    table entirely -- the standing divergence note lived in
+    `tests/parity/test_flash_oracle_parity.py`'s `CASES`, deleted with the
+    oracle axis in tan-cli#269 -- into a bounded
     exact-difference test that pins the ONLY token allowed to move.
     Bracing every artefact, with no predicate at all, is therefore not a
     behaviour change bought at the price of losing coverage: the coverage
@@ -1375,8 +1376,9 @@ def jlink_commander_script(
     `loadbin <artefact>, <base>` / `r` / `g` / `qc` and no verify line at all.
     Bug-for-bug parity would mean shipping a flash command that reports
     success for a write it never checked, on the backend that programs the
-    GD32 bridge; a silicon-safety fix outranks that. Out of reach of
-    `tests/parity/test_flash_oracle_parity.py` in any case -- the Commander
+    GD32 bridge; a silicon-safety fix outranks that. It was out of reach of
+    `tests/parity/test_flash_oracle_parity.py` even before tan-cli#269 deleted
+    that module -- the Commander
     script is written to a temp file and never appears in the envelope, whose
     `--dry-run` message names only the argv (`... -CommanderScript
     <generated.jlink>`).
@@ -1460,10 +1462,11 @@ def _resolve_jlink_device(fa: Any) -> str:
     would diverge from the oracle on 13 fixtures at once.
 
     **DIVERGES from the shipped Rust oracle** (`builders.rs:243`), which has no
-    such refusal and silently substitutes. Deliberate, and out of reach of
-    `tests/parity/test_flash_oracle_parity.py`: no `swd_probe` case there
-    declares `target` without ALSO forcing the openocd/pyocd path via
-    `use_openocd`/`use_pyocd`, which skips this branch entirely.
+    such refusal and silently substitutes. Deliberate, and it was out of
+    reach of `tests/parity/test_flash_oracle_parity.py` even before tan-cli#269
+    deleted that module: no `swd_probe` case there declared `target` without
+    ALSO forcing the openocd/pyocd path via `use_openocd`/`use_pyocd`, which
+    skips this branch entirely.
     """
     device = fa_str_checked(fa, "jlink_device", False)
     if device is not None:
@@ -1662,11 +1665,14 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     # instead of a pure preview. Every `--dry-run` case that names NEITHER
     # `openocd_usb_location` NOR `pyocd_uid` keeps that unconditional bypass,
     # UNCHANGED (`_JLINK_BINARIES[0]`, no `which()` call at all) -- this is
-    # also what every `tests/parity/test_flash_oracle_parity.py` `swd_probe`
-    # dry-run case relies on for a REPLAY-host-independent answer (13 frozen
-    # fixtures record `would run JLinkExe ...` regardless of what the replay
-    # host's PATH happens to hold); widening the real `which()` probe below
-    # to EVERY dry run would make those fixtures newly host-dependent on
+    # also what every `swd_probe` dry-run case relied on for a
+    # REPLAY-host-independent answer back when
+    # `tests/parity/test_flash_oracle_parity.py` diffed them; that module went
+    # with the oracle axis in tan-cli#269, and its 15 `would run JLinkExe ...`
+    # previews survive only as the frozen record `python/tests/fixtures/
+    # oracle_captures/test_flash_oracle_parity.json`, which nothing replays.
+    # The reason outlived the diff: widening the real `which()` probe below to
+    # EVERY dry run would make `--dry-run` host-dependent on
     # whatever probe tools this box happens to have, for no reason those
     # cases care about.
     #
@@ -2749,7 +2755,11 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     # that ID appears -- writing MRAM on the wrong attached board is the one
     # unrecoverable mistake this path can make. A hardware value, so it comes
     # from data: tan neither knows nor invents an IDR.
-    expect_dpidr = fa_str_checked(fa, "expect_dpidr", False)
+    # tan-cli#795: `as_hex_address=True` -- an unquoted YAML `expect_dpidr:
+    # 0x0BE12477` must round-trip back to `0x0BE12477`, the way `base` /
+    # `atoc_address` / `slot0_load_address` already do, not decay to the
+    # decimal string `199304311` and refuse the CORRECT board.
+    expect_dpidr = fa_str_checked(fa, "expect_dpidr", True)
     if expect_dpidr is not None:
         validate_address(expect_dpidr, "expect_dpidr")
 
@@ -2893,7 +2903,11 @@ def validate_flow_d_preflight_args(
     write -- with no diagnostic at all.
     """
     fa = flash_args
-    expected = fa_str_checked(fa, "expect_dpidr", False)
+    # tan-cli#795: `as_hex_address=True` -- same round-trip fix as
+    # `plan_alif_mram_jlink` above; a bare YAML integer must not decay to a
+    # decimal string that then fails to match the probe's hex-formatted banner
+    # on the CORRECT board.
+    expected = fa_str_checked(fa, "expect_dpidr", True)
     if expected is None and _fa_has_key(fa, "expect_dpidr"):
         raise FlashPlanError(
             f"{method}: flash_args.expect_dpidr is present but null/empty -- "
@@ -2904,6 +2918,7 @@ def validate_flow_d_preflight_args(
         if expected is None:
             return None, None
         validate_address(expected, "expect_dpidr")
+        _validate_expect_dpidr_width(expected, method)
         return expected, None
     read_device = fa_str_checked(fa, "jlink_device", False)
     if read_device is None and _fa_has_key(fa, "jlink_device"):
@@ -2934,8 +2949,34 @@ def validate_flow_d_preflight_args(
     if expected is None or read_device is None:
         return None, None
     validate_address(expected, "expect_dpidr")
+    _validate_expect_dpidr_width(expected, method)
     validate_identifier(read_device, "jlink_device")
     return expected, read_device
+
+
+def _validate_expect_dpidr_width(expected: str, method: str) -> None:
+    """Refuse an `expect_dpidr` that is not a full 32-bit / 8-hex-digit SW-DP
+    ID (tan-cli#795). `validate_address` (above) stays a generic charset check
+    of any length -- `base` and friends share it -- so this width rule lives
+    here instead, narrowly scoped to the one field this preflight arms off of,
+    and runs at the SAME PLAN-TIME call site as `validate_address` itself: both
+    `plan_swd_probe` and Flow D call `validate_flow_d_preflight_args` before
+    any write, via `tan.commands.flash_cmd`, so a truncated value surfaces
+    under `--dry-run` too, not only when a real J-Link probe reads a banner.
+
+    Without this, a truncated value like `0x2477`, or `0x477` (ARM's own
+    JEP106 designer field, shared by every ARM SW-DP), would match any ARM
+    board's banner and silently disarm the wrong-board guard.
+    """
+    digits = expected[2:] if expected[:2] in ("0x", "0X") else expected
+    if len(digits) == 8:
+        return
+    raise FlashPlanError(
+        f"{method}: flash_args.expect_dpidr = {_quoted(expected)} is not a full "
+        "32-bit SW-DP ID (8 hex digits) -- refusing to arm the wrong-board "
+        "guard with a value short enough to match more than one board (ARM's "
+        "own JEP106 designer field, 0x477, is shared by every ARM SW-DP)."
+    )
 
 
 def flow_d_preflight_script(

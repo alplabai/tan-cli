@@ -396,9 +396,6 @@ _FULL_CODE_CALLABLES: dict[tuple[str, str], int] = {
     ("tan/commands/model_cmd.py", "ModelError"): 0,
     ("tan/commands/kconfig_cmd.py", "_CoreResolutionError"): 0,
     ("tan/commands/init_cmd.py", "InitError"): 0,
-    ("tan/commands/renode_cmd.py", "_issue"): 0,
-    ("tan/commands/renode_cmd.py", "fail"): 0,
-    ("tan/commands/renode_cmd.py", "fail_sdk"): 0,
     ("tan/commands/flash_cmd.py", "_error"): 1,
     ("tan/commands/image_cmd.py", "_error_outcome"): 3,
     ("tan/commands/image_cmd.py", "_Notice"): 0,
@@ -457,9 +454,6 @@ _KNOWN_CODE_FORWARDS: frozenset[tuple[str, str]] = frozenset(
         ("tan/commands/image_cmd.py", "code"),  # `Issue(code, ...)` inside `_error_outcome`'s OWN
         # body -- `_error_outcome` is itself in `_FULL_CODE_CALLABLES`.
         ("tan/commands/size_cmd.py", "code"),  # same shape, `size_cmd.py`'s own `_error_outcome`.
-        ("tan/commands/renode_cmd.py", "code"),  # `_issue(code, ...)` inside `fail`/`fail_sdk`'s OWN
-        # bodies, forwarding THEIR OWN `code` parameter -- `fail`/`fail_sdk`
-        # are themselves in `_FULL_CODE_CALLABLES`, so their call sites carry it.
         ("tan/commands/west_forward_cmd.py", "code"),  # `Issue(code, ...)` inside `_refuse_required`'s
         # OWN body (tan-cli#454) -- `_refuse_required` is itself in
         # `_FULL_CODE_CALLABLES`, so its two call sites carry the literal.

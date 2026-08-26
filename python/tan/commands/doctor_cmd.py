@@ -151,19 +151,33 @@ from tan.core.bootstrap import (
     PrereqFailure,
     WorkspaceSdkRecord,
     confirm_missing,
+    detect_linux_pm,
+    normalize_linux_install,
     parse_west_zephyr_pin,
     parse_workspace_sdk_record,
     parse_zephyr_version_file,
     posix_venv_unusable,
     reported_missing,
+    select_linux_install,
 )
 from tan.core.consent import can_prompt
+from tan.core.doctor_git import (
+    _git_behind_upstream,
+    _git_core_longpaths,
+    _git_short_commit,
+    _is_own_git_checkout,
+    _resolve_git_executable,
+    classify_git_core_longpaths,
+)
 from tan.core.doctor_libraries import LibraryReport, inspect_selection
 from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
+from tan.core.probe import PROBE_TIMEOUT_S, probe, probe_status
+from tan.core.sdk_default_registry import registry_path
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.timestamp import generated_at_iso
+from tan.core.tool_lookup import resolve_tool
 from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
 from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, terminal_width, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -196,12 +210,6 @@ ZEPHYR_PYTHON_FLOOR = (3, 12)
 #: it via `max()` either way, so a resolvable SDK checkout with the key present
 #: never depends on this value being current.
 FALLBACK_PYTHON_FLOOR = (3, 10)
-
-#: Seconds any single probe may take before it is killed. Generous enough for a
-#: cold `west --version` (it imports the whole west package), short enough that
-#: a J-Link binary waiting on a probe that is not plugged in cannot wedge the
-#: command.
-PROBE_TIMEOUT_S = 15
 
 #: The SETOOLS executables `alif_flash.py` looks for inside `$SETOOLS_DIR`
 #: (its `--app-gen-toc` / `--app-write-mram` defaults).
@@ -368,106 +376,49 @@ class Check:
 
 
 # ---------------------------------------------------------------------------
-# Probing. Every subprocess and every filesystem read in this module goes
-# through one of these two, and neither can raise.
+# Probing. `probe_status`/`probe` (tan.core.probe) are every subprocess this
+# module's checks read a tool's own answer through; `on_path` below is the
+# PATH-only presence walk. Every filesystem read goes through one of these
+# three, and none of them can raise. `probe_status`/`probe`/`PROBE_TIMEOUT_S`
+# moved to `tan.core.probe` (tan-cli#797 module-size budget) so
+# `tan.core.doctor_git` could depend on them without an import cycle back
+# into this file; re-imported here so every existing `probe(...)` call site
+# below, and every test referencing `doctor_cmd.probe`/`doctor_cmd.
+# PROBE_TIMEOUT_S`, keeps resolving unchanged.
 # ---------------------------------------------------------------------------
 
 
-def probe_status(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> tuple[bool, str | None]:
-    """Run `argv` and return `(ran, stdout)`.
-
-    `ran` is `True` exactly when the process was actually spawned AND exited
-    zero -- the one predicate that answers "could a build slice run this
-    binary at all". `stdout` is the captured text only when `ran` is `True`,
-    else always `None`. `probe()` below collapses both into a single `None`,
-    which is right for most callers (an unparseable version banner and a
-    binary that could not be spawned are both just "no answer") but wrong for
-    a caller that needs to tell "spawned fine, printed garbage" apart from
-    "never ran at all" -- `west_resolved_check` is exactly that caller
-    (tan-cli#488 defect 1): a `west` launcher whose file survives but whose
-    interpreter does not (a relocated workspace, a deleted `.venv/bin/python`)
-    is `is_file()`-true and therefore reaches this probe, but every real
-    invocation of it fails with `OSError`/a non-zero exit -- `probe()` alone
-    cannot distinguish that from a `west` that ran and printed something this
-    command's regex could not parse, and reporting the former as `pass` is
-    the false green this function exists to close.
-
-    See `probe()` for why each failure mode below is swallowed rather than
-    raised.
-    """
-    try:
-        out = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.DEVNULL,
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, ValueError, subprocess.SubprocessError):
-        # SubprocessError covers TimeoutExpired (the child is already killed by
-        # `run`); ValueError catches an empty/garbage argv rather than letting
-        # it escape as a traceback.
-        return False, None
-    return (out.returncode == 0), (out.stdout if out.returncode == 0 else None)
-
-
-def probe(argv: list[str], timeout: int = PROBE_TIMEOUT_S) -> str | None:
-    """Run `argv` and return its stdout, or `None` for every way that can fail.
-
-    `None` means "no answer", never "the answer is bad" -- callers must not read
-    it as a verdict. The failure modes this swallows are all real on a fresh
-    host: the binary is absent (`FileNotFoundError`), it is a directory or not
-    executable (`OSError`/`PermissionError`), it waits forever on a probe that is
-    not plugged in (`TimeoutExpired`), or it exits non-zero.
-
-    `stdin` is closed, not inherited: a tool that decides to prompt then reads
-    EOF and dies instead of blocking until the timeout. `errors="replace"` is
-    the same reason `tests/conformance` uses it -- a tool answering in the
-    platform code page must not turn into a `UnicodeDecodeError` crash that
-    masquerades as a host problem.
-
-    A thin wrapper over `probe_status` (above) for every caller that only ever
-    wanted "the answer, or nothing" and has no use for the ran/did-not-run
-    split.
-    """
-    return probe_status(argv, timeout)[1]
-
-
 def on_path(command: str) -> str | None:
-    """Resolve `command` against `$PATH` ONLY, returning its full path.
+    """Resolve `command` against `$PATH`, returning its full path.
 
     NOT `shutil.which`: on Windows that inserts `os.curdir` ahead of PATH
     (documented Windows search order), so a project checked out with its own
     `west.exe`/`openocd.exe` at its root would be reported as this host's
     tooling -- and a later flow would spawn exactly that project-controlled
-    binary. `crate::util::command_on_path` walks PATH by hand for this reason;
-    so does this.
+    binary.
+
+    ONE LOOKUP, NOT A SIXTH COPY (tan-cli#532). This used to hand-roll the
+    walk; it now delegates to `tan.core.tool_lookup.resolve_tool`, which
+    `build/execute.py`, `flash_cmd.py` and `size_cmd.py` already call.
+    `faultdecode_cmd` reaches the lookup THROUGH here, so this retires the
+    last two of the five copies. Only the FINDING is shared -- the signature
+    stays `str | None` so each caller keeps its own policy about a miss; ask
+    `resolve_tool` directly for its `searched` record.
+
+    WINDOWS BEHAVIOUR CHANGED, deliberately: the old copy's `[""] + %PATHEXT%`
+    accepted a bare extension-less `%PATH%` file ahead of every suffixed
+    sibling, and `resolve_tool` never tries the bare name. Reasoning and the
+    oracle comparison are in `tool_lookup`'s docstring; pinned by
+    `test_bare_argv0_spawn.py::
+    test_the_windows_walk_never_considers_the_bare_extensionless_name`, and
+    the delegation itself by `test_doctor_on_path_consolidation.py`. POSIX is
+    unaffected.
+
+    `os.environ`, not a threaded env: this is the doctor's HOST probe. Paths
+    resolving against a constructed environment (a workspace venv prepended)
+    call `resolve_tool` with that env and never come through here.
     """
-    raw = os.environ.get("PATH") or ""
-    if os.name == "nt":
-        exts = [""] + [
-            e
-            for e in (os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(os.pathsep)
-            if e
-        ]
-    else:
-        exts = [""]
-    for directory in raw.split(os.pathsep):
-        if not directory:
-            continue
-        for ext in exts:
-            candidate = Path(directory) / (command + ext)
-            try:
-                if candidate.is_file() and os.access(candidate, os.X_OK):
-                    return str(candidate)
-            except OSError:
-                # A PATH entry on a dead network share, a name too long for the
-                # filesystem: skip the entry, never fail the command.
-                continue
-    return None
+    return resolve_tool(command, os.environ).resolved
 
 
 def _read_text(path: Path) -> str | None:
@@ -909,7 +860,7 @@ def prerequisites_check(
     )
 
 
-def _posix_venv_capable(argv: list[str]) -> bool:
+def _posix_venv_capable(argv: list[str], executable: str | None = None) -> bool:
     """Whether `argv`'s Python can create a USABLE virtual environment
     (tan-cli#161). `python -m venv --help` cannot tell -- argparse answers
     before `ensurepip` is ever touched -- so this probes the real
@@ -928,10 +879,20 @@ def _posix_venv_capable(argv: list[str]) -> bool:
     NOT built on this file's own `probe()`: `probe()` collapses "ran and
     exited non-zero" and "could not run at all" to the same `None`, and
     those two outcomes need OPPOSITE verdicts here.
+
+    `executable` -- the PATH-RESOLVED interpreter path (tan-cli#797), e.g.
+    `_probe_host_python`'s own third return element. `argv` stays the bare
+    display spelling for the child's own `argv[0]`; only the OS-level lookup
+    is pinned, the same split every other resolved spawn in this module uses.
+    `None` is accepted (rather than required) so a caller that has not
+    resolved the interpreter still gets the pre-existing bare-spawn behaviour
+    -- there is no bare-git-style "refuse outright" case here, since `argv`
+    always comes from a candidate `_probe_host_python` already ran once.
     """
     try:
         result = subprocess.run(
             [*argv, "-c", "import ensurepip"],
+            executable=executable,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -1202,11 +1163,11 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
     disbelieved a diagnostic that was actually correct.
 
     Paired with `seven_zip_check` on Windows (`_collect`, gated `os.name ==
-    "nt" and not detected` -- mirroring `crate::build_readiness`'s exact
-    `probe.is_windows && !probe.zephyr_sdk` gate, tan-cli#204): the `west sdk
-    install` this Fail's fix names cannot complete on native Windows without
-    7-Zip on PATH (`tan.core.bootstrap`'s `manual_install_windows` prose), so
-    this Fail's advice is only actionable together with that check.
+    "nt"` and nothing else -- tan-cli#736 dropped the `!probe.zephyr_sdk` term
+    the Rust sibling had, since the host WITH an SDK and no 7-Zip is precisely
+    what the pairing is for; tan-cli#204 covers that check's SEVERITY, not its
+    gate): the `west sdk install` this Fail's fix names cannot complete on
+    native Windows without 7-Zip on PATH (`manual_install_windows` prose).
     """
     if detected:
         return Check("zephyrSdk", "pass", "Zephyr SDK toolchain detected.", scope="host")
@@ -1252,8 +1213,8 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
 
 
 def seven_zip_check(found: bool) -> Check:
-    """`sevenZip` -- Windows-only, and only while `zephyrSdk` is failing (see
-    `_collect`'s gate). Ports the Rust oracle's sibling check (`crate::
+    """`sevenZip` -- Windows-only, unconditionally (tan-cli#736 dropped the
+    `zephyrSdk`-is-failing half). Ports the Rust oracle's sibling (`crate::
     build_readiness`, tan-cli#204): `west sdk install`, the remedy
     `zephyr_sdk_check` names, extracts the `.7z` toolchain archive by
     delegating to `patoolib`, which shells out to one of `SEVEN_ZIP_PROGRAMS`
@@ -1952,8 +1913,8 @@ def sdk_check(
             # `alp-sdk at {sdk_root}` above, which keeps this host's native
             # separators and is left byte-identical. The reason is the CODE:
             # this branch's detail becomes an `issues[].message` under
-            # `sdk.discovery-divergent`, which five other commands also emit
-            # -- and all five build it from `_abs_posix`. A consumer
+            # `sdk.discovery-divergent`, which four other commands also emit
+            # -- and all four build it from `_abs_posix`. A consumer
             # correlating two envelopes would otherwise match a code across a
             # message spelled `C:/...` on one side and `C:\...` on the other.
             # The envelope is the contract; normalise the filesystem side to
@@ -1965,8 +1926,8 @@ def sdk_check(
             return Check(
                 "sdk",
                 "warn",
-                f"{posix_root}; `tan init`, `tan generate`, `tan examples` "
-                f"and `tan renode` resolve a DIFFERENT checkout from this "
+                f"{posix_root}; `tan init`, `tan generate` and "
+                f"`tan examples` resolve a DIFFERENT checkout from this "
                 f"directory ({_abs_posix(divergent_candidate)}) and report "
                 f'the same sourceTier "discovery", so generated files and '
                 f"the build plan can come from different SDK versions.",
@@ -1979,7 +1940,8 @@ def sdk_check(
         return Check("sdk", "pass", detail, scope="project")
     scope_note = f" for --project {project_scope}" if project_scope is not None else ""
     if broken_global_default is not None:
-        pointer = str(_home_alp_dir() / "sdk-default")
+        home = _home_alp_dir()
+        pointer = str(home / "sdk-default")
         return Check(
             "sdk",
             "fail",
@@ -1987,8 +1949,8 @@ def sdk_check(
             f'({pointer}) names "{broken_global_default}", which is not a '
             f"valid alp-sdk checkout, so tan fell through past it and found "
             f"nothing else either.",
-            f"{global_default_pointer_fix_hint(pointer)}, or pass "
-            f"--sdk-root <path> directly.",
+            f"{global_default_pointer_fix_hint(pointer, str(registry_path(home)))}, or "
+            f"pass --sdk-root <path> directly.",
             scope="project",
         )
     return Check(
@@ -2213,7 +2175,12 @@ def sdk_provenance_check(sdk_root: str) -> Check:
     and performs no network fetch, so it only reflects the checkout's state
     as of the last `git fetch` -- never blocks a build over it.
     """
-    commit = _git_short_commit(sdk_root)
+    # tan-cli#797: resolved ONCE and threaded through both git calls below --
+    # each spawns `git` itself, and re-resolving per call would not be wrong,
+    # only wasteful; the point that matters is that neither one hands
+    # `subprocess` the bare `"git"` (see `_resolve_git_executable`).
+    git_exe = _resolve_git_executable()
+    commit = _git_short_commit(sdk_root, git_exe)
     version = _read_sdk_version(sdk_root)
     if version and commit:
         detail = f"alp-sdk {version} @ {commit}"
@@ -2224,7 +2191,7 @@ def sdk_provenance_check(sdk_root: str) -> Check:
     else:
         detail = f"alp-sdk at {sdk_root} (no git checkout / metadata/sdk_version.yaml)"
 
-    behind = _git_behind_upstream(sdk_root)
+    behind = _git_behind_upstream(sdk_root, git_exe)
     if behind is not None and behind > 0:
         return Check(
             "sdkProvenance",
@@ -2236,60 +2203,9 @@ def sdk_provenance_check(sdk_root: str) -> Check:
     return Check("sdkProvenance", "pass", detail, scope="project")
 
 
-def _is_own_git_checkout(root: str) -> bool:
-    """Whether `root` is itself the TOP of a git checkout, not merely nested
-    somewhere inside an unrelated ENCLOSING one (tan-cli#488 defect 4).
-
-    `git -C <root> ...` discovery walks UPWARD looking for a `.git`, so an SDK
-    with no `.git` of its own -- an extracted release archive, vendored under
-    a customer's own application repository, which this port explicitly
-    supports (`sdk_cmd.check_sdk_readiness`'s own docstring names exactly this
-    shape) -- answers every git query with the ENCLOSING repo's state instead
-    of "not a checkout". `_git_short_commit`/`_git_behind_upstream` below both
-    call this FIRST and refuse (`None`) rather than misattribute a foreign
-    repository's commit or upstream-skew as the SDK's own.
-
-    Compares the RESOLVED `--show-toplevel` against the RESOLVED `root`:
-    lexical string comparison alone would false-negative on a symlinked or
-    differently-cased path to the same directory.
-    """
-    top = probe(["git", "-C", root, "rev-parse", "--show-toplevel"])
-    if top is None:
-        return False
-    try:
-        return Path(top.strip()).resolve() == Path(root).resolve()
-    except OSError:
-        return False
-
-
-def _git_short_commit(root: str) -> str | None:
-    """`git -C <root> rev-parse --short HEAD`, or `None` when `root` is not a
-    git checkout of its own (e.g. an extracted SDK release archive -- including
-    one vendored inside a customer's own git repository, see
-    `_is_own_git_checkout`)."""
-    if not _is_own_git_checkout(root):
-        return None
-    out = probe(["git", "-C", root, "rev-parse", "--short", "HEAD"])
-    if out is None:
-        return None
-    commit = out.strip()
-    return commit or None
-
-
-def _git_behind_upstream(root: str) -> int | None:
-    """Commit count `HEAD` is behind its upstream tracking ref, without
-    fetching. `None` when there is no upstream, or `root` is not a git
-    checkout of its own (see `_is_own_git_checkout`)."""
-    if not _is_own_git_checkout(root):
-        return None
-    out = probe(["git", "-C", root, "rev-list", "--count", "HEAD..@{upstream}"])
-    if out is None:
-        return None
-    try:
-        return int(out.strip())
-    except ValueError:
-        return None
-
+# _resolve_git_executable / _is_own_git_checkout / _git_short_commit /
+# _git_behind_upstream moved to tan.core.doctor_git (tan-cli#797 module-size
+# budget); imported above.
 
 def _read_sdk_version(root: str) -> str | None:
     """Read a version from `<root>/metadata/sdk_version.yaml`. Shares
@@ -2411,8 +2327,22 @@ def _macos_rosetta_translated() -> bool:
     macOS command-line surface. `probe()` (and so this) returns `False` on a
     pre-Big-Sur host where the sysctl does not exist -- the compiled arch is
     already correct there, matching Rust's `rc == 0 && translated == 1`.
+
+    `sysctl` itself is resolved through `tool_lookup.resolve_tool` before the
+    spawn (tan-cli#797), the same treatment as this module's other probes --
+    POSIX `execvp` never searches the current directory the way Windows'
+    `CreateProcess` does, so a bare `argv[0]` here was never the strong form
+    of the hazard, but leaving one spawn unresolved while the rest of the
+    module resolves would be a needless inconsistency for the next reader to
+    puzzle over. `False` when `sysctl` is not on PATH at all -- the same
+    "nothing to report" verdict as every other way this probe can fail.
     """
-    return (probe(["sysctl", "-n", "sysctl.proc_translated"]) or "").strip() == "1"
+    resolved = resolve_tool("sysctl", os.environ).resolved
+    if resolved is None:
+        return False
+    return (
+        probe(["sysctl", "-n", "sysctl.proc_translated"], executable=resolved) or ""
+    ).strip() == "1"
 
 
 def _host_os_arch_tags() -> tuple[str, str]:
@@ -2444,60 +2374,8 @@ def _host_os_arch_tags() -> tuple[str, str]:
     return host_os, arch
 
 
-def classify_git_core_longpaths(exit_code: int | None, stdout: str) -> bool | None:
-    """The three-way verdict for a `git config --get core.longpaths`
-    invocation -- the git-side counterpart to `_long_paths_enabled`'s
-    registry read, split out as its own pure function (mirroring
-    `tan_core::host_env::classify_git_core_longpaths`) so the exact mapping
-    tan-cli#306 argues hardest about is unit-tested without needing a real
-    `git` invocation for every case.
-
-    * exit 0 -> the stdout value, parsed with git's own boolean grammar.
-    * exit 1 -> `False`. `git config --get` documents this code as "the key
-      is not set in any scope (system/global/local)" -- git's own default,
-      and the state a fresh `HOME` is in (tan-cli#306's exact repro).
-    * anything else (`git` not on PATH, a malformed config file, a
-      permissions error) -> `None`: uncertain, not guessed.
-    """
-    if exit_code == 0:
-        value = stdout.strip().lower()
-        return value not in ("false", "no", "off", "0")
-    if exit_code == 1:
-        return False
-    return None
-
-
-def _git_core_longpaths() -> bool | None:
-    """Read git's own EFFECTIVE `core.longpaths` (system -> global -> local
-    precedence, resolved by `git config --get` itself rather than tan
-    re-implementing that precedence by hand) via a real `git` subprocess.
-
-    A SEPARATE axis from `_long_paths_enabled` on purpose (tan-cli#306): the
-    registry governs manifested Win32 API calls; it does nothing for git,
-    which `west update` uses for every project clone/checkout and which
-    refuses a long path unless ITS OWN setting says so -- the registry read
-    alone reported `pass` on a fresh `HOME` while `west update` died on
-    `hal_nxp`'s `tf-psa-crypto` tree.
-
-    Not built on this file's own `probe()`: `probe()` collapses "ran and
-    exited non-zero" (exit 1, meaning "unset") and "could not run at all"
-    (meaning "unknown") to the same `None`, and `classify_git_core_longpaths`
-    needs to tell those apart.
-    """
-    try:
-        out = subprocess.run(
-            ["git", "config", "--get", "core.longpaths"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.DEVNULL,
-            timeout=PROBE_TIMEOUT_S,
-            check=False,
-        )
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-    return classify_git_core_longpaths(out.returncode, out.stdout)
+# classify_git_core_longpaths / _git_core_longpaths moved to
+# tan.core.doctor_git (tan-cli#797 module-size budget); imported above.
 
 
 def _long_paths_enabled() -> bool | None:
@@ -2647,19 +2525,44 @@ def _zephyr_sdk_detected() -> bool:
     return False
 
 
-def _probe_host_python(floor: tuple[int, int]) -> tuple[str, tuple[int, int]] | None:
+def _probe_host_python(
+    floor: tuple[int, int],
+) -> tuple[str, tuple[int, int], str] | None:
     """First candidate that RUNS and clears `floor`; else the first that merely
     ran, so the too-old message can name a real version instead of "did not
-    run". Mirrors `crate::util::probe_host_python`."""
-    first_that_ran: tuple[str, tuple[int, int]] | None = None
+    run". Mirrors `crate::util::probe_host_python`.
+
+    tan-cli#797: `candidate[0]` (`"py"`/`"python"`/`"python3"`) is resolved
+    through `tool_lookup.resolve_tool` and spawned as `executable=`, keeping
+    `candidate` itself -- and therefore `entry`'s display spelling -- bare. A
+    candidate that does not resolve is skipped outright, the same "no answer"
+    treatment `probe()` already gives every other way this can fail; it is
+    never handed to `subprocess` unresolved.
+
+    The returned 3-tuple carries the RESOLVED path as its third element
+    alongside the display spelling and version, so a caller that needs to
+    spawn this same interpreter again (`_posix_venv_capable`'s `ensurepip`
+    probe) threads the already-resolved path through as `executable=` instead
+    of re-deriving argv from the display spelling and handing THAT bare to
+    `subprocess` -- the resolve-then-spawn-something-else divergence
+    tan-cli#797 exists to close. `python_check` only reads the first two
+    elements; a caller wanting just those may slice `found[:2]`.
+    """
+    first_that_ran: tuple[str, tuple[int, int], str] | None = None
     for candidate in _python_candidates():
-        out = probe([*candidate, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"])
+        resolved = resolve_tool(candidate[0], os.environ).resolved
+        if resolved is None:
+            continue
+        out = probe(
+            [*candidate, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+            executable=resolved,
+        )
         if out is None:
             continue
         version = _parse_two(out)
         if version is None:
             continue
-        entry = (" ".join(candidate), version)
+        entry = (" ".join(candidate), version, resolved)
         if version >= floor:
             return entry
         if first_that_ran is None:
@@ -3526,7 +3429,9 @@ def _collect(
     host_os, host_arch = _host_os_arch_tags()
     _add(zephyr_sdk_host_check(host_os, host_arch))
     if os.name == "nt":
-        _add(long_paths_check(_long_paths_enabled(), _git_core_longpaths()))
+        _add(
+            long_paths_check(_long_paths_enabled(), _git_core_longpaths(_resolve_git_executable()))
+        )
     _add(
         home_path_check(os.environ.get("USERPROFILE" if os.name == "nt" else "HOME"))
     )
@@ -3579,7 +3484,11 @@ def _collect(
     )
 
     python_found = _probe_host_python(effective_floor)
-    _add(python_check(python_found, effective_floor, effective_source))
+    _add(
+        python_check(
+            python_found[:2] if python_found else None, effective_floor, effective_source
+        )
+    )
     skew = python_floor_skew_check(
         manifest_floor,
         effective_floor,
@@ -3609,9 +3518,23 @@ def _collect(
     required = [t for t in required if isinstance(t, str)]
     install = facts.get("install")
     platform_key = "windows" if os.name == "nt" else ("macos" if sys.platform == "darwin" else "linux")
-    per_tool = install.get(platform_key) if isinstance(install, dict) else None
-    if not isinstance(per_tool, dict):
-        per_tool = {}
+    if platform_key == "linux":
+        # `install["linux"]` is package-manager-keyed, not tool-keyed like
+        # `macos`/`windows` (alp-sdk#1464 / tan-cli#760's second half) --
+        # `facts` is the RAW parsed manifest dict (`_load_manifest`), a
+        # separate reader from `tan.core.bootstrap.parse_bootstrap_manifest`,
+        # so it needs the SAME normalize/select reconciliation that reader
+        # applies, not a flat `.get(platform_key)` (which would silently
+        # return `{}` for every Linux tool, apt included).
+        linux_pm = detect_linux_pm(lambda binary: on_path(binary) is not None)
+        per_tool = select_linux_install(
+            normalize_linux_install(install.get("linux") if isinstance(install, dict) else None),
+            linux_pm,
+        )
+    else:
+        per_tool = install.get(platform_key) if isinstance(install, dict) else None
+        if not isinstance(per_tool, dict):
+            per_tool = {}
     # RAW -- `prerequisites_check` below does its OWN tan-cli#760 PATH
     # confirmation (`available=`) to build the customer-facing `missing`
     # field; this dict stays unguarded because it is also the source of
@@ -3629,7 +3552,7 @@ def _collect(
         sys.platform.startswith("linux")
         and not missing_tools
         and python_found is not None
-        and not _posix_venv_capable(python_found[0].split())
+        and not _posix_venv_capable(python_found[0].split(), executable=python_found[2])
     ):
         venv_refusal = posix_venv_unusable()
     _add(
@@ -3827,11 +3750,14 @@ def doctor(
         False,
         "--fix",
         help="Run the manifest's own install command (ADR 0021) for any "
-        "hostPrerequisites tool this host is missing, when it needs no "
-        "elevation. A command that needs `sudo` is printed, never run -- tan "
-        "never spawns sudo. Only in an interactive, non-CI, text-mode run "
-        "(--non-interactive/--ci/--format json all disable it): a repair a "
-        "human did not watch happen is not consent.",
+        "hostPrerequisites tool this host is missing. A command needing no "
+        "elevation runs for any caller; a `sudo`-prefixed one runs too, but "
+        "only when this process is already root, with the literal `sudo` "
+        "word stripped first -- tan itself never spawns the `sudo` program. "
+        "A non-root caller instead gets that command printed to run by hand. "
+        "Only in an interactive, non-CI, text-mode run (a real terminal on "
+        "both stdin and stderr; --non-interactive/--ci/--format json all "
+        "disable it): a repair a human did not watch happen is not consent.",
     ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     non_interactive: bool = typer.Option(

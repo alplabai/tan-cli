@@ -21,6 +21,7 @@ __all__ = [
     "configure_inputs_stamp_path",
     "discover_configure_inputs",
     "read_configure_inputs_stamp",
+    "resolve_zephyr_discovery_dir",
     "write_configure_inputs_stamp",
 ]
 
@@ -51,6 +52,48 @@ _CANDIDATE_GLOBS = (
     "socs/**/*.conf",
     "socs/**/*.overlay",
 )
+
+
+def resolve_zephyr_discovery_dir(app_dir: str, build_root: Path) -> Path:
+    """Anchor a slice's plan-supplied `appDir` on `build_root`, then apply
+    Zephyr's own `app: ./src`-vs-self-contained convention, so a caller
+    working from the CONFIGURED app dir (`appDir` -- see
+    `tan.commands.build_cmd`'s "Note `appDir` is NOT the substituted value"
+    docstring) lands on the directory Zephyr actually auto-discovers
+    overlays/Kconfig fragments from -- the same one `west build` is pointed
+    at (tan-cli#798).
+
+    Anchoring mirrors both existing `appDir` probes,
+    `build_cmd._missing_app_dirs` and `build_cmd._substituted_app_dirs`: a
+    relative `appDir` resolves against `build_root`, never the `tan`
+    process's own CWD, so the result does not depend on where `tan` was
+    invoked from. The fallback mirrors `tan.planner.orchestrator`'s
+    `_zephyr_app_dir` (hash-audited, tan-cli#655's relocation gate -- not
+    importable here without reproducing its `_resolve_app_path` machinery
+    for a value, `appDir`, that is already resolved): when `app_dir` itself
+    carries no `CMakeLists.txt` but its parent does, Zephyr auto-discovers
+    from the parent instead (the shipped `app: ./src` sources-only
+    convention -- 96 of 105 alp-sdk example core entries use it). Neither
+    directory existing is reported as-is; the caller's own existence checks
+    (`discover_configure_inputs` returns the empty set for a missing dir)
+    already handle that case correctly without this function raising.
+
+    Unlike `build_cmd._substituted_app_dirs`, this does NOT carry an
+    `app_dir_path.is_dir()` precondition before falling back to the parent --
+    a nonexistent `app_dir` whose parent happens to carry a `CMakeLists.txt`
+    globs the parent here. Deliberately left unguarded: this function's only
+    caller runs on slices that already survived `_missing_app_dirs`
+    (`build.app-dir-missing` already failed a nonexistent `appDir` before
+    `execute_slices` dispatches it), so the divergence is unreachable in
+    practice, not merely tolerated."""
+    app_dir_path = Path(app_dir)
+    if not app_dir_path.is_absolute():
+        app_dir_path = build_root / app_dir_path
+    if (app_dir_path / "CMakeLists.txt").is_file():
+        return app_dir_path
+    if (app_dir_path.parent / "CMakeLists.txt").is_file():
+        return app_dir_path.parent
+    return app_dir_path
 
 
 def discover_configure_inputs(app_dir: Path) -> frozenset[str]:

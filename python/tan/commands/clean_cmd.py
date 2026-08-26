@@ -91,7 +91,8 @@ import typer
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
 from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import SDK_MARKER, global_default_foreign_project_issue, project_pin_issue
+from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
+from tan.core.shapes import SDK_MARKER
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -831,18 +832,22 @@ def _run(
     workspace_root, board_yaml = resolve_project_paths(project_arg, board_yaml_arg)
     # tan-cli#236: `boardYaml` reported only when the file really exists.
     project = Project.resolved(workspace_root, board_yaml)
+    # tan-cli#468: `resolve_sdk` now always returns an `ActiveSdk` -- never a
+    # bare `None` -- so `broken_project_pin`/`foreign_global_default_for` are
+    # read off it unconditionally, whether or not `.path` resolved. `sdk` (the
+    # envelope's `SdkInfo`) is the one field that still depends on `.path`: no
+    # checkout means no `sdk` block, exactly as before.
     resolved_sdk = resolve_sdk(sdk_root_arg, workspace_root)
-    sdk = SdkInfo.from_resolution(resolved_sdk.path, resolved_sdk) if resolved_sdk else None
-    pin_issue = (
-        project_pin_issue(resolved_sdk.broken_project_pin, resolved_sdk.tier)
-        if resolved_sdk
+    sdk = (
+        SdkInfo.from_resolution(resolved_sdk.path, resolved_sdk)
+        if resolved_sdk.path is not None
         else None
     )
-    foreign_issue = (
-        global_default_foreign_project_issue(resolved_sdk.foreign_global_default_for)
-        if resolved_sdk
-        else None
+    pin_issue = project_pin_issue(resolved_sdk.broken_project_pin, resolved_sdk.tier)
+    foreign_issue = global_default_foreign_project_issue(
+        resolved_sdk.foreign_global_default_for
     )
+    resolution_issues = [i for i in (pin_issue, foreign_issue) if i is not None]
 
     # App base: a non-`.` positional roots the removal at that app dir,
     # overriding `--project`; `.` falls back to the resolved workspace.
@@ -865,7 +870,11 @@ def _run(
             data=_report("", dry_run, [], 0),
             project=project,
             sdk=sdk,
-            issues=[Issue("clean.sdk-root-not-found", "error", message)],
+            # tan-cli#468: a broken `.alp/sdk-path` pin (or a foreign
+            # `globalDefault`) with NO other tier resolving anything used to
+            # report this refusal alone -- `resolved_sdk` was a bare `None`
+            # here, dropping both facts on the floor.
+            issues=[*resolution_issues, Issue("clean.sdk-root-not-found", "error", message)],
             text=[f"clean: {message}"],
         )
 
@@ -891,21 +900,22 @@ def _run(
             data=_report(build_root, dry_run, [], 0),
             project=project,
             sdk=sdk,
-            issues=[Issue("clean.unsafe-build-root", "error", why)],
+            # tan-cli#468: same reasoning as the guard above -- this refusal
+            # can fire even when `resolved_sdk.path` is `None` (the wide
+            # ladder `sdk_root_resolves` walks can pass while the narrower
+            # tiered resolution `resolve_sdk` reports found nothing, tan-cli
+            # `sdk_root_resolves`'s own docstring), so it must not assume a
+            # checkout resolved either.
+            issues=[*resolution_issues, Issue("clean.unsafe-build-root", "error", why)],
             text=[f"clean: {why}"],
         )
 
     text: list[str] = []
-    issues: list[Issue] = []
-    if pin_issue is not None:
-        # tan-cli#263 review: `clean` reached the SDK guard above (something
-        # DID resolve), so the pin's silent fallthrough belongs in the same
-        # place every other non-fatal notice here lands.
-        issues.append(pin_issue)
-    if foreign_issue is not None:
-        # tan-cli#464: same reasoning, for a `globalDefault` answer a
-        # DIFFERENT project's bootstrap relocation actually decided.
-        issues.append(foreign_issue)
+    # tan-cli#263 review / tan-cli#464: `pin_issue`/`foreign_issue` computed
+    # once, above, from the one `resolved_sdk` -- this is the SAME pair the
+    # two refusals above prepend, read back rather than recomputed so all
+    # three paths can never disagree about whether either warning applies.
+    issues: list[Issue] = list(resolution_issues)
 
     # Best-effort, manifest-aware sweep. Absence (or an unreadable file) is
     # silent; a parse/version error is a warning, NEVER fatal -- clean must not
@@ -1091,20 +1101,29 @@ def clean(
             text=["clean: internal failure"],
         )
 
+    # Built ONCE, for both formats: `Envelope.__init__` appends the tan-cli#407
+    # `sdk.discovery-divergent` warning at the shared seam (`_with_sdk_
+    # divergence`), and `outcome.text` was assembled strictly before any
+    # `Envelope` existed -- so a seam-appended issue reached `--format json`
+    # and was silent on the default text channel (tan-cli#799). Diffed
+    # against `outcome.issues` (by value: `Issue` is a frozen dataclass) so
+    # only what the seam ADDED is rendered.
+    envelope = Envelope(
+        "clean",
+        outcome.project,
+        outcome.data,
+        outcome.issues,
+        outcome.exit_code,
+        sdk=outcome.sdk,
+    )
     if json_mode:
-        emit(
-            Envelope(
-                "clean",
-                outcome.project,
-                outcome.data,
-                outcome.issues,
-                outcome.exit_code,
-                sdk=outcome.sdk,
-            )
-        )
+        emit(envelope)
     else:
+        seam_extra = [issue for issue in envelope.issues if issue not in outcome.issues]
         # stdout is the envelope channel and carries nothing else, in either
         # mode; stderr carries no contract of its own.
+        for issue in seam_extra:
+            print(f"{issue.severity}: {issue.message}", file=sys.stderr)
         for line in outcome.text:
             print(line, file=sys.stderr)
     raise typer.Exit(int(outcome.exit_code))

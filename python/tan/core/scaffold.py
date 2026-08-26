@@ -843,9 +843,11 @@ def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
     shipped binary's without a hand-kept list here to drift out of step with
     it. `iot` is the one tree where the two LISTS differ, not just their order:
     it carries a `native_sim.conf` the frozen Rust tree never got (tan-cli#379,
-    declared in `tests/parity/test_scaffold_content_oracle_parity.py`'s
-    `FILE_SET_DIVERGENCE`), so `tan init --template iot-starter --format json`
-    returns one `fileChanges[]` entry more than the oracle does. Sorting is
+    declared in `test_scaffold_content_oracle_parity.py`'s
+    `FILE_SET_DIVERGENCE` until tan-cli#269 deleted it with the oracle axis;
+    `tests/core/test_template_integrity.py` pins the FILE now, not the diff),
+    so `tan init --template iot-starter --format json` returns one
+    `fileChanges[]` entry more than the oracle did. Sorting is
     what keeps every file the two trees DO share in the same relative order.
 
     Sorted on that STRING, never on the `Path`: `PurePath.__lt__` compares a

@@ -80,6 +80,17 @@ RAW_TAGS = ("v0.4.1", "v0.5.0-rc4")
 #: `RELEASES`/`_build_release`, so those stay a pure mirror of real published tags.
 BAD_PAYLOAD_TAG = "v9.9.9-badpayload"
 
+#: Archive-shaped counterpart to `BAD_PAYLOAD_TAG` (tan-cli#803): a real,
+#: well-formed `.tar.gz`/`.zip` (so extraction succeeds) whose packaged
+#: `tan`/`tan.exe` is `_write_garbage_executable` output instead of a working
+#: payload. `BAD_PAYLOAD_TAG` cannot exercise install.sh's ARCHIVE branch at
+#: all -- its assets are the RAW-shaped `v0.4.1` names, so install.sh takes the
+#: `else` arm (`payload="$tmp"`) that reuses an already-trapped temp path --
+#: so it can never catch a leak in the archive arm's OWN
+#: `payload="$(mktemp)"` launcher file, which is exactly what this tag exists
+#: to reach.
+BAD_PAYLOAD_ARCHIVE_TAG = "v9.9.9-badarchive"
+
 #: tag -> the asset names that tag really publishes, verbatim. ``checksums.txt``
 #: and ``envelope-contract.json`` are omitted from the values: the first is
 #: generated below from these names, and the second is never fetched by either
@@ -118,6 +129,24 @@ RELEASES: dict[str, tuple[str, ...]] = {
     # design -- until it is listed here. Leaving it out is not a skip, it is a
     # red on every open PR.
     "v0.5.1": (
+        "tan-aarch64-apple-darwin.tar.gz",
+        "tan-x86_64-apple-darwin.tar.gz",
+        "tan-x86_64-pc-windows-msvc.zip",
+        "tan-x86_64-unknown-linux-gnu.tar.gz",
+    ),
+    # v0.6.0 (2026-08-24) is the tag `latest` resolves to today, and it
+    # publishes the same four archives. Verified against the real release the
+    # way the entry above says to, not inferred from its predecessor:
+    #   gh release view v0.6.0 --repo alplabai/tan-cli --json assets
+    # returns exactly these four plus `checksums.txt` (483 B) and
+    # `envelope-contract.json` (296588 B), the two this dict omits by the
+    # convention documented above.
+    #
+    # The prediction in the v0.5.1 comment came true on the first tag after it
+    # was written: publishing v0.6.0 reddened the two bare-`latest` tests on
+    # every open PR against `dev` until this entry landed, including PRs that
+    # touched no installer code. That is the alarm working, not a flake.
+    "v0.6.0": (
         "tan-aarch64-apple-darwin.tar.gz",
         "tan-x86_64-apple-darwin.tar.gz",
         "tan-x86_64-pc-windows-msvc.zip",
@@ -225,6 +254,37 @@ def _build_bad_release(tag_dir: Path, assets: tuple[str, ...]) -> None:
     (tag_dir / "checksums.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
+def _build_bad_archive_release(tag_dir: Path, assets: tuple[str, ...], staging: Path) -> None:
+    """Archive-shaped counterpart to `_build_bad_release` -- see
+    `BAD_PAYLOAD_ARCHIVE_TAG`. Each asset is a REAL archive (extraction must
+    succeed, so the archive-only code path is actually reached) whose packaged
+    `tan`/`tan.exe` is `_write_garbage_executable` output, so the post-extract
+    health check still refuses.
+    """
+    tag_dir.mkdir(parents=True)
+    lines = []
+    for name in assets:
+        asset = tag_dir / name
+        work = staging / tag_dir.name / name
+        root = work / "tan"
+        (root / "_internal").mkdir(parents=True)
+        (root / "_internal" / "fixture-runtime.txt").write_text(
+            "stands in for the PyInstaller runtime\n", encoding="utf-8", newline="\n"
+        )
+        exe_name = "tan.exe" if name.endswith(".zip") else "tan"
+        _write_garbage_executable(root / exe_name)
+        if name.endswith(".zip"):
+            with zipfile.ZipFile(asset, "w", zipfile.ZIP_DEFLATED) as zf:
+                for item in sorted(root.rglob("*")):
+                    zf.write(item, item.relative_to(root.parent).as_posix())
+        else:
+            with tarfile.open(asset, "w:gz") as tf:
+                tf.add(root, arcname="tan")
+        digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+        lines.append(f"{digest}  {name}")
+    (tag_dir / "checksums.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+
+
 def _build_release(tag_dir: Path, assets: tuple[str, ...], staging: Path) -> None:
     tag_dir.mkdir(parents=True)
     lines = []
@@ -261,6 +321,10 @@ def release_server(tmp_path_factory):
     # platform triple -- so BAD_PAYLOAD_TAG resolves on whichever host/arch
     # this suite happens to run on -- but every one of them is garbage bytes.
     _build_bad_release(root / BAD_PAYLOAD_TAG, RELEASES["v0.4.1"])
+    # Same asset names FIRST_ARCHIVE_TAG really publishes -- see
+    # BAD_PAYLOAD_ARCHIVE_TAG -- but every one of them is a real archive
+    # wrapping a garbage `tan`/`tan.exe`.
+    _build_bad_archive_release(root / BAD_PAYLOAD_ARCHIVE_TAG, RELEASES[FIRST_ARCHIVE_TAG], staging)
 
     handler = functools.partial(_QuietHandler, directory=str(root))
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -376,6 +440,72 @@ def _fake_uname(tmp_path: Path, os_name: str, arch: str) -> Path:
         f'  -m) echo "{arch}" ;;\n'
         f'  *) echo "{os_name}" ;;\n'
         "esac\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    script.chmod(0o755)
+    return bin_dir
+
+
+def _fake_mktemp_honouring_tmpdir(tmp_path: Path, calls_log: Path) -> Path:
+    """A minimal ``mktemp`` stub staged ahead of the real one on PATH.
+
+    BSD/macOS ``mktemp`` -- unlike GNU ``mktemp`` -- ignores ``$TMPDIR`` when
+    invoked with no template (measured: ``TMPDIR=/x mktemp`` on macOS still
+    returns a path under ``/var/folders/.../T``, never ``/x``). A test that
+    redirects ``$TMPDIR`` to observe install.sh's temp-file hygiene is
+    therefore asserting on a directory the real ``macos-latest`` runner's
+    ``mktemp`` never puts anything in, REGARDLESS of whether install.sh is
+    fixed -- exactly the vacuous-on-macOS gap this stub exists to close. It
+    makes ``$TMPDIR`` authoritative on every platform (GNU semantics), and
+    logs every path it hands out to ``calls_log`` so a test can assert it was
+    actually exercised rather than merely that an always-empty directory
+    stayed empty.
+    """
+    bin_dir = tmp_path / "fake-mktemp-bin"
+    bin_dir.mkdir(exist_ok=True)
+    script = bin_dir / "mktemp"
+    script.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        # Only a bare invocation or a lone `-d` is supported -- anything else
+        # (notably a TEMPLATE argument, as install.sh:558's noexec-retry path
+        # uses: `mktemp -d "$INSTALL_DIR/.tan-install-retry.XXXXXX"`) would
+        # otherwise be silently ignored and re-rooted under $TMPDIR instead of
+        # honoured, inverting what a caller of THAT form asserts. Refusing
+        # loudly means the next reuse of this stub against a templated call
+        # fails fast instead of silently misdirecting it.
+        'if [ "$#" -eq 0 ]; then\n'
+        '\twant_dir=0\n'
+        'elif [ "$#" -eq 1 ] && [ "$1" = "-d" ]; then\n'
+        '\twant_dir=1\n'
+        'else\n'
+        '\techo "fake mktemp stub: only a bare or lone -d invocation is supported (got: $*)" >&2\n'
+        '\texit 1\n'
+        'fi\n'
+        'base="${TMPDIR:-/tmp}"\n'
+        'mkdir -p "$base" 2>/dev/null || true\n'
+        'n=0\n'
+        'candidate=""\n'
+        # Bounded, not `while :;` forever: a $base this stub cannot write into
+        # (e.g. a permissions problem in the test's own fixture) must fail
+        # fast and readably rather than spin until _run's 180s subprocess
+        # timeout with no diagnostic at all.
+        'while [ "$n" -lt 100 ] && [ -z "$candidate" ]; do\n'
+        '\tn=$((n + 1))\n'
+        '\ttry="$base/tmp.stub$$.$n"\n'
+        '\tif [ "$want_dir" = "1" ]; then\n'
+        '\t\tmkdir "$try" 2>/dev/null && candidate="$try"\n'
+        '\telse\n'
+        '\t\t(umask 077; : > "$try") 2>/dev/null && candidate="$try"\n'
+        '\tfi\n'
+        'done\n'
+        'if [ -z "$candidate" ]; then\n'
+        '\techo "fake mktemp stub: could not create a temp path under $base after 100 attempts" >&2\n'
+        '\texit 1\n'
+        'fi\n'
+        f'printf \'%s\\n\' "$candidate" >> "{calls_log}"\n'
+        'printf \'%s\\n\' "$candidate"\n',
         encoding="utf-8",
         newline="\n",
     )
@@ -607,12 +737,21 @@ def test_ps1_refuses_when_the_checksums_cannot_be_fetched(release_server, tmp_pa
     name (tan-cli#356 adversarial review, item 2). See
     `test_ps1_refuses_a_release_with_no_asset_for_this_platform` below for real
     Outcome-2 coverage.
+
+    tan-cli#803: tightened from the permissive
+    ``assert not dest.exists() or list(dest.iterdir()) == []`` to a strict
+    ``assert not dest.exists()``. That permissive form passes on an EMPTY
+    orphan directory -- exactly what install.ps1 used to leave behind here
+    pre-fix (`New-Item -ItemType Directory -Force -Path $Dir` ran before
+    checksums.txt was ever fetched), so this assertion could never have caught
+    the defect it was meant to guard. Since the fix defers that creation past
+    the health check, `$Dir` must now not exist AT ALL after this refusal.
     """
     dest = tmp_path / "prog"
     result = _install_ps1(release_server, dest, tmp_path, "-Version", "v9.9.9-does-not-exist")
 
     assert result.returncode != 0
-    assert not dest.exists() or list(dest.iterdir()) == []
+    assert not dest.exists(), "tan-cli#803: a refused install must not create $Dir at all"
     assert "could not fetch" in (result.stdout + result.stderr)
 
 
@@ -630,6 +769,9 @@ def test_ps1_refuses_a_release_with_no_asset_for_this_platform(release_server, t
     wording -- the defect this test exists to catch -- would leave this test
     (and its install.sh sibling) failing, unlike the misnamed test above,
     which stayed green either way.
+
+    tan-cli#803: strict ``not dest.exists()``, same reasoning as the sibling
+    test above -- the permissive form never proved $Dir stayed uncreated.
     """
     dest = tmp_path / "prog"
     result = _install_ps1(
@@ -638,12 +780,45 @@ def test_ps1_refuses_a_release_with_no_asset_for_this_platform(release_server, t
     )
 
     assert result.returncode != 0
-    assert not dest.exists() or list(dest.iterdir()) == []
+    assert not dest.exists(), "tan-cli#803: a refused install must not create $Dir at all"
     combined = result.stdout + result.stderr
     assert "lists no asset for aarch64-pc-windows-msvc" in combined
     assert "tan-aarch64-pc-windows-msvc.zip" in combined
     assert "tan-aarch64-pc-windows-msvc.exe" in combined
     assert "there is no prebuilt Windows arm64 asset from v0.5.0 onward" in combined
+
+
+@windows_only
+def test_ps1_refused_install_before_download_leaves_no_orphaned_intermediate_parents(release_server, tmp_path):
+    """tan-cli#803: install.ps1 used to run
+    ``New-Item -ItemType Directory -Force -Path $Dir`` as the very FIRST thing
+    it touched on disk (pre-fix install.ps1:169) -- before ``checksums.txt``
+    was even fetched. ``-Force`` makes that the ps1 equivalent of ``mkdir -p``,
+    so it created every missing PARENT directory too, and NONE of the cleanup
+    logic further down (which only runs inside the health-check-failure
+    branch) ever ran for a refusal this early -- checksums-fetch failure, no
+    asset for this platform, download failure, sha256 mismatch, and bad
+    archive layout all left the whole chain behind.
+
+    MEASURED pre-fix (this is the issue's own repro, reproduced by hand against
+    the real script before writing this test): ``-Dir <scratch>\\a\\deep\\new\\
+    path`` against an unreachable release left all four of ``a``, ``a\\deep``,
+    ``a\\deep\\new``, ``a\\deep\\new\\path`` on disk after a
+    ``could not fetch checksums.txt`` refusal, despite nothing having been
+    downloaded. install.sh never had this defect (tan-cli#490 review already
+    deferred its own ``mkdir -p`` this way); this is the ps1 parity fix -- and
+    ``-Dir`` is nested three levels deep here so the fix has to have created
+    NOTHING, not just correctly clean up one level.
+    """
+    dest = tmp_path / "a" / "deep" / "new" / "path"  # none of these must exist before this run
+    result = _install_ps1(release_server, dest, tmp_path, "-Version", "v9.9.9-does-not-exist")
+
+    assert result.returncode != 0
+    assert "could not fetch" in (result.stdout + result.stderr)
+    assert not (tmp_path / "a").exists(), (
+        "a refused install must not leave any intermediate parent directory behind, "
+        "not just the immediate -Dir leaf"
+    )
 
 
 @windows_only
@@ -699,6 +874,73 @@ def test_ps1_bad_payload_on_upgrade_leaves_previous_install_working(release_serv
 
 
 @windows_only
+def test_ps1_backup_rename_failure_mid_block_rolls_back(release_server, tmp_path):
+    """tan-cli#794: the three backup renames at install.ps1:531-545 (now folded
+    into the same try as the commit) used to run with NO catch of their own --
+    the only enclosing construct was the file-wide `try {`/`finally {}`, whose
+    `finally` only wipes the temp stem -- so a `Move-Item` throwing partway
+    through left whatever had already been renamed (here, `tan.cmd` ->
+    `tan.cmd.bak`) stranded, printed a raw PowerShell exception instead of the
+    rollback message, and left `tan` unresolved on PATH.
+
+    Fabricates a "previous install" directly (three marker files/dirs) rather
+    than installing for real first -- the backup block only Test-Path/Move-Item
+    the paths, it never reads their content, so this is a faithful and much
+    cheaper repro of the mid-backup-window failure than reproducing the
+    original issue's cwd-locks-a-directory trigger.
+
+    tan-cli#794 review (this file, this test): an `icacls /deny *S-1-1-0:(D)`
+    ACE on `tan.exe` itself does NOT reliably make `Move-Item` fail on NTFS --
+    DELETE on a child can be granted via the PARENT directory's
+    FILE_DELETE_CHILD right regardless of a deny ACE on the child, so the
+    rename can still succeed and the whole test never exercises the rollback
+    it exists to prove. Holding an OS-level open handle on `tan.exe` for the
+    duration of the install is used instead: Python's `open()` on Windows does
+    not request FILE_SHARE_DELETE, so for as long as this handle stays open no
+    other process (including `Move-Item`) can delete or rename that file --
+    `ERROR_SHARING_VIOLATION` is unconditional kernel-level file-locking
+    behaviour, not an ACL/SID resolution detail, so it doesn't depend on the
+    runner's account or locale the way the ACE approach did. Only `tan.exe`'s
+    handle is held, so `tan.cmd`'s rename (a separate, unlocked file) still
+    succeeds first, exactly the "already renamed one thing, now failing on the
+    next" shape the issue describes: `tan.exe`'s rename is the SECOND of the
+    three backup renames and throws on it. The handle lives inside a `with`
+    block scoped to just the install call, so it is always closed again --
+    even on an assertion failure, via the `with` statement's own teardown --
+    before this function returns, so pytest's own `tmp_path` teardown can
+    still delete the tree.
+    """
+    dest = tmp_path / "prog"
+    dest.mkdir()
+    (dest / "tan.cmd").write_text("PREVIOUS-CMD-MARKER")
+    (dest / "tan.exe").write_bytes(b"PREVIOUS-EXE-MARKER")
+    lib_dir = dest / "tan-cli-lib"
+    lib_dir.mkdir()
+    (lib_dir / "marker.txt").write_text("PREVIOUS-LIB-MARKER")
+
+    exe = dest / "tan.exe"
+    with open(exe, "rb"):
+        result = _install_ps1(release_server, dest, tmp_path, "-Version", "v0.4.1")
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    # The rollback path this issue adds coverage for -- not a raw exception.
+    assert "previous installation restored" in combined
+    assert "tan' still works as before" in combined
+    # tan.cmd must be back in place, byte-for-byte, not stranded as .bak.
+    assert (dest / "tan.cmd").read_text() == "PREVIOUS-CMD-MARKER"
+    assert not (dest / "tan.cmd.bak").exists()
+    # tan.exe was never actually moved (the throw happened ON its rename),
+    # so it is untouched, and no stray .bak sits beside it.
+    assert (dest / "tan.exe").read_bytes() == b"PREVIOUS-EXE-MARKER"
+    assert not (dest / "tan.exe.bak").exists()
+    # The LibDir rename is never reached -- the throw happens one rename
+    # before it -- so it too must be completely untouched.
+    assert (lib_dir / "marker.txt").read_text() == "PREVIOUS-LIB-MARKER"
+    assert not (dest / "tan-cli-lib.bak").exists()
+
+
+@windows_only
 def test_ps1_temp_execute_denied_retries_staging_inside_dest_dir(release_server, tmp_path):
     """tan-cli#490, Windows half: a host-level "no execute from here" refusal
     over the staging location -- the same shape an AppLocker / Software
@@ -738,6 +980,13 @@ def test_ps1_temp_execute_denied_distinguishes_from_a_broken_binary(release_serv
     is a host security policy, not the generic "missing runtime dependency /
     security software altered it" wording install.ps1 gives for an
     actually-corrupt payload.
+
+    tan-cli#803 regression coverage: this is also the one scenario that
+    exercises the noexec-retry's OWN `$Dir` creation (`$dirCreatedForRetry`,
+    since `$Dir`'s real creation is now deferred out of the top of the
+    script) -- the retry has to create `-Dir` itself to have anywhere to
+    stage a copy, and since the retry then ALSO fails here, that freshly
+    created `-Dir` must be cleaned up, not left as an empty orphan.
     """
     denied_root = tmp_path / "denied"
     denied_root.mkdir()
@@ -759,6 +1008,9 @@ def test_ps1_temp_execute_denied_distinguishes_from_a_broken_binary(release_serv
     assert "security policy" in combined
     # Must not misattribute a host security policy to a missing dependency.
     assert "may be missing a runtime dependency" not in combined
+    # tan-cli#803: the retry creates `-Dir` (there is nowhere else exec-able to
+    # stage a copy into) but must clean it back up once it too fails.
+    assert not dest.exists(), "the noexec-retry's own $Dir creation must be cleaned up on failure"
 
 
 @pwsh_only
@@ -1117,7 +1369,7 @@ def test_sh_refuses_when_the_checksums_cannot_be_fetched(release_server, tmp_pat
     result = _install_sh(release_server, dest, tmp_path, "--version", "v9.9.9-does-not-exist")
 
     assert result.returncode != 0
-    assert not dest.exists() or list(dest.iterdir()) == []
+    assert not dest.exists()  # tan-cli#803: strict -- install.sh creates $INSTALL_DIR only after the health check, so a refusal must leave nothing at all
     assert "could not fetch" in (result.stdout + result.stderr)
 
 
@@ -1144,7 +1396,7 @@ def test_sh_refuses_a_release_with_no_asset_for_this_platform(release_server, tm
     )
 
     assert result.returncode != 0
-    assert not dest.exists() or list(dest.iterdir()) == []
+    assert not dest.exists()  # tan-cli#803: strict -- install.sh creates $INSTALL_DIR only after the health check, so a refusal must leave nothing at all
     combined = result.stdout + result.stderr
     assert "lists no asset for aarch64-unknown-linux-gnu" in combined
     assert "tan-aarch64-unknown-linux-gnu.tar.gz" in combined
@@ -1210,7 +1462,7 @@ def test_sh_bad_payload_on_fresh_host_leaves_nothing_behind(release_server, tmp_
     result = _install_sh_modify_path(release_server, dest, home, "--version", BAD_PAYLOAD_TAG)
 
     assert result.returncode != 0
-    assert not dest.exists() or list(dest.iterdir()) == []
+    assert not dest.exists()  # tan-cli#803: strict -- install.sh creates $INSTALL_DIR only after the health check, so a refusal must leave nothing at all
     combined = result.stdout + result.stderr
     assert "newly downloaded binary failed to run" in combined
     assert "no previous installation existed" in combined
@@ -1251,6 +1503,56 @@ def test_sh_bad_payload_on_upgrade_leaves_previous_install_working(release_serve
     combined = result.stdout + result.stderr
     assert "your existing installation" in combined
     assert "was never touched" in combined
+
+
+@posix_only
+def test_sh_bad_archive_payload_leaves_no_launcher_temp_file(release_server, tmp_path):
+    """tan-cli#803: the archive-layout launcher (`$payload` -- the "Generated
+    by tan install.sh (tan-cli#349)" heredoc) is allocated by its OWN
+    `mktemp` call, made well AFTER `trap ... EXIT` was installed, and was
+    never added to it. `BAD_PAYLOAD_TAG` cannot catch this: its assets are
+    RAW-shaped, so install.sh takes the `else` arm (`payload="$tmp"`) that
+    reuses a path the trap already covers -- `BAD_PAYLOAD_ARCHIVE_TAG` is the
+    archive-shaped counterpart this leak actually needs to be reached at all.
+
+    A dedicated, EMPTY `$TMPDIR` (matching the issue's own repro) makes any
+    leaked file trivially visible: nothing but this script's own three trapped
+    temp paths (`$tmp`/`$sums`/`$stage`) should ever be created there, on any
+    exit path -- success or refusal.
+
+    `$TMPDIR` alone is not enough on macOS: BSD `mktemp` (unlike GNU) ignores
+    it when called with no template, so on `macos-latest` the directory this
+    test asserts against is ALWAYS empty regardless of whether install.sh
+    leaks -- this test would pass against the unfixed script there, guarding
+    the regression on Linux only while reading as cross-platform coverage.
+    `_fake_mktemp_honouring_tmpdir` makes `$TMPDIR` authoritative on every
+    platform and records every path it hands out, so the positive assertion
+    below proves this run actually exercised it rather than just finding an
+    untouched directory clean.
+    """
+    tmpdir = tmp_path / "tmpdir"
+    tmpdir.mkdir()
+    dest = tmp_path / "bin"
+    mktemp_log = tmp_path / "mktemp-calls.log"
+    fake_mktemp_dir = _fake_mktemp_honouring_tmpdir(tmp_path, mktemp_log)
+    env_path = f"{fake_mktemp_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+
+    result = _install_sh(
+        release_server, dest, tmp_path, "--version", BAD_PAYLOAD_ARCHIVE_TAG,
+        extra_env={"TMPDIR": str(tmpdir), "PATH": env_path},
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "newly downloaded binary failed to run" in combined
+    # Positive assertion: prove $TMPDIR was actually exercised, so an
+    # untouched directory can never again read as "no leak".
+    assert mktemp_log.is_file() and mktemp_log.read_text(encoding="utf-8").strip(), (
+        "the mktemp stub was never invoked -- this test would be checking a "
+        "directory install.sh never touched, not a real regression guard"
+    )
+    leftover = list(tmpdir.iterdir())
+    assert leftover == [], f"install.sh leaked temp file(s) in $TMPDIR: {leftover}"
 
 
 @posix_only
@@ -1914,6 +2216,77 @@ def test_sh_relative_install_dir_rc_file_gets_an_absolute_path(release_server, t
 
 
 @posix_only
+def test_sh_rc_append_failure_does_not_turn_a_successful_install_into_a_failure(release_server, tmp_path):
+    """tan-cli#803: the rc-file PATH append (install.sh:938, pre-fix) was
+    reached only AFTER the commit above had already succeeded and printed its
+    "installed tan -> ..." line (tan-cli#434's rollback boundary is well
+    behind this point) -- yet it was an UNGUARDED `printf ... >>"$rc"` under
+    `set -eu`. `printf` is not a POSIX special builtin, so its own redirect
+    failure is what `set -e` aborts the script on, turning an install that
+    had ALREADY succeeded into a nonzero exit.
+
+    Reproduced exactly as the issue itself measured it: `$HOME/.profile` is a
+    DIRECTORY, not a file, so the `>>` redirect can never succeed. `SHELL=/bin/sh`
+    pins the rc file to `~/.profile` deterministically (`_install_sh_modify_path`'s
+    own convention).
+
+    Also covers the review finding that a bare `printf ... >>"$rc" 2>/dev/null`
+    is inert: the shell's own diagnostic from failing to open `>>"$rc"` is
+    written before `2>/dev/null` takes effect, so a raw `install.sh: line N:
+    cannot create ...` would reach the terminal right ahead of the friendly
+    "could not update" message. Asserted by absence below.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".profile").mkdir()  # a directory here, not a file -- the append can never succeed
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, home, "--version", FIRST_ARCHIVE_TAG,
+        extra_env={"SHELL": "/bin/sh"},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    combined = result.stdout + result.stderr
+    assert "installed tan ->" in combined
+    assert "could not update" in combined
+    assert (dest / "tan").is_file(), "the install itself must still have landed despite the rc-append failure"
+    # The shell's own open-failure diagnostic must not leak ahead of the
+    # friendly message -- it would read as the install itself having broken.
+    assert "cannot create" not in result.stderr, result.stderr
+
+
+@posix_only
+def test_sh_rc_update_is_skipped_gracefully_when_home_is_unset(release_server, tmp_path):
+    """tan-cli#803, folded into the same fix: every rc path the MODIFY_PATH
+    block's `case "$(basename "${SHELL:-/bin/sh}")" in ... esac` picks is
+    `$HOME/<dotfile>`. Under `set -eu`, dereferencing `$HOME` while it is
+    unset would abort the script right there -- again, well past the point
+    the install already committed.
+
+    This precondition is real, not hypothetical: `INSTALL_DIR`'s own
+    `"${TAN_INSTALL_DIR:-$HOME/.local/bin}"` fallback (install.sh:36) only
+    evaluates `$HOME` when `TAN_INSTALL_DIR` is UNSET -- so setting
+    `TAN_INSTALL_DIR` explicitly (as this test does, matching a container
+    running as an arbitrary UID with no `/etc/passwd` entry and `$HOME`
+    unset) sails straight past that earlier reference and only meets the
+    unset `$HOME` here, after the point of no return.
+    """
+    dest = tmp_path / "bin"
+
+    result = _install_sh_modify_path(
+        release_server, dest, tmp_path, "--version", FIRST_ARCHIVE_TAG,
+        extra_env={"SHELL": "/bin/sh", "HOME": None, "TAN_INSTALL_DIR": str(dest)},
+    )
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    combined = result.stdout + result.stderr
+    assert "installed tan ->" in combined
+    assert "HOME is not set" in combined
+    assert (dest / "tan").is_file()
+
+
+@posix_only
 def test_sh_fish_shell_gets_fish_syntax_in_its_own_config_file(release_server, tmp_path):
     """tan-cli#490 review finding (install.sh:507): fish never reads
     ~/.profile and does not understand POSIX `export FOO=bar` -- falling
@@ -2271,6 +2644,99 @@ def _extract_ps1_shadow_functions() -> str:
     return text[start:end]
 
 
+#: What the two `@pwsh_only` probes below are allowed to spend, and it is NOT
+#: the assertion's budget (tan-cli#871). The bound that actually guards the
+#: behaviour under test lives inside install.ps1 -- `WaitForExit(5000)` plus
+#: `WaitAll(..., 1000)` in `Get-TanVersionReport` -- so nothing these probes
+#: exercise can legitimately need even the 30 s they used to allow, and
+#: raising this number therefore cannot mask a hang in the shipped code.
+#:
+#: What it must cover is everything that is a property of the HOST rather
+#: than of install.ps1: pwsh's cold start, and a runtime C# COMPILE.
+#: `Resolve-CanonicalPath` declares its `GetLongPathName` P/Invoke with
+#: `Add-Type -MemberDefinition`, which is not a declaration -- PowerShell
+#: emits C# source, runs the compiler, and writes and loads a temp assembly,
+#: with Defender scanning it on the way in. On a cold windows-latest runner
+#: that blew through 30 s and reddened `python-tests`, a required context, on
+#: a pull request that touches no installer. Both probes hash into the same
+#: shard, so they run back-to-back on one runner and only the FIRST pays it.
+#:
+#: 180 is what the heaviest subprocess calls in this file already allow.
+_PS1_PROBE_TIMEOUT_S = 180
+
+
+def _as_text(raw: str | bytes | None) -> str:
+    """Whatever a `TimeoutExpired` is carrying, as text -- see the platform
+    note at the call site for why the type is not knowable in advance.
+    `errors="replace"` because this only ever feeds a failure message: a
+    probe that died mid-UTF-8-sequence must still be readable.
+    """
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", "replace")
+    return raw or ""
+
+
+def test_probe_timeout_output_normalises_both_platform_spellings():
+    """`_as_text` is only ever reached when a probe has ALREADY timed out --
+    on Windows CI, rarely, which is the worst place to discover that the
+    diagnostic itself is broken. So pin it here, where it costs microseconds
+    and runs on every OS, rather than finding out from the next tan-cli#871.
+
+    Both spellings are real: `subprocess.run`'s timeout path decodes on
+    Windows and does not on POSIX. A regression to a bare `raw or ""` puts
+    `b'WINNER=...'` in the failure message on POSIX pwsh; a regression to a
+    bare `.decode()` raises AttributeError on Windows and replaces the real
+    failure with a crash inside the reporter.
+    """
+    assert _as_text(b"WINNER=x\n") == "WINNER=x\n"   # POSIX: raw buffer
+    assert _as_text("WINNER=x\n") == "WINNER=x\n"    # Windows: already decoded
+    assert _as_text(None) == ""                      # wrote nothing at all
+    assert _as_text(b"\xff") == "\ufffd"             # died mid-sequence, still readable
+
+
+def _run_ps1_probe(probe: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run one extracted-from-install.ps1 probe under a bound that survives a
+    cold host, and turn a timeout into something DIAGNOSABLE.
+
+    A bare `subprocess.run(..., timeout=...)` reports only the command line,
+    which is how tan-cli#871 arrived: a required check went red naming a
+    pwsh invocation and nothing about where it stalled. `TimeoutExpired`
+    already carries whatever the process managed to write, and these probes
+    narrate themselves (`WINNER=`, then `SHADOWED`/`NOT_SHADOWED`), so the
+    partial output localises the stall to a line. Surfacing it is the half
+    that makes a recurrence actionable rather than another rerun: no output
+    at all, at 180 s, is a genuine hang and a different bug from a slow host.
+    """
+    try:
+        return subprocess.run(
+            [PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(probe), *args],
+            capture_output=True, text=True, timeout=_PS1_PROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # `.stdout`/`.stderr` are `None` when the process wrote nothing, and
+        # their TYPE depends on the PLATFORM even though the call above is in
+        # text mode -- `subprocess.run`'s timeout path re-collects the output
+        # with `process.communicate()` on Windows, which decodes it (`str`),
+        # but on POSIX keeps what `Popen._communicate` already raised, which
+        # is the raw buffer (`bytes`, decoded nowhere). These probes are
+        # `pwsh_only`, not `windows_only`, so BOTH spellings are reachable and
+        # a `.decode` or a bare `!r` that assumes one of them is wrong on the
+        # other. Normalise instead of trusting a type.
+        partial_out = _as_text(exc.stdout)
+        partial_err = _as_text(exc.stderr)
+        pytest.fail(
+            f"pwsh probe did not finish within {_PS1_PROBE_TIMEOUT_S}s.\n"
+            f"probe: {probe}\n"
+            f"args: {list(args)}\n"
+            f"partial stdout: {partial_out!r}\n"
+            f"partial stderr: {partial_err!r}\n"
+            "Empty partial output here means the process never reached "
+            "`Write-Output \"WINNER=...\"`, i.e. it stalled in pwsh startup "
+            "or in `Add-Type`, not in the shadow logic."
+        )
+
+
 @pwsh_only
 def test_ps1_shadow_functions_detect_an_earlier_tan_on_path(tmp_path):
     """tan-cli#678, Windows half, at the resolution-logic level: given an
@@ -2314,10 +2780,8 @@ def test_ps1_shadow_functions_detect_an_earlier_tan_on_path(tmp_path):
         encoding="utf-8",
     )
 
-    result = subprocess.run(
-        [PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(probe),
-         "-DecoyDir", str(decoy_dir), "-TargetDir", str(target_dir), "-Dest", str(target)],
-        capture_output=True, text=True, timeout=30,
+    result = _run_ps1_probe(
+        probe, "-DecoyDir", str(decoy_dir), "-TargetDir", str(target_dir), "-Dest", str(target)
     )
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert f"WINNER={decoy}" in result.stdout
@@ -2383,10 +2847,8 @@ def test_ps1_shadow_functions_no_false_positive_when_our_install_wins(tmp_path):
         encoding="utf-8",
     )
 
-    result = subprocess.run(
-        [PWSH, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(probe),
-         "-TargetDir", str(target_dir), "-DecoyDir", str(decoy_dir), "-Dest", str(target)],
-        capture_output=True, text=True, timeout=30,
+    result = _run_ps1_probe(
+        probe, "-TargetDir", str(target_dir), "-DecoyDir", str(decoy_dir), "-Dest", str(target)
     )
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert f"WINNER={target}" in result.stdout

@@ -112,6 +112,11 @@ jobs:
   resolve-refs:
     name: resolve the alp-sdk ref under test
     runs-on: ubuntu-latest
+    # tan-cli#855: a single `gh api` call and nothing else -- no checkout, no
+    # build. Lighter than e2e-container.yml's `shellcheck` (5, which actually
+    # lints a tree of scripts), so 5 is generous headroom for one HTTP call
+    # plus the GitHub Actions runner's own startup/checkout-less overhead.
+    timeout-minutes: 5
     outputs:
       alp_sdk_ref: ${{ steps.resolve.outputs.alp_sdk_ref }}
     steps:
@@ -191,8 +196,8 @@ jobs:
         if: ${{ !matrix.expect_refuse }}
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci/apt-bounded.sh update
+          bash scripts/ci/apt-bounded.sh install -y --no-install-recommends \
               ninja-build device-tree-compiler gperf xz-utils
 
       - name: python (west needs it; the released tan binary does not)

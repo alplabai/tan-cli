@@ -407,3 +407,75 @@ def test_neither_core_live_is_also_not_a_collision(loader_mod):
     """Both parked: still nothing that can be flashed."""
     cores = _colliding_cores(loader_mod, "off", "off")
     loader_mod._enforce_slot0_disjoint_across_roles(cores, "E1M-AEN301")
+
+
+# --------------------------------------------------------------------------
+# tan-cli#756: every case above runs through `_flash_args_for`, which
+# RE-DERIVES the presence gate rather than calling the production one. Its
+# comment claimed to mirror "`loader.py`'s own call site"; it did not --
+# `_validate_topology_cores` gated on the VALUE (`if jlink_flash_device`)
+# while the helper gated on PRESENCE, so this suite stayed green against a
+# planner that dropped `slot0_load_address` for every declared-null variant.
+# Only the byte-parity suite caught it (`usb-host-storage` / E1M-AEN401,
+# `--emit system-manifest` line 19), and that suite SKIPS without a bound
+# alp-sdk -- i.e. on every ordinary `pull_request` run.
+#
+# The two tests below therefore drive `_validate_topology_cores` itself. A
+# helper that re-implements the decision under test can only ever report on
+# its own copy.
+# --------------------------------------------------------------------------
+
+
+def _resolved_cores(loader_mod, soc_spec: dict, som_preset: dict):
+    """`_validate_topology_cores` on a one-core `m55_hp` zephyr project --
+    the real gate, with the smallest inputs it accepts."""
+    core_entry = {"os": "zephyr", "app": "alp-stock-shim"}
+    som_preset = {**som_preset, "topology": {"m55_hp": core_entry}}
+    soc_spec = {**soc_spec, "cores": [{"id": "m55_hp", "type": "cortex-m55"}]}
+    # The trailing `metadata_root` is alp-sdk#1485's (ported in tan-cli#868):
+    # the stage threads the project's own root down to `_enforce_loader_rules`
+    # instead of letting it read the module-level bound one. These inputs
+    # never leave the dicts above, so the bound root is the right answer here
+    # -- the argument exists so a `--metadata-root` project cannot be
+    # validated against a tree it was not resolved from.
+    cores, _ipc = loader_mod._validate_topology_cores(
+        {"cores": {"m55_hp": core_entry}}, som_preset, soc_spec,
+        som_preset.get("sku", "E1M-AEN801"), "alif:ensemble:e8", {}, None,
+        loader_mod.METADATA_ROOT)
+    return cores
+
+
+def test_the_production_gate_resolves_slot0_for_a_declared_null_variant(
+        loader_mod):
+    """alp-sdk#1444/#1446 (`86260edc`) moved this gate to PRESENCE: a
+    variant declaring `jlink_flash_device: null` still gets its slot0-XIP
+    window resolved, so the address a Flow D write would target travels
+    with the present-null key the consumer refuses on, instead of vanishing.
+
+    Fails against the pre-#756 planner: the value gate saw `None`, skipped
+    `_resolve_slot0_load_address`, and left `slot0_load_address` unset.
+    """
+    cores = _resolved_cores(
+        loader_mod, _null_device_soc_spec(),
+        {"sku": "E1M-AEN801", "silicon_variant": "X"})
+    slice_ = cores["m55_hp"]
+    assert slice_.jlink_flash_device_declared is True
+    assert slice_.jlink_flash_device is None
+    assert slice_.slot0_load_address == "0x80010000", (
+        "a declared-null jlink_flash_device resolved no slot0_load_address "
+        "-- the production gate is back on VALUE, and `tan build` emits a "
+        "system-manifest alp-sdk does not (tan-cli#756)")
+
+
+def test_the_production_gate_resolves_no_slot0_when_the_key_is_absent(
+        loader_mod):
+    """The negative control, and the reason the test above cannot be
+    satisfied by resolving slot0 unconditionally: an ABSENT
+    `jlink_flash_device` is the variant saying nothing, and nothing is what
+    it must resolve."""
+    cores = _resolved_cores(
+        loader_mod, _absent_device_soc_spec(),
+        {"sku": "E1M-AEN801", "silicon_variant": "X"})
+    slice_ = cores["m55_hp"]
+    assert slice_.jlink_flash_device_declared is False
+    assert slice_.slot0_load_address is None, slice_.slot0_load_address

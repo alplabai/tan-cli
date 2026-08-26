@@ -6,7 +6,7 @@ exercises none of).
 
 **tan-cli#566** -- a plan whose ``buildRoot`` is not ``build`` was accepted,
 materialised and dispatched, and its ``system-manifest.yaml`` written under
-that other root, while ``tan flash`` / ``size`` / ``image`` / ``renode`` all
+that other root, while ``tan flash`` / ``size`` / ``image`` all
 anchor on ``<project>/build/system-manifest.yaml``. Measured on ``dev``
 before the fix, twice against a real alp-sdk checkout: run 1
 (``buildRoot: build``) wrote ``build/system-manifest.yaml``; run 2
@@ -188,7 +188,7 @@ def test_a_non_build_build_root_is_refused_before_anything_is_written(project):
     # Verbatim the oracle's own sentence -- it names the offending value AND
     # the file the hazard is about, which is what makes it actionable.
     assert env["issues"][0]["message"] == (
-        "plan buildRoot `out` is not `build`; tan's flash/size/image/renode "
+        "plan buildRoot `out` is not `build`; tan's flash/size/image "
         "read `<project>/build/system-manifest.yaml`, so building elsewhere "
         "would leave them reading a stale or missing manifest"
     )

@@ -64,13 +64,12 @@ from pathlib import Path
 import typer
 
 from tan.commands.sdk_cmd import (
-    SDK_MARKER,
     ActiveSdk,
     global_default_foreign_project_issue,
     project_pin_issue,
-    rejected_sdk_root_message,
     resolve_sdk_tiered,
 )
+from tan.core.shapes import SDK_MARKER, rejected_sdk_root_message
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -93,7 +92,7 @@ SDK_UNRESOLVED_MESSAGE = (
 )
 
 #: What the reader GOT instead, for the `--sdk-root`-was-given-and-rejected
-#: branch (`sdk_cmd.rejected_sdk_root_message`, tan-cli#497). The no-flag
+#: branch (`tan.core.shapes.rejected_sdk_root_message`, tan-cli#497). The no-flag
 #: message above is byte-pinned by the `presets-no-sdk` golden envelope and the
 #: `["presets","--format","json"]` oracle-parity case and is NOT touched; this
 #: branch is unreachable from either, because neither passes the flag.
@@ -524,8 +523,9 @@ def resolve_project_paths(project: str | None, board_yaml: str | None) -> tuple[
     return root, f"{root}{sep}{_posix(leaf)}"
 
 
-def resolve_sdk(sdk_root: str | None, workspace_root: str) -> ActiveSdk | None:
-    """The resolved checkout as an `ActiveSdk` (posix `.path`), or `None`.
+def resolve_sdk(sdk_root: str | None, workspace_root: str) -> ActiveSdk:
+    """The resolved checkout as an `ActiveSdk` (posix `.path`), `.path is None`
+    when nothing usable resolved.
 
     `resolve_sdk_tiered` walks the four tiers (`--sdk-root` > project pin >
     global default > discovery) and is TERMINAL on `--sdk-root` (I-31): a typo'd
@@ -536,28 +536,31 @@ def resolve_sdk(sdk_root: str | None, workspace_root: str) -> ActiveSdk | None:
     the same as "resolved something else".
 
     `.broken_project_pin` (tan-cli#263 review) and `.foreign_global_default_for`
-    (tan-cli#464) both carry through onto the returned `ActiveSdk` -- but ONLY
-    when this call resolves to a usable checkout. When it does not (`active.path`
-    is `None`, or the loader marker is missing) this returns a bare `None`
-    instead, which drops both facts on the floor: neither caller can surface a
-    fact it was never given. `presets` and `clean_cmd._run` both guard on this
-    return (`if sdk is not None` / `if resolved_sdk`), so a workspace with,
-    say, a broken `.alp/sdk-path` pin AND no OTHER tier resolving anything
-    reports `presets.sdk-root-unresolved` / `clean.sdk-root-not-found` alone,
-    with no `sdk.project-pin-unresolved` alongside it -- the same silent-drop
-    shape tan-cli#263/#464 exist to close, just on the "resolved to nothing at
-    all" branch rather than the "resolved to something else" one those issues
-    named. Left as-is rather than fixed here: closing it needs `resolve_sdk`
-    to distinguish "nothing to report" from "a usable checkout", which changes
-    this function's return contract for both callers, not a one-line fix.
-    Returned as `ActiveSdk` itself when it DOES resolve, not a growing tuple: a
-    fact one caller needs must not force every other caller's unpacking to
-    grow a matching positional slot (the same reasoning
-    `build_cmd.SdkRootResolution` documents).
+    (tan-cli#464) both carry through onto the returned `ActiveSdk` -- INCLUDING
+    when this call does NOT resolve to a usable checkout (tan-cli#468). This
+    used to return a bare `None` on that branch (`active.path` is `None`, or
+    the loader marker is missing), dropping both facts on the floor: neither
+    caller could surface a fact it was never given, so a workspace with, say,
+    a broken `.alp/sdk-path` pin AND no OTHER tier resolving anything reported
+    `presets.sdk-root-unresolved` / `clean.sdk-root-not-found` alone, with no
+    `sdk.project-pin-unresolved` alongside it -- the same silent-drop shape
+    tan-cli#263/#464 exist to close, just on the "resolved to nothing at all"
+    branch rather than the "resolved to something else" one those issues
+    named. Both callers now check `.path is not None` rather than this
+    function's own truthiness -- an `ActiveSdk` with `path=None` is still
+    truthy (it is never `None` any more), and unpacking one is exactly how a
+    caller reads `broken_project_pin`/`foreign_global_default_for` even when
+    there is no checkout to report.
+    Returned as `ActiveSdk` itself, not a growing tuple: a fact one caller
+    needs must not force every other caller's unpacking to grow a matching
+    positional slot (the same reasoning `build_cmd.SdkRootResolution`
+    documents).
     """
     active = resolve_sdk_tiered(sdk_root, Path(workspace_root))
     if active.path is None or not Path(active.path).joinpath(*SDK_MARKER).exists():
-        return None
+        return ActiveSdk(
+            None, active.tier, active.broken_project_pin, active.foreign_global_default_for
+        )
     return ActiveSdk(
         _posix(active.path), active.tier, active.broken_project_pin,
         active.foreign_global_default_for,
@@ -623,23 +626,28 @@ def presets(
     try:
         root, board_path = resolve_project_paths(project, board_yaml)
         sdk = resolve_sdk(sdk_root, root)
-        if sdk is not None:
+        # tan-cli#468: `resolve_sdk` now always returns an `ActiveSdk` -- never
+        # a bare `None` -- so `broken_project_pin`/`foreign_global_default_for`
+        # are read off it unconditionally, whether or not `.path` resolved.
+        # The `--sdk-root` case is unaffected: that tier is terminal, so both
+        # fields stay `None` there regardless of which branch runs below.
+        issues = [
+            issue
+            for issue in (
+                project_pin_issue(sdk.broken_project_pin, sdk.tier),
+                global_default_foreign_project_issue(sdk.foreign_global_default_for),
+            )
+            if issue is not None
+        ]
+        if sdk.path is not None:
             soms = read_soms(sdk.path)
             board_libraries = read_board_libraries(sdk.path)
-            issues = [
-                issue
-                for issue in (
-                    project_pin_issue(sdk.broken_project_pin, sdk.tier),
-                    global_default_foreign_project_issue(sdk.foreign_global_default_for),
-                )
-                if issue is not None
-            ]
         else:
             # tan-cli#497 defect 7 (the sibling of `examples_cmd`'s): a
             # rejected `--sdk-root` is named, so the reader can see WHICH path
             # failed the loader-marker check instead of only that "the alp-sdk
             # root is unresolved".
-            issues = [
+            issues.append(
                 Issue(
                     SDK_UNRESOLVED_CODE,
                     "warning",
@@ -647,7 +655,7 @@ def presets(
                     if sdk_root
                     else SDK_UNRESOLVED_MESSAGE,
                 )
-            ]
+            )
     except Exception as err:  # noqa: BLE001 -- the backstop; see the module docstring
         # No registry entry applies (`contract/issue-codes.json` covers
         # `bootstrap.*`/`debug-config.*` only), so this follows the port's
@@ -687,7 +695,13 @@ def presets(
                 },
                 issues,
                 exit_code,
-                sdk=SdkInfo.from_resolution(sdk.path, sdk) if sdk is not None else None,
+                # tan-cli#468: `sdk` is now a real `ActiveSdk` (never bare
+                # `None`) whenever `resolve_sdk` ran at all -- `.path` is what
+                # says whether it found a usable checkout, `sdk is not None`
+                # alone no longer does.
+                sdk=SdkInfo.from_resolution(sdk.path, sdk)
+                if sdk is not None and sdk.path is not None
+                else None,
             )
         )
     else:

@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -811,9 +812,12 @@ def _substitute_board_yaml_pin_docs(text: str, renames: dict[str, str | None]) -
 def _substitute_cmake_core(text: str, old: str, new: str) -> str:
     """Rewrite CMakeLists.txt's `alp_sdk_zephyr_conf(<old> ...)` core
     argument to the re-derived core id. Still accepts the pre-helper
-    `alp_project.py --emit zephyr-conf --core <old>` spelling, so an
-    example not yet migrated to `cmake/alp.cmake` re-derives rather than
-    scaffolding the wrong core."""
+    `alp_project.py --emit zephyr-conf --core <old>` spelling -- the
+    only one any real example carries today, since the shared
+    `cmake/alp.cmake` helper that would define `alp_sdk_zephyr_conf()`
+    is itself PLANNED and unmerged (tan-cli#825) -- so an example
+    re-derives on that spelling rather than scaffolding the wrong
+    core."""
     pattern = re.compile(
         rf"(alp_sdk_zephyr_conf\(\s*|--core\s+){re.escape(old)}\b")
     new_text, n = pattern.subn(lambda m: f"{m.group(1)}{new}", text)
@@ -851,16 +855,22 @@ _ALP_SDK_ROOT_GUESS_RE = re.compile(
     r"    get_filename_component\(ALP_SDK_ROOT \$\{CMAKE_CURRENT_SOURCE_DIR\}(?:/\.\.)+ ABSOLUTE\)\n"
     r"endif\(\)"
 )
-# `cold-chain-monitor`'s own shape: no ALP_SDK_ROOT resolution at all, just a
-# hardcoded in-tree-relative path straight to `alp_project.py` (worse than the
-# guess above -- no override is even possible).
+# Was `cold-chain-monitor`'s own shape until alp-sdk#1400 converted it to the
+# guess shape above: no ALP_SDK_ROOT resolution at all, just a hardcoded
+# in-tree-relative path straight to `alp_project.py` (worse than the guess --
+# no override was even possible). No example carries it at the pinned SDK
+# commit any more; kept as a defensive branch, not a live path.
 _HARDCODED_ALP_PROJECT_PY_RE = re.compile(
     r"\$\{CMAKE_CURRENT_SOURCE_DIR\}(?:/\.\.)+/scripts/alp_project\.py"
 )
 # Anything that only resolves against a real alp-sdk checkout, i.e. that a
 # scaffold copied OUT of the SDK tree cannot satisfy unless ALP_SDK_ROOT has
 # been rewritten into a hard requirement: the shared `cmake/alp.cmake`
-# include, either helper it defines, or a direct `alp_project.py` shell.
+# include, either helper it would define, or a direct `alp_project.py` shell
+# (the `cmake/alp.cmake` include and its helpers are PLANNED and unmerged,
+# tan-cli#825 -- `alp_project.py` is the only spelling any real example
+# carries today; the other two are matched so this stays correct once that
+# helper ships).
 _SDK_ROOT_DEPENDENT_RE = re.compile(
     r"cmake/alp\.cmake|alp_sdk_zephyr_conf|alp_sdk_ipc_contract_header"
     r"|alp_project\.py")
@@ -997,19 +1007,21 @@ def _scaffold_cmakelists(text: str) -> str:
     """Replace an in-tree-relative ALP_SDK_ROOT guess with a hard
     requirement, and rewrite the comment paragraph that describes it.
 
-    Two shapes exist across the catalog's example CMakeLists.txt files
+    One shape is live across the catalog's example CMakeLists.txt files
     today: the `if(DEFINED ENV{ALP_SDK_ROOT}) ... else()
     get_filename_component(...)` guess most examples carry immediately
-    above `include(${ALP_SDK_ROOT}/cmake/alp.cmake)`, and
-    `cold-chain-monitor`'s own hardcoded
-    `${CMAKE_CURRENT_SOURCE_DIR}/../../../scripts/alp_project.py` call
-    with no ALP_SDK_ROOT resolution at all (worse: no override is even
-    possible). Both resolve only for the in-tree example; a scaffold a
-    customer unpacks elsewhere needs the value supplied, so each becomes
-    a FATAL_ERROR-if-unset block -- the guess shape's `include()` line
-    already names `${ALP_SDK_ROOT}` and needs no further rewriting, the
-    hardcoded shape's path is rewritten to `${ALP_SDK_ROOT}/scripts/
-    alp_project.py` alongside inserting the block.
+    above a direct `execute_process(... scripts/alp_project.py ...)`
+    call (PLANNED to become `include(${ALP_SDK_ROOT}/cmake/alp.cmake)`
+    once that helper merges -- unmerged, tan-cli#825). A second,
+    defensive-only shape is also matched -- see `_HARDCODED_ALP_PROJECT_PY_RE`
+    above for why it is no longer live and why the branch stays anyway. The
+    guess shape resolves only for the in-tree example; a scaffold a customer
+    unpacks elsewhere needs the value supplied, so it becomes a
+    FATAL_ERROR-if-unset block -- the guess shape's `include()` line
+    already names `${ALP_SDK_ROOT}` and needs no further rewriting; the
+    (defensive-only) hardcoded shape's path would be rewritten to
+    `${ALP_SDK_ROOT}/scripts/alp_project.py` alongside inserting the
+    block if it were ever matched.
 
     Each guess-block hit is substituted through a loop rather than
     `subn`: the block's own preceding comment run has to be rewritten
@@ -1072,13 +1084,46 @@ def _core_board(sku: str, core_id: str | None, metadata_root: Path) -> str | Non
     return (topology.get(core_id) or {}).get("board")
 
 
+def _tag_resolves(base_dir: Path, tag: str) -> bool:
+    """Whether `tag` exists in `base_dir`'s git checkout.
+
+    Local-only: `git rev-parse` against the checkout's own refs, never a
+    network call -- scaffolding must work offline, and a scaffold that
+    stalled on `git ls-remote` would be a worse defect than the dead link
+    this guards. A checkout that fetched from origin has origin's tags, so
+    "resolves here" is the closest offline proxy for "resolves on GitHub"
+    available, and every way it can be wrong (no git binary, tarball
+    export, `--no-tags` clone, shallow CI checkout) fails the same
+    direction: no tag found, pin to `main`, links stay live.
+
+    Ported verbatim from alp-sdk `scripts/alp_template.py::_tag_resolves`
+    (issue #1508 / alp-sdk#1535)."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(base_dir), "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"],
+            capture_output=True,
+            check=False,
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):  # no git binary, not a repo
+        return False
+
+
 def _docs_ref(base_dir: Path) -> str:
     """The GitHub ref a scaffolded README's doc links should pin to
     (issue #864 Fable-review MINOR H): `metadata/sdk_version.yaml`'s
     own `v<version>` tag when `status: released` (a released checkout's
     docs are stable at that tag; linking `main` could point at docs
     that have since changed or moved), else `main` -- an unreleased/
-    development checkout has no matching tag yet to pin to."""
+    development checkout has no matching tag yet to pin to.
+
+    The tag has to RESOLVE, not merely be declared (tan-cli#846, porting
+    alp-sdk#1535). Between an rc cut and its GA tag `sdk_version.yaml`
+    says `version: 0.16.0` / `status: released` while only
+    `v0.16.0-rc1` exists on the bound checkout -- branching on the
+    declared pair alone put a dead
+    `https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/...` link in
+    every project scaffolded in that window. A missing tag degrades to
+    `main` instead of shipping a 404."""
     try:
         doc = yaml.safe_load(
             (base_dir / "metadata" / "sdk_version.yaml").read_text(encoding="utf-8")
@@ -1086,7 +1131,7 @@ def _docs_ref(base_dir: Path) -> str:
     except OSError:
         return "main"
     version = doc.get("version")
-    if doc.get("status") == "released" and version:
+    if doc.get("status") == "released" and version and _tag_resolves(base_dir, f"v{version}"):
         return f"v{version}"
     return "main"
 

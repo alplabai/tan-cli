@@ -144,3 +144,104 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-15 -- tan-cli#760 review round 3: mutation-provable --fix wiring test (Check.fix_missing fallback in __post_init__, corrected fix_installer_not_found_check/run_fix docstrings, hardened shell-metacharacter denylist)
     - tan/commands/doctor_cmd.py: 4087 -> 4114
     - tan/core/bootstrap.py: 2269 -> 2275
+- 2026-08-15 -- tan-cli#756: hand-port alp-sdk#1446's _aen_require_disjoint_slot0 into tan/planner/zephyr_board.py -- a dual-M55 AEN SoM with no per-role <role>_slot0 region is now refused at emit time instead of silently sharing one MRAM slot0 address
+    - tan/planner/loader.py: 1301 -> 1313
+    - tan/planner/zephyr_board.py: 1433 -> 1486
+    - function_count_budget: raised on this branch from 257 to 258; the final count after merging tan-cli#760 is recorded by the merge-resync entry below
+- 2026-08-15 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 258 -> 259
+- 2026-08-16 -- tan-cli#760 second half (alp-sdk#1464/#1471): install.linux is now package-manager-keyed; bootstrap.py gains normalize_linux_install/select_linux_install/detect_linux_pm + wider BootstrapFacts.install typing, bootstrap_cmd.py/doctor_cmd.py wire package-manager detection into check_prerequisites/_collect
+    - tan/commands/bootstrap_cmd.py: 3277 -> 3286
+    - tan/commands/doctor_cmd.py: 4114 -> 4131
+    - tan/core/bootstrap.py: 2275 -> 2400
+    - function_count_budget: 259 -> 260
+- 2026-08-16 -- tan-cli#795: relocate the expect_dpidr width guard (_validate_expect_dpidr_width) from flash_cmd.py's real-write-time preflight into flash_plan.py's plan-time validate_flow_d_preflight_args, beside its validate_address(expect_dpidr) calls, so a truncated expect_dpidr surfaces under --dry-run too; the pure banner-matching helpers it does not need (FlashPlanError) moved out to a new tan/core/dp_id.py instead, but this one function must stay beside the exception type it raises
+    - tan/core/flash_plan.py: 3164 -> 3199
+- 2026-08-16 -- tan-cli#798/#801: build_root anchoring for the split-layout configure-cache guard, plus coupling the missing-tool message to a shared plan_exec constant, need a few lines of call-site docstring in execute.py and build_cmd.py that don't belong split elsewhere
+    - tan/commands/build/execute.py: 1643 -> 1662
+    - tan/commands/build_cmd.py: 2161 -> 2172
+- 2026-08-16 -- tan-cli#804: consume _teardown_sim's grace-loop poll (which already waits up to _QUIT_GRACE_S) as the sim-exited-early source at --timeout 0, discriminated via a surfaced quit() write-failure or a nonzero exit code so a healthy quit-driven shutdown is never misreported
+    - tan/commands/renode_cmd.py: 1533 -> 1587
+    - function_count_budget: 260 -> 261
+- 2026-08-16 -- tan-cli#799: build the Envelope once, unconditionally, in size_cmd/clean_cmd/validate_cmd (and image_cmd/run_cmd, both still under the cap) so the sdk.discovery-divergent seam warning reaches text mode too, not only --format json
+    - tan/commands/clean_cmd.py: 1110 -> 1119
+    - tan/commands/size_cmd.py: 831 -> 842
+    - tan/commands/validate_cmd.py: 1571 -> 1587
+- 2026-08-16 -- tan-cli#799 review: scope validate_cmd's Envelope construction to TEXT/JSON only (nit fix)
+    - tan/commands/validate_cmd.py: 1587 -> 1591
+- 2026-08-16 -- tan-cli#799: validate's sdk.* seam-issue text now carries a severity prefix, matching clean/size/image/run
+    - tan/commands/validate_cmd.py: 1591 -> 1613
+- 2026-08-18 -- tan-cli#448: Renode is retired repo-wide; the `tan renode` verb and the three modules behind it (`tan/commands/renode_cmd.py`, `tan/core/renode_plan.py`, `tan/core/renode_sim.py`) are deleted, so `regen_module_size_budget.py` was re-run -- shrink-only, no `--reason` needed
+    - tan/cli.py: 1008 -> 1006
+    - tan/commands/renode_cmd.py: 1587 -> dropped (module deleted)
+    - function_count_budget: 261 -> 252
+- 2026-08-18 -- tan-cli#826: nine oracle-parity citations swept off the test modules tan-cli#269 deleted. Four of them said a deliberate divergence was PINNED by one of those modules; the correct replacement is not "unpinned" (an adversarial re-read of the first draft measured live tan-side tests holding all four) but the NAME of the test that took over, and cli.py's stderr rule had to be narrowed from "nothing compares stderr" to "Click's rendering is unpinned" for the same reason -- ~500 assertions under python/tests/ take stderr as their subject. Naming the real pin costs more words than either wrong version did. No code changed; every line here is a comment or docstring. scaffold.py's `_vendored_files` was kept under the 50-line function cap by tightening its wording rather than by raising the cap, so function_count_budget stays at 252.
+    - tan/cli.py: 1006 -> 1015
+    - tan/commands/debug_config_cmd.py: 1949 -> 1954
+    - tan/commands/size_cmd.py: 842 -> 849
+    - tan/core/flash_plan.py: 3199 -> 3205
+    - tan/core/scaffold.py: 1510 -> 1512
+- 2026-08-18 -- tan-cli#846: port alp-sdk#1535's _tag_resolves guard into _docs_ref (tan/planner/template.py), a verbatim relocation of scripts/alp_template.py where the same guard already lives upstream
+    - tan/planner/template.py: 1436 -> 1470
+- 2026-08-19 -- tan-cli#856: corrected the stale --fix sudo help text (3 lines longer)
+    - tan/commands/doctor_cmd.py: 4035 -> 4038
+- 2026-08-19 -- tan-cli#815: the shapes.py dedup finished. Six private helper definitions deleted (_is_file x4, _is_dir x2) plus sdk_cmd's duplicate SDK_MARKER and rejected_sdk_root_message, so seven modules shrink in the tree; the five tracked in this file are below. clean_cmd.py grows by exactly 1: it had no `from tan.core` import at all and now needs one line for SDK_MARKER, which it previously took from sdk_cmd's second spelling of the same literal.
+    - tan/commands/clean_cmd.py: 1119 -> 1120
+- 2026-08-20 -- tan-cli#868: the alp-sdk 94378a05..ac38a069 planner re-sync. kconfig.py +4 (the metadata-root argument threaded through _emit_subsystems / _per_core_library_kconfig / the six library-layer calls, alp-sdk#1485) and loader.py +22 (the same threading through _validate_topology_cores, plus the corrected _resolve_slot0_load_address docstring alp-sdk#1445 rewrote). Both are MIRROR modules of scripts/alp_orchestrate/: extracting here would put tan's copy out of shape with the upstream file every re-sync 3-way-merges against, which is the drift this repo pays a whole gate to prevent. partition.py grew by 260 lines on the same port and stayed inside its existing budget.
+    - tan/planner/kconfig.py: 2088 -> 2092
+    - tan/planner/loader.py: 1313 -> 1335
+    - function_count_budget: 252 -> 254
+- 2026-08-20 -- tan-cli#810: four single-use imports moved into their call sites, so a bare `tan --version` stops loading click.testing, jsonschema, PyYAML and urllib.request (427 -> 279 modules, measured). The lines are the deferred imports plus the comment at each site saying why it is not at module scope; sdk_cmd also gains a TYPE_CHECKING block and the paragraph explaining why `_releases_opener`'s return annotation had to be respelled. REGENERATED on the merge with dev rather than resolving the ratchet conflict by side-picking: #858/#862/#851 moved tan/cli.py too, so BOTH sides' numbers were wrong for the merged tree -- ours said 1012, dev's said 1015, the merged file is 1021.
+    - tan/cli.py: 1015 -> 1021
+    - tan/commands/new_som_cmd.py: 1361 -> 1381
+    - tan/commands/sdk_cmd.py: 1415 -> 1441
+- 2026-08-21 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/cli.py: 1015 -> 1021
+    - tan/commands/new_som_cmd.py: 1360 -> 1380
+    - tan/commands/sdk_cmd.py: 1392 -> 1416
+- 2026-08-21 -- tan-cli#825: correcting the cmake/alp.cmake present-tense claim added 12 comment lines to tan/commands/generate_cmd.py (1348 -> 1360) and 2 to tan/planner/template.py (1470 -> 1472). Both are prose in place of a false statement -- alp.cmake is absent at alp-sdk v0.16.0-rc1, dev and main -- so there is no code to extract; the alternative to the raise is leaving the documentation wrong.
+    - tan/commands/generate_cmd.py: 1348 -> 1360
+    - tan/planner/template.py: 1470 -> 1472
+- 2026-08-23 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 252 -> 254
+- 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/generate_cmd.py: 1348 -> 1360
+    - tan/planner/template.py: 1470 -> 1472
+- 2026-08-25 -- PR #878 fix round: re-verify #824/#792/#825/#814 prose against measured facts (98 real alp_project.py callers not 126, cold-chain-monitor converted at v0.16.0, template.py hedging) grew generate_cmd.py and template.py docstrings/comments
+    - tan/commands/generate_cmd.py: 1360 -> 1361
+    - tan/planner/template.py: 1472 -> 1487
+- 2026-08-25 -- tan-cli#468: resolve_sdk now always returns an ActiveSdk (carrying broken_project_pin/foreign_global_default_for even when unresolved) instead of a bare None -- clean_cmd.py and diff_cmd.py grew threading that through their guards and envelope construction.
+    - tan/commands/clean_cmd.py: 1120 -> 1129
+    - tan/commands/diff_cmd.py: 882 -> 889
+- 2026-08-25 -- tan-cli#466: origin-keyed global SDK default registry (~/.alp/sdk-defaults.json) -- resolve_sdk_tiered's globalDefault tier, its bootstrap-side writer/rollback in bootstrap_cmd.py, and the two-file global_default_pointer_fix_hint
+    - tan/commands/bootstrap_cmd.py: 3272 -> 3364
+    - tan/commands/doctor_cmd.py: 4038 -> 4040
+    - tan/commands/sdk_cmd.py: 1416 -> 1472
+    - function_count_budget: 254 -> 255
+    - function_worst_budget: 747 -> 757
+- 2026-08-25 -- tan-cli#466 follow-up: clarify global_default_foreign_project_issue's docstring now that a registry hit never sets foreign_global_default_for
+    - tan/commands/sdk_cmd.py: 1472 -> 1480
+- 2026-08-25 -- tan-cli#904 review round: resolved-origin ranking + RuntimeError/ELOOP handling + atomic registry write in sdk_cmd.py/bootstrap_cmd.py
+    - tan/commands/bootstrap_cmd.py: 3364 -> 3378
+    - tan/commands/sdk_cmd.py: 1480 -> 1514
+    - function_count_budget: 255 -> 256
+- 2026-08-25 -- PR #878 fix round (3rd pass): _scaffold_cmakelists's docstring trimmed to defer to _HARDCODED_ALP_PROJECT_PY_RE's own comment instead of restating the cold-chain-monitor/alp-sdk#1400 story -- a shrink, no --reason needed, but recorded here so the shipped ceiling (1481) has a traceable entry
+    - tan/planner/template.py: 1487 -> 1481
+- 2026-08-25 -- tan-cli#896: zephyr_board.py's _aen_flash_partitions docstring re-synced (comment-only) against alp-sdk 522ea3204's stale-prose fix
+    - tan/planner/zephyr_board.py: 1486 -> 1494
+- 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/planner/zephyr_board.py: 1486 -> 1494
+- 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3272 -> 3382
+    - tan/commands/doctor_cmd.py: 4038 -> 4040
+    - tan/commands/sdk_cmd.py: 1416 -> 1533
+    - function_count_budget: 254 -> 256
+    - function_worst_budget: 747 -> 757
+- 2026-08-25 -- tan-cli#904 third round: wall_clock_iso split off generated_at_iso, atomic_write_bytes added, registry rollback wired through it, docstring corrections (base-depth nit, changelog overclaim)
+    - tan/commands/bootstrap_cmd.py: 3382 -> 3402
+    - function_count_budget: 256 -> 257
+- 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/generate_cmd.py: 1348 -> 1361
+    - tan/planner/template.py: 1470 -> 1481
+- 2026-08-25 -- tan-cli#904 final round: wall_clock_iso (timestamp.py) grows past 50 lines defending an out-of-range wall clock (item 2) and enumerating all eight generated_at_iso call sites (nit); deepest_covering_entry's docstring (sdk_default_registry.py) grows documenting the updated_at precision-normalisation fix (nit) and the 21x1x20 lstat factorization correction (item 3) -- all four are review-requested prose/behaviour fixes on tan-cli#904's final round, not unreviewed growth.
+    - function_count_budget: 257 -> 258

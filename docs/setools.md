@@ -107,6 +107,13 @@ names the write's own `-device` profile, so it is not a second, preflight-only
 field the way Flow D's is. Set `flash_args.expect_dpidr` on a `swd_probe`
 entry whenever the same cloned-serial risk applies (tan-cli#520).
 
+`flash_args.expect_dpidr` must be a **full 32-bit SW-DP ID — 8 hex digits**
+(an optional `0x`/`0X` prefix doesn't count towards the 8). `tan` refuses a
+shorter value outright, at plan time (so it surfaces under `--dry-run`, not
+only on a real write): a truncated ID like `0x2477`, or `0x477` — ARM's own
+JEP106 designer field, shared by every ARM SW-DP — would otherwise match more
+than one board and silently disarm the wrong-board guard (tan-cli#795).
+
 ### The unarmed-guard advisory, and which methods it covers
 
 `flash_args.expect_dpidr` is **optional**, so a write with none set proceeds
@@ -156,9 +163,10 @@ Flow D. It was `swd_probe`-only when tan-cli#589 shipped it, which left the AEN
 MRAM path — the genuine *customer* flash path of the two, the GD32 bridge being
 factory-programmed by Alp Lab — outside both halves of the guard. On Flow D the
 refusal fires ahead of the SETOOLS auto-sign, not merely ahead of the write:
-`app-gen-toc` rewrites `build/app-package-map.txt` rather than appending, and
-tan-cli#512 measured a wrong-board abort that correctly left slot0
-byte-identical and still left the SETOOLS install mutated.
+`app-gen-toc` appends a block to `build/app-package-map.txt` and rewrites
+`build/AppTocPackage.bin` whole, and tan-cli#512 measured a wrong-board abort
+that correctly left slot0 byte-identical and still left the SETOOLS install
+mutated.
 
 The policy belongs to the host, not to the manifest. Export it on a factory or
 bench machine, where a wrong-board write is expensive and nobody is watching;

@@ -17,26 +17,92 @@ table is still READ from the SDK's `metadata/registries/peripheral-kconfig.json`
 (the fact stays there, ADR-0017); `_CHIP_SUBSYSTEMS` has no registry file to
 read from today, so it moves with its one and only consumer -- see the note
 above the table.
+
+`peripheral_kconfig` used to be a module-level constant computed once at
+import time from the SDK's own in-tree metadata/ -- a project's own
+`--metadata-root` override never reached it (alp-sdk #1485). It now takes
+*metadata_root* as a required argument; callers pass
+`project.effective_metadata_root()` at the point of use.
 """
 
 from __future__ import annotations
 
 import functools
 import json
+from pathlib import Path
 
-from .paths import METADATA_ROOT
-
-PERIPHERAL_KCONFIG_REGISTRY = METADATA_ROOT / "registries" / "peripheral-kconfig.json"
+from .paths import REPO
 
 
-@functools.lru_cache(maxsize=1)
-def peripheral_kconfig() -> dict[str, tuple[str, ...]]:
-    """Return board.yaml peripheral tokens -> Zephyr Kconfig symbol bundles."""
-    data = json.loads(PERIPHERAL_KCONFIG_REGISTRY.read_text(encoding="utf-8"))
-    return {
-        token: tuple(symbols)
-        for token, symbols in data["peripherals"].items()
-    }
+@functools.lru_cache(maxsize=None)
+def peripheral_kconfig(metadata_root: Path) -> dict[str, tuple[str, ...]]:
+    """Return board.yaml peripheral tokens -> Zephyr Kconfig symbol bundles.
+
+    *metadata_root* is REQUIRED -- every caller must pass the project's own
+    ``project.effective_metadata_root()`` (or the SDK's own in-tree
+    ``METADATA_ROOT`` for a repo self-check). A module-level default here
+    is exactly the shape that let this registry silently ignore a project's
+    `--metadata-root` override (#1485); the cache is keyed on
+    *metadata_root* so a second root in the same process doesn't reuse the
+    first root's table.
+
+    The validation below is alp-sdk#1545's, re-rooted at *metadata_root*.
+    Upstream wrote it for two import-time callers; in tan the one caller is
+    `kconfig._emit_subsystems`, and it now reads the table at RENDER time
+    rather than at import (that is what #1485's move bought). A malformed
+    on-disk registry therefore lands here mid-render, where a raw
+    `JSONDecodeError`/`KeyError`/`AttributeError` would name neither the
+    file nor the problem -- and where `tan generate` turns an exception into
+    an envelope, so the message IS the diagnosis a customer gets. Raise a
+    `ValueError` naming the real problem instead.
+
+    A consequence tan owns and alp-sdk does not: `planner_emit.unavailable()`
+    measures in-process availability by IMPORTING `tan.planner`, so while
+    this table was a module constant, a checkout missing the registry
+    disabled the in-process engine for EVERY target. It no longer does --
+    only the emits that actually need the table fail, and they fail with the
+    message above (`tests/parity/test_planner_emit_parity.py::
+    test_a_fallback_on_an_incomplete_checkout_says_so` moved to a different
+    trigger for exactly this reason, tan-cli#868).
+    """
+    registry = Path(metadata_root) / "registries" / "peripheral-kconfig.json"
+    try:
+        rel = registry.relative_to(REPO).as_posix()
+    except ValueError:
+        # `metadata_root` legitimately points outside REPO (a scratch root
+        # under `--metadata-root`, or a test fixture) -- `relative_to()`
+        # raises its own confusing "is not in the subpath of" there, which
+        # would mask whatever the caller actually did wrong. Fall back to
+        # the raw path string.
+        rel = str(registry)
+    try:
+        text = registry.read_text(encoding="utf-8")
+    except OSError as e:
+        # A missing/unreadable file is not "invalid JSON" -- report the
+        # real failure instead of mislabeling every OSError that way.
+        raise ValueError(f"{rel}: cannot read registry ({e})") from e
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{rel}: invalid JSON ({e})") from e
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{rel}: expected a top-level object (got {type(data).__name__})")
+    if "peripherals" not in data:
+        raise ValueError(f"{rel}: missing top-level `peripherals` key")
+    peripherals = data["peripherals"]
+    if not isinstance(peripherals, dict):
+        raise ValueError(
+            f"{rel}: `peripherals` must be an object "
+            f"(got {type(peripherals).__name__})")
+    result: dict[str, tuple[str, ...]] = {}
+    for token, symbols in peripherals.items():
+        if not isinstance(symbols, list):
+            raise ValueError(
+                f"{rel}: peripherals[{token!r}] must be an array of "
+                f"Zephyr Kconfig symbols (got {type(symbols).__name__})")
+        result[token] = tuple(symbols)
+    return result
 
 
 def _is_tbd(value: object) -> bool:
@@ -164,8 +230,6 @@ def _slugs_from_helper_firmware(helper_firmware: list) -> list[str]:
     return sorted(seen)
 
 
-_PERIPHERAL_KCONFIG: dict[str, tuple[str, ...]] = peripheral_kconfig()
-
 # Slugs that map to BLOCK_ Kconfig symbols rather than CHIP_.
 # These live under blocks/ + <alp/blocks/*.h> because they are
 # SDK-level *block* utilities (`alp_button_led_*`, `alp_pdm_mic_*`)
@@ -277,4 +341,31 @@ _CHIP_SUBSYSTEMS: dict[str, tuple[str, ...]] = {
     "tlv320aic3204":      ("I2C",),
     "max98357a":          ("GPIO",),
     "es8388":             ("I2C",),
+    # SoM-intrinsic batch (issue #1487) -- act8760/tps628640/pca9451a/
+    # da9292/clk_5l35023b are I2C-only PMIC/clock parts; pi3dbs12212/
+    # murata_lbee5hy2fy/deepx_dxm1/gd32_swd are GPIO-only.  All ten were
+    # missing from this table despite each having a `config
+    # ALP_SDK_CHIP_<NAME>` / `depends on` entry in
+    # zephyr/kconfigs/chips.kconfig, so the loader turned the chip on
+    # without turning its dependency on, and Kconfig silently dropped
+    # the chip assignment as unmet (issue #1487).
+    "act8760":            ("I2C",),
+    "tps628640":          ("I2C",),
+    "pi3dbs12212":        ("GPIO",),
+    "pca9451a":           ("I2C",),
+    "da9292":             ("I2C",),
+    "clk_5l35023b":       ("I2C",),
+    "murata_lbee5hy2fy":  ("GPIO",),
+    "deepx_dxm1":         ("GPIO",),
+    "gd32_swd":           ("GPIO",),
+    # gd32g553 declares `depends on (SPI || I2C)` -- an OR, not an AND:
+    # the driver's bridge protocol is genuinely hybrid (both transports
+    # compiled in, either usable at runtime; see chips/gd32g553/
+    # gd32g553.c and docs/gd32-bridge-protocol.md), so there is no
+    # single right subsystem to force on.  Deliberately over-inclusive
+    # here rather than under (issue #1487's own bug class): turning on
+    # both is always sufficient for the `||`, whereas picking only one
+    # would silently drop the other transport the same way the missing
+    # entries above did.
+    "gd32g553":           ("SPI", "I2C"),
 }
