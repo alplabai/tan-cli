@@ -142,15 +142,32 @@ REAL_ENVIRON: dict[str, str] = dict(os.environ)
 # one of them "typer"-shaped or a downstream symptom of a subprocess that
 # crashed before writing anything.
 #
+# On WINDOWS this specific cause can never fire: CPython's user-site base on
+# that platform comes from `%APPDATA%`, not `%USERPROFILE%`/`HOME` -- so a
+# scrubbed `USERPROFILE` does not hide a Windows user-site install the way a
+# scrubbed `HOME` hides a POSIX one. That means no false positive there, and
+# the 5 green `windows-latest` legs at the time of writing are consistent
+# with that -- but a green Windows leg is NOT evidence this pre-flight (or
+# the bug it guards against) does anything on that platform; it is evidence
+# of the opposite. Recorded here so nobody reads Windows-green as "the check
+# works everywhere".
+#
 # `tan_under_test` below already spawns this same probe -- but as a
 # session-scoped AUTOUSE FIXTURE, which pytest sets up for the first test
 # BEFORE that test's function-scoped `_scrub_sdk_discovery_env` runs (broader
 # scopes set up first; verified empirically, not merely assumed). So it
 # always probes under the REAL, unscrubbed `HOME`, which is precisely the one
-# environment this bug does NOT reproduce in. It is a good check for
-# tan-cli#423/#665 (wrong tan under test) and it is USELESS for tan-cli#903
-# by construction -- it was never wired to see the environment the bug lives
-# in.
+# environment this bug does NOT reproduce in. That makes it USELESS for
+# tan-cli#903 SPECIFICALLY, by construction -- it was never wired to see the
+# environment the bug lives in -- and that is the ONLY thing "useless" means
+# here. It remains a good, NECESSARY check for tan-cli#423/#665 (wrong `tan`
+# under test), and it stays the only spawn-probe still armed on the two paths
+# that skip `pytest_configure` below entirely -- an xdist WORKER process, and
+# a session run with `TAN_TEST_SKIP_HOME_PREFLIGHT` set -- so do not read
+# "useless for #903" as "useless" and delete it: doing so would silently
+# disable the #423/#665 wrong-tree backstop on exactly those two paths, a
+# fresh instance of the "check that cannot fire" class this file exists to
+# close.
 #
 # So this runs earlier still, from `pytest_configure` -- before collection,
 # before ANY fixture, session-scoped or not, has executed -- and builds its
@@ -166,13 +183,19 @@ REAL_ENVIRON: dict[str, str] = dict(os.environ)
 # this incident's proximate cause, but it is not the only runtime dependency
 # `tan.__main__` pulls in (`pyproject.toml`'s `dependencies` also names rich,
 # pyyaml, jsonschema, click, truststore, certifi, and that list can grow).
-# Spawning the exact command every one of the 26 subprocess-based test files
+# Spawning the exact command every one of the 32 subprocess-based test files
 # spawns -- `sys.executable -m tan --version` -- exercises the real import
 # chain as it stands today, whatever it is, without this file needing to know
 # its contents. Under-probing (missing the next instance) and over-probing
 # (false-failing on an unrelated absence) both come from hand-picking a
 # module name; running the actual entry point avoids both failure modes at
 # once.
+#
+# COST: measured on `--collect-only`, three runs each, dev vs this branch --
+# 0.56/0.78/0.64s vs 1.50/1.20/1.44s -- so this adds roughly +0.72s to every
+# pytest invocation, not only the ones that run anything. Negligible next to
+# an ~850s full suite, but it is paid on every IDE-triggered collection and
+# doubles the wall time of a single-test edit loop.
 # ---------------------------------------------------------------------------
 
 #: Escape hatch, named in the failure message itself so it is discoverable
@@ -187,10 +210,31 @@ TAN_TEST_SKIP_HOME_PREFLIGHT = "TAN_TEST_SKIP_HOME_PREFLIGHT"
 
 def _home_scrubbed_environ(home: Path) -> dict[str, str]:
     """`REAL_ENVIRON` with `HOME`/`USERPROFILE` repointed at `home` and
-    `ALP_SDK_ROOT` removed -- the same transformation
-    `_scrub_sdk_discovery_env` applies via `monkeypatch`, reproduced here as a
-    pure function so the pre-flight below can apply it BEFORE that fixture,
-    or any fixture, has run.
+    `ALP_SDK_ROOT` removed, reproduced here as a pure function so the
+    pre-flight below can apply it BEFORE `_scrub_sdk_discovery_env`, or any
+    fixture, has run.
+
+    NOT the identical transformation `_scrub_sdk_discovery_env` applies,
+    despite the resemblance -- two deliberate, SAFE divergences, not a
+    drift to reconcile:
+
+    * That fixture also deletes `ZEPHYR_BASE`, `SOURCE_DATE_EPOCH` and
+      `ZEPHYR_SDK_INSTALL_DIR`; this function deletes only `ALP_SDK_ROOT`.
+      The probe below only asks "can `sys.executable -m tan --version` import
+      its dependencies under this HOME", a question those three variables do
+      not affect either way, so leaving them at the developer's real values
+      here is inert rather than wrong.
+    * The caller (`_home_preflight_failure`) additionally prepends this
+      repo's `python/` onto `PYTHONPATH` before spawning -- mirroring
+      `tan_under_test`'s spawn-side prepend below, NOT this scrub. That
+      prepend is load-bearing, not decoration: without it the probe cannot
+      find `tan` at all (a bare `ModuleNotFoundError`, nothing to do with
+      HOME) before `tan_under_test` ever gets a chance to apply its own.
+
+    Both divergences only ADD to what `_scrub_sdk_discovery_env` would leave
+    in place -- the probe environment is a strict superset -- which is why
+    the probe still reproduces the HOME-shaped failure this file exists to
+    catch (tan-cli#903) despite not being byte-for-byte identical to it.
 
     Deliberately built from `REAL_ENVIRON`, the capture taken at import before
     anything scrubs it, and not from live `os.environ` -- see the block
@@ -204,6 +248,86 @@ def _home_scrubbed_environ(home: Path) -> dict[str, str]:
     return env
 
 
+def _with_repo_pythonpath(environ: Mapping[str, str]) -> dict[str, str]:
+    """`environ` with this repo's `python/` prepended onto `PYTHONPATH` --
+    the same prepend `tan_under_test` applies to `os.environ` for its own
+    spawned probe, reproduced here as a pure function so BOTH probes in
+    `_home_preflight_failure` (the scrubbed-HOME one and its real-HOME
+    control) apply the identical transformation and differ ONLY in
+    HOME/USERPROFILE, which is the whole point of running a control at all.
+    """
+    env = dict(environ)
+    repo_python = str(Path(__file__).resolve().parents[1])
+    existing = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
+    if repo_python not in existing:
+        env["PYTHONPATH"] = os.pathsep.join([repo_python, *existing])
+    return env
+
+
+#: Values that turn the escape hatch ON. Case-insensitive, and deliberately
+#: NOT bare truthiness (`os.environ.get(...)`) -- measured, that reading
+#: means `TAN_TEST_SKIP_HOME_PREFLIGHT=0` DISABLES the pre-flight (any
+#: non-empty string is truthy in Python), the exact opposite of what a
+#: developer setting `=0` means. `=1`/`=true`/`=yes`/`=on` all skip it;
+#: anything else -- including `=0`, `=false`, or an unset/empty var -- leaves
+#: it armed.
+_SKIP_HOME_PREFLIGHT_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _skip_home_preflight_requested() -> bool:
+    """Whether `TAN_TEST_SKIP_HOME_PREFLIGHT` names one of
+    `_SKIP_HOME_PREFLIGHT_TRUE_VALUES`, case-insensitively -- never bare
+    truthiness. See that constant for why `=0` must NOT skip the check."""
+    value = os.environ.get(TAN_TEST_SKIP_HOME_PREFLIGHT, "")
+    return value.strip().lower() in _SKIP_HOME_PREFLIGHT_TRUE_VALUES
+
+
+def _run_version_probe(environ: Mapping[str, str], context: str) -> subprocess.CompletedProcess[str] | str:
+    """Spawn `sys.executable -m tan --version` under `environ`.
+
+    Returns the `CompletedProcess` on any ordinary exit (the CALLER decides
+    what a nonzero `returncode` means -- this function only reports whether
+    the probe ran at all), or a ready-to-print diagnostic STRING when the
+    subprocess could not even be spawned, or hung past its timeout. Those two
+    failure shapes get their own wording -- a spawn that never happened
+    ("could not even SPAWN") is a materially different claim from a spawn
+    that happened and then hung ("DID spawn, never returned"), and conflating
+    them under one message misdescribes whichever one didn't occur. Both name
+    the escape hatch, so a developer reading either one has the same way out
+    regardless of which branch they hit.
+
+    `context` is a short phrase describing which of the two probes this is
+    ("under a scrubbed HOME", "under this interpreter's own, REAL,
+    unmodified HOME (the control probe)") so the two callers in
+    `_home_preflight_failure` don't have to duplicate this function just to
+    get a different noun into the message.
+    """
+    try:
+        return subprocess.run(
+            [sys.executable, "-m", "tan", "--version"],
+            env=dict(environ),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return (
+            f"`{sys.executable} -m tan --version` HUNG for over 60 seconds "
+            f"{context} instead of exiting -- it DID spawn, it just never "
+            f"returned: {exc}. This pre-flight cannot tell whether the suite "
+            "itself would hang the same way; investigate directly (a shell "
+            "that never finishes venv-activating, an interactive prompt "
+            "`--version` should never trigger, ...). To bypass this check "
+            f"and run the suite anyway, set {TAN_TEST_SKIP_HOME_PREFLIGHT}=1."
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return (
+            f"could not even SPAWN `{sys.executable} -m tan --version` "
+            f"{context}: {exc}. To bypass this check and run the suite "
+            f"anyway, set {TAN_TEST_SKIP_HOME_PREFLIGHT}=1."
+        )
+
+
 def _home_preflight_failure() -> str | None:
     """`None` when `sys.executable -m tan --version` still works once `HOME`/
     `USERPROFILE` are repointed at a throwaway directory; otherwise a
@@ -214,40 +338,77 @@ def _home_preflight_failure() -> str | None:
     the dependencies `tan.__main__` actually needs are reachable. `--version`
     is the cheapest subcommand that still forces that full import chain.
 
+    A nonzero exit under the scrubbed HOME is NOT on its own evidence that
+    HOME caused it -- `tan --version` can be broken for reasons that have
+    nothing to do with HOME (a `SyntaxError` in `tan/cli.py`, say), and
+    printing this function's venv-repair recipe in that case sends a
+    developer chasing a cause that isn't there. So a scrubbed-HOME failure
+    triggers a CONTROL: the identical probe run again under
+    `REAL_ENVIRON`, completely untouched -- the two runs differ in HOME and
+    nothing else, which is what lets the diagnostic tell "HOME did this"
+    from "tan is just broken here" apart, and print the right one.
+
     A pure function of `REAL_ENVIRON` and this host's filesystem -- no
     fixture, no pytest state -- so `pytest_configure` below can call it before
     collection has even started.
     """
     with tempfile.TemporaryDirectory(prefix="tan-home-preflight-") as scratch_home:
-        env = _home_scrubbed_environ(Path(scratch_home))
-        repo_python = str(Path(__file__).resolve().parents[1])
-        existing = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
-        if repo_python not in existing:
-            env["PYTHONPATH"] = os.pathsep.join([repo_python, *existing])
-        try:
-            probe = subprocess.run(
-                [sys.executable, "-m", "tan", "--version"],
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            return (
-                f"could not even SPAWN `{sys.executable} -m tan --version` "
-                f"under a scrubbed HOME to pre-flight this suite: {exc}"
-            )
+        scrubbed_env = _with_repo_pythonpath(_home_scrubbed_environ(Path(scratch_home)))
+        probe = _run_version_probe(scrubbed_env, "under a scrubbed HOME to pre-flight this suite")
+    if isinstance(probe, str):
+        return probe
     if probe.returncode == 0:
         return None
+
+    control_env = _with_repo_pythonpath(REAL_ENVIRON)
+    control = _run_version_probe(
+        control_env, "under this interpreter's own, REAL, unmodified HOME (the control probe)"
+    )
+    if isinstance(control, str):
+        # The control itself could not be run -- say so rather than guessing
+        # at HOME's role from a comparison that never completed.
+        return (
+            f"`{sys.executable} -m tan --version` fails (exit {probe.returncode}) "
+            "under a scrubbed HOME, AND the control probe meant to confirm HOME "
+            f"is the cause could not be run either: {control}\n\n"
+            f"stderr from the scrubbed-HOME probe:\n{probe.stderr.strip()}"
+        )
+
+    if control.returncode != 0:
+        # BOTH probes fail -- scrubbed HOME and the developer's own, real
+        # HOME alike -- so the failure is not caused by the HOME/USERPROFILE
+        # repoint this suite's own `_scrub_sdk_discovery_env` fixture applies.
+        # `tan` is broken in this tree regardless of HOME; the venv recipe
+        # below would not fix that, so it is deliberately NOT printed here.
+        return (
+            f"`{sys.executable} -m tan --version` fails (exit {probe.returncode}) "
+            "under a scrubbed HOME, AND fails the SAME way "
+            f"(exit {control.returncode}) under this interpreter's own, REAL, "
+            "unmodified HOME -- so this is NOT the scrubbed-HOME failure mode "
+            "tan-cli#903 exists to catch. `tan --version` is broken in this "
+            "tree regardless of HOME; fix `tan` itself first (this pre-flight "
+            "has nothing more specific to add, and the usual scrubbed-HOME "
+            "venv recipe would not fix a failure that also reproduces under "
+            "your real HOME).\n\n"
+            f"stderr from the scrubbed-HOME probe:\n{probe.stderr.strip()}\n\n"
+            f"stderr from the control (real-HOME) probe:\n{control.stderr.strip()}\n\n"
+            f"To bypass this check and run the suite anyway, set"
+            f" {TAN_TEST_SKIP_HOME_PREFLIGHT}=1."
+        )
+
+    # The control SUCCEEDED under the developer's real HOME -- confirming the
+    # scrubbed HOME really is what broke the scrubbed-HOME probe.
     return (
         f"`{sys.executable} -m tan --version` fails (exit {probe.returncode}) "
         "once HOME/USERPROFILE are repointed at a throwaway directory -- "
         "exactly what THIS SUITE's own `_scrub_sdk_discovery_env` fixture "
         "does to every test's subprocess environment (python/tests/"
-        "conftest.py). Left uncaught, that produces several hundred "
-        "unrelated-looking test failures (crashed subprocesses returning "
-        "empty stdout) instead of this one message (tan-cli#903).\n\n"
-        f"stderr from the probe:\n{probe.stderr.strip()}\n\n"
+        "conftest.py); the SAME probe under this interpreter's own, REAL "
+        "HOME succeeds (control probe, exit 0), which is what pins the cause "
+        "to HOME rather than to `tan` itself. Left uncaught, that produces "
+        "several hundred unrelated-looking test failures (crashed subprocesses "
+        "returning empty stdout) instead of this one message (tan-cli#903).\n\n"
+        f"stderr from the (scrubbed-HOME) probe:\n{probe.stderr.strip()}\n\n"
         "The usual cause: this interpreter's runtime dependencies (typer, "
         "pydantic, ...) are importable only via a user-site install under "
         "your REAL HOME (e.g. `~/.local`), which a scrubbed-HOME subprocess "
@@ -291,10 +452,19 @@ def pytest_configure(config: pytest.Config) -> None:
     developer who already knows their interpreter is unusual on purpose --
     named in the failure message itself, so it is discoverable without
     reading this file.
+
+    SELECTION-blind, by design: this spawns the probe regardless of which
+    node IDs pytest was actually asked to collect, even a selection that
+    would never itself spawn a `tan` subprocess (measured:
+    `pytest -q tests/core/test_timestamp.py` against a broken interpreter is
+    `14 passed` on a healthy HOME, and this `UsageError` on a scrubbed one).
+    Nothing here can know in advance whether a later `-k`/path selection
+    needs a working `tan` child, so it aborts on the safe assumption that it
+    might; `TAN_TEST_SKIP_HOME_PREFLIGHT=1` runs the selection anyway.
     """
     if getattr(config, "workerinput", None) is not None:
         return
-    if os.environ.get(TAN_TEST_SKIP_HOME_PREFLIGHT):
+    if _skip_home_preflight_requested():
         return
     problem = _home_preflight_failure()
     if problem is not None:
@@ -738,7 +908,7 @@ def _probe_tools_are_a_property_of_the_test(tmp_path_factory) -> None:
 
     Mutates `os.environ` rather than using `monkeypatch`, for two reasons:
     `monkeypatch` is function-scoped and this is a session-wide property, and
-    the 26 test modules that spawn `[sys.executable, "-m", "tan", ...]` build
+    the 32 test modules that spawn `[sys.executable, "-m", "tan", ...]` build
     their child environment from `os.environ` -- an in-process patch would
     leave every one of those spawns host-dependent. Session-scoped autouse
     fixtures resolve before function-scoped ones, so
@@ -838,7 +1008,7 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
 #   * IN-PROCESS `import tan` -- asserted below, and a mismatch FAILS the
 #     session rather than skipping: a quiet skip would hide exactly the gap
 #     this fixture exists to surface.
-#   * SPAWNED `[sys.executable, "-m", "tan", ...]` -- 26 test files do this,
+#   * SPAWNED `[sys.executable, "-m", "tan", ...]` -- 32 test files do this,
 #     and a child resolves through its OWN sys.path, so asserting in this
 #     process would not touch them. `PYTHONPATH` is prepended instead, which
 #     is inherited by every child regardless of cwd or how the argv is built.
