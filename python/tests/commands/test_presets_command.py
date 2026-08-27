@@ -357,7 +357,11 @@ def test_soc_lookups_resolves_a_synthetic_checkout_end_to_end(tmp_path):
     `[o for o in choices if o not in cross]` for a bare `list(choices)` turns
     the `allowedOs` assertions RED (both classes would see every enum value,
     including the OTHER class's OS). Restoring either turns both GREEN --
-    verified by hand while writing this test.
+    verified by hand while writing this test. Also mutation-proven: swapping
+    `_resolve_soc_path`'s `!= 3` for `< 3` turns the `a:b:c:d` assertion below
+    RED (it resolves the `socs/a/b/c.json` file this fixture writes for
+    exactly that purpose and gets `{'m0': 'cortex-m33'}` back instead of
+    `{}`); restoring `!= 3` turns it GREEN.
     """
     write(
         tmp_path / "metadata" / "schemas" / "board.schema.json",
@@ -371,6 +375,17 @@ def test_soc_lookups_resolves_a_synthetic_checkout_end_to_end(tmp_path):
             {"id": "a_core", "type": "cortex-a32"},
             {"id": "m_core", "type": "cortex-m33"},
         ]}),
+    )
+    # `a:b:c:d` is 4 colon-separated parts, not 3 -- but a `< 3` guard (the
+    # mutant the assertion below exists to catch) does not reject it either,
+    # and would go on to resolve `socs/a/b/c.json`. Put a real, resolvable
+    # SoC file at exactly that path so a `< 3` mutant has something to read:
+    # without this file, `core_type_lookup("a:b:c:d")` returns `{}` under
+    # BOTH the correct guard and the mutant one (a missing file is `{}` too),
+    # so the assertion below would pass either way and prove nothing.
+    write(
+        tmp_path / "metadata" / "socs" / "a" / "b" / "c.json",
+        json.dumps({"cores": [{"id": "m0", "type": "cortex-m33"}]}),
     )
 
     core_type_lookup, allowed_os_lookup = _soc_lookups(str(tmp_path))
@@ -388,7 +403,10 @@ def test_soc_lookups_resolves_a_synthetic_checkout_end_to_end(tmp_path):
     assert core_type_lookup(None) == {}
     # Too MANY colon-separated parts is also not-a-triple -- a `!=3` guard
     # covers both directions; a `<3` guard (caught nowhere else in this
-    # suite) would let `a:b:c:d` silently resolve to `socs/a/b/c.json`.
+    # suite) would let `a:b:c:d` silently resolve to `socs/a/b/c.json`, and
+    # that file above is real and does resolve to `{'m0': 'cortex-m33'}`, so
+    # this assertion actually observes the `< 3` mutant rather than passing
+    # vacuously against a file that was never written.
     assert core_type_lookup("a:b:c:d") == {}
 
 

@@ -40,15 +40,39 @@ checkout's own `board.schema.json` `os:` enum, using `tan.core.os_class` --
 the SAME cortex-a/cortex-m convention
 `tan.planner.validate._enforce_os_matches_core_class` gates a build on --
 reused rather than re-implemented so the wizard's picker and the build-time
-gate can never disagree (see `_soc_lookups`'s own docstring for why this reads
-`tan.core.os_class` and not `tan.planner.topology` directly: the latter's
-process-global SDK-root binding is the wrong contract for a command exercised
-by dozens of independent per-test checkouts). Both degrade to their empty
-default (`type=""`, `allowedOs=[]`) rather than fail the command when the
-checkout carries no `metadata/socs/**` entry for the SoM's `silicon:` or no
-`board.schema.json` at all (a synthetic/partial `--sdk-root` is a legitimate
-case this command already tolerates elsewhere) -- no SoM detail here is
-load-bearing enough to fail `tan presets` over.
+gate can never disagree on the cross-class exclusion itself (a Cortex-A is
+never offered, and never accepted for, Zephyr; a Cortex-M is never offered,
+and never accepted for, Yocto -- both read `tan.core.os_class.cross_class_os`).
+That is narrower than "can never disagree" full stop: for an UNRESOLVED core
+type (`core_type == ""`), `allowedOs` here degrades all the way to `[]`
+(tan-cli#914's `allowed_os_for_core` guard), while `_enforce_os_matches_core_class`
+does not share that guard -- it calls `cross_class_os` directly, which treats
+`""` as just another off-class type and still accepts `os: baremetal` /
+`os: off` for it. Deliberately narrower in presets than in the gate: the
+wizard offers nothing rather than guess, the gate still allows the two
+values every core, resolved or not, may always take (see `_soc_lookups`'s own
+docstring for why this reads `tan.core.os_class` and not `tan.planner.topology`
+directly: the latter's process-global SDK-root binding is the wrong contract
+for a command exercised by dozens of independent per-test checkouts). Both
+degrade to their empty default (`type=""`, `allowedOs=[]`) rather than fail
+the command when the checkout carries no `metadata/socs/**` entry for the
+SoM's `silicon:` or no `board.schema.json` at all (a synthetic/partial
+`--sdk-root` is a legitimate case this command already tolerates elsewhere)
+-- no SoM detail here is load-bearing enough to fail `tan presets` over.
+
+**`allowedOs: []` alone does not say which of the two above degrades fired --
+`type` does.** Two different unknowns both wire as an empty `allowedOs`
+array with `ok: true` and no issue code: a SoC-lookup miss (no
+`metadata/socs/**` entry, or no entry for this core id -- `type` is ALSO
+`""`), and a schema miss (`type` resolves fine, but the checkout carries no
+`board.schema.json` -- `_os_choices()` returns `None`, `allowed_os_lookup`
+returns `[]` before ever reaching the unresolved-type guard in
+`allowed_os_for_core`). A consumer that needs to tell them apart reads
+`type` alongside `allowedOs`, never `allowedOs` alone: `type == ""` means
+the core's type itself is unresolved; a non-empty `type` with `allowedOs ==
+[]` means the type resolved but this checkout has no schema to validate an
+`os:` value against. Neither shape means "no OS is legal" -- that reading of
+an empty array does not exist on this wire.
 
 **Which rule decides where the presets come from.** SoM presets are alp-sdk
 content, so the two candidate readings are "vendor a capture like `tan init`

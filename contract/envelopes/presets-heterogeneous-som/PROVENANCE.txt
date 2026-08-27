@@ -34,9 +34,17 @@ this repo's own precedent (see CHANGELOG entries for `--build`'s payload and
 
 Both new fields are `""` / `[]` here, not populated — this fixture's `silicon:`
 value (`renesas-rzv2n`) is not a `vendor:family:part` triple, and its `sdk/`
-tree carries no `metadata/schemas/board.schema.json`, so neither the SoC-JSON
-core-type lookup nor the `tan.core.os_class` cross-class-OS rule can resolve
-against it.
+tree carries no `metadata/schemas/board.schema.json`. The two conditions
+co-occur in this one fixture, but they do not both drive `allowedOs` here:
+`allowed_os_lookup`'s `if choices is None: return []` (the missing-schema
+degrade) short-circuits before the type ever matters, so this golden pins
+the NO-SCHEMA degrade only. It does not exercise, and would not catch a
+regression in, the separate unresolved-core-type guard in
+`allowed_os_for_core` (tan-cli#914) — measured: deleting that guard leaves
+this golden green (`pytest -k presets` still passes); the guard's sole
+regression cover is
+`test_allowed_os_lookup_degrades_to_empty_for_an_unresolved_core_type` in
+`python/tests/commands/test_presets_command.py`.
 That is deliberate, not a bug this fixture happens to trip over: `tan
 presets` must not fail (or fall back to guessing) when pointed at a partial
 or synthetic `--sdk-root`, so this golden pins the DEGRADED shape of the new
