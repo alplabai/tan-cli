@@ -121,18 +121,25 @@ def retarget_example_build_target_comment(content: str, sku: str, source_sku: st
     `alp_e1m_<sku>_..._sm` target genuinely exists (e.g. `E1M-V2M101`, unlike
     several other siblings sharing this tree such as `E1M-V2N102`) has no
     way to tell, from the comment alone, that the line below it is a
-    DIFFERENT SoM's board target rather than a generic placeholder. Rewritten
-    to say so explicitly instead: `# Example (this template's own vendored
-    board target -- substitute your SoM's):`, true for every SKU that
-    reaches this line, with the one real vendored board target it introduces
-    left exactly as documented. NO-OP when `sku == source_sku` (byte-exact
-    passthrough for the tree's own two representative SKUs, same convention
-    as every retarget_* above).
+    DIFFERENT SoM's board target rather than a generic placeholder.
+
+    "Substitute your SoM's" (tan-cli#946 round-1 review's own suggested
+    wording) is wrong for HALF the SKUs that reach this line: measured at
+    `zephyr/boards/alp/`, only `e1m_v2n101_m33_sm` and `e1m_v2m101_m33_sm`
+    exist -- `E1M-V2N102` and `E1M-V2M102` have no board tree of their own AT
+    ALL (the fact this module's own docstring above cites), so telling those
+    customers to "substitute your SoM's" points at a target that does not
+    exist. Rewritten to qualify that instead: `# Example (this template's
+    own vendored board target -- substitute your SoM's, where one exists):`,
+    true for every SKU that reaches this line, with the one real vendored
+    board target it introduces left exactly as documented. NO-OP when
+    `sku == source_sku` (byte-exact passthrough for the tree's own two
+    representative SKUs, same convention as every retarget_* above).
     """
     if sku == source_sku:
         return content
     return content.replace(
         f"# Example for {source_sku}:",
         "# Example (this template's own vendored board target -- substitute "
-        "your SoM's):",
+        "your SoM's, where one exists):",
     )

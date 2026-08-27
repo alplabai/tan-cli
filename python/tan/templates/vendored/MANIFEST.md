@@ -634,11 +634,17 @@ strictness exists to catch.
     sentence as entries 5/6, but its OWN, narrower defect (tan-cli#946,
     review round on #932/#942).** `E1M-V2N101`/`E1M-V2N102`/`E1M-V2M101`/
     `E1M-V2M102` all render this one tree, and unlike the `E1M-AEN801`
-    tree's cross-family problem, "Flip `som.sku` in `board.yaml` to
-    `E1M-V2M101` for the DEEPX DX-M1 path" IS an intra-family flip here --
-    correct in shape for a V2N101/V2N102 customer. It is still wrong for a
-    V2M102 one: `metadata/socs/deepx/dx/m1.json`'s `alp_module_skus` lists
-    BOTH `E1M-V2M101` and `E1M-V2M102` (confirmed:
+    tree's problem (a target family the `e1m-x-evk` preset does not host
+    at all), "Flip `som.sku` in `board.yaml` to `E1M-V2M101` for the DEEPX
+    DX-M1 path" IS legal here: `E1M-V2N101` is family `renesas-rzv2n` and
+    `E1M-V2M101` is family `renesas-rzv2n-deepx` -- two DIFFERENT
+    families, not one -- but `e1m-x-evk`'s `hosts_som_families` lists both,
+    so the flip is a legal cross-family swap on THIS preset, correct in
+    shape for a V2N101/V2N102 customer ("intra-family" is not the right
+    word for it -- neither alp-sdk board.yaml nor this repo uses that
+    vocabulary; the preset simply hosts more than one family). It is still
+    wrong for a V2M102 one: `metadata/socs/deepx/dx/m1.json`'s
+    `alp_module_skus` lists BOTH `E1M-V2M101` and `E1M-V2M102` (confirmed:
     `E1M-V2M102.yaml`'s own `on_module.npu: deepx_dxm1`), so a V2M102
     customer reading this line is told to abandon their own DEEPX-equipped
     module for a sibling SKU no more DEEPX-equipped than the one they

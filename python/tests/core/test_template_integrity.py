@@ -496,15 +496,20 @@ def test_every_extra_conf_file_named_by_a_template_is_a_planned_file(template_id
     )
 
 
-#: `(template_id, sku, foreign_sku)` for a DELIBERATE cross-SKU mention --
-#: without this, the guard below would flag `iot-starter`'s own "E1M-V2N101
-#: is deliberately not supported" exclusion note (both in its README and its
-#: `board.yaml` comment), which names the sibling SKU ON PURPOSE to explain
-#: why `--som E1M-V2N101` refuses this template. A one-entry allowlist, not
-#: a path-level exemption: the guard counts OCCURRENCES per `(template_id,
-#: sku, foreign_sku)` across every planned file, so an unrelated NEW
-#: cross-SKU mention added to either of those same two files would still
-#: change the count and still needs its own entry to pass.
+#: `(template_id, sku, foreign_sku) -> expected occurrence count` for a
+#: DELIBERATE cross-SKU mention -- without this, the guard below would flag
+#: `iot-starter`'s own "E1M-V2N101 is deliberately not supported" exclusion
+#: note (both in its README and its `board.yaml` comment), which names the
+#: sibling SKU ON PURPOSE to explain why `--som E1M-V2N101` refuses this
+#: template. Keyed on the exact COUNT, not mere membership (tan-cli#946
+#: round-2 review): a bare allowlist entry makes the pair invisible outright,
+#: so an unrelated NEW cross-SKU mention added on top of a legitimate one --
+#: same `(template_id, sku, foreign_sku)`, one extra occurrence -- would
+#: silently pass instead of changing the count and demanding its own review.
+#: Measured against the pre-fix (membership-only) guard: appending `/* Note:
+#: E1M-V2M101 also works here. */` to `edge-ai/E1M-V2N101/src/main.c` left it
+#: at 53 passed; the count form below reds on exactly that plant, and still
+#: reds on a wholly un-allowlisted token (e.g. `E1M-NX9101`).
 #:
 #: The other twelve entries (tan-cli#946 review round, widening
 #: `_foreign_sku_hits` off `CATALOGUED_SKUS` instead of the bare
@@ -514,8 +519,8 @@ def test_every_extra_conf_file_named_by_a_template_is_a_planned_file(template_id
 #:
 #: * the `E1M-AEN801` tree's `README.md`/`board.yaml` both tell an Alif
 #:   customer to re-scaffold at `E1M-V2M101` for the DEEPX path
-#:   (tan-cli#814) -- six entries, one per AEN-family SKU that renders this
-#:   tree (`E1M-AEN301`..`E1M-AEN801`);
+#:   (tan-cli#814) -- six entries, each counting 2 (one mention per file),
+#:   one per AEN-family SKU that renders this tree (`E1M-AEN301`..`E1M-AEN801`);
 #: * the `E1M-V2N101` tree's `README.md` names BOTH `E1M-V2M101` and
 #:   `E1M-V2M102` as DEEPX-equipped (tan-cli#946 -- see
 #:   `scaffold_byte_parity.py`'s `DELIBERATE_EDITS` entry
@@ -523,24 +528,27 @@ def test_every_extra_conf_file_named_by_a_template_is_a_planned_file(template_id
 #:   replaced was misleading for an `E1M-V2M102` customer) -- six entries,
 #:   one per (sku, foreign) pair where the sentence's own SKU differs from
 #:   the token: `E1M-V2N101`/`E1M-V2N102` each see both `E1M-V2M101` and
-#:   `E1M-V2M102` as foreign (they carry neither); `E1M-V2M101` sees
-#:   `E1M-V2M102` as foreign and vice versa (each is the sentence's OWN SKU
-#:   for one of the two mentions, never for both).
-_ALLOWED_CROSS_SKU_MENTIONS: frozenset[tuple[str, str, str]] = frozenset({
-    ("iot-starter", "E1M-AEN801", "E1M-V2N101"),
-    ("edge-ai-starter", "E1M-AEN301", "E1M-V2M101"),
-    ("edge-ai-starter", "E1M-AEN401", "E1M-V2M101"),
-    ("edge-ai-starter", "E1M-AEN501", "E1M-V2M101"),
-    ("edge-ai-starter", "E1M-AEN601", "E1M-V2M101"),
-    ("edge-ai-starter", "E1M-AEN701", "E1M-V2M101"),
-    ("edge-ai-starter", "E1M-AEN801", "E1M-V2M101"),
-    ("edge-ai-starter", "E1M-V2N101", "E1M-V2M101"),
-    ("edge-ai-starter", "E1M-V2N101", "E1M-V2M102"),
-    ("edge-ai-starter", "E1M-V2N102", "E1M-V2M101"),
-    ("edge-ai-starter", "E1M-V2N102", "E1M-V2M102"),
-    ("edge-ai-starter", "E1M-V2M101", "E1M-V2M102"),
-    ("edge-ai-starter", "E1M-V2M102", "E1M-V2M101"),
-})
+#:   `E1M-V2M102` as foreign, 1 mention each (they carry neither); `E1M-V2M101`
+#:   sees `E1M-V2M102` as foreign and vice versa, 1 mention each (each is the
+#:   sentence's OWN SKU for one of the two mentions, never for both).
+#:
+#: `iot-starter`'s `E1M-AEN801` entry counts 3: the exclusion note appears
+#: once in `board.yaml`'s comment and twice in `README.md`.
+_ALLOWED_CROSS_SKU_MENTIONS: dict[tuple[str, str, str], int] = {
+    ("iot-starter", "E1M-AEN801", "E1M-V2N101"): 3,
+    ("edge-ai-starter", "E1M-AEN301", "E1M-V2M101"): 2,
+    ("edge-ai-starter", "E1M-AEN401", "E1M-V2M101"): 2,
+    ("edge-ai-starter", "E1M-AEN501", "E1M-V2M101"): 2,
+    ("edge-ai-starter", "E1M-AEN601", "E1M-V2M101"): 2,
+    ("edge-ai-starter", "E1M-AEN701", "E1M-V2M101"): 2,
+    ("edge-ai-starter", "E1M-AEN801", "E1M-V2M101"): 2,
+    ("edge-ai-starter", "E1M-V2N101", "E1M-V2M101"): 1,
+    ("edge-ai-starter", "E1M-V2N101", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-V2N102", "E1M-V2M101"): 1,
+    ("edge-ai-starter", "E1M-V2N102", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-V2M101", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-V2M102", "E1M-V2M101"): 1,
+}
 
 
 def _foreign_sku_hits(sku: str, planned: dict[str, str]) -> dict[str, int]:
@@ -619,14 +627,25 @@ def test_no_planned_file_names_a_different_skus_exact_token(template_id, sku):
     having to remember to extend this test by hand."""
     planned = _planned(template_id, sku)
     hits = _foreign_sku_hits(sku, planned)
-    for foreign in list(hits):
-        if (template_id, sku, foreign) in _ALLOWED_CROSS_SKU_MENTIONS:
+    drifted = {}
+    for foreign, count in list(hits.items()):
+        allowed = _ALLOWED_CROSS_SKU_MENTIONS.get((template_id, sku, foreign))
+        if allowed is None:
+            continue
+        if allowed == count:
             del hits[foreign]
+        else:
+            # An allowlisted pair whose occurrence COUNT no longer matches --
+            # an extra (or missing) mention on top of the declared one, not a
+            # wholly new foreign token. Reported separately so the failure
+            # reads as "the allowlisted count drifted", not "a new gap".
+            drifted[foreign] = f"expected {allowed}, found {count}"
     assert not hits, (
         f"--template {template_id} --som {sku}: names a sibling SKU's exact "
-        f"token {hits} -- either a real substitution gap (tan-cli#932) or a "
-        f"legitimate cross-reference that needs declaring in "
-        f"_ALLOWED_CROSS_SKU_MENTIONS"
+        f"token {hits} -- either a real substitution gap (tan-cli#932), an "
+        f"allowlisted pair whose occurrence count drifted ({drifted or 'none'}) "
+        f"and needs its own review, or a legitimate cross-reference that needs "
+        f"declaring (with its exact count) in _ALLOWED_CROSS_SKU_MENTIONS"
     )
 
 

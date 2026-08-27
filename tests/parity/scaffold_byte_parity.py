@@ -605,10 +605,14 @@ DELIBERATE_EDITS: dict[
         un_edit_edge_ai_main_c_model_comment_2,
     ),
     ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note"): (
-        "tan-cli#814: the emit's `Flip som.sku to E1M-V2M101` sentence is a "
-        "cross-family swap here (alif-ensemble -> renesas-rzv2n-deepx) that "
-        "tan validate refuses; the E1M-V2N101 sibling's identical sentence "
-        "is intra-family (correct in shape) but has its own, narrower "
+        "tan-cli#814: the emit's `Flip som.sku to E1M-V2M101` sentence "
+        "names a target E1M-AEN801's own `board.yaml` preset (`e1m-evk`, "
+        "which hosts only alif-ensemble/nxp-imx9, not V2M101's "
+        "renesas-rzv2n-deepx) doesn't host that tan validate refuses; the "
+        "E1M-V2N101 sibling's identical sentence IS legal on ITS preset "
+        "(`e1m-x-evk`) -- E1M-V2N101 is family renesas-rzv2n and E1M-V2M101 "
+        "is family renesas-rzv2n-deepx, two different families, both listed "
+        "in e1m-x-evk's hosts_som_families -- but has its own, narrower "
         "defect -- see the entry right below",
         un_edit_edge_ai_aen801_readme_deepx_note,
     ),
