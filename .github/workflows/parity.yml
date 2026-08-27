@@ -860,10 +860,18 @@ jobs:
       # drift: `dependencies = ["typer>=0.12", "rich>=13", "pyyaml>=6",
       # "jsonschema>=4.18", "click>=8.1"]` covers the emit path's PyYAML and
       # jsonschema too. `pytest` stays explicit -- it is a test-only dep, not a
-      # runtime one.
+      # runtime one. `pytest-xdist` alongside it: this job's `tests/gates`
+      # step below is the OTHER of the two CI legs that run `tests/gates`
+      # (the other is `ci.yml`'s `python` job), and `test_home_preflight.py::
+      # test_pytest_configure_skips_the_check_on_an_xdist_worker` needs xdist
+      # PRESENT (not just installed somewhere) to prove the `config.
+      # workerinput` worker-skip guard rather than `importorskip`-skip past it
+      # (#916 review, Major 2). Neither this job's `tests/gates` step nor any
+      # other step here passes `-n`/`--dist`, so xdist stays inert for
+      # everything else this job runs.
       - name: install SDK emit + test deps
         run: |
-          python3 -m pip install --upgrade pip pytest
+          python3 -m pip install --upgrade pip pytest pytest-xdist
           python3 -m pip install ./python
 
       # These five steps (through scaffold byte-parity) are the ones the
@@ -1174,6 +1182,20 @@ jobs:
           # skip on a missing root.
           if ! grep -qF "test_planner_oracle_ref_tracks_pinned_sdk_tag.py::test_pinned_planner_oracle_ref_tracks_pinned_sdk_tag PASSED" /tmp/gates.log; then
             echo "::error::test_pinned_planner_oracle_ref_tracks_pinned_sdk_tag did not PASS in this job -- this test needs no ALP_SDK_ROOT and runs unconditionally, so anything other than PASSED here (a SKIP via POST_270_RETIRED, or a collection failure) is a real finding, not an absent root."
+            exit 1
+          fi
+
+          # tan-cli#916 review, Major 2 (round 3): `pytest-xdist` is installed
+          # above (`install SDK emit + test deps`) specifically so
+          # `test_home_preflight.py::test_pytest_configure_skips_the_check_on_
+          # an_xdist_worker` can PASS instead of `importorskip`-SKIPping past
+          # its own coverage -- but nothing named that node id here, so the
+          # install alone proved nothing: deleting `pytest-xdist` from that
+          # step's install line sends the test back to SKIP and this job
+          # stayed green regardless, same tan-cli#308 shape as every other
+          # guard in this step.
+          if ! grep -qF "test_home_preflight.py::test_pytest_configure_skips_the_check_on_an_xdist_worker PASSED" /tmp/gates.log; then
+            echo "::error::test_pytest_configure_skips_the_check_on_an_xdist_worker did not PASS in this job -- pytest-xdist is installed above specifically so this test proves the config.workerinput worker-skip guard instead of importorskip-skipping past it; a SKIP here means xdist is no longer installed/resolvable in this job, silently returning to the #916 Major 2 defect this guard exists to catch."
             exit 1
           fi
 
