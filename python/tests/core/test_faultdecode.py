@@ -45,7 +45,10 @@ from pathlib import Path
 
 import pytest
 
+from _pytest.outcomes import Skipped
+
 from tan.core import faultdecode as port
+from tan.core.shapes import SDK_MARKER
 from tests.conftest import REAL_ENVIRON
 from tests.gates.test_planner_relocation_freshness import (
     HAND_PORT_HASHES,
@@ -112,14 +115,43 @@ def _resolve_oracle_path() -> Path | None:
     """
     override = REAL_ENVIRON.get("ALP_SDK_ROOT")
     if override:
-        candidate = Path(override) / "scripts" / "alp_cli" / "faultdecode.py"
-        if not candidate.is_file():
-            raise RuntimeError(
-                f"ALP_SDK_ROOT={override!r} has no scripts/alp_cli/faultdecode.py. "
-                "Refusing to skip: a named-but-missing oracle would make this "
-                "check pass vacuously. Fix the path, or unset it."
+        root = Path(override)
+        candidate = root / "scripts" / "alp_cli" / "faultdecode.py"
+        if candidate.is_file():
+            return candidate
+        if root.joinpath(*SDK_MARKER).is_file():
+            # A REAL alp-sdk that no longer ships the oracle. alp-sdk#1367/
+            # #1368 (`210e9fed`, "finish the alp_cli retirement") deleted
+            # `scripts/alp_cli/faultdecode.py` outright -- 670 lines, along
+            # with twelve sibling modules -- once `tan faultdecode` shipped
+            # the native port. There is no live oracle left to diff against
+            # at that ref or any later one, and there never will be again,
+            # so refusing to skip here would turn a permanent upstream fact
+            # into a permanent red.
+            #
+            # This does NOT silently drop the coverage, which is the thing
+            # the refusal below exists to prevent.
+            # `tests/fixtures/faultdecode_golden.json` was frozen FROM that
+            # module while it still shipped (see its PROVENANCE.txt), and
+            # `test_bit_tables_match_the_frozen_golden` /
+            # `test_decode_matches_the_frozen_golden` assert tan's port
+            # against it on EVERY run -- bound or not, oracle present or
+            # not. What is lost is only the live re-verification, and that
+            # was lost upstream, not here.
+            pytest.skip(
+                "the bound alp-sdk retired scripts/alp_cli/faultdecode.py "
+                "(alp-sdk#1367/#1368, landed in 210e9fed), so there is no "
+                "live oracle to diff against at this ref. The frozen golden "
+                "tests/fixtures/faultdecode_golden.json is the authority "
+                "now, and its two checks run unconditionally."
             )
-        return candidate
+        raise RuntimeError(
+            f"ALP_SDK_ROOT={override!r} has no scripts/alp_cli/faultdecode.py "
+            f"and no {'/'.join(SDK_MARKER)} either, so it does not name an "
+            "alp-sdk checkout at all. Refusing to skip: a named-but-missing "
+            "oracle would make this check pass vacuously. Fix the path, or "
+            "unset it."
+        )
     for parent in Path(__file__).resolve().parents:
         candidate = parent.parent / "alp-sdk" / "scripts" / "alp_cli" / "faultdecode.py"
         if candidate.is_file():
@@ -554,3 +586,96 @@ def test_an_address_valid_bit_is_never_announced_as_the_root_cause():
     is what gets named."""
     report = port.decode(cfsr=1 << 15, dfsr=0x2, bfar=0x20000000)
     assert report.root_cause == "BKPT set (DFSR): Breakpoint -- a BKPT instruction or hardware breakpoint."
+
+
+# --------------------------------------------------------------------------
+# The oracle retirement is SCOPED (tan-cli#940). Three directions, because a
+# one-directional test would pass for a version of this resolver that had
+# simply stopped checking anything.
+# --------------------------------------------------------------------------
+
+
+def _resolve_with_root(monkeypatch, root: Path):
+    """Run `_resolve_oracle_path()` with `ALP_SDK_ROOT` bound to *root*.
+
+    Patches `REAL_ENVIRON` rather than `os.environ`: the resolver reads the
+    collection-time snapshot precisely because `_scrub_sdk_discovery_env`
+    has already emptied the live environment by the time a test body runs
+    (tan-cli#254/#256).
+    """
+    monkeypatch.setitem(REAL_ENVIRON, "ALP_SDK_ROOT", str(root))
+    return _resolve_oracle_path()
+
+
+def test_a_retired_oracle_on_a_real_alp_sdk_skips_rather_than_failing(tmp_path, monkeypatch):
+    """A real alp-sdk that no longer ships the oracle SKIPS.
+
+    alp-sdk#1367/#1368 (`210e9fed`) deleted `scripts/alp_cli/faultdecode.py`
+    permanently. Failing on that would turn a settled upstream fact into a
+    permanent red on every bound run.
+    """
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    # `Skipped` derives from BaseException, not Exception -- a
+    # `pytest.raises(Exception)` here does NOT catch it, the skip escapes and
+    # skips THIS test, and the assertions below never run. Caught while
+    # writing this: the first version reported `1 skipped` and verified
+    # nothing.
+    with pytest.raises(Skipped) as exc:
+        _resolve_with_root(monkeypatch, sdk)
+    assert "210e9fed" in str(exc.value)
+    assert "faultdecode_golden.json" in str(exc.value), (
+        "the skip must name the fixture that takes over, or it reads as "
+        "coverage simply going away")
+
+
+def test_a_root_that_is_not_an_alp_sdk_still_refuses_to_skip(tmp_path, monkeypatch):
+    """The anti-vacuous guard survives the retirement.
+
+    This is the half that makes the skip above safe: a typo'd or stale
+    `ALP_SDK_ROOT` must NOT be read as "upstream retired the oracle" and
+    quietly pass. Without the `SDK_MARKER` discriminator both cases look
+    identical from here -- the file is simply absent -- which is exactly
+    how a retirement branch turns into blanket coverage loss.
+    """
+    not_sdk = tmp_path / "somewhere-else"
+    not_sdk.mkdir()
+    # NOT `pytest.raises(RuntimeError)`. If the retirement branch ever loses
+    # its `SDK_MARKER` discriminator, the resolver SKIPS here instead of
+    # raising -- and a `Skipped` escaping a `pytest.raises(RuntimeError)`
+    # block aborts THIS test as skipped, not failed. Measured: with the
+    # discriminator mutated away, the `raises` version reported `1 skipped`
+    # and CI would have read that as green. Catching `Skipped` explicitly and
+    # converting it to a failure is what makes this regression loud, and it
+    # is the same "a gate skips itself into silence" class tan-cli#937 and
+    # tan-cli#943 are both about.
+    try:
+        resolved = _resolve_with_root(monkeypatch, not_sdk)
+    except Skipped as exc:
+        pytest.fail(
+            "the resolver SKIPPED on a root that is not an alp-sdk at all "
+            f"({exc}). That is the oracle-retirement branch firing where the "
+            "anti-vacuous refusal belongs: a typo'd or stale ALP_SDK_ROOT "
+            "would then read as 'upstream retired the oracle' and pass "
+            "vacuously, which is the whole thing the refusal exists to stop."
+        )
+    except RuntimeError as exc:
+        assert "does not name an alp-sdk checkout" in str(exc)
+    else:
+        pytest.fail(f"expected a RuntimeError refusal, got {resolved!r}")
+
+
+def test_an_alp_sdk_that_still_ships_the_oracle_resolves_it(tmp_path, monkeypatch):
+    """And a checkout that still HAS the oracle keeps using it.
+
+    Measured against the real pins while writing this: bound to eb96112b
+    (pre-retirement) these modules are 77 passed / 0 skipped; bound to
+    791ba769 (post-retirement) they are 64 passed / 13 skipped.
+    """
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts" / "alp_cli").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    oracle = sdk / "scripts" / "alp_cli" / "faultdecode.py"
+    oracle.write_text("", encoding="utf-8")
+    assert _resolve_with_root(monkeypatch, sdk) == oracle
