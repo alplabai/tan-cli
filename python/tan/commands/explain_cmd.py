@@ -457,6 +457,7 @@ class ExplainError(Exception):
         exit_code: ExitCode = ExitCode.RUNTIME_FAILURE,
         selector_value: str = "",
         extra_data: dict | None = None,
+        extra_issues: list[Issue] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -468,6 +469,19 @@ class ExplainError(Exception):
         #: miss uses it, to carry `suggestions` next to the refusal instead of
         #: burying the shortlist in an issue message a consumer must re-parse.
         self.extra_data = extra_data or {}
+        #: tan-cli#950: PREPENDED ahead of this error's own `Issue` by
+        #: `_fail`, the same `[*resolution_issues, Issue(...)]` shape
+        #: `clean_cmd._run` / `bootstrap_cmd._run` / `new_som_cmd.new_som`
+        #: use. Only `bind_sdk`'s `explain.sdk-root-unresolved` raise
+        #: populates this today (`sdk.project-pin-unresolved` /
+        #: `sdk.global-default-foreign-project`, tan-cli#263 review /
+        #: tan-cli#464): it is the one `ExplainError` site that can compute a
+        #: broken-pin/foreign-default fact and then discard the checkout it
+        #: came from, so it is also the one site the shared `Envelope(...,
+        #: sdk=...)` advisory machinery (`_with_sdk_resolution_advisories`)
+        #: cannot reach -- that machinery fires only when an `SdkInfo` was
+        #: actually built, and `bind_sdk` raises before building one.
+        self.extra_issues = extra_issues or []
 
 
 @dataclass
@@ -676,15 +690,35 @@ def bind_sdk(sdk_root_arg: str | None, project: str | None, code: str) -> tuple[
     problem. Either way this is a refusal naming what it could not find, never
     an empty answer. Both imports are LOCAL so the three SDK-free paths keep
     paying nothing for a mode they never enter.
+
+    tan-cli#950: the unresolved-SDK raise carries `resolution.broken_project_pin`
+    / `.foreign_global_default_for` on `ExplainError.extra_issues` (the
+    `clean_cmd._run` / `bootstrap_cmd._run` / `new_som_cmd.new_som` shape --
+    the eighth instance of the tan-cli#900 class). This is the ONE branch that
+    needs it computed explicitly: the SUCCESS return below hands its `SdkInfo`
+    to `_emit`'s `Envelope(..., sdk=...)`, whose own
+    `_with_sdk_resolution_advisories` already discloses the same pair
+    generically from `SdkInfo.broken_project_pin` -- but `bind_sdk` raising
+    here means no `SdkInfo` is ever built, so that shared machinery never
+    runs and the fact would otherwise be discarded with the rest of
+    `resolution`.
     """
     from tan.commands.build_cmd import resolve_sdk_root_ladder
-    from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+    from tan.commands.sdk_cmd import (
+        NO_SDK_NEXT_STEPS,
+        global_default_foreign_project_issue,
+        project_pin_issue,
+    )
     from tan.core.shapes import SDK_MARKER
 
     cwd = Path.cwd()
     workspace_root = cwd if project is None else Path(os.path.join(str(cwd), project))
     resolution = resolve_sdk_root_ladder(sdk_root_arg, workspace_root)
     if resolution.path is None or not resolution.path.joinpath(*SDK_MARKER).exists():
+        pin_issue = project_pin_issue(resolution.broken_project_pin, resolution.tier)
+        foreign_issue = global_default_foreign_project_issue(
+            resolution.foreign_global_default_for
+        )
         raise ExplainError(
             "explain.sdk-root-unresolved",
             f"alp-sdk root is unresolved, so no diagnostic catalogue could be "
@@ -692,6 +726,7 @@ def bind_sdk(sdk_root_arg: str | None, project: str | None, code: str) -> tuple[
             f"explain: alp-sdk root is unresolved, so no diagnostic catalogue "
             f"could be read -- {NO_SDK_NEXT_STEPS}.",
             selector_value=code.strip(),
+            extra_issues=[i for i in (pin_issue, foreign_issue) if i is not None],
         )
     return resolution.path, SdkInfo.from_resolution(str(resolution.path), resolution)
 
@@ -1010,6 +1045,15 @@ def _fail(json_mode: bool, err: ExplainError, sdk: SdkInfo | None = None) -> Non
     EMPTY even though the caller named a selector, because nothing was
     explained. `data.available` stays populated."""
     if not json_mode:
+        # tan-cli#950: `err.extra_issues` (today only `bind_sdk`'s broken-pin
+        # / foreign-global-default pair) printed AHEAD of the refusal line --
+        # `bootstrap_cmd._refusal`'s `warning_lines + outcome.text` order --
+        # since this text branch is the only path those facts reach; the JSON
+        # branch below carries them in `issues[]` instead. Without this,
+        # `--format json` would disclose the pin (tan-cli#677's asymmetry).
+        for issue in err.extra_issues:
+            for line in wrap_lines([f"explain: warning: {issue.message}"], wrap_width()):
+                print(line, file=sys.stderr)
         # A refusal sentence, not a record -- `--template`/`--target` echo
         # the CALLER's own (unbounded-length) input back into it (e.g.
         # "unknown template '<whatever was typed>'"), so this is the one
@@ -1027,7 +1071,7 @@ def _fail(json_mode: bool, err: ExplainError, sdk: SdkInfo | None = None) -> Non
             details=[],
             extra=err.extra_data,
         ),
-        [Issue(err.code, "error", err.message)],
+        [*err.extra_issues, Issue(err.code, "error", err.message)],
         err.exit_code,
         sdk,
     )

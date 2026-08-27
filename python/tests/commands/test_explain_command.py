@@ -291,6 +291,89 @@ def test_an_unknown_id_is_exit_1_with_the_id_echoed(argv, code, message, echoed)
     assert doc["data"]["selector"] == {"kind": "overview", "value": echoed}
 
 
+# ---------------------------------------------------------------------------
+# `--code`'s SDK resolution -- a broken project pin (tan-cli#950)
+# ---------------------------------------------------------------------------
+
+
+def _broken_pin_project(tmp_path, monkeypatch):
+    """A project whose `.alp/sdk-path` names a checkout that no longer
+    exists, with HOME/USERPROFILE pointed at an empty directory so a real
+    `~/.alp/sdk-default` on the machine running this suite cannot decide
+    what tier the ladder falls through to -- the fixture the issue itself
+    measured against, minus the subprocess plumbing: `.alp/sdk-path` MUST be
+    JSON (`{"sdkPath": ..., "updatedAt": ...}`); a plain-text pointer makes
+    the pin unreadable rather than broken, and `broken_project_pin` stays
+    `None`, which is precisely the shape that would NOT catch this defect.
+    """
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    proj = tmp_path / "proj"
+    (proj / ".alp").mkdir(parents=True)
+    (proj / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout"), "updatedAt": "2026-01-01T00:00:00Z"})
+    )
+    return proj
+
+
+def test_a_broken_project_pin_is_reported_alongside_the_unresolved_sdk_root(tmp_path, monkeypatch):
+    """tan-cli#950 -- the `explain` instance of the tan-cli#900 class
+    (`presets`/`clean` had this from #468; `examples`/`generate` got it in
+    #900; `bootstrap`/`new-som` got it in #926/#949). `bind_sdk` raised
+    `explain.sdk-root-unresolved` while discarding
+    `resolution.broken_project_pin` on the way -- a workspace whose
+    `.alp/sdk-path` names a checkout that no longer exists, with nothing else
+    on the ladder resolving either, reported `explain.sdk-root-unresolved`
+    alone, with no `sdk.project-pin-unresolved` alongside it.
+
+    Fails against dev: `[i["code"] for i in doc["issues"]]` there is
+    `["explain.sdk-root-unresolved"]` alone, with no leading
+    `sdk.project-pin-unresolved` and "gone-checkout" nowhere in the
+    envelope."""
+    proj = _broken_pin_project(tmp_path, monkeypatch)
+    result = runner.invoke(
+        app,
+        ["explain", "--code", "ALP_ERR_TIMEOUT", "--project", str(proj), "--format", "json"],
+    )
+    assert result.exit_code == 1, result.output
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is False
+    assert doc["exitCode"] == 1
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "explain.sdk-root-unresolved",
+    ], doc
+    assert "gone-checkout" in doc["issues"][0]["message"]
+    # Still no usable checkout -- still no `sdk` block.
+    assert "sdk" not in doc
+
+
+def test_text_mode_also_discloses_the_broken_project_pin(tmp_path, monkeypatch):
+    """Same fixture as above, `--format text`. tan-cli#677's asymmetry
+    (`bootstrap`'s #949 fix hit the identical recurrence): `_fail`'s text
+    branch used to print only `err.text_line`, never `err.extra_issues`, so a
+    JSON-only fix would disclose the pin under `--format json` while text
+    stayed silent about it.
+
+    Fails against a JSON-only fix: `.alp/sdk-path` / "gone-checkout" never
+    appear in stderr even though the same invocation's `--format json`
+    carries them."""
+    proj = _broken_pin_project(tmp_path, monkeypatch)
+    result = runner.invoke(
+        app, ["explain", "--code", "ALP_ERR_TIMEOUT", "--project", str(proj)]
+    )
+    assert result.exit_code == 1, result.output
+    assert result.stdout == ""
+    assert ".alp/sdk-path" in result.stderr, (
+        f"DEFECT (tan-cli#677 recurrence): JSON carries sdk.project-pin-"
+        f"unresolved but text does not render it:\n{result.stderr}"
+    )
+    assert "gone-checkout" in result.stderr
+    assert "alp-sdk root is unresolved" in result.stderr
+
+
 def test_json_mode_writes_one_envelope_and_nothing_else():
     """The hard constraint: stdout is the envelope channel. A stray byte on
     either stream silently breaks the extension -- it renders nothing, with no

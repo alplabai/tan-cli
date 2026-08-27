@@ -302,3 +302,6 @@ and write both files from the real merged tree.
     - function_count_budget: 260 -> 261
 - 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
     - function_count_budget: 261 -> 262
+- 2026-08-27 -- tan-cli#950: bind_sdk/_fail carry ExplainError.extra_issues (pin/foreign-default disclosure) + two regression tests
+    - tan/commands/explain_cmd.py: 1043 -> 1087
+    - function_count_budget: 262 -> 263
