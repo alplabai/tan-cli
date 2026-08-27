@@ -258,3 +258,17 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-26 -- correction, no number changed: the 2026-08-26 tan-cli#914 fix round entry above ("887 -> 912") is the log's last entry before this round but is stale as a description of HEAD -- a later commit on the same PR (b35ad259, "share the unresolved-core-type degrade with the build-time gate") shrank `tan/commands/presets_cmd.py` from 912 to 905 (measured: `git show 62c2894a:python/tan/commands/presets_cmd.py | wc -l` -> 912, `git show b35ad259:...` -> 905), and that shrink was never logged. `module_size_budget.generated.json` already recorded the correct 905 (regen is measurement-driven, not log-driven, so it did not go stale); only this append-only log's prose fell behind. This round's own entry above measures growth from the true 905, not the stale 912. Append-only, so this stands as a correction rather than an edit to that line.
 - 2026-08-26 -- review round: state the type+allowedOs degrade-disambiguation rule in presets_cmd.py's contract prose (Minor 4)
     - tan/commands/presets_cmd.py: 915 -> 929
+- 2026-08-26 -- tan-cli#925: guard the ipc: append on the board not already declaring one. PyYAML accepts a duplicate top-level key and keeps the LAST, so the unconditional append silently discarded the project's own channel -- measured on alp-sdk's multicore-mailbox scaffold, where alp_shmem0 (referenced by SHMEM_REGION_NAME in both src/main.c and peer/main.c) was replaced by tan's stub. A correctness fix that cannot be written in zero lines; contrast #921, where a ratchet was DECLINED because the growth was a comment.
+    - tan/core/scaffold.py: 1512 -> 1519
+- 2026-08-26 -- tan-cli#864: register multicore-mailbox in TEMPLATE_IDS/_VENDORED_TEMPLATE_DIR and replace the one-off IOT_STARTER_SUPPORTED_SKU with the TEMPLATE_SUPPORTED_SKUS table, which two measured failures showed the single hard-coded if could not cover (a silent AEN301 render, and an init.template-unreadable that blamed the installation for a wrong --som).
+    - tan/commands/explain_cmd.py: 1020 -> 1043
+    - tan/commands/init_cmd.py: 1258 -> 1264
+    - tan/core/scaffold.py: 1519 -> 1538
+    - function_count_budget: 258 -> 259
+- 2026-08-26 -- tan-cli#890: --from-example now consults the SDK scaffold catalog's supported.som_skus and warns when --som is outside it. The +24 in init_cmd.py is the guard and its Issue construction, not prose -- the reasoning lives in the new tan/core/example_catalog.py, and the in-place comment was cut to five lines pointing there. Contrast #921, where a ratchet was DECLINED because the growth was purely a comment.
+    - tan/commands/init_cmd.py: 1264 -> 1288
+- 2026-08-26 -- tan-cli#886: every inert option's help is rendered by tan.core.inert.inert_help, which costs build_cmd.py 3 lines and doctor_cmd.py 5 (one import each, plus the call's own wrapping).
+    - tan/commands/build_cmd.py: 2175 -> 2178
+    - tan/commands/doctor_cmd.py: 4040 -> 4045
+- 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 260 -> 261

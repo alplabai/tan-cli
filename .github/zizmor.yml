@@ -74,4 +74,8 @@ rules:
       # `auto/dev-version-bump-<tag>` through the remote this checkout
       # leaves configured, and nothing downstream sets up a token remote of
       # its own. The step carries the same explanation inline.
-      - release.yml:1225:9
+      # RE-DERIVED for tan-cli#887, which added 11 lines to the `Bundle the
+      # envelope contract` step above this job: 1225 -> 1236. Exactly the
+      # rot this file's header warns about, and it rotted loudly (the
+      # finding came back and the gate went red) rather than silently.
+      - release.yml:1236:9

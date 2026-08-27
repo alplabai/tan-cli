@@ -345,13 +345,71 @@ def test_a_failed_model_is_an_issue_not_a_traceback_and_the_batch_continues(tmp_
     assert "no blob compiled" in doc["issues"][0]["message"]
 
 
+# --------------------------------------------------------------------------
+# `_resolve_compile` -- the `models[].compile.<backend>` path resolver, unit
+# --------------------------------------------------------------------------
+#
+# Pins alp-sdk#1271: only `config`/`calibration`/`images`/`spec` name paths.
+# `_resolve_compile` used to resolve EVERY string value in a compile block to
+# an absolute filesystem path, so DRP-AI's `input_shape` ("1,3,224,224"),
+# `input_name` ("images") and `product` ("V2N") -- opaque strings the adapter
+# must receive unchanged -- were corrupted into filesystem paths before ever
+# reaching the adapter, which then made the adapter's own shape check
+# misfire. alp-sdk fixed this as issue #1271; tan's hand-ported copy never
+# received it until tan-cli#776.
+
+
+def test_resolve_compile_leaves_non_path_options_unchanged(tmp_path):
+    """alp-sdk#1271: only `config`/`calibration`/`images`/`spec` name paths.
+    Resolving a shape string turned "1,3,224,224" into a filesystem path and
+    made the DRP-AI adapter's own shape check misfire."""
+    out = model_cmd._resolve_compile(
+        {"drpai": {"input_shape": "1,3,224,224", "input_name": "images",
+                   "product": "V2N", "config": "cfg.json"}},
+        tmp_path,
+    )
+    assert out["drpai"]["input_shape"] == "1,3,224,224"
+    assert out["drpai"]["input_name"] == "images"
+    assert out["drpai"]["product"] == "V2N"
+    # the one genuine path key IS resolved, absolute, against board.yaml's dir
+    assert out["drpai"]["config"] == str((tmp_path / "cfg.json").resolve())
+
+
+def test_resolve_compile_leaves_non_string_path_valued_options_unchanged(tmp_path):
+    """A path-valued key (`images`) can still carry a non-string value in a
+    plausible `board.yaml` spelling -- a YAML flow-sequence
+    (`images: [a.png, b.png]`) or a stray int (`calibration: 100`). Those must
+    pass through unchanged rather than reaching `Path.__truediv__`, which
+    raises `TypeError: unsupported operand type(s) for /: 'PosixPath' and
+    'list'` for a non-str/PathLike operand -- caught by the broad handler at
+    `model_cmd.py`'s driver-spawn callsite and turned into
+    `model.internal-failure` / exit `INTERNAL_FAILURE` instead of a build.
+    Guards the `isinstance(v, str)` half of `_resolve_compile`'s guard, not
+    just the `k in _PATH_OPT_KEYS` half that the test above pins."""
+    out = model_cmd._resolve_compile({"drpai": {"images": ["a", "b"]}}, tmp_path)
+    assert out["drpai"]["images"] == ["a", "b"]
+
+
+def test_resolve_compile_passes_through_none_and_empty():
+    """An absent `compile:` block and an empty one both fall through the
+    `if not block:` guard to `None` -- true of both the pre-fix tan code and
+    the upstream alp-sdk#1271 fix (`if not block: return None`, unchanged by
+    that fix); this is pre-existing, unrelated behaviour, not part of the
+    path-key drift this section otherwise pins."""
+    assert model_cmd._resolve_compile(None, Path(".")) is None
+    assert model_cmd._resolve_compile({}, Path(".")) is None
+
+
 @pytest.mark.skipif(not _HAS_PYTHON, reason="no python interpreter available to spawn")
 def test_compile_opts_paths_are_resolved_absolute_relative_to_board_dir(tmp_path):
-    """Port of `model.py::_resolve_compile`: string opt values become absolute
-    paths relative to board.yaml's own directory. Also covers the two other
-    values `build_model` uses to choose which silicon to compile for -- `sku`
-    and `metadata_root` -- untested before: get either wrong and the driver
-    silently compiles blobs for the wrong part."""
+    """Port of `model.py::_resolve_compile`: only PATH-VALUED opt keys
+    (`config`/`calibration`/`images`/`spec`) become absolute paths relative to
+    board.yaml's own directory -- every other compile option (DRP-AI's
+    `input_shape`/`input_name`/`product` among them, alp-sdk#1271) must
+    survive verbatim. Also covers the two other values `build_model` uses to
+    choose which silicon to compile for -- `sku` and `metadata_root` --
+    untested before: get either wrong and the driver silently compiles blobs
+    for the wrong part."""
     sdk = make_sdk(tmp_path / "sdk")
     write(
         tmp_path / "sdk" / "scripts" / "alp_model" / "__init__.py", ""
@@ -384,7 +442,11 @@ def build_model(*, sku, name, source, out_dir, metadata_root, compile_opts=None)
         "    source: source.tflite\n"
         "    compile:\n"
         "      ethos_u:\n"
-        "        config: vela.ini\n",
+        "        config: vela.ini\n"
+        "      drpai:\n"
+        "        input_shape: \"1,3,224,224\"\n"
+        "        input_name: images\n"
+        "        product: V2N\n",
     )
     result = runner.invoke(
         app,
@@ -400,6 +462,13 @@ def build_model(*, sku, name, source, out_dir, metadata_root, compile_opts=None)
     assert opts["sku"] == "E1M-TEST"
     assert opts["metadataRoot"] == str(sdk / "metadata")
     assert opts["compileOpts"]["ethos_u"]["config"] == str((tmp_path / "vela.ini").resolve())
+    # alp-sdk#1271 / tan-cli#776: these three DRP-AI opts are opaque strings,
+    # not path keys -- they must survive the round trip through
+    # `_resolve_compile` byte-for-byte, not get mangled into filesystem paths.
+    drpai = opts["compileOpts"]["drpai"]
+    assert drpai["input_shape"] == "1,3,224,224"
+    assert drpai["input_name"] == "images"
+    assert drpai["product"] == "V2N"
 
 
 # --------------------------------------------------------------------------

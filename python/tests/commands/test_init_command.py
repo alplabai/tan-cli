@@ -340,6 +340,72 @@ def test_iot_starter_rejects_an_unsupported_som_before_planning(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_multicore_mailbox_rejects_a_som_the_sdk_itself_refuses_to_emit_for(tmp_path):
+    """tan-cli#864. The SDK gates this template's `supported.som_skus` to
+    `['E1M-AEN801']` and refuses everything else outright:
+
+        $ alp_project.py --emit scaffold --template multicore-mailbox --sku E1M-AEN301
+        alp_project: multicore-mailbox: sku 'E1M-AEN301' is not supported
+                     (supported: ['E1M-AEN801'])          rc=1
+
+    Before the per-template table, tan rendered the AEN801 tree anyway --
+    `exitCode 0`, a written project claiming `sku: E1M-AEN301` -- because
+    `_family_bucket` maps every unrecognised AEN prefix onto the default
+    family. That is tan generating a project the SDK would not, silently.
+
+    E1M-AEN301 does carry both `m55_hp` and `m55_he` (measured in its
+    `topology:`), so the scaffold might even build; the defect is the silent
+    divergence from the SDK's own support matrix, not a missing core."""
+    proc = run_tan(
+        "init", "--template", "multicore-mailbox", "--som", "E1M-AEN301",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.invalid-som"
+    assert "E1M-AEN801" in issue(env)["message"]
+    assert list(tmp_path.iterdir()) == [], "a refused --som must write nothing"
+
+
+def test_multicore_mailbox_refuses_another_family_without_blaming_the_install(tmp_path):
+    """The failure mode this replaces told the customer the wrong thing.
+    `--som E1M-V2N101` fell through to `_family_bucket`'s V2N tree, which
+    this template does not vendor, and surfaced as:
+
+        exitCode 5  init.template-unreadable
+        "tan's vendored template tree for 'multicore-mailbox' is empty at ..."
+
+    i.e. "your tan installation is broken" for a user whose `--som` was
+    simply wrong. Asserting the CODE, not just a non-zero exit: an exit 5
+    here would still be a refusal, and still be the wrong story."""
+    proc = run_tan(
+        "init", "--template", "multicore-mailbox", "--som", "E1M-V2N101",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert issue(env)["code"] == "init.invalid-som", (
+        "a wrong --som must not be reported as an unreadable vendored tree"
+    )
+    assert proc.returncode == 2, env
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_template_with_no_sku_restriction_still_takes_a_non_default_sku(tmp_path):
+    """Anti-over-reach: the table must gate only the templates whose catalog
+    entry restricts them. `zephyr-app` vendors both family trees and is
+    unaffected -- measured `exitCode 0` on E1M-AEN301 before and after."""
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--som", "E1M-AEN301",
+        "--name", "unrestricted", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert (tmp_path / "unrestricted" / "board.yaml").is_file()
+
+
 # ---------------------------------------------------------------------------
 # --cores: heterogeneous scaffolding
 # ---------------------------------------------------------------------------
@@ -533,8 +599,13 @@ def test_cores_still_accepts_the_app_core_itself_at_zephyr(tmp_path):
 
 
 def test_cores_is_ignored_on_the_from_example_path(tmp_path):
-    """`--som`/`--cores` are ignored for `--from-example`: the example ships
-    its own board.yaml."""
+    """`--cores` is ignored for `--from-example`: the example ships its own
+    board.yaml.
+
+    The docstring used to say `--som` was ignored too. Measured for
+    tan-cli#890 and it is not: `--som` retargets the copied board.yaml for
+    every value, including a different silicon family. Only `--cores` is
+    dropped here, which is all this test ever asserted."""
     sdk = tmp_path / "sdk"
     (sdk / "scripts").mkdir(parents=True)
     (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
@@ -866,6 +937,135 @@ def test_from_example_traversal_is_refused(tmp_path):
         env = envelope(proc)
         assert proc.returncode == 2, src
         assert issue(env)["code"] == "init.invalid-example", src
+
+
+def _sdk_with_catalog(tmp_path, *, example="multicore/mproc-mailbox",
+                      som_skus=("E1M-AEN801",), with_catalog=True):
+    """A fake SDK carrying one example and (optionally) a catalog record for
+    it, in the real `catalog-v1.json` shape: `{"templates": [{...}]}` with
+    `example` spelled the way the catalog spells it -- `examples/<src>`."""
+    import json
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    ex = sdk / "examples" / example
+    ex.mkdir(parents=True)
+    (ex / "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n",
+        encoding="utf-8",
+    )
+    if with_catalog:
+        cat = sdk / "metadata" / "templates"
+        cat.mkdir(parents=True)
+        (cat / "catalog-v1.json").write_text(
+            json.dumps({"schemaVersion": 1, "templates": [{
+                "id": "multicore-mailbox",
+                "example": f"examples/{example}",
+                "supported": {"som_skus": list(som_skus)},
+            }]}),
+            encoding="utf-8",
+        )
+    return sdk
+
+
+def test_from_example_warns_when_som_is_outside_the_catalog_support_set(tmp_path):
+    """tan-cli#890. `--from-example` never consulted the catalog's
+    `supported.som_skus`, so it scaffolded SoMs the SDK refuses outright:
+
+        $ alp_project.py --emit scaffold --template multicore-mailbox --sku E1M-AEN301
+        alp_project: multicore-mailbox: sku 'E1M-AEN301' is not supported
+                     (supported: ['E1M-AEN801'])          rc=1
+        $ tan init --from-example multicore/mproc-mailbox --som E1M-AEN301
+        exitCode 0 | ok True | issues 0
+
+    A WARNING rather than a refusal, matching this path's own precedent
+    (`test_from_example_with_no_board_yaml_warns_and_still_scaffolds`): a hard
+    refusal here "made `tan init --from-example` unusable for nearly the whole
+    AEN family, which is worse than the original defect". The issue says the
+    same in its own words -- the wider set may genuinely work; what is wrong is
+    that nothing checked."""
+    _sdk_with_catalog(tmp_path)
+
+    proc = run_tan(
+        "init", "--from-example", "multicore/mproc-mailbox", "--sdk-root", "./sdk",
+        "--som", "E1M-AEN301", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    codes = [i["code"] for i in env["issues"]]
+    assert "init.example-som-unsupported" in codes, env["issues"]
+    warn = next(i for i in env["issues"] if i["code"] == "init.example-som-unsupported")
+    assert warn["severity"] == "warning"
+    assert "E1M-AEN801" in warn["message"], "the supported set must be named"
+    assert "E1M-AEN301" in warn["message"], "the rejected --som must be named"
+    # Files are still written -- that is the whole point of warning over refusing.
+    assert (tmp_path / "board.yaml").is_file()
+
+
+def test_from_example_is_silent_when_the_som_is_in_the_support_set(tmp_path):
+    """Anti-false-alarm: the supported SKU must not warn."""
+    _sdk_with_catalog(tmp_path)
+
+    proc = run_tan(
+        "init", "--from-example", "multicore/mproc-mailbox", "--sdk-root", "./sdk",
+        "--som", "E1M-AEN801", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert "init.example-som-unsupported" not in [i["code"] for i in env["issues"]]
+
+
+def test_from_example_does_not_warn_for_an_example_with_no_catalog_record(tmp_path):
+    """Anti-over-reach, and this is the common case, not the edge: the SDK
+    ships far more examples than the catalog declares (9 records against
+    66 under `examples/aen/` alone). An example the catalog says nothing about
+    has no declared support set, so there is nothing to check -- inventing a
+    restriction there would be the same defect pointed the other way."""
+    _sdk_with_catalog(tmp_path, example="peripheral-io/hello-world",
+                      with_catalog=False)
+
+    proc = run_tan(
+        "init", "--from-example", "peripheral-io/hello-world", "--sdk-root", "./sdk",
+        "--som", "E1M-V2N101", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert "init.example-som-unsupported" not in [i["code"] for i in env["issues"]]
+
+
+def test_from_example_survives_an_sdk_with_no_catalog_at_all(tmp_path):
+    """An older SDK checkout has no `metadata/templates/catalog-v1.json`.
+    `--from-example` worked there before this gate and must keep working:
+    a missing catalog is not a reason to refuse, and must not crash."""
+    _sdk_with_catalog(tmp_path, with_catalog=False)
+
+    proc = run_tan(
+        "init", "--from-example", "multicore/mproc-mailbox", "--sdk-root", "./sdk",
+        "--som", "E1M-AEN301", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert "init.example-som-unsupported" not in [i["code"] for i in env["issues"]]
+    assert (tmp_path / "board.yaml").is_file()
+
+
+def test_from_example_without_som_never_warns(tmp_path):
+    """No `--som` means no retarget: the example keeps its own SKU, which is
+    by definition one the example was written for."""
+    _sdk_with_catalog(tmp_path)
+
+    proc = run_tan(
+        "init", "--from-example", "multicore/mproc-mailbox", "--sdk-root", "./sdk",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert "init.example-som-unsupported" not in [i["code"] for i in env["issues"]]
 
 
 def test_from_example_with_no_board_yaml_warns_and_still_scaffolds(tmp_path):

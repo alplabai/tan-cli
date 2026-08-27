@@ -54,7 +54,8 @@ templates, five of which map onto five entries of the broader SDK catalog
 (`metadata/templates/catalog-v1.json`, alp-sdk) under DIFFERENT ids (its
 `minimal`/`sensor`/`iot`/`edge-ai`/`diagnostics` are this file's
 `zephyr-app`/`sensor-starter`/`iot-starter`/`edge-ai-starter`/
-`board-diagnostics`); `minimal-app` has no catalog counterpart at all, and the
+`board-diagnostics`). `multicore-mailbox` (tan-cli#864) is the one id spelled
+the SAME on both sides; `minimal-app` has no catalog counterpart at all, and the
 catalog's `peripheral`/`multicore-rpmsg`/`gateway` entries have no `--template`
 counterpart here -- reach them (and any other SDK example) with
 `--from-example` instead, which copies the example's own tree verbatim
@@ -99,10 +100,11 @@ from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, global_default_foreign_project_issue
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
+from tan.core.example_catalog import unsupported_som
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     DEFAULT_TEMPLATE_ID,
-    IOT_STARTER_SUPPORTED_SKU,
+    TEMPLATE_SUPPORTED_SKUS,
     TEMPLATE_IDS,
     CoresError,
     ExampleReadError,
@@ -579,14 +581,19 @@ def _plan_from_template(
 ) -> tuple[str, list[PlannedFile]]:
     template_id = _resolve_template(template)
     sku = som or DEFAULT_SOM_SKU
-    # Checked BEFORE anything is planned: `iot-starter` vendors exactly one SoM
-    # family (its Wi-Fi transport is silicon-validated on that SKU alone), so
-    # any other `--som` must be refused, never quietly rendered against it.
-    if template_id == "iot-starter" and sku != IOT_STARTER_SUPPORTED_SKU:
+    # Checked BEFORE anything is planned. A template whose SDK catalog entry
+    # restricts `supported.som_skus` must refuse every other `--som` here --
+    # never render it against the wrong family tree (silent, `exitCode 0`) and
+    # never let it fall through to `init.template-unreadable` (which blames
+    # the installation for a wrong argument). See TEMPLATE_SUPPORTED_SKUS.
+    supported = TEMPLATE_SUPPORTED_SKUS.get(template_id)
+    if supported is not None and sku not in supported:
+        plural = "s" if len(supported) > 1 else ""
+        allowed = ", ".join(f"'{s}'" for s in supported)
         raise InitError(
             "init.invalid-som",
-            f"Template 'iot-starter' supports only SoM SKU "
-            f"'{IOT_STARTER_SUPPORTED_SKU}'; got '{sku}'.",
+            f"Template '{template_id}' supports only SoM SKU{plural} "
+            f"{allowed}; got '{sku}'.",
             ExitCode.VALIDATION_FAILURE,
         )
     try:
@@ -1202,6 +1209,27 @@ def init(
         # when one was given. Every registered TEMPLATE plans its own
         # board.yaml (tan.core.scaffold), so this can only trip on
         # --from-example.
+        # tan-cli#890: this path retargets `--som` onto the copied board.yaml
+        # without asking the catalog whether the example supports that SKU.
+        # WARNS rather than refuses, for the same reason as the board.yaml
+        # case just below; `tan/core/example_catalog.py` carries the full
+        # reasoning and the "cannot tell means silent" rule.
+        example_som_issue = None
+        if from_example is not None and som is not None and resolved_sdk is not None:
+            supported = unsupported_som(resolved_sdk.path, from_example, som)
+            if supported is not None:
+                example_som_issue = Issue(
+                    "init.example-som-unsupported",
+                    "warning",
+                    f"{subject_label} declares supported.som_skus "
+                    f"{list(supported)} in the SDK scaffold catalog; --som "
+                    f"'{som}' is outside that set, and `alp_project.py --emit "
+                    f"scaffold` refuses the same pair. The files were still "
+                    f"written -- check the scaffolded board.yaml against your "
+                    f"SoM's topology before building, or widen som_skus in "
+                    f"the catalog if the example really does support it.",
+                )
+
         missing_board_yaml_issue = None
         if from_example is not None and not any(f.relative_path == "board.yaml" for f in files):
             missing_board_yaml_issue = Issue(
@@ -1221,6 +1249,8 @@ def init(
             force=force,
             sdk=resolved_sdk,
         )
+        if example_som_issue is not None:
+            outcome.issues.append(example_som_issue)
         if missing_board_yaml_issue is not None:
             outcome.issues.append(missing_board_yaml_issue)
         if divergence_issue is not None:

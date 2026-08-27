@@ -60,7 +60,7 @@ import pytest
 
 from tan.net import default_ssl_context
 from tan.core.scaffold import (
-    IOT_STARTER_SUPPORTED_SKU,
+    TEMPLATE_SUPPORTED_SKUS,
     TEMPLATE_IDS,
     VENDORED_ROOT,
     _FAMILY_TREES,
@@ -265,7 +265,7 @@ def _skus_for(template_id: str) -> tuple[str, ...]:
     is refused before planning), so asking it for the V2N SKU would silently
     re-check the Alif tree a second time and report a SKU it never supports in
     the failure message."""
-    return (IOT_STARTER_SUPPORTED_SKU,) if template_id == "iot-starter" else _FAMILY_TREES
+    return TEMPLATE_SUPPORTED_SKUS.get(template_id) or _FAMILY_TREES
 
 
 def _cases():

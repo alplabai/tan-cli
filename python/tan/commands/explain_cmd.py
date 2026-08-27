@@ -27,7 +27,7 @@ against `alp-sdk/docs/superpowers/specs/2026-07-29-tan-port-invariants.md`:
   part-numbers inside the prose (TMP112, BME280, CC3501E, the two SKUs) enter no
   decision here; they are transcribed English, and every one already ships in
   tan via the vendored scaffold trees and `core/scaffold.py`'s
-  `DEFAULT_SOM_SKU`/`IOT_STARTER_SUPPORTED_SKU`. Nothing in this file is keyed
+  `DEFAULT_SOM_SKU`/`TEMPLATE_SUPPORTED_SKUS`. Nothing in this file is keyed
   on a SKU, an address, or a pin.
 
 The ONE derived line is "Default libraries", which reads each template's
@@ -300,6 +300,29 @@ PROJECT_TEMPLATES: tuple[ProjectTemplate, ...] = (
             "FAIL.",
             "Build with `west build -b <board>` after `export ALP_SDK_ROOT=<your "
             "alp-sdk checkout>`.",
+        ),
+    ),
+    ProjectTemplate(
+        id="multicore-mailbox",
+        label="Multicore -- mailbox (AEN M55-HP <-> M55-HE)",
+        description=(
+            "Dual-Zephyr-core starter for the Alif Ensemble E8: two Cortex-M55 "
+            "cores, both real project cores."
+        ),
+        explanation=(
+            "Vendored from the SDK's `multicore-mailbox` scaffold. Both cores get "
+            "their own app -- `m55_hp: app: ./src` and `m55_he: app: ./peer` -- "
+            "which is the topology no --template/--cores combination could "
+            "scaffold before (tan-cli#864).",
+            "HP stages a payload in cache-coherent shared SRAM and signals HE "
+            "through the hardware mailbox over the portable <alp/mproc.h> "
+            "raw-shmem + mailbox + hwsem surface; HE echoes it back. Deliberately "
+            "NOT RPMsg -- no framing and no negotiated channel, just a raw pointer "
+            "view over a fixed carve-out plus a doorbell.",
+            "E1M-AEN801 only: the SDK catalog gates this template's "
+            "`supported.som_skus` to that one SKU and refuses to emit it for any "
+            "other, so tan refuses the same set rather than rendering it against "
+            "another tree.",
         ),
     ),
 )

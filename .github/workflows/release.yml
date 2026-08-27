@@ -662,6 +662,17 @@ jobs:
               "args": doctor_keys["args"],
               "dataKeys": doctor_keys["dataKeys"],
           }
+          # tan-cli#887: same reasoning for `sdk list` -- its data VALUES are
+          # whatever alp-sdk has published on GitHub at the moment of the call,
+          # so it carries `dataKeys` rather than a byte `envelope` too. This is
+          # what took `data.releases` off contract/README.md's NOT COVERED list.
+          sdk_list_keys = json.loads(
+              (root / "sdk-list-data-keys.json").read_text(encoding="utf-8")
+          )
+          envelopes["sdk-list"] = {
+              "args": sdk_list_keys["args"],
+              "dataKeys": sdk_list_keys["dataKeys"],
+          }
           json.dump(
               {
                   "schemaVersion": 1,
