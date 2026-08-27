@@ -66,11 +66,22 @@ python3 python/scripts/assemble_changelog.py --require-empty  # exit 1 if any fr
 ```
 
 `--check` never fails merely because fragments are pending — that is why it is
-not the gate. It is not unconditionally exit-0 either, whatever its `--help`
-says: like every mode it refuses an unusable fragment (a category outside the
-six, or an empty body) and exits 1, which makes it a usable filename lint.
+not the gate. Like every mode it refuses (exit 1) an unusable fragment: a
+category outside the six, an empty or whitespace-only body, or — since
+tan-cli#930 — a body whose top-level lines are not shaped as a Markdown
+bullet list, e.g. a fragment whose only line is `not a bullet at all`. That
+shape check is narrower than "any valid Markdown list": only a literal `- `
+(a dash, then a space) marks a bullet — `*`, `+`, and numbered (`1.`) markers
+are refused, as is a column-0 continuation line with no `- ` bullet above it
+(CommonMark would still parse that as part of the list; this checker does
+not) — and a ` ``` ` fence must close before the fragment ends. Before
+tan-cli#930 the check was only a filename lint; it now also refuses content
+`splice()` would otherwise insert into `CHANGELOG.md` as bare text under a
+bullet-list heading. It still does not, and never will, judge whether a
+fragment's sentences are *true* — a wrong count or a false claim reads clean;
+that stays a review problem.
 `--require-empty` is the gate, and since tan-cli#813 it is a live one:
-`.github/workflows/release.yml:704` runs it, so a tag cut with fragments still
+`.github/workflows/release.yml:724` runs it, so a tag cut with fragments still
 sitting here fails the release rather than shipping a CHANGELOG missing them.
 
 This runs **before** the version bump and tag, so `release.yml`'s existing

@@ -489,7 +489,7 @@ def test_read_soms_reports_e8s_three_cores_with_type_and_allowed_os():
 
 
 @pytestmark_soc
-def test_allowed_os_lookup_matches_tan_planner_topology_exactly(monkeypatch):
+def test_allowed_os_lookup_matches_tan_planner_topology_exactly(monkeypatch, request):
     """The STRONGEST reuse proof: `_soc_lookups`'s `allowed_os_lookup` (which
     imports only `tan.core.os_class`) agrees, core type by core type, with
     `tan.planner.topology._allowed_os_for_core` -- the planner's OWN,
@@ -514,50 +514,35 @@ def test_allowed_os_lookup_matches_tan_planner_topology_exactly(monkeypatch):
     """
     import sys
 
-    import tan as _tan_pkg
     from tan import planner_root
 
-    # `tan.planner`'s package object is BOTH a `sys.modules["tan.planner"]`
-    # entry AND a plain `.planner` attribute of the `tan` package module --
-    # Python's import machinery sets the latter as a side effect every time
-    # `tan.planner` is (re)imported, the same way it does for any submodule.
-    # `monkeypatch.delitem` below only ever touches the FIRST location: it
-    # deletes `sys.modules["tan.planner"]` (and children), which forces the
-    # `from tan.planner.paths import ...` a few lines down to reimport the
-    # whole package fresh -- and that fresh import overwrites `tan.planner`
-    # (the attribute) to point at the NEW package, a side effect `monkeypatch`
-    # was never told about and so never undoes. At teardown `sys.modules`
-    # reverts to the pre-test package while `tan`'s own `.planner` attribute
-    # is left pointing at the leaked fresh one -- two live `tan.planner`
-    # packages (and two `OrchestratorError` classes, one per copy) for the
-    # rest of the process. That is tan-cli#943: a later
-    # `import tan.planner.kconfig as m` resolves through the STALE attribute
-    # chain (`tan.planner.kconfig`) and gets the leaked copy, while a sibling
-    # `from tan.planner.models import OrchestratorError` resolves through
-    # `sys.modules` directly and gets the restored one -- `pytest.raises`
-    # then fails to match its own exception class.
+    torn_out = [
+        n for n in sys.modules if n == "tan.planner" or n.startswith("tan.planner.")
+    ]
+    # Pin the parent packages' submodule ATTRIBUTES before tearing anything
+    # out (tan-cli#943). `monkeypatch.delitem` restores the sys.modules
+    # entries, and that is not the whole state: `import tan.planner.kconfig`
+    # also rebinds `kconfig` on the parent package object, and since CPython
+    # 3.7 `import x.y as z` reads that attribute rather than sys.modules. Undo
+    # the dict alone and a later `import tan.planner.kconfig as m` hands out a
+    # module object DIFFERENT from the one sys.modules holds; the two then
+    # disagree on the identity of every class they export, which is how
+    # tests/planner/test_chip_symbol_declared_guard.py's
+    # pytest.raises(OrchestratorError) stopped matching an OrchestratorError
+    # raised three frames down.
     #
-    # Pin the attribute for restore too, exactly like the `sys.modules`
-    # entries below, so both locations snap back to the SAME pre-test package
-    # together instead of drifting apart. Guarded on `hasattr` rather than
-    # using `getattr(..., None)` + `raising=False` unconditionally: when
-    # `tan.planner` was NOT already imported (no prior test in this process
-    # touched it), `_tan_pkg` has no `.planner` attribute yet, and recording
-    # a restore for an attribute that did not previously exist makes
-    # monkeypatch DELETE it at teardown -- even though the fresh reimport a
-    # few lines down legitimately sets it as a side effect. That traded the
-    # original leak for its mirror image: `sys.modules["tan.planner"]`
-    # restored correctly while `tan.planner` (the attribute) got deleted
-    # out from under it, so `hasattr(tan, "planner")` was `False` while
-    # `"tan.planner" in sys.modules` was `True` -- and a subsequent
-    # `import tan.planner; tan.planner.paths` raised `AttributeError:
-    # module 'tan' has no attribute 'planner'`. Only registering a restore
-    # when the attribute already exists avoids ever manufacturing that
-    # inconsistency.
-    if hasattr(_tan_pkg, "planner"):
-        monkeypatch.setattr(_tan_pkg, "planner", _tan_pkg.planner)
-
-    for name in [n for n in sys.modules if n == "tan.planner" or n.startswith("tan.planner.")]:
+    # Re-setting each attribute to its CURRENT value registers the original
+    # with monkeypatch, so its own undo restores it. A finalizer cannot do
+    # this: finalizers run LIFO, monkeypatch's teardown was registered first
+    # and therefore runs LAST, so a finalizer re-pins the attributes to the
+    # window's fresh modules and monkeypatch then swaps sys.modules back
+    # underneath them -- measured, still 1 failed.
+    for name in torn_out:
+        parent_name, _, leaf = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is not None and hasattr(parent, leaf):
+            monkeypatch.setattr(parent, leaf, getattr(parent, leaf), raising=False)
+    for name in torn_out:
         monkeypatch.delitem(sys.modules, name, raising=False)
     monkeypatch.setattr(planner_root, "_BOUND", None)
 
@@ -851,3 +836,4 @@ def test_presets_text_verbose_adds_family_and_cores():
 
     assert any("alif-ensemble" in line for line in lines)
     assert any("m55_hp" in line and "zephyr" in line for line in lines)
+
