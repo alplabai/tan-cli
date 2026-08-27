@@ -53,12 +53,12 @@ wizard offers nothing rather than guess, the gate still allows the two
 values every core, resolved or not, may always take (see `_soc_lookups`'s own
 docstring for why this reads `tan.core.os_class` and not `tan.planner.topology`
 directly: the latter's process-global SDK-root binding is the wrong contract
-for a command exercised by dozens of independent per-test checkouts). Both
-degrade to their empty default (`type=""`, `allowedOs=[]`) rather than fail
-the command when the checkout carries no `metadata/socs/**` entry for the
-SoM's `silicon:` or no `board.schema.json` at all (a synthetic/partial
-`--sdk-root` is a legitimate case this command already tolerates elsewhere)
--- no SoM detail here is load-bearing enough to fail `tan presets` over.
+for a command exercised by dozens of independent per-test checkouts).
+`allowedOs` degrades to `[]` on a schema miss; `type` degrades to `""` -- and
+drags `allowedOs` to `[]` -- only on a SoC-lookup miss (no `metadata/socs/**`
+entry for the SoM's `silicon:`). Neither miss fails the command (a
+synthetic/partial `--sdk-root` is tolerated elsewhere) -- no SoM detail here is
+load-bearing enough to fail `tan presets` over.
 
 **`allowedOs: []` alone does not say which of the two above degrades fired --
 `type` does.** Two different unknowns both wire as an empty `allowedOs`

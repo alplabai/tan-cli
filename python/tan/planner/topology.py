@@ -85,6 +85,20 @@ def _allowed_os_for_core(core_type: str, metadata_root: Path) -> list[str]:
     plausible-but-wrong cross-class subtraction, the SAME degrade
     `presets_cmd.allowed_os_lookup` needs -- see that function's docstring for
     why the two must never drift apart on this again.
+
+    KNOWN DIVERGENCE FROM UPSTREAM (tan-cli#938): alp-sdk's own
+    `scripts/alp_orchestrate/topology.py` still open-codes the cross-class
+    subtraction inline and returns `["baremetal", "off"]` for an unresolved
+    `core_type`, because upstream never carried #914's guard. Do NOT
+    "resync" this function toward upstream's `["baremetal", "off"]` -- that
+    is the exact plausible-but-wrong guess #870/#914 exist to remove, and
+    reintroducing it here would reopen the alp-sdk-vscode#538-shaped defect
+    on this emit specifically. This reaches `core_os_topology`'s
+    `allowed_os` field, which `test_planner_emit_parity` pins byte-for-byte
+    against the oracle; the relocation-freshness gate
+    (`tests/gates/test_planner_relocation_freshness.py`) cannot see this
+    divergence because it only hashes upstream's `topology.py`, never this
+    file -- record here, don't reconcile.
     """
     return _allowed_os_for_core_shared(core_type, _core_os_choices(metadata_root))
 
