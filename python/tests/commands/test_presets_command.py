@@ -489,7 +489,7 @@ def test_read_soms_reports_e8s_three_cores_with_type_and_allowed_os():
 
 
 @pytestmark_soc
-def test_allowed_os_lookup_matches_tan_planner_topology_exactly(monkeypatch):
+def test_allowed_os_lookup_matches_tan_planner_topology_exactly(monkeypatch, request):
     """The STRONGEST reuse proof: `_soc_lookups`'s `allowed_os_lookup` (which
     imports only `tan.core.os_class`) agrees, core type by core type, with
     `tan.planner.topology._allowed_os_for_core` -- the planner's OWN,
@@ -516,7 +516,33 @@ def test_allowed_os_lookup_matches_tan_planner_topology_exactly(monkeypatch):
 
     from tan import planner_root
 
-    for name in [n for n in sys.modules if n == "tan.planner" or n.startswith("tan.planner.")]:
+    torn_out = [
+        n for n in sys.modules if n == "tan.planner" or n.startswith("tan.planner.")
+    ]
+    # Pin the parent packages' submodule ATTRIBUTES before tearing anything
+    # out (tan-cli#943). `monkeypatch.delitem` restores the sys.modules
+    # entries, and that is not the whole state: `import tan.planner.kconfig`
+    # also rebinds `kconfig` on the parent package object, and since CPython
+    # 3.7 `import x.y as z` reads that attribute rather than sys.modules. Undo
+    # the dict alone and a later `import tan.planner.kconfig as m` hands out a
+    # module object DIFFERENT from the one sys.modules holds; the two then
+    # disagree on the identity of every class they export, which is how
+    # tests/planner/test_chip_symbol_declared_guard.py's
+    # pytest.raises(OrchestratorError) stopped matching an OrchestratorError
+    # raised three frames down.
+    #
+    # Re-setting each attribute to its CURRENT value registers the original
+    # with monkeypatch, so its own undo restores it. A finalizer cannot do
+    # this: finalizers run LIFO, monkeypatch's teardown was registered first
+    # and therefore runs LAST, so a finalizer re-pins the attributes to the
+    # window's fresh modules and monkeypatch then swaps sys.modules back
+    # underneath them -- measured, still 1 failed.
+    for name in torn_out:
+        parent_name, _, leaf = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is not None and hasattr(parent, leaf):
+            monkeypatch.setattr(parent, leaf, getattr(parent, leaf), raising=False)
+    for name in torn_out:
         monkeypatch.delitem(sys.modules, name, raising=False)
     monkeypatch.setattr(planner_root, "_BOUND", None)
 
@@ -810,3 +836,4 @@ def test_presets_text_verbose_adds_family_and_cores():
 
     assert any("alif-ensemble" in line for line in lines)
     assert any("m55_hp" in line and "zephyr" in line for line in lines)
+
