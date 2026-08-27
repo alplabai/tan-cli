@@ -471,7 +471,7 @@ class ExplainError(Exception):
         self.extra_data = extra_data or {}
         #: tan-cli#950: PREPENDED ahead of this error's own `Issue` by
         #: `_fail`, the same `[*resolution_issues, Issue(...)]` shape
-        #: `clean_cmd._run` / `bootstrap_cmd._run` / `new_som_cmd.new_som`
+        #: `clean_cmd._run` / `bootstrap_cmd._refusal` / `new_som_cmd.new_som`
         #: use. Only `bind_sdk`'s `explain.sdk-root-unresolved` raise
         #: populates this today (`sdk.project-pin-unresolved` /
         #: `sdk.global-default-foreign-project`, tan-cli#263 review /
@@ -693,7 +693,7 @@ def bind_sdk(sdk_root_arg: str | None, project: str | None, code: str) -> tuple[
 
     tan-cli#950: the unresolved-SDK raise carries `resolution.broken_project_pin`
     / `.foreign_global_default_for` on `ExplainError.extra_issues` (the
-    `clean_cmd._run` / `bootstrap_cmd._run` / `new_som_cmd.new_som` shape --
+    `clean_cmd._run` / `bootstrap_cmd._refusal` / `new_som_cmd.new_som` shape --
     the eighth instance of the tan-cli#900 class). This is the ONE branch that
     needs it computed explicitly: the SUCCESS return below hands its `SdkInfo`
     to `_emit`'s `Envelope(..., sdk=...)`, whose own
