@@ -420,6 +420,93 @@ def un_edit_mailbox_blocked_caveat(text: str) -> str:
     return _MAILBOX_BLOCKED_CAVEAT.sub("\n", text)
 
 
+#: tan-cli#932: `diagnostics/E1M-V2N101` is a Renesas RZ/V2N scaffold whose
+#: `src/main.c` was never SKU-substituted at all -- it is byte-identical to
+#: `E1M-AEN801`'s, still naming that Alif module in its own "what success
+#: looks like" comment -- and whose `README.md` was substituted on the SoM
+#: SKU line only, leaving the serial beside it and both `SoC identity:`
+#: lines at their AEN801/Alif values. Four independent wrong tokens, each
+#: its own entry per the `edit_id` discipline above: the SoM SKU (header
+#: comment only -- `README.md` already had this half right), a placeholder
+#: serial, and the SoC identity string, wherever each appears.
+#:
+#: The SoC identity string is NOT invented to match the Alif shape: it is
+#: `renesas:rzv2n:n44`, `metadata/socs/renesas/rzv2n/n44.json`'s own `ref`
+#: field (what `scripts/gen_soc_caps.py` bakes into `ALP_SOC_REF_STR`), the
+#: same file `metadata/e1m_modules/E1M-V2N101.yaml`'s `silicon:` key names
+#: for this SKU. `n44` not `n48` on purpose: alp-sdk's own SoC json documents
+#: the n44/n48 delta as GPU/ISP/crypto fusing only (devicetree-identical for
+#: the M33 + SPI/I2C peripherals this SDK targets) and that `n48` is only the
+#: Zephyr `zephyr_soc_variant` Kconfig/DT symbol Zephyr board artefacts
+#: reference in place of the SoC json's own `ref` -- which is why this
+#: README's OWN (correct, untouched) `west build -b
+#: alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33` line names `n48gbg` two lines
+#: below a `SoC identity:` string that correctly names `n44`; not a
+#: contradiction, two different identifiers for the same silicon.
+#:
+#: The serial is NOT a plausible-looking invented value in AEN801's shape
+#: (e.g. `V2N0000123`) -- alp-sdk's own `scripts/program_eeprom.py --serial`
+#: help text uses a completely different shape (`2026W19-0001`), which
+#: proves `AEN0000123` was never a schema-driven format to begin with, just
+#: this one example's flavour text. `<factory-serial>` reuses the README's
+#: own angle-bracket placeholder convention already sitting two lines above
+#: it (`west flash --host <board-ip>`) -- obviously a placeholder, not
+#: readable as a real serial.
+_MAIN_C_V2N101_SOM_SKU_HEADER_EDITED = (
+    " * What success looks like (real hardware, E1M-V2N101):\n"
+)
+_MAIN_C_V2N101_SOM_SKU_HEADER_EMITTED = (
+    " * What success looks like (real hardware, E1M-AEN801):\n"
+)
+
+
+def un_edit_main_c_v2n101_som_sku_header(text: str) -> str:
+    """tan-cli#932: reverse the "what success looks like" heading's SKU fix
+    to recover the emit's own (unsubstituted, AEN801-named) bytes."""
+    return text.replace(
+        _MAIN_C_V2N101_SOM_SKU_HEADER_EDITED, _MAIN_C_V2N101_SOM_SKU_HEADER_EMITTED
+    )
+
+
+_MAIN_C_V2N101_SOM_SKU_OUTPUT_LINE_EDITED = (
+    " *   [selftest] SoM identity: E1M-V2N101 rev r1 sn"
+)
+_MAIN_C_V2N101_SOM_SKU_OUTPUT_LINE_EMITTED = (
+    " *   [selftest] SoM identity: E1M-AEN801 rev r1 sn"
+)
+
+
+def un_edit_main_c_v2n101_som_sku_output_line(text: str) -> str:
+    """tan-cli#932: reverse the sample-output SoM-identity line's SKU fix to
+    recover the emit's own (unsubstituted, AEN801-named) bytes. Own entry,
+    separate from the serial fix on the same line -- see the `edit_id`
+    discipline above -- so healing one half without the other still reds."""
+    return text.replace(
+        _MAIN_C_V2N101_SOM_SKU_OUTPUT_LINE_EDITED,
+        _MAIN_C_V2N101_SOM_SKU_OUTPUT_LINE_EMITTED,
+    )
+
+
+def un_edit_v2n101_serial_placeholder(text: str) -> str:
+    """tan-cli#932: reverse the `<factory-serial>` placeholder back onto the
+    emit's own AEN-shaped `AEN0000123` bytes. Shared by `src/main.c` and
+    `README.md` -- the placeholder text is identical in both, own entry per
+    file since `edit_id` is keyed per `(template, sku, path, edit_id)`."""
+    return text.replace("sn <factory-serial>", "sn AEN0000123")
+
+
+def un_edit_v2n101_soc_identity(text: str) -> str:
+    """tan-cli#932: reverse the `renesas:rzv2n:n44` SoC-identity fix back
+    onto the emit's own (unsubstituted) `alif:ensemble:e8` bytes. A plain
+    substring replace, not a regex -- `README.md` carries two occurrences
+    (the real-hardware and native_sim blocks) and both are the same wrong
+    token with the same correct replacement, so one `.replace()` (which
+    substitutes every occurrence by default) undoes both without needing two
+    entries; `src/main.c` carries one occurrence and the same call is a
+    no-op past it."""
+    return text.replace("renesas:rzv2n:n44", "alif:ensemble:e8")
+
+
 DELIBERATE_EDITS: dict[
     tuple[str, str, str, str], tuple[str, Callable[[str], str]]
 ] = {
@@ -496,6 +583,42 @@ DELIBERATE_EDITS: dict[
     ("sensor", "E1M-V2N101", "README.md", "i2c_scanner_bullet"): (
         "tan-cli#912: same as sensor/E1M-AEN801/README.md above",
         un_edit_sensor_readme_i2c_scanner_bullet,
+    ),
+    ("diagnostics", "E1M-V2N101", "src/main.c", "som_sku_header"): (
+        "tan-cli#932: src/main.c was never SKU-substituted at all -- the "
+        "'what success looks like' heading still names E1M-AEN801",
+        un_edit_main_c_v2n101_som_sku_header,
+    ),
+    ("diagnostics", "E1M-V2N101", "src/main.c", "som_sku_output_line"): (
+        "tan-cli#932: same unsubstituted-SKU defect, the sample-output SoM "
+        "identity line -- own entry from the header comment above and the "
+        "serial fix on the same line, per the edit_id discipline",
+        un_edit_main_c_v2n101_som_sku_output_line,
+    ),
+    ("diagnostics", "E1M-V2N101", "src/main.c", "serial_placeholder"): (
+        "tan-cli#932: AEN0000123 is an AEN-shaped placeholder serial, not a "
+        "value alp-sdk's own program_eeprom.py --serial format matches; "
+        "swapped for the README's own <factory-serial> placeholder shape",
+        un_edit_v2n101_serial_placeholder,
+    ),
+    ("diagnostics", "E1M-V2N101", "src/main.c", "soc_identity"): (
+        "tan-cli#932: SoC identity: alif:ensemble:e8 is the Alif SoC ref on "
+        "a Renesas RZ/V2N scaffold -- renesas:rzv2n:n44 is "
+        "metadata/socs/renesas/rzv2n/n44.json's own 'ref' field for this "
+        "SKU's silicon, not a hand-written string",
+        un_edit_v2n101_soc_identity,
+    ),
+    ("diagnostics", "E1M-V2N101", "README.md", "serial_placeholder"): (
+        "tan-cli#932: same AEN-shaped-placeholder defect as the src/main.c "
+        "entry above; README.md's SoM SKU on this line was already correct, "
+        "only the serial beside it was not",
+        un_edit_v2n101_serial_placeholder,
+    ),
+    ("diagnostics", "E1M-V2N101", "README.md", "soc_identity"): (
+        "tan-cli#932: same wrong-vendor SoC identity as the src/main.c entry "
+        "above, both occurrences (real-hardware and native_sim blocks) -- "
+        "one un_edit, since both are the same wrong token with the same fix",
+        un_edit_v2n101_soc_identity,
     ),
     # tan-cli#501 review finding 1: a matching PREPEND was added to the four
     # `sensor`/`diagnostics` CMakeLists.txt files under the same
@@ -808,6 +931,63 @@ def self_check() -> None:
             f for f in mut_failures
             if f.startswith(f"{path}: DELIBERATE_EDITS declares an edit that is no longer")
         ], (template, sku, path, edit_id, mut_failures)
+
+    # tan-cli#932's six entries (diagnostics/E1M-V2N101 only): each un_edit
+    # must round-trip the corrected src/main.c or README.md bytes back onto
+    # the emit's own (still-wrong, AEN801/Alif-named) bytes, and be
+    # registered under the exact (template, sku, path, edit_id) key.
+    for edit_id in (
+        "som_sku_header", "som_sku_output_line", "serial_placeholder", "soc_identity",
+    ):
+        assert ("diagnostics", "E1M-V2N101", "src/main.c", edit_id) in DELIBERATE_EDITS
+    for edit_id in ("serial_placeholder", "soc_identity"):
+        assert ("diagnostics", "E1M-V2N101", "README.md", edit_id) in DELIBERATE_EDITS
+
+    assert (
+        un_edit_main_c_v2n101_som_sku_header(_MAIN_C_V2N101_SOM_SKU_HEADER_EDITED)
+        == _MAIN_C_V2N101_SOM_SKU_HEADER_EMITTED
+    )
+    assert (
+        un_edit_main_c_v2n101_som_sku_output_line(
+            _MAIN_C_V2N101_SOM_SKU_OUTPUT_LINE_EDITED
+        )
+        == _MAIN_C_V2N101_SOM_SKU_OUTPUT_LINE_EMITTED
+    )
+    assert (
+        un_edit_v2n101_serial_placeholder("sn <factory-serial> -> PASS")
+        == "sn AEN0000123 -> PASS"
+    )
+    assert (
+        un_edit_v2n101_soc_identity(
+            "SoC identity: renesas:rzv2n:n44 (secure-fw OK) -> PASS\n"
+            "SoC identity: renesas:rzv2n:n44 (ping ALP_ERR_NOSUPPORT, "
+            "read ALP_ERR_NOSUPPORT) -> SKIP"
+        )
+        == "SoC identity: alif:ensemble:e8 (secure-fw OK) -> PASS\n"
+        "SoC identity: alif:ensemble:e8 (ping ALP_ERR_NOSUPPORT, "
+        "read ALP_ERR_NOSUPPORT) -> SKIP"
+    )
+
+    # ...and each is the strict half too: feeding the un_edit its OWN RAW
+    # emitted (AEN801/Alif-named, never-corrected) bytes finds nothing to
+    # undo for tan-cli#932's entries -- each `_EMITTED` constant/literal
+    # below is the pre-fix form, not the vendored one.
+    for path, edit_id, emitted in (
+        ("src/main.c", "som_sku_header", _MAIN_C_V2N101_SOM_SKU_HEADER_EMITTED),
+        ("src/main.c", "som_sku_output_line",
+         _MAIN_C_V2N101_SOM_SKU_OUTPUT_LINE_EMITTED + " AEN0000123 -> PASS\n"),
+        ("src/main.c", "serial_placeholder", "sn AEN0000123 -> PASS\n"),
+        ("src/main.c", "soc_identity", "SoC identity: alif:ensemble:e8\n"),
+        ("README.md", "serial_placeholder", "sn AEN0000123 -> PASS\n"),
+        ("README.md", "soc_identity", "SoC identity: alif:ensemble:e8\n"),
+    ):
+        _, mut_failures = undo_declared_edits(
+            "diagnostics", "E1M-V2N101", {path: emitted}
+        )
+        assert [
+            f for f in mut_failures
+            if f.startswith(f"{path}: DELIBERATE_EDITS declares an edit that is no longer")
+        ], ("diagnostics", "E1M-V2N101", path, edit_id, mut_failures)
 
     # `missing_extras` needs a real SDK checkout (a live example directory) to
     # say anything -- `resolve_example_dir` returning `None` (no SDK bound) is

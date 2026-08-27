@@ -25,11 +25,11 @@
  * of a self-test -- a missing capability and a fault must not look
  * alike.
  *
- * What success looks like (real hardware, E1M-AEN801):
+ * What success looks like (real hardware, E1M-V2N101):
  *
  *   [selftest] === board self-test ===
- *   [selftest] SoM identity: E1M-AEN801 rev r1 sn AEN0000123 -> PASS
- *   [selftest] SoC identity: alif:ensemble:e8 (secure-fw OK) -> PASS
+ *   [selftest] SoM identity: E1M-V2N101 rev r1 sn <factory-serial> -> PASS
+ *   [selftest] SoC identity: renesas:rzv2n:n44 (secure-fw OK) -> PASS
  *   [selftest] power profile: RUN core 800 mV @ 400 MHz -> PASS
  *   [selftest] i2c scan BOARD_I2C_SENSORS: probing 0x08..0x77
  *   [selftest]   found device @ 0x48
