@@ -54,6 +54,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+import warnings
 from pathlib import Path
 
 import pytest
@@ -64,8 +65,10 @@ from tan.core.scaffold import (
     TEMPLATE_IDS,
     VENDORED_ROOT,
     _FAMILY_TREES,
+    _family_bucket,
     plan_template_files,
 )
+from tests.conftest import sdk_root
 
 #: `[text](target)`. Non-greedy on the label so an `[a](x) ... [b](y)` line
 #: yields two matches, not one spanning both.
@@ -199,6 +202,104 @@ def test_the_manifest_states_one_vendor_point_not_two():
     )
 
 
+#: English number words `MANIFEST.md`'s prose spells its `DELIBERATE_EDITS`
+#: count out in (digits nowhere in that sentence) -- `enumerate` gives each
+#: word its natural value (`"zero"` -> 0, ..., `"twenty"` -> 20) with no
+#: hand-kept mapping to drift.
+_NUMBER_WORDS = {
+    word: value
+    for value, word in enumerate((
+        "zero", "one", "two", "three", "four", "five", "six", "seven",
+        "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen",
+        "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
+        "twenty-one", "twenty-two", "twenty-three", "twenty-four",
+        "twenty-five",
+    ))
+}
+
+#: MANIFEST.md's own claim of how many `DELIBERATE_EDITS` entries are live --
+#: "The `DELIBERATE_EDITS` table below currently carries **twenty** live
+#: entries (counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS`
+#: dict, not by hand)". The sentence SAYS it is not hand-counted; before
+#: tan-cli#932's review round nothing had ever actually run the count it
+#: claims to be.
+_MANIFEST_DELIBERATE_EDIT_COUNT = re.compile(
+    r"`DELIBERATE_EDITS` table below currently carries \*\*(\S+)\*\* live entries"
+)
+
+
+def _load_scaffold_byte_parity():
+    """Load `tests/parity/scaffold_byte_parity.py` -- the standalone gate
+    script, at the REPO ROOT, outside `python/`'s own `pythonpath` and never
+    otherwise imported by this suite -- by file path rather than by package
+    import (mirrors `tests/gates/test_module_size_budget.py`'s own
+    `spec_from_file_location` loading of `regen_module_size_budget.py`, the
+    established idiom in this tree for reaching a script outside the
+    package).
+
+    The script itself does `from _sdk_checkout import ...` -- a BARE sibling
+    import that only resolves because Python auto-adds a `__main__` script's
+    own directory to `sys.path[0]`, which `spec_from_file_location` does not
+    do on its own. Its directory goes onto `sys.path` for the duration of
+    `exec_module` (and is popped after, even on failure) to reproduce that,
+    same as running `python3 tests/parity/scaffold_byte_parity.py` would."""
+    import importlib.util
+    import sys
+
+    path = VENDORED_ROOT.parents[3] / "tests" / "parity" / "scaffold_byte_parity.py"
+    sys.path.insert(0, str(path.parent))
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_scaffold_byte_parity_under_test", path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(path.parent))
+    return module
+
+
+def test_the_manifest_deliberate_edit_count_matches_the_table():
+    """tan-cli#932 review round: `MANIFEST.md`'s "currently carries
+    **twenty** live entries" sentence, and the itemised 1-9 enumeration
+    right below it, are both prose a human keeps in sync by hand against
+    `scaffold_byte_parity.py`'s real `DELIBERATE_EDITS` dict -- the sentence
+    SAYS it counts "not by hand", but nothing had ever run that count until
+    this test existed. Measured (before this same change fixed both): the
+    itemised enumeration summed to 19 -- it was missing the
+    `multicore-mailbox`/`E1M-AEN801` `blocked_caveat` entry entirely, which
+    also had no numbered write-up anywhere in the 1-8 list -- one short of
+    the twenty the bold sentence claimed and `DELIBERATE_EDITS` itself
+    carries. This test pins the COUNT only (the itemised enumeration's own
+    arithmetic is prose, not a second machine-checked fact); it is what
+    keeps the next entry added or retired from rotting the sentence
+    silently, the way this one did.
+    """
+    manifest = (VENDORED_ROOT / "MANIFEST.md").read_text(encoding="utf-8")
+    match = _MANIFEST_DELIBERATE_EDIT_COUNT.search(manifest)
+    assert match, (
+        "no \"DELIBERATE_EDITS table below currently carries **<N>** live "
+        "entries\" sentence in MANIFEST.md. If it was reworded, keep this "
+        "shape or update _MANIFEST_DELIBERATE_EDIT_COUNT in the same change."
+    )
+    word = match.group(1)
+    assert word in _NUMBER_WORDS, (
+        f"MANIFEST.md's deliberate-edit count {word!r} is not a number word "
+        f"this test recognises -- extend _NUMBER_WORDS in the same change."
+    )
+    stated = _NUMBER_WORDS[word]
+
+    module = _load_scaffold_byte_parity()
+    actual = len(module.DELIBERATE_EDITS)
+    assert stated == actual, (
+        f"MANIFEST.md claims {word!r} ({stated}) live DELIBERATE_EDITS "
+        f"entries; scaffold_byte_parity.py's DELIBERATE_EDITS dict actually "
+        f"has {actual}. Whoever added or retired an entry needs to update "
+        f"the sentence (and its itemised enumeration right below it) in the "
+        f"same change."
+    )
+
+
 def _tag_exists(ref: str) -> bool | None:
     """Does `refs/tags/<ref>` exist in alp-sdk? `None` when GitHub could not be
     asked at all (offline, rate-limited, 5xx) -- the caller SKIPS on that
@@ -259,13 +360,72 @@ def _ref_exists(ref: str) -> bool | None:
     return _tag_exists(ref)
 
 
+SDK = sdk_root()
+
+
+def _catalogued_som_skus() -> tuple[str, ...] | None:
+    """Every SoM SKU alp-sdk's own metadata catalogue ships a manifest for --
+    one `metadata/e1m_modules/<SKU>.yaml` per SKU, so the SKU IS the
+    filename stem; no field inside the YAML needs parsing. `None` without a
+    bound SDK checkout (`ALP_SDK_ROOT`/`ALP_SDK_PARITY_ROOT`) rather than a
+    hardcoded fallback list -- `_skus_for` below falls back to `_FAMILY_TREES`
+    in that case, so an unbound run still exercises the two SKUs it always
+    has and this only WIDENS coverage when a checkout is available.
+
+    tan-cli#932 review round: `_skus_for` used to answer `_FAMILY_TREES`
+    (two SKUs) for every unrestricted template, so `E1M-V2N102`/`E1M-V2M101`/
+    `E1M-V2M102` and every `E1M-AEN301`..`E1M-AEN701` were never a `CASES`
+    entry at all -- the exact-token guard below (`_foreign_sku_hits`) could
+    not have caught #932's own defect class one SKU over, because the SKU it
+    would have caught it on was never checked."""
+    if SDK is None:
+        return None
+    root = SDK / "metadata" / "e1m_modules"
+    return tuple(sorted(p.stem for p in root.glob("*.yaml")))
+
+
+CATALOGUED_SKUS = _catalogued_som_skus()
+
+if CATALOGUED_SKUS is None:
+    # Degraded, not skipped: `_skus_for` and `_foreign_sku_hits` both still
+    # run, just against `_FAMILY_TREES`'s two SKUs instead of the SDK's full
+    # eleven -- a silent narrowing a contributor's local unbound run would
+    # otherwise never learn about (tan-cli#946 review round: "the
+    # `CATALOGUED_SKUS or _FAMILY_TREES` fallback emits no warning, so a
+    # contributor's local unbound run is degraded with no signal").
+    warnings.warn(
+        "test_template_integrity: no ALP_SDK_ROOT/ALP_SDK_PARITY_ROOT bound -- "
+        "SKU-catalogue coverage (CASES, _foreign_sku_hits) is degraded to "
+        f"_FAMILY_TREES's {_FAMILY_TREES!r} instead of the SDK's full catalogue",
+        stacklevel=1,
+    )
+
+
 def _skus_for(template_id: str) -> tuple[str, ...]:
-    """Every SKU whose tree this template can be asked to plan. `iot-starter`
-    vendors ONE family (`tan.core.scaffold`'s own comment: any other `--som`
-    is refused before planning), so asking it for the V2N SKU would silently
-    re-check the Alif tree a second time and report a SKU it never supports in
-    the failure message."""
-    return TEMPLATE_SUPPORTED_SKUS.get(template_id) or _FAMILY_TREES
+    """Every SKU whose tree this template can be asked to plan.
+
+    `iot-starter`/`multicore-mailbox` vendor (or the SDK catalogue accepts)
+    exactly one family each -- `TEMPLATE_SUPPORTED_SKUS` -- so asking either
+    for a SKU outside it would silently re-check the same tree a second time
+    and report a SKU it never supports in the failure message.
+
+    Every other template reads the full catalogued SKU set (falling back to
+    `_FAMILY_TREES` when no SDK is bound). `minimal-app` is tan's one
+    vendor-neutral template (`tan.core.scaffold`'s own docstring: "scaffolds
+    every SKU") and gets all of them, `E1M-NX9101` included. Every vendored
+    template is filtered through `_family_bucket`, the SAME lookup
+    `plan_template_files` itself refuses an unsupported family through
+    (`UnsupportedSomError`) -- `E1M-NX9101` has no vendored tree
+    (`_SOM_FAMILIES`'s `("E1M-NX9", "m33", None)` row) and asking a
+    vendored template to plan it is not a defect this file is testing for,
+    it is the refusal `test_scaffold.py` covers directly."""
+    restricted = TEMPLATE_SUPPORTED_SKUS.get(template_id)
+    if restricted is not None:
+        return restricted
+    all_skus = CATALOGUED_SKUS or _FAMILY_TREES
+    if template_id == "minimal-app":
+        return all_skus
+    return tuple(sku for sku in all_skus if _family_bucket(sku) is not None)
 
 
 def _cases():
@@ -336,31 +496,85 @@ def test_every_extra_conf_file_named_by_a_template_is_a_planned_file(template_id
     )
 
 
-#: `(template_id, sku, foreign_sku)` for a DELIBERATE cross-SKU mention --
-#: without this, the guard below would flag `iot-starter`'s own "E1M-V2N101
-#: is deliberately not supported" exclusion note (both in its README and its
-#: `board.yaml` comment), which names the sibling SKU ON PURPOSE to explain
-#: why `--som E1M-V2N101` refuses this template. A one-entry allowlist, not
-#: a path-level exemption: the guard counts OCCURRENCES per `(template_id,
-#: sku, foreign_sku)` across every planned file, so an unrelated NEW
-#: cross-SKU mention added to either of those same two files would still
-#: change the count and still needs its own entry to pass.
-_ALLOWED_CROSS_SKU_MENTIONS: frozenset[tuple[str, str, str]] = frozenset({
-    ("iot-starter", "E1M-AEN801", "E1M-V2N101"),
-})
+#: `(template_id, sku, foreign_sku) -> expected occurrence count` for a
+#: DELIBERATE cross-SKU mention -- without this, the guard below would flag
+#: `iot-starter`'s own "E1M-V2N101 is deliberately not supported" exclusion
+#: note (both in its README and its `board.yaml` comment), which names the
+#: sibling SKU ON PURPOSE to explain why `--som E1M-V2N101` refuses this
+#: template. Keyed on the exact COUNT, not mere membership (tan-cli#946
+#: round-2 review): a bare allowlist entry makes the pair invisible outright,
+#: so an unrelated NEW cross-SKU mention added on top of a legitimate one --
+#: same `(template_id, sku, foreign_sku)`, one extra occurrence -- would
+#: silently pass instead of changing the count and demanding its own review.
+#: Measured against the pre-fix (membership-only) guard: appending `/* Note:
+#: E1M-V2M101 also works here. */` to `edge-ai/E1M-V2N101/src/main.c` left it
+#: at 53 passed; the count form below reds on exactly that plant, and still
+#: reds on a wholly un-allowlisted token (e.g. `E1M-NX9101`).
+#:
+#: The other twelve entries (tan-cli#946 review round, widening
+#: `_foreign_sku_hits` off `CATALOGUED_SKUS` instead of the bare
+#: `_FAMILY_TREES`) are all `edge-ai-starter`'s DEEPX DX-M1 pointer, in two
+#: independent groups sharing one shape (name a DEEPX-equipped sibling SKU
+#: to steer a customer toward it), not one:
+#:
+#: * the `E1M-AEN801` tree's `README.md`/`board.yaml` both tell an Alif
+#:   customer to re-scaffold at `E1M-V2M101` for the DEEPX path
+#:   (tan-cli#814) -- six entries, each counting 2 (one mention per file),
+#:   one per AEN-family SKU that renders this tree (`E1M-AEN301`..`E1M-AEN801`);
+#: * the `E1M-V2N101` tree's `README.md` names BOTH `E1M-V2M101` and
+#:   `E1M-V2M102` as DEEPX-equipped (tan-cli#946 -- see
+#:   `scaffold_byte_parity.py`'s `DELIBERATE_EDITS` entry
+#:   `deepx_v2m102_scope` for why: the single-target-SKU wording this
+#:   replaced was misleading for an `E1M-V2M102` customer) -- six entries,
+#:   one per (sku, foreign) pair where the sentence's own SKU differs from
+#:   the token: `E1M-V2N101`/`E1M-V2N102` each see both `E1M-V2M101` and
+#:   `E1M-V2M102` as foreign, 1 mention each (they carry neither); `E1M-V2M101`
+#:   sees `E1M-V2M102` as foreign and vice versa, 1 mention each (each is the
+#:   sentence's OWN SKU for one of the two mentions, never for both).
+#:
+#: `iot-starter`'s `E1M-AEN801` entry counts 3: the exclusion note appears
+#: once in `board.yaml`'s comment and twice in `README.md`.
+_ALLOWED_CROSS_SKU_MENTIONS: dict[tuple[str, str, str], int] = {
+    ("iot-starter", "E1M-AEN801", "E1M-V2N101"): 3,
+    ("edge-ai-starter", "E1M-AEN301", "E1M-V2M101"): 2,
+    ("edge-ai-starter", "E1M-AEN401", "E1M-V2M101"): 2,
+    ("edge-ai-starter", "E1M-AEN501", "E1M-V2M101"): 2,
+    ("edge-ai-starter", "E1M-AEN601", "E1M-V2M101"): 2,
+    ("edge-ai-starter", "E1M-AEN701", "E1M-V2M101"): 2,
+    ("edge-ai-starter", "E1M-AEN801", "E1M-V2M101"): 2,
+    ("edge-ai-starter", "E1M-V2N101", "E1M-V2M101"): 1,
+    ("edge-ai-starter", "E1M-V2N101", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-V2N102", "E1M-V2M101"): 1,
+    ("edge-ai-starter", "E1M-V2N102", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-V2M101", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-V2M102", "E1M-V2M101"): 1,
+}
 
 
 def _foreign_sku_hits(sku: str, planned: dict[str, str]) -> dict[str, int]:
-    """`{foreign_sku: occurrence count}` for every OTHER vendored family
-    SKU's exact token found anywhere in `planned`'s content -- word-bounded
+    """`{foreign_sku: occurrence count}` for every OTHER CATALOGUED SKU's
+    exact token found anywhere in `planned`'s content -- word-bounded
     (`(?<![\\w-])...(?![\\w-])`) so `E1M-V2N101` can never accidentally
     match as a substring of a longer or shorter sibling SKU, and counts
     every occurrence rather than stopping at the first, so a partially
     substituted file (tan-cli#932's `README.md`: the SoM SKU line was fixed,
     the SoC identity lines were not) is reported precisely rather than
-    merely flagged."""
+    merely flagged.
+
+    Iterates `CATALOGUED_SKUS or _FAMILY_TREES` -- the same fallback
+    `_skus_for` uses -- not the bare two-entry `_FAMILY_TREES` (tan-cli#946
+    review round). `_FAMILY_TREES` alone made this guard blind to any SKU
+    token outside `E1M-AEN801`/`E1M-V2N101` even after `CASES` itself was
+    widened to the full catalogue: `_skus_for` iterates the wide list to pick
+    which `(template_id, sku)` pairs to PLAN, but this function separately
+    named the narrow list to pick which foreign tokens to LOOK for, so a
+    9-SKU blind spot survived the widening that was supposed to close it.
+    Measured: inserting `Note: on E1M-V2N102 the power rail answers
+    differently.` into `diagnostics/E1M-V2N101/README.md` left this test at
+    53 passed under the narrow list; the same mutation reds it once this
+    list is the catalogue."""
     hits: dict[str, int] = {}
-    for foreign in _FAMILY_TREES:
+    for foreign in (CATALOGUED_SKUS or _FAMILY_TREES):
         if foreign == sku:
             continue
         pattern = re.compile(r"(?<![\w-])" + re.escape(foreign) + r"(?![\w-])")
@@ -373,33 +587,65 @@ def _foreign_sku_hits(sku: str, planned: dict[str, str]) -> dict[str, int]:
 @pytest.mark.parametrize("template_id,sku", CASES)
 def test_no_planned_file_names_a_different_skus_exact_token(template_id, sku):
     """tan-cli#932 companion guard, the issue's own suggested fix: assert
-    that no vendored `<template>/<sku>` tree contains a SKU token belonging
-    to a DIFFERENT SKU. Before tan-cli#932's fix this was red on exactly the
-    six lines that issue measured -- `diagnostics/E1M-V2N101`'s `src/main.c`
+    that no vendored `<template>/<sku>` tree contains a SKU TOKEN belonging
+    to a DIFFERENT SKU -- word-bounded on the SKU string itself, nothing
+    else. Before tan-cli#932's fix, `diagnostics/E1M-V2N101`'s `src/main.c`
     was never SKU-substituted at all (still `E1M-AEN801`, byte-identical to
     that SKU's own tree) and its `README.md` was substituted on the SoM SKU
     line only, leaving the sample serial and both `SoC identity:` lines
-    unresolved. A customer running the real self-test on real V2N101
-    hardware saw output contradicting what the scaffold told them to
-    expect, and the natural reading of that mismatch is "my board failed",
-    not "the README is wrong".
+    unresolved -- six wrong bytes, declared as six `DELIBERATE_EDITS`
+    entries (`MANIFEST.md`'s "Deliberate edits on top of the emit", entry
+    8). A customer running the real self-test on real V2N101 hardware saw
+    output contradicting what the scaffold told them to expect, and the
+    natural reading of that mismatch is "my board failed", not "the README
+    is wrong".
+
+    **This guard is red on 2 of those six, not all six.** Only `src/main.c`'s
+    two SKU-token lines (`(real hardware, E1M-AEN801):` and `SoM identity:
+    E1M-AEN801 rev r1 ...`) NAME a sibling SKU's exact token, so only those
+    two are this test's business -- mutation-measured: reverting `README.md`
+    AND `src/main.c`'s SoC-identity/serial bytes to their pre-fix values
+    while leaving the SKU-token lines fixed leaves this test GREEN (it has
+    nothing to see: `alif:ensemble:e8` and `AEN0000123` name no SKU token at
+    all); reverting only the two SKU-token lines reds it, naming
+    `{'E1M-AEN801': 2}`. The other four entries -- the placeholder serial and
+    both `SoC identity:` lines, in each file -- are caught only by
+    `scaffold_byte_parity.py`'s `DELIBERATE_EDITS` `un_edit` half (each
+    `un_edit_*` is `xfail(strict=True)`-strict: it MUST find its declared
+    wrong bytes to undo, so reverting any of those four to a THIRD, un-
+    declared value fails there, just not here). "A substitution bug anywhere
+    in the plan path is caught too" would overstate this test's actual
+    reach; it is not claimed.
 
     Checked against the PLANNER's real output (`plan_template_files`, the
     same source `_planned` above reads for the link-integrity tests), not
-    the vendored tree directly -- so a substitution bug anywhere in the plan
-    path (`retarget_board_yaml_som` included, not just a vendoring gap) is
-    caught too, and a future SKU added to `_FAMILY_TREES` is covered with no
-    one having to remember to extend this test by hand."""
+    the vendored tree directly -- so a SKU-TOKEN substitution bug anywhere in
+    the plan path (`retarget_board_yaml_som`/`retarget_selftest_som_identity`
+    included, not just a vendoring gap) is caught, and -- since tan-cli#932's
+    review round widened `CASES` off the metadata catalogue (`_skus_for`
+    above) -- a future SKU added to that catalogue is covered with no one
+    having to remember to extend this test by hand."""
     planned = _planned(template_id, sku)
     hits = _foreign_sku_hits(sku, planned)
-    for foreign in list(hits):
-        if (template_id, sku, foreign) in _ALLOWED_CROSS_SKU_MENTIONS:
+    drifted = {}
+    for foreign, count in list(hits.items()):
+        allowed = _ALLOWED_CROSS_SKU_MENTIONS.get((template_id, sku, foreign))
+        if allowed is None:
+            continue
+        if allowed == count:
             del hits[foreign]
+        else:
+            # An allowlisted pair whose occurrence COUNT no longer matches --
+            # an extra (or missing) mention on top of the declared one, not a
+            # wholly new foreign token. Reported separately so the failure
+            # reads as "the allowlisted count drifted", not "a new gap".
+            drifted[foreign] = f"expected {allowed}, found {count}"
     assert not hits, (
         f"--template {template_id} --som {sku}: names a sibling SKU's exact "
-        f"token {hits} -- either a real substitution gap (tan-cli#932) or a "
-        f"legitimate cross-reference that needs declaring in "
-        f"_ALLOWED_CROSS_SKU_MENTIONS"
+        f"token {hits} -- either a real substitution gap (tan-cli#932), an "
+        f"allowlisted pair whose occurrence count drifted ({drifted or 'none'}) "
+        f"and needs its own review, or a legitimate cross-reference that needs "
+        f"declaring (with its exact count) in _ALLOWED_CROSS_SKU_MENTIONS"
     )
 
 

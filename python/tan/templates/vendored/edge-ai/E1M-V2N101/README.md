@@ -48,7 +48,8 @@ west build -b alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33 .
 west flash --host <board-ip>
 ```
 
-Flip `som.sku` in `board.yaml` to `E1M-V2M101` for the DEEPX DX-M1 path.
+`E1M-V2M101` and `E1M-V2M102` both carry the DEEPX DX-M1 NPU; pick either via
+`som.sku` in `board.yaml` for the DEEPX DX-M1 path.
 
 ## Model
 
