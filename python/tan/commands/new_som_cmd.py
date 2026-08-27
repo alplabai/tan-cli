@@ -970,7 +970,15 @@ def new_som(
         )
         return
     resolved_sdk = Path(active.path)
-    # tan-cli#263 review: read back, not recomputed -- see `resolution_issues` above.
+    # tan-cli#263 review: this command WRITES metadata skeletons into
+    # `resolved_sdk` -- a silently-missed `.alp/sdk-path` pin means porting a
+    # new SoM into the wrong checkout. Under `--format json` it rides the
+    # envelope's `issues` as the already-frozen `sdk.project-pin-unresolved`
+    # (tan-cli#399); in text mode it stays the stderr line it always was.
+    # tan-cli#464: same reasoning -- this command writes metadata skeletons
+    # into `resolved_sdk`, and a `globalDefault` answer a DIFFERENT project's
+    # bootstrap relocation actually decided is exactly as dangerous here as a
+    # silently-missed project pin.
     issues: list[Issue] = list(resolution_issues)
 
     # -- 1. Gather inputs.  Interactive prompts need a real terminal; in a

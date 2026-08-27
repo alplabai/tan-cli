@@ -1782,16 +1782,22 @@ def _refusal(
     The join is why `data.missingPrerequisites` has to exist: an install command
     contains the same spaces the join used, so the split is not recoverable.
 
-    `issues` mirrors `_fatal`'s own parameter and the same reasoning applies:
-    it is ALWAYS `log.take_issues()` at a call site reachable after a
-    `log.warn(...)` (tan-cli#491 defect 10 fixed exactly this loss on `_fatal`;
-    the `host_python is None` refusal below is the one `_refusal` call site
-    that comes after `log.warn("yocto-host", ...)` / `log.warn(*skew)`, and
-    would otherwise discard both silently, the same way the relocation refusal
-    once did). It defaults to `None` because most `_refusal` call sites in this
-    file run before `log` has recorded anything, so passing nothing there is a
-    correct no-op, not an oversight -- unlike `_fatal`, where `issues` has no
-    default and every call site must say so explicitly.
+    `issues` mirrors `_fatal`'s own parameter and much the same reasoning
+    applies, but NOT universally: at most call sites it is `log.take_issues()`
+    reachable after a `log.warn(...)` (tan-cli#491 defect 10 fixed exactly this
+    loss on `_fatal`; the `host_python is None` refusal below is the one
+    `_refusal` call site that comes after `log.warn("yocto-host", ...)` /
+    `log.warn(*skew)`, and would otherwise discard both silently, the same way
+    the relocation refusal once did). The `sdk-root-unresolved` refusal above
+    is the one exception (tan-cli#926): `pin_issue`/`foreign_issue` are raw
+    `Issue`s that never touched `log` -- there is nothing to warn through, since
+    they are computed before `resolved`/`log` exist at all -- which is exactly
+    why they also need the caller-side `warning_lines` prepend onto `.text`
+    (tan-cli#677): this helper's `text` is `list(lines)` alone and has no path
+    from `issues` to stderr. It defaults to `None` because most `_refusal` call
+    sites in this file run before `log` has recorded anything, so passing
+    nothing there is a correct no-op, not an oversight -- unlike `_fatal`,
+    where `issues` has no default and every call site must say so explicitly.
     """
     return Outcome(
         exit_code,
@@ -2189,31 +2195,53 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     active_tier = active_resolution.tier
     broken_project_pin = active_resolution.broken_project_pin
     foreign_global_default_for = active_resolution.foreign_global_default_for
+    # tan-cli#263 review: `bootstrap` sets up a whole venv/west workspace
+    # against whichever checkout this resolved -- a silently-missed
+    # `.alp/sdk-path` pin belongs on the same two SUCCESS paths below
+    # (`--print-env`, and the full run) as every other non-fatal notice this
+    # command reports; not `log.warn`, which always prefixes `bootstrap.` and
+    # would misname this shared code.
+    # tan-cli#464: `bootstrap` itself can resolve a `globalDefault` a
+    # DIFFERENT project's earlier relocation wrote -- worth disclosing before
+    # this run sets up a whole venv/west workspace against it, the same as
+    # every other command on this ladder.
     pin_issue = project_pin_issue(broken_project_pin, active_tier)  # tan-cli#926
     foreign_issue = global_default_foreign_project_issue(foreign_global_default_for)
     active_is_sdk = active_path is not None and active_path.joinpath(*SDK_MARKER).exists()
     resolved = str(active_path) if active_is_sdk else None
     if resolved is None:
+        outcome = _refusal(
+            ExitCode.VALIDATION_FAILURE,
+            "sdk-root-unresolved",
+            [
+                # `tan sdk switch`/`tan sdk install` both refuse in this
+                # build (tan-cli#305, `sdk_cmd._run_not_ported`) -- naming
+                # either here left a clean host with no way forward at
+                # all. `NO_SDK_NEXT_STEPS` is the one mechanism that
+                # actually resolves an SDK, shared with `doctor_cmd`.
+                f"alp-sdk root is unresolved -- {NO_SDK_NEXT_STEPS}."
+            ],
+            _data(
+                args=flags,
+                sdk_root="",
+                paths=None,
+                facts=fallback_facts(_manifest_absent_floor()),
+                pin="",
+            ),
+            issues=[i for i in (pin_issue, foreign_issue) if i is not None],
+        )
+        # tan-cli#677 (see the success path's own `warning_lines`, ~700 lines
+        # below): `issues=` above reaches the JSON envelope, but `_refusal`'s
+        # `text` is `list(lines)` alone -- the same JSON-only asymmetry #677
+        # fixed on the success path never reached this refusal. Prepended, not
+        # joined into `lines`, so `bootstrap.sdk-root-unresolved`'s own
+        # `issues[]` message stays exactly what `--format json` already ships.
+        warning_lines = [
+            f"{issue.severity}: {issue.message}" for issue in (pin_issue, foreign_issue) if issue
+        ]
         return (
-            _refusal(
-                ExitCode.VALIDATION_FAILURE,
-                "sdk-root-unresolved",
-                [
-                    # `tan sdk switch`/`tan sdk install` both refuse in this
-                    # build (tan-cli#305, `sdk_cmd._run_not_ported`) -- naming
-                    # either here left a clean host with no way forward at
-                    # all. `NO_SDK_NEXT_STEPS` is the one mechanism that
-                    # actually resolves an SDK, shared with `doctor_cmd`.
-                    f"alp-sdk root is unresolved -- {NO_SDK_NEXT_STEPS}."
-                ],
-                _data(
-                    args=flags,
-                    sdk_root="",
-                    paths=None,
-                    facts=fallback_facts(_manifest_absent_floor()),
-                    pin="",
-                ),
-                issues=[i for i in (pin_issue, foreign_issue) if i is not None],
+            Outcome(
+                outcome.exit_code, outcome.data, outcome.issues, warning_lines + outcome.text
             ),
             # The only refusal that predates project resolution in the oracle.
             Project(root=None, board_yaml=None),
@@ -2237,15 +2265,6 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # is a no-op for them.
     sdk_root = os.path.abspath(os.path.expanduser(resolved))
     sdk = SdkInfo(sdk_root, active_tier)
-    # tan-cli#263 review: `bootstrap` sets up a whole venv/west workspace
-    # against whichever checkout this resolved -- a silently-missed
-    # `.alp/sdk-path` pin belongs on the same two SUCCESS paths below
-    # (`--print-env`, and the full run) as every other non-fatal notice this
-    # command reports; not `log.warn`, which always prefixes `bootstrap.` and
-    # would misname this shared code.
-    # tan-cli#464: `bootstrap` can resolve a `globalDefault` a DIFFERENT
-    # project's earlier relocation wrote -- worth disclosing before this run
-    # sets up a whole venv/west workspace against it (reused above, not recomputed).
 
     # `west init -l <alp-sdk>` always makes the topdir the checkout's PARENT and
     # alp-sdk itself the manifest repo, which is what registers the `alp-*`

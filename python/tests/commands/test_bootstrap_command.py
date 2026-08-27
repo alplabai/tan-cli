@@ -568,6 +568,34 @@ def test_a_broken_project_pin_is_reported_even_when_nothing_else_resolves(tmp_pa
     assert "sdk" not in env
 
 
+def test_text_mode_renders_the_broken_project_pin_warning_json_already_carries(tmp_path):
+    """tan-cli#926's fix (see the test above) landed the `sdk.project-pin-
+    unresolved` warning in `--format json`'s `issues[]`, but the SAME
+    `sdk-root-unresolved` refusal's TEXT output (`_refusal`'s `text` is
+    `list(lines)` alone -- it never saw `issues`) stayed silent about the
+    broken pin: exactly the tan-cli#677 defect, recurring on this refusal path
+    instead of the success path #677 originally fixed.
+
+    Pre-fix, the JSON assertion above passes and this text assertion fails:
+    `.alp/sdk-path` and the dangling `gone-checkout` value never appear in
+    stderr even though the identical invocation's `--format json` carries
+    them."""
+    ws = tmp_path / "ws"
+    (ws / ".alp").mkdir(parents=True)
+    (ws / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")})
+    )
+    text = run_tan("bootstrap", cwd=ws)
+    assert text.returncode == 2
+    assert text.stdout == ""
+    assert ".alp/sdk-path" in text.stderr, (
+        f"DEFECT (tan-cli#677 recurrence): JSON carries sdk.project-pin-"
+        f"unresolved but text does not render it:\n{text.stderr}"
+    )
+    assert "gone-checkout" in text.stderr
+    assert "alp-sdk root is unresolved" in text.stderr
+
+
 def test_missing_prerequisites_is_null_or_populated_but_never_an_empty_list(tmp_path):
     """`[]` would spell "checked, nothing missing" -- which is what a successful
     run reports as `null`. One fact, one spelling."""
