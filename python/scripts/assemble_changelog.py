@@ -66,6 +66,61 @@ def repo_root(start: Path) -> Path:
     )
 
 
+def fragment_shape_errors(name: str, body: str) -> list[str]:
+    """Return structural defects in a fragment body, or `[]` if it is sound.
+
+    tan-cli#930: `--check` validated the FILENAME contract and nothing about
+    what was inside it -- a fragment whose entire body was the single line
+    `not a bullet at all` passed clean. This is deliberately NOT a prose
+    checker: whether a claim is true, a count is right, or a sentence reads
+    well stays a human review problem forever (see the issue). What this
+    checks is the one thing `splice()` (below) assumes and never verifies
+    itself: `splice()` applies ZERO transformation to a fragment's text -- it
+    joins bodies nose-to-tail with a blank line between them and inserts the
+    result verbatim under a `### <Category>` heading. So a fragment that is
+    not already a valid Markdown bullet list on its own is not one after
+    splicing either; it lands in `CHANGELOG.md` as bare prose sitting under a
+    bullet-list heading, which is exactly the measured defect this closes.
+    Because `splice()` never reformats, there is no separate "assembler rule"
+    for this check to drift from -- the fragment's own shape IS the shape it
+    ships in.
+    """
+    errors: list[str] = []
+    lines = body.split("\n")
+    seen_bullet = False
+    fence_count = 0
+
+    for line in lines:
+        if line.lstrip().startswith("```"):
+            fence_count += 1
+        if not line.strip():
+            continue
+        if line.startswith("- "):
+            seen_bullet = True
+            continue
+        if line[:1] in (" ", "\t"):
+            if not seen_bullet:
+                errors.append(
+                    f"{name}: line {line!r} is indented as if continuing a "
+                    "bullet, but no `- ` bullet precedes it"
+                )
+            continue
+        errors.append(
+            f"{name}: line {line!r} is not a Markdown bullet (`- ...`) and "
+            "is not indented under one -- it would land in CHANGELOG.md as "
+            "bare text under a bullet-list heading, not a list item"
+        )
+
+    if fence_count % 2:
+        errors.append(
+            f"{name}: unbalanced ``` fence ({fence_count} marker(s)) -- this "
+            "would swallow whatever is spliced in after it into an "
+            "unterminated code block"
+        )
+
+    return errors
+
+
 def load_fragments(frag_dir: Path) -> dict[str, list[tuple[str, str]]]:
     """Return {category: [(filename, body), ...]} sorted by filename.
 
@@ -76,6 +131,7 @@ def load_fragments(frag_dir: Path) -> dict[str, list[tuple[str, str]]]:
     """
     buckets: dict[str, list[tuple[str, str]]] = {c: [] for c in CATEGORIES}
     bad: list[str] = []
+    shape_bad: list[str] = []
 
     for path in sorted(frag_dir.glob("*.md")):
         if path.name == "README.md":
@@ -88,6 +144,7 @@ def load_fragments(frag_dir: Path) -> dict[str, list[tuple[str, str]]]:
         if not body.strip():
             bad.append(f"{path.name} (empty)")
             continue
+        shape_bad.extend(fragment_shape_errors(path.name, body))
         buckets[parts[1].lower()].append((path.name, body))
 
     if bad:
@@ -97,6 +154,12 @@ def load_fragments(frag_dir: Path) -> dict[str, list[tuple[str, str]]]:
             + f"\nexpected `<issue>.<category>.md` with category in {CATEGORIES}, "
             "and a non-empty body. Refusing to continue rather than dropping "
             "the entry silently."
+        )
+    if shape_bad:
+        raise AssembleError(
+            "malformed fragment content (tan-cli#930 -- `--check` now reads "
+            "the body, not only the filename):\n  "
+            + "\n  ".join(shape_bad)
         )
     return buckets
 
@@ -168,8 +231,10 @@ def splice(section: list[str], buckets: dict[str, list[tuple[str, str]]]) -> lis
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true",
-                    help="report what would be folded; change nothing; exit 0 always "
-                         "(this is informational, NOT a gate -- see --require-empty)")
+                    help="report what would be folded; change nothing; refuses "
+                         "(exit 1) a fragment with a bad filename or malformed "
+                         "content (tan-cli#930), but never merely because "
+                         "fragments are pending -- for that, see --require-empty")
     ap.add_argument("--require-empty", action="store_true",
                     help="exit 1 if any fragment remains unfolded (for a release gate)")
     ap.add_argument("--dry-run", action="store_true",

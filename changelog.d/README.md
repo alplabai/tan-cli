@@ -68,7 +68,13 @@ python3 python/scripts/assemble_changelog.py --require-empty  # exit 1 if any fr
 `--check` never fails merely because fragments are pending — that is why it is
 not the gate. It is not unconditionally exit-0 either, whatever its `--help`
 says: like every mode it refuses an unusable fragment (a category outside the
-six, or an empty body) and exits 1, which makes it a usable filename lint.
+six, an empty body, or — since tan-cli#930 — a body that is not itself a valid
+Markdown bullet list, e.g. a fragment whose only line is `not a bullet at all`)
+and exits 1. Before tan-cli#930 that made it only a filename lint; it now also
+refuses content `splice()` would otherwise insert into `CHANGELOG.md` as bare
+text under a bullet-list heading. It still does not, and never will, judge
+whether a fragment's sentences are *true* — a wrong count or a false claim
+reads clean; that stays a review problem.
 `--require-empty` is the gate, and since tan-cli#813 it is a live one:
 `.github/workflows/release.yml:704` runs it, so a tag cut with fragments still
 sitting here fails the release rather than shipping a CHANGELOG missing them.
