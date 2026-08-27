@@ -521,10 +521,16 @@ PINNED_SDK_COMMIT = "eb96112ba7d1cc3b4084c985962ea31772177d74"  # alp-sdk v0.16.
 #: relocation, like `alp_project_loader.py` -> `som_metadata.py`, have no
 #: single upstream file to pin and are out of scope for this hash check).
 #:
-#: KNOWN DELIBERATE DIVERGENCE (tan-cli#938, found reviewing #914): despite
-#: `topology.py` hashing byte-identical to upstream `topology.py` at
-#: PINNED_SDK_COMMIT (`eb96112ba7d1cc3b4084c985962ea31772177d74`, unchanged
-#: there since), tan's `_allowed_os_for_core` no longer BEHAVES like it.
+#: KNOWN DELIBERATE DIVERGENCE (tan-cli#938, found reviewing #914): upstream's
+#: `topology.py` still hashes to the pinned value above at PINNED_SDK_COMMIT
+#: (`eb96112ba7d1cc3b4084c985962ea31772177d74`, unchanged there since), so this
+#: gate stays green -- but this gate only ever hashes the UPSTREAM side
+#: (`upstream = root / rel_path`, never `tan/planner/topology.py`), so it
+#: cannot see that tan's own `topology.py` no longer matches upstream
+#: byte-for-byte (the relocation rewrote the module docstring, moved
+#: `_default_os_from_core_type`/`CLASS_RUNTIMES` out to `tan.core.os_class`,
+#: and added four imports) or that tan's `_allowed_os_for_core` no longer
+#: BEHAVES like upstream's.
 #: #914 (tan-cli#870) repointed it to `tan.core.os_class.allowed_os_for_core`
 #: -- the SAME shared function `presets_cmd.allowed_os_lookup` calls -- so an
 #: unresolved core type (`core_type == ""`) now returns `[]`. Upstream's

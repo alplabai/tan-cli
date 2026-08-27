@@ -7,7 +7,7 @@ Re-recorded on : 2026-08-26
 Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
                  (`python/tan/version.py::TAN_VERSION`).
 Issue          : tan-cli#870
-Branch         : feat/870-presets-core-type (off dev @ edbb0183)
+Branch         : feat/870-presets-core-type (off dev @ 5e2233bc)
 
 How it was captured
 --------------------
