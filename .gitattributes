@@ -66,6 +66,20 @@ install.sh text eol=lf
 # two branches each appending a different entry merge clean with both entries
 # present; the same scenario without this line conflicts normally.
 #
+# Two shapes union gets WRONG, both reachable today because tan-cli#906 (the
+# append-only enforcement) is still open -- nothing stops a non-append edit
+# from reaching this file. Also demonstrated 2026-08-27: (1) both branches
+# edit the SAME existing entry -> both variants land with zero conflict
+# markers, one body duplicated under two headers, no signal anything
+# collided; (2) one branch deletes an entry while the other appends -> the
+# deletion is silently REVERTED, the entry resurrected, no markers. Nothing
+# stands behind either case: nothing parses this `.md`, and
+# `python/tests/gates/test_no_conflict_markers.py` can't fire on a merge that
+# never left a marker. Read this as an argument FOR #906, not against this
+# driver -- union just makes a non-append edit merge more silently than a
+# plain conflict would have, so the enforcement gap matters more now than it
+# did before this line landed.
+#
 # Deliberately NOT applied to the sibling `module_size_budget.generated.json`
 # in the same directory: that file is a JSON object, and union-merging two
 # JSON documents that both add a trailing key can leave two sibling entries

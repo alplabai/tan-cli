@@ -28,13 +28,17 @@ tan-cli#907: this file carries `merge=union` in the repo's `.gitattributes`,
 so as of that change a real two-branch conflict on THIS file resolves itself
 (both sides' appended entries kept, no conflict markers) -- that is an
 interim mitigation for the git-mechanics problem, not a change to the
-append-only contract above. The sibling `module_size_budget.generated.json`
+append-only contract above. The union keeps ours-then-theirs order regardless
+of date (measured: a 2026-08-27 entry landed above a 2026-08-25 one), so don't
+read entry order as chronological order -- each entry carries its own date for
+that reason. The sibling `module_size_budget.generated.json`
 in this same directory is deliberately NOT unioned (union-merging two JSON
 documents that both add a key can leave two entries with no comma between
 them, i.e. invalid JSON) and will still conflict normally. If you land here
 resolving that conflict: do not hand-merge the JSON hunks -- take either
-side, then rerun `python scripts/regen_module_size_budget.py --merge-resync`
-and let it re-measure and write both files from the real merged tree.
+side, then rerun `python python/scripts/regen_module_size_budget.py --merge-resync`
+from the repo root (that is where you land mid-conflict) and let it re-measure
+and write both files from the real merged tree.
 
 ## Entries
 
