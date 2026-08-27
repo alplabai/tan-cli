@@ -34,10 +34,10 @@
 # `propose-dev-version-bump` job's `dev` checkout (both `artipacked`, both
 # named again under INVENTORY below -- deliberately by step name, not
 # `<file>:<line>`, for the same reason the suppressions themselves moved
-# off line pins) plus `release.yml:945:9` (`cache-poisoning`, pre-dates
-# tan-cli#899) -- and exits 14. That is the recipe to reach for when
-# checking whether this file's suppressions (inline or otherwise) are
-# still catching something real, not `--no-config`.
+# off line pins) plus `release.yml`'s `publish_npm` job's `actions/setup-node`
+# step (`cache-poisoning`, pre-dates tan-cli#899) -- and exits 14. That is
+# the recipe to reach for when checking whether this file's suppressions
+# (inline or otherwise) are still catching something real, not `--no-config`.
 #
 # NOT IGNORED, ON PURPOSE. The informational/low findings below medium are
 # left visible in a full report rather than suppressed by config:
@@ -147,11 +147,12 @@
 # INVENTORY, kept current by hand and re-derived (never widened to a whole
 # rule or file) whenever an inline ignore is added or removed:
 #
-#   INVENTORY -- `artipacked` ONLY (explicit scope: `release.yml:945`'s
-#   inline `# zizmor: ignore[cache-poisoning]` on `actions/setup-node`
-#   pre-dates tan-cli#899, is a different rule, and is a THIRD inline
-#   ignore this INVENTORY does not cover -- it stays documented at its own
-#   site instead, per the paragraph above). Two `artipacked` ignores, both
+#   INVENTORY -- `artipacked` ONLY (explicit scope: `release.yml`'s
+#   `publish_npm` job's `actions/setup-node` step's inline
+#   `# zizmor: ignore[cache-poisoning]` pre-dates tan-cli#899, is a
+#   different rule, and is a THIRD inline ignore this INVENTORY does not
+#   cover -- it stays documented at its own site instead, per the paragraph
+#   above). Two `artipacked` ignores, both
 #   `actions/checkout` steps that must keep their credential because a
 #   later step in the same job pushes through the remote the checkout
 #   leaves configured, and nothing downstream sets up a token remote of

@@ -139,7 +139,8 @@ jobs:
     # `sdk_parity` (declared above, `type: boolean, default: false`) is the
     # whole difference: it switches on the planner byte-parity and
     # planner-binding suites, which SKIP without an alp-sdk checkout -- 282 of
-    # 1163 tests. `release.yml:235` passes true; nothing else does.
+    # 1163 tests. `release.yml`'s `gates` job (which calls this workflow with
+    # `sdk_parity: true`) passes true; nothing else does.
     #
     #   PR / merge_group  6-11 min   measured across the last 25 successful
     #                                runs (min 6m; p100 11m, run 32174278683)
@@ -655,19 +656,21 @@ jobs:
         run: |
           set +e
           zizmor --min-severity medium --no-online-audits --no-ignores --format json .github/workflows/ \
-              >no-ignores.json 2>no-ignores.log
+              >"$RUNNER_TEMP/no-ignores.json" 2>"$RUNNER_TEMP/no-ignores.log"
           rc=$?
           set -e
-          cat no-ignores.log
+          cat "$RUNNER_TEMP/no-ignores.log"
           python3 - "$rc" <<'PY'
           import json
+          import os
           import re
           import sys
 
           rc = sys.argv[1]
 
           try:
-              with open("no-ignores.json", encoding="utf-8") as f:
+              no_ignores_json = os.path.join(os.environ["RUNNER_TEMP"], "no-ignores.json")
+              with open(no_ignores_json, encoding="utf-8") as f:
                   findings = json.load(f)
           except (OSError, json.JSONDecodeError) as exc:
               print(f"::error::zizmor --no-ignores exited {rc} without producing "
