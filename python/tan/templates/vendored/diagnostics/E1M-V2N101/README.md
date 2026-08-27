@@ -56,8 +56,8 @@ Real hardware (E1M-V2N101, all checks answer):
 
 ```
 [selftest] === board self-test ===
-[selftest] SoM identity: E1M-V2N101 rev r1 sn AEN0000123 -> PASS
-[selftest] SoC identity: alif:ensemble:e8 (secure-fw OK) -> PASS
+[selftest] SoM identity: E1M-V2N101 rev r1 sn <factory-serial> -> PASS
+[selftest] SoC identity: renesas:rzv2n:n44 (secure-fw OK) -> PASS
 [selftest] power profile: RUN core 800 mV @ 400 MHz -> PASS
 [selftest] i2c scan BOARD_I2C_SENSORS: 3 device(s) -> PASS
 [selftest] result: 4 PASS, 0 SKIP, 0 FAIL
@@ -69,7 +69,7 @@ native_sim (no EEPROM target / controller / radio; emul I2C bus is empty):
 ```
 [selftest] === board self-test ===
 [selftest] SoM identity: unreadable (ALP_ERR_NOT_READY) -> FAIL
-[selftest] SoC identity: alif:ensemble:e8 (ping ALP_ERR_NOSUPPORT, read ALP_ERR_NOSUPPORT) -> SKIP
+[selftest] SoC identity: renesas:rzv2n:n44 (ping ALP_ERR_NOSUPPORT, read ALP_ERR_NOSUPPORT) -> SKIP
 [selftest] power profile: unavailable (ALP_ERR_NOSUPPORT) -> SKIP
 [selftest] i2c scan BOARD_I2C_SENSORS: probing 0x08..0x77
 [selftest] i2c scan BOARD_I2C_SENSORS: 0 device(s) -> PASS
