@@ -16,33 +16,94 @@
 # classes in one interpreter. `tests/planner/test_chip_symbol_declared_guard.py`
 # raised the right exception and then failed its own `pytest.raises` against
 # it, because the two directories happened to run in the same process. Under
-# the sharded matrix they almost never do, so this was invisible there.
+# the sharded matrix they almost never do (measured, see below), so this was
+# invisible there.
 #
 # #943 fixed the actual leak (the test now pins `tan`'s `.planner` attribute
-# for restore too, alongside the `sys.modules` entries it already restores),
-# so THIS exact defect cannot recur. This workflow exists for the NEXT one:
-# a future test that mutates `sys.modules` (or any other process-global
-# import-adjacent state) across a directory boundary sharding hides.
+# for restore too, alongside the `sys.modules` entries it already restores).
+# It ALSO added a `pytest_runtest_teardown` hook in `tests/conftest.py` that
+# checks, after EVERY test in the WHOLE suite, that `sys.modules["tan.
+# planner"]` and the `tan` package's own `.planner` attribute are the same
+# object. That hook is the PRIMARY defence now: it fires at the polluting
+# test's own teardown, in whatever shard that test happens to land in, with
+# no dependency on `tests/planner` sharing a process at all -- it would have
+# caught the original #943 leak on its very first offending commit, on any
+# OS, in any shard. This workflow is a SECONDARY, narrower backstop for the
+# same defect SHAPE (module-global state leaking across a directory boundary
+# sharding hides), kept for two reasons: (1) it is an independent line of
+# defence should the conftest hook itself ever be weakened, skipped, or
+# removed by a future refactor, and (2) it is an integration-level proof
+# that these two specific directories -- the ones #943's bisection actually
+# named -- run cleanly together, unsharded, against a real bound SDK, which
+# the per-test hook does not by itself demonstrate.
 #
-# Deliberately NOT wired into every PR and NOT a required context.
-# `python-tests-shard` already re-runs every one of these tests four times
-# over (once per OS) on every push; a permanent unsharded leg duplicating
-# that work would add real, recurring CI minutes against a residual risk
-# that a repo-wide grep puts at zero known instances today (the
-# `test_presets_command.py` test #943 fixed was the only place in the tree
-# doing `sys.modules` surgery across a `tan.planner` reimport). A weekly +
-# on-demand canary, scoped to just the two directories the bisection in
-# #943 named, is the proportionate middle ground: cheap (one OS, no shard
-# matrix, no toolchain install), but it still puts these two directories in
-# the same interpreter on a cadence a future regression cannot silently
-# outlive.
+# ---------------------------------------------------------------------------
+# PROPORTIONALITY -- CORRECTED (tan-cli#943 review round 2)
+# ---------------------------------------------------------------------------
+#
+# An earlier draft of this comment claimed the sharded matrix costs
+# "17-26 min x 3 OSes" and that `python-tests-shard` "already re-runs every
+# one of these tests four times over (once per OS)". Both were wrong, and
+# both errors ran the same direction (overstating the sharded matrix's
+# cost, understating an always-on leg's).
+#
+# Measured directly off this PR's own `parity.yml` runs (`33086692110`,
+# `33082909656`, `33087363988`): the `python-tests-shard` matrix's four
+# per-OS `(os, shard)` legs -- `shard: 0|1|2|3`, each running
+# `--ignore=tests/parity` sharded four ways via `pytest-shard` -- took
+# **1m22s-4m6s** apiece. The 9m43s-19m44s figures the earlier draft cited
+# belong to a DIFFERENT cell of the SAME matrix: `shard: parity`, which runs
+# `tests/parity` WHOLE (unsharded, by necessity -- see `parity.yml`'s own
+# comment on why that suite cannot be sharded) as a fifth leg alongside the
+# four numbered shards, not a duplicate of them.
+#
+# And `pytest-shard` PARTITIONS the collected test set across the four
+# shard IDs -- it does not re-run anything. Each test in scope runs exactly
+# ONCE per OS (three times total across the `ubuntu/macos/windows` matrix),
+# not four times over.
+#
+# So the real comparison: an always-on, ubuntu-only, unsharded leg covering
+# just `tests/commands` + `tests/planner` (a fraction of what one full
+# `(os, shard)` leg covers) costs on the order of **3-5 runner-minutes** --
+# not a duplication of a 17-26-minute-per-OS matrix, but a small addition
+# against 15 already-parallel jobs.
+#
+# THE CALL, RE-MADE: still weekly + on-demand, not always-on. On the
+# corrected numbers alone an always-on ubuntu-only leg would be cheap enough
+# to justify; what tips the balance back to weekly is the conftest hook
+# above (`pytest_runtest_teardown` in `tests/conftest.py`). That hook is a
+# STRONGER guard than this workflow for the actual defect class -- it runs
+# on every test, on every PR, in every shard, and does not need
+# `tests/commands` and `tests/planner` to share a process at all -- so
+# spending an always-on leg's cost (however small) on a risk the hook
+# already extinguishes per-PR is not proportionate. What is left for THIS
+# workflow to guard is a smaller, meta-level risk: the hook itself
+# regressing (weakened, disabled, or deleted in some future conftest
+# refactor) without anyone noticing. A weekly + on-demand cadence is the
+# right size for that residual risk, not the same cadence as the
+# defect it is no longer the primary defence against.
 name: unsharded python canary (commands + planner, one interpreter)
 
+# ---------------------------------------------------------------------------
+# THE `schedule:` HAZARD -- checked, not assumed (tan-cli#754 convention,
+# see `e2e-container.yml`'s own block of the same name)
+# ---------------------------------------------------------------------------
+#
+# A cron fires only from the DEFAULT branch's copy of a workflow. This
+# repo's default branch is `dev` (`gh repo view alplabai/tan-cli --json
+# defaultBranchRef` -> `dev`), which is also where this PR lands, so the
+# schedule below genuinely fires once merged. If the default branch is ever
+# repointed to `main`, this cron silently stops firing and this comment is
+# the thing to re-read.
 on:
   schedule:
-    # 06:17 UTC every Monday. The exact minute is arbitrary (off a round
-    # number on purpose, so it does not queue alongside every other repo's
-    # on-the-hour cron); the day/cadence is the only thing that matters here.
+    # 06:17 UTC every Monday. Not an arbitrary minute: this repo already
+    # runs crons at 04:17 (`e2e-container.yml`), 05:23 (`planner-resync.yml`)
+    # and 06:40 (`release-combination.yml`); 06:17 is a fourth, distinct
+    # hour:minute combination chosen to avoid queuing alongside any of them.
+    # Weekly (Monday only), not daily like the other three, because this
+    # canary's job is a narrow backstop (see PROPORTIONALITY above), not a
+    # daily-cadence concern.
     - cron: "17 6 * * 1"
   workflow_dispatch:
 
@@ -60,16 +121,39 @@ jobs:
         with:
           persist-credentials: false
 
-      # Same pin `parity.yml`'s `python-tests-shard` job uses
-      # (`PINNED_SDK_TAG`) -- this canary is standing in for a shard of that
-      # same job, so it binds the same alp-sdk commit rather than tracking
-      # a moving ref that could drift the two out of comparison.
+      # Single source for the alp-sdk pin: parity.yml's PINNED_SDK_TAG,
+      # derived the same way getting-started.yml's "resolve the pinned
+      # alp-sdk ref" step does, not a second hardcoded SHA. A literal copy
+      # here would rot independently of `parity.yml`'s own pin -- exactly
+      # the drift `python/tests/conftest.py`'s `_PINNED_SDK_TAG_RE` warns
+      # about (this pair has already drifted twice: tan-cli#485, #688) --
+      # and this canary would then silently exercise a different alp-sdk
+      # than the parity gate it stands in for a shard of, while both
+      # reported green.
+      #
+      # Hard-fail when the line is not where this expects, per
+      # getting-started.yml's own `::error::` on this exact pattern: a
+      # fallback default would make the pin meaningless in exactly the case
+      # where somebody moved it and did not know this file was reading it.
+      - name: resolve the pinned alp-sdk ref (from parity.yml)
+        id: sdk_ref
+        run: |
+          set -euo pipefail
+          ref="$(sed -n 's/^[[:space:]]*PINNED_SDK_TAG:[[:space:]]*//p' \
+                 .github/workflows/parity.yml | head -1)"
+          if [ -z "${ref}" ]; then
+            echo "::error::could not read PINNED_SDK_TAG out of .github/workflows/parity.yml -- the pin moved or was reshaped. Point this step at its new home; do NOT add a second copy of the SHA here."
+            exit 1
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "::notice::unsharded canary running against pinned alp-sdk ${ref}"
+
       - name: clone alp-sdk at the pinned parity ref
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: eb96112ba7d1cc3b4084c985962ea31772177d74
+          ref: ${{ steps.sdk_ref.outputs.ref }}
           path: alp-sdk
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -100,4 +184,34 @@ jobs:
             echo "::error::ALP_SDK_ROOT is bound to ${ALP_SDK_ROOT}, which has no scripts/alp_project.py -- tests/conftest.py::sdk_root() would return None and every SDK-gated test here would SKIP while this job still reported green. Fix the 'clone alp-sdk' step above."
             exit 1
           fi
+
+          # It is not enough that the run exits 0: a SKIP does not fail
+          # pytest's exit code (parity.yml:2185-2255 makes the identical
+          # argument for its own SDK-binding guard, tan-cli#916 shipped the
+          # defect this closes -- a guard that only checks the checkout is
+          # real, never that the specific tests it exists for actually ran).
+          # `@pytestmark_soc`-style SDK gating could in principle skip either
+          # of the two node ids below for a reason unrelated to this job's
+          # own ALP_SDK_ROOT guard above; run first, by node id, and assert
+          # PASSED (not merely "not FAILED") for both.
+          set +e
+          python -m pytest -v \
+            "tests/commands/test_presets_command.py::test_allowed_os_lookup_matches_tan_planner_topology_exactly" \
+            "tests/planner/test_chip_symbol_declared_guard.py::test_undeclared_chip_symbol_is_refused_by_name" \
+            2>&1 | tee /tmp/unsharded-canary-guard.log
+          guard_rc="${PIPESTATUS[0]}"
+          set -e
+          if [ "${guard_rc}" -ne 0 ]; then
+            echo "::error::the two node ids this canary exists to co-locate did not both pass (pytest exit ${guard_rc}) -- see /tmp/unsharded-canary-guard.log above."
+            exit 1
+          fi
+          for nodeid in \
+            "test_allowed_os_lookup_matches_tan_planner_topology_exactly PASSED" \
+            "test_undeclared_chip_symbol_is_refused_by_name PASSED"; do
+            if ! grep -qF "${nodeid}" /tmp/unsharded-canary-guard.log; then
+              echo "::error::expected '${nodeid}' in the pytest -v output above and did not find it -- one of the two tests this canary exists to run together SKIPPED (or was not collected) instead of PASSING, which would report this job green having checked nothing."
+              exit 1
+            fi
+          done
+
           python -m pytest tests/commands tests/planner -q

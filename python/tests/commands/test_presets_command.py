@@ -539,8 +539,23 @@ def test_allowed_os_lookup_matches_tan_planner_topology_exactly(monkeypatch):
     #
     # Pin the attribute for restore too, exactly like the `sys.modules`
     # entries below, so both locations snap back to the SAME pre-test package
-    # together instead of drifting apart.
-    monkeypatch.setattr(_tan_pkg, "planner", getattr(_tan_pkg, "planner", None), raising=False)
+    # together instead of drifting apart. Guarded on `hasattr` rather than
+    # using `getattr(..., None)` + `raising=False` unconditionally: when
+    # `tan.planner` was NOT already imported (no prior test in this process
+    # touched it), `_tan_pkg` has no `.planner` attribute yet, and recording
+    # a restore for an attribute that did not previously exist makes
+    # monkeypatch DELETE it at teardown -- even though the fresh reimport a
+    # few lines down legitimately sets it as a side effect. That traded the
+    # original leak for its mirror image: `sys.modules["tan.planner"]`
+    # restored correctly while `tan.planner` (the attribute) got deleted
+    # out from under it, so `hasattr(tan, "planner")` was `False` while
+    # `"tan.planner" in sys.modules` was `True` -- and a subsequent
+    # `import tan.planner; tan.planner.paths` raised `AttributeError:
+    # module 'tan' has no attribute 'planner'`. Only registering a restore
+    # when the attribute already exists avoids ever manufacturing that
+    # inconsistency.
+    if hasattr(_tan_pkg, "planner"):
+        monkeypatch.setattr(_tan_pkg, "planner", _tan_pkg.planner)
 
     for name in [n for n in sys.modules if n == "tan.planner" or n.startswith("tan.planner.")]:
         monkeypatch.delitem(sys.modules, name, raising=False)
