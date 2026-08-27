@@ -83,7 +83,9 @@ native_sim (emul I2C, no TMP112 registered):
 * **`tmp112_init -> -5`** (ALP_ERR_IO / NACK).  Either the chip
   isn't populated on your board, the address is wrong (see
   table above), or the bus is held low (missing pull-ups, stuck
-  slave).  Run `examples/peripheral-io/i2c-scanner` to confirm what ACKs.
+  slave).  Run alp-sdk's
+  [`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner)
+  to confirm what ACKs -- not part of this scaffolded project.
 * **`alp_i2c_open failed`** (NULL return).  The `alp-i2c0` DT
   alias isn't set -- check your board overlay or, for
   native_sim, that `CONFIG_EMUL=y CONFIG_I2C_EMUL=y` and the

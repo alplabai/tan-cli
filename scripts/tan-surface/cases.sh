@@ -120,7 +120,7 @@ phase_discovery() {
   # Every template the --help text advertises must actually explain. A template
   # that ships in the id list but has no catalog entry is a real break.
   local t
-  for t in minimal-app zephyr-app sensor-starter iot-starter edge-ai-starter board-diagnostics; do
+  for t in minimal-app zephyr-app sensor-starter iot-starter edge-ai-starter board-diagnostics multicore-mailbox; do
     step "explain template $t"         0 -- explain --template "$t" --sdk-root "$SDK"
   done
 
