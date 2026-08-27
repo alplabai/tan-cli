@@ -51,6 +51,12 @@ UNRELEASED_RE = re.compile(
 )
 
 
+# A fence marker line: 3+ backticks, optionally followed by an info string
+# (only meaningful on an opener -- see fragment_shape_errors). Matched against
+# an already-`.strip()`ped line, so leading indentation is not part of this.
+_FENCE_RE = re.compile(r"^(`{3,})(.*)$")
+
+
 class AssembleError(RuntimeError):
     """A condition that must stop the release, not be worked around."""
 
@@ -88,14 +94,35 @@ def fragment_shape_errors(name: str, body: str) -> list[str]:
     errors: list[str] = []
     lines = body.split("\n")
     seen_bullet = False
-    fence_count = 0
+    open_fence_len: int | None = None
 
     for line in lines:
-        if line.lstrip().startswith("```"):
-            fence_count += 1
+        stripped = line.strip()
+        fence_match = _FENCE_RE.match(stripped)
+        if fence_match:
+            ticks, rest = fence_match.group(1), fence_match.group(2)
+            if open_fence_len is None:
+                # Opens a fence. An info string (` ```python`) is allowed only
+                # on the opener, so this is unconditionally an open.
+                open_fence_len = len(ticks)
+            elif len(ticks) >= open_fence_len and not rest.strip():
+                # CommonMark: a fence only CLOSES on a marker with at least
+                # as many backticks as the opener and nothing else on the
+                # line. A shorter or text-trailing run of backticks (e.g. a
+                # nested ``` inside an outer ```` fence) is fence CONTENT,
+                # not a close -- counting every ``` regardless of length
+                # falsely flagged that as unbalanced.
+                open_fence_len = None
         if not line.strip():
             continue
         if line.startswith("- "):
+            if not line[2:].strip():
+                errors.append(
+                    f"{name}: line {line!r} is a bullet marker with no "
+                    "content -- it would land in CHANGELOG.md as a bare "
+                    "`- ` with nothing readable after it"
+                )
+                continue
             seen_bullet = True
             continue
         if line[:1] in (" ", "\t"):
@@ -111,11 +138,11 @@ def fragment_shape_errors(name: str, body: str) -> list[str]:
             "bare text under a bullet-list heading, not a list item"
         )
 
-    if fence_count % 2:
+    if open_fence_len is not None:
         errors.append(
-            f"{name}: unbalanced ``` fence ({fence_count} marker(s)) -- this "
-            "would swallow whatever is spliced in after it into an "
-            "unterminated code block"
+            f"{name}: unterminated ``` fence (opened with {open_fence_len} "
+            "backtick(s), never closed) -- this would swallow whatever is "
+            "spliced in after it into an unterminated code block"
         )
 
     return errors

@@ -225,6 +225,38 @@ def test_check_reports_a_visible_count_even_when_it_matches_nothing(
     assert "0 fragment(s) pending" in capsys.readouterr().out
 
 
+def test_a_bullet_marker_with_no_content_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`- ` (dash, space, nothing else) technically `startswith("- ")` and
+    `.strip()`s to `-`, which is non-empty, so it slipped past both the
+    empty-body guard and the old bullet check and folded into CHANGELOG.md as
+    a bare, unreadable `- `. Must now be refused."""
+    root = _repo(tmp_path, {"784.fixed.md": "- "})
+    assert ac.main(["--check", "--root", str(root)]) == 1
+    assert "784.fixed.md" in capsys.readouterr().err
+
+
+def test_a_nested_fence_of_a_different_length_is_not_a_false_positive(
+    tmp_path: Path,
+) -> None:
+    """A legitimate outer fence opened with four backticks may contain a
+    literal three-backtick line (e.g. documenting Markdown fence syntax
+    itself) without that inner line counting as a close -- CommonMark only
+    closes a fence with a marker of at least the opening length. Counting
+    every ``` regardless of length previously flagged this as unbalanced."""
+    body = (
+        "- **Example.**\n\n"
+        "  ````\n"
+        "  ```\n"
+        "  a literal triple-backtick line, still inside the outer fence\n"
+        "  ```\n"
+        "  ````"
+    )
+    root = _repo(tmp_path, {"785.fixed.md": body})
+    assert ac.main(["--check", "--root", str(root)]) == 0
+
+
 def test_the_930_gate_is_not_load_bearing_on_the_word_bullet_alone(
     tmp_path: Path,
 ) -> None:
@@ -238,6 +270,45 @@ def test_the_930_gate_is_not_load_bearing_on_the_word_bullet_alone(
     assert ac.main(["--check", "--root", str(root)]) == 1
 
 
+# --- state-independent non-vacuity guard (PR #947 review) ------------------
+#
+# An earlier version of this file proved the checker isn't vacuous by
+# asserting `changelog.d/` in THIS checkout is non-empty. That is exactly
+# backwards: `changelog.d/` containing nothing but README.md is a REAL,
+# REQUIRED repo state -- it is what the tree looks like right after a release
+# fold (tan-cli#892 landed exactly that: `git ls-tree -r --name-only <that
+# commit> changelog.d/` -> only README.md), and `release.yml`'s
+# `--require-empty` step *demands* it at tag time. Asserting non-emptiness
+# there reds the one state the release path is required to reach.
+#
+# The fix is to stop asking a property of the LIVE DIRECTORY and instead ask
+# a property of the CHECKER: drive a small, fixed, in-test corpus (one valid
+# fragment, one planted-invalid one) through `load_fragments()` -- the real
+# production entry point, not a re-implemented glob, so a typo in its own
+# `*.md` glob is caught here too (a broken glob finds neither fragment, so
+# the invalid one is never inspected and no error is raised). This holds no
+# matter what -- or whether anything -- is pending in the real
+# `changelog.d/` at the time the suite runs.
+
+
+def test_the_930_guard_holds_on_a_fixed_corpus_independent_of_repo_state(
+    tmp_path: Path,
+) -> None:
+    """Non-vacuity, made state-independent: proves `fragment_shape_errors` (via
+    the production `load_fragments()` loader) still catches a planted-bad
+    fragment, using a corpus this test owns rather than whatever the real
+    `changelog.d/` happens to contain right now.
+    """
+    root = _repo(tmp_path, {
+        "9101.fixed.md": "- **A valid entry, shaped like the house style.**",
+        "9102.changed.md": "not a bullet at all",
+    })
+    with pytest.raises(ac.AssembleError) as exc:
+        ac.load_fragments(root / "changelog.d")
+    assert "9102.changed.md" in str(exc.value)
+    assert "9101.fixed.md" not in str(exc.value)
+
+
 # --- real corpus: prove the check on THIS repo's actual pending fragments --
 #
 # Everything above is a synthetic fixture. tan-cli#930's own complaint is
@@ -247,24 +318,23 @@ def test_the_930_gate_is_not_load_bearing_on_the_word_bullet_alone(
 # runs in the required `python-tests-shard` CI job on every PR (parity.yml),
 # this is also how a future malformed real fragment gets caught automatically,
 # not just at release time via `--require-empty`.
+#
+# Deliberately NOT asserting `changelog.d/` is non-empty (see above) -- an
+# empty-except-README.md tree is correct, not vacuous, and the mutation-proof
+# non-vacuity guard lives in the fixed-corpus test above instead. This test's
+# job is narrower: IF something real is pending, it must be shape-valid.
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_the_real_changelog_d_fragments_are_shape_valid() -> None:
-    frag_dir = REPO_ROOT / "changelog.d"
-    paths = [p for p in sorted(frag_dir.glob("*.md")) if p.name != "README.md"]
-    # Non-vacuity: if this ever finds zero fragments, the assertions below
-    # would pass trivially and prove nothing -- exactly the #919/#943 shape.
-    assert paths, "no pending changelog.d/ fragments found -- check would be vacuous"
-
-    errors: list[str] = []
-    for path in paths:
-        body = path.read_text(encoding="utf-8").strip("\n")
-        if not body.strip():
-            continue  # load_fragments' own empty-body refusal covers this
-        errors.extend(ac.fragment_shape_errors(path.name, body))
-    assert not errors, "\n".join(errors)
+    # Drives the production loader (not a re-implemented glob) so a typo in
+    # load_fragments()'s own `*.md` glob is caught here too, exactly as it is
+    # in the fixed-corpus test above.
+    try:
+        ac.load_fragments(REPO_ROOT / "changelog.d")
+    except ac.AssembleError as exc:
+        pytest.fail(str(exc))
 
 
 def test_check_over_the_real_repo_passes() -> None:
