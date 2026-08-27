@@ -46,7 +46,7 @@
     "tests/commands/test_flash_command.py": 8071,
     "tests/commands/test_generate_command.py": 1934,
     "tests/commands/test_image_command.py": 834,
-    "tests/commands/test_init_command.py": 1555,
+    "tests/commands/test_init_command.py": 1579,
     "tests/commands/test_kconfig_command.py": 1013,
     "tests/commands/test_new_som_command.py": 1635,
     "tests/commands/test_sdk_command.py": 1614,
