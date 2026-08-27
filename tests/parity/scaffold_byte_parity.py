@@ -275,6 +275,38 @@ def un_edit_edge_ai_aen801_readme_deepx_note(text: str) -> str:
     )
 
 
+#: tan-cli#946 (review round on #932/#942): the SAME emit sentence entry 5/6
+#: above rewrites for `E1M-AEN801` is ALSO wrong on the `E1M-V2N101` tree
+#: itself -- just for a different sibling. `E1M-V2N101`/`E1M-V2N102`/
+#: `E1M-V2M101`/`E1M-V2M102` all render this ONE tree; "Flip `som.sku` ...
+#: to `E1M-V2M101`" is correct advice for a V2N101/V2N102 customer (neither
+#: carries DEEPX) but misleading for a V2M102 customer, who already has it:
+#: `metadata/socs/deepx/dx/m1.json`'s `alp_module_skus` lists BOTH
+#: `E1M-V2M101` and `E1M-V2M102` (confirmed on `E1M-V2M102.yaml`'s own
+#: `on_module.npu: deepx_dxm1`), so telling that customer to flip to
+#: `E1M-V2M101` implies their own SKU lacks what it already has. Rewritten
+#: SKU-neutral -- true regardless of which of the four SKUs the customer
+#: is actually on -- rather than naming one specific target SKU. Filed
+#: upstream as alp-sdk#1749; this entry retires the moment that lands and
+#: this tree is re-vendored.
+_EDGE_AI_V2N101_README_DEEPX_NOTE = (
+    "`E1M-V2M101` and `E1M-V2M102` both carry the DEEPX DX-M1 NPU; pick either via\n"
+    "`som.sku` in `board.yaml` for the DEEPX DX-M1 path."
+)
+_EDGE_AI_V2N101_README_DEEPX_NOTE_EMITTED = (
+    "Flip `som.sku` in `board.yaml` to `E1M-V2M101` for the DEEPX DX-M1 path."
+)
+
+
+def un_edit_edge_ai_v2n101_readme_deepx_note(text: str) -> str:
+    """tan-cli#946: undo the README correction above to recover the emit's
+    own (still-wrong, V2M102-misleading) sentence -- alp-sdk#1749 has not
+    landed yet, so the live emit still says this."""
+    return text.replace(
+        _EDGE_AI_V2N101_README_DEEPX_NOTE, _EDGE_AI_V2N101_README_DEEPX_NOTE_EMITTED
+    )
+
+
 #: tan-cli#912: `diagnostics`'s README names a bare
 #: `scripts/program_eeprom.py` -- real only in the alp-sdk checkout the text
 #: was captured from, never emitted into any scaffolded project
@@ -425,10 +457,13 @@ def un_edit_mailbox_blocked_caveat(text: str) -> str:
 #: `E1M-AEN801`'s, still naming that Alif module in its own "what success
 #: looks like" comment -- and whose `README.md` was substituted on the SoM
 #: SKU line only, leaving the serial beside it and both `SoC identity:`
-#: lines at their AEN801/Alif values. Four independent wrong tokens, each
-#: its own entry per the `edit_id` discipline above: the SoM SKU (header
-#: comment only -- `README.md` already had this half right), a placeholder
-#: serial, and the SoC identity string, wherever each appears.
+#: lines at their AEN801/Alif values. Six entries, not one, per the
+#: `edit_id` discipline above: the SoM SKU fix in `src/main.c` gets TWO
+#: (the header comment and the sample-output line are independent
+#: locations -- `README.md` already had this half right, so neither has a
+#: `README.md` counterpart), and the placeholder serial and the SoC
+#: identity string each get ONE entry PER FILE (`edit_id` keys on `path`) --
+#: 2 + 2 + 2 = 6.
 #:
 #: The SoC identity string is NOT invented to match the Alif shape: it is
 #: `renesas:rzv2n:n44`, `metadata/socs/renesas/rzv2n/n44.json`'s own `ref`
@@ -491,7 +526,17 @@ def un_edit_v2n101_serial_placeholder(text: str) -> str:
     """tan-cli#932: reverse the `<factory-serial>` placeholder back onto the
     emit's own AEN-shaped `AEN0000123` bytes. Shared by `src/main.c` and
     `README.md` -- the placeholder text is identical in both, own entry per
-    file since `edit_id` is keyed per `(template, sku, path, edit_id)`."""
+    file since `edit_id` is keyed per `(template, sku, path, edit_id)`.
+
+    `.replace()`, unbounded -- every occurrence of the matched text is
+    undone, not just the first. Deliberate and safe for THIS token today:
+    `sn <factory-serial>` appears exactly once per file. The discipline this
+    keys on is per-TOKEN (one `un_edit_*` per distinct wrong string), not
+    per-OCCURRENCE-COUNT -- a second, independent `sn <factory-serial>`
+    landing in either file later would be silently folded into this same
+    call rather than flagged as a new thing to declare. `un_edit_v2n101_soc_
+    identity` below makes the same trade deliberately (its docstring counts
+    the two occurrences it undoes); this one has never needed to."""
     return text.replace("sn <factory-serial>", "sn AEN0000123")
 
 
@@ -503,7 +548,15 @@ def un_edit_v2n101_soc_identity(text: str) -> str:
     token with the same correct replacement, so one `.replace()` (which
     substitutes every occurrence by default) undoes both without needing two
     entries; `src/main.c` carries one occurrence and the same call is a
-    no-op past it."""
+    no-op past it.
+
+    Unbounded like `un_edit_v2n101_serial_placeholder` above, same trade:
+    every occurrence of `renesas:rzv2n:n44` is undone, whichever line it is
+    on. Correct today because every occurrence in each file IS this one
+    wrong token; a future SECOND (different) reason for that string to
+    appear in either file would be masked by the same call rather than
+    caught as its own gap -- the discipline here is per-token, not
+    per-occurrence."""
     return text.replace("renesas:rzv2n:n44", "alif:ensemble:e8")
 
 
@@ -552,16 +605,30 @@ DELIBERATE_EDITS: dict[
         un_edit_edge_ai_main_c_model_comment_2,
     ),
     ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note"): (
-        "tan-cli#814: the emit's `Flip som.sku to E1M-V2M101` sentence is a "
-        "cross-family swap here (alif-ensemble -> renesas-rzv2n-deepx) that "
-        "tan validate refuses; the E1M-V2N101 sibling's identical sentence "
-        "is correct and untouched",
+        "tan-cli#814: the emit's `Flip som.sku to E1M-V2M101` sentence "
+        "names a target E1M-AEN801's own `board.yaml` preset (`e1m-evk`, "
+        "which hosts only alif-ensemble/nxp-imx9, not V2M101's "
+        "renesas-rzv2n-deepx) doesn't host that tan validate refuses; the "
+        "E1M-V2N101 sibling's identical sentence IS legal on ITS preset "
+        "(`e1m-x-evk`) -- E1M-V2N101 is family renesas-rzv2n and E1M-V2M101 "
+        "is family renesas-rzv2n-deepx, two different families, both listed "
+        "in e1m-x-evk's hosts_som_families -- but has its own, narrower "
+        "defect -- see the entry right below",
         un_edit_edge_ai_aen801_readme_deepx_note,
     ),
     ("edge-ai", "E1M-AEN801", "board.yaml", "deepx_v2m_note"): (
         "tan-cli#814: same defect as the README entry above, the comment "
         "one file over that reinforces it",
         un_edit_edge_ai_aen801_board_yaml_deepx_note,
+    ),
+    ("edge-ai", "E1M-V2N101", "README.md", "deepx_v2m102_scope"): (
+        "tan-cli#946: the emit's `Flip som.sku to E1M-V2M101` sentence is "
+        "correct for a V2N101/V2N102 customer but misleading for a V2M102 "
+        "one -- E1M-V2M102 already carries DEEPX DX-M1 "
+        "(metadata/socs/deepx/dx/m1.json's alp_module_skus lists both "
+        "E1M-V2M101 and E1M-V2M102) -- rewritten SKU-neutral; filed "
+        "upstream as alp-sdk#1749",
+        un_edit_edge_ai_v2n101_readme_deepx_note,
     ),
     ("diagnostics", "E1M-AEN801", "README.md", "eeprom_script_pointer"): (
         "tan-cli#912: the Troubleshooting section pointed at "
@@ -889,6 +956,17 @@ def self_check() -> None:
     assert (
         un_edit_edge_ai_aen801_board_yaml_deepx_note(_EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE)
         == _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE_EMITTED
+    )
+
+    # tan-cli#946's entry: the E1M-V2N101 tree's own DEEPX sentence
+    # (misleading for a V2M102 customer -- see alp-sdk#1749) round-trips the
+    # same way, registered under its own (template, sku, path, edit_id) key.
+    assert (
+        "edge-ai", "E1M-V2N101", "README.md", "deepx_v2m102_scope"
+    ) in DELIBERATE_EDITS
+    assert (
+        un_edit_edge_ai_v2n101_readme_deepx_note(_EDGE_AI_V2N101_README_DEEPX_NOTE)
+        == _EDGE_AI_V2N101_README_DEEPX_NOTE_EMITTED
     )
 
     # tan-cli#912's four entries (diagnostics x2, sensor x2): each un_edit

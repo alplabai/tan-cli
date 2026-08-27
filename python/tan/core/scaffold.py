@@ -49,6 +49,8 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 
 from tan.core.fs_confine import PathEscapeError, resolve_confined
+from tan.core.scaffold_selftest_identity import retarget_example_build_target_comment
+from tan.core.scaffold_selftest_identity import retarget_selftest_som_identity
 from tan.core.timestamp import generated_at_iso
 from tan.templates import VENDORED_ROOT
 
@@ -873,10 +875,9 @@ def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
     `FILE_SET_DIVERGENCE` until tan-cli#269 deleted it with the oracle axis;
     `tests/core/test_template_integrity.py` pins the FILE now, not the diff),
     so `tan init --template iot-starter --format json` returns one
-    `fileChanges[]` entry more than the oracle did. Sorting is
-    what keeps every file the two trees DO share in the same relative order.
-
-    Sorted on that STRING, never on the `Path`: `PurePath.__lt__` compares a
+    `fileChanges[]` entry more than the oracle did. Sorting is what keeps
+    every file the two trees DO share in the same relative order. Sorted on
+    that STRING, never on the `Path`: `PurePath.__lt__` compares a
     case-FOLDED key on Windows, so sorting paths ordered `board.yaml` before
     `CMakeLists.txt` there and after it on Linux -- the same command emitting a
     different `fileChanges[]` order per platform.
@@ -897,11 +898,10 @@ def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
             relative = path.relative_to(root).as_posix()
             content = _read_verbatim(path)
             if relative == "board.yaml":
-                content = retarget_board_yaml_som(content, sku)
-                # tan-cli#494 defect 2: the SoM line was the ONLY thing
-                # retargeted, so a `--som` outside the tree's own SKU kept its
-                # core ids. No-op when `sku == family` (see the function).
+                content = retarget_board_yaml_som(content, sku)  # tan-cli#494 defect 2
                 content = retarget_board_yaml_cores(content, sku, family)
+            content = retarget_selftest_som_identity(content, sku, family)
+            content = retarget_example_build_target_comment(content, sku, family)
             files.append(PlannedFile(relative, content))
         _require_complete_tree(template_id, root, files)
     except OSError as err:

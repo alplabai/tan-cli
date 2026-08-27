@@ -386,20 +386,31 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **twenty** live entries
+The `DELIBERATE_EDITS` table below currently carries **twenty-one** live entries
 (counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS` dict, not by
-hand): the `iot` CMakeLists edit, six `edge-ai` entries for the
-`## Model`/`## Tests` pointers (tan-cli#821(a), see entry 4 below) — two
-`README.md` entries plus two entries PER `src/main.c` (one per comment
-rewrite, declared separately so healing one comment without the other still
-reds; see `scaffold_byte_parity.py`'s `DELIBERATE_EDITS` docstring) — two more
+hand): one `multicore-mailbox`/`E1M-AEN801` entry for the leading "blocked
+ahead" caveat (tan-cli#864 Q5, see entry 9 below), the `iot`
+CMakeLists edit, six `edge-ai` entries for the `## Model`/`## Tests` pointers
+(tan-cli#821(a), see entry 4 below) — two `README.md` entries plus two
+entries PER `src/main.c` (one per comment rewrite, declared separately so
+healing one comment without the other still reds; see
+`scaffold_byte_parity.py`'s `DELIBERATE_EDITS` docstring) — two more
 `edge-ai`/`E1M-AEN801` entries for the DEEPX retarget sentence (tan-cli#814,
-see entries 5 and 6 below), four more for `diagnostics`/`sensor`'s bare
-cross-repo pointers (tan-cli#912, see entry 7 below) — two SKUs each, one
-`README.md` entry per SKU — and six more for
-`diagnostics`/`E1M-V2N101`'s Alif/AEN801-shaped `src/main.c`/`README.md`
-bytes (tan-cli#932, see entry 8 below). tan-cli#384's seven `README.md`
-doc-link entries
+see entries 5 and 6 below), one more `edge-ai`/`E1M-V2N101` entry for that
+same tree's own narrower DEEPX-sentence defect (tan-cli#946, see entry 10
+below), four more for `diagnostics`/`sensor`'s bare cross-repo pointers
+(tan-cli#912, see entry 7 below) — two SKUs each, one `README.md` entry per
+SKU — and six more for `diagnostics`/`E1M-V2N101`'s Alif/AEN801-shaped
+`src/main.c`/`README.md` bytes (tan-cli#932, see entry 8 below). That is
+`1 + 1 + 6 + 2 + 1 + 4 + 6 = 21` — a review round on tan-cli#932 (2026-08)
+found this paragraph's arithmetic summed to 19 without the leading
+multicore-mailbox term, and entry 9 below absent from the numbered list
+entirely; both were fixed in that round (making the count twenty), and a
+further review round on tan-cli#946 added entry 10 (making it twenty-one).
+`test_the_manifest_deliberate_edit_count_matches_the_table` pins the
+**twenty-one** above against `len(DELIBERATE_EDITS)` itself, the drift this
+paragraph shipped with nothing catching before tan-cli#932. tan-cli#384's
+seven `README.md` doc-link entries
 are NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0`
 tag (see "Current vendor point" above); listed here only as history, not as
 a current exception. tan-cli#501's four `sensor`/`diagnostics` CMakeLists
@@ -603,6 +614,57 @@ strictness exists to catch.
    `examples/bringup/board-selftest/src/main.c` and `README.md`, whose
    per-SKU substitution machinery is what needs to reach these tokens;
    declared here pending that fix and a re-vendor.
+9. **`multicore-mailbox`/`E1M-AEN801`'s `README.md`: a leading caveat that
+   the scaffold's own IPC carve-out resolves `blocked` (tan-cli#864 Q5).**
+   Measured: `alp_shmem0`'s `memory_map.base` comes back `TBD` for region
+   `mram_main` on this SKU, so the mailbox roundtrip the scaffold teaches
+   compiles and does nothing — a customer's first run is silent, and the
+   emit's own text says nothing about it. Rewritten with a leading "## Before
+   you run this: the channel is not allocated yet" section explaining the
+   `blocked` status up front rather than letting the customer discover it by
+   running a no-op. `un_edit_mailbox_blocked_caveat` strips that whole
+   section (plus the blank line it opens with, appended after the emit's own
+   trailing newline) to recover the emit's own bytes. This is the one entry
+   in the table with no matching alp-sdk issue filed pending a re-vendor —
+   the carve-out `blocked`/`TBD` state is a hardware fact about this SKU's
+   memory map, not something alp-sdk's own emit is wrong to omit generically;
+   the caveat stays a standing tan-side edit rather than an upstream fix to
+   wait on.
+10. **`edge-ai`/`E1M-V2N101`'s `README.md`: the same DEEPX retarget
+    sentence as entries 5/6, but its OWN, narrower defect (tan-cli#946,
+    review round on #932/#942).** `E1M-V2N101`/`E1M-V2N102`/`E1M-V2M101`/
+    `E1M-V2M102` all render this one tree, and unlike the `E1M-AEN801`
+    tree's problem (a target family the `e1m-x-evk` preset does not host
+    at all), "Flip `som.sku` in `board.yaml` to `E1M-V2M101` for the DEEPX
+    DX-M1 path" IS legal here: `E1M-V2N101` is family `renesas-rzv2n` and
+    `E1M-V2M101` is family `renesas-rzv2n-deepx` -- two DIFFERENT
+    families, not one -- but `e1m-x-evk`'s `hosts_som_families` lists both,
+    so the flip is a legal cross-family swap on THIS preset, correct in
+    shape for a V2N101/V2N102 customer ("intra-family" is not the right
+    word for it -- neither alp-sdk board.yaml nor this repo uses that
+    vocabulary; the preset simply hosts more than one family). It is still
+    wrong for a V2M102 one: `metadata/socs/deepx/dx/m1.json`'s
+    `alp_module_skus` lists BOTH `E1M-V2M101` and `E1M-V2M102` (confirmed:
+    `E1M-V2M102.yaml`'s own `on_module.npu: deepx_dxm1`), so a V2M102
+    customer reading this line is told to abandon their own DEEPX-equipped
+    module for a sibling SKU no more DEEPX-equipped than the one they
+    already have. Discovered widening
+    `test_no_planned_file_names_a_different_skus_exact_token`'s foreign-SKU
+    list off the full SDK catalogue instead of the two vendored trees'
+    representative SKUs alone (tan-cli#946): the widened guard flagged this
+    sentence for every non-source SKU sharing the tree, and unlike the
+    other (deliberate) `edge-ai-starter` cross-references, declared in
+    `test_template_integrity.py`'s `_ALLOWED_CROSS_SKU_MENTIONS`, this one
+    was a real substitution gap one SKU over -- not allowlisted. Rewritten
+    SKU-neutral ("`E1M-V2M101` and `E1M-V2M102` both carry the DEEPX DX-M1
+    NPU; pick either via `som.sku` in `board.yaml` for the DEEPX DX-M1
+    path"), true regardless of which of the four SKUs the customer actually
+    scaffolded -- and naming only the two DEEPX-equipped siblings, not all
+    four, keeps the number of (now legitimate) cross-SKU mentions this one
+    sentence adds to the allowlist as small as the fact it states allows.
+    Fix belongs upstream, in alp-sdk's
+    `examples/ai/cold-chain-monitor/README.md`; filed as alp-sdk#1749, and
+    this entry retires the moment that lands and this tree is re-vendored.
 
 ## Template x SKU matrix vendored
 
