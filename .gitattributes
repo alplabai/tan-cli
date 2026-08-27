@@ -56,3 +56,37 @@ contract/fixtures/toolchains/** text eol=lf
 # LF in the blob is git's normalise-on-commit; pin it rather than rely on
 # every future contributor's config matching.
 install.sh text eol=lf
+
+# tan-cli#907 interim mitigation: MODULE_SIZE_BUDGET_LOG.md declares itself
+# append-only in its own header (regen_module_size_budget.py only ever adds a
+# line at the end). `union` is git's built-in low-level merge driver -- no
+# `merge.<name>.driver` config needed -- and for a genuinely append-only file
+# it produces exactly what a human resolving the conflict by hand would write:
+# both sides' new lines kept, no conflict markers. Demonstrated 2026-08-27:
+# two branches each appending a different entry merge clean with both entries
+# present; the same scenario without this line conflicts normally.
+#
+# Two shapes union gets WRONG, both reachable today because tan-cli#906 (the
+# append-only enforcement) is still open -- nothing stops a non-append edit
+# from reaching this file. Also demonstrated 2026-08-27: (1) both branches
+# edit the SAME existing entry -> both variants land with zero conflict
+# markers, one body duplicated under two headers, no signal anything
+# collided; (2) one branch deletes an entry while the other appends -> the
+# deletion is silently REVERTED, the entry resurrected, no markers. Nothing
+# stands behind either case: nothing parses this `.md`, and
+# `python/tests/gates/test_no_conflict_markers.py` can't fire on a merge that
+# never left a marker. Read this as an argument FOR #906, not against this
+# driver -- union just makes a non-append edit merge more silently than a
+# plain conflict would have, so the enforcement gap matters more now than it
+# did before this line landed.
+#
+# Deliberately NOT applied to the sibling `module_size_budget.generated.json`
+# in the same directory: that file is a JSON object, and union-merging two
+# JSON documents that both add a trailing key can leave two sibling entries
+# with no comma between them (verified: `git merge-file --union` on two
+# divergent copies of a trivial `{"a":1,"b":2}` produces `"c": 3` directly
+# followed by `"d": 4` with no separator, which fails `json.load`). Its
+# correct conflict resolution is "take either side, then rerun
+# `python scripts/regen_module_size_budget.py --merge-resync`" -- see the
+# note at the top of MODULE_SIZE_BUDGET_LOG.md.
+python/tests/gates/MODULE_SIZE_BUDGET_LOG.md merge=union
