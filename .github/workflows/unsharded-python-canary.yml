@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# tan-cli#943 canary: `tests/commands/` and `tests/planner/` sharing ONE
+# interpreter, bound to a real alp-sdk.
+#
+# `parity.yml`'s `python-tests-shard` job already runs the whole suite bound
+# to alp-sdk on every PR, three OSes -- but `pytest-shard` partitions the
+# collected tests four ways per OS, so `tests/commands/` and `tests/planner/`
+# land in the same shard only by chance. That is exactly what hid #943: a
+# `tests/commands/test_presets_command.py` test deleted every `tan.planner*`
+# entry from `sys.modules` (via `monkeypatch.delitem`) to force a rebind, and
+# the fresh reimport that followed left `tan`'s own `.planner` ATTRIBUTE
+# (set by Python's import machinery as a reimport side effect, never touched
+# by that `monkeypatch.delitem` sweep) pointing at a second, un-restored copy
+# of `tan.planner` -- two live `tan.planner.models.OrchestratorError`
+# classes in one interpreter. `tests/planner/test_chip_symbol_declared_guard.py`
+# raised the right exception and then failed its own `pytest.raises` against
+# it, because the two directories happened to run in the same process. Under
+# the sharded matrix they almost never do, so this was invisible there.
+#
+# #943 fixed the actual leak (the test now pins `tan`'s `.planner` attribute
+# for restore too, alongside the `sys.modules` entries it already restores),
+# so THIS exact defect cannot recur. This workflow exists for the NEXT one:
+# a future test that mutates `sys.modules` (or any other process-global
+# import-adjacent state) across a directory boundary sharding hides.
+#
+# Deliberately NOT wired into every PR and NOT a required context.
+# `python-tests-shard` already re-runs every one of these tests four times
+# over (once per OS) on every push; a permanent unsharded leg duplicating
+# that work would add real, recurring CI minutes against a residual risk
+# that a repo-wide grep puts at zero known instances today (the
+# `test_presets_command.py` test #943 fixed was the only place in the tree
+# doing `sys.modules` surgery across a `tan.planner` reimport). A weekly +
+# on-demand canary, scoped to just the two directories the bisection in
+# #943 named, is the proportionate middle ground: cheap (one OS, no shard
+# matrix, no toolchain install), but it still puts these two directories in
+# the same interpreter on a cadence a future regression cannot silently
+# outlive.
+name: unsharded python canary (commands + planner, one interpreter)
+
+on:
+  schedule:
+    # 06:17 UTC every Monday. The exact minute is arbitrary (off a round
+    # number on purpose, so it does not queue alongside every other repo's
+    # on-the-hour cron); the day/cadence is the only thing that matters here.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  commands-and-planner-unsharded:
+    name: "python -- tests/commands + tests/planner, unsharded, bound"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: checkout tan-cli
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Same pin `parity.yml`'s `python-tests-shard` job uses
+      # (`PINNED_SDK_TAG`) -- this canary is standing in for a shard of that
+      # same job, so it binds the same alp-sdk commit rather than tracking
+      # a moving ref that could drift the two out of comparison.
+      - name: clone alp-sdk at the pinned parity ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: alplabai/alp-sdk
+          ref: eb96112ba7d1cc3b4084c985962ea31772177d74
+          path: alp-sdk
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: install alp-tan[monitor] + pytest
+        shell: bash
+        working-directory: python
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -e ".[monitor]" pytest
+
+      # Asserted before the run, against the variable actually exported --
+      # same reasoning as `parity.yml`'s own ALP_SDK_ROOT guard: `sdk_root()`
+      # in `tests/conftest.py` returns `None` (a per-module SKIP, exit 0)
+      # for anything but a real checkout, and a silently-skipped canary would
+      # report green having checked nothing.
+      - name: pytest tests/commands tests/planner -- ONE process, both directories
+        shell: bash
+        working-directory: python
+        env:
+          ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk
+        run: |
+          set -euo pipefail
+          if [ ! -f "${ALP_SDK_ROOT}/scripts/alp_project.py" ]; then
+            echo "::error::ALP_SDK_ROOT is bound to ${ALP_SDK_ROOT}, which has no scripts/alp_project.py -- tests/conftest.py::sdk_root() would return None and every SDK-gated test here would SKIP while this job still reported green. Fix the 'clone alp-sdk' step above."
+            exit 1
+          fi
+          python -m pytest tests/commands tests/planner -q

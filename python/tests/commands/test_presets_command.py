@@ -514,7 +514,33 @@ def test_allowed_os_lookup_matches_tan_planner_topology_exactly(monkeypatch):
     """
     import sys
 
+    import tan as _tan_pkg
     from tan import planner_root
+
+    # `tan.planner`'s package object is BOTH a `sys.modules["tan.planner"]`
+    # entry AND a plain `.planner` attribute of the `tan` package module --
+    # Python's import machinery sets the latter as a side effect every time
+    # `tan.planner` is (re)imported, the same way it does for any submodule.
+    # `monkeypatch.delitem` below only ever touches the FIRST location: it
+    # deletes `sys.modules["tan.planner"]` (and children), which forces the
+    # `from tan.planner.paths import ...` a few lines down to reimport the
+    # whole package fresh -- and that fresh import overwrites `tan.planner`
+    # (the attribute) to point at the NEW package, a side effect `monkeypatch`
+    # was never told about and so never undoes. At teardown `sys.modules`
+    # reverts to the pre-test package while `tan`'s own `.planner` attribute
+    # is left pointing at the leaked fresh one -- two live `tan.planner`
+    # packages (and two `OrchestratorError` classes, one per copy) for the
+    # rest of the process. That is tan-cli#943: a later
+    # `import tan.planner.kconfig as m` resolves through the STALE attribute
+    # chain (`tan.planner.kconfig`) and gets the leaked copy, while a sibling
+    # `from tan.planner.models import OrchestratorError` resolves through
+    # `sys.modules` directly and gets the restored one -- `pytest.raises`
+    # then fails to match its own exception class.
+    #
+    # Pin the attribute for restore too, exactly like the `sys.modules`
+    # entries below, so both locations snap back to the SAME pre-test package
+    # together instead of drifting apart.
+    monkeypatch.setattr(_tan_pkg, "planner", getattr(_tan_pkg, "planner", None), raising=False)
 
     for name in [n for n in sys.modules if n == "tan.planner" or n.startswith("tan.planner.")]:
         monkeypatch.delitem(sys.modules, name, raising=False)

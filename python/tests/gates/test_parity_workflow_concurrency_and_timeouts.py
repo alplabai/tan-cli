@@ -513,6 +513,7 @@ _MIN_BOUNDED_JOBS = {
     "python-binaries.yml": 4,
     "release-combination.yml": 2,
     "release.yml": 5,
+    "unsharded-python-canary.yml": 1,
     "version-identity.yml": 1,
 }
 
