@@ -202,8 +202,18 @@ jobs:
       # the other.
       - name: install the declared package
         run: pip install -e ./python
+      # `pytest-xdist` alongside the runner, not extra: `tests/gates/
+      # test_home_preflight.py::test_pytest_configure_skips_the_check_on_an_
+      # xdist_worker` needs it PRESENT to prove the `config.workerinput`
+      # worker-skip guard at all (it `importorskip`s otherwise) -- this job
+      # is one of the two `tests/gates` legs in CI (the other is parity.yml's
+      # `seam1-plan-shape`), and before this line neither installed xdist, so
+      # that test SKIPPED in every CI leg while reading as covered (#916
+      # review, Major 2). Installing it here does not turn `-n`/parallelism
+      # on for the rest of this job's `pytest` step below -- xdist only
+      # activates under `-n`/`--dist`, neither of which this job passes.
       - name: install the test runner
-        run: pip install pytest
+        run: pip install pytest pytest-xdist
       # Public repo, so the default token is enough. Only on the release path:
       # see the `sdk_parity` input for why PRs skip it.
       #

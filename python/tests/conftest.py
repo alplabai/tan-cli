@@ -188,7 +188,7 @@ REAL_ENVIRON: dict[str, str] = dict(os.environ)
 # this incident's proximate cause, but it is not the only runtime dependency
 # `tan.__main__` pulls in (`pyproject.toml`'s `dependencies` also names rich,
 # pyyaml, jsonschema, click, truststore, certifi, and that list can grow).
-# Spawning the exact command every one of the 32 subprocess-based test files
+# Spawning the exact command every one of the 31 subprocess-based test files
 # spawns -- `sys.executable -m tan --version` -- exercises the real import
 # chain as it stands today, whatever it is, without this file needing to know
 # its contents. Under-probing (missing the next instance) and over-probing
@@ -948,7 +948,7 @@ def _probe_tools_are_a_property_of_the_test(tmp_path_factory) -> None:
 
     Mutates `os.environ` rather than using `monkeypatch`, for two reasons:
     `monkeypatch` is function-scoped and this is a session-wide property, and
-    the 32 test modules that spawn `[sys.executable, "-m", "tan", ...]` build
+    the 31 test modules that spawn `[sys.executable, "-m", "tan", ...]` build
     their child environment from `os.environ` -- an in-process patch would
     leave every one of those spawns host-dependent. Session-scoped autouse
     fixtures resolve before function-scoped ones, so
@@ -1048,7 +1048,7 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
 #   * IN-PROCESS `import tan` -- asserted below, and a mismatch FAILS the
 #     session rather than skipping: a quiet skip would hide exactly the gap
 #     this fixture exists to surface.
-#   * SPAWNED `[sys.executable, "-m", "tan", ...]` -- 32 test files do this,
+#   * SPAWNED `[sys.executable, "-m", "tan", ...]` -- 31 test files do this,
 #     and a child resolves through its OWN sys.path, so asserting in this
 #     process would not touch them. `PYTHONPATH` is prepended instead, which
 #     is inherited by every child regardless of cwd or how the argv is built.

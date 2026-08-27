@@ -471,7 +471,7 @@ def pytest_configure(config):
 """
 
 
-def test_pytest_configure_skips_the_check_on_an_xdist_worker(pytester, tmp_path):
+def test_pytest_configure_skips_the_check_on_an_xdist_worker(pytester, tmp_path, monkeypatch):
     """A worker process must not re-run the probe: only the CONTROLLER's
     invocation of `pytest_configure` should ever reach `_home_preflight_
     failure` -- the worker's own call must be skipped via `config.workerinput`
@@ -479,15 +479,35 @@ def test_pytest_configure_skips_the_check_on_an_xdist_worker(pytester, tmp_path)
     `tests/conftest.py::pytest_configure` turns this from `1` recorded call
     into `2` (controller AND worker both call through).
 
+    Neutralises an ambient `TAN_TEST_SKIP_HOME_PREFLIGHT` before spawning the
+    nested session, same reason as `test_pytest_configure_aborts_the_session_
+    with_a_usage_error` above: `pytester.runpytest_subprocess` inherits the
+    parent process's environment, and the recording conftest's own
+    `pytest_configure` forwards straight into the REAL `tests.conftest.
+    pytest_configure`, which still honours the escape hatch. Left ambient, a
+    developer (or CI) with the hatch exported would make BOTH the controller's
+    and the worker's `pytest_configure` return before ever reaching the
+    `workerinput` guard this test exists to prove, so `calls` would come back
+    empty instead of `["call"]` and this test would fail for a reason that has
+    nothing to do with xdist.
+
     Requires `pytest-xdist` on the interpreter running THIS test (it is what
     the nested `-n 1` session below needs to spawn a worker at all) --
-    installed for the sharded `pytest -n 4` jobs, but not for `ci.yml`'s
-    `python` job, which runs `tests/gates` under a bare `pip install pytest`.
-    `importorskip` rather than a hard dependency: this is the one test in the
-    suite that specifically needs xdist PRESENT to prove anything, and it
-    would be the wrong fix to make the whole suite depend on it just for
-    this.
+    installed alongside `pytest` itself in the two `tests/gates` legs
+    (`ci.yml`'s `python` job, `parity.yml`'s `seam1-plan-shape` job)
+    specifically so this test RUNS rather than skips there (#916 review,
+    Major 2: neither leg installed it before, and no other CI leg runs
+    `tests/gates` at all -- `parity.yml`'s cross-OS `python-tests` job
+    `--ignore=tests/gates` outright, and none of the sharded `python-tests`
+    matrix legs use `pytest-xdist`/`-n` either; they shard via `pytest-shard
+    --shard-id=N --num-shards=4`, a different mechanism this test does not
+    exercise). `importorskip` stays rather than a hard dependency: a developer
+    running `python -m pytest tests/gates` from a bare `pip install pytest`
+    venv (no `-e .[dev]`, no xdist) should still get a skip here, not a
+    collection error, for the one test in the suite that specifically needs
+    xdist PRESENT to prove anything.
     """
+    monkeypatch.delenv(TAN_TEST_SKIP_HOME_PREFLIGHT, raising=False)
     pytest.importorskip("xdist")
     calls_path = tmp_path / "calls.log"
     pytester.makeconftest(
