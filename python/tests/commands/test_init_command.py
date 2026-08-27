@@ -1553,3 +1553,27 @@ def test_an_error_before_the_sdk_resolves_leaves_the_key_absent(tmp_path):
     )
     assert "sdk" not in env, env
     assert [i["code"] for i in env["issues"]] == ["init.invalid-template"]
+
+
+def test_an_error_after_an_unresolved_sdk_root_still_omits_the_sdk_block(tmp_path):
+    """The `_emit_error` sibling of
+    `test_an_sdk_root_that_is_not_a_checkout_reports_no_sdk_block`: here
+    `resolved_sdk` IS bound (unlike the case above, where the key is absent
+    because `_resolve_sdk_root` never ran at all) but is not a real checkout,
+    and the failure is an ordinary validation error (`init.invalid-template`)
+    raised AFTER `_resolve_sdk_root` -- exactly the `_emit_error` call site at
+    tan-cli#922, `_emit_error(json_mode, err, resolved_sdk)`.  `_sdk_reportable`
+    must still gate that call the same way it gates `_emit_outcome`'s: nothing
+    was pinned, so the envelope must not advertise a checkout that a
+    `--sdk-root` typo never resolved to."""
+    typo = tmp_path / "alp-sdk-typo"
+    typo.mkdir()
+    proc = run_tan(
+        "init", "--template", "bogus-xyz", "--som", "E1M-AEN801",
+        "--sdk-root", str(typo), "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert env["exitCode"] != 0, env
+    assert "sdk" not in env, env
+    assert [i["code"] for i in env["issues"]] == ["init.invalid-template"]

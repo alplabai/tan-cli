@@ -386,7 +386,7 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **thirteen** live entries
+The `DELIBERATE_EDITS` table below currently carries **twenty** live entries
 (counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS` dict, not by
 hand): the `iot` CMakeLists edit, six `edge-ai` entries for the
 `## Model`/`## Tests` pointers (tan-cli#821(a), see entry 4 below) — two
@@ -394,9 +394,12 @@ hand): the `iot` CMakeLists edit, six `edge-ai` entries for the
 rewrite, declared separately so healing one comment without the other still
 reds; see `scaffold_byte_parity.py`'s `DELIBERATE_EDITS` docstring) — two more
 `edge-ai`/`E1M-AEN801` entries for the DEEPX retarget sentence (tan-cli#814,
-see entries 5 and 6 below), and four more for `diagnostics`/`sensor`'s bare
+see entries 5 and 6 below), four more for `diagnostics`/`sensor`'s bare
 cross-repo pointers (tan-cli#912, see entry 7 below) — two SKUs each, one
-`README.md` entry per SKU. tan-cli#384's seven `README.md` doc-link entries
+`README.md` entry per SKU — and six more for
+`diagnostics`/`E1M-V2N101`'s Alif/AEN801-shaped `src/main.c`/`README.md`
+bytes (tan-cli#932, see entry 8 below). tan-cli#384's seven `README.md`
+doc-link entries
 are NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0`
 tag (see "Current vendor point" above); listed here only as history, not as
 a current exception. tan-cli#501's four `sensor`/`diagnostics` CMakeLists
@@ -559,6 +562,47 @@ strictness exists to catch.
    `board.yaml`, and `testcase.yaml` too, per the extended alp-sdk#1705);
    filed as alp-sdk#1705, and this entry retires the moment that lands and
    this tree is re-vendored.
+8. **`diagnostics`/`E1M-V2N101`'s `src/main.c` and `README.md`: Alif SoC
+   identity + an AEN801-shaped SoM SKU/serial on a Renesas RZ/V2N scaffold
+   (tan-cli#932).** The emit's per-SKU substitution never reaches
+   `src/main.c` at all — it is byte-identical to `E1M-AEN801`'s, still
+   naming that Alif module in its own "what success looks like" comment —
+   and reaches `README.md` only on the SoM SKU line, leaving the serial
+   beside it and both `SoC identity:` lines at their AEN801/Alif values. A
+   customer running the selftest on real V2N101 hardware sees output that
+   contradicts what the scaffold told them to expect, and the natural
+   reading of that mismatch is "my board failed", not "the README is
+   wrong". Six entries, not one: the SoM SKU fix in `src/main.c` (its own
+   entry per occurrence — the header comment and the sample-output line are
+   independent locations), a placeholder-serial fix shared by both files
+   (one entry per file, since `edit_id` keys on `path`), and a SoC-identity
+   fix shared by both files (`README.md`'s carries two occurrences of the
+   same wrong token, undone by one `.replace()` call same as entry 1's
+   `un_edit_doc_link_ref`). The SoC identity string is not hand-written to
+   match the Alif shape: it is `renesas:rzv2n:n44`,
+   `metadata/socs/renesas/rzv2n/n44.json`'s own `ref` field (what
+   `scripts/gen_soc_caps.py` bakes into `ALP_SOC_REF_STR`) and the same
+   value `metadata/e1m_modules/E1M-V2N101.yaml`'s `silicon:` key names for
+   this SKU — `n44`, not the `n48gbg` this same README's own (correct,
+   untouched) `west build -b alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33`
+   line names two lines below it, because that is only the
+   `zephyr_soc_variant` Zephyr's own Kconfig/DT layer references in place of
+   the SoC json's `ref` (the SoC json documents the n44/n48 delta as
+   GPU/ISP/crypto fusing only, devicetree-identical for the peripherals this
+   SDK targets) — not a contradiction, two different identifiers for the
+   same silicon. The serial is not a plausible-looking invented value in
+   AEN801's shape either (e.g. `V2N0000123`, which would just repeat the
+   same mistake with a different prefix): alp-sdk's own
+   `scripts/program_eeprom.py --serial` help text uses a completely
+   different shape (`2026W19-0001`), proving `AEN0000123` was never a
+   schema-driven format, just this one example's flavour text — so the fix
+   reuses `<factory-serial>`, the README's own angle-bracket placeholder
+   convention already sitting two lines above it (`west flash --host
+   <board-ip>`), obviously a placeholder rather than a serial a customer
+   might mistake for real. Fix belongs upstream, in alp-sdk's
+   `examples/bringup/board-selftest/src/main.c` and `README.md`, whose
+   per-SKU substitution machinery is what needs to reach these tokens;
+   declared here pending that fix and a re-vendor.
 
 ## Template x SKU matrix vendored
 

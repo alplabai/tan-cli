@@ -547,6 +547,34 @@ PINNED_SDK_COMMIT = "eb96112ba7d1cc3b4084c985962ea31772177d74"  # alp-sdk v0.16.
 #: under `tan/planner/` (i.e. the actual drift surface -- files renamed on
 #: relocation, like `alp_project_loader.py` -> `som_metadata.py`, have no
 #: single upstream file to pin and are out of scope for this hash check).
+#:
+#: KNOWN DELIBERATE DIVERGENCE (tan-cli#938, found reviewing #914): upstream's
+#: `topology.py` still hashes to the pinned value above at PINNED_SDK_COMMIT
+#: (`eb96112ba7d1cc3b4084c985962ea31772177d74`, unchanged there since), so this
+#: gate stays green -- but this gate only ever hashes the UPSTREAM side
+#: (`upstream = root / rel_path`, never `tan/planner/topology.py`), so it
+#: cannot see that tan's own `topology.py` no longer matches upstream
+#: byte-for-byte (the relocation rewrote the module docstring, moved
+#: `_default_os_from_core_type`/`CLASS_RUNTIMES` out to `tan.core.os_class`,
+#: and added four imports) or that tan's `_allowed_os_for_core` no longer
+#: BEHAVES like upstream's.
+#: #914 (tan-cli#870) repointed it to `tan.core.os_class.allowed_os_for_core`
+#: -- the SAME shared function `presets_cmd.allowed_os_lookup` calls -- so an
+#: unresolved core type (`core_type == ""`) now returns `[]`. Upstream's
+#: `topology.py:96-101` at that same pin still open-codes the cross-class
+#: subtraction and returns `["baremetal", "off"]` for `""`, because upstream
+#: never shipped #914's guard. This was NOT missed: `_allowed_os_for_core`'s
+#: own docstring names #914 and the reason (matching `presets_cmd` so the
+#: build-time gate and the wizard's dropdown can never disagree on an
+#: unresolved type) -- reconciling back to upstream's shape would reopen the
+#: exact alp-sdk-vscode#538-shaped defect #870/#914 exist to close, on the
+#: `os-topology` emit specifically. Left diverged on purpose. It reaches
+#: `core_os_topology`'s `allowed_os` field, which `test_planner_emit_parity`
+#: pins byte-for-byte against the oracle -- LATENT, not broken: it only reds
+#: for a shipped board with an unresolved core type, and none exist today
+#: (parity is green at this SHA). If a future board ever hits it, the fix is
+#: NOT to "resync" this file toward upstream's `["baremetal", "off"]` --
+#: upstream is the one carrying the bug here.
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "03b610ce02d1819d09ad3d5d233bbbd46b950bdc09448748b17ebc5a1b57f272",

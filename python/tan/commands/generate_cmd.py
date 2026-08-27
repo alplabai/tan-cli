@@ -238,13 +238,28 @@ EMIT_TIMEOUT_S = 300
 
 
 class GenerateError(Exception):
-    """A refusal whose issue code and exit code are already decided."""
+    """A refusal whose issue code and exit code are already decided.
 
-    def __init__(self, code: str, message: str, exit_code: ExitCode) -> None:
+    `extra_issues` (tan-cli#900) are prepended ahead of the refusal's own
+    `Issue` by `refuse()` -- the `[*resolution_issues, Issue(...)]` shape
+    `clean_cmd._run` already uses. `None` by default: only the SDK-root-
+    unresolved raise below needs it (a broken pin surviving a refusal that
+    precedes resolution); every other raise here fires after `sdk_broken_pin`
+    is already known and reported through the success-path `issues` instead.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        exit_code: ExitCode,
+        extra_issues: list[Issue] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.exit_code = exit_code
+        self.extra_issues = extra_issues
 
 
 def zephyr_board_dir_name(sku: str, core_id: str) -> str | None:
@@ -919,24 +934,37 @@ class _ResolvedSdkRoot:
     growing tuple (the same reasoning `build_cmd.SdkRootResolution`
     documents): a fact one caller needs (`foreign_global_default_for`,
     tan-cli#464) must not force every field before it to be re-counted by
-    position."""
+    position.
 
-    path: Path
+    `.path` is `None` on the SAME two conditions `SdkRootResolution.path` is
+    (tan-cli#900): no `--sdk-root` and nothing else resolved, or a rejected
+    `--sdk-root`. `.reported` is unused there -- the raise site names the raw
+    `sdk_root` flag itself, not this field."""
+
+    path: Path | None
     tier: str
     reported: str
     broken_project_pin: str | None = None
     foreign_global_default_for: str | None = None
 
 
-def _resolve_sdk_root(
-    sdk_root: str | None, workspace_root: Path
-) -> _ResolvedSdkRoot | None:
-    """The resolved checkout as a [`_ResolvedSdkRoot`], or `None` when
-    unresolved. `--sdk-root`
-    is TERMINAL: an explicit path that is not an SDK checkout fails loudly here
-    rather than silently falling through to discovery and generating against a
-    different checkout than the caller named (I-31); its tier is always
-    `sdkRootFlag`, matching the oracle's closed `SdkSourceTier`.
+def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _ResolvedSdkRoot:
+    """The resolved checkout as a [`_ResolvedSdkRoot`] -- ALWAYS one, never a
+    bare `None` (tan-cli#900; the same fix tan-cli#468 made to
+    `presets_cmd.resolve_sdk`, applied here to this command's own WIDE ladder
+    instead of copying its narrow one). Collapsing to `None` the moment
+    nothing resolved discarded `.broken_project_pin` on that path: a
+    workspace whose `.alp/sdk-path` names a checkout that no longer exists,
+    with nothing else resolvable, reported `generate.sdk-root-unresolved`
+    alone -- the pin fact was never the customer's to lose. Callers now check
+    `.path is None`, the "unresolved" signal `SdkRootResolution.path` itself
+    already carries.
+
+    `--sdk-root` is TERMINAL: an explicit path that is not an SDK checkout
+    resolves to `.path is None` rather than falling through to discovery and
+    generating against a different checkout than the caller named (I-31); its
+    tier is always `sdkRootFlag`, matching the oracle's closed
+    `SdkSourceTier`.
 
     Without `--sdk-root`: `.alp/sdk-path` project pin > the machine-global
     default (`~/.alp/sdk-default`) > the WIDE positional walk
@@ -957,13 +985,14 @@ def _resolve_sdk_root(
         candidate = Path(sdk_root)
         if (candidate / "scripts" / "alp_project.py").is_file():
             return _ResolvedSdkRoot(candidate, "sdkRootFlag", sdk_root)
-        return None
+        return _ResolvedSdkRoot(None, "sdkRootFlag", sdk_root)
     resolution = resolve_sdk_root_wide(None, workspace_root)
     found = resolution.path
-    if found is None:
-        return None
     return _ResolvedSdkRoot(
-        found, resolution.tier, str(found), resolution.broken_project_pin,
+        found,
+        resolution.tier,
+        str(found) if found is not None else "",
+        resolution.broken_project_pin,
         resolution.foreign_global_default_for,
     )
 
@@ -1113,12 +1142,14 @@ def generate(
         # only a refusal that precedes/IS the SDK resolution itself leaves it
         # unset, matching the oracle (`generate.board-yaml-missing` and
         # `generate.sdk-root-unresolved` both carry no `sdk`; every guard past
-        # a successful resolution does).
+        # a successful resolution does). `err.extra_issues` PREPENDED
+        # (tan-cli#900), the `[*resolution_issues, Issue(...)]` shape
+        # `clean_cmd._run` already uses.
         finish(
             targets=(),
             written=[],
             failed=[],
-            issues=[Issue(err.code, "error", err.message)],
+            issues=[*(err.extra_issues or []), Issue(err.code, "error", err.message)],
             exit_code=err.exit_code,
         )
 
@@ -1141,7 +1172,14 @@ def generate(
             )
 
         resolved = _resolve_sdk_root(sdk_root, workspace_root)
-        if resolved is None:
+        if resolved.path is None:
+            # tan-cli#900: `resolved.broken_project_pin` survives even on
+            # this refusal now, so a gone `.alp/sdk-path` target still
+            # discloses instead of looking like no pin was ever set.
+            pin_issue = project_pin_issue(resolved.broken_project_pin, resolved.tier)
+            foreign_issue = global_default_foreign_project_issue(
+                resolved.foreign_global_default_for
+            )
             raise GenerateError(
                 "generate.sdk-root-unresolved",
                 # tan-cli#497 defect 7: a REJECTED `--sdk-root` names the
@@ -1159,6 +1197,7 @@ def generate(
                 else "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
                 f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
                 ExitCode.VALIDATION_FAILURE,
+                extra_issues=[i for i in (pin_issue, foreign_issue) if i is not None],
             )
         resolved_sdk = resolved.path
         sdk_tier = resolved.tier

@@ -19,6 +19,61 @@ built-in vocabulary list rather than a menu bound to any SoM. The heterogeneous
 golden (`a55` -> yocto next to `m33` -> zephyr) is the case that proves it: both
 values come back on one SoM, so a consumer cannot read the field as a choice.
 
+**`cores[].type` and `cores[].allowedOs` (tan-cli#870).** The default `os` above
+answers "what does this core run today"; a picker also needs "what MAY this core
+run" -- and re-deriving that from the core id with a regex is the duplicated-truth
+defect #870 exists to close: `alp-sdk-vscode@dev`'s
+`packages/alp-webview/src/shared/coreRuntime.ts` re-derives the cortex-a/cortex-m
+class from the core id with its own `/(^|[_-])m\\d/` heuristic, independently of
+whatever this checkout's own SoC metadata says, and two independently-maintained
+copies of the same rule are one edit away from disagreeing. (`alp-sdk-vscode#538`
+itself was a different bug in the same wizard -- Bare-metal was offered for
+every Cortex-M core and the scaffolder wrote it a Zephyr app anyway, which
+`alp_project.py` then refused because `os: baremetal` needs `cmake-args`, not
+because a Cortex-M was offered Bare-metal -- so these fields would not, by
+themselves, have prevented #538; the duplicated-truth argument above is the
+motivation that stands.) Both fields are read from the checkout, never invented here:
+`type` is the raw `metadata/socs/<vendor>/<family>/<part>.json` `cores[].type`
+string (`cortex-a32`, `cortex-m55`, ...), resolved via the SoM preset's own
+`silicon:` key; `allowedOs` is that type's cross-class OS subtracted from the
+checkout's own `board.schema.json` `os:` enum, using `tan.core.os_class` --
+the SAME cortex-a/cortex-m convention
+`tan.planner.validate._enforce_os_matches_core_class` gates a build on --
+reused rather than re-implemented so the wizard's picker and the build-time
+gate can never disagree on the cross-class exclusion itself (a Cortex-A is
+never offered, and never accepted for, Zephyr; a Cortex-M is never offered,
+and never accepted for, Yocto -- both read `tan.core.os_class.cross_class_os`).
+That is narrower than "can never disagree" full stop: for an UNRESOLVED core
+type (`core_type == ""`), `allowedOs` here degrades all the way to `[]`
+(tan-cli#914's `allowed_os_for_core` guard), while `_enforce_os_matches_core_class`
+does not share that guard -- it calls `cross_class_os` directly, which treats
+`""` as just another off-class type and still accepts `os: baremetal` /
+`os: off` for it. Deliberately narrower in presets than in the gate: the
+wizard offers nothing rather than guess, the gate still allows the two
+values every core, resolved or not, may always take (see `_soc_lookups`'s own
+docstring for why this reads `tan.core.os_class` and not `tan.planner.topology`
+directly: the latter's process-global SDK-root binding is the wrong contract
+for a command exercised by dozens of independent per-test checkouts).
+`allowedOs` degrades to `[]` on a schema miss; `type` degrades to `""` -- and
+drags `allowedOs` to `[]` -- only on a SoC-lookup miss (no `metadata/socs/**`
+entry for the SoM's `silicon:`). Neither miss fails the command (a
+synthetic/partial `--sdk-root` is tolerated elsewhere) -- no SoM detail here is
+load-bearing enough to fail `tan presets` over.
+
+**`allowedOs: []` alone does not say which of the two above degrades fired --
+`type` does.** Two different unknowns both wire as an empty `allowedOs`
+array with `ok: true` and no issue code: a SoC-lookup miss (no
+`metadata/socs/**` entry, or no entry for this core id -- `type` is ALSO
+`""`), and a schema miss (`type` resolves fine, but the checkout carries no
+`board.schema.json` -- `_os_choices()` returns `None`, `allowed_os_lookup`
+returns `[]` before ever reaching the unresolved-type guard in
+`allowed_os_for_core`). A consumer that needs to tell them apart reads
+`type` alongside `allowedOs`, never `allowedOs` alone: `type == ""` means
+the core's type itself is unresolved; a non-empty `type` with `allowedOs ==
+[]` means the type resolved but this checkout has no schema to validate an
+`os:` value against. Neither shape means "no OS is legal" -- that reading of
+an empty array does not exist on this wire.
+
 **Which rule decides where the presets come from.** SoM presets are alp-sdk
 content, so the two candidate readings are "vendor a capture like `tan init`
 does" and "read the resolved checkout". This reads the checkout, on two
@@ -55,11 +110,14 @@ the catch-all in `presets` is the backstop for whatever nobody enumerated.
 
 from __future__ import annotations
 
+import functools
+import json
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Callable
 
 import typer
 
@@ -69,6 +127,7 @@ from tan.commands.sdk_cmd import (
     project_pin_issue,
     resolve_sdk_tiered,
 )
+from tan.core.os_class import allowed_os_for_core
 from tan.core.shapes import SDK_MARKER, rejected_sdk_root_message
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -125,15 +184,25 @@ _FLOW_KEY_RE = re.compile(r"[{,\s](board|machine)\s*:")
 
 @dataclass(frozen=True)
 class SomCore:
-    """One core of a SoM topology: its id and the runtime that core's class
-    runs. Field order is the emitted JSON order (`SomCoreEntry` in
-    `presets.rs`)."""
+    """One core of a SoM topology: its id, the runtime that core's class runs,
+    its raw SoC core type, and the `os:` values that type may legally take
+    (tan-cli#870). `id`/`os` are the emitted-order fields the frozen
+    `SomCoreEntry` in `presets.rs` already carries; `type`/`allowed_os` are
+    additive and both default to their empty value (`""` / `()`) when the
+    checkout doesn't resolve them -- see the module docstring."""
 
     id: str
     os: str
+    type: str = ""
+    allowed_os: tuple[str, ...] = ()
 
-    def as_dict(self) -> dict[str, str]:
-        return {"id": self.id, "os": self.os}
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "os": self.os,
+            "type": self.type,
+            "allowedOs": list(self.allowed_os),
+        }
 
 
 @dataclass(frozen=True)
@@ -216,17 +285,28 @@ def _clean(value: object) -> str | None:
     return None if value.strip() == "TBD" else value
 
 
-def parse_som_preset(text: str) -> Som:
+def parse_som_preset(
+    text: str,
+    *,
+    core_type_lookup: "Callable[[str | None], dict[str, str]] | None" = None,
+    allowed_os_lookup: "Callable[[str], list[str]] | None" = None,
+) -> Som:
     """The `sku`/`display_name`/`family`/`topology` slice of a SoM preset.
 
     Narrower than the oracle's `parse_som_preset` on purpose: the envelope
-    carries exactly these four things, and reading `pad_routes`,
+    carries exactly these four things (plus, per core, the tan-cli#870
+    `type`/`allowed_os` enrichment below), and reading `pad_routes`,
     `i2c_devices` or `capabilities` here would be tan learning hardware facts it
     has no field to report (I-26).
 
     `schema_version` is guarded FIRST, before any other key is trusted -- the
     same skew guard every other SDK-file consumer carries. Raises
     `SomShapeError` for every unusable shape; the caller skips the entry.
+
+    *core_type_lookup*/*allowed_os_lookup* are optional so every existing
+    single-argument call (this file's own tests) keeps parsing `id`/`os` alone,
+    unchanged; `read_soms` is the one caller that supplies both, bound to the
+    checkout it read *text* from.
     """
     doc = _load_som_yaml(text)
     version = doc.get("schema_version")
@@ -236,20 +316,34 @@ def parse_som_preset(text: str) -> Som:
     if not isinstance(version, int) or isinstance(version, bool) or version != SOM_SCHEMA_VERSION:
         raise SomShapeError(f"unsupported schema_version {version!r} (this CLI consumes v1)")
     sku = _clean(doc.get("sku")) or ""
+    silicon = _clean(doc.get("silicon"))
+    core_types = core_type_lookup(silicon) if core_type_lookup is not None else {}
+    # `.get`, not `[..]`: the guard above happens to reject every shape that
+    # reaches here without a `cores` key, but a KeyError is the one failure
+    # this command may not have, so it does not lean on that.
+    raw_cores: tuple[SomCore, ...] = tuple(doc.get("cores") or ())
+    cores = tuple(
+        replace(
+            c,
+            type=core_types.get(c.id, ""),
+            allowed_os=tuple(allowed_os_lookup(core_types.get(c.id, "")))
+            if allowed_os_lookup is not None
+            else (),
+        )
+        for c in raw_cores
+    )
     return Som(
         sku=sku,
         # `display_name` falls back to `sku`, then to `""`.
         display_name=_clean(doc.get("display_name")) or sku,
         family=_clean(doc.get("family")) or "",
-        # `.get`, not `[..]`: the guard above happens to reject every shape that
-        # reaches here without a `cores` key, but a KeyError is the one failure
-        # this command may not have, so it does not lean on that.
-        cores=tuple(doc.get("cores") or ()),
+        cores=cores,
     )
 
 
 def _load_som_yaml(text: str) -> dict[str, object]:
-    """`{schema_version, sku, display_name, family, cores}` from a SoM preset.
+    """`{schema_version, sku, display_name, family, silicon, cores}` from a SoM
+    preset.
 
     PyYAML when it is importable, else `scan_som_preset`. tan's runtime
     dependencies are `typer` + `rich` only -- and the frozen binary is built from
@@ -297,13 +391,15 @@ def _load_som_yaml(text: str) -> dict[str, object]:
         "sku": doc.get("sku"),
         "display_name": doc.get("display_name"),
         "family": doc.get("family"),
+        "silicon": doc.get("silicon"),
         "cores": cores,
     }
 
 
 def scan_som_preset(text: str) -> dict[str, object]:
-    """The no-PyYAML reader: the four top-level scalars plus the `topology:`
-    block's core ids and whether each declares `board:`/`machine:`.
+    """The no-PyYAML reader: the five top-level scalars (`schema_version`,
+    `sku`, `display_name`, `family`, `silicon`) plus the `topology:` block's
+    core ids and whether each declares `board:`/`machine:`.
 
     Deliberately NOT a YAML parser -- it answers only what the envelope carries,
     the same bargain `validate_cmd._load_yaml` and `generate_cmd._scan_som_sku`
@@ -349,7 +445,7 @@ def scan_som_preset(text: str) -> dict[str, object]:
                 continue
             if key == "schema_version":
                 out["schema_version"] = _scalar_int(value)
-            elif key in ("sku", "display_name", "family"):
+            elif key in ("sku", "display_name", "family", "silicon"):
                 out[key] = _scalar(value)
             continue
 
@@ -416,6 +512,113 @@ def _entries(directory: Path) -> list[os.DirEntry]:
         return []
 
 
+def _resolve_soc_path(silicon: str | None, metadata_root: Path) -> Path | None:
+    """A `vendor:family:part` `silicon:` key's SoC-JSON path,
+    `metadata/socs/<vendor>/<family>/<part>.json` -- does NOT check the path
+    exists. Mirrors `tan.planner.som_metadata.resolve_soc_path`'s path
+    arithmetic exactly (deliberately NOT imported from there: see
+    `_soc_lookups`'s docstring for why nothing in this file imports
+    `tan.planner`). Returns `None` for a falsy or not-exactly-3-part `silicon`.
+
+    Known duplication, tracked rather than fixed here: this is a verbatim
+    second copy of `som_metadata.resolve_soc_path`'s arithmetic, not just its
+    contract -- see tan-cli#917 (`som_metadata.py` is held by another in-flight
+    change as of this writing, so the extraction is scoped as its own
+    follow-up).
+    """
+    if not silicon:
+        return None
+    parts = silicon.split(":")
+    if len(parts) != 3:
+        return None
+    return metadata_root / "socs" / parts[0] / parts[1] / f"{parts[2]}.json"
+
+
+def _soc_lookups(
+    sdk_root: str,
+) -> tuple[
+    "Callable[[str | None], dict[str, str]] | None",
+    "Callable[[str], list[str]] | None",
+]:
+    """The tan-cli#870 `(core_type_lookup, allowed_os_lookup)` pair, bound to
+    *sdk_root*, or `(None, None)` when *sdk_root* names no metadata tree at
+    all (matching `read_soms`'s own "missing tree is an empty catalogue, not
+    an error").
+
+    `core_type_lookup` resolves a SoM's `silicon:` key to
+    `metadata/socs/<vendor>/<family>/<part>.json` and reads its `cores[].type`
+    strings. `allowed_os_lookup` reuses `tan.core.os_class` -- the SAME
+    cortex-a/cortex-m convention `tan.planner.validate._enforce_os_matches_core_class`
+    gates a build on -- run against *sdk_root*'s own `board.schema.json` `os:`
+    enum, so this command's answer and the build-time rule cannot drift apart
+    (the whole point of #870).
+
+    **Deliberately does NOT import `tan.planner`.** `tan.planner` requires
+    `bind_sdk_root` before its first import and then refuses to rebind to a
+    different root for the rest of the process -- the right contract for
+    `tan build`'s one big planning pass per process, the wrong one for `tan
+    presets`, which `read_soms` calls from dozens of independent tests each
+    against their own disposable synthetic SDK root. Routing through it here
+    made the FIRST such test to run in an xdist worker permanently bind that
+    whole worker to its throwaway root, so every later test in it that needed
+    a DIFFERENT (often the real) root failed outright -- measured while
+    building #870: 292 unrelated `tests/parity/test_planner_emit_parity.py`
+    cases turned from passing to `PlannerRootError` this way. `tan.core.os_class`
+    exists precisely so this file (and any future binding-free consumer) can
+    reuse the convention without paying that cost; see its own docstring.
+    Every IO error below (a missing/unreadable/non-JSON SoC or schema file) is
+    a skipped/empty answer, never a raise -- `type`/`allowedOs` degrade to
+    their empty default the same way every other field in this file does.
+    """
+    root = Path(sdk_root) / "metadata"
+    if not root.is_dir():
+        return None, None
+
+    def core_type_lookup(silicon: str | None) -> dict[str, str]:
+        soc_path = _resolve_soc_path(silicon, root)
+        if soc_path is None:
+            return {}
+        try:
+            doc = json.loads(soc_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return {}
+        cores = doc.get("cores") if isinstance(doc, dict) else None
+        if not isinstance(cores, list):
+            return {}
+        return {
+            c["id"]: c.get("type", "")
+            for c in cores
+            if isinstance(c, dict) and isinstance(c.get("id"), str)
+        }
+
+    @functools.lru_cache(maxsize=None)
+    def _os_choices() -> tuple[str, ...] | None:
+        # No `BOARD_SCHEMA`-style fallback to a globally bound "in-tree"
+        # schema: unlike the planner, `presets` never has a second tree to
+        # fall back to -- it is reading exactly one checkout throughout, so a
+        # checkout with no schema of its own answers `None` (degrade), not a
+        # DIFFERENT checkout's enum.
+        schema_path = root / "schemas" / "board.schema.json"
+        try:
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            return tuple(schema["$defs"]["core_entry"]["properties"]["os"]["enum"])
+        except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError):
+            return None
+
+    def allowed_os_lookup(core_type: str) -> list[str]:
+        choices = _os_choices()
+        if choices is None:
+            return []
+        # `allowed_os_for_core` (tan.core.os_class) is the single place the
+        # "" == unresolved sentinel -> [] degrade lives, shared with
+        # `tan.planner.topology._allowed_os_for_core` -- see its own
+        # docstring for why (tan-cli#914: the two must never drift apart on
+        # this, the same reason this file reuses `tan.core.os_class` at all).
+        return allowed_os_for_core(core_type, choices)
+
+    return core_type_lookup, allowed_os_lookup
+
+
 def read_soms(sdk_root: str) -> list[Som]:
     """SoM presets under `<sdk>/metadata/e1m_modules`, sorted by SKU.
 
@@ -425,6 +628,7 @@ def read_soms(sdk_root: str) -> list[Som]:
     is skipped -- never an error.
     """
     root = Path(sdk_root) / "metadata" / "e1m_modules"
+    core_type_lookup, allowed_os_lookup = _soc_lookups(sdk_root)
     found: list[Som] = []
     for entry in _entries(root):
         if not entry.name.startswith(SOM_PREFIX):
@@ -445,7 +649,13 @@ def read_soms(sdk_root: str) -> list[Som]:
             # host and passes on ubuntu CI.
             continue
         try:
-            found.append(parse_som_preset(text))
+            found.append(
+                parse_som_preset(
+                    text,
+                    core_type_lookup=core_type_lookup,
+                    allowed_os_lookup=allowed_os_lookup,
+                )
+            )
         except SomShapeError:
             continue
     found.sort(key=lambda s: s.sku)

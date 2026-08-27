@@ -239,6 +239,12 @@ def test_the_relocated_renderers_behind_alp_project_agree(planners, board):
         pytest.skip("board does not load; parity of the failure is asserted elsewhere")
     got_project = relocated.load_board_yaml(board)
 
+    # tan-cli#938: relocated `_allowed_os_for_core` diverges from upstream on
+    # an unresolved core type ([] vs upstream's ["baremetal", "off"]) --
+    # deliberate, see `tan/planner/topology.py::_allowed_os_for_core`'s
+    # docstring. THIS is the assertion that reds if a shipped board ever
+    # resolves a core with `core_type == ""` -- do not "fix" it by resyncing
+    # toward upstream's value.
     assert (relocated.emit_os_topology(got_project)
             == upstream.emit_os_topology(want_project))
     assert (relocated.core_os_topology(got_project)

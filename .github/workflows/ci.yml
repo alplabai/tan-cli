@@ -139,7 +139,8 @@ jobs:
     # `sdk_parity` (declared above, `type: boolean, default: false`) is the
     # whole difference: it switches on the planner byte-parity and
     # planner-binding suites, which SKIP without an alp-sdk checkout -- 282 of
-    # 1163 tests. `release.yml:235` passes true; nothing else does.
+    # 1163 tests. `release.yml`'s `gates` job (which calls this workflow with
+    # `sdk_parity: true`) passes true; nothing else does.
     #
     #   PR / merge_group  6-11 min   measured across the last 25 successful
     #                                runs (min 6m; p100 11m, run 32174278683)
@@ -202,8 +203,18 @@ jobs:
       # the other.
       - name: install the declared package
         run: pip install -e ./python
+      # `pytest-xdist` alongside the runner, not extra: `tests/gates/
+      # test_home_preflight.py::test_pytest_configure_skips_the_check_on_an_
+      # xdist_worker` needs it PRESENT to prove the `config.workerinput`
+      # worker-skip guard at all (it `importorskip`s otherwise) -- this job
+      # is one of the two `tests/gates` legs in CI (the other is parity.yml's
+      # `seam1-plan-shape`), and before this line neither installed xdist, so
+      # that test SKIPPED in every CI leg while reading as covered (#916
+      # review, Major 2). Installing it here does not turn `-n`/parallelism
+      # on for the rest of this job's `pytest` step below -- xdist only
+      # activates under `-n`/`--dist`, neither of which this job passes.
       - name: install the test runner
-        run: pip install pytest
+        run: pip install pytest pytest-xdist
       # Public repo, so the default token is enough. Only on the release path:
       # see the `sdk_parity` input for why PRs skip it.
       #
@@ -567,14 +578,32 @@ jobs:
   # to look.
   #
   # THE VERDICT IS FALSIFIABLE, which is the part worth checking before
-  # trusting it. Same invocation, zizmor 1.29.0:
+  # trusting it. Same rule set, zizmor 1.29.0, `--no-config` (NOT this job's
+  # own `run:` invocation below -- that one loads `.github/zizmor.yml`, and
+  # since tan-cli#899 the workflows themselves also carry two inline
+  # `# zizmor: ignore[...]` comments). `--no-config` strips the CONFIG FILE
+  # ONLY -- it does NOT strip inline ignores, measured: `--no-config
+  # --min-severity medium --no-online-audits .github/workflows/` on this
+  # tree is `rc=0, 18 ignored, 58 suppressed` (re-run for the current count,
+  # don't trust this one -- it drifts with the tree; only the with/without
+  # `--no-config` agreement is load-bearing), the inline ignores still
+  # honoured. The `dev @ 01374d4` snapshot below is comparable for a
+  # different reason: it PRE-DATES tan-cli#899, so it carries neither the
+  # config-file ignores nor the inline ones -- not because `--no-config`
+  # would strip the inline ones if it were run on this tree. Stripping
+  # inline ignores too needs `--no-ignores`, per `.github/zizmor.yml`'s own
+  # NON-VACUITY recipe:
   #
   #   this tree      rc=0    no finding at or above medium
   #   dev @ 01374d4  rc=14   63 unpinned-uses, 26 artipacked,
   #                          12 excessive-permissions, 6 template-injection
   #
   # So it fails on every class the PR that introduced it fixed, not merely on
-  # nothing.
+  # nothing. This is `.github/zizmor.yml`'s own NON-VACUITY measurement, not
+  # a second one taken here -- and it is NOT the recipe for checking whether
+  # THIS file's own suppressions (the `run:` step below, with its config and
+  # inline ignores loaded) are still catching something real. For that,
+  # `.github/zizmor.yml`'s header names `--no-ignores`.
   workflow-security:
     name: zizmor · workflow security
     runs-on: ubuntu-latest
@@ -604,10 +633,132 @@ jobs:
       #
       # `--no-online-audits` keeps the gate hermetic: no token, no API, no
       # rate limit deciding whether CI is green. Verified to reach the same
-      # verdict as a networked run on this tree, which is what the
-      # `planner-resync.yml` entry in `.github/zizmor.yml` is for.
+      # verdict as a networked run on this tree.
       #
-      # The baseline is `.github/zizmor.yml`, picked up automatically. It has
-      # two entries and both carry their argument in full.
+      # That agreement does NOT extend to the two `artipacked` sites this
+      # gate must still catch if their suppression ever slipped --
+      # `planner-resync.yml`'s and `release.yml`'s `dev` checkouts, each
+      # carrying its own inline `# zizmor: ignore[artipacked]` comment
+      # (tan-cli#899). Measured, with both comments removed:
+      # `--no-online-audits` reports `rc=13` (the two now-unsuppressed
+      # `artipacked` findings, at medium), while a real networked run reports
+      # `rc=0` -- opposite verdicts at exactly those sites, not the same one.
+      # Offline being the STRICTER direction there is the safe way for a
+      # hermetic gate to err, so it does not undermine this job running
+      # without a token; it does mean "same verdict as networked" is a
+      # property of the reviewed, suppressed tree, not a guarantee that
+      # survives a suppression going missing.
+      #
+      # The baseline is `.github/zizmor.yml`, picked up automatically. Since
+      # tan-cli#899 it holds no `rules.*.ignore` entries of its own -- `rules:
+      # {}` is a required stub, not policy. Both suppressions now live inline,
+      # at the steps they excuse; the reviewed count is kept current in
+      # `.github/zizmor.yml`'s own header, under INVENTORY (not this file's --
+      # this job only runs the audit `.github/zizmor.yml` configures).
       - name: audit .github/workflows
         run: zizmor --min-severity medium --no-online-audits .github/workflows/
+      # `.github/zizmor.yml`'s header keeps a hand-maintained INVENTORY of
+      # the inline `artipacked` suppressions (tan-cli#899) so a reviewer can
+      # audit both in one place. That INVENTORY can drift from the tree --
+      # tan-cli#919 round 3 found the guard against that drift itself
+      # disagreeing with zizmor, in BOTH directions, no matter how it was
+      # patched: three prior rounds each closed three evasions and opened
+      # five more, because `python/tests/gates/test_zizmor_inventory_count.py`
+      # modelled a step by YAML INDENTATION while zizmor actually associates
+      # an inline `# zizmor: ignore[...]` comment with the finding's LINE
+      # RANGE (the whole step, indentation irrelevant) -- a different model
+      # of what a step is, not a fixable regex bug. That gate is deleted;
+      # this step asks zizmor itself instead of re-implementing its comment
+      # association, so it cannot disagree with zizmor's verdict -- it IS
+      # zizmor's verdict.
+      #
+      # `--no-ignores` strips every inline ignore and re-surfaces the
+      # `artipacked` findings they were suppressing (`.github/zizmor.yml`'s
+      # own NON-VACUITY recipe). On a tree with real suppressions to strip
+      # that exits 14 by design -- findings at or above `--min-severity
+      # medium` is the expected SUCCESS path for this probe, not a failure,
+      # so the step does not fail on zizmor's exit code. It fails only if
+      # the `artipacked` finding count zizmor reports disagrees with
+      # `.github/zizmor.yml`'s INVENTORY row count, in EITHER direction: a
+      # suppression added with no matching INVENTORY row, or an INVENTORY
+      # row for a suppression that no longer exists.
+      - name: inline artipacked suppressions match the zizmor.yml INVENTORY
+        run: |
+          set +e
+          zizmor --min-severity medium --no-online-audits --no-ignores --format json .github/workflows/ \
+              >"$RUNNER_TEMP/no-ignores.json" 2>"$RUNNER_TEMP/no-ignores.log"
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/no-ignores.log"
+          python3 - "$rc" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          rc = sys.argv[1]
+
+          try:
+              no_ignores_json = os.path.join(os.environ["RUNNER_TEMP"], "no-ignores.json")
+              with open(no_ignores_json, encoding="utf-8") as f:
+                  findings = json.load(f)
+          except (OSError, json.JSONDecodeError) as exc:
+              print(f"::error::zizmor --no-ignores exited {rc} without producing "
+                    f"parseable JSON ({exc}) -- this probe cannot run, see the "
+                    "log above")
+              sys.exit(1)
+
+          sites = sorted(
+              f"{loc['symbolic']['key']['Local']['verbatim_path']}:"
+              f"{loc['concrete']['location']['start_point']['row'] + 1}"
+              for finding in findings
+              if finding["ident"] == "artipacked"
+              for loc in finding["locations"]
+              if loc["symbolic"]["kind"] == "Primary"
+          )
+          found = len(sites)
+
+          zizmor_yml = open(".github/zizmor.yml", encoding="utf-8").read()
+          if "INVENTORY --" not in zizmor_yml:
+              print("::error::.github/zizmor.yml has no `INVENTORY --` heading "
+                    "-- nothing to compare zizmor's own artipacked count against")
+              sys.exit(1)
+          after = zizmor_yml.split("INVENTORY --", 1)[1]
+          if "DRIFT THIS INVENTORY" not in after:
+              print("::error::.github/zizmor.yml's `INVENTORY --` heading has "
+                    "no matching `DRIFT THIS INVENTORY` end marker -- without "
+                    "it this step would count numbered rows out of the rest "
+                    "of the file, not just the INVENTORY section")
+              sys.exit(1)
+          section = after.split("DRIFT THIS INVENTORY", 1)[0]
+          # Anchored to the row's OWN indent (`#     N. `), not `^#\s+\d+\.\s`
+          # -- the looser form false-positives on a legitimate numbered
+          # sub-list nested under a row (measured: `[1, 2, 1, 2] != [1, 2, 3,
+          # 4]` on a tree with one).
+          numbers = [int(n) for n in re.findall(r"^#     (\d+)\. ", section, re.MULTILINE)]
+          if numbers != list(range(1, len(numbers) + 1)):
+              print(f"::error::.github/zizmor.yml's INVENTORY rows are "
+                    f"numbered {numbers}, not a clean 1..{len(numbers)} "
+                    "sequence -- a duplicated or skipped number usually means "
+                    "a row was edited in place instead of renumbered")
+              sys.exit(1)
+          inventoried = len(numbers)
+
+          if found != inventoried:
+              direction = (
+                  "MORE real artipacked findings than" if found > inventoried
+                  else "FEWER real artipacked findings than"
+              )
+              print(f"::error::zizmor --no-ignores surfaced {found} real "
+                    f"artipacked finding(s) with inline suppressions stripped "
+                    f"-- {direction} .github/zizmor.yml's INVENTORY, which "
+                    f"lists {inventoried}. Sites zizmor names: "
+                    f"{sites or '(none)'}. Either a suppression was added or "
+                    "removed without updating the header's numbered "
+                    "INVENTORY, or the INVENTORY names a site zizmor no "
+                    "longer flags -- reconcile the two by hand (tan-cli#899).")
+              sys.exit(1)
+
+          print(f"{found} inline artipacked suppression(s), matching "
+                f".github/zizmor.yml's INVENTORY of {inventoried}: {sites}")
+          PY

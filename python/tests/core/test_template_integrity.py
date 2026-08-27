@@ -336,6 +336,73 @@ def test_every_extra_conf_file_named_by_a_template_is_a_planned_file(template_id
     )
 
 
+#: `(template_id, sku, foreign_sku)` for a DELIBERATE cross-SKU mention --
+#: without this, the guard below would flag `iot-starter`'s own "E1M-V2N101
+#: is deliberately not supported" exclusion note (both in its README and its
+#: `board.yaml` comment), which names the sibling SKU ON PURPOSE to explain
+#: why `--som E1M-V2N101` refuses this template. A one-entry allowlist, not
+#: a path-level exemption: the guard counts OCCURRENCES per `(template_id,
+#: sku, foreign_sku)` across every planned file, so an unrelated NEW
+#: cross-SKU mention added to either of those same two files would still
+#: change the count and still needs its own entry to pass.
+_ALLOWED_CROSS_SKU_MENTIONS: frozenset[tuple[str, str, str]] = frozenset({
+    ("iot-starter", "E1M-AEN801", "E1M-V2N101"),
+})
+
+
+def _foreign_sku_hits(sku: str, planned: dict[str, str]) -> dict[str, int]:
+    """`{foreign_sku: occurrence count}` for every OTHER vendored family
+    SKU's exact token found anywhere in `planned`'s content -- word-bounded
+    (`(?<![\\w-])...(?![\\w-])`) so `E1M-V2N101` can never accidentally
+    match as a substring of a longer or shorter sibling SKU, and counts
+    every occurrence rather than stopping at the first, so a partially
+    substituted file (tan-cli#932's `README.md`: the SoM SKU line was fixed,
+    the SoC identity lines were not) is reported precisely rather than
+    merely flagged."""
+    hits: dict[str, int] = {}
+    for foreign in _FAMILY_TREES:
+        if foreign == sku:
+            continue
+        pattern = re.compile(r"(?<![\w-])" + re.escape(foreign) + r"(?![\w-])")
+        count = sum(len(pattern.findall(content)) for content in planned.values())
+        if count:
+            hits[foreign] = count
+    return hits
+
+
+@pytest.mark.parametrize("template_id,sku", CASES)
+def test_no_planned_file_names_a_different_skus_exact_token(template_id, sku):
+    """tan-cli#932 companion guard, the issue's own suggested fix: assert
+    that no vendored `<template>/<sku>` tree contains a SKU token belonging
+    to a DIFFERENT SKU. Before tan-cli#932's fix this was red on exactly the
+    six lines that issue measured -- `diagnostics/E1M-V2N101`'s `src/main.c`
+    was never SKU-substituted at all (still `E1M-AEN801`, byte-identical to
+    that SKU's own tree) and its `README.md` was substituted on the SoM SKU
+    line only, leaving the sample serial and both `SoC identity:` lines
+    unresolved. A customer running the real self-test on real V2N101
+    hardware saw output contradicting what the scaffold told them to
+    expect, and the natural reading of that mismatch is "my board failed",
+    not "the README is wrong".
+
+    Checked against the PLANNER's real output (`plan_template_files`, the
+    same source `_planned` above reads for the link-integrity tests), not
+    the vendored tree directly -- so a substitution bug anywhere in the plan
+    path (`retarget_board_yaml_som` included, not just a vendoring gap) is
+    caught too, and a future SKU added to `_FAMILY_TREES` is covered with no
+    one having to remember to extend this test by hand."""
+    planned = _planned(template_id, sku)
+    hits = _foreign_sku_hits(sku, planned)
+    for foreign in list(hits):
+        if (template_id, sku, foreign) in _ALLOWED_CROSS_SKU_MENTIONS:
+            del hits[foreign]
+    assert not hits, (
+        f"--template {template_id} --som {sku}: names a sibling SKU's exact "
+        f"token {hits} -- either a real substitution gap (tan-cli#932) or a "
+        f"legitimate cross-reference that needs declaring in "
+        f"_ALLOWED_CROSS_SKU_MENTIONS"
+    )
+
+
 def test_a_documented_extra_conf_file_build_is_not_clobbered_by_the_generated_conf():
     """tan-cli#379's other half: naming the overlay is not enough, the build
     has to actually let it win.

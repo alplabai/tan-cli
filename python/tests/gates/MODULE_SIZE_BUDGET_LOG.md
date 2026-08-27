@@ -24,6 +24,22 @@ a new, coarser-grained (one line per regen, not one paragraph per PR) record
 from that point on; the tradeoff is deliberate, in exchange for a file whose
 conflicts resolve by re-running a command instead of by hand-merging prose.
 
+tan-cli#907: this file carries `merge=union` in the repo's `.gitattributes`,
+so as of that change a real two-branch conflict on THIS file resolves itself
+(both sides' appended entries kept, no conflict markers) -- that is an
+interim mitigation for the git-mechanics problem, not a change to the
+append-only contract above. The union keeps ours-then-theirs order regardless
+of date (measured: a 2026-08-27 entry landed above a 2026-08-25 one), so don't
+read entry order as chronological order -- each entry carries its own date for
+that reason. The sibling `module_size_budget.generated.json`
+in this same directory is deliberately NOT unioned (union-merging two JSON
+documents that both add a key can leave two entries with no comma between
+them, i.e. invalid JSON) and will still conflict normally. If you land here
+resolving that conflict: do not hand-merge the JSON hunks -- take either
+side, then rerun `python python/scripts/regen_module_size_budget.py --merge-resync`
+from the repo root (that is where you land mid-conflict) and let it re-measure
+and write both files from the real merged tree.
+
 ## Entries
 
 - 2026-08-11 -- migrated the ratchet from a hand-maintained dict in
@@ -286,6 +302,24 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/model_cmd.py: new entry at 1059
     - tan/model/adapters/ethos_u.py: new entry at 886
     - function_count_budget: 258 -> 270
+- 2026-08-26 -- tan-cli#900: examples_cmd.py/generate_cmd.py routed their unresolved-SDK refusal through the shared broken-project-pin/foreign-global-default disclosure (project_pin_issue/global_default_foreign_project_issue), matching resolve_sdk's tan-cli#468 fix; generate_cmd.py grew threading GenerateError.extra_issues through the refusal path
+    - tan/commands/generate_cmd.py: 1361 -> 1400
+    - function_count_budget: 258 -> 259
+- 2026-08-26 -- tan-cli#922: init_cmd._sdk_block moves its Optional-collapse guard to the call site (matching the resolution-wrapper gate's own no-bare-None contract), growing the module past its recorded budget
+    - tan/commands/init_cmd.py: 1258 -> 1276
+- 2026-08-26 -- tan-cli#870: presets_cmd.py gains cores[].type/allowedOs -- SomCore/Som dataclasses, parse_som_preset's core-type/allowed-os enrichment, and the new _soc_lookups planner-binding helper (reuses tan.planner.topology._allowed_os_for_core rather than re-deriving the cortex-a/cortex-m rule)
+    - tan/commands/presets_cmd.py: new entry at 844
+    - function_count_budget: 258 -> 260
+- 2026-08-26 -- tan-cli#870 follow-up: _soc_lookups reworked to stop importing tan.planner (its process-global SDK-root bind poisoned 292 unrelated parity tests when exercised from presets_cmd's many per-test synthetic checkouts) -- now reads tan.core.os_class + inlines the board-schema-enum/SoC-JSON reads directly
+    - tan/commands/presets_cmd.py: 844 -> 887
+- 2026-08-26 -- tan-cli#914 fix round: allowed_os_lookup guards the unresolved-core-type sentinel (Major -- degrade to [] instead of a plausible cross-class subset) with a mutation-proof test, module-docstring corrections attributing the duplicated-truth motivation to alp-sdk-vscode's coreRuntime.ts regex rather than alp-sdk-vscode#538 (Minor 1), and a tan-cli#917 follow-up pointer on _resolve_soc_path's known duplication (Minor 4)
+    - tan/commands/presets_cmd.py: 887 -> 912
+- 2026-08-26 -- correction, no number changed: the 2026-08-26 tan-cli#870 entry above ("new entry at 844") describes the design `_soc_lookups` was rewritten OUT of one entry later that same day ("follow-up") -- it names the abandoned `tan.planner.topology._allowed_os_for_core` reuse, not the shipped `tan.core.os_class` one. Append-only, so this stands as a correction rather than an edit to that line.
+- 2026-08-26 -- review round: mutation-proof the a:b:c:d fixture (test_presets_command.py), narrow the presets/build-time-gate agreement claim to the cross-class exclusion (presets_cmd.py)
+    - tan/commands/presets_cmd.py: 905 -> 915
+- 2026-08-26 -- correction, no number changed: the 2026-08-26 tan-cli#914 fix round entry above ("887 -> 912") is the log's last entry before this round but is stale as a description of HEAD -- a later commit on the same PR (b35ad259, "share the unresolved-core-type degrade with the build-time gate") shrank `tan/commands/presets_cmd.py` from 912 to 905 (measured: `git show 62c2894a:python/tan/commands/presets_cmd.py | wc -l` -> 912, `git show b35ad259:...` -> 905), and that shrink was never logged. `module_size_budget.generated.json` already recorded the correct 905 (regen is measurement-driven, not log-driven, so it did not go stale); only this append-only log's prose fell behind. This round's own entry above measures growth from the true 905, not the stale 912. Append-only, so this stands as a correction rather than an edit to that line.
+- 2026-08-26 -- review round: state the type+allowedOs degrade-disambiguation rule in presets_cmd.py's contract prose (Minor 4)
+    - tan/commands/presets_cmd.py: 915 -> 929
 - 2026-08-26 -- tan-cli#925: guard the ipc: append on the board not already declaring one. PyYAML accepts a duplicate top-level key and keeps the LAST, so the unconditional append silently discarded the project's own channel -- measured on alp-sdk's multicore-mailbox scaffold, where alp_shmem0 (referenced by SHMEM_REGION_NAME in both src/main.c and peer/main.c) was replaced by tan's stub. A correctness fix that cannot be written in zero lines; contrast #921, where a ratchet was DECLINED because the growth was a comment.
     - tan/core/scaffold.py: 1512 -> 1519
 - 2026-08-26 -- tan-cli#864: register multicore-mailbox in TEMPLATE_IDS/_VENDORED_TEMPLATE_DIR and replace the one-off IOT_STARTER_SUPPORTED_SKU with the TEMPLATE_SUPPORTED_SKUS table, which two measured failures showed the single hard-coded if could not cover (a silent AEN301 render, and an init.template-unreadable that blamed the installation for a wrong --som).
@@ -305,3 +339,15 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/init_cmd.py: 1258 -> 1288
     - tan/core/scaffold.py: 1512 -> 1538
     - function_count_budget: 270 -> 271
+    - tan/commands/init_cmd.py: 1276 -> 1306
+    - tan/core/scaffold.py: 1512 -> 1538
+    - function_count_budget: 259 -> 260
+- 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 260 -> 261
+- 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 261 -> 262
+- 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/generate_cmd.py: 1361 -> 1400
+    - tan/commands/init_cmd.py: 1288 -> 1306
+    - tan/commands/presets_cmd.py: new entry at 929
+    - function_count_budget: 271 -> 274

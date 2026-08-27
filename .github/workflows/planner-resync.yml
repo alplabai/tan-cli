@@ -148,8 +148,16 @@ jobs:
       # time; it fails several minutes later at the push, after the re-sync has
       # already been computed and committed, and the PR is then never opened.
       # Every other checkout in this repository sets it false (tan-cli#435).
+      #
+      # The `artipacked` ignore travels with this step (tan-cli#899): it used
+      # to be a `<file>:<line>` pin in `.github/zizmor.yml`, which rotted once
+      # (`140:9` -> `151:9`), pre-merge, on the tan-cli#854/#855 branch when an
+      # 11-line `timeout-minutes` block landed above it with no re-pin --
+      # `release.yml`'s pin is the one that rotted twice in two days, a
+      # different file. Inline, neither can rot -- see `.github/zizmor.yml`'s
+      # header for the full inventory and both derivations.
       - name: Check out tan-cli dev (the branch the re-sync targets)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
         with:
           ref: dev
           fetch-depth: 0

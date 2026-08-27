@@ -224,8 +224,35 @@ def _stderr(line: str) -> None:
     print(line, file=sys.stderr)
 
 
-def _sdk_block(sdk: _Sdk | None) -> SdkInfo | None:
-    """The envelope's `sdk` block for a resolved [`_Sdk`], or `None`.
+def _sdk_reportable(sdk: _Sdk | None) -> bool:
+    """Whether `sdk` is resolved AND a real checkout -- the one gate
+    `_sdk_block` used to apply internally before tan-cli#922 moved it to the
+    call site (see `_sdk_block`'s own docstring for why). Gated on the loader
+    marker, matching `build_output.resolve_project_context` ("the envelope's
+    `sdk` only records what core's own loader-marker check accepted"), and
+    NOT merely on `sdk is not None`. `_resolve_sdk_root` returns an explicit
+    `--sdk-root` unvalidated, and `_pin_sdk` then silently declines to pin a
+    path that is not a checkout -- so reporting `sdk` there would advertise a
+    checkout that is about to be pinned and is not."""
+    return sdk is not None and _is_sdk_checkout(sdk.path)
+
+
+def _sdk_block(sdk: _Sdk) -> SdkInfo:
+    """The envelope's `sdk` block for a resolved, checked-out [`_Sdk`] --
+    ALWAYS one, never a bare `None` (tan-cli#922: the same shape tan-cli#900
+    fixed for `examples_cmd._resolve_sdk`/`generate_cmd._resolve_sdk_root`,
+    applied here). Callers gate the CALL itself on `_sdk_reportable(sdk)`
+    rather than this function collapsing to `None` -- moving the "should the
+    envelope carry an `sdk` key at all" decision to the caller, the same
+    place every other resolution wrapper in this repo makes it
+    (`.path is None`), rather than folding it into this function's return
+    type. `SdkInfo.root` has no representable "unresolved" state of its own
+    (it is a bare `str`, unlike `_ResolvedSdk`/`_SdkResolution`/
+    `_ResolvedSdkRoot`'s `path: X | None`), so this function could never have
+    represented "not reportable" WITHIN an `SdkInfo` the way those do --
+    `| None` on the return was the only way to spell that, and spelling it
+    there instead of at the call site is exactly the shape
+    `tests/gates/test_sdk_resolution_wrapper_is_not_optional.py` flags.
 
     tan-cli#491 defect 5: `init` passed no `sdk=` to `Envelope(...)` on ANY
     path, so the key was absent from all four outcomes and at both resolution
@@ -234,13 +261,6 @@ def _sdk_block(sdk: _Sdk | None) -> SdkInfo | None:
     `"sdk": {"root": "../rust-sdk", "sourceTier": "sdkRootFlag"}`). It was the
     only field naming WHICH checkout a run is about to permanently pin --
     `data.sdkPinned` is `null` on the preview, refusal and error paths.
-
-    Gated on the loader marker, matching `build_output.resolve_project_context`
-    ("the envelope's `sdk` only records what core's own loader-marker check
-    accepted"), and NOT merely on `sdk is not None`. `_resolve_sdk_root`
-    returns an explicit `--sdk-root` unvalidated, and `_pin_sdk` then silently
-    declines to pin a path that is not a checkout -- so reporting `sdk` there
-    would advertise a checkout that is about to be pinned and is not.
 
     `SdkInfo.from_resolution`, not a raw `SdkInfo(root, tier)`: `_Sdk` carries
     `tier` and `foreign_global_default_for`, which is the shape that
@@ -255,8 +275,6 @@ def _sdk_block(sdk: _Sdk | None) -> SdkInfo | None:
     persisted into `.alp/sdk-path` resolves against the wrong cwd later); this
     field simply reports the same value `data.sdkPinned` does.
     """
-    if sdk is None or not _is_sdk_checkout(sdk.path):
-        return None
     return SdkInfo.from_resolution(sdk.display, sdk)
 
 
@@ -289,7 +307,7 @@ def _emit_error(json_mode: bool, err: InitError, sdk: _Sdk | None = None) -> Non
                 ),
                 [Issue(err.code, "error", err.message)],
                 err.exit_code,
-                sdk=_sdk_block(sdk),
+                sdk=_sdk_block(sdk) if _sdk_reportable(sdk) else None,
             )
         )
     else:
@@ -316,7 +334,7 @@ def _emit_outcome(json_mode: bool, outcome: _Outcome, sdk: _Sdk | None = None) -
                 ),
                 outcome.issues,
                 outcome.exit_code,
-                sdk=_sdk_block(sdk),
+                sdk=_sdk_block(sdk) if _sdk_reportable(sdk) else None,
             )
         )
     elif outcome.preview:
