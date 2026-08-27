@@ -492,7 +492,7 @@ def test_this_repos_own_workflows_produce_no_timeout_problems() -> None:
 #: `release.yml`'s real 5 bounded jobs (`verify-version`, `build`, `release`,
 #: `publish_npm`, `release_gate` -- `gates`/`python-gates` stay excluded as
 #: LOCAL `uses:` callers) down to 1 pass silently, since the old check only
-#: asked "is release.yml in the set at all". Floored for all TEN non-parity
+#: asked "is release.yml in the set at all". Floored for all ELEVEN non-parity
 #: files, not just the four tan-cli#855 named -- a review round on this same
 #: gate pointed out the other six (`ci.yml`, `clean-host.yml`,
 #: `e2e-container.yml`, `getting-started.yml`, `pin-move-verify.yml`,
@@ -527,8 +527,8 @@ def test_the_every_workflow_job_set_is_not_empty():
     jobs actually got counted, so every non-`parity.yml` workflow is
     additionally held to a minimum bounded-job count (`_MIN_BOUNDED_JOBS`);
     `parity.yml` gets the same coverage from `_PARITY_JOBS` instead. And a
-    COMPLETENESS check: `_MIN_BOUNDED_JOBS` naming exactly ten of today's
-    files says nothing about tomorrow's eleventh -- a newly added workflow
+    COMPLETENESS check: `_MIN_BOUNDED_JOBS` naming exactly eleven of today's
+    files says nothing about tomorrow's twelfth -- a newly added workflow
     would carry no floor at all and could grow or shrink invisibly until
     someone remembered to add an entry for it by hand."""
     assert set(_MIN_BOUNDED_JOBS) | {"parity.yml"} == {

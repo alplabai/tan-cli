@@ -1018,22 +1018,27 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(home))
 
 
-# `tan.planner` is BOTH a `sys.modules["tan.planner"]` entry AND a plain
-# `.planner` attribute of the `tan` package module -- Python's import
-# machinery keeps the two in lockstep on every ordinary import, but any test
-# that does `sys.modules` surgery (deleting/rebinding `tan.planner*` entries
-# to force a fresh reimport, e.g. to rebind against a different SDK root)
-# can leave them pointing at two DIFFERENT module objects if it restores one
-# location and not the other -- tan-cli#943's actual defect. Two different
-# `tan.planner.models` modules means two different `OrchestratorError`
-# classes alive in one interpreter, so a raise from one and a
-# `pytest.raises` against the other silently stop matching; the failure
-# surfaces in whatever unrelated test happens to run next -- often in a
-# different shard entirely, since `tests/commands/` and `tests/planner/`
-# are `pytest-shard`-partitioned per test, and #943's own pair landed
-# deterministically split across shards -- so the drift can go unnoticed for
-# a full week until the unsharded canary (`unsharded-python-canary.yml`)
-# catches it.
+# Every `tan.planner`-or-under module is BOTH a `sys.modules[name]` entry AND
+# a plain attribute of its PARENT package module -- Python's import machinery
+# keeps the two in lockstep on every ordinary import, but any test that does
+# `sys.modules` surgery (deleting/rebinding `tan.planner*` entries to force a
+# fresh reimport, e.g. to rebind against a different SDK root) can leave them
+# pointing at two DIFFERENT module objects if it restores one location and
+# not the other -- tan-cli#943's actual defect. This is NOT a one-level
+# check: the defect reproduces just as well one layer down (e.g.
+# `tan.planner.kconfig` restored in `sys.modules` while `tan.planner`'s own
+# `.kconfig` attribute keeps the leaked reimport, or vice versa), so this
+# hook walks every `sys.modules` key equal to or under `tan.planner` and
+# compares EACH ONE against its own parent's attribute, not just the
+# top-level package against `tan`. Two different `tan.planner.models`
+# modules -- at ANY depth -- means two different `OrchestratorError` classes
+# alive in one interpreter, so a raise from one and a `pytest.raises` against
+# the other silently stop matching; the failure surfaces in whatever
+# unrelated test happens to run next -- often in a different shard entirely,
+# since `tests/commands/` and `tests/planner/` are `pytest-shard`-partitioned
+# per test, and #943's own pair landed deterministically split across shards
+# -- so the drift can go unnoticed for a full week until the unsharded canary
+# (`unsharded-python-canary.yml`) catches it.
 #
 # A `pytest_runtest_teardown` HOOKWRAPPER, not an autouse fixture: an earlier
 # draft used a plain `@pytest.fixture(autouse=True)` with its check after
@@ -1042,7 +1047,7 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
 # import_is_refused`, which deliberately does
 # `monkeypatch.setitem(sys.modules, "tan.planner", object())` as its OWN
 # test technique (simulating "already imported" for a narrower check that
-# reads only `sys.modules`, never the `.planner` attribute, by design). A
+# reads only `sys.modules`, never the parent's attribute, by design). A
 # fixture's post-yield code runs as one more finalizer in the SAME LIFO
 # teardown chain as `monkeypatch`'s own restore, and fixture-instantiation
 # order does not guarantee this fixture's finalizer runs after
@@ -1057,47 +1062,85 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
 # to observe the fully-settled post-teardown state, not an intermediate one.
 #
 # The `isinstance(..., ModuleType)` guards below are a second, independent
-# safety net for the same false-positive shape: they skip the comparison
+# safety net for the same false-positive shape: they skip a comparison
 # whenever either side is present but is not an actual module object (e.g.
 # that same test's sentinel `object()`) -- a test is free to park an
 # arbitrary non-module placeholder in `sys.modules["tan.planner"]` for its
 # own purposes; the identity this check protects is specifically between
-# TWO REAL `tan.planner` package objects, which is the only shape tan-cli#943
-# actually manifested as (a genuine reimported module left on one side, the
-# stale genuine module -- or nothing -- on the other).
+# TWO REAL module objects at the same name, which is the only shape
+# tan-cli#943 actually manifested as (a genuine reimported module left on
+# one side, the stale genuine module -- or nothing -- on the other).
 #
-# Checked after every test in the WHOLE suite. Cost is one `sys.modules.get`
-# + one `getattr` per test -- effectively free.
+# Latched on first report (`_PLANNER_DRIFT_ALREADY_REPORTED`): once a leak
+# has been named, EVERY later test's teardown re-observes the same drifted
+# pair and would otherwise raise again -- measured on the real #943 shape
+# with the guard un-latched, bound to `eb96112b`: `1057 passed, 15 skipped,
+# 484 errors` for what is one root cause. The flag makes it one clean error
+# naming the polluting test, not 483 more burying it.
 #
-# Mutation-proven (tan-cli#943 review round 2): reverting
-# `test_presets_command.py`'s `.planner`-attribute restore back to
-# `monkeypatch.setattr(_tan_pkg, "planner", getattr(_tan_pkg, "planner",
-# None), raising=False)` turns THIS hook red on the very next test that
-# imports `tan.planner`, naming both mismatched objects, instead of
-# surfacing as a baffling `pytest.raises` mismatch three files away.
-# Restoring the fix turns it green again. Verified NOT to false-positive on
-# `test_rebinding_a_different_root_after_import_is_refused` (the sentinel
-# case above) nor on a full unbound/bound run of `python/tests`.
+# Checked after every test in the WHOLE suite. Cost is one `sys.modules`
+# walk (bounded by however many `tan.planner*` modules are currently
+# imported, typically single digits) + one `getattr` per name -- effectively
+# free.
+#
+# Mutation-proven, both the original one-level shape and the child shape a
+# one-level check is blind to (tan-cli#943 review round 3):
+#   * reverting `test_presets_command.py`'s parent-attribute restore to a
+#     no-op turns THIS hook red on the very next test that imports
+#     `tan.planner`, naming both mismatched objects (with their `hex(id())`)
+#     instead of surfacing as a baffling `pytest.raises` mismatch three files
+#     away;
+#   * planting `monkeypatch.delitem(sys.modules, "tan.planner.kconfig")`
+#     followed by a re-import, WITHOUT restoring `tan.planner`'s `.kconfig`
+#     attribute, is silent under the one-level version of this hook (it only
+#     ever compared `tan.planner` itself against `tan`'s `.planner`
+#     attribute) -- `2 passed`, no teardown error -- and reds under the
+#     generalised version above, which walks every `tan.planner`-or-under
+#     name.
+# Restoring the fix in both cases turns the hook green again. Verified NOT
+# to false-positive on `test_rebinding_a_different_root_after_import_is_
+# refused` (the sentinel case above), on `monkeypatch.setitem(sys.modules,
+# "tan.planner", None)` (`test_net.py`, `test_monitor_command.py`,
+# `test_diff_command.py`), on `monkeypatch.delitem(sys.modules, "tan")`, on
+# `test_planner_root.py`'s other `object()` sentinel case, nor on a full
+# unbound/bound run of `python/tests`.
+_PLANNER_DRIFT_ALREADY_REPORTED = False
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_teardown(item, nextitem):
+    global _PLANNER_DRIFT_ALREADY_REPORTED
     result = yield
-    mod = sys.modules.get("tan.planner")
-    attr = getattr(sys.modules.get("tan"), "planner", None)
-    if (
-        (mod is None or isinstance(mod, types.ModuleType))
-        and (attr is None or isinstance(attr, types.ModuleType))
-        and not (mod is None and attr is None)
-    ):
+    if _PLANNER_DRIFT_ALREADY_REPORTED:
+        return result
+    names = sorted(
+        n for n in sys.modules if n == "tan.planner" or n.startswith("tan.planner.")
+    )
+    for name in names:
+        mod = sys.modules.get(name)
+        parent_name, _, leaf = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        attr = getattr(parent, leaf, None) if parent is not None else None
+        if not (
+            (mod is None or isinstance(mod, types.ModuleType))
+            and (attr is None or isinstance(attr, types.ModuleType))
+        ):
+            continue
+        if mod is None and attr is None:
+            continue
+        if mod is attr:
+            continue
+        _PLANNER_DRIFT_ALREADY_REPORTED = True
         assert mod is attr, (
-            f"tan.planner drifted after {item.nodeid}: "
-            f"sys.modules['tan.planner'] is {mod!r} but the tan package's "
-            f"own .planner attribute is {attr!r} -- these must be the SAME "
-            "object. A test rebound one location (sys.modules or the "
-            ".planner attribute) via monkeypatch without restoring the "
-            "other, exactly the tan-cli#943 shape: two live "
-            "tan.planner.models.OrchestratorError classes in one "
-            "interpreter. Find the test named above and make it restore "
-            "BOTH locations."
+            f"{name} drifted after {item.nodeid}: sys.modules[{name!r}] is "
+            f"{mod!r} ({hex(id(mod))}) but the parent {parent_name!r}'s own "
+            f".{leaf} attribute is {attr!r} ({hex(id(attr))}) -- these must "
+            "be the SAME object. A test rebound one location (sys.modules "
+            "or the parent's attribute) via monkeypatch without restoring "
+            f"the other, exactly the tan-cli#943 shape: two live copies of "
+            f"{name} (and of every class it defines) in one interpreter. "
+            "Find the test named above and make it restore BOTH locations "
+            "for every torn-out module, not just the top-level package."
         )
     return result
 

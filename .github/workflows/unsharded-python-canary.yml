@@ -19,40 +19,61 @@
 # the sharded matrix they almost never do (measured, see below), so this was
 # invisible there.
 #
-# #943 fixed the actual leak (the test now pins `tan`'s `.planner` attribute
-# for restore too, alongside the `sys.modules` entries it already restores).
-# It ALSO added a `pytest_runtest_teardown` hook in `tests/conftest.py` that
-# checks, after EVERY test in the WHOLE suite, that `sys.modules["tan.
-# planner"]` and the `tan` package's own `.planner` attribute are the same
-# object. That hook is the PRIMARY defence now: it fires at the polluting
-# test's own teardown, in whatever shard that test happens to land in, with
-# no dependency on `tests/planner` sharing a process at all -- it would have
-# caught the original #943 leak on its very first offending commit, on any
-# OS, in any shard. This workflow is a SECONDARY, narrower backstop for the
-# same defect SHAPE (module-global state leaking across a directory boundary
-# sharding hides), kept for two reasons: (1) it is an independent line of
-# defence should the conftest hook itself ever be weakened, skipped, or
-# removed by a future refactor, and (2) it is an integration-level proof
-# that these two specific directories -- the ones #943's bisection actually
-# named -- run cleanly together, unsharded, against a real bound SDK, which
-# the per-test hook does not by itself demonstrate.
+# #943 was fixed at the source by #953: the leaking test now pins, before
+# tearing anything out, every parent package's submodule ATTRIBUTE for every
+# `tan.planner`-or-under name it is about to delete from `sys.modules` -- not
+# just the top-level `tan` / `.planner` pair. This PR adds a
+# `pytest_runtest_teardown` hook in `tests/conftest.py` that checks, after
+# EVERY test in the WHOLE suite, that `sys.modules[name]` and its parent's
+# matching attribute are the same object, for every currently-imported
+# `tan.planner`-or-under name -- the same generalisation #953 needed, applied
+# to the guard. That hook is the PRIMARY defence now: it fires at the
+# polluting test's own teardown, in whatever shard that test happens to land
+# in, with no dependency on `tests/planner` sharing a process at all -- it
+# would have caught the original #943 leak on its very first offending
+# commit, on any OS, in any shard. This workflow is a SECONDARY, narrower
+# backstop for the same defect SHAPE (module-global state leaking across a
+# directory boundary sharding hides): it is an integration-level proof that
+# these two specific
+# directories -- the ones #943's bisection actually named -- run cleanly
+# together, unsharded, against a real bound SDK, which the per-test hook
+# does not by itself demonstrate.
+#
+# It is NOT defence-in-depth against the conftest hook itself being
+# weakened, skipped, or removed, and an earlier draft of this comment
+# claimed otherwise -- checked, not assumed (tan-cli#943 review round 3):
+# with the hook deleted and #953's actual fix still intact, `pytest
+# tests/commands tests/planner -q` is `0 failed`. This workflow is blind to
+# the hook's absence whenever nothing currently happens to be leaking, which
+# is the ordinary case, so it cannot be the thing that notices a future
+# regression in the hook. `python/tests/gates/
+# test_planner_drift_guard_present.py` is what covers that: a direct,
+# always-on-every-PR assertion that `pytest_runtest_teardown` and its
+# `@pytest.hookimpl(wrapper=True)` decorator are still present in
+# `tests/conftest.py` at all -- cheap, and the actual answer to "what
+# notices the hook disappearing" this workflow cannot give.
 #
 # ---------------------------------------------------------------------------
 # PROPORTIONALITY -- CORRECTED (tan-cli#943 review round 2)
 # ---------------------------------------------------------------------------
 #
-# An earlier draft of this comment claimed the sharded matrix costs
-# "17-26 min x 3 OSes" and that `python-tests-shard` "already re-runs every
-# one of these tests four times over (once per OS)". Both were wrong, and
-# both errors ran the same direction (overstating the sharded matrix's
-# cost, understating an always-on leg's).
+# The "17-26 min x 3 OSes" / "9m43s-19m44s" figures corrected below are the
+# REVIEW's own estimate, not this comment's round-1 draft's -- checked, not
+# assumed (tan-cli#943 review round 3): `git grep -E "17-26|9m43|19m44|26
+# min" 7c316110` (that round-1 commit) returns nothing, so crediting them to
+# "an earlier draft of this comment" was itself a misstatement, corrected
+# here. The "`python-tests-shard` already re-runs every one of these tests
+# four times over (once per OS)" claim is different: that one WAS in the
+# round-1 draft, verified, and correcting it stays attributed there. Both
+# were wrong regardless of origin, and both errors ran the same direction
+# (overstating the sharded matrix's cost, understating an always-on leg's).
 #
 # Measured directly off this PR's own `parity.yml` runs (`33086692110`,
 # `33082909656`, `33087363988`): the `python-tests-shard` matrix's four
 # per-OS `(os, shard)` legs -- `shard: 0|1|2|3`, each running
 # `--ignore=tests/parity` sharded four ways via `pytest-shard` -- took
-# **1m22s-4m6s** apiece. The 9m43s-19m44s figures the earlier draft cited
-# belong to a DIFFERENT cell of the SAME matrix: `shard: parity`, which runs
+# **1m22s-4m6s** apiece. The 9m43s-19m44s figures the review cited belong to
+# a DIFFERENT cell of the SAME matrix: `shard: parity`, which runs
 # `tests/parity` WHOLE (unsharded, by necessity -- see `parity.yml`'s own
 # comment on why that suite cannot be sharded) as a fifth leg alongside the
 # four numbered shards, not a duplicate of them.
@@ -77,11 +98,11 @@
 # `tests/commands` and `tests/planner` to share a process at all -- so
 # spending an always-on leg's cost (however small) on a risk the hook
 # already extinguishes per-PR is not proportionate. What is left for THIS
-# workflow to guard is a smaller, meta-level risk: the hook itself
-# regressing (weakened, disabled, or deleted in some future conftest
-# refactor) without anyone noticing. A weekly + on-demand cadence is the
-# right size for that residual risk, not the same cadence as the
-# defect it is no longer the primary defence against.
+# workflow to guard, now that the hook's own presence has its own always-on
+# gate (`python/tests/gates/test_planner_drift_guard_present.py`), is
+# strictly the integration-level proof described above -- these two
+# directories, unsharded, against a real bound SDK -- and that residual
+# purpose does not need a faster cadence than weekly + on-demand.
 name: unsharded python canary (commands + planner, one interpreter)
 
 # ---------------------------------------------------------------------------
