@@ -24,6 +24,18 @@ a new, coarser-grained (one line per regen, not one paragraph per PR) record
 from that point on; the tradeoff is deliberate, in exchange for a file whose
 conflicts resolve by re-running a command instead of by hand-merging prose.
 
+tan-cli#907: this file carries `merge=union` in the repo's `.gitattributes`,
+so as of that change a real two-branch conflict on THIS file resolves itself
+(both sides' appended entries kept, no conflict markers) -- that is an
+interim mitigation for the git-mechanics problem, not a change to the
+append-only contract above. The sibling `module_size_budget.generated.json`
+in this same directory is deliberately NOT unioned (union-merging two JSON
+documents that both add a key can leave two entries with no comma between
+them, i.e. invalid JSON) and will still conflict normally. If you land here
+resolving that conflict: do not hand-merge the JSON hunks -- take either
+side, then rerun `python scripts/regen_module_size_budget.py --merge-resync`
+and let it re-measure and write both files from the real merged tree.
+
 ## Entries
 
 - 2026-08-11 -- migrated the ratchet from a hand-maintained dict in
