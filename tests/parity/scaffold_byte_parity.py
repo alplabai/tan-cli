@@ -425,10 +425,13 @@ def un_edit_mailbox_blocked_caveat(text: str) -> str:
 #: `E1M-AEN801`'s, still naming that Alif module in its own "what success
 #: looks like" comment -- and whose `README.md` was substituted on the SoM
 #: SKU line only, leaving the serial beside it and both `SoC identity:`
-#: lines at their AEN801/Alif values. Four independent wrong tokens, each
-#: its own entry per the `edit_id` discipline above: the SoM SKU (header
-#: comment only -- `README.md` already had this half right), a placeholder
-#: serial, and the SoC identity string, wherever each appears.
+#: lines at their AEN801/Alif values. Six entries, not one, per the
+#: `edit_id` discipline above: the SoM SKU fix in `src/main.c` gets TWO
+#: (the header comment and the sample-output line are independent
+#: locations -- `README.md` already had this half right, so neither has a
+#: `README.md` counterpart), and the placeholder serial and the SoC
+#: identity string each get ONE entry PER FILE (`edit_id` keys on `path`) --
+#: 2 + 2 + 2 = 6.
 #:
 #: The SoC identity string is NOT invented to match the Alif shape: it is
 #: `renesas:rzv2n:n44`, `metadata/socs/renesas/rzv2n/n44.json`'s own `ref`
@@ -491,7 +494,17 @@ def un_edit_v2n101_serial_placeholder(text: str) -> str:
     """tan-cli#932: reverse the `<factory-serial>` placeholder back onto the
     emit's own AEN-shaped `AEN0000123` bytes. Shared by `src/main.c` and
     `README.md` -- the placeholder text is identical in both, own entry per
-    file since `edit_id` is keyed per `(template, sku, path, edit_id)`."""
+    file since `edit_id` is keyed per `(template, sku, path, edit_id)`.
+
+    `.replace()`, unbounded -- every occurrence of the matched text is
+    undone, not just the first. Deliberate and safe for THIS token today:
+    `sn <factory-serial>` appears exactly once per file. The discipline this
+    keys on is per-TOKEN (one `un_edit_*` per distinct wrong string), not
+    per-OCCURRENCE-COUNT -- a second, independent `sn <factory-serial>`
+    landing in either file later would be silently folded into this same
+    call rather than flagged as a new thing to declare. `un_edit_v2n101_soc_
+    identity` below makes the same trade deliberately (its docstring counts
+    the two occurrences it undoes); this one has never needed to."""
     return text.replace("sn <factory-serial>", "sn AEN0000123")
 
 
@@ -503,7 +516,15 @@ def un_edit_v2n101_soc_identity(text: str) -> str:
     token with the same correct replacement, so one `.replace()` (which
     substitutes every occurrence by default) undoes both without needing two
     entries; `src/main.c` carries one occurrence and the same call is a
-    no-op past it."""
+    no-op past it.
+
+    Unbounded like `un_edit_v2n101_serial_placeholder` above, same trade:
+    every occurrence of `renesas:rzv2n:n44` is undone, whichever line it is
+    on. Correct today because every occurrence in each file IS this one
+    wrong token; a future SECOND (different) reason for that string to
+    appear in either file would be masked by the same call rather than
+    caught as its own gap -- the discipline here is per-token, not
+    per-occurrence."""
     return text.replace("renesas:rzv2n:n44", "alif:ensemble:e8")
 
 

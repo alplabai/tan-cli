@@ -388,17 +388,24 @@ re-vendored — nothing here needs unwinding by hand.
 
 The `DELIBERATE_EDITS` table below currently carries **twenty** live entries
 (counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS` dict, not by
-hand): the `iot` CMakeLists edit, six `edge-ai` entries for the
-`## Model`/`## Tests` pointers (tan-cli#821(a), see entry 4 below) — two
-`README.md` entries plus two entries PER `src/main.c` (one per comment
-rewrite, declared separately so healing one comment without the other still
-reds; see `scaffold_byte_parity.py`'s `DELIBERATE_EDITS` docstring) — two more
-`edge-ai`/`E1M-AEN801` entries for the DEEPX retarget sentence (tan-cli#814,
-see entries 5 and 6 below), four more for `diagnostics`/`sensor`'s bare
-cross-repo pointers (tan-cli#912, see entry 7 below) — two SKUs each, one
-`README.md` entry per SKU — and six more for
-`diagnostics`/`E1M-V2N101`'s Alif/AEN801-shaped `src/main.c`/`README.md`
-bytes (tan-cli#932, see entry 8 below). tan-cli#384's seven `README.md`
+hand): one `multicore-mailbox`/`E1M-AEN801` entry for the leading "blocked
+ahead" caveat (tan-cli#864 Q5, see entry 9 below), the `iot` CMakeLists edit,
+six `edge-ai` entries for the `## Model`/`## Tests` pointers (tan-cli#821(a),
+see entry 4 below) — two `README.md` entries plus two entries PER
+`src/main.c` (one per comment rewrite, declared separately so healing one
+comment without the other still reds; see `scaffold_byte_parity.py`'s
+`DELIBERATE_EDITS` docstring) — two more `edge-ai`/`E1M-AEN801` entries for
+the DEEPX retarget sentence (tan-cli#814, see entries 5 and 6 below), four
+more for `diagnostics`/`sensor`'s bare cross-repo pointers (tan-cli#912, see
+entry 7 below) — two SKUs each, one `README.md` entry per SKU — and six more
+for `diagnostics`/`E1M-V2N101`'s Alif/AEN801-shaped `src/main.c`/`README.md`
+bytes (tan-cli#932, see entry 8 below). That is `1 + 1 + 6 + 2 + 4 + 6 = 20`
+— a review round on tan-cli#932 (2026-08) found this paragraph's arithmetic
+summed to 19 without the leading multicore-mailbox term, and entry 9 below
+absent from the numbered list entirely; both are fixed here, and
+`test_the_manifest_deliberate_edit_count_matches_the_table` now pins the
+**twenty** above against `len(DELIBERATE_EDITS)` itself, the drift this
+paragraph shipped with nothing catching. tan-cli#384's seven `README.md`
 doc-link entries
 are NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0`
 tag (see "Current vendor point" above); listed here only as history, not as
@@ -603,6 +610,22 @@ strictness exists to catch.
    `examples/bringup/board-selftest/src/main.c` and `README.md`, whose
    per-SKU substitution machinery is what needs to reach these tokens;
    declared here pending that fix and a re-vendor.
+9. **`multicore-mailbox`/`E1M-AEN801`'s `README.md`: a leading caveat that
+   the scaffold's own IPC carve-out resolves `blocked` (tan-cli#864 Q5).**
+   Measured: `alp_shmem0`'s `memory_map.base` comes back `TBD` for region
+   `mram_main` on this SKU, so the mailbox roundtrip the scaffold teaches
+   compiles and does nothing — a customer's first run is silent, and the
+   emit's own text says nothing about it. Rewritten with a leading "## Before
+   you run this: the channel is not allocated yet" section explaining the
+   `blocked` status up front rather than letting the customer discover it by
+   running a no-op. `un_edit_mailbox_blocked_caveat` strips that whole
+   section (plus the blank line it opens with, appended after the emit's own
+   trailing newline) to recover the emit's own bytes. This is the one entry
+   in the table with no matching alp-sdk issue filed pending a re-vendor —
+   the carve-out `blocked`/`TBD` state is a hardware fact about this SKU's
+   memory map, not something alp-sdk's own emit is wrong to omit generically;
+   the caveat stays a standing tan-side edit rather than an upstream fix to
+   wait on.
 
 ## Template x SKU matrix vendored
 
