@@ -32,6 +32,7 @@ import typer
 from typer.testing import CliRunner
 
 from tan.commands.faultdecode_cmd import faultdecode
+from tan.core.shapes import SDK_MARKER
 from tests.conftest import REAL_ENVIRON
 
 app = typer.Typer()
@@ -55,14 +56,43 @@ def _resolve_oracle_path() -> Path | None:
     (tan-cli#254/#256 fix)."""
     override = REAL_ENVIRON.get("ALP_SDK_ROOT")
     if override:
-        candidate = Path(override) / "scripts" / "alp_cli" / "faultdecode.py"
-        if not candidate.is_file():
-            raise RuntimeError(
-                f"ALP_SDK_ROOT={override!r} has no scripts/alp_cli/faultdecode.py. "
-                "Refusing to skip: a named-but-missing oracle would make this "
-                "check pass vacuously. Fix the path, or unset it."
+        root = Path(override)
+        candidate = root / "scripts" / "alp_cli" / "faultdecode.py"
+        if candidate.is_file():
+            return candidate
+        if root.joinpath(*SDK_MARKER).is_file():
+            # A REAL alp-sdk that no longer ships the oracle. alp-sdk#1367/
+            # #1368 (`210e9fed`, "finish the alp_cli retirement") deleted
+            # `scripts/alp_cli/faultdecode.py` outright -- 670 lines, along
+            # with twelve sibling modules -- once `tan faultdecode` shipped
+            # the native port. There is no live oracle left to diff against
+            # at that ref or any later one, and there never will be again,
+            # so refusing to skip here would turn a permanent upstream fact
+            # into a permanent red.
+            #
+            # This does NOT silently drop the coverage, which is the thing
+            # the refusal below exists to prevent.
+            # `tests/fixtures/faultdecode_golden.json` was frozen FROM that
+            # module while it still shipped (see its PROVENANCE.txt), and
+            # `test_bit_tables_match_the_frozen_golden` /
+            # `test_decode_matches_the_frozen_golden` assert tan's port
+            # against it on EVERY run -- bound or not, oracle present or
+            # not. What is lost is only the live re-verification, and that
+            # was lost upstream, not here.
+            pytest.skip(
+                "the bound alp-sdk retired scripts/alp_cli/faultdecode.py "
+                "(alp-sdk#1367/#1368, landed in 210e9fed), so there is no "
+                "live oracle to diff against at this ref. The frozen golden "
+                "tests/fixtures/faultdecode_golden.json is the authority "
+                "now, and its two checks run unconditionally."
             )
-        return candidate
+        raise RuntimeError(
+            f"ALP_SDK_ROOT={override!r} has no scripts/alp_cli/faultdecode.py "
+            f"and no {'/'.join(SDK_MARKER)} either, so it does not name an "
+            "alp-sdk checkout at all. Refusing to skip: a named-but-missing "
+            "oracle would make this check pass vacuously. Fix the path, or "
+            "unset it."
+        )
     for parent in Path(__file__).resolve().parents:
         candidate = parent.parent / "alp-sdk" / "scripts" / "alp_cli" / "faultdecode.py"
         if candidate.is_file():
