@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""README.md / src/main.c SoM-identity retargeting for `tan.core.scaffold`.
+"""SoM-identity retargeting for `tan.core.scaffold` -- the phrases currently
+live only in README.md / src/main.c, but both functions here run
+UNCONDITIONALLY over `scaffold._vendored_files`'s per-file loop, the same as
+`retarget_selftest_som_identity`'s own no-SKU-list, general-anchored design:
+they are never gated to those two paths in code, only narrowed by which
+phrases they anchor on (`_selftest_som_identity_edits`, `# Example for
+<SKU>:`) happening to appear nowhere else in the vendored trees today. A
+future vendored file that happens to contain one of those same anchor
+phrases for an unrelated reason would be rewritten too, not skipped.
 
 Split out of `scaffold.py` itself (tan-cli#932 review round) purely to keep
 that module under its recorded size budget -- both functions here are called
@@ -67,7 +75,8 @@ def retarget_selftest_som_identity(content: str, sku: str, source_sku: str) -> s
     only the SoM-identity phrase, never the `SoC identity:` line (a
     per-family fact this port has no per-SKU value for -- correct today
     because `E1M-V2N10x`/`E1M-V2M10x` share one SoC per
-    `metadata/socs/renesas/rzv2n/n44.json`'s own `alp_module_skus`; WRONG for
+    `metadata/socs/renesas/rzv2n/n44.json`'s own `variants[].alp_module_skus`
+    (nested under the variant entry, not a top-level field); WRONG for
     the AEN family, whose SKUs are different Ensemble variants (E3..E8) and
     whose `SoC identity: alif:ensemble:e8` line is simply not re-derivable
     without a per-SKU SoC-ref table this SDK-free module does not carry --
@@ -106,12 +115,24 @@ def retarget_example_build_target_comment(content: str, sku: str, source_sku: st
 
     Relabelling the comment onto `sku` would be worse, not better: it would
     claim the UNCHANGED command below it (still `source_sku`'s real board)
-    is `sku`'s own. So this drops the claim instead of moving it -- generic
-    `# Example:` prose, true for every SKU that reaches this line, with the
-    one real vendored board target it introduces left exactly as documented.
-    NO-OP when `sku == source_sku` (byte-exact passthrough for the tree's
-    own two representative SKUs, same convention as every retarget_* above).
+    is `sku`'s own. So this drops the SKU-specific claim rather than moving
+    it -- but going fully generic (bare `# Example:`) would ALSO lose real
+    information the customer needs: without any qualifier, a `sku` whose own
+    `alp_e1m_<sku>_..._sm` target genuinely exists (e.g. `E1M-V2M101`, unlike
+    several other siblings sharing this tree such as `E1M-V2N102`) has no
+    way to tell, from the comment alone, that the line below it is a
+    DIFFERENT SoM's board target rather than a generic placeholder. Rewritten
+    to say so explicitly instead: `# Example (this template's own vendored
+    board target -- substitute your SoM's):`, true for every SKU that
+    reaches this line, with the one real vendored board target it introduces
+    left exactly as documented. NO-OP when `sku == source_sku` (byte-exact
+    passthrough for the tree's own two representative SKUs, same convention
+    as every retarget_* above).
     """
     if sku == source_sku:
         return content
-    return content.replace(f"# Example for {source_sku}:", "# Example:")
+    return content.replace(
+        f"# Example for {source_sku}:",
+        "# Example (this template's own vendored board target -- substitute "
+        "your SoM's):",
+    )

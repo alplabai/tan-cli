@@ -275,6 +275,38 @@ def un_edit_edge_ai_aen801_readme_deepx_note(text: str) -> str:
     )
 
 
+#: tan-cli#946 (review round on #932/#942): the SAME emit sentence entry 5/6
+#: above rewrites for `E1M-AEN801` is ALSO wrong on the `E1M-V2N101` tree
+#: itself -- just for a different sibling. `E1M-V2N101`/`E1M-V2N102`/
+#: `E1M-V2M101`/`E1M-V2M102` all render this ONE tree; "Flip `som.sku` ...
+#: to `E1M-V2M101`" is correct advice for a V2N101/V2N102 customer (neither
+#: carries DEEPX) but misleading for a V2M102 customer, who already has it:
+#: `metadata/socs/deepx/dx/m1.json`'s `alp_module_skus` lists BOTH
+#: `E1M-V2M101` and `E1M-V2M102` (confirmed on `E1M-V2M102.yaml`'s own
+#: `on_module.npu: deepx_dxm1`), so telling that customer to flip to
+#: `E1M-V2M101` implies their own SKU lacks what it already has. Rewritten
+#: SKU-neutral -- true regardless of which of the four SKUs the customer
+#: is actually on -- rather than naming one specific target SKU. Filed
+#: upstream as alp-sdk#1749; this entry retires the moment that lands and
+#: this tree is re-vendored.
+_EDGE_AI_V2N101_README_DEEPX_NOTE = (
+    "`E1M-V2M101` and `E1M-V2M102` both carry the DEEPX DX-M1 NPU; pick either via\n"
+    "`som.sku` in `board.yaml` for the DEEPX DX-M1 path."
+)
+_EDGE_AI_V2N101_README_DEEPX_NOTE_EMITTED = (
+    "Flip `som.sku` in `board.yaml` to `E1M-V2M101` for the DEEPX DX-M1 path."
+)
+
+
+def un_edit_edge_ai_v2n101_readme_deepx_note(text: str) -> str:
+    """tan-cli#946: undo the README correction above to recover the emit's
+    own (still-wrong, V2M102-misleading) sentence -- alp-sdk#1749 has not
+    landed yet, so the live emit still says this."""
+    return text.replace(
+        _EDGE_AI_V2N101_README_DEEPX_NOTE, _EDGE_AI_V2N101_README_DEEPX_NOTE_EMITTED
+    )
+
+
 #: tan-cli#912: `diagnostics`'s README names a bare
 #: `scripts/program_eeprom.py` -- real only in the alp-sdk checkout the text
 #: was captured from, never emitted into any scaffolded project
@@ -576,13 +608,23 @@ DELIBERATE_EDITS: dict[
         "tan-cli#814: the emit's `Flip som.sku to E1M-V2M101` sentence is a "
         "cross-family swap here (alif-ensemble -> renesas-rzv2n-deepx) that "
         "tan validate refuses; the E1M-V2N101 sibling's identical sentence "
-        "is correct and untouched",
+        "is intra-family (correct in shape) but has its own, narrower "
+        "defect -- see the entry right below",
         un_edit_edge_ai_aen801_readme_deepx_note,
     ),
     ("edge-ai", "E1M-AEN801", "board.yaml", "deepx_v2m_note"): (
         "tan-cli#814: same defect as the README entry above, the comment "
         "one file over that reinforces it",
         un_edit_edge_ai_aen801_board_yaml_deepx_note,
+    ),
+    ("edge-ai", "E1M-V2N101", "README.md", "deepx_v2m102_scope"): (
+        "tan-cli#946: the emit's `Flip som.sku to E1M-V2M101` sentence is "
+        "correct for a V2N101/V2N102 customer but misleading for a V2M102 "
+        "one -- E1M-V2M102 already carries DEEPX DX-M1 "
+        "(metadata/socs/deepx/dx/m1.json's alp_module_skus lists both "
+        "E1M-V2M101 and E1M-V2M102) -- rewritten SKU-neutral; filed "
+        "upstream as alp-sdk#1749",
+        un_edit_edge_ai_v2n101_readme_deepx_note,
     ),
     ("diagnostics", "E1M-AEN801", "README.md", "eeprom_script_pointer"): (
         "tan-cli#912: the Troubleshooting section pointed at "
@@ -910,6 +952,17 @@ def self_check() -> None:
     assert (
         un_edit_edge_ai_aen801_board_yaml_deepx_note(_EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE)
         == _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE_EMITTED
+    )
+
+    # tan-cli#946's entry: the E1M-V2N101 tree's own DEEPX sentence
+    # (misleading for a V2M102 customer -- see alp-sdk#1749) round-trips the
+    # same way, registered under its own (template, sku, path, edit_id) key.
+    assert (
+        "edge-ai", "E1M-V2N101", "README.md", "deepx_v2m102_scope"
+    ) in DELIBERATE_EDITS
+    assert (
+        un_edit_edge_ai_v2n101_readme_deepx_note(_EDGE_AI_V2N101_README_DEEPX_NOTE)
+        == _EDGE_AI_V2N101_README_DEEPX_NOTE_EMITTED
     )
 
     # tan-cli#912's four entries (diagnostics x2, sensor x2): each un_edit

@@ -54,6 +54,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+import warnings
 from pathlib import Path
 
 import pytest
@@ -385,6 +386,20 @@ def _catalogued_som_skus() -> tuple[str, ...] | None:
 
 CATALOGUED_SKUS = _catalogued_som_skus()
 
+if CATALOGUED_SKUS is None:
+    # Degraded, not skipped: `_skus_for` and `_foreign_sku_hits` both still
+    # run, just against `_FAMILY_TREES`'s two SKUs instead of the SDK's full
+    # eleven -- a silent narrowing a contributor's local unbound run would
+    # otherwise never learn about (tan-cli#946 review round: "the
+    # `CATALOGUED_SKUS or _FAMILY_TREES` fallback emits no warning, so a
+    # contributor's local unbound run is degraded with no signal").
+    warnings.warn(
+        "test_template_integrity: no ALP_SDK_ROOT/ALP_SDK_PARITY_ROOT bound -- "
+        "SKU-catalogue coverage (CASES, _foreign_sku_hits) is degraded to "
+        f"_FAMILY_TREES's {_FAMILY_TREES!r} instead of the SDK's full catalogue",
+        stacklevel=1,
+    )
+
 
 def _skus_for(template_id: str) -> tuple[str, ...]:
     """Every SKU whose tree this template can be asked to plan.
@@ -490,22 +505,68 @@ def test_every_extra_conf_file_named_by_a_template_is_a_planned_file(template_id
 #: sku, foreign_sku)` across every planned file, so an unrelated NEW
 #: cross-SKU mention added to either of those same two files would still
 #: change the count and still needs its own entry to pass.
+#:
+#: The other twelve entries (tan-cli#946 review round, widening
+#: `_foreign_sku_hits` off `CATALOGUED_SKUS` instead of the bare
+#: `_FAMILY_TREES`) are all `edge-ai-starter`'s DEEPX DX-M1 pointer, in two
+#: independent groups sharing one shape (name a DEEPX-equipped sibling SKU
+#: to steer a customer toward it), not one:
+#:
+#: * the `E1M-AEN801` tree's `README.md`/`board.yaml` both tell an Alif
+#:   customer to re-scaffold at `E1M-V2M101` for the DEEPX path
+#:   (tan-cli#814) -- six entries, one per AEN-family SKU that renders this
+#:   tree (`E1M-AEN301`..`E1M-AEN801`);
+#: * the `E1M-V2N101` tree's `README.md` names BOTH `E1M-V2M101` and
+#:   `E1M-V2M102` as DEEPX-equipped (tan-cli#946 -- see
+#:   `scaffold_byte_parity.py`'s `DELIBERATE_EDITS` entry
+#:   `deepx_v2m102_scope` for why: the single-target-SKU wording this
+#:   replaced was misleading for an `E1M-V2M102` customer) -- six entries,
+#:   one per (sku, foreign) pair where the sentence's own SKU differs from
+#:   the token: `E1M-V2N101`/`E1M-V2N102` each see both `E1M-V2M101` and
+#:   `E1M-V2M102` as foreign (they carry neither); `E1M-V2M101` sees
+#:   `E1M-V2M102` as foreign and vice versa (each is the sentence's OWN SKU
+#:   for one of the two mentions, never for both).
 _ALLOWED_CROSS_SKU_MENTIONS: frozenset[tuple[str, str, str]] = frozenset({
     ("iot-starter", "E1M-AEN801", "E1M-V2N101"),
+    ("edge-ai-starter", "E1M-AEN301", "E1M-V2M101"),
+    ("edge-ai-starter", "E1M-AEN401", "E1M-V2M101"),
+    ("edge-ai-starter", "E1M-AEN501", "E1M-V2M101"),
+    ("edge-ai-starter", "E1M-AEN601", "E1M-V2M101"),
+    ("edge-ai-starter", "E1M-AEN701", "E1M-V2M101"),
+    ("edge-ai-starter", "E1M-AEN801", "E1M-V2M101"),
+    ("edge-ai-starter", "E1M-V2N101", "E1M-V2M101"),
+    ("edge-ai-starter", "E1M-V2N101", "E1M-V2M102"),
+    ("edge-ai-starter", "E1M-V2N102", "E1M-V2M101"),
+    ("edge-ai-starter", "E1M-V2N102", "E1M-V2M102"),
+    ("edge-ai-starter", "E1M-V2M101", "E1M-V2M102"),
+    ("edge-ai-starter", "E1M-V2M102", "E1M-V2M101"),
 })
 
 
 def _foreign_sku_hits(sku: str, planned: dict[str, str]) -> dict[str, int]:
-    """`{foreign_sku: occurrence count}` for every OTHER vendored family
-    SKU's exact token found anywhere in `planned`'s content -- word-bounded
+    """`{foreign_sku: occurrence count}` for every OTHER CATALOGUED SKU's
+    exact token found anywhere in `planned`'s content -- word-bounded
     (`(?<![\\w-])...(?![\\w-])`) so `E1M-V2N101` can never accidentally
     match as a substring of a longer or shorter sibling SKU, and counts
     every occurrence rather than stopping at the first, so a partially
     substituted file (tan-cli#932's `README.md`: the SoM SKU line was fixed,
     the SoC identity lines were not) is reported precisely rather than
-    merely flagged."""
+    merely flagged.
+
+    Iterates `CATALOGUED_SKUS or _FAMILY_TREES` -- the same fallback
+    `_skus_for` uses -- not the bare two-entry `_FAMILY_TREES` (tan-cli#946
+    review round). `_FAMILY_TREES` alone made this guard blind to any SKU
+    token outside `E1M-AEN801`/`E1M-V2N101` even after `CASES` itself was
+    widened to the full catalogue: `_skus_for` iterates the wide list to pick
+    which `(template_id, sku)` pairs to PLAN, but this function separately
+    named the narrow list to pick which foreign tokens to LOOK for, so a
+    9-SKU blind spot survived the widening that was supposed to close it.
+    Measured: inserting `Note: on E1M-V2N102 the power rail answers
+    differently.` into `diagnostics/E1M-V2N101/README.md` left this test at
+    53 passed under the narrow list; the same mutation reds it once this
+    list is the catalogue."""
     hits: dict[str, int] = {}
-    for foreign in _FAMILY_TREES:
+    for foreign in (CATALOGUED_SKUS or _FAMILY_TREES):
         if foreign == sku:
             continue
         pattern = re.compile(r"(?<![\w-])" + re.escape(foreign) + r"(?![\w-])")
