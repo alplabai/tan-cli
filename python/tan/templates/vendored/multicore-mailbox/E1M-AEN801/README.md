@@ -1,0 +1,111 @@
+# mproc-mailbox
+
+Per-peripheral example for `<alp/mproc.h>`.  Demonstrates the
+M55-HP side of a Cortex-M55-HP ↔ Cortex-M55-HE mailbox roundtrip
+on AEN: stage a payload in shared SRAM, signal the peer via the
+hardware mailbox, wait for a reply, read the result back.
+
+## What this shows
+
+- Opening a shared-memory region (`alp_shmem_open`) and a
+  hardware mailbox (`alp_mbox_open`) by portable instance IDs.
+- Resolving a raw pointer view of the shared region with
+  `alp_shmem_view()`, then staging payload bytes by `memcpy`
+  through that pointer (the surface hands back a base pointer +
+  size and trusts the caller to write through it; the backend
+  handles cache-coherency for `cacheable = false` regions).
+- Signalling the peer with `alp_mbox_send` carrying a small
+  tuple (offset + length) that points at the staged bytes.
+- Receiving the reply through an inbound callback registered with
+  `alp_mbox_set_callback()` -- it fires on the SDK's mbox thread
+  with the peer's (offset, length) tuple, which `main()` then
+  drains.
+- Reading the peer's echo response back from shared SRAM via the
+  same pointer view.
+
+## Build
+
+### native_sim (no peer core; HP-side init only)
+
+```bash
+west build -b native_sim/native/64 .
+west build -t run
+```
+
+Expected output:
+
+```
+[mproc] init mbox + shmem
+[mproc] sending payload  "hello-from-HP" (13 bytes)
+[mproc]   native_sim: no peer core; skipping reply
+[mproc] done
+```
+
+### Real silicon (AEN dual-core, both images built from this project)
+
+The peer-side firmware lives at
+[`examples/multicore/mproc-mailbox/peer/main.c`](peer/main.c) -- HE-side
+image that waits on the same mbox, reads the staged shmem
+payload, and writes back an echo via reverse send.
+
+`board.yaml` declares both `m55_hp` (`app: ./src`) and `m55_he`
+(`app: ./peer`) as real project cores, so one `tan build` now
+produces both images -- no more topology-default `alp-stock-shim`
+placeholder on the HE side:
+
+```bash
+tan build --project .
+```
+
+Each core can also be built standalone with `west build` directly
+(e.g. while iterating on one side):
+
+```bash
+# HP side.
+west build -b ensemble_e8_dk/ae822fa0e5597ls0/rtss_hp .
+west flash
+
+# HE side.
+west build -b ensemble_e8_dk/ae822fa0e5597ls0/rtss_he examples/multicore/mproc-mailbox/peer
+west flash
+```
+
+Flash both into the matching SoC partitions (HP -> RTSS-HP slot,
+HE -> RTSS-HE slot) and the roundtrip completes:
+
+```
+[mproc] init mbox + shmem
+[mproc] sending payload  "hello-from-HP" (13 bytes)
+[mproc-peer] request offset=0 len=13
+[mproc-peer] payload  "hello-from-HP"
+[mproc-peer] replied "echo: hello-from-HP" (19 bytes)
+[mproc] HE replied via mbox callback
+[mproc] HE replied       "echo: hello-from-HP" (19 bytes)
+[mproc] done
+```
+
+## Reference
+
+- [`<alp/mproc.h>`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/include/alp/mproc.h) -- mailbox + shmem
+  + hwsem API.
+- [`docs/v1.0-readiness.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/v1.0-readiness.md) §4 --
+  this example is one of the v1.0 reference-app flagships; both the
+  HP host and the HE peer now build from this one project, with
+  HiL verification of the round-trip still ahead.
+
+## Before you run this: the channel is not allocated yet
+
+`E1M-AEN801` carries no `memory_map:` in its SoM metadata, so this project's
+shared-memory carve-out cannot be placed and resolves `blocked`:
+
+```
+name: alp_shmem0  kind: raw_shmem  status: blocked
+reason: memory_map.base is TBD for region 'mram_main' in SoM E1M-AEN801; this
+        SoM hasn't been HW-mapped yet so IPC carve-outs cannot be allocated.
+```
+
+The project still configures and builds, and `--emit ipc-contract-h` still
+exits 0 -- it emits `ALP_IPC_*_ADDR 0x0u /* stub: blocked */`. So the mailbox
+roundtrip this example teaches compiles and does nothing until that metadata
+lands. This is
+mapping work not yet done upstream, not a limit of the design.

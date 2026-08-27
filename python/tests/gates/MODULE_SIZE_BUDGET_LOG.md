@@ -286,3 +286,22 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/model_cmd.py: new entry at 1059
     - tan/model/adapters/ethos_u.py: new entry at 886
     - function_count_budget: 258 -> 270
+- 2026-08-26 -- tan-cli#925: guard the ipc: append on the board not already declaring one. PyYAML accepts a duplicate top-level key and keeps the LAST, so the unconditional append silently discarded the project's own channel -- measured on alp-sdk's multicore-mailbox scaffold, where alp_shmem0 (referenced by SHMEM_REGION_NAME in both src/main.c and peer/main.c) was replaced by tan's stub. A correctness fix that cannot be written in zero lines; contrast #921, where a ratchet was DECLINED because the growth was a comment.
+    - tan/core/scaffold.py: 1512 -> 1519
+- 2026-08-26 -- tan-cli#864: register multicore-mailbox in TEMPLATE_IDS/_VENDORED_TEMPLATE_DIR and replace the one-off IOT_STARTER_SUPPORTED_SKU with the TEMPLATE_SUPPORTED_SKUS table, which two measured failures showed the single hard-coded if could not cover (a silent AEN301 render, and an init.template-unreadable that blamed the installation for a wrong --som).
+    - tan/commands/explain_cmd.py: 1020 -> 1043
+    - tan/commands/init_cmd.py: 1258 -> 1264
+    - tan/core/scaffold.py: 1519 -> 1538
+    - function_count_budget: 258 -> 259
+- 2026-08-26 -- tan-cli#890: --from-example now consults the SDK scaffold catalog's supported.som_skus and warns when --som is outside it. The +24 in init_cmd.py is the guard and its Issue construction, not prose -- the reasoning lives in the new tan/core/example_catalog.py, and the in-place comment was cut to five lines pointing there. Contrast #921, where a ratchet was DECLINED because the growth was purely a comment.
+    - tan/commands/init_cmd.py: 1264 -> 1288
+- 2026-08-26 -- tan-cli#886: every inert option's help is rendered by tan.core.inert.inert_help, which costs build_cmd.py 3 lines and doctor_cmd.py 5 (one import each, plus the call's own wrapping).
+    - tan/commands/build_cmd.py: 2175 -> 2178
+    - tan/commands/doctor_cmd.py: 4040 -> 4045
+- 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/build_cmd.py: 2175 -> 2178
+    - tan/commands/doctor_cmd.py: 4040 -> 4045
+    - tan/commands/explain_cmd.py: 1020 -> 1043
+    - tan/commands/init_cmd.py: 1258 -> 1288
+    - tan/core/scaffold.py: 1512 -> 1538
+    - function_count_budget: 270 -> 271

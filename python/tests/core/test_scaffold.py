@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import pytest
+
 import yaml
 
 from tan.core import scaffold as scaffold_module
@@ -532,6 +533,140 @@ def test_splice_adds_a_companion_and_a_default_rpmsg_channel():
     assert "endpoints: [m55_hp, a55_cluster]" in out
     # The companion lands inside the `cores:` block, before the next top-level key.
     assert out.index("a55_cluster:") < out.index("libraries:")
+
+
+def test_the_default_rpmsg_carve_out_is_256_not_the_whole_ocram_low():
+    """tan-cli#921. The injected default was `512`, copied from alp-sdk's
+    commented `metadata/templates/board.yaml` stanza. alp-sdk#1613 then
+    measured that number and found it wrong in a way that only shows up on
+    the Renesas parts: `resolve_carve_outs()` prefers the non-cacheable
+    region smaller-first, and on V2N/V2M the only non-cacheable region
+    reachable from both `a55_cluster` and `m33_sm` is `ocram_low`, which
+    `metadata/socs/renesas/rzv2n/n44.json` gives as exactly `size_kib: 512`.
+    A 512 KiB carve-out therefore consumed that region ENTIRELY, leaving
+    nothing for a second channel.
+
+    alp-sdk#1694 settled on 256 from evidence, not preference:
+    `examples/multicore/rpmsg-aen/board.yaml:68` already used it against
+    `E1M-AEN801`'s `mram_main` (5632 KiB, under 5%), and it is half rather
+    than all of `ocram_low`.
+
+    The derivation lives HERE rather than beside the literal on purpose.
+    `tan/core/scaffold.py` sits at exactly its recorded ratchet (1512 lines,
+    against a nominal 800 cap) and tan-cli#408 is open about that whole
+    module class, so paying a permanent ceiling raise for a comment is the
+    wrong trade -- the value change itself is one token and zero lines. Test
+    files are measured but not gated (tan-cli#817), which makes this the
+    cheapest durable home for the reasoning. `changelog.d/921.fixed.md`
+    carries the same derivation for anyone reading the shipped notes.
+
+    Pinned as an integer through `yaml.safe_load`, not only as a substring:
+    a value written as `"256"` would satisfy a text match while giving the
+    schema a string where it wants a number."""
+    board = "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
+    out = splice_companion_cores(board, [("a55_cluster", "yocto")])
+
+    parsed = yaml.safe_load(out)
+    assert parsed["ipc"][0]["carve_out_kb"] == 256, out
+    assert "carve_out_kb: 512" not in out, (
+        "512 is exactly the whole of ocram_low on V2N/V2M -- a carve-out that "
+        f"size leaves nothing for a second channel:\n{out}"
+    )
+
+
+def test_splice_does_not_add_a_second_ipc_key_when_the_board_declares_one():
+    """tan-cli#925. The append was unconditional, so splicing a companion into
+    a board.yaml that ALREADY declares `ipc:` produced two top-level `ipc:`
+    keys -- and PyYAML does not reject that. It takes the last one, so tan's
+    stub silently replaced the project's real channel.
+
+    Measured against alp-sdk's `multicore-mailbox` scaffold for E1M-AEN801
+    (emitted at `eb96112b`, the commit `PINNED_SDK_TAG` names):
+
+        top-level 'ipc:' BEFORE splice: 1
+        top-level 'ipc:' AFTER  splice: 2
+        yaml.safe_load: OK          <- no error anywhere
+
+        TEMPLATE's own ipc: [{'kind': 'raw_shmem', 'endpoints': ['m55_hp',
+            'm55_he'], 'carve_out_kb': 4, 'name': 'alp_shmem0'}]
+        AFTER splice, what survives: [{'kind': 'rpmsg', 'name':
+            'alp_default_rpmsg', 'endpoints': ['m55_hp', 'a32_cluster'],
+            'carve_out_kb': 256}]
+
+    `alp_shmem0` is not incidental: both `src/main.c` and `peer/main.c` in
+    that scaffold carry `#define SHMEM_REGION_NAME "alp_shmem0"`, so the
+    generated app would compile against a region its own board.yaml no
+    longer declares."""
+    board = (
+        "som:\n  sku: E1M-AEN801\n"
+        "cores:\n  m55_hp:\n    app: ./src\n  m55_he:\n    app: ./peer\n"
+        "ipc:\n"
+        "  - kind: raw_shmem\n"
+        "    endpoints: [m55_hp, m55_he]\n"
+        "    carve_out_kb: 4\n"
+        "    name: alp_shmem0\n"
+    )
+    out = splice_companion_cores(board, [("a32_cluster", "yocto")])
+
+    assert sum(1 for line in out.splitlines() if line.startswith("ipc:")) == 1, (
+        "a second top-level `ipc:` key was appended; PyYAML keeps only the "
+        f"last, so the board's own channel is discarded:\n{out}"
+    )
+    channels = yaml.safe_load(out)["ipc"]
+    assert [c["name"] for c in channels] == ["alp_shmem0"], (
+        "the board's own channel must survive -- tan must not invent a "
+        f"channel over one the project already declares: {channels}"
+    )
+    # The companion itself is still spliced: the refusal is about the extra
+    # channel, not about the core the user actually asked for.
+    assert yaml.safe_load(out)["cores"]["a32_cluster"]["os"] == "yocto", out
+
+
+def test_splice_still_adds_the_default_channel_when_the_board_declares_none():
+    """Anti-regression for the fix above: the guard must key on the CONTENT
+    having an `ipc:` block, not on anything else. Every vendored scaffold
+    today declares none (`grep -rn '^ipc:' tan/templates/vendored/` is
+    empty), so this is the path that actually runs in the field."""
+    board = "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
+    out = splice_companion_cores(board, [("a55_cluster", "yocto")])
+
+    channels = yaml.safe_load(out)["ipc"]
+    assert [c["name"] for c in channels] == ["alp_default_rpmsg"], channels
+    assert channels[0]["endpoints"] == ["m55_hp", "a55_cluster"]
+
+
+def test_the_ipc_guard_keys_on_a_top_level_key_not_on_the_letters_ipc():
+    """Mutation-derived. Replacing the line-start check with a naive
+    `"ipc" in board_yaml` left BOTH tests above green, so they did not
+    distinguish a correct guard from a sloppy one.
+
+    A substring guard fires on any board.yaml that merely CONTAINS those
+    three letters -- a comment mentioning IPC, a core id like `m33_ipc`, the
+    word "recipe" -- and then silently withholds the default channel from a
+    board that declares none. That is the same silent class as the defect
+    being fixed, pointed the other way."""
+    board = (
+        "# No cross-core channel is declared here; the ipc block is\n"
+        "# deliberately absent (see tan-cli#925).\n"
+        "som:\n  sku: E1M-AEN801\n"
+        "cores:\n  m55_hp:\n    app: ./src\n"
+    )
+    # Case-sensitive on purpose: the mutant this test exists to kill is
+    # `"ipc" in board_yaml`, which does no lowering. An earlier draft asserted
+    # `"ipc" in board.lower()` and passed against a fixture carrying only
+    # "IPC" -- so it believed it was exercising the mutant and was not.
+    assert "ipc" in board, "the fixture must carry the LOWERCASE letters, or it proves nothing"
+    assert not any(line.startswith("ipc:") for line in board.splitlines())
+
+    out = splice_companion_cores(board, [("a55_cluster", "yocto")])
+
+    channels = yaml.safe_load(out).get("ipc")
+    assert channels is not None, (
+        "the default channel was withheld entirely from a board that declares "
+        f"no `ipc:` key -- the guard matched loose text, not a top-level "
+        f"key:\n{out}"
+    )
+    assert [c["name"] for c in channels] == ["alp_default_rpmsg"], channels
 
 
 def test_splice_quotes_a_newly_added_off_companion_so_yaml_parses_it_as_a_string():

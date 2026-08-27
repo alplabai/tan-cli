@@ -23,10 +23,21 @@ All notable changes to `tan` are documented here. Format follows
   tan-cli#880 exists to automate exactly this from `release.yml`, but it was
   still open when `v0.6.0` was tagged, so this bump is by hand again. Worth
   knowing before that PR lands: its `propose-dev-version-bump` job opens the
-  PR with `gh pr create`, which is the same call `planner-resync.yml` fails on
-  daily with `GitHub Actions is not permitted to create or approve pull
-  requests (createPullRequest)`. Until that repo setting is enabled, the
-  automation reaches the identical wall. tan-cli#770.
+  PR with `gh pr create`, the same call that `planner-resync.yml` hit blocked
+  ONCE, not daily -- re-derived against `gh run list --workflow
+  planner-resync.yml` while fixing tan-cli#911: the daily-repeating failure
+  over that window was an unrelated empty-diff case never surfacing its own
+  finding (an unbroken streak starting at run `31621375705`, last success
+  `31601765469`, still growing at the time of writing -- fixed separately,
+  see tan-cli#920), and conflating the two is
+  exactly the mistake tan-cli#911's own fix asks readers not to make. The
+  policy block itself hit exactly once, in run `32660981604`
+  (2026-08-23T19:21:33Z), refused with `GitHub Actions is not permitted to
+  create or approve pull requests (createPullRequest)`. That was an
+  org-level policy setting: repo-level `can_approve_pull_request_reviews`
+  read `false` then and reads `true` as of 2026-08-25, so the wall is
+  probably already gone, though no run since has had a diff to prove the
+  `gh pr create` path clean again. tan-cli#770.
 
 ## [0.6.0] — 2026-08-24
 
