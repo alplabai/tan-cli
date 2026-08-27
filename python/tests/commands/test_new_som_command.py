@@ -809,6 +809,51 @@ def test_format_json_failure_emits_a_new_som_code_not_cli_parse_error(tmp_path):
     assert "alp-sdk root is unresolved" in env["issues"][0]["message"]
 
 
+def test_a_broken_project_pin_is_reported_even_when_nothing_else_resolves(tmp_path):
+    """tan-cli#926 -- the `new-som` instance of the tan-cli#900 class
+    (`clean`/`presets` already had this; `examples`/`generate` got it in
+    #900; `bootstrap`/`new-som` are the sixth and seventh).
+
+    `new_som`'s `--sdk-root`/`--project` preflight used to call `resolve_
+    sdk_tiered`, check `active.path is None`, and `fail(...)` right there --
+    BEFORE `pin_issue`/`foreign_issue` were computed a few lines further
+    down. So a workspace whose `.alp/sdk-path` names a checkout that no
+    longer exists, with nothing else on the ladder resolving either,
+    reported `new-som.failed` alone: the customer was told no SoM scaffold
+    was written but never that their own broken project pin was the reason
+    -- `presets`/`clean` disclose it from the identical ladder.
+
+    Fails against dev: `[i["code"] for i in env["issues"]]` there is
+    `["new-som.failed"]` alone, with no leading `sdk.project-pin-unresolved`
+    and `"gone-checkout"` nowhere in the envelope."""
+    proj = tmp_path / "proj"
+    (proj / ".alp").mkdir(parents=True)
+    (proj / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")})
+    )
+    result = runner.invoke(
+        app,
+        [
+            "--dry-run",
+            "--format", "json",
+            "--project", str(proj),
+            "--sku", "E1M-ZZ9999",
+            "--soc-ref", "nxp:imx9:imx95",
+            "--family", "nxp-imx9",
+        ],
+    )
+    assert result.exit_code == 2, result.output
+
+    env = json.loads(result.output)
+    assert env["command"] == "new-som", env
+    assert env["ok"] is False and env["exitCode"] == 2
+    assert [i["code"] for i in env["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "new-som.failed",
+    ], env
+    assert "gone-checkout" in env["issues"][0]["message"]
+
+
 def test_the_success_and_failure_paths_agree_on_whether_stdout_is_json(tmp_path):
     """The exact disagreement #399 reports: one path parseable, the other not,
     on the same command with the same flag. Asserted as a PAIR so a fix to

@@ -305,3 +305,11 @@ and write both files from the real merged tree.
 - 2026-08-27 -- tan-cli#950: bind_sdk/_fail carry ExplainError.extra_issues (pin/foreign-default disclosure) + two regression tests
     - tan/commands/explain_cmd.py: 1043 -> 1087
     - function_count_budget: 262 -> 263
+- 2026-08-27 -- tan-cli#926: restored the deleted #263-review/#464 provenance comments (grew bootstrap_cmd.py + new_som_cmd.py and bootstrap_cmd.py:_run past their recorded ceilings) and fixed bootstrap's sdk-root-unresolved refusal to render its pin/foreign-default warnings on the text channel too (tan-cli#677 recurrence), not just --format json
+    - tan/commands/bootstrap_cmd.py: 3402 -> 3421
+    - tan/commands/new_som_cmd.py: 1380 -> 1385
+    - function_worst_budget: 757 -> 770
+- 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3402 -> 3421
+    - tan/commands/new_som_cmd.py: 1380 -> 1385
+    - function_worst_budget: 757 -> 770
