@@ -537,6 +537,37 @@ def test_the_sdk_key_is_absent_not_null_when_nothing_resolves(tmp_path):
     assert env["data"]["missingPrerequisites"] is None
 
 
+def test_a_broken_project_pin_is_reported_even_when_nothing_else_resolves(tmp_path):
+    """tan-cli#926 -- the `bootstrap` instance of the tan-cli#900 class
+    (`clean`/`presets` already had this; `examples`/`generate` got it in
+    #900; `bootstrap`/`new-som` are the sixth and seventh).
+
+    `_run` used to return its `sdk-root-unresolved` refusal the moment
+    `resolved is None`, BEFORE `pin_issue`/`foreign_issue` were computed a
+    few lines further down -- so a workspace whose `.alp/sdk-path` names a
+    checkout that no longer exists, with no sibling for the ladder to fall
+    through to either, reported `bootstrap.sdk-root-unresolved` alone. The
+    customer was told the SDK root was unresolved but never that their own
+    broken project pin was the reason -- `presets`/`clean` disclose it from
+    the identical ladder.
+
+    Fails against dev: `codes(env)` there is `["bootstrap.sdk-root-
+    unresolved"]` alone, with no leading `sdk.project-pin-unresolved` and
+    `"gone-checkout"` nowhere in the envelope."""
+    ws = tmp_path / "ws"
+    (ws / ".alp").mkdir(parents=True)
+    (ws / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")})
+    )
+    proc = run_tan("bootstrap", "--format", "json", cwd=ws)
+    env = envelope(proc)
+    assert proc.returncode == 2
+    assert codes(env) == ["sdk.project-pin-unresolved", "bootstrap.sdk-root-unresolved"]
+    assert "gone-checkout" in env["issues"][0]["message"]
+    # Still no usable checkout -- still no `sdk` block.
+    assert "sdk" not in env
+
+
 def test_missing_prerequisites_is_null_or_populated_but_never_an_empty_list(tmp_path):
     """`[]` would spell "checked, nothing missing" -- which is what a successful
     run reports as `null`. One fact, one spelling."""

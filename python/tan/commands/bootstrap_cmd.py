@@ -2189,6 +2189,8 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     active_tier = active_resolution.tier
     broken_project_pin = active_resolution.broken_project_pin
     foreign_global_default_for = active_resolution.foreign_global_default_for
+    pin_issue = project_pin_issue(broken_project_pin, active_tier)  # tan-cli#926
+    foreign_issue = global_default_foreign_project_issue(foreign_global_default_for)
     active_is_sdk = active_path is not None and active_path.joinpath(*SDK_MARKER).exists()
     resolved = str(active_path) if active_is_sdk else None
     if resolved is None:
@@ -2211,6 +2213,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                     facts=fallback_facts(_manifest_absent_floor()),
                     pin="",
                 ),
+                issues=[i for i in (pin_issue, foreign_issue) if i is not None],
             ),
             # The only refusal that predates project resolution in the oracle.
             Project(root=None, board_yaml=None),
@@ -2240,12 +2243,9 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # (`--print-env`, and the full run) as every other non-fatal notice this
     # command reports; not `log.warn`, which always prefixes `bootstrap.` and
     # would misname this shared code.
-    pin_issue = project_pin_issue(broken_project_pin, active_tier)
-    # tan-cli#464: `bootstrap` itself can resolve a `globalDefault` a
-    # DIFFERENT project's earlier relocation wrote -- worth disclosing before
-    # this run sets up a whole venv/west workspace against it, the same as
-    # every other command on this ladder.
-    foreign_issue = global_default_foreign_project_issue(foreign_global_default_for)
+    # tan-cli#464: `bootstrap` can resolve a `globalDefault` a DIFFERENT
+    # project's earlier relocation wrote -- worth disclosing before this run
+    # sets up a whole venv/west workspace against it (reused above, not recomputed).
 
     # `west init -l <alp-sdk>` always makes the topdir the checkout's PARENT and
     # alp-sdk itself the manifest repo, which is what registers the `alp-*`

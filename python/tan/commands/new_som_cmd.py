@@ -189,7 +189,7 @@ def _envelope(data, issues: list[Issue], exit_code: ExitCode) -> None:
 
 
 def _fail(message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE, *,
-          json_mode: bool = False) -> None:
+          json_mode: bool = False, extra_issues: list[Issue] | None = None) -> None:
     """Refuse: one error to stderr (or one envelope under `--format json`) and
     exit -- 1 by default, the flat exit code the alp_cli original's `_fail`
     always used (`raise SystemExit(1)`) for every validation failure it can
@@ -218,10 +218,14 @@ def _fail(message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE, *,
     That is the SAME generic forwarder-preflight shape `sdk_cli.rs::run`
     hands every `alp-*` forward it refuses before spawning a child (the
     class faultdecode/model/monitor share), not something specific to any
-    one refusal reason here."""
+    one refusal reason here.
+
+    `extra_issues` (tan-cli#926) PREPENDS ahead of `new-som.failed`, the
+    `clean_cmd._run` shape; `None` at every other call site in this file."""
     if json_mode:
         _envelope(
-            {"subcommand": "new-som"}, [Issue("new-som.failed", "error", message)], exit_code
+            {"subcommand": "new-som"},
+            [*(extra_issues or []), Issue("new-som.failed", "error", message)], exit_code,
         )
     else:
         typer.echo(f"new-som: {message}", err=True)
@@ -913,11 +917,12 @@ def new_som(
         if not json_mode:
             typer.echo(line)
 
-    def fail(message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE) -> None:
+    def fail(message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE, *,
+             extra_issues: list[Issue] | None = None) -> None:
         """`_fail` with this run's output mode bound, so no refusal site has to
         remember to pass it -- a forgotten one would silently print prose to
         stdout under `--format json` and leave the envelope to `cli.main`."""
-        _fail(message, exit_code, json_mode=json_mode)
+        _fail(message, exit_code, json_mode=json_mode, extra_issues=extra_issues)
 
     # Mirrors the original's `type=click.Choice(...)` flag-level validation --
     # a Click-usage error (exit 2) BEFORE anything else runs, same as the
@@ -942,6 +947,13 @@ def new_som(
 
     workspace_root = Path.cwd() / project if project else Path.cwd()
     active = resolve_sdk_tiered(sdk_root, workspace_root)
+    # tan-cli#926: computed before the `.path is None` refusal below (tan-cli#900 fix).
+    pin_issue = project_pin_issue(active.broken_project_pin, active.tier)
+    foreign_issue = global_default_foreign_project_issue(active.foreign_global_default_for)
+    resolution_issues = [i for i in (pin_issue, foreign_issue) if i is not None]
+    if not json_mode:
+        for issue in resolution_issues:
+            typer.echo(f"new-som: warning: {issue.message}", err=True)
     if active.path is None or not Path(active.path).joinpath(*SDK_MARKER).exists():
         # tan-cli#497 defect 7: a REJECTED `--sdk-root` names the value.
         # `resolve_sdk_tiered` is TERMINAL on the flag (I-31) and returns it
@@ -954,27 +966,12 @@ def new_som(
             if sdk_root
             else _SDK_ROOT_UNRESOLVED,
             ExitCode.VALIDATION_FAILURE,
+            extra_issues=resolution_issues,
         )
         return
     resolved_sdk = Path(active.path)
-    # tan-cli#263 review: this command WRITES metadata skeletons into
-    # `resolved_sdk` -- a silently-missed `.alp/sdk-path` pin means porting a
-    # new SoM into the wrong checkout. Under `--format json` it rides the
-    # envelope's `issues` as the already-frozen `sdk.project-pin-unresolved`
-    # (tan-cli#399); in text mode it stays the stderr line it always was.
-    pin_issue = project_pin_issue(active.broken_project_pin, active.tier)
-    issues: list[Issue] = [] if pin_issue is None else [pin_issue]
-    if pin_issue is not None and not json_mode:
-        typer.echo(f"new-som: warning: {pin_issue.message}", err=True)
-    # tan-cli#464: same reasoning -- this command writes metadata skeletons
-    # into `resolved_sdk`, and a `globalDefault` answer a DIFFERENT project's
-    # bootstrap relocation actually decided is exactly as dangerous here as a
-    # silently-missed project pin.
-    foreign_issue = global_default_foreign_project_issue(active.foreign_global_default_for)
-    if foreign_issue is not None:
-        issues.append(foreign_issue)
-        if not json_mode:
-            typer.echo(f"new-som: warning: {foreign_issue.message}", err=True)
+    # tan-cli#263 review: read back, not recomputed -- see `resolution_issues` above.
+    issues: list[Issue] = list(resolution_issues)
 
     # -- 1. Gather inputs.  Interactive prompts need a real terminal; in a
     # pipe / CI, fail fast naming exactly what is missing instead of an
