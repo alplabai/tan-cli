@@ -441,8 +441,10 @@ def test_allowed_os_lookup_degrades_to_empty_for_an_unresolved_core_type(tmp_pat
     degrades to `""`, not to a plausible-looking subset.
 
     Mutation-proven: deleting the `if not core_type: return []` guard in
-    `allowed_os_lookup` turns this RED (`["baremetal", "off"]` != `[]`);
-    restoring it turns it GREEN. Verified by hand while writing this test.
+    `allowed_os_for_core` (`python/tan/core/os_class.py:103`, the function
+    `allowed_os_lookup` calls) turns this RED (`["baremetal", "off"]` !=
+    `[]`); restoring it turns it GREEN. Verified by hand while writing this
+    test.
     """
     write(
         tmp_path / "metadata" / "schemas" / "board.schema.json",
