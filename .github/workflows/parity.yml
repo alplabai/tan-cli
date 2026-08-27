@@ -1185,6 +1185,20 @@ jobs:
             exit 1
           fi
 
+          # tan-cli#916 review, Major 2 (round 3): `pytest-xdist` is installed
+          # above (`install SDK emit + test deps`) specifically so
+          # `test_home_preflight.py::test_pytest_configure_skips_the_check_on_
+          # an_xdist_worker` can PASS instead of `importorskip`-SKIPping past
+          # its own coverage -- but nothing named that node id here, so the
+          # install alone proved nothing: deleting `pytest-xdist` from that
+          # step's install line sends the test back to SKIP and this job
+          # stayed green regardless, same tan-cli#308 shape as every other
+          # guard in this step.
+          if ! grep -qF "test_home_preflight.py::test_pytest_configure_skips_the_check_on_an_xdist_worker PASSED" /tmp/gates.log; then
+            echo "::error::test_pytest_configure_skips_the_check_on_an_xdist_worker did not PASS in this job -- pytest-xdist is installed above specifically so this test proves the config.workerinput worker-skip guard instead of importorskip-skipping past it; a SKIP here means xdist is no longer installed/resolvable in this job, silently returning to the #916 Major 2 defect this guard exists to catch."
+            exit 1
+          fi
+
       # test_jlink_aen_device_freshness asks a question the FROZEN audit checkout
       # cannot answer: does tan's JLINK_AEN_DEVICE fallback still agree with the
       # part number alp-sdk ships TODAY. Binding it to the audit commit like the

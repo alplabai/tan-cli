@@ -496,14 +496,20 @@ def test_pytest_configure_skips_the_check_on_an_xdist_worker(pytester, tmp_path,
     installed alongside `pytest` itself in the two `tests/gates` legs
     (`ci.yml`'s `python` job, `parity.yml`'s `seam1-plan-shape` job)
     specifically so this test RUNS rather than skips there (#916 review,
-    Major 2: neither leg installed it before, and no other CI leg runs
-    `tests/gates` at all -- `parity.yml`'s cross-OS `python-tests` job
-    `--ignore=tests/gates` outright, and none of the sharded `python-tests`
-    matrix legs use `pytest-xdist`/`-n` either; they shard via `pytest-shard
-    --shard-id=N --num-shards=4`, a different mechanism this test does not
-    exercise). `importorskip` stays rather than a hard dependency: a developer
-    running `python -m pytest tests/gates` from a bare `pip install pytest`
-    venv (no `-e .[dev]`, no xdist) should still get a skip here, not a
+    Major 2: neither leg installed it before, and no other CI step COLLECTS
+    THIS FILE -- `parity.yml`'s cross-OS `python-tests-shard` job runs
+    `--ignore=tests/gates` outright, and none of its sharded legs use
+    `pytest-xdist`/`-n` either; they shard via `pytest-shard --shard-id=N
+    --num-shards=4`, a different mechanism this test does not exercise. Other
+    CI steps DO run other paths under `tests/gates/` -- `planner-resync.yml`
+    runs `tests/gates/test_planner_relocation_freshness.py` and `tests/gates/
+    test_planner_resync.py` directly, and `parity.yml`'s own alarm/live-drift
+    steps run `test_planner_relocation_freshness.py` and `test_jlink_aen_
+    device_freshness.py` in isolation -- none of them names this file).
+    `importorskip` stays rather than a hard dependency: a developer running
+    `python -m pytest tests/gates` from a bare `pip install pytest` venv (no
+    extras -- the package's only extra is `monitor` (`pyserial`), which would
+    not add xdist either -- and no xdist) should still get a skip here, not a
     collection error, for the one test in the suite that specifically needs
     xdist PRESENT to prove anything.
     """
