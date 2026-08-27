@@ -245,6 +245,19 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/planner/template.py: 1470 -> 1481
 - 2026-08-25 -- tan-cli#904 final round: wall_clock_iso (timestamp.py) grows past 50 lines defending an out-of-range wall clock (item 2) and enumerating all eight generated_at_iso call sites (nit); deepest_covering_entry's docstring (sdk_default_registry.py) grows documenting the updated_at precision-normalisation fix (nit) and the 21x1x20 lstat factorization correction (item 3) -- all four are review-requested prose/behaviour fixes on tan-cli#904's final round, not unreviewed growth.
     - function_count_budget: 257 -> 258
+- 2026-08-26 -- tan-cli#870: presets_cmd.py gains cores[].type/allowedOs -- SomCore/Som dataclasses, parse_som_preset's core-type/allowed-os enrichment, and the new _soc_lookups planner-binding helper (reuses tan.planner.topology._allowed_os_for_core rather than re-deriving the cortex-a/cortex-m rule)
+    - tan/commands/presets_cmd.py: new entry at 844
+    - function_count_budget: 258 -> 260
+- 2026-08-26 -- tan-cli#870 follow-up: _soc_lookups reworked to stop importing tan.planner (its process-global SDK-root bind poisoned 292 unrelated parity tests when exercised from presets_cmd's many per-test synthetic checkouts) -- now reads tan.core.os_class + inlines the board-schema-enum/SoC-JSON reads directly
+    - tan/commands/presets_cmd.py: 844 -> 887
+- 2026-08-26 -- tan-cli#914 fix round: allowed_os_lookup guards the unresolved-core-type sentinel (Major -- degrade to [] instead of a plausible cross-class subset) with a mutation-proof test, module-docstring corrections attributing the duplicated-truth motivation to alp-sdk-vscode's coreRuntime.ts regex rather than alp-sdk-vscode#538 (Minor 1), and a tan-cli#917 follow-up pointer on _resolve_soc_path's known duplication (Minor 4)
+    - tan/commands/presets_cmd.py: 887 -> 912
+- 2026-08-26 -- correction, no number changed: the 2026-08-26 tan-cli#870 entry above ("new entry at 844") describes the design `_soc_lookups` was rewritten OUT of one entry later that same day ("follow-up") -- it names the abandoned `tan.planner.topology._allowed_os_for_core` reuse, not the shipped `tan.core.os_class` one. Append-only, so this stands as a correction rather than an edit to that line.
+- 2026-08-26 -- review round: mutation-proof the a:b:c:d fixture (test_presets_command.py), narrow the presets/build-time-gate agreement claim to the cross-class exclusion (presets_cmd.py)
+    - tan/commands/presets_cmd.py: 905 -> 915
+- 2026-08-26 -- correction, no number changed: the 2026-08-26 tan-cli#914 fix round entry above ("887 -> 912") is the log's last entry before this round but is stale as a description of HEAD -- a later commit on the same PR (b35ad259, "share the unresolved-core-type degrade with the build-time gate") shrank `tan/commands/presets_cmd.py` from 912 to 905 (measured: `git show 62c2894a:python/tan/commands/presets_cmd.py | wc -l` -> 912, `git show b35ad259:...` -> 905), and that shrink was never logged. `module_size_budget.generated.json` already recorded the correct 905 (regen is measurement-driven, not log-driven, so it did not go stale); only this append-only log's prose fell behind. This round's own entry above measures growth from the true 905, not the stale 912. Append-only, so this stands as a correction rather than an edit to that line.
+- 2026-08-26 -- review round: state the type+allowedOs degrade-disambiguation rule in presets_cmd.py's contract prose (Minor 4)
+    - tan/commands/presets_cmd.py: 915 -> 929
 - 2026-08-26 -- tan-cli#925: guard the ipc: append on the board not already declaring one. PyYAML accepts a duplicate top-level key and keeps the LAST, so the unconditional append silently discarded the project's own channel -- measured on alp-sdk's multicore-mailbox scaffold, where alp_shmem0 (referenced by SHMEM_REGION_NAME in both src/main.c and peer/main.c) was replaced by tan's stub. A correctness fix that cannot be written in zero lines; contrast #921, where a ratchet was DECLINED because the growth was a comment.
     - tan/core/scaffold.py: 1512 -> 1519
 - 2026-08-26 -- tan-cli#864: register multicore-mailbox in TEMPLATE_IDS/_VENDORED_TEMPLATE_DIR and replace the one-off IOT_STARTER_SUPPORTED_SKU with the TEMPLATE_SUPPORTED_SKUS table, which two measured failures showed the single hard-coded if could not cover (a silent AEN301 render, and an init.template-unreadable that blamed the installation for a wrong --som).
@@ -257,3 +270,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-26 -- tan-cli#886: every inert option's help is rendered by tan.core.inert.inert_help, which costs build_cmd.py 3 lines and doctor_cmd.py 5 (one import each, plus the call's own wrapping).
     - tan/commands/build_cmd.py: 2175 -> 2178
     - tan/commands/doctor_cmd.py: 4040 -> 4045
+- 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 260 -> 261
