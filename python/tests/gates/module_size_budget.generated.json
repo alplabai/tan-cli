@@ -50,7 +50,7 @@
     "tests/commands/test_init_command.py": 1579,
     "tests/commands/test_kconfig_command.py": 1013,
     "tests/commands/test_new_som_command.py": 1635,
-    "tests/commands/test_presets_command.py": 812,
+    "tests/commands/test_presets_command.py": 839,
     "tests/commands/test_sdk_command.py": 1614,
     "tests/commands/test_validate_command.py": 1234,
     "tests/commands/test_west_forward_command.py": 928,
