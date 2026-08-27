@@ -54,7 +54,8 @@ templates, five of which map onto five entries of the broader SDK catalog
 (`metadata/templates/catalog-v1.json`, alp-sdk) under DIFFERENT ids (its
 `minimal`/`sensor`/`iot`/`edge-ai`/`diagnostics` are this file's
 `zephyr-app`/`sensor-starter`/`iot-starter`/`edge-ai-starter`/
-`board-diagnostics`); `minimal-app` has no catalog counterpart at all, and the
+`board-diagnostics`). `multicore-mailbox` (tan-cli#864) is the one id spelled
+the SAME on both sides; `minimal-app` has no catalog counterpart at all, and the
 catalog's `peripheral`/`multicore-rpmsg`/`gateway` entries have no `--template`
 counterpart here -- reach them (and any other SDK example) with
 `--from-example` instead, which copies the example's own tree verbatim
@@ -99,10 +100,11 @@ from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, global_default_foreign_project_issue
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
+from tan.core.example_catalog import unsupported_som
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     DEFAULT_TEMPLATE_ID,
-    IOT_STARTER_SUPPORTED_SKU,
+    TEMPLATE_SUPPORTED_SKUS,
     TEMPLATE_IDS,
     CoresError,
     ExampleReadError,
@@ -222,8 +224,35 @@ def _stderr(line: str) -> None:
     print(line, file=sys.stderr)
 
 
-def _sdk_block(sdk: _Sdk | None) -> SdkInfo | None:
-    """The envelope's `sdk` block for a resolved [`_Sdk`], or `None`.
+def _sdk_reportable(sdk: _Sdk | None) -> bool:
+    """Whether `sdk` is resolved AND a real checkout -- the one gate
+    `_sdk_block` used to apply internally before tan-cli#922 moved it to the
+    call site (see `_sdk_block`'s own docstring for why). Gated on the loader
+    marker, matching `build_output.resolve_project_context` ("the envelope's
+    `sdk` only records what core's own loader-marker check accepted"), and
+    NOT merely on `sdk is not None`. `_resolve_sdk_root` returns an explicit
+    `--sdk-root` unvalidated, and `_pin_sdk` then silently declines to pin a
+    path that is not a checkout -- so reporting `sdk` there would advertise a
+    checkout that is about to be pinned and is not."""
+    return sdk is not None and _is_sdk_checkout(sdk.path)
+
+
+def _sdk_block(sdk: _Sdk) -> SdkInfo:
+    """The envelope's `sdk` block for a resolved, checked-out [`_Sdk`] --
+    ALWAYS one, never a bare `None` (tan-cli#922: the same shape tan-cli#900
+    fixed for `examples_cmd._resolve_sdk`/`generate_cmd._resolve_sdk_root`,
+    applied here). Callers gate the CALL itself on `_sdk_reportable(sdk)`
+    rather than this function collapsing to `None` -- moving the "should the
+    envelope carry an `sdk` key at all" decision to the caller, the same
+    place every other resolution wrapper in this repo makes it
+    (`.path is None`), rather than folding it into this function's return
+    type. `SdkInfo.root` has no representable "unresolved" state of its own
+    (it is a bare `str`, unlike `_ResolvedSdk`/`_SdkResolution`/
+    `_ResolvedSdkRoot`'s `path: X | None`), so this function could never have
+    represented "not reportable" WITHIN an `SdkInfo` the way those do --
+    `| None` on the return was the only way to spell that, and spelling it
+    there instead of at the call site is exactly the shape
+    `tests/gates/test_sdk_resolution_wrapper_is_not_optional.py` flags.
 
     tan-cli#491 defect 5: `init` passed no `sdk=` to `Envelope(...)` on ANY
     path, so the key was absent from all four outcomes and at both resolution
@@ -232,13 +261,6 @@ def _sdk_block(sdk: _Sdk | None) -> SdkInfo | None:
     `"sdk": {"root": "../rust-sdk", "sourceTier": "sdkRootFlag"}`). It was the
     only field naming WHICH checkout a run is about to permanently pin --
     `data.sdkPinned` is `null` on the preview, refusal and error paths.
-
-    Gated on the loader marker, matching `build_output.resolve_project_context`
-    ("the envelope's `sdk` only records what core's own loader-marker check
-    accepted"), and NOT merely on `sdk is not None`. `_resolve_sdk_root`
-    returns an explicit `--sdk-root` unvalidated, and `_pin_sdk` then silently
-    declines to pin a path that is not a checkout -- so reporting `sdk` there
-    would advertise a checkout that is about to be pinned and is not.
 
     `SdkInfo.from_resolution`, not a raw `SdkInfo(root, tier)`: `_Sdk` carries
     `tier` and `foreign_global_default_for`, which is the shape that
@@ -253,8 +275,6 @@ def _sdk_block(sdk: _Sdk | None) -> SdkInfo | None:
     persisted into `.alp/sdk-path` resolves against the wrong cwd later); this
     field simply reports the same value `data.sdkPinned` does.
     """
-    if sdk is None or not _is_sdk_checkout(sdk.path):
-        return None
     return SdkInfo.from_resolution(sdk.display, sdk)
 
 
@@ -287,7 +307,7 @@ def _emit_error(json_mode: bool, err: InitError, sdk: _Sdk | None = None) -> Non
                 ),
                 [Issue(err.code, "error", err.message)],
                 err.exit_code,
-                sdk=_sdk_block(sdk),
+                sdk=_sdk_block(sdk) if _sdk_reportable(sdk) else None,
             )
         )
     else:
@@ -314,7 +334,7 @@ def _emit_outcome(json_mode: bool, outcome: _Outcome, sdk: _Sdk | None = None) -
                 ),
                 outcome.issues,
                 outcome.exit_code,
-                sdk=_sdk_block(sdk),
+                sdk=_sdk_block(sdk) if _sdk_reportable(sdk) else None,
             )
         )
     elif outcome.preview:
@@ -579,14 +599,19 @@ def _plan_from_template(
 ) -> tuple[str, list[PlannedFile]]:
     template_id = _resolve_template(template)
     sku = som or DEFAULT_SOM_SKU
-    # Checked BEFORE anything is planned: `iot-starter` vendors exactly one SoM
-    # family (its Wi-Fi transport is silicon-validated on that SKU alone), so
-    # any other `--som` must be refused, never quietly rendered against it.
-    if template_id == "iot-starter" and sku != IOT_STARTER_SUPPORTED_SKU:
+    # Checked BEFORE anything is planned. A template whose SDK catalog entry
+    # restricts `supported.som_skus` must refuse every other `--som` here --
+    # never render it against the wrong family tree (silent, `exitCode 0`) and
+    # never let it fall through to `init.template-unreadable` (which blames
+    # the installation for a wrong argument). See TEMPLATE_SUPPORTED_SKUS.
+    supported = TEMPLATE_SUPPORTED_SKUS.get(template_id)
+    if supported is not None and sku not in supported:
+        plural = "s" if len(supported) > 1 else ""
+        allowed = ", ".join(f"'{s}'" for s in supported)
         raise InitError(
             "init.invalid-som",
-            f"Template 'iot-starter' supports only SoM SKU "
-            f"'{IOT_STARTER_SUPPORTED_SKU}'; got '{sku}'.",
+            f"Template '{template_id}' supports only SoM SKU{plural} "
+            f"{allowed}; got '{sku}'.",
             ExitCode.VALIDATION_FAILURE,
         )
     try:
@@ -1202,6 +1227,27 @@ def init(
         # when one was given. Every registered TEMPLATE plans its own
         # board.yaml (tan.core.scaffold), so this can only trip on
         # --from-example.
+        # tan-cli#890: this path retargets `--som` onto the copied board.yaml
+        # without asking the catalog whether the example supports that SKU.
+        # WARNS rather than refuses, for the same reason as the board.yaml
+        # case just below; `tan/core/example_catalog.py` carries the full
+        # reasoning and the "cannot tell means silent" rule.
+        example_som_issue = None
+        if from_example is not None and som is not None and resolved_sdk is not None:
+            supported = unsupported_som(resolved_sdk.path, from_example, som)
+            if supported is not None:
+                example_som_issue = Issue(
+                    "init.example-som-unsupported",
+                    "warning",
+                    f"{subject_label} declares supported.som_skus "
+                    f"{list(supported)} in the SDK scaffold catalog; --som "
+                    f"'{som}' is outside that set, and `alp_project.py --emit "
+                    f"scaffold` refuses the same pair. The files were still "
+                    f"written -- check the scaffolded board.yaml against your "
+                    f"SoM's topology before building, or widen som_skus in "
+                    f"the catalog if the example really does support it.",
+                )
+
         missing_board_yaml_issue = None
         if from_example is not None and not any(f.relative_path == "board.yaml" for f in files):
             missing_board_yaml_issue = Issue(
@@ -1221,6 +1267,8 @@ def init(
             force=force,
             sdk=resolved_sdk,
         )
+        if example_som_issue is not None:
+            outcome.issues.append(example_som_issue)
         if missing_board_yaml_issue is not None:
             outcome.issues.append(missing_board_yaml_issue)
         if divergence_issue is not None:

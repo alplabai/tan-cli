@@ -28,9 +28,23 @@ The setup is the real two-project sequence, not a hand-written pointer file:
 asks all five. Writing the pointer by hand would prove only that the reader
 works; bootstrapping twice proves the state a user actually reaches.
 
-Queried from a SUBdirectory of project A, for the reason that test records:
-a subdirectory carries no `.alp/sdk-path` pin, so it is the one location that
-resolves through `globalDefault` -- the collision this warning exists for.
+**tan-cli#466 update.** `tan bootstrap` now also keys `origin -> sdkPath` into
+`~/.alp/sdk-defaults.json`, and `resolve_sdk_tiered`'s `globalDefault` tier
+consults that registry, by containment, BEFORE the single shared pointer --
+so a caller under project A's OWN registered origin (a subdirectory of
+`proj_a`, which is what this fixture used to query from) now correctly
+resolves A's own checkout and never reaches the foreign-warning path at all.
+That is #466's whole point, and is pinned directly by
+`test_bootstrap_command.test_a_second_projects_relocation_no_longer_repoints_the_first`.
+
+This file's job is the case #466 explicitly leaves in place: a caller NO
+registry entry covers, which still falls through to the legacy
+`~/.alp/sdk-default` pointer and must still disclose whose bootstrap actually
+answered. The query location below (`sub_a`, kept as the historical name to
+minimise this diff) is therefore NOT a subdirectory of `proj_a` any more --
+it is a directory outside every project this fixture ever bootstrapped, so no
+registry entry covers it and resolution falls through to the shared,
+last-writer-wins pointer exactly as it did before #466.
 """
 from __future__ import annotations
 
@@ -107,7 +121,14 @@ def two_projects(tmp_path_factory):
         "precondition unmet: the shared pointer must name B, the last writer"
     )
 
-    sub_a = proj_a / "sub"
+    # tan-cli#466: deliberately NOT `proj_a / "sub"` any more -- that location
+    # is now covered by A's own registry entry and correctly resolves A's own
+    # checkout (proven in `test_bootstrap_command.py`), so it can no longer
+    # reach the foreign-disclosure path this file tests. `unregistered` sits
+    # outside every project this fixture bootstraps, so the registry has no
+    # covering entry and resolution still falls through to the shared,
+    # last-writer-wins `~/.alp/sdk-default` pointer, naming B.
+    sub_a = tmp_path / "unregistered"
     sub_a.mkdir()
     return sub_a, proj_b, proj_b / "alp-workspace" / sdk_b.name, env_extra
 

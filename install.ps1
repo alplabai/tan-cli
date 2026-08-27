@@ -147,26 +147,40 @@ if ($Version -eq "latest") {
 }
 $sumsUrl = "$baseUrl/$Version/checksums.txt"
 
-# tan-cli#490 round 9: mirror install.sh's `install_dir_created_for_retry` --
-# `New-Item -ItemType Directory -Force` below is the ps1 equivalent of
-# `mkdir -p`, and creates $Dir AND any missing PARENT directories in one call.
-# A refused install (the health-check failure branch below) must not leave
-# behind anything this line created that pre-fix would never have existed --
-# so the first ancestor that does not exist yet is recorded here. Removing
-# just THAT one, recursively, removes everything New-Item is about to create
-# and nothing that already existed, the same "first new ancestor" trick
-# install.sh's own retry gate now uses.
+# tan-cli#803: `$Dir` itself is NOT created here any more. It used to be
+# created right at this point, before checksums.txt was even fetched -- so
+# EVERY refusal below (fetch failure, no asset for this platform, download
+# failure, sha256 mismatch, bad archive layout, the health check) left $Dir
+# (and every parent it created) orphaned on disk, even though nothing had
+# been downloaded yet. install.sh already gets this right -- its own
+# "`mkdir -p "$INSTALL_DIR"` still runs later, but only once an install is
+# actually going ahead" comment -- and this script needs the same ordering:
+# `New-Item -ItemType Directory -Force -Path $Dir` (the ps1 equivalent of
+# `mkdir -p`) now runs only once the health check below has PASSED, right
+# before the commit section.
+#
+# $dirFirstNewAncestor itself is computed inside the noexec-retry block below,
+# immediately before the `New-Item` call it guards -- not here, up front.
+# install.sh's own `install_dir_first_new_ancestor` walk is computed the same
+# way, right beside its `mkdir -p "$INSTALL_DIR"`, not at script start; this
+# mirrors that. Computing it right before the one place it is ever acted on
+# reflects exactly the state "new" needs to mean -- whatever does not exist
+# yet at THAT point, not minutes earlier before the download even ran, which
+# would needlessly widen the window a concurrent process could create part of
+# the chain and have this run's cleanup remove it.
+#
+# $dirCreatedForRetry is set once, only if the noexec-retry block below is
+# the one that ATTEMPTS to create $Dir itself (see there -- set just before
+# the `New-Item` call, not after it returns, so a partial chain left behind
+# by a THROW partway through -Force's own directory walk is still cleaned
+# up) -- gates the health-check-failure cleanup further down so it never
+# removes a $Dir a PREVIOUS install already left in place.
+$dirCreatedForRetry = $false
+# Declared $null here only because Set-StrictMode -Version Latest throws on a
+# never-assigned variable if the noexec-retry block below never runs at all;
+# the WALK that gives it a real value happens down there, not here -- see the
+# comment above.
 $dirFirstNewAncestor = $null
-if (-not (Test-Path -LiteralPath $Dir)) {
-	$ancestor = $Dir
-	while (-not (Test-Path -LiteralPath $ancestor)) {
-		$dirFirstNewAncestor = $ancestor
-		$parent = Split-Path -Path $ancestor -Parent
-		if (-not $parent -or $parent -eq $ancestor) { break }
-		$ancestor = $parent
-	}
-}
-New-Item -ItemType Directory -Force -Path $Dir | Out-Null
 $LibDir = Join-Path $Dir "tan-cli-lib"
 
 # Download to TEMP, never straight into $Dir. Writing into the destination
@@ -429,32 +443,74 @@ try {
 	$retried = $false
 	$retryStageErr = $null
 	if ($verifyExit -ne 0 -and (Test-AccessDeniedSignature $verifyWin32Code)) {
-		$retryDir = Join-Path $Dir (".tan-install-retry." + [Guid]::NewGuid().ToString("N"))
-		try {
-			New-Item -ItemType Directory -Path $retryDir | Out-Null
-			$retryExe = Join-Path $retryDir (Split-Path -Leaf $stagedExe)
-			Copy-Item -LiteralPath $stagedExe -Destination $retryExe -Force
-			if ($layout -eq "archive") {
-				# The onedir freeze needs its whole runtime tree beside the exe
-				# to even start, not just the exe file by itself.
-				Copy-Item -LiteralPath (Join-Path $stage "tan\_internal") -Destination (Join-Path $retryDir "_internal") -Recurse -Force
+		# tan-cli#803: $Dir's real creation is now deferred to the commit
+		# section below (see the comment near $dirFirstNewAncestor), so unlike
+		# before, $Dir usually does NOT exist yet at this point. The retry
+		# needs a real directory under $Dir to stage a copy into -- create
+		# $Dir itself first, but ONLY when it does not already exist, and
+		# remember that THIS run is the one that created it. That mirrors
+		# install.sh's own `install_dir_created_for_retry` (tan-cli#490 round
+		# 9): if the health check still fails after retrying, the cleanup
+		# below must undo only a $Dir this run created, never one a previous
+		# install already left in place.
+		if (-not (Test-Path -LiteralPath $Dir)) {
+			# Walked HERE, immediately before the `New-Item` it guards -- not
+			# up front at script start -- so "new" means "does not exist right
+			# now, about to be created", mirroring install.sh's own
+			# `install_dir_first_new_ancestor` walk beside its `mkdir -p`.
+			$ancestor = $Dir
+			while (-not (Test-Path -LiteralPath $ancestor)) {
+				$dirFirstNewAncestor = $ancestor
+				$parent = Split-Path -Path $ancestor -Parent
+				if (-not $parent -or $parent -eq $ancestor) { break }
+				$ancestor = $parent
 			}
-			Write-Host "install.ps1: staged binary would not execute (Access is denied) -- a security policy on this host likely blocks running from its staging location. Retrying staged inside $Dir..."
-			$retried = $true
-			$check = Invoke-HealthCheck $retryExe
-			$verifyOut = $check.Out
-			$verifyExit = $check.Exit
-			$verifyWin32Code = $check.Win32ErrorCode
-		} catch {
-			# $Dir could not be used for the retry -- capture the REAL reason
-			# (mirrors install.sh's retry_stage_err, tan-cli#490: discarding
-			# it is exactly the misattributed-diagnostic class #490 is
-			# about) rather than guessing a cause the code never measured;
-			# fall through to the failure branch below with the ORIGINAL
-			# %TEMP% result.
-			$retryStageErr = $_.Exception.Message
-		} finally {
-			Remove-Item -LiteralPath $retryDir -Recurse -Force -ErrorAction SilentlyContinue
+			# Set BEFORE the New-Item call, not after it returns: -Force
+			# creates the whole missing ancestor chain in one call, and if it
+			# creates PART of that chain and then throws partway through (a
+			# path over MAX_PATH, ENOSPC, an ACL denying create midway), the
+			# chain up to that point is left on disk exactly like tan-cli#803's
+			# original defect. Gating the cleanup walk below on a flag set
+			# only after a full success would miss that partial case; the
+			# walk itself is already bounded to empty, non-recursive deletes
+			# up to $dirFirstNewAncestor, so marking this run as the creator
+			# before attempting the call is safe even when nothing was
+			# actually created.
+			$dirCreatedForRetry = $true
+			try {
+				New-Item -ItemType Directory -Force -Path $Dir -ErrorAction Stop | Out-Null
+			} catch {
+				$retryStageErr = $_.Exception.Message
+			}
+		}
+		if (Test-Path -LiteralPath $Dir) {
+			$retryDir = Join-Path $Dir (".tan-install-retry." + [Guid]::NewGuid().ToString("N"))
+			try {
+				New-Item -ItemType Directory -Path $retryDir | Out-Null
+				$retryExe = Join-Path $retryDir (Split-Path -Leaf $stagedExe)
+				Copy-Item -LiteralPath $stagedExe -Destination $retryExe -Force
+				if ($layout -eq "archive") {
+					# The onedir freeze needs its whole runtime tree beside the exe
+					# to even start, not just the exe file by itself.
+					Copy-Item -LiteralPath (Join-Path $stage "tan\_internal") -Destination (Join-Path $retryDir "_internal") -Recurse -Force
+				}
+				Write-Host "install.ps1: staged binary would not execute (Access is denied) -- a security policy on this host likely blocks running from its staging location. Retrying staged inside $Dir..."
+				$retried = $true
+				$check = Invoke-HealthCheck $retryExe
+				$verifyOut = $check.Out
+				$verifyExit = $check.Exit
+				$verifyWin32Code = $check.Win32ErrorCode
+			} catch {
+				# $Dir could not be used for the retry -- capture the REAL reason
+				# (mirrors install.sh's retry_stage_err, tan-cli#490: discarding
+				# it is exactly the misattributed-diagnostic class #490 is
+				# about) rather than guessing a cause the code never measured;
+				# fall through to the failure branch below with the ORIGINAL
+				# %TEMP% result.
+				$retryStageErr = $_.Exception.Message
+			} finally {
+				Remove-Item -LiteralPath $retryDir -Recurse -Force -ErrorAction SilentlyContinue
+			}
 		}
 	}
 
@@ -467,10 +523,25 @@ try {
 		} else {
 			Write-Host "install.ps1: no previous installation existed, so there is nothing to fall back to."
 		}
-		# tan-cli#490 round 9: a refused install must not leave an orphaned $Dir
-		# (or its freshly-created parents) behind -- see the New-Item comment
-		# above. Only reached when $dirFirstNewAncestor was actually recorded,
-		# i.e. $Dir did not exist before this run.
+		# tan-cli#490 round 9 / tan-cli#803: a refused install must not leave an
+		# orphaned $Dir (or its freshly-created parents) behind. Since $Dir's
+		# real creation is now deferred past this whole health-check phase
+		# (see the comment near $dirFirstNewAncestor above), the ONLY way this
+		# run could have created anything under $Dir before reaching here is
+		# the noexec-retry block just above -- gated on $dirCreatedForRetry so
+		# this never removes a $Dir a PREVIOUS install already left in place.
+		# $dirFirstNewAncestor is the walk's TERMINATION BOUND, not a redundant
+		# truthiness check, so the gate below keeps `-and $dirFirstNewAncestor`.
+		# It is assigned in the same `if (-not (Test-Path $Dir))` branch, but by
+		# a SECOND Test-Path (the `while (-not (Test-Path $ancestor))` loop) --
+		# and the two probes can disagree: a concurrent installer or an MDM push
+		# creating $Dir in between, or a UNC/DFS path whose first probe fails
+		# transiently, leaves the while body unexecuted and $dirFirstNewAncestor
+		# $null while $dirCreatedForRetry is still set. With a $null bound the
+		# `-eq $dirFirstNewAncestor` break never fires ($null -eq a path is
+		# $False), so the walk would climb past $Dir into %LOCALAPPDATA%\Programs,
+		# %LOCALAPPDATA%, C:\Users\<user>, C:\Users, C:\ -- deleting each that is
+		# empty. Keep both conjuncts.
 		#
 		# tan-cli#490 review, round 10: `-Recurse` here was an UNGUARDED
 		# recursive delete of a path that, with the default $Dir
@@ -487,7 +558,7 @@ try {
 		# that already existed), which is exactly the wanted semantics --
 		# remove only what this run created, and stop the moment something
 		# else is in the way.
-		if ($dirFirstNewAncestor) {
+		if ($dirCreatedForRetry -and $dirFirstNewAncestor) {
 			$dirWalkRemove = $Dir
 			while ($true) {
 				try { [System.IO.Directory]::Delete($dirWalkRemove, $false) } catch { }
@@ -509,6 +580,18 @@ try {
 		}
 		exit 1
 	}
+
+	# tan-cli#803: the REAL, unconditional creation of $Dir -- deferred all the
+	# way from immediately after argument parsing (see the $dirFirstNewAncestor
+	# comment near the top) to HERE, now that the health check just above has
+	# actually PASSED and an install is genuinely going ahead. Every refusal
+	# above -- checksums fetch, asset selection, download, sha256 mismatch, bad
+	# archive layout, and the health check itself -- now exits before this line
+	# ever runs, so none of them can leave $Dir (or any parent it would have
+	# created) behind any more. -Force makes this the ps1 equivalent of
+	# `mkdir -p`, so it is a harmless no-op if the noexec-retry block above
+	# already created $Dir (or it already existed from a previous install).
+	New-Item -ItemType Directory -Force -Path $Dir | Out-Null
 
 	# -------------------------------------------------------------------------
 	# Commit: back up whatever is already at $destCmd/$destExe/$LibDir, swap the

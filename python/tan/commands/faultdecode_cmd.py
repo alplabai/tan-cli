@@ -62,6 +62,7 @@ from tan.core.faultdecode import (
     report_to_json,
     render_human,
 )
+from tan.core.inert import NOT_APPLICABLE, inert_help
 from tan.env import no_color_requested
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -399,11 +400,25 @@ def faultdecode(
     ),
     as_json: bool = typer.Option(False, "--json", help="Emit a machine-readable JSON report."),
     no_color: bool = typer.Option(False, "--no-color", help="Disable ANSI colours."),
-    project: str = typer.Option(  # accepted, not read; see below
-        None, "--project", metavar="PATH", help="Project root (unused: faultdecode is HW-free)."
+    project: str = typer.Option(
+        None,
+        "--project",
+        metavar="PATH",
+        help=inert_help(
+            "Project root. Not read: faultdecode is pure ARMv8-M register "
+            "arithmetic and opens no project.",
+            NOT_APPLICABLE,
+        ),
     ),
-    sdk_root: str = typer.Option(  # accepted, not read; see below
-        None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root (unused; see below)."
+    sdk_root: str = typer.Option(
+        None,
+        "--sdk-root",
+        metavar="PATH",
+        help=inert_help(
+            "alp-sdk checkout root. Not read: faultdecode is pure ARMv8-M "
+            "register arithmetic and drives no alp-sdk checkout.",
+            NOT_APPLICABLE,
+        ),
     ),
     output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
     board_yaml: str = typer.Option(None, "--board-yaml", hidden=True),

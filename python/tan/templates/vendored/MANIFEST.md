@@ -95,7 +95,39 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`94378a05`**
+- **Current vendor point (all templates):** **`eb96112b`**
+  (`eb96112ba7d1cc3b4084c985962ea31772177d74`, alp-sdk — the
+  `release/v0.16.0-merge` merge, tagged `v0.16.0` the same day, 2026-08-23) —
+  tan-cli#891's pin bump. NOT a planner audit: the vendored fixtures and the
+  checkout `parity.yml`'s seam1 job compares against have to name the same
+  commit, and `contract/fixtures/toolchains/toolchains.json` was re-vendored
+  from `v0.16.0` first (tan-cli#888), which left `PINNED_SDK_TAG` behind it.
+  **Seven** files moved, all `README.md`: `diagnostics`/E1M-AEN801,
+  `diagnostics`/E1M-V2N101, `iot`/E1M-AEN801, `minimal`/E1M-AEN801,
+  `minimal`/E1M-V2N101, `sensor`/E1M-AEN801 and `sensor`/E1M-V2N101. The only
+  change in each is the doc-link ref: `blob/main/` → `blob/v0.16.0/` (file
+  links) and `tree/main/` → `tree/v0.16.0/` (directory links) — 10 of the 40
+  changed links across these seven files are `tree/`, not `blob/`.
+
+  **This is exactly the move the `94378a05` entry below predicted, arriving
+  the day it said it would.** `eb96112b` is itself tagged `v0.16.0`, so
+  alp-sdk#1535's `_tag_resolves()` guard in `_docs_ref()` now finds the tag
+  and renders the version link instead of degrading to `main` — the first
+  vendor point where that guard actually fires with a resolving tag. `tan/
+  planner/template.py` carries the same guard (ported at tan-cli#846), so
+  tan's own emit agrees and no code moved, only the vendored bytes.
+
+  `iot`/E1M-AEN801's `CMakeLists.txt` still carries the standing
+  `DELIBERATE_EDITS` entry (tan-cli#379's `list(PREPEND EXTRA_CONF_FILE
+  ...)`) and was NOT re-vendored. Verified at `eb96112b`, against a checkout
+  with tags fetched: `scaffold_byte_parity.py` **9/9 PASS** (rc 0). The same
+  commit without tags reproduces 7 FAIL / 2 PASS every time — `_docs_ref()`'s
+  `_tag_resolves()` guard reads only the checkout's local refs, never the
+  network — which is what this table's own 9/9 claims depend on: `parity.yml`
+  and `ci.yml` now clone alp-sdk with `fetch-tags: true` (tan-cli#891), so a
+  tagged clone is what CI actually measures, not a hand-run artefact.
+
+- **Prior vendor point:** **`94378a05`**
   (`94378a056549c7377d714a7f2b68878aca8fea01`, alp-sdk `dev`) — tan-cli#846's
   pin bump, which moves `parity.yml`'s `PINNED_SDK_TAG`, `ci.yml`'s
   `sdk_parity` `ref:` and `PINNED_SDK_COMMIT` past alp-sdk#1535. **Seven**
@@ -116,9 +148,8 @@ from an un-revendored SDK change.
   `tan/planner/template.py`, so tan's own emit agrees. The vendored bytes here
   follow the emit, not the other way round.
 
-  Expect these seven to move again — back to `v0.16.0` — the day alp-sdk cuts
-  that tag and the pin moves past it. `scaffold_byte_parity.py` is what will
-  say so; that is the gate working, not a regression.
+  This DID move again — back to `v0.16.0` — the day alp-sdk cut that tag; see
+  the `eb96112b` entry above.
 
   `iot`/E1M-AEN801's `CMakeLists.txt` still carries the standing
   `DELIBERATE_EDITS` entry (tan-cli#379's `list(PREPEND EXTRA_CONF_FILE
@@ -126,7 +157,7 @@ from an un-revendored SDK change.
   `scaffold_byte_parity.py` **9/9 PASS** (rc 0); 7 FAIL / 2 PASS before the
   re-vendor.
 
-- **Prior vendor point:** **`d00dbdc1`**
+- **Vendor point before `94378a05`:** **`d00dbdc1`**
   (`d00dbdc124491c89f68f404cd7ac9d26127f038f`, alp-sdk `dev`) — tan-cli#560's
   re-sync, which moves `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT` past
   alp-sdk#1394/#1399 (`c07254b2`) and #1400 (`739e998b`), both landed in the
@@ -199,8 +230,10 @@ from an un-revendored SDK change.
   "v0\.1[45]\.0"` returns 0). No schema, core, peripheral or `board.yaml`
   content changed — in particular alp-sdk#1068 (`CONFIG_USE_DT_CODE_PARTITION`
   in the AEN board `_defconfig`) touches none of `--emit scaffold`'s output;
-  `edge-ai` (whose README carries no version-pinned links) diffed clean at 0/8
-  files, confirming it. No `PINNED_SDK_COMMIT`/`PINNED_HASHES` re-audit was
+  `edge-ai` (whose README carried no version-pinned links at this vendor
+  point — since superseded, see the v0.14.0 bullet below and entry 4 under
+  "Deliberate edits on top of the emit") diffed clean at 0/8 files, confirming
+  it. No `PINNED_SDK_COMMIT`/`PINNED_HASHES` re-audit was
   needed either: `scripts/alp_orchestrate/` is byte-identical between
   `0f3cefbe` (the planner's last audit point) and this tag.
   - Re-vendored by re-running the live emit through
@@ -238,36 +271,37 @@ from an un-revendored SDK change.
     hand-edit that happens to match today is a copy that drifts tomorrow;
     the point of this tree is that it is generated.
 - Repo: `alplabai/alp-sdk`
-- Ref: `main` — the ref every shipped doc link in this tree pins, and the
+- Ref: `v0.16.0` — the ref every shipped doc link in this tree pins, and the
   one `tests/core/test_template_integrity.py` reads off THIS line to check
   them against. It is the emit's OWN rendered ref rather than a hand-edit:
   the emit renders the link ref from the SDK's `VERSION` (dropping any
   pre-release suffix), so **tan-cli#384's hand-edit is retired and the seven
   `DELIBERATE_EDITS` entries with it.** Links resolve as emitted.
 
-  It is `main` rather than a version tag as of tan-cli#846's pin bump, and
-  that is the emit doing its job, not a lost pin. alp-sdk#1535 added
-  `_tag_resolves()` to `_docs_ref()`: the declared `v<version>` has to RESOLVE
-  before a scaffold pins to it. `94378a05` declares `version: 0.16.0` /
-  `status: released` while alp-sdk's tag list is `v0.14.0`, `v0.15.0`,
-  `v0.15.0-rc1`, `v0.16.0-rc1` and no `v0.16.0`, so the emit degrades to
-  `main` — a live ref — instead of rendering 40 links that 404. This line
-  goes back to a `v<version>` the moment alp-sdk cuts that tag and the pin
-  moves past it; `scaffold_byte_parity.py` is what will say so.
-- Commit: **`94378a05`** (alp-sdk `dev`) — the checkout the emit was RUN
-  against, matching the "Current vendor point" bullet above, which is now
-  asserted by `python/tests/core/test_template_integrity.py` rather than left
-  to agree by hand.
+  It moved off `main` (tan-cli#846's pin bump) to `v0.16.0` (tan-cli#891) the
+  day alp-sdk actually cut that tag — the emit doing its job, not a lost pin.
+  alp-sdk#1535 added `_tag_resolves()` to `_docs_ref()`: the declared
+  `v<version>` has to RESOLVE before a scaffold pins to it. `eb96112b` is
+  itself tagged `v0.16.0`, so the guard finds it and renders the version link
+  instead of degrading to `main`. See the `eb96112b` bullet above for the
+  full re-vendor.
+- Commit: **`eb96112b`** (alp-sdk `v0.16.0`, full sha
+  `eb96112ba7d1cc3b4084c985962ea31772177d74`) — the checkout the emit was RUN
+  against, matching the "Current vendor point" bullet above, asserted equal
+  to it by
+  `python/tests/core/test_template_integrity.py::
+  test_the_manifest_states_one_vendor_point_not_two`.
 
-  This line used to say `f30f4d4b` and assert it was "the same commit
-  `parity.yml`'s `PINNED_SDK_TAG` now names". Both halves went stale, and in
-  that order. tan-cli#582 wrote it on 2026-08-09, setting the vendor point,
-  this line and the pin all to `f30f4d4b`. The IDENTITY broke the same day —
-  tan-cli#593 moved the pin to `ccd34f06` 21h44m later — and the COMMIT went
-  stale on 2026-08-13, when tan-cli#714 moved the tree to `d00dbdc1` and left
-  this line behind. tan-cli#851 then re-vendored onto `94378a05` and demoted
-  `d00dbdc1` to history, without this line moving either time. Nothing read
-  it, so nothing could say.
+  This line used to say `94378a05` (tan-cli#846) and, before that, `f30f4d4b`
+  and assert it was "the same commit `parity.yml`'s `PINNED_SDK_TAG` now
+  names". Both halves went stale, and in that order. tan-cli#582 wrote it on
+  2026-08-09, setting the vendor point, this line and the pin all to
+  `f30f4d4b`. The IDENTITY broke the same day — tan-cli#593 moved the pin to
+  `ccd34f06` 21h44m later — and the COMMIT went stale on 2026-08-13, when
+  tan-cli#714 moved the tree to `d00dbdc1` and left this line behind.
+  tan-cli#851 then re-vendored onto `94378a05` and demoted `d00dbdc1` to
+  history, without this line moving either time. Nothing read it, so nothing
+  could say.
 
   The two refs are not independent by design: #714 and #851 each set the
   vendor point and the pin together, so they are equal at capture and diverge
@@ -284,8 +318,10 @@ from an un-revendored SDK change.
   for both SKUs, plus `iot`/E1M-AEN801), and NOTHING else: all 40 changed
   lines differ only by the doc-version link `blob/v0.13.0/` → `blob/v0.14.0/`,
   verified line-for-line. No schema, core, peripheral or `board.yaml` content
-  changed. `edge-ai` is untouched for both SKUs because its README carries no
-  version-pinned links at all.
+  changed. `edge-ai` was untouched for both SKUs at this vendor point because
+  its README carried no version-pinned links at all — no longer true: the
+  current vendor point's `## Model`/`## Tests` rewrite (entry 4 under
+  "Deliberate edits on top of the emit") adds four, pinned at `v0.16.0`.
   - Re-vendored by re-running the live emit through
     `tests/parity/scaffold_byte_parity.py`'s OWN `emit_live_scaffold`, so the
     bytes written are by construction the bytes that gate compares against —
@@ -311,8 +347,14 @@ from an un-revendored SDK change.
     mentions `tan` (measured). The `board.yaml` comment is the smaller half.
     Fixing either is an alp-sdk change plus a re-vendor — a hand-edit here is
     possible via `scaffold_byte_parity.py`'s `DELIBERATE_EDITS`, but it books
-    a standing divergence somebody unwinds when upstream lands. Tracked by
-    tan-cli#821.
+    a standing divergence somebody unwinds when upstream lands. This is (c2)
+    of tan-cli#821, which closes without fixing it (the PR fixes (a) only);
+    filed upstream as alp-sdk#1689 (not yet landed — no
+    `DELIBERATE_EDITS` entry here for it, per the same reasoning entry 4 in
+    "Deliberate edits on top of the emit" gives for `edge-ai`'s pointers: this
+    is the smaller half of a wider `west`-vs-`tan` gap every README already
+    shares, not a defect isolated enough to book a standing divergence for
+    on its own).
 - Previous: **v0.13.0 (`93ef5726`)** — `minimal` was re-vendored at this commit
   (only its `README.md` doc-version link changed, `v0.11.1` -> `v0.13.0`; the
   scaffold content itself is unchanged since the `a0849e10` vendor point
@@ -344,13 +386,25 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **one** live entry (the
-`iot` CMakeLists edit). tan-cli#384's seven `README.md` doc-link entries are
-NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0` tag
-(see "Current vendor point" above); listed here only as history, not as a
-current exception. tan-cli#501's four `sensor`/`diagnostics` CMakeLists edits
-were REVERTED (see entry 3 below) — the theory behind them measured false, so
-those four files carry no deliberate edit at all now.
+The `DELIBERATE_EDITS` table below currently carries **twenty** live entries
+(counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS` dict, not by
+hand): the `iot` CMakeLists edit, six `edge-ai` entries for the
+`## Model`/`## Tests` pointers (tan-cli#821(a), see entry 4 below) — two
+`README.md` entries plus two entries PER `src/main.c` (one per comment
+rewrite, declared separately so healing one comment without the other still
+reds; see `scaffold_byte_parity.py`'s `DELIBERATE_EDITS` docstring) — two more
+`edge-ai`/`E1M-AEN801` entries for the DEEPX retarget sentence (tan-cli#814,
+see entries 5 and 6 below), four more for `diagnostics`/`sensor`'s bare
+cross-repo pointers (tan-cli#912, see entry 7 below) — two SKUs each, one
+`README.md` entry per SKU — and six more for
+`diagnostics`/`E1M-V2N101`'s Alif/AEN801-shaped `src/main.c`/`README.md`
+bytes (tan-cli#932, see entry 8 below). tan-cli#384's seven `README.md`
+doc-link entries
+are NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0`
+tag (see "Current vendor point" above); listed here only as history, not as
+a current exception. tan-cli#501's four `sensor`/`diagnostics` CMakeLists
+edits were REVERTED (see entry 3 below) — the theory behind them measured
+false, so those four files carry no deliberate edit at all now.
 
 **Each is DECLARED to that gate, in `scaffold_byte_parity.py`'s
 `DELIBERATE_EDITS`, and the declaration is strict in both directions.** An
@@ -408,6 +462,147 @@ strictness exists to catch.
    plain `list(APPEND …)`, which is what `--emit scaffold` produces unedited
    for these four files, so they carry no deliberate edit anymore and this
    entry is not live.
+4. **`edge-ai`'s `## Model`/`## Tests` README sections and matching
+   `src/main.c` comments, both SKUs (tan-cli#821(a)).** The emit points a
+   customer at `models/README.md` and `twister ... -T tests/unit/cold_chain`
+   — real paths only in the alp-sdk checkout the text was captured from,
+   never emitted into any scaffolded project (`_vendored_files` in
+   `tan/core/scaffold.py` reads nothing outside `vendored/edge-ai/<sku>/`).
+   Both referents are a bare inline code span / bare twister argument rather
+   than a markdown link, so the emit's own doc-link rewriter (which only
+   rewrites `[text](https://github.com/alplabai/alp-sdk/blob/<ref>/...)`
+   links) never touches them, same as most cross-repo references this tree
+   carries, which ARE real markdown links the rewriter already covers. Not
+   the only bare ones, though: `diagnostics`'s `README.md` names a bare
+   `scripts/program_eeprom.py` and `sensor`'s a bare
+   `examples/peripheral-io/i2c-scanner`, the same defect class, on both
+   SKUs, shipping to every `tan init` of those two templates. Tracked
+   separately as tan-cli#912 and fixed there — see entry 7 below, not here
+   (this entry is (a) of tan-cli#821 only). Rewritten to a
+   real link (`README.md`, pinned at `v0.16.0` per the current vendor point's
+   `- Ref:`) or a named alp-sdk path (`src/main.c`, a C comment — no markdown
+   rewriter applies there either way), each noting the referent is not part
+   of this scaffolded project. The new `README.md` link is version-pinned
+   like every other cross-repo link this tree carries, so `edge-ai` now
+   COUPLES to the tree's own `- Ref:` where before it carried zero
+   version-pinned links at all (see `MANIFEST.md`'s v0.14.0 vendor-point
+   bullet above, now corrected). MEASURED: bumping `- Ref:` alone to
+   `v0.17.0` (leaving the vendored bytes at `v0.16.0`) reds
+   `test_every_alp_sdk_link_pins_the_ref_the_tree_is_vendored_from[edge-ai-starter::E1M-AEN801]`
+   and `[::E1M-V2N101]` in `python/tests/core/test_template_integrity.py`
+   (9 failed, 2 passed, where a clean tree is 11/11) exactly like the seven
+   READMEs that already carried links — so a re-vendor that updates one half
+   and not the other is caught, not silent. This is the same class of
+   standing exception as entry 2 above, not a new mechanism: the emit's own
+   output is wrong for a customer, and the real fix — turning the two bare
+   referents into real alp-sdk markdown links so the rewriter and
+   `test_template_integrity.py`'s ref-consistency check cover them going
+   forward — lives in alp-sdk's `examples/ai/cold-chain-monitor/README.md`
+   and `src/main.c`, not here. Filed upstream as alp-sdk#1688; this entry
+   retires the moment that lands and this tree is re-vendored.
+5. **`edge-ai`/`E1M-AEN801`'s `README.md`: the DEEPX DX-M1 retarget sentence
+   (tan-cli#814).** The emit says "Flip `som.sku` in `board.yaml` to
+   `E1M-V2M101` for the DEEPX DX-M1 path" — correct on the `E1M-V2N101`
+   sibling (V2N101/V2M101 share one PCB, so every other field the flip
+   leaves untouched already matches), but wrong here: `E1M-AEN801`'s
+   `board.yaml` pins `preset: e1m-evk` (which `metadata/boards/e1m-evk.yaml`
+   hosts only `alif-ensemble`/`nxp-imx9`, not V2M101's
+   `renesas-rzv2n-deepx`), plus Alif-shaped `cores:`/`pins:`. MEASURED against
+   `v0.16.0-rc1` and re-measured against the GA `v0.16.0` tag (identical
+   result): performing exactly the documented edit and nothing else,
+   `tan validate` refuses on ALP-B007 (board/family mismatch) -- and keeps
+   refusing as each message is fixed forward, through unknown `cores:` ids,
+   a `libraries:` entry scoped to a core the flip left undeclared, a `pins:`
+   route absent from the resolved board, and a pad macro that does not match
+   the resolved pad. No count is pinned here on purpose: an earlier revision
+   of this entry said "three times in a row" and a re-measurement found five,
+   because the cascade depends on how far the customer patches forward. The
+   load-bearing fact is that it does not terminate in a working project, not
+   how many messages it takes. Rewritten to tell the customer to re-scaffold
+   (`tan init --template edge-ai-starter --som E1M-V2M101`) instead of
+   editing `som.sku` in place. Fix belongs upstream, in alp-sdk's
+   `examples/ai/cold-chain-monitor/README.md`; declared here pending that fix
+   and a re-vendor.
+6. **`edge-ai`/`E1M-AEN801`'s `board.yaml`: the comment reinforcing the same
+   sentence (tan-cli#814).** "Same source targets the V2N DEEPX path when
+   som.sku is flipped" is the comment-form of entry 5's defect, one file
+   over. Reworded to point at the re-scaffold instead.
+7. **`diagnostics`'s README `program_eeprom.py` bullet and `sensor`'s README
+   `i2c-scanner` bullet, both SKUs (tan-cli#912).** Entry 4 above named these
+   two as the same defect class as `edge-ai`'s bare pointers, tracked
+   separately (same `- Ref:` coupling as entry 4 — no new coupling created;
+   both trees already carried v0.16.0-pinned links): `diagnostics`'s
+   Troubleshooting section names a bare `scripts/program_eeprom.py`, and
+   `sensor`'s names a bare `examples/peripheral-io/i2c-scanner` in one bullet
+   (the SAME README already carries two real markdown links to that identical
+   referent elsewhere — this is the only bare instance in this README, not a
+   novel shape; the wider `sensor` scaffold still ships several more bare
+   `i2c-scanner` referents outside this README — `src/main.c`, `board.yaml`,
+   `testcase.yaml` — out of scope for this entry and tracked upstream as part
+   of extending alp-sdk#1705). Both scripts/examples are real in the alp-sdk
+   checkout the text was captured from, never emitted into any scaffolded
+   project (`_vendored_files` in `tan/core/scaffold.py` reaches nothing
+   outside `vendored/<template>/<sku>/`). Each is a bare inline code span, so
+   the emit's own doc-link rewriter never touches it, same as entry 4's
+   `edge-ai` pair. Byte-identical between the two SKUs for `sensor` (only the
+   `west build`/`west flash` block elsewhere in the README differs by SKU);
+   for `diagnostics` the two SKUs also differ in the "Real hardware" heading
+   and the `[selftest] SoM identity` line elsewhere in the README, in
+   addition to the build/flash block — none of that touches the matched
+   region here, so each template's two SKU entries still share one
+   `un_edit`. Rewritten to a real link, pinned at `v0.16.0` per the current
+   vendor point's `- Ref:`, each noting the referent is not part of this
+   scaffolded project; verified the replacement text holds with no alp-sdk
+   checkout present at all (`alplabai/alp-sdk` is public, `isPrivate: false`,
+   and both blob/tree URLs return HTTP 200 at this ref — checked directly,
+   not assumed, after a prior PR in this same series asserted the opposite of
+   a link and was corrected in review). Fix belongs upstream, in alp-sdk's
+   `examples/bringup/board-selftest/README.md` and
+   `examples/peripheral-io/i2c-master/README.md` (the latter's `src/main.c`,
+   `board.yaml`, and `testcase.yaml` too, per the extended alp-sdk#1705);
+   filed as alp-sdk#1705, and this entry retires the moment that lands and
+   this tree is re-vendored.
+8. **`diagnostics`/`E1M-V2N101`'s `src/main.c` and `README.md`: Alif SoC
+   identity + an AEN801-shaped SoM SKU/serial on a Renesas RZ/V2N scaffold
+   (tan-cli#932).** The emit's per-SKU substitution never reaches
+   `src/main.c` at all — it is byte-identical to `E1M-AEN801`'s, still
+   naming that Alif module in its own "what success looks like" comment —
+   and reaches `README.md` only on the SoM SKU line, leaving the serial
+   beside it and both `SoC identity:` lines at their AEN801/Alif values. A
+   customer running the selftest on real V2N101 hardware sees output that
+   contradicts what the scaffold told them to expect, and the natural
+   reading of that mismatch is "my board failed", not "the README is
+   wrong". Six entries, not one: the SoM SKU fix in `src/main.c` (its own
+   entry per occurrence — the header comment and the sample-output line are
+   independent locations), a placeholder-serial fix shared by both files
+   (one entry per file, since `edit_id` keys on `path`), and a SoC-identity
+   fix shared by both files (`README.md`'s carries two occurrences of the
+   same wrong token, undone by one `.replace()` call same as entry 1's
+   `un_edit_doc_link_ref`). The SoC identity string is not hand-written to
+   match the Alif shape: it is `renesas:rzv2n:n44`,
+   `metadata/socs/renesas/rzv2n/n44.json`'s own `ref` field (what
+   `scripts/gen_soc_caps.py` bakes into `ALP_SOC_REF_STR`) and the same
+   value `metadata/e1m_modules/E1M-V2N101.yaml`'s `silicon:` key names for
+   this SKU — `n44`, not the `n48gbg` this same README's own (correct,
+   untouched) `west build -b alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33`
+   line names two lines below it, because that is only the
+   `zephyr_soc_variant` Zephyr's own Kconfig/DT layer references in place of
+   the SoC json's `ref` (the SoC json documents the n44/n48 delta as
+   GPU/ISP/crypto fusing only, devicetree-identical for the peripherals this
+   SDK targets) — not a contradiction, two different identifiers for the
+   same silicon. The serial is not a plausible-looking invented value in
+   AEN801's shape either (e.g. `V2N0000123`, which would just repeat the
+   same mistake with a different prefix): alp-sdk's own
+   `scripts/program_eeprom.py --serial` help text uses a completely
+   different shape (`2026W19-0001`), proving `AEN0000123` was never a
+   schema-driven format, just this one example's flavour text — so the fix
+   reuses `<factory-serial>`, the README's own angle-bracket placeholder
+   convention already sitting two lines above it (`west flash --host
+   <board-ip>`), obviously a placeholder rather than a serial a customer
+   might mistake for real. Fix belongs upstream, in alp-sdk's
+   `examples/bringup/board-selftest/src/main.c` and `README.md`, whose
+   per-SKU substitution machinery is what needs to reach these tokens;
+   declared here pending that fix and a re-vendor.
 
 ## Template x SKU matrix vendored
 
@@ -418,6 +613,7 @@ strictness exists to catch.
 | `edge-ai-starter` | `edge-ai` | `E1M-AEN801`, `E1M-V2N101` | `examples/ai/cold-chain-monitor` | 8 |
 | `board-diagnostics` | `diagnostics` | `E1M-AEN801`, `E1M-V2N101` | `examples/bringup/board-selftest` | 8 |
 | `iot-starter` | `iot` | `E1M-AEN801` only (`status: preview`) | `examples/connectivity/mqtt-telemetry` | 7 |
+| `multicore-mailbox` | `multicore-mailbox` | `E1M-AEN801` only (`status: stable`) | `examples/multicore/mproc-mailbox` | 11 |
 
 Layout: `vendored/<sdk-template-id>/<sku>/<path>`, e.g.
 `vendored/minimal/E1M-AEN801/CMakeLists.txt`. Four templates ship past the
@@ -425,6 +621,15 @@ common six: `edge-ai` adds `src/cold_chain.c` + `src/cold_chain.h` (the
 cold-chain-metrics core the app links against); `sensor` and `diagnostics`
 each add `boards/native_sim_native_64.{conf,overlay}` (tan-cli#501 — a
 board-dir pair Zephyr auto-discovers with no CMakeLists wiring at all); and
+`multicore-mailbox` adds a whole second build slice — `peer/CMakeLists.txt`,
+`peer/prj.conf`, `peer/main.c` — plus `peer/testcase.yaml` and
+`boards/native_sim_native_64.overlay`; the overlay is load-bearing rather than
+decorative, since both `src/main.c` and `peer/main.c` carry
+`#define SHMEM_REGION_NAME "alp_shmem0"` and only that overlay declares the
+`alp-shmem0` alias the README's own `west build -b native_sim/native/64 .`
+depends on. `peer/testcase.yaml` is the first NESTED
+`NON_ENVELOPE_EXTRAS` entry (tan-cli#864); it is a literal path rather than a
+suffix match, and `scaffold_byte_parity.py` says why. And
 `iot` adds `native_sim.conf` at the project root (tan-cli#379 — NOT
 auto-discovered the same way: its own README build line passes it explicitly
 via `-DEXTRA_CONF_FILE=native_sim.conf`; see the non-envelope-extras section
@@ -603,9 +808,17 @@ scope) is **retired entirely** (tan-cli#14): its `WizardTemplateId` variant,
 generator (`c_project.rs`'s old `gen_host_tooling_files`), and registry entry
 are gone, not just left unvendored.
 
-Reverse gap (informational, no tan-side action): the SDK catalog also ships
-`peripheral`, `multicore-rpmsg`, and `gateway`, none of which has a tan wizard
-counterpart today.
+Reverse gap (informational): the SDK catalog also ships `peripheral`,
+`multicore-rpmsg`, and `gateway`, none of which has a tan wizard counterpart
+today. `multicore-mailbox` was in that list until tan-cli#864 vendored it.
+
+`multicore-rpmsg` is NOT merely unvendored -- it cannot be vendored as it
+stands. Its catalog `files.user_owned` omits a root `CMakeLists.txt` and
+`prj.conf` while its own emitted `README.md:22` diagrams one, so
+`_require_complete_tree` refuses the tree (`init.template-unreadable`, exit 5);
+`linux/CMakeLists.txt:24` builds `src/main.c`, which the envelope never emits;
+and `linux/CMakeLists.txt:21` points its generated dir at the project's PARENT.
+Filed upstream as alplabai/alp-sdk#1712; vendoring it is blocked on that.
 
 ## SKU-family gap: NXP is not in the SDK catalog
 

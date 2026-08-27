@@ -220,6 +220,10 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/doctor_cmd.py: 4035 -> 4038
 - 2026-08-19 -- tan-cli#815: the shapes.py dedup finished. Six private helper definitions deleted (_is_file x4, _is_dir x2) plus sdk_cmd's duplicate SDK_MARKER and rejected_sdk_root_message, so seven modules shrink in the tree; the five tracked in this file are below. clean_cmd.py grows by exactly 1: it had no `from tan.core` import at all and now needs one line for SDK_MARKER, which it previously took from sdk_cmd's second spelling of the same literal.
     - tan/commands/clean_cmd.py: 1119 -> 1120
+- 2026-08-20 -- tan-cli#868: the alp-sdk 94378a05..ac38a069 planner re-sync. kconfig.py +4 (the metadata-root argument threaded through _emit_subsystems / _per_core_library_kconfig / the six library-layer calls, alp-sdk#1485) and loader.py +22 (the same threading through _validate_topology_cores, plus the corrected _resolve_slot0_load_address docstring alp-sdk#1445 rewrote). Both are MIRROR modules of scripts/alp_orchestrate/: extracting here would put tan's copy out of shape with the upstream file every re-sync 3-way-merges against, which is the drift this repo pays a whole gate to prevent. partition.py grew by 260 lines on the same port and stayed inside its existing budget.
+    - tan/planner/kconfig.py: 2088 -> 2092
+    - tan/planner/loader.py: 1313 -> 1335
+    - function_count_budget: 252 -> 254
 - 2026-08-20 -- tan-cli#810: four single-use imports moved into their call sites, so a bare `tan --version` stops loading click.testing, jsonschema, PyYAML and urllib.request (427 -> 279 modules, measured). The lines are the deferred imports plus the comment at each site saying why it is not at module scope; sdk_cmd also gains a TYPE_CHECKING block and the paragraph explaining why `_releases_opener`'s return annotation had to be respelled. REGENERATED on the merge with dev rather than resolving the ratchet conflict by side-picking: #858/#862/#851 moved tan/cli.py too, so BOTH sides' numbers were wrong for the merged tree -- ours said 1012, dev's said 1015, the merged file is 1021.
     - tan/cli.py: 1015 -> 1021
     - tan/commands/new_som_cmd.py: 1361 -> 1381
@@ -232,3 +236,108 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/model_cmd.py: new entry at 1059
     - tan/model/adapters/ethos_u.py: new entry at 886
     - function_count_budget: 252 -> 264
+- 2026-08-21 -- tan-cli#825: correcting the cmake/alp.cmake present-tense claim added 12 comment lines to tan/commands/generate_cmd.py (1348 -> 1360) and 2 to tan/planner/template.py (1470 -> 1472). Both are prose in place of a false statement -- alp.cmake is absent at alp-sdk v0.16.0-rc1, dev and main -- so there is no code to extract; the alternative to the raise is leaving the documentation wrong.
+    - tan/commands/generate_cmd.py: 1348 -> 1360
+    - tan/planner/template.py: 1470 -> 1472
+- 2026-08-23 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 252 -> 254
+- 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/generate_cmd.py: 1348 -> 1360
+    - tan/planner/template.py: 1470 -> 1472
+- 2026-08-25 -- PR #878 fix round: re-verify #824/#792/#825/#814 prose against measured facts (98 real alp_project.py callers not 126, cold-chain-monitor converted at v0.16.0, template.py hedging) grew generate_cmd.py and template.py docstrings/comments
+    - tan/commands/generate_cmd.py: 1360 -> 1361
+    - tan/planner/template.py: 1472 -> 1487
+- 2026-08-25 -- tan-cli#468: resolve_sdk now always returns an ActiveSdk (carrying broken_project_pin/foreign_global_default_for even when unresolved) instead of a bare None -- clean_cmd.py and diff_cmd.py grew threading that through their guards and envelope construction.
+    - tan/commands/clean_cmd.py: 1120 -> 1129
+    - tan/commands/diff_cmd.py: 882 -> 889
+- 2026-08-25 -- tan-cli#466: origin-keyed global SDK default registry (~/.alp/sdk-defaults.json) -- resolve_sdk_tiered's globalDefault tier, its bootstrap-side writer/rollback in bootstrap_cmd.py, and the two-file global_default_pointer_fix_hint
+    - tan/commands/bootstrap_cmd.py: 3272 -> 3364
+    - tan/commands/doctor_cmd.py: 4038 -> 4040
+    - tan/commands/sdk_cmd.py: 1416 -> 1472
+    - function_count_budget: 254 -> 255
+    - function_worst_budget: 747 -> 757
+- 2026-08-25 -- tan-cli#466 follow-up: clarify global_default_foreign_project_issue's docstring now that a registry hit never sets foreign_global_default_for
+    - tan/commands/sdk_cmd.py: 1472 -> 1480
+- 2026-08-25 -- tan-cli#904 review round: resolved-origin ranking + RuntimeError/ELOOP handling + atomic registry write in sdk_cmd.py/bootstrap_cmd.py
+    - tan/commands/bootstrap_cmd.py: 3364 -> 3378
+    - tan/commands/sdk_cmd.py: 1480 -> 1514
+    - function_count_budget: 255 -> 256
+- 2026-08-25 -- PR #878 fix round (3rd pass): _scaffold_cmakelists's docstring trimmed to defer to _HARDCODED_ALP_PROJECT_PY_RE's own comment instead of restating the cold-chain-monitor/alp-sdk#1400 story -- a shrink, no --reason needed, but recorded here so the shipped ceiling (1481) has a traceable entry
+    - tan/planner/template.py: 1487 -> 1481
+- 2026-08-25 -- tan-cli#896: zephyr_board.py's _aen_flash_partitions docstring re-synced (comment-only) against alp-sdk 522ea3204's stale-prose fix
+    - tan/planner/zephyr_board.py: 1486 -> 1494
+- 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/planner/zephyr_board.py: 1486 -> 1494
+- 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3272 -> 3382
+    - tan/commands/doctor_cmd.py: 4038 -> 4040
+    - tan/commands/sdk_cmd.py: 1416 -> 1533
+    - function_count_budget: 254 -> 256
+    - function_worst_budget: 747 -> 757
+- 2026-08-25 -- tan-cli#904 third round: wall_clock_iso split off generated_at_iso, atomic_write_bytes added, registry rollback wired through it, docstring corrections (base-depth nit, changelog overclaim)
+    - tan/commands/bootstrap_cmd.py: 3382 -> 3402
+    - function_count_budget: 256 -> 257
+- 2026-08-25 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/generate_cmd.py: 1348 -> 1361
+    - tan/planner/template.py: 1470 -> 1481
+- 2026-08-25 -- tan-cli#904 final round: wall_clock_iso (timestamp.py) grows past 50 lines defending an out-of-range wall clock (item 2) and enumerating all eight generated_at_iso call sites (nit); deepest_covering_entry's docstring (sdk_default_registry.py) grows documenting the updated_at precision-normalisation fix (nit) and the 21x1x20 lstat factorization correction (item 3) -- all four are review-requested prose/behaviour fixes on tan-cli#904's final round, not unreviewed growth.
+    - function_count_budget: 257 -> 258
+- 2026-08-26 -- tan-cli#900: examples_cmd.py/generate_cmd.py routed their unresolved-SDK refusal through the shared broken-project-pin/foreign-global-default disclosure (project_pin_issue/global_default_foreign_project_issue), matching resolve_sdk's tan-cli#468 fix; generate_cmd.py grew threading GenerateError.extra_issues through the refusal path
+    - tan/commands/generate_cmd.py: 1361 -> 1400
+    - function_count_budget: 258 -> 259
+- 2026-08-26 -- tan-cli#922: init_cmd._sdk_block moves its Optional-collapse guard to the call site (matching the resolution-wrapper gate's own no-bare-None contract), growing the module past its recorded budget
+    - tan/commands/init_cmd.py: 1258 -> 1276
+- 2026-08-26 -- tan-cli#870: presets_cmd.py gains cores[].type/allowedOs -- SomCore/Som dataclasses, parse_som_preset's core-type/allowed-os enrichment, and the new _soc_lookups planner-binding helper (reuses tan.planner.topology._allowed_os_for_core rather than re-deriving the cortex-a/cortex-m rule)
+    - tan/commands/presets_cmd.py: new entry at 844
+    - function_count_budget: 258 -> 260
+- 2026-08-26 -- tan-cli#870 follow-up: _soc_lookups reworked to stop importing tan.planner (its process-global SDK-root bind poisoned 292 unrelated parity tests when exercised from presets_cmd's many per-test synthetic checkouts) -- now reads tan.core.os_class + inlines the board-schema-enum/SoC-JSON reads directly
+    - tan/commands/presets_cmd.py: 844 -> 887
+- 2026-08-26 -- tan-cli#914 fix round: allowed_os_lookup guards the unresolved-core-type sentinel (Major -- degrade to [] instead of a plausible cross-class subset) with a mutation-proof test, module-docstring corrections attributing the duplicated-truth motivation to alp-sdk-vscode's coreRuntime.ts regex rather than alp-sdk-vscode#538 (Minor 1), and a tan-cli#917 follow-up pointer on _resolve_soc_path's known duplication (Minor 4)
+    - tan/commands/presets_cmd.py: 887 -> 912
+- 2026-08-26 -- correction, no number changed: the 2026-08-26 tan-cli#870 entry above ("new entry at 844") describes the design `_soc_lookups` was rewritten OUT of one entry later that same day ("follow-up") -- it names the abandoned `tan.planner.topology._allowed_os_for_core` reuse, not the shipped `tan.core.os_class` one. Append-only, so this stands as a correction rather than an edit to that line.
+- 2026-08-26 -- review round: mutation-proof the a:b:c:d fixture (test_presets_command.py), narrow the presets/build-time-gate agreement claim to the cross-class exclusion (presets_cmd.py)
+    - tan/commands/presets_cmd.py: 905 -> 915
+- 2026-08-26 -- correction, no number changed: the 2026-08-26 tan-cli#914 fix round entry above ("887 -> 912") is the log's last entry before this round but is stale as a description of HEAD -- a later commit on the same PR (b35ad259, "share the unresolved-core-type degrade with the build-time gate") shrank `tan/commands/presets_cmd.py` from 912 to 905 (measured: `git show 62c2894a:python/tan/commands/presets_cmd.py | wc -l` -> 912, `git show b35ad259:...` -> 905), and that shrink was never logged. `module_size_budget.generated.json` already recorded the correct 905 (regen is measurement-driven, not log-driven, so it did not go stale); only this append-only log's prose fell behind. This round's own entry above measures growth from the true 905, not the stale 912. Append-only, so this stands as a correction rather than an edit to that line.
+- 2026-08-26 -- review round: state the type+allowedOs degrade-disambiguation rule in presets_cmd.py's contract prose (Minor 4)
+    - tan/commands/presets_cmd.py: 915 -> 929
+- 2026-08-26 -- tan-cli#925: guard the ipc: append on the board not already declaring one. PyYAML accepts a duplicate top-level key and keeps the LAST, so the unconditional append silently discarded the project's own channel -- measured on alp-sdk's multicore-mailbox scaffold, where alp_shmem0 (referenced by SHMEM_REGION_NAME in both src/main.c and peer/main.c) was replaced by tan's stub. A correctness fix that cannot be written in zero lines; contrast #921, where a ratchet was DECLINED because the growth was a comment.
+    - tan/core/scaffold.py: 1512 -> 1519
+- 2026-08-26 -- tan-cli#864: register multicore-mailbox in TEMPLATE_IDS/_VENDORED_TEMPLATE_DIR and replace the one-off IOT_STARTER_SUPPORTED_SKU with the TEMPLATE_SUPPORTED_SKUS table, which two measured failures showed the single hard-coded if could not cover (a silent AEN301 render, and an init.template-unreadable that blamed the installation for a wrong --som).
+    - tan/commands/explain_cmd.py: 1020 -> 1043
+    - tan/commands/init_cmd.py: 1258 -> 1264
+    - tan/core/scaffold.py: 1519 -> 1538
+    - function_count_budget: 258 -> 259
+- 2026-08-26 -- tan-cli#890: --from-example now consults the SDK scaffold catalog's supported.som_skus and warns when --som is outside it. The +24 in init_cmd.py is the guard and its Issue construction, not prose -- the reasoning lives in the new tan/core/example_catalog.py, and the in-place comment was cut to five lines pointing there. Contrast #921, where a ratchet was DECLINED because the growth was purely a comment.
+    - tan/commands/init_cmd.py: 1264 -> 1288
+- 2026-08-26 -- tan-cli#886: every inert option's help is rendered by tan.core.inert.inert_help, which costs build_cmd.py 3 lines and doctor_cmd.py 5 (one import each, plus the call's own wrapping).
+    - tan/commands/build_cmd.py: 2175 -> 2178
+    - tan/commands/doctor_cmd.py: 4040 -> 4045
+- 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/build_cmd.py: 2175 -> 2178
+    - tan/commands/doctor_cmd.py: 4040 -> 4045
+    - tan/commands/explain_cmd.py: 1020 -> 1043
+    - tan/commands/init_cmd.py: 1276 -> 1306
+    - tan/core/scaffold.py: 1512 -> 1538
+    - function_count_budget: 259 -> 260
+- 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 260 -> 261
+- 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 261 -> 262
+- 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3272 -> 3402
+    - tan/commands/build_cmd.py: 2172 -> 2178
+    - tan/commands/clean_cmd.py: 1120 -> 1129
+    - tan/commands/diff_cmd.py: 882 -> 889
+    - tan/commands/doctor_cmd.py: 4038 -> 4045
+    - tan/commands/explain_cmd.py: 1020 -> 1043
+    - tan/commands/generate_cmd.py: 1348 -> 1400
+    - tan/commands/init_cmd.py: 1258 -> 1306
+    - tan/commands/presets_cmd.py: new entry at 929
+    - tan/commands/sdk_cmd.py: 1416 -> 1533
+    - tan/core/scaffold.py: 1512 -> 1538
+    - tan/planner/kconfig.py: 2088 -> 2092
+    - tan/planner/loader.py: 1313 -> 1335
+    - tan/planner/template.py: 1470 -> 1481
+    - tan/planner/zephyr_board.py: 1486 -> 1494
+    - function_count_budget: 264 -> 274
+    - function_worst_budget: 747 -> 757

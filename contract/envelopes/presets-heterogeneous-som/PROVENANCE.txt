@@ -1,0 +1,62 @@
+SPDX-License-Identifier: Apache-2.0
+
+PROVENANCE — contract/envelopes/presets-heterogeneous-som/expected.json
+=========================================================================
+
+Re-recorded on : 2026-08-26
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#870
+Branch         : feat/870-presets-core-type (off dev @ 5e2233bc)
+
+How it was captured
+--------------------
+    python -m tan presets --sdk-root ./sdk --format json
+
+run from a fresh empty scratch directory with the fixture's `sdk/` copied in,
+`SOURCE_DATE_EPOCH=0`, `HOME`/`USERPROFILE` pointed at a second fresh
+directory, and the printed `project.root` normalised to `__WORKDIR__` — the
+same conditions `python/tests/conformance/test_contract_envelopes.py` runs
+the case under.
+
+What changed in the golden
+---------------------------
+Each `data.soms[].cores[]` entry gained two additive keys, `type` and
+`allowedOs` (tan-cli#870 — forward the SoC core class the checkout already
+knows instead of making a consumer re-derive it with a regex over the core
+id). `data.schemaVersion` stays `"1"`: an added optional key is additive per
+this repo's own precedent (see CHANGELOG entries for `--build`'s payload and
+`bootstrap`'s non-breaking additions), not a shape change.
+
+    - "cores":[{"id":"a55","os":"yocto"},{"id":"m33","os":"zephyr"}]
+    + "cores":[{"id":"a55","os":"yocto","type":"","allowedOs":[]},
+    +          {"id":"m33","os":"zephyr","type":"","allowedOs":[]}]
+
+Both new fields are `""` / `[]` here, not populated — this fixture's `silicon:`
+value (`renesas-rzv2n`) is not a `vendor:family:part` triple, and its `sdk/`
+tree carries no `metadata/schemas/board.schema.json`. The two conditions
+co-occur in this one fixture, but they do not both drive `allowedOs` here:
+`allowed_os_lookup`'s `if choices is None: return []` (the missing-schema
+degrade) short-circuits before the type ever matters, so this golden pins
+the NO-SCHEMA degrade only. It does not exercise, and would not catch a
+regression in, the separate unresolved-core-type guard in
+`allowed_os_for_core` (tan-cli#914) — measured: deleting that guard leaves
+this golden green (`pytest -k presets` still passes); the guard's sole
+regression cover is
+`test_allowed_os_lookup_degrades_to_empty_for_an_unresolved_core_type` in
+`python/tests/commands/test_presets_command.py`.
+That is deliberate, not a bug this fixture happens to trip over: `tan
+presets` must not fail (or fall back to guessing) when pointed at a partial
+or synthetic `--sdk-root`, so this golden pins the DEGRADED shape of the new
+fields the same way `presets-no-sdk` already pins the degraded shape of the
+rest of the payload. The RESOLVED (non-empty) shape against a real SoC JSON
++ board schema is covered at the unit level in
+`python/tests/commands/test_presets_command.py`, not by a golden — see that
+file's tan-cli#870 tests, mutation-proven against `metadata/socs/alif/
+ensemble/e8.json`'s `a32_cluster`/`m55_hp`/`m55_he` shape from a real alp-sdk
+checkout (`eb96112b`).
+
+Why the PREVIOUS recording was wrong
+-------------------------------------
+It was not wrong; it was recorded before these two fields existed. This is an
+ADDITIVE re-record, not a correction.

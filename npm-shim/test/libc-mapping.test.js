@@ -31,14 +31,16 @@
 // on the runner's version.
 //
 // tan-cli#362 widened the same drift class from the TRIPLE to the whole asset:
-// the release switched (from v0.5.0, NOT CUT YET) to `.zip`/`.tar.gz`
+// the release switched (from v0.5.0, shipped 2026-08-04) to `.zip`/`.tar.gz`
 // archives of a `--onedir` freeze (#349), and this shim started asking for
-// ONLY that archive name — a name no tag published today carries, since
-// every tag so far, including v0.5.0-rc4, still ships the raw
-// `tan-<triple>[.exe]` this shim used to ask for. So the asset-name and
-// archive-layout tests below live beside the triple ones, against the same
-// contract doc — .github/workflows/ci.yml runs this file by name, so a
-// second file would not be run at all.
+// ONLY that archive name — at the time, a name no published tag carried yet,
+// since every tag then, including v0.5.0-rc4, still shipped the raw
+// `tan-<triple>[.exe]` this shim used to ask for. Every tag from v0.5.0 on
+// ships only the archive shape now; the raw name survives as a fallback for
+// v0.4.1 and earlier. So the asset-name and archive-layout tests below live
+// beside the triple ones, against the same contract doc —
+// .github/workflows/ci.yml runs this file by name, so a second file would
+// not be run at all.
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -269,12 +271,12 @@ test("every asset the shim can name is one the release actually publishes", () =
 test("the shim names the contract's asset for every published target", () => {
   // Stronger than the membership check above, which a shim that served every
   // host the SAME published asset would still pass. tan-cli#362: the release
-  // WILL ship `.zip` (Windows) / `.tar.gz` (Unix) archives of a --onedir
-  // freeze from v0.5.0 -- the transition tag, not cut yet (#349) -- and this
-  // shim's ARCHIVE name composer (`assetName`) must agree with the contract
-  // doc's archive column even though no tag today publishes that shape yet
-  // (see `selectRelease` in postinstall.js for the fallback that makes a
-  // pre-v0.5.0 tag, e.g. v0.5.0-rc4, install anyway).
+  // ships `.zip` (Windows) / `.tar.gz` (Unix) archives of a --onedir freeze
+  // from v0.5.0 on (shipped 2026-08-04, #349), and this shim's ARCHIVE name
+  // composer (`assetName`) must agree with the contract doc's archive column
+  // even on a tag published before that shape existed (see `selectRelease`
+  // in postinstall.js for the fallback that makes a pre-v0.5.0 tag, e.g.
+  // v0.5.0-rc4, install anyway).
   const contract = contractTargets();
   const expected = Object.fromEntries(
     Object.entries(contract).map(([key, [, asset]]) => [key, asset]),

@@ -10,8 +10,10 @@ Two things alp-sdk's package root carried did NOT come across, because nothing
 these five modules do reaches them and a second copy would be a second source of
 truth:
 
-* `_PERIPHERAL_KCONFIG` -- `slugs.peripheral_kconfig()` already reads
-  `metadata/registries/peripheral-kconfig.json` here.
+* `_PERIPHERAL_KCONFIG` -- `slugs.peripheral_kconfig(metadata_root)` already
+  reads `metadata/registries/peripheral-kconfig.json` here. It takes the
+  project's own root since alp-sdk#1485; there is no module-level table to
+  copy any more.
 * `_CHIP_SUBSYSTEMS` -- already in `slugs.py`, with its I-26 justification.
 
 `composed-route-table` came across too: `bom_netlist.py` carries

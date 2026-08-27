@@ -286,6 +286,40 @@ def test_unresolved_sdk_is_a_refusal_not_a_crash(tmp_path):
     assert "sdk" not in env
 
 
+def test_a_broken_project_pin_is_reported_even_when_nothing_else_resolves(tmp_path):
+    """tan-cli#900. `_resolve_sdk_root` collapsed straight to a bare `None`
+    the moment `resolve_sdk_root_wide` came up empty, discarding
+    `.broken_project_pin` on the way -- the same shape tan-cli#468 fixed for
+    `presets_cmd.resolve_sdk`. A workspace whose `.alp/sdk-path` names a
+    checkout that no longer exists, with nothing else resolvable, reported
+    `generate.sdk-root-unresolved` alone: the customer was told the SDK could
+    not be resolved but not that their own project pin was the broken thing.
+
+    Fails against dev: `env["issues"]` there is `generate.sdk-root-unresolved`
+    alone, with no leading `sdk.project-pin-unresolved` and `"gone-checkout"`
+    nowhere in the envelope."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    gone = tmp_path / "gone-checkout"
+    pin_dir = project / ".alp"
+    pin_dir.mkdir()
+    (pin_dir / "sdk-path").write_text(json.dumps({"sdkPath": str(gone)}), encoding="utf-8")
+
+    proc = run_cli(["--format", "json"], cwd=project)
+    assert proc.returncode == 2
+    env = envelope_of(proc)
+    assert "sdk" not in env
+    assert [i["code"] for i in env["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "generate.sdk-root-unresolved",
+    ]
+    assert "gone-checkout" in env["issues"][0]["message"]
+
+    text = run_cli([], cwd=project)
+    assert "gone-checkout" in text.stderr
+
+
 def test_bad_target_is_a_refusal_once_the_board_and_sdk_resolve(tmp_path):
     project = tmp_path / "project"
     project.mkdir()

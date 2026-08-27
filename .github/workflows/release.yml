@@ -146,10 +146,12 @@ on:
       - "v*"
 
 permissions:
-  # Least privilege by default (tan-cli#435) -- only the `release` job (the
-  # one that actually creates the GitHub Release + uploads assets) overrides
-  # this to `write` via its own job-level `permissions:` block below. Every
-  # other job here only checks out, builds, or reads another job's outputs.
+  # Least privilege by default (tan-cli#435) -- individual jobs override this
+  # via their own job-level `permissions:` block below where they need to
+  # write: `release` (the one that actually creates the GitHub Release +
+  # uploads assets) and `propose-dev-version-bump` (tan-cli#770, which
+  # commits the version bump and opens a PR). Every other job here only
+  # checks out, builds, or reads another job's outputs.
   contents: read
 
 jobs:
@@ -163,6 +165,14 @@ jobs:
   # time the step below contradicts it the tag is already pushed and immutable.
   verify-version:
     runs-on: ubuntu-latest
+    # tan-cli#855: no bound at all on a job that runs on every pushed TAG --
+    # the sharpest place in this repo for a wedge, since a tag cannot be
+    # re-pushed the way a PR can be re-run. The work is one checkout + one
+    # setup-python + one stdlib-only script (`version_check.py` imports
+    # nothing but the standard library, per its own comment above), the same
+    # shape as version-identity.yml's `not-a-released-version` (10, measured
+    # under a minute for the same checkout+script pattern) -- matched here.
+    timeout-minutes: 10
     # Read-only: this job only compares version strings across files/tag; it
     # never writes to the repo. Explicit job-level block (tan-cli#435) so a
     # future workflow-level default change can't silently grant it more.
@@ -289,6 +299,21 @@ jobs:
   # reason (it is a scope/plan decision, NOT the absence of arm64 runners).
   build:
     needs: [verify-version, gates, python-gates]
+    # tan-cli#855: no bound at all on the job that produces the four assets a
+    # pushed, immutable tag ships -- the single sharpest job in this file to
+    # leave unbounded. Sized against clean-host.yml's `freeze-and-smoke` (20),
+    # the closest sibling (the SAME freeze steps: clean venv, pip install,
+    # build_binary.sh, per-OS matrix including the same old-glibc container
+    # leg), with headroom above it for the two things this job does that
+    # freeze-and-smoke does not: the `pytest tests/conformance/
+    # test_packaged_binary.py` run after every freeze, and, on the Linux leg
+    # only, the ELF payload glibc-floor scan (walks every file under
+    # `dist/tan/`, opening each as an ELF and reading its GNU version-need
+    # sections) -- real per-file work, unlike freeze-and-smoke's lighter
+    # smoke commands. Not sized to python-binaries.yml's matching legs (45):
+    # THIS job never runs verify_binary.sh's five extra proofs, so it does
+    # strictly less per leg than that one.
+    timeout-minutes: 30
     # Read-only: each leg freezes a binary and uploads it as a workflow
     # artifact (actions/upload-artifact -- a run-scoped blob, not a
     # repository write). None of these legs create commits, tags, or
@@ -448,45 +473,17 @@ jobs:
             PYTHON=/tmp/venv/bin/python bash scripts/build_binary.sh
             /tmp/venv/bin/pip install --quiet pytest pyelftools
             /tmp/venv/bin/python -m pytest tests/conformance/test_packaged_binary.py -q
-            /tmp/venv/bin/python - <<"PY"
-          import pathlib, sys
-          from elftools.common.exceptions import ELFError
-          from elftools.elf.elffile import ELFFile
-          from elftools.elf.gnuversions import GNUVerNeedSection
-
-          # The shipped onedir tree, not a build intermediate: dist/tan/tan plus
-          # everything under dist/tan/_internal/ (libpython, the extension
-          # modules, and their .so dependencies).
-          root = pathlib.Path("dist/tan")
-          if not root.is_dir():
-              sys.exit("dist/tan/ is missing -- the onedir freeze did not produce "
-                       "the tree this floor scan measures")
-          paths, vers = [], set()
-          for p in sorted(root.rglob("*")):
-              if not p.is_file():
-                  continue
-              try:
-                  with open(p, "rb") as f:
-                      if f.read(4) != b"\x7fELF":
-                          continue
-                      f.seek(0)
-                      elf = ELFFile(f)
-                      paths.append(str(p))
-                      for sec in elf.iter_sections():
-                          if isinstance(sec, GNUVerNeedSection):
-                              for _, auxes in sec.iter_versions():
-                                  vers.update(a.name for a in auxes
-                                              if a.name.startswith("GLIBC_"))
-              except (ELFError, OSError):
-                  continue
-          if len(paths) < 5 or not vers:
-              sys.exit("payload scan found %d native files / %d GLIBC_ versions under "
-                       "dist/tan/ -- refusing to guess a floor" % (len(paths), len(vers)))
-          floor = max(vers, key=lambda v: tuple(int(n) for n in v.split("_")[1].split(".")))
-          open("dist/glibc-floor.txt", "w").write(floor + "\n")
-          print("payload floor over %d native files: %s (saw: %s)"
-                % (len(paths), floor, " ".join(sorted(vers))))
-          PY
+            # tan-cli#450: the scan is scripts/glibc_floor_scan.py, not a
+            # heredoc, so the PR-time freeze in clean-host.yml runs THIS code
+            # rather than a copy of it, and the refusal is unit-testable off a
+            # runner. The heredoc was tag-only, which is why the --onedir
+            # switch in tan-cli#349 was first noticed by a spent v0.5.0.
+            #
+            # NOTE FOR EDITORS: no apostrophes in this docker body -- it is
+            # inside bash -euc with SINGLE quotes, so one closes the string and
+            # the leg dies at runtime on a tag. yaml lint cannot see it;
+            # tests/gates/test_packaging_path_pr_exercise.py can.
+            /tmp/venv/bin/python scripts/glibc_floor_scan.py
           '
 
       # Its own artifact, NOT part of the asset set -- the release job pulls the
@@ -563,6 +560,18 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    # tan-cli#855: no bound at all. Every step here is I/O-bound rather than
+    # compute-bound -- checkout, two artifact downloads (the four small
+    # binary archives + one glibc-floor text file), a small Python script that
+    # bundles the envelope contract, `sha256sum`, a build-provenance
+    # attestation (network round trip, but over the same handful of small
+    # files), a changelog fold-check and slice (both stdlib-only Python), and
+    # the actual `gh release create`-equivalent publish step. Nothing here is
+    # a build. Sized above the 10-minute "checkout + one script" class
+    # (`verify-version` above, version-identity.yml's `not-a-released-version`)
+    # for the extra network round trips (attestation + release publish with
+    # asset uploads), and well below anything that freezes a binary.
+    timeout-minutes: 15
     # id-token/attestations are scoped to this job only (it's the one that
     # attests the binaries); contents:write is re-declared here (an explicit
     # job-level `permissions:` block replaces, not adds to, the workflow-level
@@ -652,6 +661,17 @@ jobs:
           envelopes["doctor"] = {
               "args": doctor_keys["args"],
               "dataKeys": doctor_keys["dataKeys"],
+          }
+          # tan-cli#887: same reasoning for `sdk list` -- its data VALUES are
+          # whatever alp-sdk has published on GitHub at the moment of the call,
+          # so it carries `dataKeys` rather than a byte `envelope` too. This is
+          # what took `data.releases` off contract/README.md's NOT COVERED list.
+          sdk_list_keys = json.loads(
+              (root / "sdk-list-data-keys.json").read_text(encoding="utf-8")
+          )
+          envelopes["sdk-list"] = {
+              "args": sdk_list_keys["args"],
+              "dataKeys": sdk_list_keys["dataKeys"],
           }
           json.dump(
               {
@@ -860,6 +880,12 @@ jobs:
     needs: release
     if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
+    # tan-cli#855: no bound at all. checkout + setup-node + `npm pack
+    # --dry-run` + (armed only) `npm publish` -- no build, no compilation, one
+    # small package. Matched to the 10-minute "checkout + light tool + one
+    # command" class this file's own `verify-version` and
+    # version-identity.yml's `not-a-released-version` already use.
+    timeout-minutes: 10
     permissions:
       contents: read
       id-token: write
@@ -1028,6 +1054,14 @@ jobs:
     # makes the scope explicit rather than inherited.
     if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
+    # tan-cli#855: no bound at all, on the lightest job in this file -- no
+    # checkout, no network call, purely local bash reading `needs.*` context
+    # and writing to runner-local files. Below the 10-minute
+    # "checkout + one script" class used elsewhere in this file for exactly
+    # that reason: there is no checkout or setup step here to pad the budget
+    # for. e2e-container.yml's `shellcheck` (5) is the closest sibling by
+    # weight, and it actually lints a tree of scripts; this job does less.
+    timeout-minutes: 5
     # No checkout, no GitHub API call -- this job only reads the two upstream
     # jobs' `needs.*.result`/`outputs` context and writes to
     # $GITHUB_STEP_SUMMARY / $GITHUB_OUTPUT (local runner files, ungated by
@@ -1143,3 +1177,186 @@ jobs:
           fi
           note "All legs matched their declared intent."
           echo "release + every channel matched its declared intent."
+
+  # ---------------------------------------------------------------------------
+  # tan-cli#770 -- the moment a tag exists, `dev`'s TAN_VERSION already equals
+  # it. Tags are cut from `main`, and the release-prep commit that gets tagged
+  # reaches `main` by way of `dev` merging into it, so `dev`'s own tip carries
+  # the exact string the tag just published -- the precise state
+  # `version_check.py --not-released` exists to refuse. Every PR opened
+  # against `dev` then fails `version-identity.yml`'s `not-a-released-version`
+  # job on a check unrelated to its own diff, until a human notices and bumps
+  # four files by hand. That has happened twice (tan-cli#479 -> 0.5.2-rc1.dev0,
+  # #768 -> 0.6.0-rc2.dev0), both hand-carried, both the same recurrence one
+  # release apart.
+  #
+  # Gated on `verify-version` ALONE, not on `release`/`release_gate`: the tag
+  # already reddens `version-identity.yml` regardless of whether the rest of
+  # this pipeline succeeds, so waiting on a 15-40 minute build to finish before
+  # proposing the fix would leave every PR red for exactly the window this job
+  # exists to close.
+  #
+  # OPENS A PR AGAINST `dev` rather than pushing to it directly, per
+  # tan-cli#770's own preference: `dev` is a protected branch, and a one-click
+  # human merge is a smaller blast radius than an unreviewed bot commit
+  # landing on it. Same shape as `planner-resync.yml`'s proposal job -- the
+  # default `GITHUB_TOKEN`, a fixed per-tag branch, force-pushed so re-running
+  # this job for the SAME tag refreshes the proposal instead of accumulating.
+  #
+  # MUST NOT SILENTLY NO-OP (tan-cli#770's own requirement). Every step below
+  # runs under `set -euo pipefail` with no `continue-on-error` and no `|| true`
+  # swallowing a real failure. The one legitimate no-op --
+  # `bump_dev_version.py` reporting `status=skip` because `dev` had already
+  # moved off the tag before this job ran -- is asserted EXPLICITLY against the
+  # working tree rather than inferred from an empty diff, so an empty diff for
+  # any OTHER reason (a bug in the script, a checkout of the wrong ref) fails
+  # this job loudly instead of reporting success. The final step goes further
+  # still and re-queries whether the PR it just opened actually exists, rather
+  # than trusting the step that opened it.
+  propose-dev-version-bump:
+    name: propose · dev version bump off the tag
+    needs: verify-version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # `ref: dev`, not the tag this workflow checks out by default: the file
+      # this job edits is `dev`'s own `TAN_VERSION`. Checking out the tag
+      # itself would edit a detached commit nothing points at.
+      #
+      # This checkout deliberately KEEPS its credential (no
+      # `persist-credentials: false`) -- the push a few steps down runs
+      # through the remote it leaves configured, and no later step sets up a
+      # token remote of its own. `planner-resync.yml`'s own `dev` checkout
+      # carries the identical exception for the identical reason (see its
+      # comment -- both are inventoried in `.github/zizmor.yml`'s header).
+      #
+      # The `artipacked` ignore travels with this step (tan-cli#899): it used
+      # to be a `<file>:<line>` pin in `.github/zizmor.yml`, which rotted
+      # twice on the tan-cli#770/#880 branch, pre-merge, when unrelated edits
+      # above it moved the line -- net +21 from tan-cli#876 (+49) and
+      # tan-cli#883 (-28) landing on `dev` the same day, then +2 more from
+      # tan-cli#880's own comment edit. `.github/zizmor.yml`'s header carries
+      # the full re-derived history; do not requote the arithmetic here.
+      # Inline, it cannot rot.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
+        with:
+          ref: dev
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # No `pip install` first: bump_dev_version.py (like version_check.py, its
+      # one import) uses only the stdlib.
+      - name: Compute + apply the dev-version bump
+        id: bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          python python/scripts/bump_dev_version.py --tag "$GITHUB_REF_NAME" --apply
+
+      # The must-not-silently-no-op guard. `status` is written by the script
+      # itself into $GITHUB_OUTPUT (planner_resync.py's own convention), so
+      # this compares it against what ACTUALLY happened to the working tree
+      # rather than trusting the script's self-report alone.
+      - name: Refuse to report success on an unexplained no-op
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="${{ steps.bump.outputs.status }}"
+          changed="$(git status --porcelain -- python/tan/version.py python/pyproject.toml npm-shim/package.json CHANGELOG.md)"
+          case "${status}" in
+            applied)
+              if [ -z "${changed}" ]; then
+                echo "::error::bump_dev_version.py reported status=applied but none of the four files changed on disk -- refusing to report success on a bump that did not happen."
+                exit 1
+              fi
+              ;;
+            skip)
+              if [ -n "${changed}" ]; then
+                echo "::error::bump_dev_version.py reported status=skip but the working tree changed anyway -- the script and this guard disagree about what happened."
+                exit 1
+              fi
+              echo "dev's TAN_VERSION already differs from ${GITHUB_REF_NAME} -- nothing to propose."
+              ;;
+            *)
+              echo "::error::bump_dev_version.py reported status='${status}', neither 'applied' nor 'skip' -- either it errored (see the step above) or the \$GITHUB_OUTPUT wiring is broken."
+              exit 1
+              ;;
+          esac
+
+      - name: Open or refresh the version-bump PR
+        if: steps.bump.outputs.status == 'applied'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="auto/dev-version-bump-${GITHUB_REF_NAME}"
+          git config user.name  "tan-cli dev-version bump"
+          git config user.email "noreply@alplab.ai"
+          git checkout -q -B "${branch}"
+          git add python/tan/version.py python/pyproject.toml npm-shim/package.json CHANGELOG.md
+          git commit -q -m "chore(release): move dev off the published ${GITHUB_REF_NAME}
+
+          Machine-proposed by python/scripts/bump_dev_version.py, gated on
+          this same workflow's verify-version job. Without this, dev's
+          TAN_VERSION keeps the published tag's exact string and
+          version-identity.yml's not-a-released-version job goes red on every
+          PR opened against dev until a human bumps it by hand. Refs
+          alplabai/tan-cli#770."
+          git push -q -f origin "${branch}"
+
+          title="chore(release): move dev off the published ${GITHUB_REF_NAME}"
+          # The recursion guard is stated IN the body, the way
+          # planner-resync.yml states its own (that file's header, and the
+          # body it writes at its "open the PR" step). A PR opened by
+          # GITHUB_TOKEN does not trigger `pull_request` workflows, so none
+          # of dev's five required checks -- `seam1 -- plan-shape parity`,
+          # `python -- pytest across python/` on ubuntu/windows/macos, and
+          # `zizmor · workflow security` -- start by themselves here. Left
+          # unsaid, this PR sits unmergeable with no explanation and a human
+          # has to work out why, which is the toil tan-cli#770 exists to
+          # remove rather than relocate.
+          {
+            echo "Automated dev-version bump off \`${GITHUB_REF_NAME}\` (tan-cli#770)."
+            echo "Computed and applied by \`python/scripts/bump_dev_version.py\`; review"
+            echo "and merge to clear \`version-identity\`'s \`not-a-released-version\`"
+            echo "check on every other open PR against \`dev\`."
+            echo
+            echo "**This PR's own checks did not start, and that is expected.**"
+            echo "It was opened by \`GITHUB_TOKEN\`, and GitHub's recursion guard"
+            echo "means a PR opened that way does not trigger \`pull_request\`"
+            echo "workflows -- so none of the five checks \`dev\` requires for merge"
+            echo "will run until a human nudges it. Close and reopen the PR, or push"
+            echo "an empty commit, to get the full suite. Same one-click cost, and"
+            echo "the same reason, as \`planner-resync.yml\`'s proposal PRs."
+          } > "${RUNNER_TEMP}/dev-bump-body.md"
+          existing="$(gh pr list --head "${branch}" --base dev --state open --json number -q '.[0].number' || true)"
+          if [ -n "${existing}" ]; then
+            gh pr edit "${existing}" --title "${title}" --body-file "${RUNNER_TEMP}/dev-bump-body.md"
+          else
+            gh pr create --base dev --head "${branch}" --title "${title}" --body-file "${RUNNER_TEMP}/dev-bump-body.md"
+          fi
+
+      # The one place this job could still fail QUIETLY: `gh pr create`/`edit`
+      # returning success above is not the same as a PR actually existing
+      # afterward (a race with another run, an unexpected `gh` permissions
+      # error that still exited 0). Re-query rather than trust the step that
+      # opened it.
+      - name: Verify the PR exists when one was expected
+        if: steps.bump.outputs.status == 'applied'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="auto/dev-version-bump-${GITHUB_REF_NAME}"
+          count="$(gh pr list --head "${branch}" --base dev --state open --json number -q 'length')"
+          if [ "${count}" -lt 1 ]; then
+            echo "::error::status=applied but no open PR exists for ${branch} against dev -- the bump was computed but the proposal did not land anywhere. This must fail rather than pass quietly (tan-cli#770)."
+            exit 1
+          fi
+          echo "confirmed: ${count} open PR(s) for ${branch} -> dev"

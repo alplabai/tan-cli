@@ -116,6 +116,10 @@ FROZEN_LOCATIONS: dict[str, list[str]] = {
     "presets.sdk-root-unresolved": ["commands/presets_cmd.py"],
     "bootstrap.python-not-runnable": ["core/bootstrap.py", "commands/doctor_cmd.py"],
     "bootstrap.python-too-old": ["core/bootstrap.py", "commands/doctor_cmd.py"],
+    # tan-cli#885: alp-sdk-vscode#575 bound a consumer to this spelling, so it
+    # left `reserved`. Emitted from the JSON re-invoke in `cli.py`, which
+    # rebuilds the click result and turns a non-zero exit into one Issue.
+    "cli.parse-error": ["cli.py"],
 }
 
 

@@ -74,6 +74,8 @@ from collections.abc import Callable
 
 import typer
 
+from tan.core.inert import PARITY, inert_help
+
 #: One entry per oracle `GlobalArgs` field this port must be able to PARSE on
 #: every command (`crates/tan-cli/src/cli.rs:24-73`), as
 #: `(flag, python_name, is_bool, metavar)`. `metavar` is `None` for a bool
@@ -132,7 +134,9 @@ RELOCATABLE_FLAG_ARITY: dict[str, int] = {**GLOBAL_FLAG_ARITY, "--format": 1}
 #: precedent `clean_cmd.clean` already set for its six) -- kept as a real
 #: string anyway so a `--help -v` or future un-hiding does not surface a bare
 #: `None`.
-_ACCEPTED_NOT_READ_HELP = "Accepted for oracle parity (tan-cli#261); not read by this command."
+_ACCEPTED_NOT_READ_HELP = inert_help(
+    "Accepted for oracle parity; not read by this command.", PARITY, "tan-cli#261"
+)
 
 
 def _declared_flags(func: Callable[..., object]) -> set[str]:

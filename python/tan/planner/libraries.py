@@ -35,14 +35,12 @@ still owned and spawned by alp-sdk.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
 
 from .models import BoardProject, OrchestratorError, Slice
-from .paths import METADATA_ROOT, REPO
 from .som_metadata import _sku_family, resolve_capabilities
 
 
@@ -60,19 +58,8 @@ _SOC_FAMILY_TOKEN: dict[str, str] = {
 }
 
 
-def _library_alias_table() -> dict[str, str]:
-    """Legacy per-core `libraries:` token -> canonical manifest name
-    (metadata/library-aliases-v1.json).  Empty dict if the table is
-    absent (keeps callers robust)."""
-    path = METADATA_ROOT / "library-aliases-v1.json"
-    if not path.is_file():
-        return {}
-    doc = json.loads(path.read_text(encoding="utf-8"))
-    aliases = doc.get("aliases")
-    return dict(aliases) if isinstance(aliases, dict) else {}
-
-
-def _emit_library_hw_backends(libs: list[str], sku: str) -> list[str]:
+def _emit_library_hw_backends(
+        libs: list[str], sku: str, metadata_root: Path) -> list[str]:
     """Per-library HW-accelerator binding loader.
 
     For each enabled library whose canonical manifest (resolved via the
@@ -101,13 +88,12 @@ def _emit_library_hw_backends(libs: list[str], sku: str) -> list[str]:
         metadata for the roadmap but are not emitted as active build
         claims.
 
-    RELOCATED from `scripts/alp_project_emit/west_libs.py`. Two mechanical
-    changes, no behavioural one on the success path: the repo root is the BOUND
-    SDK checkout (`REPO`) rather than a `__file__` sibling walk, and a malformed
-    metadata YAML now raises `OrchestratorError` (the loader's own error) where
-    alp-sdk's delegating wrapper turned it into `sys.exit`. A refusal that
-    raises is reportable as a coded envelope; one that exits the interpreter is
-    not, and in-process that interpreter is `tan`'s.
+    RELOCATED from `scripts/alp_project_emit/west_libs.py`. One mechanical
+    change, no behavioural one on the success path: a malformed metadata YAML
+    now raises `OrchestratorError` (the loader's own error) where alp-sdk's
+    delegating wrapper turned it into `sys.exit`. A refusal that raises is
+    reportable as a coded envelope; one that exits the interpreter is not, and
+    in-process that interpreter is `tan`'s.
     """
     # An unrecognised SKU pattern (a synthetic/test-only SKU, or a real SKU
     # from a family this matcher doesn't know) resolves to "no HW backend
@@ -124,23 +110,28 @@ def _emit_library_hw_backends(libs: list[str], sku: str) -> list[str]:
     if soc_token is None:
         return []
 
-    from .loader import _load_yaml  # noqa: PLC0415 -- see the module docstring
+    # `_library_alias_table` is `loader.py`'s, not a second copy: this module
+    # had its own byte-identical twin until tan-cli#868, and the two had
+    # already drifted by a docstring clause. `loader` cannot be imported at
+    # module scope here -- `loader` -> `validate` -> `libraries` is a cycle --
+    # so it joins `_load_yaml` on the same deferred line the module docstring
+    # explains.
+    from .loader import _library_alias_table, _load_yaml  # noqa: PLC0415
 
     out: list[str] = []
-    repo_root = REPO
 
     # Resolve the SKU's `silicon:` ref and merged capabilities (SoC JSON
     # defaults + SoM-level overrides) via resolve_capabilities().  This
     # replaces the former inline YAML text-parser so that silicon-determined
     # capabilities removed from SoM YAMLs continue to resolve from the SoC JSON.
     silicon_ref: str | None = None
-    sku_path = repo_root / "metadata" / "e1m_modules" / f"{sku}.yaml"
+    sku_path = metadata_root / "e1m_modules" / f"{sku}.yaml"
     sku_preset: dict[str, Any] = {}
     if sku_path.exists():
         sku_preset = _load_yaml(sku_path) or {}
         silicon_ref = sku_preset.get("silicon")
 
-    merged_caps: dict[str, Any] = resolve_capabilities(sku_preset, repo_root / "metadata")
+    merged_caps: dict[str, Any] = resolve_capabilities(sku_preset, metadata_root)
 
     def _cap_truthy(name: str) -> bool:
         v = merged_caps.get(name)
@@ -162,7 +153,7 @@ def _emit_library_hw_backends(libs: list[str], sku: str) -> list[str]:
         except ValueError:
             return False
 
-    alias = _library_alias_table()
+    alias = _library_alias_table(metadata_root)
     # Canonical -> legacy token, so the annotation comment names the library
     # by its declared token regardless of whether the caller passed the legacy
     # spelling (schemaVersion 1 per-core lists) or the canonical name (the
@@ -177,7 +168,7 @@ def _emit_library_hw_backends(libs: list[str], sku: str) -> list[str]:
         # §6 -- replaces the retired metadata/library-profiles/ tree).
         canonical = alias.get(lib, lib)
         label = to_token.get(lib, lib)
-        manifest_path = repo_root / "metadata" / "libraries" / f"{canonical}.yaml"
+        manifest_path = metadata_root / "libraries" / f"{canonical}.yaml"
         if not manifest_path.exists():
             continue
         manifest = _load_yaml(manifest_path) or {}
@@ -218,7 +209,7 @@ def _emit_library_hw_backends(libs: list[str], sku: str) -> list[str]:
     return out
 
 
-def available_libraries(metadata_root: Path = METADATA_ROOT) -> list[str]:
+def available_libraries(metadata_root: Path) -> list[str]:
     """Sorted list of every curated library token (manifest filename stem)."""
     d = _libraries_dir(metadata_root)
     if not d.is_dir():
@@ -226,7 +217,7 @@ def available_libraries(metadata_root: Path = METADATA_ROOT) -> list[str]:
     return sorted(p.stem for p in d.glob("*.yaml"))
 
 
-def load_manifest(name: str, metadata_root: Path = METADATA_ROOT) -> dict[str, Any]:
+def load_manifest(name: str, metadata_root: Path) -> dict[str, Any]:
     """Load one library manifest, or raise OrchestratorError naming the options.
 
     The error lists every available library so a typo in ``libraries: [...]``
@@ -371,7 +362,7 @@ def scoped_names(
 
 def resolve_selection(
     project: BoardProject,
-    metadata_root: Path = METADATA_ROOT,
+    metadata_root: Path,
     *,
     slice_: Optional[Slice] = None,
 ) -> list[tuple[str, dict[str, Any]]]:
@@ -498,7 +489,7 @@ def zephyr_library_kconfig(manifest: dict[str, Any]) -> list[str]:
 def zephyr_kconfig_lines(
     project: BoardProject,
     slice_: Slice,
-    metadata_root: Path = METADATA_ROOT,
+    metadata_root: Path,
 ) -> list[str]:
     """Kconfig lines for every project-wide library with a Zephyr integration.
 
@@ -539,7 +530,7 @@ def zephyr_kconfig_lines(
 def yocto_image_install(
     project: BoardProject,
     slice_: Slice,
-    metadata_root: Path = METADATA_ROOT,
+    metadata_root: Path,
 ) -> list[str]:
     """IMAGE_INSTALL recipe names for libraries with a Yocto integration.
 
@@ -566,7 +557,7 @@ def yocto_image_install(
 def yocto_unwireable(
     project: BoardProject,
     slice_: Slice,
-    metadata_root: Path = METADATA_ROOT,
+    metadata_root: Path,
 ) -> list[str]:
     """In-scope library names whose manifest has NO `integration.yocto:`.
 
@@ -586,7 +577,7 @@ def yocto_unwireable(
 def baremetal_cmake_args(
     project: BoardProject,
     slice_: Slice,
-    metadata_root: Path = METADATA_ROOT,
+    metadata_root: Path,
 ) -> list[str]:
     """cmake hint lines for libraries with a baremetal integration.
 

@@ -452,3 +452,39 @@ def test_the_no_flag_message_still_names_the_flag_as_the_remedy(tmp_path, monkey
     doc = json.loads(runner.invoke(app, ["examples", "--format", "json"]).stdout)
     assert doc["issues"][0]["message"] == SDK_UNRESOLVED_MESSAGE
     assert "pass --sdk-root <path> to name the checkout." in doc["issues"][0]["message"]
+
+
+def test_a_broken_project_pin_is_reported_even_when_nothing_else_resolves(
+    tmp_path, monkeypatch
+):
+    """tan-cli#900. `_resolve_sdk` collapsed straight to a bare `None` the
+    moment `resolve_sdk_root_wide` came up empty, discarding
+    `.broken_project_pin` on the way -- the same shape tan-cli#468 fixed for
+    `presets_cmd.resolve_sdk`. A workspace whose `.alp/sdk-path` names a
+    checkout that no longer exists, with nothing else resolvable, reported
+    `examples.sdk-root-unresolved` alone: the customer was told the SDK could
+    not be resolved but not that their own project pin was the broken thing.
+
+    Fails against dev: `doc["issues"]` there is `examples.sdk-root-unresolved`
+    alone, with no leading `sdk.project-pin-unresolved` and `"gone-checkout"`
+    nowhere in the envelope."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    write(
+        tmp_path / ".alp" / "sdk-path",
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")}),
+    )
+    result = runner.invoke(app, ["examples", "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert "sdk" not in doc
+    assert doc["data"]["examples"] == []
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "examples.sdk-root-unresolved",
+    ]
+    assert "gone-checkout" in doc["issues"][0]["message"]
+
+    text = runner.invoke(app, ["examples"]).stderr
+    assert "gone-checkout" in text

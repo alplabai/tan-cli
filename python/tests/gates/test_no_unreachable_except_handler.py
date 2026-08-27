@@ -23,10 +23,11 @@ receiving `board-yaml-missing`.
 
 `B025` is exactly this rule, and #440 asks for "a focused Python lint gate
 that includes B025". A ruff job would need ruff installed: CI's `gates` job
-runs `pip install -e ./python` (no extras) plus `pip install pytest` and
-nothing else (`ci.yml`), so a gate that shells `ruff` would SKIP on every run
-that matters -- the precise failure mode `test_parity_freeze_completeness.py`
-was written to make impossible elsewhere in this suite. This walks the same
+runs `pip install -e ./python` (no extras) plus `pip install pytest
+pytest-xdist` -- still no `ruff` (`ci.yml`), so a gate that shells `ruff`
+would SKIP on every run that matters -- the precise failure mode
+`test_parity_freeze_completeness.py` was written to make impossible elsewhere
+in this suite. This walks the same
 structure with the stdlib `ast` the other gates in this directory already
 use, inside a pytest run that is ALREADY a required context, so it enforces
 from the next PR with no protection change and no new dependency.

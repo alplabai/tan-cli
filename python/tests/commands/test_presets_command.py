@@ -29,7 +29,9 @@ from typer.testing import CliRunner
 from tan.cli import app
 from tan.commands.presets_cmd import (
     SDK_UNRESOLVED_MESSAGE,
+    SomCore,
     SomShapeError,
+    _soc_lookups,
     infer_runtime_for_core_id,
     parse_som_preset,
     read_board_libraries,
@@ -40,8 +42,16 @@ from tan.commands.presets_cmd import (
     runtime_for_core,
     scan_som_preset,
 )
+from tests.conftest import sdk_root
 
 runner = CliRunner()
+
+#: The real alp-sdk checkout this file's `test_soc_lookups_*` tests bind
+#: `tan.planner` against, when one is available (`ALP_SDK_PARITY_ROOT` /
+#: `ALP_SDK_ROOT` -- `tests.conftest.sdk_root`'s own precedence). Module-level
+#: per that helper's own contract: `_scrub_sdk_discovery_env` deletes
+#: `ALP_SDK_ROOT` from the environment before every test function runs.
+SDK = sdk_root()
 
 #: A heterogeneous preset in the real shipped shape: interleaved comments, a
 #: quoted display name, a trailing `# comment` on a value, an `a55` Yocto cluster
@@ -183,6 +193,95 @@ def test_display_name_falls_back_to_sku_and_tbd_is_absent():
 
 
 # --------------------------------------------------------------------------
+# `cores[].type` / `cores[].allowedOs` (tan-cli#870)
+# --------------------------------------------------------------------------
+#
+# `parse_som_preset` takes the two SoC-derived lookups as plain injected
+# callables -- these tests exercise that plumbing directly, with no SDK
+# checkout and no `tan.planner` binding involved, so they run everywhere
+# (bound and unbound alike). `test_soc_lookups_*` below is the complementary
+# proof that the REAL lookups (bound to a checkout) compute the same values
+# `tan.planner.topology._allowed_os_for_core` does -- i.e. that this file
+# reuses that rule rather than re-deriving it.
+
+
+def test_som_core_as_dict_carries_type_and_allowed_os():
+    core = SomCore("m55_hp", "zephyr", "cortex-m55", ("zephyr", "baremetal", "off"))
+    assert core.as_dict() == {
+        "id": "m55_hp",
+        "os": "zephyr",
+        "type": "cortex-m55",
+        "allowedOs": ["zephyr", "baremetal", "off"],
+    }
+
+
+def test_som_core_type_and_allowed_os_default_empty():
+    # The default a bare `SomCore(id, os)` gets -- what every call site that
+    # predates tan-cli#870 (and every no-lookup `parse_som_preset` call) sees.
+    core = SomCore("m33", "zephyr")
+    assert core.type == ""
+    assert core.allowed_os == ()
+    assert core.as_dict() == {"id": "m33", "os": "zephyr", "type": "", "allowedOs": []}
+
+
+def test_parse_som_preset_enriches_cores_via_the_injected_lookups():
+    """`parse_som_preset` reads the SoM's own `silicon:` key, hands it to
+    `core_type_lookup`, and runs each core's resolved type through
+    `allowed_os_lookup` -- proven here with fakes standing in for the real
+    SoC-JSON / `_allowed_os_for_core` reads `_soc_lookups` supplies in
+    production. Mutation-proven: deleting the `type=`/`allowed_os=` keyword
+    arguments from the `replace(...)` call in `parse_som_preset` (leaving the
+    raw `id`/`os`-only core in place) turns this RED; restoring them turns it
+    GREEN -- verified by hand while writing this test.
+    """
+    text = (
+        "schema_version: 1\nsku: E1M-X\nsilicon: vendor:family:part\n"
+        "topology:\n  a32: { machine: m }\n  m55: { board: b }\n"
+    )
+    seen_silicon = []
+
+    def core_type_lookup(silicon):
+        seen_silicon.append(silicon)
+        return {"a32": "cortex-a32", "m55": "cortex-m55"}
+
+    def allowed_os_lookup(core_type):
+        return {
+            "cortex-a32": ["yocto", "baremetal", "off"],
+            "cortex-m55": ["zephyr", "baremetal", "off"],
+        }[core_type]
+
+    som = parse_som_preset(
+        text, core_type_lookup=core_type_lookup, allowed_os_lookup=allowed_os_lookup
+    )
+    assert seen_silicon == ["vendor:family:part"]
+    assert [c.as_dict() for c in som.cores] == [
+        {"id": "a32", "os": "yocto", "type": "cortex-a32",
+         "allowedOs": ["yocto", "baremetal", "off"]},
+        {"id": "m55", "os": "zephyr", "type": "cortex-m55",
+         "allowedOs": ["zephyr", "baremetal", "off"]},
+    ]
+
+
+def test_parse_som_preset_defaults_when_no_lookups_are_given():
+    # The existing single-argument call shape (this file's own tests above,
+    # and every caller that predates #870) must keep working unchanged.
+    som = parse_som_preset(HETEROGENEOUS)
+    assert [c.type for c in som.cores] == ["", "", ""]
+    assert [c.allowed_os for c in som.cores] == [(), (), ()]
+
+
+def test_parse_som_preset_defaults_type_when_the_core_id_is_unknown_to_the_lookup():
+    # A core the SoC JSON does not name (a typo, a topology-only accessory
+    # core) gets `type=""`, not a KeyError -- `.get(c.id, "")`, not `[c.id]`.
+    text = "schema_version: 1\nsku: E1M-X\nsilicon: v:f:p\ntopology:\n  m33: {}\n"
+    som = parse_som_preset(
+        text, core_type_lookup=lambda silicon: {}, allowed_os_lookup=lambda t: ["off"]
+    )
+    assert som.cores[0].type == ""
+    assert som.cores[0].allowed_os == ("off",)
+
+
+# --------------------------------------------------------------------------
 # Discovery
 # --------------------------------------------------------------------------
 
@@ -225,6 +324,215 @@ def test_read_board_libraries_empty_when_dir_missing(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# `_soc_lookups` (tan-cli#870) -- proves REUSE, not a second copy of the rule
+# --------------------------------------------------------------------------
+#
+# `_soc_lookups` deliberately does NOT import `tan.planner` (see its own
+# docstring: routing this through the process-global-bound planner poisoned
+# 292 unrelated `tests/parity/test_planner_emit_parity.py` cases the first
+# time this was tried, because `read_soms` -- and so `_soc_lookups` -- is
+# called from dozens of independent tests each with their own disposable
+# synthetic SDK root). So most of these tests need no gating and no planner
+# binding at all -- `test_soc_lookups_resolves_a_synthetic_checkout_end_to_end`
+# proves the mechanics with a self-contained fixture, runs unconditionally.
+# Only `test_allowed_os_lookup_matches_tan_planner_topology_exactly` binds the
+# real planner too, as the STRONGER cross-implementation proof, so IT alone is
+# gated on a real checkout and isolates the planner's process-global state.
+
+pytestmark_soc = pytest.mark.skipif(
+    SDK is None,
+    reason="set ALP_SDK_ROOT/ALP_SDK_PARITY_ROOT to a real alp-sdk checkout",
+)
+
+
+def test_soc_lookups_resolves_a_synthetic_checkout_end_to_end(tmp_path):
+    """The full mechanics, self-contained: a `board.schema.json` os enum, a
+    SoC JSON with a Cortex-A and a Cortex-M core, and a SoM preset whose
+    `silicon:` key names it. No `ALP_SDK_ROOT`, no `tan.planner` -- runs in
+    the unbound suite same as bound.
+
+    Mutation-proven: swapping the `c["id"]: c.get("type", "")` dict
+    comprehension in `core_type_lookup` for `c["id"]: ""` turns the `type`
+    assertions below RED; swapping `allowed_os_lookup`'s
+    `[o for o in choices if o not in cross]` for a bare `list(choices)` turns
+    the `allowedOs` assertions RED (both classes would see every enum value,
+    including the OTHER class's OS). Restoring either turns both GREEN --
+    verified by hand while writing this test. Also mutation-proven: swapping
+    `_resolve_soc_path`'s `!= 3` for `< 3` turns the `a:b:c:d` assertion below
+    RED (it resolves the `socs/a/b/c.json` file this fixture writes for
+    exactly that purpose and gets `{'m0': 'cortex-m33'}` back instead of
+    `{}`); restoring `!= 3` turns it GREEN.
+    """
+    write(
+        tmp_path / "metadata" / "schemas" / "board.schema.json",
+        json.dumps({"$defs": {"core_entry": {"properties": {
+            "os": {"enum": ["zephyr", "yocto", "baremetal", "off"]}
+        }}}}),
+    )
+    write(
+        tmp_path / "metadata" / "socs" / "vendor" / "family" / "part.json",
+        json.dumps({"cores": [
+            {"id": "a_core", "type": "cortex-a32"},
+            {"id": "m_core", "type": "cortex-m33"},
+        ]}),
+    )
+    # `a:b:c:d` is 4 colon-separated parts, not 3 -- but a `< 3` guard (the
+    # mutant the assertion below exists to catch) does not reject it either,
+    # and would go on to resolve `socs/a/b/c.json`. Put a real, resolvable
+    # SoC file at exactly that path so a `< 3` mutant has something to read:
+    # without this file, `core_type_lookup("a:b:c:d")` returns `{}` under
+    # BOTH the correct guard and the mutant one (a missing file is `{}` too),
+    # so the assertion below would pass either way and prove nothing.
+    write(
+        tmp_path / "metadata" / "socs" / "a" / "b" / "c.json",
+        json.dumps({"cores": [{"id": "m0", "type": "cortex-m33"}]}),
+    )
+
+    core_type_lookup, allowed_os_lookup = _soc_lookups(str(tmp_path))
+    assert core_type_lookup is not None
+    assert allowed_os_lookup is not None
+
+    types = core_type_lookup("vendor:family:part")
+    assert types == {"a_core": "cortex-a32", "m_core": "cortex-m33"}
+    assert allowed_os_lookup(types["a_core"]) == ["yocto", "baremetal", "off"]
+    assert allowed_os_lookup(types["m_core"]) == ["zephyr", "baremetal", "off"]
+    # A `silicon:` this registry doesn't resolve (not 3 colon-separated parts,
+    # or a real triple with no file on disk) is `{}`, never a raise.
+    assert core_type_lookup("not-a-triple") == {}
+    assert core_type_lookup("vendor:family:nonexistent") == {}
+    assert core_type_lookup(None) == {}
+    # Too MANY colon-separated parts is also not-a-triple -- a `!=3` guard
+    # covers both directions; a `<3` guard (caught nowhere else in this
+    # suite) would let `a:b:c:d` silently resolve to `socs/a/b/c.json`, and
+    # that file above is real and does resolve to `{'m0': 'cortex-m33'}`, so
+    # this assertion actually observes the `< 3` mutant rather than passing
+    # vacuously against a file that was never written.
+    assert core_type_lookup("a:b:c:d") == {}
+
+
+def test_soc_lookups_degrades_when_the_checkout_has_no_schema(tmp_path):
+    """A resolvable SoC JSON but NO `board.schema.json` (a synthetic/partial
+    `--sdk-root`, exactly the `presets-heterogeneous-som` golden's shape):
+    `type` still resolves, `allowedOs` degrades to `[]` rather than raising."""
+    write(
+        tmp_path / "metadata" / "socs" / "v" / "f" / "p.json",
+        json.dumps({"cores": [{"id": "c1", "type": "cortex-m7"}]}),
+    )
+    core_type_lookup, allowed_os_lookup = _soc_lookups(str(tmp_path))
+    assert core_type_lookup("v:f:p") == {"c1": "cortex-m7"}
+    assert allowed_os_lookup("cortex-m7") == []
+
+
+def test_soc_lookups_is_none_none_when_the_metadata_tree_is_missing(tmp_path):
+    assert _soc_lookups(str(tmp_path / "no-such-sdk")) == (None, None)
+
+
+def test_allowed_os_lookup_degrades_to_empty_for_an_unresolved_core_type(tmp_path):
+    """A `board.schema.json` IS present (so `_os_choices()` resolves), but the
+    core's `type` is the unresolved sentinel `""` -- the shape a SoM whose
+    `silicon:` names no on-disk SoC JSON (or a core id absent from it) hits in
+    `read_soms` via `core_types.get(c.id, "")`.
+
+    Before this guard, `cross_class_os("")` subtracted BOTH class runtimes and
+    handed back a plausible, populated list (`["baremetal", "off"]`) with no
+    way for a consumer to tell the answer was degraded -- offering Bare-metal
+    for what may be a Cortex-M core, the exact alp-sdk-vscode#538 defect #870
+    exists to close. `allowedOs` must degrade to `[]`, exactly like `type`
+    degrades to `""`, not to a plausible-looking subset.
+
+    Mutation-proven: deleting the `if not core_type: return []` guard in
+    `allowed_os_for_core` (`python/tan/core/os_class.py:103`, the function
+    `allowed_os_lookup` calls) turns this RED (`["baremetal", "off"]` !=
+    `[]`); restoring it turns it GREEN. Verified by hand while writing this
+    test.
+    """
+    write(
+        tmp_path / "metadata" / "schemas" / "board.schema.json",
+        json.dumps({"$defs": {"core_entry": {"properties": {
+            "os": {"enum": ["zephyr", "yocto", "baremetal", "off"]}
+        }}}}),
+    )
+    _, allowed_os_lookup = _soc_lookups(str(tmp_path))
+    assert allowed_os_lookup is not None
+    assert allowed_os_lookup("") == []
+
+
+@pytestmark_soc
+def test_soc_lookups_resolves_e8s_real_core_types():
+    """The issue #870 worked example, against the real SoC JSON: E8's
+    `a32_cluster`/`m55_hp`/`m55_he` come back with their real `cores[].type`
+    strings from `metadata/socs/alif/ensemble/e8.json`."""
+    core_type_lookup, _ = _soc_lookups(str(SDK))
+    assert core_type_lookup is not None
+    assert core_type_lookup("alif:ensemble:e8") == {
+        "a32_cluster": "cortex-a32",
+        "m55_hp": "cortex-m55",
+        "m55_he": "cortex-m55",
+    }
+
+
+@pytestmark_soc
+def test_read_soms_reports_e8s_three_cores_with_type_and_allowed_os():
+    """End to end, through `read_soms` -- the exact envelope the New Project
+    wizard would read for E1M-AEN801, matching issue #870's own worked
+    example verbatim."""
+    soms = read_soms(str(SDK))
+    aen801 = next(s for s in soms if s.sku == "E1M-AEN801")
+    assert [c.as_dict() for c in aen801.cores] == [
+        {"id": "a32_cluster", "os": "yocto", "type": "cortex-a32",
+         "allowedOs": ["yocto", "baremetal", "off"]},
+        {"id": "m55_hp", "os": "zephyr", "type": "cortex-m55",
+         "allowedOs": ["zephyr", "baremetal", "off"]},
+        {"id": "m55_he", "os": "zephyr", "type": "cortex-m55",
+         "allowedOs": ["zephyr", "baremetal", "off"]},
+    ]
+
+
+@pytestmark_soc
+def test_allowed_os_lookup_matches_tan_planner_topology_exactly(monkeypatch):
+    """The STRONGEST reuse proof: `_soc_lookups`'s `allowed_os_lookup` (which
+    imports only `tan.core.os_class`) agrees, core type by core type, with
+    `tan.planner.topology._allowed_os_for_core` -- the planner's OWN,
+    authoritative function, imported from the OTHER module the rule now lives
+    behind. If a future edit let the two implementations diverge (e.g. a
+    hand-rolled cross-class set that forgot `tan.core.os_class` was the single
+    source), this equality check -- not a check against a hard-coded expected
+    list -- is what would still catch it.
+
+    Binds `tan.planner` fresh (undoing whatever an earlier test in this
+    process left behind, exactly as `tests/core/test_planner_root.py`'s own
+    rebind tests do) since THIS is the one test in this file that still needs
+    to import it; every other `_soc_lookups`/`read_soms` test above does not.
+
+    Mutation-proven: replacing `_allowed_os_for_core(core_type, METADATA_ROOT)`
+    in `tan.planner.topology` with a literal `["zephyr", "baremetal", "off"]`
+    turns the `cortex-a32` iteration below RED (a Cortex-A core would wrongly
+    get the Cortex-M answer) while leaving `cortex-m55` GREEN by coincidence --
+    exactly the drift-that-looks-fine class of bug this check exists to catch;
+    restoring the delegation turns both GREEN. Verified by hand while writing
+    this test.
+    """
+    import sys
+
+    from tan import planner_root
+
+    for name in [n for n in sys.modules if n == "tan.planner" or n.startswith("tan.planner.")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setattr(planner_root, "_BOUND", None)
+
+    from tan.planner_root import bind_sdk_root
+
+    bind_sdk_root(SDK)
+    from tan.planner.paths import METADATA_ROOT
+    from tan.planner.topology import _allowed_os_for_core
+
+    _, allowed_os_lookup = _soc_lookups(str(SDK))
+    assert allowed_os_lookup is not None
+    for core_type in ("cortex-a32", "cortex-m55", "cortex-m33", "", "some-future-core"):
+        assert allowed_os_lookup(core_type) == _allowed_os_for_core(core_type, METADATA_ROOT)
+
+
+# --------------------------------------------------------------------------
 # Resolution
 # --------------------------------------------------------------------------
 
@@ -248,7 +556,14 @@ def test_project_paths_are_absolute_posix_and_the_board_path_hangs_off_the_root(
 def test_an_invalid_sdk_root_flag_resolves_to_nothing_rather_than_a_lower_tier(tmp_path):
     # I-31: `--sdk-root` is terminal. A typo must not silently report whatever
     # else happens to be resolvable.
-    assert resolve_sdk(str(tmp_path / "nope"), str(tmp_path)) is None
+    #
+    # tan-cli#468: `resolve_sdk` now always returns an `ActiveSdk`, never a
+    # bare `None` -- `.path is None` is what "resolved to nothing" looks like.
+    # `--sdk-root` is terminal, so neither carried-through fact fires here.
+    result = resolve_sdk(str(tmp_path / "nope"), str(tmp_path))
+    assert result.path is None
+    assert result.broken_project_pin is None
+    assert result.foreign_global_default_for is None
 
 
 def test_a_valid_sdk_root_flag_keeps_the_path_as_typed(tmp_path, monkeypatch):
@@ -321,10 +636,15 @@ def test_json_reports_the_som_and_stdout_carries_nothing_else(tmp_path, monkeypa
     assert doc["data"]["sdkRoot"] == "./sdk"
     assert doc["data"]["skus"] == ["E1M-V2N101"]
     assert doc["data"]["boardLibraries"] == ["lvgl"]
+    # `type`/`allowedOs` (tan-cli#870) degrade to `""`/`[]`: this fixture SDK
+    # carries no `metadata/socs/**` and no `metadata/schemas/board.schema.json`
+    # for either the SoC-type lookup or `_allowed_os_for_core` to resolve
+    # against -- see `test_read_soms_reports_e8s_three_cores_with_type_and_allowed_os`
+    # below for the populated case.
     assert doc["data"]["soms"][0]["cores"] == [
-        {"id": "a55_cluster", "os": "yocto"},
-        {"id": "m33_sm", "os": "zephyr"},
-        {"id": "a32_extra", "os": "yocto"},
+        {"id": "a55_cluster", "os": "yocto", "type": "", "allowedOs": []},
+        {"id": "m33_sm", "os": "zephyr", "type": "", "allowedOs": []},
+        {"id": "a32_extra", "os": "yocto", "type": "", "allowedOs": []},
     ]
     # `osChoices` is a vocabulary, never a per-SoM menu -- nothing in `soms`
     # offers the customer an OS to pick.
@@ -409,6 +729,43 @@ def test_a_rejected_sdk_root_flag_is_named_in_the_message(tmp_path, monkeypatch)
     # The remediation that recommends the flag the caller just passed is GONE
     # from this branch -- that self-defeating sentence is the defect.
     assert "pass --sdk-root <path>" not in text
+
+
+def test_a_broken_project_pin_is_reported_even_when_nothing_else_resolves(
+    tmp_path, monkeypatch
+):
+    """tan-cli#468. `resolve_sdk` returned a bare `None` whenever nothing
+    resolved -- so a workspace whose `.alp/sdk-path` names a checkout that no
+    longer exists, with no sibling for discovery to fall through to and no
+    `~/.alp/sdk-default` either, reported `presets.sdk-root-unresolved` alone.
+    The envelope already says "no SDK"; this is the fix that lets it say WHY.
+    Nothing here resolves at all (unlike tan-cli#464's wrong-checkout harm),
+    so this is only the diagnostic gap.
+
+    Fails against dev: `doc["issues"]` there is `presets.sdk-root-unresolved`
+    alone, with no leading `sdk.project-pin-unresolved` and `"gone-checkout"`
+    nowhere in the envelope."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    write(
+        tmp_path / ".alp" / "sdk-path",
+        json.dumps({"sdkPath": str(tmp_path / "gone-checkout")}),
+    )
+    result = runner.invoke(app, ["presets", "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    # Absent, not null -- still no usable checkout, so still no `sdk` block.
+    assert "sdk" not in doc
+    assert doc["data"]["sdkRoot"] is None
+    assert [i["code"] for i in doc["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "presets.sdk-root-unresolved",
+    ]
+    assert "gone-checkout" in doc["issues"][0]["message"]
+
+    text = runner.invoke(app, ["presets"]).stderr
+    assert "gone-checkout" in text
 
 
 def test_a_bad_format_is_a_usage_error_not_a_traceback():

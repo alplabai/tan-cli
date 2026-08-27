@@ -139,7 +139,8 @@ jobs:
     # `sdk_parity` (declared above, `type: boolean, default: false`) is the
     # whole difference: it switches on the planner byte-parity and
     # planner-binding suites, which SKIP without an alp-sdk checkout -- 282 of
-    # 1163 tests. `release.yml:235` passes true; nothing else does.
+    # 1163 tests. `release.yml`'s `gates` job (which calls this workflow with
+    # `sdk_parity: true`) passes true; nothing else does.
     #
     #   PR / merge_group  6-11 min   measured across the last 25 successful
     #                                runs (min 6m; p100 11m, run 32174278683)
@@ -202,8 +203,18 @@ jobs:
       # the other.
       - name: install the declared package
         run: pip install -e ./python
+      # `pytest-xdist` alongside the runner, not extra: `tests/gates/
+      # test_home_preflight.py::test_pytest_configure_skips_the_check_on_an_
+      # xdist_worker` needs it PRESENT to prove the `config.workerinput`
+      # worker-skip guard at all (it `importorskip`s otherwise) -- this job
+      # is one of the two `tests/gates` legs in CI (the other is parity.yml's
+      # `seam1-plan-shape`), and before this line neither installed xdist, so
+      # that test SKIPPED in every CI leg while reading as covered (#916
+      # review, Major 2). Installing it here does not turn `-n`/parallelism
+      # on for the rest of this job's `pytest` step below -- xdist only
+      # activates under `-n`/`--dist`, neither of which this job passes.
       - name: install the test runner
-        run: pip install pytest
+        run: pip install pytest pytest-xdist
       # Public repo, so the default token is enough. Only on the release path:
       # see the `sdk_parity` input for why PRs skip it.
       #
@@ -366,41 +377,73 @@ jobs:
       # with it -- see that pin's own comment (alp-sdk#1471's
       # `scripts/alp_cli/doctor.py` delta is unported).
       #
-      # Re-verified when dev merged into this branch and moved the `ref:` above
-      # from `88318e75` to `94378a05`: the OWED move below is unaffected,
-      # because none of the four artefacts it names exists at `94378a05`
-      # either. Measured against an alp-sdk checkout at that commit --
-      # `npu_toolchain` appears nowhere under `metadata/socs/`,
-      # `metadata/npu_ops/` does not exist, `scripts/alp_model/` is still
-      # present (so its deletion has not landed), and
-      # `tests/fixtures/models/` carries only `gen_tiny_model.py`,
-      # `gen_tiny_onnx.py` and `tiny_cnn.onnx`, not
-      # `person_detect_int8.tflite`. The twelve `python/tests/model/` tests
-      # still SKIP, for the same reason and against the newer pin.
+      # `94378a05` -> `ac38a069` for tan-cli#868, in the SAME change as
+      # `parity.yml`'s `PINNED_SDK_TAG` and `test_planner_relocation_
+      # freshness.py`'s `PINNED_SDK_COMMIT` -- the three MUST be bumped
+      # together, and `tests/conftest.py`'s tan-cli#691 warning fires when
+      # they are not. What moved is an AUDIT: alp-sdk#1485/#1484/#1556 are
+      # ported into `tan/planner/` and alp-sdk#1487's chip -> subsystem
+      # entries into `slugs.py` (that last one is `HAND_PORT_HASHES`
+      # territory, which is why nothing here caught it -- see
+      # `PINNED_SDK_COMMIT`'s comment). `HAND_PORT_PINNED_SDK_COMMIT` still
+      # does not move.
       #
-      # OWED MOVE, NOT YET MAKEABLE (tan-cli#791). This pin also predates every
-      # artefact ADR-0028 publishes on the alp-sdk side -- `npu_toolchain.vela`
-      # in `metadata/socs/**` (alp-sdk `fff41087`), the `metadata/npu_ops/**`
-      # op-support tables, the deletion of `scripts/alp_model/` with the
-      # regenerated C fixtures that names (`ab6968e2`), and the public
-      # `tests/fixtures/models/person_detect_int8.tflite` real-model fixture
-      # (`4fd5fab5`). All four land together in alplabai/alp-sdk#1470, which is
-      # still OPEN, so there is no post-merge SHA to move this `ref:` to yet.
-      # Until there is, twelve tests under `python/tests/model/` SKIP against
-      # this checkout instead of failing against it, each naming the one
-      # artefact it is missing (`python/tests/conftest.py`'s capability
-      # predicates). Move this `ref:` -- in the same change as `parity.yml`'s
-      # `PINNED_SDK_TAG` and both freshness pins, as always -- onto an alp-sdk
-      # commit carrying `npu_toolchain.vela`, in the SAME merge window as
-      # alp-sdk#1470. A pin left behind after #1470 merges leaves the whole
-      # relocated model engine unmeasured while this job still reports green,
-      # which is the one outcome this job exists to prevent.
+      # `ac38a069` -> `eb96112b` (tan-cli#891): NOT an audit move this time --
+      # the vendored fixtures (`contract/fixtures/toolchains/toolchains.json`,
+      # re-vendored from alp-sdk `v0.16.0` by tan-cli#888) and this checkout
+      # have to name the same commit, and `eb96112b` is the `v0.16.0` release
+      # merge itself. See `parity.yml`'s `PINNED_SDK_TAG` comment for the full
+      # per-fixture re-measurement (toolchain-lock/kconfig/bootstrap/scaffold)
+      # and the `scripts/alp_orchestrate/**` byte-identity check that keeps
+      # this a non-behavioural move for `PINNED_HASHES`.
+      # `fetch-tags: true`, not the default no-tags checkout -- same trap and
+      # same fix as `parity.yml`'s `clone alp-sdk` step (see that step's
+      # comment for the full measurement). This checkout feeds `pytest tests
+      # -q` under `ALP_SDK_ROOT`, and any test that reaches
+      # `tan.planner.template._docs_ref()` against this bound root sees a
+      # `blob/main/`/`tree/main/` degrade instead of `blob/v0.16.0/`/
+      # `tree/v0.16.0/` unless the checkout can resolve the `v0.16.0` tag from
+      # its LOCAL refs -- `_tag_resolves()` (issue #1508 / alp-sdk#1535) makes
+      # no network call, by design, so a tagless clone here silently disagrees
+      # with the vendored scaffold tree `parity.yml` already proved matches a
+      # tagged one. `fetch-depth: 0` is not needed for the same reason it
+      # is not needed there: `git fetch --tags` pulls every tag regardless of
+      # depth, and `v0.16.0` points AT this commit.
+      #
+      # OWED MOVE, NOT YET MAKEABLE (tan-cli#791). Re-measured against
+      # `eb96112b` on 2026-08-27 when dev was merged in -- NOT carried over
+      # from the `94378a05` wording this branch held, and deliberately not its
+      # "twelve tests" figure, which measurement disproved. alp-sdk#1470 is
+      # still OPEN, so there is no post-merge SHA to move this onto yet.
+      #
+      # Measured at `eb96112b` itself, not inferred from the older note:
+      #   - `npu_toolchain` appears nowhere in
+      #     `metadata/socs/alif/ensemble/e8.json` (0 occurrences)
+      #   - `metadata/npu_ops/` does not exist (HTTP 404)
+      #   - `scripts/alp_model/` is still present, so `ab6968e2`'s deletion of
+      #     it has not landed
+      #   - `tests/fixtures/models/person_detect_int8.tflite` does not exist
+      #     (HTTP 404)
+      #
+      # Bound to `eb96112b`, `python/tests/model/` runs 327 passed / 50
+      # skipped. SEVEN of those skips are the ones this pin move turns back
+      # on: `test_package.py:182` and `:196`, `test_perf.py:440`,
+      # `test_targets.py:55` and `:72`, and `test_vela_yolo_internal.py:111`'s
+      # two cases. `test_perf.py:458` is NOT one of them -- it waits on a real
+      # published perf point from the Task-5 bench campaign, and no pin move
+      # opens it. Move this -- in the same change as the other three pin sites,
+      # as always -- onto an alp-sdk commit carrying `npu_toolchain.vela`, in
+      # the SAME merge window as alp-sdk#1470. A pin left behind after #1470
+      # merges leaves the whole relocated model engine unmeasured while these
+      # jobs still report green, which is the one outcome they exist to
+      # prevent.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ inputs.sdk_parity }}
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: 94378a056549c7377d714a7f2b68878aca8fea01
+          ref: eb96112ba7d1cc3b4084c985962ea31772177d74
+          fetch-tags: true
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
       # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a
@@ -543,14 +586,32 @@ jobs:
   # to look.
   #
   # THE VERDICT IS FALSIFIABLE, which is the part worth checking before
-  # trusting it. Same invocation, zizmor 1.29.0:
+  # trusting it. Same rule set, zizmor 1.29.0, `--no-config` (NOT this job's
+  # own `run:` invocation below -- that one loads `.github/zizmor.yml`, and
+  # since tan-cli#899 the workflows themselves also carry two inline
+  # `# zizmor: ignore[...]` comments). `--no-config` strips the CONFIG FILE
+  # ONLY -- it does NOT strip inline ignores, measured: `--no-config
+  # --min-severity medium --no-online-audits .github/workflows/` on this
+  # tree is `rc=0, 18 ignored, 58 suppressed` (re-run for the current count,
+  # don't trust this one -- it drifts with the tree; only the with/without
+  # `--no-config` agreement is load-bearing), the inline ignores still
+  # honoured. The `dev @ 01374d4` snapshot below is comparable for a
+  # different reason: it PRE-DATES tan-cli#899, so it carries neither the
+  # config-file ignores nor the inline ones -- not because `--no-config`
+  # would strip the inline ones if it were run on this tree. Stripping
+  # inline ignores too needs `--no-ignores`, per `.github/zizmor.yml`'s own
+  # NON-VACUITY recipe:
   #
   #   this tree      rc=0    no finding at or above medium
   #   dev @ 01374d4  rc=14   63 unpinned-uses, 26 artipacked,
   #                          12 excessive-permissions, 6 template-injection
   #
   # So it fails on every class the PR that introduced it fixed, not merely on
-  # nothing.
+  # nothing. This is `.github/zizmor.yml`'s own NON-VACUITY measurement, not
+  # a second one taken here -- and it is NOT the recipe for checking whether
+  # THIS file's own suppressions (the `run:` step below, with its config and
+  # inline ignores loaded) are still catching something real. For that,
+  # `.github/zizmor.yml`'s header names `--no-ignores`.
   workflow-security:
     name: zizmor · workflow security
     runs-on: ubuntu-latest
@@ -580,10 +641,132 @@ jobs:
       #
       # `--no-online-audits` keeps the gate hermetic: no token, no API, no
       # rate limit deciding whether CI is green. Verified to reach the same
-      # verdict as a networked run on this tree, which is what the
-      # `planner-resync.yml` entry in `.github/zizmor.yml` is for.
+      # verdict as a networked run on this tree.
       #
-      # The baseline is `.github/zizmor.yml`, picked up automatically. It has
-      # two entries and both carry their argument in full.
+      # That agreement does NOT extend to the two `artipacked` sites this
+      # gate must still catch if their suppression ever slipped --
+      # `planner-resync.yml`'s and `release.yml`'s `dev` checkouts, each
+      # carrying its own inline `# zizmor: ignore[artipacked]` comment
+      # (tan-cli#899). Measured, with both comments removed:
+      # `--no-online-audits` reports `rc=13` (the two now-unsuppressed
+      # `artipacked` findings, at medium), while a real networked run reports
+      # `rc=0` -- opposite verdicts at exactly those sites, not the same one.
+      # Offline being the STRICTER direction there is the safe way for a
+      # hermetic gate to err, so it does not undermine this job running
+      # without a token; it does mean "same verdict as networked" is a
+      # property of the reviewed, suppressed tree, not a guarantee that
+      # survives a suppression going missing.
+      #
+      # The baseline is `.github/zizmor.yml`, picked up automatically. Since
+      # tan-cli#899 it holds no `rules.*.ignore` entries of its own -- `rules:
+      # {}` is a required stub, not policy. Both suppressions now live inline,
+      # at the steps they excuse; the reviewed count is kept current in
+      # `.github/zizmor.yml`'s own header, under INVENTORY (not this file's --
+      # this job only runs the audit `.github/zizmor.yml` configures).
       - name: audit .github/workflows
         run: zizmor --min-severity medium --no-online-audits .github/workflows/
+      # `.github/zizmor.yml`'s header keeps a hand-maintained INVENTORY of
+      # the inline `artipacked` suppressions (tan-cli#899) so a reviewer can
+      # audit both in one place. That INVENTORY can drift from the tree --
+      # tan-cli#919 round 3 found the guard against that drift itself
+      # disagreeing with zizmor, in BOTH directions, no matter how it was
+      # patched: three prior rounds each closed three evasions and opened
+      # five more, because `python/tests/gates/test_zizmor_inventory_count.py`
+      # modelled a step by YAML INDENTATION while zizmor actually associates
+      # an inline `# zizmor: ignore[...]` comment with the finding's LINE
+      # RANGE (the whole step, indentation irrelevant) -- a different model
+      # of what a step is, not a fixable regex bug. That gate is deleted;
+      # this step asks zizmor itself instead of re-implementing its comment
+      # association, so it cannot disagree with zizmor's verdict -- it IS
+      # zizmor's verdict.
+      #
+      # `--no-ignores` strips every inline ignore and re-surfaces the
+      # `artipacked` findings they were suppressing (`.github/zizmor.yml`'s
+      # own NON-VACUITY recipe). On a tree with real suppressions to strip
+      # that exits 14 by design -- findings at or above `--min-severity
+      # medium` is the expected SUCCESS path for this probe, not a failure,
+      # so the step does not fail on zizmor's exit code. It fails only if
+      # the `artipacked` finding count zizmor reports disagrees with
+      # `.github/zizmor.yml`'s INVENTORY row count, in EITHER direction: a
+      # suppression added with no matching INVENTORY row, or an INVENTORY
+      # row for a suppression that no longer exists.
+      - name: inline artipacked suppressions match the zizmor.yml INVENTORY
+        run: |
+          set +e
+          zizmor --min-severity medium --no-online-audits --no-ignores --format json .github/workflows/ \
+              >"$RUNNER_TEMP/no-ignores.json" 2>"$RUNNER_TEMP/no-ignores.log"
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/no-ignores.log"
+          python3 - "$rc" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          rc = sys.argv[1]
+
+          try:
+              no_ignores_json = os.path.join(os.environ["RUNNER_TEMP"], "no-ignores.json")
+              with open(no_ignores_json, encoding="utf-8") as f:
+                  findings = json.load(f)
+          except (OSError, json.JSONDecodeError) as exc:
+              print(f"::error::zizmor --no-ignores exited {rc} without producing "
+                    f"parseable JSON ({exc}) -- this probe cannot run, see the "
+                    "log above")
+              sys.exit(1)
+
+          sites = sorted(
+              f"{loc['symbolic']['key']['Local']['verbatim_path']}:"
+              f"{loc['concrete']['location']['start_point']['row'] + 1}"
+              for finding in findings
+              if finding["ident"] == "artipacked"
+              for loc in finding["locations"]
+              if loc["symbolic"]["kind"] == "Primary"
+          )
+          found = len(sites)
+
+          zizmor_yml = open(".github/zizmor.yml", encoding="utf-8").read()
+          if "INVENTORY --" not in zizmor_yml:
+              print("::error::.github/zizmor.yml has no `INVENTORY --` heading "
+                    "-- nothing to compare zizmor's own artipacked count against")
+              sys.exit(1)
+          after = zizmor_yml.split("INVENTORY --", 1)[1]
+          if "DRIFT THIS INVENTORY" not in after:
+              print("::error::.github/zizmor.yml's `INVENTORY --` heading has "
+                    "no matching `DRIFT THIS INVENTORY` end marker -- without "
+                    "it this step would count numbered rows out of the rest "
+                    "of the file, not just the INVENTORY section")
+              sys.exit(1)
+          section = after.split("DRIFT THIS INVENTORY", 1)[0]
+          # Anchored to the row's OWN indent (`#     N. `), not `^#\s+\d+\.\s`
+          # -- the looser form false-positives on a legitimate numbered
+          # sub-list nested under a row (measured: `[1, 2, 1, 2] != [1, 2, 3,
+          # 4]` on a tree with one).
+          numbers = [int(n) for n in re.findall(r"^#     (\d+)\. ", section, re.MULTILINE)]
+          if numbers != list(range(1, len(numbers) + 1)):
+              print(f"::error::.github/zizmor.yml's INVENTORY rows are "
+                    f"numbered {numbers}, not a clean 1..{len(numbers)} "
+                    "sequence -- a duplicated or skipped number usually means "
+                    "a row was edited in place instead of renumbered")
+              sys.exit(1)
+          inventoried = len(numbers)
+
+          if found != inventoried:
+              direction = (
+                  "MORE real artipacked findings than" if found > inventoried
+                  else "FEWER real artipacked findings than"
+              )
+              print(f"::error::zizmor --no-ignores surfaced {found} real "
+                    f"artipacked finding(s) with inline suppressions stripped "
+                    f"-- {direction} .github/zizmor.yml's INVENTORY, which "
+                    f"lists {inventoried}. Sites zizmor names: "
+                    f"{sites or '(none)'}. Either a suppression was added or "
+                    "removed without updating the header's numbered "
+                    "INVENTORY, or the INVENTORY names a site zizmor no "
+                    "longer flags -- reconcile the two by hand (tan-cli#899).")
+              sys.exit(1)
+
+          print(f"{found} inline artipacked suppression(s), matching "
+                f".github/zizmor.yml's INVENTORY of {inventoried}: {sites}")
+          PY

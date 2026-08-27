@@ -67,15 +67,21 @@ forever; ours is content-aware) -- but SUCCESS (0), dropped with a warning
 instead, when it only rides along in the bare/`--all` default set (tan-cli#501).
 
 **`--output` exists because CMake, not tan, decides where a Zephyr build reads
-from.** alp-sdk's `cmake/alp.cmake` -- the one helper all 96 Zephyr examples
-call at configure time -- writes to `${CMAKE_BINARY_DIR}/generated/alp.conf`,
-and `CMAKE_BINARY_DIR` is NOT the project directory (an in-tree `west build
-examples/<...>` puts it under the repo root). Without `--output`, `tan` would
-emit into `<project>/build/generated/` and that build would read nothing; the
-helper accordingly PROBES `generate --help` for `--output` and falls back to
-shelling `scripts/alp_project.py` when it is absent. So the flag is what makes
-`tan` the emitter for every example, and its default is exactly the previous
-hardcoded path -- nothing that already worked changes.
+from.** Today, 98 of alp-sdk's example `CMakeLists.txt` files (of 167 total)
+shell `${ALP_SDK_ROOT}/scripts/alp_project.py --input <board.yaml> --emit
+zephyr-conf` directly at configure time, and 86 of those 98 read the result
+from `${CMAKE_BINARY_DIR}/generated/alp.conf` (the other 12 read it from a
+`CMAKE_CURRENT_BINARY_DIR`-relative path instead); `CMAKE_BINARY_DIR` is NOT the
+project directory (an in-tree `west build examples/<...>` puts it under the
+repo root). Without `--output`, `tan` would emit into
+`<project>/build/generated/` and that build would read nothing. PLANNED, not
+yet merged into any released alp-sdk or its `dev`/`main` (tan-cli#825): a
+shared `cmake/alp.cmake` helper that replaces the 98 copy-pasted calls and
+PROBES `generate --help` for `--output`, falling back to shelling
+`scripts/alp_project.py` when it is absent. So the flag is what will make
+`tan` the emitter for every example once that helper ships, without changing
+anything that already works -- and it is already useful today for pointing
+`tan generate` at a build dir that is not `<project>/build/`.
 
 `--output` writes a FILE. It never puts the file's contents on stdout: stdout
 carries the envelope and nothing else, in both formats.
@@ -119,9 +125,10 @@ from tan.output_format import FORMAT_HELP, OutputFormat
 DATA_SCHEMA_VERSION = "1"
 
 #: Pin the engine instead of letting `auto` decide. An env var, not a flag:
-#: `cmake/alp.cmake` builds one argv that must stay accepted verbatim, and this
-#: is an escape hatch for a host where the in-process path misbehaves plus the
-#: seam the parity suite uses to compare both engines against the same oracle.
+#: the PLANNED `cmake/alp.cmake` (unmerged, tan-cli#825) will build one argv
+#: that must stay accepted verbatim, and this is an escape hatch for a host
+#: where the in-process path misbehaves plus the seam the parity suite uses
+#: to compare both engines against the same oracle.
 #:
 #: `subprocess` spawns alp-sdk for every target (the pre-relocation behaviour).
 #: `in-process` refuses instead of falling back, so a run cannot quietly measure
@@ -165,8 +172,9 @@ _OUTPUT_RELATIVE_PATH = {
     # set for the same reason, so a bare `tan generate` never runs a full
     # pad-route composition.
     "composed-route-table": "build/generated/composed-route-table.json",
-    # `alp_sdk_ipc_contract_header()` in alp-sdk's `cmake/alp.cmake` names
-    # exactly this one: `${CMAKE_BINARY_DIR}/generated/alp/system_ipc.h`.
+    # `alp_sdk_ipc_contract_header()`, a helper PLANNED for alp-sdk's
+    # `cmake/alp.cmake` (unmerged, tan-cli#825), names exactly this one:
+    # `${CMAKE_BINARY_DIR}/generated/alp/system_ipc.h`.
     "ipc-contract-h": "build/generated/alp/system_ipc.h",
 }
 
@@ -230,13 +238,28 @@ EMIT_TIMEOUT_S = 300
 
 
 class GenerateError(Exception):
-    """A refusal whose issue code and exit code are already decided."""
+    """A refusal whose issue code and exit code are already decided.
 
-    def __init__(self, code: str, message: str, exit_code: ExitCode) -> None:
+    `extra_issues` (tan-cli#900) are prepended ahead of the refusal's own
+    `Issue` by `refuse()` -- the `[*resolution_issues, Issue(...)]` shape
+    `clean_cmd._run` already uses. `None` by default: only the SDK-root-
+    unresolved raise below needs it (a broken pin surviving a refusal that
+    precedes resolution); every other raise here fires after `sdk_broken_pin`
+    is already known and reported through the success-path `issues` instead.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        exit_code: ExitCode,
+        extra_issues: list[Issue] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.exit_code = exit_code
+        self.extra_issues = extra_issues
 
 
 def zephyr_board_dir_name(sku: str, core_id: str) -> str | None:
@@ -441,7 +464,9 @@ def _ensure_writable(output: Path, target: str) -> bool:
     Done HERE rather than discovered when the spawned emitter trips over it, for
     two reasons: a `PermissionError` traceback on the SDK's stderr is a terrible
     issue message, and the parent directory has to be created either way --
-    `alp_sdk_zephyr_conf()` asks for `${CMAKE_BINARY_DIR}/generated/alp.conf` in
+    real example `CMakeLists.txt` today ask for
+    `${CMAKE_BINARY_DIR}/generated/alp.conf` (and the PLANNED
+    `alp_sdk_zephyr_conf()`, unmerged, tan-cli#825, would do the same) in
     a build tree where `generated/` does not exist yet.
 
     **The unlink is tan-cli#498 defect 4's fix, and it is structural.** The
@@ -506,8 +531,10 @@ def _discard_probe_file(output: Path) -> None:
     The envelope was always honest about this -- exit 3, `data.written == []`,
     `generate.emit-failed` -- so what is fixed here is the DISK, not the
     report. The file that survives a refused run is a zero-byte
-    `build/generated/alp.conf`, and `cmake/alp.cmake` hands exactly that path
-    to Zephyr as `EXTRA_CONF_FILE`. Zephyr does not treat an empty conf file
+    `build/generated/alp.conf`, and the real example `CMakeLists.txt` hands
+    exactly that path to Zephyr as `EXTRA_CONF_FILE` (the PLANNED
+    `cmake/alp.cmake`, unmerged, tan-cli#825, would do the same once it
+    ships). Zephyr does not treat an empty conf file
     as an error: it applies no configuration and says nothing. So the stray
     turns a loud failure into a later build that silently carries none of the
     project's alp config.
@@ -907,24 +934,37 @@ class _ResolvedSdkRoot:
     growing tuple (the same reasoning `build_cmd.SdkRootResolution`
     documents): a fact one caller needs (`foreign_global_default_for`,
     tan-cli#464) must not force every field before it to be re-counted by
-    position."""
+    position.
 
-    path: Path
+    `.path` is `None` on the SAME two conditions `SdkRootResolution.path` is
+    (tan-cli#900): no `--sdk-root` and nothing else resolved, or a rejected
+    `--sdk-root`. `.reported` is unused there -- the raise site names the raw
+    `sdk_root` flag itself, not this field."""
+
+    path: Path | None
     tier: str
     reported: str
     broken_project_pin: str | None = None
     foreign_global_default_for: str | None = None
 
 
-def _resolve_sdk_root(
-    sdk_root: str | None, workspace_root: Path
-) -> _ResolvedSdkRoot | None:
-    """The resolved checkout as a [`_ResolvedSdkRoot`], or `None` when
-    unresolved. `--sdk-root`
-    is TERMINAL: an explicit path that is not an SDK checkout fails loudly here
-    rather than silently falling through to discovery and generating against a
-    different checkout than the caller named (I-31); its tier is always
-    `sdkRootFlag`, matching the oracle's closed `SdkSourceTier`.
+def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _ResolvedSdkRoot:
+    """The resolved checkout as a [`_ResolvedSdkRoot`] -- ALWAYS one, never a
+    bare `None` (tan-cli#900; the same fix tan-cli#468 made to
+    `presets_cmd.resolve_sdk`, applied here to this command's own WIDE ladder
+    instead of copying its narrow one). Collapsing to `None` the moment
+    nothing resolved discarded `.broken_project_pin` on that path: a
+    workspace whose `.alp/sdk-path` names a checkout that no longer exists,
+    with nothing else resolvable, reported `generate.sdk-root-unresolved`
+    alone -- the pin fact was never the customer's to lose. Callers now check
+    `.path is None`, the "unresolved" signal `SdkRootResolution.path` itself
+    already carries.
+
+    `--sdk-root` is TERMINAL: an explicit path that is not an SDK checkout
+    resolves to `.path is None` rather than falling through to discovery and
+    generating against a different checkout than the caller named (I-31); its
+    tier is always `sdkRootFlag`, matching the oracle's closed
+    `SdkSourceTier`.
 
     Without `--sdk-root`: `.alp/sdk-path` project pin > the machine-global
     default (`~/.alp/sdk-default`) > the WIDE positional walk
@@ -945,13 +985,14 @@ def _resolve_sdk_root(
         candidate = Path(sdk_root)
         if (candidate / "scripts" / "alp_project.py").is_file():
             return _ResolvedSdkRoot(candidate, "sdkRootFlag", sdk_root)
-        return None
+        return _ResolvedSdkRoot(None, "sdkRootFlag", sdk_root)
     resolution = resolve_sdk_root_wide(None, workspace_root)
     found = resolution.path
-    if found is None:
-        return None
     return _ResolvedSdkRoot(
-        found, resolution.tier, str(found), resolution.broken_project_pin,
+        found,
+        resolution.tier,
+        str(found) if found is not None else "",
+        resolution.broken_project_pin,
         resolution.foreign_global_default_for,
     )
 
@@ -994,8 +1035,8 @@ def _finish(
         # `--quiet` silences the summary only -- never the issues. A CMake
         # `execute_process` shows this stderr verbatim when the emit fails, and
         # a quiet flag that swallowed the reason would leave the caller with a
-        # bare `rv=1` again, which is the exact defect `cmake/alp.cmake` was
-        # written to fix.
+        # bare `rv=1` again -- the exact defect the PLANNED `cmake/alp.cmake`
+        # (unmerged, tan-cli#825) is meant to fix.
         if targets and not quiet:
             tail = f"; failed: {', '.join(failed)}" if failed else " targets"
             print(
@@ -1062,9 +1103,10 @@ def generate(
 ) -> None:
     """Generate board-derived output files via the SDK's emitters."""
     # `generate` never prompts, so `--non-interactive` is accepted and ignored:
-    # it exists because alp-sdk's `cmake/alp.cmake` passes it on every configure
-    # (as it does to every `tan` invocation), and an unknown flag there is a
-    # Click usage error that fails the whole CMake configure.
+    # it exists for the PLANNED alp-sdk `cmake/alp.cmake` (unmerged,
+    # tan-cli#825), which is meant to pass it on every configure (as it will
+    # to every `tan` invocation), and an unknown flag there would be a Click
+    # usage error that fails the whole CMake configure.
     del non_interactive
     json_mode = output_format == "json"
 
@@ -1100,12 +1142,14 @@ def generate(
         # only a refusal that precedes/IS the SDK resolution itself leaves it
         # unset, matching the oracle (`generate.board-yaml-missing` and
         # `generate.sdk-root-unresolved` both carry no `sdk`; every guard past
-        # a successful resolution does).
+        # a successful resolution does). `err.extra_issues` PREPENDED
+        # (tan-cli#900), the `[*resolution_issues, Issue(...)]` shape
+        # `clean_cmd._run` already uses.
         finish(
             targets=(),
             written=[],
             failed=[],
-            issues=[Issue(err.code, "error", err.message)],
+            issues=[*(err.extra_issues or []), Issue(err.code, "error", err.message)],
             exit_code=err.exit_code,
         )
 
@@ -1128,7 +1172,14 @@ def generate(
             )
 
         resolved = _resolve_sdk_root(sdk_root, workspace_root)
-        if resolved is None:
+        if resolved.path is None:
+            # tan-cli#900: `resolved.broken_project_pin` survives even on
+            # this refusal now, so a gone `.alp/sdk-path` target still
+            # discloses instead of looking like no pin was ever set.
+            pin_issue = project_pin_issue(resolved.broken_project_pin, resolved.tier)
+            foreign_issue = global_default_foreign_project_issue(
+                resolved.foreign_global_default_for
+            )
             raise GenerateError(
                 "generate.sdk-root-unresolved",
                 # tan-cli#497 defect 7: a REJECTED `--sdk-root` names the
@@ -1146,6 +1197,7 @@ def generate(
                 else "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
                 f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
                 ExitCode.VALIDATION_FAILURE,
+                extra_issues=[i for i in (pin_issue, foreign_issue) if i is not None],
             )
         resolved_sdk = resolved.path
         sdk_tier = resolved.tier
