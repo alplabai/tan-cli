@@ -245,6 +245,11 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/planner/template.py: 1470 -> 1481
 - 2026-08-25 -- tan-cli#904 final round: wall_clock_iso (timestamp.py) grows past 50 lines defending an out-of-range wall clock (item 2) and enumerating all eight generated_at_iso call sites (nit); deepest_covering_entry's docstring (sdk_default_registry.py) grows documenting the updated_at precision-normalisation fix (nit) and the 21x1x20 lstat factorization correction (item 3) -- all four are review-requested prose/behaviour fixes on tan-cli#904's final round, not unreviewed growth.
     - function_count_budget: 257 -> 258
+- 2026-08-26 -- tan-cli#900: examples_cmd.py/generate_cmd.py routed their unresolved-SDK refusal through the shared broken-project-pin/foreign-global-default disclosure (project_pin_issue/global_default_foreign_project_issue), matching resolve_sdk's tan-cli#468 fix; generate_cmd.py grew threading GenerateError.extra_issues through the refusal path
+    - tan/commands/generate_cmd.py: 1361 -> 1400
+    - function_count_budget: 258 -> 259
+- 2026-08-26 -- tan-cli#922: init_cmd._sdk_block moves its Optional-collapse guard to the call site (matching the resolution-wrapper gate's own no-bare-None contract), growing the module past its recorded budget
+    - tan/commands/init_cmd.py: 1258 -> 1276
 - 2026-08-26 -- tan-cli#870: presets_cmd.py gains cores[].type/allowedOs -- SomCore/Som dataclasses, parse_som_preset's core-type/allowed-os enrichment, and the new _soc_lookups planner-binding helper (reuses tan.planner.topology._allowed_os_for_core rather than re-deriving the cortex-a/cortex-m rule)
     - tan/commands/presets_cmd.py: new entry at 844
     - function_count_budget: 258 -> 260
@@ -271,4 +276,13 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
     - tan/commands/build_cmd.py: 2175 -> 2178
     - tan/commands/doctor_cmd.py: 4040 -> 4045
 - 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/build_cmd.py: 2175 -> 2178
+    - tan/commands/doctor_cmd.py: 4040 -> 4045
+    - tan/commands/explain_cmd.py: 1020 -> 1043
+    - tan/commands/init_cmd.py: 1276 -> 1306
+    - tan/core/scaffold.py: 1512 -> 1538
+    - function_count_budget: 259 -> 260
+- 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
     - function_count_budget: 260 -> 261
+- 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 261 -> 262
