@@ -248,3 +248,5 @@ conflicts resolve by re-running a command instead of by hand-merging prose.
 - 2026-08-26 -- tan-cli#900: examples_cmd.py/generate_cmd.py routed their unresolved-SDK refusal through the shared broken-project-pin/foreign-global-default disclosure (project_pin_issue/global_default_foreign_project_issue), matching resolve_sdk's tan-cli#468 fix; generate_cmd.py grew threading GenerateError.extra_issues through the refusal path
     - tan/commands/generate_cmd.py: 1361 -> 1400
     - function_count_budget: 258 -> 259
+- 2026-08-26 -- tan-cli#922: init_cmd._sdk_block moves its Optional-collapse guard to the call site (matching the resolution-wrapper gate's own no-bare-None contract), growing the module past its recorded budget
+    - tan/commands/init_cmd.py: 1258 -> 1276
