@@ -40,23 +40,27 @@
 # still catching something real, not `--no-config`.
 #
 # NOT IGNORED, ON PURPOSE. The informational/low findings below medium are
-# left visible in a full report rather than suppressed by config: eleven
+# left visible in a full report rather than suppressed by config:
 # low-confidence `template-injection` hits on step outputs this repository
 # produces itself. The count is measured (re-run the gate for the current
-# one, don't trust a stale enumeration -- `dev`'s own "eight" was already
-# two short of the real ten before this PR added the eleventh); as of
-# tan-cli#880 the eleven are `steps.floor.outputs.version` (ci.yml, from
-# pyproject), `steps.sdk_ref.outputs.ref` (parity.yml, x3, from
-# `git rev-parse`), `steps.ref.outputs.sha` (planner-resync.yml, from
-# `git rev-parse`), `steps.resync.outputs.rc`, `steps.pr.outputs.url`,
-# `steps.pr.outputs.opened`, and `steps.gate.outputs.verdict` (x2, five
-# between them, all planner-resync.yml, from `planner_resync.py`), and
-# `steps.bump.outputs.status` (release.yml, from `bump_dev_version.py`), plus
-# `superfluous-actions` on the release publisher. `--min-severity medium`
-# already keeps them out of the verdict, so listing them here as config
-# `ignore` entries would only hide them from a human reading the full
-# report -- `zizmor --no-online-audits .github/workflows/` with no severity
-# flag still shows all twelve (measured).
+# one, don't trust a stale enumeration -- every prior count recorded here has
+# gone stale within days as unrelated workflow changes added or removed a
+# step output; that is expected and is not a regression). As of tan-cli#920
+# there are FOURTEEN: `steps.floor.outputs.version` (ci.yml, from pyproject),
+# `steps.sdk_ref.outputs.ref` (parity.yml, x3, from `git rev-parse`), and
+# nine in `planner-resync.yml` alone (`steps.ref.outputs.sha` from
+# `git rev-parse`; `steps.resync.outputs.rc` x2, `steps.pr.outputs.url` x2,
+# `steps.issue.outputs.url`, `steps.gate.outputs.verdict` x2 and
+# `steps.pr.outputs.opened`, all from `planner_resync.py` or `gh`, the
+# tracking-issue steps tan-cli#920 added being the growth since tan-cli#880's
+# eleven), plus `steps.bump.outputs.status` (release.yml, from
+# `bump_dev_version.py`) -- fourteen `template-injection`, plus one
+# `superfluous-actions` on the release publisher, fifteen informational
+# total. `--min-severity medium` already keeps them out of the verdict, so
+# listing them here as config `ignore` entries would only hide them from a
+# human reading the full report -- `zizmor --no-online-audits
+# .github/workflows/` with no severity flag still shows all fifteen
+# (measured).
 #
 # THE TWO `artipacked` SUPPRESSIONS ARE A DIFFERENT CASE (see INVENTORY
 # below): they are inline `# zizmor: ignore[artipacked]` comments, not a
@@ -201,8 +205,10 @@
 # `rules`" rather than running). Deleting this file entirely (`ci.yml`
 # names no `-c` flag; zizmor auto-discovers `.github/zizmor.yml` when it
 # exists and finds nothing when it doesn't) gives the byte-identical
-# verdict as keeping it: `rc=0, 15 ignored, 54 suppressed` (measured,
-# zizmor 1.29.0, same invocation, config file removed). This file
+# verdict as keeping it: `rc=0, 18 ignored, 58 suppressed` (measured,
+# zizmor 1.29.0, same invocation, config file removed -- the exact counts
+# drift with the tree, re-run rather than trust this snapshot; only the
+# byte-identical-with-or-without-the-file property is load-bearing). This file
 # contributes ZERO enforcement of its own any more -- what it carries now
 # is the reviewed record of why the two `artipacked` sites are exempt, kept
 # here because tan-cli#435 built the "one file to audit" habit around this

@@ -553,7 +553,9 @@ jobs:
   # `# zizmor: ignore[...]` comments). `--no-config` strips the CONFIG FILE
   # ONLY -- it does NOT strip inline ignores, measured: `--no-config
   # --min-severity medium --no-online-audits .github/workflows/` on this
-  # tree is `rc=0, 15 ignored, 54 suppressed`, the inline ignores still
+  # tree is `rc=0, 18 ignored, 58 suppressed` (re-run for the current count,
+  # don't trust this one -- it drifts with the tree; only the with/without
+  # `--no-config` agreement is load-bearing), the inline ignores still
   # honoured. The `dev @ 01374d4` snapshot below is comparable for a
   # different reason: it PRE-DATES tan-cli#899, so it carries neither the
   # config-file ignores nor the inline ones -- not because `--no-config`

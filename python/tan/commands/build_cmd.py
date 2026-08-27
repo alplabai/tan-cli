@@ -106,6 +106,7 @@ from tan.commands.sdk_cmd import (
     resolve_sdk_tiered,
 )
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
+from tan.core.inert import DEFERRED, inert_help
 from tan.core.plan_exec import (
     CROSS_DRIVE_MSG,
     MISSING_TOOL_RE,
@@ -198,7 +199,9 @@ _DEFERRED_FLAGS = (
 # meant was renumbered to 0.5.0, and a help string that names the release a
 # flag will appear in is a promise tan cannot keep true. The issue link is
 # the durable pointer.
-_DEFERRED_HELP = "Accepted by other commands; not implemented for `build` yet (tan-cli#427)."
+_DEFERRED_HELP = inert_help(
+    "Accepted by other commands; not implemented for `build` yet.", DEFERRED, "tan-cli#427"
+)
 
 
 class BuildError(Exception):
