@@ -160,7 +160,8 @@ def resolve_metadata_sdk_root(
 
 
 def read_sdk_som_and_soc(
-    metadata_root: str, sku: str
+    metadata_root: str, sku: str, *, warnings: list[str] | None = None,
+    skipped: list[str] | None = None,
 ) -> tuple[str, str | None, list[dict], float | None, list[tuple[str, float | None]]] | None:
     """`(silicon, silicon_variant, variants, soc_flash_mb, soc_cores)` for
     `sku`'s SoM preset + SoC JSON under `<sdk>/metadata` -- port of the ONE
@@ -181,11 +182,24 @@ def read_sdk_som_and_soc(
     Imported locally, not at module level: `size_cmd` already imports this
     module for `resolve_project_context`/`resolve_metadata_sdk_root`, so a
     top-level import the other way would cycle.
+
+    *warnings* (tan-cli#964), when given, is threaded to BOTH leaf readers --
+    a caller that does not pass it is entirely unaffected: `_read_som_preset`/
+    `_read_soc` only validate when the caller supplies a collector, so this
+    parameter defaults to a no-op. `tan debug-config` now passes one too
+    (tan-cli#964 review, major 5) -- this docstring used to name it as the
+    one caller that did not; it was.
+
+    *skipped* (tan-cli#964 review, major 6): same threading, same default,
+    for the "skip-but-disclose" half -- `missing_schema_note`'s notes rather
+    than `validate_document`'s violations.
     """
     from tan.commands.size_cmd import _read_soc, _read_som_preset  # noqa: PLC0415
 
     preset_path = os.path.join(metadata_root, "e1m_modules", f"{sku}.yaml")
-    preset = _read_som_preset(preset_path)
+    preset = _read_som_preset(
+        preset_path, metadata_root=metadata_root, warnings=warnings, skipped=skipped
+    )
     if preset is None:
         return None
     silicon, silicon_variant = preset
@@ -195,7 +209,9 @@ def read_sdk_som_and_soc(
     if len(parts) != 3:
         return silicon, silicon_variant, [], None, []
     soc_path = os.path.join(metadata_root, "socs", parts[0], parts[1], f"{parts[2]}.json")
-    variants, soc_flash_mb, soc_cores = _read_soc(soc_path)
+    variants, soc_flash_mb, soc_cores = _read_soc(
+        soc_path, metadata_root=metadata_root, warnings=warnings, skipped=skipped
+    )
     return silicon, silicon_variant, variants, soc_flash_mb, soc_cores
 
 

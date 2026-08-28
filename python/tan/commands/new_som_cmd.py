@@ -109,6 +109,7 @@ from tan.commands.sdk_cmd import (
     project_pin_issue,
     resolve_sdk_tiered,
 )
+from tan.core.metadata_schema import schema_errors
 from tan.core.shapes import SDK_MARKER, rejected_sdk_root_message
 from tan.env import stderr_is_tty, stdin_is_tty
 from tan.envelope import Envelope, Issue, Project, emit
@@ -716,24 +717,17 @@ def _soc_skeleton(sku: str, soc_ref: str, vendor: str, cores: tuple[str, ...]) -
     }
 
 
-def _schema_errors(doc, schema_path: Path) -> list[str]:
-    """Validate ``doc`` against ``schema_path``; return error strings."""
-    # tan-cli#810: the only `jsonschema` call in the package, and it drags in
-    # `attr`, `referencing` and `jsonschema_specifications` behind it -- all of
-    # which every `tan` invocation used to load for this one line. Deferred
-    # here. (No per-module millisecond figure is quoted anywhere in this
-    # change: `-X importtime` cumulative charges a shared submodule to whoever
-    # imported it FIRST, so the per-module readings are order-dependent and do
-    # not sum to the measured total. The aggregate is in the PR and the budget
-    # log, where it was measured end to end.)
-    import jsonschema  # noqa: PLC0415
-
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    validator = jsonschema.Draft202012Validator(schema)
-    return [
-        f"{'/'.join(str(p) for p in err.absolute_path) or '<root>'}: {err.message}"
-        for err in sorted(validator.iter_errors(doc), key=lambda e: list(e.absolute_path))
-    ]
+# tan-cli#964: the validator itself moved to `tan.core.metadata_schema` --
+# every READ consumer (`tan build`, `tan generate`, `tan presets`, `tan
+# size`, `tan bootstrap`) needed the SAME `jsonschema.Draft202012Validator`
+# call this file already had for its WRITE-path self-check, and a second
+# hand-rolled copy is exactly the per-consumer-guard drift #964 is about.
+# `_schema_errors` is kept as the local name (both call sites below are
+# unchanged) and still means exactly what it always has here: `source=None`,
+# so a validation failure is reported against the in-memory generated
+# skeleton (`pointer: message`), not a file on disk -- this scaffold has not
+# been written yet when either call below runs.
+_schema_errors = schema_errors
 
 
 def _rollback_write_failure(
