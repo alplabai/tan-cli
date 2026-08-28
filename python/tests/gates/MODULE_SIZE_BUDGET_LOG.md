@@ -390,6 +390,13 @@ and write both files from the real merged tree.
     - tan/commands/generate_cmd.py: 1400 -> 1404
 - 2026-08-28 -- tan-cli#980 review nit 3: doctor_cmd.py's _collect() gained a documented decision (accept vs restore) about the bootstrapManifest/hostPython/pythonFloor print-timing shift the tan-cli#441 _resolve_prerequisites_environment extraction introduced -- a comment, not new logic, kept in full per house rule rather than trimmed to dodge the cap.
     - tan/commands/doctor_cmd.py: 4145 -> 4164
+- 2026-08-28 -- tan-cli#427: build.py/execute.py grew implementing --pristine (force_pristine wiring + PristineSkipped) and resolving --plan/--manifest/--manifest-from/--target/--all/--verbose/--quiet/--no-color/--non-interactive/--ci into implemented/retired/accept-and-drop buckets
+    - tan/commands/build/execute.py: 1662 -> 1713
+    - tan/commands/build_cmd.py: 2178 -> 2255
+- 2026-08-28 -- tan-cli#963: generate_cmd.py's own docstring for pin_issue/foreign_issue prepend-ordering grew the module 4 lines past its 1400 ceiling; no compression to fit, per repo convention
+    - tan/commands/generate_cmd.py: 1400 -> 1404
+- 2026-08-28 -- PR #981 review: build_cmd.py grows ~38 lines for the --pristine/plan-materialise conflicting-flags refusal (tan-cli#427 follow-up) plus a module-docstring precedent note -- a coded refusal for a defect class, not padding.
+    - tan/commands/build_cmd.py: 2255 -> 2293
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/explain_cmd.py: 1087 -> 1138
 - 2026-08-28 -- tan-cli#905: sdk_default_registry.prune_dead_origins (drops every existence-dead entry out of the global SDK-default registry on the next relocating bootstrap's write) grows bootstrap_cmd.py past its recorded ceiling and is itself a new over-50-line function (60 lines).
@@ -405,3 +412,4 @@ and write both files from the real merged tree.
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/bootstrap_cmd.py: 3421 -> 3522
     - function_count_budget: 278 -> 280
+    - function_count_budget: 277 -> 279

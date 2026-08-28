@@ -760,14 +760,31 @@ def test_execute_with_materialise_is_a_coded_refusal_not_a_precedence_win(projec
     assert "Traceback" not in proc.stderr
 
 
-def test_execute_with_a_deferred_flag_is_refused_as_deferred(project):
-    """The other conflicting shape. ``--plan`` is not implemented in this
-    build at all, so it cannot be honoured in ANY combination -- the deferral
-    is the accurate answer and is checked FIRST, ahead of the conflict pair
-    above. Still a coded refusal, still never a silent precedence win."""
+def test_execute_with_a_retired_flag_is_refused_as_retired(project):
+    """The other conflicting shape. ``--plan`` is retired (superseded by
+    ``--plan-from``, tan-cli#427), so it cannot be honoured in ANY
+    combination -- the retirement is the accurate answer and is checked
+    FIRST, ahead of the conflict pair above. Still a coded refusal, still
+    never a silent precedence win."""
     plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
     proc = run_tan(
         "build", "--plan-from", str(plan), "--execute", "--plan",
+        "--format", "json", cwd=project,
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 2, env
+    assert [i["code"] for i in env["issues"]] == ["build.flag-retired"], env["issues"]
+    assert "--plan-from" in env["issues"][0]["message"]
+    assert not (project / "build").exists()
+
+
+def test_execute_with_a_deferred_flag_is_refused_as_deferred(project):
+    """Same precedence as the retired case above, for the one flag that is
+    still genuinely deferred (``--no-auto-bootstrap``, tan-cli#427)."""
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--no-auto-bootstrap",
         "--format", "json", cwd=project,
     )
 
@@ -1982,64 +1999,47 @@ def test_text_mode_puts_nothing_on_stdout(project, mode):
 # --- an unported oracle flag reads as deferred, never as a typo -------------
 
 
-#: Every flag `tan build` declares in the v0.4.1 oracle that this port does not
-#: implement -- read off `tan.exe build --help`, minus the six the port already
-#: has (`--plan-from --project --board-yaml --sdk-root --format` + the port-only
-#: `--build-root` and `--execute`) and minus the two it now implements
-#: (`--materialise`, `--native`).
-#: `--verbose`/`--quiet`/`--no-color`/`--non-interactive`/`--ci`
-#: are clap GLOBALS in the oracle, declared on its root and propagated; they are
-#: listed here only because this port accepts none of them at its own root
-#: today. If `cli.py` ever grows real root-level handling for them, they must
-#: leave `build_cmd.py` (and this list) or the build-local declaration shadows
-#: it.
-DEFERRED_BUILD_FLAGS = [
-    "--plan",
-    ("--target", "zephyr-conf"),
-    "--all",
-    "--manifest",
-    ("--manifest-from", "manifest.yaml"),
-    "--no-auto-bootstrap",
-    "--pristine",
-    "--verbose",
-    "--quiet",
-    "--no-color",
-    "--non-interactive",
-    "--ci",
-]
+#: The one flag `tan build` still declares but does not implement (tan-cli#427
+#: resolved the rest: `--pristine`/`--no-auto-bootstrap` implemented for real,
+#: `--plan`/`--manifest`/`--manifest-from` retired with their own coded
+#: refusal below, `--target`/`--all`/`--verbose`/`--quiet`/`--no-color`/
+#: `--non-interactive`/`--ci` now accept-and-drop via `accept_global_flags`,
+#: matching the oracle's own `BuildArgs` -- which declares NONE of those seven
+#: itself, only `GlobalArgs` does, and `build`'s Rust handler never reads
+#: them either).
+DEFERRED_BUILD_FLAGS = ["--no-auto-bootstrap"]
 
 
-@pytest.mark.parametrize(
-    "flag", DEFERRED_BUILD_FLAGS, ids=lambda f: (f[0] if isinstance(f, tuple) else f)
-)
+@pytest.mark.parametrize("flag", DEFERRED_BUILD_FLAGS)
 def test_an_unported_oracle_flag_is_refused_as_deferred_not_as_a_typo(project, flag):
-    """`tan build --pristine` used to exit 2 with Click's "No such option",
-    which is indistinguishable from `tan build --pristien`. Every flag the
-    v0.4.1 oracle has and this port does not is DECLARED, so the answer is the
-    same coded refusal `deferred_cmd` gives a deferred verb: exit 1,
+    """`tan build --no-auto-bootstrap` used to exit 2 with Click's "No such
+    option" style refusal before it was declared at all, which is
+    indistinguishable from a typo. Declared, so the answer is the same coded
+    refusal `deferred_cmd` gives a deferred verb: exit 1,
     `cli.command-deferred`, and a message naming the flag and an issue URL a
     caller can grep for.
 
-    The URL is tan-cli#427, not #260: #260 tracked the seven verbs, which all
-    shipped in 0.5.0 and closed it, so a refusal pointing there sent the user
-    to a closed issue about commands that work. No version number is asserted
-    either -- the message used to name v0.6.0 while the release it meant was
-    renumbered to 0.5.0, and a refusal that names a release is a promise this
-    port cannot keep true.
+    The URL is tan-cli#427, not #260: #260 tracked the seven deferred VERBS,
+    which all shipped in 0.5.0 and closed it, so a refusal pointing there sent
+    the user to a closed issue about commands that work. #427 stays OPEN,
+    narrowed to this one flag -- porting the implicit "run `tan bootstrap` on
+    a missing/stale Zephyr workspace" trigger this flag would disable, which
+    does not exist anywhere in this port yet (an unbootstrapped workspace
+    surfaces today as `build.plan-unavailable`, never an automatic
+    `tan bootstrap` invocation).
 
     Exit 1 is the load-bearing half. Reusing 2 would put "known but deferred"
     back at the exact exit code the typo case already occupies, which is the
     distinction this whole treatment exists to make.
     """
-    argv = flag if isinstance(flag, tuple) else (flag,)
-    proc = run_tan("build", *argv, "--format", "json", cwd=project)
+    proc = run_tan("build", flag, "--format", "json", cwd=project)
 
     env = envelope_of(proc)
     assert proc.returncode == 1, env
     assert env["command"] == "build"
     assert [i["code"] for i in env["issues"]] == ["cli.command-deferred"], env["issues"]
     message = env["issues"][0]["message"]
-    assert argv[0] in message
+    assert flag in message
     assert "tan-cli/issues/427" in message
     # The stale pointer must not come back.
     assert "issues/260" not in message
@@ -2050,18 +2050,203 @@ def test_a_deferred_flag_does_no_work_before_refusing(project):
     # The refusal happens before the plan is read, so a run naming one cannot
     # half-build: nothing on disk, and nothing on stdout in text mode either.
     plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
-    proc = run_tan("build", "--plan-from", str(plan), "--pristine", cwd=project)
+    proc = run_tan("build", "--plan-from", str(plan), "--no-auto-bootstrap", cwd=project)
     assert proc.returncode == 1, proc.stderr
     assert proc.stdout == "", proc.stdout
     assert not (project / "build").exists()
 
 
+#: `(flag, expected FULL message)` for every flag tan-cli#427 retired: "Two
+#: overlapping plan surfaces is worse than one, so the oracle spellings go"
+#: (the maintainer's own decision on the issue) -- but a retired flag's error
+#: must TEACH the replacement in the message itself, not send the caller to a
+#: tracker to work it out. The expected strings are hardcoded here (not
+#: imported from `build_cmd._RETIRED_FLAGS`) and compared with `==`, not
+#: `in`: a substring check on `flag in message` is satisfied by the WRONG
+#: entry when one retired flag's spelling is a prefix of another's
+#: (`--manifest` is a substring of `--manifest-from`) -- measured mutant:
+#: pointing `_RETIRED_FLAGS["--manifest"]` at `--manifest-from`'s own message
+#: verbatim left both a bare `flag in message` check and a
+#: `replacement_hint in message` check (`"system-manifest.yaml"`, which
+#: appears in BOTH messages) green, so `tan build --manifest` taught the
+#: customer to open a FILE they never named. Full-message equality is the
+#: only check that distinguishes the two.
+RETIRED_BUILD_FLAGS = [
+    (
+        "--plan",
+        "`--plan` is retired: run `tan build --plan-from FILE` to inspect a build plan "
+        "instead (add `--materialise` or `--execute` to act on it).",
+    ),
+    (
+        "--manifest",
+        "`--manifest` is retired: a native `tan build` already writes "
+        "`build/system-manifest.yaml` for you to read directly -- no separate flag needed.",
+    ),
+    (
+        "--manifest-from",
+        "`--manifest-from FILE` is retired: `system-manifest.yaml` is plain YAML -- open "
+        "FILE directly instead of routing it through `tan build`.",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected_message"), RETIRED_BUILD_FLAGS, ids=[f for f, _ in RETIRED_BUILD_FLAGS]
+)
+def test_a_retired_flag_is_refused_with_its_replacement_named(project, flag, expected_message):
+    """The flag still PARSES (never Click's own typo error) but always
+    refuses, at `VALIDATION_FAILURE` (exit 2, this CLI's position for an
+    invalid invocation) rather than `RUNTIME_FAILURE` -- a retired flag is a
+    permanently-wrong argv, not a transient "not built yet" the deferred
+    flags above still are.
+
+    Asserts the WHOLE message against a hardcoded golden string, not a
+    substring: see `RETIRED_BUILD_FLAGS`'s own docstring for the mutant this
+    guards against (`--manifest` silently answering with `--manifest-from`'s
+    text)."""
+    argv = [flag, "manifest.yaml"] if flag == "--manifest-from" else [flag]
+    proc = run_tan("build", *argv, "--format", "json", cwd=project)
+
+    env = envelope_of(proc)
+    assert proc.returncode == 2, env
+    assert [i["code"] for i in env["issues"]] == ["build.flag-retired"], env["issues"]
+    assert env["issues"][0]["message"] == expected_message, env["issues"][0]["message"]
+    assert not (project / "build").exists()
+
+
+def test_a_retired_flag_does_no_work_before_refusing(project):
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    proc = run_tan("build", "--plan-from", str(plan), "--manifest", cwd=project)
+    assert proc.returncode == 2, proc.stderr
+    assert proc.stdout == "", proc.stdout
+    assert not (project / "build").exists()
+
+
 def test_a_real_typo_still_exits_2(project):
-    # The other half of the distinction: a flag that is NOT a deferred oracle
-    # flag must keep Click's parse error, or "deferred" would just be the new
-    # name for every mistyped option.
+    # The other half of the distinction: a flag that is NOT a deferred or
+    # retired oracle flag must keep Click's parse error, or those codes would
+    # just become the new name for every mistyped option.
     proc = run_tan("build", "--pristien", "--format", "json", cwd=project)
     assert proc.returncode == 2, proc.stdout + proc.stderr
+
+
+def test_the_global_flags_the_oracle_never_reads_for_build_are_accepted_and_ignored(project):
+    """`--target`/`--all`/`--verbose`/`--quiet`/`--no-color`/`--non-interactive`/
+    `--ci` are declared ONLY on the oracle's shared `GlobalArgs` struct
+    (`crates/tan-cli/src/cli.rs`) -- `BuildArgs` itself has no field for any of
+    the seven, so `build`'s own Rust handler never reads them either
+    (tan-cli#427). This settles the issue's own "does `--target`/`--all` on
+    `build` collide with `generate`'s emit-backend meaning" question: it does
+    not mean anything on either binary for `build`, so there is nothing for
+    the two commands to disagree about.
+
+    Proven at the RUNTIME level, not just `--help` parsing: the identical
+    `--plan-from` run, with and without the whole septet, produces the exact
+    same envelope."""
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    baseline = envelope_of(
+        run_tan("build", "--plan-from", str(plan), "--format", "json", cwd=project)
+    )
+    with_globals = envelope_of(
+        run_tan(
+            "build", "--plan-from", str(plan),
+            "--target", "zephyr-conf", "--all", "--verbose", "--quiet", "--no-color",
+            "--non-interactive", "--ci",
+            "--format", "json", cwd=project,
+        )
+    )
+    assert with_globals["ok"] is True
+    assert with_globals == baseline
+
+
+def test_pristine_reaches_the_envelope_through_the_full_cli(project):
+    """`tan build --pristine`'s message must not be stderr-only: the JSON
+    envelope the extension actually reads must carry it, not just
+    `on_output`'s text stream (tan-cli#183, wired end-to-end tan-cli#427).
+    Simplest reachable case through the real CLI: a fresh build dir has
+    nothing configured yet, so the wipe is suppressed -- and that
+    suppression itself must show up as `build.pristine-skipped`, never
+    silently, proving `--pristine` is threaded all the way from `build()`
+    through `_dispatch` to `execute_slices`, not just accepted by
+    `--help`."""
+    doc = {
+        "schemaVersion": 1,
+        "generatedBy": "tests/commands/test_build_command.py",
+        "boardYaml": "board.yaml",
+        "sku": "E1M-TEST",
+        "buildRoot": "build",
+        "executionPolicy": {
+            "unknownBackend": "fail", "missingTool": "skip", "nullCommand": "skip",
+        },
+        "sharedArtefacts": [],
+        "slices": [
+            {
+                "coreId": "c1",
+                "backend": "baremetal",
+                "buildDir": "build/c1",
+                "appDir": None,
+                "configArtefacts": [],
+                "toolchain": {"id": "baremetal"},
+                "artifacts": {"elf": None},
+                "debug": {"console": "rtt"},
+                "command": {"tool": sys.executable, "args": ["-c", "pass"], "cwd": "build/c1"},
+                "env": {},
+                "envAppendPath": {},
+            }
+        ],
+        "warnings": [],
+    }
+    plan = write_plan(project, doc)
+
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--pristine",
+        "--format", "json", cwd=project,
+    )
+    env = envelope_of(proc)
+    assert env["ok"] is True, env
+    assert "build.pristine-skipped" in [i["code"] for i in env["issues"]], env["issues"]
+
+
+@pytest.mark.parametrize("mode_flag", ["--materialise"], ids=["materialise"])
+def test_pristine_without_execute_is_refused_not_silently_ignored(project, mode_flag):
+    """`--pristine` only ever reaches `_dispatch` (see `_build`'s tail) --
+    `_MODE_PLAN` (bare `--plan-from`) and `_MODE_MATERIALISE`
+    (`--materialise`) both return from `_build` BEFORE `_dispatch` runs, so
+    neither has a build dir to wipe. Left unchecked, `tan build --plan-from
+    p.json --pristine` used to exit 0 with `issues: []` -- silently doing
+    nothing with the flag, the tan-cli#183 defect class re-entering through
+    the mode flags. Refused with the same code/exit `--execute
+    --materialise` already uses for an invalid combination, never a silent
+    no-op."""
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    proc = run_tan(
+        "build", "--plan-from", str(plan), mode_flag, "--pristine",
+        "--format", "json", cwd=project,
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 2, env
+    assert env["ok"] is False
+    assert env["exitCode"] == 2
+    assert [i["code"] for i in env["issues"]] == ["build.conflicting-flags"], env["issues"]
+    assert "--pristine" in env["issues"][0]["message"]
+    # Refused before any work: nothing materialised, nothing wiped.
+    assert not (project / "build").exists()
+
+
+def test_pristine_without_execute_bare_plan_from_is_also_refused(project):
+    """The bare `--plan-from` (no `--materialise`) half of the same guard --
+    `_MODE_PLAN`, which shows the plan and stops even earlier than
+    `_MODE_MATERIALISE` does."""
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--pristine", "--format", "json", cwd=project,
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 2, env
+    assert [i["code"] for i in env["issues"]] == ["build.conflicting-flags"], env["issues"]
+    assert not (project / "build").exists()
 
 
 # --- tan-cli#464: a command OTHER than `sdk current` discloses the same fact -
@@ -2177,10 +2362,20 @@ def test_build_help_carries_no_port_archaeology():
     assert "v0.4.1" not in output
     assert "ADDED BY THIS PORT" not in output
     assert "parity gap" not in output
-    # The twelve deferred options stay LISTED -- hiding a flag a user will
-    # type, then refusing it at exit 1 is worse than naming it.
-    assert "--verbose" in output
-    assert "--non-interactive" in output
+    # The one still-deferred option stays LISTED -- hiding a flag a user will
+    # type, then refusing it at exit 1 is worse than naming it. Same for the
+    # three retired ones (tan-cli#427): they still parse and still need a
+    # reader to see them to know why.
+    assert "--no-auto-bootstrap" in output
+    assert "--plan" in output
+    assert "--manifest" in output
+    # The seven `accept_global_flags`-injected flags (`--target`/`--all`/
+    # `--verbose`/`--quiet`/`--no-color`/`--non-interactive`/`--ci`) are
+    # HIDDEN, same as on every other command that decorator covers -- they
+    # accept-and-drop silently, matching the oracle's own `BuildArgs` (which
+    # declares none of the seven itself).
+    assert "--verbose" not in output
+    assert "--non-interactive" not in output
 
 
 # ---------------------------------------------------------- tan-cli#697 -----
