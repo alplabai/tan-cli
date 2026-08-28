@@ -463,6 +463,41 @@ def test_resolve_table_tolerates_an_explicit_null_applies_to_block(tmp_path):
     assert rep.ops[0].reason == "no-table-for-backend"
 
 
+def test_resolve_table_tolerates_a_non_dict_applies_to_block(tmp_path):
+    # tan-cli#969: `metadata/npu_ops/**` has no schema at all, so
+    # `applies_to: 7` (a scalar where the population's own convention wants
+    # an object) is only ruled out by this isinstance guard, not by a schema
+    # gate elsewhere. Before the fix this raised
+    # `AttributeError: 'int' object has no attribute 'get'` out of
+    # `_resolve_table`; it must instead read exactly like the null-block
+    # case above -- "no table covers u55" (undetermined), not a crash.
+    d = tmp_path / "npu_ops" / "ethos_u"
+    d.mkdir(parents=True)
+    (d / "u55@vela-1.0.0.json").write_text(json.dumps({
+        "applies_to": 7, "op_namespace": "tflite", "supported_ops": ["CONV_2D"],
+    }))
+    rep = analyze_backend(backend="ethos_u", src_format="tflite", ops=[_op("CONV_2D")],
+                           metadata_root=tmp_path, variant="u55")
+    assert rep.npu_coverage == "undetermined"
+    assert rep.ops[0].reason == "no-table-for-backend"
+
+
+def test_resolve_table_tolerates_a_non_string_variant_field(tmp_path):
+    # tan-cli#969, sibling site: `applies_to.variant: 7` used to reach
+    # `table_variant.split("-")` and raise
+    # `AttributeError: 'int' object has no attribute 'split'`. Same
+    # undetermined outcome as an absent/null variant, no fourth behaviour.
+    d = tmp_path / "npu_ops" / "ethos_u"
+    d.mkdir(parents=True)
+    (d / "u55@vela-1.0.0.json").write_text(json.dumps({
+        "applies_to": {"variant": 7}, "op_namespace": "tflite", "supported_ops": ["CONV_2D"],
+    }))
+    rep = analyze_backend(backend="ethos_u", src_format="tflite", ops=[_op("CONV_2D")],
+                           metadata_root=tmp_path, variant="u55")
+    assert rep.npu_coverage == "undetermined"
+    assert rep.ops[0].reason == "no-table-for-backend"
+
+
 def test_load_table_rejects_a_parseable_non_dict_json_document(tmp_path):
     from tan.model.analyze import _load_table
     path = tmp_path / "array.json"

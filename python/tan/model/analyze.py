@@ -214,6 +214,37 @@ def _load_table(path: Path) -> dict | None:
     return doc if isinstance(doc, dict) else None
 
 
+def _table_variant(doc: dict) -> str:
+    """@doc's `applies_to.variant`, normalised to `""` for any shape that
+    isn't a plain string reachable through a dict `applies_to`.
+
+    `metadata/npu_ops/**` has NO schema at all (tan-cli#969) -- unlike the
+    `soc-spec-v1.schema.json`/`som-preset-v1.schema.json` family #964 covers,
+    there is nothing to eventually enforce on the read path here, so this
+    isinstance guard is the only defence this population will ever get, not
+    a stopgap ahead of a schema. `.get()` off a non-dict `applies_to` (e.g.
+    `applies_to: 7`) raises `AttributeError: 'int' object has no attribute
+    'get'`, and `.split()` on the caller's side off a non-string `variant`
+    (e.g. `variant: 7`) raises `AttributeError: 'int' object has no
+    attribute 'split'` -- same defect class as the #957/#965 family, same
+    `_load_table` precedent immediately above (`analyze.py:204-214`) for why
+    a malformed table is skipped rather than crashing the whole resolve.
+    `or {}` alone (the pre-#969 guard) only covered an explicit-but-null
+    `applies_to:`; it did not cover a non-dict scalar, which still reached
+    `.get()`.
+
+    `""` is the identical sentinel a genuinely-absent field already
+    produces: the caller's `variant in _table_variant(doc).split("-")`
+    then simply fails to match, the same "undetermined, not a fabricated
+    negative" outcome `_resolve_table`'s own docstring already promises for
+    "no table covers @variant" -- no fourth behaviour invented."""
+    applies_to = doc.get("applies_to")
+    if not isinstance(applies_to, dict):
+        applies_to = {}
+    table_variant = applies_to.get("variant", "")
+    return table_variant if isinstance(table_variant, str) else ""
+
+
 def _resolve_table(metadata_root: Path, backend: str, variant: str | None) -> tuple[Path, dict] | None:
     """Pick the `metadata/npu_ops/<backend>/<variant>@<toolchain>-<ver>.json`
     whose `applies_to.variant` covers @variant. None when the backend has no
@@ -237,10 +268,7 @@ def _resolve_table(metadata_root: Path, backend: str, variant: str | None) -> tu
         doc = _load_table(path)
         if doc is None:
             continue
-        # `or {}`, same reasoning as resolve_ethos_u_variant above: an
-        # explicit-but-null `applies_to:` must not raise.
-        table_variant = (doc.get("applies_to") or {}).get("variant", "")
-        if variant in table_variant.split("-"):
+        if variant in _table_variant(doc).split("-"):
             return path, doc
     return None
 
