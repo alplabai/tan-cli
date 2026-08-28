@@ -292,6 +292,229 @@ def test_bad_format_value_is_rejected(tmp_path):
     assert result.exit_code != 0
 
 
+# --- tan-cli#958: a broken project pin with NOTHING else resolving ----------
+#
+# `sdk.project-pin-unresolved` used to reach the envelope only via
+# `Envelope.__init__`'s central seam (`_with_sdk_resolution_advisories`),
+# which bails the instant `sdk is None` -- exactly the shape a broken
+# `.alp/sdk-path` pin produces when no other tier backstops it (`sdk_source_
+# tier == "none"`). `ProjectContext.broken_project_pin` was carried three
+# lines away and never read. Reproduced live (measured against unfixed
+# `dev`@`755029c7`): CASE A of the issue -- `HOME` a fresh empty dir, a JSON
+# `.alp/sdk-path` naming a directory that does not exist -- drops the code
+# from all three of `lock`/`migrate --check`/`quality --profile quick`, while
+# `sdk current`/`size`/`image`/`clean --dry-run` all disclose it from the
+# identical fixture. These tests hand-build the `sdk is None` shape directly
+# (matching `test_text_mode_discloses_a_foreign_global_default_before_
+# spawning_west`'s own style above) rather than replaying a real broken
+# pointer file -- `test_sdk_command.py`/`test_size_command.py` already prove
+# the pointer-to-`broken_project_pin` resolution mechanics; these are only
+# about whether `west_forward_cmd` reads what `resolve_project_context` handed
+# it.
+
+
+def _broken_pin_context(tmp_path, *, sdk_source_tier="none"):
+    """`sdk=None` -- the CASE A shape: the pin rejected AND no tier behind it
+    resolved either. `broken_project_pin` is carried at the TOP level, exactly
+    as the real `resolve_project_context` leaves it when `sdk` comes back
+    `None` (`build_output.py`'s own `ProjectContext.broken_project_pin`
+    docstring)."""
+    return west_forward_cmd.ProjectContext(
+        workspace_root=str(tmp_path).replace("\\", "/"),
+        board_yaml=str(tmp_path / "board.yaml").replace("\\", "/"),
+        sdk=None,
+        broken_project_pin=str(tmp_path / "gone-sdk").replace("\\", "/"),
+        sdk_source_tier=sdk_source_tier,
+    )
+
+
+@pytest.fixture
+def _broken_pin(monkeypatch, tmp_path):
+    """Every `_run_forward`/`_refuse_required` call in this section reads the
+    SAME broken-pin context, regardless of the args `resolve_project_context`
+    was actually invoked with (`lambda *a, **k: context`, matching the
+    pre-existing `test_text_mode_discloses_a_foreign_global_default_before_
+    spawning_west` fixture's own pattern)."""
+    context = _broken_pin_context(tmp_path)
+    monkeypatch.setattr(west_forward_cmd, "resolve_project_context", lambda *a, **k: context)
+    return context
+
+
+@pytest.mark.parametrize(
+    ("argv", "code"),
+    [
+        (["lock"], "lock.failed"),
+        (["migrate", "--check"], "migrate.failed"),
+        (["quality", "--profile", "quick"], "quality.failed"),
+    ],
+)
+def test_json_mode_discloses_a_broken_pin_when_nothing_else_resolves(
+    _broken_pin, monkeypatch, tmp_path, argv, code
+):
+    """The defect's own reproduction, mutation-proved: reverting
+    `_sdk_resolution_issues` to its pre-fix `sdk_resolution_issues(context.
+    sdk.broken_project_pin, ...)` (unconditional on `context.sdk`, i.e.
+    `AttributeError: 'NoneType' object has no attribute 'broken_project_pin'`
+    under this fixture) does NOT go red on this test's own assertion --
+    `env["issues"]` is compared as a full ordered list, so a crash inside
+    `_run_forward` before the envelope is ever built is a DIFFERENT failure,
+    not a false pass. The fix that actually satisfies this is reading
+    `context.broken_project_pin`/`context.sdk_source_tier` (the top-level
+    twins) when `context.sdk` is `None`, not merely avoiding the crash."""
+
+    class _Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    monkeypatch.setattr(west_forward_cmd.subprocess, "run", lambda *a, **k: _Failed())
+    result = runner.invoke(app, [*argv, "--project", str(tmp_path), "--format", "json"])
+    assert result.exit_code == 1
+    env = envelope(result)
+    assert env["ok"] is False
+    assert env["exitCode"] == 1
+    assert "sdk" not in env  # absent, not null (test_sdk_key_is_absent_when_none_not_null)
+    # Pin FIRST -- `clean_cmd.py`'s own `[*resolution_issues, Issue(...)]`
+    # ordering convention, which this module inverted before this fix (the
+    # pair used to land LAST, appended only by `Envelope.__init__`'s seam).
+    assert [i["code"] for i in env["issues"]] == ["sdk.project-pin-unresolved", code]
+    assert "gone-sdk" in env["issues"][0]["message"]
+    assert "falling through to the none tier" in env["issues"][0]["message"]
+
+
+def test_json_mode_discloses_a_broken_pin_even_when_the_child_succeeds(
+    _broken_pin, monkeypatch, tmp_path
+):
+    """The pin warning is a resolution fact, independent of whether the west
+    child that ran off the wrong workspace happened to exit 0 -- `ok` must
+    stay `True` (a warning does not fail a command) while the issue still
+    surfaces."""
+
+    class _Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(west_forward_cmd.subprocess, "run", lambda *a, **k: _Ok())
+    result = runner.invoke(
+        app, ["migrate", "--project", str(tmp_path), "--check", "--format", "json"]
+    )
+    assert result.exit_code == 0
+    env = envelope(result)
+    assert env["ok"] is True
+    assert [i["code"] for i in env["issues"]] == ["sdk.project-pin-unresolved"]
+
+
+def test_text_mode_discloses_a_broken_pin_when_nothing_else_resolves(
+    _broken_pin, monkeypatch, tmp_path
+):
+    """tan-cli#958: text mode never reaches `Envelope` at all (`_run_text`
+    hands stdio to the child directly), so before this fix the ONLY channel
+    that could ever have shown the pin here -- `_echo_sdk_resolution` -- was
+    itself gated on `sdk is not None` and stayed silent too. Measured on
+    unfixed `dev`: `tan lock` stderr carried only the west launch/exit-code
+    lines, matching the issue's own finding that CASE A is silent in BOTH
+    channels, not just JSON."""
+
+    class _Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    monkeypatch.setattr(west_forward_cmd.subprocess, "run", lambda *a, **k: _Failed())
+    result = runner.invoke(app, ["lock", "--project", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "gone-sdk" in result.output
+    assert "falling through to the none tier" in result.output
+    # The pin line precedes the failure summary, matching the JSON ordering.
+    pin_at = result.output.index("gone-sdk")
+    failure_at = result.output.index("lock:")
+    assert pin_at < failure_at, result.output
+
+
+def test_migrate_mode_required_refusal_discloses_the_pin_first_in_json(_broken_pin, tmp_path):
+    """`_refuse_required`'s JSON branch (tan-cli#958): the pin used to be
+    absent here too -- `Envelope.__init__` was the only source and this
+    refusal passes `sdk=context.sdk`, `None` under this fixture."""
+    result = runner.invoke(app, ["migrate", "--project", str(tmp_path), "--format", "json"])
+    assert result.exit_code == 2
+    env = envelope(result)
+    assert "sdk" not in env
+    assert [i["code"] for i in env["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "migrate.mode-required",
+    ]
+
+
+def test_quality_profile_required_refusal_discloses_the_pin_in_text_mode(_broken_pin, tmp_path):
+    """`_refuse_required`'s text branch (tan-cli#958)."""
+    result = runner.invoke(app, ["quality", "--project", str(tmp_path)])
+    assert result.exit_code == 2
+    assert "gone-sdk" in result.output
+    assert "`--profile` is required" in result.output
+    pin_at = result.output.index("gone-sdk")
+    refusal_at = result.output.index("`--profile` is required")
+    assert pin_at < refusal_at, result.output
+
+
+def test_launch_error_also_discloses_the_broken_pin(_broken_pin, tmp_path):
+    """The `OSError` branch of `_run_forward` (west itself missing) builds its
+    own `issues` list independently of the success/failure branch above --
+    a separate site that needed the same prepend."""
+
+    def _raise(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    import tan.commands.west_forward_cmd as wfc
+
+    original = wfc.subprocess.run
+    wfc.subprocess.run = _raise
+    try:
+        result = runner.invoke(
+            app, ["lock", "--project", str(tmp_path), "--format", "json"]
+        )
+    finally:
+        wfc.subprocess.run = original
+    assert result.exit_code == 1
+    env = envelope(result)
+    assert [i["code"] for i in env["issues"]] == ["sdk.project-pin-unresolved", "lock.failed"]
+
+
+def test_a_broken_pin_with_a_working_fallback_still_names_the_real_tier(monkeypatch, tmp_path):
+    """CASE B of the issue: the pin is broken but a `globalDefault` tier
+    backstops it. `context.sdk` is NOT `None` here, so this exercises the
+    `context.sdk is not None` branch of `_sdk_resolution_issues` -- the pin
+    message must name the tier that actually answered (`globalDefault`), not
+    `none`, and the nested `SdkInfo` triple must be read (matching pre-fix
+    behaviour) rather than the top-level twins, which are left at their
+    dataclass defaults in this hand-built context on purpose."""
+    context = west_forward_cmd.ProjectContext(
+        workspace_root=str(tmp_path).replace("\\", "/"),
+        board_yaml=str(tmp_path / "board.yaml").replace("\\", "/"),
+        sdk=west_forward_cmd.SdkInfo(
+            root=str(tmp_path / "other-sdk").replace("\\", "/"),
+            source_tier="globalDefault",
+            broken_project_pin=str(tmp_path / "gone-sdk").replace("\\", "/"),
+        ),
+    )
+    monkeypatch.setattr(west_forward_cmd, "resolve_project_context", lambda *a, **k: context)
+
+    class _Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(west_forward_cmd.subprocess, "run", lambda *a, **k: _Ok())
+    result = runner.invoke(
+        app, ["migrate", "--project", str(tmp_path), "--check", "--format", "json"]
+    )
+    assert result.exit_code == 0
+    env = envelope(result)
+    assert env["sdk"] == {"root": str(tmp_path / "other-sdk").replace("\\", "/"), "sourceTier": "globalDefault"}
+    assert [i["code"] for i in env["issues"]] == ["sdk.project-pin-unresolved"]
+    assert "falling through to the globalDefault tier" in env["issues"][0]["message"]
+
+
 # --- the argv, measured against the child's REAL surface (tan-cli#391) -------
 #
 # Every test above this line stubs `subprocess.run` and never looks at the argv
