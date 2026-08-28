@@ -435,7 +435,10 @@ def _resolve_from_build(
     return resolution, _str_list(runners.get("runners")), core_id
 
 
-def _sdk_variant_debug_block(sdk_root: str, sku: str) -> dict[str, Any] | None:
+def _sdk_variant_debug_block(
+    sdk_root: str, sku: str, *, warnings: list[str] | None = None,
+    skipped: list[str] | None = None,
+) -> dict[str, Any] | None:
     """The resolved SoC-JSON `variants[].debug` block for `sku`'s SoM preset,
     or `None` when any step of the walk fails to resolve one.
 
@@ -448,9 +451,21 @@ def _sdk_variant_debug_block(sdk_root: str, sku: str) -> dict[str, Any] | None:
     `tan size` itself relies on -- a drifted/`TBD` preset must resolve NO
     identity rather than possibly a WRONG one that still connects a live debug
     session to the wrong part (alp-sdk#1026 review finding #7).
+
+    *warnings* (tan-cli#964 review, major 5): threaded straight through to
+    `read_sdk_som_and_soc`, which threads it into both leaf readers'
+    `validate_document` calls -- the same `metadata_root`/`warnings`
+    convention `tan size` already uses. Before this, `tan debug-config`
+    called `read_sdk_som_and_soc` with no `warnings` at all, so it validated
+    NOTHING despite the PR body's own claim that it inherited #964's WARN
+    half "transitively" -- it did not, until this parameter existed.
+
+    *skipped* (tan-cli#964 review, major 6): same threading, for the
+    "skip-but-disclose" collector -- a note when the schema file itself is
+    simply absent, rather than the silent `[]` that used to be.
     """
     metadata_root = os.path.join(sdk_root, "metadata")
-    walked = read_sdk_som_and_soc(metadata_root, sku)
+    walked = read_sdk_som_and_soc(metadata_root, sku, warnings=warnings, skipped=skipped)
     if walked is None:
         return None
     _silicon, silicon_variant, variants, _soc_flash_mb, _soc_cores = walked
@@ -474,11 +489,17 @@ def _board_som_sku(board_yaml_path: str) -> str | None:
     return sku if isinstance(sku, str) and sku != "" else None
 
 
-def _sdk_published_cores(sdk_root: str | None, board_yaml_path: str) -> frozenset[str]:
+def _sdk_published_cores(
+    sdk_root: str | None, board_yaml_path: str, *, warnings: list[str] | None = None,
+    skipped: list[str] | None = None,
+) -> frozenset[str]:
     """Every core id this project's SoM publishes, per the SDK -- the SoC
     JSON's own `cores[].id`, unioned with the `variants[].debug.jlink_device`
     keys. Empty whenever the walk resolves nothing, which the caller reads as
     "cannot be asked", never as "this SoM has no cores".
+
+    *warnings*/*skipped*: see `_sdk_variant_debug_block`'s own doc -- same
+    threading, same reason (tan-cli#964 review, majors 5/6).
 
     tan-cli#477 major 2. `--core` pre-build is NOT decoration: with no
     `build/system-manifest.yaml` to check against, it selects which core's
@@ -509,7 +530,9 @@ def _sdk_published_cores(sdk_root: str | None, board_yaml_path: str) -> frozense
     sku = _board_som_sku(board_yaml_path)
     if sku is None:
         return frozenset()
-    walked = read_sdk_som_and_soc(os.path.join(sdk_root, "metadata"), sku)
+    walked = read_sdk_som_and_soc(
+        os.path.join(sdk_root, "metadata"), sku, warnings=warnings, skipped=skipped
+    )
     if walked is None:
         return frozenset()
     _silicon, silicon_variant, variants, _soc_flash_mb, soc_cores = walked
@@ -603,6 +626,9 @@ def _fill_debug_probe_identity_from_sdk(
     sdk_root: str | None,
     board_yaml_path: str,
     core_id: str | None,
+    *,
+    warnings: list[str] | None = None,
+    skipped: list[str] | None = None,
 ) -> tuple[bool, frozenset[str]]:
     """alp-sdk#1026: fill `resolution`'s remaining `device`/`target_id`/
     `config_files` gaps from the SDK's published per-variant debug-probe
@@ -632,13 +658,16 @@ def _fill_debug_probe_identity_from_sdk(
     resolved to index with" or "the given core id has no entry in this SoM's
     published map" -- two distinct, both-fixable-by-`--core` causes the caller
     cannot tell apart, or name the known cores for, without this set.
+
+    *warnings*/*skipped*: see `_sdk_variant_debug_block`'s own doc -- same
+    threading, same reason (tan-cli#964 review, majors 5/6).
     """
     if sdk_root is None:
         return False, frozenset()
     sku = _board_som_sku(board_yaml_path)
     if sku is None:
         return False, frozenset()
-    debug = _sdk_variant_debug_block(sdk_root, sku)
+    debug = _sdk_variant_debug_block(sdk_root, sku, warnings=warnings, skipped=skipped)
     if debug is None:
         return False, frozenset()
     jlink_device = debug.get("jlink_device")
@@ -1487,6 +1516,23 @@ def _run(
             generated_at, str(err), cwd_launch_path, target, server
         )
 
+    # tan-cli#964 review (major 5): collects every `som-preset-v1`/
+    # `soc-spec-v1` schema violation found while EITHER SDK-metadata walk
+    # below reads this project's SoM preset/SoC JSON -- `_sdk_published_cores`
+    # (the --core guard, just below) and `_fill_debug_probe_identity_from_sdk`
+    # (the identity fallback, further down) share this one list rather than
+    # each collecting -- and reporting -- its own, so a violation both walks
+    # would hit is not folded into two `debug-config.metadata-schema-invalid`
+    # issues.  Before this, `tan debug-config` passed no `warnings` to either
+    # walk and validated NOTHING, despite #964's PR body claiming it inherited
+    # the WARN half "transitively" through `read_sdk_som_and_soc`.
+    schema_warnings: list[str] = []
+    # tan-cli#964 review (major 6, "skip-but-disclose"): the same shared-list
+    # convention as `schema_warnings` above, for the OTHER half -- a note
+    # when the schema file itself is simply absent, rather than the silent
+    # `[]` that used to be indistinguishable from "validated clean".
+    schema_skipped: list[str] = []
+
     # tan-cli#489 (5): an EXPLICIT --target-kind bypasses `infer_target_kind`
     # entirely, so its own --core-vs-manifest guard (the `core-unknown` refusal
     # above) never runs for this path. Without this check, --core naming no
@@ -1542,7 +1588,9 @@ def _run(
             refusal_sdk = _sdk_core_refusal_authority(
                 sdk_root, sdk_source_tier, foreign_global_default_for
             )
-            published_cores = _sdk_published_cores(refusal_sdk, board_yaml)
+            published_cores = _sdk_published_cores(
+                refusal_sdk, board_yaml, warnings=schema_warnings, skipped=schema_skipped
+            )
             if published_cores and core not in published_cores:
                 return _explicit_core_unknown_failure(
                     generated_at,
@@ -1577,7 +1625,8 @@ def _run(
     target_id_before_identity = resolution.target_id
     config_files_empty_before_identity = not resolution.config_files
     identity_debug_block_found, known_jlink_cores = _fill_debug_probe_identity_from_sdk(
-        resolution, sdk_root, board_yaml, identity_core
+        resolution, sdk_root, board_yaml, identity_core,
+        warnings=schema_warnings, skipped=schema_skipped,
     )
     # Which launch-configuration JSON keys the SDK fallback (not a real build)
     # just populated -- the ONLY fields `sdk_identity_overwrites` below is
@@ -1625,7 +1674,25 @@ def _run(
     # one, or a field the fallback itself just resolved would misreport as
     # still absent. Advisory about resolution state, so it fires on
     # `--preview` too, not just a write.
-    identity_issues: list[Issue] = []
+    identity_issues: list[Issue] = [
+        # tan-cli#964 review (major 5): the WARN half of #964's decided rule,
+        # same shape `presets_cmd.py`/`size_cmd.py` already use -- one issue
+        # per violation, naming the file, the JSON pointer, and what was
+        # found. `debug-config` already degrades a schema-invalid preset/SoC
+        # JSON to its existing placeholder behaviour (nothing above refuses
+        # on `schema_warnings`); this makes that degrade visible instead of
+        # silent.
+        Issue("debug-config.metadata-schema-invalid", "warning", w)
+        for w in schema_warnings
+    ]
+    # tan-cli#964 review (major 6, "skip-but-disclose"): `info`, not
+    # `warning` -- nothing here says a document is wrong, only that a schema
+    # to check it against is absent. Deduplicated: both walks above can each
+    # find the same missing schema.
+    identity_issues.extend(
+        Issue("debug-config.metadata-schema-unchecked", "info", w)
+        for w in dict.fromkeys(schema_skipped)
+    )
     if identity_debug_block_found:
         field = _SERVER_IDENTITY_FIELD.get(server)
         if field is not None and _has_placeholder(draft.get(field)):

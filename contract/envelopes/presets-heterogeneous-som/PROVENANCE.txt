@@ -60,3 +60,37 @@ Why the PREVIOUS recording was wrong
 -------------------------------------
 It was not wrong; it was recorded before these two fields existed. This is an
 ADDITIVE re-record, not a correction.
+
+Re-recorded on : 2026-08-28
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#964 (review round)
+Branch         : fix/964-validate-metadata-on-read
+
+What changed in the golden (second re-record)
+-----------------------------------------------
+`issues` gained one entry: `presets.metadata-schema-unchecked` at severity
+`info`. This fixture's `sdk/` tree has never carried a
+`metadata/schemas/som-preset-v1.schema.json` (it predates the schema
+entirely -- see the FIRST re-record above, which already noted the missing
+`board.schema.json` degrades `allowedOs` to `[]`). tan-cli#964's review
+found the "must not fire on a checkout missing this schema" rule (correct)
+had been implemented as SILENCE (`issues: []`, byte-identical on the wire to
+a validated-clean run) rather than a disclosure -- "skip-but-disclose". This
+fixture's own SDK tree is exactly the case the fix now discloses: no schema
+present, so `tan.core.metadata_schema.validate_document` still returns no
+VIOLATIONS (nothing was checked, so nothing failed -- `cores[].type`/
+`allowedOs` still degrade to `""`/`[]` exactly as before, unchanged), but
+`tan.core.metadata_schema.missing_schema_note` now reports that the SoM
+preset was read without a schema to check it against.
+
+    - "issues":[]
+    + "issues":[{"code":"presets.metadata-schema-unchecked","severity":"info",
+    +            "message":"sdk/metadata/e1m_modules/E1M-V2N101/som.yaml: not
+    +            validated -- no schema at
+    +            sdk/metadata/schemas/som-preset-v1.schema.json in this
+    +            checkout"}]
+
+`data` is byte-identical to the first re-record -- this change is additive
+to `issues` only, at `info` severity, and does not alter `exitCode`/`ok`/any
+resolved field.
