@@ -374,3 +374,5 @@ and write both files from the real merged tree.
 - 2026-08-28 -- tan-cli#962: guard kconfig.py's TFLM kernel selector against a non-string cores[].type (the same class #957 fixed at presets_cmd.py/topology.py), plus the review's follow-on comment/docstring expansion at presets_cmd.py and topology.py
     - tan/commands/presets_cmd.py: 956 -> 962
     - tan/planner/kconfig.py: 2092 -> 2107
+- 2026-08-28 -- tan-cli#957 family, round 4: guard cores[].vector_extension against a non-string in the G-2 TFLM kernel selector, same isinstance-guard pattern as cores[].type
+    - tan/planner/kconfig.py: 2107 -> 2108

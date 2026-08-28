@@ -1184,7 +1184,8 @@ def _emit_inference(
     for c in (project.soc_spec.get("cores") or []):
         if c.get("id") != slice_.core_id:
             continue
-        vec = (c.get("vector_extension") or "").lower()
+        raw_vec = c.get("vector_extension")
+        vec = raw_vec.lower() if isinstance(raw_vec, str) else ""
         raw_type = c.get("type")
         ctype = raw_type.lower() if isinstance(raw_type, str) else ""
         if vec == "neon" or ctype.startswith("cortex-a"):
