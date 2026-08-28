@@ -18,6 +18,7 @@ from tan.core.sdk_default_registry import (
     load_raw,
     parse_registry,
     parse_registry_updated_at,
+    prune_dead_origins,
     registry_path,
     registry_text,
     with_entry,
@@ -456,6 +457,81 @@ def test_a_real_depth_difference_still_wins_even_visited_deep_first():
         "depth must still outrank recency when visited deep-first too, not "
         "just when the registry happens to list the shallow key first"
     )
+
+
+# ── prune_dead_origins: drops an origin whose directory is gone (tan-cli#905)
+#    -- and ONLY that; a merely-unused-right-now origin (still exists, just
+#    doesn't cover the current caller, or its sdkPath went stale) is untouched
+#    ──────────────────────────────────────────────────────────────────────────
+
+
+def test_prune_dead_origins_drops_an_entry_whose_directory_is_gone():
+    registry = {"/proj/a": {"sdkPath": "/sdk/a", "updatedAt": "t0"}}
+    pruned = prune_dead_origins(registry, origin_exists=lambda _origin: False)
+    assert pruned == {}
+
+
+def test_prune_dead_origins_keeps_an_entry_whose_directory_still_exists():
+    registry = {"/proj/a": {"sdkPath": "/sdk/a", "updatedAt": "t0"}}
+    pruned = prune_dead_origins(registry, origin_exists=lambda _origin: True)
+    assert pruned == registry
+
+
+def test_prune_dead_origins_only_drops_the_dead_ones_not_every_entry():
+    """The property the issue's own acceptance bar names: a reader must be
+    able to tell a dead entry from one that is merely unused right now.
+    `/proj/live` is still a real directory (just not the caller's current
+    workspace, and irrelevant to this function either way -- `covers` decides
+    that, not this one); `/proj/gone` no longer exists at all."""
+    registry = {
+        "/proj/live": {"sdkPath": "/sdk/live", "updatedAt": "t0"},
+        "/proj/gone": {"sdkPath": "/sdk/gone", "updatedAt": "t1"},
+    }
+    pruned = prune_dead_origins(
+        registry, origin_exists=lambda origin: origin == "/proj/live"
+    )
+    assert pruned == {"/proj/live": {"sdkPath": "/sdk/live", "updatedAt": "t0"}}
+
+
+def test_prune_dead_origins_does_not_prune_on_a_merely_stale_sdk_path():
+    """The distinction the issue asks for, made concrete: `has_loader_script`
+    -- not this function -- is what `deepest_covering_entry` already uses to
+    skip a covering entry whose `sdkPath` no longer resolves, because that
+    origin's PROJECT may simply be between bootstraps. `prune_dead_origins`
+    has no `has_loader_script`-shaped parameter at all -- it can only ever
+    see `origin_exists`, so a caller cannot accidentally wire sdkPath
+    staleness into it even by mistake; this test pins that the ORIGIN alone
+    decides the outcome regardless of how implausible the `sdkPath` value is.
+    """
+    registry = {"/proj/a": {"sdkPath": "/this/checkout/was/deleted", "updatedAt": "t0"}}
+    pruned = prune_dead_origins(registry, origin_exists=lambda _origin: True)
+    assert pruned == registry
+
+
+def test_prune_dead_origins_drops_a_malformed_entry_whose_origin_is_gone():
+    """A malformed entry (`parse_registry`/`parse_registry_updated_at` would
+    both drop this shape on read) is exactly as prunable as a well-formed
+    one -- `prune_dead_origins` operates on the WRITE-side `load_raw` shape,
+    which preserves whatever a hand edit or an old writer left behind, and
+    tan-cli#905's own complaint is the file growing unboundedly, which a
+    malformed-but-undead entry would defeat if left untouched."""
+    registry = {"/proj/a": "not-a-dict-entry"}
+    pruned = prune_dead_origins(registry, origin_exists=lambda _origin: False)
+    assert pruned == {}
+
+
+def test_prune_dead_origins_empty_registry_is_empty():
+    assert prune_dead_origins({}, origin_exists=lambda _origin: True) == {}
+
+
+def test_prune_dead_origins_never_touches_the_filesystem_itself():
+    """`origin_exists` is injected the same way `covers`/`has_loader_script`/
+    `resolve_origin` are for `deepest_covering_entry` -- this test proves it
+    by using an origin string no real filesystem call could answer for
+    (`os.stat` on this would raise) and a fake that never inspects it."""
+    registry = {"\0invalid\0path": {"sdkPath": "/sdk/a", "updatedAt": "t0"}}
+    pruned = prune_dead_origins(registry, origin_exists=lambda _origin: True)
+    assert pruned == registry
 
 
 # ── parse_registry_updated_at: the recency companion of parse_registry ──────

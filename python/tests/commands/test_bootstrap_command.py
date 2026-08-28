@@ -22,6 +22,7 @@ byte-identical; the four that did not are each pinned here with the reason:
 The install steps are exercised through `--dry-run`, which records the argv it
 WOULD have spawned; `test_a_dry_run_writes_nothing` is what keeps that honest.
 """
+import errno
 import hashlib
 import json
 import os
@@ -990,6 +991,134 @@ def test_write_global_sdk_registry_normalises_a_native_sdk_root_to_posix(tmp_pat
         (home / ".alp" / "sdk-defaults.json").read_text(encoding="utf-8")
     )
     assert registry_doc["/home/u/proj"]["sdkPath"] == "C:/Users/dev/alp-sdk"
+
+
+def test_write_global_sdk_registry_prunes_an_origin_whose_directory_is_gone(
+    tmp_path, monkeypatch
+):
+    """tan-cli#905: the registry's own complaint was unbounded growth from
+    throwaway/CI origins whose directory was later deleted. `dead_origin`
+    below never exists on disk at all (a bootstrap that ran, then had its
+    whole workspace removed, exactly the CI-worktree case the issue names);
+    `live_origin` is a real directory, standing in for a project that is
+    merely not the caller of THIS write. A second `_write_global_sdk_registry`
+    call, for a third, unrelated origin, must drop the dead one and keep the
+    live one untouched -- proving the prune rides the existing write rather
+    than needing its own trigger.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    live_origin = tmp_path / "still-here"
+    live_origin.mkdir()
+    dead_origin = tmp_path / "deleted-project"  # never created -- origin is dead by construction
+    new_origin = tmp_path / "new-project"
+    new_origin.mkdir()
+
+    bootstrap_cmd._write_global_sdk_registry(str(tmp_path / "sdk-old"), origin=str(live_origin))
+    bootstrap_cmd._write_global_sdk_registry(str(tmp_path / "sdk-dead"), origin=str(dead_origin))
+    registry_before = json.loads(registry_path(home / ".alp").read_text(encoding="utf-8"))
+    assert set(registry_before) == {str(live_origin), str(dead_origin)}
+
+    bootstrap_cmd._write_global_sdk_registry(str(tmp_path / "sdk-new"), origin=str(new_origin))
+
+    registry_after = json.loads(registry_path(home / ".alp").read_text(encoding="utf-8"))
+    assert set(registry_after) == {str(live_origin), str(new_origin)}, (
+        "the dead origin must be pruned on the next write, and the live one "
+        "must survive it untouched"
+    )
+    assert registry_after[str(live_origin)]["sdkPath"] == str(tmp_path / "sdk-old").replace(
+        "\\", "/"
+    )
+
+
+def test_origin_exists_treats_a_symlink_loop_as_gone_not_inconclusive(tmp_path):
+    """A symlink loop can never resolve to a real directory a `workspace_root`
+    could sit under -- `Path.is_dir()` already returns `False` for it (ELOOP
+    is one of the errnos pathlib swallows internally), and that is the
+    correct answer for `_origin_exists` too, not a case needing degrade-to-
+    `True` treatment."""
+    loop = tmp_path / "loop"
+    try:
+        loop.symlink_to(loop)
+    except (OSError, NotImplementedError):  # pragma: no cover -- Windows w/o privilege
+        pytest.skip("this host cannot create a symlink")
+    assert bootstrap_cmd._origin_exists(str(loop)) is False
+
+
+def test_origin_exists_degrades_a_permission_error_to_true_not_a_raise(tmp_path):
+    """A permission error (`EACCES`, e.g. a parent directory this process
+    cannot even stat) must degrade to `True` (inconclusive, so the entry
+    survives), not raise out of a best-effort write and not silently prune a
+    project this process simply could not check. Skipped when running as
+    root, which bypasses directory permissions entirely and would make
+    `os.stat` succeed instead of raising."""
+    if os.name != "posix" or os.geteuid() == 0:
+        pytest.skip("requires a non-root POSIX process to exercise EACCES")
+    parent = tmp_path / "unreadable"
+    parent.mkdir()
+    child = parent / "origin"
+    child.mkdir()
+    parent.chmod(0o000)
+    try:
+        assert bootstrap_cmd._origin_exists(str(child)) is True
+    finally:
+        parent.chmod(0o755)  # restore so tmp_path's own teardown can clean up
+
+
+def test_origin_exists_keeps_a_not_ready_volume_not_prunes_it(tmp_path, monkeypatch):
+    """review of #971: a live project on a volume that is merely not mounted
+    right now must NOT read as confirmed-dead. On POSIX this is an
+    unmounted mountpoint / autofs / NFS path surfacing as plain `ENOENT`
+    (already covered by the symlink-loop test above, which shares the same
+    errno) -- the shape this test targets is the Windows one, `WinError 21`
+    ("drive exists but is not accessible", `pathlib._WINERROR_NOT_READY`)
+    for a disconnected mapped or removable drive, which `pathlib` itself
+    absorbs the same way it absorbs `ENOENT`
+    (`pathlib._IGNORED_WINERRORS == (21, 123, 1921)` on the 3.12 stdlib this
+    repo floors at).
+
+    It cannot be created literally without a real not-ready Windows volume,
+    so it is simulated at the `os.stat` boundary this function calls
+    directly: a `winerror`-carrying `OSError`, regardless of its mapped
+    `errno`, must degrade to `True` (kept), never to `False` (pruned) --
+    the `winerror` check in `_origin_exists` runs BEFORE the errno check for
+    exactly this reason."""
+    origin = tmp_path / "on-a-disconnected-drive"
+
+    def fake_stat(path, *args, **kwargs):
+        err = OSError("[WinError 21] The device is not ready")
+        err.errno = errno.ENOENT  # Windows commonly folds WinError 21 into ENOENT too
+        err.winerror = 21
+        raise err
+
+    monkeypatch.setattr(bootstrap_cmd.os, "stat", fake_stat)
+    assert bootstrap_cmd._origin_exists(str(origin)) is True
+
+
+def test_origin_exists_treats_winderror_1921_as_gone_not_inconclusive(tmp_path, monkeypatch):
+    """review of #971, round 2: `windows-latest` CI caught this one LIVE, not
+    in review -- a self-referencing symlink's `os.stat` raises `WinError
+    1921` (`ERROR_CANT_RESOLVE_FILENAME`) on real Windows, not the `ELOOP`
+    errno this function's POSIX branch relies on. `1921` is one of
+    `pathlib._IGNORED_WINERRORS`, same bucket as the `WinError 21` test
+    above -- but it is NOT the same SHAPE: `21` is a drive that might come
+    back, `1921` is a symlink loop that can never resolve, on this host, no
+    matter how long this process waits -- the exact "confirmed-dead" fact
+    the POSIX symlink-loop test above already establishes for `ELOOP`. Kept
+    for a `WinError 21`-alike is correct; kept for THIS one silently
+    resurrects a genuinely dead entry, so it must read `False`, not `True`."""
+    origin = tmp_path / "on-a-loop"
+
+    def fake_stat(path, *args, **kwargs):
+        err = OSError("[WinError 1921] The symbolic link cannot be followed")
+        err.errno = errno.EINVAL  # not one of the errnos this function checks either
+        err.winerror = 1921
+        raise err
+
+    monkeypatch.setattr(bootstrap_cmd.os, "stat", fake_stat)
+    assert bootstrap_cmd._origin_exists(str(origin)) is False
 
 
 def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_path):

@@ -50,10 +50,12 @@ stray byte there breaks the extension silently.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -138,6 +140,7 @@ from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import sdk_pointer_json
 from tan.core.sdk_default_registry import (
     load_raw,
+    prune_dead_origins,
     registry_path,
     registry_text,
     with_entry,
@@ -3006,12 +3009,102 @@ def _read_global_sdk_registry_bytes() -> bytes | None:
         return None
 
 
+#: `pathlib._IGNORED_WINERRORS` on the 3.12 stdlib this repo floors at
+#: (`pyproject.toml: requires-python = ">=3.12"`) folds all three of these
+#: `winerror` codes into the SAME `False` a genuinely gone path produces --
+#: but they are not the same SHAPE, and `_origin_exists` deliberately tells
+#: them apart rather than reproducing `Path.is_dir()`'s answer:
+#:
+#: * `21` is `pathlib._WINERROR_NOT_READY` ("drive exists but is not
+#:   accessible") -- the exact shape a disconnected mapped or removable
+#:   drive raises. TRANSIENT: the drive can come back, so this is
+#:   inconclusive, not confirmed-dead.
+#: * `123` (`ERROR_INVALID_NAME`) and `1921` (`ERROR_CANT_RESOLVE_FILENAME`)
+#:   are PERMANENT structural dead ends -- a malformed path string, or (CI
+#:   caught this one live on `windows-latest`, review of #971 round 2: a
+#:   self-referencing symlink's `os.stat` raises `WinError 1921` on real
+#:   Windows, not an errno this function's own confirmed-dead errno set
+#:   would otherwise catch) a symlink loop. Both are the Windows-side
+#:   sibling of the POSIX `ENOTDIR`/`ELOOP` cases just below: the path can
+#:   never resolve, on this host, no matter how long this process waits --
+#:   the same "dead" fact this function already treats a symlink loop as.
+_INCONCLUSIVE_WINERRORS = (21,)
+_DEAD_WINERRORS = (123, 1921)
+
+
+def _origin_exists(origin: str) -> bool:
+    """`prune_dead_origins`'s injected filesystem check, production shape:
+    does `origin` -- a registry key, always an absolute directory
+    `sdk_default_registry`'s own module docstring already establishes as the
+    only kind of value that can appear there -- still exist as a directory on
+    this host.
+
+    **Deliberately `os.stat` plus an explicit errno/winerror check, not
+    `Path.is_dir()`** (review of #971, tan-cli#464 the second time around).
+    `Path.is_dir()` degrades an INCONCLUSIVE stat to `False` exactly as
+    readily as a CONFIRMED-absent one: besides `ENOENT`/`ENOTDIR`/`EBADF`/
+    `ELOOP` (a missing path, a parent that turned out to be a file, a bad
+    descriptor, a symlink loop -- these four stay treated as confirmed-dead
+    below, same as before), it also folds in `WinError 21` -- a live
+    project on a volume that is merely unmounted or offline right now (a
+    disconnected mapped or removable drive) reads as gone. That is the
+    exact tan-cli#464 wrong-answer this registry exists to prevent -- the
+    project falls back to the last-writer-wins `globalDefault` tier --
+    except reached by symptom (a cable unplugged mid-session) instead of by
+    cause (no origin key at all).
+
+    So the check here is spelled out rather than delegated to `Path.is_dir()`,
+    and the two Windows-specific tables above are checked in the same
+    breath as, not folded into, the POSIX errno set: `_INCONCLUSIVE_WINERRORS`
+    (checked FIRST, always wins over any `errno` the same `OSError` also
+    carries -- a not-ready drive's failure can carry an `ENOENT`-shaped
+    `errno` alongside `WinError 21`, and the `winerror` is the more
+    specific, more correct signal) degrades to `True`; `_DEAD_WINERRORS`,
+    checked next, degrades to `False` for the same reason a POSIX symlink
+    loop does (see below) -- confirmed, not merely unavailable. Only then
+    does `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` count as confirmed-dead, same as
+    `Path.is_dir()` already treated them (a symlink loop or a broken link
+    can never again resolve to a real directory a `workspace_root` could
+    sit under, so treating it the same as "gone" is not overreach).
+    Everything else -- most notably a permission error (`EACCES`, e.g. an
+    unreadable parent directory) -- degrades to `True`: an origin this
+    process could not conclusively resolve is inconclusive, not
+    confirmed-dead, and `prune_dead_origins` drops an entry only on a
+    confirmed absence. A stat that succeeds but names a non-directory (the
+    origin's directory was replaced by a plain file) is a real, confirmed
+    answer -- no exception to catch -- so it returns `False` directly.
+    """
+    try:
+        mode = os.stat(origin).st_mode
+    except OSError as exc:
+        winerror = getattr(exc, "winerror", None)
+        if winerror in _INCONCLUSIVE_WINERRORS:
+            return True
+        if winerror in _DEAD_WINERRORS:
+            return False
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP):
+            return False
+        return True
+    return stat.S_ISDIR(mode)
+
+
 def _write_global_sdk_registry(sdk_root: str, *, origin: str) -> None:
     """Key `origin -> sdk_root` into `~/.alp/sdk-defaults.json`, ALONGSIDE
     (never instead of) the legacy `_write_global_sdk_pointer` write this
     always runs beside (tan-cli#466). `origin` is the same absolute project
     root `_write_global_sdk_pointer`'s own `written_for` already records --
     the directory THIS bootstrap ran in.
+
+    **Also prunes every DEAD origin in the same read-modify-write**
+    (tan-cli#905): before `with_entry` keys in this run's own origin, every
+    existing entry whose origin directory no longer exists
+    (`sdk_default_registry.prune_dead_origins`, `_origin_exists` above) is
+    dropped. Riding this call rather than a new command or a new lock is
+    deliberate -- it is already the one place that reads, modifies, and
+    atomically rewrites this file, so pruning here adds no new race the
+    concurrency paragraph below does not already cover, and needs no new CLI
+    surface: the registry shrinks back down on the cadence it already grows
+    on, one relocating bootstrap at a time.
 
     A concurrent second `tan bootstrap` on the host could race this
     read-modify-write (no file lock -- matching every other pointer write in
@@ -3023,7 +3116,14 @@ def _write_global_sdk_registry(sdk_root: str, *, origin: str) -> None:
     worst case, degrades one of the two entries back to tan-cli#464's
     disclosed-but-foreign path -- never to a crash or a corrupt file, since
     the read half already tolerates any malformed content
-    (`sdk_default_registry.parse_registry`).
+    (`sdk_default_registry.parse_registry`). The prune added by tan-cli#905
+    carries the SAME tolerance and no more: it can only race away a
+    concurrent write's just-added entry if that entry's own origin somehow
+    failed `_origin_exists` in the same instant it was written (it cannot --
+    the writer only ever runs `_origin_exists` against a directory a
+    bootstrap just finished running in), so in practice a losing prune only
+    ever re-drops an ALREADY-dead entry the winner's own read had not yet
+    pruned, which the winner's own next bootstrap removes anyway.
 
     Best-effort, like `_write_global_sdk_pointer`: a permission error or a
     full disk here degrades silently to "no registry entry for this origin",
@@ -3061,7 +3161,8 @@ def _write_global_sdk_registry(sdk_root: str, *, origin: str) -> None:
         path = registry_path(_home_alp_dir())
         raw = path.read_text(encoding="utf-8") if path.is_file() else None
         stamp, posix_root = wall_clock_iso(millis=True), _to_posix(Path(sdk_root))
-        registry = with_entry(load_raw(raw), origin=origin, sdk_root=posix_root, updated_at=stamp)
+        pruned = prune_dead_origins(load_raw(raw), origin_exists=_origin_exists)
+        registry = with_entry(pruned, origin=origin, sdk_root=posix_root, updated_at=stamp)
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(str(path), registry_text(registry))
     except Exception:  # noqa: BLE001 -- best-effort by contract
