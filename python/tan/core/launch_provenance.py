@@ -48,9 +48,15 @@ that owns nothing. A customer who deletes
 forgets what it wrote and starts leaving every existing list entry alone
 (``debug_launch._merge_list_by_identity``'s position-based pass degrades to
 append-only without a confirmed hash) -- a mildly stale entry the customer
-can delete in one keystroke, never a deleted customer edit. The sidecar then
-re-establishes itself from the very next write, so the degradation is
-one run, not permanent.
+can delete in one keystroke, never a deleted customer edit. The SIDECAR
+re-establishes itself from the very next write, so the MECHANISM's
+degradation is one run, not permanent -- but a list entry it left stranded
+during that one run (appended beside a value it could not prove was its
+own) is not retroactively cleaned up once the sidecar heals; it stays in
+``launch.json`` until the customer deletes it themselves. See
+``debug_launch.sdk_identity_stranded_appends`` (surfaced by
+``debug_config_cmd.py`` as ``debug-config.sdk-identity-appended``) for the
+disclosure that names it rather than leaving it silent.
 """
 
 from __future__ import annotations

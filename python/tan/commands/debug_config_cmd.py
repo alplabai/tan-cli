@@ -110,6 +110,7 @@ from tan.core.debug_launch import (
     parse_server_kind,
     parse_target_kind,
     sdk_identity_overwrites,
+    sdk_identity_stranded_appends,
 )
 from tan.core import launch_provenance
 from tan.core.global_flags import accept_global_flags
@@ -907,6 +908,32 @@ def _sdk_identity_overwrite_issue(field: str, existing_value: str, incoming_valu
         "flash-unlock device profile more specific than the generic attach device "
         "the SDK publishes — restore it in .vscode/launch.json; a value tan itself "
         "resolves from a real build will overwrite it again the same way.",
+    )
+
+
+def _sdk_identity_appended_issue(field: str, existing_value: str, incoming_value: str) -> Issue:
+    """tan-cli#982 review finding #2: the accepted degradation
+    [`sdk_identity_stranded_appends`] exists to name -- an existing `field`
+    entry `provenance` could not prove was tan's own prior output was left in
+    place, and the value resolved this run from the SDK's published
+    debug-probe identity (alp-sdk#987) was APPENDED beside it rather than
+    replacing it. Severity `info`, same family as
+    `debug-config.comments-dropped` / `debug-config.legacy-entry-untouched`:
+    nothing failed, but a customer never told two `configFiles` entries now
+    sit on the same launch configuration has no way to know one is stale --
+    OpenOCD sources every `-f`, so two board configs on one TAP fail the
+    debug session outright, the same failure class this write just created
+    silently."""
+    return Issue(
+        "debug-config.sdk-identity-appended",
+        "info",
+        f'This write left the existing `{field}` value "{existing_value}" in place '
+        f'and appended "{incoming_value}", resolved from the SDK\'s published '
+        "debug-probe identity (alp-sdk#987), instead of replacing it -- tan could "
+        f'not prove "{existing_value}" was its own prior output (no recorded '
+        "`.alp/` provenance for it), so it left it rather than risk overwriting a "
+        "value you filled in by hand. If it is stale, delete it from "
+        ".vscode/launch.json yourself.",
     )
 
 
@@ -1778,6 +1805,15 @@ def _run(
     overwrites = sdk_identity_overwrites(
         existing, draft, sdk_filled_json_fields, provenance=provenance
     )
+    # tan-cli#982 review finding #2: the OTHER outcome that same merge can
+    # produce for a list field -- an existing value provenance could not
+    # prove was tan's own is left in place and the new one is appended
+    # beside it, rather than replaced. `sdk_identity_overwrites` above
+    # correctly stays silent about this shape (nothing concrete was lost);
+    # this discloses the append instead, so it is not silent everywhere.
+    stranded_appends = sdk_identity_stranded_appends(
+        existing, draft, sdk_filled_json_fields, provenance=provenance
+    )
 
     # tan-cli#489 (6): `--pre-launch-task ''` opts OUT of a `preLaunchTask` key
     # entirely (`create_launch_draft` builds it, then deletes it), which is
@@ -1844,6 +1880,10 @@ def _run(
     for field, existing_value, incoming_value in overwrites:
         issues.append(
             _sdk_identity_overwrite_issue(field, existing_value, incoming_value)
+        )
+    for field, existing_value, incoming_value in stranded_appends:
+        issues.append(
+            _sdk_identity_appended_issue(field, existing_value, incoming_value)
         )
 
     return success(

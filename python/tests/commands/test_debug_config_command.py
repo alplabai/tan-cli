@@ -1213,6 +1213,13 @@ def test_sdk_identity_overwrite_message_stays_true_for_config_files(tmp_path):
     assert "board/OLD.cfg" in overwrite_issue["message"]
     assert "board/alif_e8.cfg" in overwrite_issue["message"]
 
+    # tan-cli#982 review finding #2's sibling code must NOT fire here -- this
+    # run genuinely replaced the value, nothing was appended beside it.
+    appended_issue = next(
+        (i for i in env["issues"] if i["code"] == "debug-config.sdk-identity-appended"), None
+    )
+    assert appended_issue is None, env["issues"]
+
 
 def test_an_sdk_filled_config_files_value_with_no_provenance_is_disclosed_as_appended_not_replaced(
     tmp_path,
@@ -1226,7 +1233,17 @@ def test_an_sdk_filled_config_files_value_with_no_provenance_is_disclosed_as_app
     replaced -- `sdk_identity_overwrites` must not raise a "replaced" alarm
     over a value that is still sitting right there in the file. A disclosure
     here would be worse than silence: it would send the customer hunting for
-    a value to restore that was never touched."""
+    a value to restore that was never touched.
+
+    tan-cli#982 review finding #2: staying silent about the OVERWRITE is
+    right, but this run still made a decision worth telling the customer
+    about -- it left `board/OLD.cfg` in the file and appended a second
+    `configFiles` entry beside it, rather than reconciling to one. Two board
+    `.cfg`s sourced on the same TAP is the same failure class
+    `test_a_resolved_replacement_overwrites_the_previous_one_instead_of_
+    accumulating` names, and `issues: []` here told the customer nothing.
+    `debug-config.sdk-identity-appended` is the disclosure for exactly this
+    shape."""
     pytest.importorskip("yaml")
     Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
     launch_json(tmp_path).parent.mkdir()
@@ -1269,6 +1286,17 @@ def test_an_sdk_filled_config_files_value_with_no_provenance_is_disclosed_as_app
         (i for i in env["issues"] if i["code"] == "debug-config.sdk-identity-overwrite"), None
     )
     assert overwrite_issue is None, env["issues"]
+
+    # tan-cli#982 review finding #2: the append that DID happen is disclosed
+    # instead -- naming both the stranded existing value and what landed
+    # beside it, so the customer can tell there are now two.
+    appended_issue = next(
+        (i for i in env["issues"] if i["code"] == "debug-config.sdk-identity-appended"), None
+    )
+    assert appended_issue is not None, env["issues"]
+    assert appended_issue["severity"] == "info"
+    assert "board/OLD.cfg" in appended_issue["message"]
+    assert "board/alif_e8.cfg" in appended_issue["message"]
 
 
 def test_an_all_placeholder_config_files_list_keeps_a_hand_added_second_entry():
@@ -1630,6 +1658,151 @@ def test_a_customer_edit_of_a_tans_own_entry_orphans_it_instead_of_overwriting_i
         "my/own/handpicked.cfg",
         "board/rev_2.cfg",
     ], on_disk_2
+
+
+def test_a_customer_edit_stays_orphaned_through_a_third_run_never_reclaimed(tmp_path):
+    """tan-cli#982 review finding #1 (1): `_merge_list_by_identity`'s own
+    docstring promises pass-3 (appended) entries are NEVER recorded as
+    tan-owned -- only pass 1's identity matches and pass 2's positional
+    placements are. The test above
+    (`test_a_customer_edit_of_a_tans_own_entry_orphans_it_instead_of_
+    overwriting_it`) only runs TWO builds, which cannot catch a violation of
+    that promise: nothing would wrongly treat the customer's still-orphaned
+    edit as tan's own until something LOOKS UP what run 2 recorded, and
+    nothing does that until a THIRD run. Reproduces the reviewer's own probe
+    end to end: run 1 resolves and records `board/rev_1.cfg`; the customer
+    hand-edits that exact entry to `my/own/handpicked.cfg`; run 2 cannot
+    match it any more (the content hash disagrees) so it APPENDS
+    `board/rev_2.cfg` beside it -- and, per the docstring's promise, must
+    NOT record the still-unmatched `my/own/handpicked.cfg` as tan's own even
+    though it now sits in the merged result; run 3 must therefore still find
+    nothing it can prove is tan's at slot 0 and append again, never
+    overwrite the customer's edit. FAILS against `owned_entries =
+    list(result)` (claiming every merged entry as owned, including the ones
+    pass 1/2 never matched or placed) -- there, run 2 wrongly records
+    `my/own/handpicked.cfg` as tan's own, and run 3 overwrites it outright,
+    deleting it: `['board/rev_3.cfg', 'board/rev_2.cfg']` instead of this
+    test's own assertion below."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr.elf\n",
+    )
+    zephyr_dir = Path(build_dir, "zephyr")
+    zephyr_dir.mkdir(parents=True)
+    runners_yaml = zephyr_dir / "runners.yaml"
+    runners_yaml.write_text(
+        "runners:\n- openocd\nargs:\n  openocd:\n  - --config=board/rev_1.cfg\n",
+        encoding="utf-8",
+    )
+    env_1 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_1["exitCode"] == 0, env_1
+    assert env_1["data"]["configuration"]["configFiles"] == ["board/rev_1.cfg"]
+
+    on_disk_1 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    on_disk_1["configurations"][0]["configFiles"] = ["my/own/handpicked.cfg"]
+    launch_json(tmp_path).write_text(json.dumps(on_disk_1), encoding="utf-8")
+
+    runners_yaml.write_text(
+        "runners:\n- openocd\nargs:\n  openocd:\n  - --config=board/rev_2.cfg\n",
+        encoding="utf-8",
+    )
+    env_2 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_2["exitCode"] == 0, env_2
+    on_disk_2 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk_2["configurations"][0]["configFiles"] == [
+        "my/own/handpicked.cfg",
+        "board/rev_2.cfg",
+    ], on_disk_2
+
+    runners_yaml.write_text(
+        "runners:\n- openocd\nargs:\n  openocd:\n  - --config=board/rev_3.cfg\n",
+        encoding="utf-8",
+    )
+    env_3 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_3["exitCode"] == 0, env_3
+    on_disk_3 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk_3["configurations"][0]["configFiles"] == [
+        "my/own/handpicked.cfg",
+        "board/rev_3.cfg",
+    ], on_disk_3
+
+
+def test_a_run_that_resolves_nothing_for_a_field_leaves_its_provenance_record_untouched(
+    tmp_path,
+):
+    """tan-cli#982 review finding #1 (2): `_merge_list_field`'s all-placeholder
+    guard returns `owned_entries=[]` for a run that resolved NOTHING for a
+    list field, and `_merge_configuration`'s own docstring promises that
+    means the field's `.alp/` provenance record is left EXACTLY as it
+    already was, never wiped -- gated by `if owned_entries_out is not None
+    and owned:`. Reproduces the reviewer's own probe end to end: run 1
+    resolves and records `board/rev_1.cfg` as tan's own; run 2's
+    `runners.yaml` is REMOVED entirely (a build that has not been re-run
+    against this server, or registers no openocd runner at all), so
+    `configFiles` resolves to nothing but tan's own placeholder and the
+    all-placeholder guard fires -- this run touches NOTHING for the field;
+    run 3's `runners.yaml` comes back with a fresh value. If run 2 had wiped
+    the field's provenance record instead of leaving it alone, run 3 has
+    nothing left to match `board/rev_1.cfg` against and must APPEND rather
+    than replace it -- tan-cli#489's own accumulation blocker regressing,
+    silently. FAILS against dropping the `and owned` half of that guard's
+    condition (`debug_launch.py`'s `_merge_configuration`): there, run 3
+    yields `['board/rev_1.cfg', 'board/rev_3.cfg']` instead of this test's
+    own assertion below."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr.elf\n",
+    )
+    zephyr_dir = Path(build_dir, "zephyr")
+    zephyr_dir.mkdir(parents=True)
+    runners_yaml = zephyr_dir / "runners.yaml"
+    runners_yaml.write_text(
+        "runners:\n- openocd\nargs:\n  openocd:\n  - --config=board/rev_1.cfg\n",
+        encoding="utf-8",
+    )
+    env_1 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_1["exitCode"] == 0, env_1
+    assert env_1["data"]["configuration"]["configFiles"] == ["board/rev_1.cfg"]
+
+    # A run with no `runners.yaml` at all: `configFiles` resolves to nothing
+    # but tan's own placeholder, so the all-placeholder guard in
+    # `_merge_list_field` fires and this run touches NOTHING for the field.
+    runners_yaml.unlink()
+    env_2 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_2["exitCode"] == 0, env_2
+    on_disk_2 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk_2["configurations"][0]["configFiles"] == ["board/rev_1.cfg"], on_disk_2
+
+    runners_yaml.write_text(
+        "runners:\n- openocd\nargs:\n  openocd:\n  - --config=board/rev_3.cfg\n",
+        encoding="utf-8",
+    )
+    env_3 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_3["exitCode"] == 0, env_3
+    on_disk_3 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk_3["configurations"][0]["configFiles"] == ["board/rev_3.cfg"], on_disk_3
 
 
 def test_a_multi_element_draft_with_a_customer_prepended_entry_still_replaces(tmp_path):

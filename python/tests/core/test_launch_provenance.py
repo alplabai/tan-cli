@@ -57,8 +57,14 @@ def test_content_hash_changes_with_the_actual_value():
         "",
         "not json at all {{{",
         "[]",  # valid JSON, but not an object
-        '{"schemaVersion": 2, "configurations": {}}',  # unrecognised schema
-        '{"configurations": {}}',  # schemaVersion missing entirely
+        # unrecognised schema -- a POPULATED `configurations` map, not an
+        # empty one, so this case actually exercises the `schemaVersion`
+        # guard: an empty map degrades to `empty()` regardless of the guard,
+        # which is exactly what let a deleted guard hide behind this fixture
+        # (tan-cli#982 review finding #3).
+        '{"schemaVersion": 2, "configurations": {"Alp: X": {"configFiles": ["deadbeef"]}}}',
+        # schemaVersion missing entirely -- same populated-map requirement.
+        '{"configurations": {"Alp: X": {"configFiles": ["deadbeef"]}}}',
         '{"schemaVersion": 1, "configurations": "not-an-object"}',
         '{"schemaVersion": 1, "configurations": {"Alp: X": "not-an-object"}}',
         # a field whose recorded hashes are not a list of strings -- must not

@@ -643,16 +643,7 @@ def sdk_identity_overwrites(
     configs = document.get("configurations")
     if not isinstance(configs, list):
         return out
-    existing_entry = next(
-        (c for c in configs if isinstance(c, dict) and c.get("name") == name), None
-    )
-    if existing_entry is None:
-        legacy = _legacy_name(name)
-        if legacy is not None:
-            existing_entry = next(
-                (c for c in configs if isinstance(c, dict) and c.get("name") == legacy),
-                None,
-            )
+    existing_entry = _matching_existing_entry(configs, name)
     if existing_entry is None:
         return out
     for field in filled_fields:
@@ -669,6 +660,92 @@ def sdk_identity_overwrites(
                 continue
         out.append((field, _display_value(existing_val), _display_value(incoming_val)))
     return out
+
+
+def sdk_identity_stranded_appends(
+    existing_content: str | None,
+    draft: dict[str, Any],
+    filled_fields: list[str],
+    provenance: LaunchProvenance | None = None,
+) -> list[tuple[str, str, str]]:
+    """tan-cli#518 review finding #2, the counterpart [`sdk_identity_
+    overwrites`] deliberately does NOT cover: whether writing ``draft`` over
+    ``existing_content`` would leave one of ``filled_fields``' existing LIST
+    values stranded in the file -- APPENDED alongside the incoming
+    SDK-resolved value rather than replaced -- because ``provenance`` could
+    not prove that existing value was tan's own prior output.
+    [`sdk_identity_overwrites`] treats this exact shape as "nothing concrete
+    was lost" and stays silent about it, correctly for what THAT code
+    discloses (there is nothing to tell the customer to go "restore"), but
+    that left the customer with two ``configFiles`` entries -- two board
+    ``.cfg``s on the same TAP, same failure class
+    ``test_a_resolved_replacement_overwrites_the_previous_one_instead_of_
+    accumulating`` names -- and `issues: []`, no hint tan chose to leave one
+    of them behind (tan-cli#982 review).
+
+    Returns ``(field, existing, incoming)`` for each list field where this
+    write's real merge (mirrored via [`_merge_list_field`], same as
+    [`sdk_identity_overwrites`] does) would APPEND rather than replace: every
+    concrete entry ``existing`` already held survives AND the merge result
+    differs from ``existing`` (something new landed beside it). A scalar
+    field never reaches this -- only a list can be "appended to" instead of
+    overwritten. An unrelated configuration, a field absent from either side,
+    or a merge that changes nothing at all return nothing, using the SAME
+    entry-discovery rule [`sdk_identity_overwrites`] uses (current name, else
+    its legacy counterpart) so both functions can never disagree about which
+    entry this write is actually touching.
+    """
+    out: list[tuple[str, str, str]] = []
+    if not filled_fields:
+        return out
+    if provenance is None:
+        provenance = launch_provenance.empty()
+    try:
+        name = _configuration_name(draft)
+        document = _parse_launch_json_or_default(existing_content)
+    except DebugConfigError:
+        return out
+    configs = document.get("configurations")
+    if not isinstance(configs, list):
+        return out
+    existing_entry = _matching_existing_entry(configs, name)
+    if existing_entry is None:
+        return out
+    for field in filled_fields:
+        if field not in existing_entry or field not in draft:
+            continue
+        existing_val = existing_entry[field]
+        incoming_val = draft[field]
+        if not (isinstance(existing_val, list) and isinstance(incoming_val, list)):
+            continue
+        if not _value_is_concrete(existing_val) or existing_val == incoming_val:
+            continue
+        hashes = provenance.hashes_for(name, field)
+        merged, _owned = _merge_list_field(list(existing_val), list(incoming_val), hashes)
+        if merged == existing_val or _list_lost_a_concrete_entry(existing_val, merged):
+            continue
+        out.append((field, _display_value(existing_val), _display_value(incoming_val)))
+    return out
+
+
+def _matching_existing_entry(configs: list[Any], name: str) -> dict[str, Any] | None:
+    """The SAME launch-configuration entry [`create_launch_json_write_plan`]
+    would merge ``draft`` into for name ``name``: an exact-name hit, else its
+    one legacy ``"ALP: ..."`` counterpart, else `None`. Shared by
+    [`sdk_identity_overwrites`] and [`sdk_identity_stranded_appends`] so both
+    compute "which entry is this write actually touching" identically, and
+    only once."""
+    existing_entry = next(
+        (c for c in configs if isinstance(c, dict) and c.get("name") == name), None
+    )
+    if existing_entry is not None:
+        return existing_entry
+    legacy = _legacy_name(name)
+    if legacy is None:
+        return None
+    return next(
+        (c for c in configs if isinstance(c, dict) and c.get("name") == legacy), None
+    )
 
 
 def _list_lost_a_concrete_entry(existing_list: list[Any], merged_list: list[Any]) -> bool:
