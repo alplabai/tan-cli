@@ -166,9 +166,24 @@ jobs:
     # expressions or it will red on this line.
     timeout-minutes: ${{ inputs.sdk_parity && 60 || 30 }}
     steps:
+      # `fetch-depth: 0` (tan-cli#970 review, blocker 1): the default
+      # depth-1 shallow clone made `python/tests/gates/
+      # test_module_size_budget_log_append_only.py` unable to see ANY
+      # commit's own git parents (`HEAD^@` exits 0 with empty stdout on a
+      # shallow graft), so its real enforcement test read that as a
+      # repository root commit and `pytest.skip`ped -- in EVERY run of this
+      # job, silently, since the day it was written. `0`, not a small fixed
+      # number: that gate now also walks every commit since the PR's own
+      # base ref (`git rev-list <base>..HEAD`), which needs the full
+      # ancestry back to wherever this branch diverged, not a fixed depth
+      # that would eventually be wrong again for an old-enough PR. This
+      # checkout is also what makes `origin/<base>` resolvable at all for
+      # that same gate -- actions/checkout documents `fetch-depth: 0` as
+      # fetching all history for all branches, not just this ref's own.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12" # pyproject's requires-python floor
@@ -470,6 +485,18 @@ jobs:
       # them silently.
       - name: pytest
         working-directory: python
+        env:
+          # `test_module_size_budget_log_append_only.py`'s base-ref
+          # discovery (tan-cli#970 review, blocker 2): this job triggers on
+          # `merge_group` (see the `on:` block above), and GitHub Actions
+          # does not populate `GITHUB_BASE_REF` for that event (only
+          # `pull_request`/`pull_request_target`) -- without this, a
+          # `merge_group` run would hit that gate's `BaseRefUnresolved` and
+          # fail loudly (by design) instead of resolving a real base. Empty
+          # on every other trigger (`push`, `workflow_call`), which is
+          # exactly when that gate's own fallback -- no PR/merge-queue base
+          # applies to this run -- is the correct answer.
+          TAN_MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
         run: python -m pytest tests -q
 
   # The npm shim's platform -> asset table is DATA in a postinstall script, so
