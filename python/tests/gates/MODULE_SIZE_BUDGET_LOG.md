@@ -419,3 +419,6 @@ and write both files from the real merged tree.
     - function_worst_budget: 770 -> 791
     - tan/commands/bootstrap_cmd.py: 3421 -> 3522
     - function_count_budget: 277 -> 279
+- 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/build/execute.py: 1662 -> 1713
+    - tan/commands/build_cmd.py: 2178 -> 2293
