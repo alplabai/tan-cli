@@ -788,7 +788,21 @@ def test_json_reports_the_som_and_stdout_carries_nothing_else(tmp_path, monkeypa
     assert doc["command"] == "presets"
     assert doc["ok"] is True
     assert doc["sdk"] == {"root": "./sdk", "sourceTier": "sdkRootFlag"}
-    assert doc["issues"] == []
+    # tan-cli#964 review (major 6): this fixture carries no
+    # `metadata/schemas/som-preset-v1.schema.json` at all -- "skip-but-
+    # disclose", not the silent skip a missing schema used to be.
+    assert doc["issues"] == [
+        {
+            "code": "presets.metadata-schema-unchecked",
+            "severity": "info",
+            "message": (
+                "sdk/metadata/e1m_modules/E1M-V2N101/som.yaml: not "
+                "validated -- no schema at "
+                "sdk/metadata/schemas/som-preset-v1.schema.json in this "
+                "checkout"
+            ),
+        }
+    ]
     assert doc["data"]["sdkRoot"] == "./sdk"
     assert doc["data"]["skus"] == ["E1M-V2N101"]
     assert doc["data"]["boardLibraries"] == ["lvgl"]
@@ -858,7 +872,29 @@ def test_a_nonstring_core_type_in_a_schema_invalid_soc_json_never_fails_the_comm
     assert result.exit_code == 0
     doc = json.loads(result.stdout)
     assert doc["ok"] is True
-    assert doc["issues"] == []
+    # tan-cli#964 review (major 6): this fixture carries neither
+    # `som-preset-v1.schema.json` nor `soc-spec-v1.schema.json` -- both
+    # reads disclose the skip rather than staying silent.
+    assert doc["issues"] == [
+        {
+            "code": "presets.metadata-schema-unchecked",
+            "severity": "info",
+            "message": (
+                "sdk/metadata/e1m_modules/E1M-TEST/som.yaml: not validated "
+                "-- no schema at sdk/metadata/schemas/som-preset-v1.schema.json "
+                "in this checkout"
+            ),
+        },
+        {
+            "code": "presets.metadata-schema-unchecked",
+            "severity": "info",
+            "message": (
+                "sdk/metadata/socs/vendor/family/part.json: not validated "
+                "-- no schema at sdk/metadata/schemas/soc-spec-v1.schema.json "
+                "in this checkout"
+            ),
+        },
+    ]
     cores = doc["data"]["soms"][0]["cores"]
     # The non-string `type` (`7`) normalises to `""`, never leaks onto the
     # wire as `7` and never aborts the command; the well-typed sibling core
@@ -867,6 +903,191 @@ def test_a_nonstring_core_type_in_a_schema_invalid_soc_json_never_fails_the_comm
         {"id": "a55", "os": "yocto", "type": "", "allowedOs": []},
         {"id": "m33", "os": "zephyr", "type": "cortex-m33",
          "allowedOs": ["zephyr", "baremetal", "off"]},
+    ]
+
+
+#: A schema requiring `cores[].type` to be a string -- narrower than the real
+#: `soc-spec-v1.schema.json`, deliberately: this file's own coverage must not
+#: depend on that schema's exact shape never changing, only on the ONE field
+#: (`cores[].type`) every #957/#962/#964/#965/#969 crash traced back to.
+_SOC_SCHEMA = json.dumps({
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+        "cores": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "type": {"type": "string"}},
+            },
+        }
+    },
+})
+
+
+def _write_soc_lookup_fixture(sdk, *, core_a55_type):
+    """The same three-file shape `test_a_nonstring_core_type_...` above
+    builds, plus `soc-spec-v1.schema.json` (tan-cli#964's own gate) -- shared
+    by the WARN-half tests below so the fixture cannot drift from what that
+    established #957 regression test already proves resolves end to end.
+    Returns the SoC JSON's path, for asserting it by name in a message.
+
+    Also writes a fully-permissive `som-preset-v1.schema.json` (tan-cli#964
+    review, major 6): without it, every test using this fixture would ALSO
+    carry a `presets.metadata-schema-unchecked` info issue for the SoM
+    preset's own missing schema -- real, correct behaviour, but not what
+    this fixture exists to isolate (the SoC-JSON `cores[].type` gate). The
+    skip-disclosure itself has its own dedicated coverage below.
+    """
+    write(
+        sdk / "metadata" / "schemas" / "board.schema.json",
+        json.dumps({"$defs": {"core_entry": {"properties": {
+            "os": {"enum": ["zephyr", "yocto", "baremetal", "off"]}
+        }}}}),
+    )
+    write(sdk / "metadata" / "schemas" / "soc-spec-v1.schema.json", _SOC_SCHEMA)
+    write(
+        sdk / "metadata" / "schemas" / "som-preset-v1.schema.json",
+        json.dumps({"$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object"}),
+    )
+    soc_path = sdk / "metadata" / "socs" / "vendor" / "family" / "part.json"
+    write(soc_path, json.dumps({"cores": [
+        {"id": "a55", "type": core_a55_type},
+        {"id": "m33", "type": "cortex-m33"},
+    ]}))
+    write(
+        sdk / "metadata" / "e1m_modules" / "E1M-TEST" / "som.yaml",
+        "schema_version: 1\n"
+        "sku: E1M-TEST\n"
+        "family: test\n"
+        "silicon: vendor:family:part\n"
+        "topology:\n"
+        "  a55: {machine: test-a55}\n"
+        "  m33: {board: test_m33}\n",
+    )
+    return soc_path
+
+
+def test_a_schema_invalid_soc_json_warns_on_the_json_envelope_and_the_text_line(
+    tmp_path, monkeypatch
+):
+    """tan-cli#964, the WARN half of the decided rule: `tan presets` reads a
+    schema-invalid SoC JSON (`cores[].type` a number, which
+    `soc-spec-v1.schema.json` forbids), continues exactly as it already did
+    for the #957 family (`type` degrades to `""`, `ok: true`, exit 0), but now
+    ALSO reports a `presets.metadata-schema-invalid` issue naming the file,
+    the JSON pointer, and what was found -- both on the `--format json`
+    envelope AND, since `presets()` prints every collected issue verbatim in
+    text mode too, on stderr.
+
+    Mutation-proven: commenting out the `issues.extend(...)` call in
+    `presets_cmd.presets()` that turns `schema_warnings` into
+    `presets.metadata-schema-invalid` issues (byte copy restored after, never
+    `git checkout`) turns both this test's `issues` assertions RED while
+    leaving `ok`/`exitCode`/`cores` unaffected -- proving the warning is
+    additive, not a replacement for the existing #957 degrade. Restoring
+    turns it GREEN.
+    """
+    sdk = tmp_path / "sdk"
+    write(sdk / "scripts" / "alp_project.py", "x")
+    _write_soc_lookup_fixture(sdk, core_a55_type=7)
+    monkeypatch.chdir(tmp_path)
+    # `core_type_lookup` builds its path from the `--sdk-root` STRING
+    # (`"./sdk"`, resolved relative to the invocation's cwd), not from this
+    # test's absolute `tmp_path` -- `pathlib` drops the leading `./`, so the
+    # message names `sdk/metadata/...`, the same relative form `--sdk-root`
+    # was typed with.
+    rel_soc_path = "sdk/metadata/socs/vendor/family/part.json"
+
+    result = runner.invoke(app, ["presets", "--sdk-root", "./sdk", "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is True
+    assert doc["issues"] == [
+        {
+            "code": "presets.metadata-schema-invalid",
+            "severity": "warning",
+            "message": f"{rel_soc_path}: cores/0/type: 7 is not of type 'string'",
+        }
+    ]
+    # The pre-existing #957 degrade is unchanged: `type` is still `""`, never
+    # the raw `7`, and the command still answers every SoM.
+    cores = doc["data"]["soms"][0]["cores"]
+    assert cores == [
+        {"id": "a55", "os": "yocto", "type": "", "allowedOs": []},
+        {"id": "m33", "os": "zephyr", "type": "cortex-m33",
+         "allowedOs": ["zephyr", "baremetal", "off"]},
+    ]
+
+    text_result = runner.invoke(app, ["presets", "--sdk-root", "./sdk"])
+    assert text_result.exit_code == 0
+    assert (
+        # tan-cli#964 review (minor 11): text mode now tags a schema
+        # violation explicitly, so it cannot be mistaken for any other
+        # warning at a glance.
+        f"presets: schema: {rel_soc_path}: cores/0/type: 7 is not of type 'string'"
+        in text_result.stderr
+    )
+
+
+def test_a_schema_valid_soc_json_carries_no_metadata_schema_issue(tmp_path, monkeypatch):
+    """The control: the identical fixture with a schema-VALID `type` on every
+    core produces no `presets.metadata-schema-invalid` issue at all, on
+    either mode -- the new gate does not fire on the common case.
+    """
+    sdk = tmp_path / "sdk"
+    write(sdk / "scripts" / "alp_project.py", "x")
+    soc_path = _write_soc_lookup_fixture(sdk, core_a55_type="cortex-a55")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["presets", "--sdk-root", "./sdk", "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is True
+    assert doc["issues"] == []
+    assert doc["data"]["soms"][0]["cores"][0]["type"] == "cortex-a55"
+
+    text_result = runner.invoke(app, ["presets", "--sdk-root", "./sdk"])
+    assert text_result.exit_code == 0
+    assert str(soc_path) not in text_result.stderr
+
+
+def test_a_missing_soc_spec_schema_discloses_the_skip_not_silence(tmp_path, monkeypatch):
+    """tan-cli#964 review (major 6, 'skip-but-disclose'): the identical
+    fixture with `soc-spec-v1.schema.json` DELETED after being written must
+    not go back to the pre-review silent skip (`issues: []`) -- it must
+    disclose that the SoC JSON was not validated, at `info`, distinct from
+    the `warning` `presets.metadata-schema-invalid` a real violation gets.
+
+    Mutation-proven: reverting either `_soc_lookups`' `skipped.append(note)`
+    call or `presets()`'s `presets.metadata-schema-unchecked` `issues.extend`
+    (byte copy restored after, never `git checkout`) turns this test's
+    `codes`/`message` assertions red; restoring turns them green.
+    """
+    sdk = tmp_path / "sdk"
+    write(sdk / "scripts" / "alp_project.py", "x")
+    soc_path = _write_soc_lookup_fixture(sdk, core_a55_type="cortex-a55")
+    (sdk / "metadata" / "schemas" / "soc-spec-v1.schema.json").unlink()
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["presets", "--sdk-root", "./sdk", "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is True
+    # The document itself is unaffected -- unvalidated, not "known invalid".
+    assert doc["data"]["soms"][0]["cores"][0]["type"] == "cortex-a55"
+    assert doc["issues"] == [
+        {
+            "code": "presets.metadata-schema-unchecked",
+            "severity": "info",
+            "message": (
+                f"{soc_path.relative_to(tmp_path).as_posix()}: not "
+                "validated -- no schema at "
+                "sdk/metadata/schemas/soc-spec-v1.schema.json in this "
+                "checkout"
+            ),
+        }
     ]
 
 
