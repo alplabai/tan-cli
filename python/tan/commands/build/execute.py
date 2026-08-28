@@ -3,10 +3,12 @@
 skip-vs-fail dispositions, resolve `west` from the workspace venv, spawn the
 tool, stream its output, and report a per-slice outcome -- never an escaping
 exception. Mirrors the dispatch loop in `tan-cli/src/commands/build/execute/
-mod.rs`, trimmed to this port's current scope: no `tan build --pristine`
-manual override (`force_pristine` in the Rust oracle -- this port's `build`
-command has no `--pristine` flag yet, so the automatic stamp comparison is
-the only path that can ever fire).
+mod.rs`. `force_pristine` (`tan build --pristine`, tan-cli#427) is the manual
+counterpart to the automatic stamp comparison below: it forces the SAME
+[SdkStampAction.PRISTINE] decision the stamp comparison would make on its
+own, inside the identical two structural safety guards, and reports
+`build.pristine-skipped` (never silent) when one of those guards -- or a
+build dir that was never configured at all -- declines the wipe.
 What IS ported: the unknown-backend / null-command / unsafe-cwd / missing-tool
 skip-vs-fail policy and dispatch order, the build-dir-must-exist-before-the-
 tool-runs precondition, the `tool == "west"` rewrite to the workspace venv's
@@ -119,6 +121,7 @@ from tan.core.plan_exec import (
     assemble_slice_env,
     cross_drive_source_refusal,
     missing_tool_message,
+    pristine_suppression,
     resolve_action,
     sdk_stamp_action,
     sdk_stamp_key,
@@ -562,6 +565,8 @@ def _maybe_pristine_stale_sdk_build_dir(
     cmd_args: Sequence[str],
     sdk_stamp_key_str: str | None,
     on_output: Callable[[str], None],
+    *,
+    force_pristine: bool = False,
 ) -> list[Issue]:
     """Sdk-switch-pristine guard (issue #52): a build dir west configured
     against a PREVIOUS `--sdk-root` makes it FATAL ERROR on this one ("please
@@ -573,6 +578,18 @@ def _maybe_pristine_stale_sdk_build_dir(
     mid-configure failure still stamped correctly, since the dir really was
     configured against it regardless of whether the build finishes).
 
+    `force_pristine` is `tan build --pristine` (tan-cli#163, wired tan-cli#427):
+    unconditionally treats the sdk-switch-pristine decision as
+    [`SdkStampAction.PRISTINE`] instead of consulting the stamp, for the
+    manual case the automatic stamp comparison doesn't (or can't yet) cover.
+    It is NOT a second wipe path -- it forces the SAME decision the automatic
+    check already makes, still inside the same two structural safety guards
+    below, so it still never touches a build dir tan cannot vouch for. Every
+    suppression (either guard, or a build dir that was never configured at
+    all) is reported as `build.pristine-skipped` rather than silently doing
+    nothing (tan-cli#183) -- "pristine" must never silently mean
+    "incremental".
+
     Two guards (mirroring `resolve_zephyr_artefact`'s own refusal to trust a
     build dir it cannot resolve) gate the whole function -- detection, wipe,
     AND the stamp write -- so a `-d`/`--build-dir` override or a cwd outside
@@ -583,25 +600,47 @@ def _maybe_pristine_stale_sdk_build_dir(
     (~line 505) plus `manifest.rs::write_sdk_stamp`'s call site.
 
     Returns the coded `build.sdk-switch-pristine`/`build.sdk-switch-pristine-
-    failed` [`Issue`]s for this slice (verbatim `execute/mod.rs`'s
-    `sdk_switch_issues.push`, at `warning` severity like the oracle's) --
-    empty when nothing was wiped. `on_output` still gets the same "note: ..."
-    text regardless (this port's stderr stream is always-on, unlike the
-    oracle's text-mode-only `eprintln!`); the caller folds the returned
-    issues into the JSON envelope so the wipe is not stderr-only there."""
+    failed`/`build.pristine-skipped` [`Issue`]s for this slice (verbatim
+    `execute/mod.rs`'s `sdk_switch_issues.push`, at `warning` severity like
+    the oracle's) -- empty when nothing was wiped and no `--pristine` was
+    asked for. `on_output` still gets the same "note: ..." text regardless
+    (this port's stderr stream is always-on, unlike the oracle's
+    text-mode-only `eprintln!`); the caller folds the returned issues into
+    the JSON envelope so the wipe -- or its suppression -- is not
+    stderr-only there."""
     overridden = build_dir_overridden(cmd_args)
     under_build_root = _cwd_under_build_root(raw_cwd)
-    if overridden or not under_build_root:
-        return []
-
     issues: list[Issue] = []
+
+    # Probed only when `--pristine` was actually passed, so the non-pristine
+    # path keeps its existing IO exactly (one `cmake_cache_configured` call
+    # below, not two) -- mirrors the oracle's own `pristine_cache_configured`
+    # split.
+    cache_configured = cmake_cache_configured(cwd) if force_pristine else False
+    skipped = pristine_suppression(force_pristine, overridden, under_build_root, cache_configured)
+    if skipped is not None:
+        message = f"{core_id}: --pristine did NOT wipe the build dir — {skipped.reason()}"
+        on_output(f"note: {message}")
+        issues.append(Issue("build.pristine-skipped", "warning", message))
+
+    if overridden or not under_build_root:
+        return issues
+
     cached = read_sdk_stamp(cwd)
-    action = sdk_stamp_action(
-        cached, sdk_stamp_key_str, cmake_cache_configured(cwd), overridden, under_build_root
-    )
+    if force_pristine:
+        # Reached only when the dir WAS configured -- a never-configured one
+        # was already reported by `pristine_suppression` above, so this arm
+        # needs no message of its own for that case.
+        action = SdkStampAction.PRISTINE if cache_configured else SdkStampAction.KEEP
+    else:
+        action = sdk_stamp_action(
+            cached, sdk_stamp_key_str, cmake_cache_configured(cwd), overridden, under_build_root
+        )
     if action is SdkStampAction.PRISTINE:
         new_root = sdk_stamp_key_str or "?"
-        if cached is not None:
+        if force_pristine:
+            message = f"{core_id}: --pristine passed; wiping build dir before dispatch"
+        elif cached is not None:
             message = (
                 f"{core_id}: build dir was configured against SDK root `{cached}`; "
                 f"active SDK is `{new_root}` — running pristine"
@@ -1061,9 +1100,15 @@ def execute_slices(
     sdk_root: str | None = None,
     sdk_root_for_stamp: str | None = None,
     held_outcomes: Sequence[SliceOutcome] = (),
+    force_pristine: bool = False,
 ) -> list[SliceOutcome]:
     """Dispatch every slice of `plan` and return one [`SliceOutcome`] per
     slice, in plan order.
+
+    `force_pristine` is `tan build --pristine` (tan-cli#427): threaded
+    straight through to [`_maybe_pristine_stale_sdk_build_dir`] per slice --
+    see that function's own docstring for the wipe/suppression decision it
+    makes.
 
     `sdk_root_for_stamp` -- the identity the sdk-switch-pristine guard keys
     its stamp comparison on, when it differs from `sdk_root` (the value the
@@ -1294,7 +1339,13 @@ def execute_slices(
         # that then never happens on a host missing `west`.
         sdk_switch_issues.extend(
             _maybe_pristine_stale_sdk_build_dir(
-                sl.core_id, cwd, sl.command.cwd, sl.command.args, sdk_stamp_key_str, on_output
+                sl.core_id,
+                cwd,
+                sl.command.cwd,
+                sl.command.args,
+                sdk_stamp_key_str,
+                on_output,
+                force_pristine=force_pristine,
             )
         )
 

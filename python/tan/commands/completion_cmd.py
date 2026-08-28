@@ -363,7 +363,7 @@ _tan_complete() {
       COMPREPLY=( $(compgen -W "$global_flags --no-pip --no-west --print-env --allow-partial --workspace" -- "$cur") )
       ;;
     build)
-      COMPREPLY=( $(compgen -W "$global_flags --plan --plan-from --materialise --native --manifest --manifest-from --no-auto-bootstrap --pristine" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --plan-from --materialise --native --no-auto-bootstrap --pristine" -- "$cur") )
       ;;
     kconfig)
       COMPREPLY=( $(compgen -W "$global_flags --core" -- "$cur") )
@@ -551,7 +551,7 @@ _tan() {
           _arguments '--no-pip[Skip pip install]' '--no-west[Skip west init/update]' '--print-env[Print environment lines only]' '--allow-partial[Report success despite a failed dependency install]' '--workspace[Build the workspace at this path]:path:_files -/' "${global_args[@]}"
           ;;
         build)
-          _arguments '--plan[Show the build plan]' '--plan-from[Read build plan from file]:path:_files' '--materialise[Materialise plan files]' '--native[Build natively]' '--manifest[Show the system manifest]' '--manifest-from[Read manifest from file]:path:_files' '--no-auto-bootstrap[Never bootstrap implicitly]' '--pristine[Force-wipe build dirs before dispatch]' "${global_args[@]}"
+          _arguments '--plan-from[Read build plan from file]:path:_files' '--materialise[Materialise plan files]' '--native[Build natively]' '--no-auto-bootstrap[Never bootstrap implicitly]' '--pristine[Force-wipe build dirs before dispatch]' "${global_args[@]}"
           ;;
         kconfig)
           _arguments '--core[Core id to scope the menu to]' "${global_args[@]}"
@@ -637,12 +637,9 @@ complete -c tan -n '__fish_seen_subcommand_from bootstrap' -l no-west -d 'Skip w
 complete -c tan -n '__fish_seen_subcommand_from bootstrap' -l print-env -d 'Print environment lines only'
 complete -c tan -n '__fish_seen_subcommand_from bootstrap' -l allow-partial -d 'Report success despite a failed dependency install'
 complete -c tan -n '__fish_seen_subcommand_from bootstrap' -l workspace -d 'Build the workspace at this path'
-complete -c tan -n '__fish_seen_subcommand_from build' -l plan -d 'Show the build plan'
 complete -c tan -n '__fish_seen_subcommand_from build' -l plan-from -d 'Read build plan from file'
 complete -c tan -n '__fish_seen_subcommand_from build' -l materialise -d 'Materialise plan files'
 complete -c tan -n '__fish_seen_subcommand_from build' -l native -d 'Build natively'
-complete -c tan -n '__fish_seen_subcommand_from build' -l manifest -d 'Show the system manifest'
-complete -c tan -n '__fish_seen_subcommand_from build' -l manifest-from -d 'Read manifest from file'
 complete -c tan -n '__fish_seen_subcommand_from build' -l no-auto-bootstrap -d 'Never bootstrap implicitly'
 complete -c tan -n '__fish_seen_subcommand_from build' -l pristine -d 'Force-wipe build dirs before dispatch'
 complete -c tan -n '__fish_seen_subcommand_from kconfig' -l core -d 'Core id to scope the menu to'

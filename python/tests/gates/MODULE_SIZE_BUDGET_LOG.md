@@ -378,3 +378,6 @@ and write both files from the real merged tree.
     - tan/planner/kconfig.py: 2092 -> 2107
 - 2026-08-28 -- tan-cli#957 family, round 4: guard cores[].vector_extension against a non-string in the G-2 TFLM kernel selector, same isinstance-guard pattern as cores[].type
     - tan/planner/kconfig.py: 2107 -> 2108
+- 2026-08-28 -- tan-cli#427: build.py/execute.py grew implementing --pristine (force_pristine wiring + PristineSkipped) and resolving --plan/--manifest/--manifest-from/--target/--all/--verbose/--quiet/--no-color/--non-interactive/--ci into implemented/retired/accept-and-drop buckets
+    - tan/commands/build/execute.py: 1662 -> 1713
+    - tan/commands/build_cmd.py: 2178 -> 2255
