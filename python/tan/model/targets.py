@@ -190,7 +190,26 @@ def _soc_targets(soc: dict, silicon_ref: str) -> list[TargetSpec]:
     out: list[TargetSpec] = []
     profile = _vela_profile(soc)
     declares_dram = _soc_declares_dram(soc)
-    for npu in soc.get("npus", []):
+    npus = soc.get("npus", [])
+    if not isinstance(npus, list):
+        # `npus` is schema-typed `"type": "array"` but unvalidated on read
+        # (tan-cli#964 is the read-path schema check; this is the last line
+        # of defence, not a substitute). A schema-invalid SoC JSON can hand
+        # this key a non-list scalar, which `for npu in npus` would raise
+        # `TypeError: ... is not iterable` on. Same "no mappable NPUs"
+        # outcome a genuinely-absent `npus` key already produces.
+        npus = []
+    for npu in npus:
+        if not isinstance(npu, dict):
+            # One level below the `npus` guard above: an ELEMENT of a
+            # schema-valid `npus` array can itself be a non-dict scalar on a
+            # schema-invalid SoC JSON (tan-cli#967 review -- the guard below
+            # protected `npu.get("type")`'s return value but not the
+            # `npu.get` CALL, one line above where the review found it).
+            # Skip the element -- the identical "no mappable backend for
+            # this entry" outcome an unresolvable `type` already produces
+            # two blocks down.
+            continue
         # `.get("type", "")`'s default fires only when the key is ABSENT --
         # never when it is present with the wrong type -- so a schema-invalid
         # SoC JSON (unvalidated on read; the real fix is tan-cli#964) can hand
@@ -199,7 +218,12 @@ def _soc_targets(soc: dict, silicon_ref: str) -> list[TargetSpec]:
         # #957 family (cores[] `type`) settled on: an unrecognised/
         # unresolvable type falls back to the identical "no mappable
         # backend, skip this npu" outcome a genuinely-absent `type` key
-        # already produces, rather than a fourth behaviour.
+        # already produces, rather than a fourth behaviour. `.lower()` is
+        # deliberately NOT applied here (unlike #965's own snippet): it would
+        # newly match e.g. "Ethos-U55" and flip `accel_config` from
+        # "Ethos-U55-256" to "ethos-u55-256", which check.py:540-542's
+        # `accel_config.startswith(f"ethos-{variant}-")` reads -- exactly the
+        # fourth behaviour this guard exists to rule out, not a bug fix.
         raw_type = npu.get("type")
         npu_type = raw_type if isinstance(raw_type, str) else ""
         raw_subtype = npu.get("subtype")
@@ -208,7 +232,25 @@ def _soc_targets(soc: dict, silicon_ref: str) -> list[TargetSpec]:
         if backend is None:
             continue
         ethos_u = backend == "ethos_u"
-        accel = f"{npu_type}-{npu['mac_per_cycle']}" if ethos_u else ""
+        mac_per_cycle = npu.get("mac_per_cycle")
+        if ethos_u and not isinstance(mac_per_cycle, int):
+            # `mac_per_cycle` is OPTIONAL in `$defs/npu` -- only `type` plus
+            # `anyOf(gops, tops)` are required, so a SCHEMA-VALID SoC JSON
+            # (e.g. `{"type": "ethos-u55", "gops": 100}`, no `mac_per_cycle`
+            # at all) reaches here with nothing to build `accel_config` from.
+            # #964 (read-path schema validation) cannot fix this one: the
+            # document already passes the schema. There is no honest partial
+            # value to fall back to -- an incomplete string like
+            # "ethos-u55-" would be a NEW, un-degradeable shape reaching
+            # `check.py`'s `accel_config.startswith(...)` reader, worse than
+            # either resolving cleanly or not resolving at all. So this NPU
+            # is unmappable for the same reason an unrecognised `type` is:
+            # skip it, the identical "no mappable backend for this entry"
+            # outcome `backend is None` above already produces (this SoC's
+            # OTHER npus[] entries, and the always-present `cpu` target,
+            # still resolve).
+            continue
+        accel = f"{npu_type}-{mac_per_cycle}" if ethos_u else ""
         # The profile is a vela flag, so it rides only on the targets vela
         # compiles: a DRP-AI or DEEPX target on the same die must not carry
         # (and its adapter must never be handed) an Ethos-U memory mode. The
@@ -233,10 +275,28 @@ def _discrete_socs(sku: str, host_ref: str, metadata_root: Path) -> list[tuple[s
     found: list[tuple[str, dict]] = []
     for path in sorted((metadata_root / "socs").glob("**/*.json")):
         soc = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(soc, dict):
+            # A SoC JSON that parses but is not an object (e.g. a bare
+            # array) -- every read below is `soc.get(...)`/`v.get(...)`.
+            # This is an ENUMERATION over every file under `socs/`, the same
+            # shape `analyze.py`'s `_load_table` guards for a single lookup
+            # ("letting a list or scalar through turns a downstream `.get()`
+            # into an uncaught AttributeError"): skip the one bad file, don't
+            # abort the sweep over the rest of them.
+            continue
         ref = soc.get("ref")
         if not ref or ref == host_ref:
             continue
-        skus = {s for v in soc.get("variants", []) for s in v.get("alp_module_skus", [])}
+        variants = soc.get("variants", [])
+        if not isinstance(variants, list):
+            variants = []
+        # `variants[]` elements are schema-typed as objects but unvalidated
+        # on read, the same element-type gap `_soc_targets`'s `npus[]` guard
+        # covers above (tan-cli#967 review, folded in here rather than filed
+        # separately -- same file, same defect) -- a non-dict element must
+        # not reach `v.get(...)`.
+        skus = {s for v in variants if isinstance(v, dict)
+                for s in v.get("alp_module_skus", [])}
         if sku in skus:
             found.append((ref, soc))
     return found
@@ -265,6 +325,19 @@ def resolve_targets(sku: str, *, metadata_root: Path) -> list[TargetSpec]:
     if not soc_path.is_file():
         raise FileNotFoundError(f"no SoC spec for {silicon} at {soc_path}")
     host_soc = json.loads(soc_path.read_text(encoding="utf-8"))
+    if not isinstance(host_soc, dict):
+        # Unlike `_discrete_socs`'s enumeration over every socs/*.json below
+        # (where one bad file is skipped and the sweep continues), this IS
+        # THE ONE host SoC spec `silicon:` names -- there is no "skip it and
+        # try the next one". Malformed content at a path that exists is
+        # reported the same way this function already reports a malformed
+        # ref (above) or a missing path (just above this): raise, don't let
+        # it flow into `_soc_targets`'s `.get()` calls as a different,
+        # uncaught exception shape.
+        raise ValueError(
+            f"malformed SoC spec at {soc_path}: expected a JSON object, "
+            f"got {type(host_soc).__name__}"
+        )
 
     specs: list[TargetSpec] = []
     seen: set[tuple[str, str]] = set()
