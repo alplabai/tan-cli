@@ -1088,6 +1088,126 @@ def test_matching_root_but_different_plan_commit_still_wipes(tmp_path, monkeypat
     assert any("running pristine" in line for line in lines), lines
 
 
+# --------------------------------- manual `--pristine` override (tan-cli#427, #163, #183)
+
+
+def test_force_pristine_wipes_even_a_matching_stamp(tmp_path, monkeypatch):
+    """`tan build --pristine`'s whole point: force the wipe even when the
+    automatic stamp comparison would have said `keep` (a matching stamp)."""
+    _stub_manifest_write(monkeypatch)
+    slice_dir = tmp_path / "build" / "c1"
+    _configure(slice_dir, "/sdk/v1")
+    cmd = f'{{"tool": {PYTHON}, "args": ["-c", "pass"], "cwd": "build/c1"}}'
+    lines = []
+    out = execute_slices(
+        parse_build_plan(_plan(cmd, backend="baremetal")), build_root=tmp_path,
+        env_lookup=lambda k: None, gap_fillers=[], on_output=lines.append,
+        sdk_root="/sdk/v1", force_pristine=True,
+    )
+    assert out[0].status == "succeeded"
+    assert not (slice_dir / "build" / "CMakeCache.txt").exists(), "--pristine must wipe even a matching stamp"
+    assert (slice_dir / "build" / ".tan-sdk-root").read_text(encoding="utf-8") == "/sdk/v1"
+    assert any("--pristine passed; wiping build dir" in line for line in lines), lines
+
+    import tan.commands.build.execute as execute_module
+
+    codes = [i.code for i in execute_module.last_sdk_switch_issues()]
+    assert codes == ["build.sdk-switch-pristine"], codes
+    assert "build.pristine-skipped" not in codes
+
+
+def test_force_pristine_respects_both_wipe_guards(tmp_path, monkeypatch):
+    """`--pristine` must not widen where the wipe is allowed to touch: an
+    overridden (`-d`) build dir and a cwd outside `build/` are both declined,
+    each reported as its own `build.pristine-skipped` reason -- not a single
+    generic message that would leave the user guessing which one applied."""
+    _stub_manifest_write(monkeypatch)
+
+    overridden_dir = tmp_path / "build" / "c1"
+    _configure(overridden_dir, "/sdk/v1")
+    overridden_cmd = (
+        f'{{"tool": {PYTHON}, "args": ["-c", "pass", "-d", "elsewhere"], "cwd": "build/c1"}}'
+    )
+    lines: list[str] = []
+    execute_slices(
+        parse_build_plan(_plan(overridden_cmd)), build_root=tmp_path,
+        env_lookup=lambda k: None, gap_fillers=[], on_output=lines.append,
+        sdk_root="/sdk/v1", force_pristine=True,
+    )
+    assert (overridden_dir / "build" / "CMakeCache.txt").is_file(), (
+        "--pristine must not wipe an overridden (-d) build dir"
+    )
+
+    import tan.commands.build.execute as execute_module
+
+    overridden_issues = execute_module.last_sdk_switch_issues()
+    assert [i.code for i in overridden_issues] == ["build.pristine-skipped"]
+    assert "-d" in overridden_issues[0].message or "--build-dir" in overridden_issues[0].message
+    assert "build.sdk-switch-pristine" not in [i.code for i in overridden_issues]
+
+    outside_dir = tmp_path / "src" / "c1"
+    _configure(outside_dir, "/sdk/v1")
+    outside_cmd = f'{{"tool": {PYTHON}, "args": ["-c", "pass"], "cwd": "src/c1"}}'
+    execute_slices(
+        parse_build_plan(_plan(outside_cmd)), build_root=tmp_path,
+        env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None,
+        sdk_root="/sdk/v1", force_pristine=True,
+    )
+    assert (outside_dir / "build" / "CMakeCache.txt").is_file(), (
+        "--pristine must not wipe a cwd outside build/"
+    )
+    outside_issues = execute_module.last_sdk_switch_issues()
+    assert [i.code for i in outside_issues] == ["build.pristine-skipped"]
+    assert "build/" in outside_issues[0].message
+
+
+def test_force_pristine_is_a_no_op_on_a_never_configured_dir(tmp_path, monkeypatch):
+    """A first-ever `tan build --pristine` (no prior build dir at all) has
+    nothing to wipe: `build.sdk-switch-pristine`/`-failed` must not fire for
+    a dir that never existed, but the suppression must still be REPORTED
+    (`build.pristine-skipped`), not silently swallowed -- "pristine" must
+    never quietly mean "nothing happened"."""
+    _stub_manifest_write(monkeypatch)
+    cmd = f'{{"tool": {PYTHON}, "args": ["-c", "pass"], "cwd": "build/c1"}}'
+    execute_slices(
+        parse_build_plan(_plan(cmd)), build_root=tmp_path,
+        env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None,
+        sdk_root="/sdk/v1", force_pristine=True,
+    )
+
+    import tan.commands.build.execute as execute_module
+
+    issues = execute_module.last_sdk_switch_issues()
+    codes = [i.code for i in issues]
+    assert "build.sdk-switch-pristine" not in codes, "nothing existed to wipe"
+    assert "build.sdk-switch-pristine-failed" not in codes
+    assert codes == ["build.pristine-skipped"]
+    assert "never configured" in issues[0].message or "CMakeCache" in issues[0].message
+    # Still stamped, exactly as the automatic path stamps a fresh dir.
+    assert (
+        tmp_path / "build" / "c1" / "build" / ".tan-sdk-root"
+    ).read_text(encoding="utf-8") == "/sdk/v1"
+
+
+def test_without_pristine_the_guard_behaves_exactly_as_before(tmp_path, monkeypatch):
+    """`force_pristine=False` (the default) must reproduce the pre-#427
+    behaviour byte for byte: no `build.pristine-skipped` ever, on a plan this
+    whole file's OTHER tests already prove keeps/wipes correctly."""
+    _stub_manifest_write(monkeypatch)
+    slice_dir = tmp_path / "build" / "c1"
+    _configure(slice_dir, "/sdk/v1")
+    cmd = f'{{"tool": {PYTHON}, "args": ["-c", "pass"], "cwd": "build/c1"}}'
+    execute_slices(
+        parse_build_plan(_plan(cmd)), build_root=tmp_path,
+        env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None,
+        sdk_root="/sdk/v1",
+    )
+
+    import tan.commands.build.execute as execute_module
+
+    assert execute_module.last_sdk_switch_issues() == []
+
+
 # ------------------------------------------- post-build manifest write + signal
 
 

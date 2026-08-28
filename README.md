@@ -337,25 +337,39 @@ options either: a leading one is relocated across the subcommand boundary, so
 `tan --ci doctor` and `tan doctor --ci` are the same run, while a bare
 `tan --ci` with no subcommand is `No such option: --ci`.
 
-`tan build` parses them and then refuses the whole invocation — and not only
-these two. Seven of the ten flags in that shared set are deferred there
-(`--target`, `--all`, `--verbose`, `--quiet`, `--no-color`,
-`--non-interactive`, `--ci`; `build_cmd.py`'s `_DEFERRED_FLAGS`), each with the
-same envelope but for the message, which names the flag it refused. Of those
-ten only `--project`, `--board-yaml` and `--sdk-root` survive; `build`'s own
-`--plan-from`, `--materialise`, `--native`, `--execute`, `--build-root` and
-`--format` are unaffected:
+`tan build` parses all ten of the shared flags, but only ONE of them still
+refuses the invocation (tan-cli#427): `--no-auto-bootstrap`, because this port
+has no implicit "run `tan bootstrap` on a missing Zephyr workspace" trigger
+yet for the flag to disable in the first place (accepting it ahead of that
+trigger existing would be its own silent no-op). The other seven —
+`--target`, `--all`, `--verbose`, `--quiet`, `--no-color`,
+`--non-interactive`, `--ci` — are accepted and dropped, the SAME
+`accept_global_flags` mechanism 17 other commands already use: the oracle's
+own `cli.rs` declares them ONLY on the shared `GlobalArgs` struct and
+`build`'s Rust handler never read them either, so this is not a narrower
+stand-in for refusing them, it is the identical oracle behaviour. `--plan`,
+`--manifest` and `--manifest-from` are a third bucket, RETIRED rather than
+deferred or accepted: each still parses but is refused with
+`build.flag-retired` (exit 2), naming its replacement (`--plan-from`,
+`--materialise`/`--execute`) in the message itself. `--project`,
+`--board-yaml`, `--sdk-root`, `--plan-from`, `--materialise`, `--native`,
+`--execute`, `--build-root`, `--format` and `--pristine` are unaffected by any
+of the three buckets:
 
 ```console
-$ tan build --ci --format json
-{"command":"build","ok":false,"exitCode":1,...,"data":{"message":"`tan build --ci` is
- deferred and not available in this build (see
+$ tan build --ci --plan-from plan.json --format json
+{"command":"build","ok":true,"exitCode":0,"project":{...},
+ "data":{"schemaVersion":1,...},"issues":[]}
+$ tan build --no-auto-bootstrap --format json
+{"command":"build","ok":false,"exitCode":1,...,"data":{"message":"`tan build
+ --no-auto-bootstrap` is deferred and not available in this build (see
  https://github.com/alplabai/tan-cli/issues/427)."},"issues":[{"code":"cli.command-deferred",
  "severity":"error","message":"..."}]}
 ```
 
-So a script that adds `--ci` to every tan invocation breaks on `build`.
-Elsewhere it does three separate things, and only the first is consent:
+So a script that adds `--ci` to every tan invocation no longer breaks on
+`build` — only one flag in the shared set still does, and it names itself.
+Elsewhere `--ci` does three separate things, and only the first is consent:
 
 * **Consent**, on the two commands that read the flag for it — `doctor --fix`
   (`doctor_cmd.py`'s `fix_allowed`) and `scaffold` (`scaffold_cmd.py`'s
@@ -380,9 +394,10 @@ Elsewhere it does three separate things, and only the first is consent:
   consumer sees.
 
 Rely on the stdio rule for the consent half; reach for `--ci` on `doctor` and
-`scaffold` when you want that refusal regardless of what stdio looks like, and
-never on `build`, which refuses `--verbose`, `--quiet`, `--no-color`,
-`--target` and `--all` identically.
+`scaffold` when you want that refusal regardless of what stdio looks like —
+`build` accepts and drops `--ci` (and `--verbose`, `--quiet`, `--no-color`,
+`--target`, `--all`, `--non-interactive`) identically, doing nothing with any
+of them.
 
 ## How tan fits with the SDK
 

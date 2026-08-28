@@ -58,8 +58,12 @@ deliberately omitted, being byte-for-byte the pinned plan's own declared
 artefact paths, which the one caller who has that file already holds. A
 conflicting combination is refused with its own code, never resolved by silent
 precedence (`--execute --materialise` -> `build.conflicting-flags`, exit 2;
-`--execute` with a deferred flag -> `cli.command-deferred`, exit 1, because a
-flag this build does not implement at all cannot be honoured either way).
+`--pristine` with a mode that never dispatches (bare `--plan-from` or
+`--materialise`, neither paired with `--execute`) -> the same
+`build.conflicting-flags`, exit 2, because a wipe promised on the envelope
+cannot be silently skipped either; `--execute` with a deferred flag ->
+`cli.command-deferred`, exit 1, because a flag this build does not implement
+at all cannot be honoured either way).
 `--execute` is ADDED BY THIS PORT, not a v0.4.1 flag: there `--plan-from`
 implies `--plan` and outranks `--native`, so a file-supplied plan cannot be
 dispatched at all. Deliberate, not a parity gap. `--native` keeps v0.4.1's
@@ -106,6 +110,7 @@ from tan.commands.sdk_cmd import (
     resolve_sdk_tiered,
 )
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
+from tan.core.global_flags import accept_global_flags
 from tan.core.inert import DEFERRED, inert_help
 from tan.core.plan_exec import (
     CROSS_DRIVE_MSG,
@@ -161,40 +166,40 @@ _MODE_NATIVE = "native"
 #: this refusal to that guard's internals.
 CONSUMER_BUILD_ROOT = "build"
 
-#: Flags the oracle's `tan build` declares and this port does not implement,
-#: in the order a run naming several of them is refused. Declaring them is the
-#: whole point: an undeclared flag is a Click `UsageError` -- exit 2,
-#: `cli.parse-error`, and a message indistinguishable from `tan build
-#: --pristien`. Registering them turns "known, deferred" into its own coded
-#: answer at exit 1, exactly as `deferred_cmd` does for the seven deferred
-#: VERBS, whose `cli.command-deferred` code and issue URL are reused
-#: rather than forked (a caller special-casing deferral needs one code to
-#: match, not two).
+#: tan-cli#427 resolved every flag `tan build` used to lump into one
+#: refuse-everything tuple, ONE of three ways:
 #:
-#: `--verbose`/`--quiet`/`--no-color`/`--non-interactive`/`--ci` are declared
-#: HERE, build-local, only because this port accepts none of them at the root
-#: today (measured: `tan --verbose build ...` -> exit 2, "No such option");
-#: in the oracle all five are clap `global = true` args declared once on the
-#: root and propagated. The moment `cli.py` grows a real root-level
-#: implementation these five must be DELETED from here, or a build-local
-#: declaration would shadow it.
-_DEFERRED_FLAGS = (
-    "--plan",
-    "--target",
-    "--all",
-    "--manifest",
-    "--manifest-from",
-    "--no-auto-bootstrap",
-    "--pristine",
-    "--verbose",
-    "--quiet",
-    "--no-color",
-    "--non-interactive",
-    "--ci",
-)
+#: 1. **Implemented for real** -- `--pristine` (see
+#:    `_maybe_pristine_stale_sdk_build_dir`'s `force_pristine`) and the
+#:    `--target`/`--all`/`--verbose`/`--quiet`/`--no-color`/
+#:    `--non-interactive`/`--ci` septet, which the oracle's own `cli.rs`
+#:    declares ONLY on the shared `GlobalArgs` struct (`BuildArgs` itself has
+#:    no fields for any of the seven) -- `build`'s Rust handler never reads
+#:    them either, so accept-and-drop via `accept_global_flags` (see the
+#:    bottom of this module) is not a narrower stand-in, it is the SAME
+#:    oracle behaviour every other command already gets from that decorator.
+#:    This also settles the "does `--target`/`--all` on `build` mean
+#:    `generate`'s emit-backend selection" question the issue raised: it does
+#:    not mean anything on either binary -- `generate`'s own handler is the
+#:    only one that ever reads the global field, so build and generate
+#:    sharing the spelling was never a meaning collision to resolve.
+#: 2. **Retired as superseded** -- `--plan`, `--manifest`, `--manifest-from`:
+#:    see `_RETIRED_FLAGS` below. Still declared (never a Click parse error),
+#:    but refused with `build.flag-retired`, which names the replacement in
+#:    the message itself.
+#: 3. **Still deferred** -- `--no-auto-bootstrap` alone. Measured (tan-cli#427
+#:    follow-up): this port's `tan build` has NO implicit "run `tan
+#:    bootstrap` on a missing/stale Zephyr workspace" trigger for the flag to
+#:    disable in the first place -- an unbootstrapped workspace surfaces
+#:    today as `build.plan-unavailable` (`_emit_plan`'s `SystemExit` catch),
+#:    never an automatic `tan bootstrap` invocation. Accepting the flag ahead
+#:    of that trigger existing would be exactly the "declared and silently
+#:    does nothing" shape this whole issue exists to avoid, so it stays
+#:    refused rather than faked real. #427 stays OPEN, narrowed to this one
+#:    flag, until the auto-bootstrap trigger itself is ported.
+_DEFERRED_FLAGS = ("--no-auto-bootstrap",)
 
-#: `--help` text for every one of them -- one string, because they all report
-#: the same fact and a per-flag reason would be twelve things to keep true.
+#: `--help` text for the one still-deferred flag.
 # No version number: this said "Deferred to v0.6.0" while the release it
 # meant was renumbered to 0.5.0, and a help string that names the release a
 # flag will appear in is a promise tan cannot keep true. The issue link is
@@ -202,6 +207,37 @@ _DEFERRED_FLAGS = (
 _DEFERRED_HELP = inert_help(
     "Accepted by other commands; not implemented for `build` yet.", DEFERRED, "tan-cli#427"
 )
+
+#: The oracle spelling -> its replacement flag, for the three flags
+#: `_refuse_retired` reports (tan-cli#427): "Two overlapping plan surfaces is
+#: worse than one, so the oracle spellings go" (the issue's own maintainer
+#: decision), but a retired flag's error must TEACH the replacement, not just
+#: refuse -- a customer who typed `--plan` is told to type `--plan-from`, in
+#: the message itself, never pointed at a tracker to work it out.
+#:
+#: `--plan` (bare, live-fetched) has no direct one-flag substitute -- `
+#: --plan-from FILE` covers the file-sourced half of what it did, with
+#: `--materialise`/`--execute` covering the act-on-it half; there is no
+#: "preview the live plan and stop" mode left, which is the trade the
+#: decision accepts in exchange for one plan surface instead of two.
+#: `--manifest`/`--manifest-from` showed `build/system-manifest.yaml`
+#: (a DIFFERENT artefact from the build plan) before or without a real
+#: build; a native `tan build` already writes that exact file, and it is
+#: plain YAML a caller can read directly -- no second command needed.
+_RETIRED_FLAGS: dict[str, str] = {
+    "--plan": (
+        "`--plan` is retired: run `tan build --plan-from FILE` to inspect a build plan "
+        "instead (add `--materialise` or `--execute` to act on it)."
+    ),
+    "--manifest": (
+        "`--manifest` is retired: a native `tan build` already writes "
+        "`build/system-manifest.yaml` for you to read directly -- no separate flag needed."
+    ),
+    "--manifest-from": (
+        "`--manifest-from FILE` is retired: `system-manifest.yaml` is plain YAML -- open "
+        "FILE directly instead of routing it through `tan build`."
+    ),
+}
 
 
 class BuildError(Exception):
@@ -922,6 +958,7 @@ def _dispatch(
     sdk_root_for_stamp: str | None,
     *,
     json_mode: bool = False,
+    pristine: bool = False,
 ) -> tuple[list[SliceOutcome], list[Issue]]:
     """Run the plan's slices, holding back the ones token substitution demoted
     -- and, since tan-cli#483, the ones whose `cores.<id>.app` resolved to a
@@ -1001,6 +1038,11 @@ def _dispatch(
     Precedence is preserved: a demoted slice that ALSO names an unknown
     backend or carries no command is left to `execute_slices`, because both of
     those outrank a provisioning fact and are checked first there.
+
+    `pristine` (`tan build --pristine`, tan-cli#427) is threaded straight
+    through to `execute_slices`'s own `force_pristine` -- see that
+    function's docstring, and `_maybe_pristine_stale_sdk_build_dir`'s, for
+    the wipe/suppression decision it makes per slice.
 
     `sdk_root` is threaded straight through to `execute_slices` -- it is
     THIS run's already-resolved `--sdk-root`/discovered checkout (`_build`'s
@@ -1101,6 +1143,7 @@ def _dispatch(
                 sdk_root=sdk_root,
                 sdk_root_for_stamp=sdk_root_for_stamp,
                 held_outcomes=held_outcomes.values(),
+                force_pristine=pristine,
             )
         )
 
@@ -1487,6 +1530,10 @@ def _build(
     # straight through to `_dispatch`, which is where the heartbeat this
     # gates is actually armed -- see that function's own docstring.
     json_mode: bool = False,
+    # Defaulted for the same reason as `mode`/`json_mode`: `run_cmd._run` has
+    # no `tan build --pristine` equivalent of its own yet (`tan run` has no
+    # `--pristine` flag). Threaded straight through to `_dispatch`.
+    pristine: bool = False,
 ) -> tuple[ExitCode, dict, list[Issue]]:
     text, plan = _acquire_plan(plan_from, sdk_root, board_yaml)
 
@@ -1596,7 +1643,13 @@ def _build(
     # run's own write outcome below.
     reset_last_manifest_write()
     outcomes, issues = _dispatch(
-        plan, demotions, Path(build_root), sdk_root, sdk_root_for_stamp, json_mode=json_mode
+        plan,
+        demotions,
+        Path(build_root),
+        sdk_root,
+        sdk_root_for_stamp,
+        json_mode=json_mode,
+        pristine=pristine,
     )
 
     any_failed = any(o.status not in ("succeeded", "skipped") for o in outcomes)
@@ -1765,57 +1818,73 @@ def build(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
     ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
-    # --- declared so they are refused as DEFERRED, never as a typo ----------
-    # See `_DEFERRED_FLAGS`. Each is a real, working flag of the v0.4.1 oracle
-    # that this port does not implement. LISTED in `--help` rather than hidden,
-    # for the same reason `deferred_cmd` registers its seven verbs in the
+    pristine: bool = typer.Option(
+        False,
+        "--pristine",
+        help="Force-wipe every slice's build dir before dispatch, regardless of the "
+        "recorded SDK-switch stamp (tan-cli#163) -- the manual counterpart to the "
+        "automatic sdk-switch-pristine wipe, for a stale build dir the stamp heuristic "
+        "doesn't (or can't yet) catch. Same wipe, same two safety guards (an explicit "
+        "`-d`/`--build-dir` in the slice's own command, or a plan cwd outside `build/`): "
+        "this never touches a dir tan can't vouch for. A slice the wipe declines -- for "
+        "either guard, or because the dir was never configured -- says so on the "
+        "envelope and in text (`build.pristine-skipped`), so \"pristine\" never "
+        "silently means \"incremental\".",
+    ),
+    # --- retired: parsed (never a Click typo error) but always refused, ------
+    # naming the replacement flag in the message itself (tan-cli#427). NOT
+    # `inert_help`-marked: unlike the deferred/parity flags below, these are
+    # READ for real -- their value selects a specific refusal, not "accepted
+    # and does nothing" (see `_RETIRED_FLAGS`).
+    plan: bool = typer.Option(
+        False, "--plan", help="Retired -- superseded by `--plan-from` (tan-cli#427)."
+    ),
+    manifest: bool = typer.Option(
+        False,
+        "--manifest",
+        help="Retired -- a native `tan build` already writes `build/system-manifest.yaml` "
+        "(tan-cli#427).",
+    ),
+    manifest_from: str = typer.Option(
+        None,
+        "--manifest-from",
+        metavar="FILE",
+        help="Retired -- open FILE directly, it is plain YAML (tan-cli#427).",
+    ),
+    # --- declared so it is refused as DEFERRED, never as a typo --------------
+    # See `_DEFERRED_FLAGS`. A real, working flag of the v0.4.1 oracle that
+    # this port does not implement. LISTED in `--help` rather than hidden, for
+    # the same reason `deferred_cmd` registers its seven deferred verbs in the
     # command list: a reader comparing this surface to v0.4.1's needs to see
     # that tan knows the flag and is refusing it, which absence cannot say.
-    plan: bool = typer.Option(False, "--plan", help=_DEFERRED_HELP),
-    target: str = typer.Option(None, "--target", metavar="EMIT", help=_DEFERRED_HELP),
-    all_targets: bool = typer.Option(False, "--all", help=_DEFERRED_HELP),
-    manifest: bool = typer.Option(False, "--manifest", help=_DEFERRED_HELP),
-    manifest_from: str = typer.Option(
-        None, "--manifest-from", metavar="FILE", help=_DEFERRED_HELP
-    ),
     no_auto_bootstrap: bool = typer.Option(False, "--no-auto-bootstrap", help=_DEFERRED_HELP),
-    pristine: bool = typer.Option(False, "--pristine", help=_DEFERRED_HELP),
-    verbose: bool = typer.Option(False, "--verbose", help=_DEFERRED_HELP),
-    quiet: bool = typer.Option(False, "--quiet", help=_DEFERRED_HELP),
-    no_color: bool = typer.Option(False, "--no-color", help=_DEFERRED_HELP),
-    non_interactive: bool = typer.Option(False, "--non-interactive", help=_DEFERRED_HELP),
-    ci: bool = typer.Option(False, "--ci", help=_DEFERRED_HELP),
 ) -> None:
     """Build every slice of the project's build plan."""
     json_mode = output_format == "json"
 
-    # Before anything is resolved or read: a run naming a flag this port does
-    # not implement does no work at all, and says which flag and why.
-    given = dict(
-        zip(
-            _DEFERRED_FLAGS,
-            (
-                plan,
-                target is not None,
-                all_targets,
-                manifest,
-                manifest_from is not None,
-                no_auto_bootstrap,
-                pristine,
-                verbose,
-                quiet,
-                no_color,
-                non_interactive,
-                ci,
-            ),
-            strict=True,
-        )
-    )
-    # FIRST, ahead of the conflict check below: a flag this build does not
-    # implement at all cannot be honoured in any combination, so `--execute
-    # --plan` gets the accurate answer (that `--plan` is deferred) rather than
-    # a conflict message for a flag that would not have worked anyway. Either
-    # way it is a coded refusal, never a silent precedence win.
+    # Before anything is resolved or read: a run naming a retired or deferred
+    # flag does no work at all, and says which flag and why. Retired flags
+    # first (`_RETIRED_FLAGS` already teaches the replacement in its own
+    # message), then the one still-deferred flag -- same precedence reasoning
+    # as before: a flag this build cannot honour in any combination gets the
+    # accurate answer ahead of the `--execute`/`--materialise` conflict check
+    # below, rather than a conflict message for a flag that would not have
+    # worked anyway.
+    retired_given = {
+        "--plan": plan,
+        "--manifest": manifest,
+        "--manifest-from": manifest_from is not None,
+    }
+    for flag, was_given in retired_given.items():
+        if was_given:
+            _refuse(
+                "build.flag-retired",
+                _RETIRED_FLAGS[flag],
+                ExitCode.VALIDATION_FAILURE,
+                json_mode,
+            )
+
+    given = dict(zip(_DEFERRED_FLAGS, (no_auto_bootstrap,), strict=True))
     for flag, was_given in given.items():
         if was_given:
             _refuse(
@@ -1858,6 +1927,40 @@ def build(
         mode = _MODE_PLAN
     else:
         mode = _MODE_NATIVE
+
+    # `--pristine`'s own help text promises "never silently means incremental"
+    # -- but `_build` only ever threads `pristine` into `_dispatch` (see its
+    # tail), and `_MODE_PLAN`/`_MODE_MATERIALISE` both return from `_build`
+    # BEFORE `_dispatch` is reached (the former shows the plan and stops, the
+    # latter writes config files and stops -- neither runs a slice, so neither
+    # has a build dir to wipe). Left unchecked, `--pristine --plan-from p.json`
+    # or `--pristine --materialise ...` used to exit 0 with `issues: []`,
+    # having silently done nothing with the flag -- precisely the "declared
+    # and does nothing" shape `--no-auto-bootstrap` above is refused for, and
+    # the closed-issue tan-cli#183 defect class re-entering through the mode
+    # flags instead of the flag that issue was about. Refused with the same
+    # code and exit position `--execute --materialise` already uses for an
+    # invalid combination, rather than added as a fourth mode-specific `data`
+    # shape: `--pristine` has no meaning without a dispatch to apply it to, so
+    # this is a conflicting-flags case, not a new envelope shape to design.
+    # `--execute` is exempt: it selects `_MODE_NATIVE` (line 1918 above) and
+    # dispatches for real, so `--pristine --plan-from p.json --execute` reaches
+    # `_dispatch` and wipes exactly as `--pristine` alone does.
+    if pristine and mode != _MODE_NATIVE:
+        stops_after = (
+            "writes the plan's files"
+            if mode == _MODE_MATERIALISE
+            else "shows the plan"
+        )
+        flag = "--materialise" if mode == _MODE_MATERIALISE else "--plan-from"
+        _refuse(
+            "build.conflicting-flags",
+            f"`--pristine` has nothing to wipe without a dispatch: `{flag}` alone "
+            f"only {stops_after} and stops before any slice runs. Add `--execute` "
+            "to dispatch it for real, or drop `--pristine`.",
+            ExitCode.VALIDATION_FAILURE,
+            json_mode,
+        )
 
     # `util::cli_workspace_root`: `--project` joined to the (real) cwd, THEN
     # everything below anchors on this instead of the bare cwd -- board.yaml
@@ -2012,6 +2115,7 @@ def build(
             sdk_root_for_stamp=sdk_root_for_stamp,
             board_yaml=board_yaml,
             json_mode=json_mode,
+            pristine=pristine,
         )
     except BuildError as err:
         exit_code, data, issues = err.exit_code, None, [Issue(err.code, "error", err.message)]
@@ -2176,3 +2280,14 @@ def _text_recap(mode: str, data: dict | None) -> None:
     if slices:
         built = sum(1 for result in slices if result["status"] == "ok")
         print(f"{built} of {len(slices)} slice(s) built", file=sys.stderr)
+
+
+# tan-cli#427: `--target`/`--all`/`--verbose`/`--quiet`/`--no-color`/
+# `--non-interactive`/`--ci` are accept-and-drop here, same as on every other
+# command `accept_global_flags` already covers -- the oracle's own `cli.rs`
+# declares all seven ONLY on the shared `GlobalArgs` struct (`BuildArgs` has
+# no fields for any of them), so `build`'s Rust handler never reads them
+# either. `--project`/`--board-yaml`/`--sdk-root` are already declared above
+# for real, so this adds nothing for those three (`_declared_flags` skips a
+# flag `build` already reads).
+build = accept_global_flags(build)
