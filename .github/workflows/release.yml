@@ -423,7 +423,7 @@ jobs:
           VENV_PY=.venv-build/bin/python
           [ -x "$VENV_PY" ] || VENV_PY=.venv-build/Scripts/python.exe
           "$VENV_PY" -m pip install --quiet --upgrade pip
-          "$VENV_PY" -m pip install --quiet --no-deps --require-hashes -r release-requirements.lock.txt
+          "$VENV_PY" -m pip install --quiet --require-hashes -r release-requirements.lock.txt
           "$VENV_PY" -m pip install --quiet --no-deps --no-build-isolation ".[monitor]"
           # Recorded so a shipped freeze can be audited later against exactly
           # what went into it (tan-cli#437 acceptance criterion) -- uploaded
@@ -500,7 +500,7 @@ jobs:
             bash /src/scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends binutils
             python -m venv /tmp/venv
             /tmp/venv/bin/pip install --quiet --upgrade pip
-            /tmp/venv/bin/pip install --quiet --no-deps --require-hashes -r release-requirements.lock.txt
+            /tmp/venv/bin/pip install --quiet --require-hashes -r release-requirements.lock.txt
             /tmp/venv/bin/pip install --quiet --no-deps --no-build-isolation ".[monitor]"
             /tmp/venv/bin/pip freeze > dependency-inventory.txt
             PYTHON=/tmp/venv/bin/python bash scripts/build_binary.sh

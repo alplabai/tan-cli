@@ -32,7 +32,19 @@
 name: release-lock-update
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      upgrade_package:
+        description: >-
+          Optional: upgrade only this one distribution (uv pip compile
+          --upgrade-package <name>). Leave blank to upgrade every pin
+          (--upgrade) -- the default, and the only way this job actually
+          moves anything (see generate_release_lock.py's USAGE section,
+          tan-cli#989 review finding 1: a plain regenerate with neither flag
+          keeps every pin exactly as committed).
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -64,9 +76,26 @@ jobs:
         shell: bash
         run: python -m pip install --quiet uv
 
+      # `UPGRADE_PACKAGE` through `env:`, never interpolated straight into
+      # `run:` -- a `${{ }}` expansion inside `run:` is substituted into the
+      # script BEFORE the shell sees it, so a dispatch input containing shell
+      # metacharacters would expand into code rather than into an argument
+      # (the same zizmor template-injection reasoning e2e-container.yml's own
+      # dispatch-input step documents).
       - name: regenerate the lock
         shell: bash
-        run: python python/scripts/generate_release_lock.py
+        env:
+          UPGRADE_PACKAGE: ${{ inputs.upgrade_package }}
+        run: |
+          set -euo pipefail
+          if [ -n "${UPGRADE_PACKAGE}" ]; then
+            python python/scripts/generate_release_lock.py --upgrade-package "${UPGRADE_PACKAGE}"
+          else
+            # No package named: upgrade every pin. A plain regenerate with
+            # neither flag would keep every pin exactly as committed and this
+            # job would never move anything (tan-cli#989 review, finding 1).
+            python python/scripts/generate_release_lock.py --upgrade
+          fi
 
       - name: diff against what is committed
         id: diff

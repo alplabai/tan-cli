@@ -248,7 +248,7 @@ jobs:
           # `build` job uses -- this job freezes the identical artefact, so it
           # must resolve from the identical lock or it stops being a
           # pre-tag preview of what `build` actually does.
-          "$VENV_PY" -m pip install --quiet --no-deps --require-hashes -r release-requirements.lock.txt
+          "$VENV_PY" -m pip install --quiet --require-hashes -r release-requirements.lock.txt
           "$VENV_PY" -m pip install --quiet --no-deps --no-build-isolation ".[monitor]"
           PYTHON="$VENV_PY" bash scripts/build_binary.sh
 
@@ -266,7 +266,7 @@ jobs:
             bash /src/scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends binutils
             python -m venv /tmp/venv
             /tmp/venv/bin/pip install --quiet --upgrade pip
-            /tmp/venv/bin/pip install --quiet --no-deps --require-hashes -r release-requirements.lock.txt
+            /tmp/venv/bin/pip install --quiet --require-hashes -r release-requirements.lock.txt
             /tmp/venv/bin/pip install --quiet --no-deps --no-build-isolation ".[monitor]"
             PYTHON=/tmp/venv/bin/python bash scripts/build_binary.sh
             # tan-cli#450. THE PR-TIME EXERCISE OF THE PACKAGING PATH.
