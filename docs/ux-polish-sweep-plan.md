@@ -188,6 +188,14 @@ git commit -m "feat(cli): group the 32 subcommands into six help panels"
 
 **Do NOT hide these options** with `hidden=True`. Five of them (`--verbose`, `--quiet`, `--no-color`, `--non-interactive`, `--ci`) are flags every other command implements and a user will reasonably type. Hiding them from `--help` and then refusing them at exit 1 via `deferred_cmd.py`'s `cli.command-deferred` is strictly worse than listing them honestly.
 
+> **Superseded by tan-cli#427.** That issue's later resolution DOES hide those
+> five (plus `--target`/`--all`) from `build --help`, via `accept_global_flags`
+> rather than `_DEFERRED_HELP` — they are no longer refused at all, so the
+> "refusing them at exit 1 is worse than listing them" argument above no
+> longer applies to them. Kept here as the historical record of this task's
+> own decision, not current guidance; see `build_cmd.py`'s module docstring
+> and `README.md`'s `--ci` section for the shipped behaviour.
+
 Do not put a version number in the replacement string. The comment at `build_cmd.py:168-171` records why: it previously said "Deferred to v0.6.0" while the release it meant was renumbered to 0.5.0, and *"a help string that names the release a flag will appear in is a promise tan cannot keep true."* The issue link is the durable pointer.
 
 - [x] **Step 1: Write the failing test**
