@@ -3009,18 +3009,27 @@ def _read_global_sdk_registry_bytes() -> bytes | None:
         return None
 
 
-#: The three `winerror` codes CPython's own `pathlib` folds into a `False`
-#: `Path.is_dir()` answer that is NOT actually a confirmed absence --
 #: `pathlib._IGNORED_WINERRORS` on the 3.12 stdlib this repo floors at
-#: (`pyproject.toml: requires-python = ">=3.12"`). `21` is
-#: `pathlib._WINERROR_NOT_READY` ("drive exists but is not accessible" --
-#: the exact shape a disconnected mapped or removable drive raises); `123`
-#: is `ERROR_INVALID_NAME`; `1921` is `ERROR_CANT_RESOLVE_FILENAME`. None of
-#: the three means the path is gone -- only that THIS stat, right now,
-#: could not resolve it -- so `_origin_exists` treats them as inconclusive
-#: rather than dead, deliberately parting ways with what `Path.is_dir()`
-#: itself would answer.
-_INCONCLUSIVE_WINERRORS = (21, 123, 1921)
+#: (`pyproject.toml: requires-python = ">=3.12"`) folds all three of these
+#: `winerror` codes into the SAME `False` a genuinely gone path produces --
+#: but they are not the same SHAPE, and `_origin_exists` deliberately tells
+#: them apart rather than reproducing `Path.is_dir()`'s answer:
+#:
+#: * `21` is `pathlib._WINERROR_NOT_READY` ("drive exists but is not
+#:   accessible") -- the exact shape a disconnected mapped or removable
+#:   drive raises. TRANSIENT: the drive can come back, so this is
+#:   inconclusive, not confirmed-dead.
+#: * `123` (`ERROR_INVALID_NAME`) and `1921` (`ERROR_CANT_RESOLVE_FILENAME`)
+#:   are PERMANENT structural dead ends -- a malformed path string, or (CI
+#:   caught this one live on `windows-latest`, review of #971 round 2: a
+#:   self-referencing symlink's `os.stat` raises `WinError 1921` on real
+#:   Windows, not an errno this function's own confirmed-dead errno set
+#:   would otherwise catch) a symlink loop. Both are the Windows-side
+#:   sibling of the POSIX `ENOTDIR`/`ELOOP` cases just below: the path can
+#:   never resolve, on this host, no matter how long this process waits --
+#:   the same "dead" fact this function already treats a symlink loop as.
+_INCONCLUSIVE_WINERRORS = (21,)
+_DEAD_WINERRORS = (123, 1921)
 
 
 def _origin_exists(origin: str) -> bool:
@@ -3035,30 +3044,32 @@ def _origin_exists(origin: str) -> bool:
     `Path.is_dir()` degrades an INCONCLUSIVE stat to `False` exactly as
     readily as a CONFIRMED-absent one: besides `ENOENT`/`ENOTDIR`/`EBADF`/
     `ELOOP` (a missing path, a parent that turned out to be a file, a bad
-    descriptor, a symlink loop -- see `_INCONCLUSIVE_WINERRORS` for why
-    these four stay treated as confirmed-dead below, same as before), it
-    also folds in `_INCONCLUSIVE_WINERRORS` -- a live project on a volume
-    that is merely unmounted or offline right now (a disconnected mapped or
-    removable drive, `WinError 21`) reads as gone. That is the exact
-    tan-cli#464 wrong-answer this registry exists to prevent -- the project
-    falls back to the last-writer-wins `globalDefault` tier -- except
-    reached by symptom (a cable unplugged mid-session) instead of by cause
-    (no origin key at all).
+    descriptor, a symlink loop -- these four stay treated as confirmed-dead
+    below, same as before), it also folds in `WinError 21` -- a live
+    project on a volume that is merely unmounted or offline right now (a
+    disconnected mapped or removable drive) reads as gone. That is the
+    exact tan-cli#464 wrong-answer this registry exists to prevent -- the
+    project falls back to the last-writer-wins `globalDefault` tier --
+    except reached by symptom (a cable unplugged mid-session) instead of by
+    cause (no origin key at all).
 
-    So the check here is spelled out rather than delegated to `Path.is_dir()`:
-    `os.stat` surfaces every failure as a real `OSError`, and a `winerror`
-    in `_INCONCLUSIVE_WINERRORS` is checked FIRST and always degrades to
-    `True` regardless of its mapped `errno` (a not-ready drive's `os.stat`
-    failure can still carry an `ENOENT`-shaped `errno` alongside that
-    `winerror` -- the `winerror` is the more specific, more correct signal,
-    so it wins). Failing that, `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` count as
-    confirmed-dead, same as `Path.is_dir()` already treated them (a symlink
-    loop or a broken link can never again resolve to a real directory a
-    `workspace_root` could sit under, so treating it the same as "gone" is
-    not overreach). Everything else -- most notably a permission error
-    (`EACCES`, e.g. an unreadable parent directory) -- degrades to `True`:
-    an origin this process could not conclusively resolve is inconclusive,
-    not confirmed-dead, and `prune_dead_origins` drops an entry only on a
+    So the check here is spelled out rather than delegated to `Path.is_dir()`,
+    and the two Windows-specific tables above are checked in the same
+    breath as, not folded into, the POSIX errno set: `_INCONCLUSIVE_WINERRORS`
+    (checked FIRST, always wins over any `errno` the same `OSError` also
+    carries -- a not-ready drive's failure can carry an `ENOENT`-shaped
+    `errno` alongside `WinError 21`, and the `winerror` is the more
+    specific, more correct signal) degrades to `True`; `_DEAD_WINERRORS`,
+    checked next, degrades to `False` for the same reason a POSIX symlink
+    loop does (see below) -- confirmed, not merely unavailable. Only then
+    does `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` count as confirmed-dead, same as
+    `Path.is_dir()` already treated them (a symlink loop or a broken link
+    can never again resolve to a real directory a `workspace_root` could
+    sit under, so treating it the same as "gone" is not overreach).
+    Everything else -- most notably a permission error (`EACCES`, e.g. an
+    unreadable parent directory) -- degrades to `True`: an origin this
+    process could not conclusively resolve is inconclusive, not
+    confirmed-dead, and `prune_dead_origins` drops an entry only on a
     confirmed absence. A stat that succeeds but names a non-directory (the
     origin's directory was replaced by a plain file) is a real, confirmed
     answer -- no exception to catch -- so it returns `False` directly.
@@ -3066,8 +3077,11 @@ def _origin_exists(origin: str) -> bool:
     try:
         mode = os.stat(origin).st_mode
     except OSError as exc:
-        if getattr(exc, "winerror", None) in _INCONCLUSIVE_WINERRORS:
+        winerror = getattr(exc, "winerror", None)
+        if winerror in _INCONCLUSIVE_WINERRORS:
             return True
+        if winerror in _DEAD_WINERRORS:
+            return False
         if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP):
             return False
         return True

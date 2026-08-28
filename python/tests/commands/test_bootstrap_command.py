@@ -1097,6 +1097,30 @@ def test_origin_exists_keeps_a_not_ready_volume_not_prunes_it(tmp_path, monkeypa
     assert bootstrap_cmd._origin_exists(str(origin)) is True
 
 
+def test_origin_exists_treats_winderror_1921_as_gone_not_inconclusive(tmp_path, monkeypatch):
+    """review of #971, round 2: `windows-latest` CI caught this one LIVE, not
+    in review -- a self-referencing symlink's `os.stat` raises `WinError
+    1921` (`ERROR_CANT_RESOLVE_FILENAME`) on real Windows, not the `ELOOP`
+    errno this function's POSIX branch relies on. `1921` is one of
+    `pathlib._IGNORED_WINERRORS`, same bucket as the `WinError 21` test
+    above -- but it is NOT the same SHAPE: `21` is a drive that might come
+    back, `1921` is a symlink loop that can never resolve, on this host, no
+    matter how long this process waits -- the exact "confirmed-dead" fact
+    the POSIX symlink-loop test above already establishes for `ELOOP`. Kept
+    for a `WinError 21`-alike is correct; kept for THIS one silently
+    resurrects a genuinely dead entry, so it must read `False`, not `True`."""
+    origin = tmp_path / "on-a-loop"
+
+    def fake_stat(path, *args, **kwargs):
+        err = OSError("[WinError 1921] The symbolic link cannot be followed")
+        err.errno = errno.EINVAL  # not one of the errnos this function checks either
+        err.winerror = 1921
+        raise err
+
+    monkeypatch.setattr(bootstrap_cmd.os, "stat", fake_stat)
+    assert bootstrap_cmd._origin_exists(str(origin)) is False
+
+
 def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_path):
     """tan-cli#463: the test above proves the pointer FILE is written; this
     proves a *second, independent* `tan doctor` process -- run later, from the

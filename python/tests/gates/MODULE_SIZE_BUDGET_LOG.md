@@ -385,3 +385,6 @@ and write both files from the real merged tree.
     - tan/commands/bootstrap_cmd.py: 3468 -> 3508
 - 2026-08-28 -- tan-cli#963: generate_cmd.py's own docstring for pin_issue/foreign_issue prepend-ordering grew the module 4 lines past its 1400 ceiling; no compression to fit, per repo convention
     - tan/commands/generate_cmd.py: 1400 -> 1404
+- 2026-08-28 -- review of #971 round 2: _origin_exists's WinError 1921 vs 21 distinction (CI caught the merge of the two live on windows-latest) adds _DEAD_WINERRORS + expanded docstring, growing bootstrap_cmd.py and _origin_exists itself further
+    - tan/commands/bootstrap_cmd.py: 3508 -> 3522
+    - function_count_budget: 278 -> 279
