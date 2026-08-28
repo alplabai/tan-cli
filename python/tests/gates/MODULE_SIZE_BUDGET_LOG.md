@@ -418,6 +418,11 @@ and write both files from the real merged tree.
 - 2026-08-28 -- review of #971 round 2: _origin_exists's WinError 1921 vs 21 distinction (CI caught the merge of the two live on windows-latest) adds _DEAD_WINERRORS + expanded docstring, growing bootstrap_cmd.py and _origin_exists itself further
     - tan/commands/bootstrap_cmd.py: 3508 -> 3522
     - function_count_budget: 278 -> 279
+- 2026-08-28 -- tan-cli#866: explain_cmd gains data.som + scaffold gains UNSUPPORTED_SOM_FAMILY_PREFIXES/is_family_gated -- structured per-template SoM support
+    - tan/commands/explain_cmd.py: 1138 -> 1216
+    - tan/core/scaffold.py: 1538 -> 1566
+- 2026-08-28 -- tan-cli#985 review: rename data.som fields to refusal semantics, widen the prose drift gate past a single phrasing, generate iot-starter's second SoM sentence, surface the family exclusion in text mode
+    - tan/commands/explain_cmd.py: 1216 -> 1310
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - function_count_budget: 279 -> 281
 - 2026-08-28 -- tan-cli#964 review: bootstrap/generate REFUSE wiring (majors 3/4), debug-config WARN wiring (major 5), skip-but-disclose for presets/size/debug-config/generate/bootstrap (major 6), Windows path fix (blocker 2), and the shared caching layer (minor 8) grow presets_cmd.py/size_cmd.py/debug_config_cmd.py/bootstrap_cmd.py/generate_cmd.py/planner/loader.py and add new functions to tan/core/metadata_schema.py
@@ -439,9 +444,11 @@ and write both files from the real merged tree.
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/bootstrap_cmd.py: 3522 -> 3567
     - tan/commands/debug_config_cmd.py: 2047 -> 2114
+    - tan/commands/debug_config_cmd.py: 1954 -> 2021
     - tan/commands/generate_cmd.py: 1404 -> 1431
     - tan/commands/presets_cmd.py: 949 -> 1085
     - tan/commands/size_cmd.py: 840 -> 938
     - tan/planner/loader.py: 1335 -> 1410
     - function_count_budget: 280 -> 288
+    - function_count_budget: 279 -> 287
     - function_worst_budget: 770 -> 791
