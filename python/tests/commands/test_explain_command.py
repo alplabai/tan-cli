@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -30,7 +31,12 @@ from tan.commands.explain_cmd import (
     PROJECT_TEMPLATES,
     resolve,
 )
-from tan.core.scaffold import _library_names, vendored_library_names_for
+from tan.core.scaffold import (
+    TEMPLATE_SUPPORTED_SKUS,
+    UNSUPPORTED_SOM_FAMILY_PREFIXES,
+    _library_names,
+    vendored_library_names_for,
+)
 
 runner = CliRunner()
 
@@ -96,6 +102,96 @@ def test_features_default_to_all_false_lowercase():
     assert "Default features: wifi=false mqtt=false ble=false tls=false" in details(
         template="minimal-app"
     )
+
+
+# --------------------------------------------------------------------------
+# Structured SoM support -- data.som (tan-cli#866)
+# --------------------------------------------------------------------------
+
+
+def test_minimal_app_carries_no_som_restriction():
+    """minimal-app is tan's one vendor-neutral, non-family-gated template
+    (`scaffold.plan_template_files` never calls `_vendored_family` for it) --
+    every SoM, unconditionally."""
+    som = resolve("minimal-app", None).extra_data["som"]
+    assert som == {"supportedSkus": None, "unsupportedSkuPrefixes": []}
+
+
+@pytest.mark.parametrize("template_id", ["iot-starter", "multicore-mailbox"])
+def test_explicitly_gated_templates_report_the_real_sku_allowlist(template_id):
+    """Populated from `TEMPLATE_SUPPORTED_SKUS` -- the SAME table `tan init`
+    refuses `init.invalid-som` against -- not a second, hand-typed copy.
+    Pinned to the real current value (not just "the keys exist"): a
+    regression to an empty/wrong allowlist REDs here."""
+    assert TEMPLATE_SUPPORTED_SKUS[template_id] == ("E1M-AEN801",)
+    som = resolve(template_id, None).extra_data["som"]
+    assert som == {"supportedSkus": ["E1M-AEN801"], "unsupportedSkuPrefixes": []}
+
+
+@pytest.mark.parametrize(
+    "template_id", ["zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"]
+)
+def test_family_gated_templates_report_the_real_unsupported_prefix_list(template_id):
+    """No explicit SKU allowlist for these four -- their restriction is the
+    family-tree exclusion `tan init` refuses `init.som-unsupported` against.
+    Pinned to the real current value (NXP: alp-sdk's scaffold catalog ships
+    no vendored tree for it) so a regression to an empty exclusion list REDs
+    here, not just a missing key."""
+    assert UNSUPPORTED_SOM_FAMILY_PREFIXES == ("E1M-NX9",)
+    som = resolve(template_id, None).extra_data["som"]
+    assert som == {"supportedSkus": None, "unsupportedSkuPrefixes": ["E1M-NX9"]}
+
+
+def test_som_is_absent_not_null_for_module_templates_and_generation_targets():
+    """Neither selector kind carries a SoM concept -- `som` must be ABSENT
+    from `extra_data`, matching the absent-vs-null convention `--code`'s own
+    `data.diagnostic`/`data.suggestions` already use for a mode that did not
+    run (see the module docstring)."""
+    assert "som" not in resolve("sensor-driver", None).extra_data
+    assert "som" not in resolve(None, "hw-info-h").extra_data
+
+
+def test_iot_starter_json_envelope_carries_structured_som_support_data():
+    """The wire shape, through the real CLI dispatch, not just the Python
+    object `resolve()` returns -- what alp-studio/the extension actually
+    parses."""
+    result = runner.invoke(app, ["explain", "--template", "iot-starter", "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["data"]["som"] == {
+        "supportedSkus": ["E1M-AEN801"],
+        "unsupportedSkuPrefixes": [],
+    }
+
+
+_ONLY_QUALIFIER_RE = re.compile(r"\bE1M-[A-Z0-9]+\s+only\b")
+
+
+def test_every_only_qualifier_in_template_prose_matches_its_structured_som_data():
+    """The drift gate tan-cli#866 asks for: any project template whose
+    description/explanation prose still reads "<SKU> only" must name exactly
+    the SKU(s) `TEMPLATE_SUPPORTED_SKUS` (and therefore `data.som.
+    supportedSkus`) carries for that template. `iot-starter`'s description is
+    now GENERATED (`_only_note`) and cannot go stale; this is the gate over
+    the one sentence this change deliberately left hand-written --
+    `multicore-mailbox`'s explanation, which also says "E1M-AEN801 only".
+    Probe: hand-edit `TEMPLATE_SUPPORTED_SKUS["multicore-mailbox"]` to a
+    different SKU with the prose untouched and this test REDs -- it does not
+    merely check that a key exists."""
+    for pt in PROJECT_TEMPLATES:
+        prose = " ".join([pt.description, *pt.explanation])
+        mentioned = {m.split()[0] for m in _ONLY_QUALIFIER_RE.findall(prose)}
+        supported = TEMPLATE_SUPPORTED_SKUS.get(pt.id)
+        if not mentioned:
+            continue
+        assert supported is not None, (
+            f"{pt.id}: prose claims {sorted(mentioned)!r} only, but "
+            f"TEMPLATE_SUPPORTED_SKUS carries no restriction for it"
+        )
+        assert mentioned == set(supported), (
+            f"{pt.id}: prose says {sorted(mentioned)!r} only, but "
+            f"TEMPLATE_SUPPORTED_SKUS says {sorted(supported)!r}"
+        )
 
 
 @pytest.mark.parametrize(
@@ -528,12 +624,15 @@ def test_json_mode_writes_one_envelope_and_nothing_else():
     # `--template` resolves no checkout (only `--code` does), so `sdk` is
     # absent -- never null.
     assert "sdk" not in doc
+    # `som` is present here (tan-cli#866): `iot-starter` is a PROJECT
+    # template, the one selector kind that carries `data.som`.
     assert list(doc["data"]) == [
         "schemaVersion",
         "selector",
         "summary",
         "details",
         "available",
+        "som",
     ]
     assert list(doc["data"]["available"]) == [
         "projectTemplates",

@@ -392,3 +392,6 @@ and write both files from the real merged tree.
 - 2026-08-28 -- review of #971 round 2: _origin_exists's WinError 1921 vs 21 distinction (CI caught the merge of the two live on windows-latest) adds _DEAD_WINERRORS + expanded docstring, growing bootstrap_cmd.py and _origin_exists itself further
     - tan/commands/bootstrap_cmd.py: 3508 -> 3522
     - function_count_budget: 278 -> 279
+- 2026-08-28 -- tan-cli#866: explain_cmd gains data.som + scaffold gains UNSUPPORTED_SOM_FAMILY_PREFIXES/is_family_gated -- structured per-template SoM support
+    - tan/commands/explain_cmd.py: 1138 -> 1216
+    - tan/core/scaffold.py: 1538 -> 1566

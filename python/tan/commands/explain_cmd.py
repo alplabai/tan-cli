@@ -36,6 +36,26 @@ vendored `board.yaml` rather than a registry field
 deliberately blanked for a vendored template and reported "(none)" for
 `edge-ai-starter`, whose scaffold declares `tflite-micro`.
 
+**`data.som` (tan-cli#866): the SoM-support fact, structured, not just in
+prose.** A project template's `--template` hit carries `data.som.
+{supportedSkus,unsupportedSkuPrefixes}`, computed by `_som_support_data` from
+`scaffold.TEMPLATE_SUPPORTED_SKUS` / `scaffold.UNSUPPORTED_SOM_FAMILY_PREFIXES`
+-- the SAME two facts `tan init` already gates `init.invalid-som` /
+`init.som-unsupported` on, READ here rather than retyped. Before this, the
+only place a template's SoM restriction was written down was inside
+`details[]` prose ("... (E1M-AEN801 only)"), which a consumer would have had
+to parse and which could silently drift from what `tan init` actually
+enforces -- #866 is named for exactly that string. The `iot-starter`
+description's own parenthetical is now GENERATED from the same data
+(`_only_note`), so the two can no longer disagree by construction; see
+`tests/commands/test_explain_command.py`'s
+`test_every_only_qualifier_in_template_prose_matches_its_structured_som_data`
+for the drift gate over the one prose sentence (`multicore-mailbox`'s) this
+change did not also rewrite. Scoped to PROJECT templates only -- module
+templates and generation targets carry no SoM concept, so `data.som` is
+absent (not `null`) on those two selector kinds, the same absent-vs-null
+convention `--code`'s `data.diagnostic`/`data.suggestions` already use.
+
 **Every failure is a coded issue, never a traceback.** Ambiguous selector,
 unknown template, unknown target, and an unreadable vendored tree each map to an
 `explain.*` code and exit 1/5; the catch-all at the bottom is the backstop. This
@@ -125,7 +145,13 @@ import typer
 
 from tan.core import error_catalog
 from tan.core.global_flags import accept_global_flags
-from tan.core.scaffold import TemplateDataError, vendored_library_names_for
+from tan.core.scaffold import (
+    TEMPLATE_SUPPORTED_SKUS,
+    UNSUPPORTED_SOM_FAMILY_PREFIXES,
+    TemplateDataError,
+    is_family_gated,
+    vendored_library_names_for,
+)
 from tan.core.text_layout import wrap_lines
 from tan.env import wrap_width
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -153,6 +179,21 @@ def _code_hint(value: str) -> str:
     if _LOOKS_LIKE_A_DIAGNOSTIC_CODE.match(value):
         return f" Looking for a diagnostic code? Use --code {value} instead."
     return ""
+
+
+def _only_note(skus: tuple[str, ...] | None) -> str:
+    """` (<SKU>[, <SKU>...] only)`, or `""` when `skus` is falsy -- the
+    description's trailing SoM qualifier, DERIVED from `TEMPLATE_SUPPORTED_SKUS`
+    (`tan.core.scaffold`) rather than a hand-typed SKU string in the registry
+    below. tan-cli#866: a hand-typed "(E1M-AEN801 only)" is exactly the second
+    source of truth the issue is about -- it can drift from the data the CLI
+    actually gates `tan init` on, silently, the way a copy-edit here never
+    would if a consumer parsed the sentence instead of `data.som`. Called
+    at MODULE LOAD, building `PROJECT_TEMPLATES` below -- must stay defined
+    ahead of that tuple."""
+    if not skus:
+        return ""
+    return f" ({', '.join(skus)} only)"
 
 
 @dataclass(frozen=True)
@@ -248,7 +289,9 @@ PROJECT_TEMPLATES: tuple[ProjectTemplate, ...] = (
         label="IoT starter",
         description=(
             "West-buildable Wi-Fi + MQTT/TLS telemetry app wired to board.yaml via "
-            "the SDK loader (E1M-AEN801 only)."
+            "the SDK loader"
+            + _only_note(TEMPLATE_SUPPORTED_SKUS.get("iot-starter"))
+            + "."
         ),
         explanation=(
             "Real Zephyr app vendored from the SDK's `iot` scaffold: brings up Wi-Fi "
@@ -517,6 +560,36 @@ def _format_feature_flags(features: tuple[bool, bool, bool, bool]) -> str:
     return f"wifi={wifi} mqtt={mqtt} ble={ble} tls={tls}"
 
 
+def _som_support_data(template_id: str) -> dict[str, object]:
+    """`data.som` for one project template -- the exact SoM-support facts
+    `tan init` already gates this template on, READ (never retyped) from
+    `TEMPLATE_SUPPORTED_SKUS`/`UNSUPPORTED_SOM_FAMILY_PREFIXES`
+    (`tan.core.scaffold`) so this cannot drift from the refusal it describes
+    (tan-cli#866).
+
+    `supportedSkus` mirrors the `init.invalid-som` allowlist -- `None` when
+    this template carries none. `unsupportedSkuPrefixes` mirrors the
+    `init.som-unsupported` family exclusion -- always `[]` when
+    `supportedSkus` is set, because an exact-SKU allowlist is strictly
+    narrower than (and already implies) that exclusion; repeating it would be
+    a second way to say the same thing, the exact class of duplication this
+    field exists to retire. A template with neither restriction
+    (`minimal-app`, tan's one vendor-neutral, non-family-gated template --
+    `scaffold.is_family_gated` is `False` for it alone) reports
+    `supportedSkus: null, unsupportedSkuPrefixes: []`: every SoM,
+    unconditionally.
+    """
+    supported = TEMPLATE_SUPPORTED_SKUS.get(template_id)
+    if supported is not None:
+        return {"supportedSkus": list(supported), "unsupportedSkuPrefixes": []}
+    if is_family_gated(template_id):
+        return {
+            "supportedSkus": None,
+            "unsupportedSkuPrefixes": list(UNSUPPORTED_SOM_FAMILY_PREFIXES),
+        }
+    return {"supportedSkus": None, "unsupportedSkuPrefixes": []}
+
+
 def _project_template_details(pt: ProjectTemplate) -> list[str]:
     """Description, per-template explanation, default libraries, default
     features. Raises `TemplateDataError` when the vendored board.yaml behind
@@ -624,6 +697,11 @@ def resolve(template: str | None, target: str | None) -> _Result:
                     value=pt.id,
                     summary=f"{pt.label} ({pt.id})",
                     details=_project_template_details(pt),
+                    # tan-cli#866: structured, so a consumer filters a picker
+                    # without parsing `details[]` prose. Project templates
+                    # only -- module templates and generation targets carry
+                    # no SoM concept.
+                    extra_data={"som": _som_support_data(pt.id)},
                 )
         for mt in MODULE_TEMPLATES:
             if mt.id == template:
