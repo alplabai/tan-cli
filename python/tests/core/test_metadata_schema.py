@@ -104,11 +104,19 @@ def test_validate_document_silently_skips_a_missing_schema_file(tmp_path):
 
     Mutation-proven: removing the `if not Path(schema_path).is_file(): return
     []` guard (byte copy restored after, never `git checkout`) turns this RED
-    -- the call falls through to `schema_errors`, which raises
-    `FileNotFoundError`, uncaught here, propagating out of `validate_document`
-    entirely (a behaviour change every read-path caller of this module would
-    otherwise have to guard against individually). Restoring the guard turns
-    it GREEN.
+    -- but NOT because `FileNotFoundError` escapes uncaught (tan-cli#964
+    review, minor 10, correcting this docstring's own earlier claim):
+    `FileNotFoundError` IS an `OSError`, so `schema_errors`'s call falls
+    through to the SAME `except (OSError, UnicodeDecodeError, ValueError)`
+    the corrupt-schema case below already relies on, and the mutant
+    `validate_document` returns ONE synthetic message (`<doc>: could not
+    validate against <schema>: [Errno 2] No such file or directory: ...`)
+    rather than raising. The test still goes RED -- `[]` (silent skip,
+    correct) vs. one message (a false 'could not validate' report on a
+    checkout that never shipped this schema) -- which is exactly the
+    distinction this test exists to pin; only the STATED mechanism (an
+    uncaught exception) was wrong, not the mutation result. Restoring the
+    guard turns it GREEN.
     """
     missing = tmp_path / "schemas" / "soc-spec-v1.schema.json"
 
@@ -129,3 +137,69 @@ def test_validate_document_reports_one_message_for_a_corrupt_schema_file(tmp_pat
 
     assert len(errors) == 1
     assert errors[0].startswith(f"{doc_path}: could not validate against {schema_path}: ")
+
+
+# ---------------------------------------------------------------------------
+# Caching (tan-cli#964 review, minor 8)
+# ---------------------------------------------------------------------------
+
+
+def test_schema_errors_reuses_a_cached_validator_across_calls(tmp_path):
+    """The review's perf finding: `schema_errors` used to re-read + re-parse
+    + re-construct a `Draft202012Validator` on EVERY call, scaling linearly
+    with the number of documents validated against one schema (measured:
+    +0.08s at 11 SoMs, +0.46s at 111). `_cached_validator_by_stat` is keyed
+    on `(path, mtime_ns, size)`, so two calls against the SAME unchanged
+    schema file must be a cache HIT the second time, not a second
+    read+parse+construct.
+
+    Mutation-proven: removing the `@functools.lru_cache(...)` decorator on
+    `_cached_validator_by_stat` (byte copy restored after, never `git
+    checkout`) turns this test's `hits` assertion red (stays 0); restoring
+    turns it green.
+    """
+    from tan.core import metadata_schema as ms
+
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text(
+        json.dumps({"type": "object", "properties": {"x": {"type": "string"}}}),
+        encoding="utf-8",
+    )
+    ms._cached_validator_by_stat.cache_clear()
+
+    schema_errors({"x": "ok"}, schema_path)
+    before = ms._cached_validator_by_stat.cache_info()
+    schema_errors({"x": "ok"}, schema_path)
+    after = ms._cached_validator_by_stat.cache_info()
+
+    assert before.hits == 0  # the first call is always a miss (nothing cached yet)
+    assert after.hits == before.hits + 1
+
+
+def test_an_edited_schema_file_invalidates_the_cache(tmp_path):
+    """The correctness half of the same cache: a schema file EDITED between
+    two calls (its `mtime`/`size` both change) must not serve the STALE
+    compiled validator -- a `tan new-som` run followed by a `tan presets` in
+    the same interpreter must see the new schema, not the old one."""
+    from tan.core import metadata_schema as ms
+
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text(
+        json.dumps({"type": "object", "properties": {"x": {"type": "string"}}}),
+        encoding="utf-8",
+    )
+    ms._cached_validator_by_stat.cache_clear()
+
+    # `x: 7` is schema-invalid under the FIRST schema (x must be a string).
+    first = schema_errors({"x": 7}, schema_path)
+    assert first != []
+
+    # Rewrite the schema so `x` may be ANYTHING -- a real edit, not a no-op
+    # write, so `mtime_ns`/`size` both actually change.
+    schema_path.write_text(
+        json.dumps({"type": "object", "properties": {"x": {}}, "extra": "widen the size"}),
+        encoding="utf-8",
+    )
+    second = schema_errors({"x": 7}, schema_path)
+
+    assert second == []

@@ -146,6 +146,22 @@
       "note": "tan-cli#489 (4): split off `debug-config.sdk-identity-key-absent`, which used to fire for this case too -- misattributing a missing LOOKUP KEY as a missing PUBLISHED VALUE. Reproduced on a never-built E1M-AEN801 project with no --core: `metadata/socs/alif/ensemble/e8.json` publishes `jlink_device: {\"m55_hp\": \"Cortex-M55\", \"m55_he\": \"Cortex-M55\"}`, yet the old message said the identity 'does not include a value for `device` yet', naming no remedy, when `--core m55_hp` resolves it immediately. Scoped to `device`/jlink only: `configFiles` (openocd) and `targetId` (pyocd) are not keyed by core in `variants[].debug` at all (`fill_debug_probe_identity_gaps`), so `sdk-identity-key-absent` remains correct for those. This is a faithful-port gap, not a port regression: the identical message and emit condition exist in the frozen Rust oracle (`crates/tan-cli/src/commands/debug_config.rs:203`+`:439`); this Python-only split does not touch `crates/`. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from."
     },
     {
+      "code": "debug-config.metadata-schema-invalid",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#964 review (major 5): `debug-config` reads a SoM preset/SoC JSON twice -- `_sdk_published_cores` (the --core-vs-manifest guard) and `_fill_debug_probe_identity_from_sdk` (the SDK-published debug-probe identity fallback) -- both through the shared `build_output.read_sdk_som_and_soc` walk `tan size` also drives. Before this code existed, `debug-config` passed no `warnings` to either call and validated NOTHING, despite #964's own PR body claiming it inherited the WARN half of the decided rule 'transitively' through that shared reader. `message` is `<file>: <json pointer>: <what jsonschema found>`, the same shape `presets.metadata-schema-invalid`/`size.metadata-schema-invalid` use, one issue per violation, deduplicated across the two walks (both share one `warnings` list). WARN-not-refuse, matching #964's decided rule: `debug-config` already degrades a schema-invalid preset/SoC JSON to its existing placeholder behaviour -- this code makes that degrade visible, it does not change the resolved launch configuration or the command's exit code. A checkout whose bound schema file is simply absent emits nothing under THIS code -- as of tan-cli#964's review it emits `debug-config.metadata-schema-unchecked` instead (below), not silence; see `tan.core.metadata_schema.validate_document`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "debug-config.metadata-schema-unchecked",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#964 review (major 6, 'skip-but-disclose'): the sibling `debug-config.metadata-schema-invalid` code above used to degrade a missing schema file SILENTLY (`schema_warnings` stayed empty because there was nothing to check against) -- `issues: []`, byte-identical to a validated-clean run for a `--format json` consumer. `message` is `<file>: not validated -- no schema at <path> in this checkout` (`tan.core.metadata_schema.missing_schema_note`), deduplicated across the two walks exactly like the `warning` sibling. `info`, not `warning`: nothing here says the DOCUMENT is wrong, only that tan could not check it -- the resolved launch configuration and exit code are unaffected either way. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "bootstrap.workspace-guard",
       "status": "reserved",
       "severity": "error",
@@ -892,6 +908,14 @@
       "note": "tan-cli#284: fires from `rollback_relocation_after()` when a LATER phase (venv/west) fails after the checkout was already relocated, and the rollback itself is reported -- whether the move-back and the pointer restore both succeeded, only the pointer restore failed, or the move-back itself could not complete. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "bootstrap.metadata-schema-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
+      "note": "tan-cli#964 review: `bootstrap` reads `sku`'s SoM preset (`_read_som_topology` -> `presets_cmd.parse_som_preset`) to decide which host can build the project and to scaffold its topology -- so, unlike `tan presets`'s WARN-and-continue half of the same rule, a schema-invalid preset here is the REFUSE half: `read_board_runtimes`'s `warnings` collects every `som-preset-v1.schema.json` violation `parse_som_preset` finds, and `bootstrap()` refuses via `_refusal()` (the `bootstrap.` prefix) before `runtimes` is used for the Yocto gate or anything is written -- same `does not validate against som-preset-v1:\\n  - <violation>` shape `tan.planner.loader._refuse_on_schema_errors` uses for `build`/`generate`. A checkout whose bound `metadata/schemas/som-preset-v1.schema.json` is simply absent emits nothing at all -- see `tan.core.metadata_schema.validate_document`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "cli.interrupted",
       "status": "reserved",
       "severity": "error",
@@ -1092,6 +1116,14 @@
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "generate.metadata-schema-unchecked",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/generate_cmd.py",
+      "note": "tan-cli#964 review (major 6, 'skip-but-disclose'): before this code existed, a `metadata_root` whose `som-preset-v1.schema.json`/`soc-spec-v1.schema.json` is simply absent made `tan.core.metadata_schema.validate_document` degrade SILENTLY to `[]` -- indistinguishable on the wire from a validated-clean run (`{ok: true, exitCode: 0, issues: []}` either way), even though `tan generate --target os-topology` (measured) then writes `build/generated/os-topology.json` from a wholly unvalidated SoC spec. This code makes that skip visible: `message` is `<file>: not validated -- no schema at <path> in this checkout` (`tan.core.metadata_schema.missing_schema_note`), one issue per DISTINCT note across every target the run rendered (deduplicated, so several targets sharing one missing schema report it once, not once per target). `info`, not `warning`: nothing here says the DOCUMENT is wrong, only that tan could not check it -- the actual `*.metadata-schema-invalid` `warning` codes (`presets`/`size`/`debug-config`) are unaffected and still fire when a schema IS present and a document fails it. Never fires for the REFUSE-worthy case (a present-but-invalid document, or a present-but-corrupt schema file) -- those still raise/refuse exactly as before. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "image.internal-failure",
       "status": "reserved",
       "severity": "error",
@@ -1209,7 +1241,15 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/presets_cmd.py",
-      "note": "tan-cli#964: emitted once per JSON-Schema violation found while `tan presets` reads a `metadata/e1m_modules/*.yaml` SoM preset or the `metadata/socs/**` SoC JSON its `silicon:` ref resolves to, against `som-preset-v1.schema.json`/`soc-spec-v1.schema.json` respectively. `message` is `<file>: <json pointer>: <what jsonschema found>` (e.g. `metadata/socs/ae822.json: cores/2/type: 7 is not of type 'string'`), never the bare string 'schema validation failed'. WARN-not-refuse is deliberate (#964's decided rule): `tan presets` already tolerates a missing/malformed SoM detail and degrades the affected field to its existing empty sentinel (`type: \"\"`, `allowedOs: []`) -- this code makes that degrade VISIBLE, it does not change what gets listed or the command's exit code. A checkout whose bound `metadata/schemas/*.schema.json` is simply absent (an SDK predating it, or a synthetic/partial root) emits nothing at all, not this code -- see `tan.core.metadata_schema.validate_document`."
+      "note": "tan-cli#964: emitted once per JSON-Schema violation found while `tan presets` reads a `metadata/e1m_modules/*.yaml` SoM preset or the `metadata/socs/**` SoC JSON its `silicon:` ref resolves to, against `som-preset-v1.schema.json`/`soc-spec-v1.schema.json` respectively. `message` is `<file>: <json pointer>: <what jsonschema found>` (e.g. `metadata/socs/ae822.json: cores/2/type: 7 is not of type 'string'`), never the bare string 'schema validation failed'. WARN-not-refuse is deliberate (#964's decided rule): `tan presets` already tolerates a missing/malformed SoM detail and degrades the affected field to its existing empty sentinel (`type: \"\"`, `allowedOs: []`) -- this code makes that degrade VISIBLE, it does not change what gets listed or the command's exit code. A checkout whose bound `metadata/schemas/*.schema.json` is simply absent (an SDK predating it, or a synthetic/partial root) emits nothing under THIS code -- as of tan-cli#964's review it emits `presets.metadata-schema-unchecked` instead (below), not silence; see `tan.core.metadata_schema.validate_document`."
+    },
+    {
+      "code": "presets.metadata-schema-unchecked",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/presets_cmd.py",
+      "note": "tan-cli#964 review (major 6, 'skip-but-disclose'): before this code existed, a `metadata_root` whose `som-preset-v1.schema.json`/`soc-spec-v1.schema.json` is simply absent made `read_soms` degrade SILENTLY -- `schema_warnings` (and therefore `presets.metadata-schema-invalid` above) stayed empty because there was nothing to check against, which is `issues: []`, byte-identical on the wire to a validated-clean run. The review measured that the customer this protected -- an SDK checkout that predates the schema -- does not exist in the released fleet (every tagged alp-sdk `v0.6.0`..`v0.16.0` ships both schemas). `message` is `<file>: not validated -- no schema at <path> in this checkout` (`tan.core.metadata_schema.missing_schema_note`), one issue per DISTINCT note (deduplicated: several SoMs sharing one missing schema report it once, not once per SoM). `info`, not `warning`: nothing here says the DOCUMENT is wrong, only that tan could not check it. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "run.exec-failed",
@@ -1329,7 +1369,15 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/size_cmd.py",
-      "note": "tan-cli#964: emitted once per JSON-Schema violation found while `tan size` reads a slice's SoM preset or SoC JSON to resolve its FLASH/RAM budget, against `som-preset-v1.schema.json`/`soc-spec-v1.schema.json` respectively. `message` is `<file>: <json pointer>: <what jsonschema found>`, deduplicated across slices that share the same SoM (a heterogeneous SoM's cores all read the same preset/SoC JSON). WARN-not-refuse (#964's decided rule): `tan size` already degrades a bad preset/SoC JSON to `budget: unknown` (see `size_cmd._resolve_slice_budget`) -- this code makes WHY visible, it does not change the measured rows or the command's exit code. A checkout whose bound schema file is simply absent emits nothing at all -- see `tan.core.metadata_schema.validate_document`."
+      "note": "tan-cli#964: emitted once per JSON-Schema violation found while `tan size` reads a slice's SoM preset or SoC JSON to resolve its FLASH/RAM budget, against `som-preset-v1.schema.json`/`soc-spec-v1.schema.json` respectively. `message` is `<file>: <json pointer>: <what jsonschema found>`, deduplicated across slices that share the same SoM (a heterogeneous SoM's cores all read the same preset/SoC JSON). WARN-not-refuse (#964's decided rule): `tan size` already degrades a bad preset/SoC JSON to `budget: unknown` (see `size_cmd._resolve_slice_budget`) -- this code makes WHY visible, it does not change the measured rows or the command's exit code. A checkout whose bound schema file is simply absent emits nothing under THIS code -- as of tan-cli#964's review it emits `size.metadata-schema-unchecked` instead (below), not silence; see `tan.core.metadata_schema.validate_document`."
+    },
+    {
+      "code": "size.metadata-schema-unchecked",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/size_cmd.py",
+      "note": "tan-cli#964 review (major 6, 'skip-but-disclose'): the `size.metadata-schema-invalid` sibling above's own last sentence used to be the vacuous-gate shape the review measured against -- a `metadata_root` with `som-preset-v1.schema.json`/`soc-spec-v1.schema.json` simply absent degraded `schema_warnings` to `[]` SILENTLY, `issues: []`, byte-identical to a validated-clean run. `message` is `<file>: not validated -- no schema at <path> in this checkout` (`tan.core.metadata_schema.missing_schema_note`), deduplicated across slices sharing one SoM exactly like `size.metadata-schema-invalid`'s own dedup. `info`, not `warning`: nothing here says the DOCUMENT is wrong, only that tan could not check it -- the measured budget rows and exit code are unaffected either way. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "size.over-budget",

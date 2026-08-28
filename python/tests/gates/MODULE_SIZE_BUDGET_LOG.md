@@ -399,3 +399,12 @@ and write both files from the real merged tree.
     - function_count_budget: 278 -> 279
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - function_count_budget: 279 -> 281
+- 2026-08-28 -- tan-cli#964 review: bootstrap/generate REFUSE wiring (majors 3/4), debug-config WARN wiring (major 5), skip-but-disclose for presets/size/debug-config/generate/bootstrap (major 6), Windows path fix (blocker 2), and the shared caching layer (minor 8) grow presets_cmd.py/size_cmd.py/debug_config_cmd.py/bootstrap_cmd.py/generate_cmd.py/planner/loader.py and add new functions to tan/core/metadata_schema.py
+    - tan/commands/bootstrap_cmd.py: 3522 -> 3567
+    - tan/commands/debug_config_cmd.py: 1954 -> 2021
+    - tan/commands/generate_cmd.py: 1404 -> 1431
+    - tan/commands/presets_cmd.py: 1031 -> 1085
+    - tan/commands/size_cmd.py: 895 -> 938
+    - tan/planner/loader.py: 1376 -> 1410
+    - function_count_budget: 281 -> 287
+    - function_worst_budget: 770 -> 791

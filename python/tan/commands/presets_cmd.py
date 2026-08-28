@@ -131,6 +131,7 @@ from tan.commands.sdk_cmd import (
     resolve_sdk_tiered,
 )
 from tan.core.metadata_schema import (
+    missing_schema_note,
     soc_spec_schema_path,
     som_preset_schema_path,
     validate_document,
@@ -302,6 +303,7 @@ def parse_som_preset(
     metadata_root: Path | None = None,
     source: Path | str | None = None,
     warnings: list[str] | None = None,
+    skipped: list[str] | None = None,
 ) -> Som:
     """The `sku`/`display_name`/`family`/`topology` slice of a SoM preset.
 
@@ -338,6 +340,13 @@ def parse_som_preset(
     different name. Silently skipped (not "validated clean") when the
     no-PyYAML fallback parsed *text* -- `_load_som_yaml`'s `raw_out` stays
     empty there, because `scan_som_preset` builds no full mapping to check.
+
+    *skipped* (tan-cli#964 review, major 6, "skip-but-disclose"): a second,
+    independent caller-owned collector -- when the schema file is simply
+    ABSENT, `validate_document` returns `[]` (nothing to add to *warnings*)
+    and this collects `missing_schema_note`'s disclosure instead, so a
+    caller can tell "checked, no violations" apart from "not checked at
+    all" rather than the two looking identical (`issues: []` either way).
     """
     raw_holder: list[dict[str, object]] = []
     doc = _load_som_yaml(text, raw_out=raw_holder)
@@ -347,13 +356,15 @@ def parse_som_preset(
     # serde's `as_i64()` on a bool is `None` and the oracle rejects the file.
     if not isinstance(version, int) or isinstance(version, bool) or version != SOM_SCHEMA_VERSION:
         raise SomShapeError(f"unsupported schema_version {version!r} (this CLI consumes v1)")
-    if metadata_root is not None and warnings is not None and raw_holder:
-        warnings.extend(
-            validate_document(
-                raw_holder[0], som_preset_schema_path(metadata_root),
-                source if source is not None else "<som preset>",
-            )
-        )
+    if metadata_root is not None and raw_holder:
+        schema_path = som_preset_schema_path(metadata_root)
+        resolved_source = source if source is not None else "<som preset>"
+        if skipped is not None:
+            note = missing_schema_note(schema_path, source=resolved_source)
+            if note is not None:
+                skipped.append(note)
+        if warnings is not None:
+            warnings.extend(validate_document(raw_holder[0], schema_path, resolved_source))
     sku = _clean(doc.get("sku")) or ""
     silicon = _clean(doc.get("silicon"))
     core_types = core_type_lookup(silicon) if core_type_lookup is not None else {}
@@ -575,6 +586,7 @@ def _soc_lookups(
     sdk_root: str,
     *,
     warnings: list[str] | None = None,
+    skipped: list[str] | None = None,
 ) -> tuple[
     "Callable[[str | None], dict[str, str]] | None",
     "Callable[[str], list[str]] | None",
@@ -617,6 +629,10 @@ def _soc_lookups(
     Deduplicated by `soc_path` within one `_soc_lookups` binding, so a family
     of SoMs that share one `silicon:` ref (common -- V2N101/V2N102/V2M101/
     V2M102 are one PCB) does not repeat the same violation once per SoM.
+
+    *skipped* (tan-cli#964 review, major 6): the same "skip-but-disclose"
+    collector `parse_som_preset` takes, deduplicated the same way *warnings*
+    is above.
     """
     root = Path(sdk_root) / "metadata"
     if not root.is_dir():
@@ -632,9 +648,15 @@ def _soc_lookups(
             doc = json.loads(soc_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, ValueError):
             return {}
-        if warnings is not None and str(soc_path) not in _warned_soc_paths:
+        if str(soc_path) not in _warned_soc_paths:
             _warned_soc_paths.add(str(soc_path))
-            warnings.extend(validate_document(doc, soc_spec_schema_path(root), soc_path))
+            schema_path = soc_spec_schema_path(root)
+            if skipped is not None:
+                note = missing_schema_note(schema_path, source=soc_path)
+                if note is not None:
+                    skipped.append(note)
+            if warnings is not None:
+                warnings.extend(validate_document(doc, schema_path, soc_path))
         cores = doc.get("cores") if isinstance(doc, dict) else None
         if not isinstance(cores, list):
             return {}
@@ -686,7 +708,9 @@ def _soc_lookups(
     return core_type_lookup, allowed_os_lookup
 
 
-def read_soms(sdk_root: str, *, warnings: list[str] | None = None) -> list[Som]:
+def read_soms(
+    sdk_root: str, *, warnings: list[str] | None = None, skipped: list[str] | None = None
+) -> list[Som]:
     """SoM presets under `<sdk>/metadata/e1m_modules`, sorted by SKU.
 
     Both layouts the SDK has used are supported, as in the oracle: a flat
@@ -696,11 +720,15 @@ def read_soms(sdk_root: str, *, warnings: list[str] | None = None) -> list[Som]:
 
     *warnings* (tan-cli#964), when given, collects every `soc-spec-v1` /
     `som-preset-v1` violation found while reading -- see `_soc_lookups` and
-    `parse_som_preset`'s own docstrings for what feeds it.
+    `parse_som_preset`'s own docstrings for what feeds it. *skipped*
+    (tan-cli#964 review, major 6) does the same for the "skip-but-disclose"
+    half: a note per schema file this walk found simply absent.
     """
     metadata_root = Path(sdk_root) / "metadata"
     root = metadata_root / "e1m_modules"
-    core_type_lookup, allowed_os_lookup = _soc_lookups(sdk_root, warnings=warnings)
+    core_type_lookup, allowed_os_lookup = _soc_lookups(
+        sdk_root, warnings=warnings, skipped=skipped
+    )
     found: list[Som] = []
     for entry in _entries(root):
         if not entry.name.startswith(SOM_PREFIX):
@@ -729,6 +757,7 @@ def read_soms(sdk_root: str, *, warnings: list[str] | None = None) -> list[Som]:
                     metadata_root=metadata_root,
                     source=yaml_path,
                     warnings=warnings,
+                    skipped=skipped,
                 )
             )
         except SomShapeError:
@@ -926,7 +955,8 @@ def presets(
         ]
         if sdk.path is not None:
             schema_warnings: list[str] = []
-            soms = read_soms(sdk.path, warnings=schema_warnings)
+            schema_skipped: list[str] = []
+            soms = read_soms(sdk.path, warnings=schema_warnings, skipped=schema_skipped)
             board_libraries = read_board_libraries(sdk.path)
             # tan-cli#964: warn-and-continue, never refuse -- `tan presets`
             # already tolerates a missing/malformed SoM detail (see the
@@ -937,6 +967,18 @@ def presets(
             issues.extend(
                 Issue("presets.metadata-schema-invalid", "warning", w)
                 for w in schema_warnings
+            )
+            # tan-cli#964 review (major 6, "skip-but-disclose"): an absent
+            # schema file used to degrade SILENTLY (`schema_warnings` stays
+            # empty because there was nothing to check against), which is
+            # `issues: []` -- byte-identical to a validated-clean run for a
+            # `--format json` consumer. `info`, not `warning`: nothing here
+            # says a document is wrong. Deduplicated (`dict.fromkeys`): every
+            # SoM this run reads through the same missing schema reports it
+            # once, not once per SoM.
+            issues.extend(
+                Issue("presets.metadata-schema-unchecked", "info", w)
+                for w in dict.fromkeys(schema_skipped)
             )
         else:
             # tan-cli#497 defect 7 (the sibling of `examples_cmd`'s): a
@@ -1020,7 +1062,19 @@ def presets(
         for line in render_presets_text(soms, board_libraries, verbose):
             print(line, file=sys.stderr)
         for issue in issues:
-            print(f"presets: {issue.message}", file=sys.stderr)
+            # tan-cli#964 review (minor 11): the two schema codes' own
+            # `message` (`<file>: <pointer>: <what jsonschema found>` /
+            # `<file>: not validated -- no schema at <path>...`) does not
+            # itself say "schema" for the INVALID half, so a text-mode
+            # reader could not tell a schema violation apart from any other
+            # warning at a glance -- unlike the REFUSE path's own
+            # "does not validate against soc-spec-v1" wording. Tagged here,
+            # at the print site, rather than folded into `message` itself:
+            # `message` is the same string on the JSON envelope, which this
+            # PR's own tests (and the review's own worked example) pin
+            # verbatim.
+            tag = "schema: " if issue.code.endswith(".metadata-schema-invalid") else ""
+            print(f"presets: {tag}{issue.message}", file=sys.stderr)
     raise typer.Exit(int(exit_code))
 
 

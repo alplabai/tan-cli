@@ -35,8 +35,10 @@ crash a consumer whose contract is narrower than the schema; see
 
 from __future__ import annotations
 
+import functools
 import json
 from pathlib import Path
+from typing import Any
 
 
 def soc_spec_schema_path(metadata_root: Path | str) -> Path:
@@ -60,6 +62,21 @@ def som_preset_schema_path(metadata_root: Path | str) -> Path:
     return Path(metadata_root) / "schemas" / "som-preset-v1.schema.json"
 
 
+def _posix(value: object) -> str:
+    """`to_posix`: backslashes to forward slashes, nothing else.
+
+    Mirrors `build_output.to_posix` / `presets_cmd._posix` / `sdk_cmd._to_posix`
+    -- every other module that puts a filesystem path into an envelope field
+    or message keeps its own copy of this one-liner rather than importing
+    `tan.commands.build_output` from `tan.core` (which would be the pure-logic
+    layer reaching back into the command/IO layer). A schema-violation message
+    is exactly such a field: `f"{source}: ..."` on Windows renders
+    `sdk\\metadata\\socs\\...` unless the value is normalised first, and the
+    envelope convention (`build_output.py:34-37`) is forward slashes, always.
+    """
+    return str(value).replace("\\", "/")
+
+
 def schema_errors(doc: object, schema_path: Path, *, source: Path | str | None = None) -> list[str]:
     """Validate *doc* against the schema at *schema_path*; return one
     formatted string per violation, sorted by JSON-pointer path, or `[]`
@@ -67,8 +84,12 @@ def schema_errors(doc: object, schema_path: Path, *, source: Path | str | None =
 
     Moved here from `new_som_cmd._schema_errors` verbatim (tan-cli#964) --
     that function is now a thin alias for this one, so there is exactly one
-    `jsonschema.Draft202012Validator(...)` call left in the package, not two
-    that could drift on the message format. `new_som_cmd`'s own two call
+    `jsonschema.Draft202012Validator(...)` call for SoC/SoM documents left in
+    the package (tan-cli#964 review, minor 7: `planner/loader.py` carries a
+    SEPARATE one for `board.yaml` against `BOARD_SCHEMA`, a different
+    document against a different schema this module was never the gap for --
+    "exactly one call in the package" overstated it), not two that could
+    drift on the SoC/SoM message format. `new_som_cmd`'s own two call
     sites (the generated-skeleton self-check, run before anything is written)
     pass `source=None` and get the EXACT original message shape back
     (`f"{pointer}: {message}"`) -- unchanged, because that self-check
@@ -102,15 +123,47 @@ def schema_errors(doc: object, schema_path: Path, *, source: Path | str | None =
     # to the point of use rather than promoted to module scope, so a `tan`
     # invocation that never reaches a SoC/SoM read (`tan --version`, `tan
     # doctor` before any metadata walk, ...) still does not pay for it.
-    import jsonschema  # noqa: PLC0415
-
-    schema = json.loads(Path(schema_path).read_text(encoding="utf-8"))
-    validator = jsonschema.Draft202012Validator(schema)
-    prefix = f"{source}: " if source is not None else ""
+    validator = _cached_validator(Path(schema_path))
+    prefix = f"{_posix(source)}: " if source is not None else ""
     return [
         f"{prefix}{'/'.join(str(p) for p in err.absolute_path) or '<root>'}: {err.message}"
         for err in sorted(validator.iter_errors(doc), key=lambda e: list(e.absolute_path))
     ]
+
+
+@functools.lru_cache(maxsize=64)
+def _cached_validator_by_stat(schema_path: str, mtime_ns: int, size: int) -> Any:
+    """Build + cache one `jsonschema.Draft202012Validator` for *schema_path*,
+    keyed on its own `(mtime_ns, size)` -- tan-cli#964 review, minor 8.
+
+    Every `validate_document`/`schema_errors` call used to re-read and
+    re-`json.loads` the schema file and re-construct its validator from
+    scratch, EVERY time -- measured, this makes revalidation scale linearly
+    with the number of documents read against one schema: +0.08s at 11 SoMs,
+    +0.46s at 111 (the PR's own "within run-to-run noise" claim did not
+    reproduce). `(mtime_ns, size)` -- not just the path -- is the cache key so
+    a schema file edited mid-process (a `tan new-som` run immediately
+    followed by a `tan presets` in the same interpreter, or a test that
+    overwrites a fixture file between two calls in the SAME process) still
+    gets a fresh validator rather than a stale cached one; `lru_cache` does
+    not cache the exception a corrupt/unreadable file raises, so
+    `schema_errors`'s own "raises on unreadable schema" contract is
+    unaffected -- a failing call is retried, never permanently poisoned.
+    """
+    import jsonschema  # noqa: PLC0415
+
+    schema = json.loads(Path(schema_path).read_text(encoding="utf-8"))
+    return jsonschema.Draft202012Validator(schema)
+
+
+def _cached_validator(schema_path: Path) -> Any:
+    """`_cached_validator_by_stat`, keyed off *schema_path*'s CURRENT
+    `os.stat()` -- the indirection `schema_errors` calls, so the `stat()`
+    itself (cheap, but a real syscall) still runs every call while the
+    expensive `read_text` + `json.loads` + `Draft202012Validator(...)`
+    construction only runs once per distinct `(path, mtime, size)`."""
+    stat = Path(schema_path).stat()
+    return _cached_validator_by_stat(str(schema_path), stat.st_mtime_ns, stat.st_size)
 
 
 def validate_document(doc: object, schema_path: Path, source: Path | str) -> list[str]:
@@ -154,4 +207,42 @@ def validate_document(doc: object, schema_path: Path, source: Path | str) -> lis
     try:
         return schema_errors(doc, schema_path, source=source)
     except (OSError, UnicodeDecodeError, ValueError) as exc:
-        return [f"{source}: could not validate against {schema_path}: {exc}"]
+        return [f"{_posix(source)}: could not validate against {_posix(schema_path)}: {exc}"]
+
+
+def missing_schema_note(schema_path: Path | str, *, source: Path | str) -> str | None:
+    """`None` when *schema_path* exists (nothing to disclose); otherwise a
+    one-line note that *source* was not validated because the schema itself
+    is absent.
+
+    tan-cli#964 review, major 6 ("ship skip-but-disclose"): before this
+    function existed, the ABSENT-schema half of `validate_document` was a
+    SILENT skip -- `[]`, indistinguishable on the wire from "validated
+    clean" (`{ok: true, exitCode: 0, issues: []}` either way). The review
+    measured that the customer this protected -- "an SDK checkout that
+    predates this schema" -- does not exist in the released fleet (every
+    tagged alp-sdk `v0.6.0`..`v0.16.0` ships both schemas), while the cost of
+    silence is real: `tan generate --target os-topology` against a metadata
+    root with `soc-spec-v1.schema.json` deleted writes
+    `build/generated/os-topology.json` from a wholly unvalidated SoC spec, at
+    `ok: true`, with `issues: []`.
+
+    Deliberately a SEPARATE function from `validate_document`, not a second
+    return value on it: `validate_document`'s own contract (never raises,
+    "the document is not known to be invalid") is unchanged by this --
+    `[]` in the absent-schema case is still correct, because nothing was
+    found wrong with the DOCUMENT, only with tan's ability to CHECK it. A
+    caller that wants the disclosure calls this too, alongside its existing
+    `validate_document` call, and decides its own severity/code for the
+    result -- `presets`/`size`/`debug-config` fold it in at `info` beside
+    their `*.metadata-schema-invalid` `warning`; `load_board_yaml`'s REFUSE
+    callers thread it into an advisory list instead of raising, since an
+    absent schema must never become a refusal (see `validate_document`'s own
+    docstring on why silently skipping is not the same failure this closes).
+    """
+    if Path(schema_path).is_file():
+        return None
+    return (
+        f"{_posix(source)}: not validated -- no schema at {_posix(schema_path)} "
+        "in this checkout"
+    )

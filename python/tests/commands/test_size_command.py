@@ -52,6 +52,21 @@ def write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="")
 
 
+#: Fully-permissive schemas (tan-cli#964 review, major 6): `fake_sdk` writes
+#: both so the many tests in this file that are not ABOUT schema behaviour do
+#: not each pick up a `size.metadata-schema-unchecked` info issue for a
+#: schema file they never meant to test. The dedicated schema tests below
+#: overwrite one or both (or delete one) to cover the invalid/absent halves
+#: specifically -- `write()` truncates, so a later per-test `write(...)` to
+#: the same path replaces these defaults cleanly.
+_PERMISSIVE_SOM_PRESET_SCHEMA = json.dumps(
+    {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"}
+)
+_PERMISSIVE_SOC_SPEC_SCHEMA = json.dumps(
+    {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"}
+)
+
+
 def fake_sdk(root: Path, sku: str, soc: str) -> None:
     write(root / "scripts" / "alp_project.py", "")
     write(
@@ -59,6 +74,14 @@ def fake_sdk(root: Path, sku: str, soc: str) -> None:
         f"schema_version: 1\nsku: {sku}\nsilicon: test:fam:part\n",
     )
     write(root / "metadata" / "socs" / "test" / "fam" / "part.json", soc)
+    write(
+        root / "metadata" / "schemas" / "som-preset-v1.schema.json",
+        _PERMISSIVE_SOM_PRESET_SCHEMA,
+    )
+    write(
+        root / "metadata" / "schemas" / "soc-spec-v1.schema.json",
+        _PERMISSIVE_SOC_SPEC_SCHEMA,
+    )
 
 
 def footprint_project(root: Path, sku: str, rom: int, ram: int, soc: str) -> None:
@@ -149,7 +172,12 @@ def test_a_schema_invalid_soc_json_warns_but_still_measures(tmp_path):
     ]
 
     text_result = run_cli(tmp_path, "--build-root", "br", "--sdk-root", "sdk")
-    assert f"warning: {soc_path}: cores/0/type: 7 is not of type 'string'" in text_result.stderr
+    # tan-cli#964 review (minor 11): text mode now tags a schema violation
+    # explicitly, so it cannot be mistaken for any other warning.
+    assert (
+        f"warning: schema: {soc_path}: cores/0/type: 7 is not of type 'string'"
+        in text_result.stderr
+    )
 
 
 def test_a_schema_valid_soc_json_carries_no_metadata_schema_issue(tmp_path):
@@ -167,6 +195,90 @@ def test_a_schema_valid_soc_json_carries_no_metadata_schema_issue(tmp_path):
 
     text_result = run_cli(tmp_path, "--build-root", "br", "--sdk-root", "sdk")
     assert "metadata-schema-invalid" not in text_result.stderr
+
+
+#: `som-preset-v1.schema.json`, narrowed to `silicon:` -- the field
+#: `_resolve_slice_budget`/`read_sdk_som_and_soc` immediately splits on
+#: (`silicon.split(":")`), same narrowing rationale as `_SOC_SPEC_SCHEMA`.
+_SOM_PRESET_SCHEMA = json.dumps({
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["schema_version", "sku", "silicon"],
+    "properties": {
+        "schema_version": {"const": 1},
+        "sku": {"type": "string"},
+        "silicon": {"type": "string"},
+    },
+})
+
+
+def test_a_schema_invalid_som_preset_warns_but_still_measures(tmp_path):
+    """tan-cli#964 review, minor 12: `size`'s SOM-preset validation (the
+    OTHER document `_resolve_slice_budget` reads, alongside the SoC JSON
+    `test_a_schema_invalid_soc_json_warns_but_still_measures` above already
+    covers) had no CLI-level test. A schema-invalid `silicon:` (a number,
+    which `som-preset-v1.schema.json` forbids) does not change the measured
+    row -- `read_sdk_som_and_soc` degrades to `budget: unknown` exactly as it
+    already did -- but the envelope now names the file and what was found.
+
+    Mutation-proven: reverting `_read_som_preset`'s `warnings.extend(...)`
+    call (byte copy restored after, never `git checkout`) turns this test's
+    `issues` assertion red; restoring turns it green.
+    """
+    footprint_project(tmp_path, "E1M-TEST", 4096, 2048, SOC_5M5)
+    write(
+        tmp_path / "sdk" / "metadata" / "schemas" / "som-preset-v1.schema.json",
+        _SOM_PRESET_SCHEMA,
+    )
+    write(
+        tmp_path / "sdk" / "metadata" / "e1m_modules" / "E1M-TEST.yaml",
+        "schema_version: 1\nsku: E1M-TEST\nsilicon: 7\n",
+    )
+
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
+    assert result.returncode == 0
+    doc = envelope(result)
+    assert doc["ok"] is True
+    row = doc["data"]["slices"][0]
+    assert row["core_id"] == "m55_hp"
+    som_path = "sdk/metadata/e1m_modules/E1M-TEST.yaml"
+    assert doc["issues"] == [
+        {
+            "code": "size.metadata-schema-invalid",
+            "severity": "warning",
+            "message": f"{som_path}: silicon: 7 is not of type 'string'",
+        }
+    ]
+
+
+def test_a_missing_soc_spec_schema_discloses_the_skip_not_silence(tmp_path):
+    """tan-cli#964 review (major 6, 'skip-but-disclose'): the same fixture as
+    `test_a_schema_valid_soc_json_carries_no_metadata_schema_issue`, but with
+    `soc-spec-v1.schema.json` absent from the checkout entirely -- must not
+    go back to a silent `issues: []`; must disclose that nothing was
+    checked, at `info`, distinct from the `warning` a real violation gets.
+    """
+    soc = '{"soc_flash_mb": 5.5, "cores": [{"id": "m55_hp", "type": "cortex-m55", "tcm_kb": 1280}]}'
+    footprint_project(tmp_path, "E1M-TEST", 4096, 2048, soc)
+    (tmp_path / "sdk" / "metadata" / "schemas" / "soc-spec-v1.schema.json").unlink()
+
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
+    assert result.returncode == 0
+    doc = envelope(result)
+    assert doc["ok"] is True
+    row = doc["data"]["slices"][0]
+    assert row["flash"] == {"used": 4096, "total": 5_767_168, "pct": 0.1}
+    soc_path = "sdk/metadata/socs/test/fam/part.json"
+    assert doc["issues"] == [
+        {
+            "code": "size.metadata-schema-unchecked",
+            "severity": "info",
+            "message": (
+                f"{soc_path}: not validated -- no schema at "
+                "sdk/metadata/schemas/soc-spec-v1.schema.json in this checkout"
+            ),
+        }
+    ]
 
 
 def test_sdk_root_is_reported_forward_slashed_and_never_null(tmp_path):

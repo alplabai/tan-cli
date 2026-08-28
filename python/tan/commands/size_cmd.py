@@ -68,6 +68,7 @@ from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.flash_plan import slice_should_flash
 from tan.core.global_flags import accept_global_flags
 from tan.core.metadata_schema import (
+    missing_schema_note,
     soc_spec_schema_path,
     som_preset_schema_path,
     validate_document,
@@ -232,7 +233,8 @@ def _extract_sizes(
 
 
 def _read_som_preset(
-    path: str, *, metadata_root: str | None = None, warnings: list[str] | None = None
+    path: str, *, metadata_root: str | None = None, warnings: list[str] | None = None,
+    skipped: list[str] | None = None,
 ) -> tuple[str, str | None] | None:
     """`(silicon, silicon_variant)` from a SoM preset, or `None` when it cannot
     be used.
@@ -265,10 +267,14 @@ def _read_som_preset(
     version = root.get("schema_version")
     if isinstance(version, bool) or version != 1:
         return None
-    if metadata_root is not None and warnings is not None:
-        warnings.extend(
-            validate_document(root, som_preset_schema_path(metadata_root), path)
-        )
+    if metadata_root is not None:
+        schema_path = som_preset_schema_path(metadata_root)
+        if skipped is not None:
+            note = missing_schema_note(schema_path, source=path)
+            if note is not None:
+                skipped.append(note)
+        if warnings is not None:
+            warnings.extend(validate_document(root, schema_path, path))
     silicon = _clean_str(root.get("silicon")) or ""
     return silicon, _clean_str(root.get("silicon_variant"))
 
@@ -347,7 +353,8 @@ def _as_f64(value: Any) -> float | None:
 
 
 def _read_soc(
-    path: str, *, metadata_root: str | None = None, warnings: list[str] | None = None
+    path: str, *, metadata_root: str | None = None, warnings: list[str] | None = None,
+    skipped: list[str] | None = None,
 ) -> tuple[list[dict], float | None, list[tuple[str, float | None]]]:
     """`(variants, soc_flash_mb, soc_cores)` from a SoC JSON, defaulting to
     empty on any failure.
@@ -373,10 +380,14 @@ def _read_soc(
         return [], None, []
     if not isinstance(soc, dict):
         return [], None, []
-    if metadata_root is not None and warnings is not None:
-        warnings.extend(
-            validate_document(soc, soc_spec_schema_path(metadata_root), path)
-        )
+    if metadata_root is not None:
+        schema_path = soc_spec_schema_path(metadata_root)
+        if skipped is not None:
+            note = missing_schema_note(schema_path, source=path)
+            if note is not None:
+                skipped.append(note)
+        if warnings is not None:
+            warnings.extend(validate_document(soc, schema_path, path))
 
     variants: list[dict] = []
     raw_variants = soc.get("variants")
@@ -423,14 +434,15 @@ def _coerce_variants(raw: Any) -> list[dict]:
 
 def _resolve_slice_budget(
     sku: str | None, core_id: str, metadata_root: str | None,
-    *, warnings: list[str] | None = None,
+    *, warnings: list[str] | None = None, skipped: list[str] | None = None,
 ) -> MemoryBudget:
     """One core's `(flash_total, ram_total)` from the SoM preset + SoC JSON under
     `<sdk>/metadata`. The pure FLASH/RAM/note logic is `core.size.resolve_budget`;
     this only reads the files.
 
     *warnings* (tan-cli#964) is threaded to `read_sdk_som_and_soc` unchanged;
-    see its own docstring."""
+    see its own docstring. *skipped* (tan-cli#964 review, major 6) is the
+    same threading for the "skip-but-disclose" collector."""
     if sku is None:
         return budget_note_only("no SKU in manifest")
     if metadata_root is None:
@@ -439,7 +451,7 @@ def _resolve_slice_budget(
     preset_path = os.path.join(metadata_root, "e1m_modules", f"{sku}.yaml")
     if not _is_file(preset_path):
         return budget_note_only(f"no SoM preset for {sku}")
-    walked = read_sdk_som_and_soc(metadata_root, sku, warnings=warnings)
+    walked = read_sdk_som_and_soc(metadata_root, sku, warnings=warnings, skipped=skipped)
     if walked is None:
         return budget_note_only(f"unreadable SoM preset for {sku}")
     _silicon, silicon_variant, variants, soc_flash_mb, soc_cores = walked
@@ -464,10 +476,12 @@ def _measure_slice(
     size_bin: str | None,
     *,
     warnings: list[str] | None = None,
+    skipped: list[str] | None = None,
 ) -> SliceSize:
     """Measure + budget one manifest slice into a `SliceSize` row.
 
-    *warnings* (tan-cli#964) is threaded to `_resolve_slice_budget` unchanged."""
+    *warnings*/*skipped* (tan-cli#964 / review major 6) are threaded to
+    `_resolve_slice_budget` unchanged."""
     core_id = str(slice_.get("core_id"))
     os_name = str(slice_.get("os"))
 
@@ -484,7 +498,9 @@ def _measure_slice(
         slice_footprint_dirs(slice_, build_root),
         size_bin,
     )
-    budget = _resolve_slice_budget(sku, core_id, metadata_root, warnings=warnings)
+    budget = _resolve_slice_budget(
+        sku, core_id, metadata_root, warnings=warnings, skipped=skipped
+    )
 
     # tan-cli#499 defect 2: `size` never consulted the manifest `status`, so a
     # slice recorded `failed`/`skipped` was still measured from whatever
@@ -595,11 +611,27 @@ class _Outcome:
 
 
 def _sdk_warning_lines(issues: list[Issue]) -> list[str]:
-    """The text-mode rendering of the `sdk_resolution_issues` pair
-    (tan-cli#497 defect 5). `{severity}: {message}` -- the shape `tan build`
-    and `tan run` already print a resolution warning with, so the same
-    workspace reads the same way whichever command a developer runs."""
-    return [f"{issue.severity}: {issue.message}" for issue in issues]
+    """The text-mode rendering of every issue `_run` has collected by this
+    point -- originally just the `sdk_resolution_issues` pair (tan-cli#497
+    defect 5), now also `size.metadata-schema-invalid`/`-unchecked`
+    (tan-cli#964). `{severity}: {message}` -- the shape `tan build` and `tan
+    run` already print a resolution warning with, so the same workspace
+    reads the same way whichever command a developer runs.
+
+    tan-cli#964 review (minor 11): a schema-invalid issue's own `message`
+    (`<file>: <pointer>: <what jsonschema found>`) does not itself say
+    "schema", so this text line could not be told apart from any other
+    warning at a glance -- unlike the REFUSE path's "does not validate
+    against soc-spec-v1" wording. Tagged here, at the print site, rather
+    than folded into `message` itself, which is the same string the JSON
+    envelope carries and this PR's own tests pin verbatim.
+    """
+    return [
+        f"{issue.severity}: "
+        f"{'schema: ' if issue.code.endswith('.metadata-schema-invalid') else ''}"
+        f"{issue.message}"
+        for issue in issues
+    ]
 
 
 def _error_outcome(
@@ -708,11 +740,16 @@ def _run(
     # preset/SoC JSON, and `dict.fromkeys` below dedupes the repeats rather
     # than reporting one violation once per core.
     schema_warnings: list[str] = []
+    schema_skipped: list[str] = []
     rows = [
-        _measure_slice(s, build_root, sku, metadata_root, size_bin, warnings=schema_warnings)
+        _measure_slice(
+            s, build_root, sku, metadata_root, size_bin,
+            warnings=schema_warnings, skipped=schema_skipped,
+        )
         for s in manifest.slices
     ]
     schema_warnings = list(dict.fromkeys(schema_warnings))
+    schema_skipped = list(dict.fromkeys(schema_skipped))
 
     text: list[str] = []
     # The same pair `_error_outcome` above computes for a manifest-gate
@@ -725,6 +762,12 @@ def _run(
     # `_resolve_slice_budget`'s own docstring); this only makes WHY visible.
     issues.extend(
         Issue("size.metadata-schema-invalid", "warning", w) for w in schema_warnings
+    )
+    # tan-cli#964 review (major 6, "skip-but-disclose"): `info`, not
+    # `warning` -- nothing here says a document is wrong, only that a
+    # schema file to check it against is absent from this checkout.
+    issues.extend(
+        Issue("size.metadata-schema-unchecked", "info", w) for w in schema_skipped
     )
     exit_code = ExitCode.SUCCESS
 

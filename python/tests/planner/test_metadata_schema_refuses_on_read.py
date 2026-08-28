@@ -219,3 +219,46 @@ def test_a_missing_schema_file_degrades_silently_not_as_a_refusal(loader, tmp_pa
     # three call sites downstream (not exercised by this loader-level test)
     # are what remain the last line of defence for it.
     assert project.soc_spec["cores"][0]["type"] == 7
+
+
+def test_a_missing_schema_file_discloses_the_skip_when_asked(loader, tmp_path):
+    """tan-cli#964 review (major 6, 'skip-but-disclose'): the identical
+    fixture as the silent-degrade test above, but with `skip_advisories=`
+    given -- `load_board_yaml` must NOT refuse (unchanged from that test),
+    but MUST collect a disclosure note naming the absent schema file, so a
+    caller (`tan build`/`tan generate`) that wants to surface "validated
+    against nothing" rather than silence can.
+
+    Mutation-proven: reverting `_refuse_on_schema_errors`'s
+    `skip_advisories.append(note)` call (byte copy restored after, never
+    `git checkout`) turns this test's `skip_advisories` assertion red;
+    restoring turns it green.
+    """
+    board_yaml, metadata_root = _build_tree(tmp_path, soc_core_type=7)
+    (metadata_root / "schemas" / "soc-spec-v1.schema.json").unlink()
+    soc_path = metadata_root / "socs" / "vendor" / "family" / "part.json"
+
+    skip_advisories: list[str] = []
+    project = loader.load_board_yaml(
+        board_yaml, metadata_root=metadata_root, skip_advisories=skip_advisories
+    )
+
+    assert project.sku == _SKU
+    assert project.soc_spec["cores"][0]["type"] == 7
+    assert skip_advisories == [
+        f"{soc_path}: not validated -- no schema at "
+        f"{metadata_root / 'schemas' / 'soc-spec-v1.schema.json'} in this checkout"
+    ]
+
+
+def test_a_present_and_valid_schema_discloses_nothing(loader, tmp_path):
+    """The control: when both schemas are present (whether the document
+    validates or not), `skip_advisories` stays empty -- nothing was skipped."""
+    board_yaml, metadata_root = _build_tree(tmp_path, soc_core_type="cortex-m33")
+
+    skip_advisories: list[str] = []
+    loader.load_board_yaml(
+        board_yaml, metadata_root=metadata_root, skip_advisories=skip_advisories
+    )
+
+    assert skip_advisories == []
