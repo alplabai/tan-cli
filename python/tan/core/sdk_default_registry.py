@@ -386,21 +386,81 @@ def with_entry(
     plus this write easily completing inside one second is not a corner case
     worth losing the tie-break to.
 
-    **This registry is append-only; nothing here prunes a dead origin**
-    (review, #904, nit 1). An origin whose project directory or checkout was
-    later deleted or moved without a further `tan bootstrap` stays in the
-    file forever -- not a correctness bug (`deepest_covering_entry` simply
-    never matches it, or skips it via `has_loader_script` if its `sdkPath`
-    also went stale), but every future `resolve_sdk_tiered` call still pays a
-    `covers`/`has_loader_script` filesystem check for it, and the file only
-    grows. No `bootstrap`/`doctor`/`clean` path prunes an entry today.
-    Deliberately out of scope for tan-cli#466/#904 -- pruning needs its own
-    design (age-based? existence-based? on which command?) and its own
-    review, not a rider on this one. Follow-up: tan-cli#905.
+    **This function alone is still append-only** (review, #904, nit 1): it
+    only ever adds or overwrites `origin`, never drops another entry, even a
+    dead one. Pruning is a SEPARATE function, `prune_dead_origins` below
+    (tan-cli#905) -- the production writer
+    (`bootstrap_cmd._write_global_sdk_registry`) runs it right alongside this
+    one, on every relocating `tan bootstrap`, so the two together keep the
+    registry both current (this function) and bounded (that one) in the same
+    read-modify-write. See `prune_dead_origins`'s own docstring for what
+    "dead" means and why.
     """
     updated = dict(registry)
     updated[origin] = {"sdkPath": sdk_root, "updatedAt": updated_at}
     return updated
+
+
+def prune_dead_origins(
+    registry: dict[str, Any], *, origin_exists: Callable[[str], bool]
+) -> dict[str, Any]:
+    """`registry` with every entry whose ORIGIN directory no longer exists on
+    this host dropped -- `with_entry`'s "append-only; nothing here prunes"
+    gap, closed (tan-cli#905).
+
+    **What "dead" means here, and why this test and no other.** The module
+    docstring above already establishes the candidate set is closed: a key
+    can only be here because a real `tan bootstrap` ran in that directory.
+    `covers` (`sdk_cmd._workspace_under`) decides a match by STRING
+    containment on `.resolve()`d paths and does not itself require either
+    side to exist -- so the one fact that makes an origin permanently
+    unmatchable, not merely unmatched by the CURRENT invocation, is that its
+    own directory is gone: no process can set its current working directory
+    to a path that does not exist, so no future `workspace_root` can ever
+    again be produced that resolves under a deleted origin (barring the
+    coincidence of something unrelated being created at that exact path
+    later, at which point the next real `tan bootstrap` there overwrites
+    this entry anyway, exactly as it would for a brand-new origin).
+
+    **Explicitly NOT the criterion: a dead `sdkPath`.**
+    `deepest_covering_entry` already SKIPS a covering entry whose `sdkPath`
+    fails `has_loader_script`, deliberately, because that origin's PROJECT
+    may simply be between bootstraps -- a checkout mid-move, or a project
+    that has not re-bootstrapped since its SDK relocated. That entry is
+    "merely unused right now", not dead: the very next `tan bootstrap` run
+    from that origin repairs it for free, and pruning it first would only
+    force a needless rediscovery. Origin existence is the only test this
+    module can run that tells the two apart without guessing at intent
+    (age-based pruning was considered and rejected for the same reason --
+    see the issue -- a long-idle but still-real project origin is
+    indistinguishable from an abandoned one by timestamp alone, and getting
+    that wrong deletes a live project's entry, not a stale one).
+
+    Not a filesystem touch itself: `origin_exists` is injected the same way
+    `covers`/`has_loader_script`/`resolve_origin` are injected into
+    `deepest_covering_entry`, so this module stays free of any direct `Path`
+    IO. The production caller (`bootstrap_cmd._write_global_sdk_registry`)
+    degrades an INCONCLUSIVE check (a `PermissionError`, or any other
+    exception) to "exists" -- an entry is dropped only on a confirmed
+    absence, never on an inability to check one, the same conservative bias
+    every other best-effort read in this module already applies.
+
+    Applies to every key in `registry`, including one shaped too oddly for
+    `parse_registry`/`parse_registry_updated_at` to have kept (a bare string
+    value, a non-dict entry): a malformed entry whose origin is gone is
+    exactly as dead as a well-formed one, and skipping it would leave the one
+    thing this function exists to bound -- the registry's own unbounded
+    growth (tan-cli#905's own complaint) -- unfixed for exactly the shapes
+    most likely to belong to a hand-edited or long-abandoned entry.
+
+    No concurrency story of its own: called from the SAME read-modify-write
+    `with_entry` already is, so a prune racing a second `tan bootstrap`'s
+    write carries the identical last-writer-wins tolerance
+    `_write_global_sdk_registry` already accepts for that write -- the
+    LOSER's entry (add or prune) is simply overwritten by the winner's next
+    write, never corrupted or partially applied.
+    """
+    return {origin: entry for origin, entry in registry.items() if origin_exists(origin)}
 
 
 def registry_text(registry: dict[str, Any]) -> str:
