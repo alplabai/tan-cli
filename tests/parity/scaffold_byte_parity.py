@@ -476,6 +476,32 @@ def un_edit_sensor_main_c_failure_modes_instruction(text: str) -> str:
     )
 
 
+_SENSOR_MAIN_C_HARDWARE_PARAGRAPH_EDITED = (
+    " * SoM per alp-sdk's metadata/chips/tmp112.yaml (not part of this\n"
+    " * scaffolded project).  7-bit address depends on the ADD0 strap,\n"
+    " * which selects one of 0x48..0x4B; every current SoM family straps\n"
+    " * ADD0 = GND, so the address is 0x48 throughout.\n"
+)
+_SENSOR_MAIN_C_HARDWARE_PARAGRAPH_EMITTED = (
+    " * SoM per metadata/chips/tmp112.yaml.  7-bit address depends on\n"
+    " * the ADD0 strap, which selects one of 0x48..0x4B; every current\n"
+    " * SoM family straps ADD0 = GND, so the address is 0x48 throughout.\n"
+)
+
+
+def un_edit_sensor_main_c_hardware_paragraph(text: str) -> str:
+    """PR #975 review round: reverse the header-comment `Hardware:`
+    paragraph's bare `metadata/chips/tmp112.yaml` referent rewrite above
+    (a sibling of tan-cli#924's `pattern_paragraph`/`bringup_instruction`
+    entries three lines below it, in the same rewritten comment block, that
+    #924 itself left uncovered) to recover the emit's own (dead-pointer)
+    bytes."""
+    return text.replace(
+        _SENSOR_MAIN_C_HARDWARE_PARAGRAPH_EDITED,
+        _SENSOR_MAIN_C_HARDWARE_PARAGRAPH_EMITTED,
+    )
+
+
 #: Same tan-cli#814 defect, the `board.yaml` comment that reinforces the bad
 #: README instruction one file over.
 _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE = (
@@ -794,6 +820,18 @@ DELIBERATE_EDITS: dict[
     ("sensor", "E1M-V2N101", "src/main.c", "failure_modes_instruction"): (
         "tan-cli#924: same as sensor/E1M-AEN801/src/main.c above",
         un_edit_sensor_main_c_failure_modes_instruction,
+    ),
+    ("sensor", "E1M-AEN801", "src/main.c", "hardware_paragraph"): (
+        "PR #975 review round: the header-comment 'Hardware:' paragraph "
+        "named a bare metadata/chips/tmp112.yaml, not emitted into any "
+        "scaffolded project, three lines above the pattern_paragraph entry "
+        "above -- named the real alp-sdk path in prose, same shape, a "
+        "sibling tan-cli#924 itself left uncovered",
+        un_edit_sensor_main_c_hardware_paragraph,
+    ),
+    ("sensor", "E1M-V2N101", "src/main.c", "hardware_paragraph"): (
+        "PR #975 review round: same as sensor/E1M-AEN801/src/main.c above",
+        un_edit_sensor_main_c_hardware_paragraph,
     ),
     ("diagnostics", "E1M-V2N101", "src/main.c", "som_sku_header"): (
         "tan-cli#932: src/main.c was never SKU-substituted at all -- the "
@@ -1155,8 +1193,10 @@ def self_check() -> None:
         ], (template, sku, path, edit_id, mut_failures)
 
     # tan-cli#924's eight entries (sensor/src/main.c x4 substitutions x2
-    # SKUs): each un_edit must round-trip the corrected comment back onto
-    # the emit's own (still-bare) bytes, and be registered under the exact
+    # SKUs) plus PR #975's `hardware_paragraph` sibling (x1 substitution x2
+    # SKUs, the same defect class #924 itself left uncovered): each un_edit
+    # must round-trip the corrected comment back onto the emit's own
+    # (still-bare) bytes, and be registered under the exact
     # (template, sku, path, edit_id) key.
     _SENSOR_MAIN_C_924_FIXTURES = (
         (
@@ -1164,6 +1204,12 @@ def self_check() -> None:
             un_edit_sensor_main_c_pattern_paragraph,
             _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EDITED,
             _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED,
+        ),
+        (
+            "hardware_paragraph",
+            un_edit_sensor_main_c_hardware_paragraph,
+            _SENSOR_MAIN_C_HARDWARE_PARAGRAPH_EDITED,
+            _SENSOR_MAIN_C_HARDWARE_PARAGRAPH_EMITTED,
         ),
         (
             "bringup_instruction",
@@ -1191,17 +1237,25 @@ def self_check() -> None:
 
     # ...and each is the strict half too: feeding the un_edit its OWN emitted
     # (still-bare) bytes finds nothing to undo -- `undo_declared_edits` must
-    # surface that as a hard failure, not a quiet pass, for all eight.
+    # surface that as a hard failure, not a quiet pass, for all ten. `path`
+    # carries five registered entries here, so a generic-prefix match alone
+    # is satisfied by any of the OTHER four failing (they always do, fed
+    # this short a snippet) regardless of whether the entry under test
+    # actually failed -- filter on the entry's OWN reason string, which
+    # `undo_declared_edits` embeds verbatim as `({reason})`, to prove THIS
+    # entry produced a failure, not merely that some failure occurred.
     for sku in ("E1M-AEN801", "E1M-V2N101"):
         for edit_id, _un_edit, _edited, emitted in _SENSOR_MAIN_C_924_FIXTURES:
             _, mut_failures = undo_declared_edits(
                 "sensor", sku, {"src/main.c": emitted}
             )
+            reason, _ = DELIBERATE_EDITS[("sensor", sku, "src/main.c", edit_id)]
             assert [
                 f for f in mut_failures
                 if f.startswith(
                     "src/main.c: DELIBERATE_EDITS declares an edit that is no longer"
                 )
+                and f.endswith(f"({reason})")
             ], ("sensor", sku, "src/main.c", edit_id, mut_failures)
 
     # tan-cli#932's six entries (diagnostics/E1M-V2N101 only): each un_edit
@@ -1243,7 +1297,14 @@ def self_check() -> None:
     # ...and each is the strict half too: feeding the un_edit its OWN RAW
     # emitted (AEN801/Alif-named, never-corrected) bytes finds nothing to
     # undo for tan-cli#932's entries -- each `_EMITTED` constant/literal
-    # below is the pre-fix form, not the vendored one.
+    # below is the pre-fix form, not the vendored one. Both `src/main.c`
+    # (four registered entries) and `README.md` (three, counting
+    # `eeprom_script_pointer`) carry more than one entry per path, so a
+    # generic-prefix match alone is satisfied by any of the OTHER entries
+    # failing regardless of whether the entry under test actually failed --
+    # filter on the entry's OWN reason string, which `undo_declared_edits`
+    # embeds verbatim as `({reason})`, to prove THIS entry produced a
+    # failure, not merely that some failure occurred.
     for path, edit_id, emitted in (
         ("src/main.c", "som_sku_header", _MAIN_C_V2N101_SOM_SKU_HEADER_EMITTED),
         ("src/main.c", "som_sku_output_line",
@@ -1256,9 +1317,11 @@ def self_check() -> None:
         _, mut_failures = undo_declared_edits(
             "diagnostics", "E1M-V2N101", {path: emitted}
         )
+        reason, _ = DELIBERATE_EDITS[("diagnostics", "E1M-V2N101", path, edit_id)]
         assert [
             f for f in mut_failures
             if f.startswith(f"{path}: DELIBERATE_EDITS declares an edit that is no longer")
+            and f.endswith(f"({reason})")
         ], ("diagnostics", "E1M-V2N101", path, edit_id, mut_failures)
 
     # `missing_extras` needs a real SDK checkout (a live example directory) to

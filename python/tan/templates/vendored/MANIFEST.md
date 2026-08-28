@@ -386,7 +386,7 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **twenty-nine** live entries
+The `DELIBERATE_EDITS` table below currently carries **thirty-one** live entries
 (counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS`
 dict, not by hand): one `multicore-mailbox`/`E1M-AEN801` entry for the
 leading "blocked ahead" caveat (tan-cli#864 Q5, see entry 9 below), the
@@ -401,18 +401,21 @@ same tree's own narrower DEEPX-sentence defect (tan-cli#946, see entry 10
 below), four more for `diagnostics`/`sensor`'s bare cross-repo pointers
 (tan-cli#912, see entry 7 below) — two SKUs each, one `README.md` entry per
 SKU — six more for `diagnostics`/`E1M-V2N101`'s Alif/AEN801-shaped
-`src/main.c`/`README.md` bytes (tan-cli#932, see entry 8 below), and eight
+`src/main.c`/`README.md` bytes (tan-cli#932, see entry 8 below), eight
 more for `sensor`/`src/main.c`'s four remaining bare `i2c-scanner`
 mentions entry 7 left uncovered (tan-cli#924, see entry 11 below) — two
-SKUs each, one entry per substitution. That is
-`1 + 1 + 6 + 2 + 1 + 4 + 6 + 8 = 29` — a review round on tan-cli#932 (2026-08)
-found this paragraph's arithmetic summed to 19 without the leading
+SKUs each, one entry per substitution — and two more for `sensor`/
+`src/main.c`'s `Hardware:`-paragraph bare `tmp112.yaml` mention, entry 11's
+own in-paragraph sibling (PR #975 review round, see entry 12 below). That is
+`1 + 1 + 6 + 2 + 1 + 4 + 6 + 8 + 2 = 31` — a review round on tan-cli#932
+(2026-08) found this paragraph's arithmetic summed to 19 without the leading
 multicore-mailbox term, and entry 9 below absent from the numbered list
 entirely; both were fixed in that round (making the count twenty), a
 further review round on tan-cli#946 added entry 10 (making it twenty-one),
-and tan-cli#924 added entry 11's eight entries (making it twenty-nine).
+tan-cli#924 added entry 11's eight entries (making it twenty-nine), and the
+PR #975 review round added entry 12's two entries (making it thirty-one).
 `test_the_manifest_deliberate_edit_count_matches_the_table` pins the
-**twenty-one** above against `len(DELIBERATE_EDITS)` itself, the drift this
+**thirty-one** above against `len(DELIBERATE_EDITS)` itself, the drift this
 paragraph shipped with nothing catching before tan-cli#932. tan-cli#384's
 seven `README.md` doc-link entries
 are NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0`
@@ -710,6 +713,28 @@ strictness exists to catch.
     and line 10 respectively) but are descriptive/contrastive prose, not
     run-this instructions, and stay untracked here -- tan-cli#924's own
     scope note.
+12. **`sensor`'s `src/main.c`: the header comment's `Hardware:` paragraph
+    bare `metadata/chips/tmp112.yaml` mention, three lines above entry 11's
+    `pattern_paragraph` substitution in the same comment block (PR #975
+    review round).** A different specific referent than entry 11's (which
+    tracks only the `i2c-scanner` mentions #924 itself named), but the
+    identical defect class: real only in the alp-sdk checkout the text was
+    captured from, never emitted into any scaffolded project, and a C
+    comment so the emit's own doc-link rewriter never touches it. Rewritten
+    to name the real alp-sdk path in prose, noting the referent is not part
+    of this scaffolded project, matching entry 7's/entry 11's phrasing.
+    Byte-identical between the two SKUs (same as entry 11) -- one `un_edit`
+    shared across both, two entries total. `src/main.c:51,53`'s
+    `metadata/chips/tmp112.yaml`/`include/alp/chips/tmp112.h` referents in
+    the separate `TMP112_ADDR_7BIT` doc-comment below (outside this rewritten
+    block), plus `board.yaml:12,34,36`, `prj.conf:4`, and the `minimal`
+    template's `README.md:19` are the same defect class again but were left
+    for a follow-up (tan-cli#977) rather than folded in here -- this entry
+    covers only the in-paragraph sibling entry 11 itself sat three lines
+    above. Fix belongs upstream, in alp-sdk's
+    `examples/peripheral-io/i2c-master/src/main.c`, alongside entry 11's; it
+    retires the same way, the moment alp-sdk#1795 lands and this tree is
+    re-vendored.
 
 ## Template x SKU matrix vendored
 
