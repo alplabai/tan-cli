@@ -717,10 +717,25 @@ jobs:
     # instead of holding the PR for GitHub's 360-minute job default.
     timeout-minutes: 30
     steps:
+      # `fetch-depth: 0` (tan-cli#970 review, blocker 1): this is the ONLY
+      # place `python/tests/gates` runs against `pull_request`/`merge_group`
+      # events at all (see the `python/tests/gates` step below), and the
+      # default depth-1 clone made its `test_module_size_budget_log_append_
+      # only.py` unable to see ANY commit's own git parents (`HEAD^@` exits
+      # 0 with empty stdout on a shallow graft) -- its real enforcement test
+      # read that as a repository root commit and `pytest.skip`ped, in
+      # every run of this job, silently. `0`, not a small fixed depth: that
+      # gate now also walks every commit since the PR's own base ref (`git
+      # rev-list <base>..HEAD`), which needs the full ancestry back to
+      # wherever this branch diverged, and needs `origin/<base>` to resolve
+      # at all -- actions/checkout documents `fetch-depth: 0` as fetching
+      # all history for ALL branches, which is exactly what makes
+      # `origin/dev` (or whatever the PR's base is) reachable here.
       - name: checkout tan-cli
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
           # On a `repository_dispatch` the workflow FILE has to come from the
           # DEFAULT branch -- that is GitHub's rule and why #195 put the trigger
           # on `main`. But what we CHECK OUT and test is a separate choice, and
@@ -1151,6 +1166,17 @@ jobs:
           ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk-planner-audit
           ALP_SDK_HAND_PORT_ROOT: ${{ github.workspace }}/alp-sdk-hand-port-audit
           ALP_SDK_STRICT_LOADERS_ROOT: ${{ github.workspace }}/alp-sdk-strict-loaders-audit
+          # `test_module_size_budget_log_append_only.py`'s base-ref discovery
+          # (tan-cli#970 review, blocker 2): GitHub Actions sets
+          # `GITHUB_BASE_REF` automatically on `pull_request`, but NOT on
+          # `merge_group` (only pull_request/pull_request_target) -- without
+          # this, a `merge_group` run of this step would hit that gate's
+          # `BaseRefUnresolved` and fail loudly (by design; see that file's
+          # module docstring), not silently fall back. Empty on every other
+          # trigger (`push`, `workflow_call`, `repository_dispatch`), which
+          # is exactly when the gate's own fallback -- no PR/merge-queue base
+          # applies to this run -- is the correct answer, not a workaround.
+          TAN_MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
         run: |
           set -euo pipefail
           python3 -m pytest tests/gates -v --deselect tests/gates/test_jlink_aen_device_freshness.py | tee /tmp/gates.log
@@ -1219,6 +1245,32 @@ jobs:
             echo "::error::test_pytest_configure_skips_the_check_on_an_xdist_worker did not PASS in this job -- pytest-xdist is installed above specifically so this test proves the config.workerinput worker-skip guard instead of importorskip-skipping past it; a SKIP here means xdist is no longer installed/resolvable in this job, silently returning to the #916 Major 2 defect this guard exists to catch."
             exit 1
           fi
+
+          # tan-cli#970 review, Major 4: this job's checkout is never
+          # shallow (fetch-depth: 0 above) and, on every trigger this
+          # workflow carries, is never a repository root commit either, so
+          # both of `test_module_size_budget_log_append_only.py`'s
+          # real-enforcement tests must PASS here, not SKIP -- same
+          # tan-cli#308 shape as every other guard in this step.
+          # `test_the_checkout_has_full_history` is blocker 1's guard (a
+          # shallow checkout must RED, not skip); a SKIP there is impossible
+          # by construction (it only ever passes or fails), but asserting
+          # PASSED still catches a collection error hiding as neither.
+          # `test_the_ledger_only_ever_appends_since_the_prs_base` is
+          # blocker 2's real enforcement -- its one legitimate SKIP path (a
+          # genuine repository root commit) cannot occur on this job's
+          # checkout, and on this job's two base-ref-bearing triggers
+          # (`pull_request`, `merge_group`) an unresolvable base ref is a
+          # hard `pytest.fail`, not a SKIP either -- so any SKIP here means
+          # base-ref resolution silently fell back instead, exactly the
+          # vacuity blockers 1 and 2 both exist to prevent.
+          for t in test_the_checkout_has_full_history \
+                   test_the_ledger_only_ever_appends_since_the_prs_base; do
+            if ! grep -qF "test_module_size_budget_log_append_only.py::${t} PASSED" /tmp/gates.log; then
+              echo "::error::${t} did not PASS in this job -- ALP_SDK_ROOT/ALP_SDK_HAND_PORT_ROOT/ALP_SDK_STRICT_LOADERS_ROOT are irrelevant to this gate, but this job's checkout is always fetch-depth 0 and never a root commit, so anything other than PASSED (a SKIP, or a collection failure) means the tan-cli#970 review's blocker 1/blocker 2 fixes regressed back to silent vacuity."
+              exit 1
+            fi
+          done
 
       # test_jlink_aen_device_freshness asks a question the FROZEN audit checkout
       # cannot answer: does tan's JLINK_AEN_DEVICE fallback still agree with the
