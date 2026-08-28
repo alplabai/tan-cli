@@ -383,3 +383,5 @@ and write both files from the real merged tree.
     - function_count_budget: 277 -> 278
 - 2026-08-28 -- review of #971 (Major 1): _origin_exists rewritten from Path.is_dir() to an explicit os.stat + errno/winerror check with the reasoning for each branch spelled out in the docstring, plus the new _INCONCLUSIVE_WINERRORS constant, grows bootstrap_cmd.py further
     - tan/commands/bootstrap_cmd.py: 3468 -> 3508
+- 2026-08-28 -- tan-cli#963: generate_cmd.py's own docstring for pin_issue/foreign_issue prepend-ordering grew the module 4 lines past its 1400 ceiling; no compression to fit, per repo convention
+    - tan/commands/generate_cmd.py: 1400 -> 1404
