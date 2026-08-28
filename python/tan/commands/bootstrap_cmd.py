@@ -138,6 +138,7 @@ from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import sdk_pointer_json
 from tan.core.sdk_default_registry import (
     load_raw,
+    prune_dead_origins,
     registry_path,
     registry_text,
     with_entry,
@@ -3006,12 +3007,50 @@ def _read_global_sdk_registry_bytes() -> bytes | None:
         return None
 
 
+def _origin_exists(origin: str) -> bool:
+    """`prune_dead_origins`'s injected filesystem check, production shape:
+    does `origin` -- a registry key, always an absolute directory
+    `sdk_default_registry`'s own module docstring already establishes as the
+    only kind of value that can appear there -- still exist as a directory on
+    this host.
+
+    `Path.is_dir()` already degrades most "can't tell" shapes to `False` on
+    its own -- ENOENT/ENOTDIR/EBADF/ELOOP (a missing path, a broken symlink,
+    a symlink loop) and a non-encodable path all come back `False` from
+    `is_dir()` itself, with nothing to catch here, and that is the CORRECT
+    outcome for this function too: a symlink loop or a broken link can never
+    again resolve to a real directory a `workspace_root` could sit under, so
+    treating it the same as "gone" is not overreach, it is the same "dead"
+    fact `prune_dead_origins`'s docstring already argues for a deleted plain
+    directory. The one shape `is_dir()` does NOT swallow is a permission
+    error (`EACCES`, e.g. an unreadable parent directory) -- that surfaces as
+    a real `OSError`, caught here and degraded to `True`: an origin this
+    process could not even STAT is inconclusive, not confirmed-dead, and
+    `prune_dead_origins` drops an entry only on a confirmed absence.
+    """
+    try:
+        return Path(origin).is_dir()
+    except OSError:
+        return True
+
+
 def _write_global_sdk_registry(sdk_root: str, *, origin: str) -> None:
     """Key `origin -> sdk_root` into `~/.alp/sdk-defaults.json`, ALONGSIDE
     (never instead of) the legacy `_write_global_sdk_pointer` write this
     always runs beside (tan-cli#466). `origin` is the same absolute project
     root `_write_global_sdk_pointer`'s own `written_for` already records --
     the directory THIS bootstrap ran in.
+
+    **Also prunes every DEAD origin in the same read-modify-write**
+    (tan-cli#905): before `with_entry` keys in this run's own origin, every
+    existing entry whose origin directory no longer exists
+    (`sdk_default_registry.prune_dead_origins`, `_origin_exists` above) is
+    dropped. Riding this call rather than a new command or a new lock is
+    deliberate -- it is already the one place that reads, modifies, and
+    atomically rewrites this file, so pruning here adds no new race the
+    concurrency paragraph below does not already cover, and needs no new CLI
+    surface: the registry shrinks back down on the cadence it already grows
+    on, one relocating bootstrap at a time.
 
     A concurrent second `tan bootstrap` on the host could race this
     read-modify-write (no file lock -- matching every other pointer write in
@@ -3023,7 +3062,14 @@ def _write_global_sdk_registry(sdk_root: str, *, origin: str) -> None:
     worst case, degrades one of the two entries back to tan-cli#464's
     disclosed-but-foreign path -- never to a crash or a corrupt file, since
     the read half already tolerates any malformed content
-    (`sdk_default_registry.parse_registry`).
+    (`sdk_default_registry.parse_registry`). The prune added by tan-cli#905
+    carries the SAME tolerance and no more: it can only race away a
+    concurrent write's just-added entry if that entry's own origin somehow
+    failed `_origin_exists` in the same instant it was written (it cannot --
+    the writer only ever runs `_origin_exists` against a directory a
+    bootstrap just finished running in), so in practice a losing prune only
+    ever re-drops an ALREADY-dead entry the winner's own read had not yet
+    pruned, which the winner's own next bootstrap removes anyway.
 
     Best-effort, like `_write_global_sdk_pointer`: a permission error or a
     full disk here degrades silently to "no registry entry for this origin",
@@ -3061,7 +3107,8 @@ def _write_global_sdk_registry(sdk_root: str, *, origin: str) -> None:
         path = registry_path(_home_alp_dir())
         raw = path.read_text(encoding="utf-8") if path.is_file() else None
         stamp, posix_root = wall_clock_iso(millis=True), _to_posix(Path(sdk_root))
-        registry = with_entry(load_raw(raw), origin=origin, sdk_root=posix_root, updated_at=stamp)
+        pruned = prune_dead_origins(load_raw(raw), origin_exists=_origin_exists)
+        registry = with_entry(pruned, origin=origin, sdk_root=posix_root, updated_at=stamp)
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(str(path), registry_text(registry))
     except Exception:  # noqa: BLE001 -- best-effort by contract

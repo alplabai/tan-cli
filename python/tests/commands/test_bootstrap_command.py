@@ -992,6 +992,78 @@ def test_write_global_sdk_registry_normalises_a_native_sdk_root_to_posix(tmp_pat
     assert registry_doc["/home/u/proj"]["sdkPath"] == "C:/Users/dev/alp-sdk"
 
 
+def test_write_global_sdk_registry_prunes_an_origin_whose_directory_is_gone(
+    tmp_path, monkeypatch
+):
+    """tan-cli#905: the registry's own complaint was unbounded growth from
+    throwaway/CI origins whose directory was later deleted. `dead_origin`
+    below never exists on disk at all (a bootstrap that ran, then had its
+    whole workspace removed, exactly the CI-worktree case the issue names);
+    `live_origin` is a real directory, standing in for a project that is
+    merely not the caller of THIS write. A second `_write_global_sdk_registry`
+    call, for a third, unrelated origin, must drop the dead one and keep the
+    live one untouched -- proving the prune rides the existing write rather
+    than needing its own trigger.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    live_origin = tmp_path / "still-here"
+    live_origin.mkdir()
+    dead_origin = tmp_path / "deleted-project"  # never created -- origin is dead by construction
+    new_origin = tmp_path / "new-project"
+    new_origin.mkdir()
+
+    bootstrap_cmd._write_global_sdk_registry(str(tmp_path / "sdk-old"), origin=str(live_origin))
+    bootstrap_cmd._write_global_sdk_registry(str(tmp_path / "sdk-dead"), origin=str(dead_origin))
+    registry_before = json.loads(registry_path(home / ".alp").read_text(encoding="utf-8"))
+    assert set(registry_before) == {str(live_origin), str(dead_origin)}
+
+    bootstrap_cmd._write_global_sdk_registry(str(tmp_path / "sdk-new"), origin=str(new_origin))
+
+    registry_after = json.loads(registry_path(home / ".alp").read_text(encoding="utf-8"))
+    assert set(registry_after) == {str(live_origin), str(new_origin)}, (
+        "the dead origin must be pruned on the next write, and the live one "
+        "must survive it untouched"
+    )
+    assert registry_after[str(live_origin)]["sdkPath"] == str(tmp_path / "sdk-old").replace(
+        "\\", "/"
+    )
+
+
+def test_origin_exists_treats_a_symlink_loop_as_gone_not_inconclusive(tmp_path):
+    """A symlink loop can never resolve to a real directory a `workspace_root`
+    could sit under -- `Path.is_dir()` already returns `False` for it (ELOOP
+    is one of the errnos pathlib swallows internally), and that is the
+    correct answer for `_origin_exists` too, not a case needing degrade-to-
+    `True` treatment."""
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    assert bootstrap_cmd._origin_exists(str(loop)) is False
+
+
+def test_origin_exists_degrades_a_permission_error_to_true_not_a_raise(tmp_path):
+    """The one shape `Path.is_dir()` does NOT swallow itself: a parent
+    directory this process cannot even stat. That must degrade to `True`
+    (inconclusive, so the entry survives), not raise out of a best-effort
+    write and not silently prune a project this process simply could not
+    check. Skipped when running as root, which bypasses directory
+    permissions entirely and would make `is_dir()` succeed instead of
+    raising."""
+    if os.name != "posix" or os.geteuid() == 0:
+        pytest.skip("requires a non-root POSIX process to exercise EACCES")
+    parent = tmp_path / "unreadable"
+    parent.mkdir()
+    child = parent / "origin"
+    child.mkdir()
+    parent.chmod(0o000)
+    try:
+        assert bootstrap_cmd._origin_exists(str(child)) is True
+    finally:
+        parent.chmod(0o755)  # restore so tmp_path's own teardown can clean up
+
+
 def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_path):
     """tan-cli#463: the test above proves the pointer FILE is written; this
     proves a *second, independent* `tan doctor` process -- run later, from the

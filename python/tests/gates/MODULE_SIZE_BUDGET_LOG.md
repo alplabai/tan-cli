@@ -378,3 +378,6 @@ and write both files from the real merged tree.
     - tan/planner/kconfig.py: 2092 -> 2107
 - 2026-08-28 -- tan-cli#957 family, round 4: guard cores[].vector_extension against a non-string in the G-2 TFLM kernel selector, same isinstance-guard pattern as cores[].type
     - tan/planner/kconfig.py: 2107 -> 2108
+- 2026-08-28 -- tan-cli#905: sdk_default_registry.prune_dead_origins + bootstrap_cmd._write_global_sdk_registry wiring/docstrings grow bootstrap_cmd.py past its recorded ceiling and add one new over-50-line function (_write_global_sdk_registry's own docstring growth).
+    - tan/commands/bootstrap_cmd.py: 3421 -> 3468
+    - function_count_budget: 275 -> 276
