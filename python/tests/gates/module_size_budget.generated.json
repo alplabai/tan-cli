@@ -61,6 +61,7 @@
     "tests/conftest.py": 1623,
     "tests/core/test_scaffold.py": 1411,
     "tests/gates/test_every_issue_code_is_registered.py": 1729,
+    "tests/gates/test_module_size_budget_log_append_only.py": 809,
     "tests/gates/test_planner_relocation_freshness.py": 1324,
     "tests/installers/test_installer_release_layout.py": 2886,
     "tests/model/test_adapters.py": 1550,
