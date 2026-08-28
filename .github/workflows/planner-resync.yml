@@ -157,6 +157,13 @@ jobs:
       # different file. Inline, neither can rot -- see `.github/zizmor.yml`'s
       # header for the full inventory and both derivations.
       - name: Check out tan-cli dev (the branch the re-sync targets)
+        # tan-cli#929: a stable identity for `.github/zizmor.yml`'s INVENTORY
+        # to key on, deliberately separate from this step's `name:` above --
+        # renaming the DISPLAY name must not silently untrack the row that
+        # excuses this step's `artipacked` suppression. Never rename this
+        # without updating the matching `anchor: job=propose
+        # id=artipacked-inventory-1` line in `.github/zizmor.yml`.
+        id: artipacked-inventory-1
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
         with:
           ref: dev
