@@ -382,3 +382,5 @@ and write both files from the real merged tree.
     - tan/commands/doctor_cmd.py: 4045 -> 4145
     - tan/commands/support_bundle_cmd.py: 1066 -> 1067
     - function_count_budget: 277 -> 278
+- 2026-08-28 -- tan-cli#963: generate_cmd.py's own docstring for pin_issue/foreign_issue prepend-ordering grew the module 4 lines past its 1400 ceiling; no compression to fit, per repo convention
+    - tan/commands/generate_cmd.py: 1400 -> 1404
