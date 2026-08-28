@@ -759,7 +759,17 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # never answered, so the venv is reused rather than removed), and
         # `bootstrap.venv-recreated` (the one surviving delete, promoted from a
         # `log.line` so it reaches `issues[]`). Checked before bumping.
-        expected_calls=20,
+        #
+        # 31, not 20, since issue #474 (ADR 0021 Lane 1 P1) added
+        # `toolchain_phase`/`_acquire_toolchain`/`_finish_toolchain_install`,
+        # which together carry ELEVEN new `log.warn("toolchain-install", ...)`
+        # call sites -- one code, many sites, all of them the phase's own
+        # non-fatal failure modes (bad manifest, missing 7-Zip, insufficient
+        # disk, a `west sdk install` failure, a post-install version
+        # mismatch, a compiler that will not run, a failed stamp write, an
+        # adopted-root refusal). Registered as `bootstrap.toolchain-install`
+        # in contract/issue-codes.json before bumping.
+        expected_calls=31,
         sites=1,
     ),
     ("tan/commands/bootstrap_cmd.py", "_refusal"): dict(
@@ -919,13 +929,20 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # `"sdk"` -- the same literal every other arm of that function uses --
         # and passes no `code=` override, so `doctor.sdk` needs no new
         # registry entry. One more call site, no new code.
+        #
+        # 69 as of issue #474 (ADR 0021 Lane 1 P1): `toolchain_check` is SIX
+        # `Check(...)` sites (no-sdk-root, missing/malformed manifest, pass,
+        # version-skew fail, no-toolchain fail), all literally named
+        # `"toolchain"`, so they contribute ONE new code, `doctor.toolchain`,
+        # newly registered in `contract/issue-codes.json` -- the same shape
+        # as the `libraries_check` bump above.
         prefix="doctor.",
         expr="kebab_check_name(check.name)",
         name="Check",
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=63,
+        expected_calls=69,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(

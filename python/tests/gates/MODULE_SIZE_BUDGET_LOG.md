@@ -404,3 +404,10 @@ and write both files from the real merged tree.
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/bootstrap_cmd.py: 3421 -> 3522
     - function_count_budget: 277 -> 279
+- 2026-08-28 -- issue #474 (ADR 0021 Lane 1 P1): tan bootstrap acquires the arm-zephyr-eabi cross toolchain -- toolchain_phase/_acquire_toolchain/_finish_toolchain_install added to bootstrap_cmd.py alongside the phase's other IO (manifest read, disk preflight, wreckage reclaim, stamp write); kept in the existing phase-function file rather than a new module so the phase reads like pip_phase/west_phase's own siblings.
+    - tan/commands/bootstrap_cmd.py: 3522 -> 3870
+    - function_count_budget: 279 -> 282
+    - function_worst_budget: 770 -> 785
+- 2026-08-28 -- issue #474 (ADR 0021 Lane 1 P1): doctor.py gains toolchain_check() + _toolchain_store_dir() (stamp-vs-pin, ADR 0021's own 'doctor' requirement) alongside bootstrap_cmd.py's earlier-recorded toolchain_phase() growth.
+    - tan/commands/doctor_cmd.py: 4045 -> 4134
+    - function_count_budget: 282 -> 283

@@ -178,6 +178,7 @@ from tan.core.probe import PROBE_TIMEOUT_S, probe, probe_status
 from tan.core.sdk_default_registry import registry_path
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.timestamp import generated_at_iso
+from tan.core import toolchain_provision
 from tan.core.tool_lookup import resolve_tool
 from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
 from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, terminal_width, use_color
@@ -1210,6 +1211,91 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
         f"`{zephyr_sdk_install_command()}`.{host_tool_note} Details: "
         "https://docs.zephyrproject.org/latest/develop/toolchains/zephyr_sdk.html",
         scope="host",
+    )
+
+
+def _toolchain_store_dir(
+    manifest: toolchain_provision.ToolchainManifest,
+) -> Path:
+    root = toolchain_provision.resolve_toolchain_root(
+        os.environ.get("ALP_TOOLCHAIN_ROOT"), str(_home_alp_dir())
+    )
+    return Path(root.path_str) / toolchain_provision.store_dir_name(manifest.version)
+
+
+def toolchain_check(sdk_root: str | None) -> Check:
+    """`toolchain` -- STAMP-vs-PIN, never directory-exists (issue #474, ADR
+    0021 Lane 1 P1's own words: "a stamped 1.0.1 store against a moved pin is
+    a Fail with a fix, not 'a toolchain exists'"). Calls
+    `toolchain_provision.stamp_matches_pin` -- the SAME function `tan
+    bootstrap`'s own skip-if-already-installed step calls -- so this check
+    and `bootstrap` cannot independently drift on what "still valid" means,
+    the same `zephyr_python_floor`-is-imported-not-re-derived pattern this
+    file already applies one layer up.
+
+    Distinct from `zephyrSdk` above, which answers "does ANY working
+    toolchain exist on this host" unconditionally, with no SDK checkout
+    needed (an env var or a scanned install dir). This one answers a
+    narrower, PIN-specific question -- "does THIS checkout's pinned
+    cross-toolchain version exist here, verified" -- so it needs `sdk_root`
+    and reports `unknown` without one: there is no pin to check against.
+
+    `scope="project"` on every arm (never `"host"`, unlike `zephyrSdk`): a
+    single check NAME may not carry two scopes (`tests/gates/
+    test_doctor_check_scope.py`), and this one is inherently
+    project-scoped -- it cannot answer at all without a resolved
+    `sdk_root` to read `metadata/toolchains.json`'s PIN from.
+    """
+    if sdk_root is None:
+        return Check(
+            "toolchain",
+            "unknown",
+            "no alp-sdk checkout resolved -- cannot read metadata/toolchains.json to "
+            "know which cross-toolchain version is pinned.",
+            scope="project",
+        )
+    manifest_path = Path(sdk_root) / "metadata" / "toolchains.json"
+    text = _read_text(manifest_path)
+    if text is None:
+        return Check(
+            "toolchain",
+            "unknown",
+            f"{manifest_path} is missing or unreadable -- cannot determine the "
+            f"pinned cross-toolchain version.",
+            scope="project",
+        )
+    try:
+        manifest = toolchain_provision.parse_toolchain_manifest(text)
+    except toolchain_provision.ToolchainManifestError as err:
+        return Check(
+            "toolchain", "unknown", f"{manifest_path} is malformed: {err}", scope="project",
+        )
+    store_dir = _toolchain_store_dir(manifest)
+    stamp_text = _read_text(store_dir / toolchain_provision.STAMP_FILENAME)
+    stamp = toolchain_provision.parse_stamp(stamp_text) if stamp_text is not None else None
+    if toolchain_provision.stamp_matches_pin(stamp, manifest):
+        return Check(
+            "toolchain", "pass",
+            f"arm-zephyr-eabi {manifest.version} verified at {store_dir}.",
+            scope="project",
+        )
+    if stamp is not None:
+        return Check(
+            "toolchain",
+            "fail",
+            f"{store_dir} carries a verification stamp for a different pin (this "
+            f"checkout now pins {manifest.version}) -- run `tan bootstrap` to "
+            f"acquire the current pin.",
+            "tan bootstrap",
+            scope="project",
+        )
+    return Check(
+        "toolchain",
+        "fail",
+        f"no verified arm-zephyr-eabi {manifest.version} toolchain at {store_dir} -- "
+        f"run `tan bootstrap` to acquire it (ADR 0021 Lane 1 P1).",
+        "tan bootstrap",
+        scope="project",
     )
 
 
@@ -3611,6 +3697,9 @@ def _collect(
     # `zephyr_sdk_check`'s docstring (tan-cli#286).
     zephyr_sdk_ok = _zephyr_sdk_detected()
     _add(zephyr_sdk_check(zephyr_sdk_ok, os.environ.get("ZEPHYR_SDK_INSTALL_DIR")))
+    # issue #474 (ADR 0021 Lane 1 P1): stamp-vs-pin, narrower than `zephyrSdk`
+    # above -- see `toolchain_check`'s own docstring for the distinction.
+    _add(toolchain_check(sdk_root))
     # tan-cli#736: unconditional on Windows. This used to ride the
     # `zephyrSdk` Fail (`and not zephyr_sdk_ok`), which silently excused the
     # host that has an SDK and no 7-Zip -- exactly the host whose next

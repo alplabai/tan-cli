@@ -479,7 +479,7 @@ def test_the_envelope_key_set_and_sdk_omission(tmp_path):
     assert env["ok"] is (env["exitCode"] == 0)
     assert set(env["data"]) == {
         "schemaVersion", "sdkRoot", "workspaceDir", "venvDir", "zephyrBase",
-        "factsFromManifest", "zephyrPin", "noPip", "noWest", "printEnv",
+        "factsFromManifest", "zephyrPin", "noPip", "noWest", "noToolchain", "printEnv",
         "missingPrerequisites",
     }
     assert env["data"]["schemaVersion"] == "2"  # the STRING, not the number
@@ -2125,8 +2125,12 @@ def test_a_dry_run_writes_nothing_and_reports_every_step_it_would_have_run(tmp_p
 
     env = envelope(
         run_tan(
-            "bootstrap", "--dry-run", "--format", "json", "--sdk-root", str(sdk),
-            cwd=sdk.parent,
+            # `--no-toolchain`: this SDK fixture carries no
+            # `metadata/toolchains.json` (see `test_toolchain_*` below for
+            # that phase's own dry-run coverage), and the pip/west ordering
+            # this test asserts predates and is independent of it.
+            "bootstrap", "--dry-run", "--no-toolchain", "--format", "json",
+            "--sdk-root", str(sdk), cwd=sdk.parent,
         )
     )
     assert env["exitCode"] == 0
@@ -3735,6 +3739,7 @@ def _run_with_a_blocked_zephyr_requirements_install(
         sdk_root_flag=str(sdk),
         no_pip=False,
         no_west=True,
+        no_toolchain=True,
         print_env=False,
         allow_partial=allow_partial,
         workspace=None,

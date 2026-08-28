@@ -54,6 +54,7 @@ import errno
 import hashlib
 import json
 import os
+import platform
 import shutil
 import stat
 import subprocess
@@ -67,11 +68,13 @@ from tan.core.shapes import SDK_MARKER, is_dir as _is_dir, is_file as _is_file
 from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.doctor_cmd import (
     FALLBACK_PYTHON_FLOOR,
+    SEVEN_ZIP_PROGRAMS,
     _read_text,
     on_path,
     probe,
     zephyr_python_floor,
 )
+from tan.core import toolchain_provision
 from tan.commands.presets_cmd import parse_som_preset, resolve_project_paths
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
@@ -216,7 +219,18 @@ def _global_default_fix_hint() -> str:
 #: to this being a byte-for-byte port of the oracle's 3-element const, so
 #: adding a 4th member would be a parity DIVERGENCE, not a bug fix -- flagged
 #: for the maintainer to decide, not changed unilaterally here.
-WORKSPACE_BLOCKING: tuple[str, ...] = ("zephyr-requirements", "sdk-extras", "editable-install")
+#:
+#: `toolchain-install` (issue #474, ADR 0021 Lane 1 P1) is a DELIBERATE 4th
+#: member, not a divergence from that 3-element parity set: the frozen v0.4.1
+#: Rust oracle never acquired a cross toolchain at all -- this phase postdates
+#: it entirely, so there is no oracle constant to stay byte-for-byte with
+#: here. It blocks for the same reason the other three do: a `tan build` for
+#: real silicon with no `arm-zephyr-eabi` compiler fails deep in a CMake
+#: configure naming neither ADR 0021 nor a remedy -- exactly the failure this
+#: phase exists to move up front.
+WORKSPACE_BLOCKING: tuple[str, ...] = (
+    "zephyr-requirements", "sdk-extras", "editable-install", "toolchain-install",
+)
 
 
 class Log:
@@ -1141,6 +1155,314 @@ def pip_phase(ws: Workspace, venv: VenvBin, log: Log, runner: Runner, host: str)
 
 
 # ---------------------------------------------------------------------------
+# Cross-toolchain acquisition (ADR 0021 Lane 1 P1, issue #474) -- the FINAL
+# phase, after the checkout and venv resolve. Reads
+# `<sdkRoot>/metadata/toolchains.json` at RUN TIME -- tan carries no copy of
+# this pin, so a customer who bumps their alp-sdk checkout gets the new
+# toolchain on their next `tan bootstrap` with zero tan changes.
+# ---------------------------------------------------------------------------
+
+
+def _toolchain_manifest_path(sdk_root: str) -> Path:
+    return Path(sdk_root) / "metadata" / "toolchains.json"
+
+
+def load_toolchain_manifest(
+    sdk_root: str,
+) -> tuple[toolchain_provision.ToolchainManifest | None, str | None]:
+    """`(manifest, None)` on success; `(None, message)` naming exactly why not
+    -- a missing file and a malformed one are both "cannot proceed", but the
+    MESSAGE always says which, mirroring `load_facts`'s own contract for
+    `bootstrap.json`."""
+    path = _toolchain_manifest_path(sdk_root)
+    text = _read_text(path)
+    if text is None:
+        return None, f"{_native(path)} is missing or unreadable"
+    try:
+        return toolchain_provision.parse_toolchain_manifest(text), None
+    except toolchain_provision.ToolchainManifestError as err:
+        return None, f"{_native(path)} is malformed: {err}"
+
+
+def _toolchain_root_and_leaf(
+    manifest: toolchain_provision.ToolchainManifest,
+) -> tuple[Path, str, bool]:
+    """`(root, leaf_name, adopted)` -- see `toolchain_provision.
+    resolve_toolchain_root` for `adopted`'s meaning (`$ALP_TOOLCHAIN_ROOT`
+    set)."""
+    resolved = toolchain_provision.resolve_toolchain_root(
+        _env("ALP_TOOLCHAIN_ROOT"), str(_home_alp_dir())
+    )
+    leaf = toolchain_provision.store_dir_name(manifest.version)
+    return Path(resolved.path_str), leaf, resolved.adopted
+
+
+def _read_toolchain_stamp(store_dir: Path) -> toolchain_provision.ToolchainStamp | None:
+    text = _read_text(store_dir / toolchain_provision.STAMP_FILENAME)
+    return toolchain_provision.parse_stamp(text) if text is not None else None
+
+
+def _free_disk_bytes(root: Path) -> int | None:
+    """`shutil.disk_usage` against the nearest EXISTING ancestor of `root` --
+    `root` (usually `~/.alp/toolchains`) does not exist yet on a fresh host,
+    and `disk_usage` raises on a path that is not there. `None` when nothing
+    above it resolves either (a moved/deleted home directory); the caller
+    treats that as "cannot preflight", never as "no space"."""
+    probe_path = root
+    for _ in range(64):
+        if _is_dir(probe_path):
+            break
+        parent = probe_path.parent
+        if parent == probe_path:
+            return None
+        probe_path = parent
+    try:
+        return shutil.disk_usage(probe_path).free
+    except OSError:
+        return None
+
+
+def _reclaim_toolchain_wreckage(root: Path, leaf: str) -> None:
+    """Best-effort cleanup of a PRIOR interrupted attempt's `.tmp-*` sibling,
+    before a new one starts. Never raises, and only ever touches a name
+    matching `wreckage_glob_pattern` -- nothing else under this root ever
+    produces that suffix, so this can never delete a directory tan did not
+    create for exactly this purpose. Applied even under `$ALP_TOOLCHAIN_ROOT`
+    (`adopted`): the naming pattern itself is proof of provenance, unlike a
+    bare unstamped `store_dir`, which is NOT reclaimed under an adopted root
+    -- see `_finish_toolchain_install`.
+    """
+    try:
+        for candidate in root.glob(toolchain_provision.wreckage_glob_pattern(leaf)):
+            try:
+                if candidate.is_dir():
+                    shutil.rmtree(candidate)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _read_installed_sdk_version(store_dir: Path) -> str | None:
+    text = _read_text(store_dir / toolchain_provision.SDK_VERSION_FILE_RELPATH)
+    return text.strip() if text else None
+
+
+def _probe_toolchain_compiler(store_dir: Path, *, is_windows: bool) -> str | None:
+    """`arm-zephyr-eabi-gcc --version` run FROM the store -- the one check
+    that proves a real, executable compiler landed there, not just a
+    directory tree `west sdk install` happened to create. Returns the
+    banner's first line, or `None` on ANY failure to run (binary absent,
+    unspawnable, non-zero exit, empty output)."""
+    gcc = store_dir.joinpath(*toolchain_provision.gcc_binary_relpath(is_windows=is_windows))
+    if not _is_file(gcc):
+        return None
+    ran, out = probe([str(gcc), "--version"])
+    if not ran or not out:
+        return None
+    lines = out.splitlines()
+    return lines[0].strip() if lines and lines[0].strip() else None
+
+
+def _finish_toolchain_install(
+    log: Log,
+    manifest: toolchain_provision.ToolchainManifest,
+    tmp_dir: Path,
+    store_dir: Path,
+    *,
+    root_adopted: bool,
+    is_windows: bool,
+) -> None:
+    """`tmp_dir` is the directory `west sdk install --install-dir` just wrote
+    to (its own name never matches an existing sibling, so its move here can
+    never merge with one). Verify version + a real compiler probe, THEN move
+    into place, THEN stamp -- so a directory-exists check can never mistake
+    this for done: [`toolchain_provision.stamp_matches_pin`] is the only
+    verdict, and nothing here writes a stamp before every prior step in this
+    function has already succeeded.
+    """
+    installed_version = _read_installed_sdk_version(tmp_dir)
+    if installed_version != manifest.version:
+        log.warn(
+            "toolchain-install",
+            f"west sdk install exited 0, but {_native(tmp_dir)} reports SDK version "
+            f"{installed_version!r}, not the pinned {manifest.version!r} -- leaving it "
+            f"in place for inspection rather than trusting it. Remove that directory "
+            f"and re-run `tan bootstrap` once you know why they disagree.",
+        )
+        return
+    if _is_dir(store_dir):
+        if root_adopted:
+            log.warn(
+                "toolchain-install",
+                f"{_native(store_dir)} already exists and carries no valid tan "
+                f"verification stamp -- ALP_TOOLCHAIN_ROOT points at an adopted "
+                f"directory tan does not delete on your behalf. Remove it yourself, "
+                f"or unset ALP_TOOLCHAIN_ROOT, then re-run `tan bootstrap`.",
+            )
+            return
+        try:
+            shutil.rmtree(store_dir)
+        except OSError as err:
+            log.warn(
+                "toolchain-install",
+                f"cannot replace the stale directory at {_native(store_dir)}: {err}",
+            )
+            return
+    try:
+        os.replace(tmp_dir, store_dir)
+    except OSError as err:
+        log.warn(
+            "toolchain-install", f"cannot move {_native(tmp_dir)} into place: {err}"
+        )
+        return
+    triple = _probe_toolchain_compiler(store_dir, is_windows=is_windows)
+    if triple is None:
+        log.warn(
+            "toolchain-install",
+            f"installed at {_native(store_dir)}, but arm-zephyr-eabi-gcc did not run "
+            f"there -- NOT stamping it as verified (a directory existing is not "
+            f"evidence it works). Re-run `tan bootstrap` to retry.",
+        )
+        return
+    stamp_text = toolchain_provision.render_stamp(
+        toolchain_provision.ToolchainStamp(manifest.version, manifest.digest(), triple)
+    )
+    try:
+        atomic_write_text(store_dir / toolchain_provision.STAMP_FILENAME, stamp_text)
+    except OSError as err:
+        log.warn(
+            "toolchain-install",
+            f"cross toolchain installed at {_native(store_dir)} but the verification "
+            f"stamp could not be written: {err} -- it will be re-verified next run.",
+        )
+        return
+    log.line(f"Cross toolchain {manifest.version} verified and stamped: {_native(store_dir)}")
+
+
+def _acquire_toolchain(
+    ws: Workspace,
+    log: Log,
+    runner: Runner,
+    manifest: toolchain_provision.ToolchainManifest,
+    root: Path,
+    leaf: str,
+    store_dir: Path,
+    *,
+    root_adopted: bool,
+    west: str,
+    is_windows: bool,
+) -> None:
+    """`west sdk install --install-dir <tmp-sibling-of-store_dir>`, then hand
+    off to `_finish_toolchain_install` for the version/probe/stamp sequence.
+
+    The tmp-sibling IS the atomicity belt ADR 0021 asks for around a tool
+    this code does not control the internals of: a kill mid-`west` run (a
+    laptop sleep, Ctrl-C, an OOM-kill) leaves the `.tmp-*` sibling, never
+    `store_dir` itself, so a second `tan bootstrap` can never mistake a
+    half-installed toolchain for a working one.
+    """
+    if not runner.dry_run:
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as err:
+            log.warn("toolchain-install", f"cannot create {_native(root)}: {err}")
+            return
+        _reclaim_toolchain_wreckage(root, leaf)
+    tmp_dir = root / f"{leaf}{toolchain_provision.TMP_SUFFIX_PREFIX}{os.getpid()}"
+    argv = toolchain_provision.west_sdk_install_argv(
+        west, version=manifest.version, install_dir=_native(tmp_dir)
+    )
+    log.line(
+        f"Installing the Zephyr SDK {manifest.version} + arm-zephyr-eabi toolchain "
+        f"(this can take several minutes on a slow link)"
+    )
+    detail = runner.run(argv, cwd=ws.workspace_dir)
+    if detail is not None:
+        augmented = toolchain_provision.augment_acquisition_failure(detail)
+        log.warn("toolchain-install", f"west sdk install failed: {augmented}")
+        return
+    if runner.dry_run:
+        return
+    _finish_toolchain_install(
+        log, manifest, tmp_dir, store_dir, root_adopted=root_adopted, is_windows=is_windows
+    )
+
+
+def toolchain_phase(
+    ws: Workspace,
+    log: Log,
+    runner: Runner,
+    sdk_root: str,
+    venv: VenvBin | None,
+    *,
+    is_windows: bool,
+) -> None:
+    """ADR 0021 Lane 1 P1. Every exit here is either a plain `log.line` -- a
+    clean, non-blocking skip that changes nothing about the run's verdict
+    (already installed and verified, an unsupported host, no artifact for
+    this host at the pinned version) -- or `log.warn("toolchain-install",
+    ...)`, which IS `WORKSPACE_BLOCKING`: reported, and blocks `complete.`
+    unless `--allow-partial`, because a customer whose FIRST real-silicon
+    build then fails on a missing compiler -- discovered minutes or days
+    later, far from this command -- is exactly the failure ADR 0021 exists
+    to close.
+
+    `venv` may be `None` (a workspace bootstrapped with `--no-pip --no-west`
+    reaches here only via a caller that already gates on `--no-west`, so in
+    practice this is always a real venv; the fallback to a bare PATH `west`
+    exists only so this function has no unchecked assumption of its own).
+    """
+    manifest, manifest_err = load_toolchain_manifest(sdk_root)
+    if manifest is None:
+        log.warn("toolchain-install", f"cannot acquire the cross toolchain: {manifest_err}")
+        return
+
+    host_key = toolchain_provision.toolchain_host_key(sys.platform, platform.machine())
+    if isinstance(host_key, toolchain_provision.UnsupportedHost):
+        log.line(f"Skipping cross-toolchain acquisition: {host_key.reason}")
+        return
+    if toolchain_provision.artifacts_missing_for_host(manifest, host_key):
+        log.line(
+            f"Skipping cross-toolchain acquisition: the pinned Zephyr SDK "
+            f"{manifest.version} publishes no {host_key} artifact -- see "
+            f"docs/cross-platform-setup.md for this host's manual install."
+        )
+        return
+
+    root, leaf, root_adopted = _toolchain_root_and_leaf(manifest)
+    store_dir = root / leaf
+    if toolchain_provision.stamp_matches_pin(_read_toolchain_stamp(store_dir), manifest):
+        log.line(f"Cross toolchain already installed and verified: {_native(store_dir)}")
+        return
+
+    if is_windows and not any(on_path(program) for program in SEVEN_ZIP_PROGRAMS):
+        log.warn(
+            "toolchain-install",
+            "No 7-Zip on PATH -- `west sdk install` extracts the toolchain with "
+            "patoolib, which has no pure-Python fallback on native Windows. Install "
+            "it (`tan doctor --fix`, or `winget install -e --id 7zip.7zip`), then "
+            "re-run `tan bootstrap`.",
+        )
+        return
+
+    needed = toolchain_provision.required_bytes(manifest)
+    if needed is not None and not runner.dry_run:
+        free = _free_disk_bytes(root)
+        if free is not None:
+            refusal = toolchain_provision.disk_preflight_refusal(free, needed)
+            if refusal is not None:
+                log.warn("toolchain-install", f"cannot acquire the cross toolchain: {refusal}")
+                return
+
+    west = str(venv.west) if venv is not None else "west"
+    _acquire_toolchain(
+        ws, log, runner, manifest, root, leaf, store_dir,
+        root_adopted=root_adopted, west=west, is_windows=is_windows,
+    )
+
+
+# ---------------------------------------------------------------------------
 # `.west/config` reconciliation + the workspace sync record
 # ---------------------------------------------------------------------------
 
@@ -1748,6 +2070,7 @@ def _data(
         "zephyrPin": pin,
         "noPip": args["no_pip"],
         "noWest": args["no_west"],
+        "noToolchain": args["no_toolchain"],
         "printEnv": args["print_env"],
         "missingPrerequisites": missing,
     }
@@ -2157,13 +2480,14 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     sdk_root_flag: str | None,
     no_pip: bool,
     no_west: bool,
+    no_toolchain: bool,
     print_env: bool,
     allow_partial: bool,
     workspace: str | None,
     dry_run: bool,
     json_mode: bool,
 ) -> tuple[Outcome, Project, SdkInfo | None]:
-    """The whole command, as a sequence of early refusals then the three phases.
+    """The whole command, as a sequence of early refusals then the four phases.
 
     Deliberately one long function rather than a pipeline of small ones: the
     order of the gates is the contract (a refusal must leave NOTHING on disk, so
@@ -2173,7 +2497,10 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     is_windows = os.name == "nt"
     host = detect_host_os(sys.platform)
     log = Log(json_mode)
-    flags = {"no_pip": no_pip, "no_west": no_west, "print_env": print_env}
+    flags = {
+        "no_pip": no_pip, "no_west": no_west, "no_toolchain": no_toolchain,
+        "print_env": print_env,
+    }
 
     root, board_path = resolve_project_paths(project, board_yaml)
     # tan-cli#236: `board_yaml` is reported only when a file is really there --
@@ -2867,8 +3194,19 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             log.warn(*ceiling)
         pip_phase(ws, venv, log, runner, host)
 
-    # NOTE: this does NOT install the Zephyr SDK (the cross toolchains). Real
-    # silicon targets need it -- run `west sdk install` from the workspace once.
+    # ADR 0021 Lane 1 P1 (issue #474): the FINAL phase, deliberately -- it
+    # reads `<sdkRoot>/metadata/toolchains.json` at runtime and needs the west
+    # workspace the phase above just resolved (or reused).
+    if no_toolchain:
+        log.line("Skipping cross-toolchain acquisition (--no-toolchain)")
+    elif no_west:
+        log.line(
+            "Skipping cross-toolchain acquisition (--no-west: no west workspace to "
+            "run `west sdk install` from)"
+        )
+    else:
+        toolchain_phase(ws, log, runner, sdk_root, venv, is_windows=is_windows)
+
     venv_bin_dir = venv.bin_dir if venv else facts.venv_bin_dir(is_windows)
     text = optional_libs_block(facts, host)
     text.append("")
@@ -3399,6 +3737,15 @@ def bootstrap(
     ),
     no_pip: bool = typer.Option(False, "--no-pip", help="Skip the pip dependency installs."),
     no_west: bool = typer.Option(False, "--no-west", help="Skip the west init/update step."),
+    no_toolchain: bool = typer.Option(
+        False,
+        "--no-toolchain",
+        help=(
+            "Skip acquiring the arm-zephyr-eabi cross toolchain (ADR 0021 Lane 1 P1). "
+            "The workspace venv/west/pip steps are unaffected; native_sim builds do "
+            "not need the cross toolchain at all."
+        ),
+    ),
     print_env: bool = typer.Option(
         False, "--print-env", help="Print the environment-variable lines and exit."
     ),
@@ -3457,6 +3804,7 @@ def bootstrap(
             sdk_root_flag=sdk_root,
             no_pip=no_pip,
             no_west=no_west,
+            no_toolchain=no_toolchain,
             print_env=print_env,
             allow_partial=allow_partial,
             workspace=workspace,
