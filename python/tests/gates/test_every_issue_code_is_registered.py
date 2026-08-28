@@ -767,11 +767,12 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         expr="code",
         name="_refusal",
         arg_index=1,
-        # 9, not 8, since tan-cli#389 added the `workspace-orphan-refused`
-        # refusal beside `enclosing-west-workspace`: `--workspace` must not
-        # rename the manifest repository out of a live west workspace. Code
-        # registered before bumping.
-        expected_calls=9,
+        # 10, not 9, since tan-cli#964 review added the
+        # `metadata-schema-invalid` refusal: `bootstrap` reads a SoM preset to
+        # build its topology, so a schema-invalid preset must REFUSE rather
+        # than silently degrade the way `tan presets`'s WARN half is allowed
+        # to. Code registered before bumping.
+        expected_calls=10,
         sites=1,
     ),
     ("tan/commands/debug_config_cmd.py", "_failure"): dict(
