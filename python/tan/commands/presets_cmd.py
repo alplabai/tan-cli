@@ -136,6 +136,7 @@ from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
+from tan.soc_ref import resolve_soc_path as _resolve_soc_path
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -515,26 +516,12 @@ def _entries(directory: Path) -> list[os.DirEntry]:
         return []
 
 
-def _resolve_soc_path(silicon: str | None, metadata_root: Path) -> Path | None:
-    """A `vendor:family:part` `silicon:` key's SoC-JSON path,
-    `metadata/socs/<vendor>/<family>/<part>.json` -- does NOT check the path
-    exists. Mirrors `tan.planner.som_metadata.resolve_soc_path`'s path
-    arithmetic exactly (deliberately NOT imported from there: see
-    `_soc_lookups`'s docstring for why nothing in this file imports
-    `tan.planner`). Returns `None` for a falsy or not-exactly-3-part `silicon`.
-
-    Known duplication, tracked rather than fixed here: this is a verbatim
-    second copy of `som_metadata.resolve_soc_path`'s arithmetic, not just its
-    contract -- see tan-cli#917 (`som_metadata.py` is held by another in-flight
-    change as of this writing, so the extraction is scoped as its own
-    follow-up).
-    """
-    if not silicon:
-        return None
-    parts = silicon.split(":")
-    if len(parts) != 3:
-        return None
-    return metadata_root / "socs" / parts[0] / parts[1] / f"{parts[2]}.json"
+# `_resolve_soc_path` (tan-cli#917): was a verbatim second copy of the path
+# arithmetic `tan.planner.som_metadata.resolve_soc_path` also implements --
+# now both import the single definition in the leaf module `tan.soc_ref`,
+# which imports neither `tan.planner` nor anything else that reads real files
+# at import time, so importing it here does not reintroduce the `bind_sdk_root`
+# rebinding hazard `_soc_lookups`'s docstring (below) documents avoiding.
 
 
 def _soc_lookups(
