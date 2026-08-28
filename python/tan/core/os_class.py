@@ -63,8 +63,19 @@ def default_os_from_core_type(core_type: str) -> str:
     Used as the fallback when a SoM preset's `topology.<core>.os` is
     omitted (the field is optional in som-preset-v1.schema.json -- M-class
     cores default to Zephyr, A-class to Yocto).
+
+    *core_type* is typed `str` but this is the SHARED entry point both
+    binding-free callers (`presets_cmd.allowed_os_lookup`) and the planner
+    (`topology._default_os_from_core_type`) reach with a value read off a
+    SoC JSON that a schema-invalid `--sdk-root`/`--metadata-root` tree makes
+    no promise about (tan-cli#957) -- `isinstance` here, not `str`-only trust
+    in the annotation, is the backstop for every caller, present or future,
+    that forwards a `cores[].type` value without its OWN guard. A non-string
+    normalises to the same `""` unresolved sentinel a genuinely absent
+    `type` already produces, rather than raising `AttributeError` on
+    `.lower()`.
     """
-    t = (core_type or "").lower()
+    t = core_type.lower() if isinstance(core_type, str) else ""
     if t.startswith("cortex-a"):
         return "yocto"
     if t.startswith("cortex-m"):
@@ -99,8 +110,21 @@ def allowed_os_for_core(core_type: str, choices: Iterable[str]) -> list[str]:
     answer instead, for both the wizard's `presets_cmd.allowed_os_lookup` and
     the build-time `topology._allowed_os_for_core` -- the one call this
     module exists to share, so the two can never drift back apart on this.
+
+    A non-string *core_type* is ALSO treated as unresolved (tan-cli#957),
+    not just falsy ones: `default_os_from_core_type`'s own `isinstance`
+    guard already stops a truthy non-string (`7`, a populated list, `True`,
+    ...) from raising here, but without this function's OWN `isinstance`
+    check that value would still reach `cross_class_os` truthy, fall through
+    `default_os_from_core_type`'s `"off"` default the same way `""` does,
+    and hand back the identical `["baremetal", "off"]` plausible-but-wrong
+    guess this docstring already rejects for the empty-string case --
+    the crash-vs-leak choice tan-cli#957 found in `core_type_lookup` shows
+    up here too, one level in, if this guard is skipped: a caller's own
+    `isinstance` at its read site is not something this shared function may
+    assume every present or future caller remembered to add.
     """
-    if not core_type:
+    if not isinstance(core_type, str) or not core_type:
         return []
     cross = cross_class_os(core_type)
     return [o for o in choices if o not in cross]
