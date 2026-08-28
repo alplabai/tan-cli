@@ -381,3 +381,5 @@ and write both files from the real merged tree.
 - 2026-08-28 -- tan-cli#427: build.py/execute.py grew implementing --pristine (force_pristine wiring + PristineSkipped) and resolving --plan/--manifest/--manifest-from/--target/--all/--verbose/--quiet/--no-color/--non-interactive/--ci into implemented/retired/accept-and-drop buckets
     - tan/commands/build/execute.py: 1662 -> 1713
     - tan/commands/build_cmd.py: 2178 -> 2255
+- 2026-08-28 -- tan-cli#963: generate_cmd.py's own docstring for pin_issue/foreign_issue prepend-ordering grew the module 4 lines past its 1400 ceiling; no compression to fit, per repo convention
+    - tan/commands/generate_cmd.py: 1400 -> 1404
