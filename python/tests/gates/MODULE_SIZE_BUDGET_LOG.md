@@ -40,6 +40,21 @@ side, then rerun `python python/scripts/regen_module_size_budget.py --merge-resy
 from the repo root (that is where you land mid-conflict) and let it re-measure
 and write both files from the real merged tree.
 
+tan-cli#907 correction: "will still conflict normally" two paragraphs up
+overstated it. Measured directly (a plain `git merge` of two branches editing
+different keys of a shared JSON object): disjoint edits to that JSON can
+text-merge with no conflict marker at all, producing a
+file that is syntactically valid and *semantically stale* against the merged
+tree -- there is nothing to hand-merge in that case because git never told
+you anything happened. `regen_module_size_budget.py --check` is the backstop
+for exactly that shape: it re-measures the checked-out tree and compares it
+EXACTLY against the committed sidecar, and as of tan-cli#907 it runs as its
+own early step in both `ci.yml`'s `python` job and `parity.yml`'s
+`seam1-plan-shape` job, so a silently-stale merge still fails CI, with one
+targeted message, before the slower ratchet tests in
+`test_module_size_budget.py` would have caught the same drift spread across
+several less obvious failures.
+
 ## Entries
 
 - 2026-08-11 -- migrated the ratchet from a hand-maintained dict in
