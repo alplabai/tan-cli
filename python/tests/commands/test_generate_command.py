@@ -548,6 +548,71 @@ def test_a_successful_emit_reports_the_relative_written_path(tmp_path, monkeypat
     assert env["sdk"] == {"root": Path(sdk).as_posix(), "sourceTier": "sdkRootFlag"}
 
 
+def test_broken_pin_is_prepended_not_appended_on_the_resolvable_path(
+    tmp_path, monkeypatch, capsys
+):
+    """tan-cli#963. The resolvable path used to `issues.append(pin_issue)`
+    AFTER the per-target `generate.emit-failed` entries -- the opposite of the
+    unresolved path's own `[*extra_issues, Issue(...)]` shape (`refuse`,
+    above) and of the `clean_cmd._run` convention `GenerateError`'s own
+    docstring documents. A workspace with a BROKEN `.alp/sdk-path` pin that
+    still resolves an SDK (here: discovery, the project doubling as its own
+    checkout) alongside a failing emit target must read pin-first here too.
+
+    A single-element `issues` list cannot see this -- ordering is only
+    observable with >= 2 entries (tan-cli#961's first attempt shipped an
+    ordering fix with exactly that blind spot) -- so this fixture pins BOTH a
+    broken project pin AND a failing `cmake-args` emit.
+
+    Fails against dev: `codes` there is
+    `["generate.emit-failed", "generate.in-process-unavailable",
+    "sdk.project-pin-unresolved"]` -- the pin last.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    # The project doubles as its own SDK checkout (discovery tier) so a
+    # separately BROKEN `.alp/sdk-path` pin can coexist with a resolved SDK --
+    # `--sdk-root`/the project-pin tier itself would each short-circuit
+    # `broken_project_pin` before discovery ever runs.
+    make_sdk(project)
+    (project / "scripts" / "alp_project.py").write_text(
+        "import sys\nsys.stderr.write('alp_project: kaboom\\n')\nsys.exit(1)\n",
+        encoding="utf-8",
+    )
+    gone = tmp_path / "gone-checkout"
+    pin_dir = project / ".alp"
+    pin_dir.mkdir()
+    # Real JSON, not a plain-text pointer: `_pointer_target` (sdk_cmd.py)
+    # parses JSON only, so a plain-text pointer leaves `broken_project_pin`
+    # `None` and the defect this test targets does not reproduce even on
+    # unfixed code.
+    (pin_dir / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(gone), "updatedAt": "1970-01-01T00:00:00Z"}),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+
+    code = _call_generate(target="cmake-args", output_format="json")
+    assert code == 3
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["sdk"] == {"root": project.as_posix(), "sourceTier": "discovery"}
+    assert env["data"]["failed"] == ["cmake-args"]
+    codes = [i["code"] for i in env["issues"]]
+    # `cmake-args` is IN_PROCESS_MODES-eligible, and this discovery-tier
+    # "SDK" has no importable planner package, so the run also falls back to
+    # the subprocess engine and reports `generate.in-process-unavailable` --
+    # APPENDED last, deliberately (tan-cli#963 must not disturb that one; see
+    # the comment at its `issues.append` call site). The pin still reads
+    # FIRST, ahead of both.
+    assert codes == [
+        "sdk.project-pin-unresolved",
+        "generate.emit-failed",
+        "generate.in-process-unavailable",
+    ]
+
+
 # --------------------------------------------------------------------------
 # `composed-route-table`: the third explicit-only target
 #

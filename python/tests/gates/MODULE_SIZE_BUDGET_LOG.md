@@ -384,3 +384,5 @@ and write both files from the real merged tree.
     - tan/commands/debug_config_cmd.py: 1954 -> 1996
 - 2026-08-28 -- tan-cli#518: module docstring note on the new .alp/ provenance sidecar file this command now reads/writes.
     - tan/commands/debug_config_cmd.py: 1996 -> 2007
+- 2026-08-28 -- tan-cli#963: generate_cmd.py's own docstring for pin_issue/foreign_issue prepend-ordering grew the module 4 lines past its 1400 ceiling; no compression to fit, per repo convention
+    - tan/commands/generate_cmd.py: 1400 -> 1404
