@@ -365,3 +365,5 @@ and write both files from the real merged tree.
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/explain_cmd.py: 1043 -> 1087
     - function_count_budget: 274 -> 275
+- 2026-08-28 -- tan-cli#959: explain_cmd.py grows a shared _print_sdk_resolution_warnings() helper wired into the success path and _fail's text branch, closing the text-mode SDK-advisory disclosure gap
+    - tan/commands/explain_cmd.py: 1087 -> 1135

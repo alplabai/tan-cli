@@ -374,6 +374,143 @@ def test_text_mode_also_discloses_the_broken_project_pin(tmp_path, monkeypatch):
     assert "alp-sdk root is unresolved" in result.stderr
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#959: text mode never disclosed SDK-resolution advisories on the
+# SUCCESS path or on the two SDK-BOUND refusals (`explain.code-unknown`,
+# `explain.catalog-unreadable`) -- widening #950 above, which fixed only the
+# ONE refusal (`explain.sdk-root-unresolved`) that raises before an `SdkInfo`
+# is ever built. These three fire AFTER `bind_sdk` succeeds, so `--format
+# json` already discloses `sdk.project-pin-unresolved` for free through
+# `Envelope`'s `_with_sdk_resolution_advisories` (it fires for every path that
+# constructs an `Envelope`, which is `_emit`'s json branch alone); text mode
+# printed nothing on any of the three.
+# ---------------------------------------------------------------------------
+
+
+def _broken_pin_with_working_fallback(tmp_path, monkeypatch, fallback_sdk: Path) -> Path:
+    """Same broken `.alp/sdk-path` as `_broken_pin_project`, but with
+    `~/.alp/sdk-default` ALSO pointing at a real checkout (no `writtenFor`,
+    so `foreign_global_default_for` stays `None` and the unrelated
+    #464 warning does not confuse this fixture) -- the exact scenario the
+    issue measured: "`--code` resolves against a checkout whose
+    `.alp/sdk-path` was broken but a lower ladder tier caught it." `bind_sdk`
+    resolves via the `globalDefault` tier and carries `broken_project_pin`
+    through on the `SdkInfo` it returns instead of raising.
+
+    `.alp/sdk-path` MUST be JSON (`{"sdkPath": ..., "updatedAt": ...}`); a
+    plain-text pointer makes the pin unreadable rather than broken, and
+    `broken_project_pin` stays `None` -- precisely the shape that would NOT
+    reproduce this defect (same trap `_broken_pin_project` above documents).
+    """
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    (fake_home / ".alp").mkdir(parents=True)
+    (fake_home / ".alp" / "sdk-default").write_text(
+        json.dumps({"sdkPath": str(fallback_sdk).replace("\\", "/")}), encoding="utf-8"
+    )
+    proj = tmp_path / "proj"
+    (proj / ".alp").mkdir(parents=True)
+    (proj / ".alp" / "sdk-path").write_text(
+        json.dumps(
+            {"sdkPath": str(tmp_path / "gone-checkout"), "updatedAt": "2026-01-01T00:00:00Z"}
+        )
+    )
+    return proj
+
+
+def _broken_pin_warning_line(tmp_path: Path) -> str:
+    """The exact `explain: warning: ...` stderr line
+    `_print_sdk_resolution_warnings` must print for `_broken_pin_with_
+    working_fallback`'s fixture -- `sdk_cmd.project_pin_issue`'s message,
+    verbatim, at the `globalDefault` tier."""
+    gone = str(tmp_path / "gone-checkout").replace("\\", "/")
+    return (
+        f'explain: warning: .alp/sdk-path names "{gone}", which does not '
+        f"resolve to an alp-sdk checkout from the current directory -- "
+        f"falling through to the globalDefault tier instead."
+    )
+
+
+def test_the_success_path_discloses_a_broken_project_pin_in_text_mode(tmp_path, monkeypatch):
+    """The success-path half of tan-cli#959 -- first flagged during review of
+    #950 as affecting only this path. `--format json` already carries
+    `sdk.project-pin-unresolved` here (`Envelope`'s advisory machinery);
+    `--format text` printed nothing.
+
+    Fails against dev: the warning line is entirely absent from stderr even
+    though the invocation succeeds and the same run's `--format json` would
+    carry `sdk.project-pin-unresolved`."""
+    from tests.commands.test_explain_code_command import _ALP_B003, _sdk
+
+    sdk = _sdk(tmp_path / "real-sdk", {"ALP-B003": _ALP_B003})
+    proj = _broken_pin_with_working_fallback(tmp_path, monkeypatch, sdk)
+
+    result = runner.invoke(app, ["explain", "--code", "ALP-B003", "--project", str(proj)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr.splitlines()[0] == _broken_pin_warning_line(tmp_path), result.stderr
+    # The payload still follows -- the warning is a PREFIX, not a replacement.
+    assert "explain: ALP-B003 (runtime-diagnostic)" in result.stderr
+
+
+def test_the_code_unknown_refusal_discloses_a_broken_project_pin_in_text_mode(
+    tmp_path, monkeypatch
+):
+    """`explain.code-unknown`: `bind_sdk` already resolved (via
+    `globalDefault`) before `resolve_code` finds no matching key. `sdk` is
+    populated on this `ExplainError`, unlike `explain.sdk-root-unresolved`'s
+    `extra_issues` mechanism (#950) -- this is the OTHER path #959 widens
+    #950 to cover.
+
+    Fails against dev: no `explain: warning: ...` line precedes the unknown-
+    code refusal, even though `--format json` on the same invocation carries
+    `sdk.project-pin-unresolved` alongside `explain.code-unknown`."""
+    from tests.commands.test_explain_code_command import _ALP_B003, _sdk
+
+    sdk = _sdk(tmp_path / "real-sdk", {"ALP-B003": _ALP_B003})
+    proj = _broken_pin_with_working_fallback(tmp_path, monkeypatch, sdk)
+
+    result = runner.invoke(
+        app, ["explain", "--code", "ZZZ-NOT-A-CODE", "--project", str(proj)]
+    )
+
+    assert result.exit_code == 1, result.output
+    lines = result.stderr.splitlines()
+    assert lines[0] == _broken_pin_warning_line(tmp_path), result.stderr
+    assert lines[-1] == (
+        "explain: unknown code 'ZZZ-NOT-A-CODE' -- pass a code from the SDK's "
+        "metadata/error-catalog.json."
+    )
+
+
+def test_the_catalog_unreadable_refusal_discloses_a_broken_project_pin_in_text_mode(
+    tmp_path, monkeypatch
+):
+    """`explain.catalog-unreadable`: `bind_sdk` resolves the checkout fine
+    (via `globalDefault`); it is `metadata/error-catalog.json` itself that is
+    missing. `sdk` is populated on this `ExplainError` too -- the other of
+    the two SDK-BOUND refusals #959 names.
+
+    Fails against dev: no `explain: warning: ...` line precedes the
+    catalog-unreadable refusal."""
+    from tests.commands.test_explain_code_command import _sdk
+
+    sdk = _sdk(tmp_path / "real-sdk")  # no `metadata/error-catalog.json` at all
+    proj = _broken_pin_with_working_fallback(tmp_path, monkeypatch, sdk)
+
+    result = runner.invoke(app, ["explain", "--code", "ALP-B003", "--project", str(proj)])
+
+    assert result.exit_code == 1, result.output
+    lines = result.stderr.splitlines()
+    assert lines[0] == _broken_pin_warning_line(tmp_path), result.stderr
+    assert lines[-1] == (
+        "explain: error catalog not found -- run `python3 scripts/gen_error_catalog.py` "
+        f"in the alp-sdk checkout ({sdk / 'metadata' / 'error-catalog.json'})."
+    )
+
+
 def test_json_mode_writes_one_envelope_and_nothing_else():
     """The hard constraint: stdout is the envelope channel. A stray byte on
     either stream silently breaks the extension -- it renders nothing, with no

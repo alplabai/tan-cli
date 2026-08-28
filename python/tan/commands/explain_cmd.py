@@ -819,6 +819,40 @@ def _data(
     }
 
 
+def _print_sdk_resolution_warnings(sdk: SdkInfo | None) -> None:
+    """tan-cli#959: `explain: warning: <message>` lines to stderr for every
+    fact `sdk_resolution_issues` finds in `sdk`'s resolution -- the text-mode
+    disclosure of the same `sdk.project-pin-unresolved` /
+    `sdk.global-default-foreign-project` pair `Envelope`'s
+    `_with_sdk_resolution_advisories` already appends to `issues[]` for free
+    under `--format json` (it fires there because `_emit`'s json branch is
+    the only branch that ever constructs an `Envelope`). This is the text
+    branch's own copy of that disclosure, called both from the success path
+    (`explain`, ahead of the summary line) and from `_fail` (ahead of
+    `err.text_line`) -- the two SDK-bound refusal sites, `resolve_code`'s
+    `explain.catalog-unreadable` and `explain.code-unknown`, each bind an
+    `SdkInfo` via `bind_sdk` before raising, so `sdk` is populated there the
+    same way it is on success.
+
+    `sdk` is `None` on every path that never resolved a checkout --
+    `--template`/`--target` (`resolve`'s three raises), the two selector-
+    clash refusals raised before `--code` is even read, and `bind_sdk`'s own
+    `explain.sdk-root-unresolved` raise (it raises BEFORE building an
+    `SdkInfo`, which is why tan-cli#950 had to carry that one pair through
+    `ExplainError.extra_issues` instead -- the two mechanisms are disjoint by
+    construction, never double-printing the same fact).
+    """
+    if sdk is None:
+        return
+    from tan.commands.sdk_cmd import sdk_resolution_issues
+
+    for issue in sdk_resolution_issues(
+        sdk.broken_project_pin, sdk.source_tier, sdk.foreign_global_default_for
+    ):
+        for line in wrap_lines([f"explain: warning: {issue.message}"], wrap_width()):
+            print(line, file=sys.stderr)
+
+
 def _emit(
     json_mode: bool,
     data: dict,
@@ -1018,10 +1052,16 @@ def explain(
     if not json_mode:
         # stderr, in both formats: stdout is the envelope channel and nothing
         # else. Matches Rust's `emit()`, which `eprintln!`s every text line.
+        # tan-cli#959: the SDK-resolution advisories (`sdk.project-pin-
+        # unresolved` / `sdk.global-default-foreign-project`) print FIRST,
+        # matching `_fail`'s own order and `bootstrap_cmd._refusal`'s
+        # `warning_lines + outcome.text` -- a caveat about which checkout
+        # answered belongs ahead of the answer itself, not after it.
         # The summary header is a short, bounded "<label> (<id>)" -- never
         # observed over any real width, so it is never run through
         # `wrap_block`; `_print_detail_lines` is where the actual wrap
         # decision lives.
+        _print_sdk_resolution_warnings(sdk)
         print(f"explain: {result.summary}", file=sys.stderr)
         _print_detail_lines(result.details, wrap_width())
     _emit(
@@ -1054,6 +1094,14 @@ def _fail(json_mode: bool, err: ExplainError, sdk: SdkInfo | None = None) -> Non
         for issue in err.extra_issues:
             for line in wrap_lines([f"explain: warning: {issue.message}"], wrap_width()):
                 print(line, file=sys.stderr)
+        # tan-cli#959: the other half of the same disclosure -- `sdk` is
+        # populated (not `err.extra_issues`) on the two SDK-BOUND refusals,
+        # `explain.catalog-unreadable` / `explain.code-unknown`, since both
+        # raise from `resolve_code` AFTER `bind_sdk` already built an
+        # `SdkInfo`. Disjoint from the loop above by construction (see
+        # `_print_sdk_resolution_warnings`'s docstring), so this never
+        # double-prints.
+        _print_sdk_resolution_warnings(sdk)
         # A refusal sentence, not a record -- `--template`/`--target` echo
         # the CALLER's own (unbounded-length) input back into it (e.g.
         # "unknown template '<whatever was typed>'"), so this is the one
