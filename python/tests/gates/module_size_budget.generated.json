@@ -56,7 +56,7 @@
     "tests/commands/test_presets_command.py": 966,
     "tests/commands/test_sdk_command.py": 1614,
     "tests/commands/test_validate_command.py": 1234,
-    "tests/commands/test_west_forward_command.py": 928,
+    "tests/commands/test_west_forward_command.py": 1199,
     "tests/conftest.py": 1623,
     "tests/core/test_scaffold.py": 1385,
     "tests/gates/test_every_issue_code_is_registered.py": 1729,
@@ -64,7 +64,7 @@
     "tests/installers/test_installer_release_layout.py": 2886,
     "tests/model/test_adapters.py": 1550,
     "tests/model/test_check.py": 1971,
-    "tests/parity/test_planner_emit_parity.py": 1887,
+    "tests/parity/test_planner_emit_parity.py": 2078,
     "tests/scripts/test_pin_move_verify.py": 942
   }
 }

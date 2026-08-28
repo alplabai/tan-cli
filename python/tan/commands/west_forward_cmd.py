@@ -115,7 +115,7 @@ from tan.commands.build_output import ProjectContext, resolve_project_context, t
 from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
-from tan.envelope import Envelope, Issue, SdkInfo, emit
+from tan.envelope import Envelope, Issue, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
 
@@ -309,27 +309,58 @@ def _spawn_captured(plan: _Forward) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _echo_sdk_resolution(sdk: SdkInfo | None) -> None:
-    """tan-cli#478: the SDK-resolution pair on stderr, for the text paths.
+def _sdk_resolution_issues(context: ProjectContext) -> list[Issue]:
+    """The `sdk_resolution_issues` pair, computed from `context`'s own
+    top-level fields rather than `context.sdk` (tan-cli#958). `size`/`image`/
+    `clean` already read `context.broken_project_pin`/`context.sdk_source_tier`/
+    `context.foreign_global_default_for` directly for exactly this reason:
+    those three fields are carried on `ProjectContext` UNCONDITIONALLY --
+    unlike `context.sdk`, which is `None` the moment nothing resolved to a
+    usable checkout. Gating on `sdk is not None` (the seam's own
+    `_with_sdk_resolution_advisories`, and this module's own previous shape)
+    silently drops `sdk.project-pin-unresolved` in exactly the one case a
+    broken pin matters most: when the ladder falls all the way through and
+    NOTHING backstops it. `Envelope.__init__`'s seam still runs this same pair
+    off `context.sdk` when `context.sdk` is not `None` -- redundant then, but
+    deduplicated by code, so calling it here first and letting the seam run
+    second never double-emits.
+
+    Reads the top-level triple unconditionally, `size_cmd.py`/`image_cmd.py`'s
+    own established idiom, rather than branching on `context.sdk is not None`
+    to read the nested `SdkInfo` copy: `resolve_project_context` is the one
+    production construction site (`build_output.py`'s own
+    `ProjectContext.broken_project_pin` docstring -- "carried through") and
+    always writes both the nested triple and the top-level twins from the same
+    `active` resolution, so the two agree by construction in every real run
+    and a branch to pick between them is dead-equivalent there -- it only ever
+    mattered for a hand-built fixture that set one copy and not the other.
+    """
+    return sdk_resolution_issues(
+        context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
+    )
+
+
+def _echo_sdk_resolution(context: ProjectContext) -> None:
+    """tan-cli#478/#958: the SDK-resolution pair on stderr, for the text paths.
 
     Every `--format json` path in this module gets the pair for free from
-    `Envelope.__init__`'s central seam. NO text path does -- neither
-    `_run_text` (which hands stdio to the child) nor `_refuse_required`'s
-    refusal (which never builds an envelope at all) reaches `Envelope`. Both
-    call this instead of open-coding the loop, so a third text path cannot
-    be added that discloses in JSON and stays silent on the screen: that is
-    precisely how `_refuse_required` shipped silent while `_run_text` did
-    not.
+    `Envelope.__init__`'s central seam PLUS the direct `_sdk_resolution_issues`
+    call each JSON branch below now makes (tan-cli#958 -- the seam alone drops
+    the pair when nothing resolved). NO text path reaches `Envelope` at all --
+    neither `_run_text` (which hands stdio to the child) nor
+    `_refuse_required`'s refusal (which never builds an envelope) -- so both
+    call this instead of open-coding the loop, and this reads the same
+    unconditional `context` fields the JSON branches do rather than gating on
+    `context.sdk`, so a third text path cannot be added that discloses in JSON
+    and stays silent on the screen: that is precisely how `_refuse_required`
+    shipped silent while `_run_text` did not, and how all three shipped silent
+    on a broken pin with no working fallback.
     """
-    if sdk is None:
-        return
-    for issue in sdk_resolution_issues(
-        sdk.broken_project_pin, sdk.source_tier, sdk.foreign_global_default_for
-    ):
+    for issue in _sdk_resolution_issues(context):
         typer.echo(issue.message, err=True)
 
 
-def _run_text(plan: _Forward, sdk: SdkInfo | None) -> None:
+def _run_text(plan: _Forward, context: ProjectContext) -> None:
     """Inherit stdio: the child streams its own progress and may prompt.
 
     tan-cli#478 review finding 8: `_plan` resolves `west_bin`/`workspace` off
@@ -340,9 +371,15 @@ def _run_text(plan: _Forward, sdk: SdkInfo | None) -> None:
     `globalDefault` via `Envelope.__init__`'s central seam. Text mode never
     reaches `Envelope` at all (the child inherits stdio directly), so this
     is printed BEFORE the spawn -- once stdio is handed to the child, tan
-    has no stream left of its own to write a warning to.
+    has no stream left of its own to write a warning to. Takes the whole
+    `context` (tan-cli#958), not just `context.sdk`: a broken pin with NO
+    working fallback resolves `context.sdk` to `None`, and that is exactly
+    the case `_echo_sdk_resolution` must still disclose -- it is also the
+    case where `west_program`/`_west_workspace_dir` below silently fall back
+    to a bare `west` on PATH and the project root, so this warning is the
+    only signal a text-mode caller gets that the wrong `west` is about to run.
     """
-    _echo_sdk_resolution(sdk)
+    _echo_sdk_resolution(context)
     try:
         result = subprocess.run(plan.full_argv, cwd=plan.run_cwd, env=plan.env, check=False)
     except OSError as err:
@@ -392,24 +429,22 @@ def _refuse_required(
     Annotated `NoReturn`, not `None`: every caller ends its own function at
     this call (`raise typer.Exit` always fires), and an accurate signature is
     what lets a type checker prove the return type of a caller like
-    `_resolve_quality_profile` sound instead of just trusting the docstring."""
+    `_resolve_quality_profile` sound instead of just trusting the docstring.
+    tan-cli#958: the resolution pair below is PREPENDED (`clean_cmd.py`'s own
+    ordering), no longer left to `Envelope.__init__`'s `sdk`-gated seam."""
+    resolution_issues = _sdk_resolution_issues(context)
     if output_format == "json":
-        emit(
-            Envelope(
-                subcommand,
-                context.project(),
-                {"schemaVersion": "1"},
-                [Issue(code, "error", message)],
-                ExitCode.VALIDATION_FAILURE,
-                sdk=context.sdk,
-            )
-        )
+        emit(Envelope(
+            subcommand, context.project(), {"schemaVersion": "1"},
+            [*resolution_issues, Issue(code, "error", message)],
+            ExitCode.VALIDATION_FAILURE, sdk=context.sdk,
+        ))
     else:
         # tan-cli#478 (PR #504 review): this branch printed the refusal ALONE
         # while the JSON branch above disclosed the SDK-resolution pair -- and
         # a bare `tan quality` / `tan migrate` lands here, having resolved the
         # checkout `_plan` would have run `west` out of. Order as `_run_text`.
-        _echo_sdk_resolution(context.sdk)
+        _echo_sdk_resolution(context)
         typer.echo(f"{subcommand}: {message}", err=True)
     raise typer.Exit(int(ExitCode.VALIDATION_FAILURE))
 
@@ -432,8 +467,12 @@ def _run_forward(
     context = resolve_project_context(project, board_yaml, sdk_root)
     plan = _plan(subcommand, passthrough, extra_args, context)
     if output_format != "json":
-        _run_text(plan, context.sdk)
+        _run_text(plan, context)
         return
+    # tan-cli#958: PREPENDED below (`clean_cmd.py`'s own ordering convention)
+    # -- see `_sdk_resolution_issues`'s own docstring for why this reads
+    # `context`, not `context.sdk`.
+    resolution_issues = _sdk_resolution_issues(context)
     try:
         out = _spawn_captured(plan)
     except OSError as err:
@@ -445,7 +484,7 @@ def _run_forward(
         # narrower shape rather than an omission here.
         data = {**plan.data(), "westExitCode": None, "stdout": "", "stderr": ""}
         exit_code = ExitCode.RUNTIME_FAILURE
-        issues = [Issue(f"{subcommand}.failed", "error", _launch_error(err))]
+        issues = [*resolution_issues, Issue(f"{subcommand}.failed", "error", _launch_error(err))]
     else:
         # `or ""`: this is the boundary where another process's output enters
         # the envelope, and a `None` would serialise as `null` for a field a
@@ -453,11 +492,11 @@ def _run_forward(
         stdout, stderr = out.stdout or "", out.stderr or ""
         data = {**plan.data(), "westExitCode": out.returncode, "stdout": stdout, "stderr": stderr}
         if out.returncode == 0:
-            exit_code, issues = ExitCode.SUCCESS, []
+            exit_code, issues = ExitCode.SUCCESS, list(resolution_issues)
         else:
             exit_code = ExitCode.RUNTIME_FAILURE
             message = _child_failure_message(plan.west_command, out.returncode, stderr)
-            issues = [Issue(f"{subcommand}.failed", "error", message)]
+            issues = [*resolution_issues, Issue(f"{subcommand}.failed", "error", message)]
     emit(Envelope(subcommand, context.project(), data, issues, exit_code, sdk=context.sdk))
     raise typer.Exit(int(exit_code))
 
