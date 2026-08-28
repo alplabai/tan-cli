@@ -252,13 +252,19 @@ def test_windows_with_no_7zip_refuses_before_spawning_west(tmp_path, monkeypatch
     assert "7-Zip" in log.warnings[0][1] or "7-zip" in log.warnings[0][1].lower()
 
 
-def test_a_west_sdk_install_failure_is_reported_and_the_checksum_hint_is_augmented(tmp_path, monkeypatch):
+def test_a_west_sdk_install_failure_is_retried_then_reported_with_the_checksum_hint(
+    tmp_path, monkeypatch
+):
     _point_home_at(monkeypatch, tmp_path)
     sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
     monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
     monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(bootstrap_cmd.time, "sleep", lambda _seconds: None)
+
+    calls = {"n": 0}
 
     def fake_fail(self, argv, cwd=None, extra_env=None):  # noqa: ARG001
+        calls["n"] += 1
         return "sha256 mismatched: aaaa:bbbb"
 
     monkeypatch.setattr(bootstrap_cmd.Runner, "run", fake_fail)
@@ -266,10 +272,70 @@ def test_a_west_sdk_install_failure_is_reported_and_the_checksum_hint_is_augment
     log = bootstrap_cmd.Log(json_mode=True)
     bootstrap_cmd.toolchain_phase(ws, log, bootstrap_cmd.Runner(json=True), sdk_root, None, is_windows=False)
 
+    # Retried the documented number of times -- not zero (no retry at all)
+    # and not unbounded (a permanent failure must still give up).
+    assert calls["n"] == 3  # literal, not bootstrap_cmd.TOOLCHAIN_INSTALL_ATTEMPTS -- a test that reads the constant it is pinning proves nothing against a mutant that changes it
     assert log.blocking() == ["toolchain-install"]
     msg = log.warnings[0][1]
     assert "sha256 mismatched" in msg
     assert "proxy" in msg.lower()
+
+
+def test_a_transient_failure_followed_by_a_success_still_verifies_and_stamps(tmp_path, monkeypatch):
+    """The exact shape `getting-started.yml`'s own retry loop exists for:
+    the FIRST `west sdk install` attempt fails (a dropped connection, a rate
+    limit, a flaky `tar --xz` extraction), and a LATER attempt succeeds --
+    the phase must not give up on the first failure, and must still run its
+    full version/compiler verification on whichever attempt landed."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
+    monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
+    monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(bootstrap_cmd.time, "sleep", lambda _seconds: None)
+
+    real_fake = _fake_west_sdk_install_writes(_install_dir_index())
+    calls = {"n": 0}
+
+    def flaky(self, argv, cwd=None, extra_env=None):
+        calls["n"] += 1
+        if calls["n"] < 3:  # literal -- see the assertion below
+            return "west: fetch_releases API rate limit exceeded"
+        return real_fake(self, argv, cwd=cwd, extra_env=extra_env)
+
+    monkeypatch.setattr(bootstrap_cmd.Runner, "run", flaky)
+    ws = _workspace(tmp_path)
+    log = bootstrap_cmd.Log(json_mode=True)
+    bootstrap_cmd.toolchain_phase(ws, log, bootstrap_cmd.Runner(json=True), sdk_root, None, is_windows=False)
+
+    assert calls["n"] == 3  # literal, not bootstrap_cmd.TOOLCHAIN_INSTALL_ATTEMPTS -- a test that reads the constant it is pinning proves nothing against a mutant that changes it
+    assert log.blocking() == []
+    manifest, _ = bootstrap_cmd.load_toolchain_manifest(sdk_root)
+    store_dir = tmp_path / "home" / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
+    stamp = bootstrap_cmd._read_toolchain_stamp(store_dir)
+    assert tp.stamp_matches_pin(stamp, manifest) is True
+
+
+def test_dry_run_never_retries_one_planned_command_only(tmp_path, monkeypatch):
+    """`Runner.run` returns success-shaped `None` immediately under
+    `--dry-run` without spawning -- the retry loop must not mistake that for
+    3 successful attempts and must not sleep."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
+    monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
+    monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
+
+    def refuse_to_sleep(_seconds):
+        raise AssertionError("a dry run must never sleep between retries")
+
+    monkeypatch.setattr(bootstrap_cmd.time, "sleep", refuse_to_sleep)
+    ws = _workspace(tmp_path)
+    log = bootstrap_cmd.Log(json_mode=True)
+    runner = bootstrap_cmd.Runner(json=True, dry_run=True)
+    bootstrap_cmd.toolchain_phase(ws, log, runner, sdk_root, None, is_windows=False)
+
+    assert log.blocking() == []
+    install_argvs = [argv for argv in runner.planned if "install" in argv and "sdk" in argv]
+    assert len(install_argvs) == 1
 
 
 # ---------------------------------------------------------------------------

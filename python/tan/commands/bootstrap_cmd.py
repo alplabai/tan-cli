@@ -59,6 +59,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1340,6 +1341,69 @@ def _finish_toolchain_install(
     log.line(f"Cross toolchain {manifest.version} verified and stamped: {_native(store_dir)}")
 
 
+#: Retried the same number of times, with the same backoff shape, as
+#: `.github/workflows/getting-started.yml`'s OWN manual `west sdk install`
+#: step already does -- measured flaky in this exact CI, not a guess: its own
+#: comment records BOTH network legs failing independently (`fetch_releases`
+#: hitting GitHub's unauthenticated per-IP rate limit, and the SEPARATE
+#: `setup.sh -t arm-zephyr-eabi` GNU-toolchain fetch failing with no relation
+#: to the first), and this phase's own first real end-to-end CI run hit a
+#: THIRD failure mode in the same family (`tar --xz` extraction inside
+#: west's own temp dir returning exit status 2 on a sha256-verified archive
+#: -- a transient runner hiccup, not a corrupt download). One `west sdk
+#: install` attempt is not the reliability bar a fresh customer's FIRST
+#: command should be held to.
+TOOLCHAIN_INSTALL_ATTEMPTS = 3
+
+#: Seconds, multiplied by the (1-based) attempt number just finished --
+#: `getting-started.yml`'s own `sleep $((attempt * 15))`.
+TOOLCHAIN_RETRY_BACKOFF_S = 15
+
+
+def _run_west_sdk_install_with_retries(
+    ws: Workspace, log: Log, runner: Runner, argv: list[str], tmp_dir: Path
+) -> str | None:
+    """`runner.run(argv, ...)`, retried up to `TOOLCHAIN_INSTALL_ATTEMPTS`
+    times on ANY failure -- the same blind, unconditional retry policy
+    `getting-started.yml`'s own step already applies ("still fails loudly if
+    the network is genuinely unavailable"); a permanent failure (bad
+    version, no artifact for this host) already returned before this
+    function is ever reached, so everything that gets here is presumptively
+    worth a second try. Returns the LAST attempt's `runner.run` result --
+    `None` on eventual success, the final failure detail otherwise.
+
+    A single call under `--dry-run`: `Runner.run` returns `None` immediately
+    without spawning, so the loop breaks after attempt 1 -- one planned
+    command, not `TOOLCHAIN_INSTALL_ATTEMPTS` copies of it.
+    """
+    detail: str | None = None
+    for attempt in range(1, TOOLCHAIN_INSTALL_ATTEMPTS + 1):
+        if attempt > 1 and not runner.dry_run:
+            # West's OWN internal extraction tempdir is already cleaned up by
+            # its own `tempfile.TemporaryDirectory` context manager on any
+            # exit path; only OUR named sibling can still be sitting there
+            # from a failed attempt (e.g. the SDK component landed but the
+            # LATER `setup.sh -t` toolchain-component fetch failed) -- clear
+            # it before retrying, or `west`'s own `shutil.move` onto an
+            # already-existing `tmp_dir` moves INTO it instead of replacing
+            # it, corrupting the next probe.
+            if _is_dir(tmp_dir):
+                try:
+                    shutil.rmtree(tmp_dir)
+                except OSError:
+                    pass
+            time.sleep(TOOLCHAIN_RETRY_BACKOFF_S * (attempt - 1))
+        detail = runner.run(argv, cwd=ws.workspace_dir)
+        if detail is None or runner.dry_run:
+            return detail
+        if attempt < TOOLCHAIN_INSTALL_ATTEMPTS:
+            log.line(
+                f"west sdk install attempt {attempt}/{TOOLCHAIN_INSTALL_ATTEMPTS} "
+                f"failed; retrying"
+            )
+    return detail
+
+
 def _acquire_toolchain(
     ws: Workspace,
     log: Log,
@@ -1353,8 +1417,9 @@ def _acquire_toolchain(
     west: str,
     is_windows: bool,
 ) -> None:
-    """`west sdk install --install-dir <tmp-sibling-of-store_dir>`, then hand
-    off to `_finish_toolchain_install` for the version/probe/stamp sequence.
+    """`west sdk install --install-dir <tmp-sibling-of-store_dir>` (retried,
+    see `_run_west_sdk_install_with_retries`), then hand off to
+    `_finish_toolchain_install` for the version/probe/stamp sequence.
 
     The tmp-sibling IS the atomicity belt ADR 0021 asks for around a tool
     this code does not control the internals of: a kill mid-`west` run (a
@@ -1377,7 +1442,7 @@ def _acquire_toolchain(
         f"Installing the Zephyr SDK {manifest.version} + arm-zephyr-eabi toolchain "
         f"(this can take several minutes on a slow link)"
     )
-    detail = runner.run(argv, cwd=ws.workspace_dir)
+    detail = _run_west_sdk_install_with_retries(ws, log, runner, argv, tmp_dir)
     if detail is not None:
         augmented = toolchain_provision.augment_acquisition_failure(detail)
         log.warn("toolchain-install", f"west sdk install failed: {augmented}")

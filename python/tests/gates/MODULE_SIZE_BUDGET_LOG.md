@@ -434,3 +434,5 @@ and write both files from the real merged tree.
     - tan/commands/doctor_cmd.py: 4045 -> 4134
     - function_count_budget: 287 -> 291
     - function_worst_budget: 791 -> 806
+- 2026-08-28 -- issue #474 follow-up: bootstrap_cmd.py's toolchain phase gains a bounded retry (TOOLCHAIN_INSTALL_ATTEMPTS=3, matching getting-started.yml's own established retry shape) around west sdk install, after that workflow's own first real end-to-end CI run hit a live tar/xz extraction flake on this exact command.
+    - tan/commands/bootstrap_cmd.py: 3915 -> 3980
