@@ -404,3 +404,5 @@ and write both files from the real merged tree.
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/bootstrap_cmd.py: 3421 -> 3522
     - function_count_budget: 277 -> 279
+- 2026-08-28 -- tan-cli#952: scaffold.py wires retarget_selftest_soc_identity into the per-file loop (import + call site, +2 lines); tests/core/test_template_integrity.py's new SoC-identity guard test pushes it from under-800 to 874, entering the observed python/tests/** record
+    - tan/core/scaffold.py: 1538 -> 1540
