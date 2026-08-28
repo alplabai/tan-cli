@@ -378,8 +378,8 @@ and write both files from the real merged tree.
     - tan/planner/kconfig.py: 2092 -> 2107
 - 2026-08-28 -- tan-cli#957 family, round 4: guard cores[].vector_extension against a non-string in the G-2 TFLM kernel selector, same isinstance-guard pattern as cores[].type
     - tan/planner/kconfig.py: 2107 -> 2108
-- 2026-08-28 -- tan-cli#905: sdk_default_registry.prune_dead_origins + bootstrap_cmd._write_global_sdk_registry wiring/docstrings grow bootstrap_cmd.py past its recorded ceiling and add one new over-50-line function (_write_global_sdk_registry's own docstring growth).
+- 2026-08-28 -- tan-cli#905: sdk_default_registry.prune_dead_origins (drops every existence-dead entry out of the global SDK-default registry on the next relocating bootstrap's write) grows bootstrap_cmd.py past its recorded ceiling and is itself a new over-50-line function (60 lines).
     - tan/commands/bootstrap_cmd.py: 3421 -> 3468
-    - function_count_budget: 275 -> 276
-- 2026-08-28 -- tan-cli#905: rebase onto dev after #967 landed a new long function of its own (tan/model/targets.py); re-measuring the merged tree from source per this file's own conflict-resolution instructions rather than reconciling two committed numbers by hand.
-    - function_count_budget: 276 -> 278
+    - function_count_budget: 277 -> 278
+- 2026-08-28 -- review of #971 (Major 1): _origin_exists rewritten from Path.is_dir() to an explicit os.stat + errno/winerror check with the reasoning for each branch spelled out in the docstring, plus the new _INCONCLUSIVE_WINERRORS constant, grows bootstrap_cmd.py further
+    - tan/commands/bootstrap_cmd.py: 3468 -> 3508

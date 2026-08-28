@@ -50,10 +50,12 @@ stray byte there breaks the extension silently.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -3007,6 +3009,20 @@ def _read_global_sdk_registry_bytes() -> bytes | None:
         return None
 
 
+#: The three `winerror` codes CPython's own `pathlib` folds into a `False`
+#: `Path.is_dir()` answer that is NOT actually a confirmed absence --
+#: `pathlib._IGNORED_WINERRORS` on the 3.12 stdlib this repo floors at
+#: (`pyproject.toml: requires-python = ">=3.12"`). `21` is
+#: `pathlib._WINERROR_NOT_READY` ("drive exists but is not accessible" --
+#: the exact shape a disconnected mapped or removable drive raises); `123`
+#: is `ERROR_INVALID_NAME`; `1921` is `ERROR_CANT_RESOLVE_FILENAME`. None of
+#: the three means the path is gone -- only that THIS stat, right now,
+#: could not resolve it -- so `_origin_exists` treats them as inconclusive
+#: rather than dead, deliberately parting ways with what `Path.is_dir()`
+#: itself would answer.
+_INCONCLUSIVE_WINERRORS = (21, 123, 1921)
+
+
 def _origin_exists(origin: str) -> bool:
     """`prune_dead_origins`'s injected filesystem check, production shape:
     does `origin` -- a registry key, always an absolute directory
@@ -3014,24 +3030,48 @@ def _origin_exists(origin: str) -> bool:
     only kind of value that can appear there -- still exist as a directory on
     this host.
 
-    `Path.is_dir()` already degrades most "can't tell" shapes to `False` on
-    its own -- ENOENT/ENOTDIR/EBADF/ELOOP (a missing path, a broken symlink,
-    a symlink loop) and a non-encodable path all come back `False` from
-    `is_dir()` itself, with nothing to catch here, and that is the CORRECT
-    outcome for this function too: a symlink loop or a broken link can never
-    again resolve to a real directory a `workspace_root` could sit under, so
-    treating it the same as "gone" is not overreach, it is the same "dead"
-    fact `prune_dead_origins`'s docstring already argues for a deleted plain
-    directory. The one shape `is_dir()` does NOT swallow is a permission
-    error (`EACCES`, e.g. an unreadable parent directory) -- that surfaces as
-    a real `OSError`, caught here and degraded to `True`: an origin this
-    process could not even STAT is inconclusive, not confirmed-dead, and
-    `prune_dead_origins` drops an entry only on a confirmed absence.
+    **Deliberately `os.stat` plus an explicit errno/winerror check, not
+    `Path.is_dir()`** (review of #971, tan-cli#464 the second time around).
+    `Path.is_dir()` degrades an INCONCLUSIVE stat to `False` exactly as
+    readily as a CONFIRMED-absent one: besides `ENOENT`/`ENOTDIR`/`EBADF`/
+    `ELOOP` (a missing path, a parent that turned out to be a file, a bad
+    descriptor, a symlink loop -- see `_INCONCLUSIVE_WINERRORS` for why
+    these four stay treated as confirmed-dead below, same as before), it
+    also folds in `_INCONCLUSIVE_WINERRORS` -- a live project on a volume
+    that is merely unmounted or offline right now (a disconnected mapped or
+    removable drive, `WinError 21`) reads as gone. That is the exact
+    tan-cli#464 wrong-answer this registry exists to prevent -- the project
+    falls back to the last-writer-wins `globalDefault` tier -- except
+    reached by symptom (a cable unplugged mid-session) instead of by cause
+    (no origin key at all).
+
+    So the check here is spelled out rather than delegated to `Path.is_dir()`:
+    `os.stat` surfaces every failure as a real `OSError`, and a `winerror`
+    in `_INCONCLUSIVE_WINERRORS` is checked FIRST and always degrades to
+    `True` regardless of its mapped `errno` (a not-ready drive's `os.stat`
+    failure can still carry an `ENOENT`-shaped `errno` alongside that
+    `winerror` -- the `winerror` is the more specific, more correct signal,
+    so it wins). Failing that, `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` count as
+    confirmed-dead, same as `Path.is_dir()` already treated them (a symlink
+    loop or a broken link can never again resolve to a real directory a
+    `workspace_root` could sit under, so treating it the same as "gone" is
+    not overreach). Everything else -- most notably a permission error
+    (`EACCES`, e.g. an unreadable parent directory) -- degrades to `True`:
+    an origin this process could not conclusively resolve is inconclusive,
+    not confirmed-dead, and `prune_dead_origins` drops an entry only on a
+    confirmed absence. A stat that succeeds but names a non-directory (the
+    origin's directory was replaced by a plain file) is a real, confirmed
+    answer -- no exception to catch -- so it returns `False` directly.
     """
     try:
-        return Path(origin).is_dir()
-    except OSError:
+        mode = os.stat(origin).st_mode
+    except OSError as exc:
+        if getattr(exc, "winerror", None) in _INCONCLUSIVE_WINERRORS:
+            return True
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP):
+            return False
         return True
+    return stat.S_ISDIR(mode)
 
 
 def _write_global_sdk_registry(sdk_root: str, *, origin: str) -> None:

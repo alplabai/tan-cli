@@ -22,6 +22,7 @@ byte-identical; the four that did not are each pinned here with the reason:
 The install steps are exercised through `--dry-run`, which records the argv it
 WOULD have spawned; `test_a_dry_run_writes_nothing` is what keeps that honest.
 """
+import errno
 import hashlib
 import json
 import os
@@ -1039,18 +1040,20 @@ def test_origin_exists_treats_a_symlink_loop_as_gone_not_inconclusive(tmp_path):
     correct answer for `_origin_exists` too, not a case needing degrade-to-
     `True` treatment."""
     loop = tmp_path / "loop"
-    loop.symlink_to(loop)
+    try:
+        loop.symlink_to(loop)
+    except (OSError, NotImplementedError):  # pragma: no cover -- Windows w/o privilege
+        pytest.skip("this host cannot create a symlink")
     assert bootstrap_cmd._origin_exists(str(loop)) is False
 
 
 def test_origin_exists_degrades_a_permission_error_to_true_not_a_raise(tmp_path):
-    """The one shape `Path.is_dir()` does NOT swallow itself: a parent
-    directory this process cannot even stat. That must degrade to `True`
-    (inconclusive, so the entry survives), not raise out of a best-effort
-    write and not silently prune a project this process simply could not
-    check. Skipped when running as root, which bypasses directory
-    permissions entirely and would make `is_dir()` succeed instead of
-    raising."""
+    """A permission error (`EACCES`, e.g. a parent directory this process
+    cannot even stat) must degrade to `True` (inconclusive, so the entry
+    survives), not raise out of a best-effort write and not silently prune a
+    project this process simply could not check. Skipped when running as
+    root, which bypasses directory permissions entirely and would make
+    `os.stat` succeed instead of raising."""
     if os.name != "posix" or os.geteuid() == 0:
         pytest.skip("requires a non-root POSIX process to exercise EACCES")
     parent = tmp_path / "unreadable"
@@ -1062,6 +1065,36 @@ def test_origin_exists_degrades_a_permission_error_to_true_not_a_raise(tmp_path)
         assert bootstrap_cmd._origin_exists(str(child)) is True
     finally:
         parent.chmod(0o755)  # restore so tmp_path's own teardown can clean up
+
+
+def test_origin_exists_keeps_a_not_ready_volume_not_prunes_it(tmp_path, monkeypatch):
+    """review of #971: a live project on a volume that is merely not mounted
+    right now must NOT read as confirmed-dead. On POSIX this is an
+    unmounted mountpoint / autofs / NFS path surfacing as plain `ENOENT`
+    (already covered by the symlink-loop test above, which shares the same
+    errno) -- the shape this test targets is the Windows one, `WinError 21`
+    ("drive exists but is not accessible", `pathlib._WINERROR_NOT_READY`)
+    for a disconnected mapped or removable drive, which `pathlib` itself
+    absorbs the same way it absorbs `ENOENT`
+    (`pathlib._IGNORED_WINERRORS == (21, 123, 1921)` on the 3.12 stdlib this
+    repo floors at).
+
+    It cannot be created literally without a real not-ready Windows volume,
+    so it is simulated at the `os.stat` boundary this function calls
+    directly: a `winerror`-carrying `OSError`, regardless of its mapped
+    `errno`, must degrade to `True` (kept), never to `False` (pruned) --
+    the `winerror` check in `_origin_exists` runs BEFORE the errno check for
+    exactly this reason."""
+    origin = tmp_path / "on-a-disconnected-drive"
+
+    def fake_stat(path, *args, **kwargs):
+        err = OSError("[WinError 21] The device is not ready")
+        err.errno = errno.ENOENT  # Windows commonly folds WinError 21 into ENOENT too
+        err.winerror = 21
+        raise err
+
+    monkeypatch.setattr(bootstrap_cmd.os, "stat", fake_stat)
+    assert bootstrap_cmd._origin_exists(str(origin)) is True
 
 
 def test_a_relocating_bootstrap_leaves_a_later_doctor_able_to_find_the_sdk(tmp_path):
