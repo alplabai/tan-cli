@@ -332,9 +332,17 @@ def example_matches_filter(entry: Example, needle: str) -> bool:
 
 
 def example_category(entry: Example) -> str:
-    """The catalogue's top-level directory -- `ai` for `ai/cold-chain-monitor`.
-    Derived from the id rather than carried as a field: the SDK emits no
-    category, and the id prefix IS the tree it came from."""
+    """The example's top-level directory -- `ai` for `ai/cold-chain-monitor`.
+    Prefers the catalogue's `category` facet (tan-cli#484) when the bound
+    checkout's `metadata/catalog.json` carries one for this example -- the
+    same producer-wins fallback order `alp-sdk-vscode`'s own
+    `exampleCategory()` uses ("the day tan forwards a category that
+    disagrees with the directory, the producer is right") -- and falls back
+    to the id prefix only when no facet is present (an older SDK, or an
+    example the catalogue does not know about yet)."""
+    facets = entry.facets
+    if facets is not None:
+        return facets.category
     return entry.id.split("/", 1)[0]
 
 

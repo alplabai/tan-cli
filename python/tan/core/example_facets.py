@@ -112,12 +112,40 @@ def _facets_from_entry(category: str, entry: dict) -> ExampleFacets:
     core_count = entry.get("coreCount")
     os_set = entry.get("osSet")
     declares = entry.get("declares")
+
+    # Element-guarded, not just list/dict-guarded: `examples_cmd.py::as_dict`
+    # does `dict(core)` on every `cores` element it emits, and a non-mapping
+    # element (a hand-edited catalogue, or a future `gen_catalog.py`
+    # regression) would raise `ValueError` there with no envelope at all --
+    # exactly the crash this whole module exists to never let through.
+    # Malformed elements/pairs are dropped, mirroring the "skip the bad
+    # element, keep the good ones" shape already used one level up for
+    # `entries`/individual catalogue rows -- an all-bad list/dict collapses
+    # to an empty tuple/dict rather than `None`, same as a catalogue that
+    # genuinely declared nothing (`declares: {}` is a real, present
+    # `gen_catalog.py` shape, not a degradation).
     return ExampleFacets(
         category=category,
         som=som if isinstance(som, str) else None,
         board=board if isinstance(board, str) else None,
-        cores=tuple(cores) if isinstance(cores, list) else None,
-        core_count=core_count if isinstance(core_count, int) else None,
-        os_set=tuple(os_set) if isinstance(os_set, list) else None,
-        declares=declares if isinstance(declares, dict) else None,
+        cores=(
+            tuple(c for c in cores if isinstance(c, dict)) if isinstance(cores, list) else None
+        ),
+        # `isinstance(x, bool)` is excluded first: `bool` is an `int`
+        # subclass in Python, so `coreCount: true` would otherwise pass the
+        # `int` check and publish a boolean where the contract promises a
+        # core count.
+        core_count=(
+            core_count
+            if isinstance(core_count, int) and not isinstance(core_count, bool)
+            else None
+        ),
+        os_set=(
+            tuple(v for v in os_set if isinstance(v, str)) if isinstance(os_set, list) else None
+        ),
+        declares=(
+            {k: v for k, v in declares.items() if isinstance(k, str) and isinstance(v, bool)}
+            if isinstance(declares, dict)
+            else None
+        ),
     )

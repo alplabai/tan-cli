@@ -348,6 +348,42 @@ def test_a_malformed_catalog_degrades_the_facets_without_failing_the_command(tmp
     assert list(entry) == ["id", "sourceDir", "title", "description"]
 
 
+def test_a_catalog_with_non_mapping_cores_elements_does_not_crash_the_command(tmp_path):
+    """tan-cli#978 review, reproduced verbatim: `"cores": ["a55_cluster",
+    "m33_sm"]` (a list of strings, not the `cores[].{id,os,app}` mapping
+    contract) used to raise `ValueError` out of `as_dict`'s `dict(core)`
+    with no envelope at all -- directly contradicting this command's own
+    "degrades silently, never refuses `tan examples`" contract. The bad
+    elements are now dropped (an all-bad list collapses to an empty
+    `cores`, not a crash) and the command still returns a clean, `ok`
+    envelope."""
+    sdk = tmp_path / "sdk"
+    _sdk_with_example(sdk)
+    write(
+        sdk / "metadata/catalog.json",
+        json.dumps(
+            {
+                "examples": {
+                    "multicore": [
+                        {
+                            "name": "rpmsg-v2n",
+                            "cores": ["a55_cluster", "m33_sm"],
+                        }
+                    ]
+                }
+            }
+        ),
+    )
+    result = runner.invoke(app, ["examples", "--sdk-root", str(sdk), "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is True
+    assert doc["issues"] == []
+    entry = doc["data"]["examples"][0]
+    assert entry["cores"] == []
+    assert entry["category"] == "multicore"
+
+
 def test_discover_examples_attaches_facets_by_source_dir(tmp_path):
     from tan.core.example_facets import ExampleFacets
 
@@ -482,6 +518,41 @@ def test_examples_category_filter_narrows_and_reports_an_empty_match():
 
     lines = render_examples_text([], filter_=None, category="nope", verbose=False, sdk_resolved=True)
     assert lines == ['examples: no example projects in category "nope".']
+
+
+def test_example_category_prefers_the_facet_over_the_id_prefix_when_they_disagree():
+    """tan-cli#978 review: the day tan forwards a `category` facet that
+    disagrees with the id prefix, the producer (`gen_catalog.py`) is right --
+    the same fallback order `alp-sdk-vscode`'s own `exampleCategory()` uses.
+    An id-derived-only implementation would answer `ai` here; the catalogue
+    facet says `renamed` and wins."""
+    from tan.commands.examples_cmd import Example, example_category, example_matches_category
+    from tan.core.example_facets import ExampleFacets
+
+    facets = ExampleFacets(
+        category="renamed",
+        som=None,
+        board=None,
+        cores=None,
+        core_count=None,
+        os_set=None,
+        declares=None,
+    )
+    entry = Example(
+        id="ai/cold-chain",
+        source_dir="ai/cold-chain",
+        title="Cold chain",
+        description="",
+        facets=facets,
+    )
+    assert example_category(entry) == "renamed"
+    assert example_matches_category(entry, "renamed")
+    assert not example_matches_category(entry, "ai")
+
+    # No facet at all (older SDK / catalogue miss) still falls back to the
+    # id prefix, unchanged from before this fix.
+    no_facet = Example(id="ai/cold-chain", source_dir="ai/cold-chain", title="x", description="")
+    assert example_category(no_facet) == "ai"
 
 
 # --------------------------------------------------------------------------

@@ -187,3 +187,60 @@ def test_wrong_typed_optional_fields_degrade_to_none_not_a_crash(tmp_path):
     assert entry.core_count is None
     assert entry.os_set is None
     assert entry.declares is None
+
+
+def test_a_non_mapping_cores_element_is_dropped_not_a_crash(tmp_path):
+    """`cores` is a list-of-dicts contract (`cores[].{id,os,app}`). A list
+    that IS a list but whose elements are not mappings must not reach
+    `examples_cmd.py::as_dict`'s `dict(core)` -- that raises `ValueError`
+    with no envelope at all (tan-cli#978 review). Bad elements are dropped,
+    mirroring the "skip the malformed element, keep the good ones" shape
+    already used for `entries`/individual catalogue rows one level up; good
+    elements survive alongside them."""
+    _write_catalog(
+        tmp_path,
+        {
+            "multicore": [
+                {
+                    "name": "odd",
+                    "cores": [
+                        "a55_cluster",
+                        "m33_sm",
+                        {"id": "a55_cluster", "os": "yocto", "app": "./linux"},
+                    ],
+                }
+            ]
+        },
+    )
+    entry = load_example_facets(tmp_path)["multicore/odd"]
+    assert entry.cores == ({"id": "a55_cluster", "os": "yocto", "app": "./linux"},)
+
+
+def test_coreCount_true_is_not_accepted_as_an_int(tmp_path):
+    """`bool` is an `int` subclass in Python -- `isinstance(True, int)` is
+    `True` -- so a bare `isinstance(core_count, int)` guard would publish a
+    boolean where the contract promises a core count."""
+    _write_catalog(tmp_path, {"audio": [{"name": "odd", "coreCount": True}]})
+    entry = load_example_facets(tmp_path)["audio/odd"]
+    assert entry.core_count is None
+
+
+def test_osSet_and_declares_are_filtered_element_by_element(tmp_path):
+    """`osSet` elements and `declares` values are unchecked beyond their
+    container's own type -- a non-string `osSet` element or a non-bool
+    `declares` value must not reach the wire (tan-cli#978 review)."""
+    _write_catalog(
+        tmp_path,
+        {
+            "audio": [
+                {
+                    "name": "odd",
+                    "osSet": [{"a": 1}, None, "zephyr"],
+                    "declares": {"peripherals": "yes", "ipc": 3, "chips": True},
+                }
+            ]
+        },
+    )
+    entry = load_example_facets(tmp_path)["audio/odd"]
+    assert entry.os_set == ("zephyr",)
+    assert entry.declares == {"chips": True}
