@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -1015,6 +1016,157 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+
+
+# Every `tan.planner`-or-under module is BOTH a `sys.modules[name]` entry AND
+# a plain attribute of its PARENT package module -- Python's import machinery
+# keeps the two in lockstep on every ordinary import, but any test that does
+# `sys.modules` surgery (deleting/rebinding `tan.planner*` entries to force a
+# fresh reimport, e.g. to rebind against a different SDK root) can leave them
+# pointing at two DIFFERENT module objects if it restores one location and
+# not the other -- tan-cli#943's actual defect. This is NOT a one-level
+# check: the defect reproduces just as well one layer down (e.g.
+# `tan.planner.kconfig` restored in `sys.modules` while `tan.planner`'s own
+# `.kconfig` attribute keeps the leaked reimport, or vice versa), so this
+# hook walks every `sys.modules` key equal to or under `tan.planner` and
+# compares EACH ONE against its own parent's attribute, not just the
+# top-level package against `tan`. Two different `tan.planner.models`
+# modules -- at ANY depth -- means two different `OrchestratorError` classes
+# alive in one interpreter, so a raise from one and a `pytest.raises` against
+# the other silently stop matching; the failure surfaces in whatever
+# unrelated test happens to run next -- often in a different shard entirely,
+# since `tests/commands/` and `tests/planner/` are `pytest-shard`-partitioned
+# per test, and #943's own pair landed deterministically split across shards
+# -- so the drift can go unnoticed for a full week until the unsharded canary
+# (`unsharded-python-canary.yml`) catches it.
+#
+# A `pytest_runtest_teardown` HOOKWRAPPER, not an autouse fixture: an earlier
+# draft used a plain `@pytest.fixture(autouse=True)` with its check after
+# `yield`, and that produced a false positive on
+# `tests/core/test_planner_root.py::test_rebinding_a_different_root_after_
+# import_is_refused`, which deliberately does
+# `monkeypatch.setitem(sys.modules, "tan.planner", object())` as its OWN
+# test technique (simulating "already imported" for a narrower check that
+# reads only `sys.modules`, never the parent's attribute, by design). A
+# fixture's post-yield code runs as one more finalizer in the SAME LIFO
+# teardown chain as `monkeypatch`'s own restore, and fixture-instantiation
+# order does not guarantee this fixture's finalizer runs after
+# `monkeypatch`'s -- measured: it ran BEFORE, so this fixture observed
+# `sys.modules["tan.planner"]` still holding that test's sentinel
+# `object()` with the `.planner` attribute already back at its pre-test
+# value, and flagged a "drift" that was really just an in-flight teardown a
+# moment away from resolving itself correctly. A hookwrapper sidesteps the
+# ordering question entirely: `pytest_runtest_teardown` wraps the ENTIRE
+# teardown phase, including every fixture finalizer (`monkeypatch`'s
+# among them), so `yield`ing past it and checking afterward is guaranteed
+# to observe the fully-settled post-teardown state, not an intermediate one.
+#
+# The `isinstance(..., ModuleType)` guards below are a second, independent
+# safety net for the same false-positive shape: they skip a comparison
+# whenever either side is present but is not an actual module object (e.g.
+# that same test's sentinel `object()`) -- a test is free to park an
+# arbitrary non-module placeholder in `sys.modules["tan.planner"]` for its
+# own purposes; the identity this check protects is specifically between
+# TWO REAL module objects at the same name, which is the only shape
+# tan-cli#943 actually manifested as (a genuine reimported module left on
+# one side, the stale genuine module -- or nothing -- on the other).
+#
+# Latched PER NAME (`_PLANNER_DRIFT_ALREADY_REPORTED`, a `set` of already-
+# reported `tan.planner`-or-under names): once a given name has been named,
+# EVERY later test's teardown re-observes the same drifted pair for THAT
+# name and would otherwise raise again -- measured on the real #943 shape
+# with the guard un-latched, bound to `eb96112b`: `1057 passed, 15 skipped,
+# 484 errors` for what is one root cause. The set makes it one clean error
+# naming the polluting test, not 483 more burying it. A single process-wide
+# boolean latch (the original shape) over-collapses: measured with two
+# INDEPENDENT permanent leaks in one process (`tan.planner.kconfig` from one
+# test, `tan.planner.slugs` from a second, unrelated one), a boolean latch
+# reports only the first name and lets the second sail through as `passed`
+# while it is a live polluter -- run alone, it reds. Keying the latch on the
+# drifted NAME instead of a single flag still collapses the fan-out for the
+# SAME name re-observed on every subsequent teardown, but a second, distinct
+# drifted name is not shadowed by the first.
+#
+# Checked after every test in the WHOLE suite. The walk scans every
+# `sys.modules` key (239 keys, unbound, measured) and filters down to
+# whatever `tan.planner`-or-under names are currently live (23, measured --
+# not "typically single digits") + one `getattr` per matching name --
+# effectively free: 42.6 microseconds/teardown measured, ~0.25s total over
+# 5885 tests; a synthetic 3000-teardown microbenchmark measured
+# 10.88/11.12/11.32s with the hook installed vs. 10.22/10.29/10.34s without
+# -- the delta is inside run-to-run noise.
+#
+# Mutation-proven, both the original one-level shape and the child shape a
+# one-level check is blind to (tan-cli#943 review round 3):
+#   * reverting `test_presets_command.py`'s parent-attribute restore to a
+#     no-op turns THIS hook red on the very next test that imports
+#     `tan.planner`, naming both mismatched objects (with their `hex(id())`)
+#     instead of surfacing as a baffling `pytest.raises` mismatch three files
+#     away;
+#   * planting `monkeypatch.delitem(sys.modules, "tan.planner.kconfig")`
+#     followed by a re-import, WITHOUT restoring `tan.planner`'s `.kconfig`
+#     attribute, is silent under the one-level version of this hook (it only
+#     ever compared `tan.planner` itself against `tan`'s `.planner`
+#     attribute) -- `2 passed`, no teardown error -- and reds under the
+#     generalised version above, which walks every `tan.planner`-or-under
+#     name.
+# Restoring the fix in both cases turns the hook green again. Verified NOT
+# to false-positive on `test_rebinding_a_different_root_after_import_is_
+# refused` (the sentinel case above), on `monkeypatch.setitem(sys.modules,
+# "tan.planner", None)` (`test_net.py`, `test_monitor_command.py`,
+# `test_diff_command.py`), on `monkeypatch.delitem(sys.modules, "tan")`, on
+# `test_planner_root.py`'s other `object()` sentinel case, nor on a full
+# unbound/bound run of `python/tests`.
+_PLANNER_DRIFT_ALREADY_REPORTED: set[str] = set()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    result = yield
+    names = sorted(
+        n for n in sys.modules if n == "tan.planner" or n.startswith("tan.planner.")
+    )
+    for name in names:
+        if name in _PLANNER_DRIFT_ALREADY_REPORTED:
+            continue
+        mod = sys.modules.get(name)
+        parent_name, _, leaf = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is None:
+            # The parent package itself is absent from sys.modules (e.g. a
+            # permanent `del sys.modules["tan.planner"]` with children left
+            # behind) -- there is no attribute to compare `mod` against, so
+            # treating a missing parent as `attr = None` would report a
+            # bogus "two live copies" drift against `hex(id(None))` for what
+            # is really just one copy and an absent parent. Not reachable
+            # today (every `tan.planner*` mutation in this tree is
+            # monkeypatch-based, so the wrapper always sees it restored),
+            # but a future permanent parent teardown should skip, not
+            # misdiagnose.
+            continue
+        attr = getattr(parent, leaf, None)
+        if not (
+            (mod is None or isinstance(mod, types.ModuleType))
+            and (attr is None or isinstance(attr, types.ModuleType))
+        ):
+            continue
+        if mod is None and attr is None:
+            continue
+        if mod is attr:
+            continue
+        _PLANNER_DRIFT_ALREADY_REPORTED.add(name)
+        raise AssertionError(
+            f"{name} drifted after {item.nodeid}: sys.modules[{name!r}] is "
+            f"{mod!r} ({hex(id(mod))}) but the parent {parent_name!r}'s own "
+            f".{leaf} attribute is {attr!r} ({hex(id(attr))}) -- these must "
+            "be the SAME object. A test rebound one location (sys.modules "
+            "or the parent's attribute) via monkeypatch without restoring "
+            f"the other, exactly the tan-cli#943 shape: two live copies of "
+            f"{name} (and of every class it defines) in one interpreter. "
+            "Find the test named above and make it restore BOTH locations "
+            "for every torn-out module, not just the top-level package."
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
