@@ -451,3 +451,8 @@ and write both files from the real merged tree.
     - tan/planner/loader.py: 1335 -> 1410
     - function_count_budget: 279 -> 287
     - function_worst_budget: 770 -> 791
+- 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3567 -> 3998
+    - tan/commands/doctor_cmd.py: 4045 -> 4134
+    - function_count_budget: 287 -> 291
+    - function_worst_budget: 791 -> 806
