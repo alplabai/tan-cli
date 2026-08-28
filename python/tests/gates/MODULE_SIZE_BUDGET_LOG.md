@@ -367,6 +367,10 @@ and write both files from the real merged tree.
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/explain_cmd.py: 1043 -> 1087
     - function_count_budget: 274 -> 275
+- 2026-08-28 -- tan-cli#959: explain_cmd.py grows a shared _print_sdk_resolution_warnings() helper wired into the success path and _fail's text branch, closing the text-mode SDK-advisory disclosure gap
+    - tan/commands/explain_cmd.py: 1087 -> 1135
+- 2026-08-28 -- explain_cmd.py: tan-cli#966 docstring fix corrects the ambiguous-selector reason in _print_sdk_resolution_warnings, growing the module 3 lines past its 1135 cap
+    - tan/commands/explain_cmd.py: 1135 -> 1138
 - 2026-08-28 -- PR #967 review: _soc_targets (npus[] container/element type guards + the mac_per_cycle optional-key guard) and resolve_targets (host_soc isinstance(dict) guard) both crossed the 50-line function cap carrying the review's own reasoning comments for each guard; comments kept, not compressed to fit
     - function_count_budget: 275 -> 277
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
@@ -385,3 +389,5 @@ and write both files from the real merged tree.
     - tan/commands/generate_cmd.py: 1400 -> 1404
 - 2026-08-28 -- PR #981 review: build_cmd.py grows ~38 lines for the --pristine/plan-materialise conflicting-flags refusal (tan-cli#427 follow-up) plus a module-docstring precedent note -- a coded refusal for a defect class, not padding.
     - tan/commands/build_cmd.py: 2255 -> 2293
+- 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/explain_cmd.py: 1087 -> 1138

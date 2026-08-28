@@ -1245,7 +1245,14 @@ jobs:
       # tan-cli#880's own comment edit. `.github/zizmor.yml`'s header carries
       # the full re-derived history; do not requote the arithmetic here.
       # Inline, it cannot rot.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
+      #
+      # tan-cli#929: `id:` below is this step's stable identity for
+      # `.github/zizmor.yml`'s INVENTORY to key on -- this step has no
+      # `name:` to rename, but do not add one, or edit this `id:`, without
+      # also updating the matching `anchor: job=propose-dev-version-bump
+      # id=artipacked-inventory-2` line there.
+      - id: artipacked-inventory-2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
         with:
           ref: dev
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
