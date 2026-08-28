@@ -46,6 +46,11 @@ _CLOSE_STEP = "Close the tracking issue once nothing is owed or a PR now covers 
 
 _CAT_RESYNC_MD = 'cat "${RUNNER_TEMP}/resync.md"'
 
+#: Floor for `gh issue list --limit`. 100 is what the job carries and what
+#: this module's docstring names; `gh` defaults to 30 and the repo measured
+#: 49 open issues, so the floor must sit above that default to mean anything.
+_MIN_ISSUE_LIST_LIMIT = 100
+
 
 def _logical_lines(run: str) -> list[str]:
     """Join `\\`-continued physical lines so a same-statement `||` fallback
@@ -77,15 +82,25 @@ def test_the_issue_title_and_marker_are_shared_job_level_env_not_duplicated():
             f"`env:` -- not per-step, where two hand-kept copies can drift "
             f"apart silently (tan-cli#920)."
         )
+    # The two steps that read these vars must still exist -- if either is
+    # renamed this gate is looking at the wrong workflow and says so.
     for name in (_ISSUE_STEP, _CLOSE_STEP):
-        step = _step(name)
-        assert step is not None, f"step {name!r} not found -- update this gate"
+        assert _step(name) is not None, (
+            f"step {name!r} not found -- update this gate")
+
+    # ...but the redeclaration check sweeps EVERY step, not just those two
+    # (tan-cli#937). Checking only the two named steps was the hole: the
+    # `propose` job has ten steps, and a copy of `RESYNC_ISSUE_TITLE` added
+    # to any of the other eight would drift from the job-level value with
+    # nothing to catch it -- which is the whole defect tan-cli#920 closed,
+    # re-openable in eight places the gate never looked at.
+    for step in _job()["steps"]:
         step_env = step.get("env") or {}
         for key in ("RESYNC_ISSUE_TITLE", "RESYNC_ISSUE_MARKER"):
             assert key not in step_env, (
-                f"{name!r} redeclares {key!r} in its own `env:` -- this "
-                f"reintroduces the two-copies-can-drift defect tan-cli#920 "
-                f"fixed by sharing the job-level env var instead."
+                f"{step.get('name')!r} redeclares {key!r} in its own `env:` "
+                f"-- this reintroduces the two-copies-can-drift defect "
+                f"tan-cli#920 fixed by sharing the job-level env var instead."
             )
 
 
@@ -178,12 +193,30 @@ def test_gh_issue_list_lookups_fail_closed_with_a_limit_and_a_checked_exit_code(
             f"nothing"
         )
         for line in list_lines:
-            assert "--limit" in line, (
-                f"{name!r}'s `gh issue list` lookup has no `--limit` -- it "
-                f"defaults to a 30-item, newest-created-first page, so an "
+            limit = re.search(r"--limit\s+(\d+)", line)
+            assert limit is not None, (
+                f"{name!r}'s `gh issue list` lookup has no `--limit <N>` -- "
+                f"it defaults to a 30-item, newest-created-first page, so an "
                 f"older tracking issue can age off page 1 and look "
                 f"identical to \"no match\", opening a silent duplicate "
                 f"(tan-cli#920 round 3, measured live: `gh issue list "
                 f"--state open --json number --jq length` -> 30, `--limit "
                 f"500` -> 49):\n{line}"
+            )
+            # Assert the VALUE, not merely the flag (tan-cli#937). Checking
+            # `"--limit" in line` was the second hole: `--limit 1` satisfies
+            # it and reinstates the exact pagination fail-open (c) exists to
+            # prevent, only harder -- a one-item page ages the tracking issue
+            # off immediately. The floor is the 100 this job actually carries
+            # and this module's own docstring names; the repo measured 49
+            # open issues against a 30-item default, so anything at or below
+            # that default is not a fix at all.
+            assert int(limit.group(1)) >= _MIN_ISSUE_LIST_LIMIT, (
+                f"{name!r}'s `gh issue list` uses `--limit "
+                f"{limit.group(1)}`, below the {_MIN_ISSUE_LIST_LIMIT} floor "
+                f"-- `gh issue list` defaults to 30 items and this repo "
+                f"already has more open issues than that, so a small limit "
+                f"lets the tracking issue age off the page and read as \"no "
+                f"match\", which is the fail-open (a) and (b) also guard "
+                f"(tan-cli#920 round 3, tan-cli#937):\n{line}"
             )
