@@ -382,6 +382,15 @@ and write both files from the real merged tree.
     - tan/planner/kconfig.py: 2092 -> 2107
 - 2026-08-28 -- tan-cli#957 family, round 4: guard cores[].vector_extension against a non-string in the G-2 TFLM kernel selector, same isinstance-guard pattern as cores[].type
     - tan/planner/kconfig.py: 2107 -> 2108
+- 2026-08-28 -- tan-cli#427: build.py/execute.py grew implementing --pristine (force_pristine wiring + PristineSkipped) and resolving --plan/--manifest/--manifest-from/--target/--all/--verbose/--quiet/--no-color/--non-interactive/--ci into implemented/retired/accept-and-drop buckets
+    - tan/commands/build/execute.py: 1662 -> 1713
+    - tan/commands/build_cmd.py: 2178 -> 2255
+- 2026-08-28 -- tan-cli#963: generate_cmd.py's own docstring for pin_issue/foreign_issue prepend-ordering grew the module 4 lines past its 1400 ceiling; no compression to fit, per repo convention
+    - tan/commands/generate_cmd.py: 1400 -> 1404
+- 2026-08-28 -- PR #981 review: build_cmd.py grows ~38 lines for the --pristine/plan-materialise conflicting-flags refusal (tan-cli#427 follow-up) plus a module-docstring precedent note -- a coded refusal for a defect class, not padding.
+    - tan/commands/build_cmd.py: 2255 -> 2293
+- 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/explain_cmd.py: 1087 -> 1138
 - 2026-08-28 -- tan-cli#905: sdk_default_registry.prune_dead_origins (drops every existence-dead entry out of the global SDK-default registry on the next relocating bootstrap's write) grows bootstrap_cmd.py past its recorded ceiling and is itself a new over-50-line function (60 lines).
     - tan/commands/bootstrap_cmd.py: 3421 -> 3468
     - function_count_budget: 277 -> 278
@@ -397,3 +406,9 @@ and write both files from the real merged tree.
     - tan/core/scaffold.py: 1538 -> 1566
 - 2026-08-28 -- tan-cli#985 review: rename data.som fields to refusal semantics, widen the prose drift gate past a single phrasing, generate iot-starter's second SoM sentence, surface the family exclusion in text mode
     - tan/commands/explain_cmd.py: 1216 -> 1310
+- 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3421 -> 3522
+    - function_count_budget: 277 -> 279
+- 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/build/execute.py: 1662 -> 1713
+    - tan/commands/build_cmd.py: 2178 -> 2293

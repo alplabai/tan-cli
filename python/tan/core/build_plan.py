@@ -274,9 +274,10 @@ def _reject_nul(value: str, context: str) -> None:
 
     **That surface is `--plan-from`, NOT `--plan`.** An earlier version of
     this note named `tan build --plan --plan-from <nul-plan>` as the diverging
-    invocation; measured, `--plan` on `tan build` is a deferred stub in this
-    port and answers `exit 1 cli.command-deferred` for EVERY plan, valid or
-    not (tan-cli#427), so nothing about a NUL is observable through it.
+    invocation; measured, `--plan` on `tan build` is now a RETIRED flag in
+    this port and answers `exit 2 build.flag-retired` for EVERY invocation,
+    valid or not (tan-cli#427), so nothing about a NUL is observable through
+    it.
 
     The trade is taken deliberately, for the same reason and in the same shape
     as the `=`/empty env names above, which already diverge from the oracle in

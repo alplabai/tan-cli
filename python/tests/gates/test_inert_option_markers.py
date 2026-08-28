@@ -52,23 +52,17 @@ from tan.core.inert import (
 #: while saying nothing about the surface the issue is about.
 EXPECTED_VISIBLE_INERT: frozenset[tuple[str, str, str, str | None]] = frozenset(
     [
-        *(
-            ("tan build", flag, DEFERRED, "tan-cli#427")
-            for flag in (
-                "--plan",
-                "--target",
-                "--all",
-                "--manifest",
-                "--manifest-from",
-                "--no-auto-bootstrap",
-                "--pristine",
-                "--verbose",
-                "--quiet",
-                "--no-color",
-                "--non-interactive",
-                "--ci",
-            )
-        ),
+        # tan-cli#427: `--plan`/`--target`/`--all`/`--manifest`/
+        # `--manifest-from`/`--verbose`/`--quiet`/`--no-color`/
+        # `--non-interactive`/`--ci`/`--pristine` all left this census --
+        # `--pristine` is a real, working option now (no marker at all);
+        # `--plan`/`--manifest`/`--manifest-from` are retired (refused with
+        # `build.flag-retired`, naming their replacement -- not "accepted and
+        # does nothing", so no `inert_help` marker either); the remaining
+        # seven are accept-and-drop via `accept_global_flags`, HIDDEN, so
+        # they show up in the PARITY hidden count instead of here. Only
+        # `--no-auto-bootstrap` is still deferred.
+        ("tan build", "--no-auto-bootstrap", DEFERRED, "tan-cli#427"),
         ("tan doctor", "--build", COMPATIBILITY, "tan-cli#290"),
         ("tan faultdecode", "--project", NOT_APPLICABLE, None),
         ("tan faultdecode", "--sdk-root", NOT_APPLICABLE, None),
@@ -120,10 +114,10 @@ def test_the_walk_actually_reached_the_whole_surface():
         "change -- do not let a broken walk read as a clean gate."
     )
     assert len(MARKED) >= 100, (
-        f"only {len(MARKED)} inert markers found; expected ~125 (12 `build` "
-        "deferrals + `doctor --build` + 2 on `faultdecode` + the ~110 hidden "
-        "oracle-parity flags). A collapsed count means the marker stopped "
-        "reaching the built tree, not that tan got tidier."
+        f"only {len(MARKED)} inert markers found; expected ~121 (1 `build` "
+        "deferral + `doctor --build` + 2 on `faultdecode` + the ~117 hidden "
+        "oracle-parity flags, tan-cli#427). A collapsed count means the marker "
+        "stopped reaching the built tree, not that tan got tidier."
     )
 
 
