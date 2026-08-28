@@ -2549,3 +2549,155 @@ jobs:
                 --body "${body}" --label bug,ci,python-port
             echo "::notice::filed a new drift-tracking issue"
           fi
+
+  # ---------------------------------------------------------------------------
+  # tan-cli#889: every OTHER leg in this workflow measures tan against
+  # `PINNED_SDK_TAG` (a dev-tracking ref, hand-bumped whenever alp-sdk's
+  # contract surface moves -- see that env var's own header) or, on
+  # `repository_dispatch`, against the SHA alp-sdk just pushed to `dev`. On a
+  # `pull_request`/`push`/`merge_group` that is deliberate: it catches
+  # upstream drift early, before a release freezes it (see `python_only`'s
+  # own comment). But a RELEASE TAG ships against a *released* alp-sdk, and
+  # until this job existed nothing ever measured that pairing -- `python-
+  # gates` (release.yml) calls this workflow with `python_only: true`, which
+  # confines `seam1-plan-shape` to its tests/gates block and still binds
+  # `python-tests-shard`'s `ALP_SDK_ROOT` to the SAME `PINNED_SDK_TAG`
+  # checkout as a plain PR. `PINNED_SDK_TAG` happens to equal alp-sdk v0.16.0
+  # today (tan-cli#888's fix), but nothing keeps it there: it moves only when
+  # someone re-bumps it for an unrelated reason, so the day a release is cut
+  # after alp-sdk publishes a NEWER tag with no matching tan-cli pin bump,
+  # the release ships having been measured against a released alp-sdk that
+  # is no longer the one customers pairing this tag would install. tan-
+  # cli#843/#888 both record this exact gap firing for real, the second time
+  # via the ONE path that ever did catch it -- a `repository_dispatch` fired
+  # by the alp-sdk release itself, which has no vote on whether the tan tag
+  # it fires AFTER gets to publish.
+  #
+  # This job closes that gap for the release path ONLY, without touching
+  # what a `pull_request`/`push`/`merge_group`/`repository_dispatch` run
+  # measures (ground rule: do not silently change non-release coverage).
+  # `if: inputs.python_only` is exactly "this workflow was called by
+  # release.yml's `python-gates` job" -- that input is `true` in no other
+  # caller (grep this repo's workflows for `python_only:` -- release.yml is
+  # the only hit), so this job is a no-op on every trigger except a version
+  # tag push.
+  #
+  # It resolves the alp-sdk ref itself, at release time, from alp-sdk's own
+  # GitHub Releases API (`releases/latest` -- GitHub's own notion of "latest
+  # published, non-draft, non-prerelease release", chronological, so this
+  # does not have to re-implement SemVer ordering) -- deliberately NOT
+  # `PINNED_SDK_TAG`. That is what makes this leg track forward with alp-
+  # sdk's own release cadence with no tan-cli edit required, which is the
+  # whole point: `PINNED_SDK_TAG` is a decision about what tan-cli's own PRs
+  # should be measured against day to day, and conflating it with "whatever
+  # alp-sdk has most recently published" is the coupling tan-cli#889 asks to
+  # break.
+  #
+  # Runs the planner byte-parity breadth layer
+  # (`tests/parity/test_planner_emit_parity.py` -- see that module's own
+  # docstring) bound to the freshly-resolved checkout: it renders every mode
+  # for every `board.yaml` under the released alp-sdk's own `examples/` with
+  # BOTH planners (`alp_orchestrate` off the released checkout, `tan.planner`
+  # bound the same way) and compares the bytes. That is the direct answer to
+  # "does tan, as released, still emit what alp-sdk, as released, expects" --
+  # not a proxy for it. A bound-but-wrong `ALP_SDK_ROOT` makes the whole
+  # module self-skip via its own `pytestmark` (measured: an unresolvable root
+  # exits pytest 0 with "83 skipped", green having checked nothing) -- same
+  # tan-cli#308 vacuity shape as every other gate in this file, so the PASSED
+  # assertion below is not optional decoration; it is what makes a silently
+  # wrong resolution fail loudly instead of shipping a release with zero
+  # coverage from this job.
+  release-sdk-parity:
+    name: "release -- parity vs published alp-sdk"
+    if: ${{ inputs.python_only }}
+    runs-on: ubuntu-latest
+    # Measured locally (not on this runner class, but the suite does no
+    # network IO once alp-sdk is cloned, so the shape carries over): the full
+    # module against a real alp-sdk checkout takes ~9 minutes single-process.
+    # 30 leaves more than 3x headroom before this joins the "wedged job holds
+    # the release for GitHub's 360-minute default" class every other
+    # `timeout-minutes:` in this file guards against.
+    timeout-minutes: 30
+    steps:
+      - name: checkout tan-cli
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # `releases/latest` is GitHub's own answer, not a re-derived one: the
+      # most recent publish that is neither a draft nor a prerelease. Written
+      # through the same allow-list/length guard as every other ref-bearing
+      # step in this file (see `seam1-plan-shape`'s "resolve alp-sdk ref")
+      # even though this value comes from GitHub's API rather than an
+      # attacker-suppliable `client_payload` -- defence in depth, and the
+      # cost of skipping it is a raw API response landing in `$GITHUB_OUTPUT`
+      # and then in `actions/checkout`'s `ref:` unexamined.
+      - name: resolve latest published alp-sdk release
+        id: alp_sdk_release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(gh api repos/alplabai/alp-sdk/releases/latest --jq .tag_name)
+          case "${tag}" in
+            ""|[!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*)
+              echo "::error::alp-sdk releases/latest returned something that is not a plain git ref: '${tag}'"
+              exit 1 ;;
+          esac
+          if [ "${#tag}" -gt 201 ]; then
+            echo "::error::refusing an alp-sdk release tag longer than 201 characters: ${tag}"
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "::notice::this release is measured against alp-sdk ${tag} (GitHub's latest published alp-sdk release, resolved fresh -- NOT PINNED_SDK_TAG)"
+
+      - name: clone alp-sdk at the resolved release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: alplabai/alp-sdk
+          ref: ${{ steps.alp_sdk_release.outputs.tag }}
+          path: alp-sdk-released
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # Same install shape as seam1-plan-shape's "install SDK emit + test
+      # deps" -- installing `python/` itself (not a hand-listed dependency
+      # set) cannot drift from what the planner/test collection actually
+      # imports; see that step's own comment for why a hand-list already
+      # broke once.
+      - name: install alp-tan + test deps
+        run: |
+          python3 -m pip install --upgrade pip pytest
+          python3 -m pip install ./python
+
+      - name: planner emit parity vs published alp-sdk (blocking)
+        working-directory: python
+        env:
+          ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk-released
+        run: |
+          set -euo pipefail
+          python3 -m pytest tests/parity/test_planner_emit_parity.py -v | tee /tmp/release-sdk-parity.log
+          # `test_the_breadth_layer_still_covers_every_board` is this
+          # module's own non-vacuity floor (>=90 boards, >=2900 artefacts
+          # byte-compared). Measured both failure modes this guard exists to
+          # catch, locally, before landing: (1) `ALP_SDK_ROOT` pointed at a
+          # released-but-stale alp-sdk tag (v0.15.0, which predates a real
+          # planner change) reds the run directly -- 284 failed, pytest exit
+          # 1, no grep needed; (2) `ALP_SDK_ROOT` pointed at a root with no
+          # `scripts/alp_orchestrate/` (an empty/unresolvable checkout) makes
+          # the whole module self-skip -- pytest exits 0, "83 skipped" -- and
+          # ONLY this grep turns that into a job failure. Case (2) is exactly
+          # the tan-cli#308 shape: `set -e`/pipefail alone does not fail on a
+          # skip, only on a FAIL, so it would let a silently-wrong resolution
+          # (a typo'd path, an API response that parsed but named an
+          # unreachable ref) report this brand-new gate green having checked
+          # nothing -- the same failure this whole job exists to close, one
+          # layer up.
+          if ! grep -qF "tests/parity/test_planner_emit_parity.py::test_the_breadth_layer_still_covers_every_board PASSED" /tmp/release-sdk-parity.log; then
+            echo "::error::test_the_breadth_layer_still_covers_every_board did not PASS in this job -- ALP_SDK_ROOT is bound to the freshly-cloned alp-sdk-released checkout above, so a SKIP here means that checkout does not ship scripts/alp_orchestrate/ (or releases/latest resolved to something unexpected), not an absent root."
+            exit 1
+          fi
