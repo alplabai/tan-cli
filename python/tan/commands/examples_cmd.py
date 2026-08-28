@@ -46,6 +46,15 @@ nothing.
 
 No `--os`, no `--backend`, no SKU list, no hardware facts -- the catalogue is
 whatever directories carry a `board.yaml`, and nothing here reads one.
+
+**tan-cli#484** adds `category`/`som`/`board`/`cores`/`coreCount`/`osSet`/
+`declares` to each row, additively, when alp-sdk's generated
+`metadata/catalog.json` has an entry for that `sourceDir`
+(`tan.core.example_facets.load_example_facets`). That file is itself a
+pre-computed artefact of alp-sdk's topology resolver, so this still does not
+read a `board.yaml` or re-derive a hardware fact -- it reads one more
+generated JSON file, the same shape `tan.core.error_catalog` already reads
+`metadata/error-catalog.json` in.
 """
 
 from __future__ import annotations
@@ -63,6 +72,7 @@ from tan.commands.sdk_cmd import (
     global_default_foreign_project_issue,
     project_pin_issue,
 )
+from tan.core.example_facets import ExampleFacets, load_example_facets
 from tan.core.shapes import rejected_sdk_root_message
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -106,22 +116,46 @@ SDK_UNRESOLVED_CONSEQUENCE = "Returning an empty example catalogue."
 
 @dataclass(frozen=True)
 class Example:
-    """One catalogue entry. Field order is the emitted JSON order, matching
-    `ExampleEntry`'s declaration order in `examples.rs` (`id`, `sourceDir`,
-    `title`, `description`)."""
+    """One catalogue entry. `id`/`sourceDir`/`title`/`description` are the
+    emitted JSON order the frozen oracle also uses, matching `ExampleEntry`'s
+    declaration order in `examples.rs`. `facets` (tan-cli#484) is an ADDITIVE
+    Python-only extension the oracle never carried -- when
+    `metadata/catalog.json` has an entry for this `sourceDir`, its fields are
+    appended after the original four, in the order alp-sdk's own issue
+    illustrated: `category`, `som`, `board`, `cores`, `coreCount`, `osSet`,
+    `declares`. `facets is None` (an older SDK, or an example the catalogue
+    does not know about yet) reproduces the pre-#484 four-key wire shape
+    exactly -- no existing reader breaks."""
 
     id: str
     source_dir: str
     title: str
     description: str
+    facets: ExampleFacets | None = None
 
-    def as_dict(self) -> dict[str, str]:
-        return {
+    def as_dict(self) -> dict[str, object]:
+        out: dict[str, object] = {
             "id": self.id,
             "sourceDir": self.source_dir,
             "title": self.title,
             "description": self.description,
         }
+        facets = self.facets
+        if facets is not None:
+            out["category"] = facets.category
+            if facets.som is not None:
+                out["som"] = facets.som
+            if facets.board is not None:
+                out["board"] = facets.board
+            if facets.cores is not None:
+                out["cores"] = [dict(core) for core in facets.cores]
+            if facets.core_count is not None:
+                out["coreCount"] = facets.core_count
+            if facets.os_set is not None:
+                out["osSet"] = list(facets.os_set)
+            if facets.declares is not None:
+                out["declares"] = dict(facets.declares)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +204,10 @@ def _is_dir_no_follow(entry: os.DirEntry) -> bool:
         return False
 
 
-def discover_examples(examples_root: Path) -> list[Example]:
+def discover_examples(
+    examples_root: Path,
+    facets_by_source_dir: dict[str, ExampleFacets] | None = None,
+) -> list[Example]:
     """Scan `<sdk>/examples` exactly two levels deep for `<category>/<name>`
     directories carrying a `board.yaml`, sorted by source dir.
 
@@ -178,7 +215,14 @@ def discover_examples(examples_root: Path) -> list[Example]:
     "no examples" are the same renderable answer, and `tan examples` returning
     exit 0 with `examples: []` is what lets the New Project flow say "no
     examples available" instead of showing a failure.
+
+    `facets_by_source_dir` (tan-cli#484, `tan.core.example_facets`) is looked
+    up by the SAME `source_dir` this function derives -- a directory this walk
+    finds but the catalogue does not know about (a newer example than the
+    checkout's committed `metadata/catalog.json`) simply gets no facets, same
+    as an omitted or unreadable catalogue; discovery is never gated on it.
     """
+    facets_by_source_dir = facets_by_source_dir or {}
     found: list[Example] = []
     for category in _subdirectories(examples_root):
         for project in _subdirectories(category):
@@ -199,6 +243,7 @@ def discover_examples(examples_root: Path) -> list[Example]:
                     source_dir=source_dir,
                     title=example_title_from_readme(readme, source_dir),
                     description=example_description_from_readme(readme),
+                    facets=facets_by_source_dir.get(source_dir),
                 )
             )
     found.sort(key=lambda e: e.source_dir)
@@ -487,7 +532,14 @@ def examples(
         if foreign_issue is not None:
             issues.append(foreign_issue)
         if sdk.path is not None:
-            found = discover_examples(sdk.path / "examples")
+            # tan-cli#484: an OPTIONAL enrichment pass, looked up by
+            # `sourceDir` -- `load_example_facets` never raises, so a
+            # checkout predating `metadata/catalog.json` (or one where it
+            # fails to parse) still lists every example exactly as before,
+            # just without the extra keys.
+            found = discover_examples(
+                sdk.path / "examples", load_example_facets(sdk.path)
+            )
             # tan-cli#407: the catalogue this command just listed can come from
             # a different checkout than `tan build` plans against, with both
             # envelopes reporting `sourceTier: "discovery"`. `sdk_root` is the
