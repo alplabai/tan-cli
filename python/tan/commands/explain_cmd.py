@@ -36,22 +36,50 @@ vendored `board.yaml` rather than a registry field
 deliberately blanked for a vendored template and reported "(none)" for
 `edge-ai-starter`, whose scaffold declares `tflite-micro`.
 
-**`data.som` (tan-cli#866): the SoM-support fact, structured, not just in
-prose.** A project template's `--template` hit carries `data.som.
-{supportedSkus,unsupportedSkuPrefixes}`, computed by `_som_support_data` from
-`scaffold.TEMPLATE_SUPPORTED_SKUS` / `scaffold.UNSUPPORTED_SOM_FAMILY_PREFIXES`
--- the SAME two facts `tan init` already gates `init.invalid-som` /
-`init.som-unsupported` on, READ here rather than retyped. Before this, the
-only place a template's SoM restriction was written down was inside
-`details[]` prose ("... (E1M-AEN801 only)"), which a consumer would have had
-to parse and which could silently drift from what `tan init` actually
-enforces -- #866 is named for exactly that string. The `iot-starter`
-description's own parenthetical is now GENERATED from the same data
-(`_only_note`), so the two can no longer disagree by construction; see
+**`data.som` (tan-cli#866): what `tan init` will accept/refuse for this
+template, structured, not just in prose.** A project template's `--template`
+hit carries `data.som.{initAcceptsSkus,initRefusesSkuPrefixes}`, computed by
+`_som_support_data` from `scaffold.TEMPLATE_SUPPORTED_SKUS` /
+`scaffold.UNSUPPORTED_SOM_FAMILY_PREFIXES` -- the SAME two tables `tan init`
+already gates `init.invalid-som` / `init.som-unsupported` on, READ here
+rather than retyped.
+
+**These are `tan init` REFUSAL predictions, not a capability statement --
+name them accordingly and do not rename them back.** (PR #985 review, major
+1.) `TEMPLATE_SUPPORTED_SKUS` is exactly, and only, the set `init_cmd` checks
+before writing a tree; it says nothing about which SKUs alp-sdk's own
+scaffold catalog actually validates a template against. Measured: for every
+template here except `iot-starter`/`multicore-mailbox`, alp-sdk's catalog
+`supported.som_skus` is the narrow `["E1M-AEN801", "E1M-V2N101"]`
+(`tan/templates/vendored/MANIFEST.md`), while `initRefusesSkuPrefixes` here
+publishes only `["E1M-NX9"]` for those same four -- i.e. "every SoM except
+NXP", 10 of 11 catalogued SKUs, not 2. That is not a bug in this field: tan
+is SDK-free by design (I-32 above) and `_family_bucket`
+(`tan.core.scaffold`) deliberately falls an unrecognised SKU prefix onto the
+default (Alif) tree rather than refusing it, so `tan init --template
+sensor-starter --som E1M-AEN301` really does exit 0 today. A field NAMED
+"supported" would be lying about capability for those 4 of 7 templates; a
+field that says "what tan init will accept" is exactly true, including for
+a SKU that does not exist (`E1M-ZZZ999` also predicts `ok`, correctly, by
+this policy). `python/tests/gates/test_no_new_hardware_facts.py` already
+tracks the underlying gap as its largest acknowledged debt item, retiring
+only once the SDK catalog's own per-template family mapping is readable from
+`metadata/**` -- that debt is orthogonal to and not resolved by this field;
+do not read `initAcceptsSkus`/`initRefusesSkuPrefixes` as "the SDK says this
+combination works".
+
+Before this PR, the only place a template's SoM restriction was written down
+was inside `details[]` prose ("... (E1M-AEN801 only)"), which a consumer
+would have had to parse and which could silently drift from what `tan init`
+actually enforces -- #866 is named for exactly that string. The `iot-starter`
+description's own parenthetical, and its explanation's Wi-Fi-transport
+sentence, are now GENERATED from the same data (`_only_note`, `_iot_wifi_note`),
+so neither can disagree with it by construction; see
 `tests/commands/test_explain_command.py`'s
-`test_every_only_qualifier_in_template_prose_matches_its_structured_som_data`
-for the drift gate over the one prose sentence (`multicore-mailbox`'s) this
-change did not also rewrite. Scoped to PROJECT templates only -- module
+`test_every_sku_mentioned_in_template_prose_matches_its_structured_som_data`
+for the drift gate over every OTHER SKU mention in project-template prose
+(`multicore-mailbox`'s explanation, the one sentence this change did not also
+make generated). Scoped to PROJECT templates only -- module
 templates and generation targets carry no SoM concept, so `data.som` is
 absent (not `null`) on those two selector kinds, the same absent-vs-null
 convention `--code`'s `data.diagnostic`/`data.suggestions` already use.
@@ -196,6 +224,39 @@ def _only_note(skus: tuple[str, ...] | None) -> str:
     return f" ({', '.join(skus)} only)"
 
 
+def _iot_wifi_note(skus: tuple[str, ...] | None) -> str:
+    """`iot-starter`'s explanation sentence about the CC3501E Wi-Fi transport,
+    with its SUPPORTED-SKU mentions (both of them) DERIVED from
+    `TEMPLATE_SUPPORTED_SKUS["iot-starter"]` rather than hand-typed a second
+    time. PR #985 review, major 3: #866 names this sentence, verbatim, as one
+    of the two prose carriers of this restriction the issue is about; before
+    this it was hand-typed independently of `_only_note`'s parenthetical, so
+    a hand-edit of only its trailing SKU passed the whole suite (mutant E in
+    that review). `E1M-V2N101` in the middle clause stays hand-typed: it is
+    not a claim of support (the opposite -- the Wi-Fi path that does NOT
+    exist there yet) and carries no table this module owns; it is the one
+    named entry in `test_explain_command.py`'s `_CONTRAST_MENTIONS`, so a
+    future rewrite that changes which SKU is contrasted still has to update
+    that gate on purpose rather than by accident.
+
+    `skus` empty/`None` is unreachable in practice (`iot-starter` is always a
+    key of `TEMPLATE_SUPPORTED_SKUS`) but degrades to a SKU-free form rather
+    than raising, matching `_only_note`'s style."""
+    if not skus:
+        return (
+            "AEN-only + preview: the CC3501E Wi-Fi transport is "
+            "silicon-validated on the supported SKU only; the Wi-Fi path on "
+            "any other SoM does not exist yet, so --som is fixed for this "
+            "template."
+        )
+    sku = skus[0]
+    return (
+        f"AEN-only + preview: {sku}'s CC3501E Wi-Fi transport is "
+        f"silicon-validated; the E1M-V2N101 Wi-Fi path does not exist yet, "
+        f"so --som is fixed to {sku} for this template."
+    )
+
+
 @dataclass(frozen=True)
 class ProjectTemplate:
     """A `tan init` template as `tan explain` describes it.
@@ -297,9 +358,7 @@ PROJECT_TEMPLATES: tuple[ProjectTemplate, ...] = (
             "Real Zephyr app vendored from the SDK's `iot` scaffold: brings up Wi-Fi "
             "via the CC3501E bridge and publishes an mqtts:// (TLS) MQTT telemetry "
             "reading on a cadence, through the portable <alp/iot.h> surface.",
-            "AEN-only + preview: E1M-AEN801's CC3501E Wi-Fi transport is "
-            "silicon-validated; the E1M-V2N101 Wi-Fi path does not exist yet, so "
-            "--som is fixed to E1M-AEN801 for this template.",
+            _iot_wifi_note(TEMPLATE_SUPPORTED_SKUS.get("iot-starter")),
             "Build with `west build -b <board>` after `export ALP_SDK_ROOT=<your "
             "alp-sdk checkout>`.",
         ),
@@ -561,48 +620,83 @@ def _format_feature_flags(features: tuple[bool, bool, bool, bool]) -> str:
 
 
 def _som_support_data(template_id: str) -> dict[str, object]:
-    """`data.som` for one project template -- the exact SoM-support facts
-    `tan init` already gates this template on, READ (never retyped) from
-    `TEMPLATE_SUPPORTED_SKUS`/`UNSUPPORTED_SOM_FAMILY_PREFIXES`
+    """`data.som` for one project template -- what `tan init --template
+    <template_id>` will ACCEPT or REFUSE for `--som`, READ (never retyped)
+    from `TEMPLATE_SUPPORTED_SKUS`/`UNSUPPORTED_SOM_FAMILY_PREFIXES`
     (`tan.core.scaffold`) so this cannot drift from the refusal it describes
     (tan-cli#866).
 
-    `supportedSkus` mirrors the `init.invalid-som` allowlist -- `None` when
-    this template carries none. `unsupportedSkuPrefixes` mirrors the
+    PR #985 review, major 1: named `initAcceptsSkus`/`initRefusesSkuPrefixes`
+    ON PURPOSE, not `supportedSkus`/`unsupportedSkuPrefixes` -- this is a
+    REFUSAL policy, not a capability statement, and the two provably differ:
+    `tan.core.scaffold._family_bucket` falls an unrecognised SKU prefix onto
+    the default (Alif) tree rather than refusing it, so for every template
+    here except `iot-starter`/`multicore-mailbox`, `initAcceptsSkus` is wider
+    than alp-sdk's own scaffold-catalog `supported.som_skus` (see the module
+    docstring above for the measured gap). A name that said "supported"
+    would claim capability this field cannot back for 4 of 7 templates.
+
+    `initAcceptsSkus` mirrors the `init.invalid-som` allowlist -- `None` when
+    this template carries none. `initRefusesSkuPrefixes` mirrors the
     `init.som-unsupported` family exclusion -- always `[]` when
-    `supportedSkus` is set, because an exact-SKU allowlist is strictly
+    `initAcceptsSkus` is set, because an exact-SKU allowlist is strictly
     narrower than (and already implies) that exclusion; repeating it would be
     a second way to say the same thing, the exact class of duplication this
     field exists to retire. A template with neither restriction
     (`minimal-app`, tan's one vendor-neutral, non-family-gated template --
     `scaffold.is_family_gated` is `False` for it alone) reports
-    `supportedSkus: null, unsupportedSkuPrefixes: []`: every SoM,
-    unconditionally.
+    `initAcceptsSkus: null, initRefusesSkuPrefixes: []`: `tan init` accepts
+    every SoM for it, unconditionally.
     """
     supported = TEMPLATE_SUPPORTED_SKUS.get(template_id)
     if supported is not None:
-        return {"supportedSkus": list(supported), "unsupportedSkuPrefixes": []}
+        return {"initAcceptsSkus": list(supported), "initRefusesSkuPrefixes": []}
     if is_family_gated(template_id):
         return {
-            "supportedSkus": None,
-            "unsupportedSkuPrefixes": list(UNSUPPORTED_SOM_FAMILY_PREFIXES),
+            "initAcceptsSkus": None,
+            "initRefusesSkuPrefixes": list(UNSUPPORTED_SOM_FAMILY_PREFIXES),
         }
-    return {"supportedSkus": None, "unsupportedSkuPrefixes": []}
+    return {"initAcceptsSkus": None, "initRefusesSkuPrefixes": []}
+
+
+def _family_excluded_note(template_id: str) -> str | None:
+    """One `details[]` line for a FAMILY-gated (but not exact-SKU-gated)
+    project template, DERIVED from `UNSUPPORTED_SOM_FAMILY_PREFIXES` -- `None`
+    when there is nothing to add.
+
+    PR #985 review, minor 5: before this, text mode said nothing at all about
+    the family exclusion for `zephyr-app`/`sensor-starter`/`edge-ai-starter`/
+    `board-diagnostics` even after `data.som.initRefusesSkuPrefixes` started
+    carrying it in JSON -- a human running `tan explain --template zephyr-app`
+    with no `--format json` only discovered the restriction as
+    `init.som-unsupported`, at `tan init` time. `None` for `minimal-app` (not
+    family-gated at all) and for the two exact-SKU-gated templates
+    (`iot-starter`/`multicore-mailbox`): `_only_note` already reports their
+    narrower restriction from the description line, so a second sentence here
+    would repeat it rather than add information."""
+    if template_id in TEMPLATE_SUPPORTED_SKUS or not is_family_gated(template_id):
+        return None
+    if not UNSUPPORTED_SOM_FAMILY_PREFIXES:
+        return None
+    prefixes = ", ".join(UNSUPPORTED_SOM_FAMILY_PREFIXES)
+    return f"Refuses --som for these SoM families: {prefixes}."
 
 
 def _project_template_details(pt: ProjectTemplate) -> list[str]:
-    """Description, per-template explanation, default libraries, default
-    features. Raises `TemplateDataError` when the vendored board.yaml behind
-    the libraries line will not read."""
+    """Description, per-template explanation, the family-exclusion note (when
+    one applies), default libraries, default features. Raises
+    `TemplateDataError` when the vendored board.yaml behind the libraries
+    line will not read."""
     names = vendored_library_names_for(pt.id)
     if names is None:
         names = list(pt.libs)  # `minimal-app` only: no vendored tree to read.
-    return [
-        pt.description,
-        *pt.explanation,
-        f"Default libraries: {_format_library_names(names)}",
-        f"Default features: {_format_feature_flags(pt.features)}",
-    ]
+    details = [pt.description, *pt.explanation]
+    family_note = _family_excluded_note(pt.id)
+    if family_note is not None:
+        details.append(family_note)
+    details.append(f"Default libraries: {_format_library_names(names)}")
+    details.append(f"Default features: {_format_feature_flags(pt.features)}")
+    return details
 
 
 def _module_template_details(mt: ModuleTemplate) -> list[str]:

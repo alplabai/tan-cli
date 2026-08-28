@@ -395,3 +395,5 @@ and write both files from the real merged tree.
 - 2026-08-28 -- tan-cli#866: explain_cmd gains data.som + scaffold gains UNSUPPORTED_SOM_FAMILY_PREFIXES/is_family_gated -- structured per-template SoM support
     - tan/commands/explain_cmd.py: 1138 -> 1216
     - tan/core/scaffold.py: 1538 -> 1566
+- 2026-08-28 -- tan-cli#985 review: rename data.som fields to refusal semantics, widen the prose drift gate past a single phrasing, generate iot-starter's second SoM sentence, surface the family exclusion in text mode
+    - tan/commands/explain_cmd.py: 1216 -> 1310

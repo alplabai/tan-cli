@@ -105,16 +105,24 @@ def test_features_default_to_all_false_lowercase():
 
 
 # --------------------------------------------------------------------------
-# Structured SoM support -- data.som (tan-cli#866)
+# `tan init` --som accept/refuse policy -- data.som (tan-cli#866)
 # --------------------------------------------------------------------------
+#
+# PR #985 review renamed the two `data.som` fields (major 1):
+# `supportedSkus`/`unsupportedSkuPrefixes` sounded like a capability
+# statement, but they are exactly and only `tan init`'s REFUSAL policy --
+# `initAcceptsSkus`/`initRefusesSkuPrefixes` say that plainly. Do not rename
+# back to the old keys; see `explain_cmd.py`'s module docstring and
+# `_som_support_data`'s docstring for the measured gap against alp-sdk's own
+# scaffold-catalog `supported.som_skus` that makes the old names wrong.
 
 
 def test_minimal_app_carries_no_som_restriction():
     """minimal-app is tan's one vendor-neutral, non-family-gated template
     (`scaffold.plan_template_files` never calls `_vendored_family` for it) --
-    every SoM, unconditionally."""
+    `tan init` accepts every SoM for it, unconditionally."""
     som = resolve("minimal-app", None).extra_data["som"]
-    assert som == {"supportedSkus": None, "unsupportedSkuPrefixes": []}
+    assert som == {"initAcceptsSkus": None, "initRefusesSkuPrefixes": []}
 
 
 @pytest.mark.parametrize("template_id", ["iot-starter", "multicore-mailbox"])
@@ -125,7 +133,7 @@ def test_explicitly_gated_templates_report_the_real_sku_allowlist(template_id):
     regression to an empty/wrong allowlist REDs here."""
     assert TEMPLATE_SUPPORTED_SKUS[template_id] == ("E1M-AEN801",)
     som = resolve(template_id, None).extra_data["som"]
-    assert som == {"supportedSkus": ["E1M-AEN801"], "unsupportedSkuPrefixes": []}
+    assert som == {"initAcceptsSkus": ["E1M-AEN801"], "initRefusesSkuPrefixes": []}
 
 
 @pytest.mark.parametrize(
@@ -136,10 +144,14 @@ def test_family_gated_templates_report_the_real_unsupported_prefix_list(template
     family-tree exclusion `tan init` refuses `init.som-unsupported` against.
     Pinned to the real current value (NXP: alp-sdk's scaffold catalog ships
     no vendored tree for it) so a regression to an empty exclusion list REDs
-    here, not just a missing key."""
+    here, not just a missing key. This is `tan init`'s ACCEPT/REFUSE policy,
+    not what alp-sdk's own catalog validates -- `initRefusesSkuPrefixes` is
+    wider than `["E1M-AEN301".."E1M-AEN801"] + ["E1M-V2N101"]`-only support
+    on purpose (`_family_bucket`'s unrecognised-prefix fallback), see
+    `explain_cmd.py`'s module docstring."""
     assert UNSUPPORTED_SOM_FAMILY_PREFIXES == ("E1M-NX9",)
     som = resolve(template_id, None).extra_data["som"]
-    assert som == {"supportedSkus": None, "unsupportedSkuPrefixes": ["E1M-NX9"]}
+    assert som == {"initAcceptsSkus": None, "initRefusesSkuPrefixes": ["E1M-NX9"]}
 
 
 def test_som_is_absent_not_null_for_module_templates_and_generation_targets():
@@ -159,39 +171,99 @@ def test_iot_starter_json_envelope_carries_structured_som_support_data():
     assert result.exit_code == 0
     doc = json.loads(result.stdout)
     assert doc["data"]["som"] == {
-        "supportedSkus": ["E1M-AEN801"],
-        "unsupportedSkuPrefixes": [],
+        "initAcceptsSkus": ["E1M-AEN801"],
+        "initRefusesSkuPrefixes": [],
     }
 
 
-_ONLY_QUALIFIER_RE = re.compile(r"\bE1M-[A-Z0-9]+\s+only\b")
+#: Any SKU-shaped token, not just one adjacent to the word "only" -- PR #985
+#: review, major 2: the previous `\bE1M-[A-Z0-9]+\s+only\b` version of this
+#: gate matched `"(E1M-AEN801 only)"`/`"E1M-AEN801 only:"` and NOTHING else,
+#: so a copy-edit that kept the wrong SKU but changed the surrounding English
+#: (measured: `"Supported on E1M-V2N101 alone: ..."`, also `"AEN801 only"`,
+#: `"only on E1M-AEN801"`, `"E1M-AEN801-only"`, `"E1M-AEN801 ONLY"`,
+#: `"Requires E1M-AEN801"`, `"--som is fixed to E1M-AEN801"`) sailed through
+#: every test in this file. This version does not look for "only" or any
+#: other English word at all -- it extracts every SKU LITERAL a template's
+#: prose contains and requires each one to be reconcilable with
+#: `TEMPLATE_SUPPORTED_SKUS`, which inverts the problem from "enumerate every
+#: phrasing" to "any mention must agree" and so stays true as prose changes.
+_SKU_MENTION_RE = re.compile(r"\bE1M-[A-Z0-9]+\b")
+
+#: SKUs a template's prose deliberately mentions as a CONTRAST, not a claim
+#: of support -- named here, per template, so the gate below can't be
+#: silently widened to swallow an unrelated future drift the way a phrasing
+#: filter did. Every entry needs its own on-the-record reason.
+_CONTRAST_MENTIONS: dict[str, frozenset[str]] = {
+    # iot-starter's explanation names E1M-V2N101 to say its Wi-Fi path does
+    # NOT exist yet -- the opposite of a support claim (see
+    # `explain_cmd._iot_wifi_note`).
+    "iot-starter": frozenset({"E1M-V2N101"}),
+}
 
 
-def test_every_only_qualifier_in_template_prose_matches_its_structured_som_data():
-    """The drift gate tan-cli#866 asks for: any project template whose
-    description/explanation prose still reads "<SKU> only" must name exactly
-    the SKU(s) `TEMPLATE_SUPPORTED_SKUS` (and therefore `data.som.
-    supportedSkus`) carries for that template. `iot-starter`'s description is
-    now GENERATED (`_only_note`) and cannot go stale; this is the gate over
-    the one sentence this change deliberately left hand-written --
-    `multicore-mailbox`'s explanation, which also says "E1M-AEN801 only".
+def test_every_sku_mentioned_in_template_prose_matches_its_structured_som_data():
+    """The drift gate tan-cli#866 asks for, widened past a single phrasing
+    (PR #985 review, major 2): ANY `E1M-<...>` SKU token appearing anywhere
+    in a project template's description/explanation prose must be a SKU
+    `TEMPLATE_SUPPORTED_SKUS` actually allows for that template, or a named
+    `_CONTRAST_MENTIONS` exemption. `iot-starter`'s description parenthetical
+    and Wi-Fi-transport sentence are GENERATED (`_only_note`, `_iot_wifi_note`)
+    and cannot go stale; this is the gate over the one sentence this change
+    deliberately left hand-written -- `multicore-mailbox`'s explanation, which
+    also says "E1M-AEN801 only".
+
     Probe: hand-edit `TEMPLATE_SUPPORTED_SKUS["multicore-mailbox"]` to a
-    different SKU with the prose untouched and this test REDs -- it does not
+    different SKU with the prose untouched, or rewrite the prose's SKU with
+    the table untouched (in ANY phrasing), and this test REDs -- it does not
     merely check that a key exists."""
     for pt in PROJECT_TEMPLATES:
         prose = " ".join([pt.description, *pt.explanation])
-        mentioned = {m.split()[0] for m in _ONLY_QUALIFIER_RE.findall(prose)}
+        mentioned = set(_SKU_MENTION_RE.findall(prose))
         supported = TEMPLATE_SUPPORTED_SKUS.get(pt.id)
-        if not mentioned:
-            continue
-        assert supported is not None, (
-            f"{pt.id}: prose claims {sorted(mentioned)!r} only, but "
-            f"TEMPLATE_SUPPORTED_SKUS carries no restriction for it"
+        allowed = (set(supported) if supported is not None else set())
+        allowed |= _CONTRAST_MENTIONS.get(pt.id, frozenset())
+        unexplained = mentioned - allowed
+        assert not unexplained, (
+            f"{pt.id}: prose mentions {sorted(unexplained)!r}, which "
+            f"TEMPLATE_SUPPORTED_SKUS ({sorted(supported) if supported else supported!r}) "
+            f"does not allow and no _CONTRAST_MENTIONS entry exempts"
         )
-        assert mentioned == set(supported), (
-            f"{pt.id}: prose says {sorted(mentioned)!r} only, but "
-            f"TEMPLATE_SUPPORTED_SKUS says {sorted(supported)!r}"
-        )
+
+
+@pytest.mark.parametrize(
+    "template_id", ["zephyr-app", "sensor-starter", "edge-ai-starter", "board-diagnostics"]
+)
+def test_family_gated_templates_report_their_exclusion_in_text_mode_too(template_id):
+    """PR #985 review, minor 5: text mode used to say nothing at all about
+    the family exclusion for these four templates, even though JSON already
+    carried `data.som.initRefusesSkuPrefixes` -- a human running `tan explain
+    --template <id>` with no `--format json` only discovered the restriction
+    as `init.som-unsupported`, at `tan init` time. Derived from the SAME
+    table `data.som` reads, not a second hand-typed sentence."""
+    lines = details(template=template_id)
+    assert "Refuses --som for these SoM families: E1M-NX9." in lines
+
+
+def test_exact_sku_gated_templates_get_no_redundant_family_exclusion_line():
+    """`iot-starter`/`multicore-mailbox` already report their (narrower)
+    restriction via `_only_note`'s description parenthetical -- a second,
+    family-level sentence here would repeat it, not add information."""
+    assert not any(
+        "Refuses --som for these SoM families" in line for line in details(template="iot-starter")
+    )
+    assert not any(
+        "Refuses --som for these SoM families" in line
+        for line in details(template="multicore-mailbox")
+    )
+
+
+def test_minimal_app_gets_no_family_exclusion_line():
+    """minimal-app is not family-gated at all (`is_family_gated` is `False`
+    only for it) -- no exclusion sentence to add."""
+    assert not any(
+        "Refuses --som for these SoM families" in line for line in details(template="minimal-app")
+    )
 
 
 @pytest.mark.parametrize(
