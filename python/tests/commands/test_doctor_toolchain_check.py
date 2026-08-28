@@ -7,10 +7,20 @@ check consults, exercised here through real files on disk under `tmp_path`.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from tan.commands import doctor_cmd
 from tan.core import toolchain_provision as tp
+
+#: `_zephyr_sdk_root_valid` (`doctor_cmd.py`) looks for THIS exact name --
+#: `arm-zephyr-eabi-gcc.exe` on Windows, `arm-zephyr-eabi-gcc` everywhere
+#: else. A fixture that always plants the POSIX name reports a false `fail`
+#: on Windows CI (tan-cli#990 review's own blocker-fix test did exactly
+#: this on its first real CI run) -- not because the adoption path is
+#: broken, but because the fixture's "host toolchain" was never valid on
+#: that platform to begin with.
+_GCC_NAME = "arm-zephyr-eabi-gcc.exe" if os.name == "nt" else "arm-zephyr-eabi-gcc"
 
 MANIFEST = json.dumps(
     {
@@ -112,7 +122,7 @@ def test_a_host_toolchain_at_the_pinned_version_is_a_pass_not_a_fail(tmp_path, m
     home = tmp_path / "home"
     host_sdk = home / "zephyr-sdk-1.0.1"
     (host_sdk / "gnu" / "arm-zephyr-eabi" / "bin").mkdir(parents=True)
-    gcc = host_sdk / "gnu" / "arm-zephyr-eabi" / "bin" / "arm-zephyr-eabi-gcc"
+    gcc = host_sdk / "gnu" / "arm-zephyr-eabi" / "bin" / _GCC_NAME
     gcc.write_text("#!/bin/sh\necho fake gcc\n", encoding="utf-8")
     gcc.chmod(0o755)
     (host_sdk / "sdk_version").write_text("1.0.1\n", encoding="utf-8")
@@ -138,7 +148,7 @@ def test_a_host_toolchain_at_the_wrong_version_still_fails(tmp_path, monkeypatch
     home = tmp_path / "home"
     host_sdk = home / "zephyr-sdk-0.16.5"
     (host_sdk / "gnu" / "arm-zephyr-eabi" / "bin").mkdir(parents=True)
-    gcc = host_sdk / "gnu" / "arm-zephyr-eabi" / "bin" / "arm-zephyr-eabi-gcc"
+    gcc = host_sdk / "gnu" / "arm-zephyr-eabi" / "bin" / _GCC_NAME
     gcc.write_text("#!/bin/sh\necho fake gcc\n", encoding="utf-8")
     gcc.chmod(0o755)
     (host_sdk / "sdk_version").write_text("0.16.5\n", encoding="utf-8")
