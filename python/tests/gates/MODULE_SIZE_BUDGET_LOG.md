@@ -384,3 +384,8 @@ and write both files from the real merged tree.
     - tan/planner/kconfig.py: 2107 -> 2108
 - 2026-08-28 -- tan-cli#963: generate_cmd.py's own docstring for pin_issue/foreign_issue prepend-ordering grew the module 4 lines past its 1400 ceiling; no compression to fit, per repo convention
     - tan/commands/generate_cmd.py: 1400 -> 1404
+- 2026-08-28 -- tan-cli#964: read-path schema validation entry point added to loader.py/presets_cmd.py/size_cmd.py, plus the new tan.core.metadata_schema module's docstrings pushed presets_cmd.py, size_cmd.py, and planner/loader.py over their recorded module-size budgets; function count grew too (schema_errors/validate_document/_refuse_on_schema_errors and friends).
+    - tan/commands/presets_cmd.py: 949 -> 1031
+    - tan/commands/size_cmd.py: 840 -> 895
+    - tan/planner/loader.py: 1335 -> 1376
+    - function_count_budget: 277 -> 279

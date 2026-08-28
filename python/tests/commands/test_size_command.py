@@ -96,6 +96,79 @@ def test_measured_slice_reports_a_full_row(tmp_path):
     assert doc["issues"] == []
 
 
+#: `soc-spec-v1.schema.json`, narrowed to the one field the whole
+#: #957/#962/#964/#965/#969 crash family is about -- not a byte-for-byte
+#: mirror of the real schema, so this file's coverage does not depend on it
+#: never changing shape.
+_SOC_SPEC_SCHEMA = json.dumps({
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+        "cores": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "type": {"type": "string"}},
+            },
+        }
+    },
+})
+
+
+def test_a_schema_invalid_soc_json_warns_but_still_measures(tmp_path):
+    """tan-cli#964, the WARN half of the decided rule, at `tan size`: a
+    schema-invalid `cores[].type` (a number, which `soc-spec-v1.schema.json`
+    forbids) does not change what gets measured -- the budget still resolves
+    from `soc_flash_mb`/`tcm_kb`, fields this reader never even looks at --
+    but the envelope now names the file, the JSON pointer, and what was
+    found, instead of the schema violation being invisible.
+
+    Mutation-proven: commenting out the `issues.extend(Issue("size.metadata
+    -schema-invalid", ...))` line in `size_cmd._run` (byte copy restored
+    after, never `git checkout`) turns this test's `issues` assertion RED
+    while leaving `row["flash"]`/`row["ram"]` unaffected -- proving the
+    warning is additive. Restoring turns it GREEN.
+    """
+    soc = '{"soc_flash_mb": 5.5, "cores": [{"id": "m55_hp", "type": 7, "tcm_kb": 1280}]}'
+    footprint_project(tmp_path, "E1M-TEST", 4096, 2048, soc)
+    write(tmp_path / "sdk" / "metadata" / "schemas" / "soc-spec-v1.schema.json", _SOC_SPEC_SCHEMA)
+
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
+    assert result.returncode == 0
+    doc = envelope(result)
+    assert doc["ok"] is True
+    row = doc["data"]["slices"][0]
+    assert row["flash"] == {"used": 4096, "total": 5_767_168, "pct": 0.1}
+    soc_path = "sdk/metadata/socs/test/fam/part.json"
+    assert doc["issues"] == [
+        {
+            "code": "size.metadata-schema-invalid",
+            "severity": "warning",
+            "message": f"{soc_path}: cores/0/type: 7 is not of type 'string'",
+        }
+    ]
+
+    text_result = run_cli(tmp_path, "--build-root", "br", "--sdk-root", "sdk")
+    assert f"warning: {soc_path}: cores/0/type: 7 is not of type 'string'" in text_result.stderr
+
+
+def test_a_schema_valid_soc_json_carries_no_metadata_schema_issue(tmp_path):
+    """The control: the identical fixture with a schema-VALID `type` produces
+    no `size.metadata-schema-invalid` issue on either mode."""
+    soc = '{"soc_flash_mb": 5.5, "cores": [{"id": "m55_hp", "type": "cortex-m55", "tcm_kb": 1280}]}'
+    footprint_project(tmp_path, "E1M-TEST", 4096, 2048, soc)
+    write(tmp_path / "sdk" / "metadata" / "schemas" / "soc-spec-v1.schema.json", _SOC_SPEC_SCHEMA)
+
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
+    assert result.returncode == 0
+    doc = envelope(result)
+    assert doc["ok"] is True
+    assert doc["issues"] == []
+
+    text_result = run_cli(tmp_path, "--build-root", "br", "--sdk-root", "sdk")
+    assert "metadata-schema-invalid" not in text_result.stderr
+
+
 def test_sdk_root_is_reported_forward_slashed_and_never_null(tmp_path):
     footprint_project(tmp_path, "E1M-TEST", 4096, 2048, SOC_5M5)
     doc = envelope(

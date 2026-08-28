@@ -35,6 +35,12 @@ try:
 except ImportError:
     sys.exit("alp_orchestrate: jsonschema is required.  Install via `pip install jsonschema`.")
 
+from tan.core.metadata_schema import (
+    soc_spec_schema_path,
+    som_preset_schema_path,
+    validate_document,
+)
+
 from . import sdk_compat
 from .models import (
     BoardProject,
@@ -763,6 +769,35 @@ def _check_sdk_supports_hw_rev(
             f"hw_rev this SDK supports.")
 
 
+def _refuse_on_schema_errors(
+    doc: dict[str, Any], schema_path: Path, source: Path, schema_name: str, subject: str,
+) -> None:
+    """tan-cli#964: refuse a `board.yaml`-bound `tan build`/`tan generate` run
+    when the SoM preset or SoC spec it just read does not validate against
+    its own schema.
+
+    This is the REFUSE half of #964's decided rule: `load_board_yaml` is what
+    `tan build` and `tan generate` (via `planner_root.emit` /
+    `planner_emit.render`) call to turn a `board.yaml` into a plan or an
+    emitted file, and every `OrchestratorError` raised anywhere in that walk
+    already becomes a coded refusal at the command layer (`build.plan-
+    unavailable` / `generate.emit-failed`) rather than a traceback -- so
+    raising here, at the point the document is READ, closes the read-path gap
+    #964 is about with the SAME refusal machinery every other loader check in
+    this file already uses (`_check_hw_rev_exists` and friends), not a new
+    one. `tan.core.metadata_schema.validate_document` never raises itself
+    (a missing schema file degrades to one message, not an exception) -- the
+    refusal, and its exit code/issue code, are entirely this function's
+    unconditional-if-non-empty read of the returned list.
+    """
+    errors = validate_document(doc, schema_path, source)
+    if not errors:
+        return
+    raise OrchestratorError(
+        f"{subject} does not validate against {schema_name}:\n" +
+        "\n".join(f"  - {e}" for e in errors))
+
+
 def _resolve_board_impl(
     project: dict[str, Any],
     metadata_root: Path,
@@ -778,6 +813,9 @@ def _resolve_board_impl(
             f"no preset for SoM SKU {sku} at "
             f"{sku_preset_path.relative_to(REPO) if sku_preset_path.is_relative_to(REPO) else sku_preset_path}")
     som_preset = _load_yaml(sku_preset_path)
+    _refuse_on_schema_errors(
+        som_preset, som_preset_schema_path(metadata_root), sku_preset_path,
+        "som-preset-v1", f"SoM preset {sku}")
 
     # Resolve SoC spec via the preset's `silicon:` ref.
     silicon = som_preset.get("silicon")
@@ -789,6 +827,9 @@ def _resolve_board_impl(
         raise OrchestratorError(
             f"no SoC spec at {soc_path.relative_to(REPO) if soc_path.is_relative_to(REPO) else soc_path} for ref '{silicon}'")
     soc_spec = _load_json(soc_path)
+    _refuse_on_schema_errors(
+        soc_spec, soc_spec_schema_path(metadata_root), soc_path,
+        "soc-spec-v1", f"SoC spec for {silicon}")
 
     # Board definition.  Two mutually-exclusive sources (the
     # schema's `oneOf` rule enforces this):

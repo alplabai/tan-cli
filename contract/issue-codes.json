@@ -1204,6 +1204,14 @@
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "presets.metadata-schema-invalid",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/presets_cmd.py",
+      "note": "tan-cli#964: emitted once per JSON-Schema violation found while `tan presets` reads a `metadata/e1m_modules/*.yaml` SoM preset or the `metadata/socs/**` SoC JSON its `silicon:` ref resolves to, against `som-preset-v1.schema.json`/`soc-spec-v1.schema.json` respectively. `message` is `<file>: <json pointer>: <what jsonschema found>` (e.g. `metadata/socs/ae822.json: cores/2/type: 7 is not of type 'string'`), never the bare string 'schema validation failed'. WARN-not-refuse is deliberate (#964's decided rule): `tan presets` already tolerates a missing/malformed SoM detail and degrades the affected field to its existing empty sentinel (`type: \"\"`, `allowedOs: []`) -- this code makes that degrade VISIBLE, it does not change what gets listed or the command's exit code. A checkout whose bound `metadata/schemas/*.schema.json` is simply absent (an SDK predating it, or a synthetic/partial root) emits nothing at all, not this code -- see `tan.core.metadata_schema.validate_document`."
+    },
+    {
       "code": "run.exec-failed",
       "status": "reserved",
       "severity": "error",
@@ -1314,6 +1322,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/size_cmd.py",
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "size.metadata-schema-invalid",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/size_cmd.py",
+      "note": "tan-cli#964: emitted once per JSON-Schema violation found while `tan size` reads a slice's SoM preset or SoC JSON to resolve its FLASH/RAM budget, against `som-preset-v1.schema.json`/`soc-spec-v1.schema.json` respectively. `message` is `<file>: <json pointer>: <what jsonschema found>`, deduplicated across slices that share the same SoM (a heterogeneous SoM's cores all read the same preset/SoC JSON). WARN-not-refuse (#964's decided rule): `tan size` already degrades a bad preset/SoC JSON to `budget: unknown` (see `size_cmd._resolve_slice_budget`) -- this code makes WHY visible, it does not change the measured rows or the command's exit code. A checkout whose bound schema file is simply absent emits nothing at all -- see `tan.core.metadata_schema.validate_document`."
     },
     {
       "code": "size.over-budget",
