@@ -185,20 +185,39 @@ def resolve_ethos_u_variant(sku: str, *, metadata_root: Path) -> str | None:
     presets carry no per-instance Ethos-U variant), or for a preset that
     doesn't exist on disk (callers that need a hard failure for a bad SKU
     should resolve targets first; this function stays soft-fail, matching
-    `tan.soc_ref.resolve_soc_path`'s stance)."""
+    `tan.soc_ref.resolve_soc_path`'s stance). Also soft-fails (None, never a
+    raise) for a preset document, `inference` block, or `ethos_u_variant`
+    value that parses to the wrong shape -- live on `tan model check`
+    (`check.py:155`, `check.py:537`), same #957/#965/#969 defect class,
+    tan-cli#979 review finding 2: `inference: 7` and a scalar top-level
+    preset document (e.g. a YAML file containing only `7`) both raised
+    `AttributeError: 'int' object has no attribute 'get'` (measured), and
+    `ethos_u_variant: 7` returned the int straight into
+    `analyze_backend(variant: str | None)` uncaught."""
     preset_path = Path(metadata_root) / "e1m_modules" / f"{sku}.yaml"
     if not preset_path.is_file():
         return None
     import yaml  # noqa: PLC0415 -- deferred (tan-cli#810); see sdk_cmd's `_releases_opener`
 
-    preset = yaml.safe_load(preset_path.read_text(encoding="utf-8")) or {}
-    # `or {}`, not a `.get(..., {})` default: a preset carrying an explicit
-    # but EMPTY `inference:` block parses to `{"inference": None}`, and the
-    # dict-literal default only fires when the key is absent entirely --
-    # `.get("inference", {})` still returns None there, and `.get()` on None
-    # raises AttributeError, contradicting this function's own soft-fail
-    # docstring.
-    return (preset.get("inference") or {}).get("ethos_u_variant")
+    preset = yaml.safe_load(preset_path.read_text(encoding="utf-8"))
+    # A preset document that doesn't even parse to a dict (a bare scalar or
+    # list at the YAML top level) can't be walked by the `.get()`s below --
+    # treat it exactly like a missing preset rather than let it reach
+    # `.get()` and raise.
+    if not isinstance(preset, dict):
+        return None
+    # `isinstance` check, not a `.get(..., {})` default: a preset carrying an
+    # explicit but EMPTY `inference:` block parses to `{"inference": None}`,
+    # and the dict-literal default only fires when the key is absent
+    # entirely -- `.get("inference", {})` still returns None there, and
+    # `.get()` on None raises AttributeError, contradicting this function's
+    # own soft-fail docstring. A non-dict, non-null `inference:` (e.g. `7`)
+    # needs the same treatment, which a bare `or {}` alone does not give it.
+    inference = preset.get("inference")
+    if not isinstance(inference, dict):
+        return None
+    ethos_u_variant = inference.get("ethos_u_variant")
+    return ethos_u_variant if isinstance(ethos_u_variant, str) else None
 
 
 def _load_table(path: Path) -> dict | None:
@@ -220,9 +239,12 @@ def _table_variant(doc: dict) -> str:
 
     `metadata/npu_ops/**` has NO schema at all (tan-cli#969) -- unlike the
     `soc-spec-v1.schema.json`/`som-preset-v1.schema.json` family #964 covers,
-    there is nothing to eventually enforce on the read path here, so this
-    isinstance guard is the only defence this population will ever get, not
-    a stopgap ahead of a schema. `.get()` off a non-dict `applies_to` (e.g.
+    there is nothing to eventually enforce on the read path here today, so
+    this isinstance guard is the only defence this population gets FOR NOW,
+    pending an `npu-ops-v1.schema.json` (tracked: alp-sdk#1801) -- not a
+    permanent substitute for one; do not read this comment as a decision
+    that `npu_ops/**` should stay schema-free. `.get()` off a non-dict
+    `applies_to` (e.g.
     `applies_to: 7`) raises `AttributeError: 'int' object has no attribute
     'get'`, and `.split()` on the caller's side off a non-string `variant`
     (e.g. `variant: 7`) raises `AttributeError: 'int' object has no
@@ -243,6 +265,37 @@ def _table_variant(doc: dict) -> str:
         applies_to = {}
     table_variant = applies_to.get("variant", "")
     return table_variant if isinstance(table_variant, str) else ""
+
+
+def _table_supported_ops(doc: dict) -> list[str] | None:
+    """@doc's `supported_ops`, validated to a list of `str`. `None` for any
+    other shape -- the caller (`analyze_backend`) treats that identically to
+    a table that failed to resolve at all, never as evidence to score
+    against (tan-cli#979 review finding 1, on top of #969's `applies_to`/
+    `variant` guards above).
+
+    `_score_ops` used to read `set(doc.get("supported_ops", []))` straight
+    off the same schema-free `metadata/npu_ops/**` document `_table_variant`
+    sanitises above, a few lines below on the same `analyze_backend` call
+    path. `supported_ops: 7` raised `TypeError: 'int' object is not
+    iterable`; `supported_ops: null` raised the same as `'NoneType' object
+    is not iterable` -- but `supported_ops: "CONV_2D"` raised NOTHING:
+    `set("CONV_2D")` silently built a set of seven characters no real
+    operator name ever matches, so every op came back `cpu-only`/
+    `cpu-certain` -- a fabricated negative manufactured from malformed data,
+    exactly the outcome this module's own docstring (`analyze.py:18-23`)
+    names as the worst one it exists to prevent. A crash at least announces
+    itself; that one would have shipped a wrong verdict silently.
+
+    A genuinely-absent key defaults to `[]` (a table that legitimately
+    supports no operators) and passes straight through -- only a PRESENT but
+    wrong-shaped field is rejected."""
+    supported_ops = doc.get("supported_ops", [])
+    if not isinstance(supported_ops, list):
+        return None
+    if not all(isinstance(op, str) for op in supported_ops):
+        return None
+    return supported_ops
 
 
 def _resolve_table(metadata_root: Path, backend: str, variant: str | None) -> tuple[Path, dict] | None:
@@ -308,7 +361,15 @@ def _empty_ops_report(backend: str, table_path: Path, variant: str | None) -> Ba
 
 def _score_ops(ops: Sequence[OpDesc], doc: dict) -> tuple[list[OpVerdict], int, int]:
     """Per-op npu-eligible/cpu-certain verdicts against @doc's `supported_ops`,
-    plus the running total/eligible MAC totals MAC-weighting needs."""
+    plus the running total/eligible MAC totals MAC-weighting needs.
+
+    @doc is assumed pre-validated by `analyze_backend` via
+    `_table_supported_ops` before this is ever called -- a malformed
+    `supported_ops` is routed to `_no_table_report` instead of reaching
+    here (tan-cli#979 review finding 1: `set()` of a non-list, or of a list
+    containing a non-str, is exactly the crash/fabricated-negative class
+    this module exists to keep out, so this function must never be called
+    with an unvalidated @doc)."""
     supported = set(doc.get("supported_ops", []))
     verdicts: list[OpVerdict] = []
     total_macs = 0
@@ -386,6 +447,16 @@ def analyze_backend(*, backend: str, src_format: str, ops: Sequence[OpDesc],
         # whether anything was scored against it.
         actual_namespace = ops[0].op_namespace if ops else src_format
         if resolved[1].get("op_namespace") != actual_namespace:
+            resolved = None
+        elif _table_supported_ops(resolved[1]) is None:
+            # tan-cli#979 review finding 1: a table with a well-formed
+            # `applies_to`/`op_namespace` (i.e. one that survived every
+            # check above -- exactly the table `_score_ops` would otherwise
+            # be handed) but a malformed `supported_ops` is unscoreable, not
+            # a table that legitimately supports nothing. Route it through
+            # the same "no usable table" outcome as a namespace mismatch --
+            # `undetermined`, never a verdict manufactured from the bad
+            # field -- rather than reaching `_score_ops` at all.
             resolved = None
 
     if resolved is None:

@@ -507,3 +507,126 @@ def test_load_table_rejects_a_parseable_non_dict_json_document(tmp_path):
     # first caller's .get(), an uncaught AttributeError rather than the
     # clean "no table" _load_table promises.
     assert _load_table(path) is None
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#979 review finding 1: `_score_ops` reads `supported_ops` off the
+# same schema-free table document `_table_variant` sanitises, unguarded.
+# ---------------------------------------------------------------------------
+
+def test_resolve_table_tolerates_a_non_list_supported_ops_field(tmp_path):
+    # Before the fix: `set(doc.get("supported_ops", []))` on `supported_ops:
+    # 7` raised `TypeError: 'int' object is not iterable`. A table this
+    # malformed is unscoreable -- the whole resolve must read as
+    # "undetermined", not crash, and never reach _score_ops at all.
+    d = tmp_path / "npu_ops" / "ethos_u"
+    d.mkdir(parents=True)
+    (d / "u55@vela-1.0.0.json").write_text(json.dumps({
+        "applies_to": {"variant": "u55"}, "op_namespace": "tflite", "supported_ops": 7,
+    }))
+    rep = analyze_backend(backend="ethos_u", src_format="tflite", ops=[_op("CONV_2D")],
+                           metadata_root=tmp_path, variant="u55")
+    assert rep.npu_coverage == "undetermined"
+    assert rep.ops[0].reason == "no-table-for-backend"
+
+
+def test_resolve_table_tolerates_a_null_supported_ops_field(tmp_path):
+    # `supported_ops: null` raised the same TypeError as the int case, off
+    # `set(None)` -- `'NoneType' object is not iterable`.
+    d = tmp_path / "npu_ops" / "ethos_u"
+    d.mkdir(parents=True)
+    (d / "u55@vela-1.0.0.json").write_text(json.dumps({
+        "applies_to": {"variant": "u55"}, "op_namespace": "tflite", "supported_ops": None,
+    }))
+    rep = analyze_backend(backend="ethos_u", src_format="tflite", ops=[_op("CONV_2D")],
+                           metadata_root=tmp_path, variant="u55")
+    assert rep.npu_coverage == "undetermined"
+    assert rep.ops[0].reason == "no-table-for-backend"
+
+
+def test_resolve_table_tolerates_a_string_supported_ops_field_without_fabricating_cpu_only(tmp_path):
+    # The dangerous shape: `supported_ops: "CONV_2D"` does NOT raise --
+    # `set("CONV_2D")` silently builds a set of seven characters no real
+    # operator name ever matches, so the pre-fix behaviour reported EVERY op
+    # cpu-only/op-not-in-table: a fabricated negative manufactured from
+    # malformed data, exactly the outcome this module's own docstring names
+    # as the worst one it exists to prevent. Must read as undetermined, not
+    # a confident negative.
+    d = tmp_path / "npu_ops" / "ethos_u"
+    d.mkdir(parents=True)
+    (d / "u55@vela-1.0.0.json").write_text(json.dumps({
+        "applies_to": {"variant": "u55"}, "op_namespace": "tflite", "supported_ops": "CONV_2D",
+    }))
+    rep = analyze_backend(backend="ethos_u", src_format="tflite", ops=[_op("CONV_2D")],
+                           metadata_root=tmp_path, variant="u55")
+    assert rep.npu_coverage == "undetermined"
+    assert rep.npu_coverage != "cpu-only"
+    assert rep.ops[0].reason == "no-table-for-backend"
+
+
+def test_resolve_table_tolerates_a_supported_ops_list_with_a_non_string_entry(tmp_path):
+    # A list is the right container type but a non-str element inside it is
+    # still not something a `str in supported` membership test can trust
+    # blindly -- reject the whole table rather than silently coercing.
+    d = tmp_path / "npu_ops" / "ethos_u"
+    d.mkdir(parents=True)
+    (d / "u55@vela-1.0.0.json").write_text(json.dumps({
+        "applies_to": {"variant": "u55"}, "op_namespace": "tflite",
+        "supported_ops": ["CONV_2D", 7],
+    }))
+    rep = analyze_backend(backend="ethos_u", src_format="tflite", ops=[_op("CONV_2D")],
+                           metadata_root=tmp_path, variant="u55")
+    assert rep.npu_coverage == "undetermined"
+    assert rep.ops[0].reason == "no-table-for-backend"
+
+
+def test_resolve_table_scores_normally_when_supported_ops_is_absent(tmp_path):
+    # A genuinely-absent `supported_ops` key defaults to `[]` (a table that
+    # legitimately supports no operators) and must NOT be treated as
+    # malformed -- only a PRESENT but wrong-shaped field routes to
+    # "no-table-for-backend". The table still resolves and scores; the op
+    # simply has no match.
+    d = tmp_path / "npu_ops" / "ethos_u"
+    d.mkdir(parents=True)
+    (d / "u55@vela-1.0.0.json").write_text(json.dumps({
+        "applies_to": {"variant": "u55"}, "op_namespace": "tflite",
+    }))
+    rep = analyze_backend(backend="ethos_u", src_format="tflite", ops=[_op("CONV_2D")],
+                           metadata_root=tmp_path, variant="u55")
+    assert rep.table is not None
+    assert rep.ops[0].reason == "op-not-in-table"
+    assert rep.npu_coverage == "cpu-only"
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#979 review finding 2: resolve_ethos_u_variant's sibling `or {}`
+# gap, and the scalar-preset-document case at the same site.
+# ---------------------------------------------------------------------------
+
+def test_resolve_ethos_u_variant_tolerates_a_non_dict_inference_block(tmp_path):
+    # `inference: 7` used to reach `(7).get("ethos_u_variant")` and raise
+    # `AttributeError: 'int' object has no attribute 'get'`.
+    modules_dir = tmp_path / "e1m_modules"
+    modules_dir.mkdir()
+    (modules_dir / "E1M-FAKE999.yaml").write_text("inference: 7\nsom: {}\n", encoding="utf-8")
+    assert resolve_ethos_u_variant("E1M-FAKE999", metadata_root=tmp_path) is None
+
+
+def test_resolve_ethos_u_variant_tolerates_a_scalar_top_level_preset_document(tmp_path):
+    # A preset YAML file whose top-level document is a bare scalar (not even
+    # a mapping) used to reach `preset.get("inference")` on an int and raise
+    # the same AttributeError.
+    modules_dir = tmp_path / "e1m_modules"
+    modules_dir.mkdir()
+    (modules_dir / "E1M-FAKE999.yaml").write_text("7\n", encoding="utf-8")
+    assert resolve_ethos_u_variant("E1M-FAKE999", metadata_root=tmp_path) is None
+
+
+def test_resolve_ethos_u_variant_tolerates_a_non_string_ethos_u_variant_field(tmp_path):
+    # `ethos_u_variant: 7` used to return the bare int uncaught, straight
+    # into analyze_backend(variant: str | None).
+    modules_dir = tmp_path / "e1m_modules"
+    modules_dir.mkdir()
+    (modules_dir / "E1M-FAKE999.yaml").write_text(
+        "inference:\n  ethos_u_variant: 7\nsom: {}\n", encoding="utf-8")
+    assert resolve_ethos_u_variant("E1M-FAKE999", metadata_root=tmp_path) is None
