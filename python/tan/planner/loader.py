@@ -35,6 +35,13 @@ try:
 except ImportError:
     sys.exit("alp_orchestrate: jsonschema is required.  Install via `pip install jsonschema`.")
 
+from tan.core.metadata_schema import (
+    missing_schema_note,
+    soc_spec_schema_path,
+    som_preset_schema_path,
+    validate_document,
+)
+
 from . import sdk_compat
 from .models import (
     BoardProject,
@@ -607,6 +614,7 @@ def _load_and_validate_yaml(path: Path,
 def _resolve_board(
     project: dict[str, Any],
     metadata_root: Path,
+    *, skip_advisories: list[str] | None = None,
 ) -> tuple[str, Optional[str], dict[str, Any], str, dict[str, Any],
            dict[str, Any], Optional[str], Optional[str]]:
     """Stage 2 of the #673 Phase-1 `load_board_yaml` split: SoM SKU
@@ -614,8 +622,11 @@ def _resolve_board(
 
     Returns (sku, hw_rev, som_preset, silicon, soc_spec, board_preset,
     board_name, board_hw_rev).
+
+    *skip_advisories*: threaded straight to `_resolve_board_impl`'s own
+    `_refuse_on_schema_errors` calls (tan-cli#964 review, major 6).
     """
-    return _resolve_board_impl(project, metadata_root)
+    return _resolve_board_impl(project, metadata_root, skip_advisories=skip_advisories)
 
 
 def _sku_family_dir(sku: str) -> Optional[str]:
@@ -763,9 +774,56 @@ def _check_sdk_supports_hw_rev(
             f"hw_rev this SDK supports.")
 
 
+def _refuse_on_schema_errors(
+    doc: dict[str, Any], schema_path: Path, source: Path, schema_name: str, subject: str,
+    *, skip_advisories: list[str] | None = None,
+) -> None:
+    """tan-cli#964: refuse a `board.yaml`-bound `tan build`/`tan generate` run
+    when the SoM preset or SoC spec it just read does not validate against
+    its own schema.
+
+    This is the REFUSE half of #964's decided rule: `load_board_yaml` is what
+    `tan build` and `tan generate` (via `planner_root.emit` /
+    `planner_emit.render`) call to turn a `board.yaml` into a plan or an
+    emitted file, and every `OrchestratorError` raised anywhere in that walk
+    already becomes a coded refusal at the command layer (`build.plan-
+    unavailable` / `generate.emit-failed`) rather than a traceback -- so
+    raising here, at the point the document is READ, closes the read-path gap
+    #964 is about with the SAME refusal machinery every other loader check in
+    this file already uses (`_check_hw_rev_exists` and friends), not a new
+    one. `tan.core.metadata_schema.validate_document` never raises itself --
+    a CORRUPT schema file degrades to one synthetic message (which DOES
+    refuse, below, exactly like a real violation); an ABSENT schema file
+    degrades to `[]`, no message at all, which must never refuse (see
+    `validate_document`'s own docstring) -- the refusal, and its exit
+    code/issue code, are entirely this function's unconditional-if-non-empty
+    read of the returned list.
+
+    *skip_advisories* (tan-cli#964 review, major 6): when given, collects
+    `tan.core.metadata_schema.missing_schema_note`'s disclosure for the
+    ABSENT-schema case -- "skip-but-disclose", not a silent skip. Checked
+    unconditionally, before the refuse-worthy violations: a missing schema
+    means `validate_document` returns `[]` and this function would otherwise
+    return having said nothing at all, which is the exact vacuous-gate shape
+    the review measured (`tan generate --target os-topology` writing an
+    unvalidated SoC spec to disk at `ok: true`, `issues: []`).
+    """
+    if skip_advisories is not None:
+        note = missing_schema_note(schema_path, source=source)
+        if note is not None:
+            skip_advisories.append(note)
+    errors = validate_document(doc, schema_path, source)
+    if not errors:
+        return
+    raise OrchestratorError(
+        f"{subject} does not validate against {schema_name}:\n" +
+        "\n".join(f"  - {e}" for e in errors))
+
+
 def _resolve_board_impl(
     project: dict[str, Any],
     metadata_root: Path,
+    *, skip_advisories: list[str] | None = None,
 ) -> tuple[str, Optional[str], dict[str, Any], str, dict[str, Any],
            dict[str, Any], Optional[str], Optional[str]]:
     sku = project["som"]["sku"]
@@ -778,6 +836,9 @@ def _resolve_board_impl(
             f"no preset for SoM SKU {sku} at "
             f"{sku_preset_path.relative_to(REPO) if sku_preset_path.is_relative_to(REPO) else sku_preset_path}")
     som_preset = _load_yaml(sku_preset_path)
+    _refuse_on_schema_errors(
+        som_preset, som_preset_schema_path(metadata_root), sku_preset_path,
+        "som-preset-v1", f"SoM preset {sku}", skip_advisories=skip_advisories)
 
     # Resolve SoC spec via the preset's `silicon:` ref.
     silicon = som_preset.get("silicon")
@@ -789,6 +850,9 @@ def _resolve_board_impl(
         raise OrchestratorError(
             f"no SoC spec at {soc_path.relative_to(REPO) if soc_path.is_relative_to(REPO) else soc_path} for ref '{silicon}'")
     soc_spec = _load_json(soc_path)
+    _refuse_on_schema_errors(
+        soc_spec, soc_spec_schema_path(metadata_root), soc_path,
+        "soc-spec-v1", f"SoC spec for {silicon}", skip_advisories=skip_advisories)
 
     # Board definition.  Two mutually-exclusive sources (the
     # schema's `oneOf` rule enforces this):
@@ -1248,7 +1312,8 @@ def _normalize_libraries(project: dict[str, Any],
 
 
 def load_board_yaml(path: Path, *,
-                    metadata_root: Path = METADATA_ROOT) -> BoardProject:
+                    metadata_root: Path = METADATA_ROOT,
+                    skip_advisories: list[str] | None = None) -> BoardProject:
     """Load + validate a board.yaml.
 
     Raises OrchestratorError on any schema / preset / topology error.
@@ -1261,6 +1326,15 @@ def load_board_yaml(path: Path, *,
     `_validate_cross_fields`), invoked in the exact same order as the
     original monolithic function so error precedence and messages are
     unchanged.
+
+    *skip_advisories* (tan-cli#964 review, major 6): optional, caller-owned,
+    threaded to `_resolve_board`'s `_refuse_on_schema_errors` calls. `None`
+    (the default) costs nothing extra -- every existing call site is
+    unaffected. A caller that wants "skip-but-disclose" (rather than the bare
+    silent skip an absent schema file used to be) passes its own list and
+    folds the collected notes into its own issues after this returns; see
+    `planner_emit._render_route_table`/`generate_cmd._emit_one_in_process`
+    for the two commands that do.
     """
     project = _load_and_validate_yaml(path, metadata_root)
 
@@ -1270,7 +1344,8 @@ def load_board_yaml(path: Path, *,
     _normalize_libraries(project, metadata_root)
 
     (sku, hw_rev, som_preset, silicon, soc_spec, board_preset,
-     board_name, board_hw_rev) = _resolve_board(project, metadata_root)
+     board_name, board_hw_rev) = _resolve_board(
+        project, metadata_root, skip_advisories=skip_advisories)
 
     _check_hw_rev_exists(
         metadata_root,

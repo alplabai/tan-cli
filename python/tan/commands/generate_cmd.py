@@ -825,9 +825,18 @@ def _emit_one_in_process(
     emit: str,
     output: Path,
     core: str | None,
+    *,
+    skip_advisories: list[str] | None = None,
 ) -> str | None:
     """Render one relocated emit with `tan.planner` and write it. `None` on
     success, else the message for its `generate.emit-failed` issue.
+
+    *skip_advisories* (tan-cli#964 review, major 6): threaded to
+    `planner_emit.render`, which threads it to `load_board_yaml`/
+    `_render_route_table`'s own schema checks. Not threaded into the
+    `TREE_MODES` (`zephyr-board`) branch below -- that mode writes a whole
+    board directory keyed on SKU+core, a separate emit shape major 6's fix
+    does not extend to.
 
     The exception funnel this command's contract depends on. In a subprocess
     every planner blow-up -- a malformed `board.yaml`, a missing SoM preset, an
@@ -858,7 +867,8 @@ def _emit_one_in_process(
             )
         else:
             text = planner_emit.render(
-                emit, sdk_root=sdk_root, board_yaml=board_path, core=core
+                emit, sdk_root=sdk_root, board_yaml=board_path, core=core,
+                skip_advisories=skip_advisories,
             )
             planner_emit.write(text, output)
     except SystemExit as err:
@@ -1323,13 +1333,19 @@ def generate(
         script = resolved_sdk / "scripts" / "alp_project.py"
         written: list[str] = []
         failed: list[str] = []
+        # tan-cli#964 review (major 6): one shared collector across every
+        # in-process target this run renders, so a schema absent for the
+        # whole checkout is disclosed ONCE (deduplicated below), not once per
+        # target that happens to read it.
+        schema_skip_advisories: list[str] = []
         for mode in targets:
             target_output = output_override or _output_path(
                 workspace_root, mode, board_dir_name
             )
             if engine[mode] == "in-process":
                 message = _emit_one_in_process(
-                    resolved_sdk, board_path, mode, target_output, core
+                    resolved_sdk, board_path, mode, target_output, core,
+                    skip_advisories=schema_skip_advisories,
                 )
             else:
                 message = _emit_one(
@@ -1346,6 +1362,17 @@ def generate(
                 # run created, and only while it is still zero-byte.
                 if probe_created_output and target_output == output_override:
                     _discard_probe_file(target_output)
+
+        # tan-cli#964 review (major 6): "skip-but-disclose". One issue per
+        # DISTINCT note (`dict.fromkeys` dedups while keeping first-seen
+        # order) -- a run with several targets all missing the same schema
+        # must not repeat the identical line once per target. `info`, not
+        # `warning`: nothing here is wrong with the DOCUMENT, only with tan's
+        # ability to check it, matching `presets`/`size`/`debug-config`'s own
+        # severity split between `*.metadata-schema-invalid` (warning, a real
+        # violation) and this code (info, nothing was checked).
+        for note in dict.fromkeys(schema_skip_advisories):
+            issues.append(Issue("generate.metadata-schema-unchecked", "info", note))
 
         # APPENDED, after the per-target issues: what the user asked for comes
         # first and this is context about how it ran. Never omitted, though --

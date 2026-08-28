@@ -1554,11 +1554,23 @@ def _rename_hint(err: OSError) -> str:
 # ---------------------------------------------------------------------------
 
 
-def read_board_runtimes(board_yaml: str | None, sdk_root: str | None) -> list[str]:
+def read_board_runtimes(
+    board_yaml: str | None, sdk_root: str | None, *, warnings: list[str] | None = None
+) -> list[str]:
     """The runtimes this project puts in play. `[]` for every way that can fail,
-    which the Yocto gate treats as "unresolvable, proceed"."""
+    which the Yocto gate treats as "unresolvable, proceed".
+
+    *warnings* (tan-cli#964), when given, collects every `som-preset-v1`
+    schema violation found while reading `sku`'s SoM preset -- threaded
+    through to `_read_som_topology` -> `parse_som_preset`, the same
+    `metadata_root`/`source`/`warnings` convention `tan presets` uses. The
+    caller (`bootstrap`) REFUSES on a non-empty result rather than warning
+    and continuing, per tan-cli#964's decided rule: unlike `tan presets`,
+    which only lists what it read, `tan bootstrap` scaffolds a workspace off
+    this topology.
+    """
     cores, board_os, sku = _read_board_slice(board_yaml)
-    topology = _read_som_topology(sku, sdk_root)
+    topology = _read_som_topology(sku, sdk_root, warnings=warnings)
     return in_play_runtimes(cores, board_os, topology)
 
 
@@ -1661,7 +1673,9 @@ def _scan_board_slice(
     return cores or None, top_os, sku
 
 
-def _read_som_topology(sku: str | None, sdk_root: str | None) -> dict[str, str]:
+def _read_som_topology(
+    sku: str | None, sdk_root: str | None, *, warnings: list[str] | None = None
+) -> dict[str, str]:
     """`{core id: runtime}` for `sku`, from the SDK metadata. Supports both
     layouts the SDK has used -- a flat `<sku>.yaml` or an `<sku>/som.yaml`
     directory. `{}` when anything is missing or unparseable, which the caller
@@ -1671,17 +1685,27 @@ def _read_som_topology(sku: str | None, sdk_root: str | None) -> dict[str, str]:
     `board:`->zephyr / `machine:`->yocto / core-id-heuristic mapping. A second
     copy here is how `tan presets` and `tan bootstrap` would come to disagree
     about which host can build a project.
+
+    *warnings* (tan-cli#964) is threaded straight to `parse_som_preset`'s own
+    `metadata_root`/`source`/`warnings` triple, bound to the SoM preset file
+    this call actually found (`candidate`, not the caller's `sdk_root`) so a
+    violation names the exact file it came from. `sdk_root` doubles as the
+    metadata_root's parent here (`<sdk_root>/metadata`), the same layout the
+    `directory` line above already assumes.
     """
     cleaned = (sku or "").strip()
     if not cleaned or not sdk_root:
         return {}
-    directory = Path(sdk_root) / "metadata" / "e1m_modules"
+    metadata_root = Path(sdk_root) / "metadata"
+    directory = metadata_root / "e1m_modules"
     for candidate in (directory / f"{cleaned}.yaml", directory / cleaned / "som.yaml"):
         text = _read_text(candidate)
         if text is None:
             continue
         try:
-            som = parse_som_preset(text)
+            som = parse_som_preset(
+                text, metadata_root=metadata_root, source=candidate, warnings=warnings
+            )
         except Exception:  # noqa: BLE001 -- one bad preset must not fail the whole run
             continue
         return {core.id: core.os for core in som.cores}
@@ -2513,7 +2537,28 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # a project whose every in-play core is Yocto, on a non-Linux host: a
     # mixed board still bootstraps -- nothing here is Yocto-specific (venv +
     # west + Zephyr requirements) and its Zephyr cores need exactly this.
-    runtimes = read_board_runtimes(board_path, sdk_root)
+    # tan-cli#964, the REFUSE half of the decided rule: `bootstrap` is on the
+    # list of commands that put the topology this reads to WORK -- the
+    # scaffolding below is keyed off `runtimes`/the Yocto gate itself, so a
+    # schema-invalid SoM preset must not silently degrade to "no cores in
+    # play" the way `tan presets`'s WARN half is allowed to. Checked here,
+    # before `runtimes` is used for anything, and before every write below.
+    schema_warnings: list[str] = []
+    runtimes = read_board_runtimes(board_path, sdk_root, warnings=schema_warnings)
+    if schema_warnings:
+        return (
+            _refusal(
+                ExitCode.VALIDATION_FAILURE,
+                "metadata-schema-invalid",
+                [
+                    "SoM preset does not validate against som-preset-v1:\n"
+                    + "\n".join(f"  - {w}" for w in schema_warnings)
+                ],
+                payload(),
+            ),
+            reported_project,
+            sdk,
+        )
     gate = yocto_gate(runtimes, host)
     if gate == GATE_REFUSE:
         return (
