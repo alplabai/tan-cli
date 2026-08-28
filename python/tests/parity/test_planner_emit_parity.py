@@ -109,19 +109,167 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def planners():
-    """Both planners, in one process, bound to the same SDK checkout."""
+    """Both planners, in one process, bound to the same SDK checkout.
+
+    Module-scoped, so teardown runs once, after every test in this module
+    that requested it -- everything importing through `<sdk>/scripts` during
+    the module's run must keep resolving normally. What must NOT survive past
+    that teardown is the `sys.path` entry and whatever it pulled into
+    `sys.modules`: left in place, `<sdk>/scripts` can shadow a *different*
+    SDK checkout's same-named modules for the rest of the process, the exact
+    hazard `tests/core/test_planner_root.py`'s
+    `test_rebinding_before_import_swaps_the_root_and_leaves_no_first_root_route`
+    warns about (tan-cli#948). Only remove what THIS fixture added -- mirrors
+    the `added = ... not in sys.path` discipline the oracle loaders in
+    `tests/core/test_faultdecode.py`, `tests/commands/test_new_som_command.py`
+    and `tests/commands/test_faultdecode_command.py` already use.
+    """
     assert SDK is not None
     scripts = str(SDK / "scripts")
-    if scripts not in sys.path:
+    scripts_dir = (SDK / "scripts").resolve()
+    added_to_path = scripts not in sys.path
+    if added_to_path:
         sys.path.insert(0, scripts)
-    import alp_orchestrate  # noqa: F401  -- upstream, off <sdk>/scripts
+    try:
+        import alp_orchestrate  # noqa: F401  -- upstream, off <sdk>/scripts
 
-    from tan.planner_root import bind_sdk_root
-    bind_sdk_root(SDK)
-    import tan.planner  # noqa: F401
+        from tan.planner_root import bind_sdk_root
+        bind_sdk_root(SDK)
+        import tan.planner  # noqa: F401
 
-    from alp_orchestrate.cli import main as _upstream_main  # noqa: F401
-    return alp_orchestrate, tan.planner
+        from alp_orchestrate.cli import main as _upstream_main  # noqa: F401
+        yield alp_orchestrate, tan.planner
+    finally:
+        if added_to_path:
+            # Purge every module this fixture caused to load off
+            # `<sdk>/scripts` -- not just `alp_orchestrate` by name, since
+            # tests in this module also reach `alp_project` and friends
+            # (`_oracle_emit`) once the path entry is live. Filtered by
+            # `__file__` resolving under `scripts_dir`, the same technique
+            # `test_the_in_process_path_loads_none_of_the_sdks_python`'s
+            # child-interpreter probe already uses to MEASURE this closure,
+            # here used to UNDO it.
+            for name in list(sys.modules):
+                module = sys.modules.get(name)
+                origin = getattr(module, "__file__", None)
+                if not origin:
+                    continue
+                try:
+                    Path(origin).resolve().relative_to(scripts_dir)
+                except ValueError:
+                    continue
+                del sys.modules[name]
+            try:
+                sys.path.remove(scripts)
+            except ValueError:
+                pass
+
+
+#: Drives the `planners` fixture's OWN generator directly, outside pytest's
+#: fixture cache, from inside a fresh child interpreter -- for the same reason
+#: the import-closure probe near the bottom of this file runs in a child: this
+#: module's other tests keep the fixture's module-scoped instance alive for
+#: the whole file, so measuring "what does sys.path/sys.modules look like once
+#: this fixture is done" in-process would either see the shared instance's
+#: leftovers (if it already ran) or race the first test that creates it. A
+#: clean interpreter has neither problem, and its short life makes a leak that
+#: outlives the fixture visible as a diff against its OWN starting state
+#: rather than needing a second checkout to shadow.
+_FIXTURE_LIFECYCLE_PROBE = '''
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd()))
+import tests.parity.test_planner_emit_parity as mod
+
+SCRIPTS_DIR = (mod.SDK / "scripts").resolve()
+
+
+def _from_sdk_scripts(name):
+    """True iff `sys.modules[name]`'s own `__file__` resolves under
+    `<sdk>/scripts` -- the actual leak surface tan-cli#948 reports, not "any
+    module gained since we started" (importing `tan.planner` legitimately
+    pulls in `jsonschema`/`attrs`/`referencing`/etc, and those are SUPPOSED to
+    stay imported; flagging them would make this assertion fire on a correct
+    fixture and teach the test to be ignored)."""
+    module = sys.modules.get(name)
+    origin = getattr(module, "__file__", None)
+    if not origin:
+        return False
+    try:
+        Path(origin).resolve().relative_to(SCRIPTS_DIR)
+    except ValueError:
+        return False
+    return True
+
+
+path_before = list(sys.path)
+modules_before = set(sys.modules)
+
+gen = mod.planners.__wrapped__()
+upstream, relocated = next(gen)
+live_path_entry = str(mod.SDK / "scripts") in sys.path
+live_has_module = "alp_orchestrate" in sys.modules
+
+try:
+    next(gen)
+    finished_cleanly = False
+except StopIteration:
+    finished_cleanly = True
+
+leaked = [n for n in (set(sys.modules) - modules_before) if _from_sdk_scripts(n)]
+
+print(json.dumps({
+    "live_path_entry": live_path_entry,
+    "live_has_module": live_has_module,
+    "finished_cleanly": finished_cleanly,
+    "path_restored": sys.path == path_before,
+    "leaked_path_entries": [p for p in sys.path if p not in path_before],
+    "leaked_modules": sorted(leaked),
+}))
+'''
+
+
+def test_the_planners_fixture_restores_sys_path_and_sys_modules_on_teardown():
+    """Mutation-proof for tan-cli#948: once the fixture's generator has run its
+    teardown, `sys.path` must be byte-for-byte what it was before the fixture
+    started -- not merely the same LENGTH (a leaked entry paired with an
+    unrelated entry vanishing would pass a length check while still shadowing
+    a checkout) -- and every `sys.modules` entry this fixture caused to load
+    off `<sdk>/scripts` (identified the same way the fix itself identifies
+    them: by `__file__` resolving under that directory, not by checking for
+    the one name -- `alp_orchestrate` -- we happen to remember importing;
+    `alp_orchestrate.cli` and every other transitively-pulled submodule counts
+    too) must be gone. Modules the fixture legitimately leaves behind --
+    `tan.planner` itself, its real dependencies like `jsonschema` -- are
+    excluded on purpose: a bare `set(sys.modules) - modules_before` diff would
+    flag those too and make this assertion fire on a CORRECT fixture, which
+    teaches everyone to ignore the test the next time it reds for a real leak.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", _FIXTURE_LIFECYCLE_PROBE],
+        cwd=Path(__file__).resolve().parents[2],  # .../python
+        env={**os.environ, "ALP_SDK_ROOT": str(SDK)},
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, (
+        f"lifecycle probe crashed (rc={proc.returncode}):\n{proc.stderr}")
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    # The fixture must have actually done its job while live, or the rest of
+    # this test would be vacuously true of a no-op fixture.
+    assert result["live_path_entry"], (
+        "fixture never put <sdk>/scripts on sys.path while its consumers held it")
+    assert result["live_has_module"], (
+        "fixture never imported alp_orchestrate while its consumers held it")
+    assert result["finished_cleanly"], (
+        "the fixture generator raised instead of a clean StopIteration on teardown")
+
+    assert result["path_restored"], (
+        f"sys.path was not restored -- leaked entries: {result['leaked_path_entries']}")
+    assert not result["leaked_modules"], (
+        f"sys.modules leaked after teardown: {result['leaked_modules']}")
 
 
 def _render(pkg, board: Path, mode: str) -> tuple[str, str]:
