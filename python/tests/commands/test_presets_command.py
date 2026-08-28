@@ -491,6 +491,72 @@ def test_soc_lookups_is_none_none_when_the_metadata_tree_is_missing(tmp_path):
     assert _soc_lookups(str(tmp_path / "no-such-sdk")) == (None, None)
 
 
+def test_resolve_soc_path_is_the_shared_tan_soc_ref_function_not_a_local_copy():
+    """tan-cli#917: `_resolve_soc_path` used to be a byte-identical SECOND
+    copy of `tan.planner.som_metadata.resolve_soc_path`'s path arithmetic --
+    kept out of `tan.planner` deliberately (see `_soc_lookups`'s docstring
+    above for why this file cannot import it), but duplicated rather than
+    shared with it. Both now import the SAME function from the leaf module
+    `tan.soc_ref`, which imports neither `tan.planner` nor anything else that
+    reads real files at import time, so this file's binding-free contract is
+    unaffected.
+
+    `is`, not just equal output, is the thing this test pins: a well-behaved
+    verbatim reimplementation -- the exact shape #917 itself was filed
+    against -- would pass any input/output test here and still be a second
+    source of truth one edit away from drifting from the other.
+
+    Mutation-proven: reintroducing a local `def _resolve_soc_path(...)` in
+    `presets_cmd.py` with the pre-#917 body (i.e. reverting the import back
+    to a definition, without changing behaviour at all) turns this test RED
+    via the `is` check while every input/output assertion elsewhere in this
+    file involving `_resolve_soc_path`/`_soc_lookups` stays GREEN -- exactly
+    the silent-drift shape a plain equality test would miss. Restoring the
+    import turns it GREEN. Verified by hand while writing this test.
+    """
+    from tan.commands import presets_cmd
+    from tan.soc_ref import resolve_soc_path
+
+    assert presets_cmd._resolve_soc_path is resolve_soc_path
+
+
+@pytestmark_soc
+def test_resolve_soc_path_is_also_the_same_object_som_metadata_re_exports(monkeypatch):
+    """The other half of #917's claim, closed against the REAL
+    `tan.planner.som_metadata` module (requires a bound SDK -- see
+    `test_allowed_os_lookup_matches_tan_planner_topology_exactly` above for
+    why binding/unbinding `tan.planner` here needs the module-attribute
+    dance, copied verbatim for the same reason): `presets_cmd`'s import and
+    `som_metadata`'s import resolve to the literal same object, not two call
+    sites that merely agree today.
+    """
+    import sys
+
+    from tan import planner_root
+
+    torn_out = [
+        n for n in sys.modules if n == "tan.planner" or n.startswith("tan.planner.")
+    ]
+    for name in torn_out:
+        parent_name, _, leaf = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is not None and hasattr(parent, leaf):
+            monkeypatch.setattr(parent, leaf, getattr(parent, leaf), raising=False)
+    for name in torn_out:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setattr(planner_root, "_BOUND", None)
+
+    from tan.commands import presets_cmd
+    from tan.planner_root import bind_sdk_root
+
+    bind_sdk_root(SDK)
+    from tan.planner.som_metadata import resolve_soc_path as planner_resolve_soc_path
+    from tan.soc_ref import resolve_soc_path as leaf_resolve_soc_path
+
+    assert presets_cmd._resolve_soc_path is planner_resolve_soc_path
+    assert presets_cmd._resolve_soc_path is leaf_resolve_soc_path
+
+
 def test_allowed_os_lookup_degrades_to_empty_for_an_unresolved_core_type(tmp_path):
     """A `board.schema.json` IS present (so `_os_choices()` resolves), but the
     core's `type` is the unresolved sentinel `""` -- the shape a SoM whose
