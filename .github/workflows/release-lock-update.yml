@@ -1,0 +1,145 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# tan-cli#437 acceptance criterion: "an explicit, reviewed dependency-update
+# workflow that regenerates locks and runs packaged-binary conformance on all
+# release platforms."
+#
+# This is the REGENERATE half. It never pushes to `dev` directly -- it opens
+# (or refreshes) a PR, the same shape `release.yml`'s
+# `propose-dev-version-bump` job uses for the identical reason: a lock bump is
+# a real dependency-version decision (a typer/click/rich/... release could
+# carry a behaviour change, not just bytes) and belongs in front of a human,
+# not auto-merged.
+#
+# The CONFORMANCE half is not duplicated here. The PR this job opens is an
+# ordinary PR against `dev`, so `clean-host.yml`'s `freeze-and-smoke` job
+# (Windows, both macOS legs, and the glibc-floor Linux container -- the same
+# four platforms `release.yml`'s `build` job ships) already runs on it via its
+# own `pull_request` trigger, freezing the NEW lock and running
+# `tests/conformance/test_packaged_binary.py` against the result. A second
+# copy of that matrix here would drift from clean-host.yml's own eventually,
+# the same reasoning release.yml's header gives for reusing gates rather than
+# re-implementing them.
+#
+# TRIGGER: `workflow_dispatch` only, no `schedule`. A stale lock is not an
+# active incident the way an un-bumped dev version is (propose-dev-version-bump
+# reddens `version-identity.yml` on every other open PR until it merges); it
+# is a "when someone has time to review a dependency bump" chore, which reads
+# better as a deliberate, human-initiated run than as a cron nobody asked for.
+# Add a `schedule:` trigger later if that judgement changes -- nothing else
+# here would need to.
+
+name: release-lock-update
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  regenerate:
+    name: regenerate python/release-requirements.lock.txt
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Same `ref: dev` + kept-credential + artipacked-ignore shape as
+      # release.yml's `propose-dev-version-bump` (see that job's own comment
+      # for why): this job edits `dev`'s lock, and the push below runs through
+      # the checkout's own remote. `id:` is this step's INVENTORY key
+      # (`.github/zizmor.yml`, `artipacked-inventory-3`) -- do not rename or
+      # drop it without updating that file's matching `anchor:` line.
+      - id: artipacked-inventory-3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 # zizmor: ignore[artipacked]
+        with:
+          ref: dev
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: install uv
+        shell: bash
+        run: python -m pip install --quiet uv
+
+      - name: regenerate the lock
+        shell: bash
+        run: python python/scripts/generate_release_lock.py
+
+      - name: diff against what is committed
+        id: diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- python/release-requirements.lock.txt; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "no change: the committed lock already matches today's resolution."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git --no-pager diff --stat -- python/release-requirements.lock.txt
+          fi
+
+      - name: Open or refresh the lock-update PR
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="auto/release-lock-update"
+          git config user.name  "tan-cli release-lock update"
+          git config user.email "noreply@alplab.ai"
+          git checkout -q -B "${branch}"
+          git add python/release-requirements.lock.txt
+          git commit -q -m "chore(release): regenerate release-requirements.lock.txt
+
+          Machine-proposed by python/scripts/generate_release_lock.py
+          (workflow_dispatch, tan-cli#437). Review the diff for anything more
+          than a routine bump before merging -- a locked dependency changing
+          version is exactly the kind of change this lock exists to make
+          visible instead of silent. Merging into dev exercises
+          clean-host.yml's freeze-and-smoke matrix (Windows, both macOS legs,
+          the glibc-floor Linux container) against the new lock before it
+          ever reaches a tag."
+          git push -q -f origin "${branch}"
+
+          title="chore(release): regenerate release-requirements.lock.txt"
+          {
+            echo "Automated release-lock regeneration (tan-cli#437), opened by"
+            echo "\`workflow_dispatch\` on \`release-lock-update.yml\`."
+            echo
+            echo "Review the diff below for anything beyond a routine patch bump"
+            echo "before merging. \`clean-host.yml\`'s \`freeze-and-smoke\` job"
+            echo "freezes this exact lock on all four release platforms and runs"
+            echo "the packaged-binary conformance suite against the result --"
+            echo "**this PR's own checks did not start automatically**, for the"
+            echo "same GITHUB_TOKEN recursion-guard reason"
+            echo "\`propose-dev-version-bump\` documents in release.yml: close and"
+            echo "reopen, or push an empty commit, to get the full suite running."
+          } > "${RUNNER_TEMP}/lock-update-body.md"
+          existing="$(gh pr list --head "${branch}" --base dev --state open --json number -q '.[0].number' || true)"
+          if [ -n "${existing}" ]; then
+            gh pr edit "${existing}" --title "${title}" --body-file "${RUNNER_TEMP}/lock-update-body.md"
+          else
+            gh pr create --base dev --head "${branch}" --title "${title}" --body-file "${RUNNER_TEMP}/lock-update-body.md"
+          fi
+
+      # Same must-not-silently-no-op-nor-lie discipline as
+      # propose-dev-version-bump's own final step: `gh pr create`/`edit`
+      # returning success is not the same as a PR existing afterward.
+      - name: Verify the PR exists when a change was found
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="auto/release-lock-update"
+          count="$(gh pr list --head "${branch}" --base dev --state open --json number -q 'length')"
+          if [ "${count}" -lt 1 ]; then
+            echo "::error::the lock changed but no open PR exists for ${branch} -> dev -- the regeneration ran but the proposal did not land anywhere."
+            exit 1
+          fi
+          echo "confirmed: ${count} open PR(s) for ${branch} -> dev"

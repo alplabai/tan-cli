@@ -208,7 +208,11 @@ jobs:
           - os: ubuntu-latest
             asset: tan-x86_64-unknown-linux-gnu
             ext: ""
-            container: python:3.12-slim-bullseye
+            # Pinned by digest, tag kept in the comment -- same reasoning and
+            # same digest as release.yml's `build` job (tan-cli#437); the two
+            # MUST match, since this job freezes the identical artefact in the
+            # identical container on every PR.
+            container: python@sha256:411fa4dcfdce7e7a3057c45662beba9dcd4fa36b2e50a2bfcd6c9333e59bf0db # python:3.12-slim-bullseye
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -240,7 +244,12 @@ jobs:
           VENV_PY=.venv-build/bin/python
           [ -x "$VENV_PY" ] || VENV_PY=.venv-build/Scripts/python.exe
           "$VENV_PY" -m pip install --quiet --upgrade pip
-          "$VENV_PY" -m pip install --quiet ".[monitor]" "pyinstaller>=6.10"
+          # tan-cli#437: same hash-verified, locked install release.yml's
+          # `build` job uses -- this job freezes the identical artefact, so it
+          # must resolve from the identical lock or it stops being a
+          # pre-tag preview of what `build` actually does.
+          "$VENV_PY" -m pip install --quiet --no-deps --require-hashes -r release-requirements.lock.txt
+          "$VENV_PY" -m pip install --quiet --no-deps --no-build-isolation ".[monitor]"
           PYTHON="$VENV_PY" bash scripts/build_binary.sh
 
       # Old-glibc container, same reasoning as release.yml: freezing on bare
@@ -257,7 +266,8 @@ jobs:
             bash /src/scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends binutils
             python -m venv /tmp/venv
             /tmp/venv/bin/pip install --quiet --upgrade pip
-            /tmp/venv/bin/pip install --quiet ".[monitor]" "pyinstaller>=6.10"
+            /tmp/venv/bin/pip install --quiet --no-deps --require-hashes -r release-requirements.lock.txt
+            /tmp/venv/bin/pip install --quiet --no-deps --no-build-isolation ".[monitor]"
             PYTHON=/tmp/venv/bin/python bash scripts/build_binary.sh
             # tan-cli#450. THE PR-TIME EXERCISE OF THE PACKAGING PATH.
             # The three lines below are what the container leg in release.yml

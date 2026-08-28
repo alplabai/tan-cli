@@ -357,7 +357,14 @@ jobs:
           - os: ubuntu-latest
             asset: tan-x86_64-unknown-linux-gnu.tar.gz
             archive_ext: tar.gz
-            container: python:3.12-slim-bullseye
+            # Pinned by digest (tan-cli#437), not the mutable `3.12-slim-bullseye`
+            # tag: a tag can be repointed at a new image without this file
+            # changing, which would silently move the glibc floor this whole
+            # leg exists to fix at 2.31 (see the header). The tag is kept in
+            # the comment as the human-readable name; re-derive the digest with
+            # `crane digest python:3.12-slim-bullseye` or the registry API, and
+            # re-measure the glibc floor below before moving it.
+            container: python@sha256:411fa4dcfdce7e7a3057c45662beba9dcd4fa36b2e50a2bfcd6c9333e59bf0db # python:3.12-slim-bullseye
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -389,6 +396,23 @@ jobs:
       # time, so a binary built without that extra cannot gain it here"). Costs
       # +73392 B measured, against >=1.2 MB of headroom in
       # python/scripts/artifact_ceilings.env.
+      # tan-cli#437: the two `pip install` calls below used to be one live,
+      # unpinned resolution (`pip install ".[monitor]" "pyinstaller>=6.10"`),
+      # so re-running the same immutable tag on a later day could resolve a
+      # different typer/click/rich/pyyaml/jsonschema/truststore/certifi/
+      # pyinstaller and ship different bytes under an identical version
+      # string. Now: every THIRD-PARTY distribution comes from
+      # `release-requirements.lock.txt`, hash-verified
+      # (`--require-hashes` -- pip REFUSES the install outright on any
+      # mismatch or any unhashed requirement in the file, it does not fall
+      # back to resolving around the problem), and the local `alp-tan`
+      # package is installed separately, `--no-deps --no-build-isolation`
+      # (its deps are already satisfied by the lock; build-isolation would
+      # otherwise re-resolve `[build-system] requires` -- `setuptools` --
+      # live, defeating the point) straight from the checked-out commit,
+      # which is already exactly reproducible on its own. See
+      # `scripts/generate_release_lock.py`'s docstring for what the lock
+      # covers and how to regenerate it.
       - name: freeze tan (PyInstaller, clean venv)
         if: ${{ !matrix.container }}
         shell: bash
@@ -399,7 +423,14 @@ jobs:
           VENV_PY=.venv-build/bin/python
           [ -x "$VENV_PY" ] || VENV_PY=.venv-build/Scripts/python.exe
           "$VENV_PY" -m pip install --quiet --upgrade pip
-          "$VENV_PY" -m pip install --quiet ".[monitor]" "pyinstaller>=6.10"
+          "$VENV_PY" -m pip install --quiet --no-deps --require-hashes -r release-requirements.lock.txt
+          "$VENV_PY" -m pip install --quiet --no-deps --no-build-isolation ".[monitor]"
+          # Recorded so a shipped freeze can be audited later against exactly
+          # what went into it (tan-cli#437 acceptance criterion) -- uploaded
+          # as a build artifact below, never as a release asset by accident
+          # (upload-artifact only, matching the glibc-floor step's own
+          # pattern).
+          "$VENV_PY" -m pip freeze > dependency-inventory.txt
           PYTHON="$VENV_PY" bash scripts/build_binary.sh
           # pytest AFTER the freeze, never before: the artifact is already built,
           # so this cannot inflate it. tests/conformance/test_packaged_binary.py
@@ -469,7 +500,9 @@ jobs:
             bash /src/scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends binutils
             python -m venv /tmp/venv
             /tmp/venv/bin/pip install --quiet --upgrade pip
-            /tmp/venv/bin/pip install --quiet ".[monitor]" "pyinstaller>=6.10"
+            /tmp/venv/bin/pip install --quiet --no-deps --require-hashes -r release-requirements.lock.txt
+            /tmp/venv/bin/pip install --quiet --no-deps --no-build-isolation ".[monitor]"
+            /tmp/venv/bin/pip freeze > dependency-inventory.txt
             PYTHON=/tmp/venv/bin/python bash scripts/build_binary.sh
             /tmp/venv/bin/pip install --quiet pytest pyelftools
             /tmp/venv/bin/python -m pytest tests/conformance/test_packaged_binary.py -q
@@ -495,6 +528,20 @@ jobs:
         with:
           name: glibc-floor
           path: python/dist/glibc-floor.txt
+          if-no-files-found: error
+
+      # tan-cli#437 acceptance criterion: record the resolved dependency
+      # inventory so a shipped freeze can be audited later. `pip freeze`
+      # output from the SAME venv `build_binary.sh` ran in, per leg -- every
+      # leg resolves the identical hash-pinned lock, so these four files
+      # should (and are expected to) agree modulo the platform-marker-only
+      # entries (`pywin32-ctypes`, `pefile`, `macholib`). Its own artifact,
+      # same reasoning as glibc-floor above -- never a release asset.
+      - name: upload the resolved dependency inventory
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-inventory-${{ matrix.asset }}
+          path: python/dependency-inventory.txt
           if-no-files-found: error
 
       # THE SHIPPING PATH'S ARCH CHECK (tan-cli#500). `python-binaries.yml` has
@@ -687,6 +734,17 @@ jobs:
           python3 -c "import json,sys; d=json.load(open('assets/envelope-contract.json')); \
             assert d['envelopes'] and d['issueCodes'], 'empty bundle'; \
             print('bundled', len(d['envelopes']), 'envelopes,', len(d['issueCodes']), 'issue codes')"
+      # tan-cli#437 acceptance criterion: the exact, hash-pinned dependency
+      # set that produced these binaries ships WITH the release, not merely
+      # in-tree at the tag -- a customer auditing a downloaded asset should
+      # not have to separately clone the repo at that ref to see what went
+      # into it. This is the committed lock at the tagged commit (this job's
+      # own checkout, above); the per-leg `pip freeze` output uploaded as a
+      # workflow artifact in the `build` job is the finer-grained, per-platform
+      # confirmation that each freeze actually resolved to it.
+      - name: Stage the dependency lock as a release asset
+        shell: bash
+        run: cp python/release-requirements.lock.txt assets/dependency-lock.txt
       - name: Generate checksums.txt
         shell: bash
         working-directory: assets

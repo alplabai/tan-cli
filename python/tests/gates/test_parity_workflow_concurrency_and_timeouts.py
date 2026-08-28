@@ -492,8 +492,9 @@ def test_this_repos_own_workflows_produce_no_timeout_problems() -> None:
 #: `release.yml`'s real 5 bounded jobs (`verify-version`, `build`, `release`,
 #: `publish_npm`, `release_gate` -- `gates`/`python-gates` stay excluded as
 #: LOCAL `uses:` callers) down to 1 pass silently, since the old check only
-#: asked "is release.yml in the set at all". Floored for all ELEVEN non-parity
-#: files, not just the four tan-cli#855 named -- a review round on this same
+#: asked "is release.yml in the set at all". Floored for all TWELVE non-parity
+#: files (release-lock-update.yml added tan-cli#437), not just the four
+#: tan-cli#855 named -- a review round on this same
 #: gate pointed out the other six (`ci.yml`, `clean-host.yml`,
 #: `e2e-container.yml`, `getting-started.yml`, `pin-move-verify.yml`,
 #: `version-identity.yml`) could shrink silently too, and there is no reason
@@ -512,6 +513,7 @@ _MIN_BOUNDED_JOBS = {
     "planner-resync.yml": 1,
     "python-binaries.yml": 4,
     "release-combination.yml": 2,
+    "release-lock-update.yml": 1,
     "release.yml": 5,
     "unsharded-python-canary.yml": 1,
     "version-identity.yml": 1,
