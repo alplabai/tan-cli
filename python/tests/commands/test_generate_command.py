@@ -1275,6 +1275,85 @@ def test_an_in_process_sys_exit_is_an_issue_not_a_dead_cli(
     assert "exited early" in env["issues"][0]["message"]
 
 
+def test_a_missing_schema_discloses_the_skip_not_silence(tmp_path, monkeypatch, capsys):
+    """tan-cli#964 review (major 6, 'skip-but-disclose'): the review's own
+    measured repro was `tan generate --target os-topology` against a
+    `--sdk-root` with `soc-spec-v1.schema.json` deleted -- before this fix,
+    that wrote `build/generated/os-topology.json` from an unvalidated SoC
+    spec at `ok: true, issues: []`, indistinguishable from a validated-clean
+    run. `_emit_one_in_process`'s new `skip_advisories` collector is
+    threaded to `planner_emit.render`; this proves the WIRING (the
+    collector reaches `render`, and whatever it collects is folded into
+    `issues` as `generate.metadata-schema-unchecked`) with a fake `render`
+    standing in for the real planner -- exactly the seam
+    `test_an_in_process_planner_exception_is_an_issue_not_a_traceback`
+    above already uses for the exception-funnel half.
+
+    Mutation-proven: reverting `_emit_one_in_process`'s `skip_advisories=`
+    threading, or the `for note in dict.fromkeys(schema_skip_advisories)`
+    fold-in in `generate()` (byte copy restored after, never `git
+    checkout`), turns this test's `issues` assertion red; restoring turns
+    it green.
+    """
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    _stub_in_process(monkeypatch)
+
+    def fake_render(mode, *, skip_advisories=None, **kwargs):
+        if skip_advisories is not None:
+            skip_advisories.append(
+                f"{sdk}/metadata/socs/x.json: not validated -- no schema at "
+                f"{sdk}/metadata/schemas/soc-spec-v1.schema.json in this checkout"
+            )
+        return "in-process\n"
+
+    monkeypatch.setattr(generate_cmd.planner_emit, "render", fake_render)
+    assert _call_generate(target="os-topology", sdk_root=str(sdk),
+                         output_format="json") == 0
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["issues"] == [
+        {
+            "code": "generate.metadata-schema-unchecked",
+            "severity": "info",
+            "message": (
+                f"{sdk}/metadata/socs/x.json: not validated -- no schema at "
+                f"{sdk}/metadata/schemas/soc-spec-v1.schema.json in this checkout"
+            ),
+        }
+    ]
+
+
+def test_several_targets_sharing_one_missing_schema_disclose_it_once(
+    tmp_path, monkeypatch, capsys
+):
+    """The dedup half: several in-process targets in one run that each hit
+    the SAME missing schema must report it ONCE, not once per target --
+    `generate()`'s own `dict.fromkeys(schema_skip_advisories)`."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    _stub_in_process(monkeypatch)
+
+    def fake_render(mode, *, skip_advisories=None, **kwargs):
+        if skip_advisories is not None:
+            skip_advisories.append("same note, every target")
+        return "in-process\n"
+
+    monkeypatch.setattr(generate_cmd.planner_emit, "render", fake_render)
+    # `all_targets=True`: every default in-process target renders in one run
+    # (`zephyr-board` excluded -- it is never in the default set), each
+    # hitting the SAME missing schema through the identical fake `render`.
+    assert _call_generate(all_targets=True, sdk_root=str(sdk),
+                         output_format="json") == 0
+    env = json.loads(capsys.readouterr().out.strip())
+    unchecked = [i for i in env["issues"] if i["code"] == "generate.metadata-schema-unchecked"]
+    assert len(unchecked) == 1
+    assert unchecked[0] == {
+        "code": "generate.metadata-schema-unchecked",
+        "severity": "info",
+        "message": "same note, every target",
+    }
+
+
 def test_a_fully_in_process_run_never_probes_the_path_interpreter(
     tmp_path, monkeypatch, capsys
 ):

@@ -2344,6 +2344,99 @@ def test_a_broken_som_preset_never_fails_the_run(layout, tmp_path):
     assert envelope(proc)["exitCode"] == 0
 
 
+#: Deliberately narrower than the real `som-preset-v1.schema.json` -- the same
+#: narrowing rationale as `test_presets_command.py`'s own `_SOM_SCHEMA` and
+#: `test_metadata_schema_refuses_on_read.py`'s: enough to exercise the gate
+#: (`silicon:` typed), not a byte-for-byte mirror of a schema this file's
+#: coverage must not depend on never changing shape.
+_BOOTSTRAP_SOM_SCHEMA = json.dumps({
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["schema_version", "sku", "silicon"],
+    "properties": {
+        "schema_version": {"const": 1},
+        "sku": {"type": "string"},
+        "silicon": {"type": "string"},
+    },
+})
+
+
+def test_a_schema_invalid_som_preset_refuses_bootstrap(tmp_path):
+    """tan-cli#964 review (major 3): `bootstrap` reads a SoM preset
+    (`_read_som_topology` -> `presets_cmd.parse_som_preset`) to decide the
+    Yocto gate and to scaffold the workspace -- so, unlike `tan presets`'s
+    WARN-and-continue half of the same decided rule, a schema-invalid preset
+    here must REFUSE before anything is written, not silently degrade to an
+    empty topology.
+
+    Mutation-proven: reverting the `warnings=` threading added to
+    `_read_som_topology`/`read_board_runtimes`, or the `if schema_warnings:`
+    refusal in `bootstrap()` (byte copy restored after, never `git
+    checkout`), turns this test's `exitCode`/`codes` assertions red;
+    restoring turns them green.
+    """
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    schemas = sdk / "metadata" / "schemas"
+    schemas.mkdir(parents=True, exist_ok=True)
+    (schemas / "som-preset-v1.schema.json").write_text(
+        _BOOTSTRAP_SOM_SCHEMA, encoding="utf-8"
+    )
+    modules = sdk / "metadata" / "e1m_modules"
+    modules.mkdir(parents=True, exist_ok=True)
+    preset = modules / "E1M-X1.yaml"
+    preset.write_text(
+        "schema_version: 1\nsku: E1M-X1\nsilicon: 7\ntopology:\n  a55_cluster: {}\n",
+        encoding="utf-8",
+    )
+    project = sdk / "examples" / "p"
+    project.mkdir(parents=True)
+    (project / "board.yaml").write_text(
+        "som:\n  sku: E1M-X1\ncores:\n  a55_cluster: {}\n", encoding="utf-8"
+    )
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json", "--sdk-root", str(sdk),
+        "--project", str(project), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert env["exitCode"] == 2
+    assert codes(env) == ["bootstrap.metadata-schema-invalid"]
+    message = env["issues"][0]["message"]
+    assert "does not validate against som-preset-v1" in message
+    assert "silicon: 7 is not of type 'string'" in message
+
+
+def test_a_schema_valid_som_preset_does_not_refuse_bootstrap(tmp_path):
+    """The control: a valid SoM preset, checked against the same schema, does
+    not refuse -- proving the new gate does not fire on the common case."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    schemas = sdk / "metadata" / "schemas"
+    schemas.mkdir(parents=True, exist_ok=True)
+    (schemas / "som-preset-v1.schema.json").write_text(
+        _BOOTSTRAP_SOM_SCHEMA, encoding="utf-8"
+    )
+    modules = sdk / "metadata" / "e1m_modules"
+    modules.mkdir(parents=True, exist_ok=True)
+    preset = modules / "E1M-X1.yaml"
+    preset.write_text(
+        "schema_version: 1\nsku: E1M-X1\nsilicon: vendor:family:part\n"
+        "topology:\n  a55_cluster: {}\n",
+        encoding="utf-8",
+    )
+    project = sdk / "examples" / "p"
+    project.mkdir(parents=True)
+    (project / "board.yaml").write_text(
+        "som:\n  sku: E1M-X1\ncores:\n  a55_cluster: {}\n", encoding="utf-8"
+    )
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json", "--sdk-root", str(sdk),
+        "--project", str(project), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert "bootstrap.metadata-schema-invalid" not in codes(env)
+
+
 @pytest.mark.parametrize("shape", ["directory", "garbage", "non-utf8"])
 def test_an_unusable_west_yml_falls_back_to_the_manifest_pin(shape, tmp_path):
     sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])

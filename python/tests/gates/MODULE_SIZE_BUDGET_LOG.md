@@ -398,10 +398,25 @@ and write both files from the real merged tree.
     - tan/commands/bootstrap_cmd.py: 3468 -> 3508
 - 2026-08-28 -- tan-cli#963: generate_cmd.py's own docstring for pin_issue/foreign_issue prepend-ordering grew the module 4 lines past its 1400 ceiling; no compression to fit, per repo convention
     - tan/commands/generate_cmd.py: 1400 -> 1404
+- 2026-08-28 -- tan-cli#964: read-path schema validation entry point added to loader.py/presets_cmd.py/size_cmd.py, plus the new tan.core.metadata_schema module's docstrings pushed presets_cmd.py, size_cmd.py, and planner/loader.py over their recorded module-size budgets; function count grew too (schema_errors/validate_document/_refuse_on_schema_errors and friends).
+    - tan/commands/presets_cmd.py: 949 -> 1031
+    - tan/commands/size_cmd.py: 840 -> 895
+    - tan/planner/loader.py: 1335 -> 1376
+    - function_count_budget: 277 -> 279
 - 2026-08-28 -- review of #971 round 2: _origin_exists's WinError 1921 vs 21 distinction (CI caught the merge of the two live on windows-latest) adds _DEAD_WINERRORS + expanded docstring, growing bootstrap_cmd.py and _origin_exists itself further
     - tan/commands/bootstrap_cmd.py: 3508 -> 3522
     - function_count_budget: 278 -> 279
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 279 -> 281
+- 2026-08-28 -- tan-cli#964 review: bootstrap/generate REFUSE wiring (majors 3/4), debug-config WARN wiring (major 5), skip-but-disclose for presets/size/debug-config/generate/bootstrap (major 6), Windows path fix (blocker 2), and the shared caching layer (minor 8) grow presets_cmd.py/size_cmd.py/debug_config_cmd.py/bootstrap_cmd.py/generate_cmd.py/planner/loader.py and add new functions to tan/core/metadata_schema.py
+    - tan/commands/bootstrap_cmd.py: 3522 -> 3567
+    - tan/commands/debug_config_cmd.py: 1954 -> 2021
+    - tan/commands/generate_cmd.py: 1404 -> 1431
+    - tan/commands/presets_cmd.py: 1031 -> 1085
+    - tan/commands/size_cmd.py: 895 -> 938
+    - tan/planner/loader.py: 1376 -> 1410
+    - function_count_budget: 281 -> 287
+    - function_worst_budget: 770 -> 791
     - tan/commands/bootstrap_cmd.py: 3421 -> 3522
     - function_count_budget: 277 -> 279
 - 2026-08-28 -- issue #474 (ADR 0021 Lane 1 P1): tan bootstrap acquires the arm-zephyr-eabi cross toolchain -- toolchain_phase/_acquire_toolchain/_finish_toolchain_install added to bootstrap_cmd.py alongside the phase's other IO (manifest read, disk preflight, wreckage reclaim, stamp write); kept in the existing phase-function file rather than a new module so the phase reads like pip_phase/west_phase's own siblings.
@@ -411,3 +426,6 @@ and write both files from the real merged tree.
 - 2026-08-28 -- issue #474 (ADR 0021 Lane 1 P1): doctor.py gains toolchain_check() + _toolchain_store_dir() (stamp-vs-pin, ADR 0021's own 'doctor' requirement) alongside bootstrap_cmd.py's earlier-recorded toolchain_phase() growth.
     - tan/commands/doctor_cmd.py: 4045 -> 4134
     - function_count_budget: 282 -> 283
+- 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/build/execute.py: 1662 -> 1713
+    - tan/commands/build_cmd.py: 2178 -> 2293

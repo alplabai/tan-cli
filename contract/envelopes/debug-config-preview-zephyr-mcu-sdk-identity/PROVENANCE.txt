@@ -100,3 +100,56 @@ The oracle-parity fixtures went with `crates/` in the same issue, so the
 SDK-identity resolution this case exists to pin (`configuration.device`,
 `project.boardYaml`) now has this re-recorded golden as its only
 envelope-level gate.
+
+RE-RECORD 2: tan-cli#964 review round -- "skip-but-disclose"
+--------------------------------------------------------------
+Re-recorded on : 2026-08-28
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#964 (review round)
+Branch         : fix/964-validate-metadata-on-read
+
+What changed in the golden
+---------------------------
+`issues` gained two entries, both `debug-config.metadata-schema-unchecked`
+at severity `info`. This fixture's `sdk/` tree has never carried a
+`metadata/schemas/` directory at all -- neither `som-preset-v1.schema.json`
+nor `soc-spec-v1.schema.json` exists. tan-cli#964's review found the "must
+not fire on a checkout missing a schema" rule (correct) had been
+implemented as SILENCE (`issues: []`, byte-identical on the wire to a
+validated-clean run) rather than a disclosure. This fixture reads BOTH
+documents while resolving the SDK-published debug-probe identity
+(`_fill_debug_probe_identity_from_sdk` -> `read_sdk_som_and_soc`), so both
+now disclose:
+
+    - "issues":[]
+    + "issues":[
+    +   {"code":"debug-config.metadata-schema-unchecked","severity":"info",
+    +    "message":"./sdk/metadata/e1m_modules/E1M-AEN801.yaml: not
+    +    validated -- no schema at sdk/metadata/schemas/som-preset-v1.schema
+    +    .json in this checkout"},
+    +   {"code":"debug-config.metadata-schema-unchecked","severity":"info",
+    +    "message":"./sdk/metadata/socs/alif/ensemble/e8.json: not
+    +    validated -- no schema at sdk/metadata/schemas/soc-spec-v1.schema
+    +    .json in this checkout"}
+    + ]
+
+Both notes come from the SAME shared `schema_skipped` collector
+`debug_config()` threads through both of its metadata walks -- `--core
+m55_hp` with no build manifest also exercises `_sdk_published_cores` (the
+`--core`-vs-manifest guard), which reads the identical two documents and
+would otherwise duplicate each note; `dict.fromkeys` in `debug_config()`
+dedupes them down to exactly the two shown, confirmed deterministic across
+repeated captures. The SOM-preset `source` path (`./sdk/metadata/...`, `./`
+preserved) and the SCHEMA path inside each message (`sdk/metadata/schemas/
+...`, `./` stripped) look asymmetric but are not a bug: `source` is built
+with `os.path.join` on the raw `--sdk-root` string (preserves a leading
+`./`), while `som_preset_schema_path`/`soc_spec_schema_path` build a
+`pathlib.Path` (which normalises a leading `./` away on construction) --
+the same mixed os.path/pathlib convention every other path in this module
+already uses.
+
+`data` (the resolved launch configuration) is byte-identical to RE-RECORD
+1 -- this change is additive to `issues` only, at `info` severity, and does
+not alter `exitCode`/`ok`/`configuration.device` or any other resolved
+field.
