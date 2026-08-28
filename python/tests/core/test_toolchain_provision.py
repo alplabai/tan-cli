@@ -142,16 +142,16 @@ def test_store_dir_name_is_keyed_by_artifact_not_by_an_sdk_checkout():
 
 
 def test_alp_toolchain_root_env_override_is_honoured_and_marked_adopted():
-    resolved = tp.resolve_toolchain_root("/mnt/shared/toolchains", "/home/nobody/.alp")
+    resolved = tp.resolve_toolchain_root("/mnt/shared/toolchains", "/home/u/.alp")
     assert resolved.path_str == "/mnt/shared/toolchains"
     assert resolved.adopted is True
 
 
 def test_a_blank_override_falls_back_to_the_default_and_is_not_adopted():
-    resolved = tp.resolve_toolchain_root("   ", "/home/nobody/.alp")
+    resolved = tp.resolve_toolchain_root("   ", "/home/u/.alp")
     assert resolved.adopted is False
     assert resolved.path_str.endswith("toolchains")
-    assert "/home/nobody/.alp" in resolved.path_str
+    assert "/home/u/.alp" in resolved.path_str
 
 
 def test_wreckage_glob_pattern_only_matches_this_leafs_own_tmp_siblings():

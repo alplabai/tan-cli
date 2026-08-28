@@ -186,17 +186,25 @@ What those commands do:
    unaffected, and `native_sim` builds never need a cross toolchain at all).
    On a minimal Linux host this phase also needs `file` on PATH
    (Debian/Ubuntu: `sudo apt-get install -y file`); without it the underlying
-   `west sdk install`'s own host-tools step fails with "Host tools
-   installation failed" and names nothing -- alp-sdk's
-   `metadata/bootstrap.json` (`manualInstallHints.posix.note[2]`) documents
-   this the same way for the manual command below.
+   `west sdk install`'s own host-tools step fails with "Host tools installation failed" and names nothing.
 2. If you skip the toolchain phase, or need to point at a different pin, run
-   `west sdk install` by hand from inside the workspace venv (`source
-   alp-workspace/.venv/bin/activate`, `export
-   ZEPHYR_BASE="$PWD/alp-workspace/zephyr"`, then
-   `west sdk install --version 1.0.1 -t arm-zephyr-eabi`) -- the exact
-   command `tan doctor`'s `zephyrSdk` check also names, so it stays correct
-   if that pin ever moves.
+   `west sdk install` by hand from inside the workspace venv:
+
+   ```sh
+   source alp-workspace/.venv/bin/activate    # Windows: alp-workspace\.venv\Scripts\Activate.ps1
+   export ZEPHYR_BASE="$PWD/alp-workspace/zephyr"
+   west sdk install --version 1.0.1 -t arm-zephyr-eabi
+   ```
+
+   the exact command `tan doctor`'s `zephyrSdk` check also names, so it
+   stays correct if that pin ever moves. On a minimal Linux host this also
+   needs `file` on PATH (Debian/Ubuntu: `sudo apt-get install -y file`);
+   without it the SDK's own host-tools step fails with "Host tools installation failed" and names nothing. alp-sdk's `metadata/bootstrap.json`
+   (`manualInstallHints.posix.note[2]`) calls a missing `file` "WARN-only, not
+   a bootstrap.sh prerequisite", and both statements are true: that note is
+   written for the `--no-hosttools` invocation in its own `note[0]`, which
+   never runs the host-tools step. The command above installs host tools, so
+   it needs `file`. Add `--no-hosttools` and it does not.
 3. `init` creates a Zephyr application and pins the SDK checkout in
    `.alp/sdk-path`.
 4. `validate` checks `board.yaml` and related metadata.
