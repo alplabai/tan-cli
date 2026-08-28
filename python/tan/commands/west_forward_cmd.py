@@ -115,10 +115,7 @@ from tan.commands.build_output import ProjectContext, resolve_project_context, t
 from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
-from tan.envelope import Envelope, Issue, SdkInfo, emit  # noqa: F401 -- re-exported;
-# `tests/commands/test_west_forward_command.py` constructs a `ProjectContext`
-# directly via `west_forward_cmd.SdkInfo(...)`, reading it off this module's
-# own namespace rather than importing `tan.envelope` a second time.
+from tan.envelope import Envelope, Issue, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
 
@@ -313,13 +310,13 @@ def _spawn_captured(plan: _Forward) -> subprocess.CompletedProcess[str]:
 
 
 def _sdk_resolution_issues(context: ProjectContext) -> list[Issue]:
-    """The `sdk_resolution_issues` pair, computed from `context` rather than
-    `context.sdk` (tan-cli#958). `size`/`image`/`clean` already read
-    `context.broken_project_pin`/`context.sdk_source_tier`/
-    `context.foreign_global_default_for` directly for exactly this reason: those
-    three fields are carried on `ProjectContext` UNCONDITIONALLY -- unlike
-    `context.sdk`, which is `None` the moment nothing resolved to a usable
-    checkout. Gating on `sdk is not None` (the seam's own
+    """The `sdk_resolution_issues` pair, computed from `context`'s own
+    top-level fields rather than `context.sdk` (tan-cli#958). `size`/`image`/
+    `clean` already read `context.broken_project_pin`/`context.sdk_source_tier`/
+    `context.foreign_global_default_for` directly for exactly this reason:
+    those three fields are carried on `ProjectContext` UNCONDITIONALLY --
+    unlike `context.sdk`, which is `None` the moment nothing resolved to a
+    usable checkout. Gating on `sdk is not None` (the seam's own
     `_with_sdk_resolution_advisories`, and this module's own previous shape)
     silently drops `sdk.project-pin-unresolved` in exactly the one case a
     broken pin matters most: when the ladder falls all the way through and
@@ -328,23 +325,16 @@ def _sdk_resolution_issues(context: ProjectContext) -> list[Issue]:
     deduplicated by code, so calling it here first and letting the seam run
     second never double-emits.
 
-    When `context.sdk` IS set, read the triple off IT rather than off
-    `context`'s own top-level twins: `resolve_project_context` always writes
-    both from the one `active` resolution (`build_output.py`'s own
-    `ProjectContext.broken_project_pin` docstring -- "carried through"), so in
-    a real run the two agree by construction, but `context.sdk`'s copy is the
-    one this module's own pre-existing tests hand-build (a bare `ProjectContext
-    (..., sdk=SdkInfo(...))` sets only the nested triple) -- matching that
-    keeps this a pure ADDITION on the `sdk is None` path rather than a second,
-    independently-behaving read of the same fact on the path that already
-    worked.
+    Reads the top-level triple unconditionally, `size_cmd.py`/`image_cmd.py`'s
+    own established idiom, rather than branching on `context.sdk is not None`
+    to read the nested `SdkInfo` copy: `resolve_project_context` is the one
+    production construction site (`build_output.py`'s own
+    `ProjectContext.broken_project_pin` docstring -- "carried through") and
+    always writes both the nested triple and the top-level twins from the same
+    `active` resolution, so the two agree by construction in every real run
+    and a branch to pick between them is dead-equivalent there -- it only ever
+    mattered for a hand-built fixture that set one copy and not the other.
     """
-    if context.sdk is not None:
-        return sdk_resolution_issues(
-            context.sdk.broken_project_pin,
-            context.sdk.source_tier,
-            context.sdk.foreign_global_default_for,
-        )
     return sdk_resolution_issues(
         context.broken_project_pin, context.sdk_source_tier, context.foreign_global_default_for
     )

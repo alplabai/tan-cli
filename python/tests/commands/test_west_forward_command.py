@@ -26,6 +26,7 @@ from tan.commands.west_forward_cmd import (
     quality,
 )
 from tan.core.global_flags import GLOBAL_FLAGS
+from tan.envelope import SdkInfo
 
 app = typer.Typer(add_completion=False)
 app.command("migrate", context_settings=FORWARD_CONTEXT_SETTINGS)(migrate)
@@ -251,11 +252,16 @@ def test_text_mode_discloses_a_foreign_global_default_before_spawning_west(
     context = west_forward_cmd.ProjectContext(
         workspace_root=str(tmp_path).replace("\\", "/"),
         board_yaml=str(tmp_path / "board.yaml").replace("\\", "/"),
-        sdk=west_forward_cmd.SdkInfo(
+        sdk=SdkInfo(
             root=str(tmp_path / "other-sdk").replace("\\", "/"),
             source_tier="globalDefault",
             foreign_global_default_for=str(tmp_path / "projB").replace("\\", "/"),
         ),
+        # `_sdk_resolution_issues` reads the top-level twins unconditionally
+        # (tan-cli#961 review) -- matching `resolve_project_context`'s real
+        # shape, which always writes both from the same resolution.
+        sdk_source_tier="globalDefault",
+        foreign_global_default_for=str(tmp_path / "projB").replace("\\", "/"),
     )
     monkeypatch.setattr(
         west_forward_cmd, "resolve_project_context", lambda *a, **k: context
@@ -480,23 +486,32 @@ def test_launch_error_also_discloses_the_broken_pin(_broken_pin, tmp_path):
     assert [i["code"] for i in env["issues"]] == ["sdk.project-pin-unresolved", "lock.failed"]
 
 
-def test_a_broken_pin_with_a_working_fallback_still_names_the_real_tier(monkeypatch, tmp_path):
+def _working_fallback_context(tmp_path) -> west_forward_cmd.ProjectContext:
     """CASE B of the issue: the pin is broken but a `globalDefault` tier
-    backstops it. `context.sdk` is NOT `None` here, so this exercises the
-    `context.sdk is not None` branch of `_sdk_resolution_issues` -- the pin
-    message must name the tier that actually answered (`globalDefault`), not
-    `none`, and the nested `SdkInfo` triple must be read (matching pre-fix
-    behaviour) rather than the top-level twins, which are left at their
-    dataclass defaults in this hand-built context on purpose."""
-    context = west_forward_cmd.ProjectContext(
+    backstops it, so `context.sdk` is NOT `None`. `_sdk_resolution_issues`
+    reads the top-level twins unconditionally (tan-cli#961 review), so both
+    the nested `SdkInfo` triple AND the top-level `broken_project_pin`/
+    `sdk_source_tier` are set here to the same facts -- matching the one
+    production construction site (`resolve_project_context`), which always
+    writes both from the same resolution rather than leaving either at its
+    dataclass default."""
+    return west_forward_cmd.ProjectContext(
         workspace_root=str(tmp_path).replace("\\", "/"),
         board_yaml=str(tmp_path / "board.yaml").replace("\\", "/"),
-        sdk=west_forward_cmd.SdkInfo(
+        sdk=SdkInfo(
             root=str(tmp_path / "other-sdk").replace("\\", "/"),
             source_tier="globalDefault",
             broken_project_pin=str(tmp_path / "gone-sdk").replace("\\", "/"),
         ),
+        broken_project_pin=str(tmp_path / "gone-sdk").replace("\\", "/"),
+        sdk_source_tier="globalDefault",
     )
+
+
+def test_a_broken_pin_with_a_working_fallback_still_names_the_real_tier(monkeypatch, tmp_path):
+    """CASE B of the issue: the pin message must name the tier that actually
+    answered (`globalDefault`), not `none`."""
+    context = _working_fallback_context(tmp_path)
     monkeypatch.setattr(west_forward_cmd, "resolve_project_context", lambda *a, **k: context)
 
     class _Ok:
@@ -512,6 +527,39 @@ def test_a_broken_pin_with_a_working_fallback_still_names_the_real_tier(monkeypa
     env = envelope(result)
     assert env["sdk"] == {"root": str(tmp_path / "other-sdk").replace("\\", "/"), "sourceTier": "globalDefault"}
     assert [i["code"] for i in env["issues"]] == ["sdk.project-pin-unresolved"]
+    assert "falling through to the globalDefault tier" in env["issues"][0]["message"]
+
+
+def test_a_broken_pin_with_a_working_fallback_still_lands_first_when_the_child_fails(
+    monkeypatch, tmp_path
+):
+    """CASE B's ordering claim, mutation-proved: the PR body and changelog
+    both advertise "pin now lands first, was last" for CASE B, but the only
+    pre-existing CASE B test (above) drives a child that exits 0, so `issues`
+    holds a single element and ordering is unobservable there. A child that
+    FAILS makes `issues` hold two elements, so the full ordered list is the
+    thing under test -- reverting the prepend back to an append
+    (`[Issue(...), *resolution_issues]` -> `[*resolution_issues, Issue(...)]`
+    reversed) flips this assertion's own list, not a crash."""
+    context = _working_fallback_context(tmp_path)
+    monkeypatch.setattr(west_forward_cmd, "resolve_project_context", lambda *a, **k: context)
+
+    class _Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    monkeypatch.setattr(west_forward_cmd.subprocess, "run", lambda *a, **k: _Failed())
+    result = runner.invoke(
+        app, ["migrate", "--project", str(tmp_path), "--check", "--format", "json"]
+    )
+    assert result.exit_code == 1
+    env = envelope(result)
+    assert env["sdk"] == {"root": str(tmp_path / "other-sdk").replace("\\", "/"), "sourceTier": "globalDefault"}
+    assert [i["code"] for i in env["issues"]] == [
+        "sdk.project-pin-unresolved",
+        "migrate.failed",
+    ]
     assert "falling through to the globalDefault tier" in env["issues"][0]["message"]
 
 
