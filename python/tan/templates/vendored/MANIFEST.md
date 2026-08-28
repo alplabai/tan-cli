@@ -386,27 +386,31 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **twenty-one** live entries
-(counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS` dict, not by
-hand): one `multicore-mailbox`/`E1M-AEN801` entry for the leading "blocked
-ahead" caveat (tan-cli#864 Q5, see entry 9 below), the `iot`
-CMakeLists edit, six `edge-ai` entries for the `## Model`/`## Tests` pointers
-(tan-cli#821(a), see entry 4 below) — two `README.md` entries plus two
-entries PER `src/main.c` (one per comment rewrite, declared separately so
-healing one comment without the other still reds; see
+The `DELIBERATE_EDITS` table below currently carries **twenty-nine** live entries
+(counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS`
+dict, not by hand): one `multicore-mailbox`/`E1M-AEN801` entry for the
+leading "blocked ahead" caveat (tan-cli#864 Q5, see entry 9 below), the
+`iot` CMakeLists edit, six `edge-ai` entries for the `## Model`/`## Tests`
+pointers (tan-cli#821(a), see entry 4 below) — two `README.md` entries plus
+two entries PER `src/main.c` (one per comment rewrite, declared separately
+so healing one comment without the other still reds; see
 `scaffold_byte_parity.py`'s `DELIBERATE_EDITS` docstring) — two more
 `edge-ai`/`E1M-AEN801` entries for the DEEPX retarget sentence (tan-cli#814,
 see entries 5 and 6 below), one more `edge-ai`/`E1M-V2N101` entry for that
 same tree's own narrower DEEPX-sentence defect (tan-cli#946, see entry 10
 below), four more for `diagnostics`/`sensor`'s bare cross-repo pointers
 (tan-cli#912, see entry 7 below) — two SKUs each, one `README.md` entry per
-SKU — and six more for `diagnostics`/`E1M-V2N101`'s Alif/AEN801-shaped
-`src/main.c`/`README.md` bytes (tan-cli#932, see entry 8 below). That is
-`1 + 1 + 6 + 2 + 1 + 4 + 6 = 21` — a review round on tan-cli#932 (2026-08)
+SKU — six more for `diagnostics`/`E1M-V2N101`'s Alif/AEN801-shaped
+`src/main.c`/`README.md` bytes (tan-cli#932, see entry 8 below), and eight
+more for `sensor`/`src/main.c`'s four remaining bare `i2c-scanner`
+mentions entry 7 left uncovered (tan-cli#924, see entry 11 below) — two
+SKUs each, one entry per substitution. That is
+`1 + 1 + 6 + 2 + 1 + 4 + 6 + 8 = 29` — a review round on tan-cli#932 (2026-08)
 found this paragraph's arithmetic summed to 19 without the leading
 multicore-mailbox term, and entry 9 below absent from the numbered list
-entirely; both were fixed in that round (making the count twenty), and a
-further review round on tan-cli#946 added entry 10 (making it twenty-one).
+entirely; both were fixed in that round (making the count twenty), a
+further review round on tan-cli#946 added entry 10 (making it twenty-one),
+and tan-cli#924 added entry 11's eight entries (making it twenty-nine).
 `test_the_manifest_deliberate_edit_count_matches_the_table` pins the
 **twenty-one** above against `len(DELIBERATE_EDITS)` itself, the drift this
 paragraph shipped with nothing catching before tan-cli#932. tan-cli#384's
@@ -547,10 +551,12 @@ strictness exists to catch.
    `sensor`'s names a bare `examples/peripheral-io/i2c-scanner` in one bullet
    (the SAME README already carries two real markdown links to that identical
    referent elsewhere — this is the only bare instance in this README, not a
-   novel shape; the wider `sensor` scaffold still ships several more bare
-   `i2c-scanner` referents outside this README — `src/main.c`, `board.yaml`,
-   `testcase.yaml` — out of scope for this entry and tracked upstream as part
-   of extending alp-sdk#1705). Both scripts/examples are real in the alp-sdk
+   novel shape; at the time this entry was written the wider `sensor`
+   scaffold still shipped several more bare `i2c-scanner` referents outside
+   this README — `src/main.c`'s four are now covered by entry 11 below
+   (tan-cli#924); `board.yaml` and `testcase.yaml` carry one bare mention
+   each, descriptive/contrastive prose rather than run-this instructions,
+   and remain untracked here). Both scripts/examples are real in the alp-sdk
    checkout the text was captured from, never emitted into any scaffolded
    project (`_vendored_files` in `tan/core/scaffold.py` reaches nothing
    outside `vendored/<template>/<sku>/`). Each is a bare inline code span, so
@@ -569,10 +575,15 @@ strictness exists to catch.
    not assumed, after a prior PR in this same series asserted the opposite of
    a link and was corrected in review). Fix belongs upstream, in alp-sdk's
    `examples/bringup/board-selftest/README.md` and
-   `examples/peripheral-io/i2c-master/README.md` (the latter's `src/main.c`,
-   `board.yaml`, and `testcase.yaml` too, per the extended alp-sdk#1705);
-   filed as alp-sdk#1705, and this entry retires the moment that lands and
-   this tree is re-vendored.
+   `examples/peripheral-io/i2c-master/README.md`; filed as alp-sdk#1705, and
+   this entry retires the moment that lands and this tree is re-vendored.
+   (Status as of tan-cli#924: alp-sdk#1705's `i2c-master/README.md` half
+   landed upstream 2026-08-28 via alp-sdk#1792 — this entry stays live only
+   because the vendored tree is still pinned at `v0.16.0`, pre-fix; the next
+   re-vendor retires it. A comment on #1705 also extended it to
+   `i2c-master`'s `src/main.c`/`board.yaml`/`testcase.yaml`, but #1792's
+   `Closes #1705` auto-closed the issue without covering that extension —
+   re-filed as alp-sdk#1795, see entry 11 below for the `src/main.c` half.)
 8. **`diagnostics`/`E1M-V2N101`'s `src/main.c` and `README.md`: Alif SoC
    identity + an AEN801-shaped SoM SKU/serial on a Renesas RZ/V2N scaffold
    (tan-cli#932).** The emit's per-SKU substitution never reaches
@@ -665,6 +676,40 @@ strictness exists to catch.
     Fix belongs upstream, in alp-sdk's
     `examples/ai/cold-chain-monitor/README.md`; filed as alp-sdk#1749, and
     this entry retires the moment that lands and this tree is re-vendored.
+11. **`sensor`'s `src/main.c`: four more bare `i2c-scanner`/
+    `examples/peripheral-io/i2c-scanner` mentions entry 7 above deliberately
+    left uncovered (tan-cli#924, the review-flagged follow-up to
+    tan-cli#912/#918).** Entry 7's scope was the `README.md` bullet only;
+    a real `tan init --template sensor-starter --som E1M-AEN801` scaffold's
+    `src/main.c` still names the same referent bare four more times, lines
+    10, 18, 103 and 114 of the emitted file: the header comment's
+    "Contrasts with `examples/peripheral-io/i2c-scanner`..." paragraph
+    (line 10, descriptive), "On a brand-new bring-up you may want to run
+    `examples/peripheral-io/i2c-scanner` first..." (line 18, a run-this
+    instruction), the `tmp112_init` doc-comment's "`i2c-scanner` can
+    confirm which devices ACK" (line 103, descriptive), and "Use
+    `i2c-scanner` to enumerate what IS on this bus before chasing a
+    TMP112..." (line 114, a run-this instruction). Same defect class as
+    entry 7: real only in the alp-sdk checkout the text was captured from,
+    never emitted into any scaffolded project, and a C comment rather than
+    a markdown link so the emit's own doc-link rewriter never touches it.
+    Byte-identical between the two SKUs (`sensor`'s `src/main.c` carries no
+    SKU substitution at all), so each of the four substitutions below
+    shares one `un_edit` across both SKUs -- eight entries total. Rewritten
+    to name the real alp-sdk path in prose (no markdown syntax applies
+    inside a C comment), each noting the referent is not part of this
+    scaffolded project, matching entry 7's and entry 4's phrasing. Fix
+    belongs upstream, in alp-sdk's
+    `examples/peripheral-io/i2c-master/src/main.c`. A comment on entry 7's
+    alp-sdk#1705 requested this scope, but alp-sdk#1792's `Closes #1705`
+    auto-closed that issue after fixing only the `README.md` half (merged
+    2026-08-28) -- the `src/main.c` request went along with it, unaddressed;
+    re-filed fresh as alp-sdk#1795, and these entries retire the moment that
+    lands and this tree is re-vendored.
+    `board.yaml`/`testcase.yaml` carry one more bare mention each (line 6
+    and line 10 respectively) but are descriptive/contrastive prose, not
+    run-this instructions, and stay untracked here -- tan-cli#924's own
+    scope note.
 
 ## Template x SKU matrix vendored
 

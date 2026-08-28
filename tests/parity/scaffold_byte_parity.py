@@ -349,11 +349,13 @@ def un_edit_diagnostics_readme_eeprom_script(text: str) -> str:
 #: `examples/peripheral-io/i2c-scanner` in one Troubleshooting bullet -- the
 #: same referent this file links TWICE elsewhere as a real markdown link
 #: (the emit's own doc-link rewriter already covers those two), so this is
-#: the only bare instance in this README, not a novel defect shape. (The
-#: wider `sensor` scaffold still ships several more bare `i2c-scanner`
-#: referents outside this README -- `src/main.c`, `board.yaml`,
-#: `testcase.yaml` -- out of scope for this entry.) Byte-identical between
-#: the two SKUs, so both entries below share this one `un_edit`.
+#: the only bare instance in this README, not a novel defect shape. (At the
+#: time this entry was written the wider `sensor` scaffold still shipped
+#: several more bare `i2c-scanner` referents outside this README --
+#: `src/main.c`'s four are now covered below (tan-cli#924); `board.yaml` and
+#: `testcase.yaml` carry one bare, descriptive mention each and remain out
+#: of scope.) Byte-identical between the two SKUs, so both entries below
+#: share this one `un_edit`.
 _SENSOR_README_I2C_SCANNER_BULLET_EDITED = (
     "  slave).  Run alp-sdk's\n"
     "  [`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner)\n"
@@ -370,6 +372,107 @@ def un_edit_sensor_readme_i2c_scanner_bullet(text: str) -> str:
     return text.replace(
         _SENSOR_README_I2C_SCANNER_BULLET_EDITED,
         _SENSOR_README_I2C_SCANNER_BULLET_EMITTED,
+    )
+
+
+#: tan-cli#924 (the `src/main.c` follow-up tan-cli#912/#918 deliberately left
+#: out of scope): `sensor`'s `src/main.c` names FOUR more bare
+#: `i2c-scanner`/`examples/peripheral-io/i2c-scanner` mentions, lines 10, 18,
+#: 103 and 114 of the emitted file. A C comment, not markdown, so no link
+#: syntax applies -- named the alp-sdk path in prose instead, same shape as
+#: tan-cli#821(a)'s `edge-ai`/`src/main.c` fix above. Byte-identical between
+#: the two SKUs (confirmed: `sensor`'s `src/main.c` carries no SKU
+#: substitution at all), so each entry below shares one `un_edit` across both
+#: SKUs. Four separate entries, one per substitution, per tan-cli#908's
+#: discipline -- healing one without the others must still red.
+_SENSOR_MAIN_C_PATTERN_PARAGRAPH_EDITED = (
+    " * Pattern: open the bus, init the chip driver, loop reading the\n"
+    " * register every second, close cleanly.  Contrasts with alp-sdk's\n"
+    " * examples/peripheral-io/i2c-scanner (not part of this scaffolded\n"
+    " * project), which probes every 7-bit address for ACKs without\n"
+    " * knowing what's behind them.\n"
+)
+_SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED = (
+    " * Pattern: open the bus, init the chip driver, loop reading the\n"
+    " * register every second, close cleanly.  Contrasts with\n"
+    " * examples/peripheral-io/i2c-scanner which probes every 7-bit address for ACKs\n"
+    " * without knowing what's behind them.\n"
+)
+
+
+def un_edit_sensor_main_c_pattern_paragraph(text: str) -> str:
+    """tan-cli#924: reverse the header-comment `Contrasts with` paragraph
+    rewrite above to recover the emit's own (dead-pointer) bytes."""
+    return text.replace(
+        _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EDITED,
+        _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED,
+    )
+
+
+_SENSOR_MAIN_C_BRINGUP_INSTRUCTION_EDITED = (
+    " * On a brand-new bring-up you may want to run alp-sdk's\n"
+    " * examples/peripheral-io/i2c-scanner (not part of this scaffolded\n"
+    " * project) first to confirm which address ACKs.\n"
+)
+_SENSOR_MAIN_C_BRINGUP_INSTRUCTION_EMITTED = (
+    " * On a brand-new bring-up you may want to run examples/peripheral-io/i2c-scanner\n"
+    " * first to confirm which address ACKs.\n"
+)
+
+
+def un_edit_sensor_main_c_bringup_instruction(text: str) -> str:
+    """tan-cli#924: reverse the header-comment `run i2c-scanner first`
+    run-this instruction rewrite above to recover the emit's own
+    (dead-pointer) bytes."""
+    return text.replace(
+        _SENSOR_MAIN_C_BRINGUP_INSTRUCTION_EDITED,
+        _SENSOR_MAIN_C_BRINGUP_INSTRUCTION_EMITTED,
+    )
+
+
+_SENSOR_MAIN_C_INIT_FAIL_COMMENT_EDITED = (
+    "     * If init fails the example exits cleanly -- maybe the chip\n"
+    "     * isn't populated, maybe the address is wrong, maybe the\n"
+    "     * bus is held low by another device.  alp-sdk's\n"
+    "     * examples/peripheral-io/i2c-scanner (not part of this\n"
+    "     * scaffolded project) can confirm which devices ACK. */\n"
+)
+_SENSOR_MAIN_C_INIT_FAIL_COMMENT_EMITTED = (
+    "     * If init fails the example exits cleanly -- maybe the chip\n"
+    "     * isn't populated, maybe the address is wrong, maybe the\n"
+    "     * bus is held low by another device.  i2c-scanner can\n"
+    "     * confirm which devices ACK. */\n"
+)
+
+
+def un_edit_sensor_main_c_init_fail_comment(text: str) -> str:
+    """tan-cli#924: reverse the `tmp112_init` doc-comment `i2c-scanner can
+    confirm` rewrite above to recover the emit's own (dead-pointer) bytes."""
+    return text.replace(
+        _SENSOR_MAIN_C_INIT_FAIL_COMMENT_EDITED,
+        _SENSOR_MAIN_C_INIT_FAIL_COMMENT_EMITTED,
+    )
+
+
+_SENSOR_MAIN_C_FAILURE_MODES_INSTRUCTION_EDITED = (
+    "         * Use alp-sdk's examples/peripheral-io/i2c-scanner (not\n"
+    "         * part of this scaffolded project) to enumerate what IS\n"
+    "         * on this bus before chasing a TMP112 that may not be\n"
+    "         * populated. */\n"
+)
+_SENSOR_MAIN_C_FAILURE_MODES_INSTRUCTION_EMITTED = (
+    "         * Use i2c-scanner to enumerate what IS on this bus before\n"
+    "         * chasing a TMP112 that may not be populated. */\n"
+)
+
+
+def un_edit_sensor_main_c_failure_modes_instruction(text: str) -> str:
+    """tan-cli#924: reverse the "Most-frequent failure modes" `Use
+    i2c-scanner` run-this instruction rewrite above to recover the emit's
+    own (dead-pointer) bytes."""
+    return text.replace(
+        _SENSOR_MAIN_C_FAILURE_MODES_INSTRUCTION_EDITED,
+        _SENSOR_MAIN_C_FAILURE_MODES_INSTRUCTION_EMITTED,
     )
 
 
@@ -650,6 +753,47 @@ DELIBERATE_EDITS: dict[
     ("sensor", "E1M-V2N101", "README.md", "i2c_scanner_bullet"): (
         "tan-cli#912: same as sensor/E1M-AEN801/README.md above",
         un_edit_sensor_readme_i2c_scanner_bullet,
+    ),
+    ("sensor", "E1M-AEN801", "src/main.c", "pattern_paragraph"): (
+        "tan-cli#924: the header-comment 'Contrasts with' paragraph named a "
+        "bare examples/peripheral-io/i2c-scanner, not emitted into any "
+        "scaffolded project -- named the real alp-sdk path in prose (a C "
+        "comment, no markdown link syntax applies)",
+        un_edit_sensor_main_c_pattern_paragraph,
+    ),
+    ("sensor", "E1M-V2N101", "src/main.c", "pattern_paragraph"): (
+        "tan-cli#924: same as sensor/E1M-AEN801/src/main.c above",
+        un_edit_sensor_main_c_pattern_paragraph,
+    ),
+    ("sensor", "E1M-AEN801", "src/main.c", "bringup_instruction"): (
+        "tan-cli#924: the header-comment 'run i2c-scanner first' run-this "
+        "instruction, own entry from the paragraph above per tan-cli#908's "
+        "one-substitution-per-entry discipline",
+        un_edit_sensor_main_c_bringup_instruction,
+    ),
+    ("sensor", "E1M-V2N101", "src/main.c", "bringup_instruction"): (
+        "tan-cli#924: same as sensor/E1M-AEN801/src/main.c above",
+        un_edit_sensor_main_c_bringup_instruction,
+    ),
+    ("sensor", "E1M-AEN801", "src/main.c", "init_fail_comment"): (
+        "tan-cli#924: the tmp112_init doc-comment's 'i2c-scanner can "
+        "confirm which devices ACK' bare mention, own entry from the two "
+        "above",
+        un_edit_sensor_main_c_init_fail_comment,
+    ),
+    ("sensor", "E1M-V2N101", "src/main.c", "init_fail_comment"): (
+        "tan-cli#924: same as sensor/E1M-AEN801/src/main.c above",
+        un_edit_sensor_main_c_init_fail_comment,
+    ),
+    ("sensor", "E1M-AEN801", "src/main.c", "failure_modes_instruction"): (
+        "tan-cli#924: the 'Most-frequent failure modes' block's 'Use "
+        "i2c-scanner to enumerate' run-this instruction, own entry from "
+        "the three above",
+        un_edit_sensor_main_c_failure_modes_instruction,
+    ),
+    ("sensor", "E1M-V2N101", "src/main.c", "failure_modes_instruction"): (
+        "tan-cli#924: same as sensor/E1M-AEN801/src/main.c above",
+        un_edit_sensor_main_c_failure_modes_instruction,
     ),
     ("diagnostics", "E1M-V2N101", "src/main.c", "som_sku_header"): (
         "tan-cli#932: src/main.c was never SKU-substituted at all -- the "
@@ -1009,6 +1153,56 @@ def self_check() -> None:
             f for f in mut_failures
             if f.startswith(f"{path}: DELIBERATE_EDITS declares an edit that is no longer")
         ], (template, sku, path, edit_id, mut_failures)
+
+    # tan-cli#924's eight entries (sensor/src/main.c x4 substitutions x2
+    # SKUs): each un_edit must round-trip the corrected comment back onto
+    # the emit's own (still-bare) bytes, and be registered under the exact
+    # (template, sku, path, edit_id) key.
+    _SENSOR_MAIN_C_924_FIXTURES = (
+        (
+            "pattern_paragraph",
+            un_edit_sensor_main_c_pattern_paragraph,
+            _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EDITED,
+            _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED,
+        ),
+        (
+            "bringup_instruction",
+            un_edit_sensor_main_c_bringup_instruction,
+            _SENSOR_MAIN_C_BRINGUP_INSTRUCTION_EDITED,
+            _SENSOR_MAIN_C_BRINGUP_INSTRUCTION_EMITTED,
+        ),
+        (
+            "init_fail_comment",
+            un_edit_sensor_main_c_init_fail_comment,
+            _SENSOR_MAIN_C_INIT_FAIL_COMMENT_EDITED,
+            _SENSOR_MAIN_C_INIT_FAIL_COMMENT_EMITTED,
+        ),
+        (
+            "failure_modes_instruction",
+            un_edit_sensor_main_c_failure_modes_instruction,
+            _SENSOR_MAIN_C_FAILURE_MODES_INSTRUCTION_EDITED,
+            _SENSOR_MAIN_C_FAILURE_MODES_INSTRUCTION_EMITTED,
+        ),
+    )
+    for sku in ("E1M-AEN801", "E1M-V2N101"):
+        for edit_id, un_edit, edited, emitted in _SENSOR_MAIN_C_924_FIXTURES:
+            assert ("sensor", sku, "src/main.c", edit_id) in DELIBERATE_EDITS
+            assert un_edit(edited) == emitted
+
+    # ...and each is the strict half too: feeding the un_edit its OWN emitted
+    # (still-bare) bytes finds nothing to undo -- `undo_declared_edits` must
+    # surface that as a hard failure, not a quiet pass, for all eight.
+    for sku in ("E1M-AEN801", "E1M-V2N101"):
+        for edit_id, _un_edit, _edited, emitted in _SENSOR_MAIN_C_924_FIXTURES:
+            _, mut_failures = undo_declared_edits(
+                "sensor", sku, {"src/main.c": emitted}
+            )
+            assert [
+                f for f in mut_failures
+                if f.startswith(
+                    "src/main.c: DELIBERATE_EDITS declares an edit that is no longer"
+                )
+            ], ("sensor", sku, "src/main.c", edit_id, mut_failures)
 
     # tan-cli#932's six entries (diagnostics/E1M-V2N101 only): each un_edit
     # must round-trip the corrected src/main.c or README.md bytes back onto

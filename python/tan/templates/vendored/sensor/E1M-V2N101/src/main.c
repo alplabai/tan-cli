@@ -6,17 +6,19 @@
  * a known address.
  *
  * Pattern: open the bus, init the chip driver, loop reading the
- * register every second, close cleanly.  Contrasts with
- * examples/peripheral-io/i2c-scanner which probes every 7-bit address for ACKs
- * without knowing what's behind them.
+ * register every second, close cleanly.  Contrasts with alp-sdk's
+ * examples/peripheral-io/i2c-scanner (not part of this scaffolded
+ * project), which probes every 7-bit address for ACKs without
+ * knowing what's behind them.
  *
  * Hardware: the TMP112 +/-0.5 C temperature sensor sits on the
  * BRD_I2C management bus on every E1M-AEN, E1M-V2N, and E1M-V2N-M1
  * SoM per metadata/chips/tmp112.yaml.  7-bit address depends on
  * the ADD0 strap, which selects one of 0x48..0x4B; every current
  * SoM family straps ADD0 = GND, so the address is 0x48 throughout.
- * On a brand-new bring-up you may want to run examples/peripheral-io/i2c-scanner
- * first to confirm which address ACKs.
+ * On a brand-new bring-up you may want to run alp-sdk's
+ * examples/peripheral-io/i2c-scanner (not part of this scaffolded
+ * project) first to confirm which address ACKs.
  *
  * What success looks like (real hardware):
  *
@@ -100,8 +102,9 @@ int main(void)
      *      "wrong address" case (NACK on probe) up-front.
      * If init fails the example exits cleanly -- maybe the chip
      * isn't populated, maybe the address is wrong, maybe the
-     * bus is held low by another device.  i2c-scanner can
-     * confirm which devices ACK. */
+     * bus is held low by another device.  alp-sdk's
+     * examples/peripheral-io/i2c-scanner (not part of this
+     * scaffolded project) can confirm which devices ACK. */
 	tmp112_t     sensor;
 	alp_status_t s = tmp112_init(&sensor, bus, TMP112_ADDR_7BIT);
 	if (s != ALP_OK) {
@@ -111,8 +114,10 @@ int main(void)
          *                     (the bus floats high without them).
          *   * ALP_ERR_INVAL -- bad argument (NULL ctx or NULL bus).
          *
-         * Use i2c-scanner to enumerate what IS on this bus before
-         * chasing a TMP112 that may not be populated. */
+         * Use alp-sdk's examples/peripheral-io/i2c-scanner (not
+         * part of this scaffolded project) to enumerate what IS
+         * on this bus before chasing a TMP112 that may not be
+         * populated. */
 		printf("[i2c-master] tmp112_init @ 0x%02x -> %d "
 		       "(populated? right address?)\n",
 		       TMP112_ADDR_7BIT,
