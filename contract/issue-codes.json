@@ -1437,6 +1437,14 @@
       "note": "Constructed as the whole literal at a `_refuse` call site in `build_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "build.flag-retired",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "note": "Added by tan-cli#427: `--plan`/`--manifest`/`--manifest-from` are the v0.4.1 oracle's own flags, but this port implements a newer overlapping plan surface (`--plan-from`/`--materialise`/`--native`/`--execute`) and the maintainer's decision on the issue was to retire the oracle spellings rather than carry two -- \"Two overlapping plan surfaces is worse than one, so the oracle spellings go.\" Distinct from `cli.command-deferred` (RUNTIME_FAILURE, exit 1, \"not built yet, an issue tracks its arrival\") on purpose: a retired flag never arrives, so it exits `VALIDATION_FAILURE` (2), this CLI's position for a permanently-invalid invocation (`build.conflicting-flags`'s own exit code). Constructed as the whole literal at a `_refuse` call site, same shape `build.conflicting-flags` above is registered for. Every message this code carries names the replacement flag directly (`_RETIRED_FLAGS` in `build_cmd.py`) rather than pointing at a tracker. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "build.materialise-failed",
       "status": "reserved",
       "severity": "error",

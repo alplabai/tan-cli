@@ -6,11 +6,13 @@ from tan.core.plan_exec import (
     CROSS_DRIVE_MSG,
     ExecutionPolicy,
     PolicyAction,
+    PristineSkipped,
     SdkStampAction,
     apply_env_append,
     assemble_slice_env,
     cross_drive_source_refusal,
     normalize_path,
+    pristine_suppression,
     resolve_action,
     sdk_stamp_action,
     sdk_stamp_key,
@@ -88,6 +90,35 @@ def test_sdk_stamp_action_matrix():
 
 def test_sdk_stamp_key_combines_root_and_commit_when_both_present():
     assert sdk_stamp_key("/sdk", "3ffd8774") == "/sdk@3ffd8774"
+
+
+def test_pristine_suppression_is_silent_when_no_pristine_was_asked_for():
+    assert pristine_suppression(False, True, False, False) is None
+
+
+def test_pristine_suppression_is_silent_when_the_wipe_actually_ran():
+    assert pristine_suppression(True, False, True, True) is None
+
+
+def test_pristine_suppression_names_an_overridden_build_dir_first():
+    """Order is most-specific-first: an overridden build dir is reported even
+    when the cwd would also have failed, because that is the fact the user
+    must change."""
+    assert pristine_suppression(True, True, False, True) is PristineSkipped.BUILD_DIR_OVERRIDDEN
+
+
+def test_pristine_suppression_names_a_cwd_outside_the_build_root():
+    assert pristine_suppression(True, False, False, True) is PristineSkipped.CWD_OUTSIDE_BUILD_ROOT
+
+
+def test_pristine_suppression_names_a_never_configured_dir():
+    assert pristine_suppression(True, False, True, False) is PristineSkipped.NEVER_CONFIGURED
+
+
+def test_every_pristine_suppression_reason_is_distinct_and_non_empty():
+    reasons = [member.reason() for member in PristineSkipped]
+    assert all(reasons)
+    assert len(set(reasons)) == len(reasons)
 
 
 def test_sdk_stamp_key_degrades_to_the_root_alone_when_commit_is_absent_or_blank():
