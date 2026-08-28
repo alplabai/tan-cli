@@ -313,3 +313,5 @@ and write both files from the real merged tree.
     - tan/commands/bootstrap_cmd.py: 3402 -> 3421
     - tan/commands/new_som_cmd.py: 1380 -> 1385
     - function_worst_budget: 757 -> 770
+- 2026-08-28 -- tan-cli#957: core_type_lookup's isinstance guard + the doc-heavy explanation of why a non-string type must normalise to the unresolved sentinel, plus a correction to the now-reachable backstop comment, grew presets_cmd.py past its recorded budget
+    - tan/commands/presets_cmd.py: 929 -> 956

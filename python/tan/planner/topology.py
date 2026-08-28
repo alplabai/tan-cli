@@ -114,8 +114,17 @@ def core_os_topology(project: "BoardProject") -> dict[str, Any]:
     valid dropdown).  Lets the Board Configurator show the SDK's selection +
     the legal overrides instead of guessing or offering a cross-class OS.
     """
+    # `c.get("type", "")` is UNVALIDATED against `soc-spec-v1.schema.json`'s
+    # own `"type": {"type": "string"}` -- the identical gap `presets_cmd.
+    # core_type_lookup` closed for tan-cli#957, same class, this call site
+    # pre-dating it. `core_type` below feeds `_runtime_class`/
+    # `_default_os_from_core_type`'s `(core_type or "").lower()` AND is
+    # written verbatim to the emitted `core_type` field, so a non-string
+    # here is an `AttributeError` (build/`--emit os-topology` abort) or a
+    # wire leak, same two failure modes. Normalises to the same `""`
+    # unresolved sentinel a missing `type`/entry already produces.
     soc_types = {
-        c["id"]: c.get("type", "")
+        c["id"]: c["type"] if isinstance(c.get("type"), str) else ""
         for c in (project.soc_spec.get("cores") or []) if "id" in c
     }
     rows: list[dict[str, Any]] = []

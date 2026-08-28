@@ -423,6 +423,70 @@ def test_soc_lookups_degrades_when_the_checkout_has_no_schema(tmp_path):
     assert allowed_os_lookup("cortex-m7") == []
 
 
+@pytest.mark.parametrize(
+    "type_value",
+    [7, ["cortex-a55"], {"a": 1}, True, None, 0, []],
+    ids=["int", "list", "dict", "bool", "null", "zero", "emptylist"],
+)
+def test_core_type_lookup_normalises_every_non_string_type_to_the_unresolved_sentinel(
+    tmp_path, type_value
+):
+    """tan-cli#957: `cores[].type` is UNVALIDATED against
+    `soc-spec-v1.schema.json`'s own `"type": {"type": "string"}` -- a
+    schema-invalid `--sdk-root` tree (hand-authored, mid-`porting-a-new-som`,
+    or corrupted) can put anything JSON allows there. Before this guard,
+    every TRUTHY non-string (`7`, a list, a dict, `True`) raised
+    `AttributeError: '<type>' object has no attribute 'lower'` out of
+    `allowed_os_for_core` and aborted the whole `tan presets` command with
+    `presets.internal-failure` -- voiding the command's own "no SoM detail
+    here is load-bearing enough to fail `tan presets` over" contract. Every
+    FALSY non-string (`None`, `0`, `[]`) did not abort, but leaked the raw
+    value onto the wire as `"type": <value>`, where `contract/README.md`
+    promises "the raw ... `cores[].type` **string**".
+
+    Both classes must now resolve to the SAME `""` unresolved sentinel a
+    missing/unreadable SoC file already produces (`type` degrades to `""`
+    two lines above) -- never raise, never leak.
+
+    Mutation-proven: reverting `core_type_lookup`'s
+    `c["type"] if isinstance(c.get("type"), str) else ""` to the bare
+    `c.get("type", "")` this replaced turns this test RED for every
+    parametrized truthy case (an `AttributeError` inside `core_type_lookup`
+    itself, since `_os_choices()` isn't even reached) and for every falsy
+    case (`types == {"a55": <type_value>}` instead of `{"a55": ""}`).
+    Restoring the guard turns all seven GREEN -- verified by hand while
+    writing this test.
+    """
+    write(
+        tmp_path / "metadata" / "schemas" / "board.schema.json",
+        json.dumps({"$defs": {"core_entry": {"properties": {
+            "os": {"enum": ["zephyr", "yocto", "baremetal", "off"]}
+        }}}}),
+    )
+    write(
+        tmp_path / "metadata" / "socs" / "v" / "f" / "p.json",
+        json.dumps({"cores": [
+            {"id": "a55", "type": type_value},
+            {"id": "m33", "type": "cortex-m33"},
+        ]}),
+    )
+    core_type_lookup, allowed_os_lookup = _soc_lookups(str(tmp_path))
+    assert core_type_lookup is not None
+    assert allowed_os_lookup is not None
+
+    types = core_type_lookup("v:f:p")
+    # The non-string core normalises to the unresolved sentinel, never the
+    # raw value -- this is the assertion a falsy-non-string mutant (leaking
+    # `None`/`0`/`[]` onto the wire) turns RED.
+    assert types == {"a55": "", "m33": "cortex-m33"}
+    # `allowed_os_for_core("")` degrades to `[]`, not a raise and not the
+    # plausible-but-wrong cross-class subtraction (tan-cli#914) -- this is
+    # the assertion a truthy-non-string mutant (an unguarded `.lower()`
+    # AttributeError) never even reaches.
+    assert allowed_os_lookup(types["a55"]) == []
+    assert allowed_os_lookup(types["m33"]) == ["zephyr", "baremetal", "off"]
+
+
 def test_soc_lookups_is_none_none_when_the_metadata_tree_is_missing(tmp_path):
     assert _soc_lookups(str(tmp_path / "no-such-sdk")) == (None, None)
 
@@ -675,6 +739,69 @@ def test_json_reports_the_som_and_stdout_carries_nothing_else(tmp_path, monkeypa
     # `osChoices` is a vocabulary, never a per-SoM menu -- nothing in `soms`
     # offers the customer an OS to pick.
     assert doc["data"]["osChoices"] == ["zephyr", "yocto", "baremetal"]
+
+
+def test_a_nonstring_core_type_in_a_schema_invalid_soc_json_never_fails_the_command(
+    tmp_path, monkeypatch
+):
+    """tan-cli#957, at the CLI-envelope level, not just `core_type_lookup`
+    directly.
+
+    The `presets-heterogeneous-som` golden takes the no-schema short-circuit
+    and returns `[]` *before* `allowed_os_for_core` is ever called (no
+    `metadata/socs/**` in that fixture at all), so it cannot exercise this --
+    this fixture deliberately populates both `metadata/schemas/board.schema.json`
+    *and* a resolvable `metadata/socs/**/*.json` with a non-string `type`, the
+    shape a hand-authored, mid-`porting-a-new-som`, schema-invalid tree can
+    produce (`soc-spec-v1.schema.json` itself requires a string; a clean SDK
+    never reaches this).
+
+    Before the fix this fixture aborted with exit 5 / `ok: false` /
+    `presets.internal-failure` -- voiding `presets_cmd`'s own "no SoM detail
+    here is load-bearing enough to fail `tan presets` over" docstring promise
+    and `contract/README.md`'s "neither field fails the command over it".
+    """
+    sdk = tmp_path / "sdk"
+    write(sdk / "scripts" / "alp_project.py", "x")
+    write(
+        sdk / "metadata" / "schemas" / "board.schema.json",
+        json.dumps({"$defs": {"core_entry": {"properties": {
+            "os": {"enum": ["zephyr", "yocto", "baremetal", "off"]}
+        }}}}),
+    )
+    write(
+        sdk / "metadata" / "socs" / "vendor" / "family" / "part.json",
+        json.dumps({"cores": [
+            {"id": "a55", "type": 7},
+            {"id": "m33", "type": "cortex-m33"},
+        ]}),
+    )
+    write(
+        sdk / "metadata" / "e1m_modules" / "E1M-TEST" / "som.yaml",
+        "schema_version: 1\n"
+        "sku: E1M-TEST\n"
+        "family: test\n"
+        "silicon: vendor:family:part\n"
+        "topology:\n"
+        "  a55: {machine: test-a55}\n"
+        "  m33: {board: test_m33}\n",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["presets", "--sdk-root", "./sdk", "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is True
+    assert doc["issues"] == []
+    cores = doc["data"]["soms"][0]["cores"]
+    # The non-string `type` (`7`) normalises to `""`, never leaks onto the
+    # wire as `7` and never aborts the command; the well-typed sibling core
+    # resolves normally alongside it.
+    assert cores == [
+        {"id": "a55", "os": "yocto", "type": "", "allowedOs": []},
+        {"id": "m33", "os": "zephyr", "type": "cortex-m33",
+         "allowedOs": ["zephyr", "baremetal", "off"]},
+    ]
 
 
 def test_an_unresolved_sdk_is_a_warning_not_a_failure(tmp_path, monkeypatch):

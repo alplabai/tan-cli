@@ -55,10 +55,13 @@ docstring for why this reads `tan.core.os_class` and not `tan.planner.topology`
 directly: the latter's process-global SDK-root binding is the wrong contract
 for a command exercised by dozens of independent per-test checkouts).
 `allowedOs` degrades to `[]` on a schema miss; `type` degrades to `""` -- and
-drags `allowedOs` to `[]` -- only on a SoC-lookup miss (no `metadata/socs/**`
-entry for the SoM's `silicon:`). Neither miss fails the command (a
-synthetic/partial `--sdk-root` is tolerated elsewhere) -- no SoM detail here is
-load-bearing enough to fail `tan presets` over.
+drags `allowedOs` to `[]` -- on a SoC-lookup miss (no `metadata/socs/**`
+entry for the SoM's `silicon:`), and identically on a SoC-lookup HIT whose
+`type` value is not itself a JSON string (tan-cli#957 -- a schema-invalid
+SoC JSON `soc-spec-v1.schema.json` forbids but `tan` does not itself
+validate against before reading). Neither miss nor malformed value fails the
+command (a synthetic/partial/invalid `--sdk-root` is tolerated elsewhere) --
+no SoM detail here is load-bearing enough to fail `tan presets` over.
 
 **`allowedOs: []` alone does not say which of the two above degrades fired --
 `type` does.** Two different unknowns both wire as an empty `allowedOs`
@@ -585,8 +588,22 @@ def _soc_lookups(
         cores = doc.get("cores") if isinstance(doc, dict) else None
         if not isinstance(cores, list):
             return {}
+        # `c.get("type", "")` is UNVALIDATED against `soc-spec-v1.schema.json`'s
+        # own `"type": {"type": "string"}` -- a clean, schema-valid SDK never
+        # produces anything else, but this file's whole job (tan-cli#870) is
+        # reading a `--sdk-root` tree `validate_metadata.py` never ran against,
+        # exactly the hand-authored/mid-port state `porting-a-new-som` leaves a
+        # SoC JSON in. A non-string `type` here is NOT a `str | None` under
+        # `isinstance`, and this dict feeds BOTH `SomCore.type` (written
+        # verbatim to the wire by `as_dict`) and `allowed_os_for_core`'s
+        # `(core_type or "").lower()` -- a non-string reaching either one is
+        # a wire leak or an `AttributeError` respectively (tan-cli#957). Every
+        # non-string normalises to `""`, the SAME "unresolved" sentinel a
+        # missing/unreadable SoC file already degrades `type` to two lines
+        # above -- a malformed `type` and a missing one are indistinguishable
+        # to every downstream consumer, on purpose.
         return {
-            c["id"]: c.get("type", "")
+            c["id"]: c["type"] if isinstance(c.get("type"), str) else ""
             for c in cores
             if isinstance(c, dict) and isinstance(c.get("id"), str)
         }
@@ -874,6 +891,16 @@ def presets(
         # the way the oracle swallows it -- and here so the one nobody thought of
         # arrives as an envelope instead of a traceback on stderr with an empty
         # stdout the extension renders as nothing.
+        #
+        # This claim was FALSE for a while without anyone noticing (tan-cli#957):
+        # `core_type_lookup`'s `cores[].type` read had no `isinstance` guard,
+        # so a schema-invalid SoC JSON with a truthy non-string `type` (an
+        # int, a list, a dict, `true`) reached `os_class.py`'s
+        # `(core_type or "").lower()` and raised `AttributeError` right here,
+        # through this very backstop -- an enumerated path this comment did
+        # not count. `core_type_lookup` and `tan.core.os_class` both guard
+        # that input now (see their own docstrings), so this really is
+        # unreachable again, not just believed to be.
         sdk, soms, board_libraries = None, [], []
         issues = [
             Issue(
