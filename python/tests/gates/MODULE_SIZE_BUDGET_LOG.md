@@ -390,3 +390,5 @@ and write both files from the real merged tree.
     - tan/commands/generate_cmd.py: 1400 -> 1404
 - 2026-08-28 -- tan-cli#980 review nit 3: doctor_cmd.py's _collect() gained a documented decision (accept vs restore) about the bootstrapManifest/hostPython/pythonFloor print-timing shift the tan-cli#441 _resolve_prerequisites_environment extraction introduced -- a comment, not new logic, kept in full per house rule rather than trimmed to dodge the cap.
     - tan/commands/doctor_cmd.py: 4145 -> 4164
+- 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/explain_cmd.py: 1087 -> 1138
