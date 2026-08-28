@@ -76,6 +76,7 @@ from tan.commands.doctor_cmd import (
     zephyr_python_floor,
 )
 from tan.core import toolchain_provision
+from tan.core.probe import probe_status
 from tan.commands.presets_cmd import parse_som_preset, resolve_project_paths
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
@@ -1275,7 +1276,14 @@ def _probe_toolchain_compiler(store_dir: Path, *, is_windows: bool) -> str | Non
     gcc = store_dir.joinpath(*toolchain_provision.gcc_binary_relpath(is_windows=is_windows))
     if not _is_file(gcc):
         return None
-    ran, out = probe([str(gcc), "--version"])
+    # `probe_status`, NOT the single-value `probe` -- this is the one call
+    # site in this file that needs "did it even run" split from "what did it
+    # print" (`probe`'s own docstring: a thin wrapper for callers that do
+    # not). Measured live: `probe(...)` returns a bare `str | None`, and
+    # `ran, out = probe(...)` unpacks THAT STRING's characters -- exactly the
+    # `ValueError: too many values to unpack (expected 2)` this phase's own
+    # first real end-to-end CI run crashed the whole command with.
+    ran, out = probe_status([str(gcc), "--version"])
     if not ran or not out:
         return None
     lines = out.splitlines()

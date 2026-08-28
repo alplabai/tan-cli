@@ -456,3 +456,5 @@ and write both files from the real merged tree.
     - tan/commands/doctor_cmd.py: 4045 -> 4134
     - function_count_budget: 287 -> 291
     - function_worst_budget: 791 -> 806
+- 2026-08-28 -- issue #474 bugfix: _probe_toolchain_compiler used probe() (single str|None) where probe_status() (bool,str|None) was needed -- ran, out = probe(...) unpacked a bare string's characters, crashing the whole command with ValueError: too many values to unpack the moment a real west sdk install actually succeeded (caught on the first real end-to-end CI run of this phase, getting-started/first-blink jobs).
+    - tan/commands/bootstrap_cmd.py: 3998 -> 4006

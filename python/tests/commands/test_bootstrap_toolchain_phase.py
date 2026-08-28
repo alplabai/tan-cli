@@ -10,8 +10,9 @@ simulates what a real `west sdk install --install-dir <dir>` would have
 written to disk, or reports a failure string -- so this file exercises the
 decision logic, the refusals and the post-install verification step against
 a STUBBED fetch, never a real download. `_probe_toolchain_compiler`'s own
-subprocess spawn is stubbed too (`bootstrap_cmd.probe`), so no test depends
-on a real `arm-zephyr-eabi-gcc` existing on the runner, on any platform.
+subprocess spawn is stubbed too (`bootstrap_cmd.probe_status`), so no test
+depends on a real `arm-zephyr-eabi-gcc` existing on the runner, on any
+platform.
 """
 from __future__ import annotations
 
@@ -106,7 +107,7 @@ def _stub_compiler_probe(monkeypatch):
     without a real subprocess spawn -- portable to every CI shard, and keeps
     this suite testing tan's OWN verification sequencing, not a real GCC
     build's banner text."""
-    monkeypatch.setattr(bootstrap_cmd, "probe", lambda argv, *a, **kw: (True, "arm-zephyr-eabi-gcc (Zephyr SDK 1.0.1) 14.3.0\n"))
+    monkeypatch.setattr(bootstrap_cmd, "probe_status", lambda argv, *a, **kw: (True, "arm-zephyr-eabi-gcc (Zephyr SDK 1.0.1) 14.3.0\n"))
 
 
 def _argv_index_of_install_dir(argv_from_west_sdk_install_argv) -> int:
@@ -403,7 +404,7 @@ def test_a_compiler_that_does_not_run_is_never_stamped(tmp_path, monkeypatch):
     monkeypatch.setattr(bootstrap_cmd.Runner, "run", _fake_west_sdk_install_writes(_install_dir_index()))
     monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
     monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
-    monkeypatch.setattr(bootstrap_cmd, "probe", lambda argv, *a, **kw: (False, None))
+    monkeypatch.setattr(bootstrap_cmd, "probe_status", lambda argv, *a, **kw: (False, None))
 
     ws = _workspace(tmp_path)
     log = bootstrap_cmd.Log(json_mode=True)

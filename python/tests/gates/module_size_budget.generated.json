@@ -4,7 +4,7 @@
   "function_cap": 50,
   "modules": {
     "tan/cli.py": 1021,
-    "tan/commands/bootstrap_cmd.py": 3998,
+    "tan/commands/bootstrap_cmd.py": 4006,
     "tan/commands/build/execute.py": 1713,
     "tan/commands/build_cmd.py": 2293,
     "tan/commands/clean_cmd.py": 1129,
