@@ -1212,6 +1212,20 @@ def generate(
         # exactly the oracle's shape for both.
         sdk_info = SdkInfo(sdk_reported, sdk_tier)
 
+        # tan-cli#963: computed here, and seeded into `issues` before any
+        # other entry, so a resolvable-but-broken pin (or a foreign global
+        # default) reads FIRST on this path too -- matching both `refuse`'s
+        # `[*extra_issues, Issue(...)]` shape above and `clean_cmd._run`'s
+        # convention. These are resolution advisories (the run may have
+        # consulted the wrong checkout entirely); the per-target
+        # `generate.emit-failed` entries and `generate.in-process-unavailable`
+        # below are outcome/context and stay appended, in place.
+        pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier)
+        # tan-cli#464: same silence, one tier down -- a `globalDefault` answer
+        # a DIFFERENT project's bootstrap relocation actually decided.
+        foreign_issue = global_default_foreign_project_issue(sdk_foreign_default)
+        issues: list[Issue] = [i for i in (pin_issue, foreign_issue) if i is not None]
+
         targets = resolve_targets(target, all_targets, core)
 
         # Which engine runs what -- before any guard that writes, so a bad
@@ -1249,7 +1263,6 @@ def generate(
         # over it is wrong, and a generic `--force` truncating it is worse
         # (measured). So an implicit inclusion is left alone: dropped, reported.
         overlay_explicit = targets == ("native-sim-overlay",)
-        issues: list[Issue] = []
         if _overlay_would_overwrite(workspace_root, targets, False, output_override):
             if overlay_explicit:
                 if not force:
@@ -1347,15 +1360,6 @@ def generate(
                     f"in-process planner: {fallback_reason}",
                 )
             )
-        pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier)
-        if pin_issue is not None:
-            issues.append(pin_issue)
-        foreign_issue = global_default_foreign_project_issue(sdk_foreign_default)
-        if foreign_issue is not None:
-            # tan-cli#464: same silence, one tier down -- a `globalDefault`
-            # answer a DIFFERENT project's bootstrap relocation actually
-            # decided.
-            issues.append(foreign_issue)
         # tan-cli#407: this command just wrote `build/generated/alp.conf`, the
         # DTS overlays and `alp_hw_info_build.h` out of one checkout's
         # `metadata/`, and `tan build` may plan the very same tree against
