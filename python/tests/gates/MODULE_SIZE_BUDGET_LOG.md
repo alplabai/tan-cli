@@ -381,3 +381,5 @@ and write both files from the real merged tree.
 - 2026-08-28 -- tan-cli#905: sdk_default_registry.prune_dead_origins + bootstrap_cmd._write_global_sdk_registry wiring/docstrings grow bootstrap_cmd.py past its recorded ceiling and add one new over-50-line function (_write_global_sdk_registry's own docstring growth).
     - tan/commands/bootstrap_cmd.py: 3421 -> 3468
     - function_count_budget: 275 -> 276
+- 2026-08-28 -- tan-cli#905: rebase onto dev after #967 landed a new long function of its own (tan/model/targets.py); re-measuring the merged tree from source per this file's own conflict-resolution instructions rather than reconciling two committed numbers by hand.
+    - function_count_budget: 276 -> 278
