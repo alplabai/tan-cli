@@ -27,6 +27,7 @@ once per session and never fatally, when the bound `ALP_SDK_ROOT` is not
 `PINNED_SDK_COMMIT`, or when tan's two alp-sdk pins disagree with each other.
 """
 import functools
+import json
 import os
 import re
 import shutil
@@ -109,6 +110,226 @@ def _bound_sdk_root(environ: Mapping[str, str] | None = None) -> tuple[str, Path
         if raw and (Path(raw) / "scripts" / "alp_project.py").is_file():
             return var, Path(raw).resolve()
     return None
+
+
+# ---------------------------------------------------------------------------
+# WHAT THE BOUND TREE CARRIES -- a different question from whether one is
+# bound at all (tan-cli#791).
+#
+# `sdk_root()` above answers "is an alp-sdk bound?", and every SDK-gated module
+# skips on `None`. Nothing answered "does the bound one PUBLISH the metadata
+# this module asserts against?", and the two are not the same question: a tree
+# bound at a pin that PREDATES that metadata does not skip, it runs and FAILS
+# -- and the failure belongs to the pin, not to the branch.
+#
+# That is not hypothetical. `.github/workflows/ci.yml`'s `sdk_parity` checkout
+# `ref:` and `parity.yml`'s `PINNED_SDK_TAG` are both `eb96112b`, which
+# predates every artefact ADR-0028 publishes on the alp-sdk side. alp-sdk#1470
+# is still OPEN, so there is no post-merge SHA to move the pin to yet, and
+# until there is, twelve tests under `tests/model/` measure a tree that cannot
+# answer them.
+#
+# These are CAPABILITY predicates, the same discipline as
+# `pytest.importorskip("tflite")`: each names ONE artefact and reads the bound
+# tree for it. Deliberately NOT one blanket "is the bound SDK new enough"
+# switch -- the twelve failures have four distinct causes, a skip has to say
+# WHICH, and a reader has to be able to tell an expected skip from a
+# regression without opening the other repository.
+#
+# Two properties every predicate here must keep, because a skip that hides a
+# real check is worse than the failure it replaced:
+#
+#  * It tests for the PRESENCE of the artefact, never for "would this
+#    assertion fail". So it CANNOT fire once the pin moves onto a tree that
+#    carries it. A tree carrying it only PARTIALLY (say `npu_toolchain.vela`
+#    on i.MX 93 but not on the Alif parts) makes these RUN and FAIL, which is
+#    the correct direction: a loud failure names the gap, a silent skip buries
+#    it.
+#  * It fires only when a root IS bound. With nothing bound, the module's own
+#    `ALP_SDK_ROOT is not set` skip is the accurate reason and must be the one
+#    reported -- pytest takes the first true `skipif` in closest-first order,
+#    so a capability mark that also fired on `None` would shadow it.
+# ---------------------------------------------------------------------------
+
+#: Where the pin has to get to. Named in every reason string below rather than
+#: paraphrased, so a reader who sees one of these skips can go straight to the
+#: PR and see whether it has merged (in which case the skip is a bug in the
+#: predicate) or not (in which case it is expected).
+_SDK_PR = "alplabai/alp-sdk#1470"
+
+
+def sdk_publishes_vela_profile(sdk: Path) -> bool:
+    """True when ANY SoC spec under ``<sdk>/metadata/socs/`` carries an
+    ``npu_toolchain.vela`` block -- alp-sdk `fff41087`, which landed it on all
+    six Alif Ensemble parts and on i.MX 93 in one commit.
+
+    ANY, not "the part this test is about", and that is the safe direction on
+    purpose: `fff41087` is atomic, so there is no real tree in which some
+    Ethos-U parts carry the block and others do not. Should one ever exist,
+    "any" makes these tests RUN against it and fail loudly on the part that is
+    missing, rather than skipping the whole set on a partial answer.
+    """
+    for spec in sorted((sdk / "metadata" / "socs").rglob("*.json")):
+        try:
+            soc = json.loads(spec.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue          # a spec this reader cannot parse is not evidence
+        block = soc.get("npu_toolchain")
+        if isinstance(block, dict) and isinstance(block.get("vela"), dict):
+            return True
+    return False
+
+
+def sdk_publishes_npu_op_tables(sdk: Path) -> bool:
+    """True when ``<sdk>/metadata/npu_ops/`` holds at least one op-support
+    table -- the per-backend, per-variant JSON `tan.model.analyze` resolves by
+    SKU (`ethos_u/u85@vela-5.1.0.json`, `drpai/onnx-i8@translator-1.12.json`).
+
+    The whole directory is absent before ADR-0028; there is no partial state
+    to distinguish, so presence of the tree is the whole question.
+    """
+    return any((sdk / "metadata" / "npu_ops").rglob("*.json"))
+
+
+def sdk_predates_the_model_engine_relocation(sdk: Path) -> bool:
+    """True when ``<sdk>/scripts/alp_model/`` still exists -- i.e. this alp-sdk
+    still owns a HOST-SIDE model engine and ADR-0028 Task 6 (`ab6968e2`,
+    *"delete the host-side model engine, relocated to tan"*) has not landed on
+    it.
+
+    A STRUCTURAL fact about the bound tree, deliberately not a comparison
+    against the assertion it gates. `ab6968e2` deleted that package AND
+    regenerated alp-sdk's three committed C fixtures through the relocated
+    generator, so their banner moved from ``python -m alp_model._gen_fixture``
+    to ``python -m tan.model._gen_fixture``. Gating on "does the committed
+    header already say what we produce?" would be the self-defeating shape --
+    a guard that skips exactly when it would have caught something. Gating on
+    the package's presence names the CAUSE and goes away with it.
+    """
+    return (sdk / "scripts" / "alp_model").is_dir()
+
+
+def sdk_publishes_model_perf_points(sdk: Path) -> bool:
+    """True when ``<sdk>/metadata/model_perf/`` holds at least one published
+    bench-measured perf point -- the tier-2 facts `tan.model.perf` reads.
+
+    This one is a step further out than its three siblings above: the others
+    gate on metadata that EXISTS on `alplabai/alp-sdk#1470` and is merely
+    absent from the pin, whereas `metadata/model_perf/` exists in NO alp-sdk
+    at all yet. The contract landed (alp-sdk `fe56ff1d`: the schema, the
+    validator semantics, the capture recipe and ONE synthetic fixture point
+    under `tests/fixtures/`), but the directory this reads stays empty until
+    the bench campaign that is Task 5 of the tier-2 plan runs on real silicon.
+    So a test carrying this mark skips EVERYWHERE today, including against a
+    bound `origin/dev`, and that is the honest state rather than a defect --
+    the alternative is a test that asserts against data nobody has measured.
+    Presence of a real point, not "would this assertion pass", so it cannot
+    fire once the campaign publishes one.
+    """
+    return any((sdk / "metadata" / "model_perf").rglob("*.json"))
+
+
+def sdk_ships_the_model_perf_fixture(sdk: Path) -> bool:
+    """True when ``<sdk>/tests/fixtures/model_perf/`` holds at least one
+    synthetic perf point -- alp-sdk's own `_fixture`-bannered document.
+
+    A SEPARATE artefact from the published tree above and therefore a separate
+    predicate, not a broader one: a test that proves tan REFUSES a fixture
+    point needs a real fixture document to refuse, and that exists today
+    (alp-sdk `fe56ff1d`) while a published point does not. Folding the two
+    into one switch would skip the refusal proof for the next several months
+    on the strength of an unrelated absence.
+    """
+    return any((sdk / "tests" / "fixtures" / "model_perf").rglob("*.json"))
+
+
+#: Resolved once, here, at conftest import -- i.e. at the same moment a test
+#: module's own `SDK = sdk_root()` resolves, and before
+#: `_scrub_sdk_discovery_env` deletes `ALP_SDK_ROOT` for the first test.
+_BOUND_SDK: Path | None = sdk_root()
+
+#: `metadata/socs/**`'s `npu_toolchain.vela`. Without it
+#: `tan.model.targets.resolve_targets` yields `vela_memory_mode=None` for every
+#: Ethos-U target, so tan invokes vela flagless and vela picks its own
+#: DRAM-backed profile -- which on parts that have no DRAM reports 0 KiB SRAM
+#: and is exactly what `VelaFootprintRefused` exists to refuse. Under an older
+#: pin that refusal is CORRECT behaviour, so these tests have no premise.
+needs_sdk_vela_profile = pytest.mark.skipif(
+    _BOUND_SDK is not None and not sdk_publishes_vela_profile(_BOUND_SDK),
+    reason=(
+        "the bound alp-sdk publishes no `npu_toolchain.vela` in any "
+        "metadata/socs/**.json: it predates alp-sdk fff41087 "
+        f"({_SDK_PR}, still open), so resolve_targets() resolves "
+        "vela_memory_mode=None for every Ethos-U part and this test asserts "
+        "against metadata the bound tree does not carry. EXPECTED while "
+        "ci.yml's sdk_parity `ref:` and parity.yml's PINNED_SDK_TAG sit at "
+        "eb96112b; once that pin moves this test RUNS, and a failure here "
+        "then is a regression, not this skip."
+    ),
+)
+
+#: `metadata/npu_ops/**`, the committed op-support tables.
+needs_sdk_npu_op_tables = pytest.mark.skipif(
+    _BOUND_SDK is not None and not sdk_publishes_npu_op_tables(_BOUND_SDK),
+    reason=(
+        "the bound alp-sdk ships no metadata/npu_ops/ tables at all: it "
+        f"predates alp-sdk 93f2e8f8/ab6968e2 ({_SDK_PR}, still open), so "
+        "analyze_backend() resolves table=None for every backend and this "
+        "test asserts against real committed op vocabularies the bound tree "
+        "does not carry. EXPECTED while ci.yml's sdk_parity `ref:` and "
+        "parity.yml's PINNED_SDK_TAG sit at eb96112b; once that pin moves "
+        "this test RUNS, and a failure here then is a regression, not this "
+        "skip."
+    ),
+)
+
+#: alp-sdk's own committed C fixtures, as regenerated by the relocated
+#: generator.
+needs_sdk_after_the_model_engine_relocation = pytest.mark.skipif(
+    _BOUND_SDK is not None and sdk_predates_the_model_engine_relocation(_BOUND_SDK),
+    reason=(
+        "the bound alp-sdk still ships scripts/alp_model/, so it predates "
+        f"alp-sdk ab6968e2 ({_SDK_PR}, still open) and its committed C "
+        "fixtures were generated by that package -- their banner still reads "
+        "`python -m alp_model._gen_fixture`, which this relocated generator "
+        "no longer emits and must not. The CONTAINER BYTES are unaffected and "
+        "stay asserted unconditionally next door. EXPECTED while ci.yml's "
+        "sdk_parity `ref:` and parity.yml's PINNED_SDK_TAG sit at eb96112b; "
+        "once that pin moves this test RUNS, and a failure here then is a "
+        "regression, not this skip."
+    ),
+)
+
+#: `metadata/model_perf/**`, the published bench-measured perf points.
+needs_sdk_model_perf_points = pytest.mark.skipif(
+    _BOUND_SDK is not None and not sdk_publishes_model_perf_points(_BOUND_SDK),
+    reason=(
+        "the bound alp-sdk publishes no metadata/model_perf/ perf points: the "
+        "tier-2 CONTRACT landed (alp-sdk fe56ff1d -- schema, validator "
+        "semantics, capture recipe, one synthetic fixture) but the published "
+        "tree stays empty until the bench campaign that is Task 5 of "
+        "docs/superpowers/plans/2026-08-16-model-perf-tier2.md runs on real "
+        "silicon. EXPECTED everywhere today, including against a bound "
+        "origin/dev -- there is no measured data to assert against yet, and "
+        "authoring one to make this run would be exactly the fabricated "
+        "bench number the whole tier forbids. Once a real point is published "
+        "this test RUNS, and a failure here then is a regression, not this "
+        "skip."
+    ),
+)
+
+#: `tests/fixtures/model_perf/**`, alp-sdk's own `_fixture`-bannered synthetic.
+needs_sdk_model_perf_fixture = pytest.mark.skipif(
+    _BOUND_SDK is not None and not sdk_ships_the_model_perf_fixture(_BOUND_SDK),
+    reason=(
+        "the bound alp-sdk ships no tests/fixtures/model_perf/ synthetic perf "
+        f"point: it predates alp-sdk fe56ff1d ({_SDK_PR}, still open), so "
+        "there is no real fixture document for this test to prove tan REFUSES. "
+        "EXPECTED while ci.yml's sdk_parity `ref:` and parity.yml's "
+        "PINNED_SDK_TAG sit at eb96112b; once that pin moves this test RUNS, "
+        "and a failure here then is a regression, not this skip."
+    ),
+)
 
 
 #: The REAL process environment, captured at collection time -- i.e. while

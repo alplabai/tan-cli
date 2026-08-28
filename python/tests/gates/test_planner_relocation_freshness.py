@@ -513,6 +513,33 @@ from tests.conftest import sdk_root
 #: `v0.15.0-88-g88318e75`; `git tag --contains` lists both `v0.16.0-rc1` and
 #: `v0.16.0`). Corrected below to say what the commit actually is; the pin
 #: value itself is unchanged.
+#:
+#: SECOND, INDEPENDENT REASON THIS PIN MUST MOVE AGAIN (tan-cli#791). None of
+#: the three bumps above carry ADR-0028's artefacts -- they moved this pin for
+#: reasons unrelated to the model-engine relocation, so `eb96112b` still
+#: predates every artefact ADR-0028 publishes on the alp-sdk side, all of
+#: which arrive together in alplabai/alp-sdk#1470
+#: (`feat/model-edge-ai-foundation` -> `dev`, still OPEN):
+#:
+#:   - `fff41087` -- `npu_toolchain.vela` on all six Alif Ensemble parts and
+#:     on i.MX 93, the per-part `--memory-mode` `tan.model.targets` resolves.
+#:   - `93f2e8f8`/`ab6968e2` -- `metadata/npu_ops/**`, the committed
+#:     op-support tables `tan.model.analyze` resolves by SKU.
+#:   - `ab6968e2` -- deletes `scripts/alp_model/` and regenerates alp-sdk's
+#:     three committed C fixtures through the relocated generator, moving
+#:     their banner to `python -m tan.model._gen_fixture`.
+#:   - `4fd5fab5` -- `tests/fixtures/models/person_detect_int8.tflite`, the
+#:     public real-model fixture the Vela proof compiles.
+#:
+#: Until this pin (and the other three sites named above) moves onto an
+#: alp-sdk commit carrying `npu_toolchain.vela`, twelve tests under
+#: `python/tests/model/` SKIP rather than fail, each naming the one artefact
+#: it is missing -- see `tests/conftest.py`'s capability predicates. Moving
+#: the pin is what makes them run again, and it must happen in the SAME merge
+#: window as alp-sdk#1470: an alp-sdk that has merged #1470 while tan still
+#: pins `eb96112b` leaves the whole relocated model-engine surface unmeasured
+#: in CI. Do NOT move it before then -- #1470 is unmerged, so there is no
+#: post-merge SHA to move it to.
 PINNED_SDK_COMMIT = "eb96112ba7d1cc3b4084c985962ea31772177d74"  # alp-sdk v0.16.0 -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
@@ -924,6 +951,19 @@ HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-
 #: covered by that one entry -- `HAND_PORT_HASHES` is keyed by the alp-sdk
 #: source path, not by the consuming `tan` file, so a second key for the same
 #: path would be a no-op duplicate, not a new audit.
+#:
+#: `scripts/alp_cli/model.py` is the eighth member of the group above (the
+#: tan-cli#560 review's total was nine, counting "the ninth source" above
+#: alongside it). tan-cli#791 briefly retired this entry on the premise that
+#: ADR-0028 had deleted the alp-sdk original -- checked against the actual
+#: pinned commits and found premature: ADR-0028's deletion (alp-sdk
+#: `ab6968e22`, "delete the host-side model engine, relocated to tan") lives
+#: only on alp-sdk PR #1470 (`feat/model-edge-ai-foundation`, OPEN, not
+#: merged to `dev` or `main` as of this check), and `scripts/alp_cli/model.py`
+#: is still present, byte-identical, at both PINNED_SDK_COMMIT (`eb96112b`,
+#: v0.16.0) and HAND_PORT_PINNED_SDK_COMMIT (`88318e75`, v0.15.0+88) -- the
+#: same hash `origin/dev` still carries for this key. Re-pinned rather than
+#: left retired.
 HAND_PORT_HASHES: dict[str, str] = {
     "scripts/gen_zephyr_board.py": "30ab1b52835d77f226bf4ed07185cd5a91f2c374ea8b8576edb00699627ea8a7",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",

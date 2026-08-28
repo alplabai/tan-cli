@@ -1844,28 +1844,52 @@
       "note": "Constructed as the whole literal at a `ModelError` call site in `model_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "model.build-timeout",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/model_cmd.py",
-      "note": "Constructed as the whole literal at a `ModelError` call site in `model_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "model.python-too-old",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/model_cmd.py",
-      "note": "Constructed as the whole literal at a `ModelError` call site in `model_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
       "code": "model.sdk-root-unresolved",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/model_cmd.py",
       "note": "Constructed as the whole literal at a `ModelError` call site in `model_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.doctor-sdk-unresolved",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "note": "tan-cli#781: `model doctor`'s own SDK-unresolved case, distinct from `model.sdk-root-unresolved` above -- `doctor` folds an unresolved/rejected `--sdk-root` into a WARNING (the backend-availability rows it reports do not read `metadata/**` at all and are unaffected), where `build` raises a `ModelError` at `error` severity and refuses outright for the same input. Reusing `model.sdk-root-unresolved` at a different severity across the two subcommands would make one code mean two different things on the wire; this is a separate literal instead. A plain `Issue(\"model.doctor-sdk-unresolved\", ...)` construction in `_run_doctor`, not a `ModelError` (`doctor` never raises for this). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.check-sku-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "note": "tan-cli#782: `model check`'s board-level SKU refusal -- `resolve_check_backends` (`tan.model.check`) raised `FileNotFoundError`/`ValueError` resolving `som.sku`'s real NPU backends (no SoM preset, a malformed `silicon:` ref, or no SoC spec on disk), reported once for the whole run via a `ModelError` rather than once per declared model. Constructed as the whole literal at a `ModelError` call site in `model_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.check-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "note": "tan-cli#782: `model check`'s per-model failure -- an unreadable/unparseable declared model source, most commonly -- caught around `check_model_backends()` and reported as a coded issue rather than a traceback, mirroring `model.build-failed`'s exact shape so one bad model in a multi-model board.yaml does not abort the batch. A plain `Issue(\"model.check-failed\", ...)` construction in `_check_one_model`, not a `ModelError` (the run continues to the next model). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.target-caveat",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "note": "tan-cli#789 review (f): one per caveated target in a package `model build` just wrote -- the COMPILER's own unresolved caveat about the blob being shipped, carried verbatim from `tan.model.adapters.Blob.caveats` through the `.alpmodel` manifest's per-target `caveats` list and read back out of the written file by `_shipped_caveat_issues` (`package.read_manifest_file`). Today that is vela's \"Compilation may be invalid or non-optimal\" verdict when it fell back to its BUILT-IN default profile, whose memory model may not be the module's -- which matters because the `arena`/`requires.sram_kib` figures beside it in the same manifest entry are what alp-sdk's on-device selector gates fit on (`src/backends/inference/alp_model_select.c`). A WARNING, never an error: the package is written and valid, and `_run_build`'s exit code keys on error-severity issues only. A plain `Issue(\"model.target-caveat\", ...)` construction in `_shipped_caveat_issues`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.caveat-readback-failed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "note": "tan-cli#789 review (f): `model build` wrote a package but could not decode its manifest to report the compiler caveats it ships with (`package.read_manifest_file` raised). Reported rather than swallowed because silence here is indistinguishable from `model.target-caveat`'s absence, i.e. from \"this package has no caveats\" -- the exact ambiguity the caveat field exists to end. A WARNING, not an error: the artifact IS on disk, and downgrading a successful build to a failure over a diagnostic read would be the wrong trade. A plain `Issue(\"model.caveat-readback-failed\", ...)` construction in `_shipped_caveat_issues`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "monitor.launch-failed",

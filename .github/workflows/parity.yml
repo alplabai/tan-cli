@@ -597,6 +597,27 @@ env:
   # test_planner_oracle_ref_tracks_pinned_sdk_tag.py` hard-fails a tag-name
   # value; it cannot resolve a tag to a commit without a checkout or network
   # access, so a state it cannot verify is treated as drifted.
+  #
+  # OWED MOVE, STILL NOT MAKEABLE (tan-cli#791). `python-tests-shard` below
+  # binds `ALP_SDK_ROOT` to THIS tag, so this is the pin the relocated model
+  # engine is measured against -- and none of the three bumps above carry
+  # ADR-0028's artefacts; they moved this pin for reasons unrelated to the
+  # model-engine relocation. This checkout still predates every artefact
+  # ADR-0028 publishes on the alp-sdk side: `npu_toolchain.vela` in
+  # `metadata/socs/**` (alp-sdk `fff41087`), the `metadata/npu_ops/**`
+  # op-support tables, the deletion of `scripts/alp_model/` with the C
+  # fixtures regenerated to name the relocated generator (`ab6968e2`), and
+  # the public `tests/fixtures/models/person_detect_int8.tflite` real-model
+  # fixture (`4fd5fab5`). All four land together in alplabai/alp-sdk#1470,
+  # which is still OPEN, so there is no post-merge SHA to move this to yet.
+  # Until there is, twelve tests under `python/tests/model/` SKIP here rather
+  # than fail, each naming the one artefact it is missing
+  # (`python/tests/conftest.py`'s capability predicates). Move this -- in the
+  # same change as `ci.yml`'s `sdk_parity` `ref:` and both freshness pins, as
+  # always -- onto an alp-sdk commit carrying `npu_toolchain.vela`, in the
+  # SAME merge window as alp-sdk#1470. A pin left behind after #1470 merges
+  # leaves the whole relocated model engine unmeasured while these shards
+  # still report green.
   PINNED_SDK_TAG: eb96112ba7d1cc3b4084c985962ea31772177d74
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
@@ -2130,13 +2151,28 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: install alp-tan[monitor] + pytest
+      - name: install alp-tan[monitor,model-compile] + pytest
         shell: bash
         working-directory: python
         run: |
           set -euo pipefail
           python -m pip install --quiet --upgrade pip
-          python -m pip install --quiet -e ".[monitor]" pytest pytest-shard
+          # `model-compile` (ethos-u-vela + tflite + flatbuffers -- a superset of
+          # the plain `model-io` extra, tan-cli#784) is added here, not to
+          # ci.yml's bare `pip install -e ./python` (that shape is load-bearing
+          # for test_declared_dependencies.py -- see ci.yml's own comment). This
+          # job binds ALP_SDK_ROOT, so it is where tests/model/test_tensorio.py's
+          # tflite parse path AND tests/model/test_vela_yolo_internal.py's real
+          # Ethos-U/Vela compile of the public person_detect_int8.tflite fixture
+          # (alp-sdk#1471) actually get exercised instead of perpetually skipping
+          # in every tan CI run. `ethos-u-vela` ships cp312 wheels for exactly
+          # this job's OS matrix (manylinux x86_64, win_amd64, macosx arm64) at
+          # ~2 MB and is Apache-2.0 -- verified before adding it here, not
+          # assumed. DEEPX's `dxcom` and DRP-AI's TVM stay license-gated vendor
+          # toolchains with no PyPI wheel to pin, so `test_deepx_yolo_internal.py`
+          # keeps skipping in CI (see this job's own model-compile comment in
+          # pyproject.toml).
+          python -m pip install --quiet -e ".[monitor,model-compile]" pytest pytest-shard
 
       # The `python-tests` job below (the one wired into branch protection --
       # see .github/workflows/ci.yml's header for the full tan-cli#392 note and

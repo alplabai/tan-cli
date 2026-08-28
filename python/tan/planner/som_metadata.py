@@ -23,6 +23,10 @@ rules (a SoM `memory_map:` override beating the SoC variant, SoC-level
 defaults, then the per-SKU `unpopulated` restriction forcing 0/False) are
 accumulated behaviour that `tests/parity/test_planner_emit_parity.py` pins byte
 for byte -- not something to re-derive.
+
+`resolve_soc_path` itself is defined in the leaf module `tan.soc_ref` (ADR-0028
+Task 2 follow-up) and re-exported here, so `tan.model.targets` can use it
+without pulling in this package's own import-time metadata reads.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from tan.soc_ref import resolve_soc_path  # noqa: F401  (re-export: see below)
 
 # ---------------------------------------------------------------------
 # SKU-family mapping
@@ -95,27 +100,11 @@ def silicon_to_kconfig(silicon: str | None, metadata_root: Path) -> str | None:
     return prefix + silicon.upper().replace(":", "_")
 
 
-def resolve_soc_path(silicon: str | None, metadata_root: Path) -> Path | None:
-    """Resolve a `vendor:family:part` `silicon:` key to the SoC-JSON path
-    it names: `metadata/socs/<vendor>/<family>/<part>.json`.
-
-    Returns None when `silicon` is falsy or not exactly 3 colon-separated
-    parts -- does NOT check the path exists, callers decide what an
-    unresolved/missing SoC spec means for them (e.g. a SoM preset with no
-    `silicon:` at all is a valid, if incomplete, state; a `silicon:` that
-    names a spec that isn't on disk is not).
-
-    alp-sdk keeps its own copies of this resolution behind differing failure
-    shapes (`OrchestratorError`, `ZephyrBoardEmitError`, a diagnostic list);
-    `loader._silicon_to_soc_path` is the planner's raising variant. This is the
-    soft-fail one the three functions below share.
-    """
-    if not silicon:
-        return None
-    parts = silicon.split(":")
-    if len(parts) != 3:
-        return None
-    return metadata_root / "socs" / parts[0] / parts[1] / f"{parts[2]}.json"
+# resolve_soc_path() moved to the leaf module `tan.soc_ref` (imported above)
+# so that `tan.model.targets` can use it without pulling in `tan.planner`'s
+# import-time metadata reads. Re-exported here (rather than inlined) so this
+# module's own four call sites, and every external `from
+# tan.planner.som_metadata import resolve_soc_path`, keep working unchanged.
 
 
 def _resolve_silicon_variant(

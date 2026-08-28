@@ -172,6 +172,35 @@ and write both files from the real merged tree.
     - tan/core/bootstrap.py: 2275 -> 2400
     - function_count_budget: 259 -> 260
 - 2026-08-16 -- tan-cli#795: relocate the expect_dpidr width guard (_validate_expect_dpidr_width) from flash_cmd.py's real-write-time preflight into flash_plan.py's plan-time validate_flow_d_preflight_args, beside its validate_address(expect_dpidr) calls, so a truncated expect_dpidr surfaces under --dry-run too; the pure banner-matching helpers it does not need (FlashPlanError) moved out to a new tan/core/dp_id.py instead, but this one function must stay beside the exception type it raises
+    - tan/core/flash_plan.py: 3164 -> 3201
+- 2026-08-15 -- ADR-0028 Task 2: relocate the alp-sdk model engine (13 modules, 1029 lines) into tan.model verbatim; two of its already-existing over-50-line functions move with it
+    - function_count_budget: 258 -> 260
+- 2026-08-15 -- tan-cli#782: model_cmd.py grows past 800 wiring `tan model check` (a third subcommand's board.yaml/SDK resolution, per-model dispatch and envelope shaping, matching build/doctor's own shape); function_count_budget's 260->261 is a PRE-EXISTING drift from the model-doctor merge (25443c4), not from this change -- measured before any edit in this session, fixed here since it blocks a green gate.
+    - tan/commands/model_cmd.py: new entry at 893
+    - function_count_budget: 260 -> 261
+- 2026-08-16 -- tan-cli#789 review (f): model_cmd.py 893 -> 938 for _shipped_caveat_issues -- tan model build now reads the package it just wrote back (package.read_manifest_file) and reports each shipped blob's compiler caveat as a model.target-caveat warning, plus the model.caveat-readback-failed fallback and the exit-code split that keys on error-severity issues only. Kept in the command module deliberately: it is artifact IO plus envelope Issue construction, both of which tan/core is IO- and Issue-free by convention (see tan/core/model_check.py's own 'No IO' docstring), and the message construction it would leave behind is four lines.
+    - tan/commands/model_cmd.py: 893 -> 938
+- 2026-08-16 -- alp-sdk #1470 threads each SoM's vela memory profile from SoC metadata to the vela command line: VelaAdapter.compile, check._maybe_exact_ethos_u and ethos_u._footprint each cross 50 lines on measured-fact DOCSTRING and comment growth, not on logic. compile/_maybe_exact_ethos_u gained the two vela_* kwargs plus the paragraph saying they DO change the artifact (unlike silicon_ref, which reaches diagnostics only); _footprint gained the record of a known open gap -- under --memory-mode Sram_Only it reports the arena alone, because vela files the const region under on_chip_flash as a bookkeeping rename that is still SRAM0-resident on an Alif part (measured: 72.0 reported vs 72.0 + 235.265625 KiB for person_detect_int8.tflite at ethos-u85-256). Splitting a docstring out of the function it documents is not the extraction this ratchet asks for.
+    - function_count_budget: 261 -> 264
+- 2026-08-16 -- tan-cli#789 review BLOCKER: _refuse_zero_sram_footprint 42 -> 59 for the comment recording which test actually enforces its selector-clause wording -- the two tests it used to name enforce nothing on this template, and the one that does only started doing so now that it renders its note by CALLING this function instead of raising a hand-copied literal of it. The 17 lines are kept INSIDE the function deliberately, because A FLAT RATCHET DOES NOT IMPLY A FLAT FILE (tan-cli#789 review MINOR 2): core.long_functions measures end_lineno - lineno per def, so prose that moves from a docstring into a comment block ABOVE the def leaves every number here unchanged while the module grows. Measured across 88ef2f1 -> 08314b0: tan/model/adapters/ethos_u.py went 591 -> 725 lines while _refusal_remedy's span SHRANK 50 -> 42 and this file's over-50 count held at 2; only compile moved (59 -> 75). Moving that prose out of the docstrings was the right call and is NOT being undone -- but do not read a flat function_count as a flat module. As of this entry ethos_u.py measures 742 lines against MODULE_CAP 800, i.e. 58 lines of headroom before it joins the tracked modules map and starts failing outright, and nothing in this ratchet will warn on the way there.
+    - function_count_budget: 264 -> 265
+- 2026-08-16 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/model_cmd.py: new entry at 938
+    - function_count_budget: 259 -> 266
+- 2026-08-16 -- alp-sdk #1470 Tasks 4-5: re-source the vela footprint refusal's evidence from metadata, and wire the optional vendor .ini. ethos_u.py 742 -> 886 crosses the 800 cap the previous entry predicted it would ('58 lines of headroom ... and nothing in this ratchet will warn on the way there') -- the growth is measured-fact documentation, not logic: the three ethos-u-vela 5.1.0 exit codes that make --config/--system-config/--memory-mode a TRIPLE rather than a pair (--config alone and --config+--system-config are both rc=1, verbatim, and --config REPLACES Arm's vela.ini rather than merging), plus the two clauses now sourced per part (vendor_config_filename, external_memory_interfaces). Deliberately NOT split this time: the refusal/caveat text is one narrative with the module docstring that explains vela's memory model, and moving it out would sever the evidence from the code it justifies. The extraction to make when this file next grows is that whole diagnostics half (VelaFootprintRefused, _profile_clause, _refusal_remedy, _no_dram_marker, _refuse_zero_sram_footprint, _default_profile_caveats -- ~350 lines of pure string logic with no subprocess in it). model_cmd.py 938 -> 1011 for doctor's optional-prerequisite row (_vela_vendor_config_status + the data.optional[] shaping and its text line); the probe stays beside _deepx_dxm1_status/_drpai_status, which is where doctor's own narrower host probes live by convention. function_count 266 -> 268: VelaAdapter.compile and _vela_profile each cross 50 lines on that same measured-fact comment growth.
+    - tan/commands/model_cmd.py: 938 -> 1011
+    - tan/model/adapters/ethos_u.py: new entry at 886
+    - function_count_budget: 266 -> 268
+- 2026-08-16 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/model_cmd.py: new entry at 1011
+    - tan/model/adapters/ethos_u.py: new entry at 886
+    - function_count_budget: 260 -> 269
+- 2026-08-16 -- tan/commands/model_cmd.py 1011 -> 1029: `_declared_hw_rev` + plumbing board.yaml's `som.hw_rev` into `check_model_backends`. A bench-measured perf point's identity includes the module revision it ran on (alp-sdk f724d3e4), so tier-2 resolution cannot serve an r2 measurement to a customer holding an r1 module; the value has to reach the engine from the only place that states it.
+    - tan/commands/model_cmd.py: 1011 -> 1029
+- 2026-08-17 -- tan-cli#791 review MINOR 5: _declared_hw_rev now fails CLOSED (ModelError) on a present-but-unusable som.hw_rev (e.g. an unquoted YAML int) instead of silently falling through to the SKU preset's default_hw_rev; function_count_budget's 269->270 (pre-drift) is a pre-existing gap measured before any edit this session (git stash showed 270 over 50 lines against a committed 269 budget), fixed here alongside the real growth
+    - tan/commands/model_cmd.py: 1029 -> 1059
+    - function_count_budget: 269 -> 272
+- 2026-08-16 -- tan-cli#795 (as measured on the origin/dev side before this merge): relocate the expect_dpidr width guard, same change as above -- two branches' independent regens disagreed by 2 lines on flash_plan.py's total because of what else was in each tree at the time; kept as its own line rather than overwritten, per this log's own "two branches ... produce two lines" design
     - tan/core/flash_plan.py: 3164 -> 3199
 - 2026-08-16 -- tan-cli#798/#801: build_root anchoring for the split-layout configure-cache guard, plus coupling the missing-tool message to a shared plan_exec constant, need a few lines of call-site docstring in execute.py and build_cmd.py that don't belong split elsewhere
     - tan/commands/build/execute.py: 1643 -> 1662
@@ -179,6 +208,10 @@ and write both files from the real merged tree.
 - 2026-08-16 -- tan-cli#804: consume _teardown_sim's grace-loop poll (which already waits up to _QUIT_GRACE_S) as the sim-exited-early source at --timeout 0, discriminated via a surfaced quit() write-failure or a nonzero exit code so a healthy quit-driven shutdown is never misreported
     - tan/commands/renode_cmd.py: 1533 -> 1587
     - function_count_budget: 260 -> 261
+- 2026-08-17 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 272 -> 273
+- 2026-08-17 -- tan-cli#791 round-2 review: apply_perf_point's docstring grew to explain the item-2 refusal-note plumbing through every return path (_with_refusal_note); no logic was extracted, the growth is documentation
+    - function_count_budget: 273 -> 274
 - 2026-08-16 -- tan-cli#799: build the Envelope once, unconditionally, in size_cmd/clean_cmd/validate_cmd (and image_cmd/run_cmd, both still under the cap) so the sdk.discovery-divergent seam warning reaches text mode too, not only --format json
     - tan/commands/clean_cmd.py: 1110 -> 1119
     - tan/commands/size_cmd.py: 831 -> 842
@@ -261,6 +294,14 @@ and write both files from the real merged tree.
     - tan/planner/template.py: 1470 -> 1481
 - 2026-08-25 -- tan-cli#904 final round: wall_clock_iso (timestamp.py) grows past 50 lines defending an out-of-range wall clock (item 2) and enumerating all eight generated_at_iso call sites (nit); deepest_covering_entry's docstring (sdk_default_registry.py) grows documenting the updated_at precision-normalisation fix (nit) and the 21x1x20 lstat factorization correction (item 3) -- all four are review-requested prose/behaviour fixes on tan-cli#904's final round, not unreviewed growth.
     - function_count_budget: 257 -> 258
+- 2026-08-26 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/model_cmd.py: new entry at 1059
+    - tan/model/adapters/ethos_u.py: new entry at 886
+    - function_count_budget: 258 -> 270
+- 2026-08-26 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/model_cmd.py: new entry at 1059
+    - tan/model/adapters/ethos_u.py: new entry at 886
+    - function_count_budget: 258 -> 270
 - 2026-08-26 -- tan-cli#900: examples_cmd.py/generate_cmd.py routed their unresolved-SDK refusal through the shared broken-project-pin/foreign-global-default disclosure (project_pin_issue/global_default_foreign_project_issue), matching resolve_sdk's tan-cli#468 fix; generate_cmd.py grew threading GenerateError.extra_issues through the refusal path
     - tan/commands/generate_cmd.py: 1361 -> 1400
     - function_count_budget: 258 -> 259
@@ -295,6 +336,9 @@ and write both files from the real merged tree.
     - tan/commands/build_cmd.py: 2175 -> 2178
     - tan/commands/doctor_cmd.py: 4040 -> 4045
     - tan/commands/explain_cmd.py: 1020 -> 1043
+    - tan/commands/init_cmd.py: 1258 -> 1288
+    - tan/core/scaffold.py: 1512 -> 1538
+    - function_count_budget: 270 -> 271
     - tan/commands/init_cmd.py: 1276 -> 1306
     - tan/core/scaffold.py: 1512 -> 1538
     - function_count_budget: 259 -> 260
@@ -302,6 +346,11 @@ and write both files from the real merged tree.
     - function_count_budget: 260 -> 261
 - 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
     - function_count_budget: 261 -> 262
+- 2026-08-27 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/generate_cmd.py: 1361 -> 1400
+    - tan/commands/init_cmd.py: 1288 -> 1306
+    - tan/commands/presets_cmd.py: new entry at 929
+    - function_count_budget: 271 -> 274
 - 2026-08-27 -- tan-cli#950: bind_sdk/_fail carry ExplainError.extra_issues (pin/foreign-default disclosure) + two regression tests
     - tan/commands/explain_cmd.py: 1043 -> 1087
     - function_count_budget: 262 -> 263
@@ -313,3 +362,6 @@ and write both files from the real merged tree.
     - tan/commands/bootstrap_cmd.py: 3402 -> 3421
     - tan/commands/new_som_cmd.py: 1380 -> 1385
     - function_worst_budget: 757 -> 770
+- 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/explain_cmd.py: 1043 -> 1087
+    - function_count_budget: 274 -> 275

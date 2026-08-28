@@ -156,6 +156,13 @@ HAND_PORT_NO_TAN_FILE_PAIRING: dict[str, str] = {
         "PINNED_HASHES against scripts/alp_orchestrate/loader.py, so a second "
         "file pairing would double-pin one file to two upstream sources"
     ),
+    "scripts/alp_cli/model.py": (
+        "_resolve_compile crossed into tan/commands/model_cmd.py, ~15 lines "
+        "of 1059 -- the rest of that file is model build/check/doctor logic "
+        "with no upstream counterpart, and the rest of model.py's own 66 "
+        "lines (the click group + build_cmd CLI wiring) has none either, "
+        "ADR-0028 having moved the engine itself into tan/model/"
+    ),
 }
 
 #: Upstream sources whose tan counterpart is KNOWN to be wrong right now.
@@ -167,16 +174,22 @@ HAND_PORT_NO_TAN_FILE_PAIRING: dict[str, str] = {
 #: failure reproduced one file later. So the permitted contents are pinned as
 #: a literal in `_LEDGER_MAY_ONLY_CONTAIN` below: growing this table requires
 #: editing that set too, in a diff a reviewer sees.
-HAND_PORT_KNOWN_DRIFT: dict[str, str] = {
-    "scripts/alp_cli/model.py": (
-        "tan/commands/model_cmd.py's _resolve_compile is still pre-alp-sdk#1271: "
-        "it resolves EVERY string compile option to a path, so DRP-AI's "
-        "input_shape/input_name/product are corrupted into filesystem paths. "
-        "Upstream restricts this to _PATH_OPT_KEYS = {config, calibration, "
-        "images, spec}. Tracked by tan-cli#777; delete this entry and add the "
-        "pairing to HAND_PORT_TAN_SIDE when that lands."
-    ),
-}
+# `scripts/alp_cli/model.py` was here (tan-cli#777: tan/commands/model_cmd.py's
+# _resolve_compile was pre-alp-sdk#1271, corrupting DRP-AI's
+# input_shape/input_name/product into filesystem paths). #791 briefly retired
+# the whole entry (both here and from HAND_PORT_HASHES) on the premise that
+# ADR-0028 had already deleted the alp-sdk original -- re-checked against the
+# actual pinned commits (PINNED_SDK_COMMIT `eb96112b`/v0.16.0 and
+# HAND_PORT_PINNED_SDK_COMMIT `88318e75`/v0.15.0+88) and that premise does not
+# hold: the deletion (alp-sdk `ab6968e22`) lives only on alp-sdk PR #1470,
+# OPEN and unmerged, so `scripts/alp_cli/model.py` is still live upstream,
+# byte-identical to what `origin/dev` still pins there. Restored to
+# HAND_PORT_HASHES; the underlying #777 drift IS fixed though (verified:
+# `tan/commands/model_cmd.py` already carries `_PATH_OPT_KEYS = {"config",
+# "calibration", "images", "spec"}`), so the entry moves to
+# HAND_PORT_NO_TAN_FILE_PAIRING (a real, clean, function-level
+# correspondence in a much larger file) rather than staying KNOWN_DRIFT.
+HAND_PORT_KNOWN_DRIFT: dict[str, str] = {}
 
 
 #: The ONLY hand-ports allowed to decline a file-level pairing. Pinned for the
@@ -187,6 +200,7 @@ _PAIRING_MAY_ONLY_CONTAIN: frozenset[str] = frozenset(
         "scripts/alp_cli/diagnostic_format.py",
         "scripts/alp_cli/validate.py",
         "scripts/alp_cli/validator.py",
+        "scripts/alp_cli/model.py",
         "scripts/sentinels.py",
     }
 )
@@ -316,7 +330,7 @@ def test_every_declared_tan_counterpart_exists_on_disk():
 #: The ONLY hand-ports allowed to sit in `HAND_PORT_KNOWN_DRIFT`. Pinned as a
 #: literal so the ledger cannot grow quietly: adding an entry means editing
 #: this set in the same diff, with the reason visible to a reviewer.
-_LEDGER_MAY_ONLY_CONTAIN: frozenset[str] = frozenset({"scripts/alp_cli/model.py"})
+_LEDGER_MAY_ONLY_CONTAIN: frozenset[str] = frozenset()
 
 #: A tracking reference is `<repo>#<number>`. A bare `tan-cli#` passed the
 #: substring test this replaced, so the reason string could name no issue at
