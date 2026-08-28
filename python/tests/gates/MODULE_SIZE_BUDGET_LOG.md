@@ -367,6 +367,10 @@ and write both files from the real merged tree.
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/explain_cmd.py: 1043 -> 1087
     - function_count_budget: 274 -> 275
+- 2026-08-28 -- tan-cli#959: explain_cmd.py grows a shared _print_sdk_resolution_warnings() helper wired into the success path and _fail's text branch, closing the text-mode SDK-advisory disclosure gap
+    - tan/commands/explain_cmd.py: 1087 -> 1135
+- 2026-08-28 -- explain_cmd.py: tan-cli#966 docstring fix corrects the ambiguous-selector reason in _print_sdk_resolution_warnings, growing the module 3 lines past its 1135 cap
+    - tan/commands/explain_cmd.py: 1135 -> 1138
 - 2026-08-28 -- PR #967 review: _soc_targets (npus[] container/element type guards + the mac_per_cycle optional-key guard) and resolve_targets (host_soc isinstance(dict) guard) both crossed the 50-line function cap carrying the review's own reasoning comments for each guard; comments kept, not compressed to fit
     - function_count_budget: 275 -> 277
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
@@ -390,3 +394,17 @@ and write both files from the real merged tree.
     - tan/commands/debug_config_cmd.py: 2007 -> 2047
     - tan/core/debug_launch.py: 1462 -> 1541
     - function_count_budget: 277 -> 278
+- 2026-08-28 -- tan-cli#905: sdk_default_registry.prune_dead_origins (drops every existence-dead entry out of the global SDK-default registry on the next relocating bootstrap's write) grows bootstrap_cmd.py past its recorded ceiling and is itself a new over-50-line function (60 lines).
+    - tan/commands/bootstrap_cmd.py: 3421 -> 3468
+    - function_count_budget: 277 -> 278
+- 2026-08-28 -- review of #971 (Major 1): _origin_exists rewritten from Path.is_dir() to an explicit os.stat + errno/winerror check with the reasoning for each branch spelled out in the docstring, plus the new _INCONCLUSIVE_WINERRORS constant, grows bootstrap_cmd.py further
+    - tan/commands/bootstrap_cmd.py: 3468 -> 3508
+- 2026-08-28 -- tan-cli#963: generate_cmd.py's own docstring for pin_issue/foreign_issue prepend-ordering grew the module 4 lines past its 1400 ceiling; no compression to fit, per repo convention
+    - tan/commands/generate_cmd.py: 1400 -> 1404
+- 2026-08-28 -- review of #971 round 2: _origin_exists's WinError 1921 vs 21 distinction (CI caught the merge of the two live on windows-latest) adds _DEAD_WINERRORS + expanded docstring, growing bootstrap_cmd.py and _origin_exists itself further
+    - tan/commands/bootstrap_cmd.py: 3508 -> 3522
+    - function_count_budget: 278 -> 279
+- 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3421 -> 3522
+    - tan/commands/explain_cmd.py: 1087 -> 1138
+    - function_count_budget: 278 -> 280

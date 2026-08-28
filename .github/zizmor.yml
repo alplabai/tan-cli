@@ -160,29 +160,67 @@
 #
 #     1. `planner-resync.yml`, the `Check out tan-cli dev` step (the job's
 #        `propose` step pushes `auto/planner-resync` through it).
+#        anchor: job=propose id=artipacked-inventory-1
 #     2. `release.yml`, the `propose-dev-version-bump` job's `dev` checkout
 #        (a later step pushes `auto/dev-version-bump-<tag>` through it,
 #        tan-cli#770).
+#        anchor: job=propose-dev-version-bump id=artipacked-inventory-2
 #
-# DRIFT THIS INVENTORY CANNOT CATCH BY ITSELF, ON PURPOSE, FOR NOW.
+#   Each `anchor:` line names the (job key, step `id:`) pair the row is
+#   actually keyed to (tan-cli#929) -- see the note below this INVENTORY for
+#   why an `id:`, and not the step's `name:` prose above it, is the thing
+#   that must never move without this line moving with it.
+#
+# DRIFT THIS INVENTORY CATCHES, AND HOW.
 # `ci.yml`'s `workflow-security` job (this file's own audit job, the one
 # genuinely running zizmor) closes the dangerous half -- a step there asks
-# zizmor directly, with `--no-ignores`, how many real `artipacked` findings
-# it would surface with every inline suppression stripped, and fails if
-# that count disagrees with the two numbered rows above, in EITHER
-# direction. This used to be a `python/tests/gates` regex re-implementing
-# zizmor's own inline-ignore-to-step association; round after round it kept
-# disagreeing with zizmor, in both directions, because it modelled a step
-# by YAML indentation while zizmor actually associates an ignore comment
-# with the finding's LINE RANGE (the whole step, indentation irrelevant) --
-# closing three shapes a round only opened five more. Deleted in favour of
-# asking the real tool (tan-cli#919 round 4): it cannot disagree with
-# zizmor's verdict because it is zizmor's verdict. It does NOT catch the
-# other half: renaming step 1 or step 2 above so this INVENTORY names a
-# step that no longer exists. Closing that needs the inventory rewritten
-# in a machine-parseable form (workflow file + step name, not prose), which
-# is a bigger lift than this count check -- filed as tan-cli#929 rather
-# than built here.
+# zizmor directly, with `--no-ignores`, which real `artipacked` findings it
+# would surface with every inline suppression stripped, via
+# `python/scripts/check_zizmor_inventory.py`. This used to be a
+# `python/tests/gates` regex re-implementing zizmor's own inline-ignore-to-
+# step association; round after round it kept disagreeing with zizmor, in
+# both directions, because it modelled a step by YAML indentation while
+# zizmor actually associates an ignore comment with the finding's LINE
+# RANGE (the whole step, indentation irrelevant) -- closing three shapes a
+# round only opened five more. Deleted in favour of asking the real tool
+# (tan-cli#919 round 4): it cannot disagree with zizmor's verdict because it
+# is zizmor's verdict.
+#
+# DRIFT A (tan-cli#899/#919): a suppression added or removed with no
+# matching INVENTORY edit. Caught by comparing the COUNT of real
+# `artipacked` findings zizmor reports to the count of numbered rows above,
+# in EITHER direction.
+#
+# DRIFT B (tan-cli#929): renaming an inventoried STEP so this INVENTORY
+# names something that no longer exists -- measured directly: renaming
+# `planner-resync.yml`'s step to `Fetch the resync target` left this file
+# naming "the `Check out tan-cli dev` step" and the count-only gate above
+# green at rc=0, because two renamed-past-each-other sites still count the
+# same. A count is not an identity. Closed by keying each row to the
+# `anchor: job=<job> id=<id>` pair above instead of prose: `id:` is a step
+# field that is NEVER part of its human-facing `name:` (the "invisible
+# stable key" tan-cli#929 asked for, modelled on `parity.yml`'s
+# `notify-planner-drift` job matching a hidden `<!-- tan-cli-planner-drift-
+# tracker -->` body marker rather than a PR title, `parity.yml:2417-2427`,
+# specifically so a maintainer's rename cannot break the lookup). The check
+# reads each finding's `(job, id)` pair straight out of zizmor's own JSON
+# (`route` for the job, the captured `feature` text for the `id:` line --
+# still zizmor's own span, not a re-derived one) and fails if that set
+# disagrees with the declared `anchor:` pairs above, in either direction:
+# an `id:` renamed or dropped means the row's pair no longer appears among
+# real findings, an unanchored new suppression means a pair appears with no
+# row naming it.
+#
+# WHAT STAYS UNCHECKED, ON PURPOSE: a row's own PROSE describing the step
+# (e.g. "the `Check out tan-cli dev` step") is not re-validated against
+# that step's live `name:`. A step can be renamed without touching its
+# `id:`, and the gate stays green -- correctly, since the `anchor:` pair
+# still resolves to the real suppressed site, which is the property that
+# actually matters (tan-cli#929's own framing: a row naming a renamed step
+# is still a CORRECTLY suppressed finding; what degrades is the audit
+# trail, not the security posture). The row's prose going stale relative to
+# a renamed `name:` is a cosmetic staleness a reviewer catches by reading
+# the step, not the reference-resolves-to-nothing failure Drift B was.
 #
 # Growth beyond these two is still a decision someone defends in review, in
 # the same shape (a checkout that must keep its credential because it

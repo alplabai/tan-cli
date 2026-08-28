@@ -1,0 +1,25 @@
+{
+  "examples": {
+    "multicore": [
+      {
+        "board": "e1m-evk",
+        "coreCount": 2,
+        "cores": [
+          { "app": "./linux", "id": "a55_cluster", "os": "yocto" },
+          { "app": "./m33_sm", "id": "m33_sm", "os": "zephyr" }
+        ],
+        "declares": {
+          "chips": true,
+          "ipc": true,
+          "models": false,
+          "peripherals": true
+        },
+        "name": "rpmsg-v2n",
+        "osSet": ["yocto", "zephyr"],
+        "path": "examples/multicore/rpmsg-v2n",
+        "som": "E1M-V2N101",
+        "summary": "Heterogeneous A55 + M33 message passing."
+      }
+    ]
+  }
+}

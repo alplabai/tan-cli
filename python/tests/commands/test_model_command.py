@@ -339,6 +339,64 @@ def test_a_failed_model_is_an_issue_not_a_traceback_and_the_batch_continues(
     assert "no blob compiled" in doc["issues"][0]["message"]
 
 
+def test_a_missing_dxcom_toolchain_is_a_coded_issue_not_a_traceback_and_the_batch_continues(
+    tmp_path, monkeypatch
+):
+    """tan-cli#253 gap (b): the DEEPX host compiler `dxcom` (not `dx_com`) is
+    license-gated and, on any machine that hasn't installed it, simply
+    absent from PATH. `tan.model.adapters.deepx` resolves it with
+    `shutil.which("dxcom")` and raises when it can't find it -- that raise
+    reaches `_run_build`'s per-model `except Exception` (module doc,
+    `model_cmd.py:404-407`) exactly the same as any other `build_model()`
+    failure: there is no dedicated "toolchain not found" branch, so a
+    missing `dxcom` is the SAME case as `test_a_failed_model_is_an_issue_
+    not_a_traceback_and_the_batch_continues` above, not a different one --
+    it resolves to the same coded `model.build-failed` issue, and the batch
+    still continues to the next model rather than aborting."""
+
+    def _fake_build_model(*, out_dir, name, **kw):
+        if name == "needs_dxcom":
+            raise FileNotFoundError("dxcom: command not found")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"{name}.alpmodel"
+        out.write_bytes(_REAL_PACKAGE_BYTES)
+        return out
+
+    monkeypatch.setattr(model_cmd, "build_model", _fake_build_model)
+
+    sdk = make_sdk(tmp_path / "sdk")
+    write(tmp_path / "good.onnx", "x")
+    write(tmp_path / "deepx.onnx", "x")
+    board_yaml(
+        tmp_path,
+        "models:\n"
+        "  - name: good\n    source: good.onnx\n"
+        "  - name: needs_dxcom\n    source: deepx.onnx\n",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            "--project", str(tmp_path),
+            "--sdk-root", str(sdk),
+            "--format", "json",
+        ],
+    )
+    assert result.exit_code == 3  # WriteFailure -- the dxcom-needing model failed
+    doc = envelope(result)
+    assert doc["ok"] is False
+    built = doc["data"]["built"]
+    assert len(built) == 1 and built[0].endswith("good.alpmodel")  # batch continued
+    assert len(doc["issues"]) == 1
+    failed = doc["issues"][0]
+    assert failed["code"] == "model.build-failed"
+    assert failed["severity"] == "error"
+    assert "needs_dxcom" in failed["message"]
+    assert "dxcom" in failed["message"]
+    assert "FileNotFoundError" in failed["message"]
+
+
 # --------------------------------------------------------------------------
 # `_resolve_compile` -- the `models[].compile.<backend>` path resolver, unit
 # --------------------------------------------------------------------------
