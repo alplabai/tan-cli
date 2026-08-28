@@ -436,3 +436,5 @@ and write both files from the real merged tree.
     - function_worst_budget: 791 -> 806
 - 2026-08-28 -- issue #474 follow-up: bootstrap_cmd.py's toolchain phase gains a bounded retry (TOOLCHAIN_INSTALL_ATTEMPTS=3, matching getting-started.yml's own established retry shape) around west sdk install, after that workflow's own first real end-to-end CI run hit a live tar/xz extraction flake on this exact command.
     - tan/commands/bootstrap_cmd.py: 3915 -> 3980
+- 2026-08-28 -- issue #474 follow-up: bootstrap_cmd.py's toolchain phase appends a low-disk diagnostic note to a west sdk install failure at failure time, since the same first CI run's tar/xz error named no cause (capture_tail's last-4-lines limit).
+    - tan/commands/bootstrap_cmd.py: 3980 -> 3998

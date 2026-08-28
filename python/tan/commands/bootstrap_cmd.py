@@ -1223,6 +1223,23 @@ def _free_disk_bytes(root: Path) -> int | None:
         return None
 
 
+def _augment_with_low_disk_note(root: Path, detail: str) -> str:
+    """Append [`toolchain_provision.low_disk_note`] when this volume is
+    critically low RIGHT NOW -- a `west sdk install` failure whose own
+    message says nothing about space (tan-cli's `capture_tail` keeps only
+    the last 4 non-empty lines of a failed child's output, which can cut off
+    a `tar`/`xz` "No space left on device" line sitting above a longer
+    traceback) still gets the hint. Best-effort: `_free_disk_bytes` returning
+    `None` (nothing above `root` resolves) leaves `detail` unchanged rather
+    than guessing.
+    """
+    free = _free_disk_bytes(root)
+    if free is None:
+        return detail
+    note = toolchain_provision.low_disk_note(free)
+    return f"{detail} {note}" if note else detail
+
+
 def _reclaim_toolchain_wreckage(root: Path, leaf: str) -> None:
     """Best-effort cleanup of a PRIOR interrupted attempt's `.tmp-*` sibling,
     before a new one starts. Never raises, and only ever touches a name
@@ -1445,6 +1462,7 @@ def _acquire_toolchain(
     detail = _run_west_sdk_install_with_retries(ws, log, runner, argv, tmp_dir)
     if detail is not None:
         augmented = toolchain_provision.augment_acquisition_failure(detail)
+        augmented = _augment_with_low_disk_note(root, augmented)
         log.warn("toolchain-install", f"west sdk install failed: {augmented}")
         return
     if runner.dry_run:

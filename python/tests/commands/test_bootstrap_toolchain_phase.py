@@ -281,6 +281,36 @@ def test_a_west_sdk_install_failure_is_retried_then_reported_with_the_checksum_h
     assert "proxy" in msg.lower()
 
 
+def test_a_west_sdk_install_failure_on_a_critically_low_volume_gets_the_disk_note(
+    tmp_path, monkeypatch
+):
+    """`getting-started.yml`'s real first CI run of this phase hit a `tar
+    --xz` extraction failure whose message named no cause at all (`tan.core.
+    bootstrap.capture_tail` keeps only the last 4 lines) -- this is the
+    diagnostic that failure needed: a low-disk note appended when the volume
+    is critically low AT FAILURE TIME, independent of whether the preflight
+    (checked once, before anything was written) passed."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
+    monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
+    monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(bootstrap_cmd.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(bootstrap_cmd, "_free_disk_bytes", lambda _root: 10 * (1 << 20))
+
+    def fake_fail(self, argv, cwd=None, extra_env=None):  # noqa: ARG001
+        return "tar: Unexpected EOF"
+
+    monkeypatch.setattr(bootstrap_cmd.Runner, "run", fake_fail)
+    ws = _workspace(tmp_path)
+    log = bootstrap_cmd.Log(json_mode=True)
+    bootstrap_cmd.toolchain_phase(ws, log, bootstrap_cmd.Runner(json=True), sdk_root, None, is_windows=False)
+
+    assert log.blocking() == ["toolchain-install"]
+    msg = log.warnings[0][1]
+    assert "0.01 GiB" in msg
+    assert "low disk space" in msg
+
+
 def test_a_transient_failure_followed_by_a_success_still_verifies_and_stamps(tmp_path, monkeypatch):
     """The exact shape `getting-started.yml`'s own retry loop exists for:
     the FIRST `west sdk install` attempt fails (a dropped connection, a rate

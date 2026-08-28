@@ -402,6 +402,36 @@ def disk_preflight_refusal(free_bytes: int, needed_bytes: int) -> str | None:
     )
 
 
+#: Below this, a `west sdk install` failure gets a disk-exhaustion note even
+#: though the PREFLIGHT passed -- the preflight checks free space once,
+#: before anything downloads; the download+extract itself is what actually
+#: consumes it, and a host that barely cleared the preflight bar can still
+#: run out mid-extraction (the archive and the extracted tree briefly
+#: coexist, exactly the margin [`DISK_MARGIN_RATIO`] exists for, but a margin
+#: is a cushion, not a guarantee on an already-tight host).
+LOW_DISK_AFTER_FAILURE_FLOOR_BYTES = 512 * (1 << 20)
+
+
+def low_disk_note(free_bytes: int) -> str | None:
+    """`None` when `free_bytes` is comfortably above
+    [`LOW_DISK_AFTER_FAILURE_FLOOR_BYTES`]; otherwise a note worth appending
+    to a `west sdk install` failure message -- disk exhaustion DURING
+    extraction reads identically to a dozen other causes (a `tar`/`xz` error
+    with no "No space" wording tan's own truncated capture may have cut off,
+    per `tan.core.bootstrap.capture_tail`'s last-4-lines limit) unless
+    something says to check it.
+    """
+    if free_bytes >= LOW_DISK_AFTER_FAILURE_FLOOR_BYTES:
+        return None
+    return (
+        f"only {_gib(free_bytes)} free on this volume right now -- if the failure "
+        "above does not obviously name a cause, low disk space during extraction "
+        "is a likely one even though the preflight passed (the preflight checks "
+        "space ONCE, before anything is written; a host that barely cleared it can "
+        "still run out mid-extraction)."
+    )
+
+
 # ---------------------------------------------------------------------------
 # `west sdk install` argv + failure classification
 # ---------------------------------------------------------------------------

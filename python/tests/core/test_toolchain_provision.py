@@ -259,6 +259,21 @@ def test_disk_preflight_boundary_is_inclusive_not_off_by_one():
     assert tp.disk_preflight_refusal(free_bytes=99, needed_bytes=100) is not None
 
 
+def test_low_disk_note_is_silent_with_room_to_spare():
+    assert tp.low_disk_note(10 * (1 << 30)) is None
+
+
+def test_low_disk_note_fires_under_the_floor_and_names_the_free_amount():
+    note = tp.low_disk_note(100 * (1 << 20))  # 100 MiB
+    assert note is not None
+    assert "0.10 GiB" in note
+
+
+def test_low_disk_note_boundary_is_inclusive_not_off_by_one():
+    assert tp.low_disk_note(tp.LOW_DISK_AFTER_FAILURE_FLOOR_BYTES) is None
+    assert tp.low_disk_note(tp.LOW_DISK_AFTER_FAILURE_FLOOR_BYTES - 1) is not None
+
+
 # ---------------------------------------------------------------------------
 # The `west sdk install` argv
 # ---------------------------------------------------------------------------
