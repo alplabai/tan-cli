@@ -3623,6 +3623,56 @@ def test_capture_tail_lines_widens_the_window_without_changing_the_default():
     assert "line1" in wide  # would be lost at the 4-line default
 
 
+def test_runner_env_restores_ld_library_path_from_the_pyinstaller_orig_value(monkeypatch):
+    """tan-cli#990 review follow-up: the REAL cause of the "first install"
+    CI failure the PR's own body called an unproven "transient runner
+    hiccup" -- once `capture_tail`'s widened window (above) stopped
+    discarding it:
+
+        xz: /home/runner/.local/bin/tan-cli-lib/_internal/liblzma.so.5:
+        version `XZ_5.4' not found (required by xz)
+
+    `tan`'s own PyInstaller onedir freeze sets `LD_LIBRARY_PATH` to its
+    bundled lib dir; every child it spawns (`west`, and everything `west`
+    itself spawns, incl. `tar --xz`) inherited that, and the SYSTEM `xz`
+    picked up tan's older bundled `liblzma.so.5` instead of its own.
+    `LD_LIBRARY_PATH_ORIG` is PyInstaller's own preserved pre-bundle value;
+    `Runner._env` must restore it for every child, unconditionally."""
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/home/runner/.local/bin/tan-cli-lib/_internal")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/usr/lib/x86_64-linux-gnu")
+
+    env = bootstrap_cmd.Runner(json=True)._env()
+
+    assert env is not None
+    assert env["LD_LIBRARY_PATH"] == "/usr/lib/x86_64-linux-gnu"
+
+
+def test_runner_env_drops_ld_library_path_when_pyinstaller_orig_was_empty(monkeypatch):
+    """PyInstaller sets `LD_LIBRARY_PATH_ORIG` to the EMPTY string, not
+    unset, when the host had no `LD_LIBRARY_PATH` before the bootloader
+    touched it -- the restore must drop the var entirely in that case, not
+    set it to an empty string (which some loaders treat as "search the
+    current directory")."""
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/home/runner/.local/bin/tan-cli-lib/_internal")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "")
+
+    env = bootstrap_cmd.Runner(json=True)._env()
+
+    assert env is not None
+    assert "LD_LIBRARY_PATH" not in env
+
+
+def test_runner_env_is_untouched_on_an_ordinary_non_frozen_host(monkeypatch):
+    """`LD_LIBRARY_PATH_ORIG` absent -- every dev/CI/test run of `python -m
+    tan` from source, and every macOS/Windows host -- must take the SAME
+    fast `None` path as before this fix, not build an env dict for no
+    reason."""
+    monkeypatch.delenv("LD_LIBRARY_PATH_ORIG", raising=False)
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+
+    assert bootstrap_cmd.Runner(json=True)._env() is None
+
+
 def test_die_appends_a_detail_only_when_there_is_one():
     """Text mode usually has none (the child's log already streamed), so the bare
     message is what the user sees there -- no dangling colon."""

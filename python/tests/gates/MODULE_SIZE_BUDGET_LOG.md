@@ -463,3 +463,6 @@ and write both files from the real merged tree.
     - tan/commands/doctor_cmd.py: 4134 -> 4201
     - tan/core/bootstrap.py: 2400 -> 2411
     - function_count_budget: 291 -> 293
+- 2026-08-28 -- tan-cli#990 review follow-up: Runner._env restores LD_LIBRARY_PATH from PyInstaller's LD_LIBRARY_PATH_ORIG before spawning any child -- the real, proven cause of the getting-started 'first install' CI failure (a frozen tan's bundled liblzma.so.5 leaking into a subprocess west spawns, tar --xz against the system xz)
+    - tan/commands/bootstrap_cmd.py: 4067 -> 4104
+    - function_count_budget: 293 -> 294

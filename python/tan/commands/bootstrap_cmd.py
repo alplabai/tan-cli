@@ -589,9 +589,46 @@ class Runner:
     planned: list[list[str]] = field(default_factory=list)
 
     def _env(self, extra_env: dict[str, str] | None = None) -> dict[str, str] | None:
-        if not self.clear_zephyr_base and not extra_env:
+        # tan-cli#990 review follow-up: the REAL root cause of the "first
+        # install" CI failure the PR's own body called an unproven "transient
+        # runner hiccup" -- found only once `capture_tail`'s wider window
+        # (above) stopped discarding it. Verbatim from the CI envelope:
+        #   xz: /home/runner/.local/bin/tan-cli-lib/_internal/liblzma.so.5:
+        #   version `XZ_5.4' not found (required by xz)
+        #   /usr/bin/tar: Child returned status 1
+        # `tan`'s own PyInstaller ONEDIR freeze (`install.sh`'s install
+        # target) sets `LD_LIBRARY_PATH` to its bundled `_internal/` lib dir
+        # so the FROZEN `tan` binary finds its OWN shared libs -- and every
+        # child `tan` spawns inherits that same env var. `west sdk install`
+        # spawns `tar --xz`, which dynamically links the SYSTEM `xz` binary
+        # against `liblzma.so.5` and picks up tan's older BUNDLED one first,
+        # which lacks a symbol version the system `xz` needs. Nothing to do
+        # with disk, network, or runner flakiness: 100% reproducible on any
+        # frozen install whose bundled liblzma is older than the host's
+        # `xz`. PyInstaller's OWN documented fix ("Launching External
+        # Programs From The Frozen Application"): restore `LD_LIBRARY_PATH`
+        # from the `_ORIG` value its bootloader preserves before spawning
+        # anything that is not part of the bundle -- every child this class
+        # ever spawns (`python -m venv`, `pip`, `west`, and everything
+        # `west` itself spawns) is a SYSTEM program, never a bundled one, so
+        # this restoration is unconditional here, not opt-in per call site.
+        # `LD_LIBRARY_PATH_ORIG` (not merely "frozen") is the trigger: it is
+        # PyInstaller's OWN marker that its bootloader modified
+        # `LD_LIBRARY_PATH` for THIS process, and the exact value to restore
+        # -- present only on a real PyInstaller-onedir Linux run, never on
+        # `python -m tan` from source (this repo's own dev/CI/test runs) and
+        # never on macOS/Windows (LD_LIBRARY_PATH is not their loader
+        # variable), so this never touches a host that never had the
+        # problem, and never guesses at a value to fall back to.
+        ld_library_path_orig = os.environ.get("LD_LIBRARY_PATH_ORIG")
+        if not self.clear_zephyr_base and not extra_env and ld_library_path_orig is None:
             return None
         env = dict(os.environ)
+        if ld_library_path_orig is not None:
+            if ld_library_path_orig:
+                env["LD_LIBRARY_PATH"] = ld_library_path_orig
+            else:
+                env.pop("LD_LIBRARY_PATH", None)
         if self.clear_zephyr_base:
             env.pop("ZEPHYR_BASE", None)
         if extra_env:
