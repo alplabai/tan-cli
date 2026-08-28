@@ -19,6 +19,7 @@ from tan.commands.debug_config_cmd import (
     _sdk_core_refusal_authority,
     _select_slice,
 )
+from tan.core import launch_provenance
 from tan.core.debug_launch import (
     GDBSERVER,
     JLINK,
@@ -75,6 +76,13 @@ def envelope(proc):
 
 def launch_json(root):
     return Path(root, ".vscode", "launch.json")
+
+
+def provenance_sidecar(root):
+    """`tan-cli#518`'s own `.alp/` sidecar, mirroring `launch_json` above --
+    both are keyed off the workspace root the real CLI resolves `--project`
+    against."""
+    return Path(root, ".alp", "debug-launch-provenance.json")
 
 
 def test_a_write_into_the_stock_template_keeps_every_byte_outside_the_entry(tmp_path):
@@ -1143,7 +1151,16 @@ def test_sdk_identity_overwrite_message_stays_true_for_config_files(tmp_path):
     advice would hand-add a THIRD copy. The position-anchored merge fixes
     the underlying behaviour the message describes; this proves the message
     and the on-disk result agree again for the one-element SDK-filled case
-    `sdk_identity_overwrites` is scoped to."""
+    `sdk_identity_overwrites` is scoped to.
+
+    tan-cli#518: `board/OLD.cfg` must now be PROVEN tan's own prior output
+    before the merge (and this disclosure) will touch it, so this test
+    primes `.alp/debug-launch-provenance.json` with exactly the record a
+    real EARLIER `tan debug-config` run would have left behind for it --
+    the realistic story this scenario always told (a stale resolved value
+    from a run against an older SDK fixture), not a customer's own typed
+    value. `test_an_sdk_filled_config_files_value_with_no_provenance_is_
+    disclosed_as_appended_not_replaced` below covers the un-primed case."""
     pytest.importorskip("yaml")
     Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
     launch_json(tmp_path).parent.mkdir()
@@ -1165,6 +1182,15 @@ def test_sdk_identity_overwrite_message_stays_true_for_config_files(tmp_path):
         encoding="utf-8",
     )
     write_sdk_fixture_with_no_jlink_device(tmp_path)
+    provenance_sidecar(tmp_path).parent.mkdir()
+    provenance_sidecar(tmp_path).write_text(
+        launch_provenance.render(
+            launch_provenance.empty().updated(
+                "Alp: Zephyr Debug (OpenOCD)", {"configFiles": ["board/OLD.cfg"]}
+            )
+        ),
+        encoding="utf-8",
+    )
 
     env = envelope(
         run_cli(
@@ -1186,6 +1212,63 @@ def test_sdk_identity_overwrite_message_stays_true_for_config_files(tmp_path):
     assert overwrite_issue is not None, env["issues"]
     assert "board/OLD.cfg" in overwrite_issue["message"]
     assert "board/alif_e8.cfg" in overwrite_issue["message"]
+
+
+def test_an_sdk_filled_config_files_value_with_no_provenance_is_disclosed_as_appended_not_replaced(
+    tmp_path,
+):
+    """tan-cli#518's own core scenario, reached through the SDK-identity
+    path specifically: the exact fixture of the test above, but with no
+    `.alp/` sidecar at all -- `board/OLD.cfg` could be a customer's own
+    hand-typed value. Nothing here can tell it apart from tan's own stale
+    output, so the merge must not gamble: `board/alif_e8.cfg` is APPENDED,
+    `board/OLD.cfg` survives untouched, and -- because nothing was actually
+    replaced -- `sdk_identity_overwrites` must not raise a "replaced" alarm
+    over a value that is still sitting right there in the file. A disclosure
+    here would be worse than silence: it would send the customer hunting for
+    a value to restore that was never touched."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    launch_json(tmp_path).parent.mkdir()
+    launch_json(tmp_path).write_text(
+        json.dumps(
+            {
+                "version": "0.2.0",
+                "configurations": [
+                    {
+                        "name": "Alp: Zephyr Debug (OpenOCD)",
+                        "type": "cortex-debug",
+                        "request": "launch",
+                        "servertype": "openocd",
+                        "configFiles": ["board/OLD.cfg"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    write_sdk_fixture_with_no_jlink_device(tmp_path)
+    assert not provenance_sidecar(tmp_path).exists()
+
+    env = envelope(
+        run_cli(
+            tmp_path,
+            "--target-kind", ZEPHYR_MCU, "--server", "openocd",
+            "--sdk-root", "./sdk", "--format", "json",
+        )
+    )
+    assert env["exitCode"] == 0, env
+
+    on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk["configurations"][0]["configFiles"] == [
+        "board/OLD.cfg",
+        "board/alif_e8.cfg",
+    ], on_disk
+
+    overwrite_issue = next(
+        (i for i in env["issues"] if i["code"] == "debug-config.sdk-identity-overwrite"), None
+    )
+    assert overwrite_issue is None, env["issues"]
 
 
 def test_an_all_placeholder_config_files_list_keeps_a_hand_added_second_entry():
@@ -1291,7 +1374,16 @@ def test_a_resolved_replacement_overwrites_the_previous_one_instead_of_accumulat
     and OpenOCD sources every `-f`, so three board configs on one TAP fail
     the session outright. Position is restored as the fallback signal for
     exactly this one-to-one case. FAILS against the review round's own
-    identity-only merge, which accumulated all three."""
+    identity-only merge, which accumulated all three.
+
+    tan-cli#518 threads each call's own `.provenance` into the next, exactly
+    as `tan debug-config` itself does by reading back the `.alp/` sidecar it
+    just wrote -- the real CLI's idempotency (proven end-to-end by
+    `test_three_real_cli_runs_replace_configfiles_each_time_not_accumulate`
+    below) depends on that persistence, not on calling this pure function
+    with no memory of what a prior call wrote. Passing no `provenance` at all
+    is covered on its own by
+    `test_an_unrecorded_positional_slot_is_never_overwritten_by_a_bare_merge`."""
     draft_a = create_launch_draft(ZEPHYR_MCU, "openocd", None)
     draft_a["configFiles"] = ["board/alp_rev_a.cfg"]
     existing = json.dumps(
@@ -1302,14 +1394,14 @@ def test_a_resolved_replacement_overwrites_the_previous_one_instead_of_accumulat
 
     draft_b = create_launch_draft(ZEPHYR_MCU, "openocd", None)
     draft_b["configFiles"] = ["board/alp_rev_b.cfg"]
-    plan_b = create_launch_json_write_plan(plan_a.content, draft_b)
+    plan_b = create_launch_json_write_plan(plan_a.content, draft_b, provenance=plan_a.provenance)
     assert plan_b.written_configuration["configFiles"] == ["board/alp_rev_b.cfg"], (
         plan_b.written_configuration["configFiles"]
     )
 
     draft_c = create_launch_draft(ZEPHYR_MCU, "openocd", None)
     draft_c["configFiles"] = ["board/alp_rev_c.cfg"]
-    plan_c = create_launch_json_write_plan(plan_b.content, draft_c)
+    plan_c = create_launch_json_write_plan(plan_b.content, draft_c, provenance=plan_b.provenance)
     assert plan_c.written_configuration["configFiles"] == ["board/alp_rev_c.cfg"], (
         plan_c.written_configuration["configFiles"]
     )
@@ -1320,7 +1412,57 @@ def test_a_resolved_replacement_still_keeps_a_hand_added_entry_in_place():
     above -- a customer's own hand-added SECOND entry (never matched by
     anything the draft resolves) must survive a positional replacement of
     the FIRST entry, in its OWN place, not reordered to the front. This is
-    the exact case #489's own defect 3 is about."""
+    the exact case #489's own defect 3 is about.
+
+    tan-cli#518: `board/old.cfg` is what makes the positional replacement
+    legal at all now -- it must be PROVEN tan's own prior output (a recorded
+    content hash), not just occupy the one free slot. The `provenance` built
+    here is exactly what `create_launch_json_write_plan` itself would have
+    produced from an earlier run that wrote `board/old.cfg` as this same
+    field's only entry -- i.e. this test now covers "tan's own prior value
+    gets replaced", and its sibling below,
+    `test_an_unrecorded_positional_slot_is_never_overwritten_by_a_bare_merge`,
+    covers the NEW case this issue is actually about: the identical file with
+    NO provenance for `board/old.cfg` must NOT be overwritten."""
+    draft = create_launch_draft(ZEPHYR_MCU, "openocd", None)
+    draft["configFiles"] = ["board/new.cfg"]
+    existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {
+                    "name": "Alp: Zephyr Debug (OpenOCD)",
+                    "configFiles": ["board/old.cfg", "interface/jlink.cfg"],
+                }
+            ],
+        }
+    )
+    provenance = launch_provenance.empty().updated(
+        "Alp: Zephyr Debug (OpenOCD)", {"configFiles": ["board/old.cfg"]}
+    )
+
+    plan = create_launch_json_write_plan(existing, draft, provenance=provenance)
+
+    assert plan.written_configuration["configFiles"] == [
+        "board/new.cfg",
+        "interface/jlink.cfg",
+    ], plan.written_configuration["configFiles"]
+
+
+def test_an_unrecorded_positional_slot_is_never_overwritten_by_a_bare_merge():
+    """tan-cli#518, the gap tan-cli#489 itself named as a "Known, accepted
+    limitation": the EXACT scenario above, but with no provenance at all --
+    `board/old.cfg` might be the customer's own hand-typed value, or tan's
+    own output from a run that predates this sidecar, or simply a sidecar
+    that got deleted. Either way, nothing here can PROVE it is tan's, so the
+    merge must not gamble: `board/new.cfg` is appended instead of replacing
+    it, and `board/old.cfg` survives untouched, in its own place, exactly
+    like the customer's `interface/jlink.cfg` beside it always has.
+
+    FAILS against the pre-#518 position-heuristic merge, which overwrote
+    `board/old.cfg` unconditionally the moment nothing else claimed that
+    slot -- the same test this file's own history shows previously asserted
+    the overwrite."""
     draft = create_launch_draft(ZEPHYR_MCU, "openocd", None)
     draft["configFiles"] = ["board/new.cfg"]
     existing = json.dumps(
@@ -1338,8 +1480,9 @@ def test_a_resolved_replacement_still_keeps_a_hand_added_entry_in_place():
     plan = create_launch_json_write_plan(existing, draft)
 
     assert plan.written_configuration["configFiles"] == [
-        "board/new.cfg",
+        "board/old.cfg",
         "interface/jlink.cfg",
+        "board/new.cfg",
     ], plan.written_configuration["configFiles"]
 
 
@@ -1378,6 +1521,115 @@ def test_three_real_cli_runs_replace_configfiles_each_time_not_accumulate(tmp_pa
         )
     on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
     assert on_disk["configurations"][0]["configFiles"] == ["board/alp_rev_c.cfg"], on_disk
+
+
+def test_provenance_survives_the_targeted_splice_write_path(tmp_path):
+    """tan-cli#518's own explicit callout: `jsonc_splice` preserves byte
+    spans -- everything OUTSIDE the one entry being rewritten is copied
+    through unconditionally (tan-cli#182) -- so this proves the sidecar's own
+    identity is unaffected by which write path (`jsonc_splice.apply_edit` vs
+    the whole-document fallback `jsonc_splice.pretty_json`) actually produced
+    a given `launch.json` on disk. The comment above `configurations` forces
+    `_write_content` down the TARGETED SPLICE path (the same one
+    `test_a_write_into_the_stock_template_keeps_every_byte_outside_the_entry`
+    pins) on every write here, never the fallback -- if content-hash
+    provenance were somehow keyed to raw file bytes instead of the PARSED
+    value, splicing (which never re-serialises the untouched comment, but
+    DOES re-serialise the one entry it rewrites) would be exactly the kind of
+    thing that could desync it."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr.elf\n",
+    )
+    zephyr_dir = Path(build_dir, "zephyr")
+    zephyr_dir.mkdir(parents=True)
+    runners_yaml = zephyr_dir / "runners.yaml"
+    launch_json(tmp_path).parent.mkdir()
+    launch_json(tmp_path).write_text(STOCK_TEMPLATE, encoding="utf-8")
+
+    for rev in "a", "b", "c":
+        runners_yaml.write_text(
+            "runners:\n- openocd\n"
+            f"args:\n  openocd:\n  - --config=board/splice_rev_{rev}.cfg\n",
+            encoding="utf-8",
+        )
+        env = envelope(
+            run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+        )
+        assert env["exitCode"] == 0, env
+        # The comment survives every single write -- proof the targeted
+        # splice path ran, not the whole-document fallback (which would have
+        # destroyed it on the very first write).
+        assert "// Use IntelliSense" in launch_json(tmp_path).read_text(encoding="utf-8")
+
+    on_disk = json.loads(strip_jsonc(launch_json(tmp_path).read_text(encoding="utf-8")))
+    # Not accumulated: if provenance had desynced from the real (spliced)
+    # file, rev "b" and "c" would each have found no recorded hash for rev
+    # "a"'s entry and appended instead, same failure shape as tan-cli#489.
+    assert on_disk["configurations"][0]["configFiles"] == ["board/splice_rev_c.cfg"], on_disk
+
+
+def test_a_customer_edit_of_a_tans_own_entry_orphans_it_instead_of_overwriting_it(tmp_path):
+    """tan-cli#518's central scenario, end to end through the real CLI and a
+    real (rewritten between runs) `runners.yaml`: tan writes a resolved
+    `configFiles` value on run 1 (recorded in `.alp/` as tan's own), the
+    CUSTOMER then hand-edits that exact entry in `launch.json` -- the desync
+    the whole sidecar exists to survive -- and a SECOND real build resolves
+    a yet-DIFFERENT value on run 2. The edited entry's current content no
+    longer hashes to what run 1 recorded, so it reads as "not tan's any
+    more": run 2 must APPEND its own new value beside the customer's edit,
+    never silently overwrite what they just typed. FAILS against the
+    pre-#518 position-heuristic merge, which would have overwritten the
+    customer's edit unconditionally (nothing but position identified that
+    slot)."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr.elf\n",
+    )
+    zephyr_dir = Path(build_dir, "zephyr")
+    zephyr_dir.mkdir(parents=True)
+    runners_yaml = zephyr_dir / "runners.yaml"
+    runners_yaml.write_text(
+        "runners:\n- openocd\nargs:\n  openocd:\n  - --config=board/rev_1.cfg\n",
+        encoding="utf-8",
+    )
+    env_1 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_1["exitCode"] == 0, env_1
+    assert env_1["data"]["configuration"]["configFiles"] == ["board/rev_1.cfg"]
+
+    # The customer opens launch.json and edits the value tan just wrote --
+    # the sidecar still names the OLD content, `board/rev_1.cfg`, as tan's;
+    # what's on disk now is something else entirely.
+    on_disk_1 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    on_disk_1["configurations"][0]["configFiles"] = ["my/own/handpicked.cfg"]
+    launch_json(tmp_path).write_text(json.dumps(on_disk_1), encoding="utf-8")
+
+    runners_yaml.write_text(
+        "runners:\n- openocd\nargs:\n  openocd:\n  - --config=board/rev_2.cfg\n",
+        encoding="utf-8",
+    )
+    env_2 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", "openocd", "--format", "json")
+    )
+    assert env_2["exitCode"] == 0, env_2
+
+    on_disk_2 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk_2["configurations"][0]["configFiles"] == [
+        "my/own/handpicked.cfg",
+        "board/rev_2.cfg",
+    ], on_disk_2
 
 
 def test_a_multi_element_draft_with_a_customer_prepended_entry_still_replaces(tmp_path):

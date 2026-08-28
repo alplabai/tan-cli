@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
-from tan.core import jsonc_splice
+from tan.core import jsonc_splice, launch_provenance
+from tan.core.launch_provenance import LaunchProvenance
 from tan.core.run import is_native_sim_board
 from tan.core.system_manifest import SYSTEM_MANIFEST_SCHEMA_VERSION
 
@@ -582,7 +583,10 @@ def apply_launch_resolution(draft: dict[str, Any], resolution: LaunchResolution)
 
 
 def sdk_identity_overwrites(
-    existing_content: str | None, draft: dict[str, Any], filled_fields: list[str]
+    existing_content: str | None,
+    draft: dict[str, Any],
+    filled_fields: list[str],
+    provenance: LaunchProvenance | None = None,
 ) -> list[tuple[str, str, str]]:
     """Whether writing ``draft`` (already ``apply_launch_resolution``'d) over
     ``existing_content`` would REPLACE an already-concrete value on any of
@@ -611,10 +615,26 @@ def sdk_identity_overwrites(
     Matches the SAME entry [`create_launch_json_write_plan`] would merge into
     (current name, else its legacy counterpart) so this can never flag a field
     on an unrelated configuration.
+
+    tan-cli#518: for a LIST field (today only ``configFiles`` -- ``device``/
+    ``targetId`` are scalars, unaffected by this paragraph and still
+    unconditionally disclosed as before), the real merge no longer always
+    overwrites an unmatched existing entry -- [`_merge_list_by_identity`]'s
+    positional fallback now requires ``provenance`` to confirm the entry it
+    is about to reuse is tan's OWN prior output (see that function's
+    docstring). Disclosing "replaced" when the actual write instead APPENDED
+    the new entry and left the old one exactly where it was -- the safe
+    outcome the provenance gate exists to produce -- would be a false alarm
+    worse than useless: it would tell a customer to go manually restore a
+    value that was never touched. So this mirrors the real merge decision via
+    [`_merge_list_field`] before flagging a list field, and only flags it when
+    that merge would actually have dropped the existing concrete value.
     """
     out: list[tuple[str, str, str]] = []
     if not filled_fields:
         return out
+    if provenance is None:
+        provenance = launch_provenance.empty()
     try:
         name = _configuration_name(draft)
         document = _parse_launch_json_or_default(existing_content)
@@ -640,9 +660,26 @@ def sdk_identity_overwrites(
             continue
         existing_val = existing_entry[field]
         incoming_val = draft[field]
-        if _value_is_concrete(existing_val) and existing_val != incoming_val:
-            out.append((field, _display_value(existing_val), _display_value(incoming_val)))
+        if not _value_is_concrete(existing_val) or existing_val == incoming_val:
+            continue
+        if isinstance(existing_val, list) and isinstance(incoming_val, list):
+            hashes = provenance.hashes_for(name, field)
+            merged, _owned = _merge_list_field(list(existing_val), list(incoming_val), hashes)
+            if not _list_lost_a_concrete_entry(existing_val, merged):
+                continue
+        out.append((field, _display_value(existing_val), _display_value(incoming_val)))
     return out
+
+
+def _list_lost_a_concrete_entry(existing_list: list[Any], merged_list: list[Any]) -> bool:
+    """Whether ``merged_list`` (a real [`_merge_list_field`] result) DROPPED a
+    concrete element ``existing_list`` held -- the list-field analogue of a
+    scalar's plain ``!=``, honouring the SAME provenance gate the actual merge
+    applied (tan-cli#518): an unmatched existing element that provenance
+    protected is APPENDED alongside the new one, still present in
+    ``merged_list``, and is therefore not "lost" even though the two lists as
+    a WHOLE differ."""
+    return any(_value_is_concrete(v) and v not in merged_list for v in existing_list)
 
 
 def _value_is_concrete(value: Any) -> bool:
@@ -731,10 +768,25 @@ def _list_item_identity(item: Any) -> Any:
     return item
 
 
-def _merge_list_by_identity(existing: list[Any], next_value: list[Any]) -> list[Any]:
+def _merge_list_by_identity(
+    existing: list[Any],
+    next_value: list[Any],
+    tan_owned_hashes: frozenset[str] = frozenset(),
+) -> tuple[list[Any], list[Any]]:
     """Merge `next_value` into `existing`. Port target: `_merge_value`'s list
     branch, factored out so its own docstring can stay about the OVERALL
     merge rule.
+
+    Returns `(result, owned_entries)`: the merged list, and the subset of
+    `result` this run identifies as tan-authored after this merge -- every
+    entry pass 1 matched (merged in place), every entry pass 2 actually
+    placed, and every entry pass 4 appended. NEVER an entry pass 3 left
+    untouched (that is either the customer's own, or a previously-tan entry
+    this run had no reason to touch -- either way, this run makes no fresh
+    claim about it). The caller (`_merge_list_field`, in turn
+    `_merge_configuration`) hashes `owned_entries` into the `.alp/`
+    provenance sidecar (tan-cli#518) so a LATER run can tell these entries
+    apart from the customer's without relying on position.
 
     tan-cli#489 review round (second pass): identity-only matching, with no
     positional fallback, was NON-IDEMPOTENT -- measured through the real CLI,
@@ -804,19 +856,31 @@ def _merge_list_by_identity(existing: list[Any], next_value: list[Any]) -> list[
        already claimed by an earlier placement in this same merge) is a
        genuinely NEW value -- appended.
 
-    **Known, accepted limitation**, precisely what remains after the above:
-    position is still a HEURISTIC, not real provenance. A customer's
-    hand-added entry that (a) matches nothing in the fresh draft AND (b)
-    sits in the SAME bracketing window an unmatched draft item is being
-    placed into can still be overwritten -- e.g. `["mine.cfg"] + ["board/x.cfg"]
-    -> ["board/x.cfg"]`, no anchors on either side to protect `mine.cfg`,
-    exactly the way the pre-#489 code always overwrote whatever sat at that
-    lone position. [`sdk_identity_overwrites`] exists precisely to disclose
-    this one case when a caller can identify it (an SDK-filled, not
-    build-resolved, single value) -- there is still no general provenance
-    record ("did TAN write THIS value, in a prior run") to close the gap
-    further; tan-cli#518 tracks the deferred in-file-marker-vs-`.alp/`-sidecar
-    follow-up.
+    **Position alone is a heuristic, not real provenance** -- tan-cli#489's
+    own "Known, accepted limitation": a customer's hand-added entry that (a)
+    matches nothing in the fresh draft AND (b) sits in the SAME bracketing
+    window an unmatched draft item is being placed into could be silently
+    overwritten, e.g. `["mine.cfg"] + ["board/x.cfg"] -> ["board/x.cfg"]`,
+    no anchors on either side to protect `mine.cfg`. tan-cli#518 closes that
+    gap: pass 2's placement additionally requires `launch_provenance.
+    content_hash(existing[slot])` to already be a member of
+    `tan_owned_hashes` -- i.e. that exact entry is recorded, in the `.alp/`
+    sidecar, as something TAN itself wrote on the run that last touched this
+    field. A slot whose content hash is unrecorded (never written by tan, or
+    edited/reformatted since) is skipped exactly as if it were `claimed`,
+    which starves the placement search and falls through to case 4
+    (appended) instead of case 2 (overwritten).
+
+    `tan_owned_hashes` defaults to empty -- a caller with no sidecar (never
+    read one, or read one that was missing/unreadable/schema-mismatched;
+    see `launch_provenance.load`) gets the maximally conservative behaviour:
+    pass 2 NEVER overwrites, every unmatched draft item is appended. That is
+    a deliberate one-run degradation, not a bug -- see the module docstring
+    of `launch_provenance` for the asymmetry this is built to preserve. The
+    very fact that this run appends (rather than silently discarding) means
+    its own [`_merge_list_field`] caller can then record the appended
+    entry's hash, so the NEXT run recognises it and pass 2 works normally
+    again -- the sidecar self-heals from empty within one write.
     """
     n_existing = len(existing)
     # Pass 1: identity match, anywhere in `existing`, greedily consuming at
@@ -848,6 +912,7 @@ def _merge_list_by_identity(existing: list[Any], next_value: list[Any]) -> list[
     sorted_anchor_draft_indices = sorted(anchor_of_draft_index)
     claimed = set(anchor_of_draft_index.values())
     appended: list[Any] = []
+    placed_slots: list[int] = []
     for i, item in enumerate(next_value):
         if i in anchor_of_draft_index:
             continue
@@ -861,20 +926,71 @@ def _merge_list_by_identity(existing: list[Any], next_value: list[Any]) -> list[
             if j > i:
                 window_end = anchor_of_draft_index[j]
                 break
+        # tan-cli#518: a slot is only a genuine placement TARGET when its
+        # CURRENT content hashes to something `tan_owned_hashes` already
+        # knows tan wrote -- otherwise it is treated exactly like an already
+        # `claimed` slot (skipped, never overwritten).
         slot = next(
-            (k for k in range(window_start + 1, window_end) if k not in claimed), None
+            (
+                k
+                for k in range(window_start + 1, window_end)
+                if k not in claimed
+                and launch_provenance.content_hash(existing[k]) in tan_owned_hashes
+            ),
+            None,
         )
         if slot is not None:
             result[slot] = _merge_value(existing[slot], item)
             claimed.add(slot)
+            placed_slots.append(slot)
         else:
             appended.append(item)
     result.extend(appended)
-    return result
+
+    owned_entries = (
+        [result[match_index] for match_index in anchor_of_draft_index.values()]
+        + [result[slot] for slot in placed_slots]
+        + appended
+    )
+    return result, owned_entries
+
+
+def _merge_list_field(
+    existing: list[Any],
+    next_value: list[Any],
+    tan_owned_hashes: frozenset[str] = frozenset(),
+) -> tuple[list[Any], list[Any]]:
+    """The full merge for one `configFiles`/`setupCommands`-shaped launch-
+    configuration field: the all-placeholder guard, then
+    [`_merge_list_by_identity`]. Factored out of [`_merge_configuration`]'s
+    per-key loop (the only real caller -- `_merge_value` no longer merges
+    list pairs at all, see its own docstring) so that loop can pass
+    field-specific `tan_owned_hashes` and collect the returned
+    `owned_entries` without duplicating the guard.
+
+    Returns `(merged, owned_entries)`; `owned_entries` is empty when the
+    all-placeholder guard fires, because this run resolved NOTHING for the
+    field -- see [`_merge_configuration`]'s docstring for why that means the
+    field's provenance record is left exactly as it already was, not wiped.
+    """
+    # cortex-debug `configFiles`: an all-placeholder incoming list keeps the
+    # existing list WHOLE, or a hand-added second `.cfg` is lost to a
+    # per-index merge against a one-element draft. A mixed list still merges
+    # per element, so an entry we did resolve wins.
+    if next_value and existing and all(_is_unresolved(v) for v in next_value):
+        return list(existing), []
+    return _merge_list_by_identity(existing, next_value, tan_owned_hashes)
 
 
 def _merge_value(existing: Any, next_value: Any) -> Any:
-    """Merge one incoming value over what the file already holds.
+    """Merge one incoming SCALAR or nested-DICT value over what the file
+    already holds. List pairs never reach here -- [`_merge_configuration`]'s
+    per-key loop intercepts every `(list, list)` pair itself, so it can pass
+    field-specific provenance to [`_merge_list_field`] and record what that
+    merge decided was tan-owned (tan-cli#518); nothing else in this module
+    calls this function with two lists (a `configFiles` entry is a bare
+    string, a `setupCommands` entry is a dict with no list-valued key of its
+    own), so there is no second code path to keep in sync.
 
     The whole rule: **an incoming unresolved ``<...>`` placeholder never
     overwrites a concrete existing value.** That is also what tells "the
@@ -890,14 +1006,6 @@ def _merge_value(existing: Any, next_value: Any) -> Any:
     the same branch in the Rust too -- ``is_resolved(Some(Null))`` is false and
     ``Value::Null`` is not an array -- so the distinction has nothing to decide.
     """
-    if isinstance(next_value, list) and isinstance(existing, list):
-        # cortex-debug `configFiles`: an all-placeholder incoming list keeps the
-        # existing list WHOLE, or a hand-added second `.cfg` is lost to a
-        # per-index merge against a one-element draft. A mixed list still merges
-        # per element, so an entry we did resolve wins.
-        if next_value and existing and all(_is_unresolved(v) for v in next_value):
-            return list(existing)
-        return _merge_list_by_identity(existing, next_value)
     if isinstance(next_value, dict) and isinstance(existing, dict):
         # tan-cli#489 (3): recurse instead of replacing wholesale. A dict
         # *inside* a list element (`setupCommands`' `{"text": ..., "ignoreFailures":
@@ -911,7 +1019,13 @@ def _merge_value(existing: Any, next_value: Any) -> Any:
     return next_value
 
 
-def _merge_configuration(existing: Any, next_value: Any) -> Any:
+def _merge_configuration(
+    existing: Any,
+    next_value: Any,
+    *,
+    tan_owned_hashes_for: Callable[[str], frozenset[str]] | None = None,
+    owned_entries_out: dict[str, list[Any]] | None = None,
+) -> Any:
     """Merge the freshly generated configuration OVER the one already in the
     file (see [`_merge_value`]) instead of replacing it.
 
@@ -924,12 +1038,36 @@ def _merge_configuration(existing: Any, next_value: Any) -> Any:
     Key order follows the existing entry with new keys appended, and keys the
     customer added that we never write (``serverArgs``, ...) are left untouched
     because only the draft's own keys are visited.
+
+    ``tan_owned_hashes_for``/``owned_entries_out`` (tan-cli#518) are this
+    function's only awareness of list-field provenance, and both are
+    optional -- every OTHER caller (the recursive `setupCommands`-entry merge
+    inside [`_merge_value`]) omits them and gets the pre-#518 behaviour
+    exactly (`tan_owned_hashes_for=None` reads as "no sidecar", i.e. the same
+    empty-hash-set default [`_merge_list_field`] already has). Only the
+    TOP-level call from [`create_launch_json_write_plan`] passes both: a
+    `(list, list)` key pair is intercepted HERE, before it would otherwise
+    reach [`_merge_value`], specifically so this loop can look up THIS key's
+    own recorded hashes and capture which entries the merge decided were
+    tan-owned afterwards, into ``owned_entries_out[key]`` -- the caller then
+    hashes those into the `.alp/` sidecar. A key this run never visits (not
+    in ``next_value`` at all) leaves ``owned_entries_out`` untouched for it,
+    which is what makes [`launch_provenance.LaunchProvenance.updated`]'s
+    "only replace the fields actually touched" contract true from this end.
     """
     if not isinstance(existing, dict) or not isinstance(next_value, dict):
         return next_value
     merged = dict(existing)
     for key, value in next_value.items():
-        merged[key] = _merge_value(existing.get(key), value)
+        existing_val = existing.get(key)
+        if isinstance(value, list) and isinstance(existing_val, list):
+            hashes = tan_owned_hashes_for(key) if tan_owned_hashes_for is not None else frozenset()
+            merged_list, owned = _merge_list_field(existing_val, value, hashes)
+            merged[key] = merged_list
+            if owned_entries_out is not None and owned:
+                owned_entries_out[key] = owned
+        else:
+            merged[key] = _merge_value(existing_val, value)
     return merged
 
 
@@ -964,6 +1102,15 @@ class LaunchJsonWritePlan:
     #: carries its own fresh `<resolved-...>` placeholders even when this run
     #: merged over a customer's real, resolved values.
     written_configuration: Any
+    #: The `.alp/` sidecar record (tan-cli#518) AFTER this run -- the caller's
+    #: own `provenance` argument with `written_configuration`'s list fields
+    #: (re)recorded, never mutated in place (`LaunchProvenance.updated` always
+    #: returns a fresh copy). Persist this back to
+    #: `launch_provenance.sidecar_path(workspace_root)` alongside the
+    #: `launch.json` write -- a caller that discards it (never writes the
+    #: sidecar back out) simply keeps degrading to the "nothing is ours"
+    #: default forever, which is safe, just permanently conservative.
+    provenance: LaunchProvenance
 
 
 def _legacy_name(next_name: str) -> str | None:
@@ -985,10 +1132,21 @@ def create_launch_json_write_plan(
     existing_content: str | None,
     draft: dict[str, Any],
     explicit_omissions: frozenset[str] = frozenset(),
+    provenance: LaunchProvenance | None = None,
 ) -> LaunchJsonWritePlan:
     """Merge ``draft`` into an existing launch.json (or a fresh document),
     merging key-by-key over any configuration with the same ``name``. Mirrors TS
     ``createLaunchJsonWritePlan``.
+
+    ``provenance`` (tan-cli#518) is the `.alp/` sidecar record from the last
+    ``tan debug-config`` write, or ``None`` -- treated identically to
+    ``launch_provenance.empty()`` -- when the caller never read one (a fresh
+    project, a deleted/unreadable/corrupt sidecar). It gates ONLY
+    [`_merge_list_by_identity`]'s positional fallback for `configFiles`/
+    `setupCommands`; every other field's merge rule is unchanged by this
+    parameter. The returned plan's own `provenance` field is what THIS run
+    decided is tan-owned after the merge -- the caller persists it back to
+    `launch_provenance.sidecar_path(workspace_root)` for the NEXT run.
 
     #133 (reopened): the #155 rename to ``"Alp: ..."`` left any entry still
     spelled ``"ALP: ..."`` orphaned -- nothing matched it by exact name any more,
@@ -1025,6 +1183,8 @@ def create_launch_json_write_plan(
     `draft` themselves, so `_merge_configuration`'s own "visit only the
     incoming keys" contract stays true for every OTHER key.
     """
+    if provenance is None:
+        provenance = launch_provenance.empty()
     document = _parse_launch_json_or_default(existing_content)
     next_name = _configuration_name(draft)
     configs = document["configurations"]
@@ -1043,10 +1203,24 @@ def create_launch_json_write_plan(
     # re-deriving the other's filter.
     splice_index: int | None = None
     unchanged = False
+    # tan-cli#518: every list field this run TOUCHES records what it decided
+    # was tan-owned, keyed by field name -- looked up here (once, under
+    # `next_name`: the sidecar is never keyed by a legacy name, since the
+    # migration path below predates provenance entirely) and handed to
+    # `_merge_configuration` so it can populate `owned_entries` as it merges.
+    owned_entries: dict[str, list[Any]] = {}
+
+    def _tan_owned_hashes_for(field_name: str) -> frozenset[str]:
+        return provenance.hashes_for(next_name, field_name)
 
     if existing_index is not None:
         pre_merge = configs[existing_index]
-        entry = _merge_configuration(pre_merge, draft)
+        entry = _merge_configuration(
+            pre_merge,
+            draft,
+            tan_owned_hashes_for=_tan_owned_hashes_for,
+            owned_entries_out=owned_entries,
+        )
         for key in explicit_omissions:
             entry.pop(key, None)
         unchanged = entry == pre_merge
@@ -1066,7 +1240,12 @@ def create_launch_json_write_plan(
         if legacy_index is not None:
             pre_merge = configs[legacy_index]
             migrated_from = pre_merge.get("name")
-            entry = _merge_configuration(pre_merge, draft)
+            entry = _merge_configuration(
+                pre_merge,
+                draft,
+                tan_owned_hashes_for=_tan_owned_hashes_for,
+                owned_entries_out=owned_entries,
+            )
             for key in explicit_omissions:
                 entry.pop(key, None)
             unchanged = entry == pre_merge
@@ -1074,8 +1253,15 @@ def create_launch_json_write_plan(
             replaced = True
             splice_index = legacy_index
         else:
+            # A brand-new entry: every list field the draft itself carries is
+            # tan's own fresh output, with nothing to merge against -- record
+            # all of them (tan-cli#518), same as case 4 (appended) would for
+            # an ordinary merge.
             entry = dict(draft)
             configs.append(entry)
+            for key, value in entry.items():
+                if isinstance(value, list) and value:
+                    owned_entries[key] = list(value)
 
     # tan-cli#182 review finding #1: a semantically no-op re-run (the merged
     # entry is identical, ignoring formatting, to what was already there) still
@@ -1102,6 +1288,7 @@ def create_launch_json_write_plan(
         comments_dropped=comments_dropped,
         legacy_entry_present=legacy_entry_present,
         written_configuration=entry,
+        provenance=provenance.updated(next_name, owned_entries),
     )
 
 

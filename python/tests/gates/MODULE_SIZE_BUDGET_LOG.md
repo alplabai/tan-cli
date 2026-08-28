@@ -378,3 +378,9 @@ and write both files from the real merged tree.
     - tan/planner/kconfig.py: 2092 -> 2107
 - 2026-08-28 -- tan-cli#957 family, round 4: guard cores[].vector_extension against a non-string in the G-2 TFLM kernel selector, same isinstance-guard pattern as cores[].type
     - tan/planner/kconfig.py: 2107 -> 2108
+- 2026-08-28 -- tan-cli#518: content-hash provenance sidecar wiring in debug_launch.py's list merge (_merge_list_by_identity/_merge_list_field/_merge_configuration/sdk_identity_overwrites/create_launch_json_write_plan) grew the module past its recorded ceiling; new logic lives in tan/core/launch_provenance.py instead where it could be split out.
+    - tan/core/debug_launch.py: 1275 -> 1462
+- 2026-08-28 -- tan-cli#518: wired the .alp/ provenance sidecar read/write into tan debug-config (load before sdk_identity_overwrites, pass through create_launch_json_write_plan, best-effort persist after the launch.json write) -- grew debug_config_cmd.py past its recorded ceiling.
+    - tan/commands/debug_config_cmd.py: 1954 -> 1996
+- 2026-08-28 -- tan-cli#518: module docstring note on the new .alp/ provenance sidecar file this command now reads/writes.
+    - tan/commands/debug_config_cmd.py: 1996 -> 2007
