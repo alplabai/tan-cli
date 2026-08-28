@@ -238,6 +238,172 @@ def test_json_envelope_shape(tmp_path):
     assert list(doc["data"]["examples"][0]) == ["id", "sourceDir", "title", "description"]
 
 
+# --------------------------------------------------------------------------
+# tan-cli#484: catalog.json-derived facets
+# --------------------------------------------------------------------------
+
+
+def _sdk_with_cataloged_example(root):
+    """Same example tree as `_sdk_with_example`, plus a `metadata/catalog.json`
+    carrying every optional facet -- the real alp-sdk shape (`gen_catalog.py`),
+    not a synthetic key set the reader was never measured against."""
+    _sdk_with_example(root)
+    write(
+        root / "metadata/catalog.json",
+        json.dumps(
+            {
+                "examples": {
+                    "multicore": [
+                        {
+                            "name": "rpmsg-v2n",
+                            "path": "examples/multicore/rpmsg-v2n",
+                            "som": "E1M-V2N101",
+                            "board": "e1m-evk",
+                            "cores": [
+                                {"id": "a55_cluster", "os": "yocto", "app": "./linux"},
+                                {"id": "m33_sm", "os": "zephyr", "app": "./m33_sm"},
+                            ],
+                            "coreCount": 2,
+                            "osSet": ["yocto", "zephyr"],
+                            "declares": {
+                                "chips": True,
+                                "ipc": True,
+                                "models": False,
+                                "peripherals": True,
+                            },
+                        }
+                    ]
+                }
+            }
+        ),
+    )
+    return root
+
+
+def test_json_envelope_carries_catalog_facets_when_present(tmp_path):
+    """The property under test: the wire VALUES come from the catalog file on
+    disk, not a hardcoded/empty placeholder -- change any one field in the
+    fixture catalog above and this assertion must change with it."""
+    sdk = _sdk_with_cataloged_example(tmp_path / "sdk")
+    result = runner.invoke(app, ["examples", "--sdk-root", str(sdk), "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    entry = doc["data"]["examples"][0]
+    assert entry["id"] == "multicore/rpmsg-v2n"
+    assert entry["category"] == "multicore"
+    assert entry["som"] == "E1M-V2N101"
+    assert entry["board"] == "e1m-evk"
+    assert entry["cores"] == [
+        {"id": "a55_cluster", "os": "yocto", "app": "./linux"},
+        {"id": "m33_sm", "os": "zephyr", "app": "./m33_sm"},
+    ]
+    assert entry["coreCount"] == 2
+    assert entry["osSet"] == ["yocto", "zephyr"]
+    assert entry["declares"] == {
+        "chips": True,
+        "ipc": True,
+        "models": False,
+        "peripherals": True,
+    }
+    # The four original keys stay first, in their original order -- an
+    # existing reader keying on position (not just presence) is unaffected.
+    assert list(entry)[:4] == ["id", "sourceDir", "title", "description"]
+    assert list(entry)[4:] == [
+        "category",
+        "som",
+        "board",
+        "cores",
+        "coreCount",
+        "osSet",
+        "declares",
+    ]
+
+
+def test_an_example_absent_from_the_catalog_keeps_the_original_four_keys(tmp_path):
+    """A directory `discover_examples` finds but `catalog.json` has no record
+    for (a newer example than a committed catalogue) is NOT held back --
+    it is listed, just without the extra keys."""
+    sdk = tmp_path / "sdk"
+    _sdk_with_example(sdk)
+    write(sdk / "metadata/catalog.json", json.dumps({"examples": {}}))
+    doc = json.loads(
+        runner.invoke(
+            app, ["examples", "--sdk-root", str(sdk), "--format", "json"]
+        ).stdout
+    )
+    entry = doc["data"]["examples"][0]
+    assert list(entry) == ["id", "sourceDir", "title", "description"]
+
+
+def test_a_malformed_catalog_degrades_the_facets_without_failing_the_command(tmp_path):
+    sdk = tmp_path / "sdk"
+    _sdk_with_example(sdk)
+    write(sdk / "metadata/catalog.json", "{not json")
+    result = runner.invoke(app, ["examples", "--sdk-root", str(sdk), "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is True
+    assert doc["issues"] == []
+    entry = doc["data"]["examples"][0]
+    assert list(entry) == ["id", "sourceDir", "title", "description"]
+
+
+def test_a_catalog_with_non_mapping_cores_elements_does_not_crash_the_command(tmp_path):
+    """tan-cli#978 review, reproduced verbatim: `"cores": ["a55_cluster",
+    "m33_sm"]` (a list of strings, not the `cores[].{id,os,app}` mapping
+    contract) used to raise `ValueError` out of `as_dict`'s `dict(core)`
+    with no envelope at all -- directly contradicting this command's own
+    "degrades silently, never refuses `tan examples`" contract. The bad
+    elements are now dropped (an all-bad list collapses to an empty
+    `cores`, not a crash) and the command still returns a clean, `ok`
+    envelope."""
+    sdk = tmp_path / "sdk"
+    _sdk_with_example(sdk)
+    write(
+        sdk / "metadata/catalog.json",
+        json.dumps(
+            {
+                "examples": {
+                    "multicore": [
+                        {
+                            "name": "rpmsg-v2n",
+                            "cores": ["a55_cluster", "m33_sm"],
+                        }
+                    ]
+                }
+            }
+        ),
+    )
+    result = runner.invoke(app, ["examples", "--sdk-root", str(sdk), "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is True
+    assert doc["issues"] == []
+    entry = doc["data"]["examples"][0]
+    assert entry["cores"] == []
+    assert entry["category"] == "multicore"
+
+
+def test_discover_examples_attaches_facets_by_source_dir(tmp_path):
+    from tan.core.example_facets import ExampleFacets
+
+    write(tmp_path / "multicore/rpmsg-v2n/board.yaml", "x")
+    facets = {
+        "multicore/rpmsg-v2n": ExampleFacets(
+            category="multicore",
+            som="E1M-V2N101",
+            board="e1m-evk",
+            cores=None,
+            core_count=None,
+            os_set=None,
+            declares={"chips": False, "ipc": False, "models": False, "peripherals": False},
+        )
+    }
+    found = discover_examples(tmp_path, facets)
+    assert found[0].facets is facets["multicore/rpmsg-v2n"]
+    assert found[0].as_dict()["som"] == "E1M-V2N101"
+
+
 def test_a_sdk_root_that_is_not_a_checkout_is_an_empty_catalogue_not_a_failure(tmp_path):
     """`--sdk-root` is TERMINAL (I-31): a bad value must NOT fall through to
     discovery and list some other checkout's examples. And an unresolved SDK
@@ -352,6 +518,41 @@ def test_examples_category_filter_narrows_and_reports_an_empty_match():
 
     lines = render_examples_text([], filter_=None, category="nope", verbose=False, sdk_resolved=True)
     assert lines == ['examples: no example projects in category "nope".']
+
+
+def test_example_category_prefers_the_facet_over_the_id_prefix_when_they_disagree():
+    """tan-cli#978 review: the day tan forwards a `category` facet that
+    disagrees with the id prefix, the producer (`gen_catalog.py`) is right --
+    the same fallback order `alp-sdk-vscode`'s own `exampleCategory()` uses.
+    An id-derived-only implementation would answer `ai` here; the catalogue
+    facet says `renamed` and wins."""
+    from tan.commands.examples_cmd import Example, example_category, example_matches_category
+    from tan.core.example_facets import ExampleFacets
+
+    facets = ExampleFacets(
+        category="renamed",
+        som=None,
+        board=None,
+        cores=None,
+        core_count=None,
+        os_set=None,
+        declares=None,
+    )
+    entry = Example(
+        id="ai/cold-chain",
+        source_dir="ai/cold-chain",
+        title="Cold chain",
+        description="",
+        facets=facets,
+    )
+    assert example_category(entry) == "renamed"
+    assert example_matches_category(entry, "renamed")
+    assert not example_matches_category(entry, "ai")
+
+    # No facet at all (older SDK / catalogue miss) still falls back to the
+    # id prefix, unchanged from before this fix.
+    no_facet = Example(id="ai/cold-chain", source_dir="ai/cold-chain", title="x", description="")
+    assert example_category(no_facet) == "ai"
 
 
 # --------------------------------------------------------------------------

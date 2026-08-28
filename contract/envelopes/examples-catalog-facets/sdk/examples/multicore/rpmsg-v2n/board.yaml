@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# `discover_examples` keys on the presence of a board.yaml; nothing in this
+# case parses it directly -- the facets below come from metadata/catalog.json,
+# not from this file.
+schema_version: 2
