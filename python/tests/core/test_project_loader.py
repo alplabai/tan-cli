@@ -145,3 +145,53 @@ def test_a_reserved_hw_rev_refuses_through_the_route_table_emit(tmp_path, mode):
     assert "r3" in message            # the not-buildable revision
     assert "E1M-AEN801" in message    # which SoM
     assert "reserved" in message      # names the actual status, not just refuses
+
+
+@pytest.mark.parametrize("mode", ["carrier-netlist", "composed-route-table"])
+def test_a_schema_invalid_som_preset_refuses_through_the_route_table_emit(
+    tmp_path, monkeypatch, mode
+):
+    """tan-cli#964 review (major 4): both route-table modes bypass
+    `load_board_yaml` on purpose (`_render_route_table`'s own docstring --
+    resolving via `_resolve_sku` directly, off the raw board.yaml dict) and
+    both write a real file to disk (`generate_cmd.py`'s
+    `build/generated/{carrier,composed-route-table}-netlist.json`) -- so
+    #964's REFUSE gate must be repeated at THIS front door too, not skipped
+    because it does not go through the loader.
+
+    Proven by forcing `tan.core.metadata_schema.validate_document` -- the one
+    shared validator every read-path caller goes through -- to report a
+    violation for the SoM-preset schema, and checking `_render_route_table`
+    refuses on it. Not exercised against a real schema-invalid file under the
+    bound checkout, which this suite must not mutate; the fake keeps the
+    real `E1M-AEN801` preset/schema untouched and covers the WIRING
+    (`_render_route_table` reads the return value and raises), which is what
+    tan-cli#964's review found missing, not the validator itself (already
+    covered by `tests/core/test_metadata_schema.py`).
+
+    Mutation-proven: removing the `if som_schema_errors: raise ...` block
+    added to `_render_route_table` (byte copy restored after, never `git
+    checkout`) turns this test's `pytest.raises` red; restoring turns it
+    green.
+    """
+    if SDK is None:
+        pytest.skip(reason=_SKIP_REASON)
+    from tan.planner_root import bind_sdk_root
+    bind_sdk_root(SDK)
+    import tan.core.metadata_schema as metadata_schema
+    from tan import planner_emit
+
+    def _fake_validate_document(doc, schema_path, source):
+        if str(schema_path).endswith("som-preset-v1.schema.json"):
+            return [f"{source}: silicon: 7 is not of type 'string'"]
+        return []
+
+    monkeypatch.setattr(metadata_schema, "validate_document", _fake_validate_document)
+
+    board = _fixture_board_yaml(tmp_path, "r1")
+    with pytest.raises(planner_emit.PlannerEmitError) as excinfo:
+        planner_emit.render(mode, sdk_root=SDK, board_yaml=board)
+
+    message = str(excinfo.value)
+    assert "does not validate against som-preset-v1" in message
+    assert "silicon: 7 is not of type 'string'" in message

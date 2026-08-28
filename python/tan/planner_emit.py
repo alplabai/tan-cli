@@ -197,6 +197,7 @@ def render(
     sdk_root: Path,
     board_yaml: Path,
     core: str | None = None,
+    skip_advisories: list[str] | None = None,
 ) -> str:
     """One relocated emit mode as text. Raises on any refusal.
 
@@ -206,6 +207,12 @@ def render(
 
     `TREE_MODES` are refused here rather than silently mis-served: they write a
     directory, so a caller that asked for text would get a path it never wrote.
+
+    *skip_advisories* (tan-cli#964 review, major 6): optional, caller-owned;
+    threaded to `load_board_yaml`/`_render_route_table`'s own schema checks so
+    a caller that writes the rendered text to disk (`generate_cmd.py`) can
+    disclose "validated against nothing -- the schema itself is absent" rather
+    than silently writing an unvalidated artefact at `ok: true`.
     """
     if mode in TREE_MODES:
         raise PlannerEmitError(
@@ -221,9 +228,9 @@ def render(
         # board.yaml dict alone. Routing them through the v2 loader would
         # resolve a topology the emitter never looks at -- and could refuse a
         # board the SDK's own front door serves.
-        return _render_route_table(mode, board_yaml)
+        return _render_route_table(mode, board_yaml, skip_advisories=skip_advisories)
 
-    project = planner.load_board_yaml(Path(board_yaml))
+    project = planner.load_board_yaml(Path(board_yaml), skip_advisories=skip_advisories)
     if mode in _SLICE_RENDERER:
         return _render_per_core(planner, project, mode, core=core, sdk_root=sdk_root)
     if mode == "os-topology":
@@ -281,9 +288,16 @@ def render_tree(
     return {relpath.split("/", 1)[1]: content for relpath, content in files.items()}
 
 
-def _render_route_table(mode: str, board_yaml: Path) -> str:
+def _render_route_table(
+    mode: str, board_yaml: Path, *, skip_advisories: list[str] | None = None
+) -> str:
     """`--emit carrier-netlist` / `--emit composed-route-table`, mirroring
     `alp_project.main()`'s own branch (the two share one dispatch there too)."""
+    from tan.core.metadata_schema import (  # noqa: PLC0415
+        missing_schema_note,
+        som_preset_schema_path,
+        validate_document,
+    )
     from tan.planner.loader import _load_yaml  # noqa: PLC0415
     from tan.planner.paths import METADATA_ROOT  # noqa: PLC0415
     from tan.planner.project_loader import (  # noqa: PLC0415
@@ -302,6 +316,29 @@ def _render_route_table(mode: str, board_yaml: Path) -> str:
             f"{board_yaml}: `som.sku` is missing or is not a string; "
             f"--emit {mode} renders the SoM's pad routes against it.")
     sku_preset = _resolve_sku(sku, METADATA_ROOT)
+    # tan-cli#964 review (major 4): both route-table modes write a real file
+    # to disk (`generate_cmd.py`'s `build/generated/{carrier,composed-route
+    # -table}-netlist.json`) WITHOUT going through `load_board_yaml` -- the one
+    # place #964's REFUSE gate otherwise lives -- so the gate is repeated here,
+    # against the raw preset `_resolve_sku` just returned, before it reaches
+    # either emitter. Same wording `tan.planner.loader._refuse_on_schema_errors`
+    # uses for `build`/`generate`'s other modes.
+    som_preset_path = METADATA_ROOT / "e1m_modules" / f"{sku}.yaml"
+    # major 6: "skip-but-disclose", checked BEFORE the refuse-worthy
+    # violations, same ordering `_refuse_on_schema_errors` uses -- an absent
+    # schema means `validate_document` below returns `[]` and this function
+    # would otherwise write the file having said nothing at all.
+    if skip_advisories is not None:
+        note = missing_schema_note(som_preset_schema_path(METADATA_ROOT), source=som_preset_path)
+        if note is not None:
+            skip_advisories.append(note)
+    som_schema_errors = validate_document(
+        sku_preset, som_preset_schema_path(METADATA_ROOT), som_preset_path,
+    )
+    if som_schema_errors:
+        raise PlannerEmitError(
+            f"SoM preset {sku} does not validate against som-preset-v1:\n"
+            + "\n".join(f"  - {e}" for e in som_schema_errors))
     board_preset = _resolve_inline_or_preset_board(project, METADATA_ROOT)
     from tan.planner.project_emit import bom_netlist  # noqa: PLC0415
 

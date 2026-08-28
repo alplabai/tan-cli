@@ -936,6 +936,106 @@ def write_sdk_fixture(root):
     )
 
 
+#: Deliberately narrower than the real `som-preset-v1.schema.json` -- the same
+#: narrowing rationale `test_presets_command.py`'s own `_SOM_SCHEMA` states:
+#: enough to exercise the gate (`silicon:` typed), not a byte-for-byte mirror
+#: of a schema this file's coverage must not depend on never changing shape.
+_DEBUG_CONFIG_SOM_SCHEMA = json.dumps({
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["schema_version", "sku", "silicon"],
+    "properties": {
+        "schema_version": {"const": 1},
+        "sku": {"type": "string"},
+        "silicon": {"type": "string"},
+    },
+})
+
+
+def write_sdk_fixture_with_schema_invalid_som_preset(root):
+    """Same shape as `write_sdk_fixture`, plus `metadata/schemas/som-preset-v1
+    .schema.json` and a `silicon:` field the schema forbids (a number, not a
+    string) -- tan-cli#964 review (major 5): `debug-config` reads this exact
+    SoM preset through TWO walks (`_sdk_published_cores`,
+    `_fill_debug_probe_identity_from_sdk`), both via the shared
+    `read_sdk_som_and_soc`, and before the fix neither passed `warnings` at
+    all."""
+    sdk = Path(root, "sdk")
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    schema_dir = sdk / "metadata" / "schemas"
+    schema_dir.mkdir(parents=True)
+    (schema_dir / "som-preset-v1.schema.json").write_text(
+        _DEBUG_CONFIG_SOM_SCHEMA, encoding="utf-8"
+    )
+    som_dir = sdk / "metadata" / "e1m_modules"
+    som_dir.mkdir(parents=True)
+    (som_dir / "E1M-AEN801.yaml").write_text(
+        "schema_version: 1\nsku: E1M-AEN801\nsilicon: 7\n"
+        "silicon_variant: AE822FA0E5597LS0\n",
+        encoding="utf-8",
+    )
+    soc_dir = sdk / "metadata" / "socs" / "alif" / "ensemble"
+    soc_dir.mkdir(parents=True)
+    (soc_dir / "e8.json").write_text(
+        """{
+            "soc_spec_version": 1,
+            "ref": "alif:ensemble:e8",
+            "vendor": "Alif Semiconductor",
+            "family": "Ensemble",
+            "part": "E8",
+            "cores": [{"id": "a32_cluster"}, {"id": "m55_hp"}, {"id": "m55_he"}],
+            "variants": [
+                {
+                    "order_code": "AE822FA0E5597LS0",
+                    "debug": {
+                        "pyocd_target": "AE822FA0E5597LS0",
+                        "jlink_device": {"m55_hp": "Cortex-M55", "m55_he": "Cortex-M55"}
+                    }
+                }
+            ]
+        }""",
+        encoding="utf-8",
+    )
+
+
+def test_a_schema_invalid_som_preset_warns_on_debug_config(tmp_path):
+    """tan-cli#964 review (major 5): `debug-config` is one of the ten
+    read-path commands the decided rule names, but its own two walks
+    (`_sdk_published_cores`/`_fill_debug_probe_identity_from_sdk`) passed no
+    `warnings` to `read_sdk_som_and_soc` at all -- despite the PR body's own
+    claim that it inherited the WARN half "transitively". This is the
+    `--preview` regression test for the fix: the command still resolves
+    exactly as before (silicon degrades, no refusal, exit 0), but now ALSO
+    reports one `debug-config.metadata-schema-invalid` issue naming the
+    file, the JSON pointer, and what was found.
+
+    Mutation-proven: reverting the `warnings=schema_warnings` threading added
+    to `_sdk_published_cores`/`_fill_debug_probe_identity_from_sdk`'s call
+    sites (byte copy restored after, never `git checkout`) turns this test's
+    `codes`/`message` assertions red; restoring turns them green.
+    """
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    write_sdk_fixture_with_schema_invalid_som_preset(tmp_path)
+
+    env = envelope(
+        run_cli(
+            tmp_path,
+            "--target-kind", ZEPHYR_MCU, "--server", JLINK,
+            "--sdk-root", "./sdk", "--preview", "--format", "json",
+        )
+    )
+    assert env["exitCode"] == 0
+    codes = [i["code"] for i in env["issues"]]
+    assert codes.count("debug-config.metadata-schema-invalid") == 1, env["issues"]
+    issue = next(
+        i for i in env["issues"] if i["code"] == "debug-config.metadata-schema-invalid"
+    )
+    assert issue["severity"] == "warning"
+    assert "silicon: 7 is not of type 'string'" in issue["message"]
+
+
 def test_jlink_device_stays_the_placeholder_with_no_core_and_no_build(tmp_path):
     """alp-sdk#1026 review finding #3: `jlink_device` is keyed BY core id, so
     on a project that has never been built AND passes no `--core`,
