@@ -520,19 +520,27 @@ def test_the_template_and_target_paths_carry_no_code_mode_keys(
     unconditional key would be a wire change for three selectors that gained
     nothing -- and the extension reads an absent key with a `?? []` fallback,
     so absence is the honest shape for a mode that did not run. The `sdk` key
-    is absent for the same reason: these paths resolve no checkout."""
+    is absent for the same reason: these paths resolve no checkout.
+
+    `som` (tan-cli#866) is the one exception, by design: it IS unconditional
+    on a project-template hit (`minimal-app` here), because that selector
+    kind is the one with a SoM concept at all -- absent, same as `diagnostic`/
+    `suggestions`, on the other two kinds this case also covers."""
     result = _run(tmp_path, monkeypatch, *argv, "--format", "json")
 
     assert result.exit_code == 0, result.output
     doc = json.loads(result.stdout)
     assert doc["data"]["selector"] == {"kind": kind, "value": value}
-    assert set(doc["data"]) == {
+    expected_keys = {
         "schemaVersion",
         "selector",
         "summary",
         "details",
         "available",
     }
+    if kind == "project-template":
+        expected_keys.add("som")
+    assert set(doc["data"]) == expected_keys
     assert "sdk" not in doc
 
 
