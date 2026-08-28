@@ -3646,6 +3646,25 @@ def _collect(
     # are built by the ONE shared `_resolve_prerequisites_environment` --
     # `host_environment_checks` calls the SAME function for support-bundle's
     # seam, so the two callers can never build a diverging verdict.
+    #
+    # tan-cli#980 review nit 3, decided rather than restored: because this
+    # call now builds `hostPrerequisites` (PATH walk over `required`, plus
+    # the POSIX `_posix_venv_capable` spawn) EAGERLY as part of the same
+    # shared unit, `bootstrapManifest`/`hostPython`/`pythonFloor` below are
+    # `_add`ed -- and so, in `tan doctor` TEXT mode, printed by `on_check` --
+    # AFTER that PATH walk and spawn finish, where pre-#441 `_collect` built
+    # and `_add`ed each of the three the moment it had the data, before ever
+    # touching PATH or spawning `_posix_venv_capable`. The returned list
+    # order and the JSON envelope are byte-identical either way (verified in
+    # the PR's own equivalence pass) -- only the incremental print TIMING
+    # `on_check` exists for shifts by the wall-clock cost of two spawns this
+    # single caller already pays for regardless of which check the delay is
+    # attributed to. Restoring the old interleaving would mean splitting
+    # `_resolve_prerequisites_environment` back into a pre-PATH-walk half and
+    # a post-PATH-walk half so `_collect` could `_add` between them -- which
+    # reopens the exact two-copies-of-one-decision risk this helper exists to
+    # close, for a few hundred milliseconds of `tan doctor` console timing.
+    # Accepted as-is.
     prereq_env = _resolve_prerequisites_environment(sdk_root, workspace_path)
     if prereq_env.bootstrap_manifest_check is not None:
         _add(prereq_env.bootstrap_manifest_check)

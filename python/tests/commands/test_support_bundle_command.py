@@ -570,10 +570,14 @@ def test_host_environment_checks_never_calls_the_discarded_checklist_builders(
 
     Poisons every check-builder `_collect` calls that is NOT one of the five
     `host_environment_checks` keeps, with a spy that fails the test the
-    instant ANY of them runs, then calls the REAL seam against a real (if
-    minimal) SDK checkout. `_collect` itself (`tan doctor`'s own full
-    checklist -- see `test_doctor_command.py`) keeps calling every one of
-    these; only `host_environment_checks` must not.
+    instant ANY of them runs, then ALSO wraps `doctor_cmd.probe`/
+    `probe_status` themselves so a raw west/JLink/SETOOLS spawn made without
+    going through any of those builders (`_collect`'s own `west --version`
+    probes are exactly that shape) is caught too -- builder-granular alone is
+    not spawn-granular (tan-cli#980 review). Then calls the REAL seam against
+    a real (if minimal) SDK checkout. `_collect` itself (`tan doctor`'s own
+    full checklist -- see `test_doctor_command.py`) keeps calling every one
+    of these; only `host_environment_checks` must not.
     """
     for name in _DISCARDED_CHECKLIST_BUILDERS:
         monkeypatch.setattr(
@@ -583,6 +587,44 @@ def test_host_environment_checks_never_calls_the_discarded_checklist_builders(
                 f"host_environment_checks must not call {_name}()"
             ),
         )
+
+    # tan-cli#980 review finding 2: the builder-name poison above is
+    # builder-GRANULAR -- it catches a re-added *check* (a call to one of the
+    # sixteen names above), not a re-added *spawn*. `_collect` itself proves
+    # the gap exists: its `west --version` probes (`doctor_cmd.py`, the
+    # `probe_status([west_resolved_exe, "--version"])` / `probe([west_exe,
+    # "--version"])` calls) are raw spawns made directly in `_collect`'s own
+    # body, not routed through `west_check`/`west_resolved_check` (those two
+    # are pure formatters over an already-probed version) -- so a
+    # `host_environment_checks` that grew the identical raw call would sail
+    # straight past every poison above. Wrap, rather than replace outright,
+    # `doctor_cmd.probe`/`probe_status`: a west/JLink/SETOOLS-shaped argv
+    # fails the test the instant it is attempted; anything else -- the macOS
+    # `sysctl` Rosetta probe `zephyrSdkAvailableForHost` needs, the
+    # python-floor probe `hostPrerequisites` needs -- still runs for real, so
+    # this stays a spawn guard and not a second `_clean_checks`-shaped stub
+    # that would make the five real checks untestable here.
+    _forbidden_argv_tokens = ("west", "jlink", "setools")
+    _real_probe = doctor_cmd.probe
+    _real_probe_status = doctor_cmd.probe_status
+
+    def _argv_names_a_discarded_tool(argv) -> bool:
+        return any(
+            token in str(part).lower() for part in argv for token in _forbidden_argv_tokens
+        )
+
+    def _guarded_probe(argv, *a, **k):
+        if _argv_names_a_discarded_tool(argv):
+            pytest.fail(f"host_environment_checks must not spawn {argv!r}")
+        return _real_probe(argv, *a, **k)
+
+    def _guarded_probe_status(argv, *a, **k):
+        if _argv_names_a_discarded_tool(argv):
+            pytest.fail(f"host_environment_checks must not spawn {argv!r}")
+        return _real_probe_status(argv, *a, **k)
+
+    monkeypatch.setattr(doctor_cmd, "probe", _guarded_probe)
+    monkeypatch.setattr(doctor_cmd, "probe_status", _guarded_probe_status)
 
     sdk = tmp_path / "alp-sdk"
     sdk_at(sdk)
