@@ -133,8 +133,15 @@ def toolchain_host_key(sys_platform: str, machine: str) -> str | UnsupportedHost
             return UnsupportedHost(
                 "windows-arm64",
                 "the pinned Zephyr SDK publishes no windows-arm64 host build (ADR 0021) -- "
-                "run `tan bootstrap` from a WSL2 distro (linux-x86_64 or linux-aarch64) "
-                "instead; see docs/cross-platform-setup.md.",
+                # tan-cli#990 review MINOR: NOT "linux-x86_64 or linux-aarch64" --
+                # measured against both the vendored fixture and a live alp-sdk
+                # checkout, the pinned manifest publishes linux-x86_64 only (no
+                # linux-aarch64 row at all), so a WSL2-aarch64 reader following
+                # the old wording landed on this SAME host's own unsupported-host
+                # skip, one level down. Name the ONE host this pin can actually
+                # serve; widen this sentence again only once the manifest does.
+                "run `tan bootstrap` from a WSL2 distro (linux-x86_64) instead; see "
+                "docs/cross-platform-setup.md.",
             )
         return UnsupportedHost(f"windows-{m or 'unknown'}", f"no Zephyr SDK host build for windows-{m}")
     return UnsupportedHost(sys_platform or "unknown", f"unrecognised host platform {sys_platform!r}")
@@ -416,10 +423,15 @@ def low_disk_note(free_bytes: int) -> str | None:
     """`None` when `free_bytes` is comfortably above
     [`LOW_DISK_AFTER_FAILURE_FLOOR_BYTES`]; otherwise a note worth appending
     to a `west sdk install` failure message -- disk exhaustion DURING
-    extraction reads identically to a dozen other causes (a `tar`/`xz` error
-    with no "No space" wording tan's own truncated capture may have cut off,
-    per `tan.core.bootstrap.capture_tail`'s last-4-lines limit) unless
-    something says to check it.
+    extraction reads identically to a dozen other causes, and is worth
+    naming as a candidate even now that `west sdk install`'s own capture
+    uses a wider tail (`bootstrap_cmd.TOOLCHAIN_INSTALL_TAIL_LINES`, tan-cli
+    #990 review) than `tan.core.bootstrap.capture_tail`'s 4-line default:
+    the free-space reading here is taken AFTER `west`'s own
+    `tempfile.TemporaryDirectory` cleanup already ran, so it can still miss
+    a failure that was genuinely disk-caused DURING extraction and only
+    looks fine again once the failed attempt's own partial state was
+    deleted.
     """
     if free_bytes >= LOW_DISK_AFTER_FAILURE_FLOOR_BYTES:
         return None

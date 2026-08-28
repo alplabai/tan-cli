@@ -99,6 +99,56 @@ def test_a_stamp_for_a_moved_pin_is_a_fail_not_a_pass_version_skew_masquerading_
     assert "different pin" in check.detail
 
 
+def test_a_host_toolchain_at_the_pinned_version_is_a_pass_not_a_fail(tmp_path, monkeypatch):
+    """tan-cli#990 review, BLOCKER: a host with a real, working, correctly
+    pinned toolchain at a NON-tan path (`~/zephyr-sdk-1.0.1/`, the documented
+    `west sdk install` layout) must not get a `toolchain` FAIL whose only
+    prescribed remedy re-downloads a copy it already has. No stamp is ever
+    written here -- tan never installed this one -- so this is the
+    `_host_toolchain_matching_pin` adoption path, not `stamp_matches_pin`.
+    """
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    home = tmp_path / "home"
+    host_sdk = home / "zephyr-sdk-1.0.1"
+    (host_sdk / "gnu" / "arm-zephyr-eabi" / "bin").mkdir(parents=True)
+    gcc = host_sdk / "gnu" / "arm-zephyr-eabi" / "bin" / "arm-zephyr-eabi-gcc"
+    gcc.write_text("#!/bin/sh\necho fake gcc\n", encoding="utf-8")
+    gcc.chmod(0o755)
+    (host_sdk / "sdk_version").write_text("1.0.1\n", encoding="utf-8")
+    monkeypatch.setenv("ZEPHYR_SDK_INSTALL_DIR", str(host_sdk))
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "pass"
+    assert "1.0.1" in check.detail
+    assert str(host_sdk) in check.detail
+    # No tan-written stamp exists anywhere -- this is the host-scan path,
+    # not `stamp_matches_pin`, that produced the pass.
+    manifest = tp.parse_toolchain_manifest(MANIFEST)
+    store_dir = home / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
+    assert not (store_dir / tp.STAMP_FILENAME).exists()
+
+
+def test_a_host_toolchain_at_the_wrong_version_still_fails(tmp_path, monkeypatch):
+    """The adoption path is version-specific, not "any toolchain present":
+    a host SDK whose `sdk_version` does NOT match the pin must not silently
+    excuse the check."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    home = tmp_path / "home"
+    host_sdk = home / "zephyr-sdk-0.16.5"
+    (host_sdk / "gnu" / "arm-zephyr-eabi" / "bin").mkdir(parents=True)
+    gcc = host_sdk / "gnu" / "arm-zephyr-eabi" / "bin" / "arm-zephyr-eabi-gcc"
+    gcc.write_text("#!/bin/sh\necho fake gcc\n", encoding="utf-8")
+    gcc.chmod(0o755)
+    (host_sdk / "sdk_version").write_text("0.16.5\n", encoding="utf-8")
+    monkeypatch.setenv("ZEPHYR_SDK_INSTALL_DIR", str(host_sdk))
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "fail"
+    assert check.fix == "tan bootstrap"
+
+
 def test_doctor_and_bootstrap_agree_by_construction_same_verdict_function(tmp_path, monkeypatch):
     """The point of importing `stamp_matches_pin` rather than re-deriving it:
     feed the SAME (stamp, manifest) pair to both call sites and they cannot

@@ -1223,6 +1223,32 @@ def _toolchain_store_dir(
     return Path(root.path_str) / toolchain_provision.store_dir_name(manifest.version)
 
 
+def _host_toolchain_matching_pin(
+    manifest: toolchain_provision.ToolchainManifest,
+) -> Path | None:
+    """The already-installed host toolchain root (`_zephyr_sdk_detected_root`
+    -- `ZEPHYR_SDK_INSTALL_DIR` or a scanned `zephyr-sdk*` directory, same
+    precedence `zephyrSdk` above trusts) IF its own `sdk_version` file names
+    the exact version `manifest` pins; else `None`.
+
+    `SDK_VERSION_FILE_RELPATH` is `west sdk install`'s own top-level marker
+    (`toolchain_provision`'s own docstring: measured against a real extracted
+    1.0.1 tree, exact byte content `"1.0.1\\n"`) -- read back and STRING-
+    compared, matching `toolchain_phase`'s own post-install verification, so
+    this reuses the identical trust boundary rather than a fresh directory-
+    name guess. A missing or unreadable `sdk_version` -- an unusual layout
+    `_zephyr_sdk_root_valid` still validated on compiler-binary presence
+    alone -- is honestly "does not match", not a guessed pass.
+    """
+    root = _zephyr_sdk_detected_root()
+    if root is None:
+        return None
+    version_text = _read_text(root / toolchain_provision.SDK_VERSION_FILE_RELPATH)
+    if version_text is None or version_text.strip() != manifest.version:
+        return None
+    return root
+
+
 def toolchain_check(sdk_root: str | None) -> Check:
     """`toolchain` -- STAMP-vs-PIN, never directory-exists (issue #474, ADR
     0021 Lane 1 P1's own words: "a stamped 1.0.1 store against a moved pin is
@@ -1245,6 +1271,21 @@ def toolchain_check(sdk_root: str | None) -> Check:
     test_doctor_check_scope.py`), and this one is inherently
     project-scoped -- it cannot answer at all without a resolved
     `sdk_root` to read `metadata/toolchains.json`'s PIN from.
+
+    **Has an adoption path (tan-cli#990 review, the tan-cli#299
+    false-refusal class): an unstamped store is not the only way to satisfy
+    this check.** Before either `fail` branch, `_host_toolchain_matches_pin`
+    asks whether a toolchain THIS HOST ALREADY HAS -- found by the SAME
+    `ZEPHYR_SDK_INSTALL_DIR`/scan `zephyrSdk` above already trusts -- reports
+    the pinned version in ITS OWN `sdk_version` file. If so this is a `pass`,
+    never a `fail`: a stamp is tan's own bookkeeping for what IT installed,
+    not the only proof a working, correctly-versioned toolchain exists. Before
+    this, a host with a hand-installed or pre-existing SDK at the exact pinned
+    version -- `zephyrSdk` passing right above it -- got a `toolchain` FAIL
+    whose only prescribed fix, `tan bootstrap`, downloads a SECOND ~1.9 GiB
+    copy of a toolchain already on disk, and cannot even do that on an
+    offline host or the README's own hand-`west sdk install` path (this
+    check's one stamp-writing producer is `tan bootstrap` alone).
     """
     if sdk_root is None:
         return Check(
@@ -1277,6 +1318,16 @@ def toolchain_check(sdk_root: str | None) -> Check:
         return Check(
             "toolchain", "pass",
             f"arm-zephyr-eabi {manifest.version} verified at {store_dir}.",
+            scope="project",
+        )
+    host_root = _host_toolchain_matching_pin(manifest)
+    if host_root is not None:
+        return Check(
+            "toolchain",
+            "pass",
+            f"arm-zephyr-eabi {manifest.version} detected at {host_root} -- not tan's "
+            f"own store, but its `sdk_version` matches this checkout's pin, so this "
+            f"host already has what `tan bootstrap` would otherwise download again.",
             scope="project",
         )
     if stamp is not None:
@@ -2577,6 +2628,32 @@ def _zephyr_sdk_scan_roots() -> list[Path]:
     return roots
 
 
+def _zephyr_sdk_detected_root() -> Path | None:
+    """The SAME scan `_zephyr_sdk_detected` runs, but returns the root that
+    validated instead of collapsing it to a bool -- `toolchain_check` (issue
+    #474 / tan-cli#990 review) needs the actual directory back so it can read
+    ITS `sdk_version` file and compare against the pin, not just know that
+    "some" toolchain exists somewhere. `ZEPHYR_SDK_INSTALL_DIR` wins first,
+    matching `_zephyr_sdk_detected`'s own precedence; the first validated
+    `zephyr-sdk*` entry under `_zephyr_sdk_scan_roots()` otherwise.
+
+    Never raises: an unreadable or missing scan root is "nothing found
+    there", not a doctor crash.
+    """
+    env_dir = os.environ.get("ZEPHYR_SDK_INSTALL_DIR")
+    if env_dir and _zephyr_sdk_root_valid(Path(env_dir)):
+        return Path(env_dir)
+    for root in _zephyr_sdk_scan_roots():
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.startswith("zephyr-sdk") and _zephyr_sdk_root_valid(entry):
+                return entry
+    return None
+
+
 def _zephyr_sdk_detected() -> bool:
     """`True` when a Zephyr SDK toolchain is installed anywhere this host
     would resolve one from. Mirrors `crate::toolchain::resolve_toolchain_root`
@@ -2596,20 +2673,10 @@ def _zephyr_sdk_detected() -> bool:
     substitution path will need.
 
     Never raises: an unreadable or missing scan root is "nothing found
-    there", not a doctor crash.
+    there", not a doctor crash. Delegates to `_zephyr_sdk_detected_root` so
+    the two cannot independently drift on what "detected" means.
     """
-    env_dir = os.environ.get("ZEPHYR_SDK_INSTALL_DIR")
-    if env_dir and _zephyr_sdk_root_valid(Path(env_dir)):
-        return True
-    for root in _zephyr_sdk_scan_roots():
-        try:
-            entries = list(root.iterdir())
-        except OSError:
-            continue
-        for entry in entries:
-            if entry.name.startswith("zephyr-sdk") and _zephyr_sdk_root_valid(entry):
-                return True
-    return False
+    return _zephyr_sdk_detected_root() is not None
 
 
 def _probe_host_python(

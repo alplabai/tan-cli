@@ -2149,6 +2149,66 @@ def test_a_dry_run_writes_nothing_and_reports_every_step_it_would_have_run(tmp_p
     assert planned[-1].endswith(f"-m pip install -q -e {sdk}")
 
 
+def test_a_dry_run_with_a_toolchain_manifest_plans_the_west_sdk_install_call(tmp_path):
+    """tan-cli#990 review MAJOR: every one of `toolchain_phase`'s own 15
+    tests calls it DIRECTLY (`test_bootstrap_toolchain_phase.py`), never
+    through `_run`/`run_tan` -- so deleting the ONE call site that wires it
+    into `tan bootstrap` (`_run`'s `toolchain_phase(ws, log, runner,
+    sdk_root, venv, is_windows=is_windows)` line) left the whole suite
+    green. This is the missing end-to-end assertion the review asked for:
+    a REAL `tan bootstrap --dry-run` subprocess, with a real
+    `metadata/toolchains.json` on disk, must plan a `west sdk install`
+    command -- not a stubbed call into `toolchain_phase` that could still
+    pass with the wiring cut.
+    """
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    # This gate runs on ubuntu/windows/macos-latest (ci.yml): the manifest
+    # must publish a row for WHICHEVER host is actually running it, or the
+    # phase takes its "no artifact for this host" clean-skip branch instead
+    # of planning anything, and the assertion below would be testing the
+    # wrong code path on two of the three platforms.
+    import platform as _platform
+
+    from tan.core import toolchain_provision as _tp
+
+    host_key = _tp.toolchain_host_key(sys.platform, _platform.machine())
+    assert isinstance(host_key, str), host_key  # this test host must be supported
+    (sdk / "metadata" / "toolchains.json").write_text(
+        json.dumps(
+            {
+                "zephyrSdk": {
+                    "version": "1.0.1",
+                    "baseUrl": "https://example.invalid/",
+                    "artifacts": [
+                        {
+                            "host": host_key, "component": "minimal-sdk",
+                            "filename": "x.tar.xz", "sizeBytes": 1, "sha256": "a" * 64,
+                        },
+                    ],
+                },
+                "measuredFootprint": {"extractedBytes": {"wholeSdk": 4096}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = envelope(
+        run_tan(
+            "bootstrap", "--dry-run", "--format", "json",
+            "--sdk-root", str(sdk), cwd=sdk.parent,
+        )
+    )
+    assert env["exitCode"] == 0
+
+    planned = env["data"]["plannedCommands"]
+    install_cmds = [
+        p for p in planned if "sdk" in p.split() and "install" in p.split()
+    ]
+    assert len(install_cmds) == 1, planned
+    assert "--gnu-toolchains arm-zephyr-eabi" in install_cmds[0]
+    assert "--version 1.0.1" in install_cmds[0]
+
+
 def test_plannedcommands_appears_only_under_dry_run(tmp_path):
     """A normal run keeps the oracle's exact `data` key set; the key appears only
     with the flag that produces it."""
@@ -3544,6 +3604,23 @@ def test_capture_tail_prefers_stderr_and_keeps_the_last_lines_in_order():
     # Non-UTF-8 child output must not become a crash that masquerades as a host
     # problem.
     assert "\ufffd" in capture_tail(b"", b"\xff\xfe boom\n")
+
+
+def test_capture_tail_lines_widens_the_window_without_changing_the_default():
+    """tan-cli#990 review: a real `west sdk install` CI failure produced a
+    message naming no cause at all -- the actual `tar`/`xz` error line sat
+    above the last 4 lines of `west`'s own Python traceback, and the default
+    window discarded it. `lines` lets ONE caller (`Runner.run(...,
+    tail_lines=...)`, `bootstrap_cmd.TOOLCHAIN_INSTALL_TAIL_LINES`) ask for
+    more without moving every other caller's still-4-line default."""
+    stderr = b"".join(f"line{i}\n".encode() for i in range(1, 11))
+    assert capture_tail(b"", stderr) == "line7 | line8 | line9 | line10"
+    assert capture_tail(b"", stderr, lines=6) == (
+        "line5 | line6 | line7 | line8 | line9 | line10"
+    )
+    wide = capture_tail(b"", stderr, lines=40)
+    assert wide == " | ".join(f"line{i}" for i in range(1, 11))
+    assert "line1" in wide  # would be lost at the 4-line default
 
 
 def test_die_appends_a_detail_only_when_there_is_one():

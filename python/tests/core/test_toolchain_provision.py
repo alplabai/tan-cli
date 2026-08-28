@@ -56,6 +56,20 @@ def test_windows_arm64_is_refused_by_name_with_the_wsl2_redirect_adr_0021_specif
     assert "WSL2" in result.reason
 
 
+def test_the_windows_arm64_remedy_names_only_a_host_the_pin_can_actually_serve():
+    """tan-cli#990 review MINOR: the old wording said 'WSL2 distro
+    (linux-x86_64 or linux-aarch64)', but the pinned manifest -- both the
+    vendored fixture and a live alp-sdk checkout -- publishes NO
+    linux-aarch64 artifact at all. A reader following the old sentence onto
+    WSL2-aarch64 would land on this SAME `UnsupportedHost` branch one level
+    down (`linux-aarch64` is a valid HOST KEY, just not a published one).
+    The remedy must name only the host this pin can serve."""
+    result = tp.toolchain_host_key("win32", "ARM64")
+    assert isinstance(result, tp.UnsupportedHost)
+    assert "linux-x86_64" in result.reason
+    assert "linux-aarch64" not in result.reason
+
+
 @pytest.mark.parametrize(
     ("sys_platform", "machine"),
     [("linux", "riscv64"), ("darwin", "i386"), ("win32", "ia64"), ("freebsd12", "x86_64")],

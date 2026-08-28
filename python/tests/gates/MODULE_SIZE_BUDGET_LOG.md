@@ -458,3 +458,8 @@ and write both files from the real merged tree.
     - function_worst_budget: 791 -> 806
 - 2026-08-28 -- issue #474 bugfix: _probe_toolchain_compiler used probe() (single str|None) where probe_status() (bool,str|None) was needed -- ran, out = probe(...) unpacked a bare string's characters, crashing the whole command with ValueError: too many values to unpack the moment a real west sdk install actually succeeded (caught on the first real end-to-end CI run of this phase, getting-started/first-blink jobs).
     - tan/commands/bootstrap_cmd.py: 3998 -> 4006
+- 2026-08-28 -- tan-cli#990 review fixes: doctor host-toolchain adoption path, wider west sdk install capture_tail, bootstrap toolchain-install remedy text, probe-before-move reorder, build/toolchain.py artifact-store scanning
+    - tan/commands/bootstrap_cmd.py: 4006 -> 4067
+    - tan/commands/doctor_cmd.py: 4134 -> 4201
+    - tan/core/bootstrap.py: 2400 -> 2411
+    - function_count_budget: 291 -> 293

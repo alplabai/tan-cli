@@ -613,6 +613,7 @@ class Runner:
         argv: list[str],
         cwd: Path | None = None,
         extra_env: dict[str, str] | None = None,
+        tail_lines: int = 4,
     ) -> str | None:
         """Run to completion. `None` on success; otherwise a string carrying
         whatever detail is recoverable -- the captured tail in JSON mode, a
@@ -624,6 +625,10 @@ class Runner:
         `extra_env` overlays on top of the inherited environment (or the
         `clear_zephyr_base`-filtered copy of it) -- see `force_git_long_paths`
         for the one caller that uses it.
+
+        `tail_lines` forwards to `capture_tail` -- 4 for every ordinary
+        caller, wider for `west sdk install` (tan-cli#990 review: see
+        `capture_tail`'s own docstring for why that ONE call needs it).
         """
         self.planned.append(list(argv))
         if self.dry_run:
@@ -641,7 +646,7 @@ class Runner:
                 )
                 if out.returncode == 0:
                     return None
-                return capture_tail(out.stdout, out.stderr)
+                return capture_tail(out.stdout, out.stderr, lines=tail_lines)
             out = subprocess.run(
                 argv,
                 cwd=str(cwd) if cwd else None,
@@ -1306,6 +1311,18 @@ def _finish_toolchain_install(
     this for done: [`toolchain_provision.stamp_matches_pin`] is the only
     verdict, and nothing here writes a stamp before every prior step in this
     function has already succeeded.
+
+    tan-cli#990 review MINOR, fixed: the probe now runs on `tmp_dir`, BEFORE
+    the move, matching this docstring's own stated order (the code used to
+    move first and probe `store_dir` after, contradicting it). Not
+    cosmetic: probing `store_dir` meant a failed probe left an UNVERIFIED
+    tree at the CANONICAL path, and under an adopted `$ALP_TOOLCHAIN_ROOT`
+    the guard right above (`root_adopted`) then refuses to touch that path
+    on every later run, forever -- a dead end only a manual `rm -rf` clears.
+    A `tmp_dir` name always carries `toolchain_provision.TMP_SUFFIX_PREFIX`
+    (`_reclaim_toolchain_wreckage`'s own naming contract), so a failed probe
+    left there is automatically reclaimed by the NEXT `tan bootstrap`
+    attempt regardless of adoption -- the ordinary, self-healing path.
     """
     installed_version = _read_installed_sdk_version(tmp_dir)
     if installed_version != manifest.version:
@@ -1315,6 +1332,16 @@ def _finish_toolchain_install(
             f"{installed_version!r}, not the pinned {manifest.version!r} -- leaving it "
             f"in place for inspection rather than trusting it. Remove that directory "
             f"and re-run `tan bootstrap` once you know why they disagree.",
+        )
+        return
+    triple = _probe_toolchain_compiler(tmp_dir, is_windows=is_windows)
+    if triple is None:
+        log.warn(
+            "toolchain-install",
+            f"west sdk install exited 0 and reports the correct SDK version, but "
+            f"arm-zephyr-eabi-gcc did not run from {_native(tmp_dir)} -- NOT moving "
+            f"it into place or stamping it as verified (a directory existing is not "
+            f"evidence it works). Re-run `tan bootstrap` to retry.",
         )
         return
     if _is_dir(store_dir):
@@ -1342,15 +1369,6 @@ def _finish_toolchain_install(
             "toolchain-install", f"cannot move {_native(tmp_dir)} into place: {err}"
         )
         return
-    triple = _probe_toolchain_compiler(store_dir, is_windows=is_windows)
-    if triple is None:
-        log.warn(
-            "toolchain-install",
-            f"installed at {_native(store_dir)}, but arm-zephyr-eabi-gcc did not run "
-            f"there -- NOT stamping it as verified (a directory existing is not "
-            f"evidence it works). Re-run `tan bootstrap` to retry.",
-        )
-        return
     stamp_text = toolchain_provision.render_stamp(
         toolchain_provision.ToolchainStamp(manifest.version, manifest.digest(), triple)
     )
@@ -1374,15 +1392,29 @@ def _finish_toolchain_install(
 #: `setup.sh -t arm-zephyr-eabi` GNU-toolchain fetch failing with no relation
 #: to the first), and this phase's own first real end-to-end CI run hit a
 #: THIRD failure mode in the same family (`tar --xz` extraction inside
-#: west's own temp dir returning exit status 2 on a sha256-verified archive
-#: -- a transient runner hiccup, not a corrupt download). One `west sdk
-#: install` attempt is not the reliability bar a fresh customer's FIRST
-#: command should be held to.
+#: west's own temp dir returning exit status 2). **Not asserted to be a
+#: "transient runner hiccup"** -- tan-cli#990 review caught that claim
+#: unproven: `capture_tail`'s old 4-line default discarded the actual
+#: subprocess error line, leaving no evidence either way, and a
+#: byte-identical local extraction of the real released archive (this repo's
+#: own verification, not west's) succeeded cleanly, which only rules out a
+#: broken tar invocation or a corrupt upstream release -- it says nothing
+#: about what happened on that specific runner. `TOOLCHAIN_INSTALL_TAIL_LINES`
+#: below exists so the NEXT occurrence is diagnosable instead of guessed at.
+#: One `west sdk install` attempt is not the reliability bar a fresh
+#: customer's FIRST command should be held to, so the retry stays regardless.
 TOOLCHAIN_INSTALL_ATTEMPTS = 3
 
 #: Seconds, multiplied by the (1-based) attempt number just finished --
 #: `getting-started.yml`'s own `sleep $((attempt * 15))`.
 TOOLCHAIN_RETRY_BACKOFF_S = 15
+
+#: `Runner.run`'s `tail_lines` for the `west sdk install` call specifically --
+#: see `capture_tail`'s own docstring. Deliberately wider than the 4-line
+#: default every other bootstrap phase still uses; 40 is small next to a
+#: multi-hundred-line traceback but wide enough to keep the real subprocess
+#: stderr line the traceback's closing frames sit on top of.
+TOOLCHAIN_INSTALL_TAIL_LINES = 40
 
 
 def _run_west_sdk_install_with_retries(
@@ -1418,7 +1450,7 @@ def _run_west_sdk_install_with_retries(
                 except OSError:
                     pass
             time.sleep(TOOLCHAIN_RETRY_BACKOFF_S * (attempt - 1))
-        detail = runner.run(argv, cwd=ws.workspace_dir)
+        detail = runner.run(argv, cwd=ws.workspace_dir, tail_lines=TOOLCHAIN_INSTALL_TAIL_LINES)
         if detail is None or runner.dry_run:
             return detail
         if attempt < TOOLCHAIN_INSTALL_ATTEMPTS:
@@ -1471,7 +1503,23 @@ def _acquire_toolchain(
     if detail is not None:
         augmented = toolchain_provision.augment_acquisition_failure(detail)
         augmented = _augment_with_low_disk_note(root, augmented)
-        log.warn("toolchain-install", f"west sdk install failed: {augmented}")
+        # tan-cli#990 review MAJOR: this is the phase's MOST LIKELY failure
+        # (a flaky download/extraction survives the retry) and, until this
+        # fix, the ONLY refusal in this function that named no remedy --
+        # `Log.warn` has no `fix` channel (unlike `doctor_cmd.Check`), so
+        # every other refusal here (7-Zip, disk, adopted root) already
+        # folds its command into the message text itself; this one must
+        # too. Built from `manifest.version` in scope here, never
+        # `doctor_cmd.ZEPHYR_SDK_INSTALL_VERSION` -- that is a SEPARATE,
+        # hardcoded fallback constant that can desync from the pin THIS run
+        # actually resolved.
+        remedy = (
+            f"run `west sdk install --version {manifest.version} -t "
+            f"{toolchain_provision.TOOLCHAIN_COMPONENT}` by hand from your west "
+            f"workspace's top-level directory (see docs/getting-started.md), or "
+            f"re-run `tan bootstrap`."
+        )
+        log.warn("toolchain-install", f"west sdk install failed: {augmented} {remedy}")
         return
     if runner.dry_run:
         return
@@ -1504,6 +1552,19 @@ def toolchain_phase(
     practice this is always a real venv; the fallback to a bare PATH `west`
     exists only so this function has no unchecked assumption of its own).
     """
+    # tan-cli#990 review MINOR, considered and kept: a `sdk_root` with no
+    # readable `metadata/toolchains.json` at all reports `WORKSPACE_BLOCKING`
+    # here -- an alp-sdk checkout that predates issue #474's manifest field
+    # (or one with the file simply missing/malformed) makes `tan bootstrap`
+    # exit non-zero on its own, including under `--dry-run`, where it used
+    # to exit 0. Deliberate, not an oversight: `WORKSPACE_BLOCKING` already
+    # means "this workspace cannot do what it was bootstrapped for", and a
+    # workspace that cannot even attempt the toolchain acquisition ADR 0021
+    # Lane 1 P1 exists for fits that description as much as a failed
+    # `west sdk install` does. The escape hatch is the same one every other
+    # refusal in this phase has: `--no-toolchain` (or `--allow-partial`)
+    # skips this phase outright, so an older checkout stays bootstrappable
+    # on request, just not silently.
     manifest, manifest_err = load_toolchain_manifest(sdk_root)
     if manifest is None:
         log.warn("toolchain-install", f"cannot acquire the cross toolchain: {manifest_err}")

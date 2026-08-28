@@ -2277,9 +2277,10 @@ def next_steps_block(
         lines.extend(
             [
                 "  # Or jump straight into building an example for real silicon",
-                "  # (needs the Zephyr SDK toolchain, which bootstrap does NOT install --",
-                "  #  the `tan doctor` above reports it, and names the exact install "
-                "command):",
+                "  # (needs the Zephyr SDK toolchain -- bootstrap just tried to acquire it",
+                "  #  automatically (ADR 0021 Lane 1 P1); `tan doctor` above confirms "
+                "whether it",
+                "  #  landed, and names the exact install command if it did not):",
                 "  west build -b alp_e1m_aen801_m55_he/ae822fa0e5597ls0/rtss_he `",
                 f"      examples\\peripheral-io\\uart-echo -- "
                 f"-DEXTRA_ZEPHYR_MODULES={repo_root}",
@@ -2302,9 +2303,10 @@ def next_steps_block(
                 "  bash scripts/test-all.sh",
                 "",
                 "  # Or jump straight into building an example for real silicon",
-                "  # (needs the Zephyr SDK toolchain, which bootstrap does NOT install --",
-                "  #  the `tan doctor` above reports it, and names the exact install "
-                "command):",
+                "  # (needs the Zephyr SDK toolchain -- bootstrap just tried to acquire it",
+                "  #  automatically (ADR 0021 Lane 1 P1); `tan doctor` above confirms "
+                "whether it",
+                "  #  landed, and names the exact install command if it did not):",
                 f'  tan build --sdk-root "{tokens.sdk_root}" \\',
                 f'      --project "{tokens.sdk_root}/examples/peripheral-io/uart-echo"',
                 "",
@@ -2371,18 +2373,27 @@ def completion_verdict(blocking: list[str], allow_partial: bool) -> tuple[list[s
     )
 
 
-def capture_tail(stdout: bytes | str, stderr: bytes | str) -> str:
+def capture_tail(stdout: bytes | str, stderr: bytes | str, lines: int = 4) -> str:
     """The last few non-empty lines of a failed step's captured output. Prefers
     stderr, falling back to stdout when stderr is empty; `""` when there is
     nothing usable.
 
     Without this the JSON envelope carried no failure reason at all -- a pip
     traceback, a "no such file" -- because only the exit status was read.
+
+    `lines` defaults to 4 -- unchanged for every existing caller. `west sdk
+    install`'s failure path (`bootstrap_cmd._acquire_toolchain`) passes a
+    wider window (tan-cli#990 review): a real CI run's `tar --xz` extraction
+    failure produced a message naming NO cause at all, because the actual
+    subprocess error line sat above the closing frames of `west`'s own
+    Python traceback and the 4-line default discarded it along with
+    everything else -- a diagnostic gap that cannot be recovered after the
+    fact, since the untruncated child output is never written anywhere else.
     """
     text = _as_text(stderr)
     if not text.strip():
         text = _as_text(stdout)
-    tail = [line for line in text.splitlines() if line.strip()][-4:]
+    tail = [line for line in text.splitlines() if line.strip()][-lines:]
     return " | ".join(tail)
 
 

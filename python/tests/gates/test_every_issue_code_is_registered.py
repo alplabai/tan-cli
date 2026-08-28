@@ -937,13 +937,19 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # `"toolchain"`, so they contribute ONE new code, `doctor.toolchain`,
         # newly registered in `contract/issue-codes.json` -- the same shape
         # as the `libraries_check` bump above.
+        #
+        # 70 as of tan-cli#990 review (the BLOCKER fix): `toolchain_check`
+        # grew a SEVENTH `Check(...)` site -- the host-toolchain-matches-the-
+        # pin adoption path (`_host_toolchain_matching_pin`), a `pass`
+        # alongside the existing stamp-verified `pass`. Still literally named
+        # `"toolchain"`, so still `doctor.toolchain`; no new code registered.
         prefix="doctor.",
         expr="kebab_check_name(check.name)",
         name="Check",
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=69,
+        expected_calls=70,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(
