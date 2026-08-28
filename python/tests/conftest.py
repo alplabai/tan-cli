@@ -1071,17 +1071,30 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
 # tan-cli#943 actually manifested as (a genuine reimported module left on
 # one side, the stale genuine module -- or nothing -- on the other).
 #
-# Latched on first report (`_PLANNER_DRIFT_ALREADY_REPORTED`): once a leak
-# has been named, EVERY later test's teardown re-observes the same drifted
-# pair and would otherwise raise again -- measured on the real #943 shape
+# Latched PER NAME (`_PLANNER_DRIFT_ALREADY_REPORTED`, a `set` of already-
+# reported `tan.planner`-or-under names): once a given name has been named,
+# EVERY later test's teardown re-observes the same drifted pair for THAT
+# name and would otherwise raise again -- measured on the real #943 shape
 # with the guard un-latched, bound to `eb96112b`: `1057 passed, 15 skipped,
-# 484 errors` for what is one root cause. The flag makes it one clean error
-# naming the polluting test, not 483 more burying it.
+# 484 errors` for what is one root cause. The set makes it one clean error
+# naming the polluting test, not 483 more burying it. A single process-wide
+# boolean latch (the original shape) over-collapses: measured with two
+# INDEPENDENT permanent leaks in one process (`tan.planner.kconfig` from one
+# test, `tan.planner.slugs` from a second, unrelated one), a boolean latch
+# reports only the first name and lets the second sail through as `passed`
+# while it is a live polluter -- run alone, it reds. Keying the latch on the
+# drifted NAME instead of a single flag still collapses the fan-out for the
+# SAME name re-observed on every subsequent teardown, but a second, distinct
+# drifted name is not shadowed by the first.
 #
-# Checked after every test in the WHOLE suite. Cost is one `sys.modules`
-# walk (bounded by however many `tan.planner*` modules are currently
-# imported, typically single digits) + one `getattr` per name -- effectively
-# free.
+# Checked after every test in the WHOLE suite. The walk scans every
+# `sys.modules` key (239 keys, unbound, measured) and filters down to
+# whatever `tan.planner`-or-under names are currently live (23, measured --
+# not "typically single digits") + one `getattr` per matching name --
+# effectively free: 42.6 microseconds/teardown measured, ~0.25s total over
+# 5885 tests; a synthetic 3000-teardown microbenchmark measured
+# 10.88/11.12/11.32s with the hook installed vs. 10.22/10.29/10.34s without
+# -- the delta is inside run-to-run noise.
 #
 # Mutation-proven, both the original one-level shape and the child shape a
 # one-level check is blind to (tan-cli#943 review round 3):
@@ -1104,23 +1117,34 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
 # `test_diff_command.py`), on `monkeypatch.delitem(sys.modules, "tan")`, on
 # `test_planner_root.py`'s other `object()` sentinel case, nor on a full
 # unbound/bound run of `python/tests`.
-_PLANNER_DRIFT_ALREADY_REPORTED = False
+_PLANNER_DRIFT_ALREADY_REPORTED: set[str] = set()
 
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_teardown(item, nextitem):
-    global _PLANNER_DRIFT_ALREADY_REPORTED
     result = yield
-    if _PLANNER_DRIFT_ALREADY_REPORTED:
-        return result
     names = sorted(
         n for n in sys.modules if n == "tan.planner" or n.startswith("tan.planner.")
     )
     for name in names:
+        if name in _PLANNER_DRIFT_ALREADY_REPORTED:
+            continue
         mod = sys.modules.get(name)
         parent_name, _, leaf = name.rpartition(".")
         parent = sys.modules.get(parent_name)
-        attr = getattr(parent, leaf, None) if parent is not None else None
+        if parent is None:
+            # The parent package itself is absent from sys.modules (e.g. a
+            # permanent `del sys.modules["tan.planner"]` with children left
+            # behind) -- there is no attribute to compare `mod` against, so
+            # treating a missing parent as `attr = None` would report a
+            # bogus "two live copies" drift against `hex(id(None))` for what
+            # is really just one copy and an absent parent. Not reachable
+            # today (every `tan.planner*` mutation in this tree is
+            # monkeypatch-based, so the wrapper always sees it restored),
+            # but a future permanent parent teardown should skip, not
+            # misdiagnose.
+            continue
+        attr = getattr(parent, leaf, None)
         if not (
             (mod is None or isinstance(mod, types.ModuleType))
             and (attr is None or isinstance(attr, types.ModuleType))
@@ -1130,8 +1154,8 @@ def pytest_runtest_teardown(item, nextitem):
             continue
         if mod is attr:
             continue
-        _PLANNER_DRIFT_ALREADY_REPORTED = True
-        assert mod is attr, (
+        _PLANNER_DRIFT_ALREADY_REPORTED.add(name)
+        raise AssertionError(
             f"{name} drifted after {item.nodeid}: sys.modules[{name!r}] is "
             f"{mod!r} ({hex(id(mod))}) but the parent {parent_name!r}'s own "
             f".{leaf} attribute is {attr!r} ({hex(id(attr))}) -- these must "

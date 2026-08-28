@@ -47,11 +47,18 @@
 # the hook's absence whenever nothing currently happens to be leaking, which
 # is the ordinary case, so it cannot be the thing that notices a future
 # regression in the hook. `python/tests/gates/
-# test_planner_drift_guard_present.py` is what covers that: a direct,
-# always-on-every-PR assertion that `pytest_runtest_teardown` and its
-# `@pytest.hookimpl(wrapper=True)` decorator are still present in
-# `tests/conftest.py` at all -- cheap, and the actual answer to "what
-# notices the hook disappearing" this workflow cannot give.
+# test_planner_drift_guard_present.py` is what covers that -- but a plain
+# text search of `tests/conftest.py` for the hook's signature and decorator
+# (this file's own earlier claim) turned out not to be enough: deleting the
+# hook and leaving only a HISTORY comment that quotes those same lines
+# verbatim still passes a text search (checked, not assumed, tan-cli#944
+# review). That gate now checks two REAL properties instead -- that pluggy
+# actually registered a `pytest_runtest_teardown` hookwrapper whose plugin
+# is `tests/conftest.py` (`pluginmanager.hook.pytest_runtest_teardown.
+# get_hookimpls()`, not a grep), and that the registered function's body
+# still raises against a synthetic two-copy drift driven directly through
+# it -- always-on-every-PR, cheap, and the actual answer to "what notices
+# the hook disappearing or being neutered" this workflow cannot give.
 #
 # ---------------------------------------------------------------------------
 # PROPORTIONALITY -- CORRECTED (tan-cli#943 review round 2)
