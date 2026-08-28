@@ -64,8 +64,20 @@ def _core_os_choices(metadata_root: Path) -> tuple[str, ...]:
 
 
 def _runtime_class(core_type: str) -> str:
-    """`linux` for Cortex-A, `rtos` for Cortex-M, else `other`."""
-    t = (core_type or "").lower()
+    """`linux` for Cortex-A, `rtos` for Cortex-M, else `other`.
+
+    `core_type` is typed `str`, and today's one caller (`core_os_topology`)
+    already normalises a non-string `type` to `""` before this is reached
+    (`soc_types`'s `isinstance` guard, tan-cli#957/#962) -- so the
+    `isinstance` check below is defense-in-depth, not a live bug fix: it is
+    currently unreachable, not currently wrong. It is added anyway so this
+    shared-shaped helper does not repeat the exact assumption ("my caller
+    surely guarded this") that let the bare idiom survive unnoticed at both
+    `presets_cmd.core_type_lookup` and `kconfig._emit_inference` (tan-cli#962)
+    -- a future caller of this function gets the same backstop those two
+    now have, instead of inheriting the crash-or-leak choice again.
+    """
+    t = core_type.lower() if isinstance(core_type, str) else ""
     if t.startswith("cortex-a"):
         return "linux"
     if t.startswith("cortex-m"):

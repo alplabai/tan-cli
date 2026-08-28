@@ -899,8 +899,14 @@ def presets(
         # `(core_type or "").lower()` and raised `AttributeError` right here,
         # through this very backstop -- an enumerated path this comment did
         # not count. `core_type_lookup` and `tan.core.os_class` both guard
-        # that input now (see their own docstrings), so this really is
-        # unreachable again, not just believed to be.
+        # that input now (see their own docstrings), closing THIS module's
+        # path. That is what is actually known -- not that every path into
+        # this `except` is closed for good: tan-cli#962 found the identical
+        # unguarded read still live in `tan.planner.kconfig._emit_inference`
+        # after this same sweep, on a different call site this backstop
+        # cannot see. This `except` exists because that guarantee -- "every
+        # path a caller might one day add is guarded" -- is not something
+        # this file can check, not because it has been proven true.
         sdk, soms, board_libraries = None, [], []
         issues = [
             Issue(

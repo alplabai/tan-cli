@@ -371,3 +371,6 @@ and write both files from the real merged tree.
     - tan/commands/model_cmd.py: new entry at 1059
     - tan/model/adapters/ethos_u.py: new entry at 886
     - function_count_budget: 263 -> 275
+- 2026-08-28 -- tan-cli#962: guard kconfig.py's TFLM kernel selector against a non-string cores[].type (the same class #957 fixed at presets_cmd.py/topology.py), plus the review's follow-on comment/docstring expansion at presets_cmd.py and topology.py
+    - tan/commands/presets_cmd.py: 956 -> 962
+    - tan/planner/kconfig.py: 2092 -> 2107

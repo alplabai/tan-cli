@@ -1166,12 +1166,27 @@ def _emit_inference(
     # NEON / HELIUM / REF based on the vector_extension field.  Defaults
     # to REF when the SoC JSON is silent (paper-correct on the scalar
     # M33s -- iMX 93 m33, V2N m33_sm).
+    #
+    # `c.get("type")` is UNVALIDATED against `soc-spec-v1.schema.json`'s own
+    # `"type": {"type": "string"}` -- the identical gap `presets_cmd.
+    # core_type_lookup` and `topology.core_os_topology` closed for
+    # tan-cli#957, same class, this call site missed by that sweep
+    # (tan-cli#962): a schema-invalid SoC JSON (hand-authored, mid-
+    # `porting-a-new-som`, or corrupted) with a truthy non-string `type`
+    # reaches `.lower()` here and raises `AttributeError`, aborting `tan
+    # build` for the whole slice on any board that reaches this branch
+    # (`_slice_wants_inference` -- examples/ai, examples/audio,
+    # examples/camera-vision). `isinstance`-guard to the same `""`
+    # unresolved sentinel a missing `type` already produces, matching
+    # `core_type_lookup`'s `c["type"] if isinstance(c.get("type"), str)
+    # else ""`.
     tflm_kernel_kc: str = "CONFIG_ALP_SDK_INFERENCE_TFLM_KERNEL_REF=y"
     for c in (project.soc_spec.get("cores") or []):
         if c.get("id") != slice_.core_id:
             continue
         vec = (c.get("vector_extension") or "").lower()
-        ctype = (c.get("type") or "").lower()
+        raw_type = c.get("type")
+        ctype = raw_type.lower() if isinstance(raw_type, str) else ""
         if vec == "neon" or ctype.startswith("cortex-a"):
             tflm_kernel_kc = "CONFIG_ALP_SDK_INFERENCE_TFLM_KERNEL_NEON=y"
         elif vec == "helium":
