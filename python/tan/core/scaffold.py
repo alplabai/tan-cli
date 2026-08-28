@@ -97,6 +97,19 @@ _VENDORED_TEMPLATE_DIR = {
     "multicore-mailbox": "multicore-mailbox",
 }
 
+
+def is_family_gated(template_id: str) -> bool:
+    """Whether `template_id` renders a family-specific vendored tree at all --
+    `False` for `minimal-app` ALONE, tan's one hand-generated, vendor-neutral
+    template (`plan_template_files`'s `template_id == "minimal-app"` early
+    return; it never reaches `_vendored_family`/`UnsupportedSomError`, so no
+    SoM family can ever refuse it). A public read of `_VENDORED_TEMPLATE_DIR`
+    rather than a second copy of its key set -- `explain_cmd` uses this to
+    decide whether `UNSUPPORTED_SOM_FAMILY_PREFIXES` applies to a given
+    template's `data.som` (tan-cli#866)."""
+    return template_id in _VENDORED_TEMPLATE_DIR
+
+
 #: The SKU assumed when `--som` is absent (`tan_core::DEFAULT_SOM_SKU`).
 DEFAULT_SOM_SKU = "E1M-AEN801"
 
@@ -139,6 +152,21 @@ _SOM_FAMILIES: tuple[tuple[str, str, str | None], ...] = (
     ("E1M-V2N", "m33_sm", _FAMILY_TREES[1]),   # Renesas RZ/V2N
     ("E1M-V2M", "m33_sm", _FAMILY_TREES[1]),   # Renesas RZ/V2M -- shares the V2N tree
     ("E1M-NX9", "m33", None),                  # NXP -- alp-sdk's catalog ships no tree
+)
+
+#: SKU prefixes `_SOM_FAMILIES` declares NO vendored tree for -- the exact
+#: fact `_family_bucket`/`UnsupportedSomError`/`init.som-unsupported` gate a
+#: `--som` on, DERIVED from that table rather than retyped, so a family added
+#: to (or removed from) `_SOM_FAMILIES` updates this automatically instead of
+#: needing a second hand-edit. tan-cli#866: `explain_cmd` reads this to
+#: publish the SAME family-level refusal `tan init` already enforces as
+#: structured `data.som` on `tan explain --template`, instead of the
+#: hand-written "(E1M-AEN801 only)" prose that gave #866 its name -- the
+#: exact drift `_SOM_FAMILIES` vs. `app_core_for_sku` risked before tan-cli#579
+#: unified them into one table, now risked again between this table and any
+#: description string that repeats a fact it already states.
+UNSUPPORTED_SOM_FAMILY_PREFIXES: tuple[str, ...] = tuple(
+    prefix for prefix, _core, tree in _SOM_FAMILIES if tree is None
 )
 
 #: `(app core, tree)` for E1M-AEN* AND for any prefix `_SOM_FAMILIES` does not

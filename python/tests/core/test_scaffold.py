@@ -22,6 +22,7 @@ from tan.core import scaffold as scaffold_module
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     TEMPLATE_IDS,
+    UNSUPPORTED_SOM_FAMILY_PREFIXES,
     CoresError,
     ExampleReadError,
     PlannedFile,
@@ -30,6 +31,7 @@ from tan.core.scaffold import (
     UnsupportedSomError,
     app_core_for_sku,
     infer_runtime_for_core_id,
+    is_family_gated,
     is_plain_relative,
     parse_cores,
     plan_template_files,
@@ -1337,6 +1339,30 @@ def test_the_two_family_derivations_read_one_table():
     ):
         assert app_core_for_sku(sku) == core, sku
         assert scaffold_module._family_bucket(sku) == tree, sku
+
+
+def test_unsupported_som_family_prefixes_is_derived_not_retyped():
+    """tan-cli#866: `UNSUPPORTED_SOM_FAMILY_PREFIXES` is a list comprehension
+    over `_SOM_FAMILIES`, so it always names exactly the prefixes whose tree
+    is `None` there -- currently NXP alone. Pinned to the real current value,
+    not merely "is non-empty": a stale hand-typed copy of this list could
+    pass a weaker check while still disagreeing with `_SOM_FAMILIES`."""
+    assert UNSUPPORTED_SOM_FAMILY_PREFIXES == ("E1M-NX9",)
+    for prefix in UNSUPPORTED_SOM_FAMILY_PREFIXES:
+        assert scaffold_module._family_bucket(prefix + "101") is None, prefix
+
+
+def test_is_family_gated_matches_plan_template_files_own_special_case():
+    """`is_family_gated` must agree with `plan_template_files`'s own
+    `template_id == "minimal-app"` early return -- `False` for that id alone,
+    `True` for every other real template id (`TEMPLATE_IDS`)."""
+    assert is_family_gated("minimal-app") is False
+    for template_id in TEMPLATE_IDS:
+        if template_id == "minimal-app":
+            continue
+        assert is_family_gated(template_id) is True, template_id
+    # And an unknown id is not silently treated as gated.
+    assert is_family_gated("not-a-real-template") is False
 
 
 def test_an_unrecognised_prefix_still_takes_the_alif_default_in_both_derivations():
