@@ -191,8 +191,20 @@ def _soc_targets(soc: dict, silicon_ref: str) -> list[TargetSpec]:
     profile = _vela_profile(soc)
     declares_dram = _soc_declares_dram(soc)
     for npu in soc.get("npus", []):
-        npu_type = npu.get("type", "")
-        backend = _npu_backend(npu_type, npu.get("subtype", ""))
+        # `.get("type", "")`'s default fires only when the key is ABSENT --
+        # never when it is present with the wrong type -- so a schema-invalid
+        # SoC JSON (unvalidated on read; the real fix is tan-cli#964) can hand
+        # a non-string straight into `_npu_backend`'s `.startswith`/`in`
+        # calls (tan-cli#965). Guard to the same "" unresolved sentinel the
+        # #957 family (cores[] `type`) settled on: an unrecognised/
+        # unresolvable type falls back to the identical "no mappable
+        # backend, skip this npu" outcome a genuinely-absent `type` key
+        # already produces, rather than a fourth behaviour.
+        raw_type = npu.get("type")
+        npu_type = raw_type if isinstance(raw_type, str) else ""
+        raw_subtype = npu.get("subtype")
+        subtype = raw_subtype if isinstance(raw_subtype, str) else ""
+        backend = _npu_backend(npu_type, subtype)
         if backend is None:
             continue
         ethos_u = backend == "ethos_u"
