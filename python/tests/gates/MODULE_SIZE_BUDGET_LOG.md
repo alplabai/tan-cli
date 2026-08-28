@@ -362,6 +362,8 @@ and write both files from the real merged tree.
     - tan/commands/bootstrap_cmd.py: 3402 -> 3421
     - tan/commands/new_som_cmd.py: 1380 -> 1385
     - function_worst_budget: 757 -> 770
+- 2026-08-28 -- tan-cli#957: core_type_lookup's isinstance guard + the doc-heavy explanation of why a non-string type must normalise to the unresolved sentinel, plus a correction to the now-reachable backstop comment, grew presets_cmd.py past its recorded budget
+    - tan/commands/presets_cmd.py: 929 -> 956
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/explain_cmd.py: 1043 -> 1087
     - function_count_budget: 274 -> 275
@@ -369,3 +371,12 @@ and write both files from the real merged tree.
     - tan/commands/explain_cmd.py: 1087 -> 1135
 - 2026-08-28 -- explain_cmd.py: tan-cli#966 docstring fix corrects the ambiguous-selector reason in _print_sdk_resolution_warnings, growing the module 3 lines past its 1135 cap
     - tan/commands/explain_cmd.py: 1135 -> 1138
+- 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/model_cmd.py: new entry at 1059
+    - tan/model/adapters/ethos_u.py: new entry at 886
+    - function_count_budget: 263 -> 275
+- 2026-08-28 -- tan-cli#962: guard kconfig.py's TFLM kernel selector against a non-string cores[].type (the same class #957 fixed at presets_cmd.py/topology.py), plus the review's follow-on comment/docstring expansion at presets_cmd.py and topology.py
+    - tan/commands/presets_cmd.py: 956 -> 962
+    - tan/planner/kconfig.py: 2092 -> 2107
+- 2026-08-28 -- tan-cli#957 family, round 4: guard cores[].vector_extension against a non-string in the G-2 TFLM kernel selector, same isinstance-guard pattern as cores[].type
+    - tan/planner/kconfig.py: 2107 -> 2108
