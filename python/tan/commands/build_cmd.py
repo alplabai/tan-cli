@@ -58,8 +58,12 @@ deliberately omitted, being byte-for-byte the pinned plan's own declared
 artefact paths, which the one caller who has that file already holds. A
 conflicting combination is refused with its own code, never resolved by silent
 precedence (`--execute --materialise` -> `build.conflicting-flags`, exit 2;
-`--execute` with a deferred flag -> `cli.command-deferred`, exit 1, because a
-flag this build does not implement at all cannot be honoured either way).
+`--pristine` with a mode that never dispatches (bare `--plan-from` or
+`--materialise`, neither paired with `--execute`) -> the same
+`build.conflicting-flags`, exit 2, because a wipe promised on the envelope
+cannot be silently skipped either; `--execute` with a deferred flag ->
+`cli.command-deferred`, exit 1, because a flag this build does not implement
+at all cannot be honoured either way).
 `--execute` is ADDED BY THIS PORT, not a v0.4.1 flag: there `--plan-from`
 implies `--plan` and outranks `--native`, so a file-supplied plan cannot be
 dispatched at all. Deliberate, not a parity gap. `--native` keeps v0.4.1's
@@ -1923,6 +1927,40 @@ def build(
         mode = _MODE_PLAN
     else:
         mode = _MODE_NATIVE
+
+    # `--pristine`'s own help text promises "never silently means incremental"
+    # -- but `_build` only ever threads `pristine` into `_dispatch` (see its
+    # tail), and `_MODE_PLAN`/`_MODE_MATERIALISE` both return from `_build`
+    # BEFORE `_dispatch` is reached (the former shows the plan and stops, the
+    # latter writes config files and stops -- neither runs a slice, so neither
+    # has a build dir to wipe). Left unchecked, `--pristine --plan-from p.json`
+    # or `--pristine --materialise ...` used to exit 0 with `issues: []`,
+    # having silently done nothing with the flag -- precisely the "declared
+    # and does nothing" shape `--no-auto-bootstrap` above is refused for, and
+    # the closed-issue tan-cli#183 defect class re-entering through the mode
+    # flags instead of the flag that issue was about. Refused with the same
+    # code and exit position `--execute --materialise` already uses for an
+    # invalid combination, rather than added as a fourth mode-specific `data`
+    # shape: `--pristine` has no meaning without a dispatch to apply it to, so
+    # this is a conflicting-flags case, not a new envelope shape to design.
+    # `--execute` is exempt: it selects `_MODE_NATIVE` (line 1918 above) and
+    # dispatches for real, so `--pristine --plan-from p.json --execute` reaches
+    # `_dispatch` and wipes exactly as `--pristine` alone does.
+    if pristine and mode != _MODE_NATIVE:
+        stops_after = (
+            "writes the plan's files"
+            if mode == _MODE_MATERIALISE
+            else "shows the plan"
+        )
+        flag = "--materialise" if mode == _MODE_MATERIALISE else "--plan-from"
+        _refuse(
+            "build.conflicting-flags",
+            f"`--pristine` has nothing to wipe without a dispatch: `{flag}` alone "
+            f"only {stops_after} and stops before any slice runs. Add `--execute` "
+            "to dispatch it for real, or drop `--pristine`.",
+            ExitCode.VALIDATION_FAILURE,
+            json_mode,
+        )
 
     # `util::cli_workspace_root`: `--project` joined to the (real) cwd, THEN
     # everything below anchors on this instead of the bare cwd -- board.yaml

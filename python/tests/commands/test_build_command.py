@@ -2056,38 +2056,61 @@ def test_a_deferred_flag_does_no_work_before_refusing(project):
     assert not (project / "build").exists()
 
 
-#: `(flag, expected replacement substring)` for every flag tan-cli#427
-#: retired: "Two overlapping plan surfaces is worse than one, so the oracle
-#: spellings go" (the maintainer's own decision on the issue) -- but a
-#: retired flag's error must TEACH the replacement in the message itself, not
-#: send the caller to a tracker to work it out.
+#: `(flag, expected FULL message)` for every flag tan-cli#427 retired: "Two
+#: overlapping plan surfaces is worse than one, so the oracle spellings go"
+#: (the maintainer's own decision on the issue) -- but a retired flag's error
+#: must TEACH the replacement in the message itself, not send the caller to a
+#: tracker to work it out. The expected strings are hardcoded here (not
+#: imported from `build_cmd._RETIRED_FLAGS`) and compared with `==`, not
+#: `in`: a substring check on `flag in message` is satisfied by the WRONG
+#: entry when one retired flag's spelling is a prefix of another's
+#: (`--manifest` is a substring of `--manifest-from`) -- measured mutant:
+#: pointing `_RETIRED_FLAGS["--manifest"]` at `--manifest-from`'s own message
+#: verbatim left both a bare `flag in message` check and a
+#: `replacement_hint in message` check (`"system-manifest.yaml"`, which
+#: appears in BOTH messages) green, so `tan build --manifest` taught the
+#: customer to open a FILE they never named. Full-message equality is the
+#: only check that distinguishes the two.
 RETIRED_BUILD_FLAGS = [
-    ("--plan", "--plan-from"),
-    ("--manifest", "system-manifest.yaml"),
-    ("--manifest-from", "FILE"),
+    (
+        "--plan",
+        "`--plan` is retired: run `tan build --plan-from FILE` to inspect a build plan "
+        "instead (add `--materialise` or `--execute` to act on it).",
+    ),
+    (
+        "--manifest",
+        "`--manifest` is retired: a native `tan build` already writes "
+        "`build/system-manifest.yaml` for you to read directly -- no separate flag needed.",
+    ),
+    (
+        "--manifest-from",
+        "`--manifest-from FILE` is retired: `system-manifest.yaml` is plain YAML -- open "
+        "FILE directly instead of routing it through `tan build`.",
+    ),
 ]
 
 
 @pytest.mark.parametrize(
-    ("flag", "replacement_hint"), RETIRED_BUILD_FLAGS, ids=[f for f, _ in RETIRED_BUILD_FLAGS]
+    ("flag", "expected_message"), RETIRED_BUILD_FLAGS, ids=[f for f, _ in RETIRED_BUILD_FLAGS]
 )
-def test_a_retired_flag_is_refused_with_its_replacement_named(project, flag, replacement_hint):
+def test_a_retired_flag_is_refused_with_its_replacement_named(project, flag, expected_message):
     """The flag still PARSES (never Click's own typo error) but always
     refuses, at `VALIDATION_FAILURE` (exit 2, this CLI's position for an
     invalid invocation) rather than `RUNTIME_FAILURE` -- a retired flag is a
     permanently-wrong argv, not a transient "not built yet" the deferred
-    flags above still are."""
+    flags above still are.
+
+    Asserts the WHOLE message against a hardcoded golden string, not a
+    substring: see `RETIRED_BUILD_FLAGS`'s own docstring for the mutant this
+    guards against (`--manifest` silently answering with `--manifest-from`'s
+    text)."""
     argv = [flag, "manifest.yaml"] if flag == "--manifest-from" else [flag]
     proc = run_tan("build", *argv, "--format", "json", cwd=project)
 
     env = envelope_of(proc)
     assert proc.returncode == 2, env
     assert [i["code"] for i in env["issues"]] == ["build.flag-retired"], env["issues"]
-    message = env["issues"][0]["message"]
-    assert flag in message
-    assert replacement_hint in message, (
-        f"`{flag}`'s retirement message does not name its replacement: {message!r}"
-    )
+    assert env["issues"][0]["message"] == expected_message, env["issues"][0]["message"]
     assert not (project / "build").exists()
 
 
@@ -2182,6 +2205,48 @@ def test_pristine_reaches_the_envelope_through_the_full_cli(project):
     env = envelope_of(proc)
     assert env["ok"] is True, env
     assert "build.pristine-skipped" in [i["code"] for i in env["issues"]], env["issues"]
+
+
+@pytest.mark.parametrize("mode_flag", ["--materialise"], ids=["materialise"])
+def test_pristine_without_execute_is_refused_not_silently_ignored(project, mode_flag):
+    """`--pristine` only ever reaches `_dispatch` (see `_build`'s tail) --
+    `_MODE_PLAN` (bare `--plan-from`) and `_MODE_MATERIALISE`
+    (`--materialise`) both return from `_build` BEFORE `_dispatch` runs, so
+    neither has a build dir to wipe. Left unchecked, `tan build --plan-from
+    p.json --pristine` used to exit 0 with `issues: []` -- silently doing
+    nothing with the flag, the tan-cli#183 defect class re-entering through
+    the mode flags. Refused with the same code/exit `--execute
+    --materialise` already uses for an invalid combination, never a silent
+    no-op."""
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    proc = run_tan(
+        "build", "--plan-from", str(plan), mode_flag, "--pristine",
+        "--format", "json", cwd=project,
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 2, env
+    assert env["ok"] is False
+    assert env["exitCode"] == 2
+    assert [i["code"] for i in env["issues"]] == ["build.conflicting-flags"], env["issues"]
+    assert "--pristine" in env["issues"][0]["message"]
+    # Refused before any work: nothing materialised, nothing wiped.
+    assert not (project / "build").exists()
+
+
+def test_pristine_without_execute_bare_plan_from_is_also_refused(project):
+    """The bare `--plan-from` (no `--materialise`) half of the same guard --
+    `_MODE_PLAN`, which shows the plan and stops even earlier than
+    `_MODE_MATERIALISE` does."""
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--pristine", "--format", "json", cwd=project,
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 2, env
+    assert [i["code"] for i in env["issues"]] == ["build.conflicting-flags"], env["issues"]
+    assert not (project / "build").exists()
 
 
 # --- tan-cli#464: a command OTHER than `sdk current` discloses the same fact -

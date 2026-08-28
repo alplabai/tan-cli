@@ -383,3 +383,5 @@ and write both files from the real merged tree.
     - tan/commands/build_cmd.py: 2178 -> 2255
 - 2026-08-28 -- tan-cli#963: generate_cmd.py's own docstring for pin_issue/foreign_issue prepend-ordering grew the module 4 lines past its 1400 ceiling; no compression to fit, per repo convention
     - tan/commands/generate_cmd.py: 1400 -> 1404
+- 2026-08-28 -- PR #981 review: build_cmd.py grows ~38 lines for the --pristine/plan-materialise conflicting-flags refusal (tan-cli#427 follow-up) plus a module-docstring precedent note -- a coded refusal for a defect class, not padding.
+    - tan/commands/build_cmd.py: 2255 -> 2293
