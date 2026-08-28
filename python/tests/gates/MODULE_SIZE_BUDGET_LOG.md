@@ -371,6 +371,8 @@ and write both files from the real merged tree.
     - tan/commands/explain_cmd.py: 1087 -> 1135
 - 2026-08-28 -- explain_cmd.py: tan-cli#966 docstring fix corrects the ambiguous-selector reason in _print_sdk_resolution_warnings, growing the module 3 lines past its 1135 cap
     - tan/commands/explain_cmd.py: 1135 -> 1138
+- 2026-08-28 -- PR #967 review: _soc_targets (npus[] container/element type guards + the mac_per_cycle optional-key guard) and resolve_targets (host_soc isinstance(dict) guard) both crossed the 50-line function cap carrying the review's own reasoning comments for each guard; comments kept, not compressed to fit
+    - function_count_budget: 275 -> 277
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/model_cmd.py: new entry at 1059
     - tan/model/adapters/ethos_u.py: new entry at 886

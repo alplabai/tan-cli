@@ -34,7 +34,23 @@ def resolve_soc_path(silicon: str | None, metadata_root: Path) -> Path | None:
     `loader._silicon_to_soc_path` is the planner's raising variant. This is the
     soft-fail one `tan.planner.som_metadata` and `tan.model.targets` share.
     """
-    if not silicon:
+    if not isinstance(silicon, str) or not silicon:
+        # A non-string `silicon:` (e.g. a hand-authored `silicon: 7`) is
+        # "not exactly 3 colon-separated parts" exactly as much as a falsy
+        # one is -- the docstring above already promises None for that
+        # shape, `silicon.split(":")` below just didn't deliver on it
+        # (`AttributeError: 'int' object has no attribute 'split'`,
+        # tan-cli#967 review). This is a SHARED leaf (re-exported by
+        # `tan.planner.som_metadata`, imported directly by
+        # `tan.model.targets`) -- fixing it here, once, fixes every caller
+        # identically rather than needing a matching guard at each call
+        # site. Every existing caller already treats a None return as
+        # "unresolved" and reports it through its own error message
+        # (`_load_soc_spec` -> `ZephyrBoardEmitError("... is not a
+        # triple-colon string")`, `resolve_targets` -> `ValueError`), so
+        # this changes a crash into the SAME clean diagnostic those callers
+        # already produce for a malformed-but-string ref, not a new
+        # behaviour.
         return None
     parts = silicon.split(":")
     if len(parts) != 3:
