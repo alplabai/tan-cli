@@ -49,6 +49,8 @@ IMPORT_TO_DIST = {
     "serial": "pyserial",
     "truststore": "truststore",
     "certifi": "certifi",
+    "cbor2": "cbor2",
+    "tflite": "tflite",
 }
 
 #: Vendored customer scaffolds are template DATA, not part of tan's own runtime
