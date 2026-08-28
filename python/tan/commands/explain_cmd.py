@@ -836,7 +836,10 @@ def _print_sdk_resolution_warnings(sdk: SdkInfo | None) -> None:
 
     `sdk` is `None` on every path that never resolved a checkout --
     `--template`/`--target` (`resolve`'s three raises), the two selector-
-    clash refusals raised before `--code` is even read, and `bind_sdk`'s own
+    clash refusals (`explain.positional-template-conflict` fires before
+    `--code` is even cleaned; `explain.ambiguous-selector` fires only once
+    `--code` IS set, but both `_fail` before `bind_sdk` is ever called, so
+    neither attempts checkout resolution), and `bind_sdk`'s own
     `explain.sdk-root-unresolved` raise (it raises BEFORE building an
     `SdkInfo`, which is why tan-cli#950 had to carry that one pair through
     `ExplainError.extra_issues` instead -- the two mechanisms are disjoint by

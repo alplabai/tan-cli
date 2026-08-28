@@ -367,3 +367,5 @@ and write both files from the real merged tree.
     - function_count_budget: 274 -> 275
 - 2026-08-28 -- tan-cli#959: explain_cmd.py grows a shared _print_sdk_resolution_warnings() helper wired into the success path and _fail's text branch, closing the text-mode SDK-advisory disclosure gap
     - tan/commands/explain_cmd.py: 1087 -> 1135
+- 2026-08-28 -- explain_cmd.py: tan-cli#966 docstring fix corrects the ambiguous-selector reason in _print_sdk_resolution_warnings, growing the module 3 lines past its 1135 cap
+    - tan/commands/explain_cmd.py: 1135 -> 1138

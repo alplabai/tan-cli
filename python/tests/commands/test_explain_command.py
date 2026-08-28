@@ -414,7 +414,10 @@ def _broken_pin_with_working_fallback(tmp_path, monkeypatch, fallback_sdk: Path)
     (proj / ".alp").mkdir(parents=True)
     (proj / ".alp" / "sdk-path").write_text(
         json.dumps(
-            {"sdkPath": str(tmp_path / "gone-checkout"), "updatedAt": "2026-01-01T00:00:00Z"}
+            {
+                "sdkPath": str(tmp_path / "gone-checkout").replace("\\", "/"),
+                "updatedAt": "2026-01-01T00:00:00Z",
+            }
         )
     )
     return proj
