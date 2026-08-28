@@ -378,3 +378,7 @@ and write both files from the real merged tree.
     - tan/planner/kconfig.py: 2092 -> 2107
 - 2026-08-28 -- tan-cli#957 family, round 4: guard cores[].vector_extension against a non-string in the G-2 TFLM kernel selector, same isinstance-guard pattern as cores[].type
     - tan/planner/kconfig.py: 2107 -> 2108
+- 2026-08-28 -- tan-cli#441: extract doctor_cmd.host_environment_checks + the shared _resolve_prerequisites_environment seam so support-bundle stops running doctor's whole build/flash-readiness checklist for five host checks; moved code grew doctor_cmd.py/support_bundle_cmd.py and added one long function (the seam itself, a verbatim relocation of the existing bootstrapManifest/hostPrerequisites block).
+    - tan/commands/doctor_cmd.py: 4045 -> 4145
+    - tan/commands/support_bundle_cmd.py: 1066 -> 1067
+    - function_count_budget: 277 -> 278
