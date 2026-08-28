@@ -32,6 +32,16 @@ def _write(path, doc) -> None:
     path.write_text(json.dumps(doc), encoding="utf-8")
 
 
+def _posix(path) -> str:
+    """Posix-normalise a `Path` for comparison against a message the module
+    ALREADY posix-normalises internally (tan-cli#964 review, blocker 2) --
+    `str(Path(...))` alone renders with the platform's native separator,
+    which would only ever match on POSIX; every assertion below that embeds
+    a filesystem path goes through this so the test passes identically on
+    Windows and POSIX."""
+    return str(path).replace("\\", "/")
+
+
 def test_soc_spec_and_som_preset_schema_path_join_metadata_root(tmp_path):
     assert soc_spec_schema_path(tmp_path) == tmp_path / "schemas" / "soc-spec-v1.schema.json"
     assert som_preset_schema_path(tmp_path) == tmp_path / "schemas" / "som-preset-v1.schema.json"
@@ -56,7 +66,7 @@ def test_schema_errors_with_a_source_prefixes_every_message(tmp_path):
 
     errors = schema_errors({"type": 7}, schema_path, source=doc_path)
 
-    assert errors == [f"{doc_path}: type: 7 is not of type 'string'"]
+    assert errors == [f"{_posix(doc_path)}: type: 7 is not of type 'string'"]
 
 
 def test_schema_errors_sorted_and_empty_on_a_clean_document(tmp_path):
@@ -84,7 +94,7 @@ def test_validate_document_reports_a_violation_with_the_source_prefixed(tmp_path
 
     errors = validate_document({"type": 7}, schema_path, doc_path)
 
-    assert errors == [f"{doc_path}: type: 7 is not of type 'string'"]
+    assert errors == [f"{_posix(doc_path)}: type: 7 is not of type 'string'"]
 
 
 def test_validate_document_is_empty_on_a_clean_document(tmp_path):
@@ -136,7 +146,9 @@ def test_validate_document_reports_one_message_for_a_corrupt_schema_file(tmp_pat
     errors = validate_document({"type": 7}, schema_path, doc_path)
 
     assert len(errors) == 1
-    assert errors[0].startswith(f"{doc_path}: could not validate against {schema_path}: ")
+    assert errors[0].startswith(
+        f"{_posix(doc_path)}: could not validate against {_posix(schema_path)}: "
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -102,6 +102,14 @@ def _write(path: Path, doc: dict) -> None:
     path.write_text(json.dumps(doc), encoding="utf-8")
 
 
+def _posix(path: Path) -> str:
+    """Posix-normalise a `Path` for comparison against a message the module
+    ALREADY posix-normalises internally (tan-cli#964 review, blocker 2) --
+    `str(Path(...))` alone renders with the platform's native separator,
+    which would only ever match on POSIX."""
+    return str(path).replace("\\", "/")
+
+
 def _som_preset_yaml(sku: str = _SKU, silicon: str = _SILICON) -> str:
     return (
         f"schema_version: 1\nsku: {sku}\nsilicon: \"{silicon}\"\n"
@@ -155,7 +163,7 @@ def test_a_schema_invalid_soc_spec_refuses_load_board_yaml(loader, tmp_path):
     # Names the file, the JSON pointer, and what was found -- tan-cli#964's
     # own CX requirement, not the bare "schema validation failed".
     soc_path = metadata_root / "socs" / "vendor" / "family" / "part.json"
-    assert f"  - {soc_path}: cores/0/type: 7 is not of type 'string'" in message.splitlines()
+    assert f"  - {_posix(soc_path)}: cores/0/type: 7 is not of type 'string'" in message.splitlines()
 
 
 def test_a_schema_invalid_som_preset_refuses_before_the_soc_spec_is_even_read(loader, tmp_path):
@@ -177,7 +185,7 @@ def test_a_schema_invalid_som_preset_refuses_before_the_soc_spec_is_even_read(lo
 
     message = str(excinfo.value)
     assert message.startswith(f"SoM preset {_SKU} does not validate against som-preset-v1:")
-    assert f"  - {preset_path}: silicon: 7 is not of type 'string'" in message.splitlines()
+    assert f"  - {_posix(preset_path)}: silicon: 7 is not of type 'string'" in message.splitlines()
 
 
 def test_a_schema_valid_document_pair_is_untouched(loader, tmp_path):
@@ -245,9 +253,13 @@ def test_a_missing_schema_file_discloses_the_skip_when_asked(loader, tmp_path):
 
     assert project.sku == _SKU
     assert project.soc_spec["cores"][0]["type"] == 7
+    # Posix-normalised (`\` -> `/`), same as every other field this module
+    # puts on the wire (tan-cli#964 review, blocker 2) -- `_posix`, not the
+    # native `str(Path)`, so this passes identically on Windows and POSIX.
+    schema_path = metadata_root / "schemas" / "soc-spec-v1.schema.json"
     assert skip_advisories == [
-        f"{soc_path}: not validated -- no schema at "
-        f"{metadata_root / 'schemas' / 'soc-spec-v1.schema.json'} in this checkout"
+        f"{_posix(soc_path)}: not validated -- no schema at "
+        f"{_posix(schema_path)} in this checkout"
     ]
 
 
