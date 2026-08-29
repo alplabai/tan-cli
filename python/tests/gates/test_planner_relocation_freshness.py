@@ -540,7 +540,20 @@ from tests.conftest import sdk_root
 #: pins `eb96112b` leaves the whole relocated model-engine surface unmeasured
 #: in CI. Do NOT move it before then -- #1470 is unmerged, so there is no
 #: post-merge SHA to move it to.
-PINNED_SDK_COMMIT = "eb96112ba7d1cc3b4084c985962ea31772177d74"  # alp-sdk v0.16.0 -- see above
+#: AUTOMATED RE-SYNC (mirror / PINNED_HASHES): `eb96112b` -> `722320a1`, proposed by
+#: `python/scripts/planner_resync.py`. THIS BLOCK IS MACHINE-WRITTEN and
+#: records only WHAT moved -- it makes no claim about behaviour, and no
+#: claim that anything was audited. Replace it with the audited narrative
+#: (which of the commits below are behavioural, what was ported, what was
+#: re-measured rather than taken on a subject line) before merging. That
+#: narrative is the reviewer's job and is the reason this PR does not
+#: auto-merge.
+#:
+#:   scripts/alp_orchestrate/buildplan.py: merged
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 722320a1 feat(scripts,metadata): --cores template selector and optional per-core toolchain (#1652, #964) (#1835)
+PINNED_SDK_COMMIT = "722320a1abe3cea675e99e97300b8a484b4e8464"  # alp-sdk v0.16.0 -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -578,7 +591,7 @@ PINNED_SDK_COMMIT = "eb96112ba7d1cc3b4084c985962ea31772177d74"  # alp-sdk v0.16.
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "03b610ce02d1819d09ad3d5d233bbbd46b950bdc09448748b17ebc5a1b57f272",
-    "buildplan.py": "54c49e8bd21dc0a283b6499b6b39314b089cf2cd65166451f884df614b7dca9f",
+    "buildplan.py": "72b2f5227b57674f4e752c8a6578f0d703c10d0b6d2e3df8c41872f8fd748cb1",
     "carveout.py": "c05826e4b784965c332dc662c9aa82b993787d7ab588771c7aee5feaa93feb4e",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
