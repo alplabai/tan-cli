@@ -549,3 +549,5 @@ several less obvious failures.
     - tan/model/adapters/ethos_u.py: 886 -> 889
     - tan/planner/template.py: 1481 -> 1484
     - function_count_budget: 296 -> 298
+- 2026-08-29 -- gate/review fixes tan-cli#997: divergence-note comments on kconfig_symbols.py/template.py
+    - tan/planner/template.py: 1484 -> 1488

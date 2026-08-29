@@ -72,7 +72,15 @@ import pathlib
 PYTHON_ROOT = pathlib.Path(__file__).resolve().parents[2]
 TAN_ROOT = PYTHON_ROOT / "tan"
 
-_SPAWN_ATTRS = {"run", "Popen", "check_output", "call"}
+_SPAWN_ATTRS = {"run", "Popen", "check_output", "call", "check_call"}
+
+#: `subprocess.<attr>` calls that shell out with NO `env=` parameter at all --
+#: the same unverifiable-by-construction shape `os.system`/`os.popen` are
+#: banned for below, just spelled on the `subprocess` module instead of `os`.
+#: `getoutput`/`getstatusoutput` cannot be routed through `spawn_env` no
+#: matter how the call site is written, so they are refused outright rather
+#: than added to `_SPAWN_ATTRS` (which assumes an `env=` keyword to inspect).
+_BANNED_SUBPROCESS_ATTRS = {"getoutput", "getstatusoutput"}
 
 #: Bare names trusted directly -- the ONE primitive itself, matched whether
 #: called unqualified (`spawn_env(...)`) or through a module qualifier
@@ -130,18 +138,27 @@ def _resolves_to_spawn(func: ast.expr, aliases: _ModuleAliases) -> str | None:
     return None
 
 
-def _trusted_call_names_present(expr: ast.expr) -> set[str]:
+def _trusted_call_names_present(expr: ast.expr, rel: str) -> set[str]:
     """Every `Call`'s resolved name anywhere inside `expr`'s own subtree --
     catches `with_venv_on_path(spawn_env(), tool)` and
     `spawn_env(base=with_venv_on_path(...))` alike, not just a bare top-level
-    call."""
+    call.
+
+    `rel` is the POSIX-relative path of the file this expression was parsed
+    out of. `_TRUSTED_MODULE_WRAPPERS` is keyed by bare name, but trust is
+    granted only when `rel` matches the wrapper's OWN recorded definition
+    site -- a same-named function defined in some OTHER file (e.g. a second,
+    unrelated `_child_env()` that never calls `spawn_env`) must not borrow the
+    verified one's trust just because the name collides."""
     found: set[str] = set()
     for node in ast.walk(expr):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
         if isinstance(func, ast.Name):
-            if func.id == _TRUSTED_PRIMITIVE or func.id in _TRUSTED_MODULE_WRAPPERS:
+            if func.id == _TRUSTED_PRIMITIVE:
+                found.add(func.id)
+            elif func.id in _TRUSTED_MODULE_WRAPPERS and _TRUSTED_MODULE_WRAPPERS[func.id][0] == rel:
                 found.add(func.id)
         elif isinstance(func, ast.Attribute):
             if func.attr == _TRUSTED_PRIMITIVE:
@@ -184,7 +201,7 @@ class _EnclosingScopeTracker(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def _locally_trusted_names(func: ast.AST) -> dict[str, set[str]]:
+def _locally_trusted_names(func: ast.AST, rel: str) -> dict[str, set[str]]:
     """`{variable: trusted-call-names-found-in-its-assignment}` for every
     plain `name = <expr>` assignment anywhere in `func`'s body (nested blocks
     included -- an `if`/`try` does not hide the assignment from this walk,
@@ -197,7 +214,7 @@ def _locally_trusted_names(func: ast.AST) -> dict[str, set[str]]:
     for node in ast.walk(func):
         if not isinstance(node, ast.Assign):
             continue
-        trusted = _trusted_call_names_present(node.value)
+        trusted = _trusted_call_names_present(node.value, rel)
         for target in node.targets:
             if isinstance(target, ast.Name):
                 out.setdefault(target.id, set()).update(trusted)
@@ -233,7 +250,7 @@ def _violations_in_file(path: pathlib.Path) -> list[str]:
         if isinstance(env_kw.value, ast.Constant) and env_kw.value.value is None:
             out.append(f"{rel}:{node.lineno}: subprocess.{spawn_attr}(..., env=None)")
             continue
-        trusted = _trusted_call_names_present(env_kw.value)
+        trusted = _trusted_call_names_present(env_kw.value, rel)
         enclosing_class = scope_tracker.class_of_call.get(id(node))
         enclosing_func = scope_tracker.func_of_call.get(id(node))
         ok = bool(trusted & ({_TRUSTED_PRIMITIVE} | set(_TRUSTED_MODULE_WRAPPERS)))
@@ -248,7 +265,7 @@ def _violations_in_file(path: pathlib.Path) -> list[str]:
             # a same-named variable elsewhere in the file.
             cache_key = id(enclosing_func)
             if cache_key not in locals_cache:
-                locals_cache[cache_key] = _locally_trusted_names(enclosing_func)
+                locals_cache[cache_key] = _locally_trusted_names(enclosing_func, rel)
             local_trust = locals_cache[cache_key].get(env_kw.value.id, set())
             ok = bool(local_trust & ({_TRUSTED_PRIMITIVE} | set(_TRUSTED_MODULE_WRAPPERS)))
         if not ok:
@@ -280,7 +297,11 @@ def test_the_walk_actually_finds_the_real_call_sites():
     """Anti-vacuity: a broken import-alias resolver or a moved package root
     would make `_all_violations` silently return `[]` having looked at
     nothing, and the test above would report a false green forever.
-    `flash_cmd.py` alone has 5 real spawn sites."""
+    `flash_cmd.py` alone has 5 real spawn sites -- counted as THAT file's own
+    contribution (`found - before`), not the running total across every file
+    sorted ahead of it, which is already well past 5 by the time the walk
+    reaches `flash_cmd.py` and so could never catch all 5 of its sites going
+    silently missing."""
     found = 0
     for path in sorted(TAN_ROOT.rglob("*.py")):
         rel = path.relative_to(PYTHON_ROOT).as_posix()
@@ -289,11 +310,12 @@ def test_the_walk_actually_finds_the_real_call_sites():
         aliases.visit(tree)
         if not aliases.module_names and not aliases.bare_names:
             continue
+        before = found
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and _resolves_to_spawn(node.func, aliases):
                 found += 1
         if rel == "tan/commands/flash_cmd.py":
-            assert found >= 5, f"only found {found} spawn sites total by flash_cmd.py"
+            assert found - before >= 5, f"only found {found - before} spawn sites in flash_cmd.py"
     assert found >= 30, f"only {found} subprocess spawn sites found under {TAN_ROOT}"
 
 
@@ -348,23 +370,32 @@ def test_no_os_level_spawn_bypasses_the_check():
     """`os.system`/`os.popen` cannot be checked by the rule above at all --
     `os.system` has no `env=` parameter (it always shells out through the
     CURRENT process's environment, unrestorable per-call), and `os.popen` is
-    the same shell-out shape. Neither is used under `python/tan/` today; this
-    fails loudly the day one is added, rather than silently letting a spawn
-    class this gate cannot verify slip in unexamined."""
+    the same shell-out shape. `subprocess.getoutput`/`getstatusoutput` are the
+    identical unverifiable shape spelled on the OTHER module -- no `env=`
+    parameter exists on either, so `_SPAWN_ATTRS`'s env-inspection machinery
+    can never apply to them (`_BANNED_SUBPROCESS_ATTRS`, above). None of these
+    six names is used under `python/tan/` today; this fails loudly the day
+    one is added, rather than silently letting a spawn class this gate cannot
+    verify slip in unexamined."""
     banned = {"system", "popen", "spawnl", "spawnv", "spawnlp", "spawnvp"}
     hits: list[str] = []
     for path in sorted(TAN_ROOT.rglob("*.py")):
         rel = path.relative_to(PYTHON_ROOT).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        aliases = _ModuleAliases()
+        aliases.visit(tree)
         for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in banned
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "os"
-            ):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue
+            if not isinstance(node.func.value, ast.Name):
+                continue
+            if node.func.value.id == "os" and node.func.attr in banned:
                 hits.append(f"{rel}:{node.lineno}: os.{node.func.attr}(...)")
+            elif (
+                node.func.value.id in aliases.module_names
+                and node.func.attr in _BANNED_SUBPROCESS_ATTRS
+            ):
+                hits.append(f"{rel}:{node.lineno}: subprocess.{node.func.attr}(...)")
     assert not hits, (
         "these spawn calls cannot be verified by this gate at all -- route "
         "through subprocess + tan.core.subprocess_env.spawn_env instead:\n  "

@@ -359,6 +359,11 @@ def _load_board_symbols(zephyr_base: Path, board_triple: str) -> list[dict[str, 
             f"-DEXTRA_KCONFIG_TARGETS={_KCONFIG_TARGET}",
             f"-DEXTRA_KCONFIG_TARGET_COMMAND_FOR_{_KCONFIG_TARGET}={target_cmd}",
         ]
+        # RELOCATED divergence from alp-sdk's own scripts/alp_orchestrate/
+        # kconfig_symbols.py: `env=spawn_env()` on both `west build` spawns
+        # below is a tan-only addition (tan-cli#992) -- alp-sdk's own copy
+        # has no such restore because it never ships as a frozen PyInstaller
+        # bundle whose LD_LIBRARY_PATH would otherwise leak into the child.
         proc = subprocess.run(configure_cmd, cwd=zephyr_base.parent,
                               capture_output=True, text=True, env=spawn_env())
         if proc.returncode != 0:
