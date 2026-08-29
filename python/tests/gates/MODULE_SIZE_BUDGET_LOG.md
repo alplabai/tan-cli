@@ -436,3 +436,6 @@ and write both files from the real merged tree.
     - tan/planner/loader.py: 1335 -> 1410
     - function_count_budget: 279 -> 287
     - function_worst_budget: 770 -> 791
+- 2026-08-29 -- tan-cli#991: RunPaths frozen. The growth IS the fix and cannot be written in zero lines -- eleven in-place field assignments become five explicit replace() rebindings (a replace(paths, a=.., b=.., c=..) spans more lines than the three 'paths.x =' it replaces), plus WorkspacePlan.adopted_paths so _select_workspace returns the adoption instead of writing through its parameter, the caller-side rebinding that makes it visible, and a nonlocal in the rollback closure. Measured split of the added lines: 35 code, 24 comment. The comments are the load-bearing kind this module is written in -- why nonlocal is required there and not in the read-only payload closure, why the pre-manifest guessed-.venv read stays correct by construction, and why one frozen snapshot retires RelocationUndo's field-by-field copy. Not the tan-cli#921 shape, where the growth was prose around a one-token fix.
+    - tan/commands/bootstrap_cmd.py: 3567 -> 3600
+    - function_worst_budget: 791 -> 804
