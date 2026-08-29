@@ -22,6 +22,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -1013,18 +1014,19 @@ def test_an_idle_open_stdin_pipe_falls_through_to_the_no_dump_refusal():
 # --------------------------------------------------------------------------
 
 
-def _run_with_scripted_stdin_writer(
-    args: list[str], writer_code: str, *, hold_open_after: bool
-) -> tuple[int, str, str]:
+def _run_with_scripted_stdin_writer(args: list[str], writer_code: str) -> tuple[int, str, str]:
     """Spawn `python -m tan faultdecode <args>` with stdin fed by a SEPARATE
     child process running `writer_code` (a `python -c` snippet writing to its
     own stdout, piped into the `tan faultdecode` child's stdin) -- so writes
     can be scheduled with real delays without this test process itself
     blocking on a write the reader might not drain fast enough.
 
-    `hold_open_after`: whether the writer's own process (and therefore the
-    pipe's write end) stays alive/open after writing, so the read side can
-    only terminate via a bound firing, never via EOF."""
+    Whether the writer's own process (and therefore the pipe's write end)
+    stays alive/open after writing -- so the read side can only terminate via
+    a bound firing, never via EOF -- is entirely up to `writer_code` itself
+    (`_SLOW_STEADY_WRITER` exits promptly; `_WRITE_THEN_HOLD_OPEN_WRITER`
+    sleeps past the idle bound before exiting); there is nothing this helper
+    could do to affect that from the outside, so it takes no flag for it."""
     writer = subprocess.Popen(  # noqa: S603 -- fixed argv, no shell
         [sys.executable, "-c", writer_code],
         stdout=subprocess.PIPE,
@@ -1113,9 +1115,7 @@ def test_slow_but_steady_dump_is_decoded_in_full_with_no_truncation_notice():
     truncation notice on stderr -- this is the fixture that fails against
     the reverted "20x the idle window" constant and would have caught it
     before it shipped."""
-    rc, out, err = _run_with_scripted_stdin_writer(
-        ["--format", "json"], _SLOW_STEADY_WRITER, hold_open_after=False
-    )
+    rc, out, err = _run_with_scripted_stdin_writer(["--format", "json"], _SLOW_STEADY_WRITER)
     assert rc == 0, err
     payload = json.loads(out)
     assert payload["data"]["inputs"]["cfsr"] == "0x00008019"  # the LAST line wins (last parsed)
@@ -1141,7 +1141,7 @@ _WRITE_THEN_HOLD_OPEN_WRITER = (
 
 def test_a_complete_dump_written_then_held_open_past_the_idle_bound_still_decodes():
     rc, out, err = _run_with_scripted_stdin_writer(
-        ["--format", "json"], _WRITE_THEN_HOLD_OPEN_WRITER, hold_open_after=True
+        ["--format", "json"], _WRITE_THEN_HOLD_OPEN_WRITER
     )
     assert rc == 0, err
     payload = json.loads(out)
@@ -1151,15 +1151,61 @@ def test_a_complete_dump_written_then_held_open_past_the_idle_bound_still_decode
     assert [i["code"] for i in payload["issues"]] == ["faultdecode.stdin-truncated"]
 
 
-def test_an_infinite_producer_terminates_and_stays_far_under_the_byte_cap():
-    """The `yes` shape (issue #537): unguarded, this reached 409.7 MB RSS
-    over 9.59s. Guarded, it must terminate (via the byte cap, well before
-    the idle/total bounds would even matter for a fast producer) and
-    announce truncation. Peak RSS is not measured here (coarse timing only,
-    per the design's own instruction) -- the byte cap firing at all, on a
-    producer that never goes idle and never reaches EOF, is the property
-    that stands in for it: a fixed 1 MiB cap bounds the buffer regardless of
-    how long the producer is left running."""
+#: A PREAMBLE with no register values at all, then held open past the idle
+#: bound -- the shape a bound can fire on WITHOUT ever producing a complete
+#: register set (tan-cli#537 constraint 4's hole, closed after initial
+#: review): unlike `_WRITE_THEN_HOLD_OPEN_WRITER` above, nothing here ever
+#: parses into cfsr/hfsr/dfsr, so this lands on the `faultdecode.no-registers`
+#: REFUSAL, not a successful decode -- the exact case a refusal used to
+#: announce nothing about.
+_PREAMBLE_THEN_HOLD_OPEN_WRITER = (
+    "import sys, time\n"
+    "sys.stdout.buffer.write(b'preamble that is not a register at all\\n')\n"
+    "sys.stdout.buffer.flush()\n"
+    "time.sleep(6)\n"
+)
+
+
+def test_a_bound_firing_with_bytes_but_no_registers_still_announces_on_stderr():
+    """The reviewer's own reproduction of constraint 4's hole on `#998`: bytes
+    arrive, the idle bound fires, but nothing in what arrived is a complete
+    register set -- so this falls all the way through to the
+    `faultdecode.no-registers` refusal. Before the fix, that refusal path
+    built its own message from scratch and never looked at whether a bound
+    had fired, so the truncation vanished -- the engineer was told "no fault
+    registers supplied" (implying nothing arrived at all) with EMPTY stderr,
+    when tan had in fact read 39 bytes and then given up.
+
+    Asserted in DEFAULT TEXT MODE specifically, not `--format json`:
+    constraint 4 says the announcement belongs on the default surface, and
+    `_refuse`'s envelope-mode branch and its plain-text branch build stderr
+    differently enough that only actually exercising the plain-text path
+    proves it."""
+    rc, out, err = _run_with_scripted_stdin_writer([], _PREAMBLE_THEN_HOLD_OPEN_WRITER)
+    assert rc == 2
+    assert out == ""
+    assert "Warning: stdin idle" in err  # the bound announcement...
+    assert "Error: no fault registers supplied" in err  # ...alongside the refusal
+    assert "stopped reading part-way" in err  # ...distinguished from "nothing arrived"
+
+
+def test_an_infinite_producer_terminates_via_the_byte_cap_and_announces_truncation():
+    """The `yes` shape (issue #537): unguarded, this reached 409.7 MB RSS over
+    9.59s. Guarded, the end-to-end SUBPROCESS must terminate (via the byte
+    cap, well before the idle/total bounds would even matter for a fast
+    producer) and announce truncation -- proven here at the timing/exit-code/
+    issues[] level, on the real binary.
+
+    Peak RSS is NOT measured here -- by the time this subprocess exits (a
+    handful of milliseconds after the cap fires: decode + render + exit,
+    nothing slower), there is no live PID left to sample, and the previous
+    name of this test (`..._stays_far_under_the_byte_cap`) claimed a
+    memory-bound property this test could never have caught regardless of
+    what the queue actually did. `test_read_stdin_bounded_queue_stays_
+    bounded_after_the_byte_cap_fires` below is the one that actually
+    measures RSS -- it calls `_read_stdin_bounded` in-process against a real
+    OS pipe precisely so the reader thread's growth after abandonment stays
+    observable, which a subprocess boundary here would hide."""
     yes = subprocess.Popen(["yes", "CFSR: 0x00008200"], stdout=subprocess.PIPE)
     proc = subprocess.Popen(
         [sys.executable, "-m", "tan", "faultdecode", "--format", "json"],
@@ -1189,6 +1235,79 @@ def test_an_infinite_producer_terminates_and_stays_far_under_the_byte_cap():
     assert [i["code"] for i in payload["issues"]] == ["faultdecode.stdin-truncated"]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="RSS sampling here is `resource.getrusage`, POSIX-only"
+)
+def test_read_stdin_bounded_queue_stays_bounded_after_the_byte_cap_fires():
+    """tan-cli#537 follow-up: constraint 3 says the cap bounds the BUFFER,
+    but until now the abandoned reader thread (see `_read_stdin_bounded`'s
+    own docstring on why it is abandoned, not joined) kept enqueuing to an
+    unbounded `queue.Queue()` that nobody was left to drain. Measured
+    against a real OS pipe fed as fast as a background thread could write,
+    timestamped from the moment the byte cap fired: 640.1 MB at +0.5s,
+    1059.6 MB at +1.0s, 2001.9 MB at +2.0s, 3845.8 MB at +4.0s -- bounded
+    only by how soon the process happened to exit, which is not a bound.
+
+    Calls `_read_stdin_bounded` directly, in-process, rather than driving
+    the full `tan faultdecode` subprocess (the test above): the guarded
+    subprocess exits within milliseconds of the cap firing, before there is
+    any live PID left whose RSS could be sampled meaningfully. Keeping the
+    reader thread inside THIS test process, and this process alive for a
+    few seconds after the cap fires, is what makes the abandoned thread's
+    growth observable at all.
+
+    `_STDIN_DRAIN_QUEUE_MAXSIZE` is the fix under test: `ru_maxrss` is a
+    high-water mark, so comparing it before the call against several
+    seconds after asserts the abandoned thread cannot keep pushing that
+    peak up without limit, without needing to poll a live RSS number."""
+    import resource
+
+    from tan.commands.faultdecode_cmd import _read_stdin_bounded
+
+    read_fd, write_fd = os.pipe()
+
+    def _feed_forever() -> None:
+        chunk = b"x" * 65536
+        try:
+            while True:
+                os.write(write_fd, chunk)
+        except OSError:
+            pass  # the read end closed at teardown -- this thread is daemon
+
+    feeder = threading.Thread(target=_feed_forever, daemon=True)
+    feeder.start()
+
+    class _RealFdBuffer:
+        """Wraps a raw fd so `_read_stdin_bounded`'s `buffer.fileno()` probe
+        takes the real-`os.read` path, not the `.read1()` fallback -- the
+        shape a real `sys.stdin.buffer` over a pipe actually is."""
+
+        def fileno(self) -> int:
+            return read_fd
+
+    try:
+        before_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        outcome = _read_stdin_bounded(
+            _RealFdBuffer(), idle_s=5.0, byte_cap=1_048_576, total_s=10.0
+        )
+        assert outcome.bound == "byte-cap"
+        assert len(outcome.data) == 1_048_576
+        time.sleep(2.0)  # give the abandoned reader thread room to misbehave
+        after_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # ru_maxrss is KiB on Linux, bytes on Darwin (a long-standing libc
+        # quirk) -- normalise both to MB so one assertion covers both CI
+        # runners this suite ships on (ubuntu-latest, macos-latest).
+        unit_kib = 1.0 if sys.platform != "darwin" else 1.0 / 1024.0
+        grew_mb = (after_kb - before_kb) * unit_kib / 1024.0
+        assert grew_mb < 50, (
+            f"RSS grew {grew_mb:.1f} MB in 2s after the byte cap fired -- "
+            "the abandoned reader thread's queue is not bounded"
+        )
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+
 def test_detached_stdin_devnull_is_a_clean_no_dump_not_a_crash():
     """`stdin=DEVNULL` is immediate EOF, zero bytes -- one of the "detached /
     replaced stdin" shapes tan-cli#537 names, driven end to end rather than
@@ -1204,17 +1323,32 @@ def test_detached_stdin_devnull_is_a_clean_no_dump_not_a_crash():
     assert payload["issues"] == []
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="preexec_fn is POSIX-only; Popen raises on Windows"
+)
 def test_detached_stdin_closed_fd_is_a_clean_no_dump_not_a_crash():
     """A shell (or launcher) that closes fd 0 before exec -- `sys.stdin` is
     still a real object, but reading it raises. Must degrade to "no implicit
-    dump" cleanly. `close_fds=True` (the `subprocess` default on POSIX
-    already) plus `stdin=subprocess.DEVNULL` covers the portable version of
-    this above; this variant additionally checks the no-flags refusal path
-    still answers (not the open-but-silent wording, since there is no pipe
-    at all here to have been silent on)."""
+    dump" cleanly.
+
+    A GENUINELY closed fd 0, not `stdin=subprocess.DEVNULL` (the test above):
+    `preexec_fn` runs in the child between `fork()` and `exec()`, before
+    `subprocess` would otherwise `dup2` a redirection onto fd 0 -- passing no
+    `stdin=` kwarg here means no such `dup2` ever happens, so the `os.close(0)`
+    below survives into the exec'd process. `/dev/null` is an OPEN fd whose
+    reads return `b""` immediately; a CLOSED fd 0 makes `buffer.fileno()`
+    still return `0` (the number is just stored, not validated) but the
+    background reader's `os.read(0, ...)` then raises `OSError` (EBADF) --
+    caught by `_drain`'s own `except (OSError, ValueError)`, not the clean-EOF
+    path `DEVNULL` takes. Verified this doesn't crash before writing this
+    test: `preexec_fn=os.close(0)` gave rc 0 with `--cfsr` supplied and this
+    same rc 2 without it, never raising -- this test pins the second half of
+    that, plus that the no-flags refusal path still answers (not the
+    open-but-silent wording, since there is no pipe at all here to have been
+    silent on)."""
     result = subprocess.run(
         [sys.executable, "-m", "tan", "faultdecode", "--format", "json"],
-        stdin=subprocess.DEVNULL,
+        preexec_fn=lambda: os.close(0),  # noqa: S603 -- POSIX-only; a real closed fd 0
         capture_output=True, text=True, timeout=_OPEN_STDIN_TIMEOUT_S, check=False,
     )
     assert result.returncode == 2

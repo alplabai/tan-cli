@@ -186,7 +186,13 @@ def _parse_hexint(option: str, value: str | None) -> int | None:
     return parsed
 
 
-def _refuse(code: str, message: str, *, envelope_mode: bool) -> typer.Exit:
+def _refuse(
+    code: str,
+    message: str,
+    *,
+    envelope_mode: bool,
+    extra_issues: list[Issue] | None = None,
+) -> typer.Exit:
     """Build `faultdecode`'s refusal on whichever surface the caller asked for,
     and return the `typer.Exit` for the caller to `raise`.
 
@@ -195,14 +201,23 @@ def _refuse(code: str, message: str, *, envelope_mode: bool) -> typer.Exit:
     refusal that wrote plain text under `--format json` would hand the consumer
     `command: "cli"` here and `command: "faultdecode"` one invocation later,
     which is the exact defect that issue closed for the first one.
+
+    `extra_issues` (tan-cli#537 constraint 4): a bound firing on the implicit
+    stdin read is announced here TOO, not only on the success path -- a bound
+    can fire with bytes read but no complete register set, and that refusal
+    used to say nothing about the truncation at all. Included in the envelope
+    issues[] AND echoed to stderr in every mode (not just `--format json`),
+    same as the success path's own announcement.
     """
+    for issue in extra_issues or ():
+        typer.echo(f"Warning: {issue.message}", err=True)
     if envelope_mode:
         emit(
             Envelope(
                 "faultdecode",
                 Project(root=None, board_yaml=None),
                 None,
-                [Issue(code, "error", message)],
+                [*(extra_issues or ()), Issue(code, "error", message)],
                 ExitCode.VALIDATION_FAILURE,
             )
         )
@@ -258,6 +273,24 @@ _STDIN_BYTE_CAP = 1_048_576
 #: discarding -- that announcement, not the value chosen here, is what makes
 #: a truncation recoverable instead of a confident wrong root cause.
 _STDIN_TOTAL_TIMEOUT_S = 30.0
+
+#: Bound on `_read_stdin_bounded`'s internal `chunk_queue` (tan-cli#537
+#: follow-up): the byte cap above bounds the RETURNED buffer, but the
+#: background reader thread is ABANDONED, not joined, once any bound fires
+#: (see `_read_stdin_bounded`'s own docstring on why) -- an unbounded
+#: `queue.Queue()` let that abandoned thread keep calling `os.read` + `put`
+#: against a producer that never stops (the `yes` shape) with nobody ever
+#: calling `.get()` again, growing without limit. Measured from the moment
+#: the byte cap fired against a real `yes` pipe: 640.1 MB at +0.5s, 1059.6 MB
+#: at +1.0s, 2001.9 MB at +2.0s, 3845.8 MB at +4.0s -- bounded today only by
+#: how fast the process happens to exit, which is not a bound. 16 chunks is
+#: `_STDIN_BYTE_CAP // _STDIN_CHUNK_BYTES` -- exactly enough that the queue
+#: never has to reject a chunk before the byte cap itself would have ended
+#: the main loop anyway -- plus headroom for ordinary scheduling jitter
+#: between the reader thread producing and the main loop's `.get()`
+#: consuming, so this never discards a chunk the main loop was still going
+#: to want.
+_STDIN_DRAIN_QUEUE_MAXSIZE = (_STDIN_BYTE_CAP // _STDIN_CHUNK_BYTES) + 16
 
 
 @dataclass(frozen=True)
@@ -369,7 +402,7 @@ def _read_stdin_bounded(
     except (AttributeError, OSError, ValueError):
         fd = None
 
-    chunk_queue: queue.Queue[bytes] = queue.Queue()
+    chunk_queue: queue.Queue[bytes] = queue.Queue(maxsize=_STDIN_DRAIN_QUEUE_MAXSIZE)
 
     def _read_one_chunk() -> bytes:
         if fd is not None:
@@ -377,14 +410,32 @@ def _read_stdin_bounded(
         return buffer.read1(chunk_bytes)  # type: ignore[attr-defined]
 
     def _drain() -> None:
+        # `put_nowait` + discard-on-`Full`, not a blocking `put` against a
+        # bounded queue: once the main loop below has broken out of its own
+        # `while True` (a bound fired) it never calls `.get()` again, so a
+        # blocking `put()` here would just move the "abandoned daemon thread
+        # parked in a blocking call" risk from the read syscall to the
+        # queue's own lock instead of removing it -- the exact shape this
+        # function's `os.read` fix (see its docstring) exists to avoid, only
+        # one layer up. Discarding keeps this thread doing exactly what it
+        # was already doing (repeatedly calling `_read_one_chunk`) with
+        # nothing new to block on, so it drains the pipe (the fix a real OS
+        # pipe's own backpressure gives a writer) without retaining what it
+        # reads once nobody is left to consume it.
         try:
             while True:
                 chunk = _read_one_chunk()
-                chunk_queue.put(chunk)
+                try:
+                    chunk_queue.put_nowait(chunk)
+                except queue.Full:
+                    pass
                 if not chunk:
                     return
         except (OSError, ValueError):  # pragma: no cover - env-dependent
-            chunk_queue.put(b"")
+            try:
+                chunk_queue.put_nowait(b"")
+            except queue.Full:
+                pass
 
     reader = threading.Thread(target=_drain, daemon=True)
     reader.start()
@@ -742,6 +793,19 @@ def faultdecode(
         implicit_bound = implicit.bound
         implicit_bytes = implicit.bytes_read
         implicit_silent = implicit.attempted and implicit.bound == "idle" and implicit.bytes_read == 0
+    # tan-cli#537 constraint 4: whichever bound fired on the IMPLICIT stdin
+    # read, announce it -- on stderr in EVERY mode (not only `--format json`'s
+    # `issues[]`), naming the bound and the `--file -` remedy. Only when
+    # something was actually read: a bound firing on zero bytes is the
+    # separate "silent holder" refusal (`implicit_silent` above), not a
+    # truncation. Built HERE, before the no-registers check below, so a bound
+    # that fires with bytes read but no complete register set still gets
+    # this announcement on the refusal path -- not only on the success path
+    # that used to be the only place this list was built.
+    stdin_issues: list[Issue] = []
+    if implicit_bound is not None and implicit_bytes > 0:
+        stdin_bound_message = _stdin_bound_message(implicit_bound, implicit_bytes)
+        stdin_issues.append(Issue("faultdecode.stdin-truncated", "warning", stdin_bound_message))
     parsed: dict[str, int] = parse_dump(dump_text) if dump_text else {}
 
     def pick(name: str, flag_val: int | None) -> int | None:
@@ -778,6 +842,19 @@ def faultdecode(
                 f"{_STDIN_IDLE_TIMEOUT_S:g}s -- pass --cfsr/--hfsr/--dfsr, or use "
                 "`--file -` to wait for a dump indefinitely."
             )
+        elif stdin_issues:
+            # tan-cli#537 constraint 4's hole: a bound fired WITH bytes read
+            # (unlike `implicit_silent` above, which is zero bytes), but
+            # nothing in what arrived parsed into a complete register set.
+            # The plain "no fault registers supplied" wording below would
+            # tell this caller they supplied nothing at all, when tan in
+            # fact stopped reading part-way through a real dump -- distinct
+            # from "no dump arrived" and the exact misdirection the issue
+            # calls out as worse than the truncation itself.
+            no_registers = (
+                "no fault registers supplied -- stdin delivered data, but tan "
+                f"stopped reading part-way through it: {stdin_issues[0].message}"
+            )
         else:
             no_registers = (
                 "no fault registers supplied -- pass --cfsr/--hfsr/--dfsr "
@@ -787,9 +864,14 @@ def faultdecode(
         # an envelope (tan-cli#399); leaving it to `cli.main`'s generic fallback
         # gave the consumer `command: "cli"` here and `command: "faultdecode"`
         # one invocation later. `_refuse` is that agreement, shared with the
-        # negative-register refusal above.
+        # negative-register refusal above. `extra_issues=stdin_issues` is this
+        # branch's own fix for constraint 4's hole: without it, a bound firing
+        # on a would-be refusal announced nowhere at all.
         raise _refuse(
-            "faultdecode.no-registers", no_registers, envelope_mode=envelope_mode
+            "faultdecode.no-registers",
+            no_registers,
+            envelope_mode=envelope_mode,
+            extra_issues=stdin_issues or None,
         )
 
     report = decode(
@@ -809,16 +891,11 @@ def faultdecode(
                 if sym is not None:
                     symbols[which] = sym
 
-    # tan-cli#537 constraint 4: whichever bound fired on the IMPLICIT stdin
-    # read, announce it -- on stderr in EVERY mode (not only `--format json`'s
-    # `issues[]`), naming the bound and the `--file -` remedy. Only when
-    # something was actually read: a bound firing on zero bytes is the
-    # separate "silent holder" refusal handled above, not a truncation.
-    stdin_issues: list[Issue] = []
-    if implicit_bound is not None and implicit_bytes > 0:
-        bound_message = _stdin_bound_message(implicit_bound, implicit_bytes)
-        typer.echo(f"Warning: {bound_message}", err=True)
-        stdin_issues.append(Issue("faultdecode.stdin-truncated", "warning", bound_message))
+    # `stdin_issues` was already built above (before the no-registers check),
+    # so the same list -- and the same announcement -- covers both the
+    # refusal path (via `_refuse`'s `extra_issues`) and this success path.
+    for stdin_issue in stdin_issues:
+        typer.echo(f"Warning: {stdin_issue.message}", err=True)
 
     if as_json:
         typer.echo(_json.dumps(report_to_json(report, symbols or None), indent=2))

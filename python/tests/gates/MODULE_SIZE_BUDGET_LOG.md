@@ -541,3 +541,5 @@ several less obvious failures.
 - 2026-08-29 -- tan-cli#537: the implicit-stdin reader redesign (bytes-in/one-decode/three-bounds, a raw-fd read to avoid a CPython interpreter-shutdown fault) adds real bounded-reader logic plus its own rationale-heavy docstrings to faultdecode_cmd.py; not split out because the reader is faultdecode's own private concern, not a shared abstraction yet.
     - tan/commands/faultdecode_cmd.py: new entry at 848
     - function_count_budget: 296 -> 297
+- 2026-08-29 -- tan-cli#537 review follow-up: constraint 4's hole (a bound firing with bytes but no complete registers announced nothing) and the abandoned reader thread's unbounded queue.Queue() (constraint 3's actual buffer bound) both needed fixes plus rationale-heavy docstrings in faultdecode_cmd.py; not split out for the same reason as the original entry -- the reader is faultdecode's own private concern.
+    - tan/commands/faultdecode_cmd.py: 848 -> 925
