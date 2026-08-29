@@ -446,6 +446,8 @@ and write both files from the real merged tree.
     - tan/commands/explain_cmd.py: 1087 -> 1138
     - function_count_budget: 278 -> 280
     - function_count_budget: 277 -> 279
+- 2026-08-28 -- tan-cli#952: scaffold.py wires retarget_selftest_soc_identity into the per-file loop (import + call site, +2 lines); tests/core/test_template_integrity.py's new SoC-identity guard test pushes it from under-800 to 874, entering the observed python/tests/** record
+    - tan/core/scaffold.py: 1538 -> 1540
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/build/execute.py: 1662 -> 1713
     - tan/commands/build_cmd.py: 2178 -> 2293
@@ -462,6 +464,7 @@ and write both files from the real merged tree.
     - function_worst_budget: 770 -> 791
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/explain_cmd.py: 1138 -> 1310
+    - tan/core/scaffold.py: 1540 -> 1568
     - tan/core/scaffold.py: 1538 -> 1566
 - 2026-08-29 -- tan-cli#991: RunPaths frozen. The growth IS the fix and cannot be written in zero lines -- eleven in-place field assignments become five explicit replace() rebindings (a replace(paths, a=.., b=.., c=..) spans more lines than the three 'paths.x =' it replaces), plus WorkspacePlan.adopted_paths so _select_workspace returns the adoption instead of writing through its parameter, the caller-side rebinding that makes it visible, and a nonlocal in the rollback closure. Measured split of the added lines: 35 code, 24 comment. The comments are the load-bearing kind this module is written in -- why nonlocal is required there and not in the read-only payload closure, why the pre-manifest guessed-.venv read stays correct by construction, and why one frozen snapshot retires RelocationUndo's field-by-field copy. Not the tan-cli#921 shape, where the growth was prose around a one-token fix.
     - tan/commands/bootstrap_cmd.py: 3567 -> 3600
@@ -474,4 +477,12 @@ and write both files from the real merged tree.
     - tan/commands/doctor_cmd.py: 4045 -> 4164
     - tan/commands/support_bundle_cmd.py: 1066 -> 1067
     - function_count_budget: 288 -> 289
+    - function_worst_budget: 791 -> 804
+- 2026-08-29 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3567 -> 3600
+    - tan/commands/debug_config_cmd.py: 2021 -> 2114
+    - tan/commands/doctor_cmd.py: 4045 -> 4164
+    - tan/commands/support_bundle_cmd.py: 1066 -> 1067
+    - tan/core/debug_launch.py: 1275 -> 1539
+    - function_count_budget: 287 -> 289
     - function_worst_budget: 791 -> 804
