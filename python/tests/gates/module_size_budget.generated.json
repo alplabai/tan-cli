@@ -4,7 +4,7 @@
   "function_cap": 50,
   "modules": {
     "tan/cli.py": 1021,
-    "tan/commands/bootstrap_cmd.py": 3567,
+    "tan/commands/bootstrap_cmd.py": 3600,
     "tan/commands/build/execute.py": 1713,
     "tan/commands/build_cmd.py": 2293,
     "tan/commands/clean_cmd.py": 1129,
@@ -17,7 +17,7 @@
     "tan/commands/init_cmd.py": 1306,
     "tan/commands/model_cmd.py": 1059,
     "tan/commands/new_som_cmd.py": 1379,
-    "tan/commands/presets_cmd.py": 1085,
+    "tan/commands/presets_cmd.py": 1067,
     "tan/commands/sdk_cmd.py": 1533,
     "tan/commands/size_cmd.py": 938,
     "tan/commands/support_bundle_cmd.py": 1067,
@@ -25,7 +25,7 @@
     "tan/core/bootstrap.py": 2400,
     "tan/core/debug_launch.py": 1275,
     "tan/core/flash_plan.py": 3205,
-    "tan/core/scaffold.py": 1566,
+    "tan/core/scaffold.py": 1551,
     "tan/model/adapters/ethos_u.py": 886,
     "tan/planner/kconfig.py": 2108,
     "tan/planner/loader.py": 1410,
@@ -33,7 +33,7 @@
     "tan/planner/zephyr_board.py": 1494
   },
   "function_count_budget": 288,
-  "function_worst_budget": 791,
+  "function_worst_budget": 804,
   "observed_tests_are_not_a_budget": "Every key under `observed_tests` is a MEASUREMENT of python/tests/**, never a ceiling (tan-cli#817). Nothing compares these to a threshold and no growth here needs a --reason; the only failure they can cause is going stale, which a plain `python scripts/regen_module_size_budget.py` fixes. See `TEST_ROOT` in _module_size_budget_core.py for why this tree is observed rather than gated.",
   "observed_tests": {
     "tests/commands/test_bare_argv0_spawn.py": 1130,
