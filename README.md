@@ -131,7 +131,9 @@ check for this, on every native-Windows host: it warns when none of those
 binaries is on `PATH` and names the same `winget` command. It does not wait for
 the Zephyr SDK to be missing first — a host that already has the SDK and no
 7-Zip is exactly the host whose next `west sdk install` dies with
-`Zephyr SDK setup requires '7z'` (tan-cli#736).
+`Zephyr SDK setup requires '7z'` (tan-cli#736). `tan bootstrap`'s own
+cross-toolchain phase (below) checks for the same thing before it ever runs
+`west sdk install` itself, and refuses cleanly instead of hitting that error.
 
 Do not assemble any of these lists by hand. `tan doctor` reads its checks from
 the SDK's own `metadata/bootstrap.json`, so it stays correct when the SDK
@@ -157,9 +159,6 @@ Start in an empty working directory:
 ```sh
 git clone https://github.com/alplabai/alp-sdk
 tan bootstrap --sdk-root ./alp-sdk
-source alp-workspace/.venv/bin/activate    # Windows: alp-workspace\.venv\Scripts\Activate.ps1
-export ZEPHYR_BASE="$PWD/alp-workspace/zephyr"
-west sdk install --version 1.0.1 -t arm-zephyr-eabi
 tan init --name my-app
 cd my-app
 
@@ -171,17 +170,36 @@ tan run --flash --confirm
 
 What those commands do:
 
-1. `bootstrap` prepares west, Zephyr, the Python environment, and SDK
-   dependencies, into a workspace venv at `alp-workspace/.venv` (next to the
-   SDK checkout by default).
-2. `west` lives only inside that venv, so activate it and point `ZEPHYR_BASE`
-   at the workspace before running `west sdk install` -- it installs the
-   Zephyr SDK cross-toolchain (`arm-zephyr-eabi`) that `tan build` needs;
-   `bootstrap` does not install it, and `tan doctor --fix` does not either.
-   On a minimal Linux host this step also needs `file` on PATH
-   (Debian/Ubuntu: `sudo apt-get install -y file`); without it the SDK's own
-   host-tools step fails with "Host tools installation failed" and names
-   nothing. alp-sdk's `metadata/bootstrap.json`
+1. `bootstrap` prepares west, Zephyr, the Python environment and SDK
+   dependencies into a workspace venv at `alp-workspace/.venv` (next to the
+   SDK checkout by default) -- and, as its final phase (ADR 0021 Lane 1 P1),
+   acquires the Zephyr SDK cross-toolchain (`arm-zephyr-eabi`) that
+   `tan build` needs for real silicon, into the artifact-keyed store
+   `~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/` (or
+   `$ALP_TOOLCHAIN_ROOT`, shared across every project pinning that same
+   version). It reads the version to install from the SDK checkout's own
+   `metadata/toolchains.json`, so a pin bump there reaches you on your next
+   `tan bootstrap` with no `tan` upgrade needed. A second `tan bootstrap`
+   against the same pin is near-instant: it probes the existing install's
+   compiler and re-verifies its stamp rather than reinstalling. Pass
+   `--no-toolchain` to skip this phase (the rest of `bootstrap` is
+   unaffected, and `native_sim` builds never need a cross toolchain at all).
+   On a minimal Linux host this phase also needs `file` on PATH
+   (Debian/Ubuntu: `sudo apt-get install -y file`); without it the underlying
+   `west sdk install`'s own host-tools step fails with "Host tools installation failed" and names nothing.
+2. If you skip the toolchain phase, or need to point at a different pin, run
+   `west sdk install` by hand from inside the workspace venv:
+
+   ```sh
+   source alp-workspace/.venv/bin/activate    # Windows: alp-workspace\.venv\Scripts\Activate.ps1
+   export ZEPHYR_BASE="$PWD/alp-workspace/zephyr"
+   west sdk install --version 1.0.1 -t arm-zephyr-eabi
+   ```
+
+   the exact command `tan doctor`'s `zephyrSdk` check also names, so it
+   stays correct if that pin ever moves. On a minimal Linux host this also
+   needs `file` on PATH (Debian/Ubuntu: `sudo apt-get install -y file`);
+   without it the SDK's own host-tools step fails with "Host tools installation failed" and names nothing. alp-sdk's `metadata/bootstrap.json`
    (`manualInstallHints.posix.note[2]`) calls a missing `file` "WARN-only, not
    a bootstrap.sh prerequisite", and both statements are true: that note is
    written for the `--no-hosttools` invocation in its own `note[0]`, which
@@ -202,14 +220,16 @@ What those commands do:
    This is deliberate, not a bug: a fresh checkout must not silently
    reprogram an attached module.
 
-Run `tan doctor` if setup or toolchain discovery fails; its `zephyrSdk`
-check names the exact `west sdk install` command above too, so it stays
-correct if that pin ever moves. `tan doctor --fix` installs missing
-prerequisites, but only at a real, interactive terminal -- it is a no-op
-(exit 4) under a pipe, a redirect, or CI, so it is not a scripted-
-onboarding remedy. It never spawns `sudo` itself: it runs a prerequisite's
-manifest install command directly when already root, and otherwise prints
-the exact command to run by hand.
+Run `tan doctor` if setup or toolchain discovery fails; its `toolchain` check
+reports stamp-vs-pin for the resolved project (a version-skewed or
+never-verified install is a `fail` naming `tan bootstrap`, never a silent
+"looks present"), and its `zephyrSdk` check answers the broader "does any
+toolchain exist on this host at all" question, unconditionally. `tan doctor
+--fix` installs missing prerequisites, but only at a real, interactive
+terminal -- it is a no-op (exit 4) under a pipe, a redirect, or CI, so it is
+not a scripted-onboarding remedy. It never spawns `sudo` itself: it runs a
+prerequisite's manifest install command directly when already root, and
+otherwise prints the exact command to run by hand.
 
 If you do not want the west workspace next to the SDK checkout, choose it
 explicitly:

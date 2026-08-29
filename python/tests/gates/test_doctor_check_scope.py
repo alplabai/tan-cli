@@ -80,6 +80,10 @@ _PINNED_SCOPES = {
     "pythonFloor": "project",
     "sdk": "project",
     "sdkProvenance": "project",
+    # issue #474 (ADR 0021 Lane 1 P1): needs `sdk_root` to read
+    # `metadata/toolchains.json`'s pin -- cannot answer without a resolved
+    # project, unlike `zephyrSdk` above (a bare host fact).
+    "toolchain": "project",
     "venvProvenance": "project",
     "westResolved": "project",
     "workspace": "project",

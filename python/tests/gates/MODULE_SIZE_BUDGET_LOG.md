@@ -461,12 +461,27 @@ several less obvious failures.
     - tan/commands/explain_cmd.py: 1087 -> 1138
     - function_count_budget: 278 -> 280
     - function_count_budget: 277 -> 279
+- 2026-08-28 -- issue #474 (ADR 0021 Lane 1 P1): tan bootstrap acquires the arm-zephyr-eabi cross toolchain -- toolchain_phase/_acquire_toolchain/_finish_toolchain_install added to bootstrap_cmd.py alongside the phase's other IO (manifest read, disk preflight, wreckage reclaim, stamp write); kept in the existing phase-function file rather than a new module so the phase reads like pip_phase/west_phase's own siblings.
+    - tan/commands/bootstrap_cmd.py: 3522 -> 3870
+    - function_count_budget: 279 -> 282
+    - function_worst_budget: 770 -> 785
+- 2026-08-28 -- issue #474 (ADR 0021 Lane 1 P1): doctor.py gains toolchain_check() + _toolchain_store_dir() (stamp-vs-pin, ADR 0021's own 'doctor' requirement) alongside bootstrap_cmd.py's earlier-recorded toolchain_phase() growth.
+    - tan/commands/doctor_cmd.py: 4045 -> 4134
+    - function_count_budget: 282 -> 283
 - 2026-08-28 -- tan-cli#952: scaffold.py wires retarget_selftest_soc_identity into the per-file loop (import + call site, +2 lines); tests/core/test_template_integrity.py's new SoC-identity guard test pushes it from under-800 to 874, entering the observed python/tests/** record
     - tan/core/scaffold.py: 1538 -> 1540
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/build/execute.py: 1662 -> 1713
     - tan/commands/build_cmd.py: 2178 -> 2293
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3567 -> 3915
+    - tan/commands/doctor_cmd.py: 4045 -> 4134
+    - function_count_budget: 287 -> 291
+    - function_worst_budget: 791 -> 806
+- 2026-08-28 -- issue #474 follow-up: bootstrap_cmd.py's toolchain phase gains a bounded retry (TOOLCHAIN_INSTALL_ATTEMPTS=3, matching getting-started.yml's own established retry shape) around west sdk install, after that workflow's own first real end-to-end CI run hit a live tar/xz extraction flake on this exact command.
+    - tan/commands/bootstrap_cmd.py: 3915 -> 3980
+- 2026-08-28 -- issue #474 follow-up: bootstrap_cmd.py's toolchain phase appends a low-disk diagnostic note to a west sdk install failure at failure time, since the same first CI run's tar/xz error named no cause (capture_tail's last-4-lines limit).
+    - tan/commands/bootstrap_cmd.py: 3980 -> 3998
     - tan/commands/bootstrap_cmd.py: 3522 -> 3567
     - tan/commands/debug_config_cmd.py: 2047 -> 2114
     - tan/commands/debug_config_cmd.py: 1954 -> 2021
@@ -478,6 +493,20 @@ several less obvious failures.
     - function_count_budget: 279 -> 287
     - function_worst_budget: 770 -> 791
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3567 -> 3998
+    - tan/commands/doctor_cmd.py: 4045 -> 4134
+    - function_count_budget: 287 -> 291
+    - function_worst_budget: 791 -> 806
+- 2026-08-28 -- issue #474 bugfix: _probe_toolchain_compiler used probe() (single str|None) where probe_status() (bool,str|None) was needed -- ran, out = probe(...) unpacked a bare string's characters, crashing the whole command with ValueError: too many values to unpack the moment a real west sdk install actually succeeded (caught on the first real end-to-end CI run of this phase, getting-started/first-blink jobs).
+    - tan/commands/bootstrap_cmd.py: 3998 -> 4006
+- 2026-08-28 -- tan-cli#990 review fixes: doctor host-toolchain adoption path, wider west sdk install capture_tail, bootstrap toolchain-install remedy text, probe-before-move reorder, build/toolchain.py artifact-store scanning
+    - tan/commands/bootstrap_cmd.py: 4006 -> 4067
+    - tan/commands/doctor_cmd.py: 4134 -> 4201
+    - tan/core/bootstrap.py: 2400 -> 2411
+    - function_count_budget: 291 -> 293
+- 2026-08-28 -- tan-cli#990 review follow-up: Runner._env restores LD_LIBRARY_PATH from PyInstaller's LD_LIBRARY_PATH_ORIG before spawning any child -- the real, proven cause of the getting-started 'first install' CI failure (a frozen tan's bundled liblzma.so.5 leaking into a subprocess west spawns, tar --xz against the system xz)
+    - tan/commands/bootstrap_cmd.py: 4067 -> 4104
+    - function_count_budget: 293 -> 294
     - tan/commands/explain_cmd.py: 1138 -> 1310
     - tan/core/scaffold.py: 1540 -> 1568
     - tan/core/scaffold.py: 1538 -> 1566
@@ -501,3 +530,11 @@ several less obvious failures.
     - tan/core/debug_launch.py: 1275 -> 1539
     - function_count_budget: 287 -> 289
     - function_worst_budget: 791 -> 804
+- 2026-08-29 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 4104 -> 4137
+    - tan/commands/debug_config_cmd.py: 2021 -> 2114
+    - tan/commands/doctor_cmd.py: 4201 -> 4320
+    - tan/commands/support_bundle_cmd.py: 1066 -> 1067
+    - tan/core/debug_launch.py: 1275 -> 1539
+    - function_count_budget: 294 -> 296
+    - function_worst_budget: 806 -> 819
