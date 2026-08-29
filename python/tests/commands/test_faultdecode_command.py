@@ -25,6 +25,8 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -613,15 +615,13 @@ def test_resolve_symbol_skips_gracefully_when_no_tool_resolves(monkeypatch, tmp_
 # --------------------------------------------------------------------------
 
 
-def test_read_dump_auto_consume_returns_no_dump_when_stdin_is_none(monkeypatch):
-    """The IMPLICIT auto-consume path (`... | tan faultdecode`, no `--file`):
-    a detached `sys.stdin` has nothing to offer, same as a closed pipe or a
-    real tty -- `_read_dump` must answer `""`, not
-    `AttributeError: 'NoneType' object has no attribute 'isatty'`."""
+def test_read_dump_returns_empty_when_no_file_is_named():
+    """`_read_dump` is the `--file` (path or `-`) handler ONLY since
+    tan-cli#537 -- the implicit auto-consume path (no `--file` at all) is
+    `_read_implicit_stdin`, exercised separately below."""
     from tan.commands.faultdecode_cmd import _read_dump
 
-    monkeypatch.setattr(sys, "stdin", None)
-    assert _read_dump(None, auto_consume_stdin=True) == ""
+    assert _read_dump(None) == ""
 
 
 def test_read_dump_file_dash_refuses_cleanly_when_stdin_is_none(monkeypatch):
@@ -633,7 +633,245 @@ def test_read_dump_file_dash_refuses_cleanly_when_stdin_is_none(monkeypatch):
 
     monkeypatch.setattr(sys, "stdin", None)
     with pytest.raises(typer.BadParameter, match="stdin is detached"):
-        _read_dump("-", auto_consume_stdin=True)
+        _read_dump("-")
+
+
+def test_read_dump_file_dash_refuses_cleanly_when_stdin_has_no_buffer(monkeypatch):
+    """tan-cli#537: reading `.buffer` adds a shape `sys.stdin is None` alone
+    does not cover -- a text-only replacement stream (e.g. `io.StringIO`)
+    that exists, answers `.isatty()`, but has no `.buffer` at all. `--file -`
+    names stdin explicitly, so this must refuse cleanly too, not raise
+    `AttributeError` from inside `.buffer.read()`."""
+    import io
+
+    from tan.commands.faultdecode_cmd import _read_dump
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("CFSR: 0x8200\n"))
+    with pytest.raises(typer.BadParameter, match="no binary buffer"):
+        _read_dump("-")
+
+
+def test_read_dump_file_dash_and_file_path_decode_identical_bytes_the_same_way():
+    """tan-cli#537's decode-parity requirement, at the `_read_dump` unit
+    level: `--file <path>` and `--file -` must decode an identical byte
+    sequence -- including a stray non-UTF-8 byte -- to the identical string.
+    Both go through `errors="ignore"` UTF-8 decoding of the same bytes; a
+    split between a text-layer read and a bytes-layer read is exactly what
+    let attempt 5 diverge from `--file`."""
+    import io
+
+    from tan.commands.faultdecode_cmd import _read_dump
+
+    raw = b"CFSR: 0x8200\n\xffBFAR: 0xdeadbeef\n"
+
+    class _FakeBuffer:
+        def read(self):
+            return raw
+
+    class _FakeStdin:
+        buffer = _FakeBuffer()
+
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(delete=False) as handle:
+        handle.write(raw)
+        path = handle.name
+    try:
+        from_file = _read_dump(path)
+    finally:
+        Path(path).unlink()
+
+    import sys as _sys
+
+    old_stdin = _sys.stdin
+    _sys.stdin = _FakeStdin()
+    try:
+        from_stdin_dash = _read_dump("-")
+    finally:
+        _sys.stdin = old_stdin
+
+    assert from_file == from_stdin_dash
+    assert from_file == raw.decode("utf-8", errors="ignore")
+
+
+# --------------------------------------------------------------------------
+# tan-cli#537: `_read_implicit_stdin` / `_read_stdin_bounded` -- the
+# implicit-stdin reader itself, unit-tested with a fake byte source so the
+# three bounds (idle/byte-cap/total) can be proven without a real 2s/1MiB/30s
+# wait. The real-subprocess scenarios (decode parity end-to-end, slow-but-
+# steady, infinite producer, silent holder, detached stdin) are driven
+# against the actual binary further below, per the design's own "the
+# CliRunner layer is structurally blind here" call-out.
+# --------------------------------------------------------------------------
+
+
+class _ScriptedBuffer:
+    """A fake binary buffer whose `.read1(n)` plays back a scripted sequence
+    of `(chunk, delay_s)` pairs, sleeping `delay_s` before returning each
+    `chunk` -- lets the idle/byte-cap/total bounds in `_read_stdin_bounded`
+    be proven deterministically, without spawning a real pipe.
+
+    A script that ends WITHOUT an explicit `(b"", 0.0)` EOF entry means a
+    writer that stops writing but never closes its end: once exhausted, the
+    next `.read1()` call BLOCKS forever (a real held-open pipe would too),
+    so an idle/total bound firing in that case is a real bound firing, not
+    an accidental EOF the fake buffer invented."""
+
+    def __init__(self, script: list[tuple[bytes, float]]):
+        self._script = list(script)
+        self._never = threading.Event()
+
+    def read1(self, _n: int) -> bytes:
+        if not self._script:
+            self._never.wait()  # blocks forever -- see class docstring
+            return b""  # pragma: no cover - unreachable, _never is never set
+        chunk, delay = self._script.pop(0)
+        if delay:
+            time.sleep(delay)
+        return chunk
+
+
+def test_read_stdin_bounded_reads_to_a_clean_eof_with_no_bound_firing():
+    from tan.commands.faultdecode_cmd import _read_stdin_bounded
+
+    buf = _ScriptedBuffer([(b"CFSR: 0x8200\n", 0.0), (b"", 0.0)])
+    outcome = _read_stdin_bounded(buf, idle_s=1.0, byte_cap=1_000_000, total_s=10.0)
+    assert outcome.data == b"CFSR: 0x8200\n"
+    assert outcome.bound is None
+
+
+def test_read_stdin_bounded_idle_bound_keeps_data_read_so_far():
+    """Reproduces attempt 1's exact failure shape and proves this design does
+    NOT have it: a chunk that already arrived is never discarded just
+    because the NEXT one never comes."""
+    from tan.commands.faultdecode_cmd import _read_stdin_bounded
+
+    buf = _ScriptedBuffer([(b"CFSR: 0x8200\n", 0.0)])  # then blocks forever
+    outcome = _read_stdin_bounded(buf, idle_s=0.05, byte_cap=1_000_000, total_s=10.0)
+    assert outcome.data == b"CFSR: 0x8200\n"
+    assert outcome.bound == "idle"
+
+
+def test_read_stdin_bounded_idle_resets_on_every_chunk_a_slow_producer_finishes():
+    """The constraint attempt 2's TOTAL budget got wrong: an idle bound that
+    RESETS on every chunk reads a slow-but-steady producer in full, however
+    long it takes overall."""
+    from tan.commands.faultdecode_cmd import _read_stdin_bounded
+
+    script = [(f"L{i}\n".encode(), 0.05) for i in range(6)] + [(b"", 0.0)]
+    outcome = _read_stdin_bounded(buf := _ScriptedBuffer(script), idle_s=0.5, byte_cap=1_000_000, total_s=10.0)
+    assert outcome.data == b"".join(c for c, _ in script)
+    assert outcome.bound is None
+
+
+def test_read_stdin_bounded_byte_cap_fires_before_memory_grows_unbounded():
+    """The bound no earlier attempt had: an infinite producer must stop
+    accumulating once the byte cap is reached, not once a total elapses.
+
+    `_InfiniteBuffer` caps its own output at 10 MB then blocks forever,
+    rather than producing truly without limit: `_read_stdin_bounded`
+    abandons its reader thread (by design) once the byte cap fires, and a
+    fake buffer with no backpressure at all would leave that thread
+    spinning `b"x" * n` allocations as fast as the CPU allows for the rest
+    of THIS test process's life -- measured, this is what made the full
+    `test_faultdecode_command.py` run OOM (>20 GB RSS) when this fixture
+    used an actually-unbounded generator. A real OS pipe never has this
+    problem: its kernel buffer fills and the writer blocks once nobody is
+    reading, which is the backpressure this fake reproduces."""
+    from tan.commands.faultdecode_cmd import _read_stdin_bounded
+
+    class _InfiniteBuffer:
+        def __init__(self) -> None:
+            self._produced = 0
+            self._never = threading.Event()
+
+        def read1(self, n: int) -> bytes:
+            if self._produced > 10_000_000:  # far past any byte_cap under test
+                self._never.wait()  # simulates a full kernel pipe buffer
+                return b""  # pragma: no cover - unreachable
+            self._produced += n
+            return b"x" * n
+
+    outcome = _read_stdin_bounded(
+        _InfiniteBuffer(), idle_s=5.0, byte_cap=1000, total_s=10.0
+    )
+    assert outcome.bound == "byte-cap"
+    assert len(outcome.data) == 1000
+
+
+def test_read_stdin_bounded_total_cap_fires_for_a_producer_that_never_idles_or_caps():
+    """The backstop bound: a producer that keeps resetting the idle timer
+    (never idle long enough) and never reaches the byte cap must still
+    terminate eventually."""
+    from tan.commands.faultdecode_cmd import _read_stdin_bounded
+
+    script = [(b"a", 0.03) for _ in range(20)]  # never empty, never idles long
+    outcome = _read_stdin_bounded(
+        _ScriptedBuffer(script), idle_s=1.0, byte_cap=1_000_000, total_s=0.2
+    )
+    assert outcome.bound == "total-cap"
+    assert len(outcome.data) > 0
+
+
+def test_read_stdin_bounded_slow_but_steady_dump_is_read_in_full():
+    """The measured attempt 6/7 killer, reproduced directly against
+    `_read_stdin_bounded`: 26 lines with 0.24s gaps must decode in full under
+    this repo's OWN chosen idle bound, with no total cap anywhere near firing
+    (uses the real module-default idle/byte-cap/total, not injected small
+    ones, precisely because this is the regression the real defaults must
+    not reintroduce)."""
+    from tan.commands.faultdecode_cmd import _read_stdin_bounded
+
+    lines = [f"L{i:02d}: 0x{i:08x}\n".encode() for i in range(26)]
+    script = [(chunk, 0.24) for chunk in lines] + [(b"", 0.0)]
+    outcome = _read_stdin_bounded(_ScriptedBuffer(script))
+    assert outcome.data == b"".join(lines)
+    assert outcome.bound is None
+
+
+def test_read_implicit_stdin_reports_not_attempted_when_stdin_is_none(monkeypatch):
+    from tan.commands.faultdecode_cmd import _read_implicit_stdin
+
+    monkeypatch.setattr(sys, "stdin", None)
+    result = _read_implicit_stdin()
+    assert result.text == ""
+    assert result.attempted is False
+    assert result.bound is None
+
+
+def test_read_implicit_stdin_reports_not_attempted_when_stdin_has_no_buffer(monkeypatch):
+    """tan-cli#537: a text-only replacement stream (no `.buffer`) must
+    degrade to "no implicit dump" cleanly, never raise."""
+    import io
+
+    from tan.commands.faultdecode_cmd import _read_implicit_stdin
+
+    fake = io.StringIO("CFSR: 0x8200\n")
+    monkeypatch.setattr(sys, "stdin", fake)
+    result = _read_implicit_stdin()
+    assert result.text == ""
+    assert result.attempted is False
+
+
+def test_read_implicit_stdin_reports_not_attempted_on_a_tty(monkeypatch):
+    """A `.buffer` IS present here (unlike the None/no-buffer tests above) --
+    deliberately, so this test isolates the TTY check specifically: without
+    it, `_read_implicit_stdin` would fall through to `_read_stdin_bounded`
+    on `_buffer` and this assertion would fail on `attempted`, not pass by
+    accident via the separate no-`.buffer` guard."""
+    import io
+
+    from tan.commands.faultdecode_cmd import _read_implicit_stdin
+
+    class _TtyStdin:
+        buffer = io.BytesIO(b"CFSR: 0x8200\n")
+
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(sys, "stdin", _TtyStdin())
+    result = _read_implicit_stdin()
+    assert result.attempted is False
 
 
 
@@ -749,8 +987,11 @@ def test_registers_on_the_command_line_never_wait_for_an_open_stdin_pipe():
 def test_an_idle_open_stdin_pipe_falls_through_to_the_no_dump_refusal():
     """With NO registers and no `--file`, an open-but-idle pipe has nothing to
     read and never will until its writer decides otherwise. The auto-consume
-    is gated on readiness so this lands on the ordinary "no fault registers"
-    refusal -- exit 2 with a message naming the flags -- instead of blocking.
+    is gated on the idle bound so this lands on the ordinary "no fault
+    registers" refusal -- exit 2 -- instead of blocking, and (tan-cli#537)
+    the refusal now says WHY: "stdin was open but silent", distinguishing
+    this case from "no stdin was ever offered at all" (a closed pipe, a TTY,
+    or a detached stdin), which keeps the older, plainer wording.
 
     The bytes assertion is the one tan-cli#388 closes with: `faultdecode` must
     never fail to terminate, and must never terminate, having written nothing
@@ -758,7 +999,228 @@ def test_an_idle_open_stdin_pipe_falls_through_to_the_no_dump_refusal():
     rc, out, err = _run_with_stdin_held_open([])
     assert rc == 2
     assert "no fault registers supplied" in err
+    assert "stdin was open but silent" in err
     assert (out + err) != ""
+
+
+# --------------------------------------------------------------------------
+# tan-cli#537: the implicit-stdin reader's real-subprocess scenarios. The
+# in-process `CliRunner` layer is structurally blind here -- it hands the
+# command an already-closed buffer, so a green `CliRunner` run is compatible
+# with a total field hang. These extend `_run_with_stdin_held_open`'s real
+# OS-pipe harness with scripted WRITERS, so each of the design's scenarios is
+# driven against the actual binary, not simulated.
+# --------------------------------------------------------------------------
+
+
+def _run_with_scripted_stdin_writer(
+    args: list[str], writer_code: str, *, hold_open_after: bool
+) -> tuple[int, str, str]:
+    """Spawn `python -m tan faultdecode <args>` with stdin fed by a SEPARATE
+    child process running `writer_code` (a `python -c` snippet writing to its
+    own stdout, piped into the `tan faultdecode` child's stdin) -- so writes
+    can be scheduled with real delays without this test process itself
+    blocking on a write the reader might not drain fast enough.
+
+    `hold_open_after`: whether the writer's own process (and therefore the
+    pipe's write end) stays alive/open after writing, so the read side can
+    only terminate via a bound firing, never via EOF."""
+    writer = subprocess.Popen(  # noqa: S603 -- fixed argv, no shell
+        [sys.executable, "-c", writer_code],
+        stdout=subprocess.PIPE,
+    )
+    proc = subprocess.Popen(  # noqa: S603 -- fixed argv, no shell
+        [sys.executable, "-m", "tan", "faultdecode", *args],
+        stdin=writer.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    writer.stdout.close()  # this process's own handle; the child still has it
+    try:
+        rc = proc.wait(timeout=_OPEN_STDIN_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail(
+            f"tan faultdecode {' '.join(args)} did not exit within "
+            f"{_OPEN_STDIN_TIMEOUT_S}s against a scripted stdin writer"
+        )
+    finally:
+        out = proc.stdout.read()
+        err = proc.stderr.read()
+        proc.stdout.close()
+        proc.stderr.close()
+        writer.kill()
+        writer.wait()
+    return rc, out, err
+
+
+def test_decode_parity_between_the_implicit_pipe_and_file_including_a_stray_byte():
+    """tan-cli#537's named regression pin: identical bytes -- including ONE
+    stray non-UTF-8 byte -- through the IMPLICIT stdin pipe and through
+    `--file` must decode to byte-identical `--format json` output. This is
+    the one test the issue names as sufficient to have caught attempts 3, 5
+    and 6: a per-chunk text-layer decode (3), a `reconfigure()` that patched
+    only the stdin half of the `--file` idiom (5), and a total-time cap that
+    silently dropped a slow dump (6) would all show up here as a DIFFERENT
+    payload between the two paths, or a truncated one."""
+    raw = b"CFSR: 0x00008200\nBFAR: 0x\xffdeadbeef\n"
+
+    with tempfile.NamedTemporaryFile(delete=False) as handle:
+        handle.write(raw)
+        path = handle.name
+    try:
+        file_result = subprocess.run(
+            [sys.executable, "-m", "tan", "faultdecode", "--file", path, "--format", "json"],
+            capture_output=True, text=True, timeout=_OPEN_STDIN_TIMEOUT_S, check=False,
+        )
+    finally:
+        Path(path).unlink()
+
+    pipe_result = subprocess.run(
+        [sys.executable, "-m", "tan", "faultdecode", "--format", "json"],
+        input=raw,
+        capture_output=True, timeout=_OPEN_STDIN_TIMEOUT_S, check=False,
+    )
+
+    assert file_result.returncode == 0, file_result.stderr
+    assert pipe_result.returncode == 0, pipe_result.stderr
+    file_payload = json.loads(file_result.stdout)
+    pipe_payload = json.loads(pipe_result.stdout.decode("utf-8"))
+    assert file_payload["data"] == pipe_payload["data"]
+    assert file_payload["data"]["addresses"]["bfar"] == "0xdeadbeef"
+
+
+#: The write side of the 6/7-killer fixture: 26 lines, one every 0.24s, THEN
+#: close -- the exact shape the issue measured as taking 6.2s total and
+#: being cut at a reverted 5.0s constant. Written as a `python -c` snippet
+#: (not inline Python in this test process) so the delays are real
+#: wall-clock time in a SEPARATE process, matching how a serial capture
+#: script would actually feed `tan faultdecode`.
+_SLOW_STEADY_WRITER = (
+    "import sys, time\n"
+    "for i in range(26):\n"
+    "    sys.stdout.buffer.write(f'CFSR: 0x{(0x8000 + i):08x}\\n'.encode())\n"
+    "    sys.stdout.buffer.flush()\n"
+    "    time.sleep(0.24)\n"
+)
+
+
+def test_slow_but_steady_dump_is_decoded_in_full_with_no_truncation_notice():
+    """The measured attempt-6/7 killer, driven against the real binary: 26
+    lines with 0.24s gaps (~6.2s total) must decode in FULL, with NO
+    truncation notice on stderr -- this is the fixture that fails against
+    the reverted "20x the idle window" constant and would have caught it
+    before it shipped."""
+    rc, out, err = _run_with_scripted_stdin_writer(
+        ["--format", "json"], _SLOW_STEADY_WRITER, hold_open_after=False
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert payload["data"]["inputs"]["cfsr"] == "0x00008019"  # the LAST line wins (last parsed)
+    assert payload["issues"] == []
+    assert "stdin idle" not in err
+    assert "stdin exceeded" not in err
+    assert "stdin did not reach EOF" not in err
+
+
+#: A complete dump, flushed, then the writer sleeps far past the idle bound
+#: before exiting -- so the PIPE stays open (write end held) well past
+#: `_STDIN_IDLE_TIMEOUT_S` even though nothing MORE was ever going to
+#: arrive. Proves the "partial write, then hold open" scenario: the dump
+#: must still be decoded and the run must still exit 0, with the idle bound
+#: announced (this reader cannot know the writer had nothing left to say).
+_WRITE_THEN_HOLD_OPEN_WRITER = (
+    "import sys, time\n"
+    "sys.stdout.buffer.write(b'CFSR: 0x00008200\\nBFAR: 0xdeadbeef\\n')\n"
+    "sys.stdout.buffer.flush()\n"
+    "time.sleep(6)\n"
+)
+
+
+def test_a_complete_dump_written_then_held_open_past_the_idle_bound_still_decodes():
+    rc, out, err = _run_with_scripted_stdin_writer(
+        ["--format", "json"], _WRITE_THEN_HOLD_OPEN_WRITER, hold_open_after=True
+    )
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert payload["data"]["inputs"]["cfsr"] == "0x00008200"
+    assert payload["data"]["addresses"]["bfar"] == "0xdeadbeef"
+    assert "stdin idle" in err
+    assert [i["code"] for i in payload["issues"]] == ["faultdecode.stdin-truncated"]
+
+
+def test_an_infinite_producer_terminates_and_stays_far_under_the_byte_cap():
+    """The `yes` shape (issue #537): unguarded, this reached 409.7 MB RSS
+    over 9.59s. Guarded, it must terminate (via the byte cap, well before
+    the idle/total bounds would even matter for a fast producer) and
+    announce truncation. Peak RSS is not measured here (coarse timing only,
+    per the design's own instruction) -- the byte cap firing at all, on a
+    producer that never goes idle and never reaches EOF, is the property
+    that stands in for it: a fixed 1 MiB cap bounds the buffer regardless of
+    how long the producer is left running."""
+    yes = subprocess.Popen(["yes", "CFSR: 0x00008200"], stdout=subprocess.PIPE)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "tan", "faultdecode", "--format", "json"],
+        stdin=yes.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    yes.stdout.close()
+    try:
+        rc = proc.wait(timeout=_OPEN_STDIN_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail("an infinite stdin producer was not bounded by the byte cap")
+    finally:
+        out = proc.stdout.read()
+        err = proc.stderr.read()
+        proc.stdout.close()
+        proc.stderr.close()
+        yes.kill()
+        yes.wait()
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert payload["data"]["fault_detected"] is True
+    assert "stdin exceeded" in err
+    assert [i["code"] for i in payload["issues"]] == ["faultdecode.stdin-truncated"]
+
+
+def test_detached_stdin_devnull_is_a_clean_no_dump_not_a_crash():
+    """`stdin=DEVNULL` is immediate EOF, zero bytes -- one of the "detached /
+    replaced stdin" shapes tan-cli#537 names, driven end to end rather than
+    at the `_read_implicit_stdin` unit level."""
+    result = subprocess.run(
+        [sys.executable, "-m", "tan", "faultdecode", "--cfsr", "0x8200", "--format", "json"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=_OPEN_STDIN_TIMEOUT_S, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["data"]["fault_detected"] is True
+    assert payload["issues"] == []
+
+
+def test_detached_stdin_closed_fd_is_a_clean_no_dump_not_a_crash():
+    """A shell (or launcher) that closes fd 0 before exec -- `sys.stdin` is
+    still a real object, but reading it raises. Must degrade to "no implicit
+    dump" cleanly. `close_fds=True` (the `subprocess` default on POSIX
+    already) plus `stdin=subprocess.DEVNULL` covers the portable version of
+    this above; this variant additionally checks the no-flags refusal path
+    still answers (not the open-but-silent wording, since there is no pipe
+    at all here to have been silent on)."""
+    result = subprocess.run(
+        [sys.executable, "-m", "tan", "faultdecode", "--format", "json"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=_OPEN_STDIN_TIMEOUT_S, check=False,
+    )
+    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert payload["issues"][0]["code"] == "faultdecode.no-registers"
+    assert "stdin was open but silent" not in payload["issues"][0]["message"]
 
 
 # --------------------------------------------------------------------------

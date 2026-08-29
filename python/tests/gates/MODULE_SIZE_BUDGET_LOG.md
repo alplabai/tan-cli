@@ -538,3 +538,6 @@ several less obvious failures.
     - tan/core/debug_launch.py: 1275 -> 1539
     - function_count_budget: 294 -> 296
     - function_worst_budget: 806 -> 819
+- 2026-08-29 -- tan-cli#537: the implicit-stdin reader redesign (bytes-in/one-decode/three-bounds, a raw-fd read to avoid a CPython interpreter-shutdown fault) adds real bounded-reader logic plus its own rationale-heavy docstrings to faultdecode_cmd.py; not split out because the reader is faultdecode's own private concern, not a shared abstraction yet.
+    - tan/commands/faultdecode_cmd.py: new entry at 848
+    - function_count_budget: 296 -> 297
