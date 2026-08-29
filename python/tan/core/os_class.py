@@ -128,3 +128,32 @@ def allowed_os_for_core(core_type: str, choices: Iterable[str]) -> list[str]:
         return []
     cross = cross_class_os(core_type)
     return [o for o in choices if o not in cross]
+
+
+def infer_runtime_for_core_id(core_id: str) -> str:
+    """Best-effort runtime for a core id with no OS given: an `a` followed by
+    a digit at a WORD start (`a55_cluster`, `cluster_a32`, `A55`) runs
+    `yocto`; everything else defaults to `zephyr`.
+
+    Word starts are the string start and any position after `_`/`-`, so
+    `data55` is NOT Cortex-A. Mirrors
+    `tan_core::wizard::infer_runtime_for_core_id`, and KEEP IN SYNC with
+    alp-sdk-vscode's ConfiguratorView `coreSiliconClass` (same word-start
+    test; the one intentional difference is the fallback, since a CLI must
+    pick a concrete runtime where the IDE can offer "unknown").
+
+    A last resort: a topology that declares `board:`/`machine:` never reaches
+    it. Lives here rather than beside either caller because it had TWO
+    definitions -- `tan/core/scaffold.py` and `tan/commands/presets_cmd.py` --
+    and `tan/core/bootstrap.py` reached OUTWARD past the core one to import
+    the command's copy (tan-cli#408). One owner, in the leaf module that
+    already answers "what OS class is this core", is what the duplicated
+    docstrings each said they wanted.
+    """
+    lowered = core_id.lower()
+    word_start = True
+    for i, ch in enumerate(lowered):
+        if word_start and ch == "a" and i + 1 < len(lowered) and lowered[i + 1].isdigit():
+            return "yocto"
+        word_start = ch in "_-"
+    return "zephyr"

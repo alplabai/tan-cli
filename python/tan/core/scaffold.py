@@ -43,6 +43,8 @@ because the app source this scaffold writes is Zephyr source, and a scaffolded
 
 from __future__ import annotations
 
+from tan.core.os_class import infer_runtime_for_core_id
+
 import os
 import re
 from dataclasses import dataclass
@@ -643,23 +645,6 @@ class CoresError(Exception):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
-
-
-def infer_runtime_for_core_id(core_id: str) -> str:
-    """Best-effort runtime for a `--cores` entry with no `:os` given: an
-    `a<digit>` at a word start (e.g. `a55_cluster`) runs `yocto`; everything
-    else defaults to `zephyr`. Mirrors
-    `tan_core::wizard::infer_runtime_for_core_id` -- KEEP IN SYNC with
-    alp-sdk-vscode's ConfiguratorView `coreSiliconClass` (same word-start
-    test; the one intentional difference is the fallback, since a CLI must
-    pick a concrete runtime where the IDE can offer "unknown")."""
-    lower = core_id.lower()
-    word_start = True
-    for i, ch in enumerate(lower):
-        if word_start and ch == "a" and i + 1 < len(lower) and lower[i + 1].isdigit():
-            return "yocto"
-        word_start = ch in ("_", "-")
-    return "zephyr"
 
 
 def _is_valid_core_id(core_id: str) -> bool:
