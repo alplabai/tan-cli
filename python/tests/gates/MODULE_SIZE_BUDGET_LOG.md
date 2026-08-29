@@ -382,6 +382,18 @@ and write both files from the real merged tree.
     - tan/planner/kconfig.py: 2092 -> 2107
 - 2026-08-28 -- tan-cli#957 family, round 4: guard cores[].vector_extension against a non-string in the G-2 TFLM kernel selector, same isinstance-guard pattern as cores[].type
     - tan/planner/kconfig.py: 2107 -> 2108
+- 2026-08-28 -- tan-cli#518: content-hash provenance sidecar wiring in debug_launch.py's list merge (_merge_list_by_identity/_merge_list_field/_merge_configuration/sdk_identity_overwrites/create_launch_json_write_plan) grew the module past its recorded ceiling; new logic lives in tan/core/launch_provenance.py instead where it could be split out.
+    - tan/core/debug_launch.py: 1275 -> 1462
+- 2026-08-28 -- tan-cli#518: wired the .alp/ provenance sidecar read/write into tan debug-config (load before sdk_identity_overwrites, pass through create_launch_json_write_plan, best-effort persist after the launch.json write) -- grew debug_config_cmd.py past its recorded ceiling.
+    - tan/commands/debug_config_cmd.py: 1954 -> 1996
+- 2026-08-28 -- tan-cli#518: module docstring note on the new .alp/ provenance sidecar file this command now reads/writes.
+    - tan/commands/debug_config_cmd.py: 1996 -> 2007
+- 2026-08-28 -- tan-cli#963: generate_cmd.py's own docstring for pin_issue/foreign_issue prepend-ordering grew the module 4 lines past its 1400 ceiling; no compression to fit, per repo convention
+    - tan/commands/generate_cmd.py: 1400 -> 1404
+- 2026-08-28 -- tan-cli#982 review: added debug_launch.sdk_identity_stranded_appends + _matching_existing_entry (list-field append-instead-of-replace disclosure, finding #2) and debug_config_cmd._sdk_identity_appended_issue plus its wiring/tests -- grew both already-tracked modules past their recorded ceiling.
+    - tan/commands/debug_config_cmd.py: 2007 -> 2047
+    - tan/core/debug_launch.py: 1462 -> 1541
+    - function_count_budget: 277 -> 278
 - 2026-08-28 -- tan-cli#441: extract doctor_cmd.host_environment_checks + the shared _resolve_prerequisites_environment seam so support-bundle stops running doctor's whole build/flash-readiness checklist for five host checks; moved code grew doctor_cmd.py/support_bundle_cmd.py and added one long function (the seam itself, a verbatim relocation of the existing bootstrapManifest/hostPrerequisites block).
     - tan/commands/doctor_cmd.py: 4045 -> 4145
     - tan/commands/support_bundle_cmd.py: 1066 -> 1067
@@ -431,6 +443,7 @@ and write both files from the real merged tree.
     - function_count_budget: 281 -> 287
     - function_worst_budget: 770 -> 791
     - tan/commands/bootstrap_cmd.py: 3421 -> 3522
+    - tan/commands/explain_cmd.py: 1087 -> 1138
     - function_count_budget: 278 -> 280
     - function_count_budget: 277 -> 279
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
@@ -438,6 +451,7 @@ and write both files from the real merged tree.
     - tan/commands/build_cmd.py: 2178 -> 2293
 - 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/bootstrap_cmd.py: 3522 -> 3567
+    - tan/commands/debug_config_cmd.py: 2047 -> 2114
     - tan/commands/debug_config_cmd.py: 1954 -> 2021
     - tan/commands/generate_cmd.py: 1404 -> 1431
     - tan/commands/presets_cmd.py: 949 -> 1085
@@ -454,4 +468,10 @@ and write both files from the real merged tree.
     - function_worst_budget: 791 -> 804
 - 2026-08-29 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/bootstrap_cmd.py: 3567 -> 3600
+    - function_worst_budget: 791 -> 804
+- 2026-08-29 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3567 -> 3600
+    - tan/commands/doctor_cmd.py: 4045 -> 4164
+    - tan/commands/support_bundle_cmd.py: 1066 -> 1067
+    - function_count_budget: 288 -> 289
     - function_worst_budget: 791 -> 804
