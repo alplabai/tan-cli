@@ -28,12 +28,26 @@ build_doctor_report` + `tan-cli`'s two appends (`append_host_prerequisites`,
 `append_host_environment`). The base/target-branch checks are written here
 because nothing else in this port produces them -- `support-bundle` is this
 port's ONLY debug-report consumer, the debug half of `tan doctor` still
-being unported (`doctor_cmd.py`'s own module docstring). The four host
+being unported (`doctor_cmd.py`'s own module docstring). The five host
 checks are NOT rewritten: they are harvested by name from
-`doctor_cmd._collect`, which already owns each one, so a change there
-reaches the bundle with no second copy to drift (see
+`doctor_cmd.host_environment_checks`, the seam that owns each one, so a
+change there reaches the bundle with no second copy to drift (see
 [`_host_checks_from_doctor`]). `--target-kind`/`--server` now genuinely
 change the report, exactly as they do in the oracle.
+
+**tan-cli#441: `host_environment_checks` replaced a call into
+`doctor_cmd._collect`.** Until this fix, harvesting these five checks by
+name meant running `_collect`'s WHOLE build/flash-readiness checklist first
+-- `sdk`/`boardYaml`/`workspace`/`westResolved`/`venvProvenance`/
+`zephyrVersion`/`zephyrWorkspace`/`hostPython`/`pythonFloor`/`west`/
+`zephyrSdk`/`sevenZip`/`setools`/`jlink`/`sdkProvenance`, none of which this
+command ever reported -- including every spawned `west --version`, the JLink
+version-banner probe, and a git provenance shell-out, purely to throw the
+results away. `host_environment_checks` builds ONLY the five kept checks,
+from the same underlying functions `_collect` itself now calls through the
+shared `doctor_cmd._resolve_prerequisites_environment` -- see that seam's own
+docstring for how `_collect` and this command stay byte-identical on the
+checks both still report.
 
 **One harvested check is capped, not passed through raw** (tan-cli#374
 finding 1): `doctor_cmd`'s `longPaths` carries a Windows-only `fail` arm
@@ -428,48 +442,39 @@ def _extension_check(name: str, extension_id: str) -> doctor_cmd.Check:
     )
 
 
-def _host_checks_from_doctor(
-    context: ResolvedDebugContext, project_arg: str | None, board_yaml_arg: str | None
-) -> list[doctor_cmd.Check]:
+def _host_checks_from_doctor(context: ResolvedDebugContext) -> list[doctor_cmd.Check]:
     """The host half of the bundled report, harvested BY NAME from
-    `doctor_cmd._collect` rather than re-probed here.
+    `doctor_cmd.host_environment_checks` rather than re-probed here.
 
     The oracle appends these with `append_host_prerequisites` /
     `append_host_environment`, both `pub(crate)` in `tan-cli` precisely so
     `support_bundle.rs` can share `doctor.rs`'s copy. This port has the same
-    four checks -- `prerequisites_check`, `zephyr_sdk_host_check`,
+    five checks -- `prerequisites_check`, `zephyr_sdk_host_check`,
     `long_paths_check`, `home_path_check`, plus `bootstrapManifest` (see
-    `_HOST_CHECK_ORDER`) -- but their IO (manifest load,
-    effective-Python-floor arithmetic, registry read) is inline in `_collect`,
-    so calling `_collect` and picking the checks out is what keeps ONE copy of
-    each. Re-probing them here would be ~40 duplicated lines that drift the
-    first time `tan doctor` changes a verdict.
+    `_HOST_CHECK_ORDER`) -- and `doctor_cmd.host_environment_checks` is the
+    ONE place that builds them; `doctor_cmd._collect` (`tan doctor`'s own,
+    much longer checklist) calls the same underlying
+    `_resolve_prerequisites_environment` seam for `bootstrapManifest`/
+    `hostPrerequisites`, so this command and `tan doctor` can never build a
+    diverging verdict for a check both report.
 
-    KNOWN CEILING: `_collect` runs the WHOLE build/flash-readiness checklist
-    (west/JLink/SETOOLS probes included) to yield these five. It is the same
-    call this command already made before tan-cli#357, so the cost is
-    unchanged and the discarded checks are exactly the ones the oracle's
-    bundle never carried -- but if the probe cost ever matters, the fix is a
-    `doctor_cmd.host_environment_checks()` seam both callers share, not a
-    second copy of the probes here.
-
-    `board_yaml` is passed only when explicitly given (`--board-yaml`) or the
-    file really exists, mirroring `doctor_cmd.doctor`'s own preprocessing rule
-    -- irrelevant to the five checks kept here, but passing a path that does
-    not exist would misreport `_collect`'s own `boardYaml`, and a future
-    reader harvesting one more name should not inherit a lie.
+    tan-cli#441: this used to call `doctor_cmd._collect` and pick the five
+    checks out by name, which meant running `_collect`'s WHOLE
+    build/flash-readiness checklist first -- `sdk`/`boardYaml`/`workspace`/
+    `westResolved`/`venvProvenance`/`zephyrVersion`/`zephyrWorkspace`/
+    `hostPython`/`pythonFloor`/`west`/`zephyrSdk`/`sevenZip`/`setools`/
+    `jlink`/`sdkProvenance`, none of which this command ever reported --
+    including every spawned `west --version`, the JLink version-banner probe,
+    and a git provenance shell-out, purely to throw the results away.
+    `host_environment_checks` never builds any of those: no board.yaml or
+    project scope is even accepted any more, because none of the five kept
+    checks reads either (`sdk_check`/`board_yaml_preflight_check`/
+    `libraries_check` are the only `_collect` checks that did, and none of
+    the three is one of the five).
     """
-    board_yaml_for_doctor = (
-        context.board_yaml_path
-        if (board_yaml_arg is not None or context.board_yaml_exists)
-        else None
-    )
-    collected = doctor_cmd._collect(
+    collected = doctor_cmd.host_environment_checks(
         context.sdk_root,
-        board_yaml=board_yaml_for_doctor,
-        project_scope=project_arg,
         workspace_root=context.workspace_root,
-        sdk_tier=context.sdk_tier,
     )
     by_name = {check.name: check for check in collected}
     return [
@@ -481,8 +486,6 @@ def _host_checks_from_doctor(
 
 def _debug_doctor_report(
     context: ResolvedDebugContext,
-    project_arg: str | None,
-    board_yaml_arg: str | None,
     project_selected: bool,
     target: str,
     server: str,
@@ -523,7 +526,7 @@ def _debug_doctor_report(
         ),
         _board_yaml_check(context, project_selected),
         *_target_checks(target, server),
-        *_host_checks_from_doctor(context, project_arg, board_yaml_arg),
+        *_host_checks_from_doctor(context),
     ]
     missing_prerequisites = next(
         (c.missing for c in checks if c.name == "hostPrerequisites"), None
@@ -814,9 +817,7 @@ def _run(
     project_selected = any(
         (arg or "").strip() for arg in (project_arg, board_yaml_arg)
     )
-    doctor_report, checks = _debug_doctor_report(
-        context, project_arg, board_yaml_arg, project_selected, target, server
-    )
+    doctor_report, checks = _debug_doctor_report(context, project_selected, target, server)
     doctor_report["generatedAt"] = generated_at
 
     notes = [

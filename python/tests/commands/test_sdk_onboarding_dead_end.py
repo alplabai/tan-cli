@@ -267,7 +267,9 @@ def test_support_bundle_sdk_root_fix_never_recommends_a_refused_subcommand(
     user actually reads kept naming the refused command."""
     monkeypatch.chdir(tmp_path)
     support_mod.write(tmp_path / "board.yaml", "x")
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: support_mod._clean_checks())
+    monkeypatch.setattr(
+        doctor_cmd, "host_environment_checks", lambda *a, **k: support_mod._clean_checks()
+    )
     result = support_mod.runner.invoke(
         support_mod.app, ["support-bundle", "--format", "json"]
     )

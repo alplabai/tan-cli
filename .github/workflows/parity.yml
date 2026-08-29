@@ -910,6 +910,27 @@ jobs:
           python3 -m pip install --upgrade pip pytest pytest-xdist
           python3 -m pip install ./python
 
+      # tan-cli#907: same reasoning as ci.yml's `python` job step of the same
+      # name -- `module_size_budget.generated.json` is deliberately NOT
+      # `merge=union`'d (it is a JSON object; unioning two of those can leave
+      # two sibling entries with no comma between them), so a real `git
+      # merge` either conflicts visibly or -- measured directly, `git merge`
+      # of two branches editing different keys of a shared JSON object --
+      # stitches both edits into one syntactically valid, semantically STALE
+      # JSON object with NO conflict marker at all. `--check` re-measures
+      # this job's own checkout (already `fetch-depth: 0` above, already the
+      # merged/PR tree) and compares it EXACTLY against the committed
+      # sidecar. Run here, before the alp-sdk clones and the `tests/gates`
+      # step below, so a stale sidecar fails FAST with one targeted message
+      # instead of surfacing as a cluster of ratchet-test failures deep in
+      # `python/tests/gates (dependency, issue-code, hardware-fact, planner
+      # self-consistency)` below -- this job (`seam1-plan-shape`) is one of
+      # only two CI legs that run `tests/gates` at all (`ci.yml`'s `python`
+      # job is the other, and carries the identical step).
+      - name: module_size_budget.generated.json matches the checked-out tree (regen --check)
+        working-directory: python
+        run: python3 scripts/regen_module_size_budget.py --check
+
       # These five steps (through scaffold byte-parity) are the ones the
       # `push`/`pull_request` triggers above already ran for this exact commit
       # once it landed on `main` -- re-running them under `python_only: true`
