@@ -136,7 +136,7 @@ from tan.core.metadata_schema import (
     som_preset_schema_path,
     validate_document,
 )
-from tan.core.os_class import allowed_os_for_core
+from tan.core.os_class import allowed_os_for_core, infer_runtime_for_core_id
 from tan.core.shapes import SDK_MARKER, rejected_sdk_root_message
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -242,24 +242,6 @@ class SomShapeError(Exception):
 # ---------------------------------------------------------------------------
 # The derived runtime (tan_core::bootstrap::runtime_for_topology_core)
 # ---------------------------------------------------------------------------
-
-
-def infer_runtime_for_core_id(core_id: str) -> str:
-    """`a` followed by a digit at a WORD start -> `yocto`, else `zephyr`
-    (`tan_core::wizard::infer_runtime_for_core_id`).
-
-    Word starts are the string start and any position after `_`/`-`, so
-    `a55_cluster` and `cluster_a55` are both Cortex-A while `data55` is not. The
-    heuristic is a last resort: a topology that declares `board:`/`machine:`
-    never reaches it.
-    """
-    lowered = core_id.lower()
-    word_start = True
-    for i, ch in enumerate(lowered):
-        if word_start and ch == "a" and i + 1 < len(lowered) and lowered[i + 1].isdigit():
-            return "yocto"
-        word_start = ch in "_-"
-    return "zephyr"
 
 
 def runtime_for_core(core_id: str, *, board: bool, machine: bool) -> str:

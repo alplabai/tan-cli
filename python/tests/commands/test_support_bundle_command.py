@@ -9,10 +9,12 @@ Envelope/exit-code shapes below were measured against a freshly-built oracle
 extension + tool pair, then the host checks. Before #357 this module
 substituted `doctor_cmd._collect`'s whole build/flash-readiness checklist and
 declared that a deliberate divergence; a bundle attached to a debug failure
-therefore carried no debugger state at all. The four host checks are still
-`doctor_cmd`'s own -- harvested by name from `_collect` -- so they are
-monkeypatched here with a deterministic list, keeping these tests independent
-of this host's Zephyr/tool state.
+therefore carried no debugger state at all. The five host checks are still
+`doctor_cmd`'s own -- harvested by name from `doctor_cmd.host_environment_checks`
+(tan-cli#441; formerly `_collect`, which paid for the whole discarded
+checklist to yield the same five) -- so they are monkeypatched here with a
+deterministic list, keeping these tests independent of this host's
+Zephyr/tool state.
 
 **Exit follows the oracle's rule: `summary.fail > 0` -> `DOCTOR_FAILURE` (4),
 `ok: false`.** A warn does NOT flip it, and the bundle file is written on the
@@ -33,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 
+import pytest
 import typer
 from typer.testing import CliRunner
 
@@ -71,14 +74,16 @@ def sdk_at(root):
 
 
 def _clean_checks(*, fail=False, warn=False):
-    """A deterministic `doctor_cmd._collect` return, standing in for whatever
-    this real host's tools/Zephyr workspace happen to report -- keeps the
-    end-to-end tests below independent of CI/dev-machine state.
+    """A deterministic `doctor_cmd.host_environment_checks` return, standing
+    in for whatever this real host's tools/Zephyr workspace happen to report
+    -- keeps the end-to-end tests below independent of CI/dev-machine state.
 
     The `sdk` entry is deliberately one the bundle must DROP: only the five
     names in `_HOST_CHECK_ORDER` are harvested, and `sdk` is the build
-    checklist's own SDK verdict, superseded here by the debug report's
-    `sdkRoot`."""
+    checklist's own SDK verdict (`host_environment_checks` itself never
+    returns one -- this stub adds it purely to prove
+    `_host_checks_from_doctor`'s own by-name filter still holds), superseded
+    here by the debug report's `sdkRoot`."""
     status = "fail" if fail else ("warn" if warn else "pass")
     checks = [doctor_cmd.Check("sdk", "pass", "alp-sdk at /sdk", scope="project")]
     if fail or warn:
@@ -153,7 +158,7 @@ def test_written_bundle_never_contains_the_raw_home_directory(tmp_path, monkeypa
     project = home / "proj"
     write(project / "board.yaml", "x")
     monkeypatch.chdir(project)
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+    monkeypatch.setattr(doctor_cmd, "host_environment_checks", lambda *a, **k: _clean_checks())
 
     result = runner.invoke(app, ["support-bundle", "--format", "json"])
     doc = json.loads(result.stdout)
@@ -177,7 +182,7 @@ def test_a_workspace_outside_home_is_left_legible_in_the_bundle(tmp_path, monkey
     touched at all -- a maintainer reading the file needs the real layout."""
     monkeypatch.chdir(tmp_path)
     write(tmp_path / "board.yaml", "x")
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+    monkeypatch.setattr(doctor_cmd, "host_environment_checks", lambda *a, **k: _clean_checks())
 
     result = runner.invoke(app, ["support-bundle", "--format", "json"])
     doc = json.loads(result.stdout)
@@ -306,7 +311,7 @@ def test_trace_section_still_plans_all_four_targets_without_a_real_board_yaml(
     monkeypatch.chdir(tmp_path)
     sdk = tmp_path / "alp-sdk"
     sdk_at(sdk)
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+    monkeypatch.setattr(doctor_cmd, "host_environment_checks", lambda *a, **k: _clean_checks())
 
     result = runner.invoke(app, ["support-bundle", "--sdk-root", str(sdk), "--format", "json"])
     doc = json.loads(result.stdout)
@@ -316,7 +321,7 @@ def test_trace_section_still_plans_all_four_targets_without_a_real_board_yaml(
 def test_trace_section_falls_back_to_one_failed_decision_with_no_sdk(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     write(tmp_path / "board.yaml", "x")
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks(fail=True))
+    monkeypatch.setattr(doctor_cmd, "host_environment_checks", lambda *a, **k: _clean_checks(fail=True))
 
     result = runner.invoke(app, ["support-bundle", "--format", "json"])
     doc = json.loads(result.stdout)
@@ -327,7 +332,7 @@ def test_path_focus_adds_one_more_decision(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     sdk = tmp_path / "alp-sdk"
     sdk_at(sdk)
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+    monkeypatch.setattr(doctor_cmd, "host_environment_checks", lambda *a, **k: _clean_checks())
 
     result = runner.invoke(
         app, ["support-bundle", "--sdk-root", str(sdk), "--path", "som.sku", "--format", "json"]
@@ -363,7 +368,7 @@ def _healthy(tmp_path, monkeypatch, **kwargs):
     write(tmp_path / "board.yaml", "x")
     sdk = tmp_path / "alp-sdk"
     sdk_at(sdk)
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks(**kwargs))
+    monkeypatch.setattr(doctor_cmd, "host_environment_checks", lambda *a, **k: _clean_checks(**kwargs))
     return ["support-bundle", "--sdk-root", str(sdk), "--format", "json"]
 
 
@@ -421,7 +426,7 @@ def test_an_unresolved_sdk_root_fails_the_bundle(tmp_path, monkeypatch):
     `support-bundle.sdk-root` at error severity."""
     monkeypatch.chdir(tmp_path)
     write(tmp_path / "board.yaml", "x")
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+    monkeypatch.setattr(doctor_cmd, "host_environment_checks", lambda *a, **k: _clean_checks())
 
     result = runner.invoke(app, ["support-bundle", "--format", "json"])
     assert result.exit_code == 4
@@ -456,27 +461,37 @@ def test_the_bundle_carries_the_debug_report_not_the_build_checklist(tmp_path, m
         "lldb",
         "hostPrerequisites",
     ]
-    # `sdk` is in the monkeypatched `_collect` list and must NOT ride along --
-    # only the five harvested host names do.
+    # `sdk` is in the monkeypatched `host_environment_checks` list and must
+    # NOT ride along -- only the five harvested host names do.
     assert "sdk" not in names
 
 
-def test_the_real_collect_produces_the_oracle_shaped_check_list(tmp_path, monkeypatch):
+def test_the_real_host_environment_checks_produce_the_oracle_shaped_check_list(
+    tmp_path, monkeypatch
+):
     """tan-cli#374 finding 7: every OTHER test in this module monkeypatches
-    `doctor_cmd._collect` with the 2-check `_clean_checks()` stub, so none of
-    them would notice a check entering or leaving the bundle -- exactly how
-    findings 1 (`longPaths`'s undue `fail` arm) and 5 (the undeclared
-    `bootstrapManifest` divergence) reached production with no unit test
-    failing.
+    `doctor_cmd.host_environment_checks` with the 2-check `_clean_checks()`
+    stub, so none of them would notice a check entering or leaving the
+    bundle -- exactly how findings 1 (`longPaths`'s undue `fail` arm) and 5
+    (the undeclared `bootstrapManifest` divergence) reached production with
+    no unit test failing.
 
-    This one runs the REAL `_collect`, against a resolvable SDK carrying a
-    real, readable `metadata/bootstrap.json` (so `bootstrapManifest` -- a
-    documented, separately-tracked port-only divergence, finding 5 -- does
-    not fire and inflate the count), and pins the check-NAME list only: the
-    oracle's own shape (`longPaths` is Windows-only, hence the platform
-    branch), regardless of what THIS host's real tools/registry answer each
-    one with -- unlike `_healthy`'s deterministic stub, a real status here
-    would be host-dependent and not this test's job to pin.
+    This one runs the REAL `host_environment_checks`, against a resolvable
+    SDK carrying a real, readable `metadata/bootstrap.json` (so
+    `bootstrapManifest` -- a documented, separately-tracked port-only
+    divergence, finding 5 -- does not fire and inflate the count), and pins
+    the check-NAME list only: the oracle's own shape (`longPaths` is
+    Windows-only, hence the platform branch), regardless of what THIS host's
+    real tools/registry answer each one with -- unlike `_healthy`'s
+    deterministic stub, a real status here would be host-dependent and not
+    this test's job to pin.
+
+    tan-cli#441: before this fix, the seam this test measures WAS
+    `doctor_cmd._collect` -- the exact same expected NAME list below was
+    already the assertion (renamed only, never re-derived), which is itself
+    the equivalence proof the fix owes: the harvested five read identically
+    whether they were picked out of `_collect`'s much longer list or built
+    directly by `host_environment_checks`.
     """
     monkeypatch.chdir(tmp_path)
     write(tmp_path / "board.yaml", "x")
@@ -513,6 +528,148 @@ def test_the_real_collect_produces_the_oracle_shaped_check_list(tmp_path, monkey
     expected.append("homePath")
     assert names == expected
     assert "bootstrapManifest" not in names
+
+
+#: Every check-builder `_collect` calls that `host_environment_checks` must
+#: NOT -- `_collect`'s own build/flash-readiness preflight
+#: (`sdk_check`..`zephyr_workspace_check`), the discarded host-adjacent
+#: checks (`west_check`, `zephyr_sdk_check`, `seven_zip_check`), and the
+#: three probes tan-cli#441's own issue names by name (`setools_check`,
+#: `jlink_check`/`jlink_banner`/`jlink_flash_device` for J-Link, plus
+#: `sdk_provenance_check`'s git shell-out). `west_resolved_check` is listed
+#: separately from `west_check` -- `_collect` builds both from two
+#: independent `west --version` spawns.
+_DISCARDED_CHECKLIST_BUILDERS = (
+    "sdk_check",
+    "board_yaml_preflight_check",
+    "libraries_check",
+    "workspace_preflight_check",
+    "west_resolved_check",
+    "venv_provenance_check",
+    "zephyr_version_preflight_check",
+    "zephyr_workspace_check",
+    "west_check",
+    "zephyr_sdk_check",
+    "seven_zip_check",
+    "setools_check",
+    "jlink_check",
+    "jlink_banner",
+    "jlink_flash_device",
+    "sdk_provenance_check",
+)
+
+
+def test_host_environment_checks_never_calls_the_discarded_checklist_builders(
+    tmp_path, monkeypatch
+):
+    """tan-cli#441 acceptance criterion: prove `support-bundle` (via
+    `doctor_cmd.host_environment_checks`) does not invoke `west`, J-Link,
+    SETOOLS, or any of `_collect`'s other build/flash-readiness probes --
+    the ones a bundle's own doctor section never reported even before this
+    fix, but used to pay for anyway.
+
+    Poisons every check-builder `_collect` calls that is NOT one of the five
+    `host_environment_checks` keeps, with a spy that fails the test the
+    instant ANY of them runs, then ALSO wraps `doctor_cmd.probe`/
+    `probe_status` themselves so a raw west/JLink/SETOOLS spawn made without
+    going through any of those builders (`_collect`'s own `west --version`
+    probes are exactly that shape) is caught too -- builder-granular alone is
+    not spawn-granular (tan-cli#980 review). Then calls the REAL seam against
+    a real (if minimal) SDK checkout. `_collect` itself (`tan doctor`'s own
+    full checklist -- see `test_doctor_command.py`) keeps calling every one
+    of these; only `host_environment_checks` must not.
+    """
+    for name in _DISCARDED_CHECKLIST_BUILDERS:
+        monkeypatch.setattr(
+            doctor_cmd,
+            name,
+            lambda *a, _name=name, **k: pytest.fail(
+                f"host_environment_checks must not call {_name}()"
+            ),
+        )
+
+    # tan-cli#980 review finding 2: the builder-name poison above is
+    # builder-GRANULAR -- it catches a re-added *check* (a call to one of the
+    # sixteen names above), not a re-added *spawn*. `_collect` itself proves
+    # the gap exists: its `west --version` probes (`doctor_cmd.py`, the
+    # `probe_status([west_resolved_exe, "--version"])` / `probe([west_exe,
+    # "--version"])` calls) are raw spawns made directly in `_collect`'s own
+    # body, not routed through `west_check`/`west_resolved_check` (those two
+    # are pure formatters over an already-probed version) -- so a
+    # `host_environment_checks` that grew the identical raw call would sail
+    # straight past every poison above. Wrap, rather than replace outright,
+    # `doctor_cmd.probe`/`probe_status`: a west/JLink/SETOOLS-shaped argv
+    # fails the test the instant it is attempted; anything else -- the macOS
+    # `sysctl` Rosetta probe `zephyrSdkAvailableForHost` needs, the
+    # python-floor probe `hostPrerequisites` needs -- still runs for real, so
+    # this stays a spawn guard and not a second `_clean_checks`-shaped stub
+    # that would make the five real checks untestable here.
+    _forbidden_argv_tokens = ("west", "jlink", "setools")
+    _real_probe = doctor_cmd.probe
+    _real_probe_status = doctor_cmd.probe_status
+
+    def _argv_names_a_discarded_tool(argv) -> bool:
+        return any(
+            token in str(part).lower() for part in argv for token in _forbidden_argv_tokens
+        )
+
+    def _guarded_probe(argv, *a, **k):
+        if _argv_names_a_discarded_tool(argv):
+            pytest.fail(f"host_environment_checks must not spawn {argv!r}")
+        return _real_probe(argv, *a, **k)
+
+    def _guarded_probe_status(argv, *a, **k):
+        if _argv_names_a_discarded_tool(argv):
+            pytest.fail(f"host_environment_checks must not spawn {argv!r}")
+        return _real_probe_status(argv, *a, **k)
+
+    monkeypatch.setattr(doctor_cmd, "probe", _guarded_probe)
+    monkeypatch.setattr(doctor_cmd, "probe_status", _guarded_probe_status)
+
+    sdk = tmp_path / "alp-sdk"
+    sdk_at(sdk)
+    write(
+        sdk / "metadata" / "bootstrap.json",
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "prerequisites": {
+                    "posix": [],
+                    "windows": [],
+                    "pythonMinVersion": "3.10",
+                    "install": {},
+                },
+            }
+        ),
+    )
+
+    checks = doctor_cmd.host_environment_checks(str(sdk), workspace_root=str(tmp_path))
+    names = {c.name for c in checks}
+    assert "hostPrerequisites" in names
+    assert "zephyrSdkAvailableForHost" in names
+    assert "homePath" in names
+
+
+def test_support_bundle_never_calls_the_whole_doctor_checklist(tmp_path, monkeypatch):
+    """The regression this fix exists to prevent, pinned directly: if
+    `_host_checks_from_doctor` (or anything else in this module) ever again
+    reaches for `doctor_cmd._collect` -- reintroducing the whole discarded
+    build/flash-readiness checklist tan-cli#441 removed -- this test fails
+    the instant `support-bundle` runs, regardless of what `_collect` would
+    have returned. A poisoned `_collect` that is genuinely never called is
+    the "cannot quietly return" assertion tan-cli#441's own acceptance
+    criteria ask for; `test_host_environment_checks_never_calls_the_
+    discarded_checklist_builders` above covers the finer-grained "which
+    individual probes" half of the same requirement.
+    """
+    monkeypatch.setattr(
+        doctor_cmd,
+        "_collect",
+        lambda *a, **k: pytest.fail("support-bundle must not call doctor_cmd._collect"),
+    )
+    argv = _healthy(tmp_path, monkeypatch)
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 0
 
 
 def test_the_extension_checks_are_unknown_and_count_toward_nothing(tmp_path, monkeypatch):
@@ -602,7 +759,7 @@ def test_a_missing_board_yaml_warns_until_a_project_is_selected(tmp_path, monkey
     monkeypatch.chdir(tmp_path)
     sdk = tmp_path / "alp-sdk"
     sdk_at(sdk)
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+    monkeypatch.setattr(doctor_cmd, "host_environment_checks", lambda *a, **k: _clean_checks())
     argv = ["support-bundle", "--sdk-root", str(sdk), "--format", "json"]
 
     unselected = runner.invoke(app, argv)
@@ -628,7 +785,7 @@ def test_explicit_destination_is_used_verbatim(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     write(tmp_path / "board.yaml", "x")
     dest = tmp_path / "custom-dest"
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+    monkeypatch.setattr(doctor_cmd, "host_environment_checks", lambda *a, **k: _clean_checks())
 
     result = runner.invoke(
         app, ["support-bundle", "--destination", str(dest), "--format", "json"]
@@ -642,7 +799,7 @@ def test_explicit_destination_is_used_verbatim(tmp_path, monkeypatch):
 def test_default_destination_is_dot_alp_support_under_the_workspace(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     write(tmp_path / "board.yaml", "x")
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+    monkeypatch.setattr(doctor_cmd, "host_environment_checks", lambda *a, **k: _clean_checks())
 
     result = runner.invoke(app, ["support-bundle", "--format", "json"])
     doc = json.loads(result.stdout)
@@ -658,7 +815,7 @@ def test_default_destination_is_dot_alp_support_under_the_workspace(tmp_path, mo
 def test_verbose_text_mode_adds_the_json_hint(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     write(tmp_path / "board.yaml", "x")
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+    monkeypatch.setattr(doctor_cmd, "host_environment_checks", lambda *a, **k: _clean_checks())
 
     quiet = runner.invoke(app, ["support-bundle"])
     verbose = runner.invoke(app, ["support-bundle", "--verbose"])
@@ -723,7 +880,7 @@ def test_a_root_home_writes_an_unredacted_bundle_and_says_so(tmp_path, monkeypat
     monkeypatch.setenv(env_key, "C:\\" if os.name == "nt" else "/")
     write(tmp_path / "board.yaml", "x")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+    monkeypatch.setattr(doctor_cmd, "host_environment_checks", lambda *a, **k: _clean_checks())
 
     doc = json.loads(runner.invoke(app, ["support-bundle", "--format", "json"]).stdout)
     warning = [i for i in doc["issues"] if i["code"] == REDACTION_SKIPPED_CODE]
@@ -749,7 +906,7 @@ def test_an_ordinary_home_emits_no_redaction_warning(tmp_path, monkeypatch):
     monkeypatch.setenv(env_key, str(home))
     write(tmp_path / "board.yaml", "x")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+    monkeypatch.setattr(doctor_cmd, "host_environment_checks", lambda *a, **k: _clean_checks())
 
     doc = json.loads(runner.invoke(app, ["support-bundle", "--format", "json"]).stdout)
     assert [i for i in doc["issues"] if i["code"] == REDACTION_SKIPPED_CODE] == []

@@ -394,6 +394,14 @@ and write both files from the real merged tree.
     - tan/commands/debug_config_cmd.py: 2007 -> 2047
     - tan/core/debug_launch.py: 1462 -> 1541
     - function_count_budget: 277 -> 278
+- 2026-08-28 -- tan-cli#441: extract doctor_cmd.host_environment_checks + the shared _resolve_prerequisites_environment seam so support-bundle stops running doctor's whole build/flash-readiness checklist for five host checks; moved code grew doctor_cmd.py/support_bundle_cmd.py and added one long function (the seam itself, a verbatim relocation of the existing bootstrapManifest/hostPrerequisites block).
+    - tan/commands/doctor_cmd.py: 4045 -> 4145
+    - tan/commands/support_bundle_cmd.py: 1066 -> 1067
+    - function_count_budget: 277 -> 278
+- 2026-08-28 -- tan-cli#963: generate_cmd.py's own docstring for pin_issue/foreign_issue prepend-ordering grew the module 4 lines past its 1400 ceiling; no compression to fit, per repo convention
+    - tan/commands/generate_cmd.py: 1400 -> 1404
+- 2026-08-28 -- tan-cli#980 review nit 3: doctor_cmd.py's _collect() gained a documented decision (accept vs restore) about the bootstrapManifest/hostPython/pythonFloor print-timing shift the tan-cli#441 _resolve_prerequisites_environment extraction introduced -- a comment, not new logic, kept in full per house rule rather than trimmed to dodge the cap.
+    - tan/commands/doctor_cmd.py: 4145 -> 4164
 - 2026-08-28 -- tan-cli#427: build.py/execute.py grew implementing --pristine (force_pristine wiring + PristineSkipped) and resolving --plan/--manifest/--manifest-from/--target/--all/--verbose/--quiet/--no-color/--non-interactive/--ci into implemented/retired/accept-and-drop buckets
     - tan/commands/build/execute.py: 1662 -> 1713
     - tan/commands/build_cmd.py: 2178 -> 2255
@@ -452,3 +460,18 @@ and write both files from the real merged tree.
     - function_count_budget: 280 -> 288
     - function_count_budget: 279 -> 287
     - function_worst_budget: 770 -> 791
+- 2026-08-28 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/explain_cmd.py: 1138 -> 1310
+    - tan/core/scaffold.py: 1538 -> 1566
+- 2026-08-29 -- tan-cli#991: RunPaths frozen. The growth IS the fix and cannot be written in zero lines -- eleven in-place field assignments become five explicit replace() rebindings (a replace(paths, a=.., b=.., c=..) spans more lines than the three 'paths.x =' it replaces), plus WorkspacePlan.adopted_paths so _select_workspace returns the adoption instead of writing through its parameter, the caller-side rebinding that makes it visible, and a nonlocal in the rollback closure. Measured split of the added lines: 35 code, 24 comment. The comments are the load-bearing kind this module is written in -- why nonlocal is required there and not in the read-only payload closure, why the pre-manifest guessed-.venv read stays correct by construction, and why one frozen snapshot retires RelocationUndo's field-by-field copy. Not the tan-cli#921 shape, where the growth was prose around a one-token fix.
+    - tan/commands/bootstrap_cmd.py: 3567 -> 3600
+    - function_worst_budget: 791 -> 804
+- 2026-08-29 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3567 -> 3600
+    - function_worst_budget: 791 -> 804
+- 2026-08-29 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3567 -> 3600
+    - tan/commands/doctor_cmd.py: 4045 -> 4164
+    - tan/commands/support_bundle_cmd.py: 1066 -> 1067
+    - function_count_budget: 288 -> 289
+    - function_worst_budget: 791 -> 804
