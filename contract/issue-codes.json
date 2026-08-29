@@ -351,6 +351,14 @@
       "note": "tan-cli#111 registry audit: recorded via `Log::warn` in `pip_phase`, the last of the three non-fatal pip-extras warnings alongside `sdk-extras`/`zephyr-requirements`."
     },
     {
+      "code": "bootstrap.toolchain-install",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
+      "note": "issue #474 (ADR 0021 Lane 1 P1): recorded via `Log.warn` in `toolchain_phase`/`_acquire_toolchain`/`_finish_toolchain_install`, the acquisition of the `arm-zephyr-eabi` cross toolchain via `west sdk install --install-dir`. A DELIBERATE 4th `WORKSPACE_BLOCKING` member alongside `zephyr-requirements`/`sdk-extras`/`editable-install` -- the frozen v0.4.1 Rust oracle never acquired a cross toolchain at all, so this is a Python-only addition with no oracle sibling, not a parity gap. Covers every non-fatal failure mode the phase can hit: an unreadable/malformed `metadata/toolchains.json`, missing 7-Zip on native Windows, insufficient disk (a preflight against the manifest's own measured footprint), a `west sdk install` failure, a post-install version mismatch, a compiler that will not run, a failed stamp write, and an adopted `$ALP_TOOLCHAIN_ROOT` directory tan will not delete on the caller's behalf. Never fired for an unsupported host (Intel Mac, windows-arm64) or a manifest publishing no artifact for this host -- ADR 0021's own words, \"a coded, honest skip, never a failure\" -- those are `log.line`, not `log.warn`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "bootstrap.failed",
       "status": "reserved",
       "severity": "error",
@@ -2099,6 +2107,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
       "note": "The ADR-0018 curated-library verdict for the selected project (tier + licence + whether each selection can be wired on this target), ported out of alp-sdk's `scripts/alp_cli/doctor.py::_check_libraries` under ADR-0020 end-state B -- a user-facing check belongs on the user command surface, which is `tan`. `severity` is `warning` and only ever `warning`: `libraries_check` never returns a `fail` status, because `tan build` already refuses an unwireable selection outright and a `fail` here would additionally cost exit 4. Emitted only when a project selects at least one curated library; a project selecting none produces no check and therefore no issue at all. The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.toolchain",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "note": "issue #474 (ADR 0021 Lane 1 P1): `toolchain_check` -- stamp-vs-pin, never directory-exists (\"a stamped 1.0.1 store against a moved pin is a Fail with a fix, not 'a toolchain exists'\", the ADR's own words). `severity` is always `error`: the check only ever returns `unknown` (no `issues[]` entry at all, per `checks_to_issues()`) or `fail`, never `warn` -- no verified `arm-zephyr-eabi` toolchain for the checkout's pinned Zephyr SDK version means `tan build` for real silicon cannot succeed. Distinct from `doctor.zephyr-sdk` (unconditional, no SDK checkout needed, answers whether ANY toolchain exists on the host); this one needs `sdk_root` and answers whether THIS checkout's PIN is satisfied, verified. Calls `tan.core.toolchain_provision.stamp_matches_pin` -- the SAME function `tan bootstrap`'s own skip-if-already-installed step calls -- so doctor and bootstrap cannot independently drift on what \"still valid\" means. The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "doctor.long-paths",

@@ -165,10 +165,25 @@ jobs:
         with:
           persist-credentials: false
 
-      # The freeze is built in an OLD-glibc container (see the header). This is
-      # the same recipe clean-host.yml and release.yml use; `.[monitor]` matches
-      # them too -- an extra a frozen binary advertises in --help must actually
-      # be bundled.
+      # The freeze is built in an OLD-glibc container (see the header), the
+      # same base image clean-host.yml and release.yml use; `.[monitor]`
+      # matches them too -- an extra a frozen binary advertises in --help
+      # must actually be bundled.
+      #
+      # DELIBERATELY UNPINNED (tan-cli#989 review, finding 3): unlike
+      # release.yml's `build` job and clean-host.yml's `freeze-and-smoke`
+      # job, this install is NOT `--require-hashes -r
+      # release-requirements.lock.txt` -- it resolves `.[monitor]` and
+      # `pyinstaller` live against PyPI every run, on purpose. This job's own
+      # header says what it is FOR: the clean-machine bootstrap path
+      # (`dev` x `dev`), not a preview of the exact bytes a tag ships --
+      # `getting-started.yml` already smoke-tests the release-shaped freeze
+      # (tan-cli#278), and `release.yml`/`clean-host.yml` are the only
+      # hash-verified builds. Leaving this leg on a live resolution means it
+      # keeps catching an upstream dependency-set drift (e.g. tan-cli#296's
+      # `ModuleNotFoundError: No module named 'click'` class of break) on
+      # whichever day it actually happens, rather than only after the next
+      # lock-update PR regenerates and merges.
       - name: freeze tan (python:3.12-slim-bullseye)
         shell: bash
         run: |

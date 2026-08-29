@@ -1234,6 +1234,13 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
     # built -- including the demotion tests, which would resolve instead of
     # demoting and go red for a reason that is nothing to do with the code.
     monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
+    # Same reasoning, same class, added when `build.toolchain._candidates`
+    # started scanning the ADR 0021 artifact-keyed store (tan-cli#990
+    # review): `$ALP_TOOLCHAIN_ROOT` is documented for real bench/CI
+    # machines, and left unscrubbed a shell that exports it would make every
+    # toolchain-root test see THAT store instead of the fresh-per-test
+    # `home/.alp/toolchains` this fixture builds below.
+    monkeypatch.delenv("ALP_TOOLCHAIN_ROOT", raising=False)
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))

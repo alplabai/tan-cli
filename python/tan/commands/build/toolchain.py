@@ -59,6 +59,25 @@ the file it wrote (or the `issues[]` entry when it wrote nothing):
     measured reporting "no SDK" with the SDK installed. On any ordinary
     POSIX host the two sets are identical, so the measured Linux parity
     above still holds byte-for-byte.
+  * **The ADR 0021 artifact-keyed store (`tan.core.toolchain_provision.
+    resolve_toolchain_root`, `~/.alp/toolchains` or `$ALP_TOOLCHAIN_ROOT`) is
+    ALSO scanned, one level in, for its own `zephyr-sdk*`-prefixed leaf
+    directories.** The v0.4.1 oracle predates issue #474 entirely and has no
+    opinion on this store -- there is nothing to diverge FROM here, only a
+    gap `tan-cli#990` review closed: `tan bootstrap`'s own toolchain phase
+    installs into `<store-root>/zephyr-sdk-<version>-arm-zephyr-eabi/`, two
+    directory levels below every root this function used to look at, so a
+    customer who ran nothing but `tan bootstrap` (the whole point of issue
+    #474) still could not get `${TOOLCHAIN_ROOT}` to resolve to what it just
+    downloaded without ALSO hand-exporting `ZEPHYR_SDK_INSTALL_DIR` --
+    keeping the very manual step ADR 0021 Lane 1 P1 exists to remove. Per
+    alp-sdk#1286's own closing decision ("never a location; resolving it to
+    a concrete path is the executor's job, not the plan's"), tan is that
+    executor, and this is that resolution. A `.tmp-<pid>` wreckage sibling
+    (`toolchain_provision.TMP_SUFFIX_PREFIX`) from an interrupted attempt is
+    excluded by name in `_candidates()` below -- it also starts with
+    `zephyr-sdk`, and would otherwise fake a "several installs, ambiguous"
+    host next to the one real, verified store.
 
 `doctor_cmd`'s scan is DUPLICATED here rather than imported: `doctor_cmd`
 imports from `build_cmd`, and `build_cmd` imports this module, so the import
@@ -78,9 +97,15 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from tan.core import toolchain_provision as _tp
+
 #: What every candidate directory's name must start with. A PREFIX, not a
 #: `zephyr-sdk-<version>` pattern -- measured against the oracle, which
-#: accepted a directory named `zephyr-sdkXYZ`.
+#: accepted a directory named `zephyr-sdkXYZ`. Matches BOTH a manual
+#: `zephyr-sdk-1.0.1` install AND `tan.core.toolchain_provision.
+#: store_dir_name`'s `zephyr-sdk-<version>-arm-zephyr-eabi` leaf -- no
+#: change needed here for the artifact-keyed store below, only to WHERE it
+#: is looked for.
 ZEPHYR_SDK_DIR_PREFIX = "zephyr-sdk"
 
 #: The env var that overrides the scan outright, and the one every reason
@@ -148,9 +173,45 @@ def _scan_roots() -> list[Path]:
     return roots
 
 
+def _toolchain_store_scan_root() -> Path:
+    """`~/.alp/toolchains` (or `$ALP_TOOLCHAIN_ROOT`) -- the ADR 0021
+    artifact-keyed store `tan bootstrap`'s own toolchain phase installs
+    into. Delegates to `toolchain_provision.resolve_toolchain_root`, the
+    SAME function `bootstrap_cmd._toolchain_root_and_leaf` calls, so this
+    can never compute a different root than the one bootstrap actually used
+    -- the two-levels-deep discovery gap tan-cli#990 review found was a
+    location bug, not a fact this module should ever re-derive its own
+    opinion of.
+
+    `home_alp_dir` is duplicated inline (`~/.alp`, `USERPROFILE` on Windows
+    else `HOME`) rather than importing `sdk_cmd._home_alp_dir` -- this
+    module already duplicates `doctor_cmd`'s scan for the identical reason
+    (see the module docstring): `sdk_cmd` sits import-adjacent to
+    `build_cmd`, which imports this module, and one two-line duplication is
+    cheaper than auditing that edge for a cycle.
+    """
+    home = os.environ.get("USERPROFILE" if os.name == "nt" else "HOME")
+    home_alp_dir = str(Path(home or ".") / ".alp")
+    root = _tp.resolve_toolchain_root(os.environ.get("ALP_TOOLCHAIN_ROOT"), home_alp_dir)
+    return Path(root.path_str)
+
+
+def _is_toolchain_wreckage(name: str) -> bool:
+    """`True` for a `.tmp-<pid>` sibling of an interrupted acquisition
+    (`toolchain_provision.TMP_SUFFIX_PREFIX`) -- it starts with
+    `zephyr-sdk` too (it is `<leaf><TMP_SUFFIX_PREFIX><pid>` and `leaf`
+    itself starts with `zephyr-sdk`), so without this it would fake a
+    SECOND, ambiguous candidate next to the one real, verified store entry
+    every time `tan bootstrap` was interrupted mid-acquisition and its own
+    startup reclaim (`bootstrap_cmd._reclaim_toolchain_wreckage`) has not
+    yet run again."""
+    return _tp.TMP_SUFFIX_PREFIX in name
+
+
 def _candidates() -> list[str]:
     """Every distinct `zephyr-sdk*` install directory found under
-    `_scan_roots()`, as POSIX-separator strings, SORTED.
+    `_scan_roots()` PLUS `_toolchain_store_scan_root()`, as POSIX-separator
+    strings, SORTED.
 
     Deduplicated on `Path.resolve()`, keeping the FIRST literal spelling
     seen. This is the guard that stops `_scan_roots()`'s deliberate overlap
@@ -170,13 +231,15 @@ def _candidates() -> list[str]:
     there", not a failed build.
     """
     found: dict[str, str] = {}
-    for root in _scan_roots():
+    for root in [*_scan_roots(), _toolchain_store_scan_root()]:
         try:
             entries = sorted(root.iterdir())
         except OSError:
             continue
         for entry in entries:
             if not entry.name.startswith(ZEPHYR_SDK_DIR_PREFIX):
+                continue
+            if _is_toolchain_wreckage(entry.name):
                 continue
             try:
                 if not entry.is_dir():

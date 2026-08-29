@@ -361,6 +361,7 @@ def test_the_adoption_probe_is_evaluated_even_under_an_explicit_workspace(tmp_pa
         sdk_root_flag=str(sdk),
         no_pip=True,
         no_west=True,
+        no_toolchain=True,
         print_env=False,
         allow_partial=False,
         workspace=str(tmp_path / "newhome"),

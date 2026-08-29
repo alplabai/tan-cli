@@ -125,6 +125,71 @@ def test_an_install_one_level_deeper_is_not_found(scan):
     assert resolve_toolchain_root().root is None
 
 
+# ---------------------------------------------------------------------------
+# The ADR 0021 artifact-keyed store (tan-cli#990 review MAJOR)
+# ---------------------------------------------------------------------------
+#
+# `scan` above does NOT neutralise this -- only `_scan_roots`. Hermeticity
+# instead comes from `tests/conftest.py`'s autouse `_scrub_sdk_discovery_env`,
+# which points `HOME`/`USERPROFILE` at a fresh, empty `tmp_path_factory`
+# directory for every test and scrubs `ALP_TOOLCHAIN_ROOT`, so
+# `_toolchain_store_scan_root()` resolves to a `.alp/toolchains` that does
+# not exist yet unless a test below creates it.
+
+
+def test_a_toolchain_bootstrap_installed_is_found_without_any_env_var(monkeypatch):
+    """The gap this whole section closes: before it, a customer who ran
+    NOTHING but `tan bootstrap` (issue #474's entire point) still could not
+    get `${TOOLCHAIN_ROOT}` to resolve without ALSO hand-exporting
+    `ZEPHYR_SDK_INSTALL_DIR` -- `tan.core.toolchain_provision.store_dir_name`
+    nests two directory levels below every root `_scan_roots` looked at."""
+    from tan.commands.build import toolchain as bt
+
+    home = bt._toolchain_store_scan_root()
+    install = home / "zephyr-sdk-1.0.1-arm-zephyr-eabi"
+    install.mkdir(parents=True)
+    monkeypatch.setattr(bt, "_scan_roots", lambda: [])
+    monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
+
+    assert resolve_toolchain_root() == ToolchainResolution(install.as_posix())
+
+
+def test_a_tmp_wreckage_sibling_in_the_store_is_never_a_candidate(monkeypatch):
+    """A `.tmp-<pid>` sibling of an interrupted `tan bootstrap` acquisition
+    also starts with `zephyr-sdk` -- without the exclusion this would fake a
+    SECOND, ambiguous candidate next to the one real, verified store entry
+    on a host where an acquisition was interrupted and not yet reclaimed."""
+    from tan.commands.build import toolchain as bt
+
+    home = bt._toolchain_store_scan_root()
+    install = home / "zephyr-sdk-1.0.1-arm-zephyr-eabi"
+    install.mkdir(parents=True)
+    wreckage = home / "zephyr-sdk-1.0.1-arm-zephyr-eabi.tmp-99999"
+    wreckage.mkdir(parents=True)
+    monkeypatch.setattr(bt, "_scan_roots", lambda: [])
+    monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
+
+    assert resolve_toolchain_root() == ToolchainResolution(install.as_posix())
+
+
+def test_alp_toolchain_root_override_is_scanned_too(monkeypatch, tmp_path):
+    """`$ALP_TOOLCHAIN_ROOT` (ADR 0021's own escape hatch for bench/CI
+    machines) redirects the store scan exactly the way it redirects
+    `tan bootstrap`'s own install -- `_toolchain_store_scan_root` delegates
+    to the SAME `toolchain_provision.resolve_toolchain_root` bootstrap
+    calls, so the two can never name a different root."""
+    from tan.commands.build import toolchain as bt
+
+    adopted_root = tmp_path / "bench-cache"
+    install = adopted_root / "zephyr-sdk-1.0.1-arm-zephyr-eabi"
+    install.mkdir(parents=True)
+    monkeypatch.setenv("ALP_TOOLCHAIN_ROOT", str(adopted_root))
+    monkeypatch.setattr(bt, "_scan_roots", lambda: [])
+    monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
+
+    assert resolve_toolchain_root() == ToolchainResolution(install.as_posix())
+
+
 def test_a_candidate_is_never_validated_for_contents(scan):
     """Measured: an EMPTY `zephyr-sdk-9.9.9` -- no `gnu/arm-zephyr-eabi/bin/
     arm-zephyr-eabi-gcc`, nothing at all -- resolved on the oracle.
