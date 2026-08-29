@@ -202,8 +202,12 @@ def test_the_observed_test_record_has_not_rotted():
     test file, on day one. Reproduced before the fix: a fresh 9000-line
     `tests/commands/test_zz_brand_new_huge.py`, larger than the current
     record-holder, left this file at `8 passed`. The only thing that caught
-    it was `regen --check` (rc=1), and `regen_module_size_budget.py` appears
-    in no workflow, so nothing in CI saw it at all (review of #875).
+    it was `regen --check` (rc=1), and at the time `regen_module_size_budget.py`
+    appeared in no workflow, so nothing in CI saw it at all (review of #875).
+    As of tan-cli#907, `--check` runs as its own step in both `ci.yml`'s
+    `python` job and `parity.yml`'s `seam1-plan-shape` job -- see
+    `test_module_size_budget_check_is_wired_into_ci.py`, which pins that
+    directly rather than trusting this paragraph.
 
     A membership gap is a RECORD gap, not a budget breach, so this stays
     inside tan-cli#817's decision: it fails, and a plain `regen` with no
@@ -319,6 +323,69 @@ def test_the_observed_test_tree_is_recorded_not_gated(tmp_path, monkeypatch):
     assert not ledger.exists()
     assert regen.main(["--reason", "deliberate"]) == 0
     assert "deliberate" in ledger.read_text(), "the gated side still logs its reasons"
+
+
+def test_check_mode_reds_on_a_stale_sidecar_and_passes_once_resynced(tmp_path, monkeypatch):
+    """Direct probe for tan-cli#907's CI wiring: `--check` must RED on a
+    generated file that no longer matches the measured tree, and PASS once
+    the file is regenerated against it.
+
+    The scenario this reproduces is deliberately the git-mechanics one, not
+    a hand-edit: `.gitattributes` does not carry `merge=union` for
+    `module_size_budget.generated.json` (unioning two JSON documents that
+    both add a key can leave two entries with no comma between them), so a
+    real `git merge` on it either conflicts visibly or -- measured directly,
+    a plain `git merge` of two branches editing different keys of a shared
+    JSON object -- stitches both DISJOINT edits into one syntactically valid,
+    semantically stale JSON object with NO conflict marker at all. There is
+    nothing for a human or `test_no_conflict_markers.py` to catch in that
+    case; `--check` re-measuring and comparing exactly is the only thing
+    that can. Hermetic, same redirection pattern as
+    `test_the_observed_test_tree_is_recorded_not_gated` above -- this
+    changes the OBSERVED side (a `tests/**` file), not the gated `modules`
+    map, specifically so no `--reason`/`--merge-resync` flag is needed to
+    make the fixture's own resync step (below) succeed.
+    """
+    import importlib.util
+
+    regen_path = core.PACKAGE.parent / "scripts" / "regen_module_size_budget.py"
+    spec = importlib.util.spec_from_file_location("_regen_under_test_check", regen_path)
+    regen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(regen)
+    target = regen.core
+
+    package = tmp_path / "tan"
+    package.mkdir()
+    (package / "small.py").write_text("x = 1\n", encoding="utf-8")
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    drifting_test = tests_root / "test_drifts.py"
+    drifting_test.write_text("# line\n" * 900, encoding="utf-8")
+
+    generated = tmp_path / "module_size_budget.generated.json"
+    ledger = tmp_path / "LOG.md"
+    monkeypatch.setattr(target, "PACKAGE", package)
+    monkeypatch.setattr(target, "TEST_ROOT", tests_root)
+    monkeypatch.setattr(target, "GENERATED_PATH", generated)
+    monkeypatch.setattr(target, "LOG_PATH", ledger)
+
+    # Seed a generated file that matches the (fake) tree exactly.
+    assert regen.main([]) == 0
+    assert regen.main(["--check"]) == 0, "a freshly regenerated sidecar must pass --check"
+
+    # A sibling branch's edit lands on the tree, but nobody reruns the
+    # regen script for it -- exactly what a clean, marker-free text merge of
+    # two disjoint JSON edits leaves behind: a committed sidecar that no
+    # longer describes the tree it sits next to.
+    drifting_test.write_text("# line\n" * 2400, encoding="utf-8")
+    rc_stale = regen.main(["--check"])
+    assert rc_stale == 1, f"a stale sidecar must RED --check, got rc={rc_stale}"
+
+    # The merge-resync fix: re-run the regen script (no flag needed here --
+    # only the OBSERVED side moved, see the docstring above).
+    assert regen.main([]) == 0
+    rc_fresh = regen.main(["--check"])
+    assert rc_fresh == 0, f"a freshly-resynced sidecar must PASS --check, got rc={rc_fresh}"
 
 
 def test_the_generated_budget_has_no_duplicate_module_keys():

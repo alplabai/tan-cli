@@ -31,6 +31,8 @@ message is `" ".join(lines)`.
 """
 from __future__ import annotations
 
+from tan.core.os_class import infer_runtime_for_core_id
+
 import json
 import os
 import re
@@ -1700,8 +1702,6 @@ def in_play_runtimes(
     `topology` empty means the SoM metadata could not be read; an empty RESULT
     means "unresolvable", which every caller must treat as "proceed".
     """
-    from tan.commands.presets_cmd import infer_runtime_for_core_id  # noqa: PLC0415
-
     def from_topology(core_id: str) -> str:
         return topology.get(core_id) or infer_runtime_for_core_id(core_id)
 

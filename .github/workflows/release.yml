@@ -271,6 +271,22 @@ jobs:
   # gate every commit on `main` as tan-cli's own PR check, so a release tag
   # (cut from an already-green commit) gains nothing re-running THOSE here;
   # see parity.yml's `workflow_call:` comment.
+  #
+  # tan-cli#889: this call is ALSO where `release-sdk-parity` lives (it rides
+  # inside parity.yml, gated `if: inputs.python_only`, so it never runs on a
+  # `pull_request`/`push`/`merge_group`/`repository_dispatch` -- only here).
+  # Every other job this workflow reaches measures `tan/planner/` against
+  # `PINNED_SDK_TAG` -- a dev-tracking pin, re-bumped by hand whenever alp-sdk's
+  # contract surface moves, not "whatever alp-sdk has most recently
+  # published" -- so before that job existed, a release tag had never been
+  # measured against the alp-sdk release a customer installing it would
+  # actually pair it with (tan-cli#843/#888 both record that gap firing for
+  # real). `release-sdk-parity` resolves alp-sdk's latest published release
+  # itself, from the GitHub Releases API, at release time, and reds this call
+  # -- blocking `build` below via this job's own `needs:` -- on a genuine
+  # plan-shape divergence. No separate `needs:` entry on `build` for it: a
+  # `uses:` job's conclusion IS the called workflow run's conclusion, so a
+  # failure in `release-sdk-parity` already fails `python-gates` here.
   python-gates:
     uses: ./.github/workflows/parity.yml
     with:

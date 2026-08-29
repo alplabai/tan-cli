@@ -43,6 +43,8 @@ because the app source this scaffold writes is Zephyr source, and a scaffolded
 
 from __future__ import annotations
 
+from tan.core.os_class import infer_runtime_for_core_id
+
 import os
 import re
 from dataclasses import dataclass
@@ -50,6 +52,7 @@ from pathlib import Path, PureWindowsPath
 
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.scaffold_selftest_identity import retarget_example_build_target_comment
+from tan.core.scaffold_selftest_identity import retarget_selftest_soc_identity
 from tan.core.scaffold_selftest_identity import retarget_selftest_som_identity
 from tan.core.timestamp import generated_at_iso
 from tan.templates import VENDORED_ROOT
@@ -96,6 +99,19 @@ _VENDORED_TEMPLATE_DIR = {
     "multicore-mailbox": "multicore-mailbox",
 }
 
+
+def is_family_gated(template_id: str) -> bool:
+    """Whether `template_id` renders a family-specific vendored tree at all --
+    `False` for `minimal-app` ALONE, tan's one hand-generated, vendor-neutral
+    template (`plan_template_files`'s `template_id == "minimal-app"` early
+    return; it never reaches `_vendored_family`/`UnsupportedSomError`, so no
+    SoM family can ever refuse it). A public read of `_VENDORED_TEMPLATE_DIR`
+    rather than a second copy of its key set -- `explain_cmd` uses this to
+    decide whether `UNSUPPORTED_SOM_FAMILY_PREFIXES` applies to a given
+    template's `data.som` (tan-cli#866)."""
+    return template_id in _VENDORED_TEMPLATE_DIR
+
+
 #: The SKU assumed when `--som` is absent (`tan_core::DEFAULT_SOM_SKU`).
 DEFAULT_SOM_SKU = "E1M-AEN801"
 
@@ -138,6 +154,21 @@ _SOM_FAMILIES: tuple[tuple[str, str, str | None], ...] = (
     ("E1M-V2N", "m33_sm", _FAMILY_TREES[1]),   # Renesas RZ/V2N
     ("E1M-V2M", "m33_sm", _FAMILY_TREES[1]),   # Renesas RZ/V2M -- shares the V2N tree
     ("E1M-NX9", "m33", None),                  # NXP -- alp-sdk's catalog ships no tree
+)
+
+#: SKU prefixes `_SOM_FAMILIES` declares NO vendored tree for -- the exact
+#: fact `_family_bucket`/`UnsupportedSomError`/`init.som-unsupported` gate a
+#: `--som` on, DERIVED from that table rather than retyped, so a family added
+#: to (or removed from) `_SOM_FAMILIES` updates this automatically instead of
+#: needing a second hand-edit. tan-cli#866: `explain_cmd` reads this to
+#: publish the SAME family-level refusal `tan init` already enforces as
+#: structured `data.som` on `tan explain --template`, instead of the
+#: hand-written "(E1M-AEN801 only)" prose that gave #866 its name -- the
+#: exact drift `_SOM_FAMILIES` vs. `app_core_for_sku` risked before tan-cli#579
+#: unified them into one table, now risked again between this table and any
+#: description string that repeats a fact it already states.
+UNSUPPORTED_SOM_FAMILY_PREFIXES: tuple[str, ...] = tuple(
+    prefix for prefix, _core, tree in _SOM_FAMILIES if tree is None
 )
 
 #: `(app core, tree)` for E1M-AEN* AND for any prefix `_SOM_FAMILIES` does not
@@ -616,23 +647,6 @@ class CoresError(Exception):
         self.message = message
 
 
-def infer_runtime_for_core_id(core_id: str) -> str:
-    """Best-effort runtime for a `--cores` entry with no `:os` given: an
-    `a<digit>` at a word start (e.g. `a55_cluster`) runs `yocto`; everything
-    else defaults to `zephyr`. Mirrors
-    `tan_core::wizard::infer_runtime_for_core_id` -- KEEP IN SYNC with
-    alp-sdk-vscode's ConfiguratorView `coreSiliconClass` (same word-start
-    test; the one intentional difference is the fallback, since a CLI must
-    pick a concrete runtime where the IDE can offer "unknown")."""
-    lower = core_id.lower()
-    word_start = True
-    for i, ch in enumerate(lower):
-        if word_start and ch == "a" and i + 1 < len(lower) and lower[i + 1].isdigit():
-            return "yocto"
-        word_start = ch in ("_", "-")
-    return "zephyr"
-
-
 def _is_valid_core_id(core_id: str) -> bool:
     """`^[a-z][a-z0-9_]+$`, hand-checked (ASCII only) to mirror the Rust
     byte-level test exactly rather than trust `str.isalpha`/`isdigit`, which
@@ -901,6 +915,7 @@ def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
                 content = retarget_board_yaml_som(content, sku)  # tan-cli#494 defect 2
                 content = retarget_board_yaml_cores(content, sku, family)
             content = retarget_selftest_som_identity(content, sku, family)
+            content = retarget_selftest_soc_identity(content, sku, family)
             content = retarget_example_build_target_comment(content, sku, family)
             files.append(PlannedFile(relative, content))
         _require_complete_tree(template_id, root, files)

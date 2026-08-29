@@ -88,5 +88,12 @@ install.sh text eol=lf
 # followed by `"d": 4` with no separator, which fails `json.load`). Its
 # correct conflict resolution is "take either side, then rerun
 # `python scripts/regen_module_size_budget.py --merge-resync`" -- see the
-# note at the top of MODULE_SIZE_BUDGET_LOG.md.
+# note at the top of MODULE_SIZE_BUDGET_LOG.md. It does not always reach a
+# visible conflict, either: two edits on disjoint lines of that JSON can
+# text-merge clean with no marker at all, leaving a syntactically valid but
+# semantically STALE file (measured directly: a plain `git merge` of two
+# branches editing different keys of a shared JSON object auto-merges with
+# zero conflict markers). `regen_module_size_budget.py --check` is the
+# backstop for that case, wired into CI as its own step (tan-cli#907) rather
+# than left as a command someone has to remember to run.
 python/tests/gates/MODULE_SIZE_BUDGET_LOG.md merge=union

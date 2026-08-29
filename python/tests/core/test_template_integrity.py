@@ -68,6 +68,7 @@ from tan.core.scaffold import (
     _family_bucket,
     plan_template_files,
 )
+from tan.core.scaffold_selftest_identity import _AEN_TREE_SOC_REF, _SOC_IDENTITY_PLACEHOLDER
 from tests.conftest import sdk_root
 
 #: `[text](target)`. Non-greedy on the label so an `[a](x) ... [b](y)` line
@@ -647,6 +648,95 @@ def test_no_planned_file_names_a_different_skus_exact_token(template_id, sku):
         f"allowlisted pair whose occurrence count drifted ({drifted or 'none'}) "
         f"and needs its own review, or a legitimate cross-reference that needs "
         f"declaring (with its exact count) in _ALLOWED_CROSS_SKU_MENTIONS"
+    )
+
+
+#: Only `board-diagnostics` (the `diagnostics` tree) prints a `SoC identity:`
+#: line at all -- filtered from `CASES` rather than a second `_cases()`-style
+#: generator so a future SKU/template CASES gains is automatically covered
+#: here too, with no second list to keep in sync.
+DIAGNOSTICS_CASES = [param for param in CASES if param.values[0] == "board-diagnostics"]
+
+#: The literal `SoC identity: <ref>` line the AEN tree's OWN representative
+#: SKU (`_FAMILY_TREES[0]`, `E1M-AEN801`) carries -- imported from the
+#: source module rather than re-typed here, so a future re-vendor that
+#: changes the tree's captured SoC ref moves this test's expectation too
+#: instead of leaving a stale hardcoded copy behind.
+_AEN_FOREIGN_SOC_LINE = f"SoC identity: {_AEN_TREE_SOC_REF}"
+
+
+@pytest.mark.parametrize("template_id,sku", DIAGNOSTICS_CASES)
+def test_no_planned_soc_identity_line_asserts_a_different_soms_value(template_id, sku):
+    """tan-cli#952: `retarget_selftest_som_identity` (tan-cli#946) corrected
+    the `SoM identity:`/`Real hardware (...)` lines for every SKU sharing a
+    vendored tree, but deliberately left the `SoC identity:` line alone --
+    correct for the V2N/V2M family (one shared SoC) but wrong for AEN,
+    whose SKUs are different Ensemble variants. Before this fix, `--som
+    E1M-AEN301` scaffolded a README/`src/main.c` whose `SoM identity:` line
+    correctly said `E1M-AEN301` sitting directly beside a `SoC identity:`
+    line that still said `E1M-AEN801`'s own value -- a HALF-corrected
+    identity block, which tan-cli#952 argues is MORE misleading than the
+    fully-uncorrected block that preceded #946: nothing left in the block
+    signals that the SoC line belongs to another SoM.
+
+    `test_no_planned_file_names_a_different_skus_exact_token` (the existing
+    cross-SKU guard) cannot see this defect at all: a SoC ref is not a SKU
+    token, so it never appears in `CATALOGUED_SKUS` and the word-bounded
+    SKU-token scan has nothing to match. This is a SEPARATE assertion for
+    exactly that reason.
+
+    Checks the PROPERTY (`retarget_selftest_soc_identity`'s fix is a
+    neutralize, not a per-SKU retarget -- see that function's own docstring
+    for why a ground-truth table was rejected: it would be a second,
+    `test_no_new_hardware_facts.py`-violating copy of a fact
+    `metadata/e1m_modules/<SKU>.yaml` already owns), not a rendered value:
+    for the tree's OWN SKU the foreign-looking line must be exactly the
+    real captured text (a regression there means an unrelated re-vendor or
+    a scoping bug ate the tree's real content); for every OTHER SKU that
+    line must be ABSENT and the disclosed placeholder must be PRESENT in
+    its place -- "absent" alone would also pass a mutant that deleted the
+    whole line outright, which is not this fix's shape.
+    """
+    planned = _planned(template_id, sku)
+    combined = "\n".join(planned.values())
+    tree = _family_bucket(sku)
+    has_foreign_line = _AEN_FOREIGN_SOC_LINE in combined
+    if tree != _FAMILY_TREES[0]:
+        # Not the AEN tree at all (V2N/V2M) -- `_AEN_FOREIGN_SOC_LINE` never
+        # appeared in this tree's content for ANY SKU sharing it, including
+        # its own representative SKU (`E1M-V2N101`), so there is nothing this
+        # test can check here beyond the trivial negative. The general
+        # cross-SKU guard (`test_no_planned_file_names_a_different_skus_exact_
+        # token`) already covers this tree's own defect class.
+        assert not has_foreign_line, (
+            f"--template {template_id} --som {sku}: unexpectedly contains the "
+            f"AEN tree's {_AEN_FOREIGN_SOC_LINE!r} line -- this SKU renders "
+            f"the {tree} tree, which should never contain AEN content at all"
+        )
+        return
+    if sku == tree:
+        # `E1M-AEN801`, the AEN tree's own representative SKU: its line is
+        # real captured content and must stay untouched.
+        assert has_foreign_line, (
+            f"--template {template_id} --som {sku}: this SKU IS the vendored "
+            f"AEN tree's own representative SKU, so its {_AEN_FOREIGN_SOC_LINE!r} "
+            "line should be untouched -- it is missing (or was garbled) instead"
+        )
+        return
+    assert not has_foreign_line, (
+        f"--template {template_id} --som {sku}: names {tree}'s own "
+        f"{_AEN_FOREIGN_SOC_LINE!r} value as if it were {sku}'s own "
+        "(tan-cli#952: a half-corrected identity block -- the SoM line is "
+        "right, the SoC line still asserts a different SoM's silicon)"
+    )
+    # Every other AEN sibling (`E1M-AEN301`..`E1M-AEN701`): the foreign line
+    # must be NEUTRALIZED, not merely deleted.
+    assert _SOC_IDENTITY_PLACEHOLDER in combined, (
+        f"--template {template_id} --som {sku}: the foreign SoC-identity "
+        "line was removed but the disclosed placeholder "
+        f"({_SOC_IDENTITY_PLACEHOLDER!r}) is nowhere in the scaffolded "
+        "output -- the line appears to have been deleted outright rather "
+        "than neutralized"
     )
 
 
