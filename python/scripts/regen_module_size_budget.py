@@ -73,9 +73,23 @@ write path, worth knowing before you run this (review of #875):
   `tests/gates/test_module_size_budget.py` tolerates `max(200, 10%)` of the
   recorded count so an ordinary PR is not taxed, and only demands agreement
   on WHICH files are over the cap. A tree can therefore satisfy the gate and
-  still be `--check`-stale. Only the gate runs in CI -- this script is in no
-  workflow -- so that asymmetry costs nothing today, but do not read a green
-  `pytest` as a green `--check`.
+  still be `--check`-stale -- do not read a green `pytest` as a green
+  `--check`.
+
+As of tan-cli#907, `--check` is no longer merely a local convenience: it runs
+as its own early step in both `.github/workflows/ci.yml`'s `python` job and
+`.github/workflows/parity.yml`'s `seam1-plan-shape` job (the only two CI legs
+that run `tests/gates` at all). That closes a real gap, not a hypothetical
+one -- `module_size_budget.generated.json` is deliberately NOT
+`merge=union`'d (see `.gitattributes`; unioning two JSON documents that both
+add a key can leave two entries with no comma between them), so a real `git
+merge` on it either conflicts visibly or -- measured directly, `git merge`
+of two branches editing different keys of a shared JSON object -- stitches
+both edits into one syntactically valid, semantically STALE JSON object with
+no conflict marker at all. Before this step existed, that shape
+surfaced only as a cluster of unrelated-looking failures deep inside the
+pytest ratchet's own tests; `--check` now catches it directly, in one step,
+before either of those pytest runs even starts.
 """
 from __future__ import annotations
 

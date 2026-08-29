@@ -1,22 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
-"""SoM-identity retargeting for `tan.core.scaffold` -- the phrases currently
-live only in README.md / src/main.c, but both functions here run
-UNCONDITIONALLY over `scaffold._vendored_files`'s per-file loop, the same as
-`retarget_selftest_som_identity`'s own no-SKU-list, general-anchored design:
-they are never gated to those two paths in code, only narrowed by which
-phrases they anchor on (`_selftest_som_identity_edits`, `# Example for
-<SKU>:`) happening to appear nowhere else in the vendored trees today. A
-future vendored file that happens to contain one of those same anchor
-phrases for an unrelated reason would be rewritten too, not skipped.
+"""SoM/SoC-identity retargeting for `tan.core.scaffold` -- the phrases
+currently live only in README.md / src/main.c, but every `retarget_*`
+function here runs UNCONDITIONALLY over `scaffold._vendored_files`'s
+per-file loop, the same as `retarget_selftest_som_identity`'s own
+no-SKU-list, general-anchored design: they are never gated to those two
+paths in code, only narrowed by which phrases they anchor on
+(`_selftest_som_identity_edits`, `# Example for <SKU>:`, the literal
+`_AEN_TREE_SOC_REF` value) happening to appear nowhere else in the vendored
+trees today. A future vendored file that happens to contain one of those
+same anchor phrases for an unrelated reason would be rewritten too, not
+skipped.
 
 Split out of `scaffold.py` itself (tan-cli#932 review round) purely to keep
-that module under its recorded size budget -- both functions here are called
+that module under its recorded size budget -- every function here is called
 from exactly one place, `scaffold._vendored_files`'s per-file loop, and carry
 no dependency on anything else in this package. Not a new layer of
-abstraction: it is the same two `retarget_*` functions that would otherwise
+abstraction: it is the same `retarget_*` functions that would otherwise
 live beside `retarget_board_yaml_som`/`retarget_board_yaml_cores`, moved
 verbatim because the module they were written next to was already at its
-line cap.
+line cap. `retarget_selftest_soc_identity` (tan-cli#952) is the one function
+added here since the split rather than moved -- the SoC-identity half of
+`retarget_selftest_som_identity`'s own gap, deliberately left for a
+follow-up by tan-cli#946's docstring.
 """
 
 from __future__ import annotations
@@ -72,16 +77,15 @@ def retarget_selftest_som_identity(content: str, sku: str, source_sku: str) -> s
     `scaffold._SOM_FAMILIES` needs no matching edit here.
 
     Deliberately narrow in WHAT it rewrites (see `_selftest_som_identity_edits`):
-    only the SoM-identity phrase, never the `SoC identity:` line (a
-    per-family fact this port has no per-SKU value for -- correct today
-    because `E1M-V2N10x`/`E1M-V2M10x` share one SoC per
-    `metadata/socs/renesas/rzv2n/n44.json`'s own `variants[].alp_module_skus`
-    (nested under the variant entry, not a top-level field); WRONG for
-    the AEN family, whose SKUs are different Ensemble variants (E3..E8) and
-    whose `SoC identity: alif:ensemble:e8` line is simply not re-derivable
-    without a per-SKU SoC-ref table this SDK-free module does not carry --
-    `tan validate` catches that once an SDK resolves, same as every other
-    hardware fact this module guesses at) and never the placeholder serial
+    only the SoM-identity phrase, never the `SoC identity:` line -- that is
+    `retarget_selftest_soc_identity`'s job, a SEPARATE function (added
+    tan-cli#952) rather than a fourth entry in
+    `_selftest_som_identity_edits`, because it NEUTRALIZES rather than
+    substitutes (see its own docstring for why) and needs its own anchor
+    (`_AEN_TREE_SOC_REF`) and its own no-op shape (V2N/V2M share one SoC, so
+    it never fires for that family by construction; AEN's SKUs are
+    different Ensemble variants, so it fires for every non-source AEN SKU).
+    This function never touches the placeholder serial either
     (`<factory-serial>`/`AEN0000123` name no real SKU, so there is nothing
     to retarget). NO-OP when `sku == source_sku`, matching
     `retarget_board_yaml_cores`'s convention -- byte-exact passthrough for
@@ -93,6 +97,82 @@ def retarget_selftest_som_identity(content: str, sku: str, source_sku: str) -> s
     for old, new in _selftest_som_identity_edits(source_sku, sku):
         content = content.replace(old, new)
     return content
+
+
+#: What a non-source SKU's `SoC identity:` line reads after neutralizing.
+#: Mirrors `retarget_example_build_target_comment`'s wording on purpose --
+#: same disclosure shape ("this template's own vendored X -- substitute
+#: your SoM's Y"), same reason: this module carries NO per-SKU SoC-ref
+#: table (see `retarget_selftest_soc_identity`'s docstring for why one was
+#: rejected), so it cannot assert a correct replacement value, only flag
+#: the tree's own value as not-yours.
+_SOC_IDENTITY_PLACEHOLDER = (
+    "this template's own vendored SoC -- substitute your SoM's Ensemble variant"
+)
+
+#: The AEN family's own `SoC identity:` value, literal in the vendored
+#: `E1M-AEN801` tree today. This is the ONE anchor `retarget_selftest_soc_
+#: identity` needs -- not a SKU-keyed fact table, ADR-0017/I-26 territory
+#: `test_no_new_hardware_facts.py` enforces (measured: a `dict[sku, soc_ref]`
+#: version of this fix reds that gate, `tan/core/scaffold_selftest_identity.py
+#: (stripped line N): E1M-AEN301` etc., one finding per SKU literal). Used
+#: purely to DETECT and ERASE the tree's own value for every OTHER SKU, never
+#: to assert what a different SKU's real value is -- the same "anchor a
+#: phrase, don't assert a fact" shape `_selftest_som_identity_edits` and
+#: `retarget_example_build_target_comment` already use. Naturally a no-op
+#: against the V2N/V2M tree, which never contains this literal at all, so no
+#: `source_sku` branch is needed to keep this scoped to the AEN family.
+_AEN_TREE_SOC_REF = "alif:ensemble:e8"
+
+
+def retarget_selftest_soc_identity(content: str, sku: str, source_sku: str) -> str:
+    """Neutralize `diagnostics`' "what a real board prints" `SoC identity:`
+    line(s) for every SKU that is NOT the tree's own -- the half of
+    tan-cli#932's family widening that tan-cli#946 deliberately left
+    uncovered (tracked as tan-cli#952).
+
+    `retarget_selftest_som_identity` above fixes the `SoM identity:`/`Real
+    hardware (...)` lines for every SKU sharing a vendored tree, but never
+    touches `SoC identity:` -- correct for the V2N/V2M family (one shared
+    SoC) but wrong for AEN: `E1M-AEN301`..`E1M-AEN701` render
+    `E1M-AEN801`'s tree and, before this function, kept ITS `SoC identity:
+    alif:ensemble:e8` line verbatim even though `E1M-AEN301`'s own silicon is
+    a DIFFERENT Ensemble variant. Measured: `tan init --template
+    board-diagnostics --som E1M-AEN301` before this fix printed a `SoM
+    identity: E1M-AEN301` line (tan-cli#946 already corrected that half)
+    directly beside a `SoC identity: alif:ensemble:e8` line -- a
+    HALF-corrected identity block, which tan-cli#952 argues reads as MORE
+    misleading than the fully uncorrected block on `dev` before #946: a
+    reader can no longer tell the SoC line is foreign just by noticing the
+    whole block belongs to another SoM.
+
+    Neutralizes rather than retargets -- tan-cli#952's own issue weighed
+    both shapes and flagged this one "probably right". A retarget (assert
+    `sku`'s own SoC ref) needs a SKU -> SoC-ref fact table this SDK-free
+    package is not allowed to carry: ADR-0017/invariant I-26, enforced by
+    `test_no_new_hardware_facts.py`, exists precisely so `tan` never becomes
+    a second source of truth for a fact `metadata/e1m_modules/<SKU>.yaml`'s
+    `silicon:` key already owns (measured: a `dict[sku, soc_ref]` version of
+    this fix reds that gate, one finding per SKU literal). This function
+    asserts nothing about what `sku`'s real SoC is -- it only erases the
+    OTHER SKU's value, the same disclose-don't-invent choice
+    `retarget_example_build_target_comment` already made for the build-target
+    comment (and for the identical reason: several sibling SKUs reaching that
+    comment have no board of their own at all, so a guessed replacement would
+    sometimes be provably wrong, not merely unverified).
+
+    NO-OP when `sku == source_sku` (byte-exact passthrough for the tree's
+    own representative SKU, matching every other `retarget_*` here) and,
+    by construction, for the V2N/V2M tree (see `_AEN_TREE_SOC_REF`'s own
+    comment -- its `SoC identity:` line is unconditionally correct for
+    every SKU that shares that tree, so nothing here should ever touch it).
+    """
+    if sku == source_sku:
+        return content
+    return content.replace(
+        f"SoC identity: {_AEN_TREE_SOC_REF}",
+        f"SoC identity: <{_SOC_IDENTITY_PLACEHOLDER}>",
+    )
 
 
 def retarget_example_build_target_comment(content: str, sku: str, source_sku: str) -> str:

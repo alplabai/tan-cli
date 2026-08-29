@@ -7,6 +7,17 @@ the target class + server, resolve what this project's own build already knows
 `<workspace>/.vscode/launch.json`. A malformed existing launch.json -> exit 5;
 a failed write -> exit 3.
 
+A write also reads and (best-effort) rewrites one more file:
+`<workspace>/.alp/debug-launch-provenance.json` (tan-cli#518) -- a
+content-hash record of which `configFiles`/`setupCommands` list entries THIS
+command itself wrote, so a LATER merge can tell its own prior output apart
+from the customer's without guessing from position. See `tan.core.
+launch_provenance`'s module docstring for the full design and
+`debug_launch.create_launch_json_write_plan`'s for how it gates the merge.
+Losing that file (deleted, corrupted, never written) never blocks a write and
+never risks customer content -- it only makes the NEXT merge more
+conservative.
+
 Everything else this command refuses is the CALLER's own precondition or flag
 value to fix, not a tan crash, so it exits `VALIDATION_FAILURE` (2)
 (tan-cli#462, matching the distinction tan-cli#262 settled for `tan
@@ -99,7 +110,9 @@ from tan.core.debug_launch import (
     parse_server_kind,
     parse_target_kind,
     sdk_identity_overwrites,
+    sdk_identity_stranded_appends,
 )
+from tan.core import launch_provenance
 from tan.core.global_flags import accept_global_flags
 from tan.core.jsonc_splice import pretty_json
 from tan.core.run import is_native_sim_board, native_sim_exe_beside
@@ -924,6 +937,32 @@ def _sdk_identity_overwrite_issue(field: str, existing_value: str, incoming_valu
         "flash-unlock device profile more specific than the generic attach device "
         "the SDK publishes — restore it in .vscode/launch.json; a value tan itself "
         "resolves from a real build will overwrite it again the same way.",
+    )
+
+
+def _sdk_identity_appended_issue(field: str, existing_value: str, incoming_value: str) -> Issue:
+    """tan-cli#982 review finding #2: the accepted degradation
+    [`sdk_identity_stranded_appends`] exists to name -- an existing `field`
+    entry `provenance` could not prove was tan's own prior output was left in
+    place, and the value resolved this run from the SDK's published
+    debug-probe identity (alp-sdk#987) was APPENDED beside it rather than
+    replacing it. Severity `info`, same family as
+    `debug-config.comments-dropped` / `debug-config.legacy-entry-untouched`:
+    nothing failed, but a customer never told two `configFiles` entries now
+    sit on the same launch configuration has no way to know one is stale --
+    OpenOCD sources every `-f`, so two board configs on one TAP fail the
+    debug session outright, the same failure class this write just created
+    silently."""
+    return Issue(
+        "debug-config.sdk-identity-appended",
+        "info",
+        f'This write left the existing `{field}` value "{existing_value}" in place '
+        f'and appended "{incoming_value}", resolved from the SDK\'s published '
+        "debug-probe identity (alp-sdk#987), instead of replacing it -- tan could "
+        f'not prove "{existing_value}" was its own prior output (no recorded '
+        "`.alp/` provenance for it), so it left it rather than risk overwriting a "
+        "value you filled in by hand. If it is stale, delete it from "
+        ".vscode/launch.json yourself.",
     )
 
 
@@ -1802,12 +1841,46 @@ def _run(
                 cwd_launch_path,
             )
 
+    # tan-cli#518: the `.alp/` provenance sidecar, read the SAME best-effort
+    # way `_write_project_sdk_pointer`'s own reads are (`bootstrap_cmd.py`) --
+    # ANY failure (absent file, a read error, unparsable/unrecognised JSON;
+    # see `launch_provenance.load`'s own docstring) degrades to `empty()`,
+    # never to "everything is ours". This is deliberately NOT held to the
+    # same read-error-must-refuse-to-write bar as `launch.json` itself just
+    # above: losing provenance only makes the NEXT merge more conservative
+    # (append instead of overwrite), never destructive, so there is nothing
+    # here worth refusing the write over.
+    provenance_path = launch_provenance.sidecar_path(workspace_root)
+    provenance_content: str | None = None
+    if provenance_path.is_file():
+        try:
+            with open(provenance_path, encoding="utf-8") as handle:
+                provenance_content = handle.read()
+        except OSError:
+            provenance_content = None
+    provenance = launch_provenance.load(provenance_content)
+
     # alp-sdk#1026 review finding #1: compute this BEFORE the write, against
     # the file as it stood -- `create_launch_json_write_plan` below already
     # performs the same overwrite (that part of its behaviour is intentional,
     # see `_merge_configuration`'s own doc comment), this only detects it so
-    # it can be disclosed.
-    overwrites = sdk_identity_overwrites(existing, draft, sdk_filled_json_fields)
+    # it can be disclosed. tan-cli#518: `provenance` is passed through so a
+    # LIST field (`configFiles`) is only reported as overwritten when the
+    # real merge below would actually do that -- see `sdk_identity_overwrites`'s
+    # own doc comment on why an honest "would this actually happen" beats an
+    # unconditional "the values differ".
+    overwrites = sdk_identity_overwrites(
+        existing, draft, sdk_filled_json_fields, provenance=provenance
+    )
+    # tan-cli#982 review finding #2: the OTHER outcome that same merge can
+    # produce for a list field -- an existing value provenance could not
+    # prove was tan's own is left in place and the new one is appended
+    # beside it, rather than replaced. `sdk_identity_overwrites` above
+    # correctly stays silent about this shape (nothing concrete was lost);
+    # this discloses the append instead, so it is not silent everywhere.
+    stranded_appends = sdk_identity_stranded_appends(
+        existing, draft, sdk_filled_json_fields, provenance=provenance
+    )
 
     # tan-cli#489 (6): `--pre-launch-task ''` opts OUT of a `preLaunchTask` key
     # entirely (`create_launch_draft` builds it, then deletes it), which is
@@ -1819,7 +1892,9 @@ def _run(
     explicit_omissions = frozenset({"preLaunchTask"}) if pre_launch_task == "" else frozenset()
 
     try:
-        plan = create_launch_json_write_plan(existing, draft, explicit_omissions)
+        plan = create_launch_json_write_plan(
+            existing, draft, explicit_omissions, provenance=provenance
+        )
     except DebugConfigError as err:
         # A malformed existing launch.json surfaces as an internal failure in TS.
         return _internal_failure(generated_at, str(err), cwd_launch_path)
@@ -1843,6 +1918,20 @@ def _run(
             generated_at, target, server, launch_json_path, str(err)
         )
 
+    # tan-cli#518: persist the updated provenance sidecar AFTER launch.json
+    # itself is safely on disk, and best-effort -- a failure here never fails
+    # the command (the launch.json write is the one that matters and it
+    # already succeeded) and never leaves a half-written sidecar
+    # (`atomic_write_text` again), it just means the NEXT run degrades back
+    # to `launch_provenance.empty()`'s conservative default for whatever this
+    # write recorded, exactly as if this run had never touched the sidecar
+    # at all.
+    try:
+        provenance_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(str(provenance_path), launch_provenance.render(plan.provenance))
+    except OSError:
+        pass
+
     issues: list[Issue] = list(identity_issues)
     if plan.migrated_from is not None:
         issues.append(_migrated_issue(plan.migrated_from, draft.get("name", "")))
@@ -1858,6 +1947,10 @@ def _run(
     for field, existing_value, incoming_value in overwrites:
         issues.append(
             _sdk_identity_overwrite_issue(field, existing_value, incoming_value)
+        )
+    for field, existing_value, incoming_value in stranded_appends:
+        issues.append(
+            _sdk_identity_appended_issue(field, existing_value, incoming_value)
         )
 
     return success(

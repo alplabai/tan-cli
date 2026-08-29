@@ -3344,6 +3344,210 @@ def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) ->
     )
 
 
+@dataclass(frozen=True)
+class _PrerequisitesEnvironment:
+    """Everything `bootstrapManifest`/`hostPrerequisites` (and `_collect`'s
+    OWN `hostPython`/`pythonFloor`/`west` checks, which read the SAME
+    manifest load and Python probe) need, computed exactly once regardless of
+    which caller asked -- see `_resolve_prerequisites_environment` (tan-cli#441).
+    """
+
+    bootstrap_manifest_check: Check | None
+    prerequisites_check: Check
+    facts: dict
+    manifest_floor: tuple[int, int]
+    effective_floor: tuple[int, int]
+    effective_source: str
+    python_found: tuple[str, tuple[int, int], str] | None
+    manifest_is_real: bool
+
+
+def _resolve_prerequisites_environment(
+    sdk_root: str | None, workspace_path: Path | None
+) -> _PrerequisitesEnvironment:
+    """The manifest load through `hostPrerequisites` -- moved verbatim out of
+    `_collect` (tan-cli#441) so `host_environment_checks` (support-bundle's
+    seam onto exactly these two checks; see its own docstring) and `_collect`
+    (`tan doctor`'s full checklist, which ALSO needs `hostPython`/
+    `pythonFloor`/`west`'s `facts.get("_pipSpec")` off the SAME manifest load
+    and the SAME Python probe) build `bootstrapManifest`/`hostPrerequisites`
+    from ONE copy of this logic and pay for the manifest read + the
+    `_probe_host_python` subprocess spawn exactly once per caller, instead of
+    a second copy drifting the moment either check changes.
+
+    `workspace_path` is a parameter, not resolved here, so a caller that
+    already has one (`_collect`, from its own earlier `west_workspace_dir`
+    call) never pays for a second walk -- `host_environment_checks` below
+    resolves its own before calling this.
+    """
+    loaded = _load_manifest(sdk_root)
+    facts, source = loaded.facts, loaded.source
+    bootstrap_manifest_check: Check | None = None
+    if loaded.error is not None:
+        bootstrap_manifest_check = Check(
+            "bootstrapManifest",
+            "warn",
+            f"metadata/bootstrap.json rejected: {loaded.error}. Falling back to "
+            f"tan's built-in prerequisite list, which may not match this SDK.",
+            "Update `tan` or pin an SDK whose metadata/bootstrap.json this "
+            "version understands; `tan bootstrap` will refuse outright until then.",
+            scope="project",
+        )
+
+    manifest_floor = _manifest_floor_from_facts(facts)
+    # tan-cli#301 (second half): read the SAME resolved workspace `zephyrWorkspace`
+    # reports above (`workspace_path`, from the shared `west_workspace_dir`) --
+    # NOT a second, independent `$ZEPHYR_BASE` read. A stale exported
+    # `$ZEPHYR_BASE` is common (Zephyr's own docs, and this command's own `tan
+    # bootstrap` next-steps block, both tell a customer to export it), and
+    # reading it here regardless of the resolved workspace is how one report
+    # ended up citing two different Zephyrs. `$ZEPHYR_BASE` is consulted only as
+    # `zephyr_python_floor`'s fallback, when no workspace resolved at all --
+    # mirroring #290's fix for `zephyrWorkspace` itself.
+    zephyr_source_base = (
+        str(workspace_path / "zephyr")
+        if workspace_path is not None
+        else os.environ.get("ZEPHYR_BASE")
+    )
+    # tan-cli#606: when no workspace resolves, prefer alp-sdk's OWN declared
+    # `zephyr.pythonMinVersion` over `ZEPHYR_PYTHON_FLOOR` -- same `facts`
+    # dict `manifest_floor` above already reads, so this is not a second
+    # manifest parse.
+    zephyr_manifest_floor = _zephyr_manifest_floor_from_facts(facts)
+    zephyr_floor, zephyr_source = zephyr_python_floor(
+        zephyr_source_base, manifest_zephyr_floor=zephyr_manifest_floor
+    )
+    # The EFFECTIVE floor: the highest anything in the build chain enforces. The
+    # manifest is not the authority here -- it is one of two claimants.
+    effective_floor = max(manifest_floor, zephyr_floor)
+    effective_source = (
+        zephyr_source
+        if zephyr_floor >= manifest_floor
+        else "alp-sdk metadata/bootstrap.json pythonMinVersion"
+    )
+
+    python_found = _probe_host_python(effective_floor)
+
+    # tan-cli#488 defect 2: keyed on the HOST, not a `windows`/`posix` bool.
+    # `facts.get(...)` used to read straight off `"windows" if os.name == "nt"
+    # else "posix"`, which has no `macos` arm at all -- so a stock Mac (no
+    # `wget`, no standalone `xz`, both of which joined `prerequisites.posix`
+    # at alp-sdk v0.14.0) got handed the POSIX list wholesale and reported
+    # `hostPrerequisites: fail` on a host `tan bootstrap` accepts. Mirrors
+    # `tan.core.bootstrap.BootstrapFacts.prerequisites`'s own host-keyed read
+    # exactly, including its fallback: an EMPTY/absent `prerequisites.macos`
+    # means the manifest declared none (every SDK before v0.14.0), and macOS
+    # then reads `posix` exactly as it always did -- not a guess, the actual
+    # pre-v0.14.0 behaviour.
+    is_macos = sys.platform == "darwin"
+    required = facts.get("windows" if os.name == "nt" else ("macos" if is_macos else "posix"))
+    if is_macos and not (isinstance(required, list) and required):
+        required = facts.get("posix")
+    if not isinstance(required, list):
+        required = []
+    required = [t for t in required if isinstance(t, str)]
+    install = facts.get("install")
+    platform_key = "windows" if os.name == "nt" else ("macos" if sys.platform == "darwin" else "linux")
+    if platform_key == "linux":
+        # `install["linux"]` is package-manager-keyed, not tool-keyed like
+        # `macos`/`windows` (alp-sdk#1464 / tan-cli#760's second half) --
+        # `facts` is the RAW parsed manifest dict (`_load_manifest`), a
+        # separate reader from `tan.core.bootstrap.parse_bootstrap_manifest`,
+        # so it needs the SAME normalize/select reconciliation that reader
+        # applies, not a flat `.get(platform_key)` (which would silently
+        # return `{}` for every Linux tool, apt included).
+        linux_pm = detect_linux_pm(lambda binary: on_path(binary) is not None)
+        per_tool = select_linux_install(
+            normalize_linux_install(install.get("linux") if isinstance(install, dict) else None),
+            linux_pm,
+        )
+    else:
+        per_tool = install.get(platform_key) if isinstance(install, dict) else None
+        if not isinstance(per_tool, dict):
+            per_tool = {}
+    # RAW -- `prerequisites_check` below does its OWN tan-cli#760 PATH
+    # confirmation (`available=`) to build the customer-facing `missing`
+    # field; this dict stays unguarded because it is also the source of
+    # `fix_missing`, `--fix`'s (`run_fix`'s) own input -- see
+    # `prerequisites_check`'s docstring and tan-cli#760 review MAJOR 1 for
+    # why those two must NOT be the same value.
+    resolved_install = {k: v for k, v in per_tool.items() if isinstance(v, str)}
+    missing_tools = [tool for tool in required if on_path(tool) is None]
+    # tan-cli#294 finding 3: reintroduces tan-cli#161. Only reachable once the
+    # tool list itself is clean AND a Python actually ran -- mirrors
+    # `check_prerequisites`' own order (`crates/tan-cli/src/commands/
+    # bootstrap/steps.rs:296-298`): presence first, `ensurepip` only after.
+    venv_refusal = None
+    if (
+        sys.platform.startswith("linux")
+        and not missing_tools
+        and python_found is not None
+        and not _posix_venv_capable(python_found[0].split(), executable=python_found[2])
+    ):
+        venv_refusal = posix_venv_unusable()
+    built_prerequisites_check = prerequisites_check(
+        required,
+        missing_tools,
+        resolved_install,
+        source,
+        venv_refusal,
+        # tan-cli#760: confirmed -- not merely present, not GUESSED --
+        # against THIS host's real PATH walk (`on_path`, already used
+        # above for the tool-presence probe itself).
+        available=lambda binary: on_path(binary) is not None,
+    )
+
+    return _PrerequisitesEnvironment(
+        bootstrap_manifest_check=bootstrap_manifest_check,
+        prerequisites_check=built_prerequisites_check,
+        facts=facts,
+        manifest_floor=manifest_floor,
+        effective_floor=effective_floor,
+        effective_source=effective_source,
+        python_found=python_found,
+        manifest_is_real=loaded.is_real,
+    )
+
+
+def host_environment_checks(sdk_root: str | None, workspace_root: str = ".") -> list[Check]:
+    """The public/internal seam `support-bundle` harvests instead of running
+    `_collect`'s whole build/flash-readiness checklist (tan-cli#441).
+
+    Exactly the five HOST-only checks `_HOST_CHECK_ORDER`
+    (`support_bundle_cmd.py`) names -- `zephyrSdkAvailableForHost`,
+    `longPaths` (Windows only), `homePath`, `bootstrapManifest` (only on a
+    rejected manifest), `hostPrerequisites` -- none of which need a resolved
+    board.yaml, a spawned `west`/JLink/SETOOLS probe, or git provenance. Every
+    one of them is built by the SAME functions `_collect` calls
+    (`zephyr_sdk_host_check`/`long_paths_check`/`home_path_check` directly,
+    `bootstrapManifest`/`hostPrerequisites` via the shared
+    `_resolve_prerequisites_environment`) -- this is a second CALLER, not a
+    second COPY, so a change to any of the five reaches both `tan doctor` and
+    `tan support-bundle` from one place.
+
+    Returned unordered by name (construction order here, not
+    `_HOST_CHECK_ORDER`) -- `support_bundle_cmd._host_checks_from_doctor`
+    already re-indexes by `.name` before use, exactly as it did when it
+    harvested from `_collect`'s much longer list.
+    """
+    workspace_path = west_workspace_dir(
+        workspace_root, Path(sdk_root) if sdk_root is not None else None
+    )
+    host_os, host_arch = _host_os_arch_tags()
+    checks = [zephyr_sdk_host_check(host_os, host_arch)]
+    if os.name == "nt":
+        checks.append(
+            long_paths_check(_long_paths_enabled(), _git_core_longpaths(_resolve_git_executable()))
+        )
+    checks.append(home_path_check(os.environ.get("USERPROFILE" if os.name == "nt" else "HOME")))
+
+    prereq_env = _resolve_prerequisites_environment(sdk_root, workspace_path)
+    if prereq_env.bootstrap_manifest_check is not None:
+        checks.append(prereq_env.bootstrap_manifest_check)
+    checks.append(prereq_env.prerequisites_check)
+    return checks
+
+
 def _collect(
     sdk_root: str | None,
     build: bool = False,
@@ -3590,138 +3794,53 @@ def _collect(
         home_path_check(os.environ.get("USERPROFILE" if os.name == "nt" else "HOME"))
     )
 
-    loaded = _load_manifest(sdk_root)
-    facts, source = loaded.facts, loaded.source
-    if loaded.error is not None:
-        _add(
-            Check(
-                "bootstrapManifest",
-                "warn",
-                f"metadata/bootstrap.json rejected: {loaded.error}. Falling back to "
-                f"tan's built-in prerequisite list, which may not match this SDK.",
-                "Update `tan` or pin an SDK whose metadata/bootstrap.json this "
-                "version understands; `tan bootstrap` will refuse outright until then.",
-                scope="project",
-            )
-        )
+    # tan-cli#441: `bootstrapManifest` + `hostPrerequisites` (and the manifest
+    # load + Python probe `hostPython`/`pythonFloor`/`west` below also need)
+    # are built by the ONE shared `_resolve_prerequisites_environment` --
+    # `host_environment_checks` calls the SAME function for support-bundle's
+    # seam, so the two callers can never build a diverging verdict.
+    #
+    # tan-cli#980 review nit 3, decided rather than restored: because this
+    # call now builds `hostPrerequisites` (PATH walk over `required`, plus
+    # the POSIX `_posix_venv_capable` spawn) EAGERLY as part of the same
+    # shared unit, `bootstrapManifest`/`hostPython`/`pythonFloor` below are
+    # `_add`ed -- and so, in `tan doctor` TEXT mode, printed by `on_check` --
+    # AFTER that PATH walk and spawn finish, where pre-#441 `_collect` built
+    # and `_add`ed each of the three the moment it had the data, before ever
+    # touching PATH or spawning `_posix_venv_capable`. The returned list
+    # order and the JSON envelope are byte-identical either way (verified in
+    # the PR's own equivalence pass) -- only the incremental print TIMING
+    # `on_check` exists for shifts by the wall-clock cost of two spawns this
+    # single caller already pays for regardless of which check the delay is
+    # attributed to. Restoring the old interleaving would mean splitting
+    # `_resolve_prerequisites_environment` back into a pre-PATH-walk half and
+    # a post-PATH-walk half so `_collect` could `_add` between them -- which
+    # reopens the exact two-copies-of-one-decision risk this helper exists to
+    # close, for a few hundred milliseconds of `tan doctor` console timing.
+    # Accepted as-is.
+    prereq_env = _resolve_prerequisites_environment(sdk_root, workspace_path)
+    if prereq_env.bootstrap_manifest_check is not None:
+        _add(prereq_env.bootstrap_manifest_check)
+    facts = prereq_env.facts
+    effective_floor = prereq_env.effective_floor
+    effective_source = prereq_env.effective_source
+    python_found = prereq_env.python_found
 
-    manifest_floor = _manifest_floor_from_facts(facts)
-    # tan-cli#301 (second half): read the SAME resolved workspace `zephyrWorkspace`
-    # reports above (`workspace_path`, from the shared `west_workspace_dir`) --
-    # NOT a second, independent `$ZEPHYR_BASE` read. A stale exported
-    # `$ZEPHYR_BASE` is common (Zephyr's own docs, and this command's own `tan
-    # bootstrap` next-steps block, both tell a customer to export it), and
-    # reading it here regardless of the resolved workspace is how one report
-    # ended up citing two different Zephyrs. `$ZEPHYR_BASE` is consulted only as
-    # `zephyr_python_floor`'s fallback, when no workspace resolved at all --
-    # mirroring #290's fix for `zephyrWorkspace` itself.
-    zephyr_source_base = (
-        str(workspace_path / "zephyr")
-        if workspace_path is not None
-        else os.environ.get("ZEPHYR_BASE")
-    )
-    # tan-cli#606: when no workspace resolves, prefer alp-sdk's OWN declared
-    # `zephyr.pythonMinVersion` over `ZEPHYR_PYTHON_FLOOR` -- same `facts`
-    # dict `manifest_floor` above already reads, so this is not a second
-    # manifest parse.
-    zephyr_manifest_floor = _zephyr_manifest_floor_from_facts(facts)
-    zephyr_floor, zephyr_source = zephyr_python_floor(
-        zephyr_source_base, manifest_zephyr_floor=zephyr_manifest_floor
-    )
-    # The EFFECTIVE floor: the highest anything in the build chain enforces. The
-    # manifest is not the authority here -- it is one of two claimants.
-    effective_floor = max(manifest_floor, zephyr_floor)
-    effective_source = (
-        zephyr_source
-        if zephyr_floor >= manifest_floor
-        else "alp-sdk metadata/bootstrap.json pythonMinVersion"
-    )
-
-    python_found = _probe_host_python(effective_floor)
     _add(
         python_check(
             python_found[:2] if python_found else None, effective_floor, effective_source
         )
     )
     skew = python_floor_skew_check(
-        manifest_floor,
+        prereq_env.manifest_floor,
         effective_floor,
         effective_source,
-        manifest_is_real=loaded.is_real,
+        manifest_is_real=prereq_env.manifest_is_real,
     )
     if skew is not None:
         _add(skew)
 
-    # tan-cli#488 defect 2: keyed on the HOST, not a `windows`/`posix` bool.
-    # `facts.get(...)` used to read straight off `"windows" if os.name == "nt"
-    # else "posix"`, which has no `macos` arm at all -- so a stock Mac (no
-    # `wget`, no standalone `xz`, both of which joined `prerequisites.posix`
-    # at alp-sdk v0.14.0) got handed the POSIX list wholesale and reported
-    # `hostPrerequisites: fail` on a host `tan bootstrap` accepts. Mirrors
-    # `tan.core.bootstrap.BootstrapFacts.prerequisites`'s own host-keyed read
-    # exactly, including its fallback: an EMPTY/absent `prerequisites.macos`
-    # means the manifest declared none (every SDK before v0.14.0), and macOS
-    # then reads `posix` exactly as it always did -- not a guess, the actual
-    # pre-v0.14.0 behaviour.
-    is_macos = sys.platform == "darwin"
-    required = facts.get("windows" if os.name == "nt" else ("macos" if is_macos else "posix"))
-    if is_macos and not (isinstance(required, list) and required):
-        required = facts.get("posix")
-    if not isinstance(required, list):
-        required = []
-    required = [t for t in required if isinstance(t, str)]
-    install = facts.get("install")
-    platform_key = "windows" if os.name == "nt" else ("macos" if sys.platform == "darwin" else "linux")
-    if platform_key == "linux":
-        # `install["linux"]` is package-manager-keyed, not tool-keyed like
-        # `macos`/`windows` (alp-sdk#1464 / tan-cli#760's second half) --
-        # `facts` is the RAW parsed manifest dict (`_load_manifest`), a
-        # separate reader from `tan.core.bootstrap.parse_bootstrap_manifest`,
-        # so it needs the SAME normalize/select reconciliation that reader
-        # applies, not a flat `.get(platform_key)` (which would silently
-        # return `{}` for every Linux tool, apt included).
-        linux_pm = detect_linux_pm(lambda binary: on_path(binary) is not None)
-        per_tool = select_linux_install(
-            normalize_linux_install(install.get("linux") if isinstance(install, dict) else None),
-            linux_pm,
-        )
-    else:
-        per_tool = install.get(platform_key) if isinstance(install, dict) else None
-        if not isinstance(per_tool, dict):
-            per_tool = {}
-    # RAW -- `prerequisites_check` below does its OWN tan-cli#760 PATH
-    # confirmation (`available=`) to build the customer-facing `missing`
-    # field; this dict stays unguarded because it is also the source of
-    # `fix_missing`, `--fix`'s (`run_fix`'s) own input -- see
-    # `prerequisites_check`'s docstring and tan-cli#760 review MAJOR 1 for
-    # why those two must NOT be the same value.
-    resolved_install = {k: v for k, v in per_tool.items() if isinstance(v, str)}
-    missing_tools = [tool for tool in required if on_path(tool) is None]
-    # tan-cli#294 finding 3: reintroduces tan-cli#161. Only reachable once the
-    # tool list itself is clean AND a Python actually ran -- mirrors
-    # `check_prerequisites`' own order (`crates/tan-cli/src/commands/
-    # bootstrap/steps.rs:296-298`): presence first, `ensurepip` only after.
-    venv_refusal = None
-    if (
-        sys.platform.startswith("linux")
-        and not missing_tools
-        and python_found is not None
-        and not _posix_venv_capable(python_found[0].split(), executable=python_found[2])
-    ):
-        venv_refusal = posix_venv_unusable()
-    _add(
-        prerequisites_check(
-            required,
-            missing_tools,
-            resolved_install,
-            source,
-            venv_refusal,
-            # tan-cli#760: confirmed -- not merely present, not GUESSED --
-            # against THIS host's real PATH walk (`on_path`, already used
-            # above for the tool-presence probe itself).
-            available=lambda binary: on_path(binary) is not None,
-        )
-    )
+    _add(prereq_env.prerequisites_check)
 
     west_exe = on_path("west")
     # tan-cli#488 defect 5: probe `west_exe` -- the PATH-RESOLVED absolute

@@ -60,7 +60,7 @@ import stat
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import typer
@@ -2228,9 +2228,18 @@ def _read_som_topology(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class RunPaths:
-    """Mutable run state the envelope reports, threaded through the phases."""
+    """The paths this run reports, rebound (never mutated) as phases change them.
+
+    Frozen on purpose (tan-cli#991). The paths genuinely change mid-run -- the
+    venv name is only final once the manifest is read, a `--workspace` run
+    physically moves the checkout, a `$ZEPHYR_BASE` topdir can be adopted, and
+    a failure rolls all of it back -- but each of those is now an explicit
+    `replace()` rebinding in `_run`, so `grep 'paths = '` there IS the complete
+    history. It used to be eleven field assignments spread over five phases,
+    one of them written through a function PARAMETER whose call site showed no
+    assignment at all."""
 
     repo_root: Path
     workspace_dir: Path
@@ -2485,13 +2494,22 @@ class WorkspacePlan:
     #: Drop `$ZEPHYR_BASE` from every child -- set only when the ambient value
     #: was REFUSED, so a foreign tree cannot hijack `west init`.
     clear_zephyr_base: bool = False
+    #: The repointed paths when `adopted`, else `None`. Returned rather than
+    #: written through the `paths` argument (tan-cli#991): the caller rebinds,
+    #: so the adoption is visible at the call site instead of being a silent
+    #: side effect of a call whose result looked like it was only a plan.
+    adopted_paths: "RunPaths | None" = None
 
 
 def _select_workspace(
     log: Log, is_windows: bool, pin: str, facts: BootstrapFacts, paths: RunPaths
 ) -> WorkspacePlan:
-    """Workspace selection over the `$ZEPHYR_BASE` tree; repoints
-    `paths.workspace_dir`/`venv_dir` at it when adopted.
+    """Workspace selection over the `$ZEPHYR_BASE` tree; RETURNS the repointed
+    paths on `WorkspacePlan.adopted_paths` when a topdir is adopted.
+
+    Does not touch the `paths` it is given -- it used to write through that
+    parameter while its only call site assigned just the plan, so the
+    repointing was invisible there (tan-cli#991).
 
     Three outcomes for a tree whose manifest IS this checkout: on the pinned
     Zephyr it is reused untouched; on a DIFFERENT one it is adopted and
@@ -2512,13 +2530,12 @@ def _select_workspace(
 
     if choice == REUSE:
         # Never modify the user's tree: adopt it and skip init/update.
-        paths.workspace_dir = top
-        paths.venv_dir = top / facts.venv_dir_name
+        adopted = replace(paths, workspace_dir=top, venv_dir=top / facts.venv_dir_name)
         log.line(
             f"Reusing compatible alp-sdk workspace from {var}: "
-            f"{_native(paths.workspace_dir)} (Zephyr {version})"
+            f"{_native(adopted.workspace_dir)} (Zephyr {version})"
         )
-        return WorkspacePlan(reuse=True, adopted=True)
+        return WorkspacePlan(reuse=True, adopted=True, adopted_paths=adopted)
 
     if choice == STALE:
         # This IS bootstrap's own workspace, just left behind by an SDK pin bump.
@@ -2527,15 +2544,14 @@ def _select_workspace(
         # aggressive option either -- it is byte-for-byte the command a bootstrap
         # with no $ZEPHYR_BASE set would run over this same topdir, gated on a
         # manifest that already proved the tree belongs to this SDK.
-        paths.workspace_dir = top
-        paths.venv_dir = top / facts.venv_dir_name
+        adopted = replace(paths, workspace_dir=top, venv_dir=top / facts.venv_dir_name)
         log.warn(
             "zephyr-base-stale",
-            f"{var} workspace ({_native(paths.workspace_dir)}) is on Zephyr {version} "
+            f"{var} workspace ({_native(adopted.workspace_dir)}) is on Zephyr {version} "
             f"but this alp-sdk pins {pin} -- refreshing it with 'west update' (this also "
             f"moves the other west.yml projects to their pins)",
         )
-        return WorkspacePlan(adopted=True)
+        return WorkspacePlan(adopted=True, adopted_paths=adopted)
 
     if choice == MANIFEST_MISMATCH:
         log.warn(
@@ -2669,8 +2685,12 @@ class RelocationUndo:
     #: The envelope `project` this run would have reported had it never
     #: relocated anything.
     project: Project
-    workspace_dir: Path
-    venv_dir: Path
+    #: The whole `RunPaths` as it stood before the move. One frozen snapshot
+    #: instead of the two duplicated fields this used to carry: the
+    #: field-by-field copy existed only because an unfrozen `RunPaths` would
+    #: have aliased live state, and every future undo site would have had to
+    #: re-avoid that trap independently (tan-cli#991).
+    paths: RunPaths
     #: tan-cli#644: the project's own `.alp/sdk-path` root this run rewrote to
     #: follow the relocated checkout, and its bytes before the rewrite --
     #: `None` unless the SDK this run moved was resolved through the
@@ -2836,7 +2856,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             sdk,
         )
     # `venv.dirName` is a manifest fact, so the venv path is only final now.
-    paths.venv_dir = paths.workspace_dir / facts.venv_dir_name
+    # The manifest-refusal above deliberately reported the GUESSED `.venv` --
+    # it is the one read that must see the pre-manifest value, and rebinding
+    # here (rather than mutating in place) is what keeps that true by
+    # construction instead of by ordering luck.
+    paths = replace(paths, venv_dir=paths.workspace_dir / facts.venv_dir_name)
     # ONE pin authority, shared with `build`'s preflight zephyrVersion check.
     pin = resolve_zephyr_pin(_read_text(paths.repo_root / "west.yml"), facts.zephyr_version)
 
@@ -3152,14 +3176,19 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             # RE-DERIVING them (e.g. `workspace_dir` as `repo_root.parent`
             # is wrong for a `--workspace` run over an ADOPTED
             # `$ZEPHYR_BASE` topdir -- see `rollback_relocation_after`).
-            old_workspace_dir = paths.workspace_dir
-            old_venv_dir = paths.venv_dir
+            # ONE frozen snapshot now, not a field-by-field copy: `RunPaths`
+            # is immutable, so binding the object cannot alias live state
+            # (tan-cli#991).
+            old_paths = paths
             old_project = reported_project
             previous_pointer = _read_global_sdk_pointer()
             previous_registry = _read_global_sdk_registry_bytes()
-            paths.repo_root = new_root
-            paths.workspace_dir = target
-            paths.venv_dir = target / facts.venv_dir_name
+            paths = replace(
+                paths,
+                repo_root=new_root,
+                workspace_dir=target,
+                venv_dir=target / facts.venv_dir_name,
+            )
             sdk_root = str(new_root)
             sdk = SdkInfo(sdk_root, active_tier)
             move_verb = "would move" if dry_run else "moved"
@@ -3221,8 +3250,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 old_root=old_root,
                 previous_pointer=previous_pointer,
                 project=old_project,
-                workspace_dir=old_workspace_dir,
-                venv_dir=old_venv_dir,
+                paths=old_paths,
                 project_pin_root=project_pin_root,
                 previous_project_pin=previous_project_pin,
                 previous_registry=previous_registry,
@@ -3252,6 +3280,8 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         log.line("Dry run (--dry-run): planning only, nothing will be installed or written")
 
     plan = _select_workspace(log, is_windows, pin, facts, paths)
+    if plan.adopted_paths is not None:
+        paths = plan.adopted_paths
     ws = Workspace(is_windows, facts, paths.repo_root, paths.workspace_dir, paths.venv_dir)
     runner = Runner(json_mode, plan.clear_zephyr_base, dry_run)
 
@@ -3269,6 +3299,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         checkout moved back when `_undo_relocation` reports it did not. No-op
         when this run never relocated anything.
         """
+        nonlocal paths
         nonlocal sdk_root, sdk, reported_project
         if relocation_undo is None:
             return
@@ -3316,9 +3347,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                     f"{_global_default_fix_hint()} "
                     f"(to point at {_native(relocation_undo.old_root)}).",
                 )
-            paths.repo_root = Path(relocation_undo.old_root)
-            paths.workspace_dir = relocation_undo.workspace_dir
-            paths.venv_dir = relocation_undo.venv_dir
+            # `nonlocal` because this is a CLOSURE over `_run`'s `paths`, not
+            # a mutation of a shared object -- the rebinding has to reach the
+            # enclosing scope the way the old in-place writes did. The
+            # read-only `payload` closure needs no such declaration.
+            paths = relocation_undo.paths
             sdk_root = relocation_undo.old_root
             sdk = SdkInfo(sdk_root, active_tier)
             reported_project = relocation_undo.project

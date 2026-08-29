@@ -43,6 +43,8 @@ because the app source this scaffold writes is Zephyr source, and a scaffolded
 
 from __future__ import annotations
 
+from tan.core.os_class import infer_runtime_for_core_id
+
 import os
 import re
 from dataclasses import dataclass
@@ -50,6 +52,7 @@ from pathlib import Path, PureWindowsPath
 
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.scaffold_selftest_identity import retarget_example_build_target_comment
+from tan.core.scaffold_selftest_identity import retarget_selftest_soc_identity
 from tan.core.scaffold_selftest_identity import retarget_selftest_som_identity
 from tan.core.timestamp import generated_at_iso
 from tan.templates import VENDORED_ROOT
@@ -644,23 +647,6 @@ class CoresError(Exception):
         self.message = message
 
 
-def infer_runtime_for_core_id(core_id: str) -> str:
-    """Best-effort runtime for a `--cores` entry with no `:os` given: an
-    `a<digit>` at a word start (e.g. `a55_cluster`) runs `yocto`; everything
-    else defaults to `zephyr`. Mirrors
-    `tan_core::wizard::infer_runtime_for_core_id` -- KEEP IN SYNC with
-    alp-sdk-vscode's ConfiguratorView `coreSiliconClass` (same word-start
-    test; the one intentional difference is the fallback, since a CLI must
-    pick a concrete runtime where the IDE can offer "unknown")."""
-    lower = core_id.lower()
-    word_start = True
-    for i, ch in enumerate(lower):
-        if word_start and ch == "a" and i + 1 < len(lower) and lower[i + 1].isdigit():
-            return "yocto"
-        word_start = ch in ("_", "-")
-    return "zephyr"
-
-
 def _is_valid_core_id(core_id: str) -> bool:
     """`^[a-z][a-z0-9_]+$`, hand-checked (ASCII only) to mirror the Rust
     byte-level test exactly rather than trust `str.isalpha`/`isdigit`, which
@@ -929,6 +915,7 @@ def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
                 content = retarget_board_yaml_som(content, sku)  # tan-cli#494 defect 2
                 content = retarget_board_yaml_cores(content, sku, family)
             content = retarget_selftest_som_identity(content, sku, family)
+            content = retarget_selftest_soc_identity(content, sku, family)
             content = retarget_example_build_target_comment(content, sku, family)
             files.append(PlannedFile(relative, content))
         _require_complete_tree(template_id, root, files)

@@ -77,6 +77,20 @@ env:
   # Keep the quotes: `[monitor]` is a bash glob character class, and an unquoted
   # `-e .[monitor]` is at the mercy of what happens to sit in the working
   # directory.
+  #
+  # DELIBERATELY UNPINNED, not merely un-updated (tan-cli#989 review,
+  # finding 3): every leg below still resolves `.[monitor]` and this
+  # `BUILD_DEPS` live against PyPI, not from
+  # `release-requirements.lock.txt` -- unlike release.yml's `build` job and
+  # clean-host.yml's `freeze-and-smoke` job, which now install that lock
+  # `--require-hashes`. The two goals conflict: this workflow's whole point,
+  # per the paragraph above, is proving the freeze matches what `pip install
+  # alp-tan` resolves TODAY (the click regression this comment already
+  # describes is exactly the class of drift a stale lock would hide again).
+  # Locking it would trade that live signal for reproducing a pin that could
+  # already be stale. `release.yml`/`clean-host.yml` remain the only
+  # hash-verified, reproducible builds; this workflow (`workflow_dispatch`
+  # only, publishes nothing) stays an unpinned canary on purpose.
   BUILD_DEPS: pyinstaller>=6.10
   # Debian 11, i.e. glibc 2.31 -- NOT the runner's own image.
   #

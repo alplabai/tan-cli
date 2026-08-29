@@ -117,6 +117,7 @@ _PARITY_JOBS = (
     "python-tests-shard",
     "python-tests",
     "notify-planner-drift",
+    "release-sdk-parity",
 )
 
 
@@ -492,8 +493,9 @@ def test_this_repos_own_workflows_produce_no_timeout_problems() -> None:
 #: `release.yml`'s real 5 bounded jobs (`verify-version`, `build`, `release`,
 #: `publish_npm`, `release_gate` -- `gates`/`python-gates` stay excluded as
 #: LOCAL `uses:` callers) down to 1 pass silently, since the old check only
-#: asked "is release.yml in the set at all". Floored for all ELEVEN non-parity
-#: files, not just the four tan-cli#855 named -- a review round on this same
+#: asked "is release.yml in the set at all". Floored for all TWELVE non-parity
+#: files (release-lock-update.yml added tan-cli#437), not just the four
+#: tan-cli#855 named -- a review round on this same
 #: gate pointed out the other six (`ci.yml`, `clean-host.yml`,
 #: `e2e-container.yml`, `getting-started.yml`, `pin-move-verify.yml`,
 #: `version-identity.yml`) could shrink silently too, and there is no reason
@@ -512,6 +514,7 @@ _MIN_BOUNDED_JOBS = {
     "planner-resync.yml": 1,
     "python-binaries.yml": 4,
     "release-combination.yml": 2,
+    "release-lock-update.yml": 1,
     "release.yml": 5,
     "unsharded-python-canary.yml": 1,
     "version-identity.yml": 1,
@@ -676,3 +679,23 @@ def test_every_parity_job_is_bounded(job_id):
         f"asserting nothing about it"
     )
     _assert_timeout_is_bounded("parity.yml", job_id, jobs[job_id].get("timeout-minutes"))
+
+
+def test_parity_jobs_tuple_names_every_job_in_the_file():
+    """The reverse of `test_every_parity_job_is_bounded`: `_PARITY_JOBS` is a
+    literal tuple so a DELETION from `parity.yml` is visible above, but
+    nothing symmetric caught an ADDITION -- a new job could land in the file
+    and get only the generalised, un-named coverage from
+    `test_every_job_in_every_workflow_is_bounded`, silently opting out of the
+    anti-shrink guarantee `_PARITY_JOBS` exists to give `parity.yml`
+    specifically (tan-cli#988 review, minor 4: `release-sdk-parity` shipped
+    once without ever being added to this tuple, and nothing here noticed).
+    """
+    jobs = _load(PARITY)["jobs"]
+    missing = sorted(set(jobs) - set(_PARITY_JOBS))
+    assert not missing, (
+        f"parity.yml has job(s) {missing} that are not in _PARITY_JOBS -- add "
+        f"them there so test_every_parity_job_is_bounded actually covers "
+        f"them; a job present here and absent from that tuple is the one "
+        f"job in parity.yml that could be deleted without this gate noticing."
+    )

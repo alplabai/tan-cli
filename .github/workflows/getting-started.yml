@@ -230,6 +230,19 @@ jobs:
       # binutils is installed INSIDE the container (PyInstaller shells out to
       # `objdump` on Linux and slim-bullseye lacks it) rather than on the host,
       # since the host no longer runs PyInstaller at all.
+      #
+      # DELIBERATELY UNPINNED (tan-cli#989 review, finding 3): "the SAME
+      # artifact release.yml ships" above is about the BUILD IMAGE (matching
+      # release.yml's glibc floor, so the interpreter build is identical, not
+      # a hosted-runner CPython lookalike) -- it is not a claim that this leg
+      # resolves the identical hash-pinned dependency set release.yml's
+      # `build` job and clean-host.yml's `freeze-and-smoke` job now do
+      # (`--require-hashes -r release-requirements.lock.txt`). This install
+      # stays a live PyPI resolution on purpose: this job smoke-tests the
+      # first-install path end to end (install.sh -> bootstrap -> init ->
+      # build), and a live resolution here keeps catching an upstream
+      # dependency-set drift on the day it actually happens, rather than only
+      # after the next lock-update PR regenerates and merges.
       - name: freeze tan from this checkout in python:3.12-slim-bullseye (python/scripts/build_binary.sh) and swap it in
         run: |
           set -euo pipefail

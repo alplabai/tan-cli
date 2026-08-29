@@ -152,7 +152,7 @@
 #   `# zizmor: ignore[cache-poisoning]` pre-dates tan-cli#899, is a
 #   different rule, and is a THIRD inline ignore this INVENTORY does not
 #   cover -- it stays documented at its own site instead, per the paragraph
-#   above). Two `artipacked` ignores, both
+#   above). Three `artipacked` ignores, all
 #   `actions/checkout` steps that must keep their credential because a
 #   later step in the same job pushes through the remote the checkout
 #   leaves configured, and nothing downstream sets up a token remote of
@@ -165,6 +165,10 @@
 #        (a later step pushes `auto/dev-version-bump-<tag>` through it,
 #        tan-cli#770).
 #        anchor: job=propose-dev-version-bump id=artipacked-inventory-2
+#     3. `release-lock-update.yml`, the `regenerate` job's `dev` checkout
+#        (a later step pushes `auto/release-lock-update` through it,
+#        tan-cli#437).
+#        anchor: job=regenerate id=artipacked-inventory-3
 #
 #   Each `anchor:` line names the (job key, step `id:`) pair the row is
 #   actually keyed to (tan-cli#929) -- see the note below this INVENTORY for
