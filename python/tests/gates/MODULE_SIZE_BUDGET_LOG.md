@@ -538,3 +538,14 @@ several less obvious failures.
     - tan/core/debug_launch.py: 1275 -> 1539
     - function_count_budget: 294 -> 296
     - function_worst_budget: 806 -> 819
+- 2026-08-29 -- tan-cli#992: route ~26 subprocess spawn sites through the shared LD_LIBRARY_PATH-restore helper (tan.core.subprocess_env.spawn_env), plus the new gate that asserts every one of them does
+    - tan/commands/build/execute.py: 1713 -> 1726
+    - tan/commands/diff_cmd.py: 889 -> 891
+    - tan/commands/doctor_cmd.py: 4320 -> 4324
+    - tan/commands/flash_cmd.py: 3952 -> 3962
+    - tan/commands/generate_cmd.py: 1431 -> 1433
+    - tan/commands/size_cmd.py: 938 -> 940
+    - tan/commands/validate_cmd.py: 1613 -> 1615
+    - tan/model/adapters/ethos_u.py: 886 -> 889
+    - tan/planner/template.py: 1481 -> 1484
+    - function_count_budget: 296 -> 298

@@ -55,6 +55,8 @@ from typing import Any
 
 import yaml
 
+from tan.core.subprocess_env import spawn_env
+
 from .orchestrator import _zephyr_app_dir
 from .paths import METADATA_ROOT, REPO
 
@@ -1102,6 +1104,7 @@ def _tag_resolves(base_dir: Path, tag: str) -> bool:
         return subprocess.run(
             ["git", "-C", str(base_dir), "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"],
             capture_output=True,
+            env=spawn_env(),
             check=False,
         ).returncode == 0
     except (OSError, subprocess.SubprocessError):  # no git binary, not a repo

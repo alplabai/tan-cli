@@ -154,6 +154,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import NoReturn
 
+from tan.core.subprocess_env import spawn_env
 from . import CompilerAdapter, Blob
 
 _VELA_TIMEOUT_S = 600        # vela compiles are minutes at most; never unbounded in CI
@@ -856,7 +857,9 @@ class VelaAdapter(CompilerAdapter):
                 cmd += ["--config", str(vendor_config),
                         "--system-config", vela_vendor_system_config]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_VELA_TIMEOUT_S)
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=_VELA_TIMEOUT_S, env=spawn_env()
+            )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"vela timed out after {exc.timeout}s for {accel_config}") from exc
         if proc.returncode != 0:

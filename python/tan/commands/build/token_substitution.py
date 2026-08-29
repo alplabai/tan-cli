@@ -31,6 +31,7 @@ from tan.core.plan_tokens import (
     sdk_commit_mismatches,
     substitute_plan_tokens,
 )
+from tan.core.subprocess_env import spawn_env
 from tan.core.tool_lookup import resolve_tool
 
 
@@ -105,6 +106,7 @@ def _is_own_git_checkout(sdk_root: Path, git_exe: str | None) -> bool:
             capture_output=True,
             text=True,
             timeout=10,
+            env=spawn_env(),
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -143,6 +145,7 @@ def git_short_head(sdk_root: Path) -> str:
             capture_output=True,
             text=True,
             timeout=10,
+            env=spawn_env(),
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
