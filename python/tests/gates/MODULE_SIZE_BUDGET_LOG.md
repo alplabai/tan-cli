@@ -501,3 +501,7 @@ several less obvious failures.
     - tan/core/debug_launch.py: 1275 -> 1539
     - function_count_budget: 287 -> 289
     - function_worst_budget: 791 -> 804
+- 2026-08-29 -- tan-cli#996: --topology (init_cmd.py, example_catalog.py) + find_template_by_cores/AmbiguousCoresError hand-port (planner/template.py, planner/cli.py)
+    - tan/commands/init_cmd.py: 1306 -> 1413
+    - tan/planner/template.py: 1481 -> 1541
+    - function_count_budget: 289 -> 290

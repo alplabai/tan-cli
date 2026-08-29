@@ -709,6 +709,7 @@ def test_unreadable_template_data_is_a_coded_internal_failure(tmp_path, monkeypa
         init_cmd.init(
             template="zephyr-app",
             from_example=None,
+            topology=None,
             name=None,
             destination=str(tmp_path),
             som=None,
@@ -750,6 +751,7 @@ def test_non_utf8_vendored_template_byte_is_a_coded_envelope_not_a_traceback(
         init_cmd.init(
             template="zephyr-app",
             from_example=None,
+            topology=None,
             name=None,
             destination=str(tmp_path / "out"),
             som=None,
@@ -1577,3 +1579,186 @@ def test_an_error_after_an_unresolved_sdk_root_still_omits_the_sdk_block(tmp_pat
     assert env["exitCode"] != 0, env
     assert "sdk" not in env, env
     assert [i["code"] for i in env["issues"]] == ["init.invalid-template"]
+
+
+# ---------------------------------------------------------------------------
+# --topology (tan-cli#996, alp-sdk#1652's --cores scaffold selector)
+# ---------------------------------------------------------------------------
+
+
+def _sdk_with_topology_catalog(tmp_path, records):
+    """A fake SDK carrying one example per record in `records`
+    (`[(example_src, {core_id: os, ...}), ...]`), and a catalog declaring
+    each record's `cores:` topology in the real `catalog-v1.json` shape.
+    Each example gets a trivial `board.yaml` + `src/main.c` so a resolved
+    scaffold has something to write."""
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True, exist_ok=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    templates = []
+    for idx, (example, cores) in enumerate(records):
+        ex = sdk / "examples" / example
+        (ex / "src").mkdir(parents=True)
+        (ex / "board.yaml").write_text(
+            "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n",
+            encoding="utf-8",
+        )
+        (ex / "src" / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        templates.append({
+            "id": f"tmpl-{idx}",
+            "example": f"examples/{example}",
+            "cores": [{"id": k, "os": v} for k, v in cores.items()],
+        })
+    cat = sdk / "metadata" / "templates"
+    cat.mkdir(parents=True)
+    (cat / "catalog-v1.json").write_text(
+        json.dumps({"schemaVersion": 1, "templates": templates}), encoding="utf-8"
+    )
+    return sdk
+
+
+def test_topology_resolves_the_one_matching_example(tmp_path):
+    _sdk_with_topology_catalog(tmp_path, [
+        ("gateway-demo", {"m33_sm": "zephyr"}),
+        ("mailbox-demo", {"m55_hp": "zephyr", "m55_he": "zephyr"}),
+    ])
+
+    proc = run_tan(
+        "init", "--topology", "m33_sm:zephyr", "--sdk-root", "./sdk",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert env["data"]["templateId"] == "example:gateway-demo", env
+    assert (tmp_path / "board.yaml").is_file()
+
+
+def test_topology_with_no_match_names_the_known_topologies(tmp_path):
+    _sdk_with_topology_catalog(tmp_path, [("gateway-demo", {"m33_sm": "zephyr"})])
+
+    proc = run_tan(
+        "init", "--topology", "a55:yocto", "--sdk-root", "./sdk",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    err = issue(env)
+    assert err["code"] == "init.topology-not-found"
+    assert "m33_sm" in err["message"] and "zephyr" in err["message"], err
+
+
+def test_topology_ambiguous_names_every_candidate_not_just_the_first(tmp_path):
+    """The load-bearing case: two examples doing genuinely different things
+    (an RPMsg demo vs a compute-offload demo, the same real-world shape the
+    task's own example names) sharing one topology must name BOTH -- never
+    silently pick one and hide the other from the customer."""
+    _sdk_with_topology_catalog(tmp_path, [
+        ("multicore/rpmsg-demo", {"m55_hp": "zephyr", "a32_cluster": "yocto"}),
+        ("multicore/offload-demo", {"m55_hp": "zephyr", "a32_cluster": "yocto"}),
+        ("gateway-demo", {"m33_sm": "zephyr"}),
+    ])
+
+    proc = run_tan(
+        "init", "--topology", "m55_hp:zephyr,a32_cluster:yocto", "--sdk-root", "./sdk",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    err = issue(env)
+    assert err["code"] == "init.topology-ambiguous"
+    assert "tmpl-0" in err["message"], err
+    assert "tmpl-1" in err["message"], err
+    assert "tmpl-2" not in err["message"], err
+    # Nothing was written -- an ambiguous selector must refuse, not guess.
+    assert not (tmp_path / "board.yaml").exists()
+
+
+def test_topology_and_template_together_is_a_coded_conflict(tmp_path):
+    proc = run_tan(
+        "init", "--topology", "m33_sm:zephyr", "--template", "minimal-app",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    err = issue(env)
+    assert err["code"] == "init.scaffold-input-conflict"
+    assert "--topology" in err["message"] and "--template" in err["message"], err
+
+
+def test_topology_and_from_example_together_is_a_coded_conflict(tmp_path):
+    proc = run_tan(
+        "init", "--topology", "m33_sm:zephyr", "--from-example", "peripheral-io/hello-world",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.scaffold-input-conflict"
+
+
+def test_topology_without_an_sdk_checkout_is_a_coded_issue(tmp_path):
+    """Mirrors `test_from_example_without_an_sdk_checkout_is_a_coded_issue`:
+    the topology lives only in the SDK's live catalog, so this path needs a
+    checkout exactly the way --from-example does."""
+    proc = run_tan(
+        "init", "--topology", "m33_sm:zephyr", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.sdk-root-unresolved"
+
+
+@pytest.mark.parametrize(
+    "raw", ["m33_sm", "m33_sm:zephyr,m33_sm:yocto", "", ":zephyr", "m33_sm:"]
+)
+def test_topology_malformed_entries_are_a_coded_issue(raw, tmp_path):
+    _sdk_with_topology_catalog(tmp_path, [("gateway-demo", {"m33_sm": "zephyr"})])
+
+    proc = run_tan(
+        "init", "--topology", raw, "--sdk-root", "./sdk", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, (raw, env)
+    assert issue(env)["code"] == "init.invalid-topology", raw
+
+
+def test_topology_resolved_example_still_gets_the_som_support_check(tmp_path):
+    """A topology-resolved example is an example (`template_id` starts
+    "example:"), so it must share `--from-example`'s SoM-support warning --
+    this is `is_example_shaped`'s whole point, proven end to end rather than
+    only at the unit level."""
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    ex = sdk / "examples" / "multicore" / "mproc-mailbox"
+    ex.mkdir(parents=True)
+    (ex / "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n", encoding="utf-8",
+    )
+    cat = sdk / "metadata" / "templates"
+    cat.mkdir(parents=True)
+    (cat / "catalog-v1.json").write_text(
+        json.dumps({"schemaVersion": 1, "templates": [{
+            "id": "multicore-mailbox",
+            "example": "examples/multicore/mproc-mailbox",
+            "cores": [{"id": "m55_hp", "os": "zephyr"}, {"id": "m55_he", "os": "zephyr"}],
+            "supported": {"som_skus": ["E1M-AEN801"]},
+        }]}),
+        encoding="utf-8",
+    )
+
+    proc = run_tan(
+        "init", "--topology", "m55_hp:zephyr,m55_he:zephyr", "--sdk-root", "./sdk",
+        "--som", "E1M-AEN301", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    codes = [i["code"] for i in env["issues"]]
+    assert "init.example-som-unsupported" in codes, env["issues"]
