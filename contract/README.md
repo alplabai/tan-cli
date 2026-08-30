@@ -148,6 +148,7 @@ create a second list that immediately drifts.
 | `data.slices[].{core_id,os,status,flash_method,build_dir,board,machine,image,app,reason,output_artefact,log_path}`, `.ipc[].{name,kind,endpoints[],status,reason}`, `.helper_mcus[].{name,chip,flash_method,firmware_path}` | `build --manifest`, `build --manifest-from <path>` | **NOT COVERED, and now permanently unreachable.** tan-cli#427 RETIRED both flags rather than implementing them: a native `tan build` already writes `build/system-manifest.yaml` (plain YAML, readable directly), so neither flag was implemented on top of it. `tan build --manifest --format json` / `--manifest-from <path>` each answer `ok:false`, `exitCode:2`, `build.flag-retired`, naming that file as the replacement in the refusal message itself -- never `cli.command-deferred`/exit 1 any more. Note for whoever freezes `system-manifest.yaml`'s own shape instead (the artefact these flags would have echoed): the extension matches the literal `"TBD"` on `slices[].flash_method`, `helper_mcus.flash_method` and `helper_mcus.firmware_path` to gate its Flash button, and matches `slices[].os === "off"` to decide whether a core participates -- both are load-bearing wire VALUES, not placeholders tan may change freely. |
 | `data.slices[]` keyed by `.core_id`; `.status`, `.flash`, `.ram` (each `{used,total,pct}`, any member `null`), `.budget_note` | `size` | **NOT COVERED.** The command is reachable but needs a built ELF and a manifest -- a bare run answers `ok:false`, `exitCode:1`, `size.manifest-unavailable`. `slices[].status` is matched BY VALUE (`not-built`, `n/a`, `over`, `warn`, `no-budget`; anything else renders as "in budget"), so those strings are wire content. |
 | `data.configuration` (the `launch.json` entry alp-sdk-vscode#342 writes verbatim) | `debug-config` | goldens `debug-config-preview-{zephyr-mcu,zephyr-mcu-sdk-identity,baremetal-mcu,native-host,yocto-userspace}` — one per `--target-kind`, re-recorded against the shipping CLI under tan-cli#502 and no longer `xfail`'d, so an added key or a changed `program`/`executable` reds here. Oracle-parity fixtures additionally covered the bare `zephyr-mcu` invocation (all three servers) and `native-host`, but they consumed `crates/` and were deleted with it in tan-cli#269; these goldens are what survived. |
+| `data.programsDevice` (additive at `schemaVersion` `"1"`), `data.configuration.loadFiles` (cortex-debug targets only) | `debug-config` | same five goldens, second re-record under tan-cli#945 (see "Why the five `debug-config-preview-*` goldens were re-recorded" below). tan-cli#945: a consumer had no way to tell, from the written profile alone, whether starting it programs the attached target — cortex-debug's own `loadFiles` schema default silently falls back to `executable` ("if this property does not exist, then the executable is used to program the device", `marus25.cortex-debug` 1.12.1), which alp-sdk-vscode#586 had to reimplement client-side because neither of its flash gates could see the write happen inside cortex-debug's own spawned probe server. `programsDevice` is `true` for `zephyr-mcu`/`baremetal-mcu`, `false` for `yocto-userspace` (a `cppdbg` attach to an already-deployed gdbserver) and `native-host` (no target hardware exists) — `tan.core.debug_launch.programs_device`, keyed on `targetKind` alone, so it is present and correct on every outcome this command can report, including a validation failure with `configuration: null`. `loadFiles` is emitted explicitly on every cortex-debug draft, naming the SAME artefact `executable` does, and both are kept in sync by `apply_launch_resolution` once a real build resolves one. |
 
 The four NOT COVERED rows -- `build --materialise`, `build --plan`,
 `build --manifest*` and `size` -- are stated rather than quietly omitted: an
@@ -602,6 +603,24 @@ five matching the retired oracle any more — and re-recording is what stops
 `data.configuration` losing its last envelope-level gate on the three cases
 (`zephyr-mcu-sdk-identity`, `baremetal-mcu`, `yocto-userspace`) that never had
 a parity fixture.
+
+### Second re-record: `data.programsDevice` + `loadFiles` (tan-cli#945)
+
+All five `debug-config-preview-*` goldens were re-recorded a SECOND time, on
+2026-08-30 against `tan 0.6.1-rc1.dev0`, purely additively — `data.
+schemaVersion` stays `"1"` on every one. Two new facts, both explained in
+full in the `data.programsDevice`/`data.configuration.loadFiles` row of the
+frozen-`data`-field-names table above:
+
+- `data.programsDevice: bool` on every case (`true` for the two cortex-debug
+  targets, `false` for `yocto-userspace`/`native-host`).
+- `data.configuration.loadFiles` on the three cortex-debug cases
+  (`zephyr-mcu`, `zephyr-mcu-sdk-identity`, `baremetal-mcu`) only — it is not
+  a field `cppdbg`/`lldb` have any concept of, so `yocto-userspace` and
+  `native-host`'s `configuration` is untouched by this re-record.
+
+Each case's `PROVENANCE.txt` carries its own "second re-record" section with
+the exact diff. `issues[]` is unchanged on all five.
 
 Deliberately **outside the envelope**: nothing, as of tan-cli#399's close-out.
 `faultdecode` was the one verb here — its `--format json` used to print the

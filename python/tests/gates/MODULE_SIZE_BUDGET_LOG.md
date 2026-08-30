@@ -602,3 +602,6 @@ several less obvious failures.
     - tan/commands/model_cmd.py: 1059 -> 1060
     - tan/commands/support_bundle_cmd.py: 1067 -> 1068
     - tan/core/sdk_discovery.py: new entry at 963
+- 2026-08-30 -- tan-cli#945: debug_launch.py grows the programsDevice/loadFiles producer-stated facts (PROGRAMS_DEVICE map, programs_device(), the loadFiles draft/resolution wiring); debug_config_cmd.py wires programsDevice into the data payload and its module docstring. Both are additive envelope surface, not bloat to split out this round.
+    - tan/commands/debug_config_cmd.py: 2114 -> 2137
+    - tan/core/debug_launch.py: 1539 -> 1596

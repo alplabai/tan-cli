@@ -110,6 +110,47 @@ def is_server_supported_for_target(target: str, server: str) -> bool:
     return server in server_choices_for_target(target)
 
 
+#: tan-cli#945: whether STARTING a debug session for this target class writes
+#: program data to the attached target, stated by the producer instead of left
+#: for a consumer to re-derive from the cortex-debug adapter's own schema
+#: knowledge -- its ``loadFiles`` default ("if this property does not exist,
+#: then the executable is used to program the device", `marus25.cortex-debug`
+#: 1.12.1) plus any of thirteen ``*Commands`` lists that could carry a bare
+#: ``load``. alp-sdk-vscode#586/#595 had to reimplement exactly that inference
+#: client-side because neither of its flash gates could see the path -- the
+#: programming happens inside cortex-debug's own spawned `JLinkGDBServerCL` /
+#: `openocd` / `pyocd`, with no `tan` process in the loop to intercept.
+#:
+#: ``True`` for both cortex-debug targets: :func:`create_launch_draft` always
+#: emits ``request: launch`` with a non-empty ``loadFiles`` (see there) -- every
+#: session this module can produce for them programs the executable onto the
+#: target, with no attach-only draft shape today. ``False`` for
+#: yocto-userspace: its ``cppdbg`` ``launch`` request attaches MI to a
+#: gdbserver the operator already started, after their own manual deploy
+#: (``miDebuggerServerAddress``) -- this session issues no write of its own.
+#: ``False`` for native-host: ``lldb`` runs a binary on the HOST machine: there
+#: is no target hardware to program at all.
+PROGRAMS_DEVICE = {
+    ZEPHYR_MCU: True,
+    BAREMETAL_MCU: True,
+    YOCTO_USERSPACE: False,
+    NATIVE_HOST: False,
+}
+
+
+def programs_device(target: str) -> bool:
+    """Whether a launch of ``target`` writes to real hardware (tan-cli#945).
+
+    Defaults to ``False`` for an unrecognised target -- the same "assume it
+    does NOT program" floor every caller of this module already applies to an
+    unresolved target/server pairing elsewhere: overstating the safe case
+    (claiming a write when there is none) is merely confusing, understating it
+    (claiming safety for a session that flashes silicon) is the class of bug
+    this whole issue exists to close.
+    """
+    return PROGRAMS_DEVICE.get(target, False)
+
+
 #: The ``build/system-manifest.yaml`` slice ``os`` a debug target class runs
 #: on, or absent for a target with no per-core build slice keyed by ``os``.
 #: ``native-host`` is exactly that case -- its slice is picked by BOARD target
@@ -358,6 +399,13 @@ def create_launch_draft(
             "request": "launch",
             "cwd": "${workspaceFolder}",
             "executable": "${workspaceFolder}/build/app/zephyr/zephyr.elf",
+            # tan-cli#945: stated explicitly rather than left to
+            # `marus25.cortex-debug`'s own undocumented-on-the-wire schema
+            # default ("if this property does not exist, then the executable
+            # is used to program the device") -- kept identical to
+            # `executable` by `apply_launch_resolution` below, since this
+            # draft has no attach-only shape for a caller to opt into yet.
+            "loadFiles": ["${workspaceFolder}/build/app/zephyr/zephyr.elf"],
             "runToEntryPoint": "main",
             "preLaunchTask": pre_launch_task,
             "svdFile": "<resolved-svd>",
@@ -394,6 +442,9 @@ def create_launch_draft(
             "servertype": server,
             "cwd": "${workspaceFolder}",
             "executable": "${workspaceFolder}/build/baremetal/app.elf",
+            # tan-cli#945: see the ZEPHYR_MCU branch above for why this is
+            # stated explicitly rather than left to the adapter's default.
+            "loadFiles": ["${workspaceFolder}/build/baremetal/app.elf"],
         }
         if server == OPENOCD:
             draft = {
@@ -549,6 +600,12 @@ def apply_launch_resolution(draft: dict[str, Any], resolution: LaunchResolution)
         for key in ("executable", "program"):
             if key in draft:
                 draft[key] = resolution.executable
+        # tan-cli#945: `loadFiles` names the SAME artefact as `executable` --
+        # a real build's own resolved path must replace it there too, or a
+        # per-core slice's ELF and the file cortex-debug actually programs
+        # would silently diverge the moment `_resolve_from_build` finds one.
+        if "loadFiles" in draft:
+            draft["loadFiles"] = [resolution.executable]
     if resolution.device is not None and "device" in draft:
         draft["device"] = resolution.device
     if resolution.target_id is not None and "targetId" in draft:

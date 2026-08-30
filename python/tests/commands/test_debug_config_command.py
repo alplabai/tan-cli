@@ -32,8 +32,10 @@ from tan.core.debug_launch import (
     create_launch_json_write_plan,
     fill_debug_probe_identity_gaps,
     infer_target_kind,
+    programs_device,
     strip_jsonc,
 )
+from tan.core.debug_launch import BAREMETAL_MCU, OPENOCD, PYOCD, SERVER_NONE
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
@@ -542,6 +544,10 @@ def test_a_refused_selector_is_a_coded_envelope_at_exit_2(tmp_path, argv, want_t
     assert env["data"]["configuration"] is None
     assert env["project"] == {"root": None, "boardYaml": None}
     assert not launch_json(tmp_path).exists()
+    # tan-cli#945: `programsDevice` is present -- and follows `targetKind` --
+    # even on a refusal that never built a `configuration`. Derived from the
+    # SAME reported target every one of these three cases already pins.
+    assert env["data"]["programsDevice"] is programs_device(want_target)
 
 
 def test_an_svd_path_that_cannot_be_read_fails_instead_of_writing(tmp_path):
@@ -588,6 +594,89 @@ def test_svd_on_a_target_kind_without_the_field_says_so(tmp_path):
     assert any("--svd was given" in n for n in env["data"]["notes"]), (
         "accepting --svd here in silence is the no-op this note exists to prevent"
     )
+
+
+# tan-cli#945: a consumer must be able to tell, from the envelope alone,
+# whether starting the written profile programs the attached target -- see
+# alp-sdk-vscode#586, which had no way to see that fact and shipped a flash
+# consent dialog that could never trigger.
+@pytest.mark.parametrize(
+    "target,server,expect_programs",
+    [
+        (ZEPHYR_MCU, JLINK, True),
+        (BAREMETAL_MCU, OPENOCD, True),
+        (YOCTO_USERSPACE, GDBSERVER, False),
+        (NATIVE_HOST, SERVER_NONE, False),
+    ],
+)
+def test_the_preview_envelope_states_whether_the_profile_programs_the_device(
+    tmp_path, target, server, expect_programs
+):
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", target, "--server", server, "--preview", "--format", "json")
+    )
+
+    assert env["data"]["programsDevice"] is expect_programs
+    assert env["data"]["programsDevice"] is programs_device(target)
+
+
+def test_a_cortex_debug_preview_carries_an_explicit_load_files_key(tmp_path):
+    """The second half of tan-cli#945's ask: the written `configuration`
+    itself names the artefact it programs, rather than relying on
+    `marus25.cortex-debug`'s own undocumented-on-the-wire schema default."""
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--preview", "--format", "json")
+    )
+
+    config = env["data"]["configuration"]
+    assert config["loadFiles"] == [config["executable"]]
+
+
+def test_a_non_cortex_debug_preview_carries_no_load_files_key(tmp_path):
+    env = envelope(
+        run_cli(
+            tmp_path, "--target-kind", YOCTO_USERSPACE, "--server", GDBSERVER,
+            "--preview", "--format", "json",
+        )
+    )
+
+    assert "loadFiles" not in env["data"]["configuration"]
+
+
+def test_a_real_build_resolution_updates_load_files_alongside_executable(tmp_path):
+    """`loadFiles` must never drift from `executable` once a real build
+    resolves it -- both name the same artefact, or a consumer reading
+    `programsDevice: true` alongside a stale `loadFiles` would be told the
+    wrong file gets flashed."""
+    pytest.importorskip("yaml")
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr.elf\n",
+    )
+
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--preview", "--format", "json")
+    )
+
+    config = env["data"]["configuration"]
+    assert config["executable"] == "${workspaceFolder}/build/m55_hp-zephyr/build/zephyr/zephyr.elf"
+    assert config["loadFiles"] == [config["executable"]]
+
+
+def test_a_write_persists_load_files_alongside_the_executable_on_disk(tmp_path):
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--format", "json")
+    )
+
+    assert env["exitCode"] == 0, env
+    on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    written = on_disk["configurations"][0]
+    assert written["loadFiles"] == [written["executable"]]
+    assert env["data"]["configuration"]["loadFiles"] == written["loadFiles"]
 
 
 def test_text_mode_writes_nothing_to_stdout(tmp_path):

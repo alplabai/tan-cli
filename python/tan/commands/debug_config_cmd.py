@@ -69,6 +69,19 @@ indistinguishable, to the extension, from tan producing nothing at all -- it
 renders an empty panel with no error -- so the outer guard in [`debug_config`]
 converts any unexpected exception into `debug-config.internal-failure` at exit
 5 rather than letting it escape.
+
+**The written profile now says whether it programs the device (tan-cli#945).**
+Two additive facts close the gap alp-sdk-vscode#586 found: a cortex-debug
+`configuration` always carries an explicit `loadFiles` key (naming the
+artefact it programs -- `create_launch_draft` never omits it, matching the
+adapter's own default exactly rather than leaving it implicit), and every
+`data` payload carries `programsDevice: bool` (`tan.core.debug_launch.
+programs_device`), true for zephyr-mcu/baremetal-mcu, false for
+yocto-userspace (a cppdbg attach to an already-deployed gdbserver) and
+native-host (no target hardware exists). Neither field changes which profiles
+this command writes to a workspace it did not author -- a hand-written
+cortex-debug entry is still owed the same inference the extension already
+does for it (see the issue's own "Scope, honestly").
 """
 
 from __future__ import annotations
@@ -109,6 +122,7 @@ from tan.core.debug_launch import (
     manifest_slices,
     parse_server_kind,
     parse_target_kind,
+    programs_device,
     sdk_identity_overwrites,
     sdk_identity_stranded_appends,
 )
@@ -1001,6 +1015,15 @@ def _data(
         "preview": preview,
         "launchJsonPath": launch_json_path,
         "replaced": replaced,
+        # tan-cli#945: producer-stated, so a consumer never has to re-derive
+        # "does starting this profile write real hardware" from cortex-debug's
+        # own adapter schema (its `loadFiles` default, or one of thirteen
+        # `*Commands` lists that could carry a bare `load`) the way
+        # alp-sdk-vscode#586 had to before its consent dialog could even ask
+        # the question. Derived from `target` alone (`programs_device`), so it
+        # is present -- and correct -- on every outcome this command can
+        # report, including a failure before a `configuration` was ever built.
+        "programsDevice": programs_device(target),
         "notes": notes,
         # The launch configuration itself -- the very thing the command
         # produces. Additive: the envelope used to describe the write (path,
