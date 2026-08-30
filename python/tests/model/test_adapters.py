@@ -1036,7 +1036,53 @@ def test_a_supplied_memory_mode_is_not_reported_as_velas_own_default(tmp_path, m
     # sizing hardware off this caveat needs to know this figure does not
     # include it.
     assert "That SRAM figure is the tensor arena only" in caveat
-    assert "reported and provisioned separately" in caveat
+    # tan-cli#1021 review NIT: "provisioned separately", never "reported ...
+    # separately" -- nothing in `tan` reports the const/weights region's own
+    # size anywhere (`check.py`'s sizing note, `manifest.Target`, `model_cmd.py`
+    # all omit it); the blob PAYLOAD carries the bytes, not a reported figure.
+    assert "provisioned separately" in caveat
+    assert "is reported and provisioned separately" not in caveat
+
+
+def test_a_fully_specified_sram_only_profile_still_carries_the_arena_only_scope(
+        tmp_path, monkeypatch):
+    """tan-cli#1021 review MINOR: `_default_profile_caveats` returns `()` when
+    vela defaulted NEITHER flag -- exactly the shape a fully module-authored
+    vendor profile takes (`--config <ini> --system-config <name> --memory-mode
+    Sram_Only`, all three or none, per `compile()`'s own comment). Before this
+    fix that meant a fully-specified `Sram_Only` compile -- the path issue
+    #1011 named as live on every Alif Ensemble part -- shipped NO scope
+    statement at all: `requires.sram_kib` reached the customer's `.alpmodel`
+    with nothing beside it saying the figure is the arena only. This stdout
+    names BOTH flags with no "Warning:" line for either, i.e. nothing
+    defaulted."""
+    src = tmp_path / "m.tflite"
+    src.write_bytes(b"TFL3-INPUT")
+
+    def fake_run(cmd, capture_output, text, timeout, env):
+        out = _out_dir_of(cmd)
+        (out / "m_vela.tflite").write_bytes(b"VELA-OUT")
+        (out / "m_summary_Ethos_U85_SRAM_Only.csv").write_text(
+            "sram_memory_used,on_chip_flash_memory_used\n0.03125,0.234375\n", encoding="utf-8")
+        return _FakeProc(stdout=(
+            "System configuration             Ethos_U85_SRAM_Only\n"
+            "Memory mode                                 Sram_Only\n"
+            "CPU operators = 0 (0.0%)\n"
+            "NPU operators = 1 (100.0%)\n"))
+
+    monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
+    # @vela_memory_mode only shapes the argv (asserted elsewhere); what drives
+    # `defaulted`/`system_config`/`memory_mode` here is vela's own stdout
+    # above, parsed identically regardless of which flags `compile()` passed.
+    blob = VelaAdapter().compile(src, accel_config="ethos-u85-256", out_dir=tmp_path,
+                                 vela_memory_mode="Sram_Only")
+    assert len(blob.caveats) == 1
+    caveat = blob.caveats[0]
+    # No "vela used its BUILT-IN default ..." preamble -- nothing was
+    # defaulted, so that framing would be false here.
+    assert "BUILT-IN default" not in caveat
+    assert "That SRAM figure is the tensor arena only" in caveat
+    assert "provisioned separately" in caveat
 
 
 def test_a_defaulted_system_config_is_not_called_harmless_under_shared_sram(

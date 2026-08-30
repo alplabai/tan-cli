@@ -709,12 +709,59 @@ def _refuse_zero_sram_footprint(*, accel_config: str, npu_ops: int, cpu_ops: int
 # customer sizes hardware from. A run whose summary block named NO memory mode
 # at all gets a fourth, narrower sentence: it says tan cannot tell which of the
 # two happened, rather than picking one.
+#
+# `_default_profile_caveats` returns `()` -- no caveat at all -- ONLY when
+# vela defaulted NEITHER flag, i.e. `compile()` passed a fully module-authored
+# profile straight through. That does not mean the arena-only scope statement
+# stops applying under `Sram_Only`: it is a CONTRACT about what `req_sram_kib`
+# means, true whether or not vela had a flag to default (tan-cli#1021 review
+# MINOR). `compile()` falls back to `_arena_only_scope_caveat` for exactly
+# that case, so the sentence still reaches the fully-specified path -- the one
+# issue #1011 named as live on every Alif Ensemble part.
+def _arena_only_scope_clause(memory_mode: str) -> str:
+    """The `req_sram_kib`/arena-only contract sentence (tan-cli#1011), shared
+    verbatim between `_default_profile_caveats`' defaulted-profile branch and
+    `_arena_only_scope_caveat`'s standalone one -- so a fully-specified
+    compile and a defaulted one never carry two different spellings of the
+    same contract.
+
+    tan-cli#1021 review NIT: says only "provisioned separately", never
+    "reported ... separately" -- nothing in `tan` reports the const/weights
+    region's own size anywhere (`check.py`'s sizing note carries arena+SRAM
+    only, `manifest.Target` carries a blob index with no length, and
+    `model_cmd.py` prints no byte count for it); the blob PAYLOAD carries the
+    bytes, not a reported figure."""
+    return (f"That SRAM figure is the tensor arena only -- this module's const/weights region "
+            f"also lands in SRAM under {memory_mode} but is provisioned separately, never "
+            f"folded into it.")
+
+
+def _arena_only_scope_caveat(memory_mode: str | None) -> tuple[str, ...]:
+    """The arena-only contract (tan-cli#1011), standalone -- for a compile
+    that used a FULLY module-authored profile, where `_default_profile_
+    caveats` returns `()` because vela had nothing left to default.
+
+    tan-cli#1021 review MINOR: the scope statement is a CONTRACT
+    (`req_sram_kib` always means the tensor arena under a `Sram_Only`-shaped
+    memory mode, whether or not vela also had to default a flag), not an
+    artefact of a defaulted profile -- so it must reach a fully-specified
+    `Sram_Only` compile too. That is the path issue #1011 named as live on
+    every Alif Ensemble part; gating the sentence behind `defaulted` being
+    non-empty left it unreachable there. `()` for any other memory mode --
+    only `_AXI0_CONST_MEMORY_MODES` carries this quirk (see the module
+    docstring's `_AXI0_CONST_MEMORY_MODES` note)."""
+    if memory_mode not in _AXI0_CONST_MEMORY_MODES:
+        return ()
+    return (_arena_only_scope_clause(memory_mode),)
+
+
 def _default_profile_caveats(defaulted: frozenset[str], system_config: str | None,
                              memory_mode: str | None) -> tuple[str, ...]:
     """vela's own "may be invalid or non-optimal" verdict, surfaced as a report
     caveat for whichever profile flags it had to default -- so a customer
     cannot mistake a default-profile figure for one authored for this module.
-    `()` when vela defaulted neither.
+    `()` when vela defaulted neither (the caller then falls back to
+    `_arena_only_scope_caveat` for the fully-specified case).
 
     THREE SHAPES -- see the comment block above this function for what each
     says and the measurements behind it.
@@ -741,9 +788,7 @@ def _default_profile_caveats(defaulted: frozenset[str], system_config: str | Non
                 f"scheduling is tuned for that system, not this module's. The arena/SRAM figures "
                 f"are unaffected: they follow --memory-mode {memory_mode}, which came from this "
                 f"module's SoC metadata, whose const/arena/cache areas are all one AXI port every "
-                f"system config maps to SRAM. That SRAM figure is the tensor arena only -- this "
-                f"module's const/weights region also lands in SRAM under {memory_mode} but is "
-                f"reported and provisioned separately, never folded into it.",)
+                f"system config maps to SRAM. " + _arena_only_scope_clause(memory_mode),)
     if memory_mode is None:
         return (f"vela used its BUILT-IN default {default_of} -- no module-authored one is "
                 f"available -- so its scheduling is tuned for that system, not this module's. "
@@ -902,7 +947,13 @@ class VelaAdapter(CompilerAdapter):
                 system_config=system_config, memory_mode=memory_mode, defaulted=defaulted,
                 vendor_config_filename=vela_vendor_config_filename,
                 soc_declares_dram=soc_declares_dram)
+        # tan-cli#1021 review MINOR: a FULLY module-authored profile (nothing
+        # defaulted) still gets the arena-only scope caveat under
+        # `_AXI0_CONST_MEMORY_MODES` -- `_default_profile_caveats` returns
+        # `()` there, since it exists to flag DEFAULTED flags only.
+        caveats = (_default_profile_caveats(defaulted, system_config, memory_mode)
+                  or _arena_only_scope_caveat(memory_mode))
         return Blob(format="vela_tflite", payload=produced.read_bytes(),
                     arena_bytes=arena, compiler_version=_vela_version(),
                     req_sram_kib=sram_kib, cpu_op_count=cpu_ops, npu_op_count=npu_ops,
-                    caveats=_default_profile_caveats(defaulted, system_config, memory_mode))
+                    caveats=caveats)
