@@ -24,6 +24,14 @@ capture and at the `sha="$(pin "$name")"` assignment -- the two exact shapes
 tan-cli#793 fixed. A future edit that drops either `set +e` guard, or that
 reorders a `set -e` restore ahead of the capture it is meant to protect, fails
 here before it ever reaches a runner.
+
+tan-cli#1002 added a THIRD `rc=$?` capture, in the "Open or refresh the
+proposal PR" step: `planner_resync_branch_guard.py`'s exit 1 ("diverted, use
+the branch it named") is exactly as routine as `planner_resync.py`'s own exit
+1/2 above, and the same tan-cli#793 shape would kill the step on it if a
+future edit ever let errexit stay ON across that call. Covered here rather
+than in a second file, since it is the identical defect class this gate
+already exists to catch.
 """
 
 from __future__ import annotations
@@ -37,10 +45,11 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "planner-resync.yml"
 
-#: The two steps this gate is about, named exactly as they appear in the
+#: The three steps this gate is about, named exactly as they appear in the
 #: workflow so a rename is visible here rather than silently losing coverage.
 _PROPOSE_STEP = "Propose the re-sync"
 _GATE_STEP = "Run the freshness gate against the re-synced tree"
+_PR_STEP = "Open or refresh the proposal PR"
 
 #: `set -eu...` / `set -e` (errexit ON) vs `set +e` (errexit OFF). Only a
 #: `set` whose option string actually contains `e` toggles errexit -- `set
@@ -118,11 +127,10 @@ def _assert_errexit_cleared_at_every(
 
 
 def test_the_steps_still_exist():
-    """Anti-vacuity: every assertion below is about these two steps' `run:`
-    bodies -- if either name drifted and the lookup silently returned
-    nothing, the checks below would all vacuously pass having examined
-    nothing."""
-    for name in (_PROPOSE_STEP, _GATE_STEP):
+    """Anti-vacuity: every assertion below is about these three steps' `run:`
+    bodies -- if any name drifted and the lookup silently returned nothing,
+    the checks below would all vacuously pass having examined nothing."""
+    for name in (_PROPOSE_STEP, _GATE_STEP, _PR_STEP):
         step = _step(name)
         assert step is not None, (
             f"no step named {name!r} found in planner-resync.yml's "
@@ -161,3 +169,24 @@ def test_the_gate_steps_pin_capture_runs_with_errexit_cleared():
 def test_the_gate_steps_rc_capture_runs_with_errexit_cleared():
     run = _step(_GATE_STEP)["run"]
     _assert_errexit_cleared_at_every(run, _RC_CAPTURE, "rc=$?", _GATE_STEP)
+
+
+def test_the_pr_steps_branch_guard_rc_capture_runs_with_errexit_cleared():
+    """tan-cli#1002: `planner_resync_branch_guard.py`'s exit 1 (diverted) is a
+    routine outcome this step must keep running past, same shape as the two
+    steps above."""
+    run = _step(_PR_STEP)["run"]
+    _assert_errexit_cleared_at_every(run, _RC_CAPTURE, "rc=$?", _PR_STEP)
+
+
+def test_the_pr_step_restores_errexit_after_the_branch_guard_capture():
+    run = _step(_PR_STEP)["run"]
+    hit = _RC_CAPTURE.search(run)
+    assert hit, run
+    next_toggle = _SET_TOGGLE.search(run, hit.end())
+    assert next_toggle is not None and "e" in next_toggle.group(2) and next_toggle.group(1) == "-", (
+        f"errexit is not restored (`set -e`) after `rc=$?` in the "
+        f"{_PR_STEP!r} step -- everything after it (reading the guard's "
+        f"decision back out of $GITHUB_OUTPUT, the git commit/push, opening "
+        f"the PR) is meant to run under normal errexit again:\n{run}"
+    )
