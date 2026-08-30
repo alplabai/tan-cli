@@ -1165,7 +1165,9 @@ def init(
             "companion id like `m55_he` infers `:zephyr` and is refused "
             "unless `m55_he` is the app core. SPLICES onto an already-"
             "chosen template/example -- to instead CHOOSE which template to "
-            "use by its hardware topology, see --topology."
+            "use by its hardware topology, see --topology. Mutually "
+            "exclusive with --topology, which has no already-chosen "
+            "template left for this to splice onto."
         ),
     ),
     topology: str = typer.Option(
@@ -1179,8 +1181,11 @@ def init(
             "own cores: topology matches exactly, instead of naming a "
             "template id or example path directly. Not --cores, which "
             "splices a companion core onto an ALREADY-CHOSEN template "
-            "instead of choosing one. Mutually exclusive with --template "
-            "and --from-example; needs a resolved SDK checkout."
+            "instead of choosing one. Mutually exclusive with --template, "
+            "--from-example, AND --cores (there is no already-chosen "
+            "template left for --cores to splice onto -- add the extra "
+            "core to --topology itself instead); needs a resolved SDK "
+            "checkout."
         ),
     ),
     preview: bool = typer.Option(
@@ -1292,6 +1297,33 @@ def init(
                 "init.scaffold-input-conflict",
                 f"tan init takes at most one of --template, --from-example, "
                 f"--topology; got {', '.join(_chosen)}.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+
+        # tan-cli#1001 review: `--topology` ALREADY selects the template by
+        # its full hardware topology -- `--cores` combined with it has
+        # nothing left to splice onto, since there is no "already-chosen
+        # template" yet for `--cores` to attach a companion core to (unlike
+        # the `--template`/default path below, where `_plan_from_template`
+        # genuinely reads `cores`). Before this check, `--cores` on the
+        # `--topology` path was silently discarded: `ok: true`, exit 0,
+        # `issues: []`, and no trace of the requested core in the written
+        # `board.yaml` -- measured. Refuse instead, the same posture the
+        # `_chosen` conflict above takes for two scaffold-source flags.
+        # `--from-example` + `--cores` is a DIFFERENT, pre-existing case
+        # (the example ships its own board.yaml, so `--cores` is silently
+        # ignored there too, documented at `_plan_from_example`'s call site
+        # below) -- not touched here; only the `--topology` combination is
+        # new in this PR and had no such note.
+        if topology is not None and cores is not None:
+            raise InitError(
+                "init.scaffold-input-conflict",
+                "tan init --topology already selects the template by its "
+                "full hardware topology; --cores has nothing left to splice "
+                "onto and would be silently ignored. Add the extra core to "
+                "--topology instead (e.g. --topology "
+                "m55_hp:zephyr,a32_cluster:yocto), or drop --topology and "
+                "use --template/--from-example with --cores.",
                 ExitCode.VALIDATION_FAILURE,
             )
 

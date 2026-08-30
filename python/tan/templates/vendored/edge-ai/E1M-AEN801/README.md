@@ -48,9 +48,10 @@ west build -b alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp .
 west flash
 ```
 
-The DEEPX DX-M1 NPU is populated on `E1M-V2M101`/`E1M-V2M102` -- not on
-`E1M-V2N101`/`E1M-V2N102`, the same PCB without it. Pick either via
-`som.sku` in `board.yaml`.
+For the DEEPX DX-M1 path, re-scaffold rather than edit: `tan init --template
+edge-ai-starter --som E1M-V2M101`. Flipping `som.sku` alone leaves `preset:`,
+`cores:` and `pins:` pinned to this module (`e1m-evk`, which does not host
+the `renesas-rzv2n-deepx` family) and `tan validate` refuses it.
 
 ## Model
 

@@ -585,3 +585,5 @@ several less obvious failures.
     - tan/planner/template.py: 1541 -> 1548
     - function_count_budget: 298 -> 300
     - tan/commands/build_cmd.py: 2293 -> 2362
+- 2026-08-30 -- tan-cli#1001 review: refuse --topology + --cores as a coded conflict (init.scaffold-input-conflict) instead of silently discarding --cores, plus matching help-text cross-references and a regression test
+    - tan/commands/init_cmd.py: 1413 -> 1445

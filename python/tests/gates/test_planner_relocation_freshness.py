@@ -564,7 +564,7 @@ from tests.conftest import sdk_root
 #:
 #: Upstream commits in range touching this table's files:
 #:   - 722320a1 feat(scripts,metadata): --cores template selector and optional per-core toolchain (#1652, #964) (#1835)
-PINNED_SDK_COMMIT = "722320a1abe3cea675e99e97300b8a484b4e8464"  # alp-sdk v0.16.0 -- see above
+PINNED_SDK_COMMIT = "722320a1abe3cea675e99e97300b8a484b4e8464"  # alp-sdk, 63 commits past v0.16.0, untagged -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1000,7 +1000,7 @@ PINNED_HASHES: dict[str, str] = {
 #: Net: all 19 entries are re-hashed against `722320a1` below (12 remain,
 #: 7 retired), and `HAND_PORT_PINNED_SDK_COMMIT` advances to the same
 #: commit as `PINNED_SDK_COMMIT` for the first time since `1a9f753c`.
-HAND_PORT_PINNED_SDK_COMMIT = "722320a1abe3cea675e99e97300b8a484b4e8464"  # alp-sdk v0.16.0 -- see above (tan-cli#996 closes tan-cli#913)
+HAND_PORT_PINNED_SDK_COMMIT = "722320a1abe3cea675e99e97300b8a484b4e8464"  # alp-sdk, 63 commits past v0.16.0, untagged -- see above (tan-cli#996 closes tan-cli#913)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its

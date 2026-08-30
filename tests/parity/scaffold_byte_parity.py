@@ -144,6 +144,69 @@ def un_edit_iot_extra_conf_order(text: str) -> str:
     return _IOT_EXTRA_CONF_PREPEND.sub(r"list(APPEND \1)", text)
 
 
+#: tan-cli#1001 review (major), first half: alp-sdk's own `examples/
+#: connectivity/mqtt-telemetry/README.md` links `native_sim.conf` via a
+#: self-referential `../mqtt-telemetry/native_sim.conf` detour (its own
+#: README, one level down, pointing back at its own directory -- verified in
+#: the alp-sdk source tree at the current vendor point). That IS
+#: `../`-prefixed, so tan's doc-link rewriter (the same one entry 4's
+#: `- Ref:`-pinned links go through) treats it as a cross-directory reference
+#: and renders it as a `github.com/.../blob/<ref>/...` link -- even though
+#: `native_sim.conf` ships as a sibling of `README.md` in THIS scaffolded
+#: tree (`tan init --template iot-starter` writes it, tan-cli#379,
+#: `NON_ENVELOPE_EXTRAS` above). Kept as its own entry, separate from the
+#: build-comment fix below, per this module's own two-independent-
+#: substitutions-get-two-entries discipline (see the `model_comment_1`/`_2`
+#: split above): healing one without the other must still fail on its own.
+_IOT_AEN801_README_NATIVE_SIM_CONF_LINK_EDITED = (
+    "turns mbedtls off (see [`native_sim.conf`](native_sim.conf)) so the\n"
+)
+_IOT_AEN801_README_NATIVE_SIM_CONF_LINK_EMITTED = (
+    "turns mbedtls off (see\n"
+    "[`native_sim.conf`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/"
+    "examples/connectivity/mqtt-telemetry/native_sim.conf)) so the\n"
+)
+
+
+def un_edit_iot_aen801_readme_native_sim_conf_link(text: str) -> str:
+    """tan-cli#1001 review: reverse the sibling-link correction above to
+    recover the emit's own (dead-outside-an-alp-sdk-checkout) GitHub blob
+    link."""
+    return text.replace(
+        _IOT_AEN801_README_NATIVE_SIM_CONF_LINK_EDITED,
+        _IOT_AEN801_README_NATIVE_SIM_CONF_LINK_EMITTED,
+    )
+
+
+#: tan-cli#1001 review (major), second half: the re-vendor also imported a
+#: "copy it in first" build comment that is true upstream (alp-sdk's own
+#: checkout, where `native_sim.conf` really does live only in the SDK tree)
+#: and false here: `tan init --template iot-starter` vendors and writes
+#: `native_sim.conf` as a sibling of this very `README.md`
+#: (`NON_ENVELOPE_EXTRAS` above) -- there is nothing to copy in. Own entry,
+#: same discipline as the link fix above.
+_IOT_AEN801_README_NATIVE_SIM_COPY_COMMENT_EDITED = (
+    "# Standalone, native_sim (no radio; framing-only, mbedtls off):\n"
+    "west build -b native_sim/native/64 . \\\n"
+)
+_IOT_AEN801_README_NATIVE_SIM_COPY_COMMENT_EMITTED = (
+    "# Standalone, native_sim (no radio; framing-only, mbedtls off):\n"
+    "# native_sim.conf ships only in the alp-sdk tree, not in this\n"
+    "# scaffold -- copy it in first (see the link above) before\n"
+    "# running this leg.\n"
+    "west build -b native_sim/native/64 . \\\n"
+)
+
+
+def un_edit_iot_aen801_readme_native_sim_copy_comment(text: str) -> str:
+    """tan-cli#1001 review: reverse the "copy it in first" comment removal
+    above to recover the emit's own (false-in-a-tan-scaffold) instruction."""
+    return text.replace(
+        _IOT_AEN801_README_NATIVE_SIM_COPY_COMMENT_EDITED,
+        _IOT_AEN801_README_NATIVE_SIM_COPY_COMMENT_EMITTED,
+    )
+
+
 #: tan-cli#821(a): `edge-ai`'s `## Model` / `## Tests` README sections and the
 #: matching `src/main.c` comments point at `models/README.md` and
 #: `tests/unit/cold_chain` -- both real only in the alp-sdk checkout the text
@@ -242,34 +305,41 @@ def un_edit_edge_ai_main_c_model_comment_2(text: str) -> str:
     )
 
 
-#: tan-cli#814: the emit's own sentence tells the customer to flip `som.sku`
-#: to `E1M-V2M101` in `board.yaml` and stop there. On the `E1M-V2N101` sibling
-#: that is correct (V2N101/V2M101 are the same PCB, same `preset:`/`cores:`/
-#: `pins:`), but here it is a cross-family swap (`alif-ensemble` ->
-#: `renesas-rzv2n-deepx`) that leaves `preset: e1m-evk`, `cores:` and `pins:`
-#: all pinned to the Alif module -- measured: `tan validate` refuses
-#: with ALP-B007 (board/family mismatch), and keeps refusing as each message
-#: is patched around (`cores:` names unknown ids, a `libraries:` entry scoped
-#: to a core the flip left undeclared, a `pins:` route not on the resolved
-#: board, a pad macro that does not match the resolved pad). Deliberately no
-#: count here: an earlier revision of this comment said "two more hard exits"
-#: and a re-measurement found four, because how far the cascade runs depends
-#: on how far the customer patches forward. Matches the literal sentence, not
-#: a paraphrase, so an unrelated README edit still fails this gate.
+#: tan-cli#814, re-anchored tan-cli#1001 review (blocker): the emit's own
+#: sentence tells the customer to flip `som.sku` to either `E1M-V2M101` or
+#: `E1M-V2M102` in `board.yaml` and stop there. On the `E1M-V2N101` sibling
+#: that is correct (V2N101/V2M101/V2M102 are the same PCB, same
+#: `preset:`/`cores:`/`pins:`, and alp-sdk#1749 made the sentence SKU-neutral
+#: there -- see `deepx_v2m102_scope` in the retirement block comment below),
+#: but here it is a cross-family swap (`alif-ensemble` -> `renesas-rzv2n-
+#: deepx`) that leaves `preset: e1m-evk`, `cores:` and `pins:` all pinned to
+#: the Alif module -- measured: `tan validate` refuses with ALP-B007 (board/
+#: family mismatch: `board preset 'e1m-evk' hosts SoM families
+#: ['alif-ensemble', 'nxp-imx9'], but E1M-V2M101 is family
+#: 'renesas-rzv2n-deepx'`). alp-sdk#1749's rewording at the 722320a1 re-vendor
+#: made the V2N101 sibling's sentence correct but reintroduced the identical
+#: AEN801 defect in new words -- the anchor below matches the NEW wording, not
+#: the tan-cli#814-era one it replaces. Matches the literal sentence, not a
+#: paraphrase, so an unrelated README edit still fails this gate.
 _EDGE_AI_AEN801_README_DEEPX_NOTE = (
     "For the DEEPX DX-M1 path, re-scaffold rather than edit: `tan init --template\n"
     "edge-ai-starter --som E1M-V2M101`. Flipping `som.sku` alone leaves `preset:`,\n"
-    "`cores:` and `pins:` pinned to this module and `tan validate` refuses it."
+    "`cores:` and `pins:` pinned to this module (`e1m-evk`, which does not host\n"
+    "the `renesas-rzv2n-deepx` family) and `tan validate` refuses it."
 )
 _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED = (
-    "Flip `som.sku` in `board.yaml` to `E1M-V2M101` for the DEEPX DX-M1 path."
+    "The DEEPX DX-M1 NPU is populated on `E1M-V2M101`/`E1M-V2M102` -- not on\n"
+    "`E1M-V2N101`/`E1M-V2N102`, the same PCB without it. Pick either via\n"
+    "`som.sku` in `board.yaml`."
 )
 
 
 def un_edit_edge_ai_aen801_readme_deepx_note(text: str) -> str:
-    """tan-cli#814: undo the README correction above to recover the emit's
-    own (still-wrong) sentence -- alp-sdk has not been fixed yet, so the live
-    emit still says this."""
+    """tan-cli#814, re-anchored tan-cli#1001 review: undo the README
+    correction above to recover the emit's own (still-wrong on this SKU)
+    sentence -- alp-sdk's 722320a1 rewording fixed this sentence for the
+    E1M-V2N101 sibling but not for E1M-AEN801, which cannot flip `som.sku`
+    to a DEEPX SKU at all without re-scaffolding."""
     return text.replace(
         _EDGE_AI_AEN801_README_DEEPX_NOTE, _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED
     )
@@ -704,30 +774,63 @@ DELIBERATE_EDITS: dict[
         "-DEXTRA_CONF_FILE=native_sim.conf wins over the generated alp.conf",
         un_edit_iot_extra_conf_order,
     ),
-    # tan-cli#996/#1001 (the 722320a1 re-vendor): eight entries retired here
-    # (model_tests_pointers x2, model_comment_1/2 x4, deepx_v2m_note's
-    # README.md half, deepx_v2m102_scope, eeprom_script_pointer x2,
-    # i2c_scanner_bullet x2, bringup_instruction x2, init_fail_comment x2,
-    # failure_modes_instruction x2, hardware_paragraph x2 -- 21 total). Each
-    # `un_edit`'s declared EDITED anchor stopped matching this re-vendor's
-    # fresh `--emit scaffold` output verbatim -- alp-sdk 722320a1 reworded
-    # the surrounding prose in every case (the `sensor` template's own
-    # underlying example swapped chip, TMP112 -> BMP581, `examples/
-    # peripheral-io/i2c-master`'s alp-sdk#1269 fix; `edge-ai`'s cold-chain-
-    # monitor README/main.c gained real doc links and a units test pointer
-    # on its own; `diagnostics`'s eeprom Troubleshooting bullet gained a
-    # real markdown link on its own). Per this module's own doctrine above
-    # ("a healed divergence... has to force its entry out, otherwise the
-    # next real drift in that file inherits a dead excuse"), each retired
-    # entry is either fully healed (the customer-facing gap the edit closed
-    # is now closed by alp-sdk's own prose) or its specific anchor is gone
-    # and reconstructing an equivalent correction against the new wording is
-    # out of scope for a pin-bump alone -- the vendored tree now carries
-    # alp-sdk's own 722320a1 bytes verbatim at these paths, not a hand
-    # correction. `un_edit_edge_ai_readme_model_tests_pointers`,
+    ("iot", "E1M-AEN801", "README.md", "native_sim_conf_link"): (
+        "tan-cli#1001 review (major): alp-sdk's own README links "
+        "native_sim.conf via a self-referential ../mqtt-telemetry/ detour, "
+        "which the doc-link rewriter renders as a GitHub blob link -- wrong "
+        "here, native_sim.conf ships as a sibling of this README in every "
+        "scaffold this template produces",
+        un_edit_iot_aen801_readme_native_sim_conf_link,
+    ),
+    ("iot", "E1M-AEN801", "README.md", "native_sim_conf_copy_comment"): (
+        "tan-cli#1001 review (major): the emit tells the customer "
+        "native_sim.conf ships only in the alp-sdk tree and must be copied "
+        "in -- false here, tan init --template iot-starter vendors and "
+        "writes native_sim.conf itself (tan-cli#379, NON_ENVELOPE_EXTRAS)",
+        un_edit_iot_aen801_readme_native_sim_copy_comment,
+    ),
+    # tan-cli#996/#1001 (the 722320a1 re-vendor): the dict went 31 -> 11
+    # entries here, 20 retired, 0 added (tan-cli#1001 review correction --
+    # an earlier revision of this comment said "eight entries retired" and
+    # "21 total", both wrong; MANIFEST.md's "Twenty" was and is correct).
+    # Named below: model_tests_pointers x2, model_comment_1/2 x4,
+    # deepx_v2m102_scope, eeprom_script_pointer x2, i2c_scanner_bullet x2,
+    # bringup_instruction x2, init_fail_comment x2, failure_modes_instruction
+    # x2, hardware_paragraph x2 -- 20 total. (`deepx_v2m_note`'s README.md
+    # half is NOT in this list any more -- tan-cli#1001 review found upstream
+    # reintroduced the identical defect in new words on `E1M-AEN801` rather
+    # than healing it, so that entry is RE-ANCHORED just below, not retired;
+    # see `un_edit_edge_ai_aen801_readme_deepx_note`'s own comment above.)
+    # Each of the 20 above stopped matching this re-vendor's fresh `--emit
+    # scaffold` output verbatim because alp-sdk 722320a1 reworded the
+    # surrounding prose, but NOT all for the same reason -- two distinct
+    # classes, not an either/or, per entry (tan-cli#1001 review):
+    #
+    # - healed (the customer-facing gap the edit closed is now closed by
+    #   alp-sdk's own prose, verified against the 722320a1 diff): the
+    #   `sensor` template's own underlying example swapped chip, TMP112 ->
+    #   BMP581, `examples/peripheral-io/i2c-master`'s alp-sdk#1269 fix
+    #   (`bringup_instruction` x2, `failure_modes_instruction` x2,
+    #   `i2c_scanner_bullet` x2); `edge-ai`'s cold-chain-monitor README/
+    #   main.c gained real doc links and a units test pointer on its own
+    #   (`model_tests_pointers` x2, `model_comment_1`/`model_comment_2` x4);
+    #   `diagnostics`'s eeprom Troubleshooting bullet gained a real markdown
+    #   link on its own (`eeprom_script_pointer` x2); `deepx_v2m102_scope`'s
+    #   V2N101/V2M102 sentence was made SKU-neutral by alp-sdk#1749.
+    # - anchor-gone, not healed (the underlying gap alp-sdk's prose does not
+    #   close -- the specific matched string is simply gone, and
+    #   reconstructing an equivalent correction against the new wording is
+    #   out of scope for a pin-bump alone): `hardware_paragraph` x2
+    #   (`sensor/*/src/main.c:14-17` -- the bare `metadata/chips/tmp112.yaml`
+    #   referent the edit corrected is now a bare `metadata/boards/
+    #   e1m-evk.yaml` + `e1m-x-evk.yaml`, same defect class, new path) and
+    #   `init_fail_comment` x2 (`:110` -- upstream went bare-name ->
+    #   bare-path, dropping the "alp-sdk's"/"not part of this scaffolded
+    #   project" qualifiers the edit added).
+    #
+    # `un_edit_edge_ai_readme_model_tests_pointers`,
     # `un_edit_edge_ai_main_c_model_comment_1`,
     # `un_edit_edge_ai_main_c_model_comment_2`,
-    # `un_edit_edge_ai_aen801_readme_deepx_note`,
     # `un_edit_edge_ai_v2n101_readme_deepx_note`,
     # `un_edit_diagnostics_readme_eeprom_script`,
     # `un_edit_sensor_readme_i2c_scanner_bullet`,
@@ -741,12 +844,21 @@ DELIBERATE_EDITS: dict[
     # generic "Contrasts with... i2c-scanner" paragraph, which names no
     # chip) is untouched by the TMP112 -> BMP581 swap and still matches
     # verbatim, so it is reapplied forward, unchanged.
+    ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note"): (
+        "tan-cli#814, re-anchored tan-cli#1001 review (blocker): alp-sdk "
+        "722320a1 did not heal this -- it reintroduced the identical defect "
+        "in new words ('Pick either via som.sku in board.yaml', still wrong "
+        "for E1M-AEN801's e1m-evk preset, which does not host the "
+        "renesas-rzv2n-deepx family). Re-anchored on the new sentence "
+        "rather than retired.",
+        un_edit_edge_ai_aen801_readme_deepx_note,
+    ),
     ("edge-ai", "E1M-AEN801", "board.yaml", "deepx_v2m_note"): (
         "tan-cli#814: same defect as the README entry above, the comment "
-        "one file over that reinforces it. The README half of this pair "
-        "retired at tan-cli#996/#1001 (722320a1 re-vendor, see the block "
-        "comment above) -- board.yaml is untouched by that re-vendor and "
-        "this entry is unaffected.",
+        "one file over that reinforces it. Both halves of this pair are "
+        "live again after the tan-cli#1001 review re-anchor -- board.yaml "
+        "is untouched by the 722320a1 re-vendor and this entry was never "
+        "affected.",
         un_edit_edge_ai_aen801_board_yaml_deepx_note,
     ),
     ("sensor", "E1M-AEN801", "src/main.c", "pattern_paragraph"): (
@@ -1047,15 +1159,20 @@ def self_check() -> None:
     # below (reason-string-filtered, so a partial heal there would be caught
     # the same way).
 
-    # tan-cli#814's board.yaml entry (the README half retired at
-    # tan-cli#996/#1001, see the DELIBERATE_EDITS block comment): the
-    # un_edit must round-trip the corrected board.yaml comment back onto the
-    # emit's own (still-wrong) sentence, and be registered under the exact
-    # (template, sku, path, edit_id) key.
+    # tan-cli#814's board.yaml/README.md pair (both live again after the
+    # tan-cli#1001 review re-anchor -- see the DELIBERATE_EDITS block
+    # comment): each un_edit must round-trip the corrected text back onto
+    # the emit's own (still-wrong-for-E1M-AEN801) sentence, and be
+    # registered under the exact (template, sku, path, edit_id) key.
     assert ("edge-ai", "E1M-AEN801", "board.yaml", "deepx_v2m_note") in DELIBERATE_EDITS
     assert (
         un_edit_edge_ai_aen801_board_yaml_deepx_note(_EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE)
         == _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE_EMITTED
+    )
+    assert ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note") in DELIBERATE_EDITS
+    assert (
+        un_edit_edge_ai_aen801_readme_deepx_note(_EDGE_AI_AEN801_README_DEEPX_NOTE)
+        == _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED
     )
 
     # tan-cli#924's one still-live entry (`pattern_paragraph` -- the other

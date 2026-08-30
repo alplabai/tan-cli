@@ -1700,6 +1700,27 @@ def test_topology_and_from_example_together_is_a_coded_conflict(tmp_path):
     assert issue(env)["code"] == "init.scaffold-input-conflict"
 
 
+def test_topology_and_cores_together_is_a_coded_conflict(tmp_path):
+    """tan-cli#1001 review: before this refusal existed, `--cores` on the
+    `--topology` path was silently discarded -- `ok: true`, exit 0,
+    `issues: []`, no trace of the requested core in the written board.yaml.
+    `--topology` already selects the full topology, so `--cores` has
+    nothing left to splice onto; refuse rather than silently ignore, the
+    same posture the two sibling conflict tests above take. No SDK checkout
+    needed: the conflict is caught before `--topology` is even resolved."""
+    proc = run_tan(
+        "init", "--topology", "m55_hp:zephyr,m55_he:zephyr", "--cores", "a32_cluster:yocto",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    err = issue(env)
+    assert err["code"] == "init.scaffold-input-conflict"
+    assert "--topology" in err["message"] and "--cores" in err["message"], err
+    assert not (tmp_path / "board.yaml").exists()
+
+
 def test_topology_without_an_sdk_checkout_is_a_coded_issue(tmp_path):
     """Mirrors `test_from_example_without_an_sdk_checkout_is_a_coded_issue`:
     the topology lives only in the SDK's live catalog, so this path needs a

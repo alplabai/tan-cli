@@ -39,8 +39,7 @@ today**. Zephyr v4.4's mbedtls 3.6 has an `ssl_misc.h`
 include-order bug (`unknown type name 'mbedtls_error_pair_t'`); full
 `tf-psa-crypto` wiring is a v0.6 work item. On real AEN silicon the
 build follows the TF-M stack and is unaffected; the native_sim leg
-turns mbedtls off (see
-[`native_sim.conf`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/examples/connectivity/mqtt-telemetry/native_sim.conf)) so the
+turns mbedtls off (see [`native_sim.conf`](native_sim.conf)) so the
 framing path still builds and runs. This is why the catalog record
 is `preview`.
 
@@ -56,9 +55,6 @@ over `<alp/chips/bmp581.h>`) -- and the publish path is unchanged.
 
 ```bash
 # Standalone, native_sim (no radio; framing-only, mbedtls off):
-# native_sim.conf ships only in the alp-sdk tree, not in this
-# scaffold -- copy it in first (see the link above) before
-# running this leg.
 west build -b native_sim/native/64 . \
     -- -DEXTRA_ZEPHYR_MODULES=$ALP_SDK_ROOT -DEXTRA_CONF_FILE=native_sim.conf
 west build -t run
