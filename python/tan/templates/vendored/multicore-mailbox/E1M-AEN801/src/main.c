@@ -39,8 +39,10 @@
  * Peer firmware
  * =============
  *
- * The HE-side application lives at
- * `examples/multicore/mproc-mailbox/peer/main.c`.  Both halves build
+ * The HE-side application lives at `./peer/main.c` in this
+ * scaffolded project (alp-sdk's own upstream copy of this example
+ * lives at examples/multicore/mproc-mailbox/peer/main.c, not part
+ * of this scaffolded project).  Both halves build
  * standalone via `west build`, and `board.yaml` declaring both
  * `m55_hp` and `m55_he` as real project cores means one `tan build`
  * already produces both images through the orchestrator's existing

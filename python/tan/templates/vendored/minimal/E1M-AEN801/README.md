@@ -15,8 +15,11 @@ If `[hello] tick 0` doesn't appear, the suspect list is short:
 3.  **Console wiring** -- the app is running but your terminal is
     on the wrong UART, wrong baud rate, or wrong USB enumeration.
 
-Pin down which one BEFORE moving on to `gpio-button-led` or
-`i2c-scanner`.
+Pin down which one BEFORE moving on to alp-sdk's
+[`examples/peripheral-io/gpio-button-led`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/gpio-button-led)
+or
+[`examples/peripheral-io/i2c-scanner`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner)
+-- neither is part of this scaffolded project.
 
 ## What this shows
 
