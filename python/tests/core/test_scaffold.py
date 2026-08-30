@@ -583,7 +583,9 @@ def test_splice_does_not_add_a_second_ipc_key_when_the_board_declares_one():
     stub silently replaced the project's real channel.
 
     Measured against alp-sdk's `multicore-mailbox` scaffold for E1M-AEN801
-    (emitted at `eb96112b`, the commit `PINNED_SDK_TAG` names):
+    (emitted at `eb96112b`, `PINNED_SDK_TAG` at the time -- tan-cli#996/#1001
+    moved it to `722320a1`; this scaffold's own `ipc:` shape is unaffected by
+    that move):
 
         top-level 'ipc:' BEFORE splice: 1
         top-level 'ipc:' AFTER  splice: 2
