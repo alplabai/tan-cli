@@ -1659,6 +1659,45 @@ def test_remove_absent_target_is_idempotent(tmp_path, isolated_home, cache_with_
     assert_sibling_intact(cache_with_canary)
 
 
+def test_remove_deletes_a_broken_symlink_rather_than_calling_it_absent(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """A DANGLING link is still on disk, so `remove` must delete it and report
+    `removed: true` -- not follow it, find nothing behind it, and claim the slot
+    was already absent.
+
+    `Path.exists()` follows the link and answers False for exactly this
+    arrangement, which is an ordinary leftover in a cache that has had an
+    install removed out from under a `current ->` style pointer. Reporting it
+    absent breaks the idempotence tan-cli#790 asks for in its own point 3: the
+    rotation script that trusted the success then fails on the NEXT install into
+    a slot whose path already exists. Everything below the existence gate
+    already handled links correctly (`compute_tree_bytes` charges the link's own
+    `lstat` size; `dir_removal.remove_dir` unlinks the link itself rather than
+    recursing through it), so the gate was the single place it was invisible.
+    """
+    stale = cache_with_canary / "v0.15.0"
+    try:
+        stale.symlink_to(tmp_path / "never-existed", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this host cannot create a symlink")
+    assert not stale.exists()      # follows the link: nothing behind it
+    assert os.path.lexists(stale)  # the link ITSELF is on disk
+
+    env = envelope(
+        run_tan(
+            "sdk", "remove", "v0.15.0",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert env["ok"] is True
+    assert env["issues"] == []
+    assert env["data"]["removed"] is True
+    assert not os.path.lexists(stale)
+    assert_sibling_intact(cache_with_canary)
+
+
 def test_remove_deletes_an_install_and_reports_freed_bytes(
     tmp_path, isolated_home, cache_with_canary
 ):
@@ -1821,6 +1860,48 @@ def test_remove_refuses_a_path_registered_as_another_projects_global_default(
     )
     assert forced["ok"] is True
     assert not target.exists()
+
+
+def test_remove_refuses_a_backslash_spelled_registry_entry_naming_the_target(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """The SAME refusal as the test above, against a registry that spells the
+    identical directory with backslashes -- the shape a hand edit leaves on
+    Windows, which `parse_registry`'s own contract accommodates.
+
+    `bootstrap_cmd._write_global_sdk_registry` posix-normalises what it writes,
+    so a raw `==` between the stored value and the forward-slash path this
+    codebase computes is True for a tan-written entry and False for a
+    hand-written one -- two names of ONE directory. False here does not merely
+    skip a tidy-up: it means the load-bearing check does not fire, `remove`
+    proceeds without `--force`, and the install another project still points at
+    is silently orphaned. That is precisely the outcome tan-cli#790's first
+    design bar exists to prevent, so it is asserted as a refusal, not as a
+    string comparison.
+
+    Platform-independent by construction: flipping this host's own separators
+    into backslashes round-trips back through `normalized_sdk_path` on every
+    host, so the case is exercised on POSIX rather than only where it bites.
+    """
+    target = make_sdk_root(cache_with_canary / "v0.19.0", version="0.19.0")
+    other_project = tmp_path / "hand-edited-project"
+    other_project.mkdir()
+    write_registry(
+        isolated_home, {other_project: str(target).replace("/", "\\")}, dated=True
+    )
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", "v0.19.0",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert str(other_project) in refused["issues"][0]["message"]
+    assert target.exists(), "the whole point: a missed match would have deleted it"
+    assert_sibling_intact(cache_with_canary)
 
 
 def test_remove_prunes_only_the_matching_registry_entries(

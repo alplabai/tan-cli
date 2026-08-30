@@ -463,6 +463,40 @@ def prune_dead_origins(
     return {origin: entry for origin, entry in registry.items() if origin_exists(origin)}
 
 
+def normalized_sdk_path(value: str) -> str:
+    """A registry `sdkPath` reduced to the spelling its WRITER would have used,
+    so a stored value and a freshly-computed target compare equal.
+
+    `bootstrap_cmd._write_global_sdk_registry` posix-normalises every `sdkPath`
+    it writes (`sdk_discovery._to_posix`), so on POSIX this is already the
+    identity and the comparison was never at risk. On Windows it is not:
+    `write_registry`-shaped hand edits -- which this module's own
+    `parse_registry` contract explicitly accommodates, and which the registry
+    docs describe as a real shape a file can be left in -- spell the same
+    directory `C:\\Users\\me\\sdk`, and a raw `==` against the
+    forward-slash `C:/Users/me/sdk` this codebase computes everywhere else
+    then answers False for two names of ONE directory.
+
+    That mismatch is not cosmetic where it is used. `tan sdk remove` consults
+    it twice: to decide whether an install is a registered project's default
+    and must therefore be REFUSED without `--force` (tan-cli#790's first design
+    bar -- "silently orphaning any of the three is a worse failure than a
+    refusal that names exactly what would break"), and to prune the entry
+    afterwards. A False here silently removes an install another project still
+    points at, which is the one outcome that whole refusal exists to prevent.
+
+    Separator folding ONLY -- deliberately not `_abs_posix`, whose `abspath`
+    would anchor a relative stored value to the REMOVING process's cwd and
+    invent a match that the writer never wrote. This is the exact inverse of
+    the write, and nothing more. Case folding is NOT applied either: NTFS is
+    case-insensitive in practice, so two entries differing only in case name
+    one directory there too, but folding case would make this function wrong on
+    the case-SENSITIVE POSIX side, and the fix for that belongs with a
+    platform-aware comparison rather than smuggled in here.
+    """
+    return value.replace("\\", "/")
+
+
 def prune_entries_by_sdk_path(registry: dict[str, Any], *, sdk_path: str) -> dict[str, Any]:
     """`registry` with every entry whose `sdkPath` equals `sdk_path` dropped --
     `tan sdk remove`'s own honesty obligation (tan-cli#790), the sibling of
@@ -502,7 +536,7 @@ def prune_entries_by_sdk_path(registry: dict[str, Any], *, sdk_path: str) -> dic
     result: dict[str, Any] = {}
     for origin, entry in registry.items():
         path = entry.get("sdkPath") if isinstance(entry, dict) else None
-        if isinstance(path, str) and path == sdk_path:
+        if isinstance(path, str) and normalized_sdk_path(path) == sdk_path:
             continue
         result[origin] = entry
     return result

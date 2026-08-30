@@ -16,6 +16,7 @@ from pathlib import Path
 from tan.core.sdk_default_registry import (
     deepest_covering_entry,
     load_raw,
+    normalized_sdk_path,
     parse_registry,
     parse_registry_updated_at,
     prune_dead_origins,
@@ -580,6 +581,36 @@ def test_prune_entries_by_sdk_path_drops_a_malformed_entry_that_still_matches():
     registry = {"/proj/a": "/sdk/removed"}
     pruned = prune_entries_by_sdk_path(registry, sdk_path="/sdk/removed")
     assert pruned == registry
+
+
+def test_normalized_sdk_path_folds_backslashes_and_leaves_posix_alone():
+    """The write side (`bootstrap_cmd._write_global_sdk_registry`) stores every
+    `sdkPath` posix-normalised, so this is the exact inverse of that write and
+    nothing more: separators fold, everything else -- including case, which
+    NTFS ignores but POSIX does not -- is left exactly as stored."""
+    assert normalized_sdk_path("C:\\Users\\me\\sdk") == "C:/Users/me/sdk"
+    assert normalized_sdk_path("/home/me/sdk") == "/home/me/sdk"
+    assert normalized_sdk_path("C:/Users/me/sdk") == "C:/Users/me/sdk"
+    assert normalized_sdk_path("C:\\Users\\ME\\Sdk") == "C:/Users/ME/Sdk"
+
+
+def test_prune_entries_by_sdk_path_matches_a_backslash_spelled_entry():
+    """A hand-edited registry -- a shape this module's own `parse_registry`
+    contract accommodates -- spells a Windows path with backslashes, while
+    every path this codebase computes is forward-slash. A raw `==` answered
+    False for two names of ONE directory, leaving the entry behind after
+    `tan sdk remove` deleted the tree it points at (tan-cli#790).
+
+    The vacuity guard is the second entry: a genuinely DIFFERENT path, also
+    backslash-spelled, must survive -- so a "fold everything to equal" bug
+    fails this too.
+    """
+    registry = {
+        "C:\\proj\\a": {"sdkPath": "C:\\sdk\\removed", "updatedAt": "t0"},
+        "C:\\proj\\b": {"sdkPath": "C:\\sdk\\kept", "updatedAt": "t1"},
+    }
+    pruned = prune_entries_by_sdk_path(registry, sdk_path="C:/sdk/removed")
+    assert pruned == {"C:\\proj\\b": {"sdkPath": "C:\\sdk\\kept", "updatedAt": "t1"}}
 
 
 def test_prune_entries_by_sdk_path_never_touches_the_filesystem():

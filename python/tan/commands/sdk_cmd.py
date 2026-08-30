@@ -127,6 +127,7 @@ from tan.core.sdk_discovery import (
 )
 from tan.core.sdk_default_registry import (
     load_raw,
+    normalized_sdk_path,
     parse_registry,
     prune_entries_by_sdk_path,
     registry_path,
@@ -1036,7 +1037,15 @@ def _registered_origins_for(target_posix: str) -> list[str]:
     """
     raw = _read_file(registry_path(_home_alp_dir()))
     registry = parse_registry(raw)
-    return sorted(origin for origin, sdk_path in registry.items() if sdk_path == target_posix)
+    return sorted(
+        origin
+        for origin, sdk_path in registry.items()
+        # Separator-folded, not a raw `==`: a hand-edited registry on Windows
+        # spells the same directory with backslashes, and missing the match
+        # here means this removal does NOT refuse and silently orphans that
+        # project -- see `normalized_sdk_path`'s own docstring.
+        if normalized_sdk_path(sdk_path) == target_posix
+    )
 
 
 def _load_bearing_reasons(target_posix: str, active: ActiveSdk) -> list[str]:
@@ -1147,7 +1156,18 @@ def _run_remove(
     active = resolve_sdk_tiered(None, workspace_root)
     was_active = active.path is not None and _abs_posix(active.path) == target_posix
 
-    if not target.exists():
+    # `os.path.lexists`, NOT `target.exists()`: the latter FOLLOWS a link, so a
+    # BROKEN symlink or a junction whose target is gone -- an ordinary leftover in
+    # a cache that has had an install removed out from under a `current ->` style
+    # pointer -- reports False while the link itself is still very much on disk.
+    # Answering "already absent" there breaks the idempotence this branch exists to
+    # provide (tan-cli#790's own point 3): the rotation script that trusted the
+    # success then fails on the NEXT install with a path that already exists.
+    # Everything downstream of this gate already handles the link case correctly --
+    # `compute_tree_bytes` charges the link's OWN lstat size, and
+    # `dir_removal.remove_dir` unlinks the link itself rather than following it --
+    # so this predicate was the single place the link was invisible.
+    if not os.path.lexists(target):
         _emit(
             json_mode=json_mode,
             data=_remove_data(
