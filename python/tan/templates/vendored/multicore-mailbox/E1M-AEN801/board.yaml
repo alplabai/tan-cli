@@ -27,8 +27,9 @@ cores:
 # `src/backends/mproc/zephyr_drv.c` and both main.c's hardcode --
 # it is NOT a free-form label like an rpmsg channel name.
 #
-# #1069 gave E1M-AEN801 a real `memory_map:` (metadata/e1m_modules/
-# E1M-AEN801.yaml), but this carve-out still resolves `status: blocked`
+# #1069 gave E1M-AEN801 a real `memory_map:` (alp-sdk's
+# metadata/e1m_modules/E1M-AEN801.yaml, not part of this scaffolded
+# project), but this carve-out still resolves `status: blocked`
 # (`--emit system-manifest`): the five fine-grained regions
 # (mcuboot/he_slot0/hp_slot0/reserved/storage) are MRAM, not RAM, and are
 # marked `carveout: false` so the allocator can't silently place this

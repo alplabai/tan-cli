@@ -431,7 +431,7 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **thirty-eight** live entries
+The `DELIBERATE_EDITS` table below currently carries **fifty-nine** live entries
 (counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS`
 dict, not by hand): one `multicore-mailbox`/`E1M-AEN801` entry for the
 leading "blocked ahead" caveat (tan-cli#864 Q5, see entry 9 below), the
@@ -444,7 +444,7 @@ review, see entries 5/6 below), two `sensor`/`src/main.c` entries (one per
 SKU) for the header-comment `Contrasts with... i2c-scanner` paragraph
 (tan-cli#924, see entry 11 below), six more for
 `diagnostics`/`E1M-V2N101`'s Alif/AEN801-shaped `src/main.c`/`README.md`
-bytes (tan-cli#932, see entry 8 below), and twenty-four more for the
+bytes (tan-cli#932, see entry 8 below), twenty-four more for the
 remaining bare cross-repo referents PR #975's review round scoped out of
 that PR, **re-derived against this same tan-cli#996/#1001 re-vendor**
 (tan-cli#977, see entry 15 below) — two SKUs each across `sensor`'s
@@ -455,9 +455,16 @@ substitutions: the Customer-workflow paragraph, the chip-classification
 paragraph's two referents, and the `#1269` historical NOTE's two
 referents), `sensor`'s `prj.conf` (one substitution), and `minimal`'s
 `README.md` (one substitution, the template's first `DELIBERATE_EDITS`
-entry). That is `1 + 1 + 2 + 2 + 2 + 6 + 24 = 38`.
+entry), and twenty-one more for the sibling sites entry 15's own sweep
+stopped one template short of (tan-cli#1009, PR #1009's review round, see
+entry 16 below) across `minimal`/`diagnostics` `board.yaml` (four),
+`minimal` `prj.conf` (two), `diagnostics` `prj.conf` (two), `iot`
+`board.yaml` (one), `iot` `prj.conf` (two), `iot` `src/main.c` (two),
+`edge-ai` `src/main.c` (four), and `multicore-mailbox` `board.yaml` (one),
+native_sim overlay (one), `prj.conf` (one), and `src/main.c` (one). That is
+`1 + 1 + 2 + 2 + 2 + 6 + 24 + 21 = 59`.
 `test_the_manifest_deliberate_edit_count_matches_the_table` pins the
-**thirty-eight** above against `len(DELIBERATE_EDITS)` itself, the drift this
+**fifty-nine** above against `len(DELIBERATE_EDITS)` itself, the drift this
 paragraph shipped with nothing catching before tan-cli#932. tan-cli#384's
 seven `README.md` doc-link entries
 are NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0`
@@ -959,10 +966,92 @@ strictness exists to catch.
     `scripts/alp_project.py`, `scripts/check_example_portability.py`), so
     NOT covered by alp-sdk#1795, though several sites share entry 11/12's
     files; the `minimal` site is alp-sdk's `examples/peripheral-io/
-    hello-world/README.md`, a template no prior entry has touched. Not yet
-    filed upstream as an alp-sdk issue -- unlike entries 4/5/6/7/10/11/12,
-    this entry carries no issue number pending that filing; all twenty-four
-    retire the moment the corresponding upstream fix lands and this tree is
+    hello-world/README.md`, a template no prior entry has touched. Filed
+    upstream as **alp-sdk#1855** (PR #1009 review finding 4 -- unlike
+    entries 4/5/6/7/10/11/12 this entry carried no issue number at all
+    before then); all twenty-four retire the moment alp-sdk#1855 lands and
+    this tree is re-vendored.
+
+16. **The sibling sites entry 15's own sweep stopped one template short of
+    (tan-cli#1009, PR #1009's review round): `minimal`/`diagnostics`
+    board.yaml/prj.conf, `iot` board.yaml/prj.conf/src/main.c, `edge-ai`
+    src/main.c, and `multicore-mailbox` board.yaml/native_sim overlay/
+    prj.conf/src/main.c.** PR #1009 (the direct follow-up to #977, closing
+    it) swept only `sensor` and `minimal`'s `README.md` -- the same
+    byte-identical `scripts/alp_project.py` "Customer workflow" paragraph
+    entry 15 fixed in `sensor`'s `board.yaml` survived, unqualified, in
+    `minimal`'s own `board.yaml` (a template that PR had already edited,
+    two files over) and in `diagnostics` (named in tan-cli#977's own
+    title). The review round that found this (PR #1009's own review, not a
+    new issue) also swept every other vendored template for the same
+    defect class rather than stopping at the two sites it happened to name
+    first, per this manifest's own repeated lesson that a sweep bounded to
+    only the sites an issue named leaves siblings unswept indefinitely
+    (entries 11, 12, 15 above all restate variants of this same lesson).
+    Twenty-one entries:
+    - `minimal`/`diagnostics` `board.yaml` (four entries, one shared
+      `un_edit` -- byte-identical substitution, the same "Customer
+      workflow" `scripts/alp_project.py` mention entry 15 fixed in
+      `sensor`'s `board.yaml`).
+    - `minimal`'s `prj.conf` (two entries, one per SKU, byte-identical) --
+      the same bare `scripts/alp_project.py` mention, a different file, plus
+      a trailing "Add app-specific tuning knobs" sentence `diagnostics`'s
+      shorter `prj.conf` does not carry.
+    - `diagnostics`'s `prj.conf` (two entries, one per SKU, byte-identical)
+      -- same mention, four lines total, no trailing sentence.
+    - `iot`'s `board.yaml` (one entry, one SKU only -- `iot` ships
+      `E1M-AEN801` only) -- a bare `docs/cc3501e-bridge.md` mention.
+    - `iot`'s `prj.conf` (two entries, two independent paragraphs) -- a bare
+      `scripts/alp_project.py` mention in the opening comment (one of
+      finding 1's two named "different wording" instances), and a bare
+      `examples/connectivity/iot-fleet-ota/prj.conf` mention in the mbedtls
+      migration note.
+    - `iot`'s `src/main.c` (two entries, two independent doc-comments) -- a
+      bare `docs/cc3501e-bridge.md` mention (the src/main.c-side sibling of
+      `board.yaml`'s), and a bare `examples/peripheral-io/i2c-master`
+      mention in the "sensor reading" paragraph.
+    - `edge-ai`'s `src/main.c` (four entries, two independent doc-comments x
+      two SKUs, byte-identical between SKUs) -- a bare `examples/ai/
+      cold-chain-monitor/models/README.md` mention, twice (the "Honest
+      scope" paragraph and the model-stub comment).
+    - `multicore-mailbox`'s `board.yaml` (one entry, one SKU only --
+      `multicore-mailbox` ships `E1M-AEN801` only) -- a bare
+      `metadata/e1m_modules/E1M-AEN801.yaml` mention.
+    - `multicore-mailbox`'s `boards/native_sim_native_64.overlay` (one
+      entry, a `NON_ENVELOPE_EXTRAS` file diffed against the catalog
+      example's own copy, same declaration mechanism) -- a bare
+      `scripts/alp_orchestrate.py` mention.
+    - `multicore-mailbox`'s `prj.conf` (one entry) -- a bare
+      `scripts/alp_project.py` mention (finding 1's second named "different
+      wording" instance).
+    - `multicore-mailbox`'s `src/main.c` (one entry) -- a different SHAPE
+      than the rest of this entry: the "Peer firmware" doc-comment labelled
+      this template's OWN local `./peer/main.c` (a real file
+      `multicore-mailbox` scaffolds) with alp-sdk's upstream example path
+      instead of the real local one. Corrected to name the actual local
+      path, with the upstream path kept parenthetically for anyone
+      comparing against alp-sdk's own copy of this example.
+
+    Also fixed in the same review round, not a new `DELIBERATE_EDITS`
+    concern: the twelve `E1M-V2N101` entries entry 15 added under the
+    generic reason `"same as ... above"` were re-worded to each name their
+    own substitution and entry, since a shared generic reason string across
+    multiple entries on the same `(template, sku, path)` defeats
+    `self_check`'s own reason-string-filtered non-vacuity proof (the exact
+    class of vacuity `self_check`'s own comment already warned against, but
+    entry 15 shipped without exercising it against these entries -- verified
+    by mutation this round: reverting `addr_header_pointer` alone for
+    `sensor`/`E1M-V2N101` now produces exactly one filtered failure naming
+    that entry, not a sibling's).
+
+    Fix belongs upstream, alongside entry 15's alp-sdk#1855 (the `iot`,
+    `edge-ai` and `multicore-mailbox` sites are the same defect class, in
+    alp-sdk's `examples/connectivity/mqtt-telemetry`, `examples/ai/
+    cold-chain-monitor`, and `examples/multicore/mproc-mailbox` catalog
+    entries respectively -- not filed as a separate issue, since alp-sdk#1855
+    already covers the class and these are additional instances of it, not a
+    new defect); all twenty-one retire the moment alp-sdk#1855 (extended to
+    cover these three additional catalog entries) lands and this tree is
     re-vendored.
 
 ## Template x SKU matrix vendored

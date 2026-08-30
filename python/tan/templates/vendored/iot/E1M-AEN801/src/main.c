@@ -15,7 +15,8 @@
  *   5. Disconnect cleanly.                        (alp_mqtt_close)
  *
  * Transport (E1M-AEN801): the CC3501E Wi-Fi6+BLE coprocessor bridge
- * (docs/cc3501e-bridge.md), selected automatically by the AEN board
+ * (alp-sdk's docs/cc3501e-bridge.md, not part of this scaffolded
+ * project), selected automatically by the AEN board
  * emit from `iot.wifi: true` -- the app never names it, it just
  * calls <alp/iot.h>.  The bridge is silicon-validated (2026-06-24);
  * this is a real transport, not a stub.
@@ -23,9 +24,10 @@
  * The "sensor reading": to keep the focus on the transport, this
  * template publishes a synthetic metric (device uptime).  Swap
  * read_telemetry_value() for a real sensor read -- e.g. compose it
- * with the `sensor` template (examples/peripheral-io/i2c-master,
- * TMP112 over <alp/chips/tmp112.h>) -- and the publish path here is
- * unchanged.
+ * with the `sensor` template (alp-sdk's
+ * examples/peripheral-io/i2c-master, not part of this scaffolded
+ * project; TMP112 over <alp/chips/tmp112.h>) -- and the publish
+ * path here is unchanged.
  *
  * TLS status (preview): the mqtts:// path is configured through the
  * portable API (broker URI + pinned CA), but CONFIG_MBEDTLS is held
