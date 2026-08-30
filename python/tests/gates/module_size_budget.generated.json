@@ -6,7 +6,7 @@
     "tan/cli.py": 1021,
     "tan/commands/bootstrap_cmd.py": 4131,
     "tan/commands/build/execute.py": 1726,
-    "tan/commands/build_cmd.py": 2293,
+    "tan/commands/build_cmd.py": 2362,
     "tan/commands/clean_cmd.py": 1129,
     "tan/commands/debug_config_cmd.py": 2114,
     "tan/commands/diff_cmd.py": 891,
@@ -39,7 +39,7 @@
   "observed_tests": {
     "tests/commands/test_bare_argv0_spawn.py": 1130,
     "tests/commands/test_bootstrap_command.py": 4309,
-    "tests/commands/test_build_command.py": 2496,
+    "tests/commands/test_build_command.py": 2527,
     "tests/commands/test_clean_command.py": 1145,
     "tests/commands/test_completion_command.py": 1065,
     "tests/commands/test_debug_config_command.py": 3087,
