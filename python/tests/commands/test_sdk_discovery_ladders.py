@@ -37,7 +37,7 @@ from pathlib import Path
 
 import pytest
 
-from tan.commands.build_cmd import (
+from tan.core.sdk_discovery import (
     resolve_sdk_root_ladder,
     resolve_sdk_root_wide,
     sdk_ladder_divergence_issue,
@@ -51,7 +51,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 DIVERGENCE_CODE = "sdk.discovery-divergent"
 
 #: A stable substring of `sdk_ladder_divergence_issue`'s own message
-#: (`build_cmd.py`'s `sdk_ladder_divergence_issue`), pinned the same way
+#: (`tan.core.sdk_discovery`'s `sdk_ladder_divergence_issue`), pinned the same way
 #: `E2E_DIVERGENCE_PHRASE` below pins doctor's -- so a reword that keeps both
 #: checkout paths in the text but drops the sentence naming what they mean
 #: (or drops the "warning:" severity the text renderer prepends) still fails
@@ -352,10 +352,16 @@ def test_every_wide_ladder_caller_is_wired_to_the_divergence_warning():
     modules resolve an SDK and exactly ONE of them said so. A grep-shaped
     assertion is what makes a sixteenth impossible to add silently.
 
-    `build_cmd` is excluded because it DEFINES both ladders and the helper;
-    everything that CALLS `resolve_sdk_root_wide` must emit
-    `sdk.discovery-divergent` by one of the two sanctioned spellings (see
-    `WIDE_LADDER_MODULES` for why there are two).
+    `build_cmd` is excluded by name (tan-cli#408: the ladders and the helper
+    now live in `tan.core.sdk_discovery`, not here, so this scan only ever
+    walks `tan/commands/*.py` for CALLERS -- `build_cmd` merely imports
+    `resolve_sdk_root_ladder` for its own narrow resolution and never calls
+    the wide one, so the exclusion is belt-and-suspenders rather than
+    load-bearing, and is kept so a future re-import of the wide ladder into
+    `build_cmd` does not silently exempt it); everything that CALLS
+    `resolve_sdk_root_wide` must emit `sdk.discovery-divergent` by one of the
+    two sanctioned spellings (see `WIDE_LADDER_MODULES` for why there are
+    two).
 
     The caller probe matches CALL syntax (`name(`), not the bare name. The
     looser form was tried first and immediately reported `sdk_cmd.py`, which

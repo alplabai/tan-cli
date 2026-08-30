@@ -20,8 +20,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from tan.commands.build_cmd import SDK_MARKER, resolve_sdk_root_ladder
 from tan.commands.sdk_cmd import resolve_sdk_tiered
+from tan.core.sdk_discovery import resolve_sdk_root_ladder
+from tan.core.shapes import SDK_MARKER
 from tan.core.system_manifest import (
     MANIFEST_FILE,
     SystemManifest,

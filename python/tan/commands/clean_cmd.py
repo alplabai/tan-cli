@@ -89,9 +89,9 @@ from typing import Any
 import typer
 
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
-from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
 from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
+from tan.core.sdk_discovery import resolve_sdk_root_ladder
 from tan.core.shapes import SDK_MARKER
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -747,7 +747,7 @@ def _cli_workspace_root(project_arg: str | None) -> Path:
 
 
 def sdk_root_resolves(sdk_root: str | None, workspace_root: Path) -> bool:
-    """Whether `build_cmd.resolve_sdk_root_ladder` would resolve a checkout --
+    """Whether `tan.core.sdk_discovery.resolve_sdk_root_ladder` would resolve a checkout --
     the guard behind `clean.sdk-root-not-found`.
 
     `--sdk-root` is TERMINAL (I-31): an explicit path without the loader marker

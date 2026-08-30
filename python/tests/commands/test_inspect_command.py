@@ -21,7 +21,7 @@ import typer
 from typer.testing import CliRunner
 
 from tan.commands import sdk_cmd
-from tan.commands.build_cmd import _abs_posix
+from tan.core.sdk_discovery import _abs_posix
 from tan.commands.inspect_cmd import (
     ResolvedDebugContext,
     collect_resolved_values,

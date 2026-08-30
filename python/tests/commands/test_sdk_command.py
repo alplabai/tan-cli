@@ -1427,7 +1427,7 @@ def test_current_sees_the_child_checkout_the_acting_commands_resolve(tmp_path, i
     workspace.mkdir()
     child = make_sdk_root(workspace / "alp-sdk", version="0.14.0")
 
-    from tan.commands.build_cmd import resolve_sdk_root_ladder
+    from tan.core.sdk_discovery import resolve_sdk_root_ladder
 
     expected = resolve_sdk_root_ladder(None, workspace)
     assert expected.path is not None and Path(expected.path) == child

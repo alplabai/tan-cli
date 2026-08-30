@@ -65,8 +65,8 @@ from pathlib import Path
 
 import typer
 
+from tan.core.sdk_discovery import resolve_sdk_root_ladder
 from tan.core.shapes import SDK_MARKER, is_dir as _is_dir, is_file as _is_file
-from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.doctor_cmd import (
     FALLBACK_PYTHON_FLOOR,
     SEVEN_ZIP_PROGRAMS,

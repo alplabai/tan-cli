@@ -3,13 +3,13 @@
 
 `tan/commands/**` is the outer ring (the CLI surface); `tan/core/**` and
 `tan/envelope.py` sit inside it. 32 files under `tan/commands/` import from
-`tan/core` -- the healthy direction. Three imports ran the other way
-(tan-cli#408), each one function-scoped to dodge the circular import the
-inversion creates:
+`tan/core` -- the healthy direction. Four imports run the other way, each
+one function-scoped to dodge the circular import the inversion creates:
 
-    tan/core/bootstrap.py:1703  ->  tan.commands.presets_cmd
-    tan/envelope.py:380         ->  tan.commands.sdk_cmd
-    tan/envelope.py:439         ->  tan.commands.build_cmd
+    tan/core/bootstrap.py:1703      ->  tan.commands.presets_cmd
+    tan/envelope.py:380             ->  tan.commands.sdk_cmd
+    tan/core/sdk_discovery.py       ->  tan.commands.sdk_cmd
+    (two sites: `resolve_sdk_root_ladder`/`resolve_sdk_root_wide`)
 
 A function-scoped import is what makes this survivable at runtime, and it is
 also what makes it invisible: nothing at module level shows the dependency,
@@ -23,15 +23,34 @@ core reached outward past its own copy to take the command's; both are now
 one function in `tan/core/os_class.py`, the leaf that already answers "what
 OS class is this core".
 
-The two in `envelope.py` need `sdk_resolution_issues` and
-`sdk_ladder_divergence_issue` extracted to a shared core module, which
-touches ~18 call sites and is its own change. They are listed in
-`_KNOWN_INVERSIONS` so this gate holds the line at "no NEW ones" today
-rather than waiting for that work -- the ratchet shape this repo already
-uses for the module-size budget. Removing an entry from that list is the
-acceptance criterion for the extraction; the test below fails if an entry
-is listed but no longer real, so the list cannot rot into a permanent
-exemption.
+`tan/envelope.py -> tan.commands.build_cmd` is ALSO fixed (tan-cli#408, the
+ladder extraction): `resolve_sdk_root_ladder`, `resolve_sdk_root_wide`,
+`sdk_ladder_divergence_issue` and `_planner_python` moved verbatim into
+`tan/core/sdk_discovery.py`, so `envelope.py` now imports
+`sdk_ladder_divergence_issue` from there, at module level -- the concrete
+proof the inversion is gone, not just relocated.
+
+That move traded one inversion for a narrower one, and says so rather than
+hiding it: `resolve_sdk_root_ladder`/`resolve_sdk_root_wide` both call
+`tan.commands.sdk_cmd.resolve_sdk_tiered`, the single narrow tiered
+resolver, which still lives in a command module today. Moving it too was
+out of scope for the ladder extraction (a much larger, separately-scoped
+change -- `resolve_sdk_tiered` and its own dependency cluster are not part
+of "the ladder" any call site names), so the import stays function-scoped
+inside each of the two functions that need it, and the (module, target)
+pair below is newly listed rather than left undisclosed. Net count of
+listed inversions is unchanged (one fixed, one added) -- that is the honest
+shape of a partial, correctly-scoped extraction, not a wash to explain away.
+
+`tan/envelope.py -> tan.commands.sdk_cmd` needs `sdk_resolution_issues`
+extracted to a shared core module, which touches its own call sites and is
+its own change -- untouched by tan-cli#408's ladder extraction. It is
+listed in `_KNOWN_INVERSIONS` so this gate holds the line at "no NEW ones"
+today rather than waiting for that work -- the ratchet shape this repo
+already uses for the module-size budget. Removing an entry from that list
+is the acceptance criterion for the extraction that fixes it; the test
+below fails if an entry is listed but no longer real, so the list cannot
+rot into a permanent exemption.
 """
 
 from __future__ import annotations
@@ -48,7 +67,7 @@ TAN = PYTHON_ROOT / "tan"
 #: entry fails `test_no_known_inversion_has_been_silently_fixed` below.
 _KNOWN_INVERSIONS = {
     ("tan/envelope.py", "tan.commands.sdk_cmd"),
-    ("tan/envelope.py", "tan.commands.build_cmd"),
+    ("tan/core/sdk_discovery.py", "tan.commands.sdk_cmd"),
 }
 
 

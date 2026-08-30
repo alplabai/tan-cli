@@ -849,7 +849,7 @@ def resolve_sdk(sdk_root: str | None, workspace_root: str) -> ActiveSdk:
     there is no checkout to report.
     Returned as `ActiveSdk` itself, not a growing tuple: a fact one caller
     needs must not force every other caller's unpacking to grow a matching
-    positional slot (the same reasoning `build_cmd.SdkRootResolution`
+    positional slot (the same reasoning `tan.core.sdk_discovery.SdkRootResolution`
     documents).
     """
     active = resolve_sdk_tiered(sdk_root, Path(workspace_root))

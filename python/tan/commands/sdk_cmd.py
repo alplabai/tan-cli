@@ -111,6 +111,7 @@ from tan.core.sdk_default_registry import (
     parse_registry_updated_at,
     registry_path,
 )
+from tan.core.sdk_discovery import resolve_sdk_root_ladder, sdk_ladder_divergence_issue
 from tan.core.text_layout import wrap_lines
 from tan.env import wrap_width
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -590,7 +591,7 @@ def discover_workspace_sdk(workspace_root: Path) -> str | None:
     SIBLING `../alp-sdk`, else the nearest enclosing checkout. Two or more
     candidates is ambiguous, which is `None` -- not a choice.
 
-    **Deliberately NOT `build_cmd.discover_sdk_root`**, which is a different
+    **Deliberately NOT `tan.core.sdk_discovery.discover_sdk_root`**, which is a different
     Rust function (`util.rs`'s `discover_sdk_root`) with a WIDER candidate set:
     it also probes the child `<ws>/alp-sdk` and `../alp-sdk-upstream`, and takes
     the first match rather than requiring uniqueness. `sdk current` must mirror
@@ -731,7 +732,7 @@ def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
 def project_pin_issue(broken_project_pin: str | None, tier: str) -> Issue | None:
     """The tan-cli#263 warning for an unresolvable `.alp/sdk-path` project pin
     -- shared by EVERY caller of `resolve_sdk_tiered` (directly, or through
-    `build_cmd.resolve_sdk_root_ladder`/`resolve_sdk_root_wide`), not just `sdk
+    `tan.core.sdk_discovery.resolve_sdk_root_ladder`/`resolve_sdk_root_wide`), not just `sdk
     current`. `None` when nothing was rejected, so every call site can do
     `issue = project_pin_issue(broken, tier); if issue: issues.append(issue)`
     unconditionally.
@@ -1200,7 +1201,7 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
         # and printed "get an alp-sdk checkout (`git clone ...`)", while
         # `doctor`, `build`, `validate`, `inspect` and `trace` in that SAME cwd
         # all reported `<ws>/alp-sdk` at `sourceTier: "discovery"` through
-        # `build_cmd.resolve_sdk_root_ladder` -- whose own docstring names `sdk
+        # `tan.core.sdk_discovery.resolve_sdk_root_ladder` -- whose own docstring names `sdk
         # current` as one of its thirteen callers, and whose wide-walk TAIL is
         # the tier missing here. `discover_workspace_sdk`'s docstring states the
         # invariant this broke: "the tier it reports has to be what
@@ -1217,11 +1218,11 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
         # itself is reused rather than its tail re-implemented: this can add an
         # answer where there was none, never change one that already existed
         # (which would move the SDK root under a live workspace), and there is
-        # no third copy of the tier rule to keep true. Function-level import for
-        # the same one-way dependency `build_cmd` -> this module documented at
-        # `sdk_ladder_divergence_issue`'s call site below.
-        from tan.commands.build_cmd import resolve_sdk_root_ladder
-
+        # no third copy of the tier rule to keep true. `resolve_sdk_root_ladder`
+        # is imported at module level (tan-cli#408): it lives in
+        # `tan.core.sdk_discovery` now, which this module does not sit
+        # upstream of, so the function-level import this line used to need
+        # (to dodge the `build_cmd` -> this module cycle) is gone with it.
         ladder = resolve_sdk_root_ladder(sdk_root, workspace_root)
         if ladder.path is not None:
             active = ActiveSdk(
@@ -1270,11 +1271,10 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
     # user runs to ask "which SDK am I on?", and in a workspace holding both a
     # child `<ws>/alp-sdk` and a lateral `../alp-sdk` it answers with the
     # narrow one only -- reporting the readiness and VERSION of the checkout
-    # `tan generate` did not use. Function-level import because `build_cmd`
-    # imports THIS module at line 97; the same one-way dependency
-    # `build/manifest.py` works around the same way.
-    from tan.commands.build_cmd import sdk_ladder_divergence_issue
-
+    # `tan generate` did not use. `sdk_ladder_divergence_issue` is imported at
+    # module level (tan-cli#408): the `build_cmd` -> this module cycle the
+    # function-level import here used to dodge no longer exists once the
+    # ladder lives in `tan.core.sdk_discovery` instead.
     divergence = sdk_ladder_divergence_issue(sdk_root, workspace_root, wide=False)
     if divergence is not None:
         text = [*text, divergence.message]

@@ -875,12 +875,12 @@ def bind_sdk(sdk_root_arg: str | None, project: str | None, code: str) -> tuple[
     runs and the fact would otherwise be discarded with the rest of
     `resolution`.
     """
-    from tan.commands.build_cmd import resolve_sdk_root_ladder
     from tan.commands.sdk_cmd import (
         NO_SDK_NEXT_STEPS,
         global_default_foreign_project_issue,
         project_pin_issue,
     )
+    from tan.core.sdk_discovery import resolve_sdk_root_ladder
     from tan.core.shapes import SDK_MARKER
 
     cwd = Path.cwd()

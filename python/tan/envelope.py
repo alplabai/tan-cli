@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tan.core.sdk_discovery import sdk_ladder_divergence_issue
 from tan.exit_codes import ExitCode
 
 #: Every code point in the UTF-16 surrogate range. A Python `str` may hold one
@@ -415,8 +416,11 @@ class Envelope:
         an argument, and several commands keep rendering their own text from
         the list they passed in.
 
-        Import is local: `build_cmd` imports this module at module level, so a
-        top-level import here would be circular.
+        `sdk_ladder_divergence_issue` is imported at module level, from
+        `tan.core.sdk_discovery` (tan-cli#408) -- it used to live in
+        `build_cmd`, which imports this module at module level, so a
+        top-level import here was circular; the extraction is what makes it
+        importable at the top of this file at all.
         """
         if sdk is None or getattr(sdk, "source_tier", None) != "discovery":
             return issues
@@ -435,8 +439,6 @@ class Envelope:
             # as agreement. Measured: from a cwd where `doctor` warned,
             # `validate` did not, purely because of that one character.
             start = Path(root).resolve() if root else Path.cwd()
-
-            from tan.commands.build_cmd import sdk_ladder_divergence_issue
 
             divergence = sdk_ladder_divergence_issue(
                 None, start, wide=command in WIDE_LADDER_COMMANDS

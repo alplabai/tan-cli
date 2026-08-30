@@ -276,11 +276,6 @@ from typing import Any
 
 import typer
 
-from tan.commands.build_cmd import (
-    _is_sdk_root,
-    _planner_python_resolution,
-    resolve_sdk_root_ladder,
-)
 from tan.commands.doctor_cmd import resolve_manifest_python_floor
 
 # `_python_too_old` is IMPORTED, not re-spelled: `generate_cmd` and `model_cmd`
@@ -293,7 +288,8 @@ from tan.commands.doctor_cmd import resolve_manifest_python_floor
 from tan.commands.generate_cmd import _python_too_old
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
-from tan.core.shapes import rejected_sdk_root_message
+from tan.core.sdk_discovery import _planner_python_resolution, resolve_sdk_root_ladder
+from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.subprocess_env import spawn_env
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -1316,7 +1312,7 @@ def validate(
             # gives the refusal the oracle gives, instead of the SDK's own
             # `can't open file ...validate_board_yaml.py` reaching the status map
             # as a verdict about the customer's board.
-            if sdk_tier == "sdkRootFlag" and not _is_sdk_root(resolved_sdk):
+            if sdk_tier == "sdkRootFlag" and not is_sdk_root(resolved_sdk):
                 resolved_sdk = None
             if resolved_sdk is not None:
                 sdk_info = SdkInfo.from_resolution(str(resolved_sdk), sdk_resolution)

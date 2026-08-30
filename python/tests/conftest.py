@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Repo-wide test isolation for the SDK discovery ladder.
 
-`resolve_sdk_root_ladder` / `resolve_sdk_tiered` (`tan/commands/build_cmd.py`,
+`resolve_sdk_root_ladder` / `resolve_sdk_tiered` (`tan/core/sdk_discovery.py`,
 `tan/commands/sdk_cmd.py`) read the REAL process environment
 (`ALP_SDK_ROOT`) and the REAL `~/.alp/sdk-default` pointer (`HOME` on POSIX,
 `USERPROFILE` on Windows) with no isolation of their own -- by design, so a

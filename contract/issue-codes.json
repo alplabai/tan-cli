@@ -1329,7 +1329,7 @@
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
-      "emittedBy": "python/tan/commands/build_cmd.py",
+      "emittedBy": "python/tan/core/sdk_discovery.py",
       "note": "Emitted when `resolve_sdk_root_ladder` (narrow) and `resolve_sdk_root_wide` (wide) resolve DIFFERENT alp-sdk checkouts from one cwd while both label their answer `sourceTier: \"discovery\"` -- so `tan generate` can emit board files from one checkout's metadata while `tan build`/`doctor`/`kconfig` plan against another, undetectably. The message names both roots in a fixed order and says which one THIS command used, so two envelopes describing one collision correlate on the code plus the path pair. Registered by tan-cli#407. Currently emitted from `tan build` only; the remaining ladder call sites are one-line adds beside their existing `project_pin_issue(...)` calls and are tracked on that issue. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
     },
     {

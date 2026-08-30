@@ -278,7 +278,7 @@ def test_the_warning_is_not_added_twice(tmp_path):
     _make_sdk(workspace / "alp-sdk")
     _make_sdk(tmp_path / "alp-sdk")
 
-    from tan.commands.build_cmd import sdk_ladder_divergence_issue
+    from tan.core.sdk_discovery import sdk_ladder_divergence_issue
 
     already = sdk_ladder_divergence_issue(None, workspace, wide=False)
     assert already is not None

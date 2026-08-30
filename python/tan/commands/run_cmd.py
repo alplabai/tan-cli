@@ -61,18 +61,14 @@ import typer
 
 from tan.commands import flash_cmd
 from tan.commands.build import execute
-from tan.commands.build_cmd import (
-    BuildError,
-    _abs_posix,
-    _build,
-    _is_sdk_root,
-    resolve_sdk_root_ladder,
-)
+from tan.commands.build_cmd import BuildError, _build
 from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
 from tan.core.flash_plan import resolve_artefact_path
 from tan.core.global_flags import accept_global_flags
 from tan.core.plan_exec import normalize_path
 from tan.core.run import RunAction, decide_run_action, native_sim_exe_beside, native_sim_slice
+from tan.core.sdk_discovery import _abs_posix, resolve_sdk_root_ladder
+from tan.core.shapes import is_sdk_root
 from tan.core.subprocess_env import spawn_env
 from tan.core.system_manifest import SystemManifestError, parse_system_manifest
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -420,7 +416,7 @@ def run(
     # already chose. An unresolvable explicit root is treated as no root at
     # all, so the refusal downstream is the honest "no alp-sdk checkout found"
     # and no `sdk` key is emitted, matching the oracle.
-    if sdk_tier == "sdkRootFlag" and not _is_sdk_root(resolved_sdk_root):
+    if sdk_tier == "sdkRootFlag" and not is_sdk_root(resolved_sdk_root):
         resolved_sdk_root = None
     sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
     sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
