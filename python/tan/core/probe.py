@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import subprocess
 
+from tan.core.subprocess_env import spawn_env
+
 #: Every probe in this module gets the same ceiling: long enough for a slow
 #: but genuinely-answering tool, short enough that a hung one does not stall
 #: /a build's provenance read indefinitely.
@@ -52,6 +54,13 @@ def probe_status(
 
     See `probe()` for why each failure mode below is swallowed rather than
     raised.
+
+    `env=spawn_env()` (tan-cli#992): every probe in this module IS the
+    "does tan think this tool works" verdict, so a probe that leaked tan's
+    own bundled `LD_LIBRARY_PATH` into the child would report a perfectly
+    fine host tool as broken the moment its own bundled copy of some shared
+    library disagreed with the host's -- exactly the failure mode
+    `spawn_env` exists to close.
     """
     try:
         out = subprocess.run(
@@ -63,6 +72,7 @@ def probe_status(
             errors="replace",
             stdin=subprocess.DEVNULL,
             timeout=timeout,
+            env=spawn_env(),
             check=False,
         )
     except (OSError, ValueError, subprocess.SubprocessError):

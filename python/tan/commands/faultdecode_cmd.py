@@ -66,6 +66,7 @@ from tan.core.faultdecode import (
     render_human,
 )
 from tan.core.inert import NOT_APPLICABLE, inert_help
+from tan.core.subprocess_env import spawn_env
 from tan.env import no_color_requested, stdin_is_tty
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -104,7 +105,7 @@ def resolve_symbol(addr: int, elf: Path) -> Symbol | None:
     try:
         proc = subprocess.run(
             [tool, "-f", "-C", "-e", str(elf), f"0x{addr:x}"],
-            capture_output=True, text=True, timeout=15, check=False,
+            capture_output=True, text=True, timeout=15, env=spawn_env(), check=False,
         )
     except (OSError, subprocess.SubprocessError):  # pragma: no cover - env-dependent
         return None

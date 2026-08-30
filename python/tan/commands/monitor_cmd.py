@@ -73,6 +73,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.build_cmd import _planner_python
+from tan.core.subprocess_env import spawn_env
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -321,6 +322,7 @@ def _run_monitor(
         rc = subprocess.run(
             [python, "-m", "serial.tools.miniterm", port, str(baud)],
             stdout=_child_stdout(json_mode),
+            env=spawn_env(),
         ).returncode
     except OSError as err:
         raise MonitorError(

@@ -137,7 +137,7 @@ def test_vela_adapter_compile_invokes_cli_and_reads_output(tmp_path, monkeypatch
     src.write_bytes(b"TFL3-INPUT")
     seen = {}
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         seen["cmd"] = cmd
         # emulate vela's output, into the directory the adapter asked for
         (_out_dir_of(cmd) / "m_vela.tflite").write_bytes(b"VELA-OUT")
@@ -158,7 +158,7 @@ def test_vela_adapter_compile_raises_on_vela_error(tmp_path, monkeypatch):
     src = tmp_path / "m.tflite"
     src.write_bytes(b"TFL3-INPUT")
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         return _FakeProc(returncode=1, stderr="Invalid model")
 
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
@@ -170,7 +170,7 @@ def test_vela_adapter_compile_raises_when_output_file_missing(tmp_path, monkeypa
     src = tmp_path / "m.tflite"
     src.write_bytes(b"TFL3-INPUT")
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         return _FakeProc()                 # vela "succeeds" but writes no _vela.tflite
 
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
@@ -296,7 +296,7 @@ def test_vela_refuses_a_zero_sram_footprint_on_a_real_npu_placement(tmp_path, mo
               "CPU operators = 9 (60.0%)\n"
               "NPU operators = 6 (40.0%)\n")
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         out = _out_dir_of(cmd)
         (out / "keyword_scrambled_8bit_vela.tflite").write_bytes(b"VELA-OUT")
         (out / "keyword_scrambled_8bit_summary_Ethos_U85_SYS_DRAM_Mid.csv").write_text(
@@ -331,7 +331,7 @@ def test_the_refusal_prescribes_nothing_tan_cannot_actually_do(tmp_path, monkeyp
     src = tmp_path / "m.tflite"
     src.write_bytes(b"TFL3-INPUT")
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         out = _out_dir_of(cmd)
         (out / "m_vela.tflite").write_bytes(b"VELA-OUT")
         (out / "m_summary_Ethos_U85_SYS_DRAM_Mid.csv").write_text(
@@ -386,7 +386,7 @@ def test_the_refusal_names_the_profile_the_run_reported_not_a_hardcoded_alif_one
     src = tmp_path / "m.tflite"
     src.write_bytes(b"TFL3-INPUT")
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         out = _out_dir_of(cmd)
         (out / "m_vela.tflite").write_bytes(b"VELA-OUT")
         (out / "m_summary_Ethos_U65_Client_Server.csv").write_text(
@@ -430,7 +430,7 @@ def _refuse_on(accel_config, profile, tmp_path, monkeypatch, *,
     src = tmp_path / "m.tflite"
     src.write_bytes(b"TFL3-INPUT")
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         out = _out_dir_of(cmd)
         (out / "m_vela.tflite").write_bytes(b"VELA-OUT")
         (out / f"m_summary_{profile}.csv").write_text(
@@ -634,7 +634,7 @@ def test_two_runs_sharing_one_out_dir_never_read_each_others_summary(tmp_path, m
     shared_out.mkdir()
     summary_name = "m_summary_Ethos_U55_High_End_Embedded.csv"
 
-    def run_with_summary(cmd, capture_output, text, timeout):
+    def run_with_summary(cmd, capture_output, text, timeout, env):
         out = _out_dir_of(cmd)
         (out / "m_vela.tflite").write_bytes(b"VELA-OUT-256")
         (out / summary_name).write_text(
@@ -645,7 +645,7 @@ def test_two_runs_sharing_one_out_dir_never_read_each_others_summary(tmp_path, m
             "CPU operators = 0 (0.0%)\n"
             "NPU operators = 4 (100.0%)\n"))
 
-    def run_without_summary(cmd, capture_output, text, timeout):
+    def run_without_summary(cmd, capture_output, text, timeout, env):
         out = _out_dir_of(cmd)
         (out / "m_vela.tflite").write_bytes(b"VELA-OUT-128")
         return _FakeProc(stdout=(                    # same system-config, same CSV name
@@ -675,7 +675,7 @@ def test_vela_reports_a_real_zero_footprint_for_a_full_cpu_fallback(tmp_path, mo
     src = tmp_path / "float32_fc.tflite"
     src.write_bytes(b"TFL3-INPUT")
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         out = _out_dir_of(cmd)
         (out / "float32_fc_vela.tflite").write_bytes(b"VELA-OUT")
         (out / "float32_fc_summary_Ethos_U85_SYS_DRAM_Mid.csv").write_text(
@@ -702,7 +702,7 @@ def test_vela_carries_its_own_default_profile_warning_as_a_caveat(tmp_path, monk
     src = tmp_path / "m.tflite"
     src.write_bytes(b"TFL3-INPUT")
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         out = _out_dir_of(cmd)
         (out / "m_vela.tflite").write_bytes(b"VELA-OUT")
         (out / "m_summary_Ethos_U85_SYS_DRAM_Mid.csv").write_text(
@@ -837,7 +837,7 @@ def _capture_vela_cmd(monkeypatch, tmp_path, **profile):
     src.write_bytes(b"TFL3-INPUT")
     seen = {}
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         seen["cmd"] = cmd
         (_out_dir_of(cmd) / "m_vela.tflite").write_bytes(b"VELA-OUT")
         return _FakeProc()
@@ -994,7 +994,7 @@ def test_a_supplied_memory_mode_is_not_reported_as_velas_own_default(tmp_path, m
     src = tmp_path / "m.tflite"
     src.write_bytes(b"TFL3-INPUT")
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         out = _out_dir_of(cmd)
         (out / "m_vela.tflite").write_bytes(b"VELA-OUT")
         (out / "m_summary_Ethos_U85_SYS_DRAM_Mid.csv").write_text(
@@ -1053,7 +1053,7 @@ def test_a_defaulted_system_config_is_not_called_harmless_under_shared_sram(
     src = tmp_path / "m.tflite"
     src.write_bytes(b"TFL3-INPUT")
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         out = _out_dir_of(cmd)
         (out / "m_vela.tflite").write_bytes(b"VELA-OUT")
         (out / "m_summary_Ethos_U65_Client_Server.csv").write_text(
@@ -1144,7 +1144,7 @@ def test_cpu_compile_accepts_opts_kwarg(tmp_path):
 
 def test_vela_compile_accepts_opts_kwarg(tmp_path, monkeypatch):
     src = tmp_path / "m.tflite"; src.write_bytes(b"TFL3-X")
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         (_out_dir_of(cmd) / "m_vela.tflite").write_bytes(b"VELA-OUT")
         return _FakeProc()
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
@@ -1171,7 +1171,7 @@ def test_deepx_compile_invokes_dxcom_and_returns_dxnn(tmp_path, monkeypatch):
     cfg = tmp_path / "m.deepx.json"; cfg.write_text("{}", encoding="utf-8")
     seen = {}
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         if "-v" in cmd:                              # _dxcom_version() probe
             class _V:
                 returncode = 0
@@ -1205,7 +1205,7 @@ def test_deepx_compile_raises_when_no_dxnn_produced(tmp_path, monkeypatch):
     src = tmp_path / "m.onnx"; src.write_bytes(b"ONNX-IN")
     cfg = tmp_path / "m.deepx.json"; cfg.write_text("{}", encoding="utf-8")
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, env):
         if "-v" in cmd:
             class _V:
                 returncode = 0

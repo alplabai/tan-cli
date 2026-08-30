@@ -73,6 +73,7 @@ from tan.core.flash_plan import resolve_artefact_path
 from tan.core.global_flags import accept_global_flags
 from tan.core.plan_exec import normalize_path
 from tan.core.run import RunAction, decide_run_action, native_sim_exe_beside, native_sim_slice
+from tan.core.subprocess_env import spawn_env
 from tan.core.system_manifest import SystemManifestError, parse_system_manifest
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -141,7 +142,7 @@ def _exec_native_sim(exe: str) -> tuple[bool, int | None]:
     doc."""
     print(f"run: executing {exe}", file=sys.stderr)
     try:
-        proc = subprocess.run([exe])
+        proc = subprocess.run([exe], env=spawn_env())
         return proc.returncode == 0, proc.returncode
     except OSError as err:
         print(f"run: failed to launch {exe}: {err}", file=sys.stderr)

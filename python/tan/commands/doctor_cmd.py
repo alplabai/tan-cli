@@ -175,6 +175,7 @@ from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
 from tan.core.inert import COMPATIBILITY, inert_help
 from tan.core.probe import PROBE_TIMEOUT_S, probe, probe_status
+from tan.core.subprocess_env import spawn_env
 from tan.core.sdk_default_registry import registry_path
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.timestamp import generated_at_iso
@@ -901,6 +902,7 @@ def _posix_venv_capable(argv: list[str], executable: str | None = None) -> bool:
             errors="replace",
             stdin=subprocess.DEVNULL,
             timeout=PROBE_TIMEOUT_S,
+            env=spawn_env(),
             check=False,
         )
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -1589,6 +1591,7 @@ def jlink_banner(jlink_exe: str, timeout: int = PROBE_TIMEOUT_S) -> str | None:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            env=spawn_env(),
             check=False,
         )
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -3233,6 +3236,7 @@ def run_fix(
                 errors="replace",
                 stdin=subprocess.DEVNULL,
                 timeout=FIX_INSTALL_TIMEOUT_S,
+                env=spawn_env(),
                 check=False,
             )
         except subprocess.TimeoutExpired:

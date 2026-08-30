@@ -55,6 +55,8 @@ from typing import Any
 
 import yaml
 
+from tan.core.subprocess_env import spawn_env
+
 from .orchestrator import _zephyr_app_dir
 from .paths import METADATA_ROOT, REPO
 
@@ -1097,11 +1099,16 @@ def _tag_resolves(base_dir: Path, tag: str) -> bool:
     direction: no tag found, pin to `main`, links stay live.
 
     Ported verbatim from alp-sdk `scripts/alp_template.py::_tag_resolves`
-    (issue #1508 / alp-sdk#1535)."""
+    (issue #1508 / alp-sdk#1535), except for one RELOCATED divergence:
+    `env=spawn_env()` below is a tan-only addition (tan-cli#992) -- alp-sdk's
+    own copy never restores it because alp-sdk never ships as a frozen
+    PyInstaller bundle whose LD_LIBRARY_PATH would otherwise leak into the
+    spawned `git`."""
     try:
         return subprocess.run(
             ["git", "-C", str(base_dir), "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"],
             capture_output=True,
+            env=spawn_env(),
             check=False,
         ).returncode == 0
     except (OSError, subprocess.SubprocessError):  # no git binary, not a repo

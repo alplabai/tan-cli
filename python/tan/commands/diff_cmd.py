@@ -171,6 +171,7 @@ from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 from tan.core.shapes import yaml_kind
+from tan.core.subprocess_env import spawn_env
 
 #: `data.schemaVersion` for this command's payload -- the envelope payload's
 #: own version, unrelated to `board.yaml`'s `schemaVersion:`.
@@ -629,6 +630,7 @@ def _spawn_validator(
             errors="replace",
             stdin=subprocess.DEVNULL,
             timeout=VALIDATOR_TIMEOUT_S,
+            env=spawn_env(),
             check=False,
         )
     except subprocess.TimeoutExpired:
