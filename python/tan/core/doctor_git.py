@@ -18,6 +18,7 @@ import subprocess
 from pathlib import Path
 
 from tan.core.probe import PROBE_TIMEOUT_S, probe
+from tan.core.subprocess_env import spawn_env
 from tan.core.tool_lookup import resolve_tool
 
 
@@ -157,6 +158,7 @@ def _git_core_longpaths(git_exe: str | None) -> bool | None:
             errors="replace",
             stdin=subprocess.DEVNULL,
             timeout=PROBE_TIMEOUT_S,
+            env=spawn_env(),
             check=False,
         )
     except (OSError, ValueError, subprocess.SubprocessError):

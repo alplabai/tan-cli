@@ -126,6 +126,7 @@ from tan.core.plan_exec import (
     sdk_stamp_action,
     sdk_stamp_key,
 )
+from tan.core.subprocess_env import spawn_env
 from tan.core.system_manifest import SliceRunResult
 from tan.core.tool_lookup import ToolResolution, resolve_tool
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
@@ -437,6 +438,7 @@ def _terminate(proc: subprocess.Popen) -> None:
             subprocess.run(
                 [taskkill, "/T", "/F", "/PID", str(proc.pid)],
                 capture_output=True,
+                env=spawn_env(),
                 check=False,
             )
     else:
@@ -529,7 +531,13 @@ def _spawn_step(
         with subprocess.Popen(
             [program, *args],
             cwd=str(cwd),
-            env=env,
+            # tan-cli#992: re-applied at the literal spawn, not trusted from
+            # the caller alone -- `spawn_env(base=env)` is idempotent when
+            # `env` already went through it (as `execute_slices`'s does), so
+            # this is defense-in-depth, not a behaviour change, for the one
+            # caller that already gets it right, and a real fix for any
+            # future caller that doesn't.
+            env=spawn_env(base=env),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -1290,7 +1298,12 @@ def execute_slices(
         slice_env = dict(
             assemble_slice_env(sl.env, sl.env_append_path, env_lookup, slice_gap_fillers)
         )
-        env = dict(os.environ)
+        # tan-cli#992: `spawn_env()` restores tan's own bundled
+        # `LD_LIBRARY_PATH` override before this slice's own `env`/
+        # `envAppendPath` overlay -- a build slice spawns `west`/`cmake`/the
+        # toolchain, all system programs, and this is the build path (a
+        # `--flash` runs straight out of a build that just took this env).
+        env = spawn_env()
         env.update(slice_env)
         # tan-cli#289/#106: the venv `west` spawns nested `west`/`bitbake`
         # (via `alp_orchestrate`) that resolve purely via PATH -- without

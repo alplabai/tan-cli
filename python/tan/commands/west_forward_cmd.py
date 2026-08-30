@@ -114,6 +114,7 @@ import typer
 from tan.commands.build_output import ProjectContext, resolve_project_context, to_posix
 from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
+from tan.core.subprocess_env import spawn_env
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
 from tan.envelope import Envelope, Issue, emit
 from tan.exit_codes import ExitCode
@@ -289,7 +290,13 @@ def _plan(
         west_bin=west_bin,
         argv=tuple(argv),
         run_cwd=run_cwd,
-        env=with_venv_on_path(dict(os.environ), west_bin),
+        # tan-cli#992: `spawn_env()` FIRST (the restored copy), THEN the venv
+        # PATH-prepend on top -- the two touch disjoint keys (`LD_LIBRARY_PATH`
+        # vs `PATH`) so the order never matters, but this is the one
+        # `env=` every caller below shares (`_Forward.env`, "computed once ...
+        # so text and JSON can never spawn different argv" per this
+        # dataclass's own docstring), so it is built correctly exactly once.
+        env=with_venv_on_path(spawn_env(), west_bin),
     )
 
 
@@ -300,7 +307,10 @@ def _spawn_captured(plan: _Forward) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         plan.full_argv,
         cwd=plan.run_cwd,
-        env=plan.env,
+        # tan-cli#992: re-applied at the literal spawn (`plan.env` was
+        # already built via `spawn_env` in `_plan_forward` -- this is
+        # defense-in-depth, and idempotent).
+        env=spawn_env(base=plan.env),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -381,7 +391,9 @@ def _run_text(plan: _Forward, context: ProjectContext) -> None:
     """
     _echo_sdk_resolution(context)
     try:
-        result = subprocess.run(plan.full_argv, cwd=plan.run_cwd, env=plan.env, check=False)
+        result = subprocess.run(
+            plan.full_argv, cwd=plan.run_cwd, env=spawn_env(base=plan.env), check=False
+        )
     except OSError as err:
         typer.echo(f"{plan.subcommand}: {_launch_error(err)}", err=True)
         raise typer.Exit(int(ExitCode.RUNTIME_FAILURE)) from err

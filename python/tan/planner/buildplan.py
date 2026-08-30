@@ -22,6 +22,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
 
+from tan.core.subprocess_env import spawn_env
 from tan.core.tool_lookup import resolve_tool
 
 from .headers import emit_dts_partitions, emit_dts_reservations, emit_ipc_contract_h
@@ -366,7 +367,7 @@ def _sdk_commit() -> Optional[str]:
         result = subprocess.run(
             ["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
             executable=git_exe,
-            capture_output=True, text=True, check=True)
+            capture_output=True, text=True, env=spawn_env(), check=True)
     except (subprocess.CalledProcessError, OSError):
         return None
     commit = result.stdout.strip()

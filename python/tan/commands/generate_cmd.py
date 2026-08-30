@@ -117,6 +117,7 @@ from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
 from tan.core.shapes import rejected_sdk_root_message
+from tan.core.subprocess_env import spawn_env
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -809,6 +810,7 @@ def _emit_one(
             errors="replace",
             stdin=subprocess.DEVNULL,
             timeout=EMIT_TIMEOUT_S,
+            env=spawn_env(),
             check=False,
         )
     except (OSError, ValueError, subprocess.SubprocessError) as err:

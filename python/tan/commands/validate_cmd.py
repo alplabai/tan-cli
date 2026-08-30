@@ -294,6 +294,7 @@ from tan.commands.generate_cmd import _python_too_old
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.shapes import rejected_sdk_root_message
+from tan.core.subprocess_env import spawn_env
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, ValidateOutputFormat
@@ -1515,6 +1516,7 @@ def validate(
                     # somehow prompts would block forever behind the timeout.
                     stdin=subprocess.DEVNULL,
                     timeout=VALIDATOR_TIMEOUT_S,
+                    env=spawn_env(),
                     check=False,
                 )
             except subprocess.TimeoutExpired:

@@ -548,6 +548,19 @@ several less obvious failures.
     - tan/core/bootstrap.py: 2400 -> 2411
     - function_count_budget: 290 -> 297
     - function_worst_budget: 804 -> 819
+- 2026-08-29 -- tan-cli#992: route ~26 subprocess spawn sites through the shared LD_LIBRARY_PATH-restore helper (tan.core.subprocess_env.spawn_env), plus the new gate that asserts every one of them does
+    - tan/commands/build/execute.py: 1713 -> 1726
+    - tan/commands/diff_cmd.py: 889 -> 891
+    - tan/commands/doctor_cmd.py: 4320 -> 4324
+    - tan/commands/flash_cmd.py: 3952 -> 3962
+    - tan/commands/generate_cmd.py: 1431 -> 1433
+    - tan/commands/size_cmd.py: 938 -> 940
+    - tan/commands/validate_cmd.py: 1613 -> 1615
+    - tan/model/adapters/ethos_u.py: 886 -> 889
+    - tan/planner/template.py: 1481 -> 1484
+    - function_count_budget: 296 -> 298
+- 2026-08-29 -- gate/review fixes tan-cli#997: divergence-note comments on kconfig_symbols.py/template.py
+    - tan/planner/template.py: 1484 -> 1488
 - 2026-08-29 -- tan-cli#537: the implicit-stdin reader redesign (bytes-in/one-decode/three-bounds, a raw-fd read to avoid a CPython interpreter-shutdown fault) adds real bounded-reader logic plus its own rationale-heavy docstrings to faultdecode_cmd.py; not split out because the reader is faultdecode's own private concern, not a shared abstraction yet.
     - tan/commands/faultdecode_cmd.py: new entry at 848
     - function_count_budget: 296 -> 297
@@ -555,3 +568,17 @@ several less obvious failures.
     - tan/commands/faultdecode_cmd.py: 848 -> 925
 - 2026-08-30 -- merge-resync (growth already reasoned on the merged branches)
     - function_count_budget: 297 -> 298
+    - tan/commands/faultdecode_cmd.py: new entry at 926
+    - function_count_budget: 298 -> 299
+- 2026-08-30 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/build/execute.py: 1713 -> 1726
+    - tan/commands/diff_cmd.py: 889 -> 891
+    - tan/commands/doctor_cmd.py: 4320 -> 4324
+    - tan/commands/faultdecode_cmd.py: 925 -> 926
+    - tan/commands/flash_cmd.py: 3952 -> 3962
+    - tan/commands/generate_cmd.py: 1431 -> 1433
+    - tan/commands/size_cmd.py: 938 -> 940
+    - tan/commands/validate_cmd.py: 1613 -> 1615
+    - tan/model/adapters/ethos_u.py: 886 -> 889
+    - tan/planner/template.py: 1541 -> 1548
+    - function_count_budget: 298 -> 300
