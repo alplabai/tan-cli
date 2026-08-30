@@ -322,7 +322,13 @@ def resolve_targets(sku: str, *, metadata_root: Path) -> list[TargetSpec]:
             f"mapping, got {type(preset).__name__}"
         )
 
-    silicon = preset["silicon"]                                 # host SoC, e.g. "alif:ensemble:e7"
+    # `.get(...)`, not a bare subscript: `preset` is now known to be a
+    # mapping (guard above) but `silicon:` is schema-REQUIRED, not merely
+    # unvalidated-optional -- a preset that omits it must still fall into
+    # the curated `resolve_soc_path()` ValueError path below (a missing key
+    # becomes silicon=None, which is not a valid 3-part ref) rather than
+    # raising a raw KeyError from this line (tan-cli#1018 review).
+    silicon = preset.get("silicon")                              # host SoC, e.g. "alif:ensemble:e7"
     # resolve_soc_path() returns None where the old inline 3-tuple unpack
     # raised ValueError, so re-raise it here: callers distinguish a
     # malformed ref (ValueError) from a well-formed ref naming a spec that

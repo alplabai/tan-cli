@@ -41,7 +41,8 @@ def test_a_bare_list_preset_yaml_raises_a_clean_valueerror_not_a_typeerror(tmp_p
     clean, named error `resolve_targets` already raises for a malformed
     silicon ref or a malformed host SoC spec, not an uncaught
     `TypeError: list indices must be integers or slices, not str` from the
-    bare `preset["silicon"]` subscript two lines below."""
+    bare `preset["silicon"]` subscript at `targets.py:325` (the guard sits
+    between the two lines at this head)."""
     root = _metadata_root_with_raw_preset(tmp_path, "- one\n- two\n")
     with pytest.raises(ValueError, match="expected a YAML mapping"):
         resolve_targets(_SKU, metadata_root=root)
@@ -72,3 +73,17 @@ def test_the_valueerror_names_the_offending_path_and_the_actual_type(tmp_path):
     with pytest.raises(ValueError) as exc_info:
         resolve_targets(_SKU, metadata_root=root)
     assert str(preset_path) in str(exc_info.value)
+
+
+def test_a_mapping_preset_missing_silicon_raises_the_curated_ref_error_not_a_keyerror(tmp_path):
+    """tan-cli#1018 review MAJOR: the guard above only fixes the container
+    shape -- `preset["silicon"]` was still a bare subscript, so a preset
+    that IS a mapping but simply omits the schema-required `silicon:` key
+    raised raw `KeyError: 'silicon'` at `targets.py:325`, thirteen lines
+    below the guard, on the very expression the issue's title names. This
+    must instead fall into the *existing* curated `resolve_soc_path()` path
+    that already handles a malformed silicon ref -- a missing key is exactly
+    as malformed as a wrong-shaped one."""
+    root = _metadata_root_with_raw_preset(tmp_path, "not_silicon: whatever\n")
+    with pytest.raises(ValueError, match="malformed silicon ref None"):
+        resolve_targets(_SKU, metadata_root=root)
