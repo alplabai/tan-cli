@@ -48,10 +48,12 @@
 #include "alp/board.h"
 
 /* TMP112 7-bit I2C address with ADD0 = GND -- the default strap
- * on both the E1M-AEN and E1M-V2N SoM families (see
- * metadata/chips/tmp112.yaml).  The ADD0 strap selects one of
+ * on both the E1M-AEN and E1M-V2N SoM families (see alp-sdk's
+ * metadata/chips/tmp112.yaml, not part of this
+ * scaffolded project).  The ADD0 strap selects one of
  * 0x48..0x4B; see the TMP112 datasheet SBOS473K table 2 or
- * include/alp/chips/tmp112.h if your board straps differently. */
+ * alp-sdk's include/alp/chips/tmp112.h (not part of this
+ * scaffolded project) if your board straps differently. */
 #define TMP112_ADDR_7BIT TMP112_I2C_ADDR_GND /* 0x48 */
 
 /* Number of samples to take before exiting.  Capped so the

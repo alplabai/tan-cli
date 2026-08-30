@@ -8,8 +8,9 @@
 #
 # Customer workflow: `tan init --from-example peripheral-io/i2c-master`, change `som.sku` to
 # your MPN, edit the `preset:` (or use an inline board) if you're on a non-EVK board,
-# and `tan build`.  CMakeLists.txt invokes
-# scripts/alp_project.py at configure time + layers the
+# and `tan build`.  CMakeLists.txt invokes alp-sdk's
+# scripts/alp_project.py (resolved via ALP_SDK_ROOT, not part of
+# this scaffolded project) at configure time + layers the
 # generated alp.conf over prj.conf via EXTRA_CONF_FILE.
 som:
   sku: E1M-AEN801
@@ -31,9 +32,11 @@ cores:
       - i2c
 
 # TMP112 is populated on every member of the AEN, V2N, V2N-M1
-# families per metadata/chips/tmp112.yaml -- so this example is
-# Ring 2 (chip-bound, multi-family) per
-# scripts/check_example_portability.py classification.
+# families per alp-sdk's metadata/chips/tmp112.yaml (not part of
+# this scaffolded project) -- so this example is Ring 2
+# (chip-bound, multi-family) per
+# alp-sdk's scripts/check_example_portability.py classification
+# (also not part of this scaffolded project).
 chips:
   - tmp112
 

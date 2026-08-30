@@ -689,6 +689,201 @@ def un_edit_v2n101_soc_identity(text: str) -> str:
     return text.replace("renesas:rzv2n:n44", "alif:ensemble:e8")
 
 
+#: tan-cli#977 (the follow-up PR #975's review round scoped out, see entry 12
+#: above): `sensor`'s `src/main.c` carries two more bare alp-sdk-only
+#: referents in the SEPARATE `TMP112_ADDR_7BIT` doc-comment entry 12's
+#: `hardware_paragraph` fix deliberately left alone (it is a different
+#: comment block, three lines below the one that fix touched) -- a bare
+#: `metadata/chips/tmp112.yaml` and a bare `include/alp/chips/tmp112.h`,
+#: neither emitted into any scaffolded project. Two entries, not one, per the
+#: `edit_id` discipline: each substitution is independently reversible.
+#: Byte-identical between the two SKUs (same as entries 11/12), so both
+#: `un_edit`s are shared across both SKUs.
+_SENSOR_MAIN_C_ADDR_METADATA_POINTER_EMITTED = (
+    " families (see\n * metadata/chips/tmp112.yaml)."
+)
+_SENSOR_MAIN_C_ADDR_METADATA_POINTER_EDITED = (
+    " families (see alp-sdk's\n * metadata/chips/tmp112.yaml, not part of this\n"
+    " * scaffolded project)."
+)
+
+
+def un_edit_sensor_main_c_addr_metadata_pointer(text: str) -> str:
+    """tan-cli#977: reverse the `TMP112_ADDR_7BIT` doc-comment's bare
+    `metadata/chips/tmp112.yaml` mention rewrite above to recover the emit's
+    own (dead-pointer) bytes."""
+    return text.replace(
+        _SENSOR_MAIN_C_ADDR_METADATA_POINTER_EDITED,
+        _SENSOR_MAIN_C_ADDR_METADATA_POINTER_EMITTED,
+    )
+
+
+_SENSOR_MAIN_C_ADDR_HEADER_POINTER_EMITTED = (
+    " * include/alp/chips/tmp112.h if your board straps differently. */\n"
+)
+_SENSOR_MAIN_C_ADDR_HEADER_POINTER_EDITED = (
+    " * alp-sdk's include/alp/chips/tmp112.h (not part of this\n"
+    " * scaffolded project) if your board straps differently. */\n"
+)
+
+
+def un_edit_sensor_main_c_addr_header_pointer(text: str) -> str:
+    """tan-cli#977: reverse the `TMP112_ADDR_7BIT` doc-comment's bare
+    `include/alp/chips/tmp112.h` mention rewrite above to recover the emit's
+    own (dead-pointer) bytes. Own entry from the `metadata/chips/tmp112.yaml`
+    fix above -- the two are independent substitutions in the same comment
+    block, per the one-substitution-per-entry discipline (tan-cli#908)."""
+    return text.replace(
+        _SENSOR_MAIN_C_ADDR_HEADER_POINTER_EDITED,
+        _SENSOR_MAIN_C_ADDR_HEADER_POINTER_EMITTED,
+    )
+
+
+#: tan-cli#977: `sensor`'s `board.yaml` carries three more bare alp-sdk-only
+#: referents, none in the `src/main.c` comment block entries 11/12 and the
+#: two entries above cover -- a different file. The "Customer workflow"
+#: paragraph names `scripts/alp_project.py` bare (it IS invoked, via
+#: `ALP_SDK_ROOT` -- see `CMakeLists.txt` -- but the physical file lives only
+#: in the alp-sdk checkout `ALP_SDK_ROOT` resolves, never in this scaffolded
+#: tree, so the "not part of this scaffolded project" framing still applies;
+#: worded "resolved via ALP_SDK_ROOT" rather than entry 4/7/11/12's plain
+#: "not part of this scaffolded project" since, unlike those purely
+#: descriptive pointers, this one names real build machinery a customer's own
+#: `CMakeLists.txt` genuinely runs). The chip-classification paragraph below
+#: names a bare `metadata/chips/tmp112.yaml` and a bare
+#: `scripts/check_example_portability.py`, both purely descriptive, same
+#: defect class as entries 11/12. Three entries, one per substitution.
+#: Byte-identical between the two SKUs at every line these edits touch (the
+#: per-SKU diff is `som.sku:`, `preset:`, the `pins:` route and the `cores:`
+#: id further down -- confirmed none of it overlaps this paragraph), so all
+#: three `un_edit`s are shared across both SKUs.
+_SENSOR_BOARD_YAML_WORKFLOW_POINTER_EMITTED = (
+    "CMakeLists.txt invokes\n"
+    "# scripts/alp_project.py at configure time + layers the\n"
+)
+_SENSOR_BOARD_YAML_WORKFLOW_POINTER_EDITED = (
+    "CMakeLists.txt invokes alp-sdk's\n"
+    "# scripts/alp_project.py (resolved via ALP_SDK_ROOT, not part of\n"
+    "# this scaffolded project) at configure time + layers the\n"
+)
+
+
+def un_edit_sensor_board_yaml_workflow_pointer(text: str) -> str:
+    """tan-cli#977: reverse the "Customer workflow" paragraph's bare
+    `scripts/alp_project.py` mention rewrite above to recover the emit's own
+    (dead-pointer) bytes."""
+    return text.replace(
+        _SENSOR_BOARD_YAML_WORKFLOW_POINTER_EDITED,
+        _SENSOR_BOARD_YAML_WORKFLOW_POINTER_EMITTED,
+    )
+
+
+_SENSOR_BOARD_YAML_METADATA_POINTER_EMITTED = (
+    "families per metadata/chips/tmp112.yaml -- so this example is\n"
+    "# Ring 2 (chip-bound, multi-family) per\n"
+)
+_SENSOR_BOARD_YAML_METADATA_POINTER_EDITED = (
+    "families per alp-sdk's metadata/chips/tmp112.yaml (not part of\n"
+    "# this scaffolded project) -- so this example is Ring 2\n"
+    "# (chip-bound, multi-family) per\n"
+)
+
+
+def un_edit_sensor_board_yaml_metadata_pointer(text: str) -> str:
+    """tan-cli#977: reverse the chip-classification paragraph's bare
+    `metadata/chips/tmp112.yaml` mention rewrite above to recover the emit's
+    own (dead-pointer) bytes."""
+    return text.replace(
+        _SENSOR_BOARD_YAML_METADATA_POINTER_EDITED,
+        _SENSOR_BOARD_YAML_METADATA_POINTER_EMITTED,
+    )
+
+
+_SENSOR_BOARD_YAML_PORTABILITY_SCRIPT_POINTER_EMITTED = (
+    "# scripts/check_example_portability.py classification.\n"
+)
+_SENSOR_BOARD_YAML_PORTABILITY_SCRIPT_POINTER_EDITED = (
+    "# alp-sdk's scripts/check_example_portability.py classification\n"
+    "# (also not part of this scaffolded project).\n"
+)
+
+
+def un_edit_sensor_board_yaml_portability_script_pointer(text: str) -> str:
+    """tan-cli#977: reverse the chip-classification paragraph's bare
+    `scripts/check_example_portability.py` mention rewrite above to recover
+    the emit's own (dead-pointer) bytes. Own entry from the
+    `metadata/chips/tmp112.yaml` fix above, per the one-substitution-per-entry
+    discipline."""
+    return text.replace(
+        _SENSOR_BOARD_YAML_PORTABILITY_SCRIPT_POINTER_EDITED,
+        _SENSOR_BOARD_YAML_PORTABILITY_SCRIPT_POINTER_EMITTED,
+    )
+
+
+#: tan-cli#977: `sensor`'s `prj.conf` carries the same
+#: `scripts/alp_project.py` bare referent as `board.yaml`'s "Customer
+#: workflow" paragraph above, a different file. Byte-identical between the
+#: two SKUs (confirmed: `sensor`'s `prj.conf` carries no SKU substitution at
+#: all), so one `un_edit` shared across both.
+_SENSOR_PRJ_CONF_WORKFLOW_POINTER_EMITTED = (
+    "# from board.yaml by scripts/alp_project.py and layered in via\n"
+    "# EXTRA_CONF_FILE (see CMakeLists.txt).\n"
+)
+_SENSOR_PRJ_CONF_WORKFLOW_POINTER_EDITED = (
+    "# from board.yaml by alp-sdk's scripts/alp_project.py (resolved\n"
+    "# via ALP_SDK_ROOT, not part of this scaffolded project) and\n"
+    "# layered in via EXTRA_CONF_FILE (see CMakeLists.txt).\n"
+)
+
+
+def un_edit_sensor_prj_conf_workflow_pointer(text: str) -> str:
+    """tan-cli#977: reverse `prj.conf`'s bare `scripts/alp_project.py`
+    mention rewrite above to recover the emit's own (dead-pointer) bytes."""
+    return text.replace(
+        _SENSOR_PRJ_CONF_WORKFLOW_POINTER_EDITED,
+        _SENSOR_PRJ_CONF_WORKFLOW_POINTER_EMITTED,
+    )
+
+
+#: tan-cli#977: `minimal`'s `README.md` names two bare example directories
+#: ("`gpio-button-led`" / "`i2c-scanner`") in its opening troubleshooting
+#: paragraph -- neither emitted into any scaffolded project. Entry 7's shape
+#: (a markdown file, so turned into real links rather than named in prose):
+#: both are real alp-sdk directories
+#: (`examples/peripheral-io/gpio-button-led`,
+#: `examples/peripheral-io/i2c-scanner`), pinned at `v0.16.0` per the current
+#: vendor point's `- Ref:`, same as every other cross-repo link this tree
+#: carries. One substitution (both referents sit in the same sentence, turned
+#: into links together), byte-identical between the two SKUs (the per-SKU
+#: `west build`/`west flash` block is further down, untouched here), so one
+#: `un_edit` shared across both.
+_MINIMAL_README_EXAMPLE_POINTERS_EMITTED = (
+    "Pin down which one BEFORE moving on to `gpio-button-led` or\n"
+    "`i2c-scanner`.\n"
+)
+_MINIMAL_README_EXAMPLE_POINTERS_EDITED = (
+    "Pin down which one BEFORE moving on to alp-sdk's\n"
+    "[`examples/peripheral-io/gpio-button-led`]"
+    "(https://github.com/alplabai/alp-sdk/tree/v0.16.0/"
+    "examples/peripheral-io/gpio-button-led)\n"
+    "or\n"
+    "[`examples/peripheral-io/i2c-scanner`]"
+    "(https://github.com/alplabai/alp-sdk/tree/v0.16.0/"
+    "examples/peripheral-io/i2c-scanner)\n"
+    "-- neither is part of this scaffolded project.\n"
+)
+
+
+def un_edit_minimal_readme_example_pointers(text: str) -> str:
+    """tan-cli#977: reverse the opening troubleshooting paragraph's bare
+    `gpio-button-led`/`i2c-scanner` mentions rewrite above to recover the
+    emit's own (dead-pointer) bytes."""
+    return text.replace(
+        _MINIMAL_README_EXAMPLE_POINTERS_EDITED,
+        _MINIMAL_README_EXAMPLE_POINTERS_EMITTED,
+    )
+
+
 DELIBERATE_EDITS: dict[
     tuple[str, str, str, str], tuple[str, Callable[[str], str]]
 ] = {
@@ -882,6 +1077,77 @@ DELIBERATE_EDITS: dict[
     # (CONFIG_EMUL=y, CONFIG_I2C_EMUL=y either way). Reverted to plain APPEND,
     # which is what `--emit scaffold` produces unedited -- these four files
     # carry no deliberate edit at all now.
+    ("sensor", "E1M-AEN801", "src/main.c", "addr_metadata_pointer"): (
+        "tan-cli#977: the TMP112_ADDR_7BIT doc-comment's bare "
+        "metadata/chips/tmp112.yaml mention, a different comment block than "
+        "entry 12's hardware_paragraph fix, not emitted into any scaffolded "
+        "project -- named the real alp-sdk path in prose",
+        un_edit_sensor_main_c_addr_metadata_pointer,
+    ),
+    ("sensor", "E1M-V2N101", "src/main.c", "addr_metadata_pointer"): (
+        "tan-cli#977: same as sensor/E1M-AEN801/src/main.c above",
+        un_edit_sensor_main_c_addr_metadata_pointer,
+    ),
+    ("sensor", "E1M-AEN801", "src/main.c", "addr_header_pointer"): (
+        "tan-cli#977: the same doc-comment's bare "
+        "include/alp/chips/tmp112.h mention, own entry from the "
+        "metadata/chips/tmp112.yaml fix above",
+        un_edit_sensor_main_c_addr_header_pointer,
+    ),
+    ("sensor", "E1M-V2N101", "src/main.c", "addr_header_pointer"): (
+        "tan-cli#977: same as sensor/E1M-AEN801/src/main.c above",
+        un_edit_sensor_main_c_addr_header_pointer,
+    ),
+    ("sensor", "E1M-AEN801", "board.yaml", "workflow_pointer"): (
+        "tan-cli#977: the Customer workflow paragraph's bare "
+        "scripts/alp_project.py mention -- real build machinery (invoked "
+        "via ALP_SDK_ROOT) but the file itself lives only in the alp-sdk "
+        "checkout that resolves, never in this scaffolded tree",
+        un_edit_sensor_board_yaml_workflow_pointer,
+    ),
+    ("sensor", "E1M-V2N101", "board.yaml", "workflow_pointer"): (
+        "tan-cli#977: same as sensor/E1M-AEN801/board.yaml above",
+        un_edit_sensor_board_yaml_workflow_pointer,
+    ),
+    ("sensor", "E1M-AEN801", "board.yaml", "metadata_pointer"): (
+        "tan-cli#977: the chip-classification paragraph's bare "
+        "metadata/chips/tmp112.yaml mention, not emitted into any "
+        "scaffolded project",
+        un_edit_sensor_board_yaml_metadata_pointer,
+    ),
+    ("sensor", "E1M-V2N101", "board.yaml", "metadata_pointer"): (
+        "tan-cli#977: same as sensor/E1M-AEN801/board.yaml above",
+        un_edit_sensor_board_yaml_metadata_pointer,
+    ),
+    ("sensor", "E1M-AEN801", "board.yaml", "portability_script_pointer"): (
+        "tan-cli#977: the same paragraph's bare "
+        "scripts/check_example_portability.py mention, own entry from the "
+        "metadata/chips/tmp112.yaml fix above",
+        un_edit_sensor_board_yaml_portability_script_pointer,
+    ),
+    ("sensor", "E1M-V2N101", "board.yaml", "portability_script_pointer"): (
+        "tan-cli#977: same as sensor/E1M-AEN801/board.yaml above",
+        un_edit_sensor_board_yaml_portability_script_pointer,
+    ),
+    ("sensor", "E1M-AEN801", "prj.conf", "workflow_pointer"): (
+        "tan-cli#977: the same bare scripts/alp_project.py mention as "
+        "board.yaml's Customer workflow paragraph, a different file",
+        un_edit_sensor_prj_conf_workflow_pointer,
+    ),
+    ("sensor", "E1M-V2N101", "prj.conf", "workflow_pointer"): (
+        "tan-cli#977: same as sensor/E1M-AEN801/prj.conf above",
+        un_edit_sensor_prj_conf_workflow_pointer,
+    ),
+    ("minimal", "E1M-AEN801", "README.md", "example_pointers"): (
+        "tan-cli#977: the opening troubleshooting paragraph's bare "
+        "`gpio-button-led`/`i2c-scanner` mentions, neither emitted into "
+        "any scaffolded project -- turned into real links, entry 7's shape",
+        un_edit_minimal_readme_example_pointers,
+    ),
+    ("minimal", "E1M-V2N101", "README.md", "example_pointers"): (
+        "tan-cli#977: same as minimal/E1M-AEN801/README.md above",
+        un_edit_minimal_readme_example_pointers,
+    ),
 }
 
 

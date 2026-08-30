@@ -64,7 +64,7 @@
     "tests/commands/test_west_forward_command.py": 1199,
     "tests/conftest.py": 1630,
     "tests/core/test_scaffold.py": 1411,
-    "tests/core/test_template_integrity.py": 874,
+    "tests/core/test_template_integrity.py": 877,
     "tests/gates/test_every_issue_code_is_registered.py": 1755,
     "tests/gates/test_module_size_budget_log_append_only.py": 809,
     "tests/gates/test_planner_relocation_freshness.py": 1324,

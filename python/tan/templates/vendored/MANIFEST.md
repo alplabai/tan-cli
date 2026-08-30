@@ -386,7 +386,7 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **thirty-one** live entries
+The `DELIBERATE_EDITS` table below currently carries **forty-five** live entries
 (counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS`
 dict, not by hand): one `multicore-mailbox`/`E1M-AEN801` entry for the
 leading "blocked ahead" caveat (tan-cli#864 Q5, see entry 9 below), the
@@ -404,18 +404,25 @@ SKU — six more for `diagnostics`/`E1M-V2N101`'s Alif/AEN801-shaped
 `src/main.c`/`README.md` bytes (tan-cli#932, see entry 8 below), eight
 more for `sensor`/`src/main.c`'s four remaining bare `i2c-scanner`
 mentions entry 7 left uncovered (tan-cli#924, see entry 11 below) — two
-SKUs each, one entry per substitution — and two more for `sensor`/
+SKUs each, one entry per substitution — two more for `sensor`/
 `src/main.c`'s `Hardware:`-paragraph bare `tmp112.yaml` mention, entry 11's
-own in-paragraph sibling (PR #975 review round, see entry 12 below). That is
-`1 + 1 + 6 + 2 + 1 + 4 + 6 + 8 + 2 = 31` — a review round on tan-cli#932
+own in-paragraph sibling (PR #975 review round, see entry 12 below), and
+fourteen more for the remaining bare cross-repo referents that same review
+round scoped out of #975 (tan-cli#977, see entry 13 below) — two SKUs each
+for `sensor`/`src/main.c`'s separate `TMP112_ADDR_7BIT` doc-comment (two
+substitutions), `sensor`/`board.yaml`'s Customer-workflow and
+chip-classification paragraphs (three substitutions), `sensor`/`prj.conf`
+(one substitution) and `minimal`/`README.md` (one substitution). That is
+`1 + 1 + 6 + 2 + 1 + 4 + 6 + 8 + 2 + 14 = 45` — a review round on tan-cli#932
 (2026-08) found this paragraph's arithmetic summed to 19 without the leading
 multicore-mailbox term, and entry 9 below absent from the numbered list
 entirely; both were fixed in that round (making the count twenty), a
 further review round on tan-cli#946 added entry 10 (making it twenty-one),
-tan-cli#924 added entry 11's eight entries (making it twenty-nine), and the
-PR #975 review round added entry 12's two entries (making it thirty-one).
+tan-cli#924 added entry 11's eight entries (making it twenty-nine), the
+PR #975 review round added entry 12's two entries (making it thirty-one),
+and tan-cli#977 added entry 13's fourteen entries (making it forty-five).
 `test_the_manifest_deliberate_edit_count_matches_the_table` pins the
-**thirty-one** above against `len(DELIBERATE_EDITS)` itself, the drift this
+**forty-five** above against `len(DELIBERATE_EDITS)` itself, the drift this
 paragraph shipped with nothing catching before tan-cli#932. tan-cli#384's
 seven `README.md` doc-link entries
 are NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0`
@@ -735,6 +742,56 @@ strictness exists to catch.
     `examples/peripheral-io/i2c-master/src/main.c`, alongside entry 11's; it
     retires the same way, the moment alp-sdk#1795 lands and this tree is
     re-vendored.
+13. **The remaining bare cross-repo referents entry 12 scoped out (tan-cli#977,
+    the follow-up filed off PR #975's own review round).** Five more sites,
+    none in the `Hardware:`/`pattern_paragraph` comment block entries 11/12
+    already cover:
+    - `sensor`'s `src/main.c:51,53` -- the separate `TMP112_ADDR_7BIT`
+      doc-comment's bare `metadata/chips/tmp112.yaml` and
+      `include/alp/chips/tmp112.h` mentions. Two substitutions (one per
+      referent, per the one-substitution-per-entry discipline), named in
+      prose (a C comment, no markdown link syntax applies), matching entry
+      12's phrasing.
+    - `sensor`'s `board.yaml:12` -- the "Customer workflow" paragraph's bare
+      `scripts/alp_project.py` mention. Unlike entries 4/7/11/12's purely
+      descriptive pointers, this one names real build machinery a
+      scaffolded project's own `CMakeLists.txt` genuinely invokes, resolved
+      via `ALP_SDK_ROOT` -- but the physical file still lives only in the
+      alp-sdk checkout `ALP_SDK_ROOT` points at, never in this scaffolded
+      tree, so worded "resolved via `ALP_SDK_ROOT`, not part of this
+      scaffolded project" rather than the plain "not part of this
+      scaffolded project" the purely-descriptive entries use.
+    - `sensor`'s `board.yaml:34,36` -- the chip-classification paragraph's
+      bare `metadata/chips/tmp112.yaml` and
+      `scripts/check_example_portability.py` mentions, purely descriptive,
+      same defect class as entry 11/12. Two substitutions.
+    - `sensor`'s `prj.conf:4` -- the same bare `scripts/alp_project.py`
+      mention as `board.yaml`'s Customer-workflow paragraph, a different
+      file, same "resolved via `ALP_SDK_ROOT`" wording.
+    - `minimal`'s `README.md:19` -- "before moving on to `gpio-button-led`
+      or `i2c-scanner`", entry 7's shape (a markdown file, so turned into
+      real links -- both real alp-sdk directories, pinned at `v0.16.0` per
+      the current vendor point's `- Ref:`) rather than entry 11/12/this
+      entry's own prose naming, since no existing `DELIBERATE_EDITS` entry
+      touched the `minimal` template at all before this one.
+
+    Byte-identical between the two SKUs at every substitution above
+    (`sensor`'s `src/main.c`, `board.yaml` at these lines, and `prj.conf`
+    carry no SKU substitution; `minimal`'s `README.md` differs only in the
+    `west build`/`west flash` block further down, untouched here) -- each
+    `un_edit` is shared across both SKUs. Seven distinct substitutions x 2
+    SKUs = fourteen entries. Fix belongs upstream: the `src/main.c` and
+    `board.yaml`/`prj.conf` sites are alp-sdk's
+    `examples/peripheral-io/i2c-master/{src/main.c,board.yaml,prj.conf}` --
+    a different token than entry 11/12's `i2c-scanner` mentions
+    (`metadata/chips/tmp112.yaml`, `include/alp/chips/tmp112.h`,
+    `scripts/alp_project.py`, `scripts/check_example_portability.py`), so
+    NOT covered by alp-sdk#1795, though the same file; the `minimal` site is
+    alp-sdk's `examples/peripheral-io/hello-world/README.md`, a template no
+    prior entry has touched. Not yet filed upstream as an alp-sdk issue --
+    unlike entries 4/7/10/11/12, this entry carries no issue number pending
+    that filing; all fourteen retire the moment the corresponding upstream
+    fix lands and this tree is re-vendored.
 
 ## Template x SKU matrix vendored
 

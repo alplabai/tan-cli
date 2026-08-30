@@ -215,7 +215,10 @@ _NUMBER_WORDS = {
         "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
         "twenty-one", "twenty-two", "twenty-three", "twenty-four",
         "twenty-five", "twenty-six", "twenty-seven", "twenty-eight",
-        "twenty-nine", "thirty", "thirty-one",
+        "twenty-nine", "thirty", "thirty-one", "thirty-two", "thirty-three",
+        "thirty-four", "thirty-five", "thirty-six", "thirty-seven",
+        "thirty-eight", "thirty-nine", "forty", "forty-one", "forty-two",
+        "forty-three", "forty-four", "forty-five",
     ))
 }
 
