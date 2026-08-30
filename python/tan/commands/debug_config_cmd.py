@@ -119,6 +119,7 @@ from tan.core.debug_launch import (
     is_unresolved_placeholder,
     launch_preview_document,
     launch_preview_notes,
+    load_files_preserved,
     manifest_slices,
     parse_server_kind,
     parse_target_kind,
@@ -980,6 +981,30 @@ def _sdk_identity_appended_issue(field: str, existing_value: str, incoming_value
     )
 
 
+def _load_files_preserved_issue(existing_value: str, incoming_value: str) -> Issue:
+    """tan-cli#1020 review: the ``loadFiles`` sibling of
+    ``debug-config.sdk-identity-appended`` above -- ``loadFiles`` names ONE
+    deliberate artefact list per configuration, not a set of independently
+    owned entries, so its own merge rule (``debug_launch._merge_load_files``)
+    never appends beside an unproven existing value the way
+    `configFiles`/`setupCommands` do; it leaves the existing value untouched,
+    wholesale. Severity ``info``, same family as its siblings: nothing
+    failed, but a tool that silently keeps a customer's value at `exit 0`
+    with `issues: []` -- including a customer's own deliberate attach-only
+    ``[]`` -- has told them nothing about the divergence between what is on
+    disk and what this run would otherwise have written."""
+    return Issue(
+        "debug-config.load-files-preserved",
+        "info",
+        f'This write left the existing `loadFiles` value "{existing_value}" in place '
+        f'instead of replacing it with "{incoming_value}", resolved from this run\'s '
+        "own draft -- tan could not prove the existing value was its own prior output "
+        "(no recorded `.alp/` provenance for it), so it left it rather than risk "
+        "overwriting a value you filled in by hand, including an explicit `[]` for an "
+        "attach-only session. If it is stale, update it in .vscode/launch.json yourself.",
+    )
+
+
 def _comments_dropped_issue() -> Issue:
     """tan-cli#182 review finding #2: this write dropped a comment (or trailing
     comma) sitting inside a span it rewrote. Severity `info` -- nothing failed
@@ -1021,8 +1046,14 @@ def _data(
         # `*Commands` lists that could carry a bare `load`) the way
         # alp-sdk-vscode#586 had to before its consent dialog could even ask
         # the question. Derived from `target` alone (`programs_device`), so it
-        # is present -- and correct -- on every outcome this command can
-        # report, including a failure before a `configuration` was ever built.
+        # is present on every outcome this command can report, including a
+        # failure before a `configuration` was ever built -- but on one of
+        # the internal-failure backstop paths (`_internal_failure` and its
+        # siblings), `target` is a fixed `zephyr-mcu`/`none` placeholder that
+        # never learned what was actually asked for (tan-cli#1020 review),
+        # so there `programsDevice` is present and CONSERVATIVE (`true`,
+        # fail-safe), not necessarily an accurate answer for the target the
+        # caller actually named.
         "programsDevice": programs_device(target),
         "notes": notes,
         # The launch configuration itself -- the very thing the command
@@ -1904,6 +1935,13 @@ def _run(
     stranded_appends = sdk_identity_stranded_appends(
         existing, draft, sdk_filled_json_fields, provenance=provenance
     )
+    # tan-cli#1020 review: the SAME "mirror the real merge, then disclose"
+    # discipline as the two calls above, for the ONE field neither of them
+    # covers -- `loadFiles` is populated by the draft itself (tan-cli#945),
+    # never by the SDK-identity fallback those two are scoped to, and its
+    # own merge rule (`_merge_load_files`) protects a hand-authored value
+    # WHOLESALE rather than appending beside it.
+    preserved_load_files = load_files_preserved(existing, draft, provenance)
 
     # tan-cli#489 (6): `--pre-launch-task ''` opts OUT of a `preLaunchTask` key
     # entirely (`create_launch_draft` builds it, then deletes it), which is
@@ -1975,6 +2013,8 @@ def _run(
         issues.append(
             _sdk_identity_appended_issue(field, existing_value, incoming_value)
         )
+    if preserved_load_files is not None:
+        issues.append(_load_files_preserved_issue(*preserved_load_files))
 
     return success(
         replaced=plan.replaced,

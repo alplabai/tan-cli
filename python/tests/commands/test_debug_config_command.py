@@ -32,7 +32,6 @@ from tan.core.debug_launch import (
     create_launch_json_write_plan,
     fill_debug_probe_identity_gaps,
     infer_target_kind,
-    programs_device,
     strip_jsonc,
 )
 from tan.core.debug_launch import BAREMETAL_MCU, OPENOCD, PYOCD, SERVER_NONE
@@ -511,20 +510,22 @@ def test_a_rewrite_preserves_the_existing_files_own_mode(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "argv,want_target,want_server",
+    "argv,want_target,want_server,want_programs",
     [
-        (("--target-kind", "bogus-kind"), ZEPHYR_MCU, "none"),
-        (("--target-kind", ZEPHYR_MCU, "--server", "bogus-server"), ZEPHYR_MCU, "none"),
+        (("--target-kind", "bogus-kind"), ZEPHYR_MCU, "none", True),
+        (("--target-kind", ZEPHYR_MCU, "--server", "bogus-server"), ZEPHYR_MCU, "none", True),
         # A legal server for the wrong target class: gdbserver is yocto-only.
         # #508 review, Major 4 follow-up (tan-cli#477): both locals ARE bound
         # by this point, so this reports the pairing it actually refused
         # (zephyr-mcu/gdbserver), not the placeholder the first two rows
         # still get -- neither of THOSE ever finished parsing.
-        (("--target-kind", ZEPHYR_MCU, "--server", GDBSERVER), ZEPHYR_MCU, GDBSERVER),
+        (("--target-kind", ZEPHYR_MCU, "--server", GDBSERVER), ZEPHYR_MCU, GDBSERVER, True),
     ],
     ids=["target-kind", "server", "pairing"],
 )
-def test_a_refused_selector_is_a_coded_envelope_at_exit_2(tmp_path, argv, want_target, want_server):
+def test_a_refused_selector_is_a_coded_envelope_at_exit_2(
+    tmp_path, argv, want_target, want_server, want_programs
+):
     """tan-cli#477: exit 2, not 5. A flag VALUE outside the accepted set is
     the caller's own input, and every one of these already answered with a
     complete, actionable message -- only the verdict said "tan crashed".
@@ -545,9 +546,13 @@ def test_a_refused_selector_is_a_coded_envelope_at_exit_2(tmp_path, argv, want_t
     assert env["project"] == {"root": None, "boardYaml": None}
     assert not launch_json(tmp_path).exists()
     # tan-cli#945: `programsDevice` is present -- and follows `targetKind` --
-    # even on a refusal that never built a `configuration`. Derived from the
-    # SAME reported target every one of these three cases already pins.
-    assert env["data"]["programsDevice"] is programs_device(want_target)
+    # even on a refusal that never built a `configuration`. tan-cli#1020
+    # review nit: pinned against the LITERAL `want_programs`, not
+    # `programs_device(want_target)` -- comparing the CLI's output to the
+    # very function under test is vacuous for the VALUE (a `programs_device`
+    # mutated to always return `False` cancels out on both sides of `is` and
+    # every case here still passes; verified while fixing this).
+    assert env["data"]["programsDevice"] is want_programs
 
 
 def test_an_svd_path_that_cannot_be_read_fails_instead_of_writing(tmp_path):
@@ -617,7 +622,6 @@ def test_the_preview_envelope_states_whether_the_profile_programs_the_device(
     )
 
     assert env["data"]["programsDevice"] is expect_programs
-    assert env["data"]["programsDevice"] is programs_device(target)
 
 
 def test_a_cortex_debug_preview_carries_an_explicit_load_files_key(tmp_path):
@@ -1701,6 +1705,147 @@ def test_an_unrecorded_positional_slot_is_never_overwritten_by_a_bare_merge():
         "interface/jlink.cfg",
         "board/new.cfg",
     ], plan.written_configuration["configFiles"]
+
+
+def test_a_hand_authored_load_files_survives_a_rerun():
+    """tan-cli#1020 review BLOCKER: `loadFiles` is a list field, so before
+    this fix it silently routed through `configFiles`/`setupCommands`'s
+    OWN identity-plus-positional-append merge -- which APPENDS an unmatched
+    incoming value beside an existing one it cannot prove is tan's own,
+    rather than protecting the existing value the way every OTHER hand-
+    filled field in this module does. That is the right call for
+    `configFiles` (independently-owned entries a customer and tan can both
+    legitimately contribute one of); it is wrong for `loadFiles`, which
+    names ONE deliberate artefact list -- appending means cortex-debug
+    programs the customer's file AND tan's resolved one. Measured, at this
+    review's head, against a customer's own `["${workspaceFolder}/custom/
+    app.hex"]`: the pre-fix merge produced `["${workspaceFolder}/custom/
+    app.hex", "${workspaceFolder}/build/app/zephyr/zephyr.elf"]`. FAILS
+    against that merge; this fix leaves the customer's single entry alone."""
+    draft = create_launch_draft(ZEPHYR_MCU, "jlink", None)
+    existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {
+                    "name": "Alp: Zephyr Debug (J-Link)",
+                    "loadFiles": ["${workspaceFolder}/custom/app.hex"],
+                }
+            ],
+        }
+    )
+
+    plan = create_launch_json_write_plan(existing, draft)
+
+    assert plan.written_configuration["loadFiles"] == [
+        "${workspaceFolder}/custom/app.hex"
+    ], plan.written_configuration["loadFiles"]
+
+
+def test_an_explicit_empty_load_files_survives_a_rerun_as_attach_only():
+    """tan-cli#1020 review BLOCKER, the SAFETY-critical row: an explicit
+    `"loadFiles": []` is `marus25.cortex-debug`'s own documented spelling for
+    "program nothing, attach only" -- exactly the fact this issue exists to
+    let a customer express. `configFiles`'s own merge rule treats an EMPTY
+    existing list as "nothing to protect" (there is no concept of a
+    deliberate empty `configFiles`), and reusing that rule for `loadFiles`
+    silently turned a customer's attach-only session back into one that
+    programs silicon: measured, at this review's head, `[]` -> `["${
+    workspaceFolder}/build/app/zephyr/zephyr.elf"]`, at exit 0 with
+    `issues: []`. FAILS against that merge; this fix leaves `[]` exactly as
+    the customer wrote it."""
+    draft = create_launch_draft(ZEPHYR_MCU, "jlink", None)
+    existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {"name": "Alp: Zephyr Debug (J-Link)", "loadFiles": []}
+            ],
+        }
+    )
+
+    plan = create_launch_json_write_plan(existing, draft)
+
+    assert plan.written_configuration["loadFiles"] == [], (
+        plan.written_configuration["loadFiles"]
+    )
+
+
+def test_a_tan_owned_load_files_is_synced_to_a_new_build_resolution():
+    """The pairing case for the two tests above: a `loadFiles` this run CAN
+    prove -- via `.alp/` provenance -- is tan's OWN prior output must still
+    track a fresh resolution, the same "an updated build makes a stale
+    value updateable again" rule `configFiles` already gets. Protecting
+    every existing value unconditionally would be just as wrong as the
+    blocker this test's siblings cover: a rebuild that resolves a new
+    per-core ELF must still reach `loadFiles`, or `programsDevice: true`
+    would sit beside a stale artefact path."""
+    draft = create_launch_draft(ZEPHYR_MCU, "jlink", None)
+    draft["loadFiles"] = ["${workspaceFolder}/build/app/zephyr/zephyr_rev_b.elf"]
+    existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {
+                    "name": "Alp: Zephyr Debug (J-Link)",
+                    "loadFiles": ["${workspaceFolder}/build/app/zephyr/zephyr_rev_a.elf"],
+                }
+            ],
+        }
+    )
+    provenance = launch_provenance.empty().updated(
+        "Alp: Zephyr Debug (J-Link)",
+        {"loadFiles": ["${workspaceFolder}/build/app/zephyr/zephyr_rev_a.elf"]},
+    )
+
+    plan = create_launch_json_write_plan(existing, draft, provenance=provenance)
+
+    assert plan.written_configuration["loadFiles"] == [
+        "${workspaceFolder}/build/app/zephyr/zephyr_rev_b.elf"
+    ], plan.written_configuration["loadFiles"]
+
+
+def test_a_hand_authored_load_files_survives_a_real_cli_rerun_and_is_disclosed(tmp_path):
+    """The end-to-end counterpart of the two pure-merge blocker tests above,
+    through the real CLI and a real `.vscode/launch.json` -- and the
+    tan-cli#1020 review's disclosure ask: a write that protects a
+    hand-authored `loadFiles` must say so, the same way `configFiles`'s own
+    protected-append case gets `debug-config.sdk-identity-appended`."""
+    vscode_dir = tmp_path / ".vscode"
+    vscode_dir.mkdir()
+    (vscode_dir / "launch.json").write_text(
+        json.dumps(
+            {
+                "version": "0.2.0",
+                "configurations": [
+                    {
+                        "name": "Alp: Zephyr Debug (J-Link)",
+                        "type": "cortex-debug",
+                        "request": "launch",
+                        "executable": "${workspaceFolder}/build/app/zephyr/zephyr.elf",
+                        "loadFiles": [],
+                        "servertype": "jlink",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--format", "json")
+    )
+
+    assert env["exitCode"] == 0, env
+    on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk["configurations"][0]["loadFiles"] == [], on_disk["configurations"][0]
+    assert env["data"]["configuration"]["loadFiles"] == []
+    preserved_issue = next(
+        (i for i in env["issues"] if i["code"] == "debug-config.load-files-preserved"), None
+    )
+    assert preserved_issue is not None, env["issues"]
+    assert preserved_issue["severity"] == "info"
+    assert "loadFiles" in preserved_issue["message"]
 
 
 def test_three_real_cli_runs_replace_configfiles_each_time_not_accumulate(tmp_path):

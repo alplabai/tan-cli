@@ -9,6 +9,17 @@ relying on POSITION. tan-cli#518, the gap tan-cli#489's own docstring names
 as a "Known, accepted limitation" (``debug_launch.py``'s
 ``_merge_list_by_identity``).
 
+tan-cli#1020 review widened this sidecar to a THIRD field, ``loadFiles``
+(tan-cli#945) -- the same content-hash record, read by the same
+:meth:`LaunchProvenance.hashes_for`, but consumed by a DIFFERENT merge rule
+(``debug_launch._merge_load_files``, not ``_merge_list_by_identity``): a
+``loadFiles`` this run cannot prove it wrote is left untouched WHOLESALE
+(never appended-to, unlike ``configFiles``/``setupCommands``), because it
+names one deliberate artefact list -- possibly an explicit ``[]`` for
+attach-only -- not a set of independently-owned entries. This module itself
+needed no change for that: `hashes_for`/`updated`/`record` are already
+generic over the field name.
+
 ## Why content hash, and why a sidecar at all
 
 The design decision (tan-cli#518, 2026-08-28) rules out an in-file marker:

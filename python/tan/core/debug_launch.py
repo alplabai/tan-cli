@@ -785,6 +785,57 @@ def sdk_identity_stranded_appends(
     return out
 
 
+def load_files_preserved(
+    existing_content: str | None,
+    draft: dict[str, Any],
+    provenance: LaunchProvenance | None = None,
+) -> tuple[str, str] | None:
+    """tan-cli#1020 review: whether writing ``draft`` over ``existing_content``
+    will PROTECT an existing ``loadFiles`` value this run cannot prove is
+    tan's own prior output (see [`_merge_load_files`]) -- i.e. leave a
+    customer's hand-authored artefact list, an explicit attach-only ``[]``
+    included, exactly as it already was instead of the fresh resolution
+    ``draft`` itself carries. Mirrors the SAME merge decision the real write
+    (``create_launch_json_write_plan``, via ``_merge_configuration`` ->
+    ``_merge_load_files``) makes, the same way [`sdk_identity_overwrites`] /
+    [`sdk_identity_stranded_appends`] mirror theirs, so a caller can compute
+    it before a write happens (or without writing at all).
+
+    Returns ``(existing_display, incoming_display)`` when this write
+    protects a DIFFERING existing value -- the disclosure
+    ``debug-config.load-files-preserved`` names, the ``loadFiles`` sibling
+    of ``debug-config.sdk-identity-appended`` -- and ``None`` when there is
+    nothing to disclose: no ``loadFiles`` key on either side, the two
+    already agree, or this run CAN prove the existing value is its own (a
+    real overwrite happens instead, the same "a value resolved from a real
+    build overwrites unconditionally, by design" case every other field in
+    this module already leaves undisclosed).
+    """
+    if "loadFiles" not in draft:
+        return None
+    if provenance is None:
+        provenance = launch_provenance.empty()
+    try:
+        name = _configuration_name(draft)
+        document = _parse_launch_json_or_default(existing_content)
+    except DebugConfigError:
+        return None
+    configs = document.get("configurations")
+    if not isinstance(configs, list):
+        return None
+    existing_entry = _matching_existing_entry(configs, name)
+    if existing_entry is None:
+        return None
+    existing_val = existing_entry.get("loadFiles")
+    incoming_val = draft["loadFiles"]
+    if not isinstance(existing_val, list) or existing_val == incoming_val:
+        return None
+    hashes = provenance.hashes_for(name, "loadFiles")
+    if _load_files_is_tan_owned(existing_val, hashes):
+        return None
+    return (_display_value(existing_val), _display_value(incoming_val))
+
+
 def _matching_existing_entry(configs: list[Any], name: str) -> dict[str, Any] | None:
     """The SAME launch-configuration entry [`create_launch_json_write_plan`]
     would merge ``draft`` into for name ``name``: an exact-name hit, else its
@@ -1116,6 +1167,65 @@ def _merge_list_field(
     return _merge_list_by_identity(existing, next_value, tan_owned_hashes)
 
 
+def _load_files_is_tan_owned(existing: list[Any], tan_owned_hashes: frozenset[str]) -> bool:
+    """Whether an existing `loadFiles` value is provably tan's own prior
+    output rather than something a customer typed: every entry's content
+    hash is recorded in the `.alp/` sidecar as this field's own last write.
+
+    An EMPTY existing list can never satisfy this. `create_launch_draft`
+    never emits an empty `loadFiles` -- "this draft has no attach-only shape
+    for a caller to opt into yet" (tan-cli#945's own docstring, still true
+    here) -- so a customer's `[]` predates tan ever writing this key at all
+    and is unconditionally hand-authored. Treating it as "vacuously owned"
+    (the naive reading of `all(... for v in [])`) is exactly the tan-cli#1020
+    review blocker: an intentional attach-only `[]` silently turned into a
+    session that programs silicon, at exit 0 with `issues: []`.
+    """
+    if not existing:
+        return False
+    return all(launch_provenance.content_hash(v) in tan_owned_hashes for v in existing)
+
+
+def _merge_load_files(
+    existing: list[Any], incoming: list[Any], tan_owned_hashes: frozenset[str]
+) -> tuple[list[Any], list[Any]]:
+    """`loadFiles`'s own merge rule (tan-cli#1020 review) -- deliberately NOT
+    [`_merge_list_field`]'s identity-plus-positional-append rule its
+    siblings `configFiles`/`setupCommands` use.
+
+    Those two fields hold INDEPENDENT entries a customer and tan can each
+    legitimately contribute one of (a customer's extra `.cfg`, tan's own
+    resolved one), so appending tan's fresh entry beside an existing one
+    provenance cannot confirm is tan's own is the SAFE outcome
+    (tan-cli#518/#982). `loadFiles` is not that shape: it names ONE
+    deliberate artefact list per configuration -- normally the same file
+    `executable` does, or an explicit `[]` a customer wrote to make the
+    session attach-only -- so applying that same "append when unproven"
+    rule here means cortex-debug programs BOTH files when a customer typed
+    their own single entry, and an attach-only `[]` gets a fresh entry
+    appended into it, which is indistinguishable from overwriting the
+    customer's explicit "program nothing" (tan-cli#1020 review, measured:
+    `[]` -> `[<fresh elf>]`, `["custom/app.hex"]` ->
+    `["custom/app.hex", "<fresh elf>"]`, both at exit 0 with `issues: []`).
+
+    So the whole list is the unit, not its elements: a `loadFiles` this run
+    cannot prove it wrote itself (see [`_load_files_is_tan_owned`]) is left
+    EXACTLY as the file already had it -- no merge, no append -- and the
+    returned `owned` list is empty, so a later run still treats it as the
+    customer's, not tan's. A `loadFiles` this run CAN prove is its own prior
+    output (or that already equals the fresh resolution, nothing to change
+    either way) is replaced wholesale, the same "an updated build makes a
+    stale value updateable again" rule every OTHER field in this module
+    already gets from [`_merge_value`] -- and matches what
+    `apply_launch_resolution` already keeps in sync with `executable`.
+    """
+    if existing == incoming:
+        return list(incoming), list(incoming)
+    if _load_files_is_tan_owned(existing, tan_owned_hashes):
+        return list(incoming), list(incoming)
+    return list(existing), []
+
+
 def _merge_value(existing: Any, next_value: Any) -> Any:
     """Merge one incoming SCALAR or nested-DICT value over what the file
     already holds. List pairs never reach here -- [`_merge_configuration`]'s
@@ -1196,7 +1306,14 @@ def _merge_configuration(
         existing_val = existing.get(key)
         if isinstance(value, list) and isinstance(existing_val, list):
             hashes = tan_owned_hashes_for(key) if tan_owned_hashes_for is not None else frozenset()
-            merged_list, owned = _merge_list_field(existing_val, value, hashes)
+            # tan-cli#1020 review: `loadFiles` gets its OWN whole-list merge
+            # rule, not `configFiles`/`setupCommands`' identity-plus-append
+            # one -- see `_merge_load_files`'s own docstring for why the two
+            # shapes are not interchangeable.
+            if key == "loadFiles":
+                merged_list, owned = _merge_load_files(existing_val, value, hashes)
+            else:
+                merged_list, owned = _merge_list_field(existing_val, value, hashes)
             merged[key] = merged_list
             if owned_entries_out is not None and owned:
                 owned_entries_out[key] = owned
