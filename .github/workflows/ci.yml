@@ -471,12 +471,19 @@ jobs:
       # alp-sdk#1470. A pin left behind after #1470 merges leaves the whole
       # relocated model engine unmeasured while this job still reports green,
       # which is the one outcome this job exists to prevent.
+      #
+      # `eb96112b` -> `722320a1` (tan-cli#996/#1001), moved in the SAME
+      # change as `parity.yml`'s `PINNED_SDK_TAG` and
+      # `PINNED_PLANNER_ORACLE_SDK_REF` and `test_planner_relocation_
+      # freshness.py`'s `PINNED_SDK_COMMIT` / `HAND_PORT_PINNED_SDK_COMMIT` --
+      # see `parity.yml`'s `PINNED_SDK_TAG` comment for the full
+      # per-fixture re-measurement.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ inputs.sdk_parity }}
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: eb96112ba7d1cc3b4084c985962ea31772177d74
+          ref: 722320a1abe3cea675e99e97300b8a484b4e8464
           fetch-tags: true
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`

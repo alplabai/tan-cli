@@ -89,11 +89,9 @@ still latches, so the twister console harness passes regardless.
 ## Troubleshooting
 
 * **SoM identity `ALP_ERR_NOT_PROVISIONED`.** The on-module EEPROM
-  reads back blank -- the module was never run through alp-sdk's
-  [`scripts/program_eeprom.py`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/scripts/program_eeprom.py)
-  at production test -- not part of this scaffolded project; the path
-  lives only in an alp-sdk checkout, though the link above works
-  without one. On a factory-fresh board this is expected; on a
+  reads back blank -- the module was never run through
+  [`scripts/program_eeprom.py`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/scripts/program_eeprom.py) at
+  production test. On a factory-fresh board this is expected; on a
   shipped SoM it is a real fault.
 * **SoM identity `ALP_ERR_IO`.** Magic present but the CRC/schema
   check failed -- a corrupt manifest. Re-program the EEPROM.

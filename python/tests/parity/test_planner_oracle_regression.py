@@ -312,10 +312,12 @@ def test_the_fixture_is_present_and_was_captured_from_a_named_ref():
         "could tell what it froze."
     )
     assert "alp-sdk ref" in provenance.read_text(encoding="utf-8")
-    assert len(GOLDENS) >= 700, (
-        f"only {len(GOLDENS)} goldens under {EMITS} -- 700 were captured at "
-        "eb96112b (100 boards x 7 modes). A shrunken fixture silently shrinks "
-        "this gate; regenerate with scripts/capture_planner_oracle.py."
+    assert len(GOLDENS) >= 693, (
+        f"only {len(GOLDENS)} goldens under {EMITS} -- 693 were captured at "
+        "722320a1 (99 boards x 7 modes; tan-cli#996/#1001 moved this from "
+        "700/eb96112b when examples/connectivity/mqtt-sn-publish/board.yaml "
+        "was deleted upstream). A shrunken fixture silently shrinks this "
+        "gate; regenerate with scripts/capture_planner_oracle.py."
     )
 
 

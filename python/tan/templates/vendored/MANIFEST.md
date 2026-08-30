@@ -95,7 +95,51 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`eb96112b`**
+- **Current vendor point (all templates):** **`722320a1`**
+  (`722320a1abe3cea675e99e97300b8a484b4e8464`, alp-sdk `dev`, 63 commits past
+  `v0.16.0`/`eb96112b`) — tan-cli#996/#1001's re-pin, the same change that
+  moves `parity.yml`'s `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF` and
+  `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT`/
+  `HAND_PORT_PINNED_SDK_COMMIT`. Not tagged (alp-sdk's newest tag is still
+  `v0.16.0`) — `- Ref:` below stays `v0.16.0` because `_docs_ref()`'s
+  `_tag_resolves()` guard still degrades to the last RESOLVING tag, not to
+  this untagged commit.
+
+  **Twenty files moved across seven (template, sku) pairs** —
+  `diagnostics`/E1M-AEN801 (`README.md`), `diagnostics`/E1M-V2N101
+  (`README.md`), `edge-ai`/E1M-AEN801 (`README.md`, `src/main.c`),
+  `edge-ai`/E1M-V2N101 (`README.md`, `src/main.c`), `iot`/E1M-AEN801
+  (`README.md`, `board.yaml`), `sensor`/E1M-AEN801 (`README.md`,
+  `board.yaml`, `boards/native_sim_native_64.conf`,
+  `boards/native_sim_native_64.overlay`, `src/main.c`, `testcase.yaml`) and
+  `sensor`/E1M-V2N101 (the same six paths as its sibling SKU). `minimal` and
+  `multicore-mailbox` are untouched at both SKUs (`scaffold_byte_parity.py`
+  reported 0 diffs for both before this re-vendor and still does after).
+
+  Unlike every prior vendor-point move recorded here, this one is NOT just a
+  doc-link ref bump — real `examples/**` content changed inside the
+  `eb96112b..722320a1` window and the vendored bytes follow it:
+  `examples/peripheral-io/i2c-master`'s underlying chip swapped TMP112 ->
+  BMP581 (alp-sdk#1269, `sensor`'s own catalog entry), which is why `sensor`
+  moved all six of its files rather than just `README.md`;
+  `examples/ai/cold-chain-monitor`'s README/`src/main.c` gained real
+  doc-link/units-test pointers on their own (superseding entry 4's
+  `DELIBERATE_EDITS`, see "Deliberate edits on top of the emit" below); and
+  `examples/connectivity/mqtt-telemetry`'s README gained a `tan init`/
+  `tan build` customer-workflow rewrite plus a TMP112 -> BMP581 sensor-link
+  swap of its own (`iot`). Twenty of `DELIBERATE_EDITS`' prior thirty-one
+  entries retired as a direct result — their declared anchors stopped
+  matching this reworded prose verbatim; see "Deliberate edits on top of the
+  emit" below for the full retirement accounting, and
+  `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS` block comment for the
+  per-entry reasoning.
+
+  Verified at `722320a1`, against a checkout with tags fetched:
+  `scaffold_byte_parity.py` **10/10 PASS** (rc 0; `multicore-mailbox` is a
+  10th (template, sku) pair not present at the `eb96112b` vendor point's own
+  9/9 count above — tan-cli#996/#1001 adds it, unrelated to this re-vendor).
+
+- **Prior vendor point:** **`eb96112b`**
   (`eb96112ba7d1cc3b4084c985962ea31772177d74`, alp-sdk — the
   `release/v0.16.0-merge` merge, tagged `v0.16.0` the same day, 2026-08-23) —
   tan-cli#891's pin bump. NOT a planner audit: the vendored fixtures and the
@@ -285,14 +329,15 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`eb96112b`** (alp-sdk `v0.16.0`, full sha
-  `eb96112ba7d1cc3b4084c985962ea31772177d74`) — the checkout the emit was RUN
+- Commit: **`722320a1`** (alp-sdk `dev`, full sha
+  `722320a1abe3cea675e99e97300b8a484b4e8464`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::
   test_the_manifest_states_one_vendor_point_not_two`.
 
-  This line used to say `94378a05` (tan-cli#846) and, before that, `f30f4d4b`
+  This line used to say `eb96112b` (tan-cli#996/#1001, this pin's own prior
+  value), and before that `94378a05` (tan-cli#846) and, before that, `f30f4d4b`
   and assert it was "the same commit `parity.yml`'s `PINNED_SDK_TAG` now
   names". Both halves went stale, and in that order. tan-cli#582 wrote it on
   2026-08-09, setting the vendor point, this line and the pin all to
@@ -386,43 +431,33 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **forty-five** live entries
+The `DELIBERATE_EDITS` table below currently carries **thirty-eight** live entries
 (counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS`
 dict, not by hand): one `multicore-mailbox`/`E1M-AEN801` entry for the
 leading "blocked ahead" caveat (tan-cli#864 Q5, see entry 9 below), the
-`iot` CMakeLists edit, six `edge-ai` entries for the `## Model`/`## Tests`
-pointers (tan-cli#821(a), see entry 4 below) — two `README.md` entries plus
-two entries PER `src/main.c` (one per comment rewrite, declared separately
-so healing one comment without the other still reds; see
-`scaffold_byte_parity.py`'s `DELIBERATE_EDITS` docstring) — two more
-`edge-ai`/`E1M-AEN801` entries for the DEEPX retarget sentence (tan-cli#814,
-see entries 5 and 6 below), one more `edge-ai`/`E1M-V2N101` entry for that
-same tree's own narrower DEEPX-sentence defect (tan-cli#946, see entry 10
-below), four more for `diagnostics`/`sensor`'s bare cross-repo pointers
-(tan-cli#912, see entry 7 below) — two SKUs each, one `README.md` entry per
-SKU — six more for `diagnostics`/`E1M-V2N101`'s Alif/AEN801-shaped
-`src/main.c`/`README.md` bytes (tan-cli#932, see entry 8 below), eight
-more for `sensor`/`src/main.c`'s four remaining bare `i2c-scanner`
-mentions entry 7 left uncovered (tan-cli#924, see entry 11 below) — two
-SKUs each, one entry per substitution — two more for `sensor`/
-`src/main.c`'s `Hardware:`-paragraph bare `tmp112.yaml` mention, entry 11's
-own in-paragraph sibling (PR #975 review round, see entry 12 below), and
-fourteen more for the remaining bare cross-repo referents that same review
-round scoped out of #975 (tan-cli#977, see entry 13 below) — two SKUs each
-for `sensor`/`src/main.c`'s separate `TMP112_ADDR_7BIT` doc-comment (two
-substitutions), `sensor`/`board.yaml`'s Customer-workflow and
-chip-classification paragraphs (three substitutions), `sensor`/`prj.conf`
-(one substitution) and `minimal`/`README.md` (one substitution). That is
-`1 + 1 + 6 + 2 + 1 + 4 + 6 + 8 + 2 + 14 = 45` — a review round on tan-cli#932
-(2026-08) found this paragraph's arithmetic summed to 19 without the leading
-multicore-mailbox term, and entry 9 below absent from the numbered list
-entirely; both were fixed in that round (making the count twenty), a
-further review round on tan-cli#946 added entry 10 (making it twenty-one),
-tan-cli#924 added entry 11's eight entries (making it twenty-nine), the
-PR #975 review round added entry 12's two entries (making it thirty-one),
-and tan-cli#977 added entry 13's fourteen entries (making it forty-five).
+`iot` CMakeLists edit (entry 2), two `iot`/`E1M-AEN801` `README.md` entries
+for the `native_sim.conf` link and "copy it in first" comment (tan-cli#1001
+review, see entries 13/14 below), one `edge-ai`/`E1M-AEN801` `board.yaml`
+entry and one `edge-ai`/`E1M-AEN801` `README.md` entry for the DEEPX
+retarget comment/sentence pair (tan-cli#814, re-anchored tan-cli#1001
+review, see entries 5/6 below), two `sensor`/`src/main.c` entries (one per
+SKU) for the header-comment `Contrasts with... i2c-scanner` paragraph
+(tan-cli#924, see entry 11 below), six more for
+`diagnostics`/`E1M-V2N101`'s Alif/AEN801-shaped `src/main.c`/`README.md`
+bytes (tan-cli#932, see entry 8 below), and twenty-four more for the
+remaining bare cross-repo referents PR #975's review round scoped out of
+that PR, **re-derived against this same tan-cli#996/#1001 re-vendor**
+(tan-cli#977, see entry 15 below) — two SKUs each across `sensor`'s
+`src/main.c` (five substitutions: the `Hardware:` paragraph, the `#1269`
+historical note, the `BMP581_ADDR_7BIT` doc-comment's two referents, and
+the `bmp581_init` failure doc-comment), `sensor`'s `board.yaml` (five
+substitutions: the Customer-workflow paragraph, the chip-classification
+paragraph's two referents, and the `#1269` historical NOTE's two
+referents), `sensor`'s `prj.conf` (one substitution), and `minimal`'s
+`README.md` (one substitution, the template's first `DELIBERATE_EDITS`
+entry). That is `1 + 1 + 2 + 2 + 2 + 6 + 24 = 38`.
 `test_the_manifest_deliberate_edit_count_matches_the_table` pins the
-**forty-five** above against `len(DELIBERATE_EDITS)` itself, the drift this
+**thirty-eight** above against `len(DELIBERATE_EDITS)` itself, the drift this
 paragraph shipped with nothing catching before tan-cli#932. tan-cli#384's
 seven `README.md` doc-link entries
 are NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0`
@@ -430,6 +465,48 @@ tag (see "Current vendor point" above); listed here only as history, not as
 a current exception. tan-cli#501's four `sensor`/`diagnostics` CMakeLists
 edits were REVERTED (see entry 3 below) — the theory behind them measured
 false, so those four files carry no deliberate edit at all now.
+
+**tan-cli#996/#1001 (the `722320a1` re-vendor) retired nineteen entries in
+one change** — entries 4, 7, 10, 11 and 12 below (`## Model`/`## Tests`
+pointers x6, the eeprom/
+i2c-scanner README bullets x4, the `E1M-V2N101` DEEPX-scope sentence x1,
+`sensor`'s four-more-`i2c-scanner` substitutions x8, and the `Hardware:`
+paragraph x2 — thirty-one minus twelve is nineteen; the dict landed at
+twelve, not eleven, because the tan-cli#1001 review round below re-anchored
+one of the twenty originally-retired entries rather than leaving it retired,
+and then added two more). Each entry's declared `EDITED` anchor stopped
+matching a fresh `--emit scaffold` at `722320a1` verbatim: alp-sdk reworded
+the surrounding prose in every case, most from
+`examples/peripheral-io/i2c-master`'s own alp-sdk#1269 fix (the `sensor`
+template's underlying example swapped its target chip, TMP112 -> BMP581) or
+from real doc-link/units-test-pointer improvements alp-sdk made to
+`examples/ai/cold-chain-monitor` and the `diagnostics`/`sensor` README
+Troubleshooting sections on its own. Per this section's own strict-in-both-
+directions rule below, an anchor that no longer matches is a hard failure,
+not a quiet pass, so each entry was individually re-examined against the new
+bytes rather than blanket-dropped: `pattern_paragraph` (part of entry 11)
+still matched byte-for-byte and was kept, reapplied forward, and re-numbered
+into entry 11's own remaining half; every other entry's anchor was gone
+(the underlying prose reworded past it, or in one case -- entry 5/6's README
+half -- reworded to state the SAME defect in different words, not healed at
+all) and was either retired or, for that one, RE-ANCHORED on the new wording
+rather than hand-reconstructed against a paraphrase. Retiring the other
+nineteen is not asserting every one is fully healed -- some (`hardware_
+paragraph` x2, `init_fail_comment` x2) are anchor-gone, not healed: their
+specific matched string is simply gone, replaced by a new string with the
+identical underlying defect, and reconstructing a correction against it is
+out of scope for a pin-bump alone (see `scaffold_byte_parity.py`'s
+`DELIBERATE_EDITS` block comment, which now names these four explicitly as
+a separate "anchor-gone, not healed" category rather than folding them into
+either/or language — tan-cli#1001 review). The rest (`bringup_instruction`
+x2, `failure_modes_instruction` x2, `i2c_scanner_bullet` x2,
+`eeprom_script_pointer` x2, `model_tests_pointers` x2,
+`model_comment_1`/`model_comment_2` x4, `deepx_v2m102_scope`) genuinely are
+healed: the customer-facing gap the retired edit closed is now closed by
+alp-sdk's own 722320a1 prose, verified per entry against the upstream diff.
+The full per-entry reasoning lives in `scaffold_byte_parity.py`'s
+`DELIBERATE_EDITS` dict, in the block comment directly above the surviving
+entries.
 
 **Each is DECLARED to that gate, in `scaffold_byte_parity.py`'s
 `DELIBERATE_EDITS`, and the declaration is strict in both directions.** An
@@ -487,7 +564,7 @@ strictness exists to catch.
    plain `list(APPEND …)`, which is what `--emit scaffold` produces unedited
    for these four files, so they carry no deliberate edit anymore and this
    entry is not live.
-4. **`edge-ai`'s `## Model`/`## Tests` README sections and matching
+4. **(RETIRED at tan-cli#996/#1001, history only) `edge-ai`'s `## Model`/`## Tests` README sections and matching
    `src/main.c` comments, both SKUs (tan-cli#821(a)).** The emit points a
    customer at `models/README.md` and `twister ... -T tests/unit/cold_chain`
    — real paths only in the alp-sdk checkout the text was captured from,
@@ -526,7 +603,8 @@ strictness exists to catch.
    and `src/main.c`, not here. Filed upstream as alp-sdk#1688; this entry
    retires the moment that lands and this tree is re-vendored.
 5. **`edge-ai`/`E1M-AEN801`'s `README.md`: the DEEPX DX-M1 retarget sentence
-   (tan-cli#814).** The emit says "Flip `som.sku` in `board.yaml` to
+   (tan-cli#814, re-anchored tan-cli#1001 review after a false retirement).**
+   The original tan-cli#814 emit said "Flip `som.sku` in `board.yaml` to
    `E1M-V2M101` for the DEEPX DX-M1 path" — correct on the `E1M-V2N101`
    sibling (V2N101/V2M101 share one PCB, so every other field the flip
    leaves untouched already matches), but wrong here: `E1M-AEN801`'s
@@ -543,16 +621,30 @@ strictness exists to catch.
    of this entry said "three times in a row" and a re-measurement found five,
    because the cascade depends on how far the customer patches forward. The
    load-bearing fact is that it does not terminate in a working project, not
-   how many messages it takes. Rewritten to tell the customer to re-scaffold
-   (`tan init --template edge-ai-starter --som E1M-V2M101`) instead of
-   editing `som.sku` in place. Fix belongs upstream, in alp-sdk's
-   `examples/ai/cold-chain-monitor/README.md`; declared here pending that fix
-   and a re-vendor.
+   how many messages it takes.
+
+   **tan-cli#996/#1001's `722320a1` re-vendor retired this entry on the
+   theory that alp-sdk's rewording healed it — that was wrong.** The new
+   emit's sentence, "The DEEPX DX-M1 NPU is populated on `E1M-V2M101`/
+   `E1M-V2M102` ... Pick either via `som.sku` in `board.yaml`", makes no
+   mention of a target SKU at all, but the underlying defect is unchanged:
+   `tan init --template edge-ai-starter --som E1M-AEN801`, flip `som.sku` to
+   `E1M-V2M101`, `tan validate` still refuses with the identical ALP-B007
+   (`board preset 'e1m-evk' hosts SoM families ['alif-ensemble', 'nxp-imx9'],
+   but E1M-V2M101 is family 'renesas-rzv2n-deepx'`) -- re-measured at
+   `722320a1` in the tan-cli#1001 review round. Worse, retiring only the
+   README half left `board.yaml`'s own comment (entry 6 below, untouched by
+   the re-vendor) contradicting it in the same scaffold. Re-anchored on the
+   new sentence rather than retired: rewritten, same as before, to tell the
+   customer to re-scaffold (`tan init --template edge-ai-starter --som
+   E1M-V2M101`) instead of flipping `som.sku` in place. Fix belongs
+   upstream, in alp-sdk's `examples/ai/cold-chain-monitor/README.md`;
+   declared here pending that fix and a re-vendor.
 6. **`edge-ai`/`E1M-AEN801`'s `board.yaml`: the comment reinforcing the same
    sentence (tan-cli#814).** "Same source targets the V2N DEEPX path when
    som.sku is flipped" is the comment-form of entry 5's defect, one file
    over. Reworded to point at the re-scaffold instead.
-7. **`diagnostics`'s README `program_eeprom.py` bullet and `sensor`'s README
+7. **(RETIRED at tan-cli#996/#1001, history only) `diagnostics`'s README `program_eeprom.py` bullet and `sensor`'s README
    `i2c-scanner` bullet, both SKUs (tan-cli#912).** Entry 4 above named these
    two as the same defect class as `edge-ai`'s bare pointers, tracked
    separately (same `- Ref:` coupling as entry 4 — no new coupling created;
@@ -651,7 +743,7 @@ strictness exists to catch.
    memory map, not something alp-sdk's own emit is wrong to omit generically;
    the caveat stays a standing tan-side edit rather than an upstream fix to
    wait on.
-10. **`edge-ai`/`E1M-V2N101`'s `README.md`: the same DEEPX retarget
+10. **(RETIRED at tan-cli#996/#1001, history only) `edge-ai`/`E1M-V2N101`'s `README.md`: the same DEEPX retarget
     sentence as entries 5/6, but its OWN, narrower defect (tan-cli#946,
     review round on #932/#942).** `E1M-V2N101`/`E1M-V2N102`/`E1M-V2M101`/
     `E1M-V2M102` all render this one tree, and unlike the `E1M-AEN801`
@@ -690,37 +782,44 @@ strictness exists to catch.
     `examples/peripheral-io/i2c-scanner` mentions entry 7 above deliberately
     left uncovered (tan-cli#924, the review-flagged follow-up to
     tan-cli#912/#918).** Entry 7's scope was the `README.md` bullet only;
-    a real `tan init --template sensor-starter --som E1M-AEN801` scaffold's
-    `src/main.c` still names the same referent bare four more times, lines
-    10, 18, 103 and 114 of the emitted file: the header comment's
-    "Contrasts with `examples/peripheral-io/i2c-scanner`..." paragraph
-    (line 10, descriptive), "On a brand-new bring-up you may want to run
-    `examples/peripheral-io/i2c-scanner` first..." (line 18, a run-this
-    instruction), the `tmp112_init` doc-comment's "`i2c-scanner` can
-    confirm which devices ACK" (line 103, descriptive), and "Use
+    a `tan init --template sensor-starter --som E1M-AEN801` scaffold's
+    `src/main.c` also named the same referent bare four more times, at what
+    were then lines 10, 18, 103 and 114 of the emitted file: the header
+    comment's "Contrasts with `examples/peripheral-io/i2c-scanner`..."
+    paragraph (line 10, descriptive), "On a brand-new bring-up you may want
+    to run `examples/peripheral-io/i2c-scanner` first..." (line 18, a
+    run-this instruction), the `tmp112_init` doc-comment's "`i2c-scanner`
+    can confirm which devices ACK" (line 103, descriptive), and "Use
     `i2c-scanner` to enumerate what IS on this bus before chasing a
     TMP112..." (line 114, a run-this instruction). Same defect class as
     entry 7: real only in the alp-sdk checkout the text was captured from,
     never emitted into any scaffolded project, and a C comment rather than
     a markdown link so the emit's own doc-link rewriter never touches it.
-    Byte-identical between the two SKUs (`sensor`'s `src/main.c` carries no
-    SKU substitution at all), so each of the four substitutions below
-    shares one `un_edit` across both SKUs -- eight entries total. Rewritten
-    to name the real alp-sdk path in prose (no markdown syntax applies
-    inside a C comment), each noting the referent is not part of this
-    scaffolded project, matching entry 7's and entry 4's phrasing. Fix
-    belongs upstream, in alp-sdk's
-    `examples/peripheral-io/i2c-master/src/main.c`. A comment on entry 7's
-    alp-sdk#1705 requested this scope, but alp-sdk#1792's `Closes #1705`
-    auto-closed that issue after fixing only the `README.md` half (merged
-    2026-08-28) -- the `src/main.c` request went along with it, unaddressed;
-    re-filed fresh as alp-sdk#1795, and these entries retire the moment that
-    lands and this tree is re-vendored.
+    Byte-identical between the two SKUs (`sensor`'s `src/main.c` carried no
+    SKU substitution at all), so each of the four substitutions shared one
+    `un_edit` across both SKUs -- eight entries total, originally.
+    **tan-cli#996/#1001 (the `722320a1` re-vendor) retired three of the
+    four substitutions** -- the line-18 bring-up instruction, the line-103
+    `tmp112_init`-doc-comment mention, and the line-114 "Use i2c-scanner to
+    enumerate" instruction. `examples/peripheral-io/i2c-master`'s own
+    alp-sdk#1269 fix swapped the example's target chip (TMP112 -> BMP581)
+    and reworded all three surrounding comments past this entry's declared
+    anchors in the process; see `scaffold_byte_parity.py`'s
+    `DELIBERATE_EDITS` block comment for the retirement rationale, and this
+    file's "Deliberate edits" intro paragraph above for why they were not
+    hand-reconstructed against the new wording. **The line-10 "Contrasts
+    with" paragraph survives, unchanged and still live** (`pattern_paragraph`,
+    the two entries in the table below) -- alp-sdk#1269's rewrite left this
+    specific paragraph (generic, names no chip) byte-identical, so the
+    original tan-cli#924 fix still applies verbatim. Fix for the surviving
+    entry belongs upstream, in alp-sdk's
+    `examples/peripheral-io/i2c-master/src/main.c`; it retires the moment
+    that lands and this tree is re-vendored.
     `board.yaml`/`testcase.yaml` carry one more bare mention each (line 6
     and line 10 respectively) but are descriptive/contrastive prose, not
     run-this instructions, and stay untracked here -- tan-cli#924's own
     scope note.
-12. **`sensor`'s `src/main.c`: the header comment's `Hardware:` paragraph
+12. **(RETIRED at tan-cli#996/#1001, history only) `sensor`'s `src/main.c`: the header comment's `Hardware:` paragraph
     bare `metadata/chips/tmp112.yaml` mention, three lines above entry 11's
     `pattern_paragraph` substitution in the same comment block (PR #975
     review round).** A different specific referent than entry 11's (which
@@ -742,56 +841,129 @@ strictness exists to catch.
     `examples/peripheral-io/i2c-master/src/main.c`, alongside entry 11's; it
     retires the same way, the moment alp-sdk#1795 lands and this tree is
     re-vendored.
-13. **The remaining bare cross-repo referents entry 12 scoped out (tan-cli#977,
-    the follow-up filed off PR #975's own review round).** Five more sites,
-    none in the `Hardware:`/`pattern_paragraph` comment block entries 11/12
-    already cover:
-    - `sensor`'s `src/main.c:51,53` -- the separate `TMP112_ADDR_7BIT`
-      doc-comment's bare `metadata/chips/tmp112.yaml` and
-      `include/alp/chips/tmp112.h` mentions. Two substitutions (one per
-      referent, per the one-substitution-per-entry discipline), named in
-      prose (a C comment, no markdown link syntax applies), matching entry
-      12's phrasing.
+13. **`iot`/`E1M-AEN801`'s `README.md`: the `native_sim.conf` link
+    (tan-cli#1001 review).** alp-sdk's own `examples/connectivity/
+    mqtt-telemetry/README.md` links `native_sim.conf` via a self-referential
+    `../mqtt-telemetry/native_sim.conf` detour (its own README pointing back
+    at its own directory), which IS `../`-prefixed, so the doc-link rewriter
+    (the same one entry 4's `- Ref:`-pinned links go through) treats it as
+    cross-directory and renders a `github.com/.../blob/<ref>/...` link --
+    wrong here, since `tan init --template iot-starter` vendors and writes
+    `native_sim.conf` as a sibling of this very `README.md` (tan-cli#379,
+    `NON_ENVELOPE_EXTRAS`; confirmed present in a live scaffolded tree).
+    Rewritten to the plain sibling link, `[native_sim.conf](native_sim.conf)`.
+    Fix belongs upstream, in alp-sdk's
+    `examples/connectivity/mqtt-telemetry/README.md`; declared here pending
+    that fix and a re-vendor.
+14. **`iot`/`E1M-AEN801`'s `README.md`: the "copy it in first" build comment
+    (tan-cli#1001 review).** The re-vendor imported a comment reading
+    "native_sim.conf ships only in the alp-sdk tree, not in this scaffold --
+    copy it in first" ahead of the `west build -b native_sim/native/64`
+    command block. True in an alp-sdk checkout, where this text was
+    captured from; false in a tan scaffold, where entry 13's own file
+    already vendors and writes `native_sim.conf` next to this README --
+    confirmed by running `tan init --template iot-starter` and finding the
+    file written. A customer following this instruction would go looking
+    for an alp-sdk checkout to copy from, for a file already sitting in
+    their own project. Own entry, separate from entry 13, per this file's
+    own two-independent-substitutions-get-two-entries discipline (see entry
+    11's `model_comment_1`/`_2` split under `scaffold_byte_parity.py`).
+    Removed outright -- no replacement text needed once the file is known
+    to already be present. Fix belongs upstream, in alp-sdk's
+    `examples/connectivity/mqtt-telemetry/README.md`; declared here pending
+    that fix and a re-vendor.
+15. **The remaining bare cross-repo referents entry 12 scoped out (tan-cli#977,
+    the follow-up filed off PR #975's own review round), re-derived against
+    THIS SAME tan-cli#996/#1001 re-vendor rather than the tree #977 was
+    originally filed against.** alp-sdk#1269 (part of #1001's re-vendor)
+    swapped `sensor`'s chip from TMP112 to BMP581 -- TMP112 lives on
+    `BRD_I2C`, a bus this example never opens, and on the E1M-AEN family
+    `BRD_I2C` is additionally the slave-only Alif LPI2C0 (ADR 0017), so the
+    SoC cannot master it at all -- and #1001 retired entry 12 (and entry
+    11's `bringup_instruction`/`init_fail_comment`/`failure_modes_
+    instruction` trio, folded into entry 11's own history above) as
+    "anchor-gone" rather than leaving them live, since the specific TMP112
+    bytes those entries matched no longer exist. That retirement was
+    correct for the exact bytes retired -- but the underlying BARE-REFERENT
+    DEFECT recurred almost one-for-one in the rewritten BMP581 paragraphs,
+    which is exactly the trap this manifest's own doctrine two sections up
+    warns against ("retire only when upstream healed the underlying
+    problem, not when the anchor stopped matching"): an anchor going stale
+    is not evidence the customer-facing defect it was tracking is gone.
+    Swept the whole of `sensor`'s `src/main.c` and `board.yaml` rather than
+    only re-deriving the two lines #977 originally named (`src/main.c:51,53`
+    in the pre-re-vendor tree), and found the defect at eleven distinct
+    sites, not the seven #977 was filed against:
+    - `sensor`'s `src/main.c`, the `Hardware:` paragraph -- a bare
+      `metadata/boards/e1m-evk.yaml`/`e1m-x-evk.yaml` mention. New: this
+      paragraph carried no bare referent in the pre-re-vendor tree (its
+      `i2c-scanner` mention was already qualified); the re-vendor's
+      rewrite introduced this one.
+    - `sensor`'s `src/main.c`, the `#1269` historical note -- a bare
+      `examples/v2n/v2n-temp-sensor` mention. New text this re-vendor
+      added outright; no predecessor entry ever covered it.
+    - `sensor`'s `src/main.c`, the `BMP581_ADDR_7BIT` doc-comment -- bare
+      `metadata/boards/e1m-evk.yaml`/`e1m-x-evk.yaml` and
+      `include/alp/chips/bmp581.h` mentions (two substitutions). The direct
+      BMP581-era descendant of #977's original `src/main.c:51,53` sites
+      (then `TMP112_ADDR_7BIT`, then naming `metadata/chips/tmp112.yaml`/
+      `include/alp/chips/tmp112.h`).
+    - `sensor`'s `src/main.c`, the `bmp581_init` failure doc-comment -- a
+      bare `examples/peripheral-io/i2c-scanner` mention. The BMP581-era
+      recurrence of entry 11's retired `init_fail_comment` anchor
+      ("`i2c-scanner` can confirm which devices ACK", now "`examples/
+      peripheral-io/i2c-scanner` can confirm which devices ACK").
     - `sensor`'s `board.yaml:12` -- the "Customer workflow" paragraph's bare
-      `scripts/alp_project.py` mention. Unlike entries 4/7/11/12's purely
-      descriptive pointers, this one names real build machinery a
-      scaffolded project's own `CMakeLists.txt` genuinely invokes, resolved
-      via `ALP_SDK_ROOT` -- but the physical file still lives only in the
-      alp-sdk checkout `ALP_SDK_ROOT` points at, never in this scaffolded
-      tree, so worded "resolved via `ALP_SDK_ROOT`, not part of this
-      scaffolded project" rather than the plain "not part of this
-      scaffolded project" the purely-descriptive entries use.
+      `scripts/alp_project.py` mention, unchanged by the re-vendor. Unlike
+      entries 4/7/11/12's purely descriptive pointers, this one names real
+      build machinery a scaffolded project's own `CMakeLists.txt` genuinely
+      invokes, resolved via `ALP_SDK_ROOT` -- but the physical file still
+      lives only in the alp-sdk checkout `ALP_SDK_ROOT` points at, never in
+      this scaffolded tree, so worded "resolved via `ALP_SDK_ROOT`, not
+      part of this scaffolded project" rather than the plain "not part of
+      this scaffolded project" the purely-descriptive entries use.
     - `sensor`'s `board.yaml:34,36` -- the chip-classification paragraph's
-      bare `metadata/chips/tmp112.yaml` and
-      `scripts/check_example_portability.py` mentions, purely descriptive,
-      same defect class as entry 11/12. Two substitutions.
+      bare `metadata/chips/bmp581.yaml` (the chip-renamed descendant of
+      #977's original `tmp112.yaml` site) and `scripts/check_example_
+      portability.py` (unchanged) mentions, purely descriptive, same defect
+      class as entry 11/12. Two substitutions.
+    - `sensor`'s `board.yaml`, the `#1269` historical NOTE -- bare
+      `metadata/boards/e1m-evk.yaml`/`e1m-x-evk.yaml` `i2c_devices:` and
+      `examples/v2n/v2n-temp-sensor` mentions (two substitutions), the
+      board.yaml-side siblings of `src/main.c`'s equivalents above. New
+      text this re-vendor added, same as its `src/main.c` counterpart.
     - `sensor`'s `prj.conf:4` -- the same bare `scripts/alp_project.py`
-      mention as `board.yaml`'s Customer-workflow paragraph, a different
-      file, same "resolved via `ALP_SDK_ROOT`" wording.
+      mention as `board.yaml`'s Customer-workflow paragraph, unchanged, a
+      different file, same "resolved via `ALP_SDK_ROOT`" wording.
     - `minimal`'s `README.md:19` -- "before moving on to `gpio-button-led`
-      or `i2c-scanner`", entry 7's shape (a markdown file, so turned into
-      real links -- both real alp-sdk directories, pinned at `v0.16.0` per
-      the current vendor point's `- Ref:`) rather than entry 11/12/this
-      entry's own prose naming, since no existing `DELIBERATE_EDITS` entry
-      touched the `minimal` template at all before this one.
+      or `i2c-scanner`", unaffected by the re-vendor (`minimal` was not one
+      of the seven `README.md` files it re-vendored). Entry 7's shape (a
+      markdown file, so turned into real links -- both real alp-sdk
+      directories, pinned at `v0.16.0` per the current vendor point's
+      `- Ref:`) rather than this entry's own prose naming, since no
+      existing `DELIBERATE_EDITS` entry touched the `minimal` template at
+      all before this one.
 
     Byte-identical between the two SKUs at every substitution above
     (`sensor`'s `src/main.c`, `board.yaml` at these lines, and `prj.conf`
     carry no SKU substitution; `minimal`'s `README.md` differs only in the
     `west build`/`west flash` block further down, untouched here) -- each
-    `un_edit` is shared across both SKUs. Seven distinct substitutions x 2
-    SKUs = fourteen entries. Fix belongs upstream: the `src/main.c` and
-    `board.yaml`/`prj.conf` sites are alp-sdk's
-    `examples/peripheral-io/i2c-master/{src/main.c,board.yaml,prj.conf}` --
-    a different token than entry 11/12's `i2c-scanner` mentions
-    (`metadata/chips/tmp112.yaml`, `include/alp/chips/tmp112.h`,
+    `un_edit` is shared across both SKUs. Eleven distinct substitutions x 2
+    SKUs = twenty-two entries for `sensor`, plus one substitution x 2 SKUs =
+    two entries for `minimal` -- twenty-four entries total. Fix belongs
+    upstream: the `sensor`-side sites are alp-sdk's `examples/peripheral-io/
+    i2c-master/{src/main.c,board.yaml,prj.conf}` -- distinct tokens from
+    entry 11/12's `i2c-scanner`/`tmp112.yaml`/`tmp112.h` mentions (this
+    entry's own `metadata/boards/*.yaml`, `examples/v2n/v2n-temp-sensor`,
+    `metadata/chips/bmp581.yaml`, `include/alp/chips/bmp581.h`,
     `scripts/alp_project.py`, `scripts/check_example_portability.py`), so
-    NOT covered by alp-sdk#1795, though the same file; the `minimal` site is
-    alp-sdk's `examples/peripheral-io/hello-world/README.md`, a template no
-    prior entry has touched. Not yet filed upstream as an alp-sdk issue --
-    unlike entries 4/7/10/11/12, this entry carries no issue number pending
-    that filing; all fourteen retire the moment the corresponding upstream
-    fix lands and this tree is re-vendored.
+    NOT covered by alp-sdk#1795, though several sites share entry 11/12's
+    files; the `minimal` site is alp-sdk's `examples/peripheral-io/
+    hello-world/README.md`, a template no prior entry has touched. Not yet
+    filed upstream as an alp-sdk issue -- unlike entries 4/5/6/7/10/11/12,
+    this entry carries no issue number pending that filing; all twenty-four
+    retire the moment the corresponding upstream fix lands and this tree is
+    re-vendored.
 
 ## Template x SKU matrix vendored
 

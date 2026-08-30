@@ -641,14 +641,18 @@ rather than urgent. What guards them:
 
 - **`PINNED_HASHES`** (`test_planner_relocation_freshness.py:516` onward)
   pins the sha256 of all 21 `scripts/alp_orchestrate/*.py` at
-  `PINNED_SDK_COMMIT = eb96112ba7d1cc3b4084c985962ea31772177d74` (moved
-  from `94378a056549c7377d714a7f2b68878aca8fea01` by the same PR, after
-  this document was written). Covers derivations 4 (via `slugs.py`,
-  `339bffdb…`) and 6 (via `libraries.py`) and the six planner `TBD` call
-  sites.
+  `PINNED_SDK_COMMIT = 722320a1abe3cea675e99e97300b8a484b4e8464` (moved from
+  `94378a056549c7377d714a7f2b68878aca8fea01` by an earlier PR, after this
+  document was written, then to `eb96112ba7d1cc3b4084c985962ea31772177d74`,
+  then to the current value by tan-cli#996/#1001). Covers derivations 4
+  (via `slugs.py`, `339bffdb…`) and 6 (via `libraries.py`) and the six
+  planner `TBD` call sites.
 - **`HAND_PORT_HASHES`** (same file, `:824-844`) pins 19 sources outside
   `alp_orchestrate/` at `HAND_PORT_PINNED_SDK_COMMIT =
-  88318e759958529fbbd8fe9d481373681c0fa78d`. Covers derivations 1, 2, 3, 5,
+  722320a1abe3cea675e99e97300b8a484b4e8464` -- the same commit as
+  `PINNED_SDK_COMMIT` above, for the first time since `1a9f753c`
+  (tan-cli#996/#1001 advanced it from `88318e759958529fbbd8fe9d481373681c0fa78d`,
+  closing tan-cli#913). Covers derivations 1, 2, 3, 5,
   6 and 7 -- and `scripts/sentinels.py` itself
   (`54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c`,
   1186 bytes), which is in that table specifically because it has no tan
@@ -693,15 +697,21 @@ Where the net does not reach, measured rather than assumed:
    (`renesas_rzv2n`) match none, which is why neither `slugs.py` nor
    `libraries.py` appears in its `ALLOWED` dict despite carrying 74
    hardware facts between them.
-5. **Three pins at three commits.** `PINNED_SDK_COMMIT` (`eb96112b`, at
-   the time this document was written `94378a05`),
-   `HAND_PORT_PINNED_SDK_COMMIT` (`88318e75`) and
+5. **Three pins, tracked independently -- two of the three currently share a
+   commit, by coincidence of timing, not by mechanism.**
+   `PINNED_SDK_COMMIT` and `HAND_PORT_PINNED_SDK_COMMIT` are both
+   `722320a1abe3cea675e99e97300b8a484b4e8464` as of tan-cli#996/#1001 (at
+   the time this document was written, `PINNED_SDK_COMMIT` was `94378a05`
+   and `HAND_PORT_PINNED_SDK_COMMIT` was held at `88318e75`; the two later
+   moved together for the first time since `1a9f753c`). The third,
    `STRICT_LOADERS_PINNED_SDK_COMMIT`
-   (`26b0040e9a762c16aff5c7c53b2e19cc7583b2a4`) are deliberately
-   independent -- `test_planner_relocation_freshness.py:57-69` explains
-   why a shared pin would certify unaudited drift away -- but the
-   consequence is that a change landing between two of them is audited by
-   one table and not the other.
+   (`26b0040e9a762c16aff5c7c53b2e19cc7583b2a4`), remains behind. All three
+   are deliberately independent tables -- `test_planner_relocation_freshness.py:57-69`
+   explains why a shared pin would certify unaudited drift away -- so the
+   consequence still holds even while two read the same value: a change
+   landing between two of them is audited by one table and not the other,
+   and the next re-pin of either `PINNED_SDK_COMMIT` or
+   `HAND_PORT_PINNED_SDK_COMMIT` alone will likely split them apart again.
 
 ## Adjacent duplications this inventory does NOT count
 

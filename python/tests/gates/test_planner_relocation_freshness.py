@@ -540,7 +540,31 @@ from tests.conftest import sdk_root
 #: pins `eb96112b` leaves the whole relocated model-engine surface unmeasured
 #: in CI. Do NOT move it before then -- #1470 is unmerged, so there is no
 #: post-merge SHA to move it to.
-PINNED_SDK_COMMIT = "eb96112ba7d1cc3b4084c985962ea31772177d74"  # alp-sdk v0.16.0 -- see above
+#: `eb96112b` -> `722320a1` (tan-cli#996, auditing `auto/planner-resync`'s
+#: machine-proposed re-sync; the placeholder that used to sit here made no
+#: claim about behaviour and is replaced below). ONE file in `PINNED_HASHES`
+#: moved: `scripts/alp_orchestrate/buildplan.py`, by alp-sdk#964 (the 3-way
+#: merge `planner_resync.py` already applied cleanly). COSMETIC, not
+#: behavioural: the entire upstream diff is `_slice_toolchain`'s own
+#: docstring gaining one clause ("...the SoM preset's `topology.<core>.
+#: toolchain` default, or a project's `cores.<core>.toolchain` override
+#: (issue #964)...") -- no code changed. The feature the docstring now
+#: names was already load-bearing in `tan/planner/` before this bump:
+#: `loader._resolve_topology_for_core` already merges a project's
+#: `cores.<id>` block (which can carry its own `toolchain:`) over the SoM
+#: preset's `topology.<id>` ("Per spec section 4.5: project's `cores.<id>`
+#: overrides the SoM preset's `topology.<id>`"), so `Slice.toolchain` was
+#: already resolving a per-project override the same way upstream's fix
+#: describes -- the docstring is catching up to behaviour `tan/planner/`
+#: already had, the same shape the `522ea320`/#1482 paragraph documents
+#: for `gen_zephyr_board.py` below. The other twenty `PINNED_HASHES`
+#: entries are unchanged in this range (only `buildplan.py` appears in
+#: `git diff --stat eb96112b..722320a1 -- scripts/alp_orchestrate/`), so
+#: nothing else is re-frozen past an unaudited delta.
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 722320a1 feat(scripts,metadata): --cores template selector and optional per-core toolchain (#1652, #964) (#1835)
+PINNED_SDK_COMMIT = "722320a1abe3cea675e99e97300b8a484b4e8464"  # alp-sdk, 63 commits past v0.16.0, untagged -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -578,7 +602,7 @@ PINNED_SDK_COMMIT = "eb96112ba7d1cc3b4084c985962ea31772177d74"  # alp-sdk v0.16.
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "03b610ce02d1819d09ad3d5d233bbbd46b950bdc09448748b17ebc5a1b57f272",
-    "buildplan.py": "54c49e8bd21dc0a283b6499b6b39314b089cf2cd65166451f884df614b7dca9f",
+    "buildplan.py": "72b2f5227b57674f4e752c8a6578f0d703c10d0b6d2e3df8c41872f8fd748cb1",
     "carveout.py": "c05826e4b784965c332dc662c9aa82b993787d7ab588771c7aee5feaa93feb4e",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
@@ -880,7 +904,103 @@ PINNED_HASHES: dict[str, str] = {
 #: values, stays exactly as written for now; this paragraph remains the
 #: record of the `eb96112b` re-hash and its (corrected) verdict, the same
 #: role the `#846` paragraph plays for the first two sources.
-HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-sdk v0.15.0+88, an ancestor of the released v0.16.0 -- deliberately BEHIND PINNED_SDK_COMMIT, see above
+#:
+#: `88318e75` -> `722320a1` (tan-cli#996, CLOSES tan-cli#913: the
+#: re-hash-all-19-entries-at-once decision the paragraph above deferred).
+#: Auditing `auto/planner-resync`'s machine proposal against a real
+#: `722320a1` checkout (not the placeholder narrative it opened with,
+#: which named seven "hand-port-changed" and seven "removed-upstream"
+#: entries with no verdict) gives, of the 19:
+#:
+#:   - FIVE unchanged (`git diff --stat 88318e75..722320a1` over each path
+#:     is empty, re-hashed one by one, not assumed): `scripts/sentinels.py`,
+#:     `scripts/alp_project_emit/{bom_netlist,dts,hw_info,native_sim}.py`.
+#:     Their `HAND_PORT_HASHES` values below are UNCHANGED by this move.
+#:   - SEVEN carry a real upstream diff but are each already covered on the
+#:     `tan/planner/` side, by an equivalent or already-ported mechanism --
+#:     re-hashed to `722320a1`, no `tan/planner/` code changed for any of
+#:     them:
+#:       * `scripts/gen_zephyr_board.py` (alp-sdk#1354, #1482 doc fix):
+#:         solved DIFFERENTLY -- `zephyr_board.py::_aen_peripherals_dtsi`
+#:         already checks `require_capability(metadata_root,
+#:         AEN_ZEPHYR_PERIPHERALS_DTSI)` and raises `SdkTooOldError` for a
+#:         checkout that predates the field, a capability-registry probe
+#:         (tan-cli#591) rather than upstream's filesystem-probe-for-an-
+#:         overlay-file heuristic; #1482's docstring wording is already
+#:         present at `_aen_flash_partitions`'s docstring, citing
+#:         tan-cli#896.
+#:       * `scripts/alp_project_loader.py` (alp-sdk#1485 continuation --
+#:         thread `metadata_root`, `is_relative_to` hardening): already
+#:         present -- `som_metadata.py:_load_silicon_kconfig`/
+#:         `silicon_to_kconfig` take a required `metadata_root`;
+#:         `project_loader._resolve_sku`'s message uses
+#:         `preset_path.is_relative_to(REPO)` before calling
+#:         `.relative_to(REPO)`. `bind_sdk_root`'s one-shot-root invariant
+#:         (`planner_root.py`) forecloses the defect class this hardening
+#:         guards against structurally.
+#:       * `scripts/alp_project_emit/__init__.py` (alp-sdk#1487's ten
+#:         missing `_CHIP_SUBSYSTEMS` entries): already present, relocated
+#:         to `slugs.py` (see the `94378a05..eb96112b` paragraph above --
+#:         this is the SAME table, re-confirmed byte-identical to the
+#:         `722320a1` addition).
+#:       * `scripts/alp_project_emit/west_libs.py` (alp-sdk#1485
+#:         continuation): already present -- `loader.py:_library_alias_table`
+#:         takes a required `metadata_root`, threaded into
+#:         `project_emit/west_libs.py`'s `_emit_west_libraries` /
+#:         `_load_curated_library_manifest`.
+#:       * `scripts/alp_cli/diagnostic_format.py`: DOCSTRING ONLY (names
+#:         `tan validate` as `alp_cli.validate`'s retirement replacement,
+#:         ADR-0020 end-state B) -- no code changed. Tracked here
+#:         deliberately, not a `HAND_PORT_NO_TAN_FILE_PAIRING` gap.
+#:       * `scripts/alp_cli/validator.py`: a REAL fix (`additionalProperties`
+#:         now walks to the object that actually rejected the extra key
+#:         instead of naming its parent's own path segment) -- but only
+#:         `load_board_schema`/`iter_schema_errors` are hand-ported into
+#:         `tan/planner/loader.py` (see that file's own docstring); the
+#:         fixed function, `_schema_error_to_diagnostic`, does not exist in
+#:         tan at all. `tan validate`'s non-`--offline` path spawns
+#:         `scripts/validate_board_yaml.py` against the user's OWN bound
+#:         checkout (see `validate_cmd.py`'s module docstring), so the fix
+#:         is inherited automatically the moment a customer's alp-sdk
+#:         checkout carries it -- nothing to port.
+#:   - SEVEN are gone from alp-sdk entirely at `722320a1`
+#:     (`scripts/alp_cli/{faultdecode,validate,new_som,doctor,explain,
+#:     monitor,model}.py` -- confirmed by `git diff --stat`, each a pure
+#:     deletion, not a rename: `alp-sdk#1367`/`#1368` via commit `210e9fed`
+#:     ("finish the alp_cli retirement"), whose own message says each "already
+#:     had a released, native tan-cli v0.6.0 port and no in-repo caller
+#:     outside its own tests." RETIRED from this table below (their entries
+#:     removed, not zeroed) -- there is no longer an alp-sdk source to audit
+#:     tan's still-live native ports (`validate_cmd.py`, `new_som_cmd.py`,
+#:     `doctor_cmd.py`/`doctor_libraries.py`, `error_catalog.py`,
+#:     `monitor_cmd.py`, `model_cmd.py`, `faultdecode.py`/`faultdecode_cmd.py`)
+#:     against. `python/tests/gates/test_hand_port_tan_side.py`'s
+#:     `HAND_PORT_TAN_SIDE`/`HAND_PORT_NO_TAN_FILE_PAIRING`/
+#:     `_PAIRING_MAY_ONLY_CONTAIN` drop the matching six/two/two entries in
+#:     the SAME change, per that file's own "drop them in the same change
+#:     that dropped the pin" rule -- `scripts/alp_cli/model.py` is genuinely
+#:     retired THIS time (unlike tan-cli#791's premature attempt, corrected
+#:     at the `88318e75` paragraph above: that check was against
+#:     `eb96112b`/`88318e75`, where the file was still live; `722320a1` is
+#:     past alp-sdk#1470 landing #1367/#1368 for real).
+#:
+#: `scripts/alp_template.py` is the ONE genuine hand-port in this range --
+#: alp-sdk#1652 adds `find_template_by_cores` + `AmbiguousCoresError` (a
+#: `--cores` topology SELECTOR over the catalog, distinct from tan's OWN
+#: `--cores` splice flag on `tan init`) -- PORTED into `tan/planner/
+#: template.py` verbatim in this same change, plus a small standalone
+#: re-implementation in `tan/core/example_catalog.py` (`find_example_by_
+#: cores`) backing the customer-facing `tan init --topology` surface, which
+#: cannot import `tan.planner` before an SDK root is bound (see that
+#: module's own docstring). `tan.planner_cli`'s `--emit scaffold` gains the
+#: matching `--cores` argparse flag, mirroring `alp_project.py`'s own
+#: `_run_scaffold_emit`/`_parse_cores_arg` 1:1, since that entry point IS
+#: the developer/parity mirror of the SDK's own argv.
+#:
+#: Net: all 19 entries are re-hashed against `722320a1` below (12 remain,
+#: 7 retired), and `HAND_PORT_PINNED_SDK_COMMIT` advances to the same
+#: commit as `PINNED_SDK_COMMIT` for the first time since `1a9f753c`.
+HAND_PORT_PINNED_SDK_COMMIT = "722320a1abe3cea675e99e97300b8a484b4e8464"  # alp-sdk, 63 commits past v0.16.0, untagged -- see above (tan-cli#996 closes tan-cli#913)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -906,84 +1026,56 @@ HAND_PORT_PINNED_SDK_COMMIT = "88318e759958529fbbd8fe9d481373681c0fa78d"  # alp-
 #: `54c0b5c4...`), so pinning it here at HAND_PORT_PINNED_SDK_COMMIT re-freezes
 #: nothing unaudited.
 #:
-#: `scripts/alp_cli/faultdecode.py` is in THIS table for the same reason as
-#: `sentinels.py` above and, like it, deliberately NOT in HAND_PORT_SOURCES:
-#: its port, `tan/core/faultdecode.py`, lives under `tan/core/`, not
-#: `tan/planner/`, so it has no `tan/planner/`-relative path this dict's
-#: `HAND_PORT_SOURCES` half (a coverage list over `tan/planner/**.py`, see
-#: that dict's own docstring) could name. Tracking the SDK-side hash anyway
-#: is the point (tan-cli#560 review, blocker 2): without it, this entire
-#: freshness gate had zero visibility into `scripts/alp_cli/faultdecode.py`,
-#: and alp-sdk dad5b35a (#1389) changed it inside the very
-#: `a3173305..d00dbdc1` range this file's own pin moved across, unseen. sha256
-#: taken directly from the `d00dbdc1` checkout this HAND_PORT_PINNED_SDK_COMMIT
-#: already names, so pinning it here re-freezes nothing unaudited either.
+#: `scripts/alp_cli/faultdecode.py`, `.../validate.py`, `.../new_som.py`,
+#: `.../doctor.py`, `.../explain.py`, `.../monitor.py`, `.../model.py` --
+#: the seven sources this paragraph used to track alongside
+#: `diagnostic_format.py`/`validator.py` (tan-cli#560 review, blocker 2 /
+#: minor 2) -- are RETIRED as of `722320a1` (tan-cli#996, see the pin's own
+#: comment above): alp-sdk `210e9fed` (#1367/#1368, "finish the alp_cli
+#: retirement") deletes all seven outright, each superseded by a released,
+#: native tan-cli v0.6.0 port with no in-repo caller left upstream. Their
+#: tan-side counterparts are unaffected and keep working
+#: (`validate_cmd.py`, `new_som_cmd.py`, `doctor_cmd.py`/
+#: `doctor_libraries.py`, `error_catalog.py`, `monitor_cmd.py`,
+#: `model_cmd.py`, `faultdecode.py`/`faultdecode_cmd.py`) -- what is retired
+#: is only the AUDIT, because there is no longer an alp-sdk source on the
+#: other end of it. `test_hand_port_tan_side.py`'s
+#: `HAND_PORT_TAN_SIDE`/`HAND_PORT_NO_TAN_FILE_PAIRING`/
+#: `_PAIRING_MAY_ONLY_CONTAIN` drop the matching entries in this same
+#: change, per that file's own "drop them in the same change that dropped
+#: the pin" rule. `scripts/alp_cli/model.py` genuinely retires this time --
+#: contrast the `88318e75` paragraph above, where the SAME retirement was
+#: attempted prematurely (tan-cli#791) against `eb96112b`, where the file
+#: was still live; `722320a1` is past `210e9fed` landing for real, measured
+#: by `git diff --stat 88318e75..722320a1 -- scripts/alp_cli/model.py`
+#: reporting a pure deletion, not a rename.
 #:
-#: The eight `scripts/alp_cli/{diagnostic_format,validate,new_som,doctor,
-#: explain,monitor,model,validator}.py` entries below close the same blind
-#: spot (tan-cli#560 review, minor 2): each is named as a hand-port source in
-#: a comment somewhere under `python/tan/` --
-#: `tan/output_format.py`/`tan/commands/validate_cmd.py`
-#: (`diagnostic_format.py`), `tan/commands/validate_cmd.py` (`validate.py`),
-#: `tan/commands/new_som_cmd.py` (`new_som.py`),
-#: `tan/commands/doctor_cmd.py`/`tan/core/doctor_libraries.py` (`doctor.py`),
-#: `tan/core/error_catalog.py`/`tan/commands/explain_cmd.py` (`explain.py`),
-#: `tan/commands/monitor_cmd.py` (`monitor.py`), and
-#: `tan/commands/model_cmd.py` (`model.py`). `scripts/alp_cli/validator.py`'s
-#: `load_board_schema`/`iter_schema_errors` are hand-ported into
+#: `scripts/alp_cli/diagnostic_format.py` and `scripts/alp_cli/validator.py`
+#: remain (see the `88318e75 -> 722320a1` paragraph above for what changed
+#: in each): `diagnostic_format.py`'s hand-port is the ~150-line region
+#: inside `tan/commands/validate_cmd.py` named in
+#: `HAND_PORT_NO_TAN_FILE_PAIRING`; `validator.py`'s is
+#: `load_board_schema`/`iter_schema_errors`, hand-ported into
 #: `tan/planner/loader.py` (that file's own docstring: "RELOCATED from
 #: alp-sdk's scripts/alp_cli/validator.py, the last module-scope import this
 #: file made across the repo boundary") -- `loader.py` itself is already
 #: tracked in `PINNED_HASHES` above (its main body relocated from
-#: `scripts/alp_orchestrate/loader.py`), so this is the SAME split-heritage
-#: shape `sentinels.py` set the precedent for: a hand-port INTO an
-#: already-tracked file still needs its own SDK-side source hashed. None of
-#: these eight sources live under `tan/planner/` themselves, so like
-#: `faultdecode.py` they are deliberately NOT added to `HAND_PORT_SOURCES`
-#: either. sha256 taken directly from the `d00dbdc1` checkout
-#: HAND_PORT_PINNED_SDK_COMMIT already names, and each verified unchanged
-#: across the `a3173305..d00dbdc1` range this file's own pin moved across, so
-#: pinning them here re-freezes nothing unaudited. `scripts/alp_project_loader.py`
-#: -- the ninth source the same review named -- is deliberately NOT re-added:
-#: it is already a key above (added for `tan/planner/project_loader.py` and
-#: `tan/planner/som_metadata.py`), and its OWN additional hand-port sites
-#: (`tan/commands/new_som_cmd.py`) are already
-#: covered by that one entry -- `HAND_PORT_HASHES` is keyed by the alp-sdk
-#: source path, not by the consuming `tan` file, so a second key for the same
-#: path would be a no-op duplicate, not a new audit.
-#:
-#: `scripts/alp_cli/model.py` is the eighth member of the group above (the
-#: tan-cli#560 review's total was nine, counting "the ninth source" above
-#: alongside it). tan-cli#791 briefly retired this entry on the premise that
-#: ADR-0028 had deleted the alp-sdk original -- checked against the actual
-#: pinned commits and found premature: ADR-0028's deletion (alp-sdk
-#: `ab6968e22`, "delete the host-side model engine, relocated to tan") lives
-#: only on alp-sdk PR #1470 (`feat/model-edge-ai-foundation`, OPEN, not
-#: merged to `dev` or `main` as of this check), and `scripts/alp_cli/model.py`
-#: is still present, byte-identical, at both PINNED_SDK_COMMIT (`eb96112b`,
-#: v0.16.0) and HAND_PORT_PINNED_SDK_COMMIT (`88318e75`, v0.15.0+88) -- the
-#: same hash `origin/dev` still carries for this key. Re-pinned rather than
-#: left retired.
+#: `scripts/alp_orchestrate/loader.py`), the same split-heritage shape
+#: `sentinels.py` set the precedent for. Neither lives under `tan/planner/`
+#: itself, so neither is in `HAND_PORT_SOURCES` below.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "30ab1b52835d77f226bf4ed07185cd5a91f2c374ea8b8576edb00699627ea8a7",
+    "scripts/gen_zephyr_board.py": "c7a44b285e5f8d944544ac8ca6d3a060470befdfe5401772707bec6820621b0c",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
-    "scripts/alp_project_loader.py": "d5f142173a13cfac9e130ef8fde90d35d6bb92d21d152925a275b3e8bdaa49db",
-    "scripts/alp_template.py": "9321c7e31759ef4f9c03c2c750b1d7d7f4019b9a50dd2679668deaa2b0054708",
-    "scripts/alp_project_emit/__init__.py": "62c4742bc373e7fafcd8aa864ad7692d3c05b610c6d7457023aeb82c98847d88",
+    "scripts/alp_project_loader.py": "4e355a59fb37457ce0479c59d06863dacfd20144f59dd0eb6dc197ac5ba19f66",
+    "scripts/alp_template.py": "24fe62eeeb00414522d109c177edaac23567f8fb7c668e1213bd2e1f4ef68a8e",
+    "scripts/alp_project_emit/__init__.py": "9213c745751e23a36b3f582846a147fb9060386992ff7b8244a0c1d44d5987cf",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
     "scripts/alp_project_emit/dts.py": "cb6d4278e2fc886a23c28f2ef30b4ae9714738071219f7c29cbccbbeb1bc1782",
     "scripts/alp_project_emit/hw_info.py": "25673bb45305ce3f54280560beea8577bdf04bfdada44a133ff7ca48fbe05167",
     "scripts/alp_project_emit/native_sim.py": "24943e7099d745b254b853135ff0b4ae8415be7946d93170d479b637105f18c0",
-    "scripts/alp_project_emit/west_libs.py": "0bfad8fb6c22b955d0554f8fffca8c1c9bf9f73d3c64778b9ba2de76eb6a972d",
-    "scripts/alp_cli/faultdecode.py": "3a9e82b7b6892523923e6f571602be1e3bb11e24090dde0b90f6a5ae207aaa0b",
-    "scripts/alp_cli/diagnostic_format.py": "d6f7872013b7990a08ca724814daaf800a8acf37dec4d9a7d5078807757d162d",
-    "scripts/alp_cli/validate.py": "c7b7175798c3e8f0d7961fb40e3318f60570f7ec85d131c599f83109c2cebfe6",
-    "scripts/alp_cli/new_som.py": "1118f99aa8c334c5d058e69b0e454954b4637678971d9c47472e45dc2d4eb558",
-    "scripts/alp_cli/doctor.py": "f2faa07cecbbffc1bcfb510210e3f24d96a3ad6864eef8f3fe92f93886ddacd5",
-    "scripts/alp_cli/explain.py": "b9e05d32896d1e0855f1c040b581b3e77869b4b03b15371c125757be1e0e09fe",
-    "scripts/alp_cli/monitor.py": "1f67ee1372c73e2bd76b5c9338c141e31accdef1e206b7a64806cf8eb691c0e2",
-    "scripts/alp_cli/model.py": "a51be0a8d3a16bd408bb57d01f049175406b73cc48ab9346d39555c3aa5b1925",
-    "scripts/alp_cli/validator.py": "8dac2e4d3799fe67feceb74e587f23b5e8b44a40df2805220632f8edae26a421",
+    "scripts/alp_project_emit/west_libs.py": "bfd9735519d120d2a32bd054a69838c32e339a04cd977521fc5a53c950055392",
+    "scripts/alp_cli/diagnostic_format.py": "44532953d828dd00af524238b89726ecb0bd4b472b662a9d4c5dcc1d33a16680",
+    "scripts/alp_cli/validator.py": "5968691c316370a6369ff3096f89e9b77bc2e359ac200184a9accffe9455e3ac",
 }
 
 #: `tan/planner/`-relative path -> the alp-sdk-relative source path it was
@@ -1262,8 +1354,10 @@ def test_hand_ported_planner_modules_match_their_pinned_sdk_source():
 
     Same shape as `test_relocated_planner_modules_match_the_pinned_sdk_audit`
     above, but keyed by the alp-sdk-relative source path rather than a
-    `scripts/alp_orchestrate/`-relative name -- these nine files live all over
-    alp-sdk's `scripts/` tree, not in one directory. Reads its OWN root
+    `scripts/alp_orchestrate/`-relative name -- these (twelve, as of
+    tan-cli#996's retirement of seven now-deleted-upstream entries) files
+    live all over alp-sdk's `scripts/` tree, not in one directory. Reads its
+    OWN root
     (`_hand_port_sdk_root()`, ALP_SDK_HAND_PORT_ROOT) rather than `_sdk_root()`
     -- see the module docstring's tan-cli#296 note.
     """

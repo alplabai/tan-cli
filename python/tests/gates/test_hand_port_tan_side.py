@@ -104,23 +104,17 @@ HAND_PORT_TAN_SIDE: dict[str, tuple[str, ...]] = {
         "tan/planner/project_emit/west_libs.py",
         "tan/planner/libraries.py",
     ),
-    # The `scripts/alp_cli/*` half -- the nine #778 is about. Each of these was
-    # unmapped before this file existed.
-    "scripts/alp_cli/faultdecode.py": (
-        "tan/core/faultdecode.py",
-        "tan/commands/faultdecode_cmd.py",
-    ),
-    "scripts/alp_cli/new_som.py": ("tan/commands/new_som_cmd.py",),
-    "scripts/alp_cli/monitor.py": ("tan/commands/monitor_cmd.py",),
-    # `tan/core/error_catalog.py` ONLY. `explain_cmd.py` also touches this
-    # upstream module, but ~80% of it is template registries ported from the
-    # retired Rust oracle with no upstream-Python origin at all; pairing it
-    # here would attribute that prose to `explain.py`.
-    "scripts/alp_cli/explain.py": ("tan/core/error_catalog.py",),
-    # Lopsided, and worth knowing before reading a red here as a port failure:
-    # 66 of `doctor.py`'s 832 lines crossed (`_check_libraries`). The upstream
-    # hash therefore also moves for the ~24 checks that never came over.
-    "scripts/alp_cli/doctor.py": ("tan/core/doctor_libraries.py",),
+    # `scripts/alp_cli/{faultdecode,new_som,monitor,explain,doctor}.py` were
+    # here (the `scripts/alp_cli/*` half #778 is about) until tan-cli#996:
+    # RETIRED, alongside their `HAND_PORT_HASHES` pins, when alp-sdk `210e9fed`
+    # (#1367/#1368) deleted all seven `alp_cli/*` sources outright -- see that
+    # pin's own comment in `test_planner_relocation_freshness.py`. Their tan
+    # counterparts (`tan/core/faultdecode.py` + `tan/commands/
+    # faultdecode_cmd.py`, `tan/commands/new_som_cmd.py`, `tan/commands/
+    # monitor_cmd.py`, `tan/core/error_catalog.py`, `tan/core/
+    # doctor_libraries.py`) are unaffected and keep governing their own tan
+    # commands; only the alp-sdk half of the audit is gone, per this file's
+    # own "drop them in the same change that dropped the pin" rule.
 }
 
 #: Upstream sources whose tan counterpart is real but is NOT a file. A
@@ -138,11 +132,6 @@ HAND_PORT_NO_TAN_FILE_PAIRING: dict[str, str] = {
         "(1613 lines), a file under active change for stderr parsing, "
         "exit-code classification and spawn behaviour"
     ),
-    "scripts/alp_cli/validate.py": (
-        "no real counterpart: tan/commands/validate_cmd.py is a port of the retired Rust "
-        "oracle's validate.rs. What crossed is the --format human/json/sarif "
-        "concept, which tan deliberately diverges on, plus two indent=2 calls"
-    ),
     "scripts/sentinels.py": (
         "INLINED, not ported as a file: `sentinels.is_tbd` is spelled "
         "`_is_tbd` inside tan/planner/zephyr_board.py, which this table "
@@ -156,13 +145,12 @@ HAND_PORT_NO_TAN_FILE_PAIRING: dict[str, str] = {
         "PINNED_HASHES against scripts/alp_orchestrate/loader.py, so a second "
         "file pairing would double-pin one file to two upstream sources"
     ),
-    "scripts/alp_cli/model.py": (
-        "_resolve_compile crossed into tan/commands/model_cmd.py, ~15 lines "
-        "of 1059 -- the rest of that file is model build/check/doctor logic "
-        "with no upstream counterpart, and the rest of model.py's own 66 "
-        "lines (the click group + build_cmd CLI wiring) has none either, "
-        "ADR-0028 having moved the engine itself into tan/model/"
-    ),
+    # "scripts/alp_cli/validate.py" and "scripts/alp_cli/model.py" were here
+    # until tan-cli#996: RETIRED, alongside their HAND_PORT_HASHES pins, when
+    # alp-sdk 210e9fed (#1367/#1368) deleted the whole alp_cli click-group --
+    # see that pin's own comment in test_planner_relocation_freshness.py.
+    # tan/commands/validate_cmd.py and tan/commands/model_cmd.py are
+    # unaffected; only the alp-sdk half of the audit is gone.
 }
 
 #: Upstream sources whose tan counterpart is KNOWN to be wrong right now.
@@ -198,9 +186,7 @@ HAND_PORT_KNOWN_DRIFT: dict[str, str] = {}
 _PAIRING_MAY_ONLY_CONTAIN: frozenset[str] = frozenset(
     {
         "scripts/alp_cli/diagnostic_format.py",
-        "scripts/alp_cli/validate.py",
         "scripts/alp_cli/validator.py",
-        "scripts/alp_cli/model.py",
         "scripts/sentinels.py",
     }
 )
@@ -529,7 +515,26 @@ def test_explain_hand_port_still_agrees_with_its_upstream_symbols():
 
     Skips visibly without a bound checkout, same contract as the sibling
     gate: a run that never bound the root is not set up to do this audit.
+
+    tan-cli#996: `scripts/alp_cli/explain.py` was RETIRED upstream at
+    alp-sdk `210e9fed` (#1367/#1368, "finish the alp_cli retirement") and is
+    no longer a `HAND_PORT_HASHES` key -- see that pin's own comment. This
+    symbol-level probe has nothing left to compare against upstream, so it
+    SKIPS (loudly, naming why) rather than either hard-failing on a
+    `FileNotFoundError` that looks like drift, or silently vanishing --
+    `tan/core/error_catalog.py`'s own three symbols are unaffected and still
+    govern `tan explain`'s real behaviour; only the alp-sdk half of this
+    audit is gone. If a future upstream re-adds an equivalent module, port
+    this probe to the new path rather than reviving `explain.py`'s.
     """
+    upstream_path = _hand_port_sdk_root() / "scripts" / "alp_cli" / "explain.py"
+    if not upstream_path.is_file():
+        pytest.skip(
+            "scripts/alp_cli/explain.py no longer exists upstream (alp-sdk "
+            "210e9fed retired the whole alp_cli click-group, tan-cli#996) -- "
+            "nothing to compare tan/core/error_catalog.py's symbols against. "
+            "Not a failure: tan's own explain command is unaffected."
+        )
     upstream = _upstream_ast("scripts/alp_cli/explain.py")
 
     from tan.core import error_catalog

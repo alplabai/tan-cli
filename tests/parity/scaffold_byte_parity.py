@@ -144,6 +144,69 @@ def un_edit_iot_extra_conf_order(text: str) -> str:
     return _IOT_EXTRA_CONF_PREPEND.sub(r"list(APPEND \1)", text)
 
 
+#: tan-cli#1001 review (major), first half: alp-sdk's own `examples/
+#: connectivity/mqtt-telemetry/README.md` links `native_sim.conf` via a
+#: self-referential `../mqtt-telemetry/native_sim.conf` detour (its own
+#: README, one level down, pointing back at its own directory -- verified in
+#: the alp-sdk source tree at the current vendor point). That IS
+#: `../`-prefixed, so tan's doc-link rewriter (the same one entry 4's
+#: `- Ref:`-pinned links go through) treats it as a cross-directory reference
+#: and renders it as a `github.com/.../blob/<ref>/...` link -- even though
+#: `native_sim.conf` ships as a sibling of `README.md` in THIS scaffolded
+#: tree (`tan init --template iot-starter` writes it, tan-cli#379,
+#: `NON_ENVELOPE_EXTRAS` above). Kept as its own entry, separate from the
+#: build-comment fix below, per this module's own two-independent-
+#: substitutions-get-two-entries discipline (see the `model_comment_1`/`_2`
+#: split above): healing one without the other must still fail on its own.
+_IOT_AEN801_README_NATIVE_SIM_CONF_LINK_EDITED = (
+    "turns mbedtls off (see [`native_sim.conf`](native_sim.conf)) so the\n"
+)
+_IOT_AEN801_README_NATIVE_SIM_CONF_LINK_EMITTED = (
+    "turns mbedtls off (see\n"
+    "[`native_sim.conf`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/"
+    "examples/connectivity/mqtt-telemetry/native_sim.conf)) so the\n"
+)
+
+
+def un_edit_iot_aen801_readme_native_sim_conf_link(text: str) -> str:
+    """tan-cli#1001 review: reverse the sibling-link correction above to
+    recover the emit's own (dead-outside-an-alp-sdk-checkout) GitHub blob
+    link."""
+    return text.replace(
+        _IOT_AEN801_README_NATIVE_SIM_CONF_LINK_EDITED,
+        _IOT_AEN801_README_NATIVE_SIM_CONF_LINK_EMITTED,
+    )
+
+
+#: tan-cli#1001 review (major), second half: the re-vendor also imported a
+#: "copy it in first" build comment that is true upstream (alp-sdk's own
+#: checkout, where `native_sim.conf` really does live only in the SDK tree)
+#: and false here: `tan init --template iot-starter` vendors and writes
+#: `native_sim.conf` as a sibling of this very `README.md`
+#: (`NON_ENVELOPE_EXTRAS` above) -- there is nothing to copy in. Own entry,
+#: same discipline as the link fix above.
+_IOT_AEN801_README_NATIVE_SIM_COPY_COMMENT_EDITED = (
+    "# Standalone, native_sim (no radio; framing-only, mbedtls off):\n"
+    "west build -b native_sim/native/64 . \\\n"
+)
+_IOT_AEN801_README_NATIVE_SIM_COPY_COMMENT_EMITTED = (
+    "# Standalone, native_sim (no radio; framing-only, mbedtls off):\n"
+    "# native_sim.conf ships only in the alp-sdk tree, not in this\n"
+    "# scaffold -- copy it in first (see the link above) before\n"
+    "# running this leg.\n"
+    "west build -b native_sim/native/64 . \\\n"
+)
+
+
+def un_edit_iot_aen801_readme_native_sim_copy_comment(text: str) -> str:
+    """tan-cli#1001 review: reverse the "copy it in first" comment removal
+    above to recover the emit's own (false-in-a-tan-scaffold) instruction."""
+    return text.replace(
+        _IOT_AEN801_README_NATIVE_SIM_COPY_COMMENT_EDITED,
+        _IOT_AEN801_README_NATIVE_SIM_COPY_COMMENT_EMITTED,
+    )
+
+
 #: tan-cli#821(a): `edge-ai`'s `## Model` / `## Tests` README sections and the
 #: matching `src/main.c` comments point at `models/README.md` and
 #: `tests/unit/cold_chain` -- both real only in the alp-sdk checkout the text
@@ -242,34 +305,41 @@ def un_edit_edge_ai_main_c_model_comment_2(text: str) -> str:
     )
 
 
-#: tan-cli#814: the emit's own sentence tells the customer to flip `som.sku`
-#: to `E1M-V2M101` in `board.yaml` and stop there. On the `E1M-V2N101` sibling
-#: that is correct (V2N101/V2M101 are the same PCB, same `preset:`/`cores:`/
-#: `pins:`), but here it is a cross-family swap (`alif-ensemble` ->
-#: `renesas-rzv2n-deepx`) that leaves `preset: e1m-evk`, `cores:` and `pins:`
-#: all pinned to the Alif module -- measured: `tan validate` refuses
-#: with ALP-B007 (board/family mismatch), and keeps refusing as each message
-#: is patched around (`cores:` names unknown ids, a `libraries:` entry scoped
-#: to a core the flip left undeclared, a `pins:` route not on the resolved
-#: board, a pad macro that does not match the resolved pad). Deliberately no
-#: count here: an earlier revision of this comment said "two more hard exits"
-#: and a re-measurement found four, because how far the cascade runs depends
-#: on how far the customer patches forward. Matches the literal sentence, not
-#: a paraphrase, so an unrelated README edit still fails this gate.
+#: tan-cli#814, re-anchored tan-cli#1001 review (blocker): the emit's own
+#: sentence tells the customer to flip `som.sku` to either `E1M-V2M101` or
+#: `E1M-V2M102` in `board.yaml` and stop there. On the `E1M-V2N101` sibling
+#: that is correct (V2N101/V2M101/V2M102 are the same PCB, same
+#: `preset:`/`cores:`/`pins:`, and alp-sdk#1749 made the sentence SKU-neutral
+#: there -- see `deepx_v2m102_scope` in the retirement block comment below),
+#: but here it is a cross-family swap (`alif-ensemble` -> `renesas-rzv2n-
+#: deepx`) that leaves `preset: e1m-evk`, `cores:` and `pins:` all pinned to
+#: the Alif module -- measured: `tan validate` refuses with ALP-B007 (board/
+#: family mismatch: `board preset 'e1m-evk' hosts SoM families
+#: ['alif-ensemble', 'nxp-imx9'], but E1M-V2M101 is family
+#: 'renesas-rzv2n-deepx'`). alp-sdk#1749's rewording at the 722320a1 re-vendor
+#: made the V2N101 sibling's sentence correct but reintroduced the identical
+#: AEN801 defect in new words -- the anchor below matches the NEW wording, not
+#: the tan-cli#814-era one it replaces. Matches the literal sentence, not a
+#: paraphrase, so an unrelated README edit still fails this gate.
 _EDGE_AI_AEN801_README_DEEPX_NOTE = (
     "For the DEEPX DX-M1 path, re-scaffold rather than edit: `tan init --template\n"
     "edge-ai-starter --som E1M-V2M101`. Flipping `som.sku` alone leaves `preset:`,\n"
-    "`cores:` and `pins:` pinned to this module and `tan validate` refuses it."
+    "`cores:` and `pins:` pinned to this module (`e1m-evk`, which does not host\n"
+    "the `renesas-rzv2n-deepx` family) and `tan validate` refuses it."
 )
 _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED = (
-    "Flip `som.sku` in `board.yaml` to `E1M-V2M101` for the DEEPX DX-M1 path."
+    "The DEEPX DX-M1 NPU is populated on `E1M-V2M101`/`E1M-V2M102` -- not on\n"
+    "`E1M-V2N101`/`E1M-V2N102`, the same PCB without it. Pick either via\n"
+    "`som.sku` in `board.yaml`."
 )
 
 
 def un_edit_edge_ai_aen801_readme_deepx_note(text: str) -> str:
-    """tan-cli#814: undo the README correction above to recover the emit's
-    own (still-wrong) sentence -- alp-sdk has not been fixed yet, so the live
-    emit still says this."""
+    """tan-cli#814, re-anchored tan-cli#1001 review: undo the README
+    correction above to recover the emit's own (still-wrong on this SKU)
+    sentence -- alp-sdk's 722320a1 rewording fixed this sentence for the
+    E1M-V2N101 sibling but not for E1M-AEN801, which cannot flip `som.sku`
+    to a DEEPX SKU at all without re-scaffolding."""
     return text.replace(
         _EDGE_AI_AEN801_README_DEEPX_NOTE, _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED
     )
@@ -689,29 +759,88 @@ def un_edit_v2n101_soc_identity(text: str) -> str:
     return text.replace("renesas:rzv2n:n44", "alif:ensemble:e8")
 
 
-#: tan-cli#977 (the follow-up PR #975's review round scoped out, see entry 12
-#: above): `sensor`'s `src/main.c` carries two more bare alp-sdk-only
-#: referents in the SEPARATE `TMP112_ADDR_7BIT` doc-comment entry 12's
-#: `hardware_paragraph` fix deliberately left alone (it is a different
-#: comment block, three lines below the one that fix touched) -- a bare
-#: `metadata/chips/tmp112.yaml` and a bare `include/alp/chips/tmp112.h`,
-#: neither emitted into any scaffolded project. Two entries, not one, per the
-#: `edit_id` discipline: each substitution is independently reversible.
-#: Byte-identical between the two SKUs (same as entries 11/12), so both
-#: `un_edit`s are shared across both SKUs.
+#: tan-cli#977 (the follow-up PR #975's review round scoped out, see the
+#: retired entry 12 above): `sensor`'s `src/main.c` carried a bare
+#: `metadata/chips/tmp112.yaml` and a bare `include/alp/chips/tmp112.h` in
+#: its `TMP112_ADDR_7BIT` doc-comment when this entry was first written.
+#: **Re-derived against `dev`'s tan-cli#996/#1001 re-vendor** (alp-sdk#1269:
+#: `sensor` swapped its chip from TMP112 to BMP581, since TMP112 lives on
+#: BRD_I2C -- a bus the E1M-AEN family's LPI2C0 cannot master at all -- not
+#: on the `BOARD_I2C_SENSORS` bus this example actually opens): the anchors
+#: below match the CURRENT vendored bytes, not the TMP112-era ones this
+#: entry was filed against. `#1001` retired entry 12 outright rather than
+#: re-deriving it -- entries 11/12's own module doctrine two sections up
+#: warns against exactly that conflation ("retire only when upstream healed
+#: the underlying problem, not when the anchor stopped matching"): the
+#: TMP112-specific bytes are genuinely gone, but the BARE-REFERENT DEFECT
+#: recurred in the new BMP581 paragraph verbatim, one bare mention for the
+#: other. Swept the whole file rather than only the two lines the issue
+#: named (`src/main.c:51,53` in the pre-re-vendor tree): the `Hardware:`
+#: paragraph and the `#1269` historical note each gained a fresh bare
+#: mention neither predecessor entry ever covered, and the `bmp581_init`
+#: failure doc-comment's `i2c-scanner` mention -- entry 11's `init_fail_
+#: comment`, also retired anchor-gone by `#1001` -- recurred near-verbatim.
+#: Five substitutions, one per site, byte-identical between the two SKUs
+#: (`sensor`'s `src/main.c` carries no SKU substitution at all, confirmed
+#: against the current tree), so each `un_edit` is shared across both.
+_SENSOR_MAIN_C_HARDWARE_BOARDS_POINTER_EMITTED = (
+    "on both -- see metadata/boards/e1m-evk.yaml and\n"
+    " * metadata/boards/e1m-x-evk.yaml `i2c_devices:`.  On a brand-new\n"
+)
+_SENSOR_MAIN_C_HARDWARE_BOARDS_POINTER_EDITED = (
+    "on both -- see alp-sdk's metadata/boards/e1m-evk.yaml and\n"
+    " * metadata/boards/e1m-x-evk.yaml (not part of this scaffolded\n"
+    " * project) `i2c_devices:`.  On a brand-new\n"
+)
+
+
+def un_edit_sensor_main_c_hardware_boards_pointer(text: str) -> str:
+    """tan-cli#977: reverse the `Hardware:` paragraph's bare
+    `metadata/boards/e1m-evk.yaml`/`e1m-x-evk.yaml` mentions rewrite above
+    to recover the emit's own (dead-pointer) bytes."""
+    return text.replace(
+        _SENSOR_MAIN_C_HARDWARE_BOARDS_POINTER_EDITED,
+        _SENSOR_MAIN_C_HARDWARE_BOARDS_POINTER_EMITTED,
+    )
+
+
+_SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EMITTED = (
+    "at all; see examples/v2n/v2n-temp-sensor for the V2N-only\n"
+    " * BRD_I2C/TMP112 pattern.)\n"
+)
+_SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EDITED = (
+    "at all; see alp-sdk's examples/v2n/v2n-temp-sensor (not part\n"
+    " * of this scaffolded project) for the V2N-only\n"
+    " * BRD_I2C/TMP112 pattern.)\n"
+)
+
+
+def un_edit_sensor_main_c_historical_note_v2n_pointer(text: str) -> str:
+    """tan-cli#977: reverse the `#1269` historical note's bare
+    `examples/v2n/v2n-temp-sensor` mention rewrite above to recover the
+    emit's own (dead-pointer) bytes. Own entry from the `Hardware:`
+    paragraph fix above -- a different comment block, per the
+    one-substitution-per-entry discipline."""
+    return text.replace(
+        _SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EDITED,
+        _SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EMITTED,
+    )
+
+
 _SENSOR_MAIN_C_ADDR_METADATA_POINTER_EMITTED = (
-    " families (see\n * metadata/chips/tmp112.yaml)."
+    "E1M-X EVK (see\n * metadata/boards/e1m-evk.yaml / e1m-x-evk.yaml `i2c_devices:`).\n"
 )
 _SENSOR_MAIN_C_ADDR_METADATA_POINTER_EDITED = (
-    " families (see alp-sdk's\n * metadata/chips/tmp112.yaml, not part of this\n"
-    " * scaffolded project)."
+    "E1M-X EVK (see alp-sdk's\n"
+    " * metadata/boards/e1m-evk.yaml / e1m-x-evk.yaml, not part of\n"
+    " * this scaffolded project, `i2c_devices:`).\n"
 )
 
 
 def un_edit_sensor_main_c_addr_metadata_pointer(text: str) -> str:
-    """tan-cli#977: reverse the `TMP112_ADDR_7BIT` doc-comment's bare
-    `metadata/chips/tmp112.yaml` mention rewrite above to recover the emit's
-    own (dead-pointer) bytes."""
+    """tan-cli#977: reverse the `BMP581_ADDR_7BIT` doc-comment's bare
+    `metadata/boards/e1m-evk.yaml`/`e1m-x-evk.yaml` mention rewrite above to
+    recover the emit's own (dead-pointer) bytes."""
     return text.replace(
         _SENSOR_MAIN_C_ADDR_METADATA_POINTER_EDITED,
         _SENSOR_MAIN_C_ADDR_METADATA_POINTER_EMITTED,
@@ -719,18 +848,20 @@ def un_edit_sensor_main_c_addr_metadata_pointer(text: str) -> str:
 
 
 _SENSOR_MAIN_C_ADDR_HEADER_POINTER_EMITTED = (
-    " * include/alp/chips/tmp112.h if your board straps differently. */\n"
+    " * BST-BMP581-DS004 s5.6 or include/alp/chips/bmp581.h if your\n"
+    " * board straps differently. */\n"
 )
 _SENSOR_MAIN_C_ADDR_HEADER_POINTER_EDITED = (
-    " * alp-sdk's include/alp/chips/tmp112.h (not part of this\n"
-    " * scaffolded project) if your board straps differently. */\n"
+    " * BST-BMP581-DS004 s5.6 or alp-sdk's include/alp/chips/bmp581.h\n"
+    " * (not part of this scaffolded project) if your board straps\n"
+    " * differently. */\n"
 )
 
 
 def un_edit_sensor_main_c_addr_header_pointer(text: str) -> str:
-    """tan-cli#977: reverse the `TMP112_ADDR_7BIT` doc-comment's bare
-    `include/alp/chips/tmp112.h` mention rewrite above to recover the emit's
-    own (dead-pointer) bytes. Own entry from the `metadata/chips/tmp112.yaml`
+    """tan-cli#977: reverse the `BMP581_ADDR_7BIT` doc-comment's bare
+    `include/alp/chips/bmp581.h` mention rewrite above to recover the emit's
+    own (dead-pointer) bytes. Own entry from the `metadata/boards/*.yaml`
     fix above -- the two are independent substitutions in the same comment
     block, per the one-substitution-per-entry discipline (tan-cli#908)."""
     return text.replace(
@@ -739,24 +870,51 @@ def un_edit_sensor_main_c_addr_header_pointer(text: str) -> str:
     )
 
 
-#: tan-cli#977: `sensor`'s `board.yaml` carries three more bare alp-sdk-only
-#: referents, none in the `src/main.c` comment block entries 11/12 and the
-#: two entries above cover -- a different file. The "Customer workflow"
-#: paragraph names `scripts/alp_project.py` bare (it IS invoked, via
-#: `ALP_SDK_ROOT` -- see `CMakeLists.txt` -- but the physical file lives only
-#: in the alp-sdk checkout `ALP_SDK_ROOT` resolves, never in this scaffolded
-#: tree, so the "not part of this scaffolded project" framing still applies;
-#: worded "resolved via ALP_SDK_ROOT" rather than entry 4/7/11/12's plain
-#: "not part of this scaffolded project" since, unlike those purely
-#: descriptive pointers, this one names real build machinery a customer's own
-#: `CMakeLists.txt` genuinely runs). The chip-classification paragraph below
-#: names a bare `metadata/chips/tmp112.yaml` and a bare
-#: `scripts/check_example_portability.py`, both purely descriptive, same
-#: defect class as entries 11/12. Three entries, one per substitution.
-#: Byte-identical between the two SKUs at every line these edits touch (the
-#: per-SKU diff is `som.sku:`, `preset:`, the `pins:` route and the `cores:`
-#: id further down -- confirmed none of it overlaps this paragraph), so all
-#: three `un_edit`s are shared across both SKUs.
+_SENSOR_MAIN_C_INIT_FAIL_SCANNER_POINTER_EMITTED = (
+    "     * is wrong, maybe the bus is held low by another device.\n"
+    "     * examples/peripheral-io/i2c-scanner can confirm which devices ACK. */\n"
+)
+_SENSOR_MAIN_C_INIT_FAIL_SCANNER_POINTER_EDITED = (
+    "     * is wrong, maybe the bus is held low by another device.\n"
+    "     * alp-sdk's examples/peripheral-io/i2c-scanner (not part of\n"
+    "     * this scaffolded project) can confirm which devices ACK. */\n"
+)
+
+
+def un_edit_sensor_main_c_init_fail_scanner_pointer(text: str) -> str:
+    """tan-cli#977: reverse the `bmp581_init` failure doc-comment's bare
+    `examples/peripheral-io/i2c-scanner` mention rewrite above to recover
+    the emit's own (dead-pointer) bytes -- the BMP581-era recurrence of
+    entry 11's retired `init_fail_comment` anchor."""
+    return text.replace(
+        _SENSOR_MAIN_C_INIT_FAIL_SCANNER_POINTER_EDITED,
+        _SENSOR_MAIN_C_INIT_FAIL_SCANNER_POINTER_EMITTED,
+    )
+
+
+#: tan-cli#977: `sensor`'s `board.yaml` carries the board.yaml-side sibling
+#: of the `src/main.c` sweep above -- a different file, same defect class,
+#: **re-derived against `dev`'s tan-cli#996/#1001 re-vendor** the same way.
+#: The "Customer workflow" paragraph names `scripts/alp_project.py` bare (it
+#: IS invoked, via `ALP_SDK_ROOT` -- see `CMakeLists.txt` -- but the
+#: physical file lives only in the alp-sdk checkout `ALP_SDK_ROOT` resolves,
+#: never in this scaffolded tree, so the "not part of this scaffolded
+#: project" framing still applies; worded "resolved via ALP_SDK_ROOT" rather
+#: than the plain "not part of this scaffolded project" the purely
+#: descriptive pointers below use, since this one names real build machinery
+#: a customer's own `CMakeLists.txt` genuinely runs) -- unchanged by the
+#: re-vendor. The chip-classification paragraph's `metadata/chips/
+#: bmp581.yaml` mention is the chip-renamed descendant of the entry this was
+#: originally filed against (`tmp112.yaml`); its `scripts/check_example_
+#: portability.py` mention is unchanged. The `#1269` historical NOTE
+#: paragraph is new (added by the same re-vendor as `src/main.c`'s) and
+#: carries two more bare mentions of its own -- `metadata/boards/*.yaml
+#: i2c_devices:` and `examples/v2n/v2n-temp-sensor`, the board.yaml-side
+#: siblings of `src/main.c`'s equivalents above. Five entries, one per
+#: substitution. Byte-identical between the two SKUs at every line these
+#: edits touch (the per-SKU diff is `som.sku:`, `preset:`, the `pins:` route
+#: and the `cores:` id further down -- confirmed none of it overlaps this
+#: paragraph), so all five `un_edit`s are shared across both SKUs.
 _SENSOR_BOARD_YAML_WORKFLOW_POINTER_EMITTED = (
     "CMakeLists.txt invokes\n"
     "# scripts/alp_project.py at configure time + layers the\n"
@@ -779,11 +937,11 @@ def un_edit_sensor_board_yaml_workflow_pointer(text: str) -> str:
 
 
 _SENSOR_BOARD_YAML_METADATA_POINTER_EMITTED = (
-    "families per metadata/chips/tmp112.yaml -- so this example is\n"
+    "families per metadata/chips/bmp581.yaml -- so this example is\n"
     "# Ring 2 (chip-bound, multi-family) per\n"
 )
 _SENSOR_BOARD_YAML_METADATA_POINTER_EDITED = (
-    "families per alp-sdk's metadata/chips/tmp112.yaml (not part of\n"
+    "families per alp-sdk's metadata/chips/bmp581.yaml (not part of\n"
     "# this scaffolded project) -- so this example is Ring 2\n"
     "# (chip-bound, multi-family) per\n"
 )
@@ -791,7 +949,7 @@ _SENSOR_BOARD_YAML_METADATA_POINTER_EDITED = (
 
 def un_edit_sensor_board_yaml_metadata_pointer(text: str) -> str:
     """tan-cli#977: reverse the chip-classification paragraph's bare
-    `metadata/chips/tmp112.yaml` mention rewrite above to recover the emit's
+    `metadata/chips/bmp581.yaml` mention rewrite above to recover the emit's
     own (dead-pointer) bytes."""
     return text.replace(
         _SENSOR_BOARD_YAML_METADATA_POINTER_EDITED,
@@ -812,11 +970,60 @@ def un_edit_sensor_board_yaml_portability_script_pointer(text: str) -> str:
     """tan-cli#977: reverse the chip-classification paragraph's bare
     `scripts/check_example_portability.py` mention rewrite above to recover
     the emit's own (dead-pointer) bytes. Own entry from the
-    `metadata/chips/tmp112.yaml` fix above, per the one-substitution-per-entry
+    `metadata/chips/bmp581.yaml` fix above, per the one-substitution-per-entry
     discipline."""
     return text.replace(
         _SENSOR_BOARD_YAML_PORTABILITY_SCRIPT_POINTER_EDITED,
         _SENSOR_BOARD_YAML_PORTABILITY_SCRIPT_POINTER_EMITTED,
+    )
+
+
+_SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EMITTED = (
+    "BRD_I2C, not on BOARD_I2C_SENSORS -- see metadata/boards/e1m-evk.yaml\n"
+    "# i2c_devices: and metadata/boards/e1m-x-evk.yaml i2c_devices:, neither\n"
+    "# of which lists a TMP112 on the sensor bus this example opens. On the\n"
+)
+_SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EDITED = (
+    "BRD_I2C, not on BOARD_I2C_SENSORS -- see alp-sdk's\n"
+    "# metadata/boards/e1m-evk.yaml i2c_devices: and\n"
+    "# metadata/boards/e1m-x-evk.yaml i2c_devices: (not part of this\n"
+    "# scaffolded project), neither of which lists a TMP112 on the\n"
+    "# sensor bus this example opens. On the\n"
+)
+
+
+def un_edit_sensor_board_yaml_historical_note_boards_pointer(text: str) -> str:
+    """tan-cli#977: reverse the `#1269` historical NOTE's bare
+    `metadata/boards/e1m-evk.yaml`/`e1m-x-evk.yaml` mentions rewrite above
+    to recover the emit's own (dead-pointer) bytes -- the board.yaml-side
+    sibling of `src/main.c`'s `hardware_boards_pointer` entry above."""
+    return text.replace(
+        _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EDITED,
+        _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EMITTED,
+    )
+
+
+_SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EMITTED = (
+    "(0x47) on each -- see examples/v2n/v2n-temp-sensor for the V2N-only\n"
+    "# BRD_I2C/TMP112 pattern instead.\n"
+)
+_SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EDITED = (
+    "(0x47) on each -- see alp-sdk's examples/v2n/v2n-temp-sensor\n"
+    "# (not part of this scaffolded project) for the V2N-only\n"
+    "# BRD_I2C/TMP112 pattern instead.\n"
+)
+
+
+def un_edit_sensor_board_yaml_historical_note_v2n_pointer(text: str) -> str:
+    """tan-cli#977: reverse the `#1269` historical NOTE's bare
+    `examples/v2n/v2n-temp-sensor` mention rewrite above to recover the
+    emit's own (dead-pointer) bytes -- the board.yaml-side sibling of
+    `src/main.c`'s `historical_note_v2n_pointer` entry above. Own entry from
+    the `metadata/boards/*.yaml` fix above, per the
+    one-substitution-per-entry discipline."""
+    return text.replace(
+        _SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EDITED,
+        _SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EMITTED,
     )
 
 
@@ -899,81 +1106,92 @@ DELIBERATE_EDITS: dict[
         "-DEXTRA_CONF_FILE=native_sim.conf wins over the generated alp.conf",
         un_edit_iot_extra_conf_order,
     ),
-    ("edge-ai", "E1M-AEN801", "README.md", "model_tests_pointers"): (
-        "tan-cli#821(a): `## Model`/`## Tests` pointed a customer at "
-        "models/README.md and tests/unit/cold_chain, neither emitted into any "
-        "scaffolded project -- turned into real links to the alp-sdk paths",
-        un_edit_edge_ai_readme_model_tests_pointers,
+    ("iot", "E1M-AEN801", "README.md", "native_sim_conf_link"): (
+        "tan-cli#1001 review (major): alp-sdk's own README links "
+        "native_sim.conf via a self-referential ../mqtt-telemetry/ detour, "
+        "which the doc-link rewriter renders as a GitHub blob link -- wrong "
+        "here, native_sim.conf ships as a sibling of this README in every "
+        "scaffold this template produces",
+        un_edit_iot_aen801_readme_native_sim_conf_link,
     ),
-    ("edge-ai", "E1M-V2N101", "README.md", "model_tests_pointers"): (
-        "tan-cli#821(a): same as E1M-AEN801/README.md above",
-        un_edit_edge_ai_readme_model_tests_pointers,
+    ("iot", "E1M-AEN801", "README.md", "native_sim_conf_copy_comment"): (
+        "tan-cli#1001 review (major): the emit tells the customer "
+        "native_sim.conf ships only in the alp-sdk tree and must be copied "
+        "in -- false here, tan init --template iot-starter vendors and "
+        "writes native_sim.conf itself (tan-cli#379, NON_ENVELOPE_EXTRAS)",
+        un_edit_iot_aen801_readme_native_sim_copy_comment,
     ),
-    ("edge-ai", "E1M-AEN801", "src/main.c", "model_comment_1"): (
-        "tan-cli#821(a): first comment pointed at models/README.md, not "
-        "emitted into any scaffolded project -- named the real alp-sdk path",
-        un_edit_edge_ai_main_c_model_comment_1,
-    ),
-    ("edge-ai", "E1M-AEN801", "src/main.c", "model_comment_2"): (
-        "tan-cli#821(a): second comment, same file, same defect -- own "
-        "entry so healing one comment without the other still reds "
-        "(tan-cli#908 review)",
-        un_edit_edge_ai_main_c_model_comment_2,
-    ),
-    ("edge-ai", "E1M-V2N101", "src/main.c", "model_comment_1"): (
-        "tan-cli#821(a): same as E1M-AEN801/src/main.c comment 1 above",
-        un_edit_edge_ai_main_c_model_comment_1,
-    ),
-    ("edge-ai", "E1M-V2N101", "src/main.c", "model_comment_2"): (
-        "tan-cli#821(a): same as E1M-AEN801/src/main.c comment 2 above",
-        un_edit_edge_ai_main_c_model_comment_2,
-    ),
+    # tan-cli#996/#1001 (the 722320a1 re-vendor): the dict went 31 -> 11
+    # entries here, 20 retired, 0 added (tan-cli#1001 review correction --
+    # an earlier revision of this comment said "eight entries retired" and
+    # "21 total", both wrong; MANIFEST.md's "Twenty" was and is correct).
+    # Named below: model_tests_pointers x2, model_comment_1/2 x4,
+    # deepx_v2m102_scope, eeprom_script_pointer x2, i2c_scanner_bullet x2,
+    # bringup_instruction x2, init_fail_comment x2, failure_modes_instruction
+    # x2, hardware_paragraph x2 -- 20 total. (`deepx_v2m_note`'s README.md
+    # half is NOT in this list any more -- tan-cli#1001 review found upstream
+    # reintroduced the identical defect in new words on `E1M-AEN801` rather
+    # than healing it, so that entry is RE-ANCHORED just below, not retired;
+    # see `un_edit_edge_ai_aen801_readme_deepx_note`'s own comment above.)
+    # Each of the 20 above stopped matching this re-vendor's fresh `--emit
+    # scaffold` output verbatim because alp-sdk 722320a1 reworded the
+    # surrounding prose, but NOT all for the same reason -- two distinct
+    # classes, not an either/or, per entry (tan-cli#1001 review):
+    #
+    # - healed (the customer-facing gap the edit closed is now closed by
+    #   alp-sdk's own prose, verified against the 722320a1 diff): the
+    #   `sensor` template's own underlying example swapped chip, TMP112 ->
+    #   BMP581, `examples/peripheral-io/i2c-master`'s alp-sdk#1269 fix
+    #   (`bringup_instruction` x2, `failure_modes_instruction` x2,
+    #   `i2c_scanner_bullet` x2); `edge-ai`'s cold-chain-monitor README/
+    #   main.c gained real doc links and a units test pointer on its own
+    #   (`model_tests_pointers` x2, `model_comment_1`/`model_comment_2` x4);
+    #   `diagnostics`'s eeprom Troubleshooting bullet gained a real markdown
+    #   link on its own (`eeprom_script_pointer` x2); `deepx_v2m102_scope`'s
+    #   V2N101/V2M102 sentence was made SKU-neutral by alp-sdk#1749.
+    # - anchor-gone, not healed (the underlying gap alp-sdk's prose does not
+    #   close -- the specific matched string is simply gone, and
+    #   reconstructing an equivalent correction against the new wording is
+    #   out of scope for a pin-bump alone): `hardware_paragraph` x2
+    #   (`sensor/*/src/main.c:14-17` -- the bare `metadata/chips/tmp112.yaml`
+    #   referent the edit corrected is now a bare `metadata/boards/
+    #   e1m-evk.yaml` + `e1m-x-evk.yaml`, same defect class, new path) and
+    #   `init_fail_comment` x2 (`:110` -- upstream went bare-name ->
+    #   bare-path, dropping the "alp-sdk's"/"not part of this scaffolded
+    #   project" qualifiers the edit added).
+    #
+    # `un_edit_edge_ai_readme_model_tests_pointers`,
+    # `un_edit_edge_ai_main_c_model_comment_1`,
+    # `un_edit_edge_ai_main_c_model_comment_2`,
+    # `un_edit_edge_ai_v2n101_readme_deepx_note`,
+    # `un_edit_diagnostics_readme_eeprom_script`,
+    # `un_edit_sensor_readme_i2c_scanner_bullet`,
+    # `un_edit_sensor_main_c_bringup_instruction`,
+    # `un_edit_sensor_main_c_init_fail_comment`,
+    # `un_edit_sensor_main_c_failure_modes_instruction` and
+    # `un_edit_sensor_main_c_hardware_paragraph` are kept as functions (their
+    # constants document the transform for the next re-vendor that finds the
+    # same class of gap) but are no longer referenced from this dict.
+    # `pattern_paragraph` below is NOT in this list: its anchor (`sensor`'s
+    # generic "Contrasts with... i2c-scanner" paragraph, which names no
+    # chip) is untouched by the TMP112 -> BMP581 swap and still matches
+    # verbatim, so it is reapplied forward, unchanged.
     ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note"): (
-        "tan-cli#814: the emit's `Flip som.sku to E1M-V2M101` sentence "
-        "names a target E1M-AEN801's own `board.yaml` preset (`e1m-evk`, "
-        "which hosts only alif-ensemble/nxp-imx9, not V2M101's "
-        "renesas-rzv2n-deepx) doesn't host that tan validate refuses; the "
-        "E1M-V2N101 sibling's identical sentence IS legal on ITS preset "
-        "(`e1m-x-evk`) -- E1M-V2N101 is family renesas-rzv2n and E1M-V2M101 "
-        "is family renesas-rzv2n-deepx, two different families, both listed "
-        "in e1m-x-evk's hosts_som_families -- but has its own, narrower "
-        "defect -- see the entry right below",
+        "tan-cli#814, re-anchored tan-cli#1001 review (blocker): alp-sdk "
+        "722320a1 did not heal this -- it reintroduced the identical defect "
+        "in new words ('Pick either via som.sku in board.yaml', still wrong "
+        "for E1M-AEN801's e1m-evk preset, which does not host the "
+        "renesas-rzv2n-deepx family). Re-anchored on the new sentence "
+        "rather than retired.",
         un_edit_edge_ai_aen801_readme_deepx_note,
     ),
     ("edge-ai", "E1M-AEN801", "board.yaml", "deepx_v2m_note"): (
         "tan-cli#814: same defect as the README entry above, the comment "
-        "one file over that reinforces it",
+        "one file over that reinforces it. Both halves of this pair are "
+        "live again after the tan-cli#1001 review re-anchor -- board.yaml "
+        "is untouched by the 722320a1 re-vendor and this entry was never "
+        "affected.",
         un_edit_edge_ai_aen801_board_yaml_deepx_note,
-    ),
-    ("edge-ai", "E1M-V2N101", "README.md", "deepx_v2m102_scope"): (
-        "tan-cli#946: the emit's `Flip som.sku to E1M-V2M101` sentence is "
-        "correct for a V2N101/V2N102 customer but misleading for a V2M102 "
-        "one -- E1M-V2M102 already carries DEEPX DX-M1 "
-        "(metadata/socs/deepx/dx/m1.json's alp_module_skus lists both "
-        "E1M-V2M101 and E1M-V2M102) -- rewritten SKU-neutral; filed "
-        "upstream as alp-sdk#1749",
-        un_edit_edge_ai_v2n101_readme_deepx_note,
-    ),
-    ("diagnostics", "E1M-AEN801", "README.md", "eeprom_script_pointer"): (
-        "tan-cli#912: the Troubleshooting section pointed at "
-        "scripts/program_eeprom.py, not emitted into any scaffolded "
-        "project -- turned into a real link to the alp-sdk path",
-        un_edit_diagnostics_readme_eeprom_script,
-    ),
-    ("diagnostics", "E1M-V2N101", "README.md", "eeprom_script_pointer"): (
-        "tan-cli#912: same as diagnostics/E1M-AEN801/README.md above",
-        un_edit_diagnostics_readme_eeprom_script,
-    ),
-    ("sensor", "E1M-AEN801", "README.md", "i2c_scanner_bullet"): (
-        "tan-cli#912: a Troubleshooting bullet pointed at a bare "
-        "examples/peripheral-io/i2c-scanner, not emitted into any "
-        "scaffolded project -- turned into a real link, matching the two "
-        "real links this same README already carries for the same path",
-        un_edit_sensor_readme_i2c_scanner_bullet,
-    ),
-    ("sensor", "E1M-V2N101", "README.md", "i2c_scanner_bullet"): (
-        "tan-cli#912: same as sensor/E1M-AEN801/README.md above",
-        un_edit_sensor_readme_i2c_scanner_bullet,
     ),
     ("sensor", "E1M-AEN801", "src/main.c", "pattern_paragraph"): (
         "tan-cli#924: the header-comment 'Contrasts with' paragraph named a "
@@ -985,48 +1203,6 @@ DELIBERATE_EDITS: dict[
     ("sensor", "E1M-V2N101", "src/main.c", "pattern_paragraph"): (
         "tan-cli#924: same as sensor/E1M-AEN801/src/main.c above",
         un_edit_sensor_main_c_pattern_paragraph,
-    ),
-    ("sensor", "E1M-AEN801", "src/main.c", "bringup_instruction"): (
-        "tan-cli#924: the header-comment 'run i2c-scanner first' run-this "
-        "instruction, own entry from the paragraph above per tan-cli#908's "
-        "one-substitution-per-entry discipline",
-        un_edit_sensor_main_c_bringup_instruction,
-    ),
-    ("sensor", "E1M-V2N101", "src/main.c", "bringup_instruction"): (
-        "tan-cli#924: same as sensor/E1M-AEN801/src/main.c above",
-        un_edit_sensor_main_c_bringup_instruction,
-    ),
-    ("sensor", "E1M-AEN801", "src/main.c", "init_fail_comment"): (
-        "tan-cli#924: the tmp112_init doc-comment's 'i2c-scanner can "
-        "confirm which devices ACK' bare mention, own entry from the two "
-        "above",
-        un_edit_sensor_main_c_init_fail_comment,
-    ),
-    ("sensor", "E1M-V2N101", "src/main.c", "init_fail_comment"): (
-        "tan-cli#924: same as sensor/E1M-AEN801/src/main.c above",
-        un_edit_sensor_main_c_init_fail_comment,
-    ),
-    ("sensor", "E1M-AEN801", "src/main.c", "failure_modes_instruction"): (
-        "tan-cli#924: the 'Most-frequent failure modes' block's 'Use "
-        "i2c-scanner to enumerate' run-this instruction, own entry from "
-        "the three above",
-        un_edit_sensor_main_c_failure_modes_instruction,
-    ),
-    ("sensor", "E1M-V2N101", "src/main.c", "failure_modes_instruction"): (
-        "tan-cli#924: same as sensor/E1M-AEN801/src/main.c above",
-        un_edit_sensor_main_c_failure_modes_instruction,
-    ),
-    ("sensor", "E1M-AEN801", "src/main.c", "hardware_paragraph"): (
-        "PR #975 review round: the header-comment 'Hardware:' paragraph "
-        "named a bare metadata/chips/tmp112.yaml, not emitted into any "
-        "scaffolded project, three lines above the pattern_paragraph entry "
-        "above -- named the real alp-sdk path in prose, same shape, a "
-        "sibling tan-cli#924 itself left uncovered",
-        un_edit_sensor_main_c_hardware_paragraph,
-    ),
-    ("sensor", "E1M-V2N101", "src/main.c", "hardware_paragraph"): (
-        "PR #975 review round: same as sensor/E1M-AEN801/src/main.c above",
-        un_edit_sensor_main_c_hardware_paragraph,
     ),
     ("diagnostics", "E1M-V2N101", "src/main.c", "som_sku_header"): (
         "tan-cli#932: src/main.c was never SKU-substituted at all -- the "
@@ -1077,11 +1253,36 @@ DELIBERATE_EDITS: dict[
     # (CONFIG_EMUL=y, CONFIG_I2C_EMUL=y either way). Reverted to plain APPEND,
     # which is what `--emit scaffold` produces unedited -- these four files
     # carry no deliberate edit at all now.
+    ("sensor", "E1M-AEN801", "src/main.c", "hardware_boards_pointer"): (
+        "tan-cli#977: the Hardware: paragraph's bare "
+        "metadata/boards/e1m-evk.yaml/e1m-x-evk.yaml mentions, not emitted "
+        "into any scaffolded project -- named the real alp-sdk paths in "
+        "prose. Re-derived against dev's tan-cli#996/#1001 re-vendor "
+        "(alp-sdk#1269: sensor's chip swapped TMP112 -> BMP581, and this "
+        "paragraph's own bare referents changed with it)",
+        un_edit_sensor_main_c_hardware_boards_pointer,
+    ),
+    ("sensor", "E1M-V2N101", "src/main.c", "hardware_boards_pointer"): (
+        "tan-cli#977: same as sensor/E1M-AEN801/src/main.c above",
+        un_edit_sensor_main_c_hardware_boards_pointer,
+    ),
+    ("sensor", "E1M-AEN801", "src/main.c", "historical_note_v2n_pointer"): (
+        "tan-cli#977: the #1269 historical note's bare "
+        "examples/v2n/v2n-temp-sensor mention, own entry from the "
+        "hardware_boards_pointer fix above -- new text this re-vendor added",
+        un_edit_sensor_main_c_historical_note_v2n_pointer,
+    ),
+    ("sensor", "E1M-V2N101", "src/main.c", "historical_note_v2n_pointer"): (
+        "tan-cli#977: same as sensor/E1M-AEN801/src/main.c above",
+        un_edit_sensor_main_c_historical_note_v2n_pointer,
+    ),
     ("sensor", "E1M-AEN801", "src/main.c", "addr_metadata_pointer"): (
-        "tan-cli#977: the TMP112_ADDR_7BIT doc-comment's bare "
-        "metadata/chips/tmp112.yaml mention, a different comment block than "
-        "entry 12's hardware_paragraph fix, not emitted into any scaffolded "
-        "project -- named the real alp-sdk path in prose",
+        "tan-cli#977: the BMP581_ADDR_7BIT doc-comment's bare "
+        "metadata/boards/e1m-evk.yaml/e1m-x-evk.yaml mention, a different "
+        "comment block than the hardware_boards_pointer fix above -- named "
+        "the real alp-sdk paths in prose. Re-derived against dev's "
+        "tan-cli#996/#1001 re-vendor (this doc-comment is the BMP581-era "
+        "descendant of the retired entry 12's TMP112_ADDR_7BIT anchor)",
         un_edit_sensor_main_c_addr_metadata_pointer,
     ),
     ("sensor", "E1M-V2N101", "src/main.c", "addr_metadata_pointer"): (
@@ -1090,13 +1291,23 @@ DELIBERATE_EDITS: dict[
     ),
     ("sensor", "E1M-AEN801", "src/main.c", "addr_header_pointer"): (
         "tan-cli#977: the same doc-comment's bare "
-        "include/alp/chips/tmp112.h mention, own entry from the "
-        "metadata/chips/tmp112.yaml fix above",
+        "include/alp/chips/bmp581.h mention, own entry from the "
+        "metadata/boards/*.yaml fix above",
         un_edit_sensor_main_c_addr_header_pointer,
     ),
     ("sensor", "E1M-V2N101", "src/main.c", "addr_header_pointer"): (
         "tan-cli#977: same as sensor/E1M-AEN801/src/main.c above",
         un_edit_sensor_main_c_addr_header_pointer,
+    ),
+    ("sensor", "E1M-AEN801", "src/main.c", "init_fail_scanner_pointer"): (
+        "tan-cli#977: the bmp581_init failure doc-comment's bare "
+        "examples/peripheral-io/i2c-scanner mention -- the BMP581-era "
+        "recurrence of retired entry 11's init_fail_comment anchor",
+        un_edit_sensor_main_c_init_fail_scanner_pointer,
+    ),
+    ("sensor", "E1M-V2N101", "src/main.c", "init_fail_scanner_pointer"): (
+        "tan-cli#977: same as sensor/E1M-AEN801/src/main.c above",
+        un_edit_sensor_main_c_init_fail_scanner_pointer,
     ),
     ("sensor", "E1M-AEN801", "board.yaml", "workflow_pointer"): (
         "tan-cli#977: the Customer workflow paragraph's bare "
@@ -1111,8 +1322,9 @@ DELIBERATE_EDITS: dict[
     ),
     ("sensor", "E1M-AEN801", "board.yaml", "metadata_pointer"): (
         "tan-cli#977: the chip-classification paragraph's bare "
-        "metadata/chips/tmp112.yaml mention, not emitted into any "
-        "scaffolded project",
+        "metadata/chips/bmp581.yaml mention, not emitted into any "
+        "scaffolded project. Re-derived against dev's tan-cli#996/#1001 "
+        "re-vendor (alp-sdk#1269 chip rename, tmp112.yaml -> bmp581.yaml)",
         un_edit_sensor_board_yaml_metadata_pointer,
     ),
     ("sensor", "E1M-V2N101", "board.yaml", "metadata_pointer"): (
@@ -1122,12 +1334,34 @@ DELIBERATE_EDITS: dict[
     ("sensor", "E1M-AEN801", "board.yaml", "portability_script_pointer"): (
         "tan-cli#977: the same paragraph's bare "
         "scripts/check_example_portability.py mention, own entry from the "
-        "metadata/chips/tmp112.yaml fix above",
+        "metadata/chips/bmp581.yaml fix above",
         un_edit_sensor_board_yaml_portability_script_pointer,
     ),
     ("sensor", "E1M-V2N101", "board.yaml", "portability_script_pointer"): (
         "tan-cli#977: same as sensor/E1M-AEN801/board.yaml above",
         un_edit_sensor_board_yaml_portability_script_pointer,
+    ),
+    ("sensor", "E1M-AEN801", "board.yaml", "historical_note_boards_pointer"): (
+        "tan-cli#977: the #1269 historical NOTE's bare "
+        "metadata/boards/e1m-evk.yaml/e1m-x-evk.yaml i2c_devices: mentions "
+        "-- the board.yaml-side sibling of src/main.c's "
+        "hardware_boards_pointer entry, new text this re-vendor added",
+        un_edit_sensor_board_yaml_historical_note_boards_pointer,
+    ),
+    ("sensor", "E1M-V2N101", "board.yaml", "historical_note_boards_pointer"): (
+        "tan-cli#977: same as sensor/E1M-AEN801/board.yaml above",
+        un_edit_sensor_board_yaml_historical_note_boards_pointer,
+    ),
+    ("sensor", "E1M-AEN801", "board.yaml", "historical_note_v2n_pointer"): (
+        "tan-cli#977: the same NOTE's bare examples/v2n/v2n-temp-sensor "
+        "mention -- the board.yaml-side sibling of src/main.c's "
+        "historical_note_v2n_pointer entry, own entry from the "
+        "metadata/boards/*.yaml fix above",
+        un_edit_sensor_board_yaml_historical_note_v2n_pointer,
+    ),
+    ("sensor", "E1M-V2N101", "board.yaml", "historical_note_v2n_pointer"): (
+        "tan-cli#977: same as sensor/E1M-AEN801/board.yaml above",
+        un_edit_sensor_board_yaml_historical_note_v2n_pointer,
     ),
     ("sensor", "E1M-AEN801", "prj.conf", "workflow_pointer"): (
         "tan-cli#977: the same bare scripts/alp_project.py mention as "
@@ -1375,154 +1609,62 @@ def self_check() -> None:
     # substitutions, so healing comment 1 alone while comment 2 stayed edited
     # produced `after != before` (comment 2 still changed something) and no
     # failure fired at all -- measured against the pre-split function.
-    half_healed_main_c = (
-        " * (see models/README.md); with no model the deterministic classifier + anomaly\n"
-        " * fallback run.\n"
-        " * detects and routes to cc_anomaly_fallback().  See alp-sdk's\n"
-        " * examples/ai/cold-chain-monitor/models/README.md (not part of this\n"
-        " * scaffolded project) for the autoencoder training recipe to replace this\n"
-        " * stub. */\n"
-    )
-    _, split_failures = undo_declared_edits(
-        "edge-ai", "E1M-AEN801", {"src/main.c": half_healed_main_c}
-    )
-    healed_comment_failures = [
-        f for f in split_failures
-        if f.startswith("src/main.c: DELIBERATE_EDITS declares an edit that is no longer")
-    ]
-    assert len(healed_comment_failures) == 1, split_failures
+    #
+    # The original fixture for this discipline was `edge-ai`'s
+    # `model_comment_1`/`model_comment_2` pair, retired at tan-cli#996/#1001
+    # (see the DELIBERATE_EDITS block comment) -- both functions still exist
+    # (`un_edit_edge_ai_main_c_model_comment_1`/`_2`) but neither is
+    # registered any more, so they can no longer exercise this discipline
+    # through `undo_declared_edits`. The discipline itself stays covered by
+    # `diagnostics`/E1M-V2N101's four-entries-one-path `src/main.c` set
+    # below (reason-string-filtered, so a partial heal there would be caught
+    # the same way).
 
-    # tan-cli#814's two entries: the un_edit must round-trip the corrected
-    # README/board.yaml prose back onto the emit's own (still-wrong) sentence,
-    # and be registered under the exact (template, sku, path, edit_id) key.
-    assert ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note") in DELIBERATE_EDITS
-    assert (
-        un_edit_edge_ai_aen801_readme_deepx_note(_EDGE_AI_AEN801_README_DEEPX_NOTE)
-        == _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED
-    )
+    # tan-cli#814's board.yaml/README.md pair (both live again after the
+    # tan-cli#1001 review re-anchor -- see the DELIBERATE_EDITS block
+    # comment): each un_edit must round-trip the corrected text back onto
+    # the emit's own (still-wrong-for-E1M-AEN801) sentence, and be
+    # registered under the exact (template, sku, path, edit_id) key.
     assert ("edge-ai", "E1M-AEN801", "board.yaml", "deepx_v2m_note") in DELIBERATE_EDITS
     assert (
         un_edit_edge_ai_aen801_board_yaml_deepx_note(_EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE)
         == _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE_EMITTED
     )
-
-    # tan-cli#946's entry: the E1M-V2N101 tree's own DEEPX sentence
-    # (misleading for a V2M102 customer -- see alp-sdk#1749) round-trips the
-    # same way, registered under its own (template, sku, path, edit_id) key.
+    assert ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note") in DELIBERATE_EDITS
     assert (
-        "edge-ai", "E1M-V2N101", "README.md", "deepx_v2m102_scope"
-    ) in DELIBERATE_EDITS
-    assert (
-        un_edit_edge_ai_v2n101_readme_deepx_note(_EDGE_AI_V2N101_README_DEEPX_NOTE)
-        == _EDGE_AI_V2N101_README_DEEPX_NOTE_EMITTED
+        un_edit_edge_ai_aen801_readme_deepx_note(_EDGE_AI_AEN801_README_DEEPX_NOTE)
+        == _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED
     )
 
-    # tan-cli#912's four entries (diagnostics x2, sensor x2): each un_edit
-    # must round-trip the corrected README bullet back onto the emit's own
-    # (still-wrong) bytes, and be registered under the exact
-    # (template, sku, path, edit_id) key.
-    for sku in ("E1M-AEN801", "E1M-V2N101"):
-        assert (
-            "diagnostics", sku, "README.md", "eeprom_script_pointer"
-        ) in DELIBERATE_EDITS
-        assert (
-            un_edit_diagnostics_readme_eeprom_script(
-                _DIAGNOSTICS_README_EEPROM_SCRIPT_EDITED
-            )
-            == _DIAGNOSTICS_README_EEPROM_SCRIPT_EMITTED
-        )
-        assert ("sensor", sku, "README.md", "i2c_scanner_bullet") in DELIBERATE_EDITS
-        assert (
-            un_edit_sensor_readme_i2c_scanner_bullet(
-                _SENSOR_README_I2C_SCANNER_BULLET_EDITED
-            )
-            == _SENSOR_README_I2C_SCANNER_BULLET_EMITTED
-        )
-
-    # ...and each is the strict half too: feeding the un_edit its OWN emitted
-    # (already-healed) bytes finds nothing to undo -- `undo_declared_edits`
-    # must surface that as a hard failure, not a quiet pass, for all four.
-    for template, sku, path, edit_id, emitted in (
-        ("diagnostics", "E1M-AEN801", "README.md", "eeprom_script_pointer",
-         _DIAGNOSTICS_README_EEPROM_SCRIPT_EMITTED),
-        ("diagnostics", "E1M-V2N101", "README.md", "eeprom_script_pointer",
-         _DIAGNOSTICS_README_EEPROM_SCRIPT_EMITTED),
-        ("sensor", "E1M-AEN801", "README.md", "i2c_scanner_bullet",
-         _SENSOR_README_I2C_SCANNER_BULLET_EMITTED),
-        ("sensor", "E1M-V2N101", "README.md", "i2c_scanner_bullet",
-         _SENSOR_README_I2C_SCANNER_BULLET_EMITTED),
-    ):
-        _, mut_failures = undo_declared_edits(template, sku, {path: emitted})
-        assert [
-            f for f in mut_failures
-            if f.startswith(f"{path}: DELIBERATE_EDITS declares an edit that is no longer")
-        ], (template, sku, path, edit_id, mut_failures)
-
-    # tan-cli#924's eight entries (sensor/src/main.c x4 substitutions x2
-    # SKUs) plus PR #975's `hardware_paragraph` sibling (x1 substitution x2
-    # SKUs, the same defect class #924 itself left uncovered): each un_edit
-    # must round-trip the corrected comment back onto the emit's own
+    # tan-cli#924's one still-live entry (`pattern_paragraph` -- the other
+    # four sibling substitutions, `hardware_paragraph`/`bringup_instruction`/
+    # `init_fail_comment`/`failure_modes_instruction`, retired at
+    # tan-cli#996/#1001, see the DELIBERATE_EDITS block comment): the
+    # un_edit must round-trip the corrected comment back onto the emit's own
     # (still-bare) bytes, and be registered under the exact
     # (template, sku, path, edit_id) key.
-    _SENSOR_MAIN_C_924_FIXTURES = (
-        (
-            "pattern_paragraph",
-            un_edit_sensor_main_c_pattern_paragraph,
-            _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EDITED,
-            _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED,
-        ),
-        (
-            "hardware_paragraph",
-            un_edit_sensor_main_c_hardware_paragraph,
-            _SENSOR_MAIN_C_HARDWARE_PARAGRAPH_EDITED,
-            _SENSOR_MAIN_C_HARDWARE_PARAGRAPH_EMITTED,
-        ),
-        (
-            "bringup_instruction",
-            un_edit_sensor_main_c_bringup_instruction,
-            _SENSOR_MAIN_C_BRINGUP_INSTRUCTION_EDITED,
-            _SENSOR_MAIN_C_BRINGUP_INSTRUCTION_EMITTED,
-        ),
-        (
-            "init_fail_comment",
-            un_edit_sensor_main_c_init_fail_comment,
-            _SENSOR_MAIN_C_INIT_FAIL_COMMENT_EDITED,
-            _SENSOR_MAIN_C_INIT_FAIL_COMMENT_EMITTED,
-        ),
-        (
-            "failure_modes_instruction",
-            un_edit_sensor_main_c_failure_modes_instruction,
-            _SENSOR_MAIN_C_FAILURE_MODES_INSTRUCTION_EDITED,
-            _SENSOR_MAIN_C_FAILURE_MODES_INSTRUCTION_EMITTED,
-        ),
-    )
     for sku in ("E1M-AEN801", "E1M-V2N101"):
-        for edit_id, un_edit, edited, emitted in _SENSOR_MAIN_C_924_FIXTURES:
-            assert ("sensor", sku, "src/main.c", edit_id) in DELIBERATE_EDITS
-            assert un_edit(edited) == emitted
-
-    # ...and each is the strict half too: feeding the un_edit its OWN emitted
-    # (still-bare) bytes finds nothing to undo -- `undo_declared_edits` must
-    # surface that as a hard failure, not a quiet pass, for all ten. `path`
-    # carries five registered entries here, so a generic-prefix match alone
-    # is satisfied by any of the OTHER four failing (they always do, fed
-    # this short a snippet) regardless of whether the entry under test
-    # actually failed -- filter on the entry's OWN reason string, which
-    # `undo_declared_edits` embeds verbatim as `({reason})`, to prove THIS
-    # entry produced a failure, not merely that some failure occurred.
-    for sku in ("E1M-AEN801", "E1M-V2N101"):
-        for edit_id, _un_edit, _edited, emitted in _SENSOR_MAIN_C_924_FIXTURES:
-            _, mut_failures = undo_declared_edits(
-                "sensor", sku, {"src/main.c": emitted}
+        assert ("sensor", sku, "src/main.c", "pattern_paragraph") in DELIBERATE_EDITS
+        assert (
+            un_edit_sensor_main_c_pattern_paragraph(
+                _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EDITED
             )
-            reason, _ = DELIBERATE_EDITS[("sensor", sku, "src/main.c", edit_id)]
-            assert [
-                f for f in mut_failures
-                if f.startswith(
-                    "src/main.c: DELIBERATE_EDITS declares an edit that is no longer"
-                )
-                and f.endswith(f"({reason})")
-            ], ("sensor", sku, "src/main.c", edit_id, mut_failures)
+            == _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED
+        )
+
+    # ...and the strict half too: feeding the un_edit its OWN emitted
+    # (still-bare) bytes finds nothing to undo -- `undo_declared_edits` must
+    # surface that as a hard failure, not a quiet pass.
+    for sku in ("E1M-AEN801", "E1M-V2N101"):
+        _, mut_failures = undo_declared_edits(
+            "sensor", sku, {"src/main.c": _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED}
+        )
+        assert [
+            f for f in mut_failures
+            if f.startswith(
+                "src/main.c: DELIBERATE_EDITS declares an edit that is no longer"
+            )
+        ], (sku, mut_failures)
 
     # tan-cli#932's six entries (diagnostics/E1M-V2N101 only): each un_edit
     # must round-trip the corrected src/main.c or README.md bytes back onto
