@@ -50,21 +50,23 @@ west flash
 
 For the DEEPX DX-M1 path, re-scaffold rather than edit: `tan init --template
 edge-ai-starter --som E1M-V2M101`. Flipping `som.sku` alone leaves `preset:`,
-`cores:` and `pins:` pinned to this module and `tan validate` refuses it.
+`cores:` and `pins:` pinned to this module (`e1m-evk`, which does not host
+the `renesas-rzv2n-deepx` family) and `tan validate` refuses it.
 
 ## Model
 
-No model is shipped (stub + deterministic classifier/fallback). The
-autoencoder training recipe is alp-sdk's
-[`examples/ai/cold-chain-monitor/models/README.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/examples/ai/cold-chain-monitor/models/README.md)
--- not part of this scaffolded project; the path lives only in an alp-sdk
-checkout, though the link above works without one.
+<!-- The ../cold-chain-monitor/ detour is deliberate: the scaffold
+     rewriter's _RELATIVE_LINK_RE only matches `../`-prefixed links, and
+     models/ is a child of this dir, not a sibling -- don't "fix" this. -->
+
+No model is shipped (stub + deterministic classifier/fallback). See
+[`models/README.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/examples/ai/cold-chain-monitor/models/README.md) for the
+autoencoder training recipe.
 
 ## Tests
 
-The `cold_chain` core's host-unit test suite is alp-sdk's
-[`tests/unit/cold_chain`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/tests/unit/cold_chain)
--- also not part of this scaffolded project. From an alp-sdk checkout:
+In the alp-sdk tree, unit tests live in
+[`tests/unit/cold_chain`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/tests/unit/cold_chain) and run with:
 
 ```
 twister -p native_sim/native/64 -T tests/unit/cold_chain

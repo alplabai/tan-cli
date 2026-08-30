@@ -1861,12 +1861,28 @@
       "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "init.invalid-topology",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "note": "tan-cli#996 (alp-sdk#1652's `--cores` scaffold selector, ported as `tan init --topology`). EMISSION CONDITION: `--topology`'s value fails `tan.core.example_catalog.parse_topology_arg` -- an entry with no `:`, an empty core id or os, or a core id repeated more than once. Raised before any SDK checkout is even resolved (the parse is pure string handling), so this fires the same whether or not `--sdk-root` was given. Constructed as the whole literal at an `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "init.invalid-template",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/init_cmd.py",
       "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.scaffold-input-conflict",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "note": "tan-cli#996, extended tan-cli#1001 review. `--template`, `--from-example`, and `--topology` are three alternative ways to say which project to scaffold; more than one given at once is refused rather than silently preferring one (the same posture `init.topology-ambiguous` takes when a topology itself is ambiguous). EMISSION CONDITION (two independent sites, same code -- distinguished only by message text): (1) more than one of the three flags above is non-null, message names every flag that WAS given (not just the first two), e.g. \"got --topology, --template\"; (2) `--topology` and `--cores` are both non-null -- `--topology` already selects the template by its full hardware topology, so `--cores` (which splices a companion core onto an ALREADY-CHOSEN template) has nothing left to attach to. Before site (2) existed, `--topology` + `--cores` silently discarded `--cores`: `ok: true`, exit 0, `issues: []`, no trace of the requested core in the written `board.yaml` -- measured, tan-cli#1001 review. `--from-example` + `--cores` is a different, pre-existing, NOT-refused case (the example ships its own board.yaml, so `--cores` is silently ignored there, documented in `init_cmd.py` at the `_plan_from_example` call site) -- out of scope for this code. Constructed as the whole literal at two `InitError` call sites in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "init.sdk-root-invalid",
@@ -1899,6 +1915,22 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/init_cmd.py",
       "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.topology-ambiguous",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "note": "tan-cli#996 (alp-sdk#1652's `AmbiguousCoresError`, ported into `tan.core.example_catalog.find_example_by_cores` as `AmbiguousCoresTopologyError`). EMISSION CONDITION: `--topology`'s exact core/os topology matches MORE THAN ONE record in the SDK's live `metadata/templates/catalog-v1.json`. The message names every matching template id, sorted, never just the first -- the whole point of this code existing is that a customer chooses, rather than tan guessing on their behalf and hiding the other candidates. Not a hypothetical: measured against the alp-sdk v0.16.0 catalog, the single-core `{\"m55_hp\": \"zephyr\"}` topology alone already matches five templates (`diagnostics`, `iot`, `minimal`, `peripheral`, `sensor`) -- see `tests/planner/test_find_template_by_cores.py::test_the_live_catalog_is_ambiguous_for_a_single_m55_hp_zephyr_topology`. Constructed as the whole literal at an `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.topology-not-found",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "note": "tan-cli#996 (alp-sdk#1652's own `find_template_by_cores` raises `TemplateNotFoundError` for the same zero-match case; the standalone `find_example_by_cores` this code's caller uses raises `CoresTopologyNotFoundError` instead). EMISSION CONDITION: `--topology`'s exact core/os topology matches NO record in the bound SDK's live catalog. The message names every topology the catalog DOES offer, so the customer can see what is actually on the menu rather than guessing again blind. Constructed as the whole literal at an `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "kconfig.board-yaml-invalid",

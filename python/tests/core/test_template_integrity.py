@@ -538,6 +538,49 @@ def test_every_extra_conf_file_named_by_a_template_is_a_planned_file(template_id
 #: once in `board.yaml`'s comment and twice in `README.md`.
 _ALLOWED_CROSS_SKU_MENTIONS: dict[tuple[str, str, str], int] = {
     ("iot-starter", "E1M-AEN801", "E1M-V2N101"): 3,
+    # tan-cli#996/#1001 (the 722320a1 re-vendor): alp-sdk's own DEEPX-note
+    # rewrite (see MANIFEST.md's "Current vendor point" bullet) made the
+    # sentence SKU-neutral for BOTH SKU pairs, not just the V2M101/V2M102
+    # pair the entries below already covered -- "The DEEPX DX-M1 NPU is
+    # populated on E1M-V2M101/E1M-V2M102 -- not on E1M-V2N101/E1M-V2N102,
+    # the same PCB without it." Every planned `edge-ai-starter` tree now
+    # names whichever of E1M-V2N101/E1M-V2N102 is not its own SKU once (both,
+    # for a tree that is neither). A real cross-reference (explaining what
+    # does and does not carry DEEPX), not a substitution gap; alp-sdk's own
+    # rewrite is what retired the `deepx_v2m_note`/README.md and
+    # `deepx_v2m102_scope` DELIBERATE_EDITS entries (entries 5 and 10 in
+    # MANIFEST.md's "Deliberate edits on top of the emit").
+    ("edge-ai-starter", "E1M-AEN301", "E1M-V2N101"): 1,
+    ("edge-ai-starter", "E1M-AEN301", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-AEN401", "E1M-V2N101"): 1,
+    ("edge-ai-starter", "E1M-AEN401", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-AEN501", "E1M-V2N101"): 1,
+    ("edge-ai-starter", "E1M-AEN501", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-AEN601", "E1M-V2N101"): 1,
+    ("edge-ai-starter", "E1M-AEN601", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-AEN701", "E1M-V2N101"): 1,
+    ("edge-ai-starter", "E1M-AEN701", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-AEN801", "E1M-V2N101"): 1,
+    ("edge-ai-starter", "E1M-AEN801", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-V2M101", "E1M-V2N101"): 1,
+    ("edge-ai-starter", "E1M-V2M101", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-V2M102", "E1M-V2N101"): 1,
+    ("edge-ai-starter", "E1M-V2M102", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-V2N101", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-V2N102", "E1M-V2N101"): 1,
+    # Same rewrite, the other new mention: the AEN trees' `board.yaml`
+    # comment still carries the OLD `deepx_v2m_note` DELIBERATE_EDITS text
+    # ("Flip som.sku ... to E1M-V2M101"), which is why E1M-V2M101's count
+    # below is unchanged at 2 (README + board.yaml) -- but the README's own
+    # new SKU-neutral sentence adds a first-ever E1M-V2M102 mention (1, from
+    # README.md alone) that the old "Flip ... to E1M-V2M101" sentence never
+    # named.
+    ("edge-ai-starter", "E1M-AEN301", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-AEN401", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-AEN501", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-AEN601", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-AEN701", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-AEN801", "E1M-V2M102"): 1,
     ("edge-ai-starter", "E1M-AEN301", "E1M-V2M101"): 2,
     ("edge-ai-starter", "E1M-AEN401", "E1M-V2M101"): 2,
     ("edge-ai-starter", "E1M-AEN501", "E1M-V2M101"): 2,
