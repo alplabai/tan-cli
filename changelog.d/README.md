@@ -28,8 +28,14 @@ changelog.d/651.added.md
 changelog.d/612.changed.md
 ```
 
-- `<issue>` — the GitHub issue or PR number this entry belongs to. It only has
-  to make the filename unique; it is not parsed for meaning.
+- `<issue>` — the GitHub **issue** number this entry belongs to, never a PR
+  number. The parser does not enforce this (it only has to make the filename
+  unique; the number itself is not parsed for meaning), but a fragment named
+  after the PR that implements the work sends a released `CHANGELOG.md`
+  reader to a diff instead of a problem statement. This has cost real review
+  rounds — #786, #787, #788, #882, #907, #913, #1012, #1016, #1017, #1024 are
+  all instances of exactly this fix. If the work has no covering issue yet,
+  file one first; don't borrow the PR's own number.
 - `<category>` — one of `added`, `changed`, `deprecated`, `removed`, `fixed`,
   `security`. It selects the `###` heading the entry lands under. All six are
   live in `python/scripts/assemble_changelog.py`'s `CATEGORIES`, and a category
