@@ -1257,16 +1257,32 @@ jobs:
             fi
           done
 
-          # tan-cli#778's gate lives in its OWN file, so the loop above cannot
-          # reach it -- it greps one fixed module name. Its symbol-parity test
-          # is the only one there needing ALP_SDK_HAND_PORT_ROOT, and this job
-          # is the only one that binds it, so an unasserted SKIP exits 0 and
-          # passes silently: verbatim the tan-cli#308 shape that gate's own
-          # docstring invokes.
-          if ! grep -qF "test_hand_port_tan_side.py::test_explain_hand_port_still_agrees_with_its_upstream_symbols PASSED" /tmp/gates.log; then
-            echo "::error::test_explain_hand_port_still_agrees_with_its_upstream_symbols did not PASS in this job -- ALP_SDK_HAND_PORT_ROOT is bound here, so a SKIP means the oracle checkout this job cloned did not resolve (or the test regressed to fail-open), not an absent root."
-            exit 1
-          fi
+          # tan-cli#778's gate lived in its OWN file (test_hand_port_tan_side.py's
+          # test_explain_hand_port_still_agrees_with_its_upstream_symbols), so
+          # the loop above could not reach it -- this used to grep that one
+          # fixed node id, asserting PASSED.
+          #
+          # RETIRED at tan-cli#996/#1001 (the 722320a1 re-pin). alp-sdk
+          # `210e9fed` (#1367/#1368, "finish the alp_cli retirement") deleted
+          # `scripts/alp_cli/explain.py` for good -- confirmed absent at
+          # `722320a1`, 63 commits past that deletion, with no reintroduction
+          # anywhere in between. The test itself already anticipated this
+          # (its own tan-cli#996 docstring paragraph): with a bound
+          # `ALP_SDK_HAND_PORT_ROOT` it now SKIPS, permanently, by design --
+          # "If a future upstream re-adds an equivalent module, port this
+          # probe to the new path rather than reviving explain.py's." A
+          # PASSED-only assertion against a test that can never PASS again is
+          # not a gate, it is a permanently red light; keeping it would force
+          # every future PR through this job to carry a matching workaround
+          # instead of a real fix.
+          #
+          # Not a lost check: `_hand_port_sdk_root()` (ALP_SDK_HAND_PORT_ROOT)
+          # is the SAME root `test_hand_ported_planner_modules_match_their_
+          # pinned_sdk_source` reads (test_planner_relocation_freshness.py),
+          # asserted PASSED in the loop above -- a checkout that failed to
+          # resolve for THIS root fails there too, so the "oracle checkout
+          # did not resolve" case this block used to catch is still caught,
+          # by a sibling assertion against the identical root.
 
           # tan-cli#897's gate (test_planner_oracle_ref_tracks_pinned_sdk_tag.py)
           # also lives in its OWN file, so the first loop cannot reach it
