@@ -26,7 +26,7 @@
  * read_telemetry_value() for a real sensor read -- e.g. compose it
  * with the `sensor` template (alp-sdk's
  * examples/peripheral-io/i2c-master, not part of this scaffolded
- * project; TMP112 over <alp/chips/tmp112.h>) -- and the publish
+ * project; BMP581 over <alp/chips/bmp581.h>) -- and the publish
  * path here is unchanged.
  *
  * TLS status (preview): the mqtts:// path is configured through the

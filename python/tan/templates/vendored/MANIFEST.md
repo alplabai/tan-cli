@@ -431,7 +431,7 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **fifty-nine** live entries
+The `DELIBERATE_EDITS` table below currently carries **sixty-two** live entries
 (counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS`
 dict, not by hand): one `multicore-mailbox`/`E1M-AEN801` entry for the
 leading "blocked ahead" caveat (tan-cli#864 Q5, see entry 9 below), the
@@ -455,16 +455,22 @@ substitutions: the Customer-workflow paragraph, the chip-classification
 paragraph's two referents, and the `#1269` historical NOTE's two
 referents), `sensor`'s `prj.conf` (one substitution), and `minimal`'s
 `README.md` (one substitution, the template's first `DELIBERATE_EDITS`
-entry), and twenty-one more for the sibling sites entry 15's own sweep
-stopped one template short of (tan-cli#1009, PR #1009's review round, see
-entry 16 below) across `minimal`/`diagnostics` `board.yaml` (four),
+entry), twenty-one more for the sibling sites entry 15's own sweep
+stopped one template short of (tan-cli#1009, PR #1009's round-two review,
+see entry 16 below) across `minimal`/`diagnostics` `board.yaml` (four),
 `minimal` `prj.conf` (two), `diagnostics` `prj.conf` (two), `iot`
 `board.yaml` (one), `iot` `prj.conf` (two), `iot` `src/main.c` (two),
 `edge-ai` `src/main.c` (four), and `multicore-mailbox` `board.yaml` (one),
-native_sim overlay (one), `prj.conf` (one), and `src/main.c` (one). That is
-`1 + 1 + 2 + 2 + 2 + 6 + 24 + 21 = 59`.
+native_sim overlay (one), `prj.conf` (one), and `src/main.c` (one), and
+three more the round-two sweep itself missed (tan-cli#1009, PR #1009's
+round-three review, see entry 17 below): `multicore-mailbox`'s
+`board.yaml` (a second bare referent, three lines from the one entry 16
+already qualified), and two `README.md` sites (a link-label mislabel
+byte-for-byte matching entry 16's `src/main.c` fix, and a `west build`
+command that names a path that does not exist in a scaffolded project).
+That is `1 + 1 + 2 + 2 + 2 + 6 + 24 + 21 + 3 = 62`.
 `test_the_manifest_deliberate_edit_count_matches_the_table` pins the
-**fifty-nine** above against `len(DELIBERATE_EDITS)` itself, the drift this
+**sixty-two** above against `len(DELIBERATE_EDITS)` itself, the drift this
 paragraph shipped with nothing catching before tan-cli#932. tan-cli#384's
 seven `README.md` doc-link entries
 are NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0`
@@ -826,6 +832,22 @@ strictness exists to catch.
     and line 10 respectively) but are descriptive/contrastive prose, not
     run-this instructions, and stay untracked here -- tan-cli#924's own
     scope note.
+
+    **Re-examined at tan-cli#1009's round-three review**, since entries
+    15-17 went on to sweep twenty-four-plus purely descriptive bare
+    mentions (no run-this instructions among them) across `sensor`,
+    `minimal`, `diagnostics`, `iot`, `edge-ai` and `multicore-mailbox` --
+    "descriptive, not run-this" no longer distinguishes THIS exception from
+    everything since fixed under the identical ground. The exception still
+    holds, but now on precedent rather than principle: tan-cli#924 itself
+    scoped its OWN fix to the `i2c-scanner` referents it was filed against
+    and explicitly left `board.yaml`/`testcase.yaml` for later (a
+    deliberate, reviewed scope decision, not an oversight), and nothing
+    since has re-opened that specific scope decision to widen it. Left
+    exactly as tan-cli#924 left it; a future sweep that reaches `sensor`'s
+    `board.yaml`/`testcase.yaml` again should fold these in rather than
+    treat the "descriptive" wording above as still doing any distinguishing
+    work on its own.
 12. **(RETIRED at tan-cli#996/#1001, history only) `sensor`'s `src/main.c`: the header comment's `Hardware:` paragraph
     bare `metadata/chips/tmp112.yaml` mention, three lines above entry 11's
     `pattern_paragraph` substitution in the same comment block (PR #975
@@ -1009,7 +1031,13 @@ strictness exists to catch.
     - `iot`'s `src/main.c` (two entries, two independent doc-comments) -- a
       bare `docs/cc3501e-bridge.md` mention (the src/main.c-side sibling of
       `board.yaml`'s), and a bare `examples/peripheral-io/i2c-master`
-      mention in the "sensor reading" paragraph.
+      mention in the "sensor reading" paragraph. **Widened in the PR #1009
+      round-three review** to also correct that same paragraph's stale
+      "TMP112 over `<alp/chips/tmp112.h>`" -- alp-sdk#1269 swapped
+      `sensor`'s underlying chip to BMP581 and this template's own
+      `README.md:52` already said BMP581, but this `src/main.c` copy was
+      never updated; kept as one entry since both fixes sit in the same
+      matched paragraph.
     - `edge-ai`'s `src/main.c` (four entries, two independent doc-comments x
       two SKUs, byte-identical between SKUs) -- a bare `examples/ai/
       cold-chain-monitor/models/README.md` mention, twice (the "Honest
@@ -1044,15 +1072,50 @@ strictness exists to catch.
     `sensor`/`E1M-V2N101` now produces exactly one filtered failure naming
     that entry, not a sibling's).
 
-    Fix belongs upstream, alongside entry 15's alp-sdk#1855 (the `iot`,
-    `edge-ai` and `multicore-mailbox` sites are the same defect class, in
-    alp-sdk's `examples/connectivity/mqtt-telemetry`, `examples/ai/
-    cold-chain-monitor`, and `examples/multicore/mproc-mailbox` catalog
-    entries respectively -- not filed as a separate issue, since alp-sdk#1855
-    already covers the class and these are additional instances of it, not a
-    new defect); all twenty-one retire the moment alp-sdk#1855 (extended to
-    cover these three additional catalog entries) lands and this tree is
+    Fix belongs upstream, alongside entry 15's alp-sdk#1855, which this
+    entry's own review round EXTENDED to cover it (verified: #1855's own
+    Scope note previously named `sensor`/`minimal` only, exactly the
+    alp-sdk#1795 orphaning shape it warns against -- fixed in the same
+    review round that found this gap, not left standing) -- `diagnostics`,
+    `iot`, `edge-ai` and `multicore-mailbox` are the same defect class, in
+    alp-sdk's `examples/bringup/board-selftest`, `examples/connectivity/
+    mqtt-telemetry`, `examples/ai/cold-chain-monitor`, and
+    `examples/multicore/mproc-mailbox` catalog entries respectively -- not
+    filed as a separate issue, since #1855 now explicitly covers all four;
+    all twenty-one retire the moment #1855 lands and this tree is
     re-vendored.
+
+17. **The eleventh sibling site entry 16's own sweep missed, plus a broken
+    run-this command (tan-cli#1009, PR #1009's round-three review).** The
+    round-two sweep audited every vendored template but still missed one
+    site in the same file it had already partly fixed, and mislabeled one
+    more the same way `src/main.c`'s `peer_main_pointer` entry already
+    corrected, one file over:
+    - `multicore-mailbox`'s `board.yaml` -- a bare `src/backends/mproc/
+      zephyr_drv.c` mention, three lines above the `e1m_modules_pointer`
+      entry (entry 16) in the same IPC-carve-out comment block. Worse than
+      the other entries in this file: this scaffold has its own `src/` (the
+      `m55_hp` app's), so the unqualified mention reads as a customer path.
+    - `multicore-mailbox`'s `README.md` -- the "peer-side firmware" link
+      labels the scaffold's own local `./peer/main.c` (the href, already
+      correct) with alp-sdk's upstream example path as the link TEXT.
+      Byte-for-byte the same mislabel shape as `src/main.c`'s
+      `peer_main_pointer` entry (entry 16), left in place by the round-two
+      sweep because it sits in a different file.
+    - `multicore-mailbox`'s `README.md`, the HE-side standalone `west
+      build` command four lines below the link above -- names
+      `examples/multicore/mproc-mailbox/peer`, which does not exist in a
+      `tan init` project at all (`m55_he: app: ./peer` is this scaffold's
+      own path). Not a mislabel: a **run-this instruction that fails** when
+      a customer runs it, the strongest form under tan-cli#924's own
+      rationale (descriptive prose vs. run-this instructions is why that
+      entry's exception still stands -- see the note after entry 11 above).
+
+    Three entries. Fix belongs upstream, alongside entries 15/16's
+    alp-sdk#1855 (extended again in this same review round to cover the
+    `zephyr_drv.c` mention and the `west build` command fix); all three
+    retire the moment #1855 lands and this tree is re-vendored.
+
 
 ## Template x SKU matrix vendored
 

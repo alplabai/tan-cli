@@ -221,7 +221,8 @@ _NUMBER_WORDS = {
         "forty-three", "forty-four", "forty-five", "forty-six", "forty-seven",
         "forty-eight", "forty-nine", "fifty", "fifty-one", "fifty-two",
         "fifty-three", "fifty-four", "fifty-five", "fifty-six",
-        "fifty-seven", "fifty-eight", "fifty-nine",
+        "fifty-seven", "fifty-eight", "fifty-nine", "sixty", "sixty-one",
+        "sixty-two",
     ))
 }
 

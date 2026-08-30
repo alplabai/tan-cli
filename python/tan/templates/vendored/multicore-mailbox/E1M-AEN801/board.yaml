@@ -24,8 +24,10 @@ cores:
 # block and emits CONFIG_DCACHE=n for both m55_hp and m55_he
 # accordingly -- see the comment in prj.conf / peer/prj.conf for the
 # hardware reasoning). `name: alp_shmem0` matches the DT-alias name
-# `src/backends/mproc/zephyr_drv.c` and both main.c's hardcode --
-# it is NOT a free-form label like an rpmsg channel name.
+# alp-sdk's `src/backends/mproc/zephyr_drv.c` (a different `src/`
+# than this project's own -- not part of this scaffolded project)
+# and both main.c's hardcode -- it is NOT a free-form label like an
+# rpmsg channel name.
 #
 # #1069 gave E1M-AEN801 a real `memory_map:` (alp-sdk's
 # metadata/e1m_modules/E1M-AEN801.yaml, not part of this scaffolded
