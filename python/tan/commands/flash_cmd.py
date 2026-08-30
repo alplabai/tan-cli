@@ -147,6 +147,7 @@ from tan.core.flash_plan import (
     validate_flow_d_shape,
 )
 from tan.core.global_flags import accept_global_flags
+from tan.core.subprocess_env import spawn_env
 from tan.core.setools import (
     find_app_gen_toc,
     missing_tool_message,
@@ -639,12 +640,13 @@ def _spawn(
     pipes are kept UNCHANGED. See [`_open_console_pty`] for each case.
 
     `venv_bin` (tan-cli#289/#59), when given, is prepended onto the child's
-    PATH -- `env=None` (the default, passed through unchanged) means
-    "inherit this process's own environment", exactly the pre-#59 behaviour.
-    That inheritance is also what carries `TERM` (and `COLUMNS`/`LINES`, when
-    the operator exports them) to a child now spawned onto a pty -- tan never
-    synthesises a `TERM`, so a child sees the operator's own or none at all,
-    the same value it saw under fd inheritance before the tee existed.
+    PATH; [`_child_env`] (tan-cli#992) otherwise hands the child a restored
+    copy of this process's own environment rather than `None`, so `TERM`
+    (and `COLUMNS`/`LINES`, when the operator exports them) still reaches a
+    child now spawned onto a pty exactly as inheritance would have -- tan
+    never synthesises a `TERM`, so a child sees the operator's own or none
+    at all, the same value it saw under fd inheritance before the tee
+    existed.
     `workspace` (tan-cli#289/#61), when given, becomes the child's cwd, so
     `west flash` can see alp-sdk's out-of-tree runners.
     """
@@ -1330,31 +1332,39 @@ def _programs_resolved_in_venv(argv: list[str], venv_bin: Path | None) -> list[s
     return out
 
 
-def _child_env(venv_bin: Path | None) -> dict[str, str] | None:
-    """The `env=` every spawn in this module hands its child: the venv's bin dir
-    prepended onto PATH when one is in play, else `None` -- which `subprocess`
-    documents as "inherit this process's environment", and which is exactly the
-    pre-tan-cli#59 behaviour.
+def _child_env(venv_bin: Path | None) -> dict[str, str]:
+    """The `env=` every spawn in this module hands its child -- this is the
+    flash path, so this is the highest-stakes call site [`spawn_env`]
+    (tan-cli#992) exists to protect: a flash tool binding the wrong bundled
+    `liblzma`/`libssl`/`libusb`/`libz` under a frozen `tan` is not a build
+    failure, it is unpredictable behaviour on the path that programs a
+    customer's board.
+
+    Always an explicit dict -- never `None` (tan-cli#992 dropped the
+    pre-existing "`None` means inherit" shortcut precisely because plain
+    inheritance is the leak): [`spawn_env`]'s own restored copy of
+    `os.environ`, with the venv's bin dir prepended onto PATH when one is in
+    play.
 
     One definition, called by [`_spawn`], [`_spawn_pipeline`] and
     [`_resolution_env`], rather than the same expression written out three
     times: tan-cli#567's whole shape is a lookup and a spawn that drifted into
     disagreeing, and the env is the other half of what they must agree on."""
+    env = spawn_env()
     if venv_bin is None:
-        return None
-    return prepend_path(dict(os.environ), venv_bin)
+        return env
+    return prepend_path(env, venv_bin)
 
 
 def _resolution_env(venv_bin: Path | None) -> dict[str, str]:
     """The environment a child spawned with this `venv_bin` will actually see
     -- the ONE thing `argv[0]` may be resolved against (tan-cli#567/#510).
 
-    [`_child_env`], with its "inherit" `None` spelled out as the environment
-    that inheriting actually yields, because a lookup needs a real mapping.
-    Resolving against a different PATH than the child gets is precisely how
+    [`_child_env`] itself, which (tan-cli#992) no longer ever returns `None`:
+    resolving against a different PATH than the child gets is precisely how
     tan-cli#510's MAJOR 2 let an approved tool and a spawned tool be two
     different files."""
-    return _child_env(venv_bin) or dict(os.environ)
+    return _child_env(venv_bin)
 
 
 def _unresolved_program_outcome(program: str, venv_bin: Path | None, capture: bool) -> _Outcome:

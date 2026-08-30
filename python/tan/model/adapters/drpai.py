@@ -31,6 +31,7 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+from tan.core.subprocess_env import spawn_env
 from . import CompilerAdapter, Blob
 
 # The TVM/MERA build runs quantization + DRP-AI translation; minutes for a real
@@ -215,7 +216,7 @@ class DrpaiAdapter(CompilerAdapter):
             "-i", str(input_name),
             "--images", str(images),
         ]
-        env = {**os.environ, "PRODUCT": product}
+        env = spawn_env({"PRODUCT": product})
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
                                   timeout=_DRPAI_TIMEOUT_S, env=env)

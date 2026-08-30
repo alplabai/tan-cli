@@ -74,6 +74,7 @@ from tan.core.metadata_schema import (
     validate_document,
 )
 from tan.core.pending import is_pending_placeholder
+from tan.core.subprocess_env import spawn_env
 from tan.core.size import (
     MemoryBudget,
     SliceSize,
@@ -170,6 +171,7 @@ def _sizes_from_size_tool(size_bin: str, elf: str) -> tuple[int, int] | None:
             encoding="utf-8",
             errors="replace",
             timeout=_SIZE_TOOL_TIMEOUT,
+            env=spawn_env(),
             check=False,
         )
     except (OSError, subprocess.SubprocessError, ValueError):

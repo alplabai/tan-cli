@@ -77,6 +77,7 @@ from tan.core.flash_plan import (
     parse_atoc_start_address,
     validate_identifier,
 )
+from tan.core.subprocess_env import spawn_env
 
 #: The one SETOOLS executable this module drives. Bare name, no extension --
 #: the Alif Security Toolkit bundle (`app-release-exec-linux-SE_FW_x.y.z`) is
@@ -553,6 +554,10 @@ def sign_slot0(
 
         config_rel = os.path.join("build", "config", config_name)
         try:
+            # tan-cli#992: this signs the ATOC that gets written to real
+            # silicon -- the same reasoning `flash_cmd._child_env` documents
+            # applies here verbatim, so `env=` is never left to inherit this
+            # process's (possibly bundle-poisoned) environment.
             proc = subprocess.run(
                 [app_gen_toc, "-f", config_rel],
                 cwd=setools_dir,
@@ -560,6 +565,7 @@ def sign_slot0(
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=spawn_env(),
                 timeout=APP_GEN_TOC_TIMEOUT_S,
             )
         except subprocess.TimeoutExpired as err:

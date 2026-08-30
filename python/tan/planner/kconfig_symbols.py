@@ -59,6 +59,8 @@ import textwrap
 from pathlib import Path
 from typing import Any, Optional
 
+from tan.core.subprocess_env import spawn_env
+
 from .models import BoardProject, OrchestratorError
 
 # RELOCATED divergence from alp-sdk's own scripts/alp_orchestrate/
@@ -357,8 +359,13 @@ def _load_board_symbols(zephyr_base: Path, board_triple: str) -> list[dict[str, 
             f"-DEXTRA_KCONFIG_TARGETS={_KCONFIG_TARGET}",
             f"-DEXTRA_KCONFIG_TARGET_COMMAND_FOR_{_KCONFIG_TARGET}={target_cmd}",
         ]
+        # RELOCATED divergence from alp-sdk's own scripts/alp_orchestrate/
+        # kconfig_symbols.py: `env=spawn_env()` on both `west build` spawns
+        # below is a tan-only addition (tan-cli#992) -- alp-sdk's own copy
+        # has no such restore because it never ships as a frozen PyInstaller
+        # bundle whose LD_LIBRARY_PATH would otherwise leak into the child.
         proc = subprocess.run(configure_cmd, cwd=zephyr_base.parent,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=spawn_env())
         if proc.returncode != 0:
             raise OrchestratorError(
                 f"--emit kconfig: `west build --cmake-only -b "
@@ -368,7 +375,7 @@ def _load_board_symbols(zephyr_base: Path, board_triple: str) -> list[dict[str, 
         # it explicitly (a second, separate `west build`).
         build_cmd = [west, "build", "-d", str(build_dir), "-t", _KCONFIG_TARGET]
         proc = subprocess.run(build_cmd, cwd=zephyr_base.parent,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=spawn_env())
         if proc.returncode != 0:
             raise OrchestratorError(
                 f"--emit kconfig: `west build -t {_KCONFIG_TARGET}` failed "
