@@ -32,12 +32,87 @@ bare names are both resolved -- see `_SubprocessBinding` below):
    itself, or one of the two hand-verified wrapper functions
    (`_child_env`/`_resolution_env` in `flash_cmd.py`, `Runner._env` in
    `bootstrap_cmd.py`) whose OWN bodies this gate independently confirms
-   still call `spawn_env`/`restore_ld_library_path` (see
-   `test_the_verified_wrappers_still_call_the_primitive` below) -- so an edit
-   that hollows out a wrapper (tan-cli#992's own "helper wrapping a helper"
-   concern) reds here even though no subprocess call site changed at all.
+   still REACH `spawn_env`/`restore_ld_library_path` **on every path that
+   produces the wrapper's return value** (see
+   `test_the_verified_wrappers_still_call_the_primitive` below, tightened by
+   tan-cli#999) -- so an edit that hollows out a wrapper (tan-cli#992's own
+   "helper wrapping a helper" concern) reds here even though no subprocess
+   call site changed at all, and so does an edit that merely leaves the call
+   PRESENT somewhere in the wrapper's body without it ever feeding the
+   returned value (tan-cli#999's own "dead-code call satisfies the gate"
+   defect -- a `Call` node existing ANYWHERE in the function's AST used to be
+   enough; it no longer is).
 
-## What this gate CANNOT catch (see this PR's body for the full list)
+## How rule 3's wrapper-body check works (tan-cli#999)
+
+`_call_reaches_every_return` walks a wrapper's own statements (not descending
+into any `def`/`lambda` nested inside it -- a nested scope's own reachability
+is a separate question, see "cross-function flow" below) and asks, for EVERY
+`return` that isn't a bare `return None`: does `target_name(...)`'s result
+plausibly flow into the value that `return` yields? A value flows if it is:
+
+* the direct result of a `target_name(...)` call in the return's own value
+  expression (`return spawn_env()`, `return _child_env(venv_bin)`);
+* a local variable assigned from a flowing expression, later returned bare
+  (`env = spawn_env(); return env` -- [`_child_env`]'s first branch);
+* passed as an argument into ANOTHER call that IS (or is folded into) the
+  return value (`return prepend_path(env, venv_bin)` -- [`_child_env`]'s
+  second branch: the call's own return is trusted because a trusted argument
+  was folded into it, not because `prepend_path` itself is on the trusted
+  list);
+* a local variable passed BY NAME into a bare `target_name(some_var)`
+  statement -- the in-place-mutation shape [`restore_ld_library_path`] uses
+  (it mutates its dict argument rather than returning a new one):
+  `env = dict(os.environ); restore_ld_library_path(env); return env`
+  ([`Runner._env`]'s real shape) trusts `env` because it was passed BY NAME
+  into the trusted call, even though the assignment that PRODUCED `env` was
+  itself untrusted.
+
+A function with no qualifying `return` at all fails closed (vacuous truth is
+refused, not granted). This is a conservative STRUCTURAL walk, not a real
+dataflow/control-flow analysis -- see the four blind-spot classes below for
+exactly what shape of code it cannot see through.
+
+## What this gate CANNOT catch
+
+Four classes, following from what a static AST walk can and cannot prove --
+not a list of function names, because enumerating names is exactly the
+method that missed `check_call`/`getoutput`/`getstatusoutput` in an earlier
+round of this same gate (tan-cli#992's own postmortem):
+
+* **Reachability without execution.** This walk cannot run the code, so it
+  cannot know whether a branch condition is ever true or false at runtime --
+  `if False:` and `if today_is_a_leap_year():` are structurally identical to
+  it. It also collects trust LEXICALLY across every branch of a function
+  (`if`/`for`/`try`/`except`) without proving a particular assignment
+  DOMINATES a particular `return` -- a variable trusted-assigned only inside
+  an `except` clause, then returned from a DIFFERENT `return` reachable only
+  via the `try`'s success path, would still read as trusted. (Rule 3's own
+  probe 4 -- a call confined to an untaken `except` branch -- happens to
+  still be caught, but only because that probe's call passes no argument
+  and is never assigned to anything, not because this walk modelled the
+  branch as unreachable.) This is the same documented leniency
+  `_locally_trusted_names` (rule 3's file-scan sibling) already accepts.
+* **Aliasing.** A trusted value stored into a container (`d["x"] =
+  spawn_env()`), an attribute (`self._env = spawn_env()`), or captured by a
+  closure and read back through a different name is invisible to this walk
+  -- it tracks bare local `Name` targets and bare `Name` call arguments only.
+* **Dynamic dispatch.** `getattr(subprocess, "run")(...)`, a call stored in
+  and invoked through a dict/list, a spawn reached via `exec()`/`eval()`, or
+  `target_name` resolved through anything other than a literal `Name`/
+  `Attribute` in the call's `.func` -- purely static resolution cannot see
+  through these. Nothing under `python/tan/` does this today.
+* **Cross-function flow.** When a trusted local is passed as an argument
+  into ANOTHER function's call (`prepend_path(env, venv_bin)`), this walk
+  trusts that call's result because SOME argument was trusted -- it does not
+  (cannot, without inlining the callee) verify the callee actually
+  incorporates that argument into what it returns. A function that receives
+  a trusted `env` and discards it, returning something unrelated, looks
+  structurally identical to `prepend_path`, which does not; nothing under
+  `python/tan/` does this today, and this is what makes rule 3's "any
+  argument flows through" rule permissive rather than a real dataflow proof.
+
+Beyond rule 3's own wrapper-body check:
 
 * **A wrapper NOT in the small hand-verified set.** A brand new
   `_my_own_child_env()` added at some future call site, itself never calling
@@ -53,16 +128,6 @@ bare names are both resolved -- see `_SubprocessBinding` below):
   fails loudly if one appears, forcing it to be taught to this file rather
   than silently passing it through), but a genuinely new such call would need
   the `_SubprocessBinding` walk extended to match it.
-* **A dynamically resolved call target** -- `getattr(subprocess, "run")(...)`,
-  a call stored in and invoked through a dict/list, or a spawn reached via
-  `exec()`/`eval()`. Purely static analysis cannot see through these; nothing
-  under `python/tan/` does this today.
-* **A structurally-present but semantically-empty reference** -- e.g.
-  `env=(spawn_env(), dict(os.environ))[1]`, which contains a `Call` to
-  `spawn_env` (so rule 3 above passes) but never actually uses its result.
-  This is a textual/structural check, not a dataflow one; nothing under
-  `python/tan/` is written this way, and code review is what catches a
-  contortion like this, not this gate.
 """
 from __future__ import annotations
 
@@ -221,6 +286,163 @@ def _locally_trusted_names(func: ast.AST, rel: str) -> dict[str, set[str]]:
     return out
 
 
+def _direct_call_target(call: ast.Call, target_name: str) -> bool:
+    """Whether `call` is syntactically a bare `target_name(...)` or
+    `<anything>.target_name(...)`. The same Name/Attribute shape
+    `_resolves_to_spawn`/`_trusted_call_names_present` use above, kept as its
+    own function here because `_call_reaches_every_return` (below) is
+    parameterised by an arbitrary `target_name` -- each wrapper's OWN
+    `must_call` -- not the fixed `_TRUSTED_PRIMITIVE`/`_TRUSTED_MODULE_WRAPPERS`
+    set those two use."""
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id == target_name
+    if isinstance(func, ast.Attribute):
+        return func.attr == target_name
+    return False
+
+
+def _expr_flows_from(expr: ast.expr, target_name: str, trusted_locals: set[str]) -> bool:
+    """Whether `target_name(...)`'s result plausibly reaches the value `expr`
+    evaluates to. A conservative STRUCTURAL walk, not dataflow analysis --
+    see "What this gate CANNOT catch" in the module docstring for exactly
+    what this cannot see through.
+
+    * a direct `target_name(...)` call -- true immediately.
+    * any OTHER call -- true if any of its positional/keyword arguments flow
+      true (the "cross-function flow" class: trusts the CALL because an
+      argument was trusted, without verifying the callee actually uses it).
+    * a bare `Name` -- true iff it is in `trusted_locals`.
+    * `and`/`or`/ternary -- true if EITHER operand/branch flows true; this
+      walk cannot execute the condition to know which one runs.
+    * `ast.Subscript` -- ALWAYS opaque, deliberately: refuses to descend
+      into `.value` or `.slice` at all. `(target_name(), other)[1]` visibly
+      CONTAINS a call to `target_name` but the index throws its result away,
+      and there is no static way to tell a safe index from a discarding one
+      -- this is what makes `return (spawn_env(), dict(os.environ))[1]` red
+      (tan-cli#999 probe 3).
+    * anything else (constants, comprehensions, attribute access on an
+      untracked base, ...) -- opaque, false.
+    """
+    if isinstance(expr, ast.Call):
+        if _direct_call_target(expr, target_name):
+            return True
+        if any(_expr_flows_from(a, target_name, trusted_locals) for a in expr.args):
+            return True
+        return any(_expr_flows_from(kw.value, target_name, trusted_locals) for kw in expr.keywords)
+    if isinstance(expr, ast.Name):
+        return expr.id in trusted_locals
+    if isinstance(expr, ast.BoolOp):
+        return any(_expr_flows_from(v, target_name, trusted_locals) for v in expr.values)
+    if isinstance(expr, ast.IfExp):
+        return _expr_flows_from(expr.body, target_name, trusted_locals) or _expr_flows_from(
+            expr.orelse, target_name, trusted_locals
+        )
+    if isinstance(expr, ast.Starred):
+        return _expr_flows_from(expr.value, target_name, trusted_locals)
+    return False
+
+
+def _is_bare_none(value: ast.expr | None) -> bool:
+    return value is None or (isinstance(value, ast.Constant) and value.value is None)
+
+
+class _OwnStatements(ast.NodeVisitor):
+    """Collects the `Assign` / bare-`Call`-`Expr` / `Return` statements that
+    belong DIRECTLY to `root` -- descending into `if`/`for`/`while`/`try`/
+    `except`/`with` bodies (no control-flow modelling -- see "reachability
+    without execution" in the module docstring) but NOT into any `def`/
+    `async def`/`lambda` nested inside `root`. A nested scope's own
+    reachability is a separate question this walk does not answer; a value
+    crossing INTO one through a closure is the "aliasing" blind spot, not
+    something this class claims to see through."""
+
+    def __init__(self, root: ast.AST) -> None:
+        self.root = root
+        self.assigns: list[ast.Assign] = []
+        self.bare_calls: list[ast.Expr] = []
+        self.returns: list[ast.Return] = []
+
+    def visit_FunctionDef(self, node: ast.AST) -> None:
+        if node is self.root:
+            self.generic_visit(node)
+        # else: a nested `def` -- its statements are not `root`'s own.
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+    visit_Lambda = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return  # never relevant to a single function's own body
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.assigns.append(node)
+        self.generic_visit(node)
+
+    def visit_Return(self, node: ast.Return) -> None:
+        self.returns.append(node)
+
+    def visit_Expr(self, node: ast.Expr) -> None:
+        if isinstance(node.value, ast.Call):
+            self.bare_calls.append(node)
+
+
+def _locally_flowed_names(own: _OwnStatements, target_name: str) -> set[str]:
+    """Fixed-point closure of every local name `target_name(...)`'s result
+    reaches, over `own`'s collected assigns/bare-calls:
+
+    * `name = <expr>` where `<expr>` flows true adds `name`
+      (`env = spawn_env()` adds `env`).
+    * a bare `target_name(some_var)` statement -- the in-place-mutation shape
+      [`restore_ld_library_path`] uses -- adds `some_var`
+      (`restore_ld_library_path(env)` adds `env`, even though `env` was
+      itself assigned from an UNTRUSTED expression beforehand).
+
+    Iterates to a fixed point since a later assignment can build on an
+    earlier one's trust (`a = spawn_env(); b = prepend_path(a, x)` trusts
+    `b` too). Lexical, not control-flow-aware -- extends
+    `_locally_trusted_names`'s own documented leniency to this reachability
+    check rather than that function's `env=`-keyword check."""
+    trusted: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for assign in own.assigns:
+            if _expr_flows_from(assign.value, target_name, trusted):
+                for tgt in assign.targets:
+                    if isinstance(tgt, ast.Name) and tgt.id not in trusted:
+                        trusted.add(tgt.id)
+                        changed = True
+        for expr_stmt in own.bare_calls:
+            call = expr_stmt.value
+            assert isinstance(call, ast.Call)
+            if not _direct_call_target(call, target_name):
+                continue
+            for arg in call.args:
+                if isinstance(arg, ast.Name) and arg.id not in trusted:
+                    trusted.add(arg.id)
+                    changed = True
+            for kw in call.keywords:
+                if isinstance(kw.value, ast.Name) and kw.value.id not in trusted:
+                    trusted.add(kw.value.id)
+                    changed = True
+    return trusted
+
+
+def _call_reaches_every_return(func: ast.AST, target_name: str) -> bool:
+    """Whether `target_name(...)`'s result is reachable on the path that
+    produces EVERY value `func` can return (tan-cli#999). A bare `return
+    None` is exempted -- there is no dict there to leak. Fails CLOSED: a
+    function with no qualifying return at all trusts nothing, rather than
+    vacuously passing an empty `all()`."""
+    own = _OwnStatements(func)
+    own.visit(func)
+    trusted_locals = _locally_flowed_names(own, target_name)
+    qualifying = [r for r in own.returns if not _is_bare_none(r.value)]
+    if not qualifying:
+        return False
+    return all(_expr_flows_from(r.value, target_name, trusted_locals) for r in qualifying)  # type: ignore[arg-type]
+
+
 def _violations_in_file(path: pathlib.Path) -> list[str]:
     rel = path.relative_to(PYTHON_ROOT).as_posix()
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -322,11 +544,16 @@ def test_the_walk_actually_finds_the_real_call_sites():
 def test_the_verified_wrappers_still_call_the_primitive():
     """Anti-drift for `_TRUSTED_MODULE_WRAPPERS`/`_TRUSTED_SELF_METHODS`: each
     entry is trusted ONLY because this test independently confirms its body
-    still calls the name it claims to. Hollow one out -- e.g. make
-    `_child_env` return `dict(os.environ)` again without going through
-    `spawn_env` -- and THIS test reds, even though no subprocess call site
-    changed a single character. This is the "helper wrapping a helper" defence
-    tan-cli#992 asked for."""
+    still REACHES the name it claims to on every path that produces its
+    return value (`_call_reaches_every_return`, tan-cli#999). Hollow one out
+    -- e.g. make `_child_env` return `dict(os.environ)` again without going
+    through `spawn_env` -- and THIS test reds, even though no subprocess call
+    site changed a single character (the "helper wrapping a helper" defence
+    tan-cli#992 asked for). A call merely PRESENT somewhere in the body --
+    behind `if False:`, discarded via `(x, y)[1]`, or confined to a branch
+    the return doesn't take -- is no longer enough to pass; that gap is
+    exactly what tan-cli#999 closes (see `_call_reaches_every_return`'s own
+    docstring and the four `test_reachability_rejects_*` probes below)."""
     problems: list[str] = []
     for name, (rel, must_call) in _TRUSTED_MODULE_WRAPPERS.items():
         path = PYTHON_ROOT / rel
@@ -335,13 +562,10 @@ def test_the_verified_wrappers_still_call_the_primitive():
         if len(defs) != 1:
             problems.append(f"{rel}: expected exactly one `def {name}`, found {len(defs)}")
             continue
-        calls = {
-            c.func.id
-            for c in ast.walk(defs[0])
-            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-        }
-        if must_call not in calls:
-            problems.append(f"{rel}::{name} no longer calls `{must_call}()`")
+        if not _call_reaches_every_return(defs[0], must_call):
+            problems.append(
+                f"{rel}::{name} no longer reaches `{must_call}()` on every return path"
+            )
 
     for (cls, method), (rel, must_call) in _TRUSTED_SELF_METHODS.items():
         path = PYTHON_ROOT / rel
@@ -355,15 +579,95 @@ def test_the_verified_wrappers_still_call_the_primitive():
         if target is None:
             problems.append(f"{rel}: no `class {cls}` method `{method}` found")
             continue
-        calls = {
-            c.func.id
-            for c in ast.walk(target)
-            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-        }
-        if must_call not in calls:
-            problems.append(f"{rel}::{cls}.{method} no longer calls `{must_call}()`")
+        if not _call_reaches_every_return(target, must_call):
+            problems.append(
+                f"{rel}::{cls}.{method} no longer reaches `{must_call}()` on every return path"
+            )
 
     assert not problems, "\n".join(problems)
+
+
+def test_reachability_rejects_a_dead_code_guard():
+    """tan-cli#999 probe 1: `if False: spawn_env()` reads as "the wrapper
+    calls spawn_env" to a bare presence check, but the branch never runs and
+    the returned value never passes through it."""
+    fn = ast.parse(
+        "def _child_env():\n"
+        "    if False:\n"
+        "        spawn_env()\n"
+        "    return dict(os.environ)\n"
+    ).body[0]
+    assert not _call_reaches_every_return(fn, "spawn_env")
+
+
+def test_reachability_rejects_a_discarded_call_result():
+    """tan-cli#999 probe 2: `spawn_env()` is called, but its RESULT is never
+    used -- the returned dict is a fresh, unrestored `dict(os.environ)`."""
+    fn = ast.parse("def _child_env():\n    spawn_env()\n    return dict(os.environ)\n").body[0]
+    assert not _call_reaches_every_return(fn, "spawn_env")
+
+
+def test_reachability_rejects_a_call_thrown_away_through_a_subscript():
+    """tan-cli#999 probe 3: `spawn_env()` is textually present INSIDE the
+    `return` statement's own value expression -- closer to a real use than
+    probes 1/2 -- but `[1]` selects the OTHER tuple element, discarding it.
+    A walk that trusts "any Call anywhere in the return expression's
+    subtree" is fooled by this; `_expr_flows_from` refuses to look inside a
+    `Subscript` at all rather than guess which index is safe."""
+    fn = ast.parse("def _child_env():\n    return (spawn_env(), dict(os.environ))[1]\n").body[0]
+    assert not _call_reaches_every_return(fn, "spawn_env")
+
+
+def test_reachability_rejects_a_call_confined_to_an_untaken_except_branch():
+    """tan-cli#999 probe 4: `spawn_env()` is only ever called from an
+    exception handler; the normal-path return builds its dict independently
+    and never sees it -- and even the except branch's own return doesn't use
+    the call's result, so this reds regardless of which branch runs."""
+    fn = ast.parse(
+        "def _child_env():\n"
+        "    try:\n"
+        "        return dict(os.environ)\n"
+        "    except OSError:\n"
+        "        spawn_env()\n"
+        "        return dict(os.environ)\n"
+    ).body[0]
+    assert not _call_reaches_every_return(fn, "spawn_env")
+
+
+def test_reachability_accepts_the_real_wrapper_shapes():
+    """Positive control for the four probes above: the exact shapes the real
+    hand-verified wrappers use must still pass. A trusted value built once
+    and returned on one branch, folded into another call's argument on
+    another branch ([`_child_env`]); a bare pass-through to another trusted
+    wrapper ([`_resolution_env`]); and an in-place mutation of a variable
+    that was assigned from an UNTRUSTED expression before the trusted call
+    ran ([`Runner._env`])."""
+    direct_and_folded = ast.parse(
+        "def _child_env(venv_bin):\n"
+        "    env = spawn_env()\n"
+        "    if venv_bin is None:\n"
+        "        return env\n"
+        "    return prepend_path(env, venv_bin)\n"
+    ).body[0]
+    assert _call_reaches_every_return(direct_and_folded, "spawn_env")
+
+    pass_through = ast.parse(
+        "def _resolution_env(venv_bin):\n    return _child_env(venv_bin)\n"
+    ).body[0]
+    assert _call_reaches_every_return(pass_through, "_child_env")
+
+    mutation_of_a_prior_untrusted_assignment = ast.parse(
+        "def _env(self, extra_env=None):\n"
+        "    ld = os.environ.get('LD_LIBRARY_PATH_ORIG')\n"
+        "    if not extra_env and ld is None:\n"
+        "        return None\n"
+        "    env = dict(os.environ)\n"
+        "    restore_ld_library_path(env)\n"
+        "    return env\n"
+    ).body[0]
+    assert _call_reaches_every_return(
+        mutation_of_a_prior_untrusted_assignment, "restore_ld_library_path"
+    )
 
 
 def test_no_os_level_spawn_bypasses_the_check():
