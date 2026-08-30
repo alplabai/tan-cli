@@ -309,6 +309,18 @@ def resolve_targets(sku: str, *, metadata_root: Path) -> list[TargetSpec]:
     import yaml  # noqa: PLC0415 -- deferred (tan-cli#810); see sdk_cmd's `_releases_opener`
 
     preset = yaml.safe_load(preset_path.read_text(encoding="utf-8"))
+    if not isinstance(preset, dict):
+        # Mirrors the `host_soc` guard below (tan-cli#964/#965): a preset
+        # YAML that parses but is not a mapping (e.g. a bare list or a bare
+        # scalar) must not reach the bare `preset["silicon"]` subscript --
+        # that raises a raw TypeError ("list indices must be integers or
+        # slices, not str" / "string indices must be integers, not 'str'")
+        # instead of a curated error a caller can distinguish from any other
+        # TypeError in the call stack (tan-cli#1010).
+        raise ValueError(
+            f"malformed SoM preset at {preset_path}: expected a YAML "
+            f"mapping, got {type(preset).__name__}"
+        )
 
     silicon = preset["silicon"]                                 # host SoC, e.g. "alif:ensemble:e7"
     # resolve_soc_path() returns None where the old inline 3-tuple unpack
