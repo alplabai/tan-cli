@@ -605,3 +605,7 @@ several less obvious failures.
 - 2026-08-30 -- tan-cli#945: debug_launch.py grows the programsDevice/loadFiles producer-stated facts (PROGRAMS_DEVICE map, programs_device(), the loadFiles draft/resolution wiring); debug_config_cmd.py wires programsDevice into the data payload and its module docstring. Both are additive envelope surface, not bloat to split out this round.
     - tan/commands/debug_config_cmd.py: 2114 -> 2137
     - tan/core/debug_launch.py: 1539 -> 1596
+- 2026-08-30 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/debug_config_cmd.py: 2137 -> 2177
+    - tan/core/debug_launch.py: 1596 -> 1713
+    - function_count_budget: 300 -> 301
