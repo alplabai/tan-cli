@@ -103,19 +103,17 @@ import typer
 # which interpreter name the SDK's own scripts run under -- a PATH name, never
 # `sys.executable`, which is `tan` itself once PyInstaller has frozen it.
 from tan import planner_emit
-from tan.commands.build_cmd import (
-    _planner_python,
-    resolve_sdk_root_wide,
-    sdk_ladder_divergence_issue,
-)
-from tan.commands.sdk_cmd import (
-    NO_SDK_NEXT_STEPS,
-    global_default_foreign_project_issue,
-    project_pin_issue,
-)
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
+from tan.core.sdk_discovery import (
+    _planner_python,
+    global_default_foreign_project_issue,
+    project_pin_issue,
+    resolve_sdk_root_wide,
+    sdk_ladder_divergence_issue,
+)
 from tan.core.shapes import rejected_sdk_root_message
 from tan.core.subprocess_env import spawn_env
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -943,7 +941,7 @@ def _resolve_board_path(board_yaml: str | None, workspace_root: Path) -> Path:
 @dataclass(frozen=True)
 class _ResolvedSdkRoot:
     """`_resolve_sdk_root`'s own return shape -- a named result, not a
-    growing tuple (the same reasoning `build_cmd.SdkRootResolution`
+    growing tuple (the same reasoning `tan.core.sdk_discovery.SdkRootResolution`
     documents): a fact one caller needs (`foreign_global_default_for`,
     tan-cli#464) must not force every field before it to be re-counted by
     position.

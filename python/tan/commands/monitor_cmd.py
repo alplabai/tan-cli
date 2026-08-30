@@ -40,7 +40,7 @@ imports nothing from alp-sdk beyond `alp_cli._workspace.python_exe`, itself
 just `sys.executable` -- the running interpreter. This port does NOT read
 `sys.executable` directly, though: under PyInstaller `sys.executable` IS
 `tan` itself, so spawning it would just re-enter this CLI instead of
-launching miniterm -- the same reasoning `build_cmd.py`'s `_planner_python`
+launching miniterm -- the same reasoning `tan.core.sdk_discovery`'s `_planner_python`
 and `generate_cmd.py` already carry, spelled out there so it need not be
 re-argued per call site. This port reuses that same function, a PATH name
 (`python`/`python3`) never `sys.executable`, when frozen or when
@@ -72,7 +72,7 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import _planner_python
+from tan.core.sdk_discovery import _planner_python
 from tan.core.subprocess_env import spawn_env
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -293,7 +293,7 @@ def _run_monitor(
 ) -> tuple[dict, list[Issue], ExitCode]:
     # Frozen (PyInstaller) or an embedded interpreter with no reportable
     # `sys.executable`: fall back to a PATH name, mirroring
-    # `build_cmd._planner_python` -- NOT `sys.executable`, which under a
+    # `tan.core.sdk_discovery._planner_python` -- NOT `sys.executable`, which under a
     # PyInstaller freeze IS `tan` itself and would just re-enter this CLI.
     using_this_interpreter = not getattr(sys, "frozen", False) and bool(sys.executable)
     python = (

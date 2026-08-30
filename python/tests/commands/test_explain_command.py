@@ -594,7 +594,7 @@ def _broken_pin_with_working_fallback(tmp_path, monkeypatch, fallback_sdk: Path)
 def _broken_pin_warning_line(tmp_path: Path) -> str:
     """The exact `explain: warning: ...` stderr line
     `_print_sdk_resolution_warnings` must print for `_broken_pin_with_
-    working_fallback`'s fixture -- `sdk_cmd.project_pin_issue`'s message,
+    working_fallback`'s fixture -- `sdk_discovery.project_pin_issue`'s message,
     verbatim, at the `globalDefault` tier."""
     gone = str(tmp_path / "gone-checkout").replace("\\", "/")
     return (

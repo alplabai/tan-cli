@@ -96,11 +96,15 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, global_default_foreign_project_issue
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
 from tan.core.example_catalog import unsupported_som
+from tan.core.sdk_discovery import (
+    global_default_foreign_project_issue,
+    resolve_sdk_root_wide,
+    sdk_ladder_divergence_issue,
+)
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     DEFAULT_TEMPLATE_ID,
@@ -495,7 +499,7 @@ def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None
     No `ALP_SDK_ROOT` tier (tried and reverted -- see
     `resolve_sdk_root_ladder`'s own docstring).
 
-    `build_cmd.resolve_sdk_root_wide`, not the narrow ladder its thirteen
+    `tan.core.sdk_discovery.resolve_sdk_root_wide`, not the narrow ladder its thirteen
     sibling commands take (tan-cli#263, measured against the oracle): where a
     workspace holds both a child `<ws>/alp-sdk` and a competing sibling
     `../alp-sdk`, the oracle's `init` pins the CHILD. The narrow ladder pinned
@@ -506,7 +510,7 @@ def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None
 
     An explicit `--sdk-root` is expanded (`~`/`~user`) then anchored against
     the process's real cwd with `os.path.abspath` -- lexical only (matching
-    `build_cmd._abs_posix`'s own reasoning), never `Path.resolve()`, so a
+    `tan.core.sdk_discovery._abs_posix`'s own reasoning), never `Path.resolve()`, so a
     project reached through a symlink keeps the name the user typed and a
     not-yet-existing path still resolves. `expanduser` first: `abspath` alone
     does not expand `~`, so `--sdk-root ~/alp-sdk` would otherwise anchor to

@@ -425,13 +425,15 @@ _KNOWN_CODE_FORWARDS: frozenset[tuple[str, str]] = frozenset(
     {
         ("tan/commands/build_cmd.py", "err.code"),  # BuildError <- PlanParseError/TokenSubstitutionError
         ("tan/commands/build_cmd.py", "DEFERRED_ISSUE_CODE"),  # imported from deferred_cmd.py
-        ("tan/commands/doctor_cmd.py", "SDK_DISCOVERY_DIVERGENT"),  # imported from build_cmd.py
-        # (tan-cli#407). Same shape as the line above and covered the same way:
-        # `_module_string_constants` only reads the file it is given, so a
-        # constant DEFINED in `build_cmd.py` (where its literal
+        # imported from `tan.core.sdk_discovery` (tan-cli#407; the module
+        # moved under tan-cli#408, this entry did not need to). Same shape as
+        # the line above and covered the same way: `_module_string_constants`
+        # only reads the file it is given, so a constant DEFINED in
+        # `tan/core/sdk_discovery.py` (where its literal
         # `"sdk.discovery-divergent"` IS resolved and checked against
         # `contract/issue-codes.json`) cannot resolve from `doctor_cmd.py`'s
         # own tree. Declared, not silently dropped.
+        ("tan/commands/doctor_cmd.py", "SDK_DISCOVERY_DIVERGENT"),
         ("tan/commands/build_cmd.py", "code"),  # `Issue(code, ...)` inside `_refuse`'s OWN body,
         # forwarding ITS OWN `code` parameter -- `_refuse` is itself in
         # `_FULL_CODE_CALLABLES`, so its call sites carry the literal.

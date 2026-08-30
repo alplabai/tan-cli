@@ -101,15 +101,15 @@ from pathlib import Path
 import click
 import typer
 
-from tan.commands.build_cmd import _planner_python
 from tan.commands.doctor_cmd import probe
-from tan.commands.sdk_cmd import (
-    NO_SDK_NEXT_STEPS,
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.metadata_schema import schema_errors
+from tan.core.sdk_discovery import (
+    _planner_python,
     global_default_foreign_project_issue,
     project_pin_issue,
     resolve_sdk_tiered,
 )
-from tan.core.metadata_schema import schema_errors
 from tan.core.shapes import SDK_MARKER, rejected_sdk_root_message
 from tan.env import stderr_is_tty, stdin_is_tty
 from tan.envelope import Envelope, Issue, Project, emit

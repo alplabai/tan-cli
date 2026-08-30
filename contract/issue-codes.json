@@ -1329,7 +1329,7 @@
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
-      "emittedBy": "python/tan/commands/build_cmd.py",
+      "emittedBy": "python/tan/core/sdk_discovery.py",
       "note": "Emitted when `resolve_sdk_root_ladder` (narrow) and `resolve_sdk_root_wide` (wide) resolve DIFFERENT alp-sdk checkouts from one cwd while both label their answer `sourceTier: \"discovery\"` -- so `tan generate` can emit board files from one checkout's metadata while `tan build`/`doctor`/`kconfig` plan against another, undetectably. The message names both roots in a fixed order and says which one THIS command used, so two envelopes describing one collision correlate on the code plus the path pair. Registered by tan-cli#407. Currently emitted from `tan build` only; the remaining ladder call sites are one-line adds beside their existing `project_pin_issue(...)` calls and are tracked on that issue. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
     },
     {
@@ -1345,7 +1345,7 @@
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
-      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "emittedBy": "python/tan/core/sdk_discovery.py",
       "note": "tan-cli#263: shared by every caller of `resolve_sdk_tiered` (not just `sdk current`) when `.alp/sdk-path` names a checkout that no longer resolves and the ladder fell through to another tier. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
@@ -1353,7 +1353,7 @@
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
-      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "emittedBy": "python/tan/core/sdk_discovery.py",
       "note": "tan-cli#464: `sdk current` warns when the `globalDefault` tier answers for a caller that is under neither the `writtenFor` project the machine-global `~/.alp/sdk-default` pointer was last written for, nor the SDK path it names -- the pointer is shared and last-writer-wins across every project that ever relocates a checkout on the host, so a second project's bootstrap used to silently repoint an earlier project's `sdk current`/`tan build` at the wrong checkout, `ok: true`, `issues: []`. Resolution is unchanged by this warning; only the silence about WHOSE answer it is closes. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {

@@ -31,11 +31,15 @@ the exact regression this file exists for.
 ALIASING IS NOT A DEFINITION, in either spelling, and both must stay allowed:
 
     from tan.core.shapes import is_file as _is_file   # flash_cmd, size_cmd
-    _is_sdk_root = is_sdk_root                        # build_cmd, flash_cmd
+    _is_sdk_root = is_sdk_root                        # flash_cmd
 
 `flash_cmd._is_file` is passed as an injected predicate at four call sites and
 imported by two tests, so the private module-level name has to survive the
-dedup; `_is_sdk_root = is_sdk_root` is the same move tan-cli#408 already made.
+dedup; `_is_sdk_root = is_sdk_root` is the same move tan-cli#408 already made
+(`build_cmd.py` carried this same alias until tan-cli#408's ladder
+extraction removed its last internal use, at which point the call site was
+rewritten to the public `is_sdk_root` directly rather than keeping an alias
+nothing else needed).
 The first form binds a name without a statement the walk sees at all; the
 second is an `Assign` whose value is a bare `Name`, which is why the walk
 below skips that shape. A first draft of this gate did not, and reported three

@@ -563,3 +563,12 @@ several less obvious failures.
     - function_count_budget: 298 -> 299
 - 2026-08-30 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/build_cmd.py: 2293 -> 2362
+- 2026-08-30 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/build_cmd.py: 1934 -> 2003
+- 2026-08-30 -- tan-cli#408 review follow-up: move resolve_sdk_tiered/ActiveSdk/the two Issue builders from sdk_cmd.py to sdk_discovery.py, emptying _KNOWN_INVERSIONS; sdk_cmd.py shrinks ~473 lines, sdk_discovery.py grows to carry the moved cluster, a handful of importers grow a couple of lines each from split import statements
+    - tan/commands/clean_cmd.py: 1129 -> 1132
+    - tan/commands/init_cmd.py: 1306 -> 1310
+    - tan/commands/model_cmd.py: 1059 -> 1060
+    - tan/commands/support_bundle_cmd.py: 1067 -> 1068
+    - tan/commands/validate_cmd.py: 1611 -> 1615
+    - tan/core/sdk_discovery.py: new entry at 963

@@ -70,7 +70,6 @@ from tan.commands.build_output import (
     resolve_build_root,
     resolve_project_context,
 )
-from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
 from tan.core.image_bundle import (
     BUNDLE_DIR,
@@ -87,6 +86,7 @@ from tan.core.image_bundle import (
     slice_entry,
     slice_should_bundle,
 )
+from tan.core.sdk_discovery import sdk_resolution_issues
 from tan.core.system_manifest import (
     SystemManifest,
     raw_passthrough,

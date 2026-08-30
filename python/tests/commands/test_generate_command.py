@@ -583,7 +583,7 @@ def test_broken_pin_is_prepended_not_appended_on_the_resolvable_path(
     gone = tmp_path / "gone-checkout"
     pin_dir = project / ".alp"
     pin_dir.mkdir()
-    # Real JSON, not a plain-text pointer: `_pointer_target` (sdk_cmd.py)
+    # Real JSON, not a plain-text pointer: `_pointer_target` (tan.core.sdk_discovery)
     # parses JSON only, so a plain-text pointer leaves `broken_project_pin`
     # `None` and the defect this test targets does not reproduce even on
     # unfixed code.

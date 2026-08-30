@@ -64,7 +64,6 @@ from tan.commands.build_output import (
     resolve_metadata_sdk_root,
     resolve_project_context,
 )
-from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.flash_plan import slice_should_flash
 from tan.core.global_flags import accept_global_flags
 from tan.core.metadata_schema import (
@@ -74,6 +73,7 @@ from tan.core.metadata_schema import (
     validate_document,
 )
 from tan.core.pending import is_pending_placeholder
+from tan.core.sdk_discovery import sdk_resolution_issues
 from tan.core.subprocess_env import spawn_env
 from tan.core.size import (
     MemoryBudget,
