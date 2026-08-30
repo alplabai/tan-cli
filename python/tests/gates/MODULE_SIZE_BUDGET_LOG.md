@@ -602,3 +602,5 @@ several less obvious failures.
     - tan/commands/model_cmd.py: 1059 -> 1060
     - tan/commands/support_bundle_cmd.py: 1067 -> 1068
     - tan/core/sdk_discovery.py: new entry at 963
+- 2026-08-30 -- tan-cli#1011: ethos_u.py docstring/comment growth documenting the arena-only req_sram_kib contract decision under Sram_Only (no arithmetic change)
+    - tan/model/adapters/ethos_u.py: 889 -> 908
