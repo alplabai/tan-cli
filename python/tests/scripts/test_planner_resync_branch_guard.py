@@ -484,6 +484,60 @@ def test_cli_writes_github_output(repo: pathlib.Path, tmp_path: pathlib.Path, mo
     assert "observed_tip=\n" in text
 
 
+def test_forged_commit_with_separator_embedded_in_author_name_is_refused(
+    repo: pathlib.Path,
+):
+    """PR #1006 review (nit): `_LOG_SEP` (`\\x1f`) trusts a real git porcelain
+    guarantee that it never appears inside a field -- true of everything real
+    `git commit`/`--amend`/rebase produce, but not of a hand-forged commit
+    object (`git hash-object -t commit -w --stdin`, exactly as driven in the
+    review). Plant `\\x1f` inside the author name so the bounded
+    `split(_LOG_SEP, 5)` this used to be would shift every field after it
+    (crafted right, both identity pairs read as the automation and the
+    pre-fix guard returns rc 0) and confirm the unbounded split + field-count
+    check instead REFUSES the record -- fail-closed, the same posture this
+    module already takes for an ambiguous `git log`/`ls-remote` failure,
+    rather than silently misparsing it into a false "safe"."""
+    _push_branch_from_dev(repo, "auto/planner-resync")
+    tree = _run(repo, "rev-parse", "HEAD^{tree}").strip()
+    parent = _run(repo, "rev-parse", "HEAD").strip()
+    poisoned_name = f"{AUTOMATION_NAME}\x1f{HUMAN_NAME}"
+    commit_text = (
+        f"tree {tree}\n"
+        f"parent {parent}\n"
+        f"author {poisoned_name} <{AUTOMATION_EMAIL}> 1700000000 +0000\n"
+        f"committer {poisoned_name} <{AUTOMATION_EMAIL}> 1700000000 +0000\n"
+        "\n"
+        "forged: separator planted inside the author/committer name\n"
+    )
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "hash-object", "-t", "commit", "-w", "--stdin"],
+        input=commit_text.encode("utf-8"),
+        capture_output=True,
+        check=True,
+    )
+    forged_sha = proc.stdout.decode("utf-8").strip()
+    _run(repo, "update-ref", "refs/heads/auto/planner-resync", forged_sha)
+    _run(repo, "push", "-q", "-f", "origin", "auto/planner-resync")
+
+    with pytest.raises(guard.BranchGuardError):
+        guard.decide_branch(
+            repo, "dev", "auto/planner-resync", "cafef00d", AUTOMATION_NAME, AUTOMATION_EMAIL
+        )
+
+    rc = guard.main(
+        [
+            "--repo-root",
+            str(repo),
+            "--branch",
+            "auto/planner-resync",
+            "--divert-suffix",
+            "cafef00d",
+        ]
+    )
+    assert rc == 2, "an unparseable commit record must be refused, not read as safe"
+
+
 def test_refuses_rather_than_guessing_when_existence_cannot_be_determined(
     repo: pathlib.Path, tmp_path: pathlib.Path
 ):

@@ -147,7 +147,7 @@ jobs:
     timeout-minutes: 30
     steps:
       # THE ONE CHECKOUT IN THIS REPOSITORY THAT KEEPS ITS CREDENTIAL, and it
-      # must: the `propose` step below runs `git push -q -f origin` against the
+      # must: the `propose` step below runs `git push -q --force-with-lease` against the
       # `auto/planner-resync` branch (or a diverted stand-in when that branch
       # is occupied -- tan-cli#1002) through the remote THIS checkout leaves
       # configured -- no later step sets up a token remote of its own. Adding
@@ -409,6 +409,28 @@ jobs:
           # key, but a rerun-safe read should not assume that stays true.
           branch="$(grep '^branch=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
           diverted="$(grep '^diverted=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          # tan-cli#1006 review round 2 (blocker): this used to be the ONE key
+          # `planner_resync_branch_guard.py` wrote CONDITIONALLY (only `if
+          # decision.protected is not None`), while every read down here is
+          # unconditional and this step runs under `set -euo pipefail`. On a
+          # clean, non-diverted run -- the everyday case -- the key was
+          # simply absent, `grep` exited 1, `pipefail` propagated that into
+          # this assignment, and the step died right here: `git config`,
+          # `checkout -B`, `commit`, and `git push` never ran, and the
+          # proposal PR was never opened or refreshed. The guard script now
+          # writes `protected_commit=` (and the three `protected_commit_*`
+          # keys below it) on EVERY path, empty when there is nothing
+          # protected -- the same shape `branch=`/`diverted=`/
+          # `observed_tip=`/`occupied_count=` already use, which is what
+          # keeps THEM safe against this exact class of bug. Audited every
+          # other `grep '^…=' "$GITHUB_OUTPUT"` read in this job against the
+          # guard script's writes when this was fixed: `branch=`,
+          # `diverted=`, `observed_tip=`, and `occupied_count=` were already
+          # unconditional; `occupied_${i}_branch=`/`_commit=`/`_author=`
+          # (further down) are written once per `decision.occupied` entry and
+          # only ever read for `i` in `1..occupied_count`, so those two counts
+          # can't drift apart. `protected_commit=` was the one conditional
+          # key in the set.
           protected_commit="$(grep '^protected_commit=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
           # tan-cli#1006 review (minor): the sha the guard actually inspected
           # on `origin/${branch}` -- empty when it didn't exist there yet.
@@ -485,7 +507,22 @@ jobs:
                   ob="$(grep "^occupied_${i}_branch=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
                   oc="$(grep "^occupied_${i}_commit=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
                   oa="$(grep "^occupied_${i}_author=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
-                  echo "* \`${ob}\` carries \`${oc}\` (by ${oa}):"
+                  # tan-cli#1006 review (minor): `oa` alone reads as the
+                  # automation itself on the `--amend`/`fixup!` shape this
+                  # round exists to catch -- author identity survives the
+                  # amend/autosquash, only the committer changes, so a reader
+                  # here would see this protected commit credited to
+                  # `alp-sdk planner re-sync <noreply@alplab.ai>`. The guard
+                  # already emits `occupied_${i}_committer` and `main()`
+                  # already does exactly this for `protected_commit` at
+                  # planner_resync_branch_guard.py:476-484 -- this is wiring
+                  # an existing key in, not new logic.
+                  ocommitter="$(grep "^occupied_${i}_committer=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+                  credit="${oa}"
+                  if [ "${ocommitter}" != "${oa}" ]; then
+                    credit="${oa}, committed by ${ocommitter}"
+                  fi
+                  echo "* \`${ob}\` carries \`${oc}\` (by ${credit}):"
                   echo "  <https://github.com/${{ github.repository }}/tree/${ob}>"
                 done
               fi
@@ -807,7 +844,18 @@ jobs:
           fi
           rc='${{ steps.resync.outputs.rc }}'
           case "${rc}" in
-            0) echo "Re-sync clean (or nothing owed)." ;;
+            0)
+              # tan-cli#1006 review (nit): with `diverted=true` this arm used
+              # to print "Re-sync clean (or nothing owed)." unconditionally,
+              # directly under the `::warning::` above -- driven, the warning
+              # pre-empts the contradiction it could otherwise read as, but
+              # this line is free to say so itself rather than lean on that.
+              if [ '${{ steps.pr.outputs.diverted }}' = 'true' ]; then
+                echo "Re-sync clean, but this proposal was DIVERTED -- see the warning above."
+              else
+                echo "Re-sync clean (or nothing owed)."
+              fi
+              ;;
             1) echo "::error::a re-sync is owed and part of it needs a human -- see ${{ steps.pr.outputs.url || steps.issue.outputs.url || 'the job summary' }}. The pins covering the unresolved half did NOT move, so the freshness gate stays red until someone ports it."; exit 1 ;;
             2) echo "::error::planner_resync.py REFUSED to propose anything (a pin disagrees with its own hash table, or the alp-sdk checkout is unusable) -- see the job summary."; exit 1 ;;
             *) echo "::error::planner_resync.py did not report an exit code"; exit 1 ;;
