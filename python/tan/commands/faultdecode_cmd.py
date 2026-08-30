@@ -46,10 +46,13 @@ original's `click.BadParameter`/`click.UsageError`, both exit 2).
 from __future__ import annotations
 
 import json as _json
-import select
+import os
+import queue
 import subprocess
 import sys
 import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import typer
@@ -63,7 +66,7 @@ from tan.core.faultdecode import (
     render_human,
 )
 from tan.core.inert import NOT_APPLICABLE, inert_help
-from tan.env import no_color_requested
+from tan.env import no_color_requested, stdin_is_tty
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
@@ -183,7 +186,13 @@ def _parse_hexint(option: str, value: str | None) -> int | None:
     return parsed
 
 
-def _refuse(code: str, message: str, *, envelope_mode: bool) -> typer.Exit:
+def _refuse(
+    code: str,
+    message: str,
+    *,
+    envelope_mode: bool,
+    extra_issues: list[Issue] | None = None,
+) -> typer.Exit:
     """Build `faultdecode`'s refusal on whichever surface the caller asked for,
     and return the `typer.Exit` for the caller to `raise`.
 
@@ -192,14 +201,23 @@ def _refuse(code: str, message: str, *, envelope_mode: bool) -> typer.Exit:
     refusal that wrote plain text under `--format json` would hand the consumer
     `command: "cli"` here and `command: "faultdecode"` one invocation later,
     which is the exact defect that issue closed for the first one.
+
+    `extra_issues` (tan-cli#537 constraint 4): a bound firing on the implicit
+    stdin read is announced here TOO, not only on the success path -- a bound
+    can fire with bytes read but no complete register set, and that refusal
+    used to say nothing about the truncation at all. Included in the envelope
+    issues[] AND echoed to stderr in every mode (not just `--format json`),
+    same as the success path's own announcement.
     """
+    for issue in extra_issues or ():
+        typer.echo(f"Warning: {issue.message}", err=True)
     if envelope_mode:
         emit(
             Envelope(
                 "faultdecode",
                 Project(root=None, board_yaml=None),
                 None,
-                [Issue(code, "error", message)],
+                [*(extra_issues or ()), Issue(code, "error", message)],
                 ExitCode.VALIDATION_FAILURE,
             )
         )
@@ -208,115 +226,380 @@ def _refuse(code: str, message: str, *, envelope_mode: bool) -> typer.Exit:
     return typer.Exit(int(ExitCode.VALIDATION_FAILURE))
 
 
-#: How long the IMPLICIT stdin auto-consume waits for a non-TTY stdin to offer
-#: something -- bytes, or EOF, both of which make it readable -- before giving
-#: up and decoding from the flags alone (tan-cli#388).
+#: Chunk size for each background stdin read. `.read1(n)` (see
+#: `_read_stdin_bounded` for why not `.read(n)`) never blocks trying to fill
+#: this, so its exact value only bounds worst-case per-chunk latency, not
+#: correctness -- 64 KiB is the same figure `shutil.copyfileobj` defaults to.
+_STDIN_CHUNK_BYTES = 65536
+
+#: Idle bound (tan-cli#537): how long the background reader waits, after
+#: either the LAST chunk that arrived or start (if none yet), before
+#: deciding no more is coming. Reset on every chunk -- this is what lets a
+#: slow-but-steady producer (a serial capture, a script draining a device)
+#: read in full, which a TOTAL budget (attempts 2 and 6/7) cannot do.
 #:
-#: Not 0: `producer | tan faultdecode` races the producer's first write against
-#: this process's own startup, and losing that race would drop a dump the user
-#: really did pipe. Not unbounded either -- unbounded is the defect. A quarter
-#: second is far longer than a scheduler hiccup and far shorter than the
-#: indefinite block a held-open pipe used to cause.
-_STDIN_READY_TIMEOUT_S = 0.25
+#: Measured, not argued: an ad-hoc bench script (tan-cli#537, not checked in) fed a
+#: real OS pipe 26 lines with a 0.24s `time.sleep` between each and recorded
+#: the gaps the reader thread actually observed -- max 0.250s under this
+#: environment's own scheduling jitter, essentially the nominal 0.24s with no
+#: slack to spare. 2.0s is that measured worst case with roughly 8x headroom,
+#: not a number chosen by reasoning about the idle window in the abstract --
+#: that reasoning is exactly what produced the reverted "20x the idle window"
+#: comment in attempt 6/7, which was arithmetically false for this same
+#: shape.
+_STDIN_IDLE_TIMEOUT_S = 2.0
+
+#: Byte cap (tan-cli#537): a hard ceiling on accumulated stdin bytes. No
+#: earlier attempt had one -- unguarded, `yes "CFSR: 0x00008200" | tan
+#: faultdecode` reached 409.7 MB RSS over 9.59s (issue #537, measured). A
+#: real pasted fault dump is at most a few KB; 1 MiB is roughly three orders
+#: of magnitude below that measured unguarded growth while staying two-plus
+#: orders of magnitude above any legitimate paste. Bounds the ACCUMULATED
+#: BUFFER itself (checked after every chunk), not the read loop -- a large
+#: total-cap alone would still let the buffer grow unbounded until it fired.
+_STDIN_BYTE_CAP = 1_048_576
+
+#: Total bound (tan-cli#537): a backstop so a producer that never goes idle
+#: for `_STDIN_IDLE_TIMEOUT_S` and never reaches `_STDIN_BYTE_CAP` (a
+#: continuous writer trickling below both) still terminates. NOT the primary
+#: defence -- the idle bound is, for exactly the reason attempts 6/7 got a
+#: fixed total wrong: any fixed total remains capable of truncating a
+#: sufficiently slow legitimate producer. 30s is ~5x the 6.2s measured
+#: slow-but-steady shape (the same ad-hoc bench), which is comfortably
+#: inside it because the IDLE bound is what actually governs that case (each
+#: gap is ~0.24s, far under `_STDIN_IDLE_TIMEOUT_S`); this total exists only
+#: to catch the case the idle bound cannot. Whichever bound fires, the
+#: read still ANNOUNCES it (`_stdin_bound_message`) rather than silently
+#: discarding -- that announcement, not the value chosen here, is what makes
+#: a truncation recoverable instead of a confident wrong root cause.
+_STDIN_TOTAL_TIMEOUT_S = 30.0
+
+#: Bound on `_read_stdin_bounded`'s internal `chunk_queue` (tan-cli#537
+#: follow-up): the byte cap above bounds the RETURNED buffer, but the
+#: background reader thread is ABANDONED, not joined, once any bound fires
+#: (see `_read_stdin_bounded`'s own docstring on why) -- an unbounded
+#: `queue.Queue()` let that abandoned thread keep calling `os.read` + `put`
+#: against a producer that never stops (the `yes` shape) with nobody ever
+#: calling `.get()` again, growing without limit. Measured from the moment
+#: the byte cap fired against a real `yes` pipe: 640.1 MB at +0.5s, 1059.6 MB
+#: at +1.0s, 2001.9 MB at +2.0s, 3845.8 MB at +4.0s -- bounded today only by
+#: how fast the process happens to exit, which is not a bound. 16 chunks is
+#: `_STDIN_BYTE_CAP // _STDIN_CHUNK_BYTES` -- exactly enough that the queue
+#: never has to reject a chunk before the byte cap itself would have ended
+#: the main loop anyway -- plus headroom for ordinary scheduling jitter
+#: between the reader thread producing and the main loop's `.get()`
+#: consuming, so this never discards a chunk the main loop was still going
+#: to want.
+_STDIN_DRAIN_QUEUE_MAXSIZE = (_STDIN_BYTE_CAP // _STDIN_CHUNK_BYTES) + 16
 
 
-def _stdin_offers_input() -> bool:
-    """Whether reading `sys.stdin` will terminate promptly (tan-cli#388).
+@dataclass(frozen=True)
+class _StdinReadOutcome:
+    """Result of one bounded background stdin BYTE read (tan-cli#537)."""
 
-    `sys.stdin.read()` returns at EOF, and a pipe reaches EOF only when its
-    last writer CLOSES it -- not when the writer merely stops writing. Every
-    caller that spawns `tan` as a child with `stdin=PIPE` and does not close
-    the write end (the default shape of `subprocess.Popen(..., stdin=PIPE)`)
-    therefore used to block the child forever, with zero bytes on stdout and
-    stderr and no exit code: worse than a malformed report, because there is
-    nothing for the caller to classify.
+    #: Raw bytes accumulated before whichever bound fired (or clean EOF).
+    data: bytes
+    #: Which bound fired, or `None` on a clean EOF (the writer closed the
+    #: pipe on its own, no bound needed to intervene at all).
+    bound: str | None  # None | "idle" | "byte-cap" | "total-cap"
 
-    `select` reports a pipe readable both when bytes are buffered and when the
-    writer has closed, so a real `echo ... | tan faultdecode` still reads its
-    dump and only the open-and-idle pipe falls through.
 
-    `select.select` answers this directly wherever it can, which is every
-    POSIX host. It CANNOT on Windows -- there it accepts sockets only -- and an
-    in-memory `CliRunner` stdin has no `fileno` at all
-    (`io.UnsupportedOperation` derives from both `OSError` and `ValueError`).
+def _read_stdin_bounded(
+    buffer: object,
+    *,
+    idle_s: float = _STDIN_IDLE_TIMEOUT_S,
+    byte_cap: int = _STDIN_BYTE_CAP,
+    total_s: float = _STDIN_TOTAL_TIMEOUT_S,
+    chunk_bytes: int = _STDIN_CHUNK_BYTES,
+) -> _StdinReadOutcome:
+    """Read `buffer` (a binary stream, e.g. `sys.stdin.buffer`) to bytes,
+    bounded three ways at once (tan-cli#537): an IDLE timeout that resets on
+    every chunk, a hard BYTE CAP on the accumulated buffer, and a TOTAL
+    timeout as a backstop. All state (the queue, the buffer, the deadlines)
+    is local to this call -- tan-cli#537's own module-global `_PREREAD_STDIN`
+    stash is what let one invocation's empty read leak into the next
+    in-process call; nothing here survives past the `return`.
 
-    Falling back to "just read it" was the first shape of this fix, and it left
-    the bug fully intact on Windows: measured on windows-latest,
-    `test_an_idle_open_stdin_pipe_falls_through_to_the_no_dump_refusal` still
-    hit its 20 s bound, because an idle open pipe with no registers supplied
-    took the fallback and blocked exactly as before. A platform-specific
-    readiness check meant a platform-specific hang, on a platform this repo
-    gates as a required check.
+    ONE mechanism on every platform: a single daemon thread looping a
+    single-syscall chunk read and pushing each chunk to a `queue.Queue`,
+    with EOF pushed in-band as `b""` -- never inferred from a clock. This
+    deletes the select()-on-POSIX/thread-on-Windows split the previous
+    reader carried: `select()` is WinSock-only on Windows (anonymous pipes
+    are not selectable there at all), and neither `PeekNamedPipe` nor a
+    console wait handle answers "will this read terminate?" -- only "is a
+    byte available?", a different question. A chunked thread reader needs
+    none of that and behaves identically everywhere.
 
-    So the fallback is a BOUNDED read rather than a guess: the read still
-    happens, still terminates at EOF, and still yields a dump that arrives
-    inside the window -- but a writer that never writes and never closes costs
-    `_STDIN_READY_TIMEOUT_S`, not the process.
+    Never `buffer.read(n)`: `io.BufferedReader.read(n)` blocks issuing
+    repeated raw reads until it collects `n` bytes OR hits EOF -- it does NOT
+    return early just because some bytes are already available. Measured
+    (the same ad-hoc bench): with `.read(65536)` a producer
+    writing 26 lines with 0.24s gaps between them delivered exactly ONE
+    chunk containing the whole dump, at EOF, 6.29s after the first byte --
+    the per-chunk idle-reset this function exists to provide never had
+    anything to reset against, silently degrading to the "wait for the
+    whole thing" case attempt 6/7 already got a total budget wrong for.
+
+    The chunk primitive is `os.read(fd, chunk_bytes)` on `buffer`'s real file
+    descriptor when it has one (a genuine `sys.stdin.buffer` over a pipe,
+    file, or console), falling back to `buffer.read1(chunk_bytes)` only when
+    it does not (`typer.testing.CliRunner`'s in-memory `BytesIO`-backed
+    stdin double, whose `.fileno()` raises `io.UnsupportedOperation` --
+    `CliRunner` hands the command an already-complete buffer, so `.read1()`
+    there returns immediately and reaches its own in-band EOF quickly; it
+    never blocks on a real held-open pipe, so it carries none of the risk
+    the next paragraph describes). Both return AT MOST ONE underlying
+    system read's worth of data rather than trying to fill `chunk_bytes` --
+    the same bench run measured 27 `.read1()` chunks, one per line plus the
+    terminating empty read, with gaps at 0.239-0.250s, matching the
+    writer's own 0.24s sleep, and `os.read` shares that same one-syscall
+    contract by construction (it does not go through any buffering layer
+    at all).
+
+    `os.read(fd, ...)` over `buffer.read1(...)` on a REAL stdin is not a
+    style choice, it is the fix for a second, more severe defect this
+    function's own first cut hit: with the reader parked in
+    `buffer.read1()` (a `BufferedReader` method) when the idle bound fires
+    and the caller proceeds without joining the thread, a normal process
+    exit then aborts -- measured, reproducibly, via
+    `test_registers_on_the_command_line_never_wait_for_an_open_stdin_pipe`
+    (a REAL subprocess, not `CliRunner`) -- with `Fatal Python error:
+    _enter_buffered_busy: could not acquire lock for <_io.BufferedReader
+    name='<stdin>'> at interpreter shutdown, possibly due to daemon
+    threads` and exit code -6 (SIGABRT): CPython's interpreter-shutdown
+    finalizer tries to flush/close `sys.stdin`, which needs the
+    `BufferedReader`'s internal per-object lock, and the abandoned thread
+    is holding that same lock parked in a real blocking read syscall that
+    will never return (the parent still owns the open write end) --
+    exactly the "daemon thread parked in a read at interpreter exit" risk
+    the design flagged for Windows specifically, reproduced here on Linux
+    too. `os.read(fd, n)` is a bare syscall on the raw descriptor with no
+    Python-level stream OBJECT and therefore no such lock for the
+    finalizer to contend on; the same reproduction, switched to it, exits
+    0 cleanly (verified with a second ad-hoc reproduction script,
+    tan-cli#537, not checked in).
+
+    Termination is never inferred: EOF is the in-band `b""` chunk, the idle
+    bound fires only via `queue.Queue.get(timeout=...)` actually elapsing
+    with nothing delivered, the byte cap fires only once the accumulated
+    total has actually reached it, and the total bound fires only once the
+    wall clock has actually run out. Whichever one fires, what already
+    arrived is kept (never the discard-on-timeout shape of attempt 1, where
+    `got.append(sys.stdin.read())` only ran on `read()` RETURNING, so a join
+    timeout threw away every buffered byte).
+
+    The reader thread is abandoned, not joined, on every exit from the loop
+    below except a clean EOF: it may still be parked in a read when this
+    function returns (a producer that never closes its end), and it holds
+    nothing but stdin, so leaving it for the daemon-thread interpreter-exit
+    path to reap is the correct outcome -- the same trade the previous
+    reader already made for exactly the same reason, and now safe to make
+    (see the `os.read` paragraph above) because nothing it holds blocks
+    that exit any more.
     """
     try:
-        ready, _, _ = select.select([sys.stdin], [], [], _STDIN_READY_TIMEOUT_S)
-    except (OSError, ValueError):
-        return _stdin_offers_input_by_reading()
-    return bool(ready)
+        fd: int | None = buffer.fileno()  # type: ignore[attr-defined]
+    except (AttributeError, OSError, ValueError):
+        fd = None
 
+    chunk_queue: queue.Queue[bytes] = queue.Queue(maxsize=_STDIN_DRAIN_QUEUE_MAXSIZE)
 
-#: Filled by `_stdin_offers_input_by_reading` so `_read_dump` does not read a
-#: second time -- those bytes are already consumed, and a pipe cannot be
-#: rewound.
-_PREREAD_STDIN: list[str] = []
-
-
-def _stdin_offers_input_by_reading() -> bool:
-    """The Windows / no-`fileno` path: read stdin on a daemon thread, bounded.
-
-    Reading is the only way to learn whether a Windows pipe will ever deliver,
-    so this reads -- but off the main thread, so `_STDIN_READY_TIMEOUT_S` is a
-    real bound and not an aspiration. Whatever arrived is stashed in
-    :data:`_PREREAD_STDIN` for `_read_dump` to return, because a pipe read
-    cannot be undone and reading twice would drop the dump this exists to
-    preserve.
-
-    The thread is a daemon precisely because it may still be parked in
-    `read()` at interpreter exit; it holds nothing but stdin, and leaving it
-    is the correct outcome for a producer that never speaks.
-    """
-    got: list[str] = []
+    def _read_one_chunk() -> bytes:
+        if fd is not None:
+            return os.read(fd, chunk_bytes)
+        return buffer.read1(chunk_bytes)  # type: ignore[attr-defined]
 
     def _drain() -> None:
+        # `put_nowait` + discard-on-`Full`, not a blocking `put` against a
+        # bounded queue: once the main loop below has broken out of its own
+        # `while True` (a bound fired) it never calls `.get()` again, so a
+        # blocking `put()` here would just move the "abandoned daemon thread
+        # parked in a blocking call" risk from the read syscall to the
+        # queue's own lock instead of removing it -- the exact shape this
+        # function's `os.read` fix (see its docstring) exists to avoid, only
+        # one layer up. Discarding keeps this thread doing exactly what it
+        # was already doing (repeatedly calling `_read_one_chunk`) with
+        # nothing new to block on, so it drains the pipe (the fix a real OS
+        # pipe's own backpressure gives a writer) without retaining what it
+        # reads once nobody is left to consume it.
         try:
-            got.append(sys.stdin.read())
+            while True:
+                chunk = _read_one_chunk()
+                try:
+                    chunk_queue.put_nowait(chunk)
+                except queue.Full:
+                    pass
+                if not chunk:
+                    return
         except (OSError, ValueError):  # pragma: no cover - env-dependent
-            pass
+            try:
+                chunk_queue.put_nowait(b"")
+            except queue.Full:
+                pass
 
     reader = threading.Thread(target=_drain, daemon=True)
     reader.start()
-    reader.join(_STDIN_READY_TIMEOUT_S)
-    if not got:
-        return False
-    _PREREAD_STDIN.append(got[0])
-    return bool(got[0])
+
+    chunks: list[bytes] = []
+    total = 0
+    bound: str | None = None
+    start = time.monotonic()
+    while True:
+        remaining_total = total_s - (time.monotonic() - start)
+        if remaining_total <= 0:
+            bound = "total-cap"
+            break
+        wait = min(idle_s, remaining_total)
+        try:
+            chunk = chunk_queue.get(timeout=wait)
+        except queue.Empty:
+            # Which bound actually expired depends on which of the two was
+            # the shorter (and therefore limiting) wait, NOT on which one is
+            # checked first above: if `remaining_total` was the smaller of
+            # the two, the wait timed out because the TOTAL deadline was
+            # imminent, not because the reader went idle for a full
+            # `idle_s` -- mislabelling that as "idle" would misreport a
+            # total-cap termination on a producer whose chunks are only
+            # slightly slower than `idle_s - remaining_total`.
+            bound = "total-cap" if wait < idle_s else "idle"
+            break
+        if not chunk:
+            break  # clean EOF -- no bound fired, whatever arrived is complete
+        chunks.append(chunk)
+        total += len(chunk)
+        if total >= byte_cap:
+            bound = "byte-cap"
+            break
+
+    data = b"".join(chunks)
+    if bound == "byte-cap":
+        data = data[:byte_cap]
+    return _StdinReadOutcome(data=data, bound=bound)
 
 
-def _read_dump(file_: str | None, *, auto_consume_stdin: bool) -> str:
-    """Read a pasted dump from --file, '-' (stdin), or piped stdin.
+def _stdin_bound_message(bound: str, bytes_read: int) -> str:
+    """The stderr/`issues[]` announcement for whichever bound
+    `_read_stdin_bounded` fired (tan-cli#537 constraint 4): names the bound
+    BY NAME and the remedy -- `--file -` is already the explicit
+    read-to-EOF path, the unbounded opt-in a truncated caller should be told
+    to reach for. A truncated decode the engineer is told about is a
+    recoverable inconvenience; a silent one is a confident wrong root
+    cause, which is the whole cost this design refuses to pay silently."""
+    remedy = "use `--file -` to read the complete dump instead (reads to EOF, no bound)"
+    if bound == "idle":
+        return (
+            f"stdin idle for {_STDIN_IDLE_TIMEOUT_S:g}s after {bytes_read} byte(s) "
+            f"without reaching EOF -- decoded what arrived; {remedy}."
+        )
+    if bound == "byte-cap":
+        return (
+            f"stdin exceeded the {_STDIN_BYTE_CAP}-byte cap without reaching EOF -- "
+            f"decoded the first {_STDIN_BYTE_CAP} bytes only; {remedy}."
+        )
+    if bound == "total-cap":
+        return (
+            f"stdin did not reach EOF within {_STDIN_TOTAL_TIMEOUT_S:g}s -- decoded "
+            f"the {bytes_read} byte(s) read so far; {remedy}."
+        )
+    raise AssertionError(f"unknown stdin bound: {bound!r}")  # pragma: no cover
 
-    `--file -` is the EXPLICIT opt-in and always reads stdin to EOF, whatever
-    else is on the command line: the caller asked for that read by name, and a
-    dump has no terminator other than EOF. `auto_consume_stdin` gates only the
-    IMPLICIT read; the CLI always passes `True` for it now (tan-cli#503,
-    defect 1 -- see the call site in `faultdecode()` for why); the parameter
-    itself stays (rather than inlined away) because two tests below call
-    `_read_dump` directly with it.
+
+@dataclass(frozen=True)
+class ImplicitStdinResult:
+    """Result of the IMPLICIT (unnamed, auto-consume) stdin read (tan-cli#537)
+    -- `... | tan faultdecode`, no `--file` on the command line at all.
+
+    Never raises: a detached/replaced/absent stdin degrades to
+    `attempted=False, text=""`, the same "nothing to offer" answer a real
+    closed pipe gives, because the implicit path's whole job is "just work
+    when there is something to read, fall through cleanly when there is
+    not" -- `--file -` is the surface that raises on a stdin it cannot
+    serve, because THAT read was named explicitly.
+    """
+
+    #: The decoded dump text -- "" when nothing was read at all.
+    text: str
+    #: Which bound fired during the read, or `None` when either no read was
+    #: attempted or the read reached a clean EOF with no bound needed.
+    bound: str | None
+    #: Whether a background read was actually started (False for a TTY, a
+    #: detached/`None` stdin, or a text-only replacement with no `.buffer`).
+    attempted: bool
+    #: How many bytes were actually read (0 when not attempted, or when an
+    #: attempted read got nothing before its idle bound fired).
+    bytes_read: int
+
+
+def _read_implicit_stdin() -> ImplicitStdinResult:
+    """The IMPLICIT stdin reader tan-cli#537 exists to redesign.
+
+    Reads `sys.stdin.buffer` as BYTES via `_read_stdin_bounded`, accumulates,
+    and decodes EXACTLY ONCE at the end with `bytes.decode("utf-8",
+    errors="ignore")` -- byte-identical to what `--file <path>` already does
+    via `Path.read_text(encoding="utf-8", errors="ignore")` (same codec, same
+    error handler), so decode parity with `--file` stops being a property
+    tested for and becomes one that cannot be violated: there is one decode
+    call, on the complete buffer, with the same two operands on both paths.
+    This is also what deletes the entire class that produced attempts 3 and
+    5: no chunk boundary exists for a multi-byte sequence to split across (no
+    decode happens per chunk at all), so no `UnicodeDecodeError` can be
+    raised mid-read for an `except` to swallow, and nothing here ever calls
+    `.reconfigure()`, so its `io.UnsupportedOperation` on an already-read
+    stream never arises either.
+
+    Routes the TTY/detached/replaced-stream checks through this repo's own
+    guarded probes rather than hand-rolling a second copy of either
+    (tan-cli#488's `_TeeStderr` class of bug): `stdin_is_tty()` -- not a bare
+    `sys.stdin.isatty()` -- absorbs both `sys.stdin is None` and a replaced
+    stream with no `.isatty()` at all. Reading `.buffer` adds ONE further
+    shape neither existing probe covers: a text-only replacement stream
+    (e.g. a test harness's `io.StringIO`) has no `.buffer` attribute at all
+    -- `getattr(..., "buffer", None)` degrades that to `attempted=False`
+    cleanly, matching every other "nothing to offer" case, rather than
+    raising `AttributeError` from inside a background thread.
+    """
+    if sys.stdin is None or stdin_is_tty():
+        return ImplicitStdinResult(text="", bound=None, attempted=False, bytes_read=0)
+    buf = getattr(sys.stdin, "buffer", None)
+    if buf is None:
+        return ImplicitStdinResult(text="", bound=None, attempted=False, bytes_read=0)
+    outcome = _read_stdin_bounded(buf)
+    text = outcome.data.decode("utf-8", errors="ignore")
+    return ImplicitStdinResult(
+        text=text, bound=outcome.bound, attempted=True, bytes_read=len(outcome.data)
+    )
+
+
+def _read_dump(file_: str | None) -> str:
+    """Read a pasted dump from `--file <path>` or `--file -` (stdin to EOF).
+
+    Returns `""` when `file_` is `None`: the IMPLICIT auto-consume path
+    (no `--file` on the command line at all) is `_read_implicit_stdin`
+    above, a SEPARATE function since tan-cli#537 -- folding it into this one
+    (the pre-#537 shape) is what let a module-global stash of pre-read bytes
+    (`_PREREAD_STDIN`) survive between invocations; splitting it out means
+    this function needs no such stash at all.
+
+    `--file -` is the EXPLICIT unbounded opt-in `_stdin_bound_message` tells
+    a truncated implicit-read caller to reach for: it reads to EOF with NO
+    idle/byte/total bound, whatever else was on the command line, because
+    the caller named this read specifically and a dump has no terminator
+    other than EOF. Reads `.buffer` and decodes once with the same
+    `errors="ignore"` UTF-8 decode `--file <path>` and the implicit path
+    both use, rather than the previous text-layer `sys.stdin.read()`, which
+    could itself raise `UnicodeDecodeError` on a non-UTF-8 host and broke
+    decode parity a second way.
 
     tan-cli#488 round 5 class sweep: `sys.stdin` itself, not just the result
     of calling `.isatty()` on it, can be `None` -- a process launched with
     its standard handles detached (a GUI launcher, a `pythonw`-style spawn,
     or a shell that closed fd 0 before exec). `--file -` names stdin
-    explicitly, so a detached stdin there is refused with a clear message
-    rather than a raw `AttributeError`; the IMPLICIT auto-consume path below
-    treats a detached stdin the same as one that offers nothing (`""`) -- it
-    was already never blocking on a stdin that has no answer to give.
+    explicitly, so a detached stdin (or one replaced by a text-only stream
+    with no `.buffer`) is refused with a clear message rather than a raw
+    `AttributeError`.
     """
+    if file_ is None:
+        return ""
     if file_ == "-":
         if sys.stdin is None:
             raise typer.BadParameter(
@@ -324,27 +607,16 @@ def _read_dump(file_: str | None, *, auto_consume_stdin: bool) -> str:
                 "so `--file -` cannot read a dump from it",
                 param_hint="--file",
             )
-        return sys.stdin.read()
-    if file_ is not None:
-        return Path(file_).read_text(encoding="utf-8", errors="ignore")
-    # Auto-consume piped stdin (non-tty) so `... | tan faultdecode` just works.
-    if (
-        not auto_consume_stdin
-        or sys.stdin is None
-        or sys.stdin.isatty()
-        or not _stdin_offers_input()
-    ):
-        return ""
-    if _PREREAD_STDIN:
-        # The readiness check had to consume stdin to answer (Windows, or a
-        # stdin with no `fileno`). Return what it read rather than reading
-        # again: a pipe cannot be rewound, so a second read returns "" and
-        # would silently drop the dump.
-        return _PREREAD_STDIN.pop()
-    try:
-        return sys.stdin.read()
-    except (OSError, ValueError):  # pragma: no cover - env-dependent
-        return ""
+        buf = getattr(sys.stdin, "buffer", None)
+        if buf is None:
+            raise typer.BadParameter(
+                "stdin has no binary buffer to read from (it has been replaced "
+                "by a text-only stream), so `--file -` cannot read a dump from it",
+                param_hint="--file",
+            )
+        return buf.read().decode("utf-8", errors="ignore")
+    return Path(file_).read_text(encoding="utf-8", errors="ignore")
+
 
 
 def _check_elf_path(value: str | None) -> Path | None:
@@ -488,26 +760,52 @@ def faultdecode(
             "faultdecode.invalid-register-value", err.message, envelope_mode=envelope_mode
         ) from None
 
-    # Read the implicit stdin dump UNCONDITIONALLY (tan-cli#503, defect 1) --
-    # not gated on whether any register flag was also given. A prior version
-    # skipped this read whenever ANY of cfsr/hfsr/dfsr/bfar/mmfar/mmfsr/bfsr/
-    # ufsr was supplied, which broke the command's own documented contract
-    # ("Explicit flags win over a parsed dump" only holds if the dump is
-    # still read when flags are present) two ways: a piped CFSR/BFAR was
-    # silently dropped in favour of the flag's registers alone (measured:
-    # `... | tan faultdecode --hfsr 0x40000000` reported a self-contradictory
-    # "Forced HardFault ... its own status bits are clear" while the piped
-    # CFSR=0x00008200/BFAR=0xdeadbeef it never read said otherwise), and
-    # --bfar/--mmfar counted as "a register was given" without satisfying the
-    # cfsr/hfsr/dfsr gate below, so the dump was skipped AND the command still
-    # refused with `faultdecode.no-registers`. `_stdin_offers_input` already
-    # bounds this read to `_STDIN_READY_TIMEOUT_S` (0.25 s) even when nothing
-    # arrives, so making it unconditional does not reopen tan-cli#388's
-    # unbounded hang -- measured,
+    # Read the dump UNCONDITIONALLY (tan-cli#503, defect 1) -- not gated on
+    # whether any register flag was also given. A prior version skipped this
+    # read whenever ANY of cfsr/hfsr/dfsr/bfar/mmfar/mmfsr/bfsr/ufsr was
+    # supplied, which broke the command's own documented contract ("Explicit
+    # flags win over a parsed dump" only holds if the dump is still read when
+    # flags are present) two ways: a piped CFSR/BFAR was silently dropped in
+    # favour of the flag's registers alone (measured: `... | tan faultdecode
+    # --hfsr 0x40000000` reported a self-contradictory "Forced HardFault ...
+    # its own status bits are clear" while the piped CFSR=0x00008200/
+    # BFAR=0xdeadbeef it never read said otherwise), and --bfar/--mmfar
+    # counted as "a register was given" without satisfying the cfsr/hfsr/dfsr
+    # gate below, so the dump was skipped AND the command still refused with
+    # `faultdecode.no-registers`.
+    #
+    # `--file` (path or `-`) is explicit and unbounded; with no `--file` at
+    # all the IMPLICIT path (tan-cli#537) reads `sys.stdin.buffer` on a
+    # background thread bounded three ways (idle/byte-cap/total, see
+    # `_read_stdin_bounded`), so making this unconditional does not reopen
+    # tan-cli#388's unbounded hang -- measured,
     # `test_registers_on_the_command_line_never_wait_for_an_open_stdin_pipe`
     # (a real held-open OS pipe, not `CliRunner`) still returns in well under
     # a second, not the 20 s bound it fails at.
-    dump_text = _read_dump(file_value, auto_consume_stdin=True)
+    implicit_bound: str | None = None
+    implicit_bytes = 0
+    implicit_silent = False
+    if file_value is not None:
+        dump_text = _read_dump(file_value)
+    else:
+        implicit = _read_implicit_stdin()
+        dump_text = implicit.text
+        implicit_bound = implicit.bound
+        implicit_bytes = implicit.bytes_read
+        implicit_silent = implicit.attempted and implicit.bound == "idle" and implicit.bytes_read == 0
+    # tan-cli#537 constraint 4: whichever bound fired on the IMPLICIT stdin
+    # read, announce it -- on stderr in EVERY mode (not only `--format json`'s
+    # `issues[]`), naming the bound and the `--file -` remedy. Only when
+    # something was actually read: a bound firing on zero bytes is the
+    # separate "silent holder" refusal (`implicit_silent` above), not a
+    # truncation. Built HERE, before the no-registers check below, so a bound
+    # that fires with bytes read but no complete register set still gets
+    # this announcement on the refusal path -- not only on the success path
+    # that used to be the only place this list was built.
+    stdin_issues: list[Issue] = []
+    if implicit_bound is not None and implicit_bytes > 0:
+        stdin_bound_message = _stdin_bound_message(implicit_bound, implicit_bytes)
+        stdin_issues.append(Issue("faultdecode.stdin-truncated", "warning", stdin_bound_message))
     parsed: dict[str, int] = parse_dump(dump_text) if dump_text else {}
 
     def pick(name: str, flag_val: int | None) -> int | None:
@@ -532,17 +830,48 @@ def faultdecode(
     # No status registers at all => bad input (this is an analysis tool, but it
     # needs *something* to analyse). Exit nonzero with a usage hint.
     if cfsr_v is None and hfsr_v is None and dfsr_v is None:
-        no_registers = (
-            "no fault registers supplied -- pass --cfsr/--hfsr/--dfsr "
-            "or pipe a dump via --file/-/stdin."
-        )
+        if implicit_silent:
+            # tan-cli#537: distinguishes "no stdin at all" (TTY, detached, a
+            # closed pipe already at EOF) from "a pipe WAS open and offered
+            # nothing" -- today's refusal could not tell the two apart, and
+            # the second one is the shape a caller can actually fix by
+            # waiting longer (`--file -`) rather than by piping something in
+            # the first place.
+            no_registers = (
+                "no fault registers supplied, and stdin was open but silent for "
+                f"{_STDIN_IDLE_TIMEOUT_S:g}s -- pass --cfsr/--hfsr/--dfsr, or use "
+                "`--file -` to wait for a dump indefinitely."
+            )
+        elif stdin_issues:
+            # tan-cli#537 constraint 4's hole: a bound fired WITH bytes read
+            # (unlike `implicit_silent` above, which is zero bytes), but
+            # nothing in what arrived parsed into a complete register set.
+            # The plain "no fault registers supplied" wording below would
+            # tell this caller they supplied nothing at all, when tan in
+            # fact stopped reading part-way through a real dump -- distinct
+            # from "no dump arrived" and the exact misdirection the issue
+            # calls out as worse than the truncation itself.
+            no_registers = (
+                "no fault registers supplied -- stdin delivered data, but tan "
+                f"stopped reading part-way through it: {stdin_issues[0].message}"
+            )
+        else:
+            no_registers = (
+                "no fault registers supplied -- pass --cfsr/--hfsr/--dfsr "
+                "or pipe a dump via --file/-/stdin."
+            )
         # The refusal has to agree with the success path about whether stdout is
         # an envelope (tan-cli#399); leaving it to `cli.main`'s generic fallback
         # gave the consumer `command: "cli"` here and `command: "faultdecode"`
         # one invocation later. `_refuse` is that agreement, shared with the
-        # negative-register refusal above.
+        # negative-register refusal above. `extra_issues=stdin_issues` is this
+        # branch's own fix for constraint 4's hole: without it, a bound firing
+        # on a would-be refusal announced nowhere at all.
         raise _refuse(
-            "faultdecode.no-registers", no_registers, envelope_mode=envelope_mode
+            "faultdecode.no-registers",
+            no_registers,
+            envelope_mode=envelope_mode,
+            extra_issues=stdin_issues or None,
         )
 
     report = decode(
@@ -562,6 +891,12 @@ def faultdecode(
                 if sym is not None:
                     symbols[which] = sym
 
+    # `stdin_issues` was already built above (before the no-registers check),
+    # so the same list -- and the same announcement -- covers both the
+    # refusal path (via `_refuse`'s `extra_issues`) and this success path.
+    for stdin_issue in stdin_issues:
+        typer.echo(f"Warning: {stdin_issue.message}", err=True)
+
     if as_json:
         typer.echo(_json.dumps(report_to_json(report, symbols or None), indent=2))
     elif envelope_mode:
@@ -574,7 +909,7 @@ def faultdecode(
                 "faultdecode",
                 Project(root=None, board_yaml=None),
                 report_to_json(report, symbols or None),
-                [],
+                stdin_issues,
                 ExitCode.SUCCESS,
             )
         )
