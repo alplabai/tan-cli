@@ -17,28 +17,96 @@ command. This module is the fix -- `tan.core` importing no command module
 `envelope.py` can import [`sdk_ladder_divergence_issue`] at the top of the
 file rather than inside the one method that needed it.
 
-Two names this module still reaches for are themselves only resolvable from
-a command module -- `resolve_sdk_tiered` (`tan.commands.sdk_cmd`, the single
-NARROW tiered resolver both ladders below share) and `Issue`
-(`tan.envelope`, the wire type [`sdk_ladder_divergence_issue`] returns).
-Importing either at MODULE level here would recreate exactly the cycle this
-extraction exists to remove, just with a new module on one end -- `sdk_cmd`
-already imports these ladders back (for `sdk current`'s own wide-walk
-fallback and its own divergence check), and `envelope` is the module this
-whole move is FOR. Both stay function-scoped, deferred to the moment the
-enclosing function actually runs, by which point the caller (always a
-command, or `envelope` acting on a command's behalf) has necessarily already
-imported the module it is calling into -- so the deferred import always
-resolves. This module's own top-level imports stay command-free either way;
-what moved is WHERE the deferral lives, not whether the cycle is real.
+**Finished here, tan-cli#408 review follow-up.** The first pass of this
+extraction left `resolve_sdk_tiered` -- the single NARROW tiered resolver
+both ladders share -- behind in `tan.commands.sdk_cmd`, reached through a
+function-scoped import in each ladder function, on the reasoning that it was
+"a much larger, separately-scoped change." Review of that first pass found
+the opposite: `resolve_sdk_tiered` and the dozen filesystem-primitive
+functions under it (the tier-pointer reads, the registry lookup, the two
+positional-discovery walks) touch none of `typer`, `tan.envelope`,
+`tan.output_format` or `tan.exit_codes` -- their only non-stdlib dependencies
+were already `tan.core.shapes` and `tan.core.sdk_default_registry`, both
+core. The whole cluster moved here in the same shape, verbatim, along with
+`ActiveSdk` and the two `Issue` builders (`project_pin_issue`,
+`global_default_foreign_project_issue`) `envelope.py` needs through
+[`sdk_resolution_issues`]. Both ladder functions call `resolve_sdk_tiered`
+directly now -- no function-scoped import left inside either one, because
+the cycle it used to dodge (`sdk_discovery` -> `sdk_cmd` -> back into this
+module's own ladders) no longer exists once `resolve_sdk_tiered` lives here
+too.
+
+`Issue` (`tan.envelope`, the wire type every `*_issue`/`*_issues` function
+below returns) is the one name this module still cannot import at module
+level: `tan.envelope` imports THIS module at module level
+(`sdk_ladder_divergence_issue`, `sdk_resolution_issues`), so a top-level
+import back would recreate exactly the cycle this extraction removes, just
+with the two modules swapped. `TYPE_CHECKING` supplies the name for every
+annotation below, which is what a real type checker (mypy, an IDE) resolves
+against -- `from __future__ import annotations` defers every annotation to
+string form, so this costs nothing at runtime, and it is the same idiom
+`sdk_cmd._releases_opener` already uses for `OpenerDirector` one file over.
+Each function that actually CONSTRUCTS an `Issue` imports it again,
+function-scoped, at the point it runs. The deferral is safe NOT because
+some caller has necessarily already imported `tan.envelope` first (tan-cli#408
+review, nit: an earlier draft of this paragraph claimed exactly that, and it
+does not hold -- measured in a process that imported ONLY this module,
+`'tan.envelope' in sys.modules` is `False` right up to the call, and the
+deferred import still succeeds). It is safe because by the time any function
+in this module RUNS, this module's OWN top-level execution has already
+finished and `tan.core.sdk_discovery` is fully registered in `sys.modules` --
+so `tan.envelope`'s own top-level `from tan.core.sdk_discovery import
+sdk_ladder_divergence_issue, sdk_resolution_issues` finds a complete module,
+never a partially-initialized one, however `tan.envelope` first got
+imported. A genuine cycle can only happen while ONE of the two modules is
+still in the middle of its OWN top-level execution; nothing here runs at
+that time.
+
+**`typing.get_type_hints()` still raises on these annotations, and that is
+not fixed by the `TYPE_CHECKING` guard -- it cannot be, and no wrapper
+should try (tan-cli#408 review, minor 2 follow-up).** `TYPE_CHECKING` is
+`False` at runtime, so the guarded import never executes and `Issue` is
+never bound in this module's real `__dict__`; `get_type_hints()` resolves a
+string annotation by `eval`-ing it against `func.__globals__`, which IS that
+same `__dict__`, so `NameError: name 'Issue' is not defined` is still the
+measured result of calling it on any function below that names `Issue`.
+Making it resolve for real would mean binding the real `Issue` class at
+module level, which is the exact cycle this whole module exists to avoid --
+there is no way to have both. This is the identical tradeoff
+`_releases_opener`'s own docstring already makes for `OpenerDirector`, for
+the identical reason: `get_type_hints()` is live in this codebase
+(`tan.core.global_flags.accept_global_flags`), but it is called ONLY on each
+`*_cmd.py` module's top-level typer command callback -- never on an internal
+helper in `tan/core/`, here or in `sdk_cmd.py` -- so the two never meet in
+production. A guard test asserting `get_type_hints()` resolves across this
+module's public functions was considered and rejected for the same reason:
+it would be false by construction for every `Issue`-returning one, so it
+would not catch a real regression, only encode this already-understood and
+already-accepted limitation as a failing assertion.
 """
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import TYPE_CHECKING, Any
 
-from tan.core.shapes import is_sdk_root
+if TYPE_CHECKING:  # pragma: no cover
+    # Type-checker only -- see the module docstring for why this cannot be a
+    # runtime import. `get_type_hints()` needs this name in the module
+    # namespace to resolve the `Issue | None` / `list[Issue]` annotations
+    # below; it is never evaluated at import time (`TYPE_CHECKING` is False
+    # in a real run), so it adds no runtime dependency on `tan.envelope`.
+    from tan.envelope import Issue
+
+from tan.core.sdk_default_registry import (
+    deepest_covering_entry,
+    parse_registry,
+    parse_registry_updated_at,
+    registry_path,
+)
+from tan.core.shapes import SDK_MARKER, is_sdk_root
 from tan.core.venv import venv_python
 
 
@@ -99,6 +167,498 @@ def discover_sdk_root(workspace_root: Path) -> Path | None:
     return None
 
 
+# ── filesystem primitives (every failure is a value, never an exception) ────
+# Moved verbatim from `tan/commands/sdk_cmd.py`, tan-cli#408 review follow-up
+# -- see the module docstring. `check_sdk_readiness`/`cached_sdk_versions`,
+# which stay in `sdk_cmd.py` (they are readiness REPORTING, not resolution),
+# import `_read_file`/`_has_loader_script`/`_home_alp_dir` back from here.
+
+
+def _read_file(path: Path) -> str | None:
+    """`tan_core`'s injected `read_file`: contents, or `None` on ANY read
+    failure -- missing, a directory, permission-denied, non-UTF-8 bytes.
+
+    `encoding="utf-8"` explicitly (I-27): a bare `read_text()` decodes with the
+    host locale, so a pointer file or `sdk_version.yaml` carrying one non-ASCII
+    byte raises `UnicodeDecodeError` on a cp1252 Windows host and passes on
+    ubuntu CI. Swallowing it to `None` is what the Rust does and is what keeps
+    an unreadable file a reported fact instead of a traceback.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _has_loader_script(root: Path) -> bool:
+    """True when `root/scripts/alp_project.py` exists -- `util.rs`'s
+    `has_loader_script`. `Path.exists()` swallows its own `OSError`/`ValueError`
+    (a too-long path, an illegal name), so a pathological pointer value reads as
+    "not an SDK" rather than raising out of a tier lookup."""
+    return root.joinpath(*SDK_MARKER).exists()
+
+
+def _to_posix(path: Path) -> str:
+    """`tan_core::project::to_posix`. The discovery tier's result is a reported
+    path, and every golden-pinned path field is platform-identical forward
+    slashes; `Path` renders `\\` on Windows."""
+    return str(path).replace("\\", "/")
+
+
+def _home_alp_dir() -> Path:
+    """`~/.alp` -- `USERPROFILE` on Windows else `HOME`, falling back to `.`
+    when neither is set (`util.rs`'s `home_alp_dir`). Home of the global default
+    pointer and the install cache, and the reason the conformance harness
+    overrides BOTH variables: a developer's real `~/.alp/sdk-default` would
+    otherwise decide what `sdk current` reports."""
+    home = os.environ.get("USERPROFILE" if os.name == "nt" else "HOME")
+    return Path(home or ".") / ".alp"
+
+
+def _read_pointer_json(pointer: Path) -> dict[str, Any] | None:
+    """Parse a pointer file (`.alp/sdk-path`, `~/.alp/sdk-default`) into its
+    dict, or `None` on ANY failure -- missing, unreadable, invalid JSON, or a
+    non-dict shape (a list). Shared by every field reader over this shape so
+    `_pointer_target` and `_pointer_written_for` can never disagree about what
+    counts as an unreadable pointer.
+    """
+    if not pointer.exists():
+        return None
+    raw = _read_file(pointer)
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _pointer_target(pointer: Path) -> str | None:
+    """The `sdkPath` out of a `{"sdkPath": ..., "updatedAt": ...}` pointer file.
+
+    One function for both pointers -- `tan_core`'s `resolve_active_sdk`
+    (`<workspace>/.alp/sdk-path`) and `resolve_global_default_sdk`
+    (`~/.alp/sdk-default`) are the same read of the same shape at two paths.
+    Every failure is `None`, matching the Rust's `.ok()?` chain: a hand-edited
+    pointer holding invalid JSON, a list, or no `sdkPath` at all must fall
+    through to the next tier, not abort the command.
+    """
+    parsed = _read_pointer_json(pointer)
+    value = parsed.get("sdkPath") if parsed is not None else None
+    return value if isinstance(value, str) else None
+
+
+def _pointer_written_for(pointer: Path) -> str | None:
+    """The optional `writtenFor` field alongside `sdkPath`/`updatedAt` in
+    `~/.alp/sdk-default` -- which project's bootstrap relocation last wrote
+    this machine-global pointer (tan-cli#464).
+
+    `None` covers both "no opinion" cases the same way, on purpose: a pointer
+    written by an older tan that predates this field, and one this tan wrote
+    for a run that never relocated a checkout FOR a project at all. Neither is
+    a claim that no other project wrote the pointer -- it is the absence of
+    evidence, and `resolve_sdk_tiered` must never manufacture a warning out of
+    it.
+
+    A non-`str`, empty, or non-absolute value is ALSO `None` (measured
+    tan-cli#464 review regression): `writtenFor: ""` used to pass the bare
+    `isinstance(value, str)` check here and reach `_workspace_under(ws, "")`,
+    which resolves `Path("")` to the process's cwd -- so whether the foreign
+    warning fired depended on where the caller happened to be standing, not
+    on anything the pointer actually recorded. Every OTHER project root this
+    field can legitimately hold is written by `bootstrap_cmd._run` as an
+    already-absolute `root` (`Project.resolved`'s own contract), so rejecting
+    a relative or blank one here is not narrowing real coverage ON THE
+    WRITER'S OWN PLATFORM -- but `~/.alp/sdk-default` is one pointer shared by
+    every tan on the host, and a bare `Path(value).is_absolute()` is answered
+    by whichever pathlib flavour the READER's OS picked: `PureWindowsPath`
+    needs a drive letter, so a legitimate `"/home/u/projB"` written by a
+    Linux/macOS tan degraded to "no opinion" the moment a Windows tan read it
+    back, and symmetrically `"C:/projB"` from a Windows writer is non-absolute
+    to `PurePosixPath` on the other two. Accepted here when EITHER
+    `PurePosixPath` or `PureWindowsPath` calls it absolute, so a value either
+    platform's tan legitimately wrote still counts, while `""`/`"."`/a bare
+    relative segment (`"projB/ws"`)/a drive-relative `"C:projB"` stay `None`
+    under both -- the safe degradation is unchanged, only which absolute
+    shapes clear it.
+    """
+    parsed = _read_pointer_json(pointer)
+    value = parsed.get("writtenFor") if parsed is not None else None
+    if not isinstance(value, str) or not value:
+        return None
+    if not PurePosixPath(value).is_absolute() and not PureWindowsPath(value).is_absolute():
+        return None
+    return value
+
+
+def _workspace_under(workspace_root: Path, root: str) -> bool:
+    """Whether `workspace_root` IS `root`, or sits somewhere below it --
+    resolved on both sides so a `..`, a symlink, or Windows' case-folding
+    cannot spoof a match (mirrors `tan.core.fs_confine.resolve_confined`'s own
+    reasoning for the same comparison). Any resolution failure (a path shape
+    the host rejects outright) reads as "not under it" -- the caller treats
+    that as grounds for a WARNING, never a hard failure.
+
+    `RuntimeError` is caught alongside `OSError`/`ValueError` (review, #904,
+    minor 1): `Path.resolve()` re-raises an `ELOOP` (a symlink loop) as a
+    `RuntimeError` ("Symlink loop from ...") rather than an `OSError` --
+    pathlib's own choice, not this module's -- so a registry origin or a
+    legacy `writtenFor` naming a symlink loop must degrade the same as any
+    other unresolvable path, not raise out of a tier lookup. Pre-existing
+    from tan-cli#464 (both pointer tiers shared this gap before #466 added a
+    third caller of the same pattern); left uncaught here would contradict
+    `parse_registry`'s own "never raises" contract one function over.
+    """
+    try:
+        return workspace_root.resolve().is_relative_to(Path(root).resolve())
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _resolved_origin_depth_key(root: str) -> str:
+    """`root`, resolved the same way `_workspace_under` resolves it for
+    containment -- reused as `sdk_default_registry.deepest_covering_entry`'s
+    depth-ranking key so ranking can never diverge from `covers`'s own notion
+    of "contains" (review, #904, major 1: a symlinked origin made the raw
+    registry-key string length disagree with `_workspace_under`'s resolved
+    containment test, so the WRONG registered SDK could win the "deepest"
+    tie-break with no warning at all).
+
+    Any resolution failure (including a symlink loop, `RuntimeError`) falls
+    back to the raw string rather than raising. IN PRODUCTION, via
+    `deepest_covering_entry`, this is only ever called after `covers` has
+    already resolved this SAME `root` successfully for this SAME candidate,
+    so a failure here would mean the filesystem changed between the two
+    calls -- treated as a same-caliber non-event as every other best-effort
+    read in this module, not a crash out of a tier lookup. That reasoning
+    made the `RuntimeError` arm of this guard genuinely hard to reach through
+    the production call graph alone (review, #904 second round, minor: a
+    narrowed `except (OSError, ValueError)` left the entire existing suite
+    green). `test_resolved_origin_depth_key_degrades_a_symlink_loop_instead_
+    of_raising` closes that by calling this function DIRECTLY, with no prior
+    `covers` call in front of it -- proving the degrade independent of
+    whether any production call order happens to exercise it.
+    """
+    try:
+        return str(Path(root).resolve())
+    except (OSError, ValueError, RuntimeError):
+        return root
+
+
+def _read_global_sdk_registry_raw() -> str | None:
+    """`~/.alp/sdk-defaults.json`'s raw text, or `None` when unreadable --
+    read ONCE and shared by both views `resolve_sdk_tiered` needs
+    (`parse_registry`'s flattened `sdkPath` view and
+    `parse_registry_updated_at`'s recency view, review #904 second round,
+    major): reading the file twice would let a concurrent `tan bootstrap`'s
+    write land BETWEEN the two reads, so one view could see an origin the
+    other one does not -- not a crash (`deepest_covering_entry`'s
+    `updated_at.get(origin, "")` tolerates a missing key the same as a
+    pre-tie-break registry), but an avoidable extra race window for a file
+    this module already goes out of its way to read atomically-consistent
+    once.
+
+    Reuses `_read_file` -- the same swallow-every-read-failure primitive
+    every pointer read in this file already goes through -- rather than a
+    second bespoke try/except, so a non-UTF-8 registry degrades exactly like
+    a non-UTF-8 pointer does.
+    """
+    return _read_file(registry_path(_home_alp_dir()))
+
+
+def _nearest_ancestor_sdk(start: Path) -> str | None:
+    """The nearest ENCLOSING checkout, walking `start`'s parents upward.
+    `start` itself is deliberately not probed -- every caller checks it first
+    (`tan_core::project::nearest_ancestor_sdk`).
+
+    This is what makes the documented Quickstart resolve: `tan --project
+    examples/<cat>/<name>` puts the workspace root levels BELOW the checkout it
+    was invoked from (tan-cli #101). The walk yields at most ONE path, so it can
+    never turn an otherwise-unambiguous resolution into an ambiguous `None`.
+    """
+    for ancestor in start.parents:
+        if _has_loader_script(ancestor):
+            return _to_posix(ancestor)
+    return None
+
+
+def discover_workspace_sdk(workspace_root: Path) -> str | None:
+    """Auto-discovery for the `discovery` tier: the workspace root itself or its
+    SIBLING `../alp-sdk`, else the nearest enclosing checkout. Two or more
+    candidates is ambiguous, which is `None` -- not a choice.
+
+    **Deliberately NOT [`discover_sdk_root`], above**, which is a different
+    Rust function (`util.rs`'s `discover_sdk_root`) with a WIDER candidate set:
+    it also probes the child `<ws>/alp-sdk` and `../alp-sdk-upstream`, and takes
+    the first match rather than requiring uniqueness. `sdk current` must mirror
+    `tan_core::discover_workspace_sdk` instead, per `resolve_sdk_tiered`'s own
+    doc comment: the tier it reports has to be what build/validate/doctor would
+    actually resolve here, or `sourceTier: "discovery"` names a path no other
+    command agrees with. Reusing the build-side helper would be the tempting
+    de-duplication and it would make the report lie.
+    """
+    candidates: list[str] = []
+    lateral_hit = False
+
+    if _has_loader_script(workspace_root):
+        # Normalised BEFORE the dedup below: on Windows a root spelled with
+        # backslashes and its `parent/alp-sdk` sibling can name the same
+        # directory yet compare unequal as strings, which counted one SDK twice
+        # and reported "ambiguous".
+        candidates.append(_to_posix(workspace_root))
+        lateral_hit = True
+
+    # `parent != self` is pathlib's spelling of Rust's `Path::parent()` returning
+    # `None`: at a filesystem/drive root `Path("C:/").parent` is `Path("C:/")`
+    # itself, so an unguarded probe would invent a `C:/alp-sdk` candidate the
+    # Rust never considers -- flipping `sourceTier` from `none` to `discovery`
+    # for anyone whose cwd is a drive root.
+    parent = workspace_root.parent
+    if parent != workspace_root:
+        sibling = _to_posix(parent / "alp-sdk")
+        if _has_loader_script(Path(sibling)):
+            if sibling not in candidates:
+                candidates.append(sibling)
+            lateral_hit = True
+
+    # A strict fallback, gated on whether THIS folder's lateral probes answered
+    # -- never on the candidate count, which stays unchanged for a folder that
+    # resolved perfectly well but deduped against an earlier one.
+    if not lateral_hit:
+        ancestor = _nearest_ancestor_sdk(workspace_root)
+        if ancestor is not None:
+            candidates.append(ancestor)
+
+    return candidates[0] if len(candidates) == 1 else None
+
+
+# ── the four-tier precedence chain ──────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ActiveSdk:
+    """What `sdk current` reports: the active path (or `None`) and the tier that
+    produced it. `tier` is the wire string, camelCase, from `SdkSourceTier`.
+
+    `broken_project_pin` (tan-cli#263) is the raw `sdkPath` a workspace
+    `.alp/sdk-path` pointer held when that file existed but its target failed
+    the loader-script check -- `None` on every other path, including "no
+    pointer file at all". Set once, in the one tier that can discover it,
+    then carried through every LOWER tier this call falls through to: a caller
+    that reports the tier which finally answered must still be able to say a
+    pin existed and did not, rather than silently looking as deliberate as a
+    workspace that was never pinned in the first place. Distinct from a
+    SIXTH `sourceTier` value on purpose -- the tier that actually supplied
+    `path` stays accurate; this is a supplementary fact about a REJECTED
+    candidate, reported by the caller via `issues[]` instead.
+
+    `foreign_global_default_for` (tan-cli#464) is the SAME shape of fact for a
+    different silence: `~/.alp/sdk-default` is machine-global and
+    last-writer-wins across every project that ever relocated a checkout on
+    this host, so a caller resolving through the `globalDefault` tier from a
+    workspace that is neither the project the pointer was last written for
+    nor under the SDK it names is reading an answer left behind by SOMEONE
+    ELSE'S bootstrap -- silently, before this. Set only on the `globalDefault`
+    tier (the only one this ambiguity can apply to); `None` covers both "the
+    pointer was written for (or covers) this workspace" and "the pointer
+    predates `writtenFor` and carries no opinion at all" -- deliberately the
+    same as `broken_project_pin`'s "no pointer" case, since neither is
+    evidence of a mismatch."""
+
+    path: str | None
+    tier: str
+    broken_project_pin: str | None = None
+    foreign_global_default_for: str | None = None
+
+
+def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
+    """`--sdk-root` > project pin > global default > discovery > nothing
+    (`util.rs`'s `resolve_sdk_tiered` + `tan_core`'s `resolve_sdk_source_tier`).
+
+    `--sdk-root` is TERMINAL and returned as-is **even when it is not a
+    checkout** (I-31). That is not an oversight to tidy: a bad `--sdk-root`
+    surfaces as a `missing` readiness naming the path the user typed, where the
+    Pythonic `if not valid: continue` would silently fall through to a lower
+    tier and report a DIFFERENT SDK than the one they asked for.
+
+    Both pointer tiers are best-effort by contrast -- each is used only while it
+    still points at a real checkout -- so a stale pointer falls through instead
+    of locking the user out of every command. The project pin's own fallthrough
+    is not silent, though (tan-cli#263): its raw target survives on the
+    returned `ActiveSdk.broken_project_pin` no matter which lower tier ends up
+    answering, so a caller can report "this workspace IS pinned, and the pin
+    does not resolve" instead of looking indistinguishable from a workspace
+    that was never pinned at all -- exactly what let a `tan init` run under a
+    since-moved project silently re-resolve a DIFFERENT alp-sdk checkout with
+    `ok: true`, `issues: []`.
+
+    The `globalDefault` tier carries the SAME kind of silence one tier down
+    (tan-cli#464): it is one pointer shared by every project on the host, so a
+    caller resolving through it from a workspace the pointer was not written
+    for -- and that is not even under the SDK it names -- gets no signal that
+    a DIFFERENT project's bootstrap relocation is what actually decided this
+    answer. `foreign_global_default_for` names that project when this run hit
+    exactly that case; `None` when the pointer covers this caller, or predates
+    `writtenFor` and has no opinion.
+
+    tan-cli#466 makes that answer CORRECT, not just disclosed, without moving
+    this tier or adding a sixth `SdkSourceTier`: before falling to the single
+    legacy pointer, this tier first consults `~/.alp/sdk-defaults.json`, an
+    origin-keyed registry every relocating `tan bootstrap` writes alongside
+    (never instead of) the legacy file, and picks the DEEPEST registry key
+    that contains `workspace_root` (`sdk_default_registry.
+    deepest_covering_entry`, using this same `_workspace_under` containment
+    test, with a resolved-depth TIE broken by which entry's `updatedAt` is
+    most recent -- review, #904 second round, major: two distinct raw
+    origins that alias the same directory, e.g. a symlink bootstrapped once
+    and the same directory bootstrapped again later through its real path,
+    resolve to identical depth). A registry hit still reports `sourceTier:
+    "globalDefault"` -- it IS the machine-default mechanism, keyed -- and
+    never carries `foreign_global_default_for`: a caller a registry entry
+    was written FOR is, by construction, not reading someone else's answer.
+    Only when NO registry entry covers the caller does resolution fall
+    through to the legacy pointer exactly as it did before this issue,
+    foreign-warning included.
+    """
+    flag = (sdk_root or "").strip()
+    if flag:
+        return ActiveSdk(flag, "sdkRootFlag")
+
+    broken_project_pin: str | None = None
+    pin = _pointer_target(workspace_root / ".alp" / "sdk-path")
+    if pin is not None:
+        if _has_loader_script(Path(pin)):
+            return ActiveSdk(pin, "projectPin")
+        broken_project_pin = pin
+
+    registry_raw = _read_global_sdk_registry_raw()
+    registry_hit = deepest_covering_entry(
+        parse_registry(registry_raw),
+        workspace_root,
+        covers=_workspace_under,
+        has_loader_script=_has_loader_script,
+        resolve_origin=_resolved_origin_depth_key,
+        updated_at=parse_registry_updated_at(registry_raw),
+    )
+    if registry_hit is not None:
+        _origin, registry_sdk_path = registry_hit
+        return ActiveSdk(registry_sdk_path, "globalDefault", broken_project_pin, None)
+
+    default_pointer = _home_alp_dir() / "sdk-default"
+    default = _pointer_target(default_pointer)
+    if default is not None and _has_loader_script(Path(default)):
+        written_for = _pointer_written_for(default_pointer)
+        foreign = (
+            written_for
+            if written_for is not None
+            and not _workspace_under(workspace_root, written_for)
+            and not _workspace_under(workspace_root, default)
+            else None
+        )
+        return ActiveSdk(default, "globalDefault", broken_project_pin, foreign)
+
+    discovered = discover_workspace_sdk(workspace_root)
+    if discovered is not None:
+        return ActiveSdk(discovered, "discovery", broken_project_pin)
+
+    return ActiveSdk(None, "none", broken_project_pin)
+
+
+def project_pin_issue(broken_project_pin: str | None, tier: str) -> Issue | None:
+    """The tan-cli#263 warning for an unresolvable `.alp/sdk-path` project pin
+    -- shared by EVERY caller of `resolve_sdk_tiered` (directly, or through
+    `resolve_sdk_root_ladder`/`resolve_sdk_root_wide`, below), not just `sdk
+    current`. `None` when nothing was rejected, so every call site can do
+    `issue = project_pin_issue(broken, tier); if issue: issues.append(issue)`
+    unconditionally.
+
+    `tan build` is the caller this matters most for: a workspace whose pin
+    silently misses still gets a real build, against whichever SDK the ladder
+    fell through to, with no signal it was not the one `.alp/sdk-path` names
+    -- `sdk current` alone only helps someone already suspicious enough to run
+    it."""
+    if broken_project_pin is None:
+        return None
+    # Function-scoped: see the module docstring -- `tan.envelope` imports this
+    # module at module level, so a top-level import back would be circular.
+    from tan.envelope import Issue
+
+    return Issue(
+        "sdk.project-pin-unresolved",
+        "warning",
+        f'.alp/sdk-path names "{broken_project_pin}", which does not resolve '
+        f"to an alp-sdk checkout from the current directory -- falling "
+        f"through to the {tier} tier instead.",
+    )
+
+
+def global_default_foreign_project_issue(foreign_global_default_for: str | None) -> Issue | None:
+    """The tan-cli#464 warning for a `globalDefault` answer that a DIFFERENT
+    project's bootstrap relocation actually decided: `~/.alp/sdk-default` is
+    one pointer, shared and last-writer-wins across every project that ever
+    relocates a checkout on this host, so the earlier of two projects can
+    silently start resolving the later one's SDK the moment the later one
+    bootstraps -- `ok: true`, `issues: []`, same as a caller that was never
+    pinned at all (the maintainer's own #464 repro).
+
+    `None` when `resolve_sdk_tiered` found nothing to warn about -- the
+    pointer covers this caller, or it predates `writtenFor` and carries no
+    opinion -- so every call site can do `issue =
+    global_default_foreign_project_issue(active.foreign_global_default_for);
+    if issue: issues.append(issue)` unconditionally, exactly like
+    `project_pin_issue`.
+
+    tan-cli#466: `resolve_sdk_tiered` sets `foreign_global_default_for` ONLY
+    when resolution fell all the way through to this single legacy pointer
+    -- never for a `~/.alp/sdk-defaults.json` registry hit, which by
+    construction was written FOR the resolving workspace. Resolution itself
+    is unchanged by THIS warning specifically: the root `sdk current`
+    reports here is the same root it would have reported before this
+    function existed -- #466 is what changed the root itself, for the
+    workspaces a registry entry now covers.
+    """
+    if foreign_global_default_for is None:
+        return None
+    # Function-scoped: see `project_pin_issue`, above.
+    from tan.envelope import Issue
+
+    return Issue(
+        "sdk.global-default-foreign-project",
+        "warning",
+        f'The machine-global default SDK (~/.alp/sdk-default) was last set by '
+        f'a bootstrap relocation in "{foreign_global_default_for}", not by one '
+        f"here -- this workspace is falling through to that project's SDK, "
+        f"which may not be the checkout you expect. Pin this workspace "
+        f"explicitly with `--sdk-root <path>`, or bootstrap here, to stop "
+        f"relying on the shared default.",
+    )
+
+
+def sdk_resolution_issues(
+    broken_project_pin: str | None, tier: str, foreign_global_default_for: str | None
+) -> list[Issue]:
+    """`project_pin_issue` + `global_default_foreign_project_issue`, together,
+    in the order `flash`/`size`/`image` -- the three callers this actually
+    has -- append them: each used to compute this pair only on the happy
+    path and skip it on a manifest-gate early return.
+
+    **Not the only copy.** Twelve other modules still hand-copy the pair
+    directly rather than through here -- most fold in a third, caller-
+    specific issue or use a different order, not the mechanical swap it
+    looks like; left as-is (tan-cli#464 review).
+
+    `[]` when neither fires -- a caller can `issues.extend(...)` unconditionally."""
+    issues: list[Issue] = []
+    pin_issue = project_pin_issue(broken_project_pin, tier)
+    if pin_issue is not None:
+        issues.append(pin_issue)
+    foreign_issue = global_default_foreign_project_issue(foreign_global_default_for)
+    if foreign_issue is not None:
+        issues.append(foreign_issue)
+    return issues
+
+
 @dataclass(frozen=True)
 class SdkRootResolution:
     """`resolve_sdk_root_ladder`/`resolve_sdk_root_wide`'s own return type --
@@ -109,7 +669,7 @@ class SdkRootResolution:
     reproduced the exact silent-drop shape tan-cli#464 exists to close, at
     the next field this ladder needs to carry.
 
-    Mirrors `sdk_cmd.ActiveSdk`'s same four facts (this IS `ActiveSdk` for the
+    Mirrors [`ActiveSdk`]'s same four facts (this IS `ActiveSdk` for the
     two tiers it cannot see -- `discovery`/`none` -- carried through as a
     distinct type only because `.path` here stays `Path`, the shape every
     filesystem-touching caller of these two ladders already expects, where
@@ -143,9 +703,9 @@ def resolve_sdk_root_ladder(sdk_root_arg: str | None, workspace_root: Path) -> S
     This is the fix for the worst reported CX defect in this port: `tan init`
     writes `.alp/sdk-path` into the project it just scaffolded, but every
     command below used to jump straight from `--sdk-root` to the positional
-    walk, skipping `resolve_sdk_tiered` (`sdk_cmd.py`) entirely -- so that
-    pointer was silently ignored the moment `tan build` ran in that SAME
-    directory, unless the checkout also happened to sit beside the project by
+    walk, skipping `resolve_sdk_tiered` entirely -- so that pointer was
+    silently ignored the moment `tan build` ran in that SAME directory,
+    unless the checkout also happened to sit beside the project by
     coincidence. `resolve_sdk_tiered` already IS the oracle's `--sdk-root` >
     project pin > global default > discovery chain; the only thing missing
     from it here is the WIDER positional walk as one more fallback below
@@ -182,23 +742,17 @@ def resolve_sdk_root_ladder(sdk_root_arg: str | None, workspace_root: Path) -> S
     `.alp/sdk-path` target when that file exists but its target failed the
     loader check, `None` otherwise -- even when a LOWER tier (global default,
     discovery, or nothing) is what this call actually returns.
-    `sdk_cmd.project_pin_issue` turns it into the shared
-    `sdk.project-pin-unresolved` warning; every caller here should surface it,
-    not just `sdk current` -- `tan build` is the one that matters most, since
-    it is the command that silently builds against whichever SDK the pin's
-    fallthrough landed on. `foreign_global_default_for` (tan-cli#464) is the
-    same carry-through for `ActiveSdk.foreign_global_default_for`, and
-    `sdk_cmd.global_default_foreign_project_issue` is its sibling warning.
+    [`project_pin_issue`] turns it into the shared `sdk.project-pin-unresolved`
+    warning; every caller here should surface it, not just `sdk current` --
+    `tan build` is the one that matters most, since it is the command that
+    silently builds against whichever SDK the pin's fallthrough landed on.
+    `foreign_global_default_for` (tan-cli#464) is the same carry-through for
+    `ActiveSdk.foreign_global_default_for`, and
+    [`global_default_foreign_project_issue`] is its sibling warning.
     """
     flag = (sdk_root_arg or "").strip()
     if flag:
         return SdkRootResolution(Path(flag), "sdkRootFlag")
-
-    # Function-scoped: `sdk_cmd` imports THIS module's ladders back (for `sdk
-    # current`'s own wide-walk fallback and divergence check), so a top-level
-    # import here would recreate the very cycle tan-cli#408 removes -- see
-    # the module docstring.
-    from tan.commands.sdk_cmd import resolve_sdk_tiered
 
     tiered = resolve_sdk_tiered(None, workspace_root)
     if tiered.path is not None:
@@ -247,9 +801,6 @@ def resolve_sdk_root_wide(sdk_root_arg: str | None, workspace_root: Path) -> Sdk
     if flag:
         return SdkRootResolution(Path(flag), "sdkRootFlag")
 
-    # Function-scoped: see `resolve_sdk_root_ladder`, above.
-    from tan.commands.sdk_cmd import resolve_sdk_tiered
-
     tiered = resolve_sdk_tiered(None, workspace_root)
     if tiered.path is not None and tiered.tier != "discovery":
         return SdkRootResolution(
@@ -290,7 +841,7 @@ def sdk_ladder_divergence_issue(
     answer DIFFERENT checkouts -- `None` (the overwhelmingly common case)
     when they agree, so every call site can do `issue =
     sdk_ladder_divergence_issue(...); if issue: issues.append(issue)`
-    unconditionally, exactly like `sdk_cmd.project_pin_issue`.
+    unconditionally, exactly like [`project_pin_issue`].
 
     The divergence itself is deliberate and oracle-measured (see
     [`resolve_sdk_root_ladder`]'s own docstring, and
@@ -341,11 +892,9 @@ def sdk_ladder_divergence_issue(
     if narrow == wider:
         return None
 
-    # Function-scoped: `tan.envelope` imports THIS function at module level
-    # (that top-level import is the whole point of tan-cli#408), so a
-    # top-level import back would be circular. Deferred to call time, by
-    # which point `tan.envelope` has necessarily already finished defining
-    # `Issue` -- see the module docstring.
+    # Function-scoped: see the module docstring -- `tan.envelope` imports
+    # THIS function at module level (that top-level import is the whole
+    # point of tan-cli#408), so a top-level import back would be circular.
     from tan.envelope import Issue
 
     narrow_label = _NARROW_COMMANDS if wide else "this command"

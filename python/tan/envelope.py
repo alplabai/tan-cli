@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from tan.core.sdk_discovery import sdk_ladder_divergence_issue
+from tan.core.sdk_discovery import sdk_ladder_divergence_issue, sdk_resolution_issues
 from tan.exit_codes import ExitCode
 
 #: Every code point in the UTF-16 surrogate range. A Python `str` may hold one
@@ -375,11 +375,16 @@ class Envelope:
 
         Appends to a NEW list -- several commands keep rendering their own
         text from the list they passed in.
+
+        `sdk_resolution_issues` is imported at module level, from
+        `tan.core.sdk_discovery` (tan-cli#408 review follow-up) -- it used to
+        live in `sdk_cmd`, which imports this module at module level, so a
+        top-level import here was circular; moving `resolve_sdk_tiered` and
+        its two `Issue` builders alongside the ladders is what makes this
+        importable at the top of this file at all.
         """
         if sdk is None:
             return issues
-        from tan.commands.sdk_cmd import sdk_resolution_issues
-
         advisories = sdk_resolution_issues(
             sdk.broken_project_pin, sdk.source_tier, sdk.foreign_global_default_for
         )

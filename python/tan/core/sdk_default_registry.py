@@ -13,10 +13,10 @@ against B's SDK, now with a warning attached.
 
 **The fix.** `tan bootstrap` records `origin -> sdkPath` in this registry,
 where `origin` is the same absolute project root stage 1 already computes as
-`writtenFor` -- the directory bootstrap ran in. `sdk_cmd.resolve_sdk_tiered`
+`writtenFor` -- the directory bootstrap ran in. `sdk_discovery.resolve_sdk_tiered`
 then picks the DEEPEST registry key that CONTAINS the caller's
 `workspace_root`, using the same containment test
-(`sdk_cmd._workspace_under`) stage 1 already uses to decide "foreign". This is
+(`sdk_discovery._workspace_under`) stage 1 already uses to decide "foreign". This is
 NOT zero filesystem probing (an earlier version of this docstring, and of
 `changelog.d/466.fixed.md`, claimed it was, and was wrong -- caught in review,
 #904).
@@ -24,7 +24,7 @@ NOT zero filesystem probing (an earlier version of this docstring, and of
 **What actually touches the filesystem, and how much (corrected a second time
 in review, #904 second round -- the FIRST correction above was itself
 wrong on two counts, and is superseded by this paragraph, not by the one
-above it).** `covers` (`sdk_cmd._workspace_under`) runs once per registry
+above it).** `covers` (`sdk_discovery._workspace_under`) runs once per registry
 entry, unconditionally -- it IS the filter. `has_loader_script` and
 `resolve_origin` (the ranking) run ONLY for a candidate that already passed
 `covers`, i.e. once per COVERING entry, not once per registry entry.
@@ -38,7 +38,7 @@ The registry-size claim was ALSO wrong: resolution cost is
 `covers`/`resolve_origin` call resolves a real path, and `Path.resolve()`
 `lstat`s every path COMPONENT, so a deeper caller costs more at the same
 registry size. Measured (counting `os.lstat` calls, real directories, the
-production `sdk_cmd._workspace_under`/`_has_loader_script`/
+production `sdk_discovery._workspace_under`/`_has_loader_script`/
 `_resolved_origin_depth_key` triple, 21 registry entries that ALL cover the
 workspace -- the worst case, nothing skipped by `covers` or
 `has_loader_script`): appending 20 extra path components to the SAME
@@ -88,12 +88,12 @@ rather than for every non-last bootstrap on the host.
 **A pure `tan.core` module, deliberately.** The functions that need
 filesystem judgement calls (whether one path contains another; whether an
 `sdkPath` still names a real checkout; what a raw origin string resolves to)
-are `sdk_cmd._workspace_under`, `sdk_cmd._has_loader_script`, and
-`sdk_cmd._resolved_origin_depth_key` -- injected into `deepest_covering_entry`
+are `sdk_discovery._workspace_under`, `sdk_discovery._has_loader_script`, and
+`sdk_discovery._resolved_origin_depth_key` -- injected into `deepest_covering_entry`
 as callables rather than imported, so this module stays free of any
 `tan.commands.*` import, the same convention every other `tan/core` module
-here already follows. `sdk_cmd.py` and `bootstrap_cmd.py` both import this
-module instead of duplicating its parse/format logic.
+here already follows. `sdk_discovery.py` and `bootstrap_cmd.py` both import
+this module instead of duplicating its parse/format logic.
 """
 from __future__ import annotations
 
@@ -139,7 +139,7 @@ REGISTRY_FILENAME = "sdk-defaults.json"
 
 def registry_path(home_alp_dir: Path) -> Path:
     """`<home_alp_dir>/sdk-defaults.json`. `home_alp_dir` is the caller's own
-    `~/.alp` (`sdk_cmd._home_alp_dir()`), passed in rather than recomputed
+    `~/.alp` (`sdk_discovery._home_alp_dir()`), passed in rather than recomputed
     here -- this module has no opinion on `HOME`/`USERPROFILE` resolution,
     exactly like it has no opinion on filesystem containment."""
     return home_alp_dir / REGISTRY_FILENAME
@@ -148,7 +148,7 @@ def registry_path(home_alp_dir: Path) -> Path:
 def parse_registry(raw: str | None) -> dict[str, str]:
     """`origin -> sdkPath`, best-effort. `raw` is the file's text, or `None`
     when it could not be read at all (missing, permission-denied, non-UTF-8 --
-    `sdk_cmd._read_file`'s own contract).
+    `sdk_discovery._read_file`'s own contract).
 
     Every failure shape degrades to `{}`, the empty registry -- a truncated
     write from a concurrent `tan bootstrap`, a hand-edited syntax error, a
@@ -243,7 +243,7 @@ def load_raw(raw: str | None) -> dict[str, Any]:
 
 
 def _is_absolute_either_platform(value: str) -> bool:
-    """Mirrors `sdk_cmd._pointer_written_for`'s own cross-platform absolute
+    """Mirrors `sdk_discovery._pointer_written_for`'s own cross-platform absolute
     check, for the same reason: this registry is one file shared by every
     `tan` on the host, and a bare `Path(value).is_absolute()` is answered by
     whichever pathlib flavour the READING platform picked. A relative,
@@ -268,7 +268,7 @@ def deepest_covering_entry(
 
     "Deepest" is measured by the length of the origin's RESOLVED path
     (`resolve_origin`), NOT the raw registry key string. That distinction is
-    load-bearing, found by review (#904): `covers` (`sdk_cmd._workspace_under`
+    load-bearing, found by review (#904): `covers` (`sdk_discovery._workspace_under`
     in production) decides containment on `.resolve()`d paths, so a symlinked
     origin makes the raw key's string length disagree with `covers`'s own
     notion of "deeper" -- two origins reached through a symlink can be
@@ -411,7 +411,7 @@ def prune_dead_origins(
     **What "dead" means here, and why this test and no other.** The module
     docstring above already establishes the candidate set is closed: a key
     can only be here because a real `tan bootstrap` ran in that directory.
-    `covers` (`sdk_cmd._workspace_under`) decides a match by STRING
+    `covers` (`sdk_discovery._workspace_under`) decides a match by STRING
     containment on `.resolve()`d paths and does not itself require either
     side to exist -- so the one fact that makes an origin permanently
     unmatchable, not merely unmatched by the CURRENT invocation, is that its

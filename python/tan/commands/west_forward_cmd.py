@@ -112,8 +112,8 @@ from typing import NoReturn
 import typer
 
 from tan.commands.build_output import ProjectContext, resolve_project_context, to_posix
-from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.core.global_flags import accept_global_flags
+from tan.core.sdk_discovery import sdk_resolution_issues
 from tan.core.subprocess_env import spawn_env
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
 from tan.envelope import Envelope, Issue, emit

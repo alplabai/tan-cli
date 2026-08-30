@@ -20,8 +20,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from tan.commands.sdk_cmd import resolve_sdk_tiered
-from tan.core.sdk_discovery import resolve_sdk_root_ladder
+from tan.core.sdk_discovery import resolve_sdk_root_ladder, resolve_sdk_tiered
 from tan.core.shapes import SDK_MARKER
 from tan.core.system_manifest import (
     MANIFEST_FILE,
@@ -72,7 +71,7 @@ class ProjectContext:
     sdk: SdkInfo | None
     #: `ActiveSdk.broken_project_pin` carried through (tan-cli#263 review) --
     #: `size`/`image`'s own `_run` turns this into the shared
-    #: `sdk.project-pin-unresolved` warning via `sdk_cmd.project_pin_issue`.
+    #: `sdk.project-pin-unresolved` warning via `sdk_discovery.project_pin_issue`.
     broken_project_pin: str | None = None
     #: `ActiveSdk.tier`, unconditionally -- unlike `sdk` above, set even when
     #: nothing resolved to a usable checkout (`sdk is None`), which is exactly
@@ -81,7 +80,7 @@ class ProjectContext:
     sdk_source_tier: str = "none"
     #: `ActiveSdk.foreign_global_default_for` carried through (tan-cli#464) --
     #: `size`/`image`'s own `_run` turns this into
-    #: `sdk_cmd.global_default_foreign_project_issue`, the sibling warning to
+    #: `sdk_discovery.global_default_foreign_project_issue`, the sibling warning to
     #: `broken_project_pin` above.
     foreign_global_default_for: str | None = None
 

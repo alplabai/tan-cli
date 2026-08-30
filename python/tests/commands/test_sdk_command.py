@@ -37,14 +37,16 @@ import typer
 from tan.commands import bootstrap_cmd
 from tan.commands.sdk_cmd import (
     _fetch_releases,
-    _resolved_origin_depth_key,
-    _workspace_under,
     check_sdk_readiness,
     describe_network_error,
-    discover_workspace_sdk,
     global_default_pointer_fix_hint,
     parse_remote_sdk_releases,
     parse_sdk_version_yaml,
+)
+from tan.core.sdk_discovery import (
+    _resolved_origin_depth_key,
+    _workspace_under,
+    discover_workspace_sdk,
     resolve_sdk_tiered,
 )
 

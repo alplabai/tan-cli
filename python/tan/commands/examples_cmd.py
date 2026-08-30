@@ -67,12 +67,13 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.sdk_cmd import (
+from tan.core.example_facets import ExampleFacets, load_example_facets
+from tan.core.sdk_discovery import (
     global_default_foreign_project_issue,
     project_pin_issue,
+    resolve_sdk_root_wide,
+    sdk_ladder_divergence_issue,
 )
-from tan.core.example_facets import ExampleFacets, load_example_facets
-from tan.core.sdk_discovery import resolve_sdk_root_wide, sdk_ladder_divergence_issue
 from tan.core.shapes import rejected_sdk_root_message
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit

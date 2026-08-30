@@ -286,9 +286,13 @@ from tan.commands.doctor_cmd import resolve_manifest_python_floor
 # oracle's own "(VS Code users can instead set alpSdk.pythonPath)" sentence. A
 # third copy here would make it the pattern.
 from tan.commands.generate_cmd import _python_too_old
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.global_flags import accept_global_flags
-from tan.core.sdk_discovery import _planner_python_resolution, resolve_sdk_root_ladder
+from tan.core.sdk_discovery import (
+    _planner_python_resolution,
+    resolve_sdk_root_ladder,
+    sdk_resolution_issues,
+)
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.subprocess_env import spawn_env
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit

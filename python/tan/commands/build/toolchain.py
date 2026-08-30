@@ -184,11 +184,11 @@ def _toolchain_store_scan_root() -> Path:
     opinion of.
 
     `home_alp_dir` is duplicated inline (`~/.alp`, `USERPROFILE` on Windows
-    else `HOME`) rather than importing `sdk_cmd._home_alp_dir` -- this
-    module already duplicates `doctor_cmd`'s scan for the identical reason
-    (see the module docstring): `sdk_cmd` sits import-adjacent to
-    `build_cmd`, which imports this module, and one two-line duplication is
-    cheaper than auditing that edge for a cycle.
+    else `HOME`) rather than importing `tan.core.sdk_discovery._home_alp_dir`
+    -- this module already duplicates `doctor_cmd`'s scan for the identical
+    reason (see the module docstring): one two-line duplication is cheaper
+    than auditing this module's own import graph for a cycle every time the
+    canonical helper's home changes.
     """
     home = os.environ.get("USERPROFILE" if os.name == "nt" else "HOME")
     home_alp_dir = str(Path(home or ".") / ".alp")

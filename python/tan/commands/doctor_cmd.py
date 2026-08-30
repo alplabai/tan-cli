@@ -130,13 +130,8 @@ import typer
 
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
-    _has_loader_script,
-    _home_alp_dir,
-    _pointer_target,
-    global_default_foreign_project_issue,
     global_default_pointer_fix_hint,
     parse_sdk_version_yaml,
-    project_pin_issue,
 )
 from tan.core.bootstrap import (
     BOOTSTRAP_MANIFEST_SCHEMA_VERSION,
@@ -173,7 +168,12 @@ from tan.core.sdk_default_registry import registry_path
 from tan.core.sdk_discovery import (
     SDK_DISCOVERY_DIVERGENT,
     _abs_posix,
+    _has_loader_script,
+    _home_alp_dir,
+    _pointer_target,
     discover_sdk_root,
+    global_default_foreign_project_issue,
+    project_pin_issue,
     resolve_sdk_root_ladder,
     resolve_sdk_root_wide,
 )

@@ -69,7 +69,7 @@ def _make_sdk(root: Path) -> Path:
 
 
 def _write_pin(workspace: Path, target: Path) -> None:
-    """`.alp/sdk-path` in the `{"sdkPath": ...}` shape `sdk_cmd._pointer_target`
+    """`.alp/sdk-path` in the `{"sdkPath": ...}` shape `sdk_discovery._pointer_target`
     reads -- a bare path string parses as invalid JSON and falls through."""
     (workspace / ".alp").mkdir(parents=True, exist_ok=True)
     (workspace / ".alp" / "sdk-path").write_text(

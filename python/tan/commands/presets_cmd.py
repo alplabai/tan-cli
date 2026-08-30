@@ -124,12 +124,6 @@ from typing import Callable
 
 import typer
 
-from tan.commands.sdk_cmd import (
-    ActiveSdk,
-    global_default_foreign_project_issue,
-    project_pin_issue,
-    resolve_sdk_tiered,
-)
 from tan.core.metadata_schema import (
     missing_schema_note,
     soc_spec_schema_path,
@@ -137,6 +131,12 @@ from tan.core.metadata_schema import (
     validate_document,
 )
 from tan.core.os_class import allowed_os_for_core, infer_runtime_for_core_id
+from tan.core.sdk_discovery import (
+    ActiveSdk,
+    global_default_foreign_project_issue,
+    project_pin_issue,
+    resolve_sdk_tiered,
+)
 from tan.core.shapes import SDK_MARKER, rejected_sdk_root_message
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit

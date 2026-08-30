@@ -65,7 +65,7 @@ def som_preset_schema_path(metadata_root: Path | str) -> Path:
 def _posix(value: object) -> str:
     """`to_posix`: backslashes to forward slashes, nothing else.
 
-    Mirrors `build_output.to_posix` / `presets_cmd._posix` / `sdk_cmd._to_posix`
+    Mirrors `build_output.to_posix` / `presets_cmd._posix` / `sdk_discovery._to_posix`
     -- every other module that puts a filesystem path into an envelope field
     or message keeps its own copy of this one-liner rather than importing
     `tan.commands.build_output` from `tan.core` (which would be the pure-logic

@@ -70,8 +70,9 @@ from pathlib import Path
 import typer
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.global_flags import accept_global_flags
+from tan.core.sdk_discovery import sdk_resolution_issues
 from tan.core.venv import west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkDisclosure, SdkInfo, emit
 from tan.exit_codes import ExitCode

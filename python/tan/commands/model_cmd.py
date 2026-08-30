@@ -108,10 +108,11 @@ from tan.commands.build_output import (
     resolve_metadata_sdk_root,
     resolve_project_context,
 )
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.global_flags import accept_global_flags
 from tan.core.model_check import backend_report_as_dict, render_check_text
 from tan.core.model_doctor import backend_row, optional_row, registry_backends
+from tan.core.sdk_discovery import sdk_resolution_issues
 from tan.core.shapes import rejected_sdk_root_message
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode

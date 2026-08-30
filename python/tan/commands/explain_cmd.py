@@ -875,12 +875,12 @@ def bind_sdk(sdk_root_arg: str | None, project: str | None, code: str) -> tuple[
     runs and the fact would otherwise be discarded with the rest of
     `resolution`.
     """
-    from tan.commands.sdk_cmd import (
-        NO_SDK_NEXT_STEPS,
+    from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+    from tan.core.sdk_discovery import (
         global_default_foreign_project_issue,
         project_pin_issue,
+        resolve_sdk_root_ladder,
     )
-    from tan.core.sdk_discovery import resolve_sdk_root_ladder
     from tan.core.shapes import SDK_MARKER
 
     cwd = Path.cwd()
@@ -1019,7 +1019,7 @@ def _print_sdk_resolution_warnings(sdk: SdkInfo | None) -> None:
     """
     if sdk is None:
         return
-    from tan.commands.sdk_cmd import sdk_resolution_issues
+    from tan.core.sdk_discovery import sdk_resolution_issues
 
     for issue in sdk_resolution_issues(
         sdk.broken_project_pin, sdk.source_tier, sdk.foreign_global_default_for

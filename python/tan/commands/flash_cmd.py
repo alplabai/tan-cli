@@ -97,8 +97,7 @@ except ImportError:  # pragma: no cover -- Windows has none of the four
 import typer
 
 from tan.core.shapes import is_file as _is_file
-from tan.commands.sdk_cmd import sdk_resolution_issues
-from tan.core.sdk_discovery import resolve_sdk_root_ladder
+from tan.core.sdk_discovery import resolve_sdk_root_ladder, sdk_resolution_issues
 from tan.core.dp_id import (
     _CONNECT_FAILED_TARGET_RE,
     _connect_failed_outright,

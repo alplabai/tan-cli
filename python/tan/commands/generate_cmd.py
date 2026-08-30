@@ -103,16 +103,14 @@ import typer
 # which interpreter name the SDK's own scripts run under -- a PATH name, never
 # `sys.executable`, which is `tan` itself once PyInstaller has frozen it.
 from tan import planner_emit
-from tan.commands.sdk_cmd import (
-    NO_SDK_NEXT_STEPS,
-    global_default_foreign_project_issue,
-    project_pin_issue,
-)
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
 from tan.core.sdk_discovery import (
     _planner_python,
+    global_default_foreign_project_issue,
+    project_pin_issue,
     resolve_sdk_root_wide,
     sdk_ladder_divergence_issue,
 )

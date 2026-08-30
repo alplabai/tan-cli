@@ -96,11 +96,15 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, global_default_foreign_project_issue
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
 from tan.core.example_catalog import unsupported_som
-from tan.core.sdk_discovery import resolve_sdk_root_wide, sdk_ladder_divergence_issue
+from tan.core.sdk_discovery import (
+    global_default_foreign_project_issue,
+    resolve_sdk_root_wide,
+    sdk_ladder_divergence_issue,
+)
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     DEFAULT_TEMPLATE_ID,

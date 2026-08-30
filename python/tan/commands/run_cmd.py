@@ -62,12 +62,16 @@ import typer
 from tan.commands import flash_cmd
 from tan.commands.build import execute
 from tan.commands.build_cmd import BuildError, _build
-from tan.commands.sdk_cmd import global_default_foreign_project_issue, project_pin_issue
 from tan.core.flash_plan import resolve_artefact_path
 from tan.core.global_flags import accept_global_flags
 from tan.core.plan_exec import normalize_path
 from tan.core.run import RunAction, decide_run_action, native_sim_exe_beside, native_sim_slice
-from tan.core.sdk_discovery import _abs_posix, resolve_sdk_root_ladder
+from tan.core.sdk_discovery import (
+    _abs_posix,
+    global_default_foreign_project_issue,
+    project_pin_issue,
+    resolve_sdk_root_ladder,
+)
 from tan.core.shapes import is_sdk_root
 from tan.core.subprocess_env import spawn_env
 from tan.core.system_manifest import SystemManifestError, parse_system_manifest

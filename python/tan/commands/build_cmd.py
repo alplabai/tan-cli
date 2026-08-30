@@ -104,10 +104,6 @@ from tan.commands.build.token_substitution import (
 )
 from tan.commands.build.toolchain import ToolchainResolution, resolve_toolchain_root
 from tan.commands.deferred_cmd import DEFERRED_ISSUE_CODE, DEFERRED_ISSUE_URL
-from tan.commands.sdk_cmd import (
-    global_default_foreign_project_issue,
-    project_pin_issue,
-)
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.global_flags import accept_global_flags
 from tan.core.inert import DEFERRED, inert_help
@@ -122,6 +118,8 @@ from tan.core.plan_tokens import TOKEN_TOOLCHAIN_ROOT
 from tan.core.sdk_discovery import (
     _abs_posix,
     _planner_python,
+    global_default_foreign_project_issue,
+    project_pin_issue,
     resolve_sdk_root_ladder,
     sdk_ladder_divergence_issue,
 )

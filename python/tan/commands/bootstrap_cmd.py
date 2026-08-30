@@ -65,7 +65,13 @@ from pathlib import Path
 
 import typer
 
-from tan.core.sdk_discovery import resolve_sdk_root_ladder
+from tan.core.sdk_discovery import (
+    _home_alp_dir,
+    _to_posix,
+    global_default_foreign_project_issue,
+    project_pin_issue,
+    resolve_sdk_root_ladder,
+)
 from tan.core.shapes import SDK_MARKER, is_dir as _is_dir, is_file as _is_file
 from tan.commands.doctor_cmd import (
     FALLBACK_PYTHON_FLOOR,
@@ -79,14 +85,7 @@ from tan.core import toolchain_provision
 from tan.core.probe import probe_status
 from tan.core.subprocess_env import restore_ld_library_path, spawn_env
 from tan.commands.presets_cmd import parse_som_preset, resolve_project_paths
-from tan.commands.sdk_cmd import (
-    NO_SDK_NEXT_STEPS,
-    _home_alp_dir,
-    _to_posix,
-    global_default_foreign_project_issue,
-    global_default_pointer_fix_hint,
-    project_pin_issue,
-)
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, global_default_pointer_fix_hint
 from tan.core.atomic_write import atomic_write_bytes, atomic_write_text
 from tan.core.bootstrap import (
     BOOTSTRAP_MANIFEST_REL_PATH,
