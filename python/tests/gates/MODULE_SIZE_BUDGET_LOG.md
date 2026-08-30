@@ -566,6 +566,8 @@ several less obvious failures.
     - function_count_budget: 296 -> 297
 - 2026-08-29 -- tan-cli#537 review follow-up: constraint 4's hole (a bound firing with bytes but no complete registers announced nothing) and the abandoned reader thread's unbounded queue.Queue() (constraint 3's actual buffer bound) both needed fixes plus rationale-heavy docstrings in faultdecode_cmd.py; not split out for the same reason as the original entry -- the reader is faultdecode's own private concern.
     - tan/commands/faultdecode_cmd.py: 848 -> 925
+- 2026-08-30 -- tan-cli#1000: build_cmd.py 2293 -> 2362 (+69: 24 code, 39 comment/docstring, 7 blank). The code half is one promoter, _plan_warning_issues, plus its one-line wiring into _build's existing issue chain and the plan-mode recap's warning expansion -- the third instance of a promoter shape build_cmd.py already carries twice (_missing_tool_issues tan-cli#283/#801, _cross_drive_issues tan-cli#697), so it sits beside its siblings rather than starting a new concern. Extracting the three into a module would be the real fix for this file's size and is NOT attempted here: it would move code tan-cli#408 is separately tracking, on a change whose subject is a silent-failure hole. Comment-heavy by intent -- the open-vs-closed issue-code decision and the oracle-parity measurement are exactly the reasoning a later reader would otherwise re-derive.
+    - tan/commands/build_cmd.py: 2293 -> 2362
 - 2026-08-30 -- merge-resync (growth already reasoned on the merged branches)
     - function_count_budget: 297 -> 298
     - tan/commands/faultdecode_cmd.py: new entry at 926
@@ -582,3 +584,4 @@ several less obvious failures.
     - tan/model/adapters/ethos_u.py: 886 -> 889
     - tan/planner/template.py: 1541 -> 1548
     - function_count_budget: 298 -> 300
+    - tan/commands/build_cmd.py: 2293 -> 2362

@@ -1541,6 +1541,14 @@
       "note": "Constructed as the whole literal at a `PlanParseError` call site in `build_plan.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "build.plan-warning",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "note": "One per entry in the build plan's own `warnings[]`, carrying that warning's OPEN-set code, its optional coreId and its message inside the text (tan-cli#1000). Registered as a single closed code on purpose: `core/build_plan.py`'s `_warnings` documents the plan-warning codes as an open set, so minting `build.<warning code>` would emit unregistered codes the moment the planner adds one. Third sibling of `build.missing-tool` (tan-cli#283/#801) and `build.cross-drive-workspace` (tan-cli#697) -- same promotion, a refusal class those two did not match. Pre-consumer: nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
+    },
+    {
       "code": "build.plan-token-unresolved",
       "status": "reserved",
       "severity": "error",
