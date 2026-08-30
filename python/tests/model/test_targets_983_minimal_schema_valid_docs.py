@@ -62,7 +62,7 @@ import yaml
 
 from tan.model.targets import resolve_targets
 
-_SKU = "E1M-FAKE983"
+_SKU = "E1M-V2M999"  # pattern-legal fake SKU (som-preset-v1.schema.json ^E1M-(...|V2M[0-9]{3}|...)$), not a real catalogued MPN
 _SILICON = "fakevendor:fakefamily:fakepart"
 # The on-module discrete accelerator's own SoC ref -- distinct from the host,
 # found only through `variants[].alp_module_skus`, mirroring the real
@@ -205,18 +205,22 @@ def test_a_soc_declaring_every_minimal_npu_family_at_once_resolves_what_can_reso
 def _discrete_accelerator_soc() -> dict:
     """The real on-module DEEPX DX-M1 shape E1M-V2M101 uses
     (`test_resolve_targets_for_v2m101_folds_in_on_module_deepx`,
-    `test_targets.py`): a SECOND, schema-valid SoC JSON under `socs/`, a
+    `test_targets.py`; the real committed spec is `metadata/socs/deepx/dx/
+    m1.json` in alp-sdk): a SECOND, schema-valid SoC JSON under `socs/`, a
     different `ref` from the host, found only through
     `variants[].alp_module_skus` -- never through `sku:` or a hardcoded
     backend->silicon map (`_discrete_socs`'s own module docstring).
+    `variants[]` elements are `$defs/variant` in `soc-spec-v1.schema.json`:
+    `order_code` required, `additionalProperties: false` -- `alp_module_skus`
+    is the only other key used here, both legal.
 
-    Two variants on purpose, not one: `other-die` carries no
+    Two variants on purpose, not one: `DX-M1-OTHER` carries no
     `alp_module_skus` key at all (a sibling die option this SKU does not
     populate -- a real SoC spec can and does list more than one variant);
-    only `m1` names `_SKU`. That exercises `v.get("alp_module_skus", [])`'s
-    DEFAULT, not merely its presence -- a bare `v["alp_module_skus"]` raises
-    on the FIRST variant, before ever reaching the one that actually matches
-    this SKU."""
+    only `DX-M1` (the real order_code, `m1.json`'s own) names `_SKU`. That
+    exercises `v.get("alp_module_skus", [])`'s DEFAULT, not merely its
+    presence -- a bare `v["alp_module_skus"]` raises on the FIRST variant,
+    before ever reaching the one that actually matches this SKU."""
     return {
         "soc_spec_version": 1,
         "ref": _DISCRETE_SILICON,
@@ -227,8 +231,8 @@ def _discrete_accelerator_soc() -> dict:
         "npus": [_MINIMAL_NPU_BY_BACKEND["deepx_dxm1"]],
         "peripherals": {},
         "variants": [
-            {"variant_id": "other-die", "memory_mb": 2},
-            {"variant_id": "m1", "alp_module_skus": [_SKU]},
+            {"order_code": "DX-M1-OTHER"},
+            {"order_code": "DX-M1", "alp_module_skus": [_SKU]},
         ],
     }
 
