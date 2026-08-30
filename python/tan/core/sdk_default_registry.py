@@ -463,6 +463,51 @@ def prune_dead_origins(
     return {origin: entry for origin, entry in registry.items() if origin_exists(origin)}
 
 
+def prune_entries_by_sdk_path(registry: dict[str, Any], *, sdk_path: str) -> dict[str, Any]:
+    """`registry` with every entry whose `sdkPath` equals `sdk_path` dropped --
+    `tan sdk remove`'s own honesty obligation (tan-cli#790), the sibling of
+    [`prune_dead_origins`] pruning on the OTHER axis: that function drops an
+    entry whose ORIGIN (the project that registered it) no longer exists;
+    this one drops an entry whose TARGET (the SDK checkout it points at) was
+    just deleted by this very command.
+
+    Without this, a removed install stays registered as SOME other project's
+    machine-global default: that project's very next `sdk current`/`tan
+    build` would still answer `sourceTier: "globalDefault"` naming a path
+    that is now gone, degrading only as far as `check_sdk_readiness`'s
+    `state: "missing"` -- correctly REPORTED, but never repaired, and never
+    falling through to a lower tier the way a dead `~/.alp/sdk-default`
+    pointer already does (`resolve_sdk_tiered`'s `_has_loader_script` gate on
+    that pointer). `deepest_covering_entry` applies the identical
+    `has_loader_script` gate to a registry hit too, so leaving a dead entry
+    in place would not silently mis-resolve anyone -- it would just leave a
+    permanently-unusable entry sitting in a file tan-cli#905 already exists to
+    keep bounded, for a project whose bootstrap the very next re-run repairs
+    for free regardless. This function closes the gap anyway, on the same
+    reasoning tan-cli#905's own docstring gives for pruning eagerly rather
+    than waiting for staleness to matter: the registry is honest about what
+    still resolves, not just eventually self-correcting about it.
+
+    `sdk_path` is the caller's to normalise (`sdk_discovery._abs_posix`,
+    posix-normalised the same way [`with_entry`]'s own `sdk_root` argument
+    already is) -- this module has no opinion on path normalisation, the same
+    division every other function here draws.
+
+    Compares only entries whose `sdkPath` is present and a string; anything
+    shaped too oddly for `parse_registry` to have kept either cannot name
+    `sdk_path` at all (no string to compare) or is exactly as findable by
+    [`prune_dead_origins`]'s own broader sweep -- this function narrows on
+    purpose, to the one axis its caller actually knows just changed.
+    """
+    result: dict[str, Any] = {}
+    for origin, entry in registry.items():
+        path = entry.get("sdkPath") if isinstance(entry, dict) else None
+        if isinstance(path, str) and path == sdk_path:
+            continue
+        result[origin] = entry
+    return result
+
+
 def registry_text(registry: dict[str, Any]) -> str:
     """The committed-to-disk rendering: sorted keys (a deterministic diff
     across runs, and a stable read order for a human `cat`ing the file), two-

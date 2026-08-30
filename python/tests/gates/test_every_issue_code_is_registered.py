@@ -841,7 +841,21 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # `sdk.network-required`, is still a LITERAL `Issue("sdk.network-
         # required", ...)` first-arg site, so it is still covered, just by the
         # plain-literal scan (shape 1) instead of this prefixing scan (shape 3).
-        expected_calls=4,
+        # tan-cli#790: 4 -> 9. `sdk remove` added five new `_fail(...)` call
+        # sites -- `remove-missing-argument`, `remove-outside-root`,
+        # `remove-active`, and `remove-in-use`/`remove-permission` (TWO
+        # literal call sites, not one `f"remove-{outcome.kind}"`: this exact
+        # gate can only resolve a `code=` keyword to a registered wire string
+        # when it is a literal at the call site, so the dynamic form would
+        # have emitted a real string this gate cannot see). Every suffix is
+        # FLAT -- one dash, no dot -- rather than the nested `remove.<reason>`
+        # shape the tan-cli#790 issue's own prose sketches:
+        # `contract/issue-codes.json`'s `sdk.remove-missing-argument` entry
+        # explains why a nested (two-dot) code is not available on this wire
+        # at all (alp-sdk-vscode's `ISSUE_CODE_SHAPE` hard-requires exactly
+        # one dot; `test_issue_code_registry_shape.py` caught the first,
+        # nested-dot draft of this change).
+        expected_calls=9,
         sites=1,
     ),
     ("tan/commands/validate_cmd.py", "validate.fail"): dict(

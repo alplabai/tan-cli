@@ -92,6 +92,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 import typer
 
+from tan.core.atomic_write import atomic_write_text
 from tan.core.global_flags import accept_global_flags
 from tan.core.proxy import (
     HTTPS_PROXY_ENV_VARS,
@@ -104,16 +105,38 @@ from tan.core.proxy import (
 # follow-up) -- `check_sdk_readiness`/`cached_sdk_versions`/
 # `_default_cache_root` below still need them for readiness reporting, which
 # stayed here because it is not part of the discovery/resolution cluster.
+# `_abs_posix`/`_pointer_target` are the same kind of shared filesystem
+# primitive, pulled in for `sdk remove` (tan-cli#790): `_abs_posix` is the
+# cwd-anchored/lexical path form every removal-target comparison below uses,
+# `_pointer_target` is the direct (not `resolve_sdk_tiered`-mediated) read of
+# `~/.alp/sdk-default`'s own `sdkPath`, needed because that pointer can name
+# a checkout THIS workspace does not resolve through at all while still being
+# exactly what removing it would orphan for some OTHER project on the host.
 from tan.core.sdk_discovery import (
     ActiveSdk,
+    _abs_posix,
     _has_loader_script,
     _home_alp_dir,
+    _pointer_target,
     _read_file,
     global_default_foreign_project_issue,
     project_pin_issue,
     resolve_sdk_root_ladder,
     resolve_sdk_tiered,
     sdk_ladder_divergence_issue,
+)
+from tan.core.sdk_default_registry import (
+    load_raw,
+    parse_registry,
+    prune_entries_by_sdk_path,
+    registry_path,
+    registry_text,
+)
+from tan.core.sdk_removal import (
+    RemovalOutcome,
+    is_outside_cache_root,
+    remove_sdk_tree,
+    resolve_removal_target,
 )
 from tan.core.text_layout import wrap_lines
 from tan.env import wrap_width
@@ -140,7 +163,8 @@ NETWORK_TIMEOUT_SECONDS = 20.0
 #: more site recommending a subcommand this build refuses.
 AVAILABLE_SUBCOMMANDS = (
     "Available subcommands: list, current, install <version> (refuses -- not "
-    "yet ported), switch <version> (refuses -- not yet ported)"
+    "yet ported), switch <version> (refuses -- not yet ported), "
+    "remove <version|path>"
 )
 
 #: `install`/`switch` refuse outright in this build (`_run_not_ported` below)
@@ -953,6 +977,299 @@ def _run_unknown(*, json_mode: bool, subcommand: str | None) -> None:
     )
 
 
+# ── sdk remove (tan-cli#790) ─────────────────────────────────────────────────
+#
+# The one destructive verb in this file, so it earns its own section rather
+# than living beside `install`/`switch`'s refusal stubs. Designed for
+# long-term customer experience the way the maintainer's own standing
+# direction for this class of question asks, spelled out here once rather
+# than re-derived at every call site below:
+#
+#   * an install that is currently load-bearing -- the ACTIVE resolution for
+#     this workspace, the machine-global default, or a project's own
+#     registered pin -- refuses to be removed without `--force`
+#     ([`_load_bearing_reasons`]); silently orphaning any of the three is a
+#     worse failure than a refusal that names exactly what would break;
+#   * removal is IDEMPOTENT: a target that is already absent succeeds at
+#     `data.removed: false`, so a rotation script never has to pre-check;
+#   * a target outside the cache root refuses without `--force` too -- the
+#     footgun guard `is_outside_cache_root` exists for -- but ONLY once it is
+#     confirmed to exist, so an idempotent no-op never trips it;
+#   * every failure names WHAT blocked it (`sdk.remove-active`,
+#     `sdk.remove-outside-root`, `sdk.remove-in-use`, `sdk.remove-permission` --
+#     flat, ONE dot, not the nested `sdk.remove.active` shape the issue's own
+#     prose sketches: `contract/issue-codes.json`'s
+#     `sdk.remove-missing-argument` entry explains why nested is not available
+#     on this wire) and what to do instead (`--force`, for the first two;
+#     close the holder, for the third; fix the permissions/attributes by
+#     hand, for the fourth) -- the issue's own bar: "the refusal messages
+#     must name what blocked it and what to do instead".
+#
+# `sdk list`'s proposed `managed`/`active` columns (tan-cli#790's own "related
+# gap" aside) are deliberately OUT of this change: `sdk list` today reports
+# UPSTREAM GitHub releases, not local installs, so a per-release
+# managed/active flag has no local install to describe until `sdk
+# install`/`sdk switch` are themselves ported (tan-cli#305) -- tracked
+# separately, not bundled into a single-verb change.
+
+
+def _sdk_default_pointer_target() -> str | None:
+    """`~/.alp/sdk-default`'s own `sdkPath`, read DIRECTLY rather than through
+    `resolve_sdk_tiered`. That ladder only ever reports the ONE tier that
+    wins for the CALLER's workspace, and the plain machine-global pointer can
+    name a checkout this workspace's own project pin or registry entry
+    outranks -- so it would never surface as `active.path` here -- while
+    still being exactly what removing it would orphan for every OTHER,
+    unregistered project on the host that falls through to it. `None` on any
+    read/parse failure, the same degrade `_pointer_target` already applies to
+    a missing or malformed pointer.
+    """
+    return _pointer_target(_home_alp_dir() / "sdk-default")
+
+
+def _registered_origins_for(target_posix: str) -> list[str]:
+    """Every `~/.alp/sdk-defaults.json` origin whose `sdkPath` names
+    `target_posix` (posix-normalised, matching how the registry itself stores
+    it -- `bootstrap_cmd._write_global_sdk_registry`'s own `_to_posix` write).
+    Sorted for a deterministic message; `[]` on any read/parse failure,
+    matching `parse_registry`'s own best-effort contract.
+    """
+    raw = _read_file(registry_path(_home_alp_dir()))
+    registry = parse_registry(raw)
+    return sorted(origin for origin, sdk_path in registry.items() if sdk_path == target_posix)
+
+
+def _load_bearing_reasons(target_posix: str, active: ActiveSdk) -> list[str]:
+    """Every reason removing `target_posix` right now would orphan something
+    live -- the tan-cli#790 design bar itself: "silently orphaning either [the
+    active install or a pinned one] is a worse failure than refusing". `[]`
+    means safe to remove without `--force`. More than one reason can apply at
+    once (the active install for THIS workspace can also be another
+    project's registered default), and the caller reports all of them rather
+    than only the first.
+    """
+    reasons: list[str] = []
+    if active.path is not None and _abs_posix(active.path) == target_posix:
+        reasons.append(f'the active alp-sdk for this workspace (sourceTier "{active.tier}")')
+    default_target = _sdk_default_pointer_target()
+    if default_target is not None and _abs_posix(default_target) == target_posix:
+        reasons.append("the machine-global default SDK (~/.alp/sdk-default)")
+    for origin in _registered_origins_for(target_posix):
+        reasons.append(f'the registered global default for project "{origin}"')
+    return reasons
+
+
+def _prune_registry_entries_for(target_posix: str) -> None:
+    """Best-effort: drop every `~/.alp/sdk-defaults.json` entry naming the
+    just-removed `target_posix` -- keeps tan-cli#905's registry honest about
+    what still resolves (`sdk_default_registry.prune_entries_by_sdk_path`),
+    the same read-modify-write shape `bootstrap_cmd._write_global_sdk_registry`
+    already uses for the ORIGIN-pruning half of the identical file. Silent on
+    any failure, matching every other best-effort registry write in this
+    codebase: the removal itself already succeeded by the time this runs, and
+    a registry entry this call could not prune degrades no worse than it
+    already would have before this function existed (`deepest_covering_entry`
+    skips a covering entry whose `sdkPath` fails `_has_loader_script`, so a
+    dead entry left behind answers nobody incorrectly -- it is merely not yet
+    tidied).
+    """
+    try:
+        path = registry_path(_home_alp_dir())
+        raw = path.read_text(encoding="utf-8") if path.is_file() else None
+        pruned = prune_entries_by_sdk_path(load_raw(raw), sdk_path=target_posix)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(str(path), registry_text(pruned))
+    except Exception:  # noqa: BLE001 -- best-effort, matching every other registry write
+        pass
+
+
+def _remove_data(
+    *, removed: bool, path: str | None, version: str | None, was_active: bool, freed_bytes: int
+) -> dict[str, Any]:
+    """`sdk remove`'s payload shape, built at every call site through this one
+    function so a field can never drift between the idempotent, refused and
+    successful arms below."""
+    return {
+        "subcommand": "remove",
+        "removed": removed,
+        "path": path,
+        "version": version,
+        "wasActive": was_active,
+        "freedBytes": freed_bytes,
+    }
+
+
+def _run_remove(
+    *,
+    json_mode: bool,
+    arg: str | None,
+    destination_arg: str | None,
+    force: bool,
+    workspace_root: Path,
+) -> None:
+    """`tan sdk remove <version|path>` (tan-cli#790) -- see the section banner
+    above this function for the design this implements. Every refusal fires
+    BEFORE any filesystem write, so the three possible outcomes -- refused,
+    idempotently already-absent, or removed -- are the only ones a caller
+    ever has to handle; nothing here can leave a target partially gone in a
+    way a rerun cannot cleanly finish or recover from.
+
+    `active`/`was_active` are resolved ONCE, right after the target itself,
+    and threaded through every branch below (including every refusal) rather
+    than recomputed per-branch -- so `data.wasActive` is truthful on the
+    outside-root refusal too, not just on the one branch that refuses BECAUSE
+    of it.
+    """
+    raw_arg = (arg or "").strip()
+    if not raw_arg:
+        _fail(
+            json_mode=json_mode,
+            data=_remove_data(
+                removed=False, path=None, version=None, was_active=False, freed_bytes=0
+            ),
+            code="remove-missing-argument",
+            message=(
+                "`sdk remove` needs a version name (looked up under --destination) "
+                "or an explicit path naming the install to remove."
+            ),
+            text_lines=[
+                "sdk remove: needs a version or path argument, e.g. `tan sdk remove v0.15.0`."
+            ],
+        )
+        return
+
+    destination = Path(destination_arg).expanduser() if destination_arg else _default_cache_root()
+    resolution = resolve_removal_target(raw_arg, destination)
+    target = resolution.target
+    target_posix = _abs_posix(str(target))
+    version = raw_arg if resolution.is_named_version else None
+
+    active = resolve_sdk_tiered(None, workspace_root)
+    was_active = active.path is not None and _abs_posix(active.path) == target_posix
+
+    if not target.exists():
+        _emit(
+            json_mode=json_mode,
+            data=_remove_data(
+                removed=False,
+                path=target_posix,
+                version=version,
+                was_active=was_active,
+                freed_bytes=0,
+            ),
+            issues=[],
+            exit_code=ExitCode.SUCCESS,
+            text_lines=[f"sdk remove: nothing at {target_posix} -- already absent."],
+        )
+        return
+
+    if is_outside_cache_root(target, destination) and not force:
+        _fail(
+            json_mode=json_mode,
+            data=_remove_data(
+                removed=False,
+                path=target_posix,
+                version=version,
+                was_active=was_active,
+                freed_bytes=0,
+            ),
+            code="remove-outside-root",
+            message=(
+                f'"{target_posix}" is outside the SDK cache root '
+                f'"{_abs_posix(str(destination))}". Pass --force to remove an '
+                "explicit path outside the managed cache."
+            ),
+            text_lines=[
+                f"sdk remove: {target_posix} is outside the cache root; refusing without --force."
+            ],
+        )
+        return
+
+    if not resolution.is_named_version:
+        version = check_sdk_readiness(str(target)).get("version")
+
+    reasons = _load_bearing_reasons(target_posix, active)
+    if reasons and not force:
+        _fail(
+            json_mode=json_mode,
+            data=_remove_data(
+                removed=False,
+                path=target_posix,
+                version=version,
+                was_active=was_active,
+                freed_bytes=0,
+            ),
+            code="remove-active",
+            message=(
+                f'"{target_posix}" is currently load-bearing: it is '
+                + "; and it is ".join(reasons)
+                + ". Pass --force to remove it anyway."
+            ),
+            text_lines=[
+                f"sdk remove: {target_posix} is still in use; refusing without --force."
+            ],
+        )
+        return
+
+    outcome: RemovalOutcome = remove_sdk_tree(target)
+    if not outcome.ok:
+        failing = (outcome.failing_path or target_posix).replace("\\", "/")
+        failure_data = _remove_data(
+            removed=False,
+            path=target_posix,
+            version=version,
+            was_active=was_active,
+            freed_bytes=outcome.freed_bytes,
+        )
+        # TWO literal `code=` call sites, deliberately not one dynamic
+        # `f"remove-{outcome.kind}"`: `test_every_issue_code_is_registered.py`
+        # can only resolve a `code=` keyword argument to a registered wire
+        # string when it is a literal at the call site, exactly the same
+        # non-vacuity discipline that gate applies to every OTHER command in
+        # this codebase.
+        if outcome.kind == "in-use":
+            _fail(
+                json_mode=json_mode,
+                data=failure_data,
+                code="remove-in-use",
+                message=(
+                    f"could not remove {failing}: {outcome.detail} -- another "
+                    "process still holds this open; close whatever has it open "
+                    "(a shell, a build, an editor, an indexer) and retry."
+                ),
+                text_lines=[f"sdk remove: failed removing {target_posix} (in-use)."],
+            )
+        else:
+            _fail(
+                json_mode=json_mode,
+                data=failure_data,
+                code="remove-permission",
+                message=(
+                    f"could not remove {failing}: {outcome.detail} -- tan could "
+                    "not clear the permissions/attributes blocking this; check "
+                    "ownership/ACLs on the path above, or remove it by hand with "
+                    "elevated privileges."
+                ),
+                text_lines=[f"sdk remove: failed removing {target_posix} (permission)."],
+            )
+        return
+
+    _prune_registry_entries_for(target_posix)
+    _emit(
+        json_mode=json_mode,
+        data=_remove_data(
+            removed=True,
+            path=target_posix,
+            version=version,
+            was_active=was_active,
+            freed_bytes=outcome.freed_bytes,
+        ),
+        issues=[],
+        exit_code=ExitCode.SUCCESS,
+        text_lines=[f"sdk remove: removed {target_posix} ({outcome.freed_bytes} bytes freed)."],
+    )
+
+
 # ── the command ─────────────────────────────────────────────────────────────
 
 
@@ -961,19 +1278,30 @@ def sdk(
         None,
         metavar="SUBCOMMAND",
         help=(
-            "list, current, install, or switch. install/switch are not yet "
-            "ported and refuse in this build -- use --sdk-root instead "
+            "list, current, install, switch, or remove. install/switch are not "
+            "yet ported and refuse in this build -- use --sdk-root instead "
             "(tan-cli#305)."
         ),
     ),
     arg: str = typer.Argument(
-        None, metavar="ARG", help="Version for install, version|path for switch."
+        None,
+        metavar="ARG",
+        help="Version for install, version|path for switch/remove.",
     ),
-    # Accepted and unused: `--destination` only steers `install`/`switch` cache-root
-    # resolution, neither of which is ported. Kept in the surface because dropping
-    # it would turn an argv the shipped Rust binary accepts into a usage error.
+    # `--destination` steers `install`/`switch` cache-root resolution (neither
+    # ported, tan-cli#305) AND `remove`'s (tan-cli#790, live): a bare version
+    # name is looked up under this root, and it is the root `remove`'s
+    # outside-root footgun guard is measured against.
     destination: str = typer.Option(
         None, "--destination", metavar="PATH", help="SDK cache root (default: ~/.alp/sdk-cache)."
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "With remove: also remove the active/pinned install, or a path "
+            "outside the cache root."
+        ),
     ),
     global_: bool = typer.Option(
         False, "--global", help="With switch: pin the machine-global default."
@@ -1028,6 +1356,14 @@ def sdk(
                     "version": None,
                     "scope": "global" if global_ else "project",
                 },
+            )
+        elif subcommand == "remove":
+            _run_remove(
+                json_mode=json_mode,
+                arg=arg,
+                destination_arg=destination,
+                force=force,
+                workspace_root=workspace_root,
             )
         else:
             _run_unknown(json_mode=json_mode, subcommand=subcommand)

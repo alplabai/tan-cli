@@ -602,3 +602,6 @@ several less obvious failures.
     - tan/commands/model_cmd.py: 1059 -> 1060
     - tan/commands/support_bundle_cmd.py: 1067 -> 1068
     - tan/core/sdk_discovery.py: new entry at 963
+- 2026-08-30 -- tan-cli#790: sdk_cmd.py grew for the new 'sdk remove' verb (target resolution, load-bearing checks, registry pruning, five refusal codes); pure logic split out to new tan/core/sdk_removal.py and tan/core/dir_removal.py (the latter extracted, verbatim, from clean_cmd.py -- clean_cmd shrank) and the registry-prune helper added to tan/core/sdk_default_registry.py, but the command module itself still grew past its prior budget.
+    - tan/commands/sdk_cmd.py: 1060 -> 1421
+    - function_count_budget: 300 -> 302
