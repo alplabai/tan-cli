@@ -437,6 +437,37 @@ def test_a_null_command_slice_survives_with_its_warning(project):
     assert warnings[0]["coreId"] == "m33"
 
 
+def test_a_plan_warning_reaches_issues_and_text_not_only_data_warnings(project):
+    """tan-cli#1000, on the same real plan as the test above.
+
+    `data.warnings` (asserted there) was the ONLY place this message reached.
+    A human sees text and a consumer branches on `issues[]`, so the cause was
+    invisible in both. This is the end-to-end half of the fix: the unit tests
+    in `test_build_plan_warnings_visible.py` cover `_plan_warning_issues`
+    itself, but only a real run proves it is actually WIRED into `_build`'s
+    issue chain -- delete the `issues.extend(_plan_warning_issues(...))` line
+    and those unit tests stay green while this one goes red.
+    """
+    plan = write_plan(project, real_plan("multicore_rpmsg-imx93"))
+
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--format", "json",
+        cwd=project, scrub_path=True,
+    )
+    env = envelope_of(proc)
+    promoted = [i for i in env["issues"] if i["code"] == "build.plan-warning"]
+    assert len(promoted) == 1, env["issues"]
+    assert promoted[0]["severity"] == "warning"
+    assert "board-tree-missing" in promoted[0]["message"]
+    assert "m33" in promoted[0]["message"]
+
+    text_proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute",
+        cwd=project, scrub_path=True,
+    )
+    assert "board-tree-missing" in text_proc.stderr, text_proc.stderr
+
+
 #: The synthetic three-slice, all-tools-missing shape both tests below need
 #: -- coreIds/backends/tool names mirroring the real `multicore_rpmsg-aen`
 #: fixture these tests used before tan-cli#483, but with `appDir: null`
