@@ -48,22 +48,24 @@ west build -b alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33 .
 west flash --host <board-ip>
 ```
 
-`E1M-V2M101` and `E1M-V2M102` both carry the DEEPX DX-M1 NPU; pick either via
-`som.sku` in `board.yaml` for the DEEPX DX-M1 path.
+The DEEPX DX-M1 NPU is populated on `E1M-V2M101`/`E1M-V2M102` -- not on
+`E1M-V2N101`/`E1M-V2N102`, the same PCB without it. Pick either via
+`som.sku` in `board.yaml`.
 
 ## Model
 
-No model is shipped (stub + deterministic classifier/fallback). The
-autoencoder training recipe is alp-sdk's
-[`examples/ai/cold-chain-monitor/models/README.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/examples/ai/cold-chain-monitor/models/README.md)
--- not part of this scaffolded project; the path lives only in an alp-sdk
-checkout, though the link above works without one.
+<!-- The ../cold-chain-monitor/ detour is deliberate: the scaffold
+     rewriter's _RELATIVE_LINK_RE only matches `../`-prefixed links, and
+     models/ is a child of this dir, not a sibling -- don't "fix" this. -->
+
+No model is shipped (stub + deterministic classifier/fallback). See
+[`models/README.md`](https://github.com/alplabai/alp-sdk/blob/v0.16.0/examples/ai/cold-chain-monitor/models/README.md) for the
+autoencoder training recipe.
 
 ## Tests
 
-The `cold_chain` core's host-unit test suite is alp-sdk's
-[`tests/unit/cold_chain`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/tests/unit/cold_chain)
--- also not part of this scaffolded project. From an alp-sdk checkout:
+In the alp-sdk tree, unit tests live in
+[`tests/unit/cold_chain`](https://github.com/alplabai/alp-sdk/tree/v0.16.0/tests/unit/cold_chain) and run with:
 
 ```
 twister -p native_sim/native/64 -T tests/unit/cold_chain

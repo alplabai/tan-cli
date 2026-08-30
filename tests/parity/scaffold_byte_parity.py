@@ -704,81 +704,50 @@ DELIBERATE_EDITS: dict[
         "-DEXTRA_CONF_FILE=native_sim.conf wins over the generated alp.conf",
         un_edit_iot_extra_conf_order,
     ),
-    ("edge-ai", "E1M-AEN801", "README.md", "model_tests_pointers"): (
-        "tan-cli#821(a): `## Model`/`## Tests` pointed a customer at "
-        "models/README.md and tests/unit/cold_chain, neither emitted into any "
-        "scaffolded project -- turned into real links to the alp-sdk paths",
-        un_edit_edge_ai_readme_model_tests_pointers,
-    ),
-    ("edge-ai", "E1M-V2N101", "README.md", "model_tests_pointers"): (
-        "tan-cli#821(a): same as E1M-AEN801/README.md above",
-        un_edit_edge_ai_readme_model_tests_pointers,
-    ),
-    ("edge-ai", "E1M-AEN801", "src/main.c", "model_comment_1"): (
-        "tan-cli#821(a): first comment pointed at models/README.md, not "
-        "emitted into any scaffolded project -- named the real alp-sdk path",
-        un_edit_edge_ai_main_c_model_comment_1,
-    ),
-    ("edge-ai", "E1M-AEN801", "src/main.c", "model_comment_2"): (
-        "tan-cli#821(a): second comment, same file, same defect -- own "
-        "entry so healing one comment without the other still reds "
-        "(tan-cli#908 review)",
-        un_edit_edge_ai_main_c_model_comment_2,
-    ),
-    ("edge-ai", "E1M-V2N101", "src/main.c", "model_comment_1"): (
-        "tan-cli#821(a): same as E1M-AEN801/src/main.c comment 1 above",
-        un_edit_edge_ai_main_c_model_comment_1,
-    ),
-    ("edge-ai", "E1M-V2N101", "src/main.c", "model_comment_2"): (
-        "tan-cli#821(a): same as E1M-AEN801/src/main.c comment 2 above",
-        un_edit_edge_ai_main_c_model_comment_2,
-    ),
-    ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note"): (
-        "tan-cli#814: the emit's `Flip som.sku to E1M-V2M101` sentence "
-        "names a target E1M-AEN801's own `board.yaml` preset (`e1m-evk`, "
-        "which hosts only alif-ensemble/nxp-imx9, not V2M101's "
-        "renesas-rzv2n-deepx) doesn't host that tan validate refuses; the "
-        "E1M-V2N101 sibling's identical sentence IS legal on ITS preset "
-        "(`e1m-x-evk`) -- E1M-V2N101 is family renesas-rzv2n and E1M-V2M101 "
-        "is family renesas-rzv2n-deepx, two different families, both listed "
-        "in e1m-x-evk's hosts_som_families -- but has its own, narrower "
-        "defect -- see the entry right below",
-        un_edit_edge_ai_aen801_readme_deepx_note,
-    ),
+    # tan-cli#996/#1001 (the 722320a1 re-vendor): eight entries retired here
+    # (model_tests_pointers x2, model_comment_1/2 x4, deepx_v2m_note's
+    # README.md half, deepx_v2m102_scope, eeprom_script_pointer x2,
+    # i2c_scanner_bullet x2, bringup_instruction x2, init_fail_comment x2,
+    # failure_modes_instruction x2, hardware_paragraph x2 -- 21 total). Each
+    # `un_edit`'s declared EDITED anchor stopped matching this re-vendor's
+    # fresh `--emit scaffold` output verbatim -- alp-sdk 722320a1 reworded
+    # the surrounding prose in every case (the `sensor` template's own
+    # underlying example swapped chip, TMP112 -> BMP581, `examples/
+    # peripheral-io/i2c-master`'s alp-sdk#1269 fix; `edge-ai`'s cold-chain-
+    # monitor README/main.c gained real doc links and a units test pointer
+    # on its own; `diagnostics`'s eeprom Troubleshooting bullet gained a
+    # real markdown link on its own). Per this module's own doctrine above
+    # ("a healed divergence... has to force its entry out, otherwise the
+    # next real drift in that file inherits a dead excuse"), each retired
+    # entry is either fully healed (the customer-facing gap the edit closed
+    # is now closed by alp-sdk's own prose) or its specific anchor is gone
+    # and reconstructing an equivalent correction against the new wording is
+    # out of scope for a pin-bump alone -- the vendored tree now carries
+    # alp-sdk's own 722320a1 bytes verbatim at these paths, not a hand
+    # correction. `un_edit_edge_ai_readme_model_tests_pointers`,
+    # `un_edit_edge_ai_main_c_model_comment_1`,
+    # `un_edit_edge_ai_main_c_model_comment_2`,
+    # `un_edit_edge_ai_aen801_readme_deepx_note`,
+    # `un_edit_edge_ai_v2n101_readme_deepx_note`,
+    # `un_edit_diagnostics_readme_eeprom_script`,
+    # `un_edit_sensor_readme_i2c_scanner_bullet`,
+    # `un_edit_sensor_main_c_bringup_instruction`,
+    # `un_edit_sensor_main_c_init_fail_comment`,
+    # `un_edit_sensor_main_c_failure_modes_instruction` and
+    # `un_edit_sensor_main_c_hardware_paragraph` are kept as functions (their
+    # constants document the transform for the next re-vendor that finds the
+    # same class of gap) but are no longer referenced from this dict.
+    # `pattern_paragraph` below is NOT in this list: its anchor (`sensor`'s
+    # generic "Contrasts with... i2c-scanner" paragraph, which names no
+    # chip) is untouched by the TMP112 -> BMP581 swap and still matches
+    # verbatim, so it is reapplied forward, unchanged.
     ("edge-ai", "E1M-AEN801", "board.yaml", "deepx_v2m_note"): (
         "tan-cli#814: same defect as the README entry above, the comment "
-        "one file over that reinforces it",
+        "one file over that reinforces it. The README half of this pair "
+        "retired at tan-cli#996/#1001 (722320a1 re-vendor, see the block "
+        "comment above) -- board.yaml is untouched by that re-vendor and "
+        "this entry is unaffected.",
         un_edit_edge_ai_aen801_board_yaml_deepx_note,
-    ),
-    ("edge-ai", "E1M-V2N101", "README.md", "deepx_v2m102_scope"): (
-        "tan-cli#946: the emit's `Flip som.sku to E1M-V2M101` sentence is "
-        "correct for a V2N101/V2N102 customer but misleading for a V2M102 "
-        "one -- E1M-V2M102 already carries DEEPX DX-M1 "
-        "(metadata/socs/deepx/dx/m1.json's alp_module_skus lists both "
-        "E1M-V2M101 and E1M-V2M102) -- rewritten SKU-neutral; filed "
-        "upstream as alp-sdk#1749",
-        un_edit_edge_ai_v2n101_readme_deepx_note,
-    ),
-    ("diagnostics", "E1M-AEN801", "README.md", "eeprom_script_pointer"): (
-        "tan-cli#912: the Troubleshooting section pointed at "
-        "scripts/program_eeprom.py, not emitted into any scaffolded "
-        "project -- turned into a real link to the alp-sdk path",
-        un_edit_diagnostics_readme_eeprom_script,
-    ),
-    ("diagnostics", "E1M-V2N101", "README.md", "eeprom_script_pointer"): (
-        "tan-cli#912: same as diagnostics/E1M-AEN801/README.md above",
-        un_edit_diagnostics_readme_eeprom_script,
-    ),
-    ("sensor", "E1M-AEN801", "README.md", "i2c_scanner_bullet"): (
-        "tan-cli#912: a Troubleshooting bullet pointed at a bare "
-        "examples/peripheral-io/i2c-scanner, not emitted into any "
-        "scaffolded project -- turned into a real link, matching the two "
-        "real links this same README already carries for the same path",
-        un_edit_sensor_readme_i2c_scanner_bullet,
-    ),
-    ("sensor", "E1M-V2N101", "README.md", "i2c_scanner_bullet"): (
-        "tan-cli#912: same as sensor/E1M-AEN801/README.md above",
-        un_edit_sensor_readme_i2c_scanner_bullet,
     ),
     ("sensor", "E1M-AEN801", "src/main.c", "pattern_paragraph"): (
         "tan-cli#924: the header-comment 'Contrasts with' paragraph named a "
@@ -790,48 +759,6 @@ DELIBERATE_EDITS: dict[
     ("sensor", "E1M-V2N101", "src/main.c", "pattern_paragraph"): (
         "tan-cli#924: same as sensor/E1M-AEN801/src/main.c above",
         un_edit_sensor_main_c_pattern_paragraph,
-    ),
-    ("sensor", "E1M-AEN801", "src/main.c", "bringup_instruction"): (
-        "tan-cli#924: the header-comment 'run i2c-scanner first' run-this "
-        "instruction, own entry from the paragraph above per tan-cli#908's "
-        "one-substitution-per-entry discipline",
-        un_edit_sensor_main_c_bringup_instruction,
-    ),
-    ("sensor", "E1M-V2N101", "src/main.c", "bringup_instruction"): (
-        "tan-cli#924: same as sensor/E1M-AEN801/src/main.c above",
-        un_edit_sensor_main_c_bringup_instruction,
-    ),
-    ("sensor", "E1M-AEN801", "src/main.c", "init_fail_comment"): (
-        "tan-cli#924: the tmp112_init doc-comment's 'i2c-scanner can "
-        "confirm which devices ACK' bare mention, own entry from the two "
-        "above",
-        un_edit_sensor_main_c_init_fail_comment,
-    ),
-    ("sensor", "E1M-V2N101", "src/main.c", "init_fail_comment"): (
-        "tan-cli#924: same as sensor/E1M-AEN801/src/main.c above",
-        un_edit_sensor_main_c_init_fail_comment,
-    ),
-    ("sensor", "E1M-AEN801", "src/main.c", "failure_modes_instruction"): (
-        "tan-cli#924: the 'Most-frequent failure modes' block's 'Use "
-        "i2c-scanner to enumerate' run-this instruction, own entry from "
-        "the three above",
-        un_edit_sensor_main_c_failure_modes_instruction,
-    ),
-    ("sensor", "E1M-V2N101", "src/main.c", "failure_modes_instruction"): (
-        "tan-cli#924: same as sensor/E1M-AEN801/src/main.c above",
-        un_edit_sensor_main_c_failure_modes_instruction,
-    ),
-    ("sensor", "E1M-AEN801", "src/main.c", "hardware_paragraph"): (
-        "PR #975 review round: the header-comment 'Hardware:' paragraph "
-        "named a bare metadata/chips/tmp112.yaml, not emitted into any "
-        "scaffolded project, three lines above the pattern_paragraph entry "
-        "above -- named the real alp-sdk path in prose, same shape, a "
-        "sibling tan-cli#924 itself left uncovered",
-        un_edit_sensor_main_c_hardware_paragraph,
-    ),
-    ("sensor", "E1M-V2N101", "src/main.c", "hardware_paragraph"): (
-        "PR #975 review round: same as sensor/E1M-AEN801/src/main.c above",
-        un_edit_sensor_main_c_hardware_paragraph,
     ),
     ("diagnostics", "E1M-V2N101", "src/main.c", "som_sku_header"): (
         "tan-cli#932: src/main.c was never SKU-substituted at all -- the "
@@ -1109,154 +1036,57 @@ def self_check() -> None:
     # substitutions, so healing comment 1 alone while comment 2 stayed edited
     # produced `after != before` (comment 2 still changed something) and no
     # failure fired at all -- measured against the pre-split function.
-    half_healed_main_c = (
-        " * (see models/README.md); with no model the deterministic classifier + anomaly\n"
-        " * fallback run.\n"
-        " * detects and routes to cc_anomaly_fallback().  See alp-sdk's\n"
-        " * examples/ai/cold-chain-monitor/models/README.md (not part of this\n"
-        " * scaffolded project) for the autoencoder training recipe to replace this\n"
-        " * stub. */\n"
-    )
-    _, split_failures = undo_declared_edits(
-        "edge-ai", "E1M-AEN801", {"src/main.c": half_healed_main_c}
-    )
-    healed_comment_failures = [
-        f for f in split_failures
-        if f.startswith("src/main.c: DELIBERATE_EDITS declares an edit that is no longer")
-    ]
-    assert len(healed_comment_failures) == 1, split_failures
+    #
+    # The original fixture for this discipline was `edge-ai`'s
+    # `model_comment_1`/`model_comment_2` pair, retired at tan-cli#996/#1001
+    # (see the DELIBERATE_EDITS block comment) -- both functions still exist
+    # (`un_edit_edge_ai_main_c_model_comment_1`/`_2`) but neither is
+    # registered any more, so they can no longer exercise this discipline
+    # through `undo_declared_edits`. The discipline itself stays covered by
+    # `diagnostics`/E1M-V2N101's four-entries-one-path `src/main.c` set
+    # below (reason-string-filtered, so a partial heal there would be caught
+    # the same way).
 
-    # tan-cli#814's two entries: the un_edit must round-trip the corrected
-    # README/board.yaml prose back onto the emit's own (still-wrong) sentence,
-    # and be registered under the exact (template, sku, path, edit_id) key.
-    assert ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note") in DELIBERATE_EDITS
-    assert (
-        un_edit_edge_ai_aen801_readme_deepx_note(_EDGE_AI_AEN801_README_DEEPX_NOTE)
-        == _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED
-    )
+    # tan-cli#814's board.yaml entry (the README half retired at
+    # tan-cli#996/#1001, see the DELIBERATE_EDITS block comment): the
+    # un_edit must round-trip the corrected board.yaml comment back onto the
+    # emit's own (still-wrong) sentence, and be registered under the exact
+    # (template, sku, path, edit_id) key.
     assert ("edge-ai", "E1M-AEN801", "board.yaml", "deepx_v2m_note") in DELIBERATE_EDITS
     assert (
         un_edit_edge_ai_aen801_board_yaml_deepx_note(_EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE)
         == _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE_EMITTED
     )
 
-    # tan-cli#946's entry: the E1M-V2N101 tree's own DEEPX sentence
-    # (misleading for a V2M102 customer -- see alp-sdk#1749) round-trips the
-    # same way, registered under its own (template, sku, path, edit_id) key.
-    assert (
-        "edge-ai", "E1M-V2N101", "README.md", "deepx_v2m102_scope"
-    ) in DELIBERATE_EDITS
-    assert (
-        un_edit_edge_ai_v2n101_readme_deepx_note(_EDGE_AI_V2N101_README_DEEPX_NOTE)
-        == _EDGE_AI_V2N101_README_DEEPX_NOTE_EMITTED
-    )
-
-    # tan-cli#912's four entries (diagnostics x2, sensor x2): each un_edit
-    # must round-trip the corrected README bullet back onto the emit's own
-    # (still-wrong) bytes, and be registered under the exact
-    # (template, sku, path, edit_id) key.
-    for sku in ("E1M-AEN801", "E1M-V2N101"):
-        assert (
-            "diagnostics", sku, "README.md", "eeprom_script_pointer"
-        ) in DELIBERATE_EDITS
-        assert (
-            un_edit_diagnostics_readme_eeprom_script(
-                _DIAGNOSTICS_README_EEPROM_SCRIPT_EDITED
-            )
-            == _DIAGNOSTICS_README_EEPROM_SCRIPT_EMITTED
-        )
-        assert ("sensor", sku, "README.md", "i2c_scanner_bullet") in DELIBERATE_EDITS
-        assert (
-            un_edit_sensor_readme_i2c_scanner_bullet(
-                _SENSOR_README_I2C_SCANNER_BULLET_EDITED
-            )
-            == _SENSOR_README_I2C_SCANNER_BULLET_EMITTED
-        )
-
-    # ...and each is the strict half too: feeding the un_edit its OWN emitted
-    # (already-healed) bytes finds nothing to undo -- `undo_declared_edits`
-    # must surface that as a hard failure, not a quiet pass, for all four.
-    for template, sku, path, edit_id, emitted in (
-        ("diagnostics", "E1M-AEN801", "README.md", "eeprom_script_pointer",
-         _DIAGNOSTICS_README_EEPROM_SCRIPT_EMITTED),
-        ("diagnostics", "E1M-V2N101", "README.md", "eeprom_script_pointer",
-         _DIAGNOSTICS_README_EEPROM_SCRIPT_EMITTED),
-        ("sensor", "E1M-AEN801", "README.md", "i2c_scanner_bullet",
-         _SENSOR_README_I2C_SCANNER_BULLET_EMITTED),
-        ("sensor", "E1M-V2N101", "README.md", "i2c_scanner_bullet",
-         _SENSOR_README_I2C_SCANNER_BULLET_EMITTED),
-    ):
-        _, mut_failures = undo_declared_edits(template, sku, {path: emitted})
-        assert [
-            f for f in mut_failures
-            if f.startswith(f"{path}: DELIBERATE_EDITS declares an edit that is no longer")
-        ], (template, sku, path, edit_id, mut_failures)
-
-    # tan-cli#924's eight entries (sensor/src/main.c x4 substitutions x2
-    # SKUs) plus PR #975's `hardware_paragraph` sibling (x1 substitution x2
-    # SKUs, the same defect class #924 itself left uncovered): each un_edit
-    # must round-trip the corrected comment back onto the emit's own
+    # tan-cli#924's one still-live entry (`pattern_paragraph` -- the other
+    # four sibling substitutions, `hardware_paragraph`/`bringup_instruction`/
+    # `init_fail_comment`/`failure_modes_instruction`, retired at
+    # tan-cli#996/#1001, see the DELIBERATE_EDITS block comment): the
+    # un_edit must round-trip the corrected comment back onto the emit's own
     # (still-bare) bytes, and be registered under the exact
     # (template, sku, path, edit_id) key.
-    _SENSOR_MAIN_C_924_FIXTURES = (
-        (
-            "pattern_paragraph",
-            un_edit_sensor_main_c_pattern_paragraph,
-            _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EDITED,
-            _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED,
-        ),
-        (
-            "hardware_paragraph",
-            un_edit_sensor_main_c_hardware_paragraph,
-            _SENSOR_MAIN_C_HARDWARE_PARAGRAPH_EDITED,
-            _SENSOR_MAIN_C_HARDWARE_PARAGRAPH_EMITTED,
-        ),
-        (
-            "bringup_instruction",
-            un_edit_sensor_main_c_bringup_instruction,
-            _SENSOR_MAIN_C_BRINGUP_INSTRUCTION_EDITED,
-            _SENSOR_MAIN_C_BRINGUP_INSTRUCTION_EMITTED,
-        ),
-        (
-            "init_fail_comment",
-            un_edit_sensor_main_c_init_fail_comment,
-            _SENSOR_MAIN_C_INIT_FAIL_COMMENT_EDITED,
-            _SENSOR_MAIN_C_INIT_FAIL_COMMENT_EMITTED,
-        ),
-        (
-            "failure_modes_instruction",
-            un_edit_sensor_main_c_failure_modes_instruction,
-            _SENSOR_MAIN_C_FAILURE_MODES_INSTRUCTION_EDITED,
-            _SENSOR_MAIN_C_FAILURE_MODES_INSTRUCTION_EMITTED,
-        ),
-    )
     for sku in ("E1M-AEN801", "E1M-V2N101"):
-        for edit_id, un_edit, edited, emitted in _SENSOR_MAIN_C_924_FIXTURES:
-            assert ("sensor", sku, "src/main.c", edit_id) in DELIBERATE_EDITS
-            assert un_edit(edited) == emitted
-
-    # ...and each is the strict half too: feeding the un_edit its OWN emitted
-    # (still-bare) bytes finds nothing to undo -- `undo_declared_edits` must
-    # surface that as a hard failure, not a quiet pass, for all ten. `path`
-    # carries five registered entries here, so a generic-prefix match alone
-    # is satisfied by any of the OTHER four failing (they always do, fed
-    # this short a snippet) regardless of whether the entry under test
-    # actually failed -- filter on the entry's OWN reason string, which
-    # `undo_declared_edits` embeds verbatim as `({reason})`, to prove THIS
-    # entry produced a failure, not merely that some failure occurred.
-    for sku in ("E1M-AEN801", "E1M-V2N101"):
-        for edit_id, _un_edit, _edited, emitted in _SENSOR_MAIN_C_924_FIXTURES:
-            _, mut_failures = undo_declared_edits(
-                "sensor", sku, {"src/main.c": emitted}
+        assert ("sensor", sku, "src/main.c", "pattern_paragraph") in DELIBERATE_EDITS
+        assert (
+            un_edit_sensor_main_c_pattern_paragraph(
+                _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EDITED
             )
-            reason, _ = DELIBERATE_EDITS[("sensor", sku, "src/main.c", edit_id)]
-            assert [
-                f for f in mut_failures
-                if f.startswith(
-                    "src/main.c: DELIBERATE_EDITS declares an edit that is no longer"
-                )
-                and f.endswith(f"({reason})")
-            ], ("sensor", sku, "src/main.c", edit_id, mut_failures)
+            == _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED
+        )
+
+    # ...and the strict half too: feeding the un_edit its OWN emitted
+    # (still-bare) bytes finds nothing to undo -- `undo_declared_edits` must
+    # surface that as a hard failure, not a quiet pass.
+    for sku in ("E1M-AEN801", "E1M-V2N101"):
+        _, mut_failures = undo_declared_edits(
+            "sensor", sku, {"src/main.c": _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED}
+        )
+        assert [
+            f for f in mut_failures
+            if f.startswith(
+                "src/main.c: DELIBERATE_EDITS declares an edit that is no longer"
+            )
+        ], (sku, mut_failures)
 
     # tan-cli#932's six entries (diagnostics/E1M-V2N101 only): each un_edit
     # must round-trip the corrected src/main.c or README.md bytes back onto
