@@ -249,6 +249,20 @@ _LOG_SEP = "\x1f"
 def _identity_is_foreign(
     name: str, email: str, automation_name: str, automation_email: str
 ) -> bool:
+    # tan-cli#1006 review (nit): name is compared case-SENSITIVELY, email
+    # case-INSENSITIVELY -- deliberate, not an oversight. There is no
+    # case-folding convention for a git commit's free-text display name, so
+    # a name that differs only by case (`Alp-SDK Planner Re-Sync` vs this
+    # module's own `alp-sdk planner re-sync`) is exactly as likely to be a
+    # distinct human as a retyped automation identity, and this guard's bias
+    # throughout is to treat ambiguity as foreign (over-protect) rather than
+    # wave it through. Email addresses DO have a real case-folding
+    # convention: the domain is case-insensitive by RFC 5321/5322, and
+    # GitHub itself folds address case when matching a committer to an
+    # account -- so a same-address, different-case email is the SAME
+    # identity, not a distinct one, and comparing it case-sensitively would
+    # risk misreading the automation's own commits as foreign if some git
+    # client ever presented `noreply@alplab.ai` back with different casing.
     return name != automation_name or email.lower() != automation_email.lower()
 
 
@@ -284,9 +298,33 @@ def _foreign_commits(
     for line in proc.stdout.decode("utf-8", "replace").splitlines():
         if not line:
             continue
-        sha, author_name, author_email, committer_name, committer_email, subject = (
-            line.split(_LOG_SEP, 5)
-        )
+        # tan-cli#1006 review (nit): `split(_LOG_SEP, 5)` (a bounded
+        # maxsplit) trusts `_LOG_SEP` never appears INSIDE a field. Real git
+        # porcelain guarantees that -- but a hand-forged commit object
+        # (`git hash-object -t commit -w`) is not real porcelain, and one
+        # with `\x1f` planted inside `%an` shifts every field after it
+        # (driven: the forged author name reads as a truncated prefix, the
+        # forged content spills into what should be the next field, and the
+        # trailing remainder rides along inside `subject`) -- crafted right,
+        # both identity pairs parse as the automation and this function
+        # reports the commit as NOT foreign. A plain (unbounded) split turns
+        # that shift into an extra field instead of a silent misparse: this
+        # module's own trust boundary is "not cryptographic" (module
+        # docstring, "THE SIGNAL"), but refusing an unparseable record is the
+        # same fail-closed posture `BranchGuardError` already takes for a
+        # `git log`/`ls-remote` failure -- guessing "probably fine" here
+        # would be exactly the kind of ambiguity-read-as-safe this guard
+        # exists to reject.
+        fields = line.split(_LOG_SEP)
+        if len(fields) != 6:
+            raise BranchGuardError(
+                f"a commit log entry in {base_ref}..{tracking_ref} did not "
+                f"split into exactly 6 {_LOG_SEP!r}-separated fields (got "
+                f"{len(fields)}) -- refusing to guess which field is which "
+                f"rather than risk misreading a foreign identity as the "
+                f"automation's own: {line!r}"
+            )
+        sha, author_name, author_email, committer_name, committer_email, subject = fields
         author_foreign = _identity_is_foreign(
             author_name, author_email, automation_name, automation_email
         )
@@ -442,29 +480,44 @@ def main(argv: list[str] | None = None) -> int:
                     f"occupied_{i}_committer={oc.commit.committer_name} "
                     f"<{oc.commit.committer_email}>\n"
                 )
-            if decision.protected is not None:
-                # A commit subject cannot contain a literal newline (`%s` is
-                # one line by construction), so this is safe to write verbatim
-                # into $GITHUB_OUTPUT without a heredoc delimiter.
-                fh.write(f"protected_commit={decision.protected.sha}\n")
-                fh.write(
-                    f"protected_commit_subject={decision.protected.subject}\n"
-                )
-                fh.write(
-                    "protected_commit_author="
-                    f"{decision.protected.author_name} "
-                    f"<{decision.protected.author_email}>\n"
-                )
-                # Reported separately from author (tan-cli#1006): an
-                # `--amend`/`--autosquash fixup!` shape keeps the
-                # automation's own author identity and only the committer is
-                # foreign, so author alone can misleadingly point back at
-                # the automation.
-                fh.write(
-                    "protected_commit_committer="
-                    f"{decision.protected.committer_name} "
-                    f"<{decision.protected.committer_email}>\n"
-                )
+            # tan-cli#1006 review (blocker): written UNCONDITIONALLY, empty
+            # when `decision.protected is None` -- same shape as
+            # `observed_tip` above, not the `if decision.protected is not
+            # None:` guard this used to sit behind. The workflow's own read
+            # (`planner-resync.yml`'s "Open or refresh the proposal PR" step)
+            # does `grep '^protected_commit=' "$GITHUB_OUTPUT" | tail -1 | cut
+            # -d= -f2-` under `set -euo pipefail`; a KEY THAT IS ABSENT makes
+            # `grep` exit 1, `pipefail` propagates that into the assignment,
+            # and the step dies right there -- on every clean, non-diverted
+            # run, which is the everyday case. Writing the key on every path
+            # (empty string when there is nothing protected) makes that read
+            # symmetric with `branch=`/`diverted=`/`observed_tip=`/
+            # `occupied_count=`, which is what keeps THEM safe already, and
+            # closes the whole class of "conditional key, unconditional grep"
+            # rather than patching this one instance.
+            #
+            # A commit subject cannot contain a literal newline (`%s` is
+            # one line by construction), so this is safe to write verbatim
+            # into $GITHUB_OUTPUT without a heredoc delimiter.
+            protected = decision.protected
+            fh.write(f"protected_commit={protected.sha if protected else ''}\n")
+            fh.write(
+                "protected_commit_subject="
+                f"{protected.subject if protected else ''}\n"
+            )
+            fh.write(
+                "protected_commit_author="
+                f"{f'{protected.author_name} <{protected.author_email}>' if protected else ''}\n"
+            )
+            # Reported separately from author (tan-cli#1006): an
+            # `--amend`/`--autosquash fixup!` shape keeps the
+            # automation's own author identity and only the committer is
+            # foreign, so author alone can misleadingly point back at
+            # the automation.
+            fh.write(
+                "protected_commit_committer="
+                f"{f'{protected.committer_name} <{protected.committer_email}>' if protected else ''}\n"
+            )
 
     if decision.diverted:
         assert decision.protected is not None
