@@ -67,12 +67,13 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
-from tan.commands.sdk_cmd import (
+from tan.core.example_facets import ExampleFacets, load_example_facets
+from tan.core.sdk_discovery import (
     global_default_foreign_project_issue,
     project_pin_issue,
+    resolve_sdk_root_wide,
+    sdk_ladder_divergence_issue,
 )
-from tan.core.example_facets import ExampleFacets, load_example_facets
 from tan.core.shapes import rejected_sdk_root_message
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -421,7 +422,7 @@ def render_examples_text(
 @dataclass(frozen=True)
 class _ResolvedSdk:
     """`_resolve_sdk`'s own return shape -- a named result, not a growing
-    tuple (the same reasoning `build_cmd.SdkRootResolution` documents): a fact
+    tuple (the same reasoning `tan.core.sdk_discovery.SdkRootResolution` documents): a fact
     one caller needs (`foreign_global_default_for`, tan-cli#464) must not
     force every field before it to be re-counted by position.
 

@@ -84,8 +84,8 @@ from typing import Any
 import typer
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import ActiveSdk
 from tan.core.fs_confine import PathEscapeError, resolve_confined
+from tan.core.sdk_discovery import ActiveSdk
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format

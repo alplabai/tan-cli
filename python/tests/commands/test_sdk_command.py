@@ -37,14 +37,16 @@ import typer
 from tan.commands import bootstrap_cmd
 from tan.commands.sdk_cmd import (
     _fetch_releases,
-    _resolved_origin_depth_key,
-    _workspace_under,
     check_sdk_readiness,
     describe_network_error,
-    discover_workspace_sdk,
     global_default_pointer_fix_hint,
     parse_remote_sdk_releases,
     parse_sdk_version_yaml,
+)
+from tan.core.sdk_discovery import (
+    _resolved_origin_depth_key,
+    _workspace_under,
+    discover_workspace_sdk,
     resolve_sdk_tiered,
 )
 
@@ -1427,7 +1429,7 @@ def test_current_sees_the_child_checkout_the_acting_commands_resolve(tmp_path, i
     workspace.mkdir()
     child = make_sdk_root(workspace / "alp-sdk", version="0.14.0")
 
-    from tan.commands.build_cmd import resolve_sdk_root_ladder
+    from tan.core.sdk_discovery import resolve_sdk_root_ladder
 
     expected = resolve_sdk_root_ladder(None, workspace)
     assert expected.path is not None and Path(expected.path) == child

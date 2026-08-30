@@ -2,7 +2,7 @@
 """`tan.core.sdk_default_registry` -- the pure parse/pick/render logic behind
 tan-cli#466's origin-keyed `~/.alp/sdk-defaults.json`.
 
-Resolver-level coverage (wired into `sdk_cmd.resolve_sdk_tiered`, with real
+Resolver-level coverage (wired into `sdk_discovery.resolve_sdk_tiered`, with real
 `_workspace_under`/`_has_loader_script`) lives in `test_sdk_command.py`
 alongside every other `globalDefault`-tier case; this file is the narrower,
 faster unit layer underneath it -- pure functions, fake `covers`/
@@ -154,7 +154,7 @@ def test_registry_text_sorts_keys_for_a_deterministic_diff():
 
 def _covers_prefix(workspace_root: Path, origin: str) -> bool:
     """A fake `covers` -- pure string-prefix containment, standing in for
-    `sdk_cmd._workspace_under` without touching a real filesystem."""
+    `sdk_discovery._workspace_under` without touching a real filesystem."""
     ws = str(workspace_root).replace("\\", "/")
     root = origin.replace("\\", "/")
     return ws == root or ws.startswith(root + "/")
@@ -283,7 +283,7 @@ def test_deepest_covering_entry_none_when_every_covering_entry_is_stale():
 
 
 def test_deepest_covering_entry_rejects_a_relative_origin():
-    """Mirrors `sdk_cmd._pointer_written_for`'s own defence: a registry is
+    """Mirrors `sdk_discovery._pointer_written_for`'s own defence: a registry is
     one file a hand edit (or a future writer bug) could corrupt into holding
     a relative key, and `_workspace_under`-style containment resolves a
     relative `root` against the CALLER's cwd -- exactly the tan-cli#464
@@ -306,7 +306,7 @@ def test_deepest_covering_entry_rejects_a_relative_origin():
 
 def test_deepest_covering_entry_ranks_by_resolved_origin_not_raw_key_length():
     """tan-cli#904 review, major 1: a symlinked origin makes `covers`'s own
-    notion of "deepest" (decided on RESOLVED paths -- `sdk_cmd.
+    notion of "deepest" (decided on RESOLVED paths -- `sdk_discovery.
     _workspace_under` calls `.resolve()` on both sides) disagree with a raw
     registry-key STRING-LENGTH ranking.
 

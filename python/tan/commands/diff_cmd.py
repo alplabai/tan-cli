@@ -153,11 +153,9 @@ from typing import Any
 
 import typer
 
-from tan.commands.build_cmd import _planner_python_resolution
 from tan.commands.doctor_cmd import resolve_manifest_python_floor
 from tan.commands.generate_cmd import _python_too_old
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import sdk_resolution_issues
 from tan.commands.validate_cmd import (
     OUTCOME_CLEAN,
     OUTCOME_FAILED,
@@ -167,6 +165,7 @@ from tan.commands.validate_cmd import (
     _synthesised_finding,
     analyze_validator_output,
 )
+from tan.core.sdk_discovery import _planner_python_resolution, sdk_resolution_issues
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format

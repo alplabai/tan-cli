@@ -97,8 +97,7 @@ except ImportError:  # pragma: no cover -- Windows has none of the four
 import typer
 
 from tan.core.shapes import is_file as _is_file
-from tan.commands.build_cmd import resolve_sdk_root_ladder
-from tan.commands.sdk_cmd import sdk_resolution_issues
+from tan.core.sdk_discovery import resolve_sdk_root_ladder, sdk_resolution_issues
 from tan.core.dp_id import (
     _CONNECT_FAILED_TARGET_RE,
     _connect_failed_outright,
@@ -354,7 +353,7 @@ def _resolve_project(root: str, board_yaml: str | None) -> Project:
 class _SdkResolution:
     """The local shape both `_resolve_sdk` and [`resolve_sdk_root_ladder_safe`]
     return -- a named result, not a growing tuple (the same reasoning
-    `build_cmd.SdkRootResolution` documents): a fact one caller needs
+    `tan.core.sdk_discovery.SdkRootResolution` documents): a fact one caller needs
     (`foreign_global_default_for`, tan-cli#464) must not force every field
     before it to be re-counted by position.
 
@@ -404,7 +403,7 @@ _is_sdk_root = is_sdk_root
 
 
 def resolve_sdk_root_ladder_safe(workspace_root: str) -> _SdkResolution:
-    """`build_cmd.resolve_sdk_root_ladder(None, ...)`, made incapable of
+    """`tan.core.sdk_discovery.resolve_sdk_root_ladder(None, ...)`, made incapable of
     raising -- an unreadable `.alp/sdk-path` pin, an unreadable global-default
     pointer (`~/.alp/sdk-default`), or an unreadable ancestor on the
     positional walk must not become a traceback in a command whose whole job

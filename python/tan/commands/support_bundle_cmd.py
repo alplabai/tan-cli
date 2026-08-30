@@ -103,12 +103,13 @@ from tan.commands.inspect_cmd import (
     collect_resolved_values,
     resolve_debug_project_context,
 )
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, sdk_resolution_issues
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.commands.trace_cmd import (
     TraceTargetError,
     build_trace_decisions,
     resolve_trace_targets,
 )
+from tan.core.sdk_discovery import sdk_resolution_issues
 from tan.core.debug_launch import (
     BAREMETAL_MCU,
     GDBSERVER,

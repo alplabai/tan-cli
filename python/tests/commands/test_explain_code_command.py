@@ -186,7 +186,7 @@ def test_the_success_envelope_names_the_checkout_it_read(tmp_path, monkeypatch):
 
 
 def _write_pin(workspace: Path, target: Path) -> None:
-    """`.alp/sdk-path` in the `{"sdkPath": ...}` shape `sdk_cmd._pointer_target`
+    """`.alp/sdk-path` in the `{"sdkPath": ...}` shape `sdk_discovery._pointer_target`
     reads -- mirrors `test_sdk_discovery_ladders._write_pin`."""
     (workspace / ".alp").mkdir(parents=True, exist_ok=True)
     (workspace / ".alp" / "sdk-path").write_text(

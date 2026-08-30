@@ -157,7 +157,7 @@ def wall_clock_iso(*, millis: bool = False) -> str:
     write, never compared against a sibling write, so `SOURCE_DATE_EPOCH`
     reproducibility is exactly the right behaviour there -- this function
     exists for the one field that is a comparison key, not a display
-    value. `sdk_cmd._pointer_target` reads `sdkPath` only, never
+    value. `sdk_discovery._pointer_target` reads `sdkPath` only, never
     `updatedAt`; `bootstrap.parse_workspace_sdk_record` never reads
     `updatedAt` either; and no mtime comparison exists anywhere in the
     resolution ladder -- so none of the eight is secretly a second
