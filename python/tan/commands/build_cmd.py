@@ -1406,6 +1406,55 @@ def _cross_drive_issues(outcomes: list[SliceOutcome]) -> list[Issue]:
     return issues
 
 
+def _plan_warning_issues(warnings: list[dict]) -> list[Issue]:
+    """tan-cli#1000: promote the PLAN's own warnings into `issues[]`.
+
+    Third sibling of `_missing_tool_issues` (tan-cli#283/#801) and
+    `_cross_drive_issues` (tan-cli#697), and filed because it was the door
+    those two left open. `plan.warnings` reached exactly one place -- the
+    envelope's `data.warnings` -- so the message that says WHY a build
+    produced nothing was invisible to text mode and to any consumer reading
+    `issues[]`, which is the field alp-sdk-vscode and CI actually branch on.
+
+    Measured on `E1M-AEN301`, a SKU `tan presets` lists: `tan init` rc=0,
+    `tan validate` rc=0 "clean", `tan build` rc=1 with a four-line text
+    output whose only cause-bearing words were ``slice `m55_hp` has no
+    command``, while `data.warnings` held "SoM 'E1M-AEN301' core 'm55_hp'
+    wants Zephyr board 'alp_e1m_aen301_m55_hp', which has no tree under
+    zephyr/boards/alp/ -- board bring-up for this target has not happened
+    yet."
+
+    ONE registered code for every warning, not `build.<the warning's own
+    code>`: `build_plan.py`'s `_warnings` documents the warning codes as an
+    OPEN set ("the forward compatibility is in the CODES being open"), so
+    minting an issue code per warning code would emit unregistered codes the
+    moment the planner adds one -- and `contract/issue-codes.json` is a
+    closed registry whose consumer matches with `===`. The warning's own code
+    travels inside the message instead, where an open set costs nothing.
+
+    Severity is always `warning`, never promoted to `error` on the count: a
+    build that fails BECAUSE of these already carries its own
+    `build.nothing-built`/`build.slice-failed` error beside them, and a
+    partial build where one core lacks a board tree is genuinely not an
+    error for the cores that did build.
+
+    Text mode needs no separate change -- `_print_text_issues` prints every
+    surviving issue as ``{severity}: {message}``, and `_text_issues`'
+    dedup (tan-cli#746) only drops a message that ENDS WITH a slice's own
+    `reason`, which a warning's text does not.
+    """
+    issues = []
+    for warning in warnings:
+        code = warning.get("code")
+        core_id = warning.get("coreId")
+        message = warning.get("message")
+        where = f" {core_id}:" if core_id else ""
+        issues.append(
+            Issue("build.plan-warning", "warning", f"[{code}]{where} {message}")
+        )
+    return issues
+
+
 def _toolchain_for_plan(plan_text: str) -> ToolchainResolution:
     """This host's `${TOOLCHAIN_ROOT}` -- resolved ONLY when `plan_text`
     actually names the token (tan-cli#547).
@@ -1692,6 +1741,10 @@ def _build(
     # only `issues[]` must see the specific cause, not just the generic
     # `build.slice-failed` header this promotion sits alongside.
     issues.extend(_cross_drive_issues(outcomes))
+    # tan-cli#1000: the PLAN's own warnings, same reasoning again -- these
+    # are the only place the planner explains a `command: null` slice, and
+    # they reached `data.warnings` alone until now.
+    issues.extend(_plan_warning_issues(plan.warnings))
     # The sdk-switch-pristine wipe (issue #52) must not be stderr-only in
     # JSON mode -- the VS Code extension only ever sees the envelope, not
     # `_stream`'s output. Verbatim oracle codes/severity
@@ -2251,7 +2304,23 @@ def _text_recap(mode: str, data: dict | None) -> None:
             f"  shared artefacts: {len(data.get('sharedArtefacts') or [])}",
             file=sys.stderr,
         )
-        print(f"  warnings: {len(data.get('warnings') or [])}", file=sys.stderr)
+        # tan-cli#1000, oracle parity: the retired Rust `summarize_plan`
+        # (`crates/tan-core/src/build_plan.rs:358`, read at `2883cdf^`)
+        # printed `warnings: 0` when empty and otherwise expanded every
+        # entry as `  - [{code}] {coreId}: {message}`. The port counted them,
+        # so this surface lost the same cause the ordinary build path did.
+        plan_warnings = data.get("warnings") or []
+        if not plan_warnings:
+            print("  warnings: 0", file=sys.stderr)
+        else:
+            print(f"  warnings ({len(plan_warnings)}):", file=sys.stderr)
+            for warning in plan_warnings:
+                core_id = warning.get("coreId")
+                where = f" {core_id}:" if core_id else ""
+                print(
+                    f"    - [{warning.get('code')}]{where} {warning.get('message')}",
+                    file=sys.stderr,
+                )
         return
     slices = data.get("slices", [])
     for result in slices:
