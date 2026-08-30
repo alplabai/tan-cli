@@ -1000,8 +1000,9 @@ def _load_files_preserved_issue(existing_value: str, incoming_value: str) -> Iss
         f'instead of replacing it with "{incoming_value}", resolved from this run\'s '
         "own draft -- tan could not prove the existing value was its own prior output "
         "(no recorded `.alp/` provenance for it), so it left it rather than risk "
-        "overwriting a value you filled in by hand, including an explicit `[]` for an "
-        "attach-only session. If it is stale, update it in .vscode/launch.json yourself.",
+        "overwriting a value that may have been filled in by hand, including an "
+        "explicit `[]` for an attach-only session. If it is stale, update it in "
+        ".vscode/launch.json yourself.",
     )
 
 

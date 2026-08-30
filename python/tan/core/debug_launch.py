@@ -122,11 +122,21 @@ def is_server_supported_for_target(target: str, server: str) -> bool:
 #: `openocd` / `pyocd`, with no `tan` process in the loop to intercept.
 #:
 #: ``True`` for both cortex-debug targets: :func:`create_launch_draft` always
-#: emits ``request: launch`` with a non-empty ``loadFiles`` (see there) -- every
-#: session this module can produce for them programs the executable onto the
-#: target, with no attach-only draft shape today. ``False`` for
-#: yocto-userspace: its ``cppdbg`` ``launch`` request attaches MI to a
-#: gdbserver the operator already started, after their own manual deploy
+#: emits ``request: launch`` with a non-empty ``loadFiles`` -- every FRESH
+#: draft this module produces for them programs the executable onto the
+#: target. Keyed on ``targetKind`` alone, not on the ``loadFiles`` a given
+#: WRITE actually lands: after tan-cli#1020's re-review, a MERGE over an
+#: existing entry can protect a customer's own explicit attach-only ``[]``
+#: (see :func:`_merge_load_files`), so a single exit-0 payload can legitimately
+#: carry ``programsDevice: true`` beside a written ``configuration.loadFiles``
+#: of ``[]`` -- the class of session this constant's docstring used to say
+#: could not happen. That is the same fail-safe direction every other caller
+#: of this map already leans on (overstating the write is confusing, not
+#: unsafe), so it is left as-is rather than keyed per-write; a consumer that
+#: needs per-write precision must read ``data.configuration.loadFiles``
+#: itself, not just ``programsDevice``. ``False`` for yocto-userspace: its
+#: ``cppdbg`` ``launch`` request attaches MI to a gdbserver the operator
+#: already started, after their own manual deploy
 #: (``miDebuggerServerAddress``) -- this session issues no write of its own.
 #: ``False`` for native-host: ``lldb`` runs a binary on the HOST machine: there
 #: is no target hardware to program at all.
@@ -1317,6 +1327,33 @@ def _merge_configuration(
             merged[key] = merged_list
             if owned_entries_out is not None and owned:
                 owned_entries_out[key] = owned
+        elif isinstance(value, list) and existing_val is None:
+            # tan-cli#1020 re-review: the entry already exists (this is the
+            # MERGE path, not the brand-new-entry branch below), but this
+            # particular list-valued key is genuinely ABSENT from it -- e.g. a
+            # pre-#945 `tan` wrote this configuration before `loadFiles`
+            # existed at all. That is NOT the same fact as the key being
+            # PRESENT and holding `[]` (a customer's own explicit
+            # attach-only marker, or a value some other run already decided
+            # not to touch -- see `_load_files_is_tan_owned`'s docstring for
+            # why those two must never be conflated), so this is deliberately
+            # its own branch rather than substituting `[]` for `existing_val`
+            # and falling into the branch above.
+            #
+            # With nothing here for a customer to have hand-authored, this
+            # run's fresh value is unambiguously its own -- exactly the same
+            # reasoning `create_launch_json_write_plan`'s brand-new-entry case
+            # already applies to a whole configuration, just at the single-key
+            # level. Recording it now is what lets `_merge_load_files`'s
+            # protect branch heal on the VERY NEXT write instead of pinning a
+            # value it can never afterwards prove is tan's own -- the
+            # permanent-staleness bug the 1020 re-review found: without this,
+            # the first write after upgrading past #945 (or after the `.alp/`
+            # sidecar is lost) leaves `loadFiles` frozen forever, even as
+            # `executable` keeps tracking every fresh build resolution.
+            merged[key] = value
+            if owned_entries_out is not None and value:
+                owned_entries_out[key] = list(value)
         else:
             merged[key] = _merge_value(existing_val, value)
     return merged

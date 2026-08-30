@@ -1805,6 +1805,65 @@ def test_a_tan_owned_load_files_is_synced_to_a_new_build_resolution():
     ], plan.written_configuration["loadFiles"]
 
 
+def test_a_load_files_key_absent_from_an_existing_entry_is_recorded_as_tan_owned():
+    """tan-cli#1020 re-review MAJOR: a `loadFiles` key genuinely ABSENT from an
+    existing entry (a pre-#945 `tan` wrote the configuration before this field
+    existed, or the `.alp/` sidecar was never shared) is not a customer's value
+    to protect -- there is nothing there to have hand-authored. Before this fix
+    `_merge_configuration` only populated `owned_entries` on its `(list, list)`
+    branch, so this write's own fresh `loadFiles` landed on disk but the
+    returned `provenance` recorded NOTHING for it. FAILS pre-fix:
+    `hashes_for` returns the empty set even though `loadFiles` is right there
+    in `written_configuration`, freshly written by this very run."""
+    draft = create_launch_draft(ZEPHYR_MCU, "jlink", None)
+    existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {"name": "Alp: Zephyr Debug (J-Link)", "servertype": "jlink"}
+            ],
+        }
+    )
+
+    plan = create_launch_json_write_plan(existing, draft)
+
+    assert plan.written_configuration["loadFiles"] == draft["loadFiles"]
+    recorded = plan.provenance.hashes_for("Alp: Zephyr Debug (J-Link)", "loadFiles")
+    assert recorded == frozenset(
+        launch_provenance.content_hash(v) for v in draft["loadFiles"]
+    ), recorded
+
+
+def test_the_default_upgrade_path_heals_load_files_within_one_run():
+    """The pairing test for the one above, proving the fix actually closes the
+    loop rather than merely recording something that goes nowhere: feed run
+    1's own returned `provenance` into run 2, the same way the real CLI
+    persists it to `.alp/debug-launch-provenance.json` between invocations. A
+    rebuild that resolves a NEW per-core ELF between the two runs must still
+    reach `loadFiles` on run 2. FAILS pre-fix -- run 2's `loadFiles` stays
+    pinned to run 1's own value forever, the review's measured "never heals"
+    repro, because run 1 never recorded what it wrote."""
+    pre_945_existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {"name": "Alp: Zephyr Debug (J-Link)", "servertype": "jlink"}
+            ],
+        }
+    )
+    draft_1 = create_launch_draft(ZEPHYR_MCU, "jlink", None)
+    run_1 = create_launch_json_write_plan(pre_945_existing, draft_1)
+    assert run_1.written_configuration["loadFiles"] == draft_1["loadFiles"]
+
+    draft_2 = create_launch_draft(ZEPHYR_MCU, "jlink", None)
+    draft_2["loadFiles"] = ["${workspaceFolder}/build/app/zephyr/zephyr_rev_b.elf"]
+    run_2 = create_launch_json_write_plan(run_1.content, draft_2, provenance=run_1.provenance)
+
+    assert run_2.written_configuration["loadFiles"] == [
+        "${workspaceFolder}/build/app/zephyr/zephyr_rev_b.elf"
+    ], run_2.written_configuration["loadFiles"]
+
+
 def test_a_hand_authored_load_files_survives_a_real_cli_rerun_and_is_disclosed(tmp_path):
     """The end-to-end counterpart of the two pure-merge blocker tests above,
     through the real CLI and a real `.vscode/launch.json` -- and the
@@ -1846,6 +1905,75 @@ def test_a_hand_authored_load_files_survives_a_real_cli_rerun_and_is_disclosed(t
     assert preserved_issue is not None, env["issues"]
     assert preserved_issue["severity"] == "info"
     assert "loadFiles" in preserved_issue["message"]
+
+
+def test_the_default_upgrade_path_heals_load_files_within_one_run_through_the_real_cli(tmp_path):
+    """tan-cli#1020 re-review MAJOR, through the real CLI and a real `.alp/`
+    sidecar (not the pure-merge tests above, which the re-review noted "hand-
+    feed `launch_provenance.empty().updated(...)`, so nothing exercises
+    whether a real write ever *records* `loadFiles`"). Mirrors the
+    re-review's own measured repro: a pre-#945-shaped entry (`executable`, no
+    `loadFiles` key, no sidecar) -- run 1 writes a fresh `loadFiles` -- then a
+    rebuild resolves a NEW per-core ELF -- run 2 must track it, not stay
+    pinned to run 1's own value. FAILS pre-fix: run 2's `loadFiles` on disk is
+    still run 1's stale ELF path, `executable` and `loadFiles` name different
+    files, and `.alp/debug-launch-provenance.json` still records nothing for
+    `loadFiles` after two writes."""
+    pytest.importorskip("yaml")
+    vscode_dir = tmp_path / ".vscode"
+    vscode_dir.mkdir()
+    (vscode_dir / "launch.json").write_text(
+        json.dumps(
+            {
+                "version": "0.2.0",
+                "configurations": [
+                    {
+                        "name": "Alp: Zephyr Debug (J-Link)",
+                        "type": "cortex-debug",
+                        "request": "launch",
+                        "executable": "${workspaceFolder}/build/app/zephyr/zephyr.elf",
+                        "servertype": "jlink",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert not provenance_sidecar(tmp_path).exists()
+
+    run_1 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--format", "json")
+    )
+    assert run_1["exitCode"] == 0, run_1
+    after_run_1 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    load_files_after_run_1 = after_run_1["configurations"][0]["loadFiles"]
+    assert load_files_after_run_1 == [after_run_1["configurations"][0]["executable"]]
+    sidecar_after_run_1 = json.loads(provenance_sidecar(tmp_path).read_text(encoding="utf-8"))
+    assert sidecar_after_run_1["configurations"]["Alp: Zephyr Debug (J-Link)"]["loadFiles"], (
+        "run 1's own fresh loadFiles must be recorded, or run 2 can never prove it its own"
+    )
+
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr_rev_b.elf\n",
+    )
+
+    run_2 = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--format", "json")
+    )
+
+    assert run_2["exitCode"] == 0, run_2
+    after_run_2 = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    entry = after_run_2["configurations"][0]
+    assert entry["executable"].endswith("zephyr_rev_b.elf"), entry
+    assert entry["loadFiles"] == [entry["executable"]], entry
+    assert not any(i["code"] == "debug-config.load-files-preserved" for i in run_2["issues"]), (
+        "a provably tan-owned loadFiles must sync, not be reported as preserved"
+    )
 
 
 def test_three_real_cli_runs_replace_configfiles_each_time_not_accumulate(tmp_path):
