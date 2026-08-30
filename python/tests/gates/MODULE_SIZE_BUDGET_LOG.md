@@ -530,6 +530,10 @@ several less obvious failures.
     - tan/core/debug_launch.py: 1275 -> 1539
     - function_count_budget: 287 -> 289
     - function_worst_budget: 791 -> 804
+- 2026-08-29 -- tan-cli#996: --topology (init_cmd.py, example_catalog.py) + find_template_by_cores/AmbiguousCoresError hand-port (planner/template.py, planner/cli.py)
+    - tan/commands/init_cmd.py: 1306 -> 1413
+    - tan/planner/template.py: 1481 -> 1541
+    - function_count_budget: 289 -> 290
 - 2026-08-29 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/bootstrap_cmd.py: 4104 -> 4137
     - tan/commands/debug_config_cmd.py: 2021 -> 2114
@@ -538,6 +542,12 @@ several less obvious failures.
     - tan/core/debug_launch.py: 1275 -> 1539
     - function_count_budget: 294 -> 296
     - function_worst_budget: 806 -> 819
+- 2026-08-29 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 3600 -> 4137
+    - tan/commands/doctor_cmd.py: 4164 -> 4320
+    - tan/core/bootstrap.py: 2400 -> 2411
+    - function_count_budget: 290 -> 297
+    - function_worst_budget: 804 -> 819
 - 2026-08-29 -- tan-cli#992: route ~26 subprocess spawn sites through the shared LD_LIBRARY_PATH-restore helper (tan.core.subprocess_env.spawn_env), plus the new gate that asserts every one of them does
     - tan/commands/build/execute.py: 1713 -> 1726
     - tan/commands/diff_cmd.py: 889 -> 891
@@ -559,10 +569,24 @@ several less obvious failures.
 - 2026-08-30 -- tan-cli#1000: build_cmd.py 2293 -> 2362 (+69: 24 code, 39 comment/docstring, 7 blank). The code half is one promoter, _plan_warning_issues, plus its one-line wiring into _build's existing issue chain and the plan-mode recap's warning expansion -- the third instance of a promoter shape build_cmd.py already carries twice (_missing_tool_issues tan-cli#283/#801, _cross_drive_issues tan-cli#697), so it sits beside its siblings rather than starting a new concern. Extracting the three into a module would be the real fix for this file's size and is NOT attempted here: it would move code tan-cli#408 is separately tracking, on a change whose subject is a silent-failure hole. Comment-heavy by intent -- the open-vs-closed issue-code decision and the oracle-parity measurement are exactly the reasoning a later reader would otherwise re-derive.
     - tan/commands/build_cmd.py: 2293 -> 2362
 - 2026-08-30 -- merge-resync (growth already reasoned on the merged branches)
+    - function_count_budget: 297 -> 298
     - tan/commands/faultdecode_cmd.py: new entry at 926
     - function_count_budget: 298 -> 299
 - 2026-08-30 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/build/execute.py: 1713 -> 1726
+    - tan/commands/diff_cmd.py: 889 -> 891
+    - tan/commands/doctor_cmd.py: 4320 -> 4324
+    - tan/commands/faultdecode_cmd.py: 925 -> 926
+    - tan/commands/flash_cmd.py: 3952 -> 3962
+    - tan/commands/generate_cmd.py: 1431 -> 1433
+    - tan/commands/size_cmd.py: 938 -> 940
+    - tan/commands/validate_cmd.py: 1613 -> 1615
+    - tan/model/adapters/ethos_u.py: 886 -> 889
+    - tan/planner/template.py: 1541 -> 1548
+    - function_count_budget: 298 -> 300
     - tan/commands/build_cmd.py: 2293 -> 2362
+- 2026-08-30 -- tan-cli#1001 review: refuse --topology + --cores as a coded conflict (init.scaffold-input-conflict) instead of silently discarding --cores, plus matching help-text cross-references and a regression test
+    - tan/commands/init_cmd.py: 1413 -> 1445
 - 2026-08-30 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/build_cmd.py: 1934 -> 2003
 - 2026-08-30 -- tan-cli#408 review follow-up: move resolve_sdk_tiered/ActiveSdk/the two Issue builders from sdk_cmd.py to sdk_discovery.py, emptying _KNOWN_INVERSIONS; sdk_cmd.py shrinks ~473 lines, sdk_discovery.py grows to carry the moved cluster, a handful of importers grow a couple of lines each from split import statements
@@ -571,4 +595,10 @@ several less obvious failures.
     - tan/commands/model_cmd.py: 1059 -> 1060
     - tan/commands/support_bundle_cmd.py: 1067 -> 1068
     - tan/commands/validate_cmd.py: 1611 -> 1615
+    - tan/core/sdk_discovery.py: new entry at 963
+- 2026-08-30 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/clean_cmd.py: 1129 -> 1132
+    - tan/commands/init_cmd.py: 1445 -> 1449
+    - tan/commands/model_cmd.py: 1059 -> 1060
+    - tan/commands/support_bundle_cmd.py: 1067 -> 1068
     - tan/core/sdk_discovery.py: new entry at 963

@@ -70,6 +70,27 @@ gets no pointer to `--from-example` -- so the help text here says more than
 NOT the same claim as the paragraph below: that one is about which FLAGS are
 listed at all, not about every flag's help wording matching byte-for-byte.
 
+**`--topology` selects a template BY hardware topology instead of by id or
+example path (alp-sdk#1652, tan-cli#996) -- and it is NOT `--cores`.**
+`--cores` (above) splices a companion core onto an ALREADY-CHOSEN template's
+board.yaml; `--topology core_id:os[,core_id:os...]` chooses WHICH template (or
+SDK example) to use in the first place, by asking the SDK catalog which
+record's own `cores:` declaration matches exactly -- a wizard that knows its
+hardware ("M55-HP running Zephyr, A55 running Yocto") but not the catalog's
+naming can ask this way instead of guessing a `--template`/`--from-example`
+value. Mutually exclusive with both `--template` and `--from-example` (all
+three answer the same question: which project to scaffold). Needs a resolved
+SDK checkout, like `--from-example` -- the topology lives only in the SDK's
+live catalog, never tan's own vendored set. Exactly one match resolves like
+`--from-example <that record's example path>` would; zero matches or more
+than one is a hard refusal (`init.topology-not-found` /
+`init.topology-ambiguous`) naming the topologies or candidates that ARE on
+offer -- silently picking the first of several candidates would hide the
+other option from a customer who never knew it existed. See
+`tan.core.example_catalog.find_example_by_cores`'s docstring for why this is
+a small standalone re-implementation of alp-sdk's `find_template_by_cores`
+rather than a call into `tan.planner.template`'s hand-ported copy.
+
 **`--all`, `--target`, `--verbose`, `--quiet`, `--no-color` are accepted and
 genuinely IGNORED here -- matching the oracle, not merely tolerated.** Every
 one is a member of clap's `GlobalArgs` (`global = true`), so the real `tan
@@ -99,7 +120,13 @@ import typer
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
-from tan.core.example_catalog import unsupported_som
+from tan.core.example_catalog import (
+    AmbiguousCoresTopologyError,
+    CoresTopologyNotFoundError,
+    find_example_by_cores,
+    parse_topology_arg,
+    unsupported_som,
+)
 from tan.core.sdk_discovery import (
     global_default_foreign_project_issue,
     resolve_sdk_root_wide,
@@ -895,6 +922,40 @@ def _plan_from_example(
     return f"example:{src}", files
 
 
+def _plan_from_topology(
+    topology_raw: str, som: str | None, sdk: _Sdk | None
+) -> tuple[str, list[PlannedFile]]:
+    """Resolve `--topology` to a catalog record, then delegate to
+    `_plan_from_example` exactly as if `--from-example <record's example>`
+    had been given -- one resolution step ahead of the existing path, not a
+    second file-copying implementation."""
+    try:
+        cores = parse_topology_arg(topology_raw)
+    except ValueError as err:
+        raise InitError(
+            "init.invalid-topology", str(err), ExitCode.VALIDATION_FAILURE
+        ) from err
+    if sdk is None or not _is_sdk_checkout(sdk.path):
+        raise InitError(
+            "init.sdk-root-unresolved",
+            "alp-sdk root is unresolved. Use --sdk-root or run near an "
+            "alp-sdk checkout to select a template by --topology."
+            + (f" (tried '{sdk.display}')" if sdk is not None else ""),
+            ExitCode.VALIDATION_FAILURE,
+        )
+    try:
+        src = find_example_by_cores(sdk.path, cores)
+    except CoresTopologyNotFoundError as err:
+        raise InitError(
+            "init.topology-not-found", str(err), ExitCode.VALIDATION_FAILURE
+        ) from err
+    except AmbiguousCoresTopologyError as err:
+        raise InitError(
+            "init.topology-ambiguous", str(err), ExitCode.VALIDATION_FAILURE
+        ) from err
+    return _plan_from_example(src, som, sdk)
+
+
 # ---------------------------------------------------------------------------
 # Diff, then preview / guard / write
 # ---------------------------------------------------------------------------
@@ -1106,7 +1167,29 @@ def init(
             "the plan's app core -- any other id can only be spliced in "
             "app-less, as `:off` or (on a Cortex-A id) `:yocto`, so a bare "
             "companion id like `m55_he` infers `:zephyr` and is refused "
-            "unless `m55_he` is the app core."
+            "unless `m55_he` is the app core. SPLICES onto an already-"
+            "chosen template/example -- to instead CHOOSE which template to "
+            "use by its hardware topology, see --topology. Mutually "
+            "exclusive with --topology, which has no already-chosen "
+            "template left for this to splice onto."
+        ),
+    ),
+    topology: str = typer.Option(
+        None,
+        "--topology",
+        metavar="TOPOLOGY",
+        help=(
+            "core_id:os[,core_id:os...] hardware topology (e.g. "
+            "'m55_hp:zephyr,m55_he:zephyr'); an alternative to --template/"
+            "--from-example that SELECTS whichever SDK catalog template's "
+            "own cores: topology matches exactly, instead of naming a "
+            "template id or example path directly. Not --cores, which "
+            "splices a companion core onto an ALREADY-CHOSEN template "
+            "instead of choosing one. Mutually exclusive with --template, "
+            "--from-example, AND --cores (there is no already-chosen "
+            "template left for --cores to splice onto -- add the extra "
+            "core to --topology itself instead); needs a resolved SDK "
+            "checkout."
         ),
     ),
     preview: bool = typer.Option(
@@ -1205,7 +1288,55 @@ def init(
         # declines to write `.alp/sdk-path` for it.
         sdk_root_invalid_issue = _sdk_root_flag_unresolved_issue(sdk_root, resolved_sdk)
 
-        if from_example is not None:
+        # `--topology`, `--template`, `--from-example` all answer the same
+        # question (which project to scaffold) -- refuse rather than
+        # silently prefer one, the same posture `find_example_by_cores`
+        # itself takes for an ambiguous topology match (tan-cli#996).
+        _chosen = [n for n, v in (
+            ("--topology", topology), ("--template", template),
+            ("--from-example", from_example),
+        ) if v is not None]
+        if len(_chosen) > 1:
+            raise InitError(
+                "init.scaffold-input-conflict",
+                f"tan init takes at most one of --template, --from-example, "
+                f"--topology; got {', '.join(_chosen)}.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+
+        # tan-cli#1001 review: `--topology` ALREADY selects the template by
+        # its full hardware topology -- `--cores` combined with it has
+        # nothing left to splice onto, since there is no "already-chosen
+        # template" yet for `--cores` to attach a companion core to (unlike
+        # the `--template`/default path below, where `_plan_from_template`
+        # genuinely reads `cores`). Before this check, `--cores` on the
+        # `--topology` path was silently discarded: `ok: true`, exit 0,
+        # `issues: []`, and no trace of the requested core in the written
+        # `board.yaml` -- measured. Refuse instead, the same posture the
+        # `_chosen` conflict above takes for two scaffold-source flags.
+        # `--from-example` + `--cores` is a DIFFERENT, pre-existing case
+        # (the example ships its own board.yaml, so `--cores` is silently
+        # ignored there too, documented at `_plan_from_example`'s call site
+        # below) -- not touched here; only the `--topology` combination is
+        # new in this PR and had no such note.
+        if topology is not None and cores is not None:
+            raise InitError(
+                "init.scaffold-input-conflict",
+                "tan init --topology already selects the template by its "
+                "full hardware topology; --cores has nothing left to splice "
+                "onto and would be silently ignored. Add the extra core to "
+                "--topology instead (e.g. --topology "
+                "m55_hp:zephyr,a32_cluster:yocto), or drop --topology and "
+                "use --template/--from-example with --cores.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+
+        if topology is not None:
+            template_id, files = _plan_from_topology(topology, som, resolved_sdk)
+            # `find_example_by_cores` resolved to an example, so this is the
+            # same shape `_plan_from_example` returns directly below.
+            subject_label = f"example '{template_id[len('example:') :]}'"
+        elif from_example is not None:
             template_id, files = _plan_from_example(from_example, som, resolved_sdk)
             # `--cores` is ignored on this path (the example ships its own
             # board.yaml); `--board-yaml`'s subject names the example, not a
@@ -1215,8 +1346,15 @@ def init(
             template_id, files = _plan_from_template(template, som, cores)
             subject_label = f"template '{template_id}'"
 
+        # `--topology` resolves to an example the same way `--from-example`
+        # does (`template_id` starts "example:" either way), so both share
+        # the same `allow_add`/SoM-support/missing-board.yaml treatment below
+        # -- a topology-resolved example is not a template's own plan and can
+        # equally have no board.yaml or a supported.som_skus mismatch.
+        is_example_shaped = template_id.startswith("example:")
+
         files = _apply_board_yaml_override(
-            files, subject_label, board_yaml, allow_add=from_example is not None
+            files, subject_label, board_yaml, allow_add=is_example_shaped
         )
 
         # `tan build` discovers a project's board.yaml at its root; an example
@@ -1237,8 +1375,9 @@ def init(
         # case just below; `tan/core/example_catalog.py` carries the full
         # reasoning and the "cannot tell means silent" rule.
         example_som_issue = None
-        if from_example is not None and som is not None and resolved_sdk is not None:
-            supported = unsupported_som(resolved_sdk.path, from_example, som)
+        if is_example_shaped and som is not None and resolved_sdk is not None:
+            example_src = template_id[len("example:") :]
+            supported = unsupported_som(resolved_sdk.path, example_src, som)
             if supported is not None:
                 example_som_issue = Issue(
                     "init.example-som-unsupported",
@@ -1253,7 +1392,7 @@ def init(
                 )
 
         missing_board_yaml_issue = None
-        if from_example is not None and not any(f.relative_path == "board.yaml" for f in files):
+        if is_example_shaped and not any(f.relative_path == "board.yaml" for f in files):
             missing_board_yaml_issue = Issue(
                 "init.example-missing-board-yaml",
                 "warning",

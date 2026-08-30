@@ -48,7 +48,12 @@ from . import (
     load_board_yaml,
 )
 from .paths import REPO
-from .template import TemplateError, emit_scaffold
+from .template import (
+    TemplateError,
+    emit_scaffold,
+    find_template_by_cores,
+    load_catalog,
+)
 
 if False:  # typing-only; keeps the runtime import graph unchanged
     from .models import BoardProject
@@ -104,22 +109,81 @@ def emit_artefact(project: "BoardProject", mode: str, *, board_yaml: Path,
     raise OrchestratorError(f"unknown emit mode '{mode}'")
 
 
-def _emit_scaffold(template: Optional[str], sku: Optional[str]) -> int:
-    """`--emit scaffold --template <id> --sku <SKU>`, straight to stdout.
-
-    Both flags are required and refused ONE AT A TIME, in that order, exactly as
-    `alp_project._run_scaffold_emit` refused them -- so a caller that omitted
-    both still learns about `--template` first. `argparse` cannot express
-    "required only for this `--emit`", which is why this is a hand-check.
+def _parse_cores_arg(raw: str) -> dict[str, str]:
+    """`--cores` (alp-sdk#1652): `core_id:os[,core_id:os...]` -- the
+    topology an IDE wizard already knows (which cores it's targeting and
+    which OS each runs), NOT a directory. RELOCATED verbatim from
+    `alp_project._parse_cores_arg`. `--cores` is a SELECTOR over the
+    catalog's existing templates (see `find_template_by_cores`'s
+    docstring for why this stops short of an arbitrary core -> app-dir
+    renderer): the directory each core lands in is whatever the matched
+    template already uses, same as picking that template by `--template`
+    would give.
     """
-    if not template:
-        print("alp-orchestrate: --emit scaffold requires --template <id>",
-              file=sys.stderr)
+    cores: dict[str, str] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if ":" not in entry:
+            raise ValueError(
+                f"--cores entry {entry!r} must be core_id:os (e.g. "
+                f"m55_hp:zephyr)")
+        core_id, _, os_name = entry.partition(":")
+        core_id, os_name = core_id.strip(), os_name.strip()
+        if not core_id or not os_name:
+            raise ValueError(
+                f"--cores entry {entry!r} must be core_id:os (e.g. "
+                f"m55_hp:zephyr)")
+        if core_id in cores:
+            raise ValueError(f"--cores names {core_id!r} more than once")
+        cores[core_id] = os_name
+    if not cores:
+        raise ValueError("--cores must name at least one core_id:os pair")
+    return cores
+
+
+def _emit_scaffold(
+    template: Optional[str], sku: Optional[str], cores: Optional[str] = None,
+) -> int:
+    """`--emit scaffold --template <id> --sku <SKU>`, or `--emit scaffold
+    --cores <core_id:os,...> --sku <SKU>` (alp-sdk#1652), straight to
+    stdout.
+
+    `--template`/`--cores` are mutually exclusive alternative ways to pick
+    the template -- `--cores` resolves to a `template_id` via
+    `find_template_by_cores`, then falls into the exact same
+    `emit_scaffold()` call `--template` would reach, exactly as
+    `alp_project._run_scaffold_emit` refuses/resolves them. `--sku` is
+    still required either way and refused ONE AT A TIME, in that order,
+    so a caller that omitted both still learns about `--template`/
+    `--cores` first. `argparse` cannot express "required only for this
+    `--emit`", which is why this is a hand-check.
+    """
+    if template and cores:
+        print("alp-orchestrate: --emit scaffold takes --template OR "
+              "--cores, not both", file=sys.stderr)
+        return 1
+    if not template and not cores:
+        print("alp-orchestrate: --emit scaffold requires --template <id> "
+              "or --cores <core_id:os,...>", file=sys.stderr)
         return 1
     if not sku:
         print("alp-orchestrate: --emit scaffold requires --sku <SKU>",
               file=sys.stderr)
         return 1
+    if cores:
+        try:
+            cores_topology = _parse_cores_arg(cores)
+        except ValueError as e:
+            print(f"alp-orchestrate: {e}", file=sys.stderr)
+            return 1
+        try:
+            record = find_template_by_cores(load_catalog(), cores_topology)
+        except TemplateError as e:
+            print(f"alp-orchestrate: {e}", file=sys.stderr)
+            return 1
+        template = record["id"]
     try:
         sys.stdout.write(emit_scaffold(template, sku))
     except TemplateError as e:
@@ -144,7 +208,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                              "mode ignores it).")
     parser.add_argument("--template", default=None,
                         help="metadata/templates/catalog-v1.json template id; "
-                             "required for --emit scaffold.")
+                             "required for --emit scaffold (unless --cores is "
+                             "given instead).")
+    parser.add_argument("--cores", default=None,
+                        help="core_id:os[,core_id:os...] topology (e.g. "
+                             "'m55_hp:zephyr,m55_he:zephyr'); an alternative "
+                             "to --template for --emit scaffold -- selects "
+                             "whichever catalog template's own cores: "
+                             "topology matches exactly (alp-sdk#1652). "
+                             "Mutually exclusive with --template.")
     parser.add_argument("--sku", default=None,
                         help="Target SoM SKU (e.g. the one a scaffold is "
                              "retargeted onto); required for --emit scaffold, "
@@ -160,7 +232,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if args.emit in TEMPLATE_MODES:
         # Before `--input` is touched: a scaffold IS the new project, so there
         # is no board.yaml to load yet.
-        return _emit_scaffold(args.template, args.sku)
+        return _emit_scaffold(args.template, args.sku, args.cores)
 
     if args.emit in PROJECT_MODES:
         # Straight to the relocated renderers, deliberately WITHOUT the
