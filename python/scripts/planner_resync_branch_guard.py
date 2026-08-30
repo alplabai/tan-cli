@@ -41,20 +41,32 @@ itself the everyday, reused name (the common case: nothing to protect, no
 branch churn) while guaranteeing a diversion target that does not collide
 with the branch the guard just protected.
 
-THE SIGNAL: (author name, author email), not "did the diff move"
+THE SIGNAL: (author name, author email) OR (committer name, committer email),
+not "did the diff move"
 ------------------------------------------------------------------
 The workflow sets a fixed identity before it ever commits
 (`git config user.name "alp-sdk planner re-sync"` /
 `user.email "noreply@alplab.ai"`, `planner-resync.yml`'s "Open or refresh the
 proposal PR" step). Any commit reachable from the branch tip but not from
-`dev` whose author is NOT that exact (name, email) pair is, by construction,
-something a human (or a different tool) added on top of an automated
-proposal -- and is protected. This is not cryptographic: anyone with push
-access could set `user.email` to the same string locally and defeat the
-check. It closes the actual failure mode observed on PR #996 (an ordinary
-human commit under the committer's own identity), not a deliberately hostile
-one -- the same trust boundary this workflow's own `GITHUB_TOKEN` already
-sits inside.
+`dev` whose AUTHOR pair is not that exact (name, email) pair, OR whose
+COMMITTER pair is not, is, by construction, something a human (or a
+different tool) added on top of an automated proposal -- and is protected.
+Author alone is not enough: a human who folds hand-port work into the
+automation's own commit -- `git commit --amend`, or an `--autosquash`
+`fixup!` rebase -- keeps the automation's author identity on the resulting
+commit and only changes the committer to their own. PR #1006's review
+reproduced this end to end: amending 1096 lines onto the automation's commit
+left the guard reading rc 0 ("safe to force-push") on a commit that, a
+force-push later, was destroyed exactly like PR #996's. Checking both pairs
+closes that gap; the workflow's own commits still pass, since its `git
+config` sets both `user.name`/`user.email` before it commits, which fixes
+BOTH author and committer to the automation identity in the same commit.
+This is not cryptographic: anyone with push access could set `user.email` to
+the same string locally (for either identity) and defeat the check. It
+closes the actual failure mode observed on PR #996 and reproduced for
+PR #1006 (an ordinary human identity on one half of a commit), not a
+deliberately hostile one -- the same trust boundary this workflow's own
+`GITHUB_TOKEN` already sits inside.
 
 THE FULL RANGE IS SCANNED, NOT JUST THE TIP
 --------------------------------------------
@@ -93,6 +105,17 @@ Exit codes (`main`)
    line this prints to `$GITHUB_OUTPUT` instead, and leave `--branch` alone.
 2  refused: could not determine whether some candidate branch is safe (a git
    failure other than "ref does not exist"), or ran out of candidate names.
+
+Both 0 and 1 also write `observed_tip=` -- the sha this guard actually
+inspected on `origin/<branch>` (empty string if the branch did not exist
+there yet). This exists so the caller's own `git push` can be made atomic
+with the check, rather than merely advisory: `git checkout -B`/`add
+-A`/`commit` all run between this guard's read and the push, so a commit
+landing on `origin/<branch>` in that window is invisible to a bare `git push
+-f` no matter how careful this guard was. Pass it straight through to `git
+push --force-with-lease="${branch}":"${observed_tip}"` (the documented way to
+require "still exactly this sha", or "still does not exist" for an empty
+value) instead of `-f`.
 """
 
 from __future__ import annotations
@@ -123,7 +146,26 @@ class ForeignCommit:
     sha: str
     author_name: str
     author_email: str
+    committer_name: str
+    committer_email: str
     subject: str
+
+
+@dataclass(frozen=True)
+class OccupiedCandidate:
+    """One candidate branch `decide_branch` tried and found occupied by a
+    foreign commit before moving on to the next name.
+
+    tan-cli#1006 review (minor): on a cascaded diversion, EVERY occupied
+    candidate needs reporting, not just the first -- a reader told about only
+    `candidates_tried[0]`'s foreign commit has no way to know
+    `candidates_tried[1]` (say, a prior run's own diversion target) is also
+    sitting on someone else's work. `protected` on `BranchDecision` keeps
+    naming only the first (it is still "the finding", for the common
+    single-diversion case); `occupied` below is the full list."""
+
+    branch: str
+    commit: ForeignCommit
 
 
 @dataclass(frozen=True)
@@ -132,6 +174,21 @@ class BranchDecision:
     diverted: bool
     protected: ForeignCommit | None
     candidates_tried: tuple[str, ...]
+    #: Every candidate in `candidates_tried` that was found occupied by a
+    #: foreign commit (i.e. every entry except the last, which is always
+    #: `branch` itself) paired with the commit that occupied it -- see
+    #: `OccupiedCandidate`.
+    occupied: tuple[OccupiedCandidate, ...]
+    #: The sha this guard actually inspected on `origin/<branch>` at the
+    #: moment it approved the force-push -- empty string when the branch did
+    #: not exist there yet. Callers pass it to `git push
+    #: --force-with-lease=<branch>:<observed_tip>` so the approval is
+    #: atomic with the write: a commit landing on `origin/<branch>` in the
+    #: window between this check and the push (this step also runs `git
+    #: config` x2, `checkout -B`, `add -A`, `commit` first) is caught by
+    #: `git push` itself rather than silently force-pushed away, closing the
+    #: TOCTOU gap a bare `git push -f` leaves open.
+    observed_tip: str
 
 
 def _git(root: pathlib.Path, *args: str) -> subprocess.CompletedProcess[bytes]:
@@ -174,9 +231,25 @@ def _fetch_branch_tip(root: pathlib.Path, branch: str) -> str:
     return tracking_ref
 
 
+def _rev_parse(root: pathlib.Path, ref: str) -> str:
+    proc = _git(root, "rev-parse", ref)
+    if proc.returncode != 0:
+        raise BranchGuardError(
+            f"git rev-parse {ref} failed: "
+            + proc.stderr.decode("utf-8", "replace").strip()
+        )
+    return proc.stdout.decode("utf-8", "replace").strip()
+
+
 #: `%x1f` (unit separator) rather than a space or comma: a commit subject can
 #: legitimately contain either.
 _LOG_SEP = "\x1f"
+
+
+def _identity_is_foreign(
+    name: str, email: str, automation_name: str, automation_email: str
+) -> bool:
+    return name != automation_name or email.lower() != automation_email.lower()
 
 
 def _foreign_commits(
@@ -187,7 +260,11 @@ def _foreign_commits(
     automation_email: str,
 ) -> list[ForeignCommit]:
     """Every commit reachable from `tracking_ref` but not from `base_ref`
-    whose (author name, author email) pair is not the automation's own.
+    whose AUTHOR pair is not the automation's own, OR whose COMMITTER pair
+    is not -- see the module docstring's "THE SIGNAL" for why both halves
+    are checked: `git commit --amend` and an `--autosquash` `fixup!` rebase
+    both fold a human's work onto the automation's own commit while leaving
+    its author identity untouched, changing only the committer.
 
     Scans the FULL range, not just the tip -- see the module docstring's "THE
     FULL RANGE IS SCANNED, NOT JUST THE TIP".
@@ -195,7 +272,7 @@ def _foreign_commits(
     proc = _git(
         root,
         "log",
-        f"--format=%H{_LOG_SEP}%an{_LOG_SEP}%ae{_LOG_SEP}%s",
+        f"--format=%H{_LOG_SEP}%an{_LOG_SEP}%ae{_LOG_SEP}%cn{_LOG_SEP}%ce{_LOG_SEP}%s",
         f"{base_ref}..{tracking_ref}",
     )
     if proc.returncode != 0:
@@ -207,9 +284,26 @@ def _foreign_commits(
     for line in proc.stdout.decode("utf-8", "replace").splitlines():
         if not line:
             continue
-        sha, name, email, subject = line.split(_LOG_SEP, 3)
-        if name != automation_name or email.lower() != automation_email.lower():
-            foreign.append(ForeignCommit(sha, name, email, subject))
+        sha, author_name, author_email, committer_name, committer_email, subject = (
+            line.split(_LOG_SEP, 5)
+        )
+        author_foreign = _identity_is_foreign(
+            author_name, author_email, automation_name, automation_email
+        )
+        committer_foreign = _identity_is_foreign(
+            committer_name, committer_email, automation_name, automation_email
+        )
+        if author_foreign or committer_foreign:
+            foreign.append(
+                ForeignCommit(
+                    sha,
+                    author_name,
+                    author_email,
+                    committer_name,
+                    committer_email,
+                    subject,
+                )
+            )
     return foreign
 
 
@@ -238,6 +332,7 @@ def decide_branch(
     of how many diversion attempts it took to land somewhere safe.
     """
     tried: list[str] = []
+    occupied: list[OccupiedCandidate] = []
     protected: ForeignCommit | None = None
     candidate = primary_branch
     attempt = 0
@@ -252,7 +347,12 @@ def decide_branch(
         tried.append(candidate)
         if not _remote_branch_exists(root, candidate):
             return BranchDecision(
-                candidate, candidate != primary_branch, protected, tuple(tried)
+                candidate,
+                candidate != primary_branch,
+                protected,
+                tuple(tried),
+                tuple(occupied),
+                "",
             )
         tracking_ref = _fetch_branch_tip(root, candidate)
         foreign = _foreign_commits(
@@ -260,10 +360,16 @@ def decide_branch(
         )
         if not foreign:
             return BranchDecision(
-                candidate, candidate != primary_branch, protected, tuple(tried)
+                candidate,
+                candidate != primary_branch,
+                protected,
+                tuple(tried),
+                tuple(occupied),
+                _rev_parse(root, tracking_ref),
             )
         if protected is None:
             protected = foreign[0]
+        occupied.append(OccupiedCandidate(candidate, foreign[0]))
         candidate = (
             f"{primary_branch}-{divert_suffix}"
             if attempt == 1
@@ -310,6 +416,32 @@ def main(argv: list[str] | None = None) -> int:
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
             fh.write(f"branch={decision.branch}\n")
             fh.write(f"diverted={'true' if decision.diverted else 'false'}\n")
+            # Empty when `decision.branch` did not exist on origin at the
+            # moment this guard checked it -- `git push
+            # --force-with-lease=<branch>:` (empty <expect>) is the documented
+            # way to say "the ref must not already exist" for that case.
+            fh.write(f"observed_tip={decision.observed_tip}\n")
+            # tan-cli#1006 review (minor): every candidate found occupied
+            # on the way to `decision.branch`, not just the first -- a
+            # cascaded diversion (this run's own primary AND its predecessor
+            # run's diversion target both carrying a foreign commit) must
+            # name all of them, not just `decision.protected`'s one. Numbered
+            # keys (`occupied_N_*`), not a single delimited blob: the caller
+            # reads $GITHUB_OUTPUT with plain `grep`/`cut` (no `jq` in this
+            # step), same convention as every other key here.
+            fh.write(f"occupied_count={len(decision.occupied)}\n")
+            for i, oc in enumerate(decision.occupied, start=1):
+                fh.write(f"occupied_{i}_branch={oc.branch}\n")
+                fh.write(f"occupied_{i}_commit={oc.commit.sha}\n")
+                fh.write(f"occupied_{i}_subject={oc.commit.subject}\n")
+                fh.write(
+                    f"occupied_{i}_author={oc.commit.author_name} "
+                    f"<{oc.commit.author_email}>\n"
+                )
+                fh.write(
+                    f"occupied_{i}_committer={oc.commit.committer_name} "
+                    f"<{oc.commit.committer_email}>\n"
+                )
             if decision.protected is not None:
                 # A commit subject cannot contain a literal newline (`%s` is
                 # one line by construction), so this is safe to write verbatim
@@ -323,15 +455,37 @@ def main(argv: list[str] | None = None) -> int:
                     f"{decision.protected.author_name} "
                     f"<{decision.protected.author_email}>\n"
                 )
+                # Reported separately from author (tan-cli#1006): an
+                # `--amend`/`--autosquash fixup!` shape keeps the
+                # automation's own author identity and only the committer is
+                # foreign, so author alone can misleadingly point back at
+                # the automation.
+                fh.write(
+                    "protected_commit_committer="
+                    f"{decision.protected.committer_name} "
+                    f"<{decision.protected.committer_email}>\n"
+                )
 
     if decision.diverted:
         assert decision.protected is not None
+        protected = decision.protected
+        # An `--amend`/`--autosquash fixup!` shape keeps the automation's
+        # own author identity and changes only the committer, so naming
+        # author alone would misleadingly read as "the automation wrote
+        # this" -- name the committer too whenever it differs.
+        identity = f"{protected.author_name} <{protected.author_email}>"
+        if (protected.author_name, protected.author_email) != (
+            protected.committer_name,
+            protected.committer_email,
+        ):
+            identity += (
+                f", committed by {protected.committer_name} "
+                f"<{protected.committer_email}>"
+            )
         sys.stderr.write(
             f"planner_resync_branch_guard: refusing to force-push "
-            f"{args.branch!r} -- it carries {decision.protected.sha[:8]} "
-            f"({decision.protected.subject!r}, by "
-            f"{decision.protected.author_name} "
-            f"<{decision.protected.author_email}>), which the automation "
+            f"{args.branch!r} -- it carries {protected.sha[:8]} "
+            f"({protected.subject!r}, by {identity}), which the automation "
             f"did not write. Diverting to {decision.branch!r} instead; "
             f"{args.branch!r} is left untouched.\n"
         )

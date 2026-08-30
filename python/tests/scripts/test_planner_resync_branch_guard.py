@@ -19,6 +19,18 @@ tan-cli#1002's own required probes verbatim:
 Plus the two failure-mode guards the module's own docstring calls out:
 refusing to guess when a branch's existence can't be determined, and
 refusing to run forever hunting for a free name.
+
+PR #1006's review added a fifth probe (a `major` finding, not read off the
+existing four): the identity check keyed on AUTHOR alone, so a human who
+folds hand-port work into the automation's own commit -- `git commit
+--amend`, or an `--autosquash` `fixup!` rebase -- left the resulting
+commit's author as the automation and its committer as the human, and the
+pre-fix guard called it safe. `test_probe_amend_onto_automation_commit_is_protected`
+and `test_probe_autosquash_fixup_onto_automation_commit_is_protected` drive
+both real shapes end to end; `test_probe_automation_committed_replay_of_human_authored_commit_is_protected`
+is the mirror image, proving the AUTHOR half is still load-bearing on its
+own (author=human, committer=automation) so neither half of the check can be
+dropped without a probe going red.
 """
 
 from __future__ import annotations
@@ -112,6 +124,35 @@ def test_no_remote_branch_yet_is_safe_to_push(repo: pathlib.Path):
     assert decision.branch == "auto/planner-resync"
     assert decision.diverted is False
     assert decision.protected is None
+    # PR #1006 review (minor, force-with-lease): empty when the branch
+    # doesn't exist on origin yet -- `--force-with-lease=<branch>:` (empty
+    # expect) is the documented spelling for "the ref must not already
+    # exist".
+    assert decision.observed_tip == ""
+
+
+def test_observed_tip_names_the_exact_sha_the_guard_approved(repo: pathlib.Path):
+    """PR #1006 review (minor): the guard must hand back the sha it actually
+    inspected on `origin/<branch>`, so the caller's `git push
+    --force-with-lease` is atomic with this check rather than merely
+    advisory -- a commit landing on `origin/<branch>` between this call and
+    the push must be caught by `git push` itself, not silently overwritten."""
+    _push_branch_from_dev(repo, "auto/planner-resync")
+    tip = _commit(repo, AUTOMATION_NAME, AUTOMATION_EMAIL, "propose re-sync", "resync.txt")
+    _run(repo, "push", "-q", "-f", "origin", "auto/planner-resync")
+
+    decision = guard.decide_branch(
+        repo, "dev", "auto/planner-resync", "deadbeef", AUTOMATION_NAME, AUTOMATION_EMAIL
+    )
+    assert decision.diverted is False
+    assert decision.observed_tip == tip
+
+    # A commit landing on origin AFTER the guard's read (the TOCTOU window
+    # this fix closes) must not be silently reflected in an already-returned
+    # decision -- `observed_tip` is a snapshot, not a live query.
+    _commit(repo, HUMAN_NAME, HUMAN_EMAIL, "raced in after the guard's read", "race.txt")
+    _run(repo, "push", "-q", "-f", "origin", "auto/planner-resync")
+    assert decision.observed_tip == tip, "the earlier decision must not mutate"
 
 
 def test_probe_only_automation_commits_force_push_proceeds(repo: pathlib.Path):
@@ -193,6 +234,140 @@ def test_probe_human_commit_behind_automation_tip_still_protected(repo: pathlib.
     assert decision.protected.author_email == HUMAN_EMAIL
 
 
+def test_probe_amend_onto_automation_commit_is_protected(repo: pathlib.Path):
+    """PR #1006 review (major): `git commit --amend` folds a human's
+    hand-port work into the automation's own commit -- the resulting commit
+    KEEPS the automation's author identity (amend does not change it unless
+    `--reset-author` is passed) and changes only the COMMITTER to whoever
+    ran the amend. Reproduces the exact repro from the review comment
+    (a 1096-line hand-port amended onto the machine commit), driven with a
+    real `git commit --amend`, not constructed by hand.
+
+    An author-only check (the pre-fix shape) reads this commit's author as
+    the automation and calls it safe -- this is the shape that let PR #996's
+    force-push destroy 1096 insertions across 15 files."""
+    _push_branch_from_dev(repo, "auto/planner-resync")
+    _commit(repo, AUTOMATION_NAME, AUTOMATION_EMAIL, "propose re-sync", "resync.txt")
+    (repo / "handport.txt").write_text("hand-ported line\n" * 1096, encoding="utf-8")
+    _run(repo, "add", "handport.txt")
+    _run(
+        repo,
+        "-c",
+        f"user.name={HUMAN_NAME}",
+        "-c",
+        f"user.email={HUMAN_EMAIL}",
+        "commit",
+        "-q",
+        "--amend",
+        "--no-edit",
+    )
+    amended_sha = _run(repo, "rev-parse", "HEAD").strip()
+    # Confirm the shape actually landed as intended before trusting the
+    # guard's verdict on it -- author stays the automation, committer is the
+    # human who ran the amend.
+    author = _run(repo, "log", "-1", "--format=%an%x1f%ae").strip().split("\x1f")
+    committer = _run(repo, "log", "-1", "--format=%cn%x1f%ce").strip().split("\x1f")
+    assert author == [AUTOMATION_NAME, AUTOMATION_EMAIL]
+    assert committer == [HUMAN_NAME, HUMAN_EMAIL]
+    _run(repo, "push", "-q", "-f", "origin", "auto/planner-resync")
+
+    decision = guard.decide_branch(
+        repo, "dev", "auto/planner-resync", "cafef00d", AUTOMATION_NAME, AUTOMATION_EMAIL
+    )
+    assert decision.diverted is True
+    assert decision.protected is not None
+    assert decision.protected.sha == amended_sha
+    assert decision.protected.committer_email == HUMAN_EMAIL
+
+    rc = guard.main(
+        [
+            "--repo-root",
+            str(repo),
+            "--branch",
+            "auto/planner-resync",
+            "--divert-suffix",
+            "cafef00d",
+        ]
+    )
+    assert rc == 1, "an amended-in human commit must fail the step, not pass it"
+
+
+def test_probe_autosquash_fixup_onto_automation_commit_is_protected(repo: pathlib.Path):
+    """PR #1006 review (major): a human's `fixup!` commit, folded into the
+    automation's commit by `git rebase --autosquash`, produces the identical
+    shape as `--amend` -- author stays the automation's, committer becomes
+    whoever ran the rebase. Driven with a real `git rebase --autosquash`."""
+    _push_branch_from_dev(repo, "auto/planner-resync")
+    _commit(repo, AUTOMATION_NAME, AUTOMATION_EMAIL, "propose re-sync", "resync.txt")
+    _commit(repo, HUMAN_NAME, HUMAN_EMAIL, "fixup! propose re-sync", "handport.txt")
+    _run(
+        repo,
+        "-c",
+        f"user.name={HUMAN_NAME}",
+        "-c",
+        f"user.email={HUMAN_EMAIL}",
+        "-c",
+        "sequence.editor=true",
+        "rebase",
+        "-q",
+        "-i",
+        "--autosquash",
+        "dev",
+    )
+    fixed_sha = _run(repo, "rev-parse", "HEAD").strip()
+    author = _run(repo, "log", "-1", "--format=%an%x1f%ae").strip().split("\x1f")
+    committer = _run(repo, "log", "-1", "--format=%cn%x1f%ce").strip().split("\x1f")
+    assert author == [AUTOMATION_NAME, AUTOMATION_EMAIL]
+    assert committer == [HUMAN_NAME, HUMAN_EMAIL]
+    _run(repo, "push", "-q", "-f", "origin", "auto/planner-resync")
+
+    decision = guard.decide_branch(
+        repo, "dev", "auto/planner-resync", "cafef00d", AUTOMATION_NAME, AUTOMATION_EMAIL
+    )
+    assert decision.diverted is True
+    assert decision.protected is not None
+    assert decision.protected.sha == fixed_sha
+
+
+def test_probe_automation_committed_replay_of_human_authored_commit_is_protected(
+    repo: pathlib.Path,
+):
+    """Mirror of the two probes above, proving the AUTHOR half of the check
+    still matters and was not made redundant by adding the committer half:
+    author=human, committer=automation (e.g. the automation's own machinery
+    replaying a human-authored change under its own committer identity).
+    Dropping the author check -- checking committer only -- would read this
+    commit as safe."""
+    _push_branch_from_dev(repo, "auto/planner-resync")
+    _run(
+        repo,
+        "-c",
+        f"user.name={AUTOMATION_NAME}",
+        "-c",
+        f"user.email={AUTOMATION_EMAIL}",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "--author",
+        f"{HUMAN_NAME} <{HUMAN_EMAIL}>",
+        "-m",
+        "hand-port replayed under the automation's committer identity",
+    )
+    replayed_sha = _run(repo, "rev-parse", "HEAD").strip()
+    author = _run(repo, "log", "-1", "--format=%an%x1f%ae").strip().split("\x1f")
+    committer = _run(repo, "log", "-1", "--format=%cn%x1f%ce").strip().split("\x1f")
+    assert author == [HUMAN_NAME, HUMAN_EMAIL]
+    assert committer == [AUTOMATION_NAME, AUTOMATION_EMAIL]
+    _run(repo, "push", "-q", "-f", "origin", "auto/planner-resync")
+
+    decision = guard.decide_branch(
+        repo, "dev", "auto/planner-resync", "cafef00d", AUTOMATION_NAME, AUTOMATION_EMAIL
+    )
+    assert decision.diverted is True
+    assert decision.protected is not None
+    assert decision.protected.sha == replayed_sha
+
+
 def test_diversion_target_is_itself_reprotected_if_also_occupied(repo: pathlib.Path):
     """The escape hatch is not trusted blindly: if `<branch>-<suffix>` is
     ALSO occupied by someone else's work, the guard must keep looking rather
@@ -220,6 +395,61 @@ def test_diversion_target_is_itself_reprotected_if_also_occupied(repo: pathlib.P
         "auto/planner-resync-cafef00d",
         "auto/planner-resync-cafef00d-2",
     )
+    # PR #1006 review (minor, cascaded diversion): BOTH occupied candidates
+    # must be reported, not just the primary one `protected` already names --
+    # a reader told about only the first has no way to know the diversion
+    # target it's about to be pointed at is ALSO holding someone else's work.
+    assert [oc.branch for oc in decision.occupied] == [
+        "auto/planner-resync",
+        "auto/planner-resync-cafef00d",
+    ]
+    assert decision.occupied[0].commit.author_email == HUMAN_EMAIL
+    assert decision.occupied[1].commit.author_email == "other@example.com"
+
+
+def test_cascaded_diversion_reports_every_occupied_candidate_in_github_output(
+    repo: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Driven end to end against the CLI, matching PR #1006's review repro:
+    a hand-port left on `auto/planner-resync` by one run, and a second,
+    unrelated hand-port left on that run's own diversion target by a later
+    run. A THIRD run must report both occupied branches in $GITHUB_OUTPUT --
+    reporting only `protected_commit` (the primary branch's finding) would
+    leave `auto/planner-resync-cafef00d`'s own foreign commit unmentioned."""
+    _push_branch_from_dev(repo, "auto/planner-resync")
+    primary_sha = _commit(repo, HUMAN_NAME, HUMAN_EMAIL, "hand-port on the primary branch", "a.txt")
+    _run(repo, "push", "-q", "-f", "origin", "auto/planner-resync")
+
+    _push_branch_from_dev(repo, "auto/planner-resync-cafef00d")
+    diverted_sha = _commit(
+        repo, "Another Human", "other@example.com", "unrelated work on the divert name", "b.txt"
+    )
+    _run(repo, "push", "-q", "-f", "origin", "auto/planner-resync-cafef00d")
+
+    out = tmp_path / "github_output"
+    out.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+
+    rc = guard.main(
+        [
+            "--repo-root",
+            str(repo),
+            "--branch",
+            "auto/planner-resync",
+            "--divert-suffix",
+            "cafef00d",
+        ]
+    )
+    assert rc == 1
+    text = out.read_text(encoding="utf-8")
+    assert "branch=auto/planner-resync-cafef00d-2" in text
+    assert "occupied_count=2" in text
+    assert "occupied_1_branch=auto/planner-resync" in text
+    assert f"occupied_1_commit={primary_sha}" in text
+    assert f"occupied_1_author={HUMAN_NAME} <{HUMAN_EMAIL}>" in text
+    assert "occupied_2_branch=auto/planner-resync-cafef00d" in text
+    assert f"occupied_2_commit={diverted_sha}" in text
+    assert "occupied_2_author=Another Human <other@example.com>" in text
 
 
 def test_cli_writes_github_output(repo: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
@@ -248,6 +478,10 @@ def test_cli_writes_github_output(repo: pathlib.Path, tmp_path: pathlib.Path, mo
     assert "diverted=true" in text
     assert "protected_commit_subject=hand-port work" in text
     assert f"protected_commit_author={HUMAN_NAME} <{HUMAN_EMAIL}>" in text
+    assert f"protected_commit_committer={HUMAN_NAME} <{HUMAN_EMAIL}>" in text
+    # The diverted name doesn't exist on origin yet -- empty, matching
+    # `--force-with-lease=<branch>:` (empty <expect>) for "must not exist".
+    assert "observed_tip=\n" in text
 
 
 def test_refuses_rather_than_guessing_when_existence_cannot_be_determined(

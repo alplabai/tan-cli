@@ -357,6 +357,20 @@ jobs:
           fi
           short="${SDK_SHA:0:8}"
 
+          # tan-cli#1006 review (nit): this is the ONE place the automation's
+          # commit identity is spelled out in this step -- both the guard
+          # invocation below (`--automation-name`/`--automation-email`,
+          # explicit rather than relying on the script's argparse defaults
+          # matching by coincidence) and the `git config` calls further down
+          # read it from here. Before this, the two lived as independent
+          # string literals (this step's `git config` vs. the script's own
+          # `--automation-name`/`--automation-email` defaults) with nothing
+          # tying them together -- a one-sided edit would silently put the
+          # guard into "every automation commit reads as foreign" mode
+          # (fail-safe, since that only ever over-protects, but silent).
+          AUTOMATION_NAME="alp-sdk planner re-sync"
+          AUTOMATION_EMAIL="noreply@alplab.ai"
+
           # tan-cli#1002: never force-push over a commit this automation did
           # not write. `planner_resync_branch_guard.py` inspects the CURRENT
           # `origin/auto/planner-resync` (before this step commits anything
@@ -378,7 +392,9 @@ jobs:
             --repo-root "${GITHUB_WORKSPACE}" \
             --base-ref dev \
             --branch auto/planner-resync \
-            --divert-suffix "${short}"
+            --divert-suffix "${short}" \
+            --automation-name "${AUTOMATION_NAME}" \
+            --automation-email "${AUTOMATION_EMAIL}"
           rc=$?
           set -e
           if [ "${rc}" -eq 2 ]; then
@@ -394,9 +410,21 @@ jobs:
           branch="$(grep '^branch=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
           diverted="$(grep '^diverted=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
           protected_commit="$(grep '^protected_commit=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          # tan-cli#1006 review (minor): the sha the guard actually inspected
+          # on `origin/${branch}` -- empty when it didn't exist there yet.
+          # Passed to `--force-with-lease` below so the guard's approval is
+          # atomic with the push instead of merely advisory.
+          observed_tip="$(grep '^observed_tip=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          # tan-cli#1006 review (minor, cascaded diversion): EVERY candidate
+          # the guard found occupied on its way to `${branch}`, not just
+          # `protected_commit` (which only ever names the first) -- a run
+          # that diverts past a name a PRIOR run already diverted to must
+          # name both, or a reader is told about only one of two branches
+          # holding someone else's work.
+          occupied_count="$(grep '^occupied_count=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
 
-          git config user.name  "alp-sdk planner re-sync"
-          git config user.email "noreply@alplab.ai"
+          git config user.name  "${AUTOMATION_NAME}"
+          git config user.email "${AUTOMATION_EMAIL}"
           git checkout -q -B "${branch}"
           git add -A python/
           # Commit subject carries NO issue-closing keyword. GitHub builds a
@@ -409,7 +437,16 @@ jobs:
           Machine-proposed by python/scripts/planner_resync.py. See the PR body
           for what merged, what was flagged for manual porting, and which pins
           moved. Refs alplabai/alp-sdk#855."
-          git push -q -f origin "${branch}"
+          # tan-cli#1006 review (minor): a bare `git push -q -f` is TOCTOU-stale
+          # by the time it lands -- `planner_resync_branch_guard.py` above
+          # read `origin/${branch}` before this step's own `git config` x2,
+          # `checkout -B`, `add -A`, `commit` ran, and any of those give a
+          # commit pushed into that window room to land on `${branch}`
+          # unnoticed. `--force-with-lease="${branch}":"${observed_tip}"`
+          # (empty `observed_tip` spells "the ref must not already exist",
+          # git's own documented form) makes the push itself re-verify the
+          # guard's premise instead of trusting it went stale-free.
+          git push -q --force-with-lease="${branch}":"${observed_tip}" origin "${branch}"
 
           {
             # Same fallback as the "Propose the re-sync" step above (tan-cli#911)
@@ -426,14 +463,36 @@ jobs:
             if [ "${diverted}" = "true" ]; then
               echo "### This proposal was diverted (tan-cli#1002)"
               echo
-              echo "\`auto/planner-resync\` carries commit \`${protected_commit}\`,"
-              echo "which this automation did not write, and was left completely"
-              echo "untouched -- this PR proposes against \`${branch}\` instead. If"
-              echo "that commit is hand-port work you (or another re-sync PR) left"
-              echo "on \`auto/planner-resync\`, it is still there:"
-              echo "<https://github.com/${{ github.repository }}/tree/auto/planner-resync>."
-              echo "Reconcile it with this proposal by hand -- do not assume the two"
-              echo "cover the same delta."
+              if [ "${occupied_count:-0}" -eq 1 ]; then
+                echo "\`auto/planner-resync\` carries commit \`${protected_commit}\`,"
+                echo "which this automation did not write, and was left completely"
+                echo "untouched -- this PR proposes against \`${branch}\` instead. If"
+                echo "that commit is hand-port work you (or another re-sync PR) left"
+                echo "on \`auto/planner-resync\`, it is still there:"
+                echo "<https://github.com/${{ github.repository }}/tree/auto/planner-resync>."
+              else
+                # tan-cli#1006 review: a cascaded diversion (this run's own
+                # primary AND an earlier run's diversion target both already
+                # occupied) -- name every branch this run found occupied, not
+                # just the primary, so a reader isn't pointed at only one of
+                # several branches holding someone else's work.
+                echo "This run found **${occupied_count}** branches already"
+                echo "occupied by a commit this automation did not write, and"
+                echo "left every one of them completely untouched -- this PR"
+                echo "proposes against \`${branch}\` instead:"
+                echo
+                for i in $(seq 1 "${occupied_count}"); do
+                  ob="$(grep "^occupied_${i}_branch=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+                  oc="$(grep "^occupied_${i}_commit=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+                  oa="$(grep "^occupied_${i}_author=" "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+                  echo "* \`${ob}\` carries \`${oc}\` (by ${oa}):"
+                  echo "  <https://github.com/${{ github.repository }}/tree/${ob}>"
+                done
+              fi
+              echo
+              echo "If any of those commits are hand-port work you (or another"
+              echo "re-sync PR) left there, reconcile it with this proposal by"
+              echo "hand -- do not assume they cover the same delta."
               echo
             fi
             echo "### This proposal's own checks"
@@ -442,7 +501,7 @@ jobs:
             echo "| --- | --- |"
             echo "| \`planner_resync.py\` exit | \`${RC}\` (0 clean · 1 needs a human · 2 refused) |"
             echo "| freshness gate + resync tests, run in the proposing job | ${GATE_VERDICT:-not run} |"
-            echo "| branch-clobber guard (tan-cli#1002) | $([ "${diverted}" = "true" ] && echo "diverted -- \`auto/planner-resync\` was occupied" || echo "auto/planner-resync was safe to force-push") |"
+            echo "| branch-clobber guard (tan-cli#1002) | $([ "${diverted}" = "true" ] && echo "diverted -- ${occupied_count:-1} branch(es) occupied, see above" || echo "auto/planner-resync was safe to force-push") |"
             echo
             echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
@@ -730,6 +789,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # tan-cli#1006 review (minor): a diversion means a human's work was
+          # nearly force-pushed away and the guard caught it -- that is a
+          # real finding, not routine, and must not be indistinguishable from
+          # an ordinary clean run. `steps.pr.outputs.diverted` is one of the
+          # keys `planner_resync_branch_guard.py` writes to $GITHUB_OUTPUT
+          # from inside the "Open or refresh the proposal PR" step (`id:
+          # pr`), which is how it surfaces as that step's own output here.
+          # Checked BEFORE the `case` below (which can itself `exit 1` on
+          # `rc` 1/2, already loud on its own) so a diversion is never lost
+          # regardless of which `rc` branch runs -- the incident this closes
+          # is specifically `rc == 0` with a diversion, which the `case`
+          # below would otherwise report as nothing more than "Re-sync clean
+          # (or nothing owed)." and let the job go green on.
+          if [ '${{ steps.pr.outputs.diverted }}' = 'true' ]; then
+            echo "::warning::planner-resync diverted away from auto/planner-resync (tan-cli#1002) -- ${{ steps.pr.outputs.occupied_count || 1 }} branch(es) carry a commit this automation did not write and were left completely untouched. A green job here does NOT mean nothing needs attention: see ${{ steps.pr.outputs.url || 'the job summary' }} for what was protected and which branch this proposal actually landed on."
+          fi
           rc='${{ steps.resync.outputs.rc }}'
           case "${rc}" in
             0) echo "Re-sync clean (or nothing owed)." ;;
