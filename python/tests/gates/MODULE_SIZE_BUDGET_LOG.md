@@ -674,6 +674,8 @@ several less obvious failures.
   missing rather than rewriting them. No size delta of its own.
 - 2026-08-31 -- tan-cli#1008 review round 6: extract the shared _split_child_key rule so vendored_som (reader) and retarget_board_yaml_som (writer) cannot diverge on a spaced sku:/hw_rev: child key again
     - tan/core/scaffold.py: 1752 -> 1791
+- 2026-08-31 -- tan-cli#1025: _load_som_doc gains an isinstance(dict) guard mirroring targets.py's malformed-preset check
+    - tan/planner/template.py: 1548 -> 1562
 - 2026-08-31 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/bootstrap_cmd.py: 4130 -> 4135
     - tan/commands/generate_cmd.py: 1431 -> 1437
@@ -682,6 +684,8 @@ several less obvious failures.
     - function_count_budget: 302 -> 303
     - tan/commands/sdk_cmd.py: 1060 -> 1456
     - function_count_budget: 301 -> 303
+- 2026-08-31 -- tan-cli#1025 round 2 (PR #1034 review): _topology_for_sku gains outer + per-entry isinstance guards, _default_preset_for_sku gains a default_board string guard
+    - tan/planner/template.py: 1562 -> 1614
 - 2026-08-31 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/debug_config_cmd.py: 2114 -> 2192
     - tan/core/debug_launch.py: 1539 -> 1770
