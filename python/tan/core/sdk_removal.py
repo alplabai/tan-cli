@@ -108,6 +108,28 @@ def is_outside_cache_root(target: Path, destination: Path) -> bool:
     return not (candidate == root or candidate.is_relative_to(root))
 
 
+def is_cache_root_itself(target: Path, destination: Path) -> bool:
+    """Whether `target` resolves to `destination` EXACTLY -- the case
+    `is_outside_cache_root` treats as fine (`candidate == root` is
+    deliberately not "outside") but that is in fact the single most
+    destructive target this command can be pointed at: every install under
+    the cache root at once, not one of them. Found live, by measurement, not
+    by reading: `tan sdk remove .` from inside an otherwise-empty cwd, or
+    `tan sdk remove <dest> --destination <dest>`, deleted a two-version cache
+    root outright, `ok: true`, no `--force` required, because `--destination`
+    itself is never checked against `_load_bearing_reasons` (that ladder only
+    ever names a specific VERSION subdirectory, never the root that holds
+    them) and `is_outside_cache_root` explicitly exempts the equal case so a
+    caller CAN still name the root on purpose elsewhere.
+
+    Same lexical-abspath comparison as `is_outside_cache_root`, for the same
+    reason (stable for a target that will not exist once removed).
+    """
+    root = Path(os.path.abspath(str(destination)))
+    candidate = Path(os.path.abspath(str(target)))
+    return candidate == root
+
+
 def compute_tree_bytes(path: Path) -> int:
     """Best-effort total size of `path` -- a single file/symlink's own size, or
     the sum of every regular file under it. `0` for anything that does not

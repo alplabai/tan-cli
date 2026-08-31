@@ -607,3 +607,5 @@ several less obvious failures.
     - function_count_budget: 300 -> 302
 - 2026-08-31 -- tan-cli#790 review follow-up, same PR: the existence gate became `os.path.lexists` so a DANGLING link at the target is removed rather than followed, found empty and reported already-absent; and both `~/.alp/sdk-defaults.json` comparisons (the load-bearing refusal and the prune) now fold separators through the new `sdk_default_registry.normalized_sdk_path`, so a hand-edited Windows `sdkPath` spelled with backslashes cannot defeat the refusal and silently orphan the project that registered it. Net effect on the ceiling is a SHRINK against the entry above -- recorded because that entry's number is otherwise the last one a reader sees.
     - tan/commands/sdk_cmd.py: 1421 -> 1416
+- 2026-08-31 -- tan-cli#790 review follow-up, same PR: refuse removing the SDK cache root itself (every install at once) without --force -- sdk_removal.is_cache_root_itself, sdk_cmd's new sdk.remove-is-cache-root refusal, and its own mutation-proved test
+    - tan/commands/sdk_cmd.py: 1416 -> 1456

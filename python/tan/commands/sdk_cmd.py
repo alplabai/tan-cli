@@ -135,6 +135,7 @@ from tan.core.sdk_default_registry import (
 )
 from tan.core.sdk_removal import (
     RemovalOutcome,
+    is_cache_root_itself,
     is_outside_cache_root,
     remove_sdk_tree,
     resolve_removal_target,
@@ -996,15 +997,22 @@ def _run_unknown(*, json_mode: bool, subcommand: str | None) -> None:
 #   * a target outside the cache root refuses without `--force` too -- the
 #     footgun guard `is_outside_cache_root` exists for -- but ONLY once it is
 #     confirmed to exist, so an idempotent no-op never trips it;
+#   * the cache ROOT ITSELF -- every install at once, not one of them --
+#     refuses without `--force` too (`is_cache_root_itself`): the outside-root
+#     guard above deliberately does NOT catch this (`target == destination` is
+#     not "outside"), and no version is individually load-bearing for its own
+#     root, so this was the one target `--force`-less `remove` could wipe the
+#     whole cache with, found live during this review;
 #   * every failure names WHAT blocked it (`sdk.remove-active`,
-#     `sdk.remove-outside-root`, `sdk.remove-in-use`, `sdk.remove-permission` --
-#     flat, ONE dot, not the nested `sdk.remove.active` shape the issue's own
-#     prose sketches: `contract/issue-codes.json`'s
-#     `sdk.remove-missing-argument` entry explains why nested is not available
-#     on this wire) and what to do instead (`--force`, for the first two;
-#     close the holder, for the third; fix the permissions/attributes by
-#     hand, for the fourth) -- the issue's own bar: "the refusal messages
-#     must name what blocked it and what to do instead".
+#     `sdk.remove-outside-root`, `sdk.remove-is-cache-root`,
+#     `sdk.remove-in-use`, `sdk.remove-permission` -- flat, ONE dot, not the
+#     nested `sdk.remove.active` shape the issue's own prose sketches:
+#     `contract/issue-codes.json`'s `sdk.remove-missing-argument` entry
+#     explains why nested is not available on this wire) and what to do
+#     instead (`--force`, for the first three; close the holder, for the
+#     fourth; fix the permissions/attributes by hand, for the fifth) -- the
+#     issue's own bar: "the refusal messages must name what blocked it and
+#     what to do instead".
 #
 # `sdk list`'s proposed `managed`/`active` columns (tan-cli#790's own "related
 # gap" aside) are deliberately OUT of this change: `sdk list` today reports
@@ -1180,6 +1188,38 @@ def _run_remove(
             issues=[],
             exit_code=ExitCode.SUCCESS,
             text_lines=[f"sdk remove: nothing at {target_posix} -- already absent."],
+        )
+        return
+
+    # Checked BEFORE the outside-root guard, and separately from it:
+    # `is_outside_cache_root` deliberately answers False for `target ==
+    # destination` (a caller CAN name the root on purpose), which left the
+    # single most destructive target -- the whole cache, every version at
+    # once -- completely unguarded: `_load_bearing_reasons` only ever names a
+    # specific version subdirectory, never the root that holds them, so
+    # nothing else in this function would have refused it either. Found live
+    # (`tan sdk remove .` from inside an otherwise-empty cache root, `ok:
+    # true`, no `--force`) -- see `sdk_removal.is_cache_root_itself`.
+    if is_cache_root_itself(target, destination) and not force:
+        _fail(
+            json_mode=json_mode,
+            data=_remove_data(
+                removed=False,
+                path=target_posix,
+                version=version,
+                was_active=was_active,
+                freed_bytes=0,
+            ),
+            code="remove-is-cache-root",
+            message=(
+                f'"{target_posix}" IS the SDK cache root itself; removing it '
+                "would delete every install under it at once, not a single "
+                "one. Pass --force to remove the entire cache root, or name "
+                "a specific version or path to remove one install."
+            ),
+            text_lines=[
+                f"sdk remove: {target_posix} is the cache root; refusing without --force."
+            ],
         )
         return
 
