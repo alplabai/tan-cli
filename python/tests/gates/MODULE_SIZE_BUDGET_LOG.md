@@ -674,6 +674,8 @@ several less obvious failures.
   missing rather than rewriting them. No size delta of its own.
 - 2026-08-31 -- tan-cli#1008 review round 6: extract the shared _split_child_key rule so vendored_som (reader) and retarget_board_yaml_som (writer) cannot diverge on a spaced sku:/hw_rev: child key again
     - tan/core/scaffold.py: 1752 -> 1791
+- 2026-08-31 -- tan-cli#1026 planner re-sync to alp-sdk f1b1c9df: kconfig.py ports the unconditional CONFIG_ALP_SDK_SOM_HW_REV emission from alp-sdk#1862
+    - tan/planner/kconfig.py: 2108 -> 2122
 - 2026-08-31 -- tan-cli#1025: _load_som_doc gains an isinstance(dict) guard mirroring targets.py's malformed-preset check
     - tan/planner/template.py: 1548 -> 1562
 - 2026-08-31 -- merge-resync (growth already reasoned on the merged branches)
