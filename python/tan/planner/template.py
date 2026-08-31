@@ -498,14 +498,31 @@ def _board_route_entries(board_name: str, metadata_root: Path) -> list[dict[str,
     flattened across sections -- mirrors
     scripts/gen_portability_matrix.py's `_route_entries` (same section
     list, same join; mirrored here rather than imported across module
-    boundaries for a handful of lines)."""
+    boundaries for a handful of lines).
+
+    Same document-class guard as `_load_som_doc`/`_topology_for_sku`
+    (tan-cli#1037, its own round-two amendment): a `metadata/boards/
+    <board_name>.yaml` that parses but is not itself a mapping (e.g. a
+    bare list) must not reach the outer `.get("e1m_routes")` bare, and
+    an `e1m_routes:` that parses but is not itself a mapping must not
+    reach the per-section `.get(section)` one line down -- both raised
+    a raw `AttributeError` instead of a curated error naming the file
+    and the actual type (tan-cli#1037's Measured, and PR #1034's
+    round-two review, respectively)."""
     board_path = metadata_root / "boards" / f"{board_name}.yaml"
     if not board_path.is_file():
         raise TemplateError(
             f"no metadata/boards/{board_name}.yaml for board {board_name!r}")
-    routes = (
-        yaml.safe_load(board_path.read_text(encoding="utf-8")) or {}
-    ).get("e1m_routes") or {}
+    doc = yaml.safe_load(board_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(doc, dict):
+        raise TemplateError(
+            f"malformed board metadata at {board_path}: expected a YAML "
+            f"mapping, got {type(doc).__name__}")
+    routes = doc.get("e1m_routes") or {}
+    if not isinstance(routes, dict):
+        raise TemplateError(
+            f"{board_path} e1m_routes must be a mapping, got "
+            f"{type(routes).__name__}")
     return [
         entry for section in _ROUTE_SECTIONS
         for entry in (routes.get(section) or [])
@@ -1256,12 +1273,25 @@ def _docs_ref(base_dir: Path) -> str:
     declared pair alone put a dead
     `https://github.com/alplabai/alp-sdk/blob/v0.16.0/docs/...` link in
     every project scaffolded in that window. A missing tag degrades to
-    `main` instead of shipping a 404."""
+    `main` instead of shipping a 404.
+
+    A `sdk_version.yaml` that parses but is not itself a mapping (e.g.
+    a bare list) degrades to `main` the same way a missing file does,
+    rather than raising: this is a README doc-link decision, not a
+    fatal `--emit scaffold` input, so a malformed version file should
+    cost a stale-but-safe link, not the whole scaffold (tan-cli#1037 --
+    a PR #1034 round-two review nit had described this read as safe on
+    the reasoning that `yaml.safe_load(...) or {}` only ever produces a
+    dict-or-`{}` result; a non-empty bare-list/scalar document is
+    neither, and reached `doc.get(...)` bare, `AttributeError: 'list'
+    object has no attribute 'get'`)."""
     try:
         doc = yaml.safe_load(
             (base_dir / "metadata" / "sdk_version.yaml").read_text(encoding="utf-8")
         ) or {}
     except OSError:
+        return "main"
+    if not isinstance(doc, dict):
         return "main"
     version = doc.get("version")
     if doc.get("status") == "released" and version and _tag_resolves(base_dir, f"v{version}"):

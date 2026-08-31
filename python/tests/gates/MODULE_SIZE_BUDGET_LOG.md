@@ -690,3 +690,5 @@ several less obvious failures.
     - tan/commands/debug_config_cmd.py: 2114 -> 2192
     - tan/core/debug_launch.py: 1539 -> 1770
     - function_count_budget: 303 -> 305
+- 2026-08-31 -- tan-cli#1037: _board_route_entries gains outer + nested e1m_routes isinstance guards; _docs_ref gains an isinstance(dict) guard (PR #1034 round-two review nit)
+    - tan/planner/template.py: 1614 -> 1644
