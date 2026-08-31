@@ -695,6 +695,10 @@ several less obvious failures.
     - tan/commands/debug_config_cmd.py: 2114 -> 2192
     - tan/core/debug_launch.py: 1539 -> 1770
     - function_count_budget: 303 -> 305
+- 2026-08-31 -- tan-cli#1037: _board_route_entries gains outer + nested e1m_routes isinstance guards; _docs_ref gains an isinstance(dict) guard (PR #1034 round-two review nit)
+    - tan/planner/template.py: 1614 -> 1644
+- 2026-08-31 -- tan-cli#1037 PR #1048 review: add the third (per-section) isinstance(list) guard to _board_route_entries, mirroring _topology_for_sku's outer-plus-per-entry shape
+    - tan/planner/template.py: 1644 -> 1658
 - 2026-08-31 -- tan-cli#1028: sdk remove reports resolvesToAfter (what now resolves post-removal)
     - tan/commands/sdk_cmd.py: 1456 -> 1516
 - 2026-08-31 -- tan-cli#1043 round-2 review: correct _resolves_to_after docstring's sdk-current-equivalence claim + document the dangling-project-pin gap (tan-cli#1051)

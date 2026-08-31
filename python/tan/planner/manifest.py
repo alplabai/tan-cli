@@ -65,13 +65,14 @@ def _helper_mcus(project: BoardProject) -> list[dict[str, Any]]:
     written locally (flash_method + flash_args), how it is updated in the
     field (update_channel), and who may invoke the flash method
     (flash_policy) are three separate axes, and a helper may declare any
-    combination.  The GD32 bridge declares all three: an
-    `alp_ota_spi_bridge` channel for normal field updates AND a
-    `recovery_only` swd_probe method for a bricked board.  Dropping the
-    flash keys because a channel exists would DELETE that recovery path
-    from the manifest rather than let `tan flash` decline it, so this
-    function must never make one key's presence suppress another's
-    (alp-sdk #1357).  `firmware_path` is entirely ABSENT from the row when
+    combination.  The GD32 bridge declares two: an `alp_ota_spi_bridge`
+    channel for normal field updates, and (until tan-cli#732 removed its
+    local write path, `swd_probe`) a `recovery_only` local flash method for
+    a bricked board.  Dropping the flash keys because a channel exists would
+    DELETE that recovery path from the manifest rather than let `tan flash`
+    decline it, so this function must never make one key's presence
+    suppress another's (alp-sdk #1357).  `firmware_path` is entirely ABSENT
+    from the row when
     the preset doesn't declare one (e.g. GD32 bridge SKUs pending a
     released binary, alp-sdk #852/#936) -- it is never emitted as `null`,
     because `system-manifest-v1.schema.json` types it `string` when present

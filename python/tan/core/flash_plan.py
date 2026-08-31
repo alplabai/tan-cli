@@ -23,20 +23,14 @@ reintroduce a tolerant bool/int reader here.
 **No hardware facts (I-26 / ADR-0017).** Nothing in this module names a SKU, an
 address, a pin, an I2C address, a probe serial or a vendor branch. Every such
 value arrives in ``flash_args``, passed through from alp-sdk ``metadata/``.
-
-**TWO** exceptions remain, both inherited verbatim from the Rust oracle and
-both flagged at their definitions: ``_DEFAULT_JLINK_DEVICE`` (a part number)
-and ``_DEFAULT_BASE`` (a flash base address). Do not add a third. The count
-used to read "the ONE exception", naming ``_DEFAULT_JLINK_DEVICE`` and
-silently passing over the address -- tan-cli#402, which also found the two
-literals that miscount was keeping company with: both ``swd_probe``
-success messages hardcoded a ``GD32G553`` SKU and reported it as what the run
-had just programmed, whatever ``flash_args`` actually resolved to. The
-messages now name the resolved device/target, so the only SKU and address
-left in this module are the two named above, each reachable only when the
-manifest supplied nothing. An honest count is the whole mechanism: a
-docstring that undercounts its own debt is how the third one gets added
-without argument.
+tan-cli#732 removed the module's last two exceptions along with the
+``swd_probe`` backend they existed for -- ``_DEFAULT_JLINK_DEVICE`` (a part
+number) and ``_DEFAULT_BASE`` (a flash base address), both inherited verbatim
+from the Rust oracle and reachable only from ``plan_swd_probe`` when a
+manifest omitted the corresponding ``flash_args`` key. Neither default has any
+other caller. If a future backend needs one, restate the count here rather
+than adding it silently -- a docstring that undercounts its own debt is how
+the next one gets added without argument.
 """
 from __future__ import annotations
 
@@ -52,54 +46,8 @@ from tan.core.pending import PENDING_PLACEHOLDER as PENDING_SENTINEL, is_pending
 #: `system_manifest.rs::SYSTEM_MANIFEST_SCHEMA_VERSION`.
 SYSTEM_MANIFEST_SCHEMA_VERSION = 1
 
-#: INHERITED HARDWARE FACT, not a new one -- the second of the two this module
-#: carries, flagged here by #402 after the module docstring had counted only
-#: `_DEFAULT_JLINK_DEVICE` for as long as both had existed.
-#: `builders.rs:16`'s `DEFAULT_BASE`, byte-identical. An ADDRESS, which
-#: ADR-0017 / I-26 forbids, and it is already shipped in the Rust binary --
-#: dropping it here would make the port place a raw `.bin` somewhere else than
-#: the oracle on every `swd_probe` entry whose `flash_args` omits `base`. Only
-#: ever reached when the manifest supplied nothing; the correct fix is for the
-#: SoM preset to always supply `flash_args.base`. alp-sdk#1357/#1364 (measured
-#: against `origin/dev` `496e32ad`) did exactly that for the four V2N/V2M
-#: presets -- `E1M-V2N101`/`E1M-V2N102`/`E1M-V2M101`/`E1M-V2M102` all now carry
-#: an explicit `base: "0x08000000"` -- so this default is unreachable for THOSE
-#: four today; it stays live for any other `swd_probe` entry (present or
-#: future) that omits `base`, and is not yet deleted on either side.
-_DEFAULT_BASE = "0x08000000"
-#: INHERITED HARDWARE FACT, not a new one. `builders.rs:15`'s
-#: `DEFAULT_JLINK_DEVICE`. This is a part number in tan, which ADR-0017 / I-26
-#: forbids, and it is already shipped in the Rust binary -- changing or dropping
-#: it here would make the port disagree with the oracle on every `swd_probe`
-#: entry whose `flash_args` omits `jlink_device`. Kept byte-identical and
-#: quarantined to this one constant; the correct fix is for the SoM preset to
-#: always supply `flash_args.jlink_device`. alp-sdk#1357/#1364 did exactly that
-#: (tan-cli#612) -- all four V2N/V2M presets now supply
-#: `jlink_device: GD32G553MEY7TR` explicitly, the SAME value as this default,
-#: so this default is unreachable for those four today; it stays live for any
-#: other `swd_probe` entry (present or future) that omits `jlink_device`, and
-#: is not yet deleted on either side.
-_DEFAULT_JLINK_DEVICE = "GD32G553MEY7TR"
 _DEFAULT_JLINK_SPEED = 4000
 _JLINK_BINARIES = ("JLinkExe", "JLink")
-
-#: tan-cli#519/#522 review, NIT: shared verbatim between the fallback refusal
-#: at the bottom of `plan_swd_probe` (`chosen` still `None` after BOTH arms
-#: were tried) and the two wrong-arm checks it is now also raised from (see
-#: `_swd_probe_no_tool_found` below) -- one string, not two spellings of the
-#: same diagnosis.
-_SWD_PROBE_NO_TOOL_FOUND = (
-    "swd_probe: no flash tool found -- install SEGGER J-Link (preferred), "
-    "or `openocd`, or `pyocd`."
-)
-
-#: tan-cli#520 REVIEW round 2, nit: the backend-registry key AND the string
-#: `validate_flow_d_preflight_args`/`flow_d_preflight_script`/`_flow_d_
-#: preflight` read as `method` to pick which backend a refusal names --
-#: named the same way `FLOW_D_METHOD` already is, rather than a bare
-#: `"swd_probe"` literal repeated at every call site with nothing tying them
-#: together.
-SWD_PROBE_METHOD = "swd_probe"
 
 
 class ManifestError(Exception):
@@ -972,35 +920,6 @@ def validate_identifier(
         )
 
 
-#: tan-cli#519 review, MINOR: `validate_identifier`'s charset (alnum/`-`/`_`
-#: per `/`-separated segment) refuses `:`, but pyOCD's own `-u`/`--uid`
-#: documents an OPTIONAL `<plugin>:<uid>` form -- confirmed against a real
-#: installed pyOCD 0.44.1's own `--uid` help text ("Optionally prefixed with
-#: '<probe-type>:' where <probe-type> is the name of a probe plugin") and
-#: `pyocd list --plugins`, whose plugin names (`cmsisdap`, `jlink`,
-#: `picoprobe`, `remote`, `stlink`) are themselves plain lowercase
-#: identifiers. A real DAPLink/ST-Link/J-Link UID (bare hex/decimal, no
-#: prefix -- `pyocd list` on this box shows attached J-Links as `600107451`/
-#: `603000869`) already passed the plain guard; only the plugin-prefixed
-#: spelling was over-refused.
-def validate_pyocd_uid(text: str, field_name: str = "pyocd_uid") -> None:
-    """`validate_identifier`, widened by exactly one shape: a SINGLE
-    `<plugin>:<uid>` split, each half charset-guarded the same way the whole
-    value always was. Anything that is not that one shape (no colon, more
-    than one, or an empty half either side of it) falls straight through to
-    the ordinary `validate_identifier` call on the WHOLE value, which refuses
-    it with the same message this field always gave -- this function adds
-    acceptance for one real pyOCD shape, not a new failure mode."""
-    destination = "a spawned pyocd command line argument"
-    if text.count(":") == 1:
-        plugin, uid = text.split(":", 1)
-        if plugin and uid:
-            validate_identifier(plugin, field_name, destination=destination)
-            validate_identifier(uid, field_name, destination=destination)
-            return
-    validate_identifier(text, field_name, destination=destination)
-
-
 def validate_address(text: str, field_name: str) -> None:
     """A flash base address must be purely hex digits, with an optional `0x`/`0X`.
 
@@ -1062,122 +981,6 @@ def validate_commander_path(text: str, label: str) -> None:
         )
 
 
-#: The Jim Tcl bytes that are dangerous UNQUOTED in an OpenOCD `-c` word:
-#: `[`/`]` trigger command substitution (Jim Tcl ships `exec`, so this is
-#: arbitrary HOST command execution, not just an extra OpenOCD command);
-#: `$` triggers variable substitution; `;` separates commands; `"`/`{`/`}`
-#: change how the rest of the word is quoted/grouped. Everything else --
-#: spaces, `:`, `\\`, letters, digits, `.` -- is left alone; a real artefact
-#: path routinely carries all of them and none is special to Jim Tcl outside
-#: an already-quoted/braced word.
-_OPENOCD_TCL_UNSAFE = frozenset('[]$;"{}')
-
-
-def validate_openocd_word(text: str, label: str) -> None:
-    """Reject a control character or a Jim Tcl metacharacter in a value bound
-    for OpenOCD's `-c` command string (tan-cli#486).
-
-    `interface`/`target` already go through `validate_identifier` for exactly
-    this reason; the flash artefact cannot, because it is a real filesystem
-    path (spaces, `:`, `\\`, drive letters all legitimate) rather than a
-    plain identifier. This is the path-shaped equivalent: it blocks the
-    substitution/separator characters Jim Tcl treats specially in an
-    unquoted word, and control characters (a smuggled newline could inject an
-    extra Tcl command the same way it does in a J-Link Commander script),
-    while leaving every character a real path needs untouched.
-    """
-    bad = sorted({c for c in text if ord(c) < 0x20 or ord(c) == 0x7F or c in _OPENOCD_TCL_UNSAFE})
-    if bad:
-        raise FlashPlanError(
-            f"{label} = {_quoted(text)} contains {_str_list_debug(bad)}, a Jim Tcl "
-            "metacharacter or control character -- refusing to interpolate it "
-            "into OpenOCD's -c command string, where it could inject an extra "
-            "command or trigger [...] command substitution (arbitrary host "
-            "command execution)."
-        )
-
-
-def openocd_program_word(text: str) -> str:
-    """Brace `text` for an OpenOCD `-c` command word, UNCONDITIONALLY
-    (tan-cli#486 / tan-cli#487 / tan-cli#511 -- see below for why this is no
-    longer conditional). Named for its original and still primary caller
-    (`-c program {...} verify ...`, the flash artefact); tan-cli#519 review
-    reuses it verbatim for `-c adapter usb location {...}` -- the bracing
-    mechanism below is generic, not artefact-specific, and every value this
-    function ever receives has already passed `validate_openocd_word`.
-
-    `validate_openocd_word` closes the injection hole but leaves the artefact
-    at the mercy of Jim Tcl's own WORD-level rules the moment it is left
-    unbraced: whitespace splits an unquoted word on Tcl's normal command
-    boundary (`program a.elf verify exit 0x20000000` parses as five words --
-    `program`/`a.elf`/`verify`/`exit`/`0x20000000` -- so a space-only hostile
-    artefact injects extra keywords with no metacharacter in sight), and
-    Jim Tcl performs backslash substitution on every unbraced word regardless
-    of whether it also has whitespace, silently mangling any Windows-style
-    path (`C:\\Program Files\\alp\\build\\zephyr.elf` -> `C:Program` /
-    `Files\\x07lp\\x08uildzephyr.elf` -- `\\a`->BEL, `\\b`->BS -- verified
-    against `tclsh`). Both are real, honest-input failures: a Windows user's
-    default install path (`C:\\Program Files\\...`) or an artefact whose
-    directory happens to contain a space needs no attacker at all to trip
-    either one.
-
-    A matched brace pair is the fix: Jim Tcl performs NO substitution --
-    command, variable, OR backslash -- on the material between braces, and
-    treats the whole braced span as ONE word regardless of embedded
-    whitespace. This is safe here BECAUSE `validate_openocd_word` has already
-    rejected `{`/`}` (along with `[`/`]`/`$`/`;`/`"`/control characters) for
-    every caller of this function -- nothing inside `text` can prematurely
-    close the brace or smuggle a substitution past it.
-
-    **Unconditional now, not conditional on whitespace/backslash (tan-cli#511
-    Fable advisory).** The conditional version's own justification -- "leaves
-    every already-recorded `program <path> verify ...` parity fixture
-    byte-identical, since neither recorded case contains whitespace or a
-    backslash" -- was never actually true: both frozen fixtures were captured
-    with `oracle_captures.CAPTURE_PLATFORM = "win32"`
-    (`tests/oracle_captures.py`, tan-cli#269), so the `<ORACLE-ROOT-0>` scratch
-    root each one interpolates is a native Windows path and carries
-    backslashes UNCONDITIONALLY -- the predicate this docstring used to
-    describe could never once observe the "no backslash" branch on the one
-    platform the fixtures are actually anchored to. The Linux-green replay
-    that made it LOOK preserved was an artefact of `compare()`'s own
-    `normalise_scrubbed_path_separators`, which flattens `\\`->`/` in both
-    sides' `entries[].message` before the diff -- plus a POSIX build root
-    that never contains a literal backslash to begin with, so the predicate
-    happened to answer `False` on BOTH sides there and the diff passed by
-    coincidence, not because bracing was truly conditional. On a real
-    Windows run -- the platform the fixtures are pinned to -- the predicate
-    is unconditionally `True` (every path carries `\\`) and always was; it
-    never preserved the parity it was written to protect. So the two cases
-    that exercise this ("multi-segment-interface-is-allowed",
-    "openocd-forced-bin-appends-base") moved OUT of the byte-diff oracle
-    table entirely -- the standing divergence note lived in
-    `tests/parity/test_flash_oracle_parity.py`'s `CASES`, deleted with the
-    oracle axis in tan-cli#269 -- into a bounded
-    exact-difference test that pins the ONLY token allowed to move.
-    Bracing every artefact, with no predicate at all, is therefore not a
-    behaviour change bought at the price of losing coverage: the coverage
-    the predicate was defending never existed.
-
-    **The one glass jaw this trades in, on purpose: a value ending in an ODD
-    number of backslashes.** Jim Tcl's own brace-counting (unrelated to the
-    backslash-substitution rule above, which never runs on braced material)
-    still walks a braced word looking for the UNESCAPED close brace, and
-    counts a run of backslashes immediately before a `}` to decide whether
-    that `}` is escaped. A `text` ending in an odd number of `\\` (impossible
-    for a real file path -- no filesystem lets a name end in `\\`, and
-    `validate_openocd_word` does not need to reject it specially) leaves the
-    closing `}` this function appends looking escaped to that counting rule,
-    so the brace never closes and OpenOCD reports a parse error. FAIL-SAFE
-    (a parse error before anything is written, not a mis-parsed argv), and
-    unreachable by any real artefact path -- documented here, not "fixed" by
-    stripping the guard, because there is no guard: this is an inherent
-    property of Tcl brace-counting that bracing cannot itself avoid, and a
-    future reader must not mistake it for a bug in this function.
-    """
-    return f"{{{text}}}"
-
-
 #: `char::escape_debug`'s named escapes, which is what Rust's `{:?}` for a
 #: `&str` emits. Applied in ONE pass -- escaping `\\` up front and then
 #: re-scanning would revisit the backslashes it just added.
@@ -1231,13 +1034,13 @@ class FlashPlan:
     ok_message: str
     planning_only: bool = False
     jlink_script: str | None = None
-    #: tan-cli#520: the J-Link device profile `swd_probe`'s J-Link arm already
-    #: resolved for the WRITE (`_resolve_jlink_device`), carried through so
-    #: the caller's read-only DPIDR preflight can reuse it as its own connect
-    #: device rather than re-reading a second `flash_args` key with a
-    #: different meaning. `None` for every other backend/arm, including
-    #: `swd_probe`'s own openocd/pyocd arm (no J-Link device profile exists
-    #: there at all).
+    #: tan-cli#520: a backend's own already-resolved WRITE device, carried
+    #: through so the caller's read-only DPIDR preflight can reuse it as its
+    #: own connect device rather than re-reading a second `flash_args` key
+    #: with a different meaning. `None` for every backend/arm that has no such
+    #: device to offer -- today that is every registered backend; the field
+    #: exists for a future J-Link-arm backend that needs it (`swd_probe`, the
+    #: original setter, was removed by tan-cli#732).
     preflight_device: str | None = None
 
 
@@ -1306,7 +1109,7 @@ def _str_list_debug(items) -> str:
     return "[" + ", ".join(_quoted(i) for i in items) + "]"
 
 
-# ── swd_probe ───────────────────────────────────────────────────────────────
+# ── J-Link Commander script quoting (shared by Flow D) ──────────────────────
 
 
 def commander_path(path: str) -> str:
@@ -1323,729 +1126,6 @@ def commander_path(path: str) -> str:
     oracle/bench script -- renders byte-identical to before this fix.
     """
     return f'"{path}"' if any(c.isspace() for c in path) else path
-
-
-def jlink_commander_script(
-    artefact: str, base: str, do_reset: bool, serial: str | None = None
-) -> str:
-    """The J-Link Commander script: reset/halt, load (`loadbin`+base for `.bin`,
-    else `loadfile`), a `verifybin` read-back for the `.bin` arm, optional
-    reset-and-go, quit-close.
-
-    **tan-cli#540 defect 2.** This script used to have no verify step of any
-    kind, so `swd_probe`'s success was inferred from JLinkExe's exit code
-    alone -- and tan-cli#522 measured, on real silicon, that a
-    failure to halt the core does NOT make JLinkExe exit non-zero even with
-    `-ExitOnError 1` on the argv (this backend carries that flag). A load into
-    a core that never halted therefore reported byte-for-byte the same as a
-    clean one. `verifybin` is the second signal that makes the claim an
-    observation: JLinkExe reads the region back and compares it to the file,
-    and a mismatch is an error, which `-ExitOnError 1` turns into a non-zero
-    exit -- so a write that did not land now FAILS the run instead of being
-    reported `ok`. That last link is the same one Flow D has staked since it
-    was written (`plan_alif_mram_jlink` claims `verified` on exactly this
-    basis); it is worth confirming once on the bench with a deliberately
-    wrong artefact.
-
-    **Placement and shape are Flow D's, not new ones.** The line is
-    `verifybin <path> <addr>` -- the form `plan_alif_mram_jlink` emits and the
-    only `verifybin` spelling this repo has actually run on silicon (SEGGER's
-    Commander accepts the comma form too; the load line above keeps its own
-    comma because that line is oracle-measured byte-for-byte). It sits AFTER
-    the load and BEFORE the optional `r`/`g`, for the reason Flow D orders it
-    the same way: once `g` runs, the core is executing and the memory being
-    compared is no longer quiescent.
-
-    **Only the `.bin` arm gets it, and that asymmetry is deliberate.**
-    `verifybin` takes an ADDRESS, and the `loadfile` arm has none to give it
-    -- `base` is a load offset, meaningful only for a raw binary (tan-cli#487
-    defect 6 is precisely about not naming an address the tool never
-    received). J-Link Commander's own `verifyfile` is NOT emitted here: no
-    call site in this repo has ever issued it, so nothing has measured that
-    the shipped Commander/DLL accepts it, and with `-ExitOnError 1` armed an
-    unrecognised command would turn every working ELF/HEX flash into a hard
-    failure. Guessing tool behaviour is the same class of invention the
-    device-profile refusal in `_resolve_jlink_device` already refuses to make.
-    The ELF/HEX arm is therefore still genuinely unverifiable, and
-    `tan.commands.flash_cmd` keeps the `flash.swd-probe-write-unconfirmed`
-    advisory alive for exactly that arm.
-
-    **DIVERGES from the shipped Rust oracle**, deliberately. Measured, not
-    inferred: `target/debug/tan` (`tan 0.4.1`) driven through a real
-    `swd_probe` write with a capturing stub on PATH emits `r` / `halt` /
-    `loadbin <artefact>, <base>` / `r` / `g` / `qc` and no verify line at all.
-    Bug-for-bug parity would mean shipping a flash command that reports
-    success for a write it never checked, on the backend that programs the
-    GD32 bridge; a silicon-safety fix outranks that. It was out of reach of
-    `tests/parity/test_flash_oracle_parity.py` even before tan-cli#269 deleted
-    that module -- the Commander
-    script is written to a temp file and never appears in the envelope, whose
-    `--dry-run` message names only the argv (`... -CommanderScript
-    <generated.jlink>`).
-
-    `serial` (tan-cli#513) is the ONLY disambiguator when a bench carries more
-    than one J-Link -- `JLinkExe` selects a probe by serial alone, with no
-    USB-port equivalent. When given, it is emitted as a leading
-    `SelectEmuBySN {serial}` line, matching `plan_alif_mram_jlink`'s own Flow D
-    shape (its `lines.append(f"SelectEmuBySN {serial}")` emit, its DPIDR
-    preflight's identical emit in `flow_d_preflight_script`) byte-for-byte --
-    same line text, same "first line of the script" position, same
-    "absent -> no line" default. `swd_probe` (tan-cli#513 REVIEW) also passes
-    `-SelectEmuBySN {serial}` in its own argv, belt-and-braces: this backend's
-    `-AutoConnect 1` flag (unlike Flow D's argv, which carries no
-    `-AutoConnect` and relies on its script's own leading `si SWD`/`connect`)
-    means JLinkExe may start connecting to WHATEVER probe autoconnect finds
-    before this script's first line is ever read, so the script-line selector
-    alone is not provably ahead of the connect on every DLL version -- the
-    argv selector is.
-
-    The caller (`plan_swd_probe`) validates `serial` with the same
-    `validate_identifier(..., destination=_JLINK_SERIAL_DESTINATION)` guard
-    Flow D applies, before this function is ever reached; this function does
-    NOT re-validate it -- unlike `artefact`, which this function DOES validate
-    itself via `validate_commander_path` just below (`artefact` has no other
-    single caller to trust; `serial` has exactly one, `plan_swd_probe`, which
-    validates it unconditionally regardless of which arm ends up running).
-    """
-    validate_commander_path(artefact, "the flash artefact path")
-    lines: list[str] = []
-    if serial is not None:
-        lines.append(f"SelectEmuBySN {serial}")
-    lines += ["r", "halt"]
-    # `is_raw_bin` reads the extension via `os.path.splitext` -- checked on
-    # the UNQUOTED artefact, before `commander_path` may wrap it in `"..."`,
-    # which would otherwise shift the extension off the string entirely.
-    is_bin = is_raw_bin(artefact)
-    artefact = commander_path(artefact)
-    if is_bin:
-        lines.append(f"loadbin {artefact}, {base}")
-        # tan-cli#540: the read-back that makes the success claim an
-        # observation. Emitted whether or not `do_reset` is set -- `reset`
-        # governs the post-write `r`/`g` below, not whether the bytes are
-        # checked -- and always before that pair. See this function's
-        # docstring for the shape, the placement and the oracle divergence.
-        lines.append(f"verifybin {artefact} {base}")
-    else:
-        lines.append(f"loadfile {artefact}")
-    if do_reset:
-        lines += ["r", "g"]
-    lines.append("qc")
-    return "\n".join(lines) + "\n"
-
-
-def _resolve_jlink_device(fa: Any) -> str:
-    """The J-Link device profile for `swd_probe`'s primary branch:
-    `flash_args.jlink_device` when the manifest named one, else the inherited
-    `_DEFAULT_JLINK_DEVICE` -- EXCEPT when `flash_args.target` is present,
-    which REFUSES.
-
-    **tan-cli#402.** `target` is the OpenOCD/pyOCD target name, read ~15 lines
-    below at the point the FALLBACK branch builds its argv -- i.e. after the
-    J-Link branch has already returned. A SoM preset declaring `interface:
-    cmsis-dap, target: stm32h7x` and no `jlink_device` therefore reached a real
-    J-Link write with the compiled-in GD32 profile, at the compiled-in
-    `_DEFAULT_BASE`, on any host that merely happens to have SEGGER installed,
-    with no diagnostic at all -- and `flash_plan.py`'s own `_DEFAULT_JLINK_
-    DEVICE` note records that a shipped preset omits `jlink_device` today. tan
-    cannot derive one spelling from the other (`stm32h7x` is not
-    `STM32H747XI_M7`: an OpenOCD target names a family, a J-Link profile names
-    a part), and guessing is exactly the silicon knowledge I-26 forbids -- so a
-    manifest naming a DIFFERENT part gets a refusal, never a substitution.
-
-    Scoped to `target`, and by KEY PRESENCE rather than by what it resolves to.
-    `interface` names no part, so it does not trip this on its own; and a
-    `target: ""` must not buy the silent GD32 default back on a quoting detail,
-    the same reason `flow_d_available` reads presence. `flash_args` naming
-    NEITHER key keeps the oracle's fallback untouched: that is what every
-    recorded `swd_probe` parity fixture captures (`would run JLinkExe -device
-    GD32G553MEY7TR ...`), so widening this to fire on an empty `flash_args`
-    would diverge from the oracle on 13 fixtures at once.
-
-    **DIVERGES from the shipped Rust oracle** (`builders.rs:243`), which has no
-    such refusal and silently substitutes. Deliberate, and it was out of
-    reach of `tests/parity/test_flash_oracle_parity.py` even before tan-cli#269
-    deleted that module: no `swd_probe` case there declared `target` without
-    ALSO forcing the openocd/pyocd path via `use_openocd`/`use_pyocd`, which
-    skips this branch entirely.
-    """
-    device = fa_str_checked(fa, "jlink_device", False)
-    if device is not None:
-        # tan-cli#520 REVIEW round 2, MAJOR: validated HERE, at PLAN time --
-        # not only inside `flow_d_preflight_script`'s own defensive repeat
-        # (kept; see that call site's comment). Originally this was the ONE
-        # choke point every caller of the J-Link branch passed through,
-        # `--dry-run` included; round 3, finding 1 moved the primary check
-        # to `plan_swd_probe`, ahead of the J-Link-vs-openocd/pyocd split
-        # (this branch is reached only from the J-Link side of that split,
-        # so the openocd/pyocd branch never called this function and never
-        # got the guard). This call is now the redundant-but-harmless
-        # defensive repeat for the J-Link branch's own choke point --
-        # `validate_identifier` is pure, so re-running it here costs nothing
-        # and protects a future caller of `_resolve_jlink_device` that does
-        # not go through `plan_swd_probe`'s hoisted check.
-        validate_identifier(device, "jlink_device")
-        return device
-    if _fa_has_key(fa, "target"):
-        raise FlashPlanError(
-            "swd_probe: flash_args.target is set but flash_args.jlink_device is "
-            f"not -- refusing to fall back to the built-in {_DEFAULT_JLINK_DEVICE} "
-            "profile for a SoM that named a different part. An OpenOCD/pyOCD "
-            "target is not a J-Link device profile and tan does not guess one "
-            "from the other. Add flash_args.jlink_device with the part-number "
-            "J-Link profile, or set flash_args.use_openocd: true (or "
-            "flash_args.use_pyocd: true) to take the path flash_args.target "
-            "belongs to."
-        )
-    return _DEFAULT_JLINK_DEVICE
-
-
-def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
-    """`swd_probe`: J-Link (primary) / OpenOCD / pyOCD."""
-    fa = inp.flash_args
-    base = fa_str_checked(fa, "base", True)
-    if base is not None:
-        validate_address(base, "base")
-    else:
-        base = _DEFAULT_BASE
-    do_reset = _default(fa_bool_checked(fa, "reset"), True)
-    force_pyocd = _default(fa_bool_checked(fa, "use_pyocd"), False)
-    force_openocd = _default(fa_bool_checked(fa, "use_openocd"), False)
-    core = inp.core_id
-    is_bin = is_raw_bin(inp.artefact)
-
-    # tan-cli#513: `flash_args.jlink_serial` was accepted (it passes the #486
-    # charset guard on every other backend) and then silently dropped here --
-    # `swd_probe` emitted no `SelectEmuBySN` at all, so on a bench with more
-    # than one J-Link this backend either failed to connect (JLinkExe with no
-    # probe selected refuses to pick) or, if a connect got through anyway,
-    # could not be trusted to have reached the intended board: `JLinkExe`
-    # selects a probe ONLY by serial, and an OEM-cloned serial shared by two
-    # different probes on the same host is a measured, not hypothetical,
-    # bench condition (tan-cli#513).
-    #
-    # Resolved and validated HERE, unconditionally, BEFORE the J-Link-vs-
-    # openocd/pyocd arm split just below -- not only inside the J-Link
-    # branch (tan-cli#513 REVIEW, finding 2). Two gaps that split closed:
-    # (1) a host-dependent refusal -- `--dry-run` always takes the J-Link arm
-    # (see the `inp.dry_run` bypass just below), so a hostile `jlink_serial`
-    # was refused under `--dry-run` and silently accepted-and-ignored on a
-    # real run on an openocd-only host, the SAME manifest getting two
-    # different verdicts depending on what happened to be on PATH; and
-    # (2) `jlink_serial` reaching the openocd/pyocd arm at all with no
-    # diagnostic -- openocd/pyocd have no probe-serial selection of their own
-    # (`JLinkExe`'s `SelectEmuBySN` is a J-Link-only primitive), so silently
-    # planning that arm anyway would be the exact accept-and-ignore shape
-    # #513 fixed for the J-Link arm, just moved one branch over; that branch
-    # refuses explicitly instead, below.
-    #
-    # `fa_str_checked`, not the tolerant `fa_str` (tan-cli#486 on Flow D): a
-    # NUMERIC serial -- the canonical SEGGER spelling -- is a bare YAML
-    # integer, which `fa_str` treats as "absent" and would silently drop the
-    # line right back. `validate_identifier` closes the same newline-
-    # injection hole `jlink_serial` is guarded against on Flow D
-    # (`_JLINK_SERIAL_DESTINATION`) -- `serial` is interpolated verbatim into
-    # `SelectEmuBySN {serial}`, a J-Link Commander script LINE, and (as of
-    # tan-cli#513 REVIEW) a `-SelectEmuBySN` argv word too.
-    serial = fa_str_checked(fa, "jlink_serial", False)
-    if serial is not None:
-        validate_identifier(serial, "jlink_serial", destination=_JLINK_SERIAL_DESTINATION)
-
-    # tan-cli#519: the OpenOCD and pyOCD arms had NO probe-selection field at
-    # all -- an ABSENT feature, not #513's accept-and-ignore shape (`serial`,
-    # just above, is the ONLY selector this function used to read anywhere).
-    # Deliberately TWO new fields, not one neutral one reused across all three
-    # tools: `JLinkExe` selects by SERIAL only (`SelectEmuBySN`, above); OpenOCD
-    # selects by USB PATH (`adapter usb location 3-4.4.3`); pyOCD has its own
-    # `--uid`. A serial and a USB path are different identifiers, not two
-    # spellings of one -- collapsing them would force this planner to guess
-    # which shape a given manifest string names. Not hypothetical: on the
-    # alplab-gw bench, two DIFFERENT attached probes (distinct USB paths,
-    # distinct SW-DP IDs -- tan-cli#519) enumerate with the SAME OEM-cloned
-    # serial `603000869` -- a serial cannot disambiguate them; a USB path can.
-    #
-    # Both charset-guarded HERE, unconditionally, ahead of the arm split --
-    # mirroring `serial`'s own hoist just above, for the identical reason:
-    # `--dry-run` always takes the J-Link arm (the `inp.dry_run` bypass a few
-    # lines down), so a hostile value must be refused the same way under
-    # `--dry-run` and on a real run, whichever arm the real run happens to take.
-    #
-    # `openocd_usb_location` is interpolated into an OpenOCD `-c` Tcl command
-    # word (`adapter usb location <value>`, built below) -- `validate_identifier`
-    # would reject the dots a real USB topology path uses (`3-4.4.3`), so this
-    # is `validate_openocd_word`, the Jim-Tcl-metacharacter/control-character
-    # guard #486 already gives OpenOCD's other `-c` words.
-    openocd_usb_location = fa_str_checked(fa, "openocd_usb_location", False)
-    if openocd_usb_location is not None:
-        validate_openocd_word(
-            openocd_usb_location, "flash_args.openocd_usb_location"
-        )
-        # tan-cli#519/#522 review round 3, MINOR: `validate_openocd_word`
-        # guards the Jim Tcl/control-character charset only -- whitespace is
-        # deliberately left alone there (a real artefact path needs it, see
-        # that function's own docstring), so a WHITESPACE-ONLY value passed
-        # straight through and reached OpenOCD as `adapter usb location {  }`,
-        # an empty selector the tool would only reject at runtime, on the
-        # bench. Refused at plan time instead, the same as an absent value
-        # would be refused later by OpenOCD -- but before anything is spawned.
-        if not openocd_usb_location.strip():
-            raise FlashPlanError(
-                f"flash_args.openocd_usb_location = {_quoted(openocd_usb_location)} "
-                "is whitespace-only -- refusing to interpolate an empty USB-location "
-                "selector into OpenOCD's `adapter usb location` command."
-            )
-    # `pyocd_uid` only ever reaches argv (`pyocd flash --uid <value> ...`,
-    # below) -- no shell, no Tcl script -- but it is still an identifier-shaped
-    # value from an untrusted manifest, so it gets the same `validate_identifier`
-    # charset guard `jlink_serial` gets (widened for pyOCD's own optional
-    # `<plugin>:<uid>` prefix -- see `validate_pyocd_uid`), not a bespoke
-    # pass-through.
-    pyocd_uid = fa_str_checked(fa, "pyocd_uid", False)
-    if pyocd_uid is not None:
-        validate_pyocd_uid(pyocd_uid, "pyocd_uid")
-
-    # tan-cli#520 REVIEW round 3, finding 1: `flash_args.jlink_device`'s
-    # charset guard used to live ONLY inside `_resolve_jlink_device`, which
-    # is called from the J-Link branch alone -- the openocd/pyocd branch
-    # below never calls it and never reads `jlink_device` at all, so a
-    # hostile value there reached `ok_message`/argv unvalidated whenever a
-    # real run happened to land on that branch (e.g. no J-Link binary on
-    # PATH). `--dry-run` always forces the J-Link branch (the `inp.dry_run`
-    # bypass a few lines down), so the SAME manifest disagreed by mode alone:
-    # `--dry-run` refused, a real run on an openocd-only host reported `ok`.
-    # Hoisted here, unconditionally, mirroring the `jlink_serial` guard just
-    # above -- charset AND type (`fa_str_checked`, not merely `validate_
-    # identifier`'s charset check), so it still doesn't change which branch
-    # is taken, and a benign `jlink_device` still plans identically on the
-    # openocd/pyocd branch -- but a hostile TYPE there (`true` / `-8` / a
-    # list / a map) now raises `FlashPlanError` where it previously reached
-    # `ok_message`/argv unvalidated (that branch has no `_DEFAULT_JLINK_
-    # DEVICE` fallback to protect; it simply never read the key before).
-    # Deliberate arm parity with the J-Link branch's own guard, not an
-    # accident. `_resolve_jlink_device`'s own `validate_identifier` call is kept,
-    # not deleted -- see its docstring -- as the defensive repeat for the
-    # J-Link branch's own choke point, the same "kept" shape this file
-    # already uses for `flow_d_preflight_script`'s read-device recheck.
-    device_precheck = fa_str_checked(fa, "jlink_device", False)
-    if device_precheck is not None:
-        validate_identifier(device_precheck, "jlink_device")
-
-    # tan-cli#520: `flash_args.expect_dpidr` shape-validated HERE,
-    # unconditionally -- reusing Flow D's own `validate_flow_d_preflight_args`
-    # (with `method="swd_probe"` so a refusal names the right backend) rather
-    # than growing a second null/empty checker. `require_device_key=False`:
-    # unlike Flow D, `swd_probe` has no SEPARATE preflight-only device field --
-    # `flash_args.jlink_device` here ALREADY means the write's own `-device`
-    # profile (`_resolve_jlink_device`, a few lines below), oracle-pinned on
-    # its own (`tests/parity/…jlink-bin-artefact-uses-loadbin`, `jlink_device:
-    # NRF_DUMMY` with no `expect_dpidr` at all) -- pairing it with
-    # `expect_dpidr` the way Flow D's DIFFERENT `jlink_device` (a live-core
-    # READ attach profile, distinct from Flow D's own WRITE profile
-    # `jlink_flash_device`) is paired would retroactively demand a preflight
-    # of every manifest that only ever set the write device, moving that
-    # frozen fixture's answer -- measured: it did, before this was scoped to
-    # `require_device_key=False`. `swd_probe`'s preflight is armed by
-    # `expect_dpidr` ALONE; the read device is the same one already resolved
-    # for the write (`_resolve_jlink_device`, passed through explicitly below
-    # rather than re-read from a second `flash_args` key).
-    #
-    # `swd_probe` also has no confirm gate to hide a malformed `expect_dpidr`
-    # behind (`planning_only` is always False here, unlike Flow D) -- so this
-    # runs at PLAN time, same as Flow D's own call, so a malformed manifest
-    # surfaces under `--dry-run` too, not only on a real write. The returned
-    # tuple is discarded here on purpose: this call exists only to make a
-    # null/empty `expect_dpidr` fail loudly now; the real, read-only preflight
-    # probe (which needs a live JLinkExe) reruns `flow_d_preflight_script` --
-    # and therefore this same validation -- from the same `flash_args`, at
-    # write time, in `tan.commands.flash_cmd`.
-    validate_flow_d_preflight_args(fa, method=SWD_PROBE_METHOD, require_device_key=False)
-
-    # `--dry-run` is documented to bypass the required-tool PATH gate entirely;
-    # without SOME bypass here this inner probe hard-failed a dry run on any
-    # box without a probe tool installed, making `--dry-run` host-dependent
-    # instead of a pure preview. Every `--dry-run` case that names NEITHER
-    # `openocd_usb_location` NOR `pyocd_uid` keeps that unconditional bypass,
-    # UNCHANGED (`_JLINK_BINARIES[0]`, no `which()` call at all) -- this is
-    # also what every `swd_probe` dry-run case relied on for a
-    # REPLAY-host-independent answer back when
-    # `tests/parity/test_flash_oracle_parity.py` diffed them; that module went
-    # with the oracle axis in tan-cli#269, and its 15 `would run JLinkExe ...`
-    # previews survive only as the frozen record `python/tests/fixtures/
-    # oracle_captures/test_flash_oracle_parity.json`, which nothing replays.
-    # The reason outlived the diff: widening the real `which()` probe below to
-    # EVERY dry run would make `--dry-run` host-dependent on
-    # whatever probe tools this box happens to have, for no reason those
-    # cases care about.
-    #
-    # MAJOR 2 fix (tan-cli#519/#522 review), scoped to the two fields it
-    # actually concerns: with NEITHER new field bypassed unconditionally as
-    # above, a manifest naming `openocd_usb_location`/`pyocd_uid` still hit
-    # the SAME unconditional J-Link assumption, so BOTH of this arm's
-    # wrong-arm refusals (just below) fired on EVERY such preview, even on a
-    # host that genuinely has openocd/pyocd and no J-Link at all, where a
-    # REAL run takes neither refusal and reports `ok`. Those two fields could
-    # then never be previewed at all unless the manifest also forced
-    # `use_openocd`/`use_pyocd` -- and the refusal text ("this run is taking
-    # the J-Link path") was flatly false for a preview that never spawns
-    # anything. For exactly this pair of fields, `which()` is now consulted
-    # for real, falling back to the synthetic J-Link default only when NO
-    # probe tool at all is found (the one case that still needs a bypass) --
-    # so a host that has openocd/pyocd for real previews the SAME arm a real
-    # run on that host would take, and a `pyocd_uid`/`openocd_usb_location`
-    # refusal (or lack of one) agrees between `--dry-run` and a real write on
-    # the same machine.
-    new_probe_selector_named = openocd_usb_location is not None or pyocd_uid is not None
-    jlink: str | None = None
-    # tan-cli#519/#522 review, NIT: tracks the ONE branch below where `jlink`
-    # is a synthetic placeholder rather than a tool this host actually has --
-    # the bare-host `--dry-run` fallback a few lines down, armed only when NO
-    # probe tool at all could be found. The two wrong-arm refusals just below
-    # need this to tell "a real J-Link is genuinely the arm this run takes"
-    # apart from "no tool resolved at all, and J-Link is merely this
-    # function's default preview assumption" -- see their own comments.
-    jlink_is_bare_host_fallback = False
-    if not (force_pyocd or force_openocd):
-        if inp.dry_run and not new_probe_selector_named:
-            jlink = _JLINK_BINARIES[0]
-        else:
-            jlink = next((n for n in _JLINK_BINARIES if which(n)), None)
-            if jlink is None and inp.dry_run and not (which("openocd") or which("pyocd")):
-                jlink = _JLINK_BINARIES[0]
-                jlink_is_bare_host_fallback = True
-    if jlink is not None:
-        # tan-cli#519: the SAME wrong-arm refusal #513 gave `jlink_serial` on
-        # the OTHER side of this split (below), mirrored here -- a manifest
-        # naming an OpenOCD/pyOCD-only selector that then lands on the J-Link
-        # arm must refuse, not silently drop it. `JLinkExe` has no USB-path or
-        # `--uid` selector of its own; `jlink_serial` is its ONLY one.
-        #
-        # tan-cli#519/#522 review, NIT: EXCEPT when `jlink` is only here
-        # because of the bare-host `--dry-run` fallback just above -- there,
-        # no probe tool was actually found on PATH at all (that is the one
-        # condition that fallback checks), so "this run is taking the J-Link
-        # path" is not true; it is this function's own preview default for a
-        # host with nothing installed. The more useful diagnosis there is the
-        # same one a REAL run on that host reaches (`_SWD_PROBE_NO_TOOL_
-        # FOUND`, below) -- previously a `--dry-run` on a bare host that named
-        # `openocd_usb_location`/`pyocd_uid` reported "taking the J-Link
-        # path" while a real run on the SAME host reported "not taking the
-        # OpenOCD path", two different wrong root causes for one actual fact:
-        # no flash tool is installed.
-        if openocd_usb_location is not None:
-            if jlink_is_bare_host_fallback:
-                raise FlashPlanError(_SWD_PROBE_NO_TOOL_FOUND)
-            raise FlashPlanError(
-                "swd_probe: flash_args.openocd_usb_location is set, but this run is "
-                "taking the J-Link path, which has no USB-location selector of its "
-                "own -- OpenOCD's `adapter usb location` is an OpenOCD-only primitive "
-                "(J-Link selects a probe by serial: flash_args.jlink_serial). Remove "
-                "flash_args.openocd_usb_location, or ensure no SEGGER J-Link is on "
-                "PATH and flash_args.use_openocd is set, so the manifest takes the "
-                "path flash_args.openocd_usb_location belongs to."
-            )
-        if pyocd_uid is not None:
-            if jlink_is_bare_host_fallback:
-                raise FlashPlanError(_SWD_PROBE_NO_TOOL_FOUND)
-            raise FlashPlanError(
-                "swd_probe: flash_args.pyocd_uid is set, but this run is taking the "
-                "J-Link path, which has no --uid selector of its own -- pyOCD's "
-                "--uid is a pyOCD-only primitive (J-Link selects a probe by serial: "
-                "flash_args.jlink_serial). Remove flash_args.pyocd_uid, or ensure no "
-                "SEGGER J-Link is on PATH and flash_args.use_pyocd is set, so the "
-                "manifest takes the path flash_args.pyocd_uid belongs to."
-            )
-        device = _resolve_jlink_device(fa)
-        speed = _default(fa_int_checked(fa, "jlink_speed"), _DEFAULT_JLINK_SPEED)
-        return FlashPlan(
-            argv=(
-                jlink, "-device", device, "-if", "SWD", "-speed", str(speed),
-                # tan-cli#513 REVIEW: `-SelectEmuBySN {serial}` in ARGV, not
-                # only the Commander script's leading line. This arm's argv
-                # carries `-AutoConnect 1` (unlike Flow D's argv, which has no
-                # `-AutoConnect` and instead relies entirely on its script's
-                # own leading `si SWD`/`connect` lines) -- with AutoConnect
-                # armed, JLinkExe may start connecting to whatever probe
-                # autoconnect finds during its own startup, BEFORE this
-                # backend's script is ever read, so the script line alone is
-                # not provably ahead of the connect on every DLL version. The
-                # argv selector applies at parse time, ahead of any connect
-                # the tool performs on its own -- order-independent within
-                # argv itself, and documented SEGGER Commander behaviour, so
-                # both are emitted: belt and braces, not a replacement.
-                *(("-SelectEmuBySN", serial) if serial is not None else ()),
-                "-AutoConnect", "1", "-ExitOnError", "1", "-NoGui", "1",
-                "-CommanderScript",
-            ),
-            # The RESOLVED device, never a compiled-in SKU (#402). This string
-            # is `data.entries[].message` -- the only per-entry human text in
-            # the flash envelope, so it is what alp-sdk-vscode renders as the
-            # outcome of a flash. It used to read `GD32G553 flashed via J-Link
-            # ({device})`, i.e. it resolved the device from metadata and then
-            # threw it away in the prose half, reporting every successful
-            # `swd_probe` write as a GD32G553 whatever it had programmed.
-            #
-            # `@ {base}` only for a raw `.bin` (tan-cli#487, the address half
-            # of #402's device fix): `jlink_commander_script` itself withholds
-            # `base` from `loadfile` for an ELF/HEX (`base` is a load OFFSET,
-            # meaningful only for a raw binary -- see that function and the
-            # openocd/pyocd arm below), so asserting it here unconditionally
-            # named an address the tool never received on every non-`.bin`
-            # write -- either the compiled-in `_DEFAULT_BASE` or whatever the
-            # manifest's `base` happened to be, neither of which this run used.
-            #
-            # `and verified` only on the SAME arm, and for the same discipline
-            # (tan-cli#540 defect 2): that arm's script now ends its load with
-            # a `verifybin` read-back, so on a run that exits 0 the bytes have
-            # genuinely been compared against the artefact. The ELF/HEX arm
-            # gets no verify line -- `verifybin` needs an address and
-            # `loadfile` has none -- so it keeps the plain claim, and
-            # `tan.commands.flash_cmd` keeps qualifying THAT one from the
-            # transcript. The two claims are deliberately lexically DISJOINT
-            # (`flashed via J-Link` is not a substring of `flashed and
-            # verified via J-Link`): flash_cmd's qualification is a targeted
-            # substring swap, and an overlapping pair would let the
-            # unverifiable arm's wording land on a verified write.
-            ok_message=(
-                f"swd_probe[{core}]: {device} flashed and verified via J-Link @ {base}"
-                if is_bin
-                else f"swd_probe[{core}]: {device} flashed via J-Link"
-            ),
-            jlink_script=jlink_commander_script(inp.artefact, base, do_reset, serial),
-            # tan-cli#520: the ALREADY-RESOLVED write device, carried through
-            # so the caller's read-only DPIDR preflight (armed by
-            # `flash_args.expect_dpidr` alone -- see the `require_device_key
-            # =False` note above) can reuse it as the preflight's own connect
-            # device, instead of a manifest needing to repeat a value under a
-            # second key with a different meaning.
-            preflight_device=device,
-        )
-
-    # tan-cli#513 REVIEW, finding 2: the openocd/pyocd arm has no probe-serial
-    # selection of its own -- `JLinkExe`'s `SelectEmuBySN` is a J-Link-only
-    # primitive, and neither `openocd`'s nor `pyocd`'s argv below reads
-    # `jlink_serial` at all. Refusing here (rather than silently building the
-    # plan anyway) is the same accept-and-ignore fix #513 applied to the
-    # J-Link arm, extended to this one: a manifest that names a probe serial
-    # and then runs on the arm that cannot honour it must say so, not report
-    # `ok:true` having dropped the field. Checked unconditionally, ahead of
-    # the `interface`/`target` requirement just below, so the diagnosis is
-    # about the field this arm cannot use rather than a field it happens to
-    # be missing.
-    if serial is not None:
-        raise FlashPlanError(
-            "swd_probe: flash_args.jlink_serial is set, but this run is taking the "
-            "openocd/pyocd path, which has no probe-serial selection of its own -- "
-            "JLinkExe's SelectEmuBySN is a J-Link-only primitive. Remove "
-            "flash_args.jlink_serial, or ensure a SEGGER J-Link is on PATH (and "
-            "flash_args.use_openocd/use_pyocd are not forcing this path) so the "
-            "manifest takes the primary path flash_args.jlink_serial belongs to."
-        )
-
-    # tan-cli#520, the same accept-and-ignore shape one field over: the
-    # SW-DP IDR read-only preflight this arms is a JLinkExe-only primitive too
-    # (there is no OpenOCD/pyOCD DPIDR probe wired here), so a manifest naming
-    # `expect_dpidr` that then lands on this arm must refuse, not silently
-    # drop the wrong-board guard. `_fa_has_key` (not the validated tuple
-    # above) so a null/empty `expect_dpidr` -- already refused by the
-    # `validate_flow_d_preflight_args` call above, on every arm -- is not
-    # reported a second time with a different message; reaching here at all
-    # means it was well-formed (present-and-valid, or absent). Unlike the
-    # `jlink_serial` guard just above, this does NOT also check
-    # `flash_args.jlink_device`: that key already means the WRITE's `-device`
-    # profile on this arm's OWN sibling J-Link branch (`_resolve_jlink_
-    # device`) and has no preflight-only meaning to protect here -- see the
-    # `require_device_key=False` note on the `validate_flow_d_preflight_args`
-    # call above.
-    if _fa_has_key(fa, "expect_dpidr"):
-        raise FlashPlanError(
-            "swd_probe: flash_args.expect_dpidr is set, but this run is taking the "
-            "openocd/pyocd path, which has no DPIDR preflight of its own -- the SW-DP "
-            "IDR read is a JLinkExe-only primitive. Remove flash_args.expect_dpidr, or "
-            "ensure a SEGGER J-Link is on PATH (and flash_args.use_openocd/use_pyocd "
-            "are not forcing this path) so the manifest takes the primary path "
-            "flash_args.expect_dpidr belongs to."
-        )
-
-    # tan-cli#519: mirrors the two wrong-arm refusals just above -- neither
-    # OpenOCD's `adapter usb location` nor pyOCD's `--uid` is the OTHER tool's
-    # primitive, so a manifest naming one and then landing on the other must
-    # refuse rather than silently drop the selector (the same accept-and-ignore
-    # shape #513 closed for `jlink_serial`, now closed on this side too).
-    # `openocd`/`pyocd` are resolved HERE, ahead of the `interface`/`target`
-    # requirement below (mirroring `serial`'s/`expect_dpidr`'s own hoist), so
-    # the diagnosis is about the field this run cannot honour rather than a
-    # field it happens to be missing -- and reused, unchanged, by the argv
-    # build below instead of being computed a second time.
-    #
-    # tan-cli#519/#522 review round 3, MAJOR 2: `(inp.dry_run or which(...))`
-    # treated EVERY `--dry-run` as "assume the tool is on PATH", unconditionally
-    # -- the SAME unscoped bypass the J-Link resolution above had until this
-    # round (`new_probe_selector_named`, defined there), just never scoped
-    # here. Measured on a host with pyocd alone on PATH: a manifest naming
-    # `openocd_usb_location` previewed a full `openocd -f ... -c 'adapter usb
-    # location ...'` command line (`--dry-run` always saw `openocd = True`,
-    # bypassed, so `chosen` was always `"openocd"`), while a REAL run on that
-    # same host refuses (`which("openocd")` is `None` there, so `chosen` is
-    # `"pyocd"`, and the wrong-arm refusal below fires) -- the preview an
-    # operator runs BEFORE touching a board printed a command for a tool not
-    # installed on that host. Scoped exactly like the J-Link resolution: keep
-    # the unconditional bypass ONLY when neither new field is named (every
-    # `would run JLinkExe` oracle-pinned dry-run fixture relies on reaching
-    # THAT bypass first and never falls through to here at all); otherwise
-    # consult `which()` for real, so `openocd`/`pyocd` -- and therefore
-    # `chosen` and every refusal keyed off it -- agree between `--dry-run` and
-    # a real run on the SAME host.
-    if inp.dry_run and not new_probe_selector_named:
-        openocd = not force_pyocd
-        pyocd = not force_openocd
-    else:
-        openocd = not force_pyocd and bool(which("openocd"))
-        pyocd = not force_openocd and bool(which("pyocd"))
-    # BLOCKER fix: `openocd`/`pyocd` above test tool AVAILABILITY only. The arm
-    # actually taken below is `if openocd: ... elif pyocd: ...` -- OpenOCD wins
-    # whenever BOTH are on PATH, but a refusal keyed off availability alone
-    # (`not pyocd`) stayed silent in exactly that case: with both tools present
-    # and `pyocd_uid` set, `pyocd` was True so this guard never fired, and the
-    # run then landed on the `if openocd:` branch below, which has no `--uid`
-    # primitive at all -- silently dropping the probe selector on a
-    # wrong-board write. This is the same accept-and-ignore defect #513/#519
-    # exist to close, re-created by testing availability instead of the
-    # resolved arm. `chosen` resolves the arm ONCE, with the exact same
-    # if/elif precedence the argv-building code below uses, so every refusal
-    # (and the argv build itself) shares one answer to "which arm is this run
-    # actually taking" instead of each asking a differently-shaped question.
-    chosen = "openocd" if openocd else "pyocd" if pyocd else None
-    # tan-cli#519/#522 review, NIT: on a BARE host (no J-Link, no OpenOCD, no
-    # pyOCD) that names `openocd_usb_location`/`pyocd_uid`, `chosen` lands on
-    # `None` here for the SAME reason the fallback refusal at the bottom of
-    # this function raises `_SWD_PROBE_NO_TOOL_FOUND` -- no probe tool
-    # resolved, forced or not (`openocd`/`pyocd` above already fold `force_
-    # pyocd`/`force_openocd` in). Without this check the two field-specific
-    # wrong-arm messages just below fire instead: "not taking the OpenOCD
-    # path" / "not taking the pyOCD path" is technically true but names the
-    # wrong root cause on a bare host -- there is no path this run COULD
-    # take, and naming one specific OTHER tool implies one is available when
-    # none is (measured, paired with the `--dry-run` mirror of this same gap
-    # a few lines up: the same manifest got "taking the J-Link path" under
-    # `--dry-run` and "not taking the OpenOCD path" on a real run, two
-    # different wrong causes for one fact). Scoped to `new_probe_selector_
-    # named` -- a manifest naming NEITHER field never reaches a field-
-    # specific message anyway, so its own diagnosis choice (the `interface`/
-    # `target` gate just below, ahead of the generic fallback) is unaffected.
-    if chosen is None and new_probe_selector_named:
-        raise FlashPlanError(_SWD_PROBE_NO_TOOL_FOUND)
-    if openocd_usb_location is not None and chosen != "openocd":
-        raise FlashPlanError(
-            "swd_probe: flash_args.openocd_usb_location is set, but this run is not "
-            "taking the OpenOCD path -- `adapter usb location` is an OpenOCD-only "
-            "primitive (pyOCD selects a probe by flash_args.pyocd_uid, J-Link by "
-            "flash_args.jlink_serial). Remove flash_args.openocd_usb_location, or "
-            "ensure OpenOCD is on PATH and flash_args.use_pyocd is not forcing the "
-            "pyOCD path, so the manifest takes the path "
-            "flash_args.openocd_usb_location belongs to."
-        )
-    if pyocd_uid is not None and chosen != "pyocd":
-        raise FlashPlanError(
-            "swd_probe: flash_args.pyocd_uid is set, but this run is not taking the "
-            "pyOCD path -- `--uid` is a pyOCD-only primitive (OpenOCD selects a probe "
-            "by flash_args.openocd_usb_location, J-Link by flash_args.jlink_serial). "
-            "Remove flash_args.pyocd_uid, or ensure pyOCD is on PATH and "
-            "flash_args.use_openocd is not forcing the OpenOCD path, so the manifest "
-            "takes the path flash_args.pyocd_uid belongs to."
-        )
-
-    interface = _default(fa_str_checked(fa, "interface", False), "")
-    target = _default(fa_str_checked(fa, "target", False), "")
-    if not interface or not target:
-        raise FlashPlanError(
-            "swd_probe: flash_args.interface and flash_args.target are required for "
-            "the openocd/pyocd path (e.g. interface=cmsis-dap, target=gd32g553) -- "
-            "or install SEGGER J-Link for the primary path."
-        )
-    validate_identifier(interface, "interface")
-    validate_identifier(target, "target")
-    if chosen == "openocd":
-        validate_openocd_word(inp.artefact, "the flash artefact path")
-        # `openocd_program_word` braces the artefact UNCONDITIONALLY -- see
-        # its docstring (tan-cli#486 review, unconditional as of tan-cli#511)
-        # for why a conditional predicate never actually preserved anything.
-        # Safe here because `validate_openocd_word` just rejected every
-        # character (`{`/`}` included) that could escape the brace.
-        program = f"program {openocd_program_word(inp.artefact)} verify"
-        if do_reset:
-            program += " reset"
-        # `base` is a load OFFSET, meaningful only for a raw `.bin`; ELF/HEX
-        # carry their own addresses and OpenOCD's `program` proc adds a trailing
-        # address to them, so passing it unconditionally shifts every section.
-        program += f" exit {base}" if is_bin else " exit"
-        tool = "openocd"
-        argv = (
-            "openocd", "-f", f"interface/{interface}.cfg",
-            # tan-cli#519: the USB-path probe selector, emitted as its own `-c`
-            # command BEFORE the target config/program -- OpenOCD processes
-            # `-f`/`-c` in argv order, and `adapter usb location` must be set
-            # before anything triggers a connect (the target config or the
-            # `program` command below can). Absent entirely when the manifest
-            # names no `openocd_usb_location`, matching every other optional
-            # selector in this module (`jlink_serial`'s own `-SelectEmuBySN`).
-            #
-            # tan-cli#519 review, MINOR: braced via `openocd_program_word`,
-            # the SAME unconditional bracing the artefact word gets just below
-            # -- this was this module's only UNBRACED `-c` value interpolation,
-            # and `validate_openocd_word` (already run on this value, above)
-            # rejects Jim Tcl metacharacters and control characters but not
-            # whitespace: `openocd_usb_location: "3-4.4.3 verify"` reached the
-            # tool as `-c "adapter usb location 3-4.4.3 verify"`, a Tcl
-            # command carrying TWO words where OpenOCD expects one (not an
-            # injection -- every metacharacter is still refused -- but the
-            # exact whitespace-splits-an-unquoted-word class
-            # `openocd_program_word`'s own docstring names, and #511's answer
-            # to that class was unconditional bracing, not a conditional
-            # predicate).
-            *(
-                (
-                    "-c",
-                    f"adapter usb location {openocd_program_word(openocd_usb_location)}",
-                )
-                if openocd_usb_location is not None
-                else ()
-            ),
-            "-f", f"target/{target}.cfg", "-c", program,
-        )
-    elif chosen == "pyocd":
-        tool = "pyocd"
-        parts = ["pyocd", "flash", "--target", target]
-        # tan-cli#519: pyOCD's own probe-UID selector -- an argv pair, not a
-        # Tcl word, so it needs no bracing/quoting the way the OpenOCD line
-        # above does.
-        if pyocd_uid is not None:
-            parts += ["--uid", pyocd_uid]
-        # pyOCD's --base-address is documented binary-only; passing it for an
-        # ELF/HEX is meaningless at best and a wrong-address write at worst.
-        if is_bin:
-            parts += ["--base-address", base]
-        parts.append(inp.artefact)
-        argv = tuple(parts)
-    else:
-        raise FlashPlanError(_SWD_PROBE_NO_TOOL_FOUND)
-    # The same #402 fix as the J-Link line above, on the worse of the two: this
-    # arm named `GD32G553` and echoed no device AT ALL, so nothing in the
-    # message could contradict it. `target` is the only device identity this
-    # path has -- it is literally what OpenOCD/pyOCD were pointed at -- so it
-    # is what the line records, together with which of the two ran.
-    #
-    # `@ {base}` only for a raw `.bin` (tan-cli#487, the address half of #402):
-    # the argv just above deliberately withholds `base` for an ELF/HEX on
-    # BOTH tools (openocd's `program ... exit` with no trailing address;
-    # pyOCD's `if is_bin` guard on `--base-address`), so asserting it here
-    # unconditionally named an address neither tool ever received.
-    return FlashPlan(
-        argv=argv,
-        ok_message=(
-            f"swd_probe[{core}]: {target} flashed via {tool} @ {base}"
-            if is_bin
-            else f"swd_probe[{core}]: {target} flashed via {tool}"
-        ),
-    )
 
 
 def _default(value, fallback):
@@ -2585,9 +1665,8 @@ def validate_flow_d_shape(fa: Any, artefact: str, is_file: Callable[[str], bool]
         # The mramxip shape `loadbin`s the app blob at an explicit MRAM
         # address -- correct ONLY for a raw `.bin`. `loadbin`ing anything else
         # (e.g. `zephyr.elf`) at that address writes the artefact's own
-        # headers into MRAM instead of the app image (tan-cli#311). Unlike
-        # `plan_swd_probe`'s ELF/HEX fallback to `loadfile`, there is no
-        # fallback here: `loadfile` ignores `slot0_load_address` entirely,
+        # headers into MRAM instead of the app image (tan-cli#311). There is no
+        # ELF/HEX fallback to `loadfile` here: it ignores `slot0_load_address` entirely,
         # which would silently place the app wherever the ELF's own load
         # addresses say rather than where this flow demands -- a refusal is
         # the safer failure. tan-cli#353 resolves a real ELF/sibling-`.bin`
@@ -2843,8 +1922,8 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
         # the oracle is being diverged from, and it is the only backend in the
         # registry that persistently programs on-die MRAM: a `tan flash` in a
         # fresh customer's checkout must not silently reprogram an attached
-        # module. `swd_probe` is ungated for a reason that does not apply here
-        # (it targets an external helper MCU's own flash).
+        # module. A backend targeting an external helper MCU's own flash
+        # rather than persistent on-die storage would not need this gate.
         planning_only=inp.dry_run or not confirm,
         jlink_script="\n".join(lines) + "\n",
     )
@@ -2865,33 +1944,29 @@ def validate_flow_d_preflight_args(
     surfaces as a `flash.entry-failed` issue in the planned envelope too --
     not only at real-write time.
 
-    Shared by two backends, not two copies of this shape (tan-cli#520): the
-    ORIGINAL caller is Flow D (`alif_mram_jlink`), and `plan_swd_probe`'s
-    J-Link arm now calls this too, with `method="swd_probe"`, to give the GD32
-    bridge write the identical wrong-board guard. `method` is interpolated
-    ONLY into the refusal text -- it names which backend's `flash_args` a
-    customer needs to fix, since both share one `flash_args` namespace and a
-    manifest could otherwise not tell which entry a bare "flash_args.
-    expect_dpidr" refusal was about. Defaults to `FLOW_D_METHOD` so every
-    existing Flow D call site keeps its exact wording unchanged.
+    Written to be shared by more than one backend, not one copy per backend
+    (tan-cli#520): the caller is Flow D (`alif_mram_jlink`) today, with
+    `method` interpolated ONLY into the refusal text -- it names which
+    backend's `flash_args` a customer needs to fix, since a manifest could
+    otherwise not tell which entry a bare "flash_args.expect_dpidr" refusal
+    was about. Defaults to `FLOW_D_METHOD` so every existing Flow D call site
+    keeps its exact wording unchanged. `swd_probe`'s J-Link arm was the second
+    caller (`method="swd_probe"`, `require_device_key=False`) until tan-cli#732
+    removed the backend; the parameter stays for a future J-Link-arm backend
+    with the same shape.
 
     `require_device_key` (default `True`, Flow D's own shape, unchanged):
     whether `expect_dpidr` must be PAIRED with a `flash_args.jlink_device`
     naming the live-core read attach profile, the way Flow D needs it
     (Flow D's `jlink_device` is DISTINCT from its write-time flash-algorithm
-    profile, `jlink_flash_device`). `swd_probe` passes `False`: it has no
-    separate preflight-only device field at all -- `flash_args.jlink_device`
-    on THAT backend already means the write's own `-device` profile
-    (`_resolve_jlink_device`), oracle-pinned on its own with no `expect_dpidr`
-    anywhere near it (`tests/parity/…jlink-bin-artefact-uses-loadbin`).
-    Pairing `swd_probe`'s `jlink_device` with `expect_dpidr` the way Flow D's
+    profile, `jlink_flash_device`). A backend whose `flash_args.jlink_device`
+    already means the write's own `-device` profile -- `swd_probe` was one --
+    passes `False`: pairing that field with `expect_dpidr` the way Flow D's
     DIFFERENT field is paired would retroactively demand a preflight of every
-    manifest that only ever set the write device -- measured: it moved that
-    frozen fixture's answer before this parameter existed. With
+    manifest that only ever set the write device. With
     `require_device_key=False`, `expect_dpidr` ALONE arms the preflight and
     the second returned slot is always `None`; the caller supplies its own
-    read device (`plan_swd_probe` reuses the already-resolved write device via
-    `FlashPlan.preflight_device`).
+    read device via `FlashPlan.preflight_device`.
 
     `None`/`None` (or `expect_dpidr`/`None` under `require_device_key=False`)
     only for a genuinely ABSENT `expect_dpidr` -- the documented, test-pinned
@@ -2959,10 +2034,10 @@ def _validate_expect_dpidr_width(expected: str, method: str) -> None:
     ID (tan-cli#795). `validate_address` (above) stays a generic charset check
     of any length -- `base` and friends share it -- so this width rule lives
     here instead, narrowly scoped to the one field this preflight arms off of,
-    and runs at the SAME PLAN-TIME call site as `validate_address` itself: both
-    `plan_swd_probe` and Flow D call `validate_flow_d_preflight_args` before
-    any write, via `tan.commands.flash_cmd`, so a truncated value surfaces
-    under `--dry-run` too, not only when a real J-Link probe reads a banner.
+    and runs at the SAME PLAN-TIME call site as `validate_address` itself:
+    Flow D calls `validate_flow_d_preflight_args` before any write, via
+    `tan.commands.flash_cmd`, so a truncated value surfaces under `--dry-run`
+    too, not only when a real J-Link probe reads a banner.
 
     Without this, a truncated value like `0x2477`, or `0x477` (ARM's own
     JEP106 designer field, shared by every ARM SW-DP), would match any ARM
@@ -2982,28 +2057,31 @@ def _validate_expect_dpidr_width(expected: str, method: str) -> None:
 def flow_d_preflight_script(
     inp: FlashInputs, method: str = FLOW_D_METHOD, *, read_device: str | None = None
 ) -> tuple[str, str] | None:
-    """The read-only DPIDR preflight script for a Flow D OR `swd_probe` J-Link
-    plan (tan-cli#520 generalised this from Flow D-only): `(script,
-    expected_id)`, or `None` when the preflight is not armed at all -- see
+    """The read-only DPIDR preflight script for a Flow D J-Link plan (tan-cli
+    #520 generalised this out of a Flow D-only shape so a second backend
+    could reuse it -- see `read_device` below): `(script, expected_id)`, or
+    `None` when the preflight is not armed at all -- see
     `validate_flow_d_preflight_args` for every refusal shape, which this
     delegates to (passing `method` through unchanged) before building the
     script.
 
-    `read_device` (tan-cli#520, default `None`): when the CALLER already has a
-    connect device in hand -- `swd_probe` always does, via
-    `FlashPlan.preflight_device`, the same device its write already resolved
-    -- pass it here rather than requiring a second `flash_args` key. This
-    flips `validate_flow_d_preflight_args`'s `require_device_key` to `False`,
-    so `expect_dpidr` ALONE arms the preflight on that path. `None` (the
-    default) keeps Flow D's own shape exactly: `jlink_device` PAIRED with
-    `expect_dpidr` in `flash_args`, as it always has been.
+    `read_device` (tan-cli#520, default `None`): for a CALLER that already has
+    a connect device in hand via `FlashPlan.preflight_device` -- the same
+    device its own write already resolved -- pass it here rather than
+    requiring a second `flash_args` key. This flips
+    `validate_flow_d_preflight_args`'s `require_device_key` to `False`, so
+    `expect_dpidr` ALONE arms the preflight on that path. `None` (the default)
+    keeps Flow D's own shape exactly: `jlink_device` PAIRED with
+    `expect_dpidr` in `flash_args`, as it always has been. `swd_probe`'s
+    J-Link arm was the one caller that passed a `read_device` until tan-cli
+    #732 removed the backend; the parameter stays for the next one.
 
     Run BEFORE any write, with a live-core attach profile (which the
     part-number one is not), so the caller can abort on the wrong board while
     the session is still read-only. The expected ID always comes from
     `flash_args.expect_dpidr`; the device name comes from either
-    `flash_args.jlink_device` (Flow D shape) or `read_device` (`swd_probe`
-    shape) depending on which was armed.
+    `flash_args.jlink_device` (Flow D shape) or the caller-supplied
+    `read_device`, depending on which was armed.
     """
     expected, paired_device = validate_flow_d_preflight_args(
         inp.flash_args, method, require_device_key=read_device is None
@@ -3053,7 +2131,6 @@ def flow_d_preflight_script(
 
 
 _REGISTRY: dict[str, BackendMeta] = {
-    SWD_PROBE_METHOD: BackendMeta(("JLinkExe", "JLink", "openocd", "pyocd"), plan_swd_probe),
     "zephyr_west_flash": BackendMeta(("west",), plan_zephyr_west_flash),
     "baremetal_cmake_flash": BackendMeta(("cmake",), plan_baremetal_cmake_flash),
     "yocto_wic_to_sd_or_emmc": BackendMeta(("bmaptool", "dd"), plan_yocto_wic),
@@ -3071,8 +2148,8 @@ _REGISTRY: dict[str, BackendMeta] = {
 #: it. `True` is the guard's coverage set.
 #:
 #: A TABLE rather than an inline `method == ...` test at the one call site,
-#: because tan-cli#609 measured what the inline form costs. `flash_cmd` gated
-#: the unarmed-guard ADVISORY on `method == SWD_PROBE_METHOD`; the AEN
+#: because tan-cli#609 measured what the inline form costs. `flash_cmd` used to
+#: gate the unarmed-guard ADVISORY on a single hardcoded method; the AEN
 #: dispatches Flow D (`alif_mram_jlink`), so a real MRAM write on
 #: `e1m-aen-evk-01` (2026-08-10, `origin/dev` `a9062ea`) emitted `ISSUES = []`
 #: -- no guard AND no signal -- on a bench where one J-Link serial is
@@ -3095,7 +2172,6 @@ _REGISTRY: dict[str, BackendMeta] = {
 #: `dpidr_preflight_possible` a closed question rather than a silent omission.
 DPIDR_GUARD_COVERAGE: dict[str, bool] = {
     FLOW_D_METHOD: True,
-    SWD_PROBE_METHOD: True,
     "zephyr_west_flash": False,
     "baremetal_cmake_flash": False,
     "yocto_wic": False,
@@ -3108,25 +2184,17 @@ def dpidr_preflight_possible(method: str, preflight_device: str | None) -> bool:
     """Whether tan CAN run its read-only SW-DP IDR preflight for this entry --
     i.e. whether `flash_args.expect_dpidr` would arm a real check here. Pure.
 
-    Two conditions, in order:
-
-    * the method is on the `True` side of `DPIDR_GUARD_COVERAGE` (see there);
-    * and, for `swd_probe` ONLY, this entry actually took the J-Link arm
-      (`FlashPlan.preflight_device is not None`).
-
-    That second clause is the one method-specific test left in this predicate,
-    and it is about an ARM WITHIN a covered method, not about which methods
-    are covered. On `swd_probe`'s openocd/pyocd arm the DPIDR read is not
-    merely absent but impossible -- `plan_swd_probe` refuses an `expect_dpidr`
-    that lands there, at plan time -- so "the guard is unarmed, set
-    `expect_dpidr`" would be advice that cannot be taken. Flow D has no such
-    split (it is J-Link by construction) and passes `preflight_device=None`.
+    The method being on the `True` side of `DPIDR_GUARD_COVERAGE` is the whole
+    test today. `preflight_device` stays a parameter for call-site symmetry
+    with `dpidr_preflight_unarmed`, which threads the same `FlashPlan` field
+    through -- tan-cli#732 removed `swd_probe`, the one backend whose plan
+    builder could take an arm where a preflight is impossible even though the
+    METHOD is covered (`preflight_device is None` on its openocd/pyocd arm).
+    Flow D has no such split (it is J-Link by construction) and always passes
+    `preflight_device=None`; a future backend with its own split arm would
+    restate that second condition here rather than inventing a new predicate.
     """
-    if not DPIDR_GUARD_COVERAGE.get(method, False):
-        return False
-    if method == SWD_PROBE_METHOD:
-        return preflight_device is not None
-    return True
+    return DPIDR_GUARD_COVERAGE.get(method, False)
 
 
 def dpidr_preflight_unarmed(

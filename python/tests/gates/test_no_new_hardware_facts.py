@@ -78,11 +78,6 @@ ALLOWED: dict[str, str] = {
         "FALLBACK for a doctor run with no --sdk-root, kept byte-identical to today's "
         "metadata value; retires once doctor refuses to run without a resolved SDK."
     ),
-    "flash_plan.py": (
-        "DEBT: _DEFAULT_JLINK_DEVICE, inherited byte-identically from crates/tan-cli "
-        "builders.rs -- a pre-existing I-26 breach in the Rust, kept faithful by the "
-        "port rather than fixed silently."
-    ),
     "new_som_cmd.py": (
         "MIXED. `DEFAULT_BOARD = \"E1M-EVK\"` is DEBT: a UI default only, not a "
         "value the file trusts -- every accepted --default-board (including this "

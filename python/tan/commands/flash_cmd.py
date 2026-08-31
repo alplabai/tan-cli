@@ -112,7 +112,6 @@ from tan.core.flash_plan import (
     FLOW_D_METHOD,
     PIPE,
     SKIP,
-    SWD_PROBE_METHOD,
     FlashInputs,
     FlashPlan,
     FlashPlanError,
@@ -203,6 +202,15 @@ _PREFLIGHT_TIMEOUT_S = 60.0
 #: actually spent.
 _DRAIN_JOIN_S = 2.0
 
+#: tan-cli#732: the ONE `flash_method` spelling this module still recognises
+#: by name after removing the backend it used to dispatch to (`plan_swd_probe`,
+#: `tan.core.flash_plan.SWD_PROBE_METHOD` -- also deleted). Not re-registered
+#: in `_REGISTRY`: kept here only so `_flash_entry`'s unknown-backend refusal
+#: can name the removal and the replacement path explicitly for a manifest
+#: still carrying it, rather than folding it into the generic "no registered
+#: backend" message every OTHER unrecognised method gets.
+_REMOVED_SWD_PROBE_METHOD = "swd_probe"
+
 
 @dataclass
 class _Entry:
@@ -223,24 +231,11 @@ class _Entry:
     #: it, only `_run`'s own `issues` list reads it.
     #:
     #: tan-cli#609: which methods can set it is `DPIDR_GUARD_COVERAGE`'s
-    #: answer (`swd_probe`'s J-Link arm AND Flow D), not `swd_probe`'s alone
-    #: as #520 shipped it -- the AEN dispatches Flow D, so this stayed False
-    #: for every real MRAM write and the envelope carried no signal at all.
+    #: answer -- Flow D today, generalised off a single hardcoded method by
+    #: #609 (originally `swd_probe`'s J-Link arm alone, #520) -- the AEN
+    #: dispatches Flow D, so this stayed False for every real MRAM write and
+    #: the envelope carried no signal at all before #609.
     preflight_unarmed: bool = False
-    #: tan-cli#540: set on a CONFIRMED, real, `swd_probe` J-Link write whose
-    #: own transcript said the core never halted AND whose Commander script
-    #: could carry no `verifybin` -- i.e. the ELF/HEX (`loadfile`) arm, where
-    #: the load went into a running core and nothing observed the bytes land.
-    #: NOT set on the raw-`.bin` arm, which since tan-cli#540 defect 2 reads
-    #: its own write back (`jlink_commander_script`) and is therefore
-    #: confirmed even when the halt failed -- only its post-write reset is in
-    #: doubt there, and the entry's message says so. `_run` reads this to
-    #: append its own `flash.swd-probe-write-unconfirmed` warning `Issue` (and
-    #: the matching text line) alongside this entry's `ok` one; the entry's
-    #: own `message` is already qualified by `_swd_probe_qualified_message`,
-    #: which is what decides this flag. NOT part of the envelope contract --
-    #: `as_dict()` never emits it, exactly like `preflight_unarmed` above.
-    write_unconfirmed: bool = False
     #: tan-cli#611: set when a `flash_policy: recovery_only` helper was let
     #: through by `--helper <id> --recover`. The write itself is legitimate --
     #: it is the bricked-device path the policy exists to keep reachable -- but
@@ -1616,12 +1611,13 @@ def _capture_tail(outcome: _Outcome) -> str | None:
     * Splitting it back apart is not free. Giving the child two ptys would
       restore the preference but would hand it two DIFFERENT terminals, would
       re-interleave the two streams through two reader threads instead of the
-      child's own write order, and -- the load-bearing one -- would cost
-      `_swd_probe_halt_markers` the chronological ordering its positional
-      reading depends on (tan-cli#540 review, MAJOR 1: whether a halt failure
-      came before or after the load is the entire distinction between a failed
-      write and a benign busy core). Trading a correct flash verdict for a
-      fourth line of tail is the wrong way round.
+      child's own write order, and -- the load-bearing one -- would cost a
+      positional transcript reading its chronological ordering (tan-cli#540
+      review, MAJOR 1, on the now-removed `swd_probe` backend's own
+      write-verification reading: whether a halt failure came before or after
+      the load was the entire distinction between a failed write and a benign
+      busy core). Trading a correct flash verdict for a fourth line of tail is
+      the wrong way round.
     * And the preference is not uniformly a win even where it survives: it
       picks stderr over stdout whenever stderr is non-blank, so a tool whose
       real diagnosis goes to stdout and whose stderr carries only a
@@ -1668,8 +1664,9 @@ def _execute_message(outcome: _Outcome, method: str, entry_id: str) -> str:
     now surfaces that diagnosis here too, in place of the old generic
     sentence -- a CUSTOMER-VISIBLE change to the exact string
     `data.entries[].message` (and the text-mode `FAIL:` line) reports for
-    every `_spawn`-backed method (`swd_probe`, `alif_setools`, `west_flash`,
-    ...), declared in this change's own CHANGELOG entry. The bare fallback
+    every `_spawn`-backed method (`alif_mram_jlink`, `alif_setools`,
+    `west_flash`, ...), declared in this change's own CHANGELOG entry. The
+    bare fallback
     now survives only for a child that truly prints nothing (both streams
     genuinely empty) and for `_spawn_pipeline`'s UNCAPTURED text-mode path,
     which pipes neither half's stderr at all and so still reaches
@@ -1751,355 +1748,6 @@ def _flow_d_reset_qualified_message(ok_message: str, outcome: _Outcome) -> str:
     return ok_message.replace(_FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_ONLY)
 
 
-#: The exact claim `plan_swd_probe`'s J-Link arm composes at PLAN time for an
-#: ELF/HEX artefact (`f"...{device} flashed via J-Link"`) -- the arm whose
-#: Commander script takes `loadfile` and therefore carries NO `verifybin`
-#: (there is no address to give one; see `jlink_commander_script`). Matched
-#: verbatim so the qualification below is a targeted substring swap of the one
-#: asserted word, not a re-derivation of the message shape -- the same
-#: discipline `_FLOW_D_VERIFIED_AND_RESET` applies one backend over.
-_SWD_PROBE_FLASHED_CLAIM = "flashed via J-Link"
-_SWD_PROBE_ATTEMPTED_CLAIM = "write attempted via J-Link"
-
-#: The claim the SAME arm composes for a raw `.bin` (tan-cli#540 defect 2),
-#: whose script now ends its load with a `verifybin` read-back. Deliberately
-#: NOT a superstring-safe variant of the above by accident: `_SWD_PROBE_
-#: FLASHED_CLAIM` is not a substring of this one, so the two never both match
-#: and the unverifiable arm's wording can never land on a verified write.
-_SWD_PROBE_VERIFIED_CLAIM = "flashed and verified via J-Link"
-
-#: The POST-LOAD qualification (tan-cli#590), appended when a halt failure
-#: landed after the load completed. Deliberately NOT a fourth phrasing: the
-#: clause `core was busy and did not halt` is lifted from Flow D's own
-#: `_FLOW_D_VERIFIED_ONLY`, which draws this distinction already, and the
-#: remediation sentence is the one the pre-load case in
-#: [`_swd_probe_qualified_message`] already ends with. What is added is the
-#: quoted marker -- the tan-cli#540 discipline of reporting what the tool said
-#: rather than paraphrasing it.
-#:
-#: **It says "after the load", not "the post-write reset", and that limit is
-#: deliberate** (tan-cli#590 REVIEW, MINOR 1). Flow D CAN name its reset,
-#: because `plan_alif_mram_jlink` always emits one. This backend cannot, for
-#: two measured reasons:
-#:
-#:   * `jlink_commander_script` emits `verifybin` BETWEEN the load and the
-#:     `r`/`g` on the `.bin` arm, so a marker in this region may belong to the
-#:     VERIFY stage rather than any reset.
-#:   * `do_reset = _default(fa_bool_checked(fa, "reset"), True)` is a local in
-#:     `plan_swd_probe`, consumed by `jlink_commander_script` and never carried
-#:     on `FlashPlan` -- so a manifest with `reset: false` emits no `r`/`g` at
-#:     all and this code cannot tell. Claiming "reset requested" there would be
-#:     flatly false, not merely imprecise.
-#:
-#: What the partition DOES prove is that the core was busy after the load, and
-#: therefore that nothing took the part through a halted reset into the image
-#: just written -- which is exactly what the remediation turns on. The claim is
-#: narrowed to that; the advice is unchanged.
-_SWD_PROBE_BUSY_AFTER_LOAD = (
-    "; after the load the core was busy and did not halt (J-Link reported "
-    "{quoted}) -- the target may not have been taken through a halted reset "
-    "into the firmware just written, and may still be running the firmware it "
-    "had. Power-cycle it and confirm the new firmware answers."
-)
-
-
-def _swd_probe_halt_markers(outcome: _Outcome) -> list[str]:
-    """Which of the J-Link halt-failure phrases this `swd_probe` write's own
-    transcript actually contains (tan-cli#540). Empty when none did.
-
-    Same two phrases Flow D matches (`_FLOW_D_HALT_FAILURE_MARKERS`) and for
-    the same measured reason: #522 established on real E1M-AEN801 silicon
-    that a halt failure does NOT make JLinkExe exit non-zero even with
-    `-ExitOnError 1` on the argv -- this arm carries that flag too, and the
-    bench still saw exit 0 alongside `VC_CORERESET did not halt CPU` /
-    `WARNING: CPU could not be halted` / `****** Error: Failed to halt CPU` /
-    `CPU is not halted`. So the exit code cannot tell a load into a halted
-    core apart from a load into one that kept running.
-
-    Returned as a LIST rather than a bool so the message below can quote what
-    the tool actually said instead of paraphrasing it -- the difference
-    between "tan thinks the core did not halt" and "J-Link said `Failed to
-    halt CPU`" is the whole point of tan-cli#540.
-
-    **POSITIONAL, not a whole-transcript substring search** (tan-cli#540
-    review, MAJOR 1). `jlink_commander_script` emits TWO halt-capable stages,
-    not one: the pre-load `r`/`halt`, and then -- after the load -- `r`/`g`,
-    which `do_reset = _default(fa_bool_checked(fa, "reset"), True)` turns ON
-    BY DEFAULT, so a shipped `E1M-V2N101` manifest carrying no `reset:` key
-    gets it. Established by RUNNING the script through a capturing Commander
-    stub on `PATH` rather than assuming an order: the script really is `r,
-    halt, loadbin <art>, <base>, r, g, qc`, and the transcript really does
-    report the load finishing (`Downloading file [...]` then `O.K.`) BEFORE
-    the reset chatter that follows it.
-
-    That ordering is the whole distinction. A resident image -- the GD32
-    bridge firmware is exactly one -- starts running the instant `loadbin`
-    finishes, so the post-load `r` cannot halt it and JLinkExe prints the same
-    two phrases a never-halted core would, on a flash that landed perfectly.
-    Searched positionlessly, a COMPLETELY SUCCESSFUL write was reported as
-    unconfirmed and the operator was told to re-flash hardware. Markers after
-    the load speak to the RESET (which is all Flow D ever claims them for --
-    `_flow_d_reset_qualified_message` scopes them to `reset requested, core
-    was busy and did not halt`); only markers BEFORE it can speak to whether
-    the write happened.
-
-    Conservative in the direction that matters: when the transcript never
-    reports a completed load -- because the pre-load halt failed and the write
-    never had a halted target, because the tool worded it differently, or
-    because [`_Tee`]'s bounded join truncated it -- there is no boundary, every
-    marker counts, and the unconfirmed verdict stands. Only a load the tool
-    itself reported FINISHING moves a marker to the reset side.
-
-    A marker landing between the two -- i.e. during the download -- cannot
-    reach here at all: this arm carries `-ExitOnError 1` (measured on the real
-    argv), so a `loadbin` that fails moves the exit code, `outcome.success` is
-    `False`, and `_flash_entry` reports a failure rather than qualifying a
-    success.
-
-    The search runs over `stdout + stderr`, the same concatenation
-    `_flow_d_reset_qualified_message` reads, so a marker on `stderr` sorts
-    after all of `stdout`. That is the real ordering in both transports that
-    exist here: JLinkExe writes this transcript to one stream, and a pty run
-    is ONE device whose entire transcript lands in `.stdout` with `.stderr`
-    empty (see [`_tee_text`]). Pure."""
-    transcript = outcome.stdout + outcome.stderr
-    loaded_at = _jlink_load_completed_at(transcript)
-    markers = []
-    for marker in _FLOW_D_HALT_FAILURE_MARKERS:
-        at = transcript.find(marker)
-        if at < 0:
-            continue
-        if loaded_at is not None and at >= loaded_at:
-            continue  # after the load: the reset stage's, not the write's
-        markers.append(marker)
-    return markers
-
-
-def _swd_probe_post_load_halt_markers(outcome: _Outcome) -> list[str]:
-    """The other half of the same partition (tan-cli#590): which halt-failure
-    phrases this write's transcript contains AT OR AFTER the point JLinkExe
-    said the load finished. Empty when none did, and empty whenever the
-    transcript never reported a load COMPLETING at all. Pure.
-
-    tan-cli#575 made [`_swd_probe_halt_markers`] positional and dropped every
-    post-load marker from the WRITE verdict, which was right: a marker printed
-    after `loadbin`/`loadfile` finished says nothing about whether the bytes
-    landed, and treating it as write-doubt was the false alarm #575 removed.
-    But it does not follow that such a marker says NOTHING -- it says the core
-    was still running after the bytes landed, so nothing took the part through
-    a halted reset INTO the image just written. `jlink_commander_script`'s
-    post-load `r`/`g` is ON BY DEFAULT (`do_reset = _default(fa_bool_checked(
-    fa, "reset"), True)`, so a shipped `E1M-V2N101` manifest carrying no
-    `reset:` key gets it), and it is exactly the stage a freshly-written
-    resident image refuses -- the GD32 bridge firmware starts running the
-    instant the load completes. So this is the COMMON post-write shape, not an
-    edge one, and #575 left it reported as a bare `flashed and verified` with
-    no qualification at all.
-
-    This function does NOT claim the marker came from that `r`/`g`, and the
-    message it feeds does not either -- see [`_SWD_PROBE_BUSY_AFTER_LOAD`] for
-    the two measured reasons the region is wider than the reset stage
-    (`verifybin` sits inside it on the `.bin` arm, and `reset: false` removes
-    the reset entirely without this code being able to tell).
-
-    The boundary is [`_jlink_load_completed_at`]'s, unchanged and shared, so
-    the two halves can never disagree about where the load ended. A marker
-    present on BOTH sides lands in both lists; [`_swd_probe_qualified_message`]
-    checks the write-scoped half FIRST, so the pre-load wording wins there and
-    the two qualifications are never both appended.
-
-    `loaded_at is None` yields `[]` deliberately, and that asymmetry is the
-    same conservatism [`_swd_probe_halt_markers`] documents from the other
-    side: when the tool never reported a completed load, every marker counts
-    as the WRITE's (the unconfirmed verdict stands) and none as the post-load
-    stage's. Splitting one ambiguous marker across both verdicts would qualify
-    the write AND the post-load stage off a single phrase.
-
-    Searched over `stdout + stderr`, the same concatenation every other reader
-    here uses -- see [`_swd_probe_halt_markers`] for why that ordering holds
-    in both transports."""
-    transcript = outcome.stdout + outcome.stderr
-    loaded_at = _jlink_load_completed_at(transcript)
-    if loaded_at is None:
-        return []
-    return [m for m in _FLOW_D_HALT_FAILURE_MARKERS if transcript.find(m, loaded_at) >= 0]
-
-
-#: The two phrases JLinkExe's own transcript uses to open and to close a load
-#: -- `loadbin` (raw `.bin`) and `loadfile` (ELF/HEX) print the same pair, so
-#: the positional reading below covers BOTH of `jlink_commander_script`'s
-#: arms. Matched verbatim, as substrings, exactly as the halt markers above
-#: are: the path inside the brackets varies per run and the completion token
-#: stands alone on its own line.
-_JLINK_LOAD_OPENED = "Downloading file"
-_JLINK_LOAD_COMPLETED = "O.K."
-
-
-def _jlink_load_completed_at(transcript: str) -> int | None:
-    """The index just past the point JLinkExe said the load FINISHED, or `None`
-    when it never said so (tan-cli#540 review, MAJOR 1). Pure.
-
-    Completion, not commencement: the opening `Downloading file [...]` alone
-    proves only that a write was attempted, which is the very thing already in
-    doubt. The completion token is required to come AFTER the opening one so a
-    stray `O.K.` from an earlier stage (a connect, a `halt`) cannot be read as
-    this load's, and so a download that opens and then goes quiet -- the
-    truncated-transcript case -- yields `None` and keeps every marker
-    counting."""
-    opened = transcript.find(_JLINK_LOAD_OPENED)
-    if opened < 0:
-        return None
-    completed = transcript.find(_JLINK_LOAD_COMPLETED, opened)
-    if completed < 0:
-        return None
-    return completed + len(_JLINK_LOAD_COMPLETED)
-
-
-def _swd_probe_qualified_message(
-    ok_message: str, markers: list[str], post_load_markers: list[str]
-) -> tuple[str, bool]:
-    """Qualify `swd_probe`'s claim by what the transcript shows, and say
-    whether the WRITE itself is left unconfirmed (tan-cli#540). Returns
-    `(message, write_unconfirmed)`; `(ok_message, False)` unchanged when the
-    transcript named no halt failure on EITHER side of the load, or when the
-    message is not one this backend's J-Link arm composed. Pure.
-
-    `markers` are the PRE-load (write-scoped) halt failures and
-    `post_load_markers` the ones after the load completed -- see
-    [`_swd_probe_halt_markers`] and [`_swd_probe_post_load_halt_markers`] for
-    the partition. `markers` is checked first and returns on its own, so a
-    marker present on both sides gets the write-scoped wording alone; the two
-    are never both appended.
-
-    `plan_swd_probe` composes its claim at PLAN time, before anything has run,
-    and `_flash_entry` asserts it on the exit code -- which tan-cli#522
-    measured on real E1M-AEN801 silicon does NOT go non-zero when the core
-    fails to halt, even with `-ExitOnError 1` (this arm carries it). So the
-    exit code alone can never tell a halted write from a non-halted one; only
-    the transcript (see [`_swd_probe_halt_markers`]) and the script's own
-    read-back can.
-
-    **Two arms, two different truths, because only one can verify.**
-
-    * A raw `.bin` (`_SWD_PROBE_VERIFIED_CLAIM`) -- `jlink_commander_script`
-      now emits `verifybin` after the load (tan-cli#540 defect 2), so a run
-      that exits 0 has had its bytes COMPARED against the artefact. The write
-      is confirmed; `write_unconfirmed` is `False` and the
-      `flash.swd-probe-write-unconfirmed` advisory (whose own text says "this
-      backend runs no verifybin") would be false here and must not fire. What
-      a halt failure still costs is the RESET half: nothing took the part
-      through a halted reset into the image just written, so it may still be
-      executing the one it had. That is Flow D's exact residual and it gets
-      Flow D's exact treatment -- the message is qualified, the claim of a
-      verified write is not. The sentence deliberately does NOT name the
-      post-write `r`/`g` as the stage that failed, because after the
-      positional fix it cannot have been: [`_swd_probe_halt_markers`] drops
-      every marker printed after the load completes, so a marker that reaches
-      here is a PRE-load one (or one from a transcript that never reported a
-      load completing at all, where the stage is unknowable). Naming the
-      post-write reset would be the one wording that is wrong in every case
-      that still gets here.
-    * An ELF/HEX (`_SWD_PROBE_FLASHED_CLAIM`) -- `loadfile` takes no address,
-      `verifybin` requires one, and no `verifyfile` is emitted because nothing
-      in this repo has measured that the shipped Commander accepts it (see
-      `jlink_commander_script`). This arm therefore still has NEITHER of the
-      two things that could make `flashed` an observation, so the word becomes
-      `write attempted`, `write_unconfirmed` is `True`, and the advisory
-      fires. Narrowed, not deleted: a path that cannot check its own write
-      still owes the operator that sentence.
-
-    Blast radius, for a reader wondering whether this matters: `swd_probe` is
-    declared in alp-sdk metadata solely under `helper_firmware:` (`name:
-    gd32_bridge`, `chip: gd32g553`) on `E1M-V2N101`, `E1M-V2M101` and
-    `E1M-V2M102`, so the failure this qualifies is "tan says the GD32 bridge
-    firmware is flashed when it may not be", which then presents downstream as
-    the bridge not answering with the flash step apparently clean.
-
-    Status stays `ok` and rc stays 0 in BOTH arms (`_flash_entry`),
-    deliberately. On the `.bin` arm a genuinely failed write no longer reaches
-    this function at all -- `verifybin` + `-ExitOnError 1` makes it a non-zero
-    exit and a `failed` entry. On the ELF/HEX arm the write may well have
-    landed (a busy-resident core is the documented benign shape on the Flow D
-    side) and there is no bench evidence that a GD32 halt failure means a
-    failed write, so failing the run there would trade an overstatement for a
-    false negative -- worse, on a command that writes hardware.
-
-    **The POST-load case (tan-cli#590), one qualification for both arms.**
-    #575's positional rule dropped a post-load marker from the write verdict
-    and then dropped it entirely, so the commonest real outcome -- a
-    resident image that starts running the instant `loadbin` finishes and
-    refuses the default post-write `r`/`g` -- reported the bare `flashed and
-    verified via J-Link @ <base>` with nothing qualifying it. The operator was
-    told the write succeeded (true) and told nothing about the target never
-    having been taken through a halted reset.
-
-    What changes is the POST-LOAD half only, and identically on both arms:
-    [`_SWD_PROBE_BUSY_AFTER_LOAD`] is appended and NOTHING else moves. The write
-    claim is untouched in both spellings -- `flashed and verified` stays
-    verified (that is what `verifybin` measured), and the ELF/HEX arm's plain
-    `flashed` is left exactly as unqualified as it is today, because a
-    post-load marker is not evidence against a write and the thing that arm
-    genuinely cannot do (verify) is the pre-load branch's separate sentence.
-    `write_unconfirmed` stays `False`, so `flash.swd-probe-write-unconfirmed`
-    does NOT fire: that advisory's own text says "this backend runs no
-    verifybin", which would be false on the `.bin` arm, and firing it here
-    would undo exactly what #575 fixed.
-
-    Status stays `ok` and rc stays 0 here too. #590 records the exit-code
-    question rather than deciding it, and the reasoning it gives for leaning
-    that way is the one already applied one paragraph up: the write succeeded
-    and was verified, so failing the run would be a worse false alarm than the
-    one #575 removed."""
-    if not markers:
-        return _swd_probe_post_load_qualified(ok_message, post_load_markers)
-    quoted = " / ".join(f'"{marker}"' for marker in markers)
-    if _SWD_PROBE_VERIFIED_CLAIM in ok_message:
-        return (
-            ok_message
-            + f"; the core did not halt (J-Link reported {quoted}), so the bytes "
-            "are verified but the target was never taken through a halted reset "
-            "-- it may still be running the firmware it had. Power-cycle it and "
-            "confirm the new firmware answers.",
-            False,
-        )
-    if _SWD_PROBE_FLASHED_CLAIM not in ok_message:
-        return ok_message, False
-    return (
-        ok_message.replace(_SWD_PROBE_FLASHED_CLAIM, _SWD_PROBE_ATTEMPTED_CLAIM)
-        + f"; the core did not halt (J-Link reported {quoted}) and this backend "
-        "runs no verifybin for an ELF/HEX load, so nothing confirms the bytes "
-        "landed -- re-run the write with the target held in reset and confirm the "
-        "firmware answers before trusting it.",
-        True,
-    )
-
-
-def _swd_probe_post_load_qualified(
-    ok_message: str, post_load_markers: list[str]
-) -> tuple[str, bool]:
-    """The post-load half of [`_swd_probe_qualified_message`] (tan-cli#590),
-    split out so that function's own pre-load branches stay untouched. Pure.
-
-    Returns `(ok_message, False)` unchanged when the transcript named no
-    post-load halt failure, or when the message is not one this backend's
-    J-Link arm composed -- the openocd/pyocd arm makes neither claim and never
-    emits these phrases, and `_flash_entry` already gates the whole
-    qualification on the J-Link arm having run.
-
-    Both claims are matched, and both keep their write wording verbatim: the
-    append is the ONLY edit. The two claim constants are lexically disjoint by
-    construction (`_SWD_PROBE_VERIFIED_CLAIM` is not a superstring of
-    `_SWD_PROBE_FLASHED_CLAIM`), so this cannot append twice."""
-    if not post_load_markers:
-        return ok_message, False
-    if not (
-        _SWD_PROBE_VERIFIED_CLAIM in ok_message or _SWD_PROBE_FLASHED_CLAIM in ok_message
-    ):
-        return ok_message, False
-    quoted = " / ".join(f'"{marker}"' for marker in post_load_markers)
-    return ok_message + _SWD_PROBE_BUSY_AFTER_LOAD.format(quoted=quoted), False
-
-
 #: `ALP_FLASH_REQUIRE_DPIDR=1` (tan-cli#589) -- the env spelling, matching the
 #: `ALP_FLASH_FORCE=1` idiom this same command already reads for its confirm
 #: gate (`_run`), so a bench/factory harness arms both the same way.
@@ -2110,15 +1758,17 @@ def _dpidr_unarmed_advisory(entry_id: str, method: str | None) -> str:
     """The `flash.dpidr-preflight-unarmed` warning text for one entry (tan-cli
     #520, generalised off the method by tan-cli#609). Pure.
 
-    The method NAMES ITSELF here rather than the string saying `swd_probe`
-    unconditionally: #609 measured an AEN Flow D write emitting no advisory at
-    all, and the fix that makes it emit one must not then mislabel it as a
-    `swd_probe` write. For `swd_probe` this renders byte-for-byte what it
-    rendered before -- the only difference is which entries reach it.
+    The method NAMES ITSELF here rather than a single backend's string being
+    hardcoded: #609 measured an AEN Flow D write emitting no advisory at all,
+    and the fix that makes it emit one must not then mislabel it as some other
+    backend's write. `swd_probe` (removed by tan-cli#732) was the original
+    hardcoded spelling; this renders byte-for-byte what it rendered for that
+    backend -- the only difference is which entries reach it.
 
-    The remedy clause differs because the two backends' ARMED shapes differ.
-    `swd_probe` arms off `expect_dpidr` alone (its read device is the already-
-    resolved write device, `FlashPlan.preflight_device`). Flow D pairs
+    The remedy clause is keyed off the method because a future second backend
+    could need a different ARMED shape, the way `swd_probe` once did (its own
+    `expect_dpidr` armed alone, off the already-resolved write device,
+    `FlashPlan.preflight_device` -- no `jlink_device` pairing). Flow D pairs
     `expect_dpidr` with `flash_args.jlink_device`, the LIVE-CORE attach
     profile, which is a different field from `jlink_flash_device` (the
     write-time MRAM-loader profile that arms Flow D itself) -- telling an AEN
@@ -2148,16 +1798,19 @@ def _require_dpidr_gate(
     Scoped by `DPIDR_GUARD_COVERAGE`, not by a `method ==` literal (tan-cli
     #609), so the strict switch and the default advisory cover exactly the
     same methods and cannot drift apart the way they had before #609: the
-    advisory was wired to `swd_probe` and #607 wired the switch to `swd_probe`
-    after it, leaving the AEN's customer MRAM path outside both.
+    advisory was wired to a single hardcoded method (`swd_probe`, removed by
+    tan-cli#732) and #607 wired the switch to the same one after it, leaving
+    the AEN's customer MRAM path outside both.
 
     `armed` is written as `possible and not <the advisory's own predicate>`
     rather than as a second reading of `flash_args`, for the same reason the
     #520 call site hoisted its arm test to a single local: two spellings of
     "is the guard up" silently disagreeing is how a refusal fires on a guarded
     write, or stays silent on an unguarded one. An entry where a preflight is
-    IMPOSSIBLE (`swd_probe`'s openocd/pyocd arm) is never `armed`, so it
-    refuses too -- with different remediation, see `_require_dpidr_refusal`.
+    IMPOSSIBLE is never `armed`, so it refuses too -- with different
+    remediation, see `_require_dpidr_refusal`. No registered backend today
+    reaches that branch (`swd_probe`'s openocd/pyocd arm was the one that
+    could); it stays reachable for a future split-arm backend.
     """
     if not DPIDR_GUARD_COVERAGE.get(method, False):
         return None
@@ -2170,8 +1823,8 @@ def _require_dpidr_gate(
 
 def _require_dpidr_refusal(method: str, entry_id: str, preflight_possible: bool) -> str:
     """The refusal text for a write that `ALP_FLASH_REQUIRE_DPIDR=1` demands a
-    wrong-board guard for and that has none (tan-cli#589; generalised past
-    `swd_probe` by tan-cli#609). Pure.
+    wrong-board guard for and that has none (tan-cli#589; generalised past a
+    single hardcoded method by tan-cli#609). Pure.
 
     **Why the conditional #589 asks for cannot be implemented as written.**
     #589 asks for `flash.dpidr-preflight-unarmed` to become a refusal "for
@@ -2189,9 +1842,8 @@ def _require_dpidr_refusal(method: str, entry_id: str, preflight_possible: bool)
       the plan and the write. Hence the switch below.
     * **Refuse always, no override.** No shipped alp-sdk preset carries a
       SW-DP ID today (measured: `expect_dpidr` appears nowhere under
-      `metadata/**`) and tan is forbidden from deriving one
-      (`_resolve_jlink_device`'s I-26 reasoning), so this refuses 100% of real
-      `swd_probe` writes with no way out. That is not defensible.
+      `metadata/**`) and tan is forbidden from deriving one, so this refuses
+      100% of real writes with no way out. That is not defensible.
     * **Refuse by default WITH a documented override** (e.g. an
       `ALP_FLASH_ALLOW_UNGUARDED=1`, or reusing the existing
       `ALP_FLASH_FORCE`). This one refuses NOBODY: the refusal text is itself
@@ -2214,45 +1866,40 @@ def _require_dpidr_refusal(method: str, entry_id: str, preflight_possible: bool)
     forgotten precisely on the run that needed it, and this is a property of
     the host, not of the command.
 
-    **Scope: every method tan can run the preflight for** -- today
-    `swd_probe` AND Flow D (`alif_mram_jlink`), read off
-    `DPIDR_GUARD_COVERAGE` rather than a `method ==` literal (tan-cli#609).
-    #589 shipped this switch scoped to `swd_probe`, matching the advisory's
-    own scope at the time; #609 then measured that the advisory never reached
-    the AEN at all, so the Alif MRAM write -- the one genuinely
-    CUSTOMER-facing flash path of the two, the GD32 bridge being
-    factory-programmed by Alp Lab -- sat outside both halves of the guard.
-    Widening the switch with the advisory, off one shared table, is what stops
-    the next backend inheriting the same silence. It changes nothing for
-    anyone who has not set the env var: the switch is opt-in and defaults off.
+    **Scope: every method tan can run the preflight for** -- today Flow D
+    (`alif_mram_jlink`) alone, read off `DPIDR_GUARD_COVERAGE` rather than a
+    `method ==` literal (tan-cli#609). #589 shipped this switch scoped to
+    `swd_probe` (removed by tan-cli#732), matching the advisory's own scope at
+    the time; #609 then measured that the advisory never reached the AEN at
+    all, so the Alif MRAM write -- the genuinely CUSTOMER-facing flash path,
+    the GD32 bridge having been factory-programmed by Alp Lab -- sat outside
+    both halves of the guard. Widening the switch with the advisory, off one
+    shared table, is what stops the next backend inheriting the same silence.
+    It changes nothing for anyone who has not set the env var: the switch is
+    opt-in and defaults off.
 
     **Where the Flow D refusal fires matters.** `_flash_entry` calls this for
     Flow D from the same early point tan-cli#512 hoisted Flow D's preflight
     to -- ahead of the SETOOLS auto-sign, which is itself a real write into
     the customer's SETOOLS install (`app-gen-toc` REWRITES
-    `build/app-package-map.txt`). Refusing at the later, shared `swd_probe`
-    site instead would let the sign run first, which is exactly the ordering
-    defect #512 fixed.
+    `build/app-package-map.txt`).
 
-    **Both `swd_probe` arms refuse, with different remediation.** On the
-    openocd/pyocd arm
-    an armed preflight is not merely absent but IMPOSSIBLE: the DPIDR read is
-    a JLinkExe-only primitive here, so `plan_swd_probe` refuses an
-    `expect_dpidr` that lands there at plan time. That arm therefore has no
-    wrong-board guard AND (unlike the J-Link arm) no advisory either, because
-    `preflight_device is None` makes `dpidr_preflight_possible` False -- the
-    quietest case of the two. `openocd_usb_location` does not close it:
-    a USB path SELECTS a probe, it never confirms what is on the other end of
-    the SWD cable, which is the exact failure #589 measured (the probe
-    resolved to a device and the device was a different SoC on a different,
-    unreserved board).
+    **The `preflight_possible=False` branch below is a general fallback, not
+    dead prose.** No registered backend reaches it today: Flow D is J-Link by
+    construction and always `preflight_possible`. `swd_probe`'s openocd/pyocd
+    arm was the one case where an armed preflight was not merely absent but
+    IMPOSSIBLE (the DPIDR read is a JLinkExe-only primitive), so that arm had
+    no wrong-board guard AND no advisory either -- the quietest case of the
+    two, and the exact failure #589 measured (the probe resolved to a device
+    that was a different SoC on a different, unreserved board). The branch
+    stays for a future backend with a comparable split arm.
 
     `preflight_possible` is `dpidr_preflight_possible`'s answer for this
     entry, threaded in rather than recomputed, so the branch a customer READS
-    is the same one the gate DECIDED on. `method` prefixes the message -- for
-    `swd_probe` both texts render byte-for-byte as they did before #609; the
-    only new wording is Flow D's paired remedy, since `expect_dpidr` alone
-    would earn an AEN manifest a half-armed refusal on its next run."""
+    is the same one the gate DECIDED on. `method` prefixes the message; the
+    only wording specific to a covered method today is Flow D's paired
+    remedy, since `expect_dpidr` alone would earn an AEN manifest a
+    half-armed refusal on its next run."""
     if preflight_possible:
         remedy = (
             "flash_args.expect_dpidr to this board's SW-DP IDR AND "
@@ -2312,8 +1959,8 @@ class _Context:
     #: the wrong-board guard. Default `False`, i.e. every existing invocation
     #: behaves byte-for-byte as before and an unarmed write keeps the
     #: `flash.dpidr-preflight-unarmed` advisory. When set, an unarmed write on
-    #: any method the guard covers (`DPIDR_GUARD_COVERAGE` -- `swd_probe` AND
-    #: Flow D since tan-cli#609, not `swd_probe` alone as #589 shipped it)
+    #: any method the guard covers (`DPIDR_GUARD_COVERAGE` -- Flow D today,
+    #: not the single hardcoded `swd_probe` #589 shipped it scoped to)
     #: REFUSES before anything spawns, and before Flow D's SETOOLS auto-sign
     #: mutates anything -- see [`_require_dpidr_refusal`] for the whole
     #: argument and [`_require_dpidr_gate`] for the decision itself.
@@ -2602,12 +2249,10 @@ def _flash_entry(
         message: str,
         *,
         preflight_unarmed: bool = False,
-        write_unconfirmed: bool = False,
     ) -> _Entry:
         return _Entry(
             kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message,
-            preflight_unarmed=preflight_unarmed, write_unconfirmed=write_unconfirmed,
-            recovery_armed=recovery,
+            preflight_unarmed=preflight_unarmed, recovery_armed=recovery,
         )
 
     # tan-cli#611, THE HOIST. WHO may flash this entry is decided BEFORE
@@ -2655,10 +2300,29 @@ def _flash_entry(
     method = select_flash_method(target) or raw_method
     meta = backend_for(method)
     if meta is None:
-        msg = (
-            f"flash: {kind} '{entry_id}' uses flash_method '{method}' which has no "
-            f"registered backend. Available: {registry_keys_debug()}"
-        )
+        # tan-cli#732: `swd_probe` gets its own named refusal, not the generic
+        # "no registered backend" one below -- a manifest reaching this line
+        # with this exact method is either hand-authored against a doc that
+        # predates the removal, or emitted by an alp-sdk checkout older than
+        # alp-sdk#1439 (which stopped emitting `flash_method: swd_probe` on
+        # every shipped GD32-bridge preset). Either way the operator needs
+        # the removal named and the actual replacement path pointed at, not
+        # a bare "which has no registered backend" that reads like a typo.
+        if method == _REMOVED_SWD_PROBE_METHOD:
+            msg = (
+                f"flash: {kind} '{entry_id}' declares flash_method '{method}', which "
+                "tan-cli#732 removed -- GD32 bridge programming has separated out of "
+                "tan; this backend no longer exists. The GD32's field-update path is "
+                "unaffected: update_channel: alp_ota_spi_bridge (unchanged, still "
+                "projected into this manifest when the preset declares it). tan has "
+                "no built-in replacement for a LOCAL SWD write today (e.g. recovering "
+                "a bricked bridge) -- see docs/setools.md and tan-cli#610."
+            )
+        else:
+            msg = (
+                f"flash: {kind} '{entry_id}' uses flash_method '{method}' which has no "
+                f"registered backend. Available: {registry_keys_debug()}"
+            )
         lines.append(msg)
         return 1, entry(method, "failed", 1, msg), lines
 
@@ -2947,114 +2611,36 @@ def _flash_entry(
                 lines.append(f"  FAIL: {refusal}")
                 return 1, entry(method, "failed", 1, refusal), lines
 
-    # tan-cli#520: `swd_probe`'s J-Link arm gets the identical read-only DPIDR
-    # preflight Flow D has via #512 -- reusing `_flow_d_preflight` (the same
-    # runner, `method="swd_probe"` so a refusal names the right backend)
-    # rather than growing a second implementation. Placed HERE, immediately
-    # before the one spawn (`_execute`, just below) that can ever write for
-    # this entry: unlike Flow D there is no earlier mutating step (no SETOOLS
-    # auto-sign) to hoist ahead of on this path, so this position already
-    # satisfies #512's "before anything that writes or mutates" rule -- it is
-    # not the ordering bug #512 fixed, because that bug was specifically about
-    # a mutating step that does not exist here. Reached only on a genuine,
-    # non-dry-run write: the `plan.planning_only or ctx.dry_run` return above
-    # already exits for a preview (`plan_swd_probe` never sets
-    # `planning_only`, so a real run always reaches this line unconfirmed --
-    # `swd_probe` targets an external helper MCU's own flash, not persistent
-    # SoC MRAM, and has no `flash_args.confirm` gate to hide behind).
-    #
-    # Gated on `plan.preflight_device is not None` -- NOT merely
-    # `method == "swd_probe"` (tan-cli#520 REVIEW, BLOCKER 2). `preflight_
-    # device` is set ONLY by `plan_swd_probe`'s J-Link branch; it is `None`
-    # for the openocd/pyocd arm. Calling `_flow_d_preflight` unconditionally
-    # for every `swd_probe` entry passed `read_device=None` on THAT arm,
-    # which `flow_d_preflight_script` reads as "derive `require_device_key`
-    # from `read_device is None`" -- i.e. `True`, Flow D's PAIRED shape -- so
-    # a manifest that legitimately sets `flash_args.jlink_device` (e.g. as a
-    # J-Link fallback profile) while `flash_args.use_openocd: true` forces
-    # this arm for real got refused at WRITE time for an absent
-    # `expect_dpidr` it was never asked to pair, even though `--dry-run` on
-    # the exact same manifest stayed green (the plan-time guard just below
-    # `plan_swd_probe`'s arm split checks `expect_dpidr` on that arm, and
-    # only that -- `jlink_device` has no preflight-only meaning on the
-    # openocd/pyocd arm, since it is not paired with `expect_dpidr` there.
-    # This no longer means "never checked" though: the round-four hoist
-    # (`flash_plan.py:1225`, ahead of this same split) added a `jlink_device`
-    # charset-and-type guard that runs unconditionally on BOTH arms -- a
-    # shape check, not a preflight pairing, so it does not change the
-    # conclusion here). Gating on `preflight_device`
-    # instead means this call never runs at all for that arm, matching
-    # `plan_swd_probe`'s own plan-time guard exactly: `expect_dpidr` set on
-    # the openocd/pyocd arm still refuses (that check, unaffected by this
-    # fix); `expect_dpidr` absent there now stays a true no-op, both under
-    # `--dry-run` and for real.
-    # tan-cli#520 REVIEW, design point: `expect_dpidr` stays OPTIONAL (making
-    # it required would refuse every shipped preset -- none carries a SW-DP
-    # ID today, and tan is forbidden from deriving one, the same I-26
-    # reasoning `_resolve_jlink_device` already documents), but that leaves a
-    # SILENT gap: a confirmed J-Link `swd_probe` write with no `expect_dpidr`
-    # runs with no wrong-board guard and no signal that it did. Recorded
-    # here, before the preflight call, and surfaced as a non-fatal warning
-    # `Issue` on the eventual SUCCESS return below (never on a refusal --
-    # armed-and-mismatched already gets its own `flash.entry-failed`) so a
-    # `--format json` consumer can tell "this write had no wrong-board check"
-    # from an ordinary clean flash.
-    # tan-cli#520 REVIEW round 2, nit: whether the preflight call below runs
-    # and whether an unarmed write can warn must not drift apart -- two copies
-    # of "did the J-Link arm actually run" silently going out of sync would
-    # let the warning fire on an entry whose preflight DID run, or stay silent
-    # on one where it did not.
-    #
-    # tan-cli#609 keeps that property while widening the warning past this
-    # method: both are `plan.preflight_device is not None` for `swd_probe`,
-    # this local directly and `preflight_unarmed` via
-    # `dpidr_preflight_possible`, which is handed the SAME value. The local
-    # stays `swd_probe`-shaped because its OTHER readers -- the preflight call
-    # and #540/#590's halt-marker partition -- are about JLinkExe's transcript
-    # on this backend specifically, not about the guard's coverage.
-    swd_probe_took_jlink_arm = method == SWD_PROBE_METHOD and plan.preflight_device is not None
     # tan-cli#609: METHOD-INDEPENDENT, decided by `DPIDR_GUARD_COVERAGE` inside
-    # `dpidr_preflight_unarmed` rather than by `method == SWD_PROBE_METHOD`
-    # here. The literal this replaces is the whole defect #609 measured: the
-    # AEN dispatches Flow D, so a real MRAM write emitted `ISSUES = []` -- no
+    # `dpidr_preflight_unarmed` rather than by a single hardcoded method. The
+    # literal this replaces is the whole defect #609 measured: the AEN
+    # dispatches Flow D, so a real MRAM write emitted `ISSUES = []` -- no
     # wrong-board guard AND no signal that there was none -- while the warning
-    # about an unarmed guard was wired only to the other backend. Reached only
-    # on a real, confirmed write for BOTH methods (every preview path has
-    # already returned above), which is the precondition
+    # about an unarmed guard was wired only to `swd_probe` (removed by
+    # tan-cli#732). Reached only on a real, confirmed write (every preview
+    # path has already returned above), which is the precondition
     # `dpidr_preflight_unarmed` documents.
     preflight_unarmed = dpidr_preflight_unarmed(method, flash_args, plan.preflight_device)
     # tan-cli#589: the OPT-IN strict half. Placed HERE -- after the
-    # `planning_only or ctx.dry_run` return above and BEFORE both the
-    # preflight probe and `_execute` -- so it is the last word before
-    # anything can write, and so `--dry-run` stays the pure, policy-free
-    # preview it is documented to be (a preview writes nothing, so there is
-    # nothing for a wrong-board guard to protect there, and making a preview
-    # depend on a bench env var would make the same manifest preview
-    # differently on two machines for no reason a preview cares about).
+    # `planning_only or ctx.dry_run` return above and BEFORE `_execute` -- so
+    # it is the last word before anything can write, and so `--dry-run` stays
+    # the pure, policy-free preview it is documented to be (a preview writes
+    # nothing, so there is nothing for a wrong-board guard to protect there,
+    # and making a preview depend on a bench env var would make the same
+    # manifest preview differently on two machines for no reason a preview
+    # cares about).
     #
     # The ARMED predicate lives in `_require_dpidr_gate`, written as the
     # negation of the advisory's own condition rather than as a second reading
-    # of `flash_args`, so "armed" and "unarmed" can never disagree. On the
-    # openocd/pyocd arm it is False unconditionally -- an armed preflight is
-    # impossible there (`plan_swd_probe` refuses `expect_dpidr` on that arm at
-    # plan time), which is why the refusal text branches on the arm rather
-    # than pretending a manifest edit alone would fix it.
+    # of `flash_args`, so "armed" and "unarmed" can never disagree.
     #
-    # tan-cli#609: scoped by coverage, not by `method == SWD_PROBE_METHOD`.
-    # For Flow D this is a NO-OP by the time control reaches here -- its own
-    # call site above (ahead of the SETOOLS auto-sign) fires on the identical
+    # tan-cli#609: scoped by coverage, not by a single hardcoded method. For
+    # Flow D this is a NO-OP by the time control reaches here -- its own call
+    # site above (ahead of the SETOOLS auto-sign) fires on the identical
     # condition and returns -- and it is kept unconditional anyway so that a
     # future covered method reaching only this site is still gated.
     if ctx.require_dpidr:
         refusal = _require_dpidr_gate(method, entry_id, flash_args, plan.preflight_device)
-        if refusal is not None:
-            lines.append(f"  FAIL: {refusal}")
-            return 1, entry(method, "failed", 1, refusal), lines
-    if swd_probe_took_jlink_arm:
-        refusal = _flow_d_preflight(
-            inputs, ctx.venv_bin, ctx.workspace, method=method,
-            read_device=plan.preflight_device,
-        )
         if refusal is not None:
             lines.append(f"  FAIL: {refusal}")
             return 1, entry(method, "failed", 1, refusal), lines
@@ -3070,44 +2656,10 @@ def _flash_entry(
         ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
         if method == FLOW_D_METHOD:
             ok_message = _flow_d_reset_qualified_message(ok_message, outcome)
-        # tan-cli#540: the same intent-vs-observed shape #522 closed for Flow
-        # D. Gated on `swd_probe_took_jlink_arm` (already computed above for
-        # the DPIDR preflight, so the two can never drift): the halt phrases
-        # are JLinkExe's, and the openocd/pyocd arm neither emits them nor
-        # makes either of the two claims this qualifies.
-        #
-        # WHICH qualification, and whether the write is left unconfirmed at
-        # all, is decided by the pure `_swd_probe_qualified_message` off the
-        # claim the plan composed -- a `.bin` write now carries a `verifybin`
-        # read-back and is confirmed even when the core refused to halt (only
-        # its reset is in doubt); an ELF/HEX load still cannot be verified at
-        # all. Neither decision is re-derived here.
-        #
-        # tan-cli#590: the SAME transcript is now partitioned BOTH ways, on
-        # the one boundary `_jlink_load_completed_at` finds -- pre-load
-        # markers speak to the write (unchanged), post-load ones to the
-        # default `r`/`g` that #575 correctly removed from the write verdict
-        # and then dropped entirely. Both lists are computed under the same
-        # `swd_probe_took_jlink_arm` gate, off the same `outcome`, so they
-        # cannot disagree about which stage a marker belongs to.
-        halt_markers = _swd_probe_halt_markers(outcome) if swd_probe_took_jlink_arm else []
-        post_load_markers = (
-            _swd_probe_post_load_halt_markers(outcome) if swd_probe_took_jlink_arm else []
-        )
-        ok_message, write_unconfirmed = _swd_probe_qualified_message(
-            ok_message, halt_markers, post_load_markers
-        )
         lines.append(f"  ok: {ok_message}")
         return (
             0,
-            entry(
-                method,
-                "ok",
-                0,
-                ok_message,
-                preflight_unarmed=preflight_unarmed,
-                write_unconfirmed=write_unconfirmed,
-            ),
+            entry(method, "ok", 0, ok_message, preflight_unarmed=preflight_unarmed),
             lines,
         )
     msg = _execute_message(outcome, method, entry_id)
@@ -3127,17 +2679,20 @@ def _flow_d_preflight(
     the SW-DP IDR before any write. Returns a refusal message, or `None`
     to proceed.
 
-    Shared by Flow D (`alif_mram_jlink`, an MRAM write) and `swd_probe`'s
-    J-Link arm (a GD32 bridge write; tan-cli#520) -- `method` selects which
-    backend a refusal names, and both `method` and `read_device` are threaded
-    straight through to `flow_d_preflight_script`/`validate_flow_d_
-    preflight_args`, the ONE definition of this preflight's shape. `method`
-    defaults to `FLOW_D_METHOD` and `read_device` to `None` so every existing
-    Flow D call site is unaffected. `read_device` (`swd_probe` only): the
-    ALREADY-RESOLVED write device (`FlashPlan.preflight_device`) -- passing it
-    arms the preflight off `flash_args.expect_dpidr` ALONE, since `swd_probe`
-    has no separate preflight-only device field the way Flow D's `jlink_
-    device` is (see `validate_flow_d_preflight_args`'s `require_device_key`).
+    Written to be shared by more than one backend, not one copy per backend
+    (tan-cli#520): `method` selects which backend a refusal names, and both
+    `method` and `read_device` are threaded straight through to
+    `flow_d_preflight_script`/`validate_flow_d_preflight_args`, the ONE
+    definition of this preflight's shape. `method` defaults to `FLOW_D_METHOD`
+    and `read_device` to `None` so every existing Flow D call site is
+    unaffected. `read_device`: for a caller with an ALREADY-RESOLVED write
+    device (`FlashPlan.preflight_device`) -- passing it arms the preflight off
+    `flash_args.expect_dpidr` ALONE, for a backend with no separate
+    preflight-only device field the way Flow D's `jlink_device` is (see
+    `validate_flow_d_preflight_args`'s `require_device_key`). `swd_probe`'s
+    J-Link arm (a GD32 bridge write) was the one caller that passed
+    `read_device` until tan-cli#732 removed the backend; both parameters stay
+    for the next one.
 
     ABSENT-BY-DEFAULT, on purpose: a manifest that declares BOTH no `expect_dpidr`
     AND no attach-profile `jlink_device` gets no preflight, because tan has no
@@ -3178,8 +2733,9 @@ def _flow_d_preflight(
     # backend; a bare generalisation to backend-neutral "write" would have
     # SILENTLY changed wording a bench operator reads, with nothing pinning
     # the string to catch it. Branched on `method` instead, so Flow D's exact
-    # original wording is byte-for-byte unchanged and `swd_probe` gets its
-    # own correct noun (it writes the GD32 bridge's own flash, not MRAM).
+    # original wording is byte-for-byte unchanged and a future second backend
+    # can get its own correct noun the way `swd_probe` (removed by tan-cli
+    # #732) once did -- it wrote the GD32 bridge's own flash, not MRAM.
     verb = "write MRAM" if method == FLOW_D_METHOD else "write"
     binary = next((n for n in ("JLinkExe", "JLink") if _tool_available(n, venv_bin)), None)
     if binary is None:
@@ -3611,9 +3167,9 @@ def _run(
         if entry.preflight_unarmed:
             # tan-cli#520 REVIEW, design point: `expect_dpidr` stays optional
             # (no shipped preset carries a SW-DP ID for tan to require), but a
-            # confirmed `swd_probe` J-Link write that ran with none armed had
-            # NO signal at all that its wrong-board guard never ran -- this
-            # closes that without making the field mandatory.
+            # confirmed write that ran with none armed had NO signal at all
+            # that its wrong-board guard never ran -- this closes that without
+            # making the field mandatory.
             #
             # tan-cli#520 REVIEW round 3, finding 2: appended to `text_lines`
             # too, not only `issues` -- `_run`'s caller prints only
@@ -3621,43 +3177,21 @@ def _run(
             # opt-in), so this warning used to be invisible on a plain
             # `tan flash`: the exact bench operator this preflight exists to
             # protect (a cloned probe serial reaching the wrong board) saw a
-            # bare `ok: swd_probe[...] flashed via J-Link` with no hint the
-            # wrong-board guard never armed. Every other `flash.*` issue is
-            # already text-visible this way -- `flash.confirm-required` rides
-            # the entry's own message into `lines` above,
-            # `flash.entries-skipped`/`flash.nothing-matched` append to
-            # `text_lines` explicitly below -- this one was the outlier.
+            # bare `ok: ...` line with no hint the wrong-board guard never
+            # armed. Every other `flash.*` issue is already text-visible this
+            # way -- `flash.confirm-required` rides the entry's own message
+            # into `lines` above, `flash.entries-skipped`/`flash.nothing-
+            # matched` append to `text_lines` explicitly below -- this one was
+            # the outlier.
             #
             # tan-cli#609: the text is composed off `entry.method`, because
-            # this warning is no longer `swd_probe`'s alone. Which entries set
-            # `preflight_unarmed` is decided in `_flash_entry` off
-            # `DPIDR_GUARD_COVERAGE`; nothing about the METHOD is re-decided
-            # here.
+            # this warning is not one backend's alone (originally `swd_probe`,
+            # removed by tan-cli#732). Which entries set `preflight_unarmed`
+            # is decided in `_flash_entry` off `DPIDR_GUARD_COVERAGE`; nothing
+            # about the METHOD is re-decided here.
             message = _dpidr_unarmed_advisory(entry.id, entry.method)
             text_lines.append(message)
             issues.append(Issue("flash.dpidr-preflight-unarmed", "warning", message))
-        if entry.write_unconfirmed:
-            # tan-cli#540. The entry's own `message` is already qualified
-            # (`_swd_probe_unconfirmed_message`), and that message reaches
-            # DEFAULT text output via its `ok:` line -- so this is not about
-            # visibility, it is about MACHINE-detectability: an `ok` entry
-            # whose prose happens to contain a caveat is not something a
-            # `--format json` consumer can key off, and `issues` is the
-            # channel alp-sdk-vscode renders warnings from. Appended to
-            # `text_lines` too, for the same reason `flash.dpidr-preflight-
-            # unarmed` is just above: a bench operator does not pass
-            # `--format json`, and this is the one line that says what to do
-            # about it rather than only what happened.
-            message = (
-                f"{entry.id}: swd_probe's J-Link write is UNCONFIRMED -- the core did "
-                "not halt, and an ELF/HEX load takes `loadfile`, which this backend "
-                "has no verifybin for, so JLinkExe's exit code 0 does not mean the "
-                "firmware landed. Re-run with the target held in reset, then confirm "
-                "the flashed firmware answers. A raw .bin artefact takes the verified "
-                "path instead."
-            )
-            text_lines.append(message)
-            issues.append(Issue("flash.swd-probe-write-unconfirmed", "warning", message))
         entries.append(entry.as_dict())
         if rc < 0:
             continue  # silently skipped -- not counted, does not set flashed_anything
@@ -3846,18 +3380,20 @@ def flash(
         False,
         "--confirm",
         # tan-cli#796: this gate covers only yocto_wic, xspi_flashwriter, and
-        # Flow D MRAM (alif_mram_jlink) -- zephyr_west_flash,
-        # baremetal_cmake_flash, and swd_probe write the attached device
-        # UNCONDITIONALLY, with or without --confirm. An earlier, unqualified
-        # "every slice is previewed" claim here read as covering all six
-        # backends; --dry-run is the flag that actually previews all of them.
+        # Flow D MRAM (alif_mram_jlink) -- zephyr_west_flash and
+        # baremetal_cmake_flash write the attached device UNCONDITIONALLY,
+        # with or without --confirm. An earlier, unqualified "every slice is
+        # previewed" claim here read as covering every backend; --dry-run is
+        # the flag that actually previews all of them. tan-cli#732 removed
+        # the fifth backend this help text used to name (swd_probe, also
+        # unconditional).
         help="Arm the confirm gate on the backends that have one -- yocto_wic, "
         "xspi_flashwriter, and Flow D MRAM (alif_mram_jlink). Without it (and "
         "without ALP_FLASH_FORCE=1 or flash_args.confirm: true) those three preview "
-        "only and the run exits non-zero (tan-cli#719). zephyr_west_flash, "
-        "baremetal_cmake_flash, and swd_probe have no confirm gate and write the "
-        "attached device regardless of this flag. Use --dry-run for a preview that "
-        "works on every backend.",
+        "only and the run exits non-zero (tan-cli#719). zephyr_west_flash and "
+        "baremetal_cmake_flash have no confirm gate and write the attached device "
+        "regardless of this flag. Use --dry-run for a preview that works on every "
+        "backend.",
     ),
     skip_missing_tools: bool = typer.Option(
         False,
