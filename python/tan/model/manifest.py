@@ -72,12 +72,25 @@ def _required_field(d: dict, key: str, expected: type | tuple[type, ...], type_d
     first-party output, and a corrupted `src_sha` (the model-source identity
     field written by `build.py:222`) is exactly the class of corruption this
     container's own bounds checks exist to catch. Fail loudly here, the same
-    way, rather than degrade silently."""
+    way, rather than degrade silently.
+
+    `bool` is rejected whenever `expected` names `int` but not `bool` itself
+    (tan-cli#1058 review round 3): Python's `bool` is an `int` subclass, so
+    `isinstance(True, int)` is `True` and the plain `isinstance` check below
+    would otherwise let `arena=True` / `requires["sram_kib"]=True` decode
+    silently -- re-emitted on the CBOR wire as byte `0xf5` (major type 7,
+    "true"), not an unsigned int -- straight into
+    `src/backends/inference/alp_model_select.c`'s fit gate as `t->req_sram_kib`.
+    A mechanism check here, not a per-field one, so every current and future
+    `(int, ...)` entry in `_TENSOR_TYPES`/`_TARGET_TYPES`/`_REQUIRES_TYPES`/
+    `_COVERAGE_TYPES` inherits it automatically."""
     where = f" in {context}" if context else ""
     if key not in d:
         raise ValueError(f"malformed .alpmodel manifest: missing required field {key!r}{where}")
     v = d[key]
-    if not isinstance(v, expected):
+    expected_types = expected if isinstance(expected, tuple) else (expected,)
+    wrong_type = not isinstance(v, expected) or (isinstance(v, bool) and bool not in expected_types)
+    if wrong_type:
         raise ValueError(
             f"malformed .alpmodel manifest: field {key!r} must be {type_desc}, got {type(v).__name__}{where}"
         )

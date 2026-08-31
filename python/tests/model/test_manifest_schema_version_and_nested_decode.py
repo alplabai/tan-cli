@@ -296,6 +296,55 @@ def test_cbor_manifest_none_typed_requires_sram_kib_raises_a_curated_valueerror(
         }))
 
 
+def test_cbor_manifest_bool_typed_requires_sram_kib_raises_a_curated_valueerror():
+    """tan-cli#1058 review round 3: `bool` is an `int` subclass in Python
+    (`isinstance(True, int)` is `True`), so round 2's own
+    `_REQUIRES_TYPES = {"sram_kib": (int, "an int")}` reproduced the exact
+    bool hole it was closing, one level down -- `requires={"sram_kib": True}`
+    decoded silently before this and re-emitted on the CBOR wire as byte
+    `0xf5` (major type 7, "true"), not an unsigned int, straight into
+    `alp_model_select.c`'s `t->req_sram_kib`."""
+    good = {"backend": "cpu", "silicon_ref": "*", "blob_format": "tflite",
+            "accel_config": "", "arena": 4096, "blob": 0}
+    with pytest.raises(ValueError,
+                        match=r"field 'sram_kib' must be an int, got bool in targets\[0\]\.requires"):
+        Manifest.from_cbor(cbor2.dumps({
+            "name": "x", "src_sha": b"\x00",
+            "targets": [{**good, "requires": {"sram_kib": True}}],
+        }))
+
+
+def test_json_manifest_bool_typed_requires_sram_kib_raises_a_curated_valueerror():
+    with pytest.raises(ValueError,
+                        match=r"field 'sram_kib' must be an int, got bool in targets\[0\]\.requires"):
+        Manifest.from_json(
+            '{"name": "x", "src_sha": "00", "targets": '
+            '[{"backend": "cpu", "silicon_ref": "*", "blob_format": "tflite", '
+            '"accel_config": "", "arena": 4096, "requires": {"sram_kib": true}, "blob": 0}]}'
+        )
+
+
+def test_cbor_manifest_bool_typed_target_arena_raises_a_curated_valueerror():
+    """Same hole, one field over: `arena` is the other half of the same
+    fit-gate figure (`_TARGET_TYPES["arena"] = (int, "an int")`)."""
+    good = {"backend": "cpu", "silicon_ref": "*", "blob_format": "tflite",
+            "accel_config": "", "requires": {"sram_kib": 0}, "blob": 0}
+    with pytest.raises(ValueError, match=r"field 'arena' must be an int, got bool in targets\[0\]"):
+        Manifest.from_cbor(cbor2.dumps({
+            "name": "x", "src_sha": b"\x00",
+            "targets": [{**good, "arena": True}],
+        }))
+
+
+def test_json_manifest_bool_typed_target_arena_raises_a_curated_valueerror():
+    with pytest.raises(ValueError, match=r"field 'arena' must be an int, got bool in targets\[0\]"):
+        Manifest.from_json(
+            '{"name": "x", "src_sha": "00", "targets": '
+            '[{"backend": "cpu", "silicon_ref": "*", "blob_format": "tflite", '
+            '"accel_config": "", "arena": true, "requires": {"sram_kib": 0}, "blob": 0}]}'
+        )
+
+
 def test_requires_missing_sram_kib_entirely_is_still_accepted():
     """Non-vacuity in the other direction: `sram_kib` is not a REQUIRED key
     of `requires` (only `requires` itself, as a mapping, is a required
