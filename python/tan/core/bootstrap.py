@@ -295,7 +295,9 @@ def resolve_zephyr_pin(west_yml: str | None, facts_version: str) -> str:
     """The ONE Zephyr pin the workspace-reuse test compares against.
 
     `west.yml` leads because `build`'s preflight `zephyrVersion` check reads
-    exactly that file, and `build`'s auto-bootstrap fires ON its warning. With
+    exactly that file, and the operator re-runs `tan bootstrap` ON its warning
+    (`tan build` does not do it for them -- tan-cli#427 settled that this port
+    has no implicit bootstrap and is not getting one). With
     two pin sources an SDK bump made bootstrap ADOPT a workspace preflight
     simultaneously called stale -- a loop that never converges. Full
     `MAJOR.MINOR.PATCH`, never a `MAJOR.MINOR` truncation: that truncation is
@@ -411,8 +413,8 @@ class BootstrapFacts:
     #: `posix` key at all (tan-cli#495 defect 6). Optional on the wire, unlike
     #: `windows`: every SDK before alp-sdk v0.14.0 declares `windows` alone,
     #: and requiring it here would turn each of those into a hard
-    #: `BootstrapManifestError` that `tan build` inherits through
-    #: auto-bootstrap -- the same trap `prerequisites.install` and
+    #: `BootstrapManifestError` for everyone who runs `tan bootstrap` against
+    #: an older SDK -- the same trap `prerequisites.install` and
     #: `prerequisites.windows` above already document. Empty renders nothing,
     #: which is exactly what those SDKs did before the field existed.
     manual_install_posix: tuple[str, ...]
@@ -648,7 +650,7 @@ def parse_bootstrap_manifest(text: str) -> BootstrapFacts:
         prerequisites_posix=_str_list(prerequisites.get("posix"), "prerequisites.posix"),
         # OPTIONAL on the wire: absent means "use `posix`", which is every SDK
         # before v0.14.0. Required here, it would turn each of those into a hard
-        # ValidationFailure that `tan build` inherits through auto-bootstrap.
+        # ValidationFailure for every `tan bootstrap` run against such an SDK.
         prerequisites_macos=_str_list(prerequisites.get("macos", []), "prerequisites.macos"),
         prerequisites_windows=_str_list(
             prerequisites.get("windows"), "prerequisites.windows"
@@ -850,8 +852,10 @@ def _resolve_install_commands(
     schema requires its keys to equal `prerequisites.<os>`).
 
     Degrade, do not refuse: every shape handled here is out of contract today,
-    and a `ValidationFailure` on a manifest field reaches `tan build` and
-    `tan run` through auto-bootstrap.
+    and a `ValidationFailure` on a manifest field fails the whole
+    `tan bootstrap` run -- which is the step a customer has to get through
+    before `tan build` or `tan run` can work at all, since neither of those
+    bootstraps implicitly (tan-cli#427).
 
     `LINUX` is handled separately (tan-cli#760's second half):
     `normalize_linux_install` reconciles both shapes `install.linux` has ever

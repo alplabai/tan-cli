@@ -225,7 +225,7 @@ def _unemitted_reason(path: pathlib.Path, code: str) -> str | None:
 
       1. WHOLE code as a string constant -- `Issue("sdk.network-required", ...)`
          however it is wrapped, `code="kconfig.emit-failed"`, or a module
-         constant (`DEFERRED_ISSUE_CODE = "cli.command-deferred"`).
+         constant (`SHELL_UNSUPPORTED_CODE = "completion.shell-unsupported"`).
       2. BARE SUFFIX as a string constant -- the dominant shape: a prefixing
          helper is handed `"venv-unusable"` / `"yocto-host"` / `"boardYaml"`
          and assembles `family.` + suffix itself.

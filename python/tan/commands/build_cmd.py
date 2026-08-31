@@ -61,9 +61,9 @@ precedence (`--execute --materialise` -> `build.conflicting-flags`, exit 2;
 `--pristine` with a mode that never dispatches (bare `--plan-from` or
 `--materialise`, neither paired with `--execute`) -> the same
 `build.conflicting-flags`, exit 2, because a wipe promised on the envelope
-cannot be silently skipped either; `--execute` with a deferred flag ->
-`cli.command-deferred`, exit 1, because a flag this build does not implement
-at all cannot be honoured either way).
+cannot be silently skipped either; `--execute` with a RETIRED flag ->
+`build.flag-retired`, exit 2, because a flag this build refuses outright
+cannot be honoured either way).
 `--execute` is ADDED BY THIS PORT, not a v0.4.1 flag: there `--plan-from`
 implies `--plan` and outranks `--native`, so a file-supplied plan cannot be
 dispatched at all. Deliberate, not a parity gap. `--native` keeps v0.4.1's
@@ -103,10 +103,8 @@ from tan.commands.build.token_substitution import (
     apply_plan_token_substitution,
 )
 from tan.commands.build.toolchain import ToolchainResolution, resolve_toolchain_root
-from tan.commands.deferred_cmd import DEFERRED_ISSUE_CODE, DEFERRED_ISSUE_URL
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.global_flags import accept_global_flags
-from tan.core.inert import DEFERRED, inert_help
 from tan.core.plan_exec import (
     CROSS_DRIVE_MSG,
     MISSING_TOOL_RE,
@@ -189,26 +187,19 @@ CONSUMER_BUILD_ROOT = "build"
 #:    see `_RETIRED_FLAGS` below. Still declared (never a Click parse error),
 #:    but refused with `build.flag-retired`, which names the replacement in
 #:    the message itself.
-#: 3. **Still deferred** -- `--no-auto-bootstrap` alone. Measured (tan-cli#427
-#:    follow-up): this port's `tan build` has NO implicit "run `tan
-#:    bootstrap` on a missing/stale Zephyr workspace" trigger for the flag to
-#:    disable in the first place -- an unbootstrapped workspace surfaces
-#:    today as `build.plan-unavailable` (`_emit_plan`'s `SystemExit` catch),
-#:    never an automatic `tan bootstrap` invocation. Accepting the flag ahead
-#:    of that trigger existing would be exactly the "declared and silently
-#:    does nothing" shape this whole issue exists to avoid, so it stays
-#:    refused rather than faked real. #427 stays OPEN, narrowed to this one
-#:    flag, until the auto-bootstrap trigger itself is ported.
-_DEFERRED_FLAGS = ("--no-auto-bootstrap",)
-
-#: `--help` text for the one still-deferred flag.
-# No version number: this said "Deferred to v0.6.0" while the release it
-# meant was renumbered to 0.5.0, and a help string that names the release a
-# flag will appear in is a promise tan cannot keep true. The issue link is
-# the durable pointer.
-_DEFERRED_HELP = inert_help(
-    "Accepted by other commands; not implemented for `build` yet.", DEFERRED, "tan-cli#427"
-)
+#: 3. **Nothing is left deferred.** `--no-auto-bootstrap` was the last one,
+#:    and it is now retired (bucket 2) rather than implemented, on a
+#:    maintainer decision closing tan-cli#427: `tan build` does not run
+#:    `tan bootstrap` implicitly and is not going to. Measured before
+#:    deciding -- no call path from `build` or `run` reaches bootstrap;
+#:    an unbootstrapped workspace surfaces as `build.plan-unavailable`
+#:    (`_emit_plan`'s `SystemExit` catch), never an automatic invocation.
+#:    So there was never a trigger for the flag to disable, and building one
+#:    just to give the flag something to switch off would add a heavy
+#:    implicit side effect (a `west update` and a venv install) to a command
+#:    whose job is to build. A flag that disables a behaviour this CLI does
+#:    not have is not deferred work -- it is a flag with nothing to mean, so
+#:    it teaches the explicit command instead.
 
 #: The oracle spelling -> its replacement flag, for the three flags
 #: `_refuse_retired` reports (tan-cli#427): "Two overlapping plan surfaces is
@@ -238,6 +229,14 @@ _RETIRED_FLAGS: dict[str, str] = {
     "--manifest-from": (
         "`--manifest-from FILE` is retired: `system-manifest.yaml` is plain YAML -- open "
         "FILE directly instead of routing it through `tan build`."
+    ),
+    # Retired rather than implemented (tan-cli#427): there is no implicit
+    # bootstrap for it to switch off, and there is not going to be one, so the
+    # message teaches the explicit command rather than describing a toggle.
+    "--no-auto-bootstrap": (
+        "`--no-auto-bootstrap` is retired: `tan build` never bootstraps implicitly, so "
+        "there is nothing for it to disable -- run `tan bootstrap` yourself when a "
+        "workspace needs preparing."
     ),
 }
 
@@ -1436,10 +1435,10 @@ def _refuse(code: str, message: str, exit_code: ExitCode, json_mode: bool) -> No
     """Report a refusal this command makes UP FRONT -- before any project is
     resolved, any plan read, and any byte written -- and exit.
 
-    One helper for both of them (a deferred flag, and a conflicting flag pair)
+    One helper for both of them (a retired flag, and a conflicting flag pair)
     because they differ only in code, message and exit code. `project` is left
-    unresolved, as `deferred_cmd`'s verb-level stubs leave it: nothing was
-    read, so reporting a root would be reporting work this run did not do."""
+    unresolved: nothing was read, so reporting a root would be reporting work
+    this run did not do."""
     issue = Issue(code, "error", message)
     if json_mode:
         emit(
@@ -1524,8 +1523,8 @@ def build(
         "silently means \"incremental\".",
     ),
     # --- retired: parsed (never a Click typo error) but always refused, ------
-    # naming the replacement flag in the message itself (tan-cli#427). NOT
-    # `inert_help`-marked: unlike the deferred/parity flags below, these are
+    # naming the replacement in the message itself (tan-cli#427). NOT
+    # `inert_help`-marked: unlike the accept-and-drop global flags, these are
     # READ for real -- their value selects a specific refusal, not "accepted
     # and does nothing" (see `_RETIRED_FLAGS`).
     plan: bool = typer.Option(
@@ -1543,13 +1542,16 @@ def build(
         metavar="FILE",
         help="Retired -- open FILE directly, it is plain YAML (tan-cli#427).",
     ),
-    # --- declared so it is refused as DEFERRED, never as a typo --------------
-    # See `_DEFERRED_FLAGS`. A real, working flag of the v0.4.1 oracle that
-    # this port does not implement. LISTED in `--help` rather than hidden, for
-    # the same reason `deferred_cmd` registers its seven deferred verbs in the
-    # command list: a reader comparing this surface to v0.4.1's needs to see
-    # that tan knows the flag and is refusing it, which absence cannot say.
-    no_auto_bootstrap: bool = typer.Option(False, "--no-auto-bootstrap", help=_DEFERRED_HELP),
+    # A real, working flag of the v0.4.1 oracle, retired here rather than
+    # implemented (tan-cli#427) -- `tan build` has no implicit bootstrap for it
+    # to switch off. LISTED in `--help` rather than hidden, for the same reason
+    # the three above are: a reader comparing this surface to v0.4.1's needs to
+    # see that tan knows the flag and is refusing it, which absence cannot say.
+    no_auto_bootstrap: bool = typer.Option(
+        False,
+        "--no-auto-bootstrap",
+        help="Retired -- `tan build` never bootstraps implicitly (tan-cli#427).",
+    ),
 ) -> None:
     """Build every slice of the project's build plan."""
     json_mode = output_format == "json"
@@ -1566,6 +1568,7 @@ def build(
         "--plan": plan,
         "--manifest": manifest,
         "--manifest-from": manifest_from is not None,
+        "--no-auto-bootstrap": no_auto_bootstrap,
     }
     for flag, was_given in retired_given.items():
         if was_given:
@@ -1573,17 +1576,6 @@ def build(
                 "build.flag-retired",
                 _RETIRED_FLAGS[flag],
                 ExitCode.VALIDATION_FAILURE,
-                json_mode,
-            )
-
-    given = dict(zip(_DEFERRED_FLAGS, (no_auto_bootstrap,), strict=True))
-    for flag, was_given in given.items():
-        if was_given:
-            _refuse(
-                DEFERRED_ISSUE_CODE,
-                f"`tan build {flag}` is deferred and not available in this "
-                f"build (see {DEFERRED_ISSUE_URL}).",
-                ExitCode.RUNTIME_FAILURE,
                 json_mode,
             )
 

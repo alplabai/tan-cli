@@ -33,7 +33,8 @@ exists to prevent, applied to this file about itself):
 
   1. LITERAL sites -- `Issue("family.code", ...)`, `code="family.code"`
      anywhere, and `Issue(NAME, ...)` where `NAME` is a module-level constant
-     assigned exactly that literal (`cli.command-deferred`'s actual shape).
+     assigned exactly that literal (`completion.shell-unsupported`'s actual
+     shape, via `completion_cmd.SHELL_UNSUPPORTED_CODE`).
   2. FULL-CODE-CARRYING CALL sites -- [`_FULL_CODE_CALLABLES`]: the port's
      DOMINANT emit idiom is not `Issue("family.code", ...)` directly but a
      per-command error TYPE (`BuildError`, `InitError`, `GenerateError`, ...)
@@ -347,8 +348,8 @@ def _rel(path: pathlib.Path) -> str:
 
 def _module_string_constants(tree: ast.Module) -> dict[str, str]:
     """Module-level `NAME = "literal.with.a.dot"` assignments -- the
-    `cli.command-deferred` shape (`DEFERRED_ISSUE_CODE` in
-    `deferred_cmd.py`), where the whole code is named once and referenced by
+    `completion.shell-unsupported` shape (`SHELL_UNSUPPORTED_CODE` in
+    `completion_cmd.py`), where the whole code is named once and referenced by
     identifier at the `Issue(...)` call site rather than spelled inline.
     Deliberately shallow: only a direct top-level `Assign` to a `Name`
     counts, so a value reassigned or computed elsewhere is correctly left
@@ -417,14 +418,13 @@ _FULL_CODE_CALLABLES: dict[tuple[str, str], int] = {
 #: Every entry's literal IS captured elsewhere in this same scan: an
 #: `except <X>Error as err:` block re-emitting `err.code` (`<X>Error` is
 #: itself in `_FULL_CODE_CALLABLES`, so its OWN construction sites carry the
-#: literal), or a module constant imported from another file (`deferred_cmd
-#: .py`'s `DEFERRED_ISSUE_CODE`, resolved by `_module_string_constants` only
-#: at ITS OWN definition site -- deliberately shallow, per that function's own
-#: docstring -- so the cross-module import here needs its own declared entry).
+#: literal), or a module constant imported from another file, which
+#: `_module_string_constants` resolves only at ITS OWN definition site --
+#: deliberately shallow, per that function's own docstring -- so a
+#: cross-module import needs its own declared entry here.
 _KNOWN_CODE_FORWARDS: frozenset[tuple[str, str]] = frozenset(
     {
         ("tan/commands/build_cmd.py", "err.code"),  # BuildError <- PlanParseError/TokenSubstitutionError
-        ("tan/commands/build_cmd.py", "DEFERRED_ISSUE_CODE"),  # imported from deferred_cmd.py
         # imported from `tan.core.sdk_discovery` (tan-cli#407; the module
         # moved under tan-cli#408, this entry did not need to). Same shape as
         # the line above and covered the same way: `_module_string_constants`
@@ -1674,6 +1674,97 @@ def test_gate_rejects_a_deliberately_unregistered_code():
     # not unconditionally red.
     offenders_clean = _missing(real_emitted, registered)
     assert fabricated not in offenders_clean
+
+
+def test_every_known_code_forward_entry_is_still_needed(monkeypatch):
+    """`_KNOWN_CODE_FORWARDS` is a static allowlist that only ever answers
+    "is this unresolved site declared" -- it never asks "is this declared
+    entry unresolved anywhere any more", so a stale row (the call site it
+    used to shield renamed, refactored away, or resolved some other way)
+    costs the gate above nothing. Proven by mutation while reviewing
+    tan-cli#427: this change deletes `deferred_cmd.py` and, with it, every
+    call site `("tan/commands/build_cmd.py", "DEFERRED_ISSUE_CODE")` used to
+    shield -- had that row been left in `_KNOWN_CODE_FORWARDS` instead of
+    removed in the same commit,
+    `test_every_emitted_issue_code_is_registered` would have stayed exactly
+    as green, because that gate only ever checks the declared side, never
+    whether the declaration still matches anything real. A gate that cannot
+    go red for carrying a dead row is not pruning itself.
+
+    This is the missing other half. With `_KNOWN_CODE_FORWARDS` temporarily
+    emptied, re-run the SAME whole-tree scan `_all_literal_codes` runs for
+    the real gate, and recover every `(rel, expr)` pair that comes back
+    unresolved without it. Every entry in the real table must appear there --
+    i.e. removing it must make some real `Issue(...)`/`code=` call regress
+    from resolved to unresolved. One that does not is dead: nothing in the
+    tree needs it forwarded any more, and it should be deleted in the same
+    change that made it dead, not left for the next reviewer to notice by
+    hand.
+    """
+    live_forwards = _KNOWN_CODE_FORWARDS
+    monkeypatch.setitem(globals(), "_KNOWN_CODE_FORWARDS", frozenset())
+    _, unresolved_without_forwards = _all_literal_codes()
+
+    # `_literal_codes_in_file`'s own message format ends every unresolved
+    # entry in `({payload})`, following `{rel}:{lineno} -- ...` -- recover
+    # both halves the same way the message was built, not by re-deriving
+    # them from the AST a second time.
+    observed: set[tuple[str, str]] = set()
+    for line in unresolved_without_forwards:
+        rel = line.split(":", 1)[0]
+        expr = line.rsplit(" (", 1)[-1].rstrip(")")
+        observed.add((rel, expr))
+
+    # A single callable, not two independently-typed subtraction expressions:
+    # the negative half below calls this SAME function on a different input
+    # rather than re-deriving `forwards - observed` a second time, so a
+    # mutation of the computation itself (not just of one call site) is
+    # visible to both halves. Proven by mutation while reviewing this same
+    # PR's round 3: with the negative half re-deriving its own copy of the
+    # subtraction, replacing this real computation with the always-empty
+    # `live_forwards - live_forwards` left the whole test green -- the
+    # positive assertion below is trivially satisfied by an empty `stale`
+    # regardless of how it was computed, and the re-derived negative half
+    # never touched the mutated line at all.
+    def _stale_forwards(forwards: frozenset[tuple[str, str]]) -> list[tuple[str, str]]:
+        return sorted(forwards - observed)
+
+    stale = _stale_forwards(live_forwards)
+    assert not stale, (
+        f"{len(stale)} _KNOWN_CODE_FORWARDS entr(ies) match no unresolved "
+        "code-position site anywhere in the tree once forwarding is disabled "
+        "for the check -- the call site each one used to shield is gone, "
+        "renamed, or resolves some other way now, so the entry is dead "
+        "weight that would silently swallow a real FUTURE escape sharing the "
+        "same (file, expr) spelling. Delete the stale row(s), in the same "
+        "change that made them dead:\n  "
+        + "\n  ".join(f"{rel!r}, {expr!r}" for rel, expr in stale)
+    )
+
+    # And the negative -- proven properly, not by construction. Intersecting
+    # `live_forwards` against a scan run WITH `live_forwards` itself bound to
+    # `_KNOWN_CODE_FORWARDS` is empty for ANY table: `_resolve_code_value`'s
+    # forward branch trivially excludes every member of whatever set is
+    # currently bound there from ever landing in `unresolved`, so that
+    # intersection cannot be non-empty no matter what the table holds -- a
+    # check with no way to fail is not a check (round-3 review of
+    # tan-cli#1062). What `_stale_forwards` needs to be shown capable of is
+    # flagging a row that IS genuinely dead: fabricate one that matches no
+    # real call site anywhere in the tree -- the exact shape a stale row
+    # takes -- and confirm calling `_stale_forwards` again, on
+    # `live_forwards | {fabricated}`, reports exactly it. This calls the
+    # gate's own `_stale_forwards`, not a re-derived copy of its expression,
+    # so a mutation of that expression fails HERE too, not just above.
+    fabricated = ("tan/commands/build_cmd.py", "__no_such_forward_target__")
+    assert fabricated not in observed  # sanity: matches nothing real
+    fabricated_stale = _stale_forwards(live_forwards | {fabricated})
+    assert fabricated_stale == [fabricated], (
+        "a fabricated _KNOWN_CODE_FORWARDS entry matching no real call site "
+        "was not reported stale -- the negative half of this gate cannot "
+        f"fail for any table content:\n  {fabricated_stale!r}"
+    )
+
+    monkeypatch.setitem(globals(), "_KNOWN_CODE_FORWARDS", live_forwards)
 
 
 def test_check_site_counts_flags_a_declared_vs_actual_mismatch():

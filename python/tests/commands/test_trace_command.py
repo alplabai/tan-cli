@@ -7,9 +7,11 @@ including the mixed-separator `outputPath`/command-line shape, which is a
 genuine byte-for-byte requirement, not a stylistic choice (see
 `trace_cmd`'s module docstring).
 
-`trace` is not yet registered in `tan.cli.app` (the orchestrator's to wire,
-per `deferred_cmd.py`'s module docstring), so these tests build a throwaway
-local Typer app around the ported command function directly.
+`trace` IS registered in the real `tan.cli.app` too (tan-cli#260 shipped it;
+`deferred_cmd.py`, the module that used to stub it, is gone as of
+tan-cli#427), but these tests still build a throwaway local Typer app around
+the ported command function directly, for isolation from the other 31
+commands' registration and startup side effects.
 """
 from __future__ import annotations
 

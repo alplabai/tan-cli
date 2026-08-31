@@ -115,6 +115,9 @@ with a full `consumerEffect` per entry — this table does not duplicate them.
 | `presets.sdk-root-unresolved` (severity `warning`) | frozen | The New Project wizard silently falls back to its static catalogue, which carries no `cores`, so a **heterogeneous SoM scaffolds single-core with no IPC**. The reference part E1M-AEN801 is multi-core, so that is the default path. |
 | `bootstrap.python-not-runnable` (severity `error`) | frozen | `python`/`python3` resolves on PATH but will not run (a Microsoft Store alias, or similar). Renamed, `alp-sdk-vscode`'s `prerequisitesMissingIssue` (`PREREQ_CODES`, `src/alpCli/service.ts`) no longer recognises tan's own refusal, so the extension spawns the real bootstrap terminal anyway and the customer watches the identical failure scroll past with the install guidance lost — same failure shape as `bootstrap.prerequisites-missing`. Carries no `missingPrerequisites[]` entry: a `{tool, command}` pair cannot represent "the Python you have will not run", so the fix travels only in `issues[].message`. |
 | `bootstrap.python-too-old` (severity `error`) | frozen | The resolved Python is below the SDK tooling's floor (currently >= 3.10). Same consumer and the same failure shape as `bootstrap.python-not-runnable`; also tool-less. |
+| `cli.parse-error` (severity `error`) | frozen | Reports "this build of the tan CLI doesn't accept the command the extension sent", raises the outcome to error severity (exit 2 alone reads as a board.yaml validation warning), routes the usage dump to the output channel and offers Update CLI. Renamed, the customer sees the raw click usage dump in a warning toast again. |
+| `cli.command-deferred` (severity `error`) | retired | Pre-consumer — nothing in alp-sdk-vscode ever matched this code. Retired rather than deleted by tan-cli#427 (its emission module, `tan/commands/deferred_cmd.py`, is gone) so the spelling is RESERVED and must never be re-used for a different verdict. |
+| `flash.swd-probe-write-unconfirmed` (severity `warning`) | retired | Pre-consumer — nothing in alp-sdk-vscode ever matched this code. Retired rather than deleted by tan-cli#732, which removed the `swd_probe` flash backend entirely, so the spelling is RESERVED and must never be re-used for a different verdict. |
 
 `bootstrap.prerequisites-missing`, `bootstrap.python-not-runnable` and
 `bootstrap.python-too-old` are the three codes `alp-sdk-vscode`'s
@@ -344,18 +347,48 @@ its `--help` text with a marker naming WHICH KIND of inert it is**, rendered by
 `python/tan/core/inert.py` and nothing else:
 
 ```
---no-auto-bootstrap  Accepted by other commands; not implemented for `build`
-                     yet. (inert:deferred:tan-cli#427)
 --build              Accepted for compatibility: ... (inert:compatibility:tan-cli#290)
 --project            Project root. Not read: ... (inert:not-applicable)
 ```
 
-(`--plan` was this section's example for `deferred` before tan-cli#427: it is
-now RETIRED instead, a fifth, actively-read mechanism this closed vocabulary
-does not cover -- see the `build --plan` row above. A retired flag carries no
-`(inert:...)` marker at all; its value selects a real, distinct refusal
-(`build.flag-retired`), which is why it moved out of this example rather than
-keeping its old slot.)
+`--build` (`doctor_cmd.py`) is, measured, the ONLY live `compatibility` tenant
+today — the identical single-flag population `deferred`'s worked example had
+right before it emptied out twice (below). It is named directly rather than
+documented from the enforcing code the way `deferred` now is, and
+deliberately so: `COMPATIBILITY` is a `PERMANENT_KINDS` member
+(`python/tan/core/inert.py`) precisely because its flags are kept forever, not
+retired the way a `deferred` flag eventually ships or gets retired outright —
+so `--build` going away here would mean `doctor`'s own compat flag was
+deleted, a change big enough to update this worked example deliberately, not
+the structural churn (`build` retiring flags under tan-cli#427) that emptied
+`deferred`'s twice. If a second `compatibility` tenant ever appears, prefer it
+over `--build` alone so the block stops being read as "the one and only".
+
+`deferred` has no live specimen to put in that block: `--no-auto-bootstrap`
+was the last option carrying it, and tan-cli#427 retired that flag outright
+rather than implementing it, so `tan build --help` now carries no
+inert-marked option at all (measured population as of that change: `parity`
+117, `compatibility` 1, `not-applicable` 2, `deferred` 0). This is the
+SECOND time this doc's worked example for `deferred` has emptied out from
+under it — `--plan` was the original specimen, retired by an earlier pass of
+the same issue, and `--no-auto-bootstrap` was repointed to after that. Rather
+than repoint to a third named flag that the next retirement can empty out
+again, the shape is documented straight from the enforcing code instead:
+`inert_help("...", DEFERRED, "tan-cli#NNN")` renders
+`(inert:deferred:tan-cli#NNN)`, where `NNN` is the tracking issue --
+`inert_help` refuses to build one with no ref (`python/tan/core/inert.py`).
+
+The kind itself stays in the closed vocabulary (`INERT_KINDS`) with zero
+current members: it names "a real flag from the v0.4.1 oracle this port has
+not built yet, with an issue tracking its arrival", which is a property of
+individual flags, not of the vocabulary, and can recur for any future oracle
+gap. Retiring the KIND for lack of a current tenant would be a breaking wire
+change in its own right (see "The vocabulary is closed" below) for a problem
+a doc fix can solve instead.
+
+A retired flag, unlike a deferred one, carries no `(inert:...)` marker at
+all — its value selects a real, distinct refusal (`build.flag-retired`); see
+the `build --plan` row above.
 
 Read it back with, after collapsing runs of whitespace:
 
@@ -393,8 +426,10 @@ which walks the built Click tree (not the source) and fails on an unknown
 kind, a `deferred` with no ref, a hidden inert option of a non-`parity` kind,
 an option that reads as inert in prose but carries no marker, and — the pin
 that matters to this repo's consumer — any change at all to the census of
-**visible** inert options. That census is 15 rows today: the twelve `build`
-deferrals, `doctor --build`, and `faultdecode`'s `--project`/`--sdk-root`.
+**visible** inert options. That census is 3 rows today: `doctor --build` and
+`faultdecode`'s `--project`/`--sdk-root`. `build` used to contribute rows of
+its own (twelve, then one after tan-cli#427's first pass) but now contributes
+none — see "Inert options and their kind" above for why.
 
 ## Fixture shape (`envelopes/<case>/`)
 

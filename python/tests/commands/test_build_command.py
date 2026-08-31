@@ -810,9 +810,23 @@ def test_execute_with_a_retired_flag_is_refused_as_retired(project):
     assert not (project / "build").exists()
 
 
-def test_execute_with_a_deferred_flag_is_refused_as_deferred(project):
-    """Same precedence as the retired case above, for the one flag that is
-    still genuinely deferred (``--no-auto-bootstrap``, tan-cli#427)."""
+def test_execute_with_the_no_auto_bootstrap_flag_is_refused_as_retired(project):
+    """Same precedence as the case above, for the flag tan-cli#427 retired
+    LAST and for a different reason.
+
+    ``--plan`` above is retired as SUPERSEDED (``--plan-from`` replaced it);
+    ``--no-auto-bootstrap`` is retired because `tan build` has no implicit
+    bootstrap for it to switch off. Different reasons, same contract -- so
+    this pins that the newly-retired flag takes the retirement path in the
+    ``--execute`` combination too, rather than the retirement being wired up
+    only for the three that were superseded.
+
+    It also pins that the answer moved: this flag used to refuse at exit 1
+    with ``cli.command-deferred``, and that code no longer has any emission
+    site in the tree -- it stays in ``contract/issue-codes.json`` at
+    ``status: "retired"`` (RESERVED, never reused for a different verdict),
+    but nothing in ``python/`` emits it any more.
+    """
     plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
     proc = run_tan(
         "build", "--plan-from", str(plan), "--execute", "--no-auto-bootstrap",
@@ -820,8 +834,9 @@ def test_execute_with_a_deferred_flag_is_refused_as_deferred(project):
     )
 
     env = envelope_of(proc)
-    assert proc.returncode == 1, env
-    assert [i["code"] for i in env["issues"]] == ["cli.command-deferred"], env["issues"]
+    assert proc.returncode == 2, env
+    assert [i["code"] for i in env["issues"]] == ["build.flag-retired"], env["issues"]
+    assert "run `tan bootstrap` yourself" in env["issues"][0]["message"]
     assert not (project / "build").exists()
 
 
@@ -2027,64 +2042,7 @@ def test_text_mode_puts_nothing_on_stdout(project, mode):
     assert "aaa_probe" in proc.stderr
 
 
-# --- an unported oracle flag reads as deferred, never as a typo -------------
-
-
-#: The one flag `tan build` still declares but does not implement (tan-cli#427
-#: resolved the rest: `--pristine`/`--no-auto-bootstrap` implemented for real,
-#: `--plan`/`--manifest`/`--manifest-from` retired with their own coded
-#: refusal below, `--target`/`--all`/`--verbose`/`--quiet`/`--no-color`/
-#: `--non-interactive`/`--ci` now accept-and-drop via `accept_global_flags`,
-#: matching the oracle's own `BuildArgs` -- which declares NONE of those seven
-#: itself, only `GlobalArgs` does, and `build`'s Rust handler never reads
-#: them either).
-DEFERRED_BUILD_FLAGS = ["--no-auto-bootstrap"]
-
-
-@pytest.mark.parametrize("flag", DEFERRED_BUILD_FLAGS)
-def test_an_unported_oracle_flag_is_refused_as_deferred_not_as_a_typo(project, flag):
-    """`tan build --no-auto-bootstrap` used to exit 2 with Click's "No such
-    option" style refusal before it was declared at all, which is
-    indistinguishable from a typo. Declared, so the answer is the same coded
-    refusal `deferred_cmd` gives a deferred verb: exit 1,
-    `cli.command-deferred`, and a message naming the flag and an issue URL a
-    caller can grep for.
-
-    The URL is tan-cli#427, not #260: #260 tracked the seven deferred VERBS,
-    which all shipped in 0.5.0 and closed it, so a refusal pointing there sent
-    the user to a closed issue about commands that work. #427 stays OPEN,
-    narrowed to this one flag -- porting the implicit "run `tan bootstrap` on
-    a missing/stale Zephyr workspace" trigger this flag would disable, which
-    does not exist anywhere in this port yet (an unbootstrapped workspace
-    surfaces today as `build.plan-unavailable`, never an automatic
-    `tan bootstrap` invocation).
-
-    Exit 1 is the load-bearing half. Reusing 2 would put "known but deferred"
-    back at the exact exit code the typo case already occupies, which is the
-    distinction this whole treatment exists to make.
-    """
-    proc = run_tan("build", flag, "--format", "json", cwd=project)
-
-    env = envelope_of(proc)
-    assert proc.returncode == 1, env
-    assert env["command"] == "build"
-    assert [i["code"] for i in env["issues"]] == ["cli.command-deferred"], env["issues"]
-    message = env["issues"][0]["message"]
-    assert flag in message
-    assert "tan-cli/issues/427" in message
-    # The stale pointer must not come back.
-    assert "issues/260" not in message
-    assert "Traceback" not in proc.stderr
-
-
-def test_a_deferred_flag_does_no_work_before_refusing(project):
-    # The refusal happens before the plan is read, so a run naming one cannot
-    # half-build: nothing on disk, and nothing on stdout in text mode either.
-    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
-    proc = run_tan("build", "--plan-from", str(plan), "--no-auto-bootstrap", cwd=project)
-    assert proc.returncode == 1, proc.stderr
-    assert proc.stdout == "", proc.stdout
-    assert not (project / "build").exists()
+# --- a retired oracle flag reads as retired, never as a typo ----------------
 
 
 #: `(flag, expected FULL message)` for every flag tan-cli#427 retired: "Two
@@ -2118,6 +2076,18 @@ RETIRED_BUILD_FLAGS = [
         "`--manifest-from FILE` is retired: `system-manifest.yaml` is plain YAML -- open "
         "FILE directly instead of routing it through `tan build`.",
     ),
+    # Retired rather than implemented, unlike the three above which were
+    # retired as SUPERSEDED: `tan build` has no implicit bootstrap for this to
+    # switch off, and is not getting one (tan-cli#427's closing decision), so
+    # the message teaches the explicit command instead of naming a substitute
+    # flag. It reached this table from `DEFERRED_BUILD_FLAGS`, which is now
+    # empty and gone -- nothing `tan build` declares is deferred any more.
+    (
+        "--no-auto-bootstrap",
+        "`--no-auto-bootstrap` is retired: `tan build` never bootstraps implicitly, so "
+        "there is nothing for it to disable -- run `tan bootstrap` yourself when a "
+        "workspace needs preparing.",
+    ),
 ]
 
 
@@ -2128,8 +2098,9 @@ def test_a_retired_flag_is_refused_with_its_replacement_named(project, flag, exp
     """The flag still PARSES (never Click's own typo error) but always
     refuses, at `VALIDATION_FAILURE` (exit 2, this CLI's position for an
     invalid invocation) rather than `RUNTIME_FAILURE` -- a retired flag is a
-    permanently-wrong argv, not a transient "not built yet" the deferred
-    flags above still are.
+    permanently-wrong argv, never a transient "not built yet" (that used to
+    be `RUNTIME_FAILURE`'s job too, for the now-retired `cli.command-deferred`
+    vocabulary; `tan build` declares nothing deferred any more, tan-cli#427).
 
     Asserts the WHOLE message against a hardcoded golden string, not a
     substring: see `RETIRED_BUILD_FLAGS`'s own docstring for the mutant this
@@ -2154,9 +2125,9 @@ def test_a_retired_flag_does_no_work_before_refusing(project):
 
 
 def test_a_real_typo_still_exits_2(project):
-    # The other half of the distinction: a flag that is NOT a deferred or
-    # retired oracle flag must keep Click's parse error, or those codes would
-    # just become the new name for every mistyped option.
+    # The other half of the distinction: a flag that is NOT a retired oracle
+    # flag must keep Click's parse error, or `build.flag-retired` would just
+    # become the new name for every mistyped option.
     proc = run_tan("build", "--pristien", "--format", "json", cwd=project)
     assert proc.returncode == 2, proc.stdout + proc.stderr
 
@@ -2393,9 +2364,9 @@ def test_build_help_carries_no_port_archaeology():
     assert "v0.4.1" not in output
     assert "ADDED BY THIS PORT" not in output
     assert "parity gap" not in output
-    # The one still-deferred option stays LISTED -- hiding a flag a user will
-    # type, then refusing it at exit 1 is worse than naming it. Same for the
-    # three retired ones (tan-cli#427): they still parse and still need a
+    # All four retired options stay LISTED (tan-cli#427) -- hiding a flag a
+    # user will type, then refusing it, is worse than naming it. `tan build`
+    # declares nothing deferred any more; they still parse and still need a
     # reader to see them to know why.
     assert "--no-auto-bootstrap" in output
     assert "--plan" in output

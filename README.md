@@ -357,39 +357,49 @@ options either: a leading one is relocated across the subcommand boundary, so
 `tan --ci doctor` and `tan doctor --ci` are the same run, while a bare
 `tan --ci` with no subcommand is `No such option: --ci`.
 
-`tan build` parses all ten of the shared flags, but only ONE of them still
-refuses the invocation (tan-cli#427): `--no-auto-bootstrap`, because this port
-has no implicit "run `tan bootstrap` on a missing Zephyr workspace" trigger
-yet for the flag to disable in the first place (accepting it ahead of that
-trigger existing would be its own silent no-op). The other seven —
-`--target`, `--all`, `--verbose`, `--quiet`, `--no-color`,
-`--non-interactive`, `--ci` — are accepted and dropped, the SAME
-`accept_global_flags` mechanism 17 other commands already use: the oracle's
-own `cli.rs` declares them ONLY on the shared `GlobalArgs` struct and
-`build`'s Rust handler never read them either, so this is not a narrower
-stand-in for refusing them, it is the identical oracle behaviour. `--plan`,
-`--manifest` and `--manifest-from` are a third bucket, RETIRED rather than
-deferred or accepted: each still parses but is refused with
-`build.flag-retired` (exit 2), naming its replacement (`--plan-from`,
-`--materialise`/`--execute`) in the message itself. `--project`,
-`--board-yaml`, `--sdk-root`, `--plan-from`, `--materialise`, `--native`,
-`--execute`, `--build-root`, `--format` and `--pristine` are unaffected by any
-of the three buckets:
+`tan build` accepts all ten of the shared flags (`global_flags.py`'s
+`_GLOBAL_FLAG_SPECS`) — zero of them refuse the invocation. Three —
+`--project`, `--board-yaml`, `--sdk-root` — are already declared by `build`
+itself and pass through untouched. The other seven — `--target`, `--all`,
+`--verbose`, `--quiet`, `--no-color`, `--non-interactive`, `--ci` — are
+accepted and dropped, the SAME `accept_global_flags` mechanism 17 other
+commands already use: the oracle's own `cli.rs` declares them ONLY on the
+shared `GlobalArgs` struct and `build`'s Rust handler never read them either,
+so this is not a narrower stand-in for refusing them, it is the identical
+oracle behaviour.
+
+Separately, four flags LOCAL to `build` — never part of the shared set —
+still refuse the invocation outright (tan-cli#427): `--plan`, `--manifest`,
+`--manifest-from` and `--no-auto-bootstrap`. Each is RETIRED rather than
+deferred or accepted — parsed (never a Click typo error) but refused with
+`build.flag-retired` (exit 2), naming what to do instead directly in the
+message: `--plan-from` (with `--materialise`/`--execute`) for `--plan`, a
+native `tan build`'s own `build/system-manifest.yaml` for `--manifest`,
+opening the file directly for `--manifest-from`, and running `tan bootstrap`
+yourself for `--no-auto-bootstrap` — this port has no implicit "run
+`tan bootstrap` on a missing Zephyr workspace" trigger for that one to
+disable, and is not building one just to give the flag something to switch
+off, so it is retired outright rather than left pending.
+`--plan-from`, `--materialise`, `--native`, `--execute`, `--build-root`,
+`--format` and `--pristine` are unaffected by either bucket:
 
 ```console
 $ tan build --ci --plan-from plan.json --format json
 {"command":"build","ok":true,"exitCode":0,"project":{...},
  "data":{"schemaVersion":1,...},"issues":[]}
 $ tan build --no-auto-bootstrap --format json
-{"command":"build","ok":false,"exitCode":1,...,"data":{"message":"`tan build
- --no-auto-bootstrap` is deferred and not available in this build (see
- https://github.com/alplabai/tan-cli/issues/427)."},"issues":[{"code":"cli.command-deferred",
- "severity":"error","message":"..."}]}
+{"command":"build","ok":false,"exitCode":2,...,"issues":[{"code":"build.flag-retired",
+ "severity":"error","message":"`--no-auto-bootstrap` is retired: `tan build` never
+ bootstraps implicitly, so there is nothing for it to disable -- run `tan bootstrap`
+ yourself when a workspace needs preparing."}]}
 ```
 
 So a script that adds `--ci` to every tan invocation no longer breaks on
-`build` — only one flag in the shared set still does, and it names itself.
-Elsewhere `--ci` does three separate things, and only the first is consent:
+`build` — none of the ten shared flags refuse. Of the four BUILD-local flags
+that do refuse, each names itself and says what to run instead:
+`--no-auto-bootstrap` is retired rather than pending (tan-cli#427), because
+`tan build` never bootstraps implicitly. Elsewhere `--ci` does three separate
+things, and only the first is consent:
 
 * **Consent**, on the two commands that read the flag for it — `doctor --fix`
   (`doctor_cmd.py`'s `fix_allowed`) and `scaffold` (`scaffold_cmd.py`'s

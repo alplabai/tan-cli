@@ -6,10 +6,12 @@ Every shape asserted below was measured against a freshly-built oracle
 the possibly-stale `dev`-branch binary -- see `inspect_cmd`'s module
 docstring for why that distinction matters here specifically).
 
-`inspect`/`trace`/`support-bundle` are not yet registered in `tan.cli.app`
-(that registration is the orchestrator's, not this unit's, to make -- see
-`deferred_cmd.py`'s module docstring), so these tests build a throwaway
-local Typer app around the ported command function directly, with a minimal
+`inspect`/`trace`/`support-bundle` are registered in the real `tan.cli.app`
+now (tan-cli#260 shipped all seven deferred verbs; `deferred_cmd.py`, the
+module that used to stub them, is gone as of tan-cli#427), but these tests
+still build a throwaway local Typer app around the ported command function
+directly rather than going through the real app -- unit isolation from the
+other 31 commands' registration and startup side effects, with a minimal
 root callback that reproduces `tan.cli.root`'s `ctx.obj = {"format": ...}`
 wiring closely enough to exercise the leading-`--format` path.
 """
@@ -35,10 +37,9 @@ from tan.envelope import Project, SdkInfo
 def _local_app():
     """A throwaway Typer app wrapping just [`inspect`], with a minimal root
     callback reproducing `tan.cli.root`'s `ctx.obj = {"format": ...}` wiring --
-    `inspect` is not yet registered in the real `tan.cli.app` (that
-    registration is the orchestrator's to make, not this unit's; see
-    `deferred_cmd.py`'s module docstring), so testing through it would still
-    exercise the OLD deferred stub."""
+    `inspect` IS registered in the real `tan.cli.app` too (tan-cli#260), but
+    this suite exercises the ported command function in isolation rather
+    than going through the full 32-command app."""
     local = typer.Typer()
 
     @local.callback(invoke_without_command=True)

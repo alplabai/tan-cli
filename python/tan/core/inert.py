@@ -24,10 +24,21 @@ hand-maintain its own copy of a table tan already knows
 **The marker.** Every inert option's help ends with a single whitespace-free
 token, `(inert:KIND)` or `(inert:KIND:REF)`:
 
-    --plan        Accepted by other commands; not implemented for `build`
-                  yet. (inert:deferred:tan-cli#427)
     --build       Accepted for compatibility: ... (inert:compatibility:tan-cli#290)
     --project     Project root. Not read: ... (inert:not-applicable)
+
+`deferred` has no live instance to show, so this block cannot illustrate it.
+`--plan` filled the slot until tan-cli#427 RETIRED that flag, and
+`--no-auto-bootstrap` took it over until the same issue retired that one too.
+Measured on this tree with the census gate's own walk: 458 options, 120 marked
+-- parity 117, compatibility 1, not-applicable 2, deferred 0. (A hand-rolled
+walk reports 2: typer vendors click, so `isinstance(cmd, click.Group)` is
+False and the recursion never starts. Use `hasattr(cmd, "list_commands")`.)
+
+The kind stays in the closed vocabulary because it is the right marker the
+next time tan declares a flag it has not built yet. A RETIRED flag is NOT it
+and carries no marker at all: its value selects a real, distinct refusal
+rather than being accepted and dropped.
 
 Three properties of that shape are deliberate, and each rules out a rendering
 defect measured on the real `--help`:
