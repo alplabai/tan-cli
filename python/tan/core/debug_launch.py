@@ -1228,6 +1228,16 @@ def _merge_load_files(
     stale value updateable again" rule every OTHER field in this module
     already gets from [`_merge_value`] -- and matches what
     `apply_launch_resolution` already keeps in sync with `executable`.
+
+    This function alone cannot un-protect a value once it lands here: the
+    KEY-ABSENT case that lets `loadFiles` re-establish provenance after a
+    lost sidecar is handled one level up, in
+    [`_merge_configuration`]'s own key-absent branch, before a pair ever
+    reaches this function. See `launch_provenance`'s module docstring
+    ("``loadFiles`` heals the same way for the same reason, but only from
+    ONE specific starting point") for why this function's own protect
+    branch, unlike that branch, can never safely self-heal from a value
+    already sitting in the file.
     """
     if existing == incoming:
         return list(incoming), list(incoming)
@@ -1327,18 +1337,28 @@ def _merge_configuration(
             merged[key] = merged_list
             if owned_entries_out is not None and owned:
                 owned_entries_out[key] = owned
-        elif isinstance(value, list) and existing_val is None:
+        elif isinstance(value, list) and key not in existing:
             # tan-cli#1020 re-review: the entry already exists (this is the
             # MERGE path, not the brand-new-entry branch below), but this
             # particular list-valued key is genuinely ABSENT from it -- e.g. a
             # pre-#945 `tan` wrote this configuration before `loadFiles`
-            # existed at all. That is NOT the same fact as the key being
-            # PRESENT and holding `[]` (a customer's own explicit
-            # attach-only marker, or a value some other run already decided
-            # not to touch -- see `_load_files_is_tan_owned`'s docstring for
-            # why those two must never be conflated), so this is deliberately
-            # its own branch rather than substituting `[]` for `existing_val`
-            # and falling into the branch above.
+            # existed at all. `key not in existing`, deliberately NOT
+            # `existing_val is None`: `existing.get(key)` returns `None` for
+            # BOTH "the key is absent" and "the key is present holding JSON
+            # `null`", and those are not the same fact -- an explicit
+            # `"loadFiles": null` some tool or hand-edit wrote is a concrete
+            # value sitting in the file, indistinguishable from a customer's
+            # `[]` in every way that matters here (measured pre-fix: an
+            # `is None` check silently overwrote a `null` value AND recorded
+            # it as tan-owned, exactly the "nothing to protect" mistake this
+            # whole branch exists to avoid for the KEY-ABSENT case only).
+            # That is also NOT the same fact as the key being PRESENT and
+            # holding `[]` (a customer's own explicit attach-only marker, or
+            # a value some other run already decided not to touch -- see
+            # `_load_files_is_tan_owned`'s docstring for why those two must
+            # never be conflated), so this is deliberately its own branch
+            # rather than substituting `[]` for `existing_val` and falling
+            # into the branch above.
             #
             # With nothing here for a customer to have hand-authored, this
             # run's fresh value is unambiguously its own -- exactly the same

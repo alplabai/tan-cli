@@ -1834,6 +1834,39 @@ def test_a_load_files_key_absent_from_an_existing_entry_is_recorded_as_tan_owned
     ), recorded
 
 
+def test_an_explicit_json_null_load_files_is_not_conflated_with_a_missing_key():
+    """tan-cli#1020 review round 4 nit: `existing.get(key)` returns `None`
+    for BOTH "the key is absent" and "the key is present holding JSON
+    `null`" -- an `is None` check cannot tell them apart. `loadFiles: null`
+    is a concrete value some tool or hand-edit put in the file, not the
+    same fact as the key never having existed; conflating them let a
+    pre-fix build silently overwrite it AND record it as tan-owned, as if
+    it were the brand-new-entry case. This write must still land the fresh
+    value (there is nothing sensible to merge `null` against), but must NOT
+    claim ownership of it -- a later run that resolves something different
+    again must still be free to protect whatever a customer put there in
+    the meantime, the same as any other unprovable existing value."""
+    draft = create_launch_draft(ZEPHYR_MCU, "jlink", None)
+    existing = json.dumps(
+        {
+            "version": "0.2.0",
+            "configurations": [
+                {
+                    "name": "Alp: Zephyr Debug (J-Link)",
+                    "servertype": "jlink",
+                    "loadFiles": None,
+                }
+            ],
+        }
+    )
+
+    plan = create_launch_json_write_plan(existing, draft)
+
+    assert plan.written_configuration["loadFiles"] == draft["loadFiles"]
+    recorded = plan.provenance.hashes_for("Alp: Zephyr Debug (J-Link)", "loadFiles")
+    assert recorded == frozenset(), recorded
+
+
 def test_the_default_upgrade_path_heals_load_files_within_one_run():
     """The pairing test for the one above, proving the fix actually closes the
     loop rather than merely recording something that goes nowhere: feed run
@@ -1974,6 +2007,66 @@ def test_the_default_upgrade_path_heals_load_files_within_one_run_through_the_re
     assert not any(i["code"] == "debug-config.load-files-preserved" for i in run_2["issues"]), (
         "a provably tan-owned loadFiles must sync, not be reported as preserved"
     )
+
+
+def test_the_load_files_preserved_disclosure_reaches_text_mode(tmp_path):
+    """tan-cli#1020 review round 4: `debug-config.load-files-preserved` was
+    only ever rendered under `--format json` -- `launch_provenance.py`'s own
+    "disclosed, every run" claim held for a JSON consumer and NOT for a
+    customer at a terminal, the DEFAULT output mode. Measured pre-fix: the
+    residual case (a `loadFiles` this run cannot prove is tan's own, e.g. a
+    sidecar lost while the key was already present) printed three routine
+    `note:` lines and exited 0 with no hint that `executable` and the
+    actually-programmed `loadFiles` had just diverged -- exactly the silent
+    divergence this `flash-path`/`safety`-labelled issue exists to prevent.
+    FAILS pre-fix: no `note:` line mentions `loadFiles` at all. Shown even
+    under `--quiet`, the same as `debug-config.comments-dropped`."""
+    pytest.importorskip("yaml")
+    vscode_dir = tmp_path / ".vscode"
+    vscode_dir.mkdir()
+    (vscode_dir / "launch.json").write_text(
+        json.dumps(
+            {
+                "version": "0.2.0",
+                "configurations": [
+                    {
+                        "name": "Alp: Zephyr Debug (J-Link)",
+                        "type": "cortex-debug",
+                        "request": "launch",
+                        "executable": "${workspaceFolder}/build/app/zephyr/zephyr_rev_a.elf",
+                        "servertype": "jlink",
+                        "loadFiles": ["${workspaceFolder}/build/app/zephyr/zephyr_rev_a.elf"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    root = str(tmp_path).replace("\\", "/")
+    build_dir = f"{root}/build/m55_hp-zephyr/build"
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n"
+        f"  board: alp_x\n  build_dir: {build_dir}\n"
+        f"  output_artefact: {build_dir}/zephyr/zephyr_rev_b.elf\n",
+    )
+
+    # tan-cli#182: stdout is the envelope channel in BOTH modes; the human
+    # text preview is stderr (see `test_text_mode_writes_nothing_to_stdout`).
+    proc = run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout == ""
+    load_files_notes = [
+        line for line in proc.stderr.splitlines() if line.startswith("note:") and "loadFiles" in line
+    ]
+    assert load_files_notes, proc.stderr
+    assert "zephyr_rev_a.elf" in load_files_notes[0]
+    assert "zephyr_rev_b.elf" in load_files_notes[0]
+
+    proc_quiet = run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--quiet")
+    assert proc_quiet.returncode == 0, proc_quiet.stdout + proc_quiet.stderr
+    assert any("loadFiles" in line for line in proc_quiet.stderr.splitlines()), proc_quiet.stderr
 
 
 def test_three_real_cli_runs_replace_configfiles_each_time_not_accumulate(tmp_path):

@@ -605,7 +605,15 @@ several less obvious failures.
 - 2026-08-30 -- tan-cli#945: debug_launch.py grows the programsDevice/loadFiles producer-stated facts (PROGRAMS_DEVICE map, programs_device(), the loadFiles draft/resolution wiring); debug_config_cmd.py wires programsDevice into the data payload and its module docstring. Both are additive envelope surface, not bloat to split out this round.
     - tan/commands/debug_config_cmd.py: 2114 -> 2137
     - tan/core/debug_launch.py: 1539 -> 1596
+- 2026-08-30 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/debug_config_cmd.py: 2137 -> 2177
+    - tan/core/debug_launch.py: 1596 -> 1713
+    - function_count_budget: 300 -> 301
 - 2026-08-30 -- tan-cli#1020 review (round 1 + round 2): loadFiles gets its own whole-list merge rule (_merge_load_files/_load_files_is_tan_owned), the key-absent provenance-recording branch that lets it heal within one run, the load-files-preserved disclosure, and the corrected programsDevice/protect-branch wording -- correcting the earlier 2026-08-30 merge-resync entry, which wrongly attributed this same growth to a dev merge that touched neither file
     - tan/commands/debug_config_cmd.py: 2137 -> 2178
     - tan/core/debug_launch.py: 1596 -> 1750
     - function_count_budget: 300 -> 301
+- 2026-08-31 -- tan-cli#1020 review round 4: text-mode disclosure for debug-config.load-files-preserved, the key-absent-vs-null distinction in _merge_configuration, and the launch_provenance.py cross-reference from _merge_load_files
+    - tan/commands/debug_config_cmd.py: 2178 -> 2192
+    - tan/core/debug_launch.py: 1750 -> 1770
+    - function_count_budget: 301 -> 302

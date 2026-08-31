@@ -1416,6 +1416,20 @@ def _success_text(
     for issue in issues:
         if issue.code == "debug-config.comments-dropped":
             lines.append(f"note: {issue.message}")
+    # tan-cli#1020 round 4: `debug-config.load-files-preserved` is the
+    # `flash-path`/`safety` disclosure this whole issue exists for -- a
+    # customer at a terminal (the DEFAULT output mode, not `--format json`)
+    # must be told `executable` and the actually-programmed `loadFiles` now
+    # disagree, the same way `comments-dropped` already is. Emitting it only
+    # under `--format json` left `launch_provenance.py`'s own "disclosed,
+    # every run" claim true for a consumer that never reads text output and
+    # false for one that does: measured, a terminal run over the residual
+    # (sidecar-lost-with-key-present) case printed three routine `note:`
+    # lines and exited 0 with no hint `loadFiles` had gone stale. Always
+    # shown, even under `--quiet`, for the same reason `comments-dropped` is.
+    for issue in issues:
+        if issue.code == "debug-config.load-files-preserved":
+            lines.append(f"note: {issue.message}")
     if not quiet:
         lines.extend(f"note: {n}" for n in notes)
     return lines
