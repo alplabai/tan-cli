@@ -564,7 +564,53 @@ from tests.conftest import sdk_root
 #:
 #: Upstream commits in range touching this table's files:
 #:   - 722320a1 feat(scripts,metadata): --cores template selector and optional per-core toolchain (#1652, #964) (#1835)
-PINNED_SDK_COMMIT = "722320a1abe3cea675e99e97300b8a484b4e8464"  # alp-sdk, 63 commits past v0.16.0, untagged -- see above
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `722320a1` -> `f1b1c9df`
+#: (tan-cli#1026, auditing `auto/planner-resync`'s machine proposal against a
+#: real `f1b1c9df` checkout). Two upstream commits touch this table's files in
+#: the range, both from `alp-sdk` on 2026-08-30/31:
+#:
+#:   - `ec8be8b9` feat(dts): give the E8 low-power bank, DMA2 event router and
+#:     BOD a devicetree presence (#1858) -- touches `partition.py` ONLY, and
+#:     only a devicetree-line citation inside `_has_real_dt_label`'s own
+#:     docstring: `ensemble_e8_peripherals.dtsi:503` -> `:688`, because that
+#:     commit inserted lines ahead of it in the dtsi. INERT: no code changed.
+#:   - `b3775381` fix(hw_info): warn at boot when the compiled SoM revision
+#:     disagrees with the module's EEPROM (#1862) -- touches `kconfig.py`
+#:     ONLY, and IS behavioural: `_emit_som_caps` now appends
+#:     `CONFIG_ALP_SDK_SOM_HW_REV="<hw_rev>"` to EVERY board's generated
+#:     `alp.conf`, unconditionally -- not scoped to boards with an EEPROM
+#:     wired, so E1M-NX9101 (no `on_module.eeprom` today) gets the symbol
+#:     too, on the "harmless now, not silently dropped later" rationale the
+#:     upstream commit message states. The Kconfig symbol is declared by
+#:     this SAME commit (`zephyr/kconfigs/core.kconfig:84`), so every
+#:     alp-sdk checkout new enough to resolve the `PINNED_SDK_COMMIT` pin
+#:     above also declares the symbol -- no undefined-Kconfig-symbol risk.
+#:     `tan/planner/kconfig.py`'s merged hunk is byte-identical to the
+#:     upstream diff.
+#:
+#: MEASURED, not assumed: this line moves emitted bytes, on every board.
+#: `python/tests/parity/test_planner_emit_parity.py`, serial, bound to the
+#: NEW pin `f1b1c9df`: 761 passed / 8 skipped / 0 failed -- tan's planner is
+#: byte-equal to upstream's new output. The SAME suite bound to the OLD pin
+#: `722320a1` (tan's already-ported new line vs. upstream's pre-move output):
+#: 393 failed / 368 passed / 8 skipped, every failure the same one inserted
+#: `CONFIG_ALP_SDK_SOM_HW_REV` line. The frozen oracle fixture
+#: (`python/tests/fixtures/planner_oracle/`) was re-captured against
+#: `f1b1c9df` in this same change for the identical reason -- see
+#: `PROVENANCE.txt` there and `PINNED_PLANNER_ORACLE_SDK_REF` below.
+#:
+#: The other twenty `PINNED_HASHES` entries are unchanged in this range (only
+#: `kconfig.py` and `partition.py` appear in
+#: `git diff --stat 722320a1..f1b1c9df -- scripts/alp_orchestrate/`), so
+#: nothing else is re-frozen past an unaudited delta.
+#:
+#:   scripts/alp_orchestrate/kconfig.py: merged (behavioural -- see above)
+#:   scripts/alp_orchestrate/partition.py: merged (inert -- citation only)
+#:
+#: Upstream commits in range touching this table's files:
+#:   - b3775381 fix(hw_info): warn at boot when the compiled SoM revision disagrees with the module's EEPROM (#1862)
+#:   - ec8be8b9 feat(dts): give the E8 low-power bank, DMA2 event router and BOD a devicetree presence (#1858)
+PINNED_SDK_COMMIT = "f1b1c9df0edd23988961150439863e70e5d99211"  # alp-sdk, 78 commits past v0.16.0, untagged -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -606,7 +652,7 @@ PINNED_HASHES: dict[str, str] = {
     "carveout.py": "c05826e4b784965c332dc662c9aa82b993787d7ab588771c7aee5feaa93feb4e",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "33671fc14bac333da568ca02e42ee872acb70cae31e6b29b4336b51a366a7276",
+    "kconfig.py": "8359c20bbd310749e1b21a9d837c904476bd5af5480fd9a4c211e842756837ae",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
     "loader.py": "136e674d0b2594f99004d99dc0e1c9e116c477f764d759a3919668141182cffe",
@@ -614,7 +660,7 @@ PINNED_HASHES: dict[str, str] = {
     "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
     "models.py": "7e174871caa49f4d7f877dc0229571f1961d29d5c6d2214ced58aa1b86b11585",
     "orchestrator.py": "cb6a38e1a2f4200b16da93c1b11512c6e59b963e8e08279d801b8d38e57c3002",
-    "partition.py": "120f458934f7027175b5d362eec73d34195c282db88f7f0fd41a8c37c9b7a132",
+    "partition.py": "e5b52e5b99971a7ae39805ccb8e6f30f0c304f5e0b09ba550e6eab65ea0047f6",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "db2c6658b421cf862118b468ff164cdeea36debae291af37ad6f840fe9565970",
     "secure.py": "44743b887ab8d29293469f2574b6d88e0d433c9b9ba1f1001709f51104716c0c",
@@ -1000,7 +1046,23 @@ PINNED_HASHES: dict[str, str] = {
 #: Net: all 19 entries are re-hashed against `722320a1` below (12 remain,
 #: 7 retired), and `HAND_PORT_PINNED_SDK_COMMIT` advances to the same
 #: commit as `PINNED_SDK_COMMIT` for the first time since `1a9f753c`.
-HAND_PORT_PINNED_SDK_COMMIT = "722320a1abe3cea675e99e97300b8a484b4e8464"  # alp-sdk, 63 commits past v0.16.0, untagged -- see above (tan-cli#996 closes tan-cli#913)
+#: AUDITED RE-SYNC (hand-port / HAND_PORT_HASHES): `722320a1` -> `f1b1c9df`
+#: (tan-cli#1026). Neither of the two range commits (`b3775381`, `ec8be8b9`,
+#: see the `PINNED_SDK_COMMIT` paragraph above) touches any file this table
+#: pins -- `git diff --stat 722320a1..f1b1c9df` over the 12 remaining
+#: `HAND_PORT_HASHES` paths is empty. Re-hashed all 12 one by one against
+#: `f1b1c9df` to confirm rather than assume: unchanged. This pin moves in
+#: lockstep with `PINNED_SDK_COMMIT` (the two have advanced together since
+#: `722320a1`, per this table's own "Net:" paragraph above) even though
+#: nothing in its own surface moved, so a later diff of this range shows
+#: `HAND_PORT_PINNED_SDK_COMMIT` staying current rather than falling behind
+#: for no stated reason.
+#:
+#:   no hand-port source moved in this range; hashes unchanged
+#:
+#: Upstream commits in range touching this table's files:
+#:   (none)
+HAND_PORT_PINNED_SDK_COMMIT = "f1b1c9df0edd23988961150439863e70e5d99211"  # alp-sdk, 78 commits past v0.16.0, untagged -- see above (tan-cli#996 closes tan-cli#913)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its

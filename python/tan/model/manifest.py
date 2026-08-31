@@ -45,18 +45,26 @@ _COV_KEYS = {"backend", "accel_config", "status", "reason"}
 VALID_BLOB_FORMATS = frozenset({"vela_tflite", "tflite", "drpai_dir", "dxnn", "onnx"})
 
 
-def _required_field(d: dict, key: str, expected: type | tuple[type, ...], type_desc: str) -> object:
-    """Look up a required top-level field in a decoded `.alpmodel` manifest
-    document (a JSON object or CBOR map that has already passed the
-    document-level `isinstance(d, dict)` guard in `from_json`/`from_cbor`),
-    raising a curated `ValueError` naming the field instead of letting the
-    bare subscript this replaces escape as a raw `KeyError` (field absent)
-    or, worse, being handed to a coercing constructor that manufactures a
-    wrong value from the wrong type (`from_cbor`'s old `bytes(d["src_sha"])`
+def _required_field(d: dict, key: str, expected: type | tuple[type, ...], type_desc: str,
+                     *, context: str = "") -> object:
+    """Look up a required field in a decoded `.alpmodel` manifest document (a
+    JSON object or CBOR map that has already passed the document-level
+    `isinstance(d, dict)` guard in `from_json`/`from_cbor`), raising a
+    curated `ValueError` naming the field instead of letting the bare
+    subscript this replaces escape as a raw `KeyError` (field absent) or,
+    worse, being handed to a coercing constructor that manufactures a wrong
+    value from the wrong type (`from_cbor`'s old `bytes(d["src_sha"])`
     zero-filled/byte-wise-coerced an int/list/bool `src_sha` into a bogus
     hash with no diagnostic at all -- tan-cli#1023 review round 2, the
     document-level guard stopped one field short of `name`/`src_sha`
     themselves).
+
+    `context`, when given, is appended to both messages as "in <context>" --
+    `_decode_list_field` below passes e.g. `"targets[2]"` so a malformed
+    nested element's error names WHICH element, the same way the top-level
+    calls (no `context`) name the document itself. Genuinely the same check
+    both shapes need: `d` here is a decoded sub-document (a `targets[]`
+    element) exactly as much as it is the top-level manifest.
 
     `.alpmodel` packages are machine-generated CBOR/JSON, not hand-authored
     documents like `board.yaml` -- but `package.py`'s own bounds-checked
@@ -65,18 +73,67 @@ def _required_field(d: dict, key: str, expected: type | tuple[type, ...], type_d
     field written by `build.py:222`) is exactly the class of corruption this
     container's own bounds checks exist to catch. Fail loudly here, the same
     way, rather than degrade silently."""
+    where = f" in {context}" if context else ""
     if key not in d:
-        raise ValueError(f"malformed .alpmodel manifest: missing required field {key!r}")
+        raise ValueError(f"malformed .alpmodel manifest: missing required field {key!r}{where}")
     v = d[key]
     if not isinstance(v, expected):
         raise ValueError(
-            f"malformed .alpmodel manifest: field {key!r} must be {type_desc}, got {type(v).__name__}"
+            f"malformed .alpmodel manifest: field {key!r} must be {type_desc}, got {type(v).__name__}{where}"
         )
     return v
 
 
 def _pick(d: dict, keys: set) -> dict:
     return {k: d[k] for k in keys if k in d}   # drop unknown keys + tolerate missing-known
+
+
+def _decode_list_field(d: dict, key: str, item_keys: set, required: frozenset, ctor) -> list:
+    """Decode a nested `.alpmodel` manifest list field (`inputs`/`outputs`/
+    `targets`/`coverage`) into `ctor` instances, guarding both the field and
+    each element the way `_required_field` guards a top-level one
+    (tan-cli#1040). Before this, every reader built these lists straight out
+    of `ctor(**t)` (`from_dict`) or `ctor(**_pick(t, item_keys))` (the old
+    `from_cbor`) with no element-type or completeness check: a non-mapping
+    element degrades `_pick` to `{}` rather than raising (`k in 'abc'` is a
+    legal, false, substring check), so a raw `TypeError` out of the dataclass
+    constructor was the first thing to notice, not a curated `ValueError` --
+    `inputs=['abc']` -> `Tensor.__init__() missing 5 required positional
+    arguments`; an incomplete `targets[]` entry names 7. `from_dict`'s own
+    bare `Tensor(**t)` (no `_pick`) failed even earlier on the `**` unpack
+    itself. One helper now closes both readers, since `from_cbor` routes
+    through `from_dict`.
+
+    The field-level check below (is `d[key]` a list at all) is the same
+    shape one step up: a `targets` value that decodes but isn't a list would
+    otherwise reach `enumerate()` and, for a string, iterate its CHARACTERS
+    as "elements" -- silently wrong, not a crash."""
+    elems = d.get(key, [])
+    if not isinstance(elems, list):
+        raise ValueError(
+            f"malformed .alpmodel manifest: field {key!r} must be a list, got {type(elems).__name__}"
+        )
+    out = []
+    for i, elem in enumerate(elems):
+        if not isinstance(elem, dict):
+            raise ValueError(
+                f"malformed .alpmodel manifest: {key}[{i}] must be a mapping, "
+                f"got {type(elem).__name__}"
+            )
+        for field_name in sorted(required):
+            # `object` accepts every value -- this call is a PRESENCE check
+            # only (the dataclasses below don't runtime-validate field
+            # types either; `Tensor.dtype: str` is an annotation, not an
+            # enforced constraint), so `_required_field`'s wrong-type branch
+            # can never fire here. The point is reusing its curated
+            # missing-field message + `context` naming, not adding a second
+            # validation tier `from_json`'s document-level fields don't have.
+            _required_field(elem, field_name, object, "present", context=f"{key}[{i}]")
+        out.append(ctor(**_pick(elem, item_keys)))
+    return out
+
+
+_TARGET_REQUIRED = frozenset(_TARGET_KEYS - {"compiler_version", "caveats"})
 
 
 def _json_default(d: dict) -> dict:
@@ -93,8 +150,8 @@ def _target_dict(t: "Target") -> dict:
     bytes it did before `caveats` existed, so no committed fixture, no shipped
     package and no on-device footprint moves for a field that has nothing to
     say. Absent means "no caveats"; every reader must treat it that way (the
-    `_pick`-based `from_cbor` below already does, and so does
-    `Target.caveats`'s own default)."""
+    `_pick`-based `_decode_list_field` both `from_json` and `from_cbor` route
+    through already does, and so does `Target.caveats`'s own default)."""
     d = asdict(t)
     if not d["caveats"]:
         del d["caveats"]
@@ -174,16 +231,25 @@ class Manifest:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Manifest":
+        # Both `from_json` and `from_cbor` route through here (tan-cli#1039)
+        # -- the version check and the guarded nested-list decode below are
+        # therefore each written ONCE and enforced on both reader paths,
+        # rather than the version check living only in the JSON-era code
+        # this method used to be (`from_cbor` built a `Manifest` directly
+        # and never called this method at all, so a future manifest version
+        # read by an older `tan` over CBOR -- the PRODUCTION reader path for
+        # `.alpmodel` packages -- was silently parsed as v1 instead of
+        # refused).
         v = d.get("v", MANIFEST_SCHEMA_VERSION)
         if v != MANIFEST_SCHEMA_VERSION:
             raise ValueError(f"unsupported manifest version {v!r}; expected {MANIFEST_SCHEMA_VERSION}")
         return cls(
             name=d["name"],
             src_sha=d["src_sha"],  # raw bytes pass-through; JSON/text callers must decode to bytes first
-            inputs=[Tensor(**t) for t in d.get("inputs", [])],
-            outputs=[Tensor(**t) for t in d.get("outputs", [])],
-            targets=[Target(**t) for t in d.get("targets", [])],
-            coverage=[Coverage(**c) for c in d.get("coverage", [])],
+            inputs=_decode_list_field(d, "inputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor),
+            outputs=_decode_list_field(d, "outputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor),
+            targets=_decode_list_field(d, "targets", _TARGET_KEYS, _TARGET_REQUIRED, Target),
+            coverage=_decode_list_field(d, "coverage", _COV_KEYS, _COV_KEYS, Coverage),
         )
 
     def to_json(self) -> str:
@@ -249,11 +315,13 @@ class Manifest:
         # ever runs on it.
         _required_field(d, "name", str, "a string")
         src_sha_raw = _required_field(d, "src_sha", (bytes, bytearray), "a byte string")
-        return cls(
-            name=d["name"],
-            src_sha=bytes(src_sha_raw),
-            inputs=[Tensor(**_pick(t, _TENSOR_KEYS)) for t in d.get("inputs", [])],
-            outputs=[Tensor(**_pick(t, _TENSOR_KEYS)) for t in d.get("outputs", [])],
-            targets=[Target(**_pick(t, _TARGET_KEYS)) for t in d.get("targets", [])],
-            coverage=[Coverage(**_pick(c, _COV_KEYS)) for c in d.get("coverage", [])],
-        )
+        # Normalise in place (bytearray -> bytes, mirroring `from_json`'s
+        # hex-string -> bytes normalisation two methods up) and hand off to
+        # `from_dict` -- which is what actually enforces `MANIFEST_SCHEMA_VERSION`
+        # and guards the nested `inputs`/`outputs`/`targets`/`coverage`
+        # decodes (tan-cli#1039, tan-cli#1040). Before this, `from_cbor` built
+        # the `Manifest` directly and never reached either check: CBOR is the
+        # PRODUCTION reader path for `.alpmodel` packages, so the stricter
+        # checks used to sit on the path that matters less.
+        d["src_sha"] = bytes(src_sha_raw)
+        return cls.from_dict(d)

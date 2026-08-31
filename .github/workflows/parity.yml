@@ -643,7 +643,24 @@ env:
   # board's 7 emits deleted) and nothing else -- no host path, timestamp or
   # other volatile value survived normalisation (the tool's own refusal did
   # not fire).
-  PINNED_SDK_TAG: 722320a1abe3cea675e99e97300b8a484b4e8464
+  #
+  # `722320a1` -> `f1b1c9df` (tan-cli#1026, finishing the re-sync
+  # `python/tests/gates/test_planner_relocation_freshness.py`'s
+  # `PINNED_SDK_COMMIT` moved to alone): moved together with that pin, with
+  # `ci.yml`'s `sdk_parity` `ref:`, and with `PINNED_PLANNER_ORACLE_SDK_REF`
+  # below, per this comment's own rule. The behavioural delta is
+  # `scripts/alp_orchestrate/kconfig.py` gaining an UNCONDITIONAL
+  # `CONFIG_ALP_SDK_SOM_HW_REV="<hw_rev>"` line in every board's generated
+  # `alp.conf` (alp-sdk#1862, full account in
+  # `test_planner_relocation_freshness.py`'s own `PINNED_SDK_COMMIT`
+  # paragraph) -- `partition.py`'s only other change in range is an inert
+  # docstring line-number citation. Re-measured against `f1b1c9df`:
+  # `python scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+  # f1b1c9df0edd23988961150439863e70e5d99211` produces a 98-file diff, each
+  # file gaining exactly one `CONFIG_ALP_SDK_SOM_HW_REV` line per core slice
+  # in its embedded `alp.conf`, and nothing else -- no host path, timestamp
+  # or other volatile value survived normalisation.
+  PINNED_SDK_TAG: f1b1c9df0edd23988961150439863e70e5d99211
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -715,7 +732,20 @@ env:
   # planner_oracle` and `PROVENANCE.txt` (100 -> 99 boards, 700 -> 693
   # emits, 1,141,262 -> 1,123,525 bytes) -- see `PINNED_SDK_TAG`'s own
   # comment above for what moved and why.
-  PINNED_PLANNER_ORACLE_SDK_REF: 722320a1abe3cea675e99e97300b8a484b4e8464
+  #
+  # `722320a1` -> `f1b1c9df` (tan-cli#1026), moved in lockstep with
+  # `PINNED_SDK_TAG` above -- #270 has not landed. `python
+  # scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+  # f1b1c9df0edd23988961150439863e70e5d99211` regenerated `tests/fixtures/
+  # planner_oracle` and `PROVENANCE.txt`: board/emit counts unchanged
+  # (99 boards, 693 emits, 7 error-contract), bytes 1,123,525 -> 1,129,537
+  # (+6,012 -- one `CONFIG_ALP_SDK_SOM_HW_REV="<hw_rev>"` line landing per
+  # Zephyr core slice's embedded `alp.conf`, across 97 of the 98 `build-plan`
+  # goldens that carry one; the one untouched board, `display/
+  # lvgl-dashboard-x-evk`, has an A55/Yocto-only slice (`local.conf`, not
+  # `alp.conf`) so the Kconfig line never reaches it). See `PINNED_SDK_TAG`'s
+  # own comment above for what moved and why.
+  PINNED_PLANNER_ORACLE_SDK_REF: f1b1c9df0edd23988961150439863e70e5d99211
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

@@ -297,6 +297,53 @@ class UnsupportedSomError(Exception):
         self.sku = sku
 
 
+class FlowStyleSomError(Exception):
+    """The board.yaml's top-level `som:` line opens a YAML FLOW mapping
+    (`som: {sku: ..., hw_rev: ...}`, valid YAML but on one physical line)
+    rather than the BLOCK style (`som:` alone, `sku:`/`hw_rev:` indented
+    beneath it) `vendored_som`/`retarget_board_yaml_som` understand.
+
+    tan-cli#1029, `Refs #1008`. This module is deliberately NOT a YAML
+    parser (see its own module docstring): it scans line-by-line and edits
+    in place, which is what lets a hand-authored comment, a wrapped comment
+    block, or column alignment survive a `--som` retarget byte-for-byte.
+    Extending that scan to also parse a flow mapping correctly -- telling a
+    comma inside a quoted value apart from one separating two keys, an
+    escaped brace from a real one, a `{`/`}` that itself appears inside a
+    quoted string -- needs a real YAML parser, not a seventh line-oriented
+    special case bolted onto tan-cli#1008's own six-round history of exactly
+    that kind of case. Refusing loudly is the deliberate choice over
+    supporting it: the alternative was `vendored_som` silently reporting
+    `(None, None)` and `retarget_board_yaml_som` silently returning its
+    input byte-for-byte unchanged, so `--som` was discarded with `issues:
+    []` and exit 0 -- indistinguishable from success.
+
+    Raised from `vendored_som` (the reader) the moment it sees this shape;
+    `retarget_board_yaml_som` (the writer) inherits the same raise for free,
+    since it calls `vendored_som` first -- one rule, in one place, so the
+    two cannot diverge on which `som:` lines this module refuses, the same
+    shape `top_level_key_name`/`_is_som_key_line`/`_split_child_key` already
+    hold for tan-cli#1008.
+
+    Reachability (tan-cli#1029): 0 of the SDK's 100 tracked `board.yaml`
+    files and 0 vendored templates use a flow-style `som:` mapping --
+    hand-authored only, same as the spaced/quoted shapes tan-cli#1008 rounds
+    5-6 fixed.
+    """
+
+    def __init__(self, flow_body: str) -> None:
+        super().__init__(
+            f"This board.yaml's `som:` block is written in YAML flow style "
+            f"(`som: {flow_body}`), which tan's board.yaml scaffolder does "
+            f"not parse. Rewrite the `som:` block in block style (`sku:`/"
+            f"`hw_rev:` each on their own indented line beneath `som:`) and "
+            f"try again -- keep any `&anchor`/`!tag` the `som:` key itself "
+            f"carries where it is: dropping it would silently break a `*alias` "
+            f"referring to it elsewhere in the file."
+        )
+        self.flow_body = flow_body
+
+
 class ExampleReadError(Exception):
     """`--from-example`'s source directory is missing, or a file in it is not
     readable UTF-8 text. `not_found` separates the two: a missing example is
@@ -539,6 +586,87 @@ def _split_child_key(trimmed: str) -> tuple[str, str] | None:
     return key.strip(), rest
 
 
+#: A single leading YAML node-property token: an anchor (`&name`) or a tag
+#: (`!tag`, `!!type`, or a verbatim `!<...>` URI) -- whatever character
+#: sequence starts at `&`/`!` and runs to the next whitespace. Doesn't
+#: validate the anchor name or tag URI; that is not this scanner's job, only
+#: recognizing that a property token, rather than the value, sits here.
+_NODE_PROPERTY_RE = re.compile(r"^[&!]\S+")
+
+
+def _strip_yaml_node_properties(text: str) -> str:
+    """Strip zero or more leading YAML node-property tokens (an anchor
+    `&name`, a tag `!tag`/`!!type`, or both together, in EITHER order,
+    separated by whitespace) from `text`, returning whatever remains after
+    the last one (with any following whitespace also stripped).
+
+    tan-cli#1035 review round 2 major: separates "what decorations precede
+    the value" from "is the value a flow mapping" -- the two concerns
+    `_som_flow_style_body` conflated when it tested `stripped.startswith("{")`
+    against text that could still carry an anchor/tag prefix. YAML allows an
+    anchor and a tag together, in either order (`&s !!map {...}` and
+    `!!map &s {...}` are both valid), and either alone; this strips as many
+    property tokens as are present, so `_som_flow_style_body`'s own `{` test
+    runs against the actual value, never against a property token that
+    happens to not start with `{`.
+    """
+    remainder = text
+    while True:
+        match = _NODE_PROPERTY_RE.match(remainder)
+        if not match:
+            return remainder
+        remainder = remainder[match.end() :].lstrip(" \t")
+
+
+def _som_flow_style_body(body: str) -> str | None:
+    """When `body` is the top-level `som:` line ([`_is_som_key_line`]) AND
+    what follows its colon -- past any anchor/tag prefix
+    ([`_strip_yaml_node_properties`]) -- opens a YAML FLOW mapping (`som:
+    {sku: ..., hw_rev: ...}`, `som: &s {sku: ...}`, `som: !!map {sku: ...}`)
+    -- i.e. the first non-blank character there is `{` -- return the ORIGINAL
+    trailing text (properties included) verbatim, for the error message.
+    `None` for an ordinary block-style `som:` line: nothing, only a trailing
+    comment, or a bare anchor/tag (`som: &s`, `som: !!map`, `som: &s !!map`)
+    with nothing flow-shaped after it, all of which are valid YAML that still
+    opens a BLOCK mapping on the lines beneath it, not a non-`som:` line.
+
+    tan-cli#1029: the one signal both `vendored_som` and
+    `retarget_board_yaml_som` need to refuse a shape neither actually reads
+    (see [`FlowStyleSomError`]) -- called from `vendored_som` alone; the
+    writer inherits the same refusal by calling the reader first, so the
+    two share this one rule rather than each guessing independently, the
+    same shape `top_level_key_name`/`_is_som_key_line`/`_split_child_key`
+    already hold for tan-cli#1008.
+
+    tan-cli#1035 review round 2 major 1: an earlier version of this function
+    treated ANY non-comment content after the colon as flow style, which
+    also caught `som: &s` (an anchor) and `som: !!map` (a tag) -- both valid
+    BLOCK-style `som:` lines -- so it was narrowed to `stripped.startswith
+    ("{")`. That narrowing over-corrected: it tested the RAW text after the
+    colon, so `som: &s {sku: ...}` and `som: !!map {sku: ...}` -- genuine
+    flow mappings carrying an anchor/tag prefix -- no longer started with
+    `{` and escaped the detector entirely, reopening tan-cli#1029's own
+    silent-`--som`-discard symptom on exactly the shape this function exists
+    to refuse. Stripping the anchor/tag prefix FIRST, then testing the
+    remainder, is what lets both prior fixes stay true at once: a bare
+    anchor/tag still falls through to the block path (nothing left to test
+    after stripping), and an anchor/tag ahead of a real `{` is still caught
+    (something starting with `{` left after stripping).
+    """
+    if not _is_som_key_line(body):
+        return None
+    _key, _colon, rest = body.partition(":")
+    stripped = rest.lstrip(" \t")
+    if not stripped or stripped.startswith("#"):
+        return None
+    remainder = _strip_yaml_node_properties(stripped)
+    if not remainder or remainder.startswith("#"):
+        return None
+    if not remainder.startswith("{"):
+        return None
+    return stripped
+
+
 #: Mirrors `tan.core.som_buildability._SKU_FAMILY` -- deliberately
 #: duplicated rather than imported, the same call that module's own
 #: docstring already makes for its family-directory map: this file plans
@@ -644,6 +772,11 @@ def retarget_board_yaml_som(content: str, sku: str) -> str:
     (`_is_som_key_line`) -- they used to disagree on a `som:` line carrying
     a trailing comment or trailing whitespace, which silently reintroduced
     this same stale-`hw_rev:` defect on exactly that shape of file.
+
+    tan-cli#1029: raises [`FlowStyleSomError`] on a flow-style `som:` block
+    (`som: {sku: ..., hw_rev: ...}`) instead of silently returning `content`
+    byte-for-byte unchanged -- inherited for free from the `vendored_som`
+    call immediately below, which raises first.
     """
     existing_sku, _existing_hw_rev = vendored_som(content)
     changing_sku = existing_sku is not None and existing_sku != sku
@@ -971,13 +1104,22 @@ def vendored_som(board_yaml: str) -> tuple[str | None, str | None]:
     review rounds 3+4 -- and otherwise leaves it exactly as the source
     example wrote it, whether that is the ORIGINAL SKU's own value or one
     surviving a same-family retarget, so it must be read, not presumed
-    absent)."""
+    absent).
+
+    Raises [`FlowStyleSomError`] (tan-cli#1029) the moment the top-level
+    `som:` line turns out to be flow-style rather than block-style --
+    `retarget_board_yaml_som` calls this function first and so inherits the
+    identical refusal, rather than each guessing independently whether a
+    line it cannot read is safe to treat as "no som: block at all"."""
     in_som = False
     sku: str | None = None
     hw_rev: str | None = None
     for line in _rust_lines(board_yaml):
         body, _cr = _split_cr(line)
         if not in_som:
+            flow_body = _som_flow_style_body(body)
+            if flow_body is not None:
+                raise FlowStyleSomError(flow_body)
             in_som = _is_som_key_line(body)
             continue
         if body and not body[0].isspace():
