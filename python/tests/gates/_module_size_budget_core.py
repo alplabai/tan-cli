@@ -8,7 +8,9 @@ previous design's real defect was not the ratchet, it was that the ratchet's
 numbers lived nowhere except a hand-maintained dict literal, so every PR that
 moved one had to retype it and every merge that touched two had to reconcile
 them by hand. See `module_size_budget.generated.json` for the data this
-produces and `MODULE_SIZE_BUDGET_LOG.md` for why any entry in it grew.
+produces and `MODULE_SIZE_BUDGET_LOG.d/` for why any entry in it grew
+(tan-cli#907; `MODULE_SIZE_BUDGET_LOG.md` is the frozen pre-migration
+history, see `LOG_PATH` below).
 """
 from __future__ import annotations
 
@@ -43,7 +45,25 @@ PACKAGE = Path(__file__).resolve().parents[2] / "tan"
 TEST_ROOT = Path(__file__).resolve().parents[1]
 
 GENERATED_PATH = Path(__file__).resolve().parent / "module_size_budget.generated.json"
+
+#: FROZEN as of tan-cli#907 -- no future write path targets this file any
+#: more (`_append_log` in `scripts/regen_module_size_budget.py` writes into
+#: `LOG_DIR` below instead). Kept, and still enforced append-only by
+#: `test_module_size_budget_log_append_only.py`, purely as the historical
+#: record up to the freeze; see its own closing note for why.
 LOG_PATH = Path(__file__).resolve().parent / "MODULE_SIZE_BUDGET_LOG.md"
+
+#: tan-cli#907: the live ledger. One file per regen-written entry, mirroring
+#: `changelog.d/` (`changelog.d/README.md`'s own reasoning applies verbatim:
+#: "disjoint files cannot conflict"). Unlike `LOG_PATH`'s old single-file
+#: shape, two branches that each add an entry here need no merge driver and
+#: no conflict resolution at all -- git (and, unlike `.gitattributes`
+#: `merge=union`, GitHub's own PR-mergeability computation, which does not
+#: apply custom merge drivers -- measured on PR #971, tan-cli#907 comment,
+#: 2026-08-28: a clean local `git merge origin/dev` at that head, GitHub
+#: polled three times over eight minutes to `CONFLICTING` every time) both
+#: treat two new, differently-named files as trivially compatible.
+LOG_DIR = Path(__file__).resolve().parent / "MODULE_SIZE_BUDGET_LOG.d"
 
 #: The house guideline. Any module NOT recorded in the generated file's
 #: `modules` map must be under this -- that is what stops a new oversized

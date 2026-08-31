@@ -2,6 +2,22 @@
 """`MODULE_SIZE_BUDGET_LOG.md` declares itself append-only but nothing
 enforced that (tan-cli#906) until this file.
 
+## tan-cli#907: this file is now FROZEN
+
+As of tan-cli#907, `scripts/regen_module_size_budget.py` no longer writes
+into `MODULE_SIZE_BUDGET_LOG.md` at all -- every new ledger entry is a new
+file under the sibling `MODULE_SIZE_BUDGET_LOG.d/` directory (mirroring
+`changelog.d/`; see that directory's `README.md`). This gate is UNCHANGED and
+keeps running: the `.md` file's 2026-08-11 through 2026-08-30 history still
+needs the same append-only protection it always did, it just never gains a
+new line to protect going forward. `MODULE_SIZE_BUDGET_LOG.d/`'s own
+immutability is a separate, simpler gate --
+`test_module_size_budget_log_d_entries_are_immutable.py` -- because a
+directory of one-file-per-entry does not need this file's base-vs-HEAD
+machinery at all (see that file's own docstring for why "compare against a
+resolved PR base" was never quite right even here, and why the new design
+sidesteps the question rather than fixing it).
+
 ## The incident
 
 On tan-cli#902 (`fix/896-hand-port-hash-drift`), resolving a merge conflict
@@ -117,15 +133,21 @@ And the complementary probe that motivates the whole redesign:
 
 ## Two shapes this deliberately does NOT try to catch
 
-`.gitattributes` documents two ways `merge=union` itself gets a conflict
-wrong: two branches editing the SAME existing entry land both variants with
-no conflict markers (a duplicate, not a loss), and a delete racing an
-adjacent append silently reverts the deletion. Both are pre-existing,
-documented limitations of the union driver, not a gap in this gate -- fighting
-them here would mean rejecting the union driver's own legitimate output, i.e.
+`.gitattributes` used to document two ways `merge=union` itself gets a
+conflict wrong (two branches editing the SAME existing entry land both
+variants with no conflict markers; a delete racing an adjacent append
+silently reverts the deletion). Both were pre-existing, documented
+limitations of the union driver, not a gap in this gate -- fighting them here
+would have meant rejecting the union driver's own legitimate output, i.e.
 regressing the merge-clean case this file also has to prove. tan-cli#906
-scopes this gate to "an entry edited or removed"; tan-cli#907 owns making
-either of those two shapes safer at the git-mechanics layer.
+scoped this gate to "an entry edited or removed"; tan-cli#907 closed the
+underlying question a different way -- `MODULE_SIZE_BUDGET_LOG.md` is now
+frozen (no future entry lands in it, so `merge=union` is no longer needed or
+applied to it at all) and every new entry goes to
+`MODULE_SIZE_BUDGET_LOG.d/`, whose one-file-per-entry shape makes both of
+these union-specific failure modes structurally unreachable rather than
+merely undetected: there is no shared file for two entries to collide inside
+of any more.
 """
 from __future__ import annotations
 
