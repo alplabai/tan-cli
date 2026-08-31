@@ -804,22 +804,38 @@ def un_edit_sensor_main_c_hardware_boards_pointer(text: str) -> str:
     )
 
 
+#: RE-ANCHORED tan-cli#1026 (finishing the f1b1c9df re-sync): anchor moved,
+#: problem intact -- alp-sdk#1866 (`f1b1c9df`) reworded the surrounding
+#: sentence (the old, WRONG "On the E1M-AEN family BRD_I2C is additionally
+#: the slave-only Alif LPI2C0 -- ADR 0017 -- so the SoC can't master it at
+#: all" claim, itself corrected by that same commit's own PR title: BRD_I2C
+#: is master-capable I2C0 on P7_0/P7_1, not the slave-only LPI2C0), which
+#: shifted this entry's old `"at all; see ..."` anchor text out of
+#: existence -- but did not touch the bare `examples/v2n/v2n-temp-sensor`
+#: mention this entry qualifies, which upstream still emits bare. Span
+#: starts at `simply repointing...` -- a whole fresh source line, not a
+#: mid-line word -- so `EDITED` is free to wrap the qualifier onto its
+#: own line instead of gluing `see alp-sdk's...` onto the passthrough
+#: sentence above it. The `so\n` line one step earlier is untouched
+#: passthrough: it names no path, so it needs no qualifier and simply
+#: matches upstream's own bytes.
 _SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EMITTED = (
-    "at all; see examples/v2n/v2n-temp-sensor for the V2N-only\n"
-    " * BRD_I2C/TMP112 pattern.)\n"
+    "simply repointing the bus_id would still not reach a TMP112 there; see\n"
+    " * examples/v2n/v2n-temp-sensor for the V2N-only BRD_I2C/TMP112\n"
+    " * pattern.)\n"
 )
 _SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EDITED = (
-    "at all; see alp-sdk's examples/v2n/v2n-temp-sensor (not part\n"
-    " * of this scaffolded project) for the V2N-only\n"
-    " * BRD_I2C/TMP112 pattern.)\n"
+    "simply repointing the bus_id would still not reach a TMP112 there;\n"
+    " * see alp-sdk's examples/v2n/v2n-temp-sensor (not part of this\n"
+    " * scaffolded project) for the V2N-only BRD_I2C/TMP112 pattern.)\n"
 )
 
 
 def un_edit_sensor_main_c_historical_note_v2n_pointer(text: str) -> str:
-    """tan-cli#977: reverse the `#1269` historical note's bare
-    `examples/v2n/v2n-temp-sensor` mention rewrite above to recover the
-    emit's own (dead-pointer) bytes. Own entry from the `Hardware:`
-    paragraph fix above -- a different comment block, per the
+    """tan-cli#977, re-anchored tan-cli#1026: reverse the `#1269` historical
+    note's bare `examples/v2n/v2n-temp-sensor` mention rewrite above to
+    recover the emit's own (dead-pointer) bytes. Own entry from the
+    `Hardware:` paragraph fix above -- a different comment block, per the
     one-substitution-per-entry discipline."""
     return text.replace(
         _SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EDITED,
@@ -978,48 +994,82 @@ def un_edit_sensor_board_yaml_portability_script_pointer(text: str) -> str:
     )
 
 
+#: RE-ANCHORED tan-cli#1026 (finishing the f1b1c9df re-sync): anchor moved,
+#: problem intact -- alp-sdk#1866 (`f1b1c9df`) reworded the technical claim
+#: in the middle of this NOTE (the old, WRONG "On the E1M-AEN family
+#: BRD_I2C is additionally the slave-only Alif LPI2C0 (ADR 0017)" text,
+#: corrected by that same commit's own PR title: BRD_I2C is master-capable
+#: I2C0 on P7_0/P7_1, not the slave-only LPI2C0), which shifted this
+#: entry's old `"...opens. On the\n"` trailing anchor out of existence --
+#: but did not touch the bare `metadata/boards/e1m-evk.yaml`/
+#: `e1m-x-evk.yaml` mentions this entry qualifies, which upstream still
+#: emits bare. Span narrowed to end right before the reworded sentence
+#: (`"...on each -- "`, shared boundary with the sibling
+#: `historical_note_v2n_pointer` entry below) so it no longer overlaps
+#: upstream's changed text; the middle sentence itself passes through
+#: unedited (it needs no qualifier -- it names no path).
 _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EMITTED = (
     "BRD_I2C, not on BOARD_I2C_SENSORS -- see metadata/boards/e1m-evk.yaml\n"
     "# i2c_devices: and metadata/boards/e1m-x-evk.yaml i2c_devices:, neither\n"
-    "# of which lists a TMP112 on the sensor bus this example opens. On the\n"
+    "# of which lists a TMP112 on the sensor bus this example opens. BRD_I2C\n"
+    "# is a SEPARATE controller instance from BOARD_I2C_SENSORS regardless\n"
+    "# (on the E1M-AEN family, BRD_I2C is SoC I2C0, function C -- #1848), so\n"
+    "# repointing the bus_id would still not reach a TMP112 there. BMP581 is\n"
+    "# the part that is actually on BOARD_I2C_SENSORS on both supported\n"
+    "# boards, at the same address (0x47) on each -- "
 )
 _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EDITED = (
     "BRD_I2C, not on BOARD_I2C_SENSORS -- see alp-sdk's\n"
     "# metadata/boards/e1m-evk.yaml i2c_devices: and\n"
     "# metadata/boards/e1m-x-evk.yaml i2c_devices: (not part of this\n"
-    "# scaffolded project), neither of which lists a TMP112 on the\n"
-    "# sensor bus this example opens. On the\n"
+    "# scaffolded project), neither of which lists a TMP112 on the sensor\n"
+    "# bus this example opens. BRD_I2C is a SEPARATE controller instance\n"
+    "# from BOARD_I2C_SENSORS regardless (on the E1M-AEN family, BRD_I2C is\n"
+    "# SoC I2C0, function C -- #1848), so repointing the bus_id would still\n"
+    "# not reach a TMP112 there. BMP581 is the part that is actually on\n"
+    "# BOARD_I2C_SENSORS on both supported boards, at the same address\n"
+    "# (0x47) on each --\n"
 )
 
 
 def un_edit_sensor_board_yaml_historical_note_boards_pointer(text: str) -> str:
-    """tan-cli#977: reverse the `#1269` historical NOTE's bare
-    `metadata/boards/e1m-evk.yaml`/`e1m-x-evk.yaml` mentions rewrite above
-    to recover the emit's own (dead-pointer) bytes -- the board.yaml-side
-    sibling of `src/main.c`'s `hardware_boards_pointer` entry above."""
+    """tan-cli#977, re-anchored tan-cli#1026: reverse the `#1269` historical
+    NOTE's bare `metadata/boards/e1m-evk.yaml`/`e1m-x-evk.yaml` mentions
+    rewrite above to recover the emit's own (dead-pointer) bytes -- the
+    board.yaml-side sibling of `src/main.c`'s `hardware_boards_pointer`
+    entry above. `EDITED`'s trailing `"each --\n"` need not match
+    `EMITTED`'s trailing `"each -- "` (no newline) byte-for-byte: this is a
+    plain independent `str.replace`, not a line-anchored patch, and the
+    adjacent `historical_note_v2n_pointer` entry's own `EMITTED` supplies
+    the `"see\n..."` that follows in the real emit either way."""
     return text.replace(
         _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EDITED,
         _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EMITTED,
     )
 
 
+#: RE-ANCHORED tan-cli#1026, same alp-sdk#1866 rewording as the sibling
+#: entry above -- the boundary the two entries share (`"...on each -- "`)
+#: moved with it. Span starts at `see` (the word immediately after the
+#: shared boundary) so the two entries partition the whole reworded NOTE
+#: between them with no gap and no overlap.
 _SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EMITTED = (
-    "(0x47) on each -- see examples/v2n/v2n-temp-sensor for the V2N-only\n"
-    "# BRD_I2C/TMP112 pattern instead.\n"
+    "see\n"
+    "# examples/v2n/v2n-temp-sensor for the V2N-only BRD_I2C/TMP112 pattern\n"
+    "# instead.\n"
 )
 _SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EDITED = (
-    "(0x47) on each -- see alp-sdk's examples/v2n/v2n-temp-sensor\n"
-    "# (not part of this scaffolded project) for the V2N-only\n"
-    "# BRD_I2C/TMP112 pattern instead.\n"
+    "# see alp-sdk's examples/v2n/v2n-temp-sensor (not part of this\n"
+    "# scaffolded project) for the V2N-only BRD_I2C/TMP112 pattern instead.\n"
 )
 
 
 def un_edit_sensor_board_yaml_historical_note_v2n_pointer(text: str) -> str:
-    """tan-cli#977: reverse the `#1269` historical NOTE's bare
-    `examples/v2n/v2n-temp-sensor` mention rewrite above to recover the
-    emit's own (dead-pointer) bytes -- the board.yaml-side sibling of
-    `src/main.c`'s `historical_note_v2n_pointer` entry above. Own entry from
-    the `metadata/boards/*.yaml` fix above, per the
+    """tan-cli#977, re-anchored tan-cli#1026: reverse the `#1269` historical
+    NOTE's bare `examples/v2n/v2n-temp-sensor` mention rewrite above to
+    recover the emit's own (dead-pointer) bytes -- the board.yaml-side
+    sibling of `src/main.c`'s `historical_note_v2n_pointer` entry above.
+    Own entry from the `metadata/boards/*.yaml` fix above, per the
     one-substitution-per-entry discipline."""
     return text.replace(
         _SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EDITED,
@@ -1788,14 +1838,17 @@ DELIBERATE_EDITS: dict[
         un_edit_sensor_main_c_hardware_boards_pointer,
     ),
     ("sensor", "E1M-AEN801", "src/main.c", "historical_note_v2n_pointer"): (
-        "tan-cli#977: the #1269 historical note's bare "
-        "examples/v2n/v2n-temp-sensor mention, own entry from the "
-        "hardware_boards_pointer fix above -- new text this re-vendor added",
+        "tan-cli#977, re-anchored tan-cli#1026 (alp-sdk#1866 corrected the "
+        "surrounding BRD_I2C/LPI2C0 sentence, moving this entry's old "
+        "anchor -- the underlying problem, a bare examples/v2n/"
+        "v2n-temp-sensor mention, was untouched by that fix): the #1269 "
+        "historical note's bare examples/v2n/v2n-temp-sensor mention, own "
+        "entry from the hardware_boards_pointer fix above",
         un_edit_sensor_main_c_historical_note_v2n_pointer,
     ),
     ("sensor", "E1M-V2N101", "src/main.c", "historical_note_v2n_pointer"): (
-        "tan-cli#977: the #1269 historical note's bare "
-        "examples/v2n/v2n-temp-sensor mention, same substitution as "
+        "tan-cli#977, re-anchored tan-cli#1026: the #1269 historical note's "
+        "bare examples/v2n/v2n-temp-sensor mention, same substitution as "
         "sensor/E1M-AEN801/src/main.c's historical_note_v2n_pointer entry "
         "above (own reason string per PR #1009 review finding 2)",
         un_edit_sensor_main_c_historical_note_v2n_pointer,
@@ -1885,32 +1938,40 @@ DELIBERATE_EDITS: dict[
         un_edit_sensor_board_yaml_portability_script_pointer,
     ),
     ("sensor", "E1M-AEN801", "board.yaml", "historical_note_boards_pointer"): (
-        "tan-cli#977: the #1269 historical NOTE's bare "
+        "tan-cli#977, re-anchored tan-cli#1026 (alp-sdk#1866 corrected the "
+        "surrounding BRD_I2C/LPI2C0 sentence, moving this entry's old "
+        "anchor -- the underlying problem, bare metadata/boards/"
+        "e1m-evk.yaml/e1m-x-evk.yaml i2c_devices: mentions, was untouched "
+        "by that fix): the #1269 historical NOTE's bare "
         "metadata/boards/e1m-evk.yaml/e1m-x-evk.yaml i2c_devices: mentions "
         "-- the board.yaml-side sibling of src/main.c's "
-        "hardware_boards_pointer entry, new text this re-vendor added",
+        "hardware_boards_pointer entry",
         un_edit_sensor_board_yaml_historical_note_boards_pointer,
     ),
     ("sensor", "E1M-V2N101", "board.yaml", "historical_note_boards_pointer"): (
-        "tan-cli#977: the #1269 historical NOTE's bare "
-        "metadata/boards/e1m-evk.yaml/e1m-x-evk.yaml i2c_devices: mentions, "
-        "same substitution as sensor/E1M-AEN801/board.yaml's "
+        "tan-cli#977, re-anchored tan-cli#1026: the #1269 historical NOTE's "
+        "bare metadata/boards/e1m-evk.yaml/e1m-x-evk.yaml i2c_devices: "
+        "mentions, same substitution as sensor/E1M-AEN801/board.yaml's "
         "historical_note_boards_pointer entry above (own reason string per "
         "PR #1009 review finding 2)",
         un_edit_sensor_board_yaml_historical_note_boards_pointer,
     ),
     ("sensor", "E1M-AEN801", "board.yaml", "historical_note_v2n_pointer"): (
-        "tan-cli#977: the same NOTE's bare examples/v2n/v2n-temp-sensor "
-        "mention -- the board.yaml-side sibling of src/main.c's "
-        "historical_note_v2n_pointer entry, own entry from the "
-        "metadata/boards/*.yaml fix above",
+        "tan-cli#977, re-anchored tan-cli#1026 (alp-sdk#1866 corrected the "
+        "surrounding BRD_I2C/LPI2C0 sentence, moving this entry's old "
+        "anchor -- the underlying problem, a bare examples/v2n/"
+        "v2n-temp-sensor mention, was untouched by that fix): the same "
+        "NOTE's bare examples/v2n/v2n-temp-sensor mention -- the "
+        "board.yaml-side sibling of src/main.c's historical_note_v2n_"
+        "pointer entry, own entry from the metadata/boards/*.yaml fix "
+        "above",
         un_edit_sensor_board_yaml_historical_note_v2n_pointer,
     ),
     ("sensor", "E1M-V2N101", "board.yaml", "historical_note_v2n_pointer"): (
-        "tan-cli#977: the same NOTE's bare examples/v2n/v2n-temp-sensor "
-        "mention, same substitution as sensor/E1M-AEN801/board.yaml's "
-        "historical_note_v2n_pointer entry above (own reason string per PR "
-        "#1009 review finding 2)",
+        "tan-cli#977, re-anchored tan-cli#1026: the same NOTE's bare "
+        "examples/v2n/v2n-temp-sensor mention, same substitution as "
+        "sensor/E1M-AEN801/board.yaml's historical_note_v2n_pointer entry "
+        "above (own reason string per PR #1009 review finding 2)",
         un_edit_sensor_board_yaml_historical_note_v2n_pointer,
     ),
     ("sensor", "E1M-AEN801", "prj.conf", "workflow_pointer"): (
