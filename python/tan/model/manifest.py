@@ -72,12 +72,25 @@ def _required_field(d: dict, key: str, expected: type | tuple[type, ...], type_d
     first-party output, and a corrupted `src_sha` (the model-source identity
     field written by `build.py:222`) is exactly the class of corruption this
     container's own bounds checks exist to catch. Fail loudly here, the same
-    way, rather than degrade silently."""
+    way, rather than degrade silently.
+
+    `bool` is rejected whenever `expected` names `int` but not `bool` itself
+    (tan-cli#1058 review round 3): Python's `bool` is an `int` subclass, so
+    `isinstance(True, int)` is `True` and the plain `isinstance` check below
+    would otherwise let `arena=True` / `requires["sram_kib"]=True` decode
+    silently -- re-emitted on the CBOR wire as byte `0xf5` (major type 7,
+    "true"), not an unsigned int -- straight into
+    `src/backends/inference/alp_model_select.c`'s fit gate as `t->req_sram_kib`.
+    A mechanism check here, not a per-field one, so every current and future
+    `(int, ...)` entry in `_TENSOR_TYPES`/`_TARGET_TYPES`/`_REQUIRES_TYPES`/
+    `_COVERAGE_TYPES` inherits it automatically."""
     where = f" in {context}" if context else ""
     if key not in d:
         raise ValueError(f"malformed .alpmodel manifest: missing required field {key!r}{where}")
     v = d[key]
-    if not isinstance(v, expected):
+    expected_types = expected if isinstance(expected, tuple) else (expected,)
+    wrong_type = not isinstance(v, expected) or (isinstance(v, bool) and bool not in expected_types)
+    if wrong_type:
         raise ValueError(
             f"malformed .alpmodel manifest: field {key!r} must be {type_desc}, got {type(v).__name__}{where}"
         )
@@ -88,7 +101,23 @@ def _pick(d: dict, keys: set) -> dict:
     return {k: d[k] for k in keys if k in d}   # drop unknown keys + tolerate missing-known
 
 
-def _decode_list_field(d: dict, key: str, item_keys: set, required: frozenset, ctor) -> list:
+def _check_nested_types(value: dict, inner_types: dict[str, tuple[type | tuple[type, ...], str]],
+                         context: str) -> None:
+    """One level of `_required_field` under a field `_decode_list_field` has
+    already confirmed is a `dict` (`value`) -- see `nested_types` on that
+    function and `_REQUIRES_TYPES` below for the why. Only keys present in
+    `inner_types` AND in `value` are checked; a missing inner key is left
+    alone, matching `_pick`'s tolerate-missing-known convention elsewhere in
+    this module."""
+    for inner_key, (inner_expected, inner_desc) in inner_types.items():
+        if inner_key in value:
+            _required_field(value, inner_key, inner_expected, inner_desc, context=context)
+
+
+def _decode_list_field(d: dict, key: str, item_keys: set, required: frozenset, ctor,
+                        field_types: dict[str, tuple[type | tuple[type, ...], str]],
+                        nested_types: dict[str, dict[str, tuple[type | tuple[type, ...], str]]]
+                        | None = None) -> list:
     """Decode a nested `.alpmodel` manifest list field (`inputs`/`outputs`/
     `targets`/`coverage`) into `ctor` instances, guarding both the field and
     each element the way `_required_field` guards a top-level one
@@ -103,6 +132,13 @@ def _decode_list_field(d: dict, key: str, item_keys: set, required: frozenset, c
     bare `Tensor(**t)` (no `_pick`) failed even earlier on the `**` unpack
     itself. One helper now closes both readers, since `from_cbor` routes
     through `from_dict`.
+    `field_types` gives `_required_field` a REAL `expected` type per field,
+    not the accepts-anything `object` an earlier version passed (tan-cli#1049
+    -- see `_TENSOR_TYPES`/`_TARGET_TYPES`/`_COVERAGE_TYPES` below for the
+    why/what). Only `required` fields are checked; `compiler_version`/
+    `caveats` are a separate gap (tan-cli#1056). `nested_types` routes a
+    field's already-checked-`dict` value through `_check_nested_types` --
+    see `_REQUIRES_TYPES` below for the why.
 
     The field-level check below (is `d[key]` a list at all) is the same
     shape one step up: a `targets` value that decodes but isn't a list would
@@ -121,19 +157,63 @@ def _decode_list_field(d: dict, key: str, item_keys: set, required: frozenset, c
                 f"got {type(elem).__name__}"
             )
         for field_name in sorted(required):
-            # `object` accepts every value -- this call is a PRESENCE check
-            # only (the dataclasses below don't runtime-validate field
-            # types either; `Tensor.dtype: str` is an annotation, not an
-            # enforced constraint), so `_required_field`'s wrong-type branch
-            # can never fire here. The point is reusing its curated
-            # missing-field message + `context` naming, not adding a second
-            # validation tier `from_json`'s document-level fields don't have.
-            _required_field(elem, field_name, object, "present", context=f"{key}[{i}]")
+            expected, type_desc = field_types[field_name]
+            value = _required_field(elem, field_name, expected, type_desc, context=f"{key}[{i}]")
+            inner_types = nested_types.get(field_name) if nested_types else None
+            if inner_types:
+                _check_nested_types(value, inner_types, context=f"{key}[{i}].{field_name}")
         out.append(ctor(**_pick(elem, item_keys)))
     return out
 
 
 _TARGET_REQUIRED = frozenset(_TARGET_KEYS - {"compiler_version", "caveats"})
+
+# Per-field `(expected type, type_desc)` for `_decode_list_field`'s element
+# guard (tan-cli#1049) -- one entry per member of the `required` frozenset
+# each caller below passes, so every required field of `Tensor`/`Target`/
+# `Coverage` gets a real type check, not the `object`-accepts-anything one
+# `_required_field`'s presence-only call used before -- `arena` and
+# `requires["sram_kib"]` are exactly the figures
+# `src/backends/inference/alp_model_select.c`'s fit gate reads, so a
+# wrong-typed value there was the silent-wrong-value class, not a crash.
+# `scale` accepts `(int, float)`: a whole-number scale is legal JSON/CBOR
+# content (`1` is as valid as `1.0`) and the dataclass field is a plain
+# `float` annotation, not an enforced constraint -- rejecting `int` here
+# would be a new, undocumented restriction on well-formed input, not a
+# defect fix.
+_TENSOR_TYPES = {
+    "dtype": (str, "a string"),
+    "rank": (int, "an int"),
+    "shape": (list, "a list"),
+    "scale": ((int, float), "a number"),
+    "zp": (int, "an int"),
+}
+_TARGET_TYPES = {
+    "backend": (str, "a string"),
+    "silicon_ref": (str, "a string"),
+    "blob_format": (str, "a string"),
+    "accel_config": (str, "a string"),
+    "arena": (int, "an int"),
+    "requires": (dict, "a mapping"),
+    "blob": (int, "an int"),
+}
+
+# One level deeper than `_TARGET_TYPES["requires"]`, which only guards the
+# container is a mapping at all (tan-cli#1049 review round 2). `sram_kib` is
+# the other half of the same fit-gate figure `arena` is -- when present it
+# must be an `int`, the same way `arena` itself already is. `op_features` is
+# not checked here: nothing downstream reads it as anything but an opaque
+# list yet, so adding a shape requirement for it now would be a new,
+# undocumented restriction rather than closing a known gap.
+_REQUIRES_TYPES = {
+    "sram_kib": (int, "an int"),
+}
+_COVERAGE_TYPES = {
+    "backend": (str, "a string"),
+    "accel_config": (str, "a string"),
+    "status": (str, "a string"),
+    "reason": (str, "a string"),
+}
 
 
 def _json_default(d: dict) -> dict:
@@ -246,10 +326,11 @@ class Manifest:
         return cls(
             name=d["name"],
             src_sha=d["src_sha"],  # raw bytes pass-through; JSON/text callers must decode to bytes first
-            inputs=_decode_list_field(d, "inputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor),
-            outputs=_decode_list_field(d, "outputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor),
-            targets=_decode_list_field(d, "targets", _TARGET_KEYS, _TARGET_REQUIRED, Target),
-            coverage=_decode_list_field(d, "coverage", _COV_KEYS, _COV_KEYS, Coverage),
+            inputs=_decode_list_field(d, "inputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor, _TENSOR_TYPES),
+            outputs=_decode_list_field(d, "outputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor, _TENSOR_TYPES),
+            targets=_decode_list_field(d, "targets", _TARGET_KEYS, _TARGET_REQUIRED, Target, _TARGET_TYPES,
+                                        nested_types={"requires": _REQUIRES_TYPES}),
+            coverage=_decode_list_field(d, "coverage", _COV_KEYS, _COV_KEYS, Coverage, _COVERAGE_TYPES),
         )
 
     def to_json(self) -> str:

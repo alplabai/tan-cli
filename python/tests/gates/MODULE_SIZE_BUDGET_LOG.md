@@ -714,3 +714,27 @@ several less obvious failures.
     - tan/core/bootstrap.py: 2411 -> 2415
 - 2026-08-31 -- tan-cli#427 follow-up in the same change: sdk_cmd.py +1 line replacing a prose reference to the deleted tan/commands/deferred_cmd.py with the fact it is gone.
     - tan/commands/sdk_cmd.py: 1529 -> 1530
+- 2026-08-31 -- tan-cli#907: this file is FROZEN as of this entry. Everything
+  above (2026-08-11 through this line) stays exactly as written and stays
+  enforced append-only by `test_module_size_budget_log_append_only.py`, but
+  `scripts/regen_module_size_budget.py`'s `_append_log` no longer writes
+  here -- every future `--reason`/`--merge-resync` entry is a new file under
+  the sibling `MODULE_SIZE_BUDGET_LOG.d/` directory instead (see its
+  `README.md`). This corrects, without editing, the "writes one entry here
+  every time" claim in this file's own opening paragraph above: that claim
+  was true through 2026-08-30 and is not true of any commit after this line,
+  same append-only-correction shape as the two "correction, no number
+  changed" entries already in this log. The root-cause measurement and the
+  reasoning for moving to a directory-of-files instead of patching this
+  file's own conflict behaviour further live in tan-cli#907 and in
+  `scripts/regen_module_size_budget.py`'s module docstring.
+- 2026-08-31 -- tan-cli#907 round-3 correction: this file's own opening
+  paragraph above ("this file carries `merge=union` in the repo's
+  `.gitattributes`") is now false, not just superseded -- as of this same
+  change `.gitattributes` no longer carries that entry at all (it applied
+  only to this file, and this file no longer accepts new entries, so the
+  driver that existed solely to union-merge its tail region has nothing left
+  to do). This is a third, separate correction, no number changed: the FROZEN
+  note directly above corrected the "writes one entry here every time" claim;
+  this corrects the neighbouring `merge=union` claim in that same opening
+  paragraph, which the FROZEN note did not touch.

@@ -89,10 +89,37 @@ def read_manifest_file(path: Path) -> Manifest:
 
 
 def read_package(raw: bytes) -> tuple[Manifest, list[bytes]]:
+    """The manifest AND blobs of an in-memory `.alpmodel` buffer.
+
+    Every region this reads (`mft_off`/`mft_len`, the blob table itself, and
+    each table entry's `off`/`length`) is bounds-checked against `len(raw)`
+    before the matching slice, using the same subtraction-style compare
+    `read_manifest_file` uses (`off > size or length > size - off`, chosen
+    there because adding the untrusted u32 offset and length first can wrap).
+    The motivation for checking at all differs, though: `read_manifest_file`
+    checks to avoid an over-allocation risk (`f.read(n)` allocates n bytes up
+    front), while slicing `bytes` cannot over-allocate but also does not
+    raise -- `b"AB"[0:999999]` is `b"AB"`, silently truncated, not a crash
+    (tan-cli#1045). A corrupted or adversarial header/table entry must be
+    refused here, the same way `read_manifest_file`'s file-based sibling
+    already refuses one."""
+    size = len(raw)
+    if size < _HEADER_SIZE:
+        raise ValueError(f"truncated container: {size} bytes, header is {_HEADER_SIZE}")
     mft_off, mft_len, tbl_off, n = _unpack_header(raw)
+    if mft_off > size or mft_len > size - mft_off:
+        raise ValueError(f"manifest region {mft_off}+{mft_len} runs past "
+                         f"the end of a {size}-byte container")
     mft = Manifest.from_cbor(raw[mft_off:mft_off + mft_len])
+    tbl_len = n * _TBL_ENTRY.size
+    if tbl_off > size or tbl_len > size - tbl_off:
+        raise ValueError(f"blob table region {tbl_off}+{tbl_len} (for {n} "
+                         f"entries) runs past the end of a {size}-byte container")
     blobs = []
     for i in range(n):
         off, length = _TBL_ENTRY.unpack_from(raw, tbl_off + i * _TBL_ENTRY.size)
+        if off > size or length > size - off:
+            raise ValueError(f"blob {i} region {off}+{length} runs past "
+                             f"the end of a {size}-byte container")
         blobs.append(raw[off:off + length])
     return mft, blobs
