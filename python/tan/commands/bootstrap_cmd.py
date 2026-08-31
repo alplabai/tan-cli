@@ -142,7 +142,7 @@ from tan.core.bootstrap import (
 )
 from tan.core.fs_confine import resolve_confined
 from tan.core.global_flags import accept_global_flags
-from tan.core.scaffold import sdk_pointer_json
+from tan.core.scaffold import sdk_pointer_json, top_level_key_name
 from tan.core.sdk_default_registry import (
     load_raw,
     prune_dead_origins,
@@ -2136,7 +2136,12 @@ def _scan_board_slice(
 ) -> tuple[dict[str, str | None] | None, str | None, str | None]:
     """The no-PyYAML reader: the top-level `os:`, `som: sku:`, and the `cores:`
     block's ids plus each one's `os:`. Deliberately not a YAML parser -- it
-    answers only what the Yocto gate consumes."""
+    answers only what the Yocto gate consumes.
+
+    tan-cli#1008 review round 5: `section` (the top-level key) is derived
+    from `tan.core.scaffold.top_level_key_name`, the same rule
+    `generate_cmd._scan_som_sku`/`scaffold._is_som_key_line` use -- not a
+    fourth independent copy of "what is this line's top-level key"."""
     cores: dict[str, str | None] = {}
     top_os: str | None = None
     sku: str | None = None
@@ -2152,7 +2157,7 @@ def _scan_board_slice(
         key = key.strip()
         cleaned = value.strip().strip("'\"")
         if indent == 0:
-            section = key
+            section = top_level_key_name(stripped)
             current_core = None
             core_indent = -1
             if key == "os" and sep:
