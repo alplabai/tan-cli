@@ -682,3 +682,7 @@ several less obvious failures.
     - function_count_budget: 302 -> 303
     - tan/commands/sdk_cmd.py: 1060 -> 1456
     - function_count_budget: 301 -> 303
+- 2026-08-31 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/debug_config_cmd.py: 2114 -> 2192
+    - tan/core/debug_launch.py: 1539 -> 1770
+    - function_count_budget: 303 -> 305
