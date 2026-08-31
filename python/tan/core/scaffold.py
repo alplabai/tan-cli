@@ -586,11 +586,13 @@ def _split_child_key(trimmed: str) -> tuple[str, str] | None:
 
 def _som_flow_style_body(body: str) -> str | None:
     """When `body` is the top-level `som:` line ([`_is_som_key_line`]) AND
-    what follows its colon is not empty/comment-only -- i.e. a YAML FLOW
-    mapping (`som: {sku: ..., hw_rev: ...}`) or any other non-block content
-    on that same line -- return that trailing text verbatim. `None` for an
-    ordinary block-style `som:` line (nothing, or only a trailing comment,
-    after the colon) or a non-`som:` line.
+    what follows its colon opens a YAML FLOW mapping (`som: {sku: ...,
+    hw_rev: ...}`) -- i.e. the first non-blank character after the colon is
+    `{` -- return that trailing text verbatim. `None` for an ordinary
+    block-style `som:` line: nothing, only a trailing comment, or a bare
+    anchor/tag (`som: &s`, `som: !!map`) after the colon, all of which are
+    valid YAML that still opens a BLOCK mapping on the lines beneath it, not
+    a non-`som:` line.
 
     tan-cli#1029: the one signal both `vendored_som` and
     `retarget_board_yaml_som` need to refuse a shape neither actually reads
@@ -599,12 +601,24 @@ def _som_flow_style_body(body: str) -> str | None:
     two share this one rule rather than each guessing independently, the
     same shape `top_level_key_name`/`_is_som_key_line`/`_split_child_key`
     already hold for tan-cli#1008.
+
+    tan-cli#1035 review major 1: an earlier version of this function
+    treated ANY non-comment content after the colon as flow style, which
+    also caught `som: &s` (an anchor) and `som: !!map` (a tag) -- both
+    valid BLOCK-style `som:` lines (`yaml.safe_load` parses either as a
+    mapping with `sku:`/`hw_rev:` read from the indented lines beneath
+    them) that this scanner already reads correctly once past this gate.
+    Only a genuine flow mapping -- content that starts with `{` -- is a
+    shape this scanner cannot read; an anchor/tag prefix falls through to
+    the ordinary block-style path instead of being refused.
     """
     if not _is_som_key_line(body):
         return None
     _key, _colon, rest = body.partition(":")
     stripped = rest.lstrip(" \t")
     if not stripped or stripped.startswith("#"):
+        return None
+    if not stripped.startswith("{"):
         return None
     return stripped
 

@@ -45,8 +45,10 @@ to override is a hard error (`init.board-yaml-unsupported`) rather than a
 silent no-op that drops the caller's file. `--cores` (heterogeneous
 scaffolding) validates + splices companion cores and a default RPMsg channel
 into the SAME board.yaml `plan_template_files` already planned -- see
-`tan.core.scaffold.splice_companion_cores`. `--from-example` ignores both
-`--som` and `--cores`: the example ships its own board.yaml.
+`tan.core.scaffold.splice_companion_cores`. `--from-example` ignores `--cores`
+(by design: the example ships its own `cores:` topology) but DOES retarget
+`--som` onto the copied board.yaml's `som:` block (`retarget_board_yaml_som`,
+tan-cli#890/#1029) -- it is not ignored.
 
 **`--template`'s id space is NOT the SDK's example catalog.** `TEMPLATE_IDS`
 (`tan.core.scaffold`) is tan's own curated, vendored subset -- six starter

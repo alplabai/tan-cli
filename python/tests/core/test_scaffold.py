@@ -594,6 +594,48 @@ def test_vendored_som_still_reads_a_block_style_som_with_an_inline_flow_looking_
     assert vendored_som(content) == ("E1M-AEN801", None)
 
 
+def test_vendored_som_still_reads_a_som_line_carrying_a_yaml_anchor():
+    """tan-cli#1035 review major 1: `som: &s` opens a YAML anchor, not a flow
+    mapping -- `yaml.safe_load` still parses `sku:`/`hw_rev:` off the indented
+    lines beneath it (`{"som": {"sku": "E1M-AEN801", "hw_rev": "r1"}}`). An
+    earlier version of `_som_flow_style_body` treated ANY non-comment content
+    after the colon as flow style and raised `FlowStyleSomError` here, which
+    broke a valid block-style file. It must read through, not refuse."""
+    content = "som: &s\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    assert vendored_som(content) == ("E1M-AEN801", "r1")
+
+
+def test_retarget_still_retargets_a_som_line_carrying_a_yaml_anchor():
+    """The writer side of the same regression: `--som` onto an anchored
+    `som: &s` block must still retarget the `sku:` value (and, on a
+    cross-family retarget, still drop the now-stale `hw_rev:`), the same as
+    the equivalent plain `som:\\n  sku: ...` block -- not refuse."""
+    content = "som: &s\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+
+    result = retarget_board_yaml_som(content, "E1M-NX9101")
+
+    assert result == "som: &s\n  sku: E1M-NX9101\ncores:\n"
+
+
+def test_vendored_som_still_reads_a_som_line_carrying_a_yaml_tag():
+    """Same regression, the YAML TAG shape (`som: !!map`) instead of an
+    anchor -- also valid block-style YAML, also not a flow mapping."""
+    content = "som: !!map\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    assert vendored_som(content) == ("E1M-AEN801", "r1")
+
+
+def test_retarget_still_retargets_a_som_line_carrying_a_yaml_tag():
+    content = "som: !!map\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+
+    result = retarget_board_yaml_som(content, "E1M-NX9101")
+
+    assert result == "som: !!map\n  sku: E1M-NX9101\ncores:\n"
+
+
 # ---------------------------------------------------------------------------
 # retarget_board_yaml_som -- tan-cli#404: wrapped comments, and CRLF sources
 # ---------------------------------------------------------------------------
