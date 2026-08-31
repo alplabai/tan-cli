@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """tan-cli#1037: `tan/planner/template.py::_board_route_entries` had no
-`isinstance(dict)` guard at EITHER level between `yaml.safe_load(...)` and
-the bare `.get(...)` chain it performs on a decoded `metadata/boards/
-<board_name>.yaml` document.
+`isinstance(dict)`/`isinstance(list)` guard at any of THREE levels between
+`yaml.safe_load(...)` and the bare `.get(...)`/iteration chain it performs on
+a decoded `metadata/boards/<board_name>.yaml` document.
 
-Two levels, per the issue's own amendment (filed after PR #1034's round-two
-review found the issue as originally written covered only the first):
+Three levels: the first two per the issue's own amendment (filed after PR
+#1034's round-two review found the issue as originally written covered only
+the first); the third per PR #1048's own review, which found the fix as
+first landed still left the per-section value bare, one level past the
+`e1m_routes:` mapping guard -- the same "outer guarded, nested missed" shape
+this issue's own amendment was filed to close for the level above it:
 
 1. The OUTER document -- `metadata/boards/<board_name>.yaml` itself parsing
    to something other than a mapping (e.g. a bare list). Measured, verbatim
@@ -26,13 +30,30 @@ review found the issue as originally written covered only the first):
        e1m_routes: a string -> AttributeError: 'str' object has no
                                 attribute 'get'
 
-Guarding only level 1 leaves level 2 reachable one document deeper -- the
+3. The PER-SECTION value -- `e1m_routes:` itself IS a mapping, but one
+   section's value (e.g. `gpio:`) is not a list. Measured, PR #1048 review:
+
+       e1m_routes:
+         gpio: 3        -> TypeError: 'int' object is not iterable
+       e1m_routes:
+         gpio: true      -> TypeError: 'bool' object is not iterable
+
+   (a falsy scalar, e.g. `gpio: 0`, degrades silently to `[]` via the
+   existing `routes.get(section) or []` -- same asymmetry the review
+   flagged as a pre-existing nit, not a defect, matching the `_load_som_doc`
+   precedent, and left as-is here too.)
+
+Guarding only levels 1-2 leaves level 3 reachable one field deeper -- the
 same "outer guarded, nested missed" shape tan-cli#1025 round one left behind
 for `_load_som_doc`'s own nested reads (fixed in PR #1034 round two by
-`_topology_for_sku`). This fix mirrors that shape: outer `isinstance(dict)`
-guard, then a guard on the specific nested field this function itself reads
-(`e1m_routes:`), each raising `TemplateError` naming the board path and the
-actual type instead of letting a raw `AttributeError` escape.
+`_topology_for_sku`'s own outer-plus-per-entry shape) and the same shape
+this file's own level-1/level-2 fix left behind one level further in. This
+fix mirrors `_topology_for_sku`'s three-level shape completely: outer
+`isinstance(dict)` guard, a guard on the specific nested field this function
+itself reads (`e1m_routes:`), and a guard on every per-section value before
+the flattening comprehension iterates it -- each raising `TemplateError`
+naming the board path (and, for the third level, the section) and the
+actual type instead of letting a raw `AttributeError`/`TypeError` escape.
 
 `_board_alias_to_entry` (`_board_route_entries`'s only caller inside this
 module, reached by the exact same CLI path via `_resolve_pin_target`) is
@@ -174,6 +195,82 @@ def test_board_alias_to_entry_also_raises_not_a_bare_attributeerror(tmp_path):
     root = _metadata_root_with_raw_board(tmp_path, "- one\n- two\n")
     with pytest.raises(tmpl.TemplateError, match="expected a YAML mapping"):
         tmpl._board_alias_to_entry(_BOARD, root)
+
+
+# ---------------------------------------------------------------------
+# Level 3: the outer document and `e1m_routes:` ARE mappings, but one
+# section's own value is not a list -- PR #1048's review finding, one
+# field deeper than level 2.
+# ---------------------------------------------------------------------
+
+def test_an_int_section_value_raises_a_curated_error_not_a_typeerror(tmp_path):
+    """PR #1048 review's own repro: `gpio: 3` reaches
+    `for entry in (routes.get(section) or [])` unguarded and raises
+    `TypeError: 'int' object is not iterable` instead of a curated
+    `TemplateError`."""
+    tmpl = _tmpl()
+    root = _metadata_root_with_raw_board(
+        tmp_path, "e1m_routes:\n  gpio: 3\n")
+    with pytest.raises(tmpl.TemplateError, match="e1m_routes.gpio must be a list"):
+        tmpl._board_route_entries(_BOARD, root)
+
+
+def test_a_bool_section_value_raises_a_curated_error_not_a_typeerror(tmp_path):
+    """Same guard, the other truthy non-list shape PR #1048's review
+    measured: `gpio: true` -> `TypeError: 'bool' object is not
+    iterable` on the unguarded code."""
+    tmpl = _tmpl()
+    root = _metadata_root_with_raw_board(
+        tmp_path, "e1m_routes:\n  gpio: true\n")
+    with pytest.raises(tmpl.TemplateError, match="e1m_routes.gpio must be a list"):
+        tmpl._board_route_entries(_BOARD, root)
+
+
+def test_the_per_section_error_names_the_offending_path_section_and_type(tmp_path):
+    tmpl = _tmpl()
+    root = _metadata_root_with_raw_board(
+        tmp_path, "e1m_routes:\n  pwm: 3\n")
+    board_path = root / "boards" / f"{_BOARD}.yaml"
+    with pytest.raises(tmpl.TemplateError) as exc_info:
+        tmpl._board_route_entries(_BOARD, root)
+    assert "e1m_routes.pwm must be a list, got int" in str(exc_info.value)
+    assert str(board_path) in str(exc_info.value)
+
+
+def test_board_alias_to_entry_also_raises_on_a_bad_section_value(tmp_path):
+    """`_board_alias_to_entry` reaches the same malformed document
+    through `_board_route_entries` -- the third-level guard lives in
+    the shared function, so it must cover this caller too."""
+    tmpl = _tmpl()
+    root = _metadata_root_with_raw_board(
+        tmp_path, "e1m_routes:\n  gpio: 3\n")
+    with pytest.raises(tmpl.TemplateError, match="e1m_routes.gpio must be a list"):
+        tmpl._board_alias_to_entry(_BOARD, root)
+
+
+def test_a_falsy_scalar_section_value_still_degrades_silently(tmp_path):
+    """Vacuity/asymmetry control for the third guard: `gpio: 0` is a
+    non-list scalar too, but falls out via the pre-existing
+    `routes.get(section) or []` short-circuit before the new
+    `isinstance` check ever sees it -- same asymmetry #1048's review
+    flagged as a pre-existing nit (matching the `_load_som_doc`
+    precedent for the outer `or {}`), not something this fix changes."""
+    tmpl = _tmpl()
+    root = _metadata_root_with_raw_board(
+        tmp_path, "e1m_routes:\n  gpio: 0\n")
+    assert tmpl._board_route_entries(_BOARD, root) == []
+
+
+def test_an_empty_list_section_value_is_not_stricter_than_the_schema(tmp_path):
+    """`e1m_routes.<section>` is `type: array` in
+    metadata/schemas/board-preset.schema.json, with no `minItems` --
+    an empty list is schema-legal and must still pass. Mirrors the
+    #1034 precedent that `topology.<core>: {}` passes while `null` is
+    refused for `_topology_for_sku`'s own per-entry guard."""
+    tmpl = _tmpl()
+    root = _metadata_root_with_raw_board(
+        tmp_path, "e1m_routes:\n  gpio: []\n")
+    assert tmpl._board_route_entries(_BOARD, root) == []
 
 
 # ---------------------------------------------------------------------

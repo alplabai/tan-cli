@@ -501,14 +501,22 @@ def _board_route_entries(board_name: str, metadata_root: Path) -> list[dict[str,
     boundaries for a handful of lines).
 
     Same document-class guard as `_load_som_doc`/`_topology_for_sku`
-    (tan-cli#1037, its own round-two amendment): a `metadata/boards/
-    <board_name>.yaml` that parses but is not itself a mapping (e.g. a
-    bare list) must not reach the outer `.get("e1m_routes")` bare, and
-    an `e1m_routes:` that parses but is not itself a mapping must not
-    reach the per-section `.get(section)` one line down -- both raised
-    a raw `AttributeError` instead of a curated error naming the file
-    and the actual type (tan-cli#1037's Measured, and PR #1034's
-    round-two review, respectively)."""
+    (tan-cli#1037, its own round-two amendment, plus a same-shape
+    third level a PR #1048 review found still bare): a `metadata/
+    boards/<board_name>.yaml` that parses but is not itself a mapping
+    (e.g. a bare list) must not reach the outer `.get("e1m_routes")`
+    bare; an `e1m_routes:` that parses but is not itself a mapping
+    must not reach the per-section `.get(section)` one line down; and
+    a per-section value (`e1m_routes.<section>`) that parses but is
+    not itself a list must not reach the `for entry in ...` below --
+    all three raised a raw `AttributeError`/`TypeError` instead of a
+    curated error naming the file, the section, and the actual type
+    (tan-cli#1037's Measured, PR #1034's round-two review, and PR
+    #1048's review, respectively). The third level mirrors
+    `_topology_for_sku`'s own outer-plus-per-entry shape: guarding
+    every entry, not just the container, closes the same class one
+    level down that guarding only `e1m_routes:` itself would leave
+    open."""
     board_path = metadata_root / "boards" / f"{board_name}.yaml"
     if not board_path.is_file():
         raise TemplateError(
@@ -523,6 +531,12 @@ def _board_route_entries(board_name: str, metadata_root: Path) -> list[dict[str,
         raise TemplateError(
             f"{board_path} e1m_routes must be a mapping, got "
             f"{type(routes).__name__}")
+    for section in _ROUTE_SECTIONS:
+        section_entries = routes.get(section) or []
+        if not isinstance(section_entries, list):
+            raise TemplateError(
+                f"{board_path} e1m_routes.{section} must be a list, got "
+                f"{type(section_entries).__name__}")
     return [
         entry for section in _ROUTE_SECTIONS
         for entry in (routes.get(section) or [])
