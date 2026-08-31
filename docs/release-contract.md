@@ -260,12 +260,13 @@ The authority is the extension's own source:
 [`alp-sdk-vscode` `src/alpCli/service.ts`](https://github.com/alplabai/alp-sdk-vscode/blob/main/src/alpCli/service.ts).
 Read it there rather than here.
 
-Measured 2026-08-18 against that checkout, for orientation only -- if this
+Measured 2026-08-31 against that checkout, for orientation only -- if this
 paragraph and the file disagree, the file wins:
 
-* `SUPPORTED_CLI_VERSION` is `"0.5.1"` on `origin/main` and `"0.6.0-rc1"` on
-  `origin/dev`. Neither pins a Rust release; the extension has fetched the
-  Python `tan` since 2026-08-01.
+* `SUPPORTED_CLI_VERSION` is `"0.5.1"` on `origin/main` and `"0.6.0"` on
+  `origin/dev` (`v0.6.0-rc1` shipped stable as `v0.6.0` on 2026-08-24). Neither
+  pins a Rust release; the extension has fetched the Python `tan` since
+  2026-08-01.
 * `TARGETS` is keyed `platform/arch` (a slash, not a colon) and `linux/x64`
   maps to `x86_64-unknown-linux-gnu`, carrying the comment
   `// ── gnu, NOT musl. Do not "restore" -musl here (#444) ──`. It is a table
@@ -275,9 +276,10 @@ paragraph and the file disagree, the file wins:
 * The unpublished pair is `win32/arm64` and `linux/arm64` -- the extension
   tracks them per version in `HOSTS_WITHOUT_RELEASE_ASSET`, at
   `src/alpCli/service.ts:168` on `origin/main` (the branch the link above
-  points at) and `:211` on `origin/dev`. The entry
-  `"0.6.0-rc1": ["win32/arm64", "linux/arm64"]` exists only on `dev`; main's
-  table still ends at `"0.5.1"`, matching its `SUPPORTED_CLI_VERSION` pin.
+  points at) and `:218` on `origin/dev`. The entry
+  `"0.6.0-rc1": ["win32/arm64", "linux/arm64"]` exists on `dev` (no `"0.6.0"`
+  entry has been added there yet); main's table still ends at `"0.5.1"`,
+  matching its `SUPPORTED_CLI_VERSION` pin.
 
 `release.yml`'s header calls this document the thing the extension "MUST match
 exactly". That claim is only checkable if something fails when the two drift,
