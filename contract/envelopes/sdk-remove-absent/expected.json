@@ -1,0 +1,1 @@
+{"command":"sdk","ok":true,"exitCode":0,"project":{"root":null,"boardYaml":null},"data":{"subcommand":"remove","removed":false,"path":"__WORKDIR__/sdk-cache/v0.0.0-nonexistent","version":"v0.0.0-nonexistent","wasActive":false,"freedBytes":0},"issues":[]}
