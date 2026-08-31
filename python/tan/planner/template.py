@@ -323,14 +323,28 @@ def _rendered_bytes(
 
 def _load_som_doc(sku: str, metadata_root: Path) -> dict[str, Any]:
     """Parse metadata/e1m_modules/<sku>.yaml -- shared by
-    `_default_preset_for_sku` (the `default_board:` field) and
-    `_derive_core_renames` (the `topology:` block), so both read the
-    exact same doc for the same `(sku, metadata_root)`."""
+    `_default_preset_for_sku` (the `default_board:` field),
+    `_derive_core_renames` (the `topology:` block), and `_core_board`
+    (also `topology:`), so all three read the exact same doc for the
+    same `(sku, metadata_root)`."""
     som_path = metadata_root / "e1m_modules" / f"{sku}.yaml"
     if not som_path.is_file():
         raise TemplateError(
             f"no metadata/e1m_modules/{sku}.yaml for sku {sku!r}")
-    return yaml.safe_load(som_path.read_text(encoding="utf-8")) or {}
+    doc = yaml.safe_load(som_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(doc, dict):
+        # Mirrors `resolve_targets`'s `preset` guard (tan-cli#1010,
+        # `tan/model/targets.py:312-323`): a SoM YAML that parses but is
+        # not a mapping (e.g. a bare list or a bare scalar) must not
+        # reach a caller's bare `.get(...)` -- every caller of this
+        # function does exactly that -- which raises a raw
+        # AttributeError instead of a curated error a caller can
+        # distinguish from any other such error in the call stack
+        # (tan-cli#1025).
+        raise TemplateError(
+            f"malformed SoM preset at {som_path}: expected a YAML "
+            f"mapping, got {type(doc).__name__}")
+    return doc
 
 
 def _default_preset_for_sku(sku: str, metadata_root: Path) -> str:
@@ -346,7 +360,59 @@ def _default_preset_for_sku(sku: str, metadata_root: Path) -> str:
     if not board:
         raise TemplateError(
             f"metadata/e1m_modules/{sku}.yaml has no default_board")
+    if not isinstance(board, str):
+        # Same document-class guard as `_load_som_doc` itself
+        # (tan-cli#1025 sweep): a `default_board:` that parses but isn't
+        # a scalar string (e.g. a YAML list) must not reach `.lower()`
+        # bare -- that raises `AttributeError: 'list' object has no
+        # attribute 'lower'` instead of a curated error naming the file.
+        raise TemplateError(
+            f"metadata/e1m_modules/{sku}.yaml default_board must be a "
+            f"string, got {type(board).__name__}")
     return board.lower()
+
+
+def _topology_for_sku(sku: str, metadata_root: Path) -> dict[str, Any]:
+    """`metadata/e1m_modules/<sku>.yaml` `topology:` -- shared by
+    `_derive_core_renames` and `_core_board`, both of which key into the
+    result by core id (`.items()`/`.get(core_id)`) and then read a
+    `board:`/`app:` field off each core's own entry (`spec.get(...)`).
+
+    Same document-class guard as `_load_som_doc` itself (tan-cli#1025
+    sweep, round 2 -- the first round guarded the outer document but
+    left every nested read this function serves unguarded): a
+    `topology:` block that parses but is not itself a mapping (e.g. a
+    bare list) must not reach either caller's bare `.items()`/`.get()`
+    -- that raises a raw AttributeError instead of a curated error
+    naming the file and the actual type. Guarding the OUTER shape here,
+    once, also closes a quieter failure mode a plain per-caller
+    AttributeError guard would not: `_derive_core_renames`'s own `cid
+    not in topology` membership test does not raise against a list
+    `topology` at all (a list supports `in`), so an unguarded list would
+    silently resolve `stale == []` and return `None` -- a byte-
+    identical-passthrough verdict that is not true, instead of
+    surfacing the malformed document.
+
+    Each core's own entry is validated too, for the same reason one
+    level down: `_derive_core_renames`'s `spec.get("board")` and
+    `_core_board`'s `topology.get(core_id).get("board")` both assume
+    the per-core value is itself a mapping. A `topology:` that IS a
+    mapping but whose value for some core id is a bare list/scalar
+    (legal YAML, illegal `som-preset` schema) would otherwise reach
+    those bare `.get()` calls unguarded -- validating every entry here,
+    once, closes that for both callers the same way the outer check
+    does."""
+    topology = _load_som_doc(sku, metadata_root).get("topology") or {}
+    if not isinstance(topology, dict):
+        raise TemplateError(
+            f"metadata/e1m_modules/{sku}.yaml topology must be a "
+            f"mapping, got {type(topology).__name__}")
+    for core_id, spec in topology.items():
+        if not isinstance(spec, dict):
+            raise TemplateError(
+                f"metadata/e1m_modules/{sku}.yaml topology.{core_id} "
+                f"must be a mapping, got {type(spec).__name__}")
+    return topology
 
 
 def _derive_core_renames(
@@ -399,7 +465,7 @@ def _derive_core_renames(
     fix -- unreachable today, since no template's `supported.som_skus`
     combo exercises it, but latently wrong).
     """
-    topology = _load_som_doc(sku, metadata_root).get("topology") or {}
+    topology = _topology_for_sku(sku, metadata_root)
     stale = [cid for cid in original_core_ids if cid not in topology]
     if not stale:
         return None
@@ -1142,7 +1208,7 @@ def _core_board(sku: str, core_id: str | None, metadata_root: Path) -> str | Non
     cleanly instead of guessing."""
     if not core_id:
         return None
-    topology = _load_som_doc(sku, metadata_root).get("topology") or {}
+    topology = _topology_for_sku(sku, metadata_root)
     return (topology.get(core_id) or {}).get("board")
 
 

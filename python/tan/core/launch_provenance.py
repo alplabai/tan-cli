@@ -9,6 +9,17 @@ relying on POSITION. tan-cli#518, the gap tan-cli#489's own docstring names
 as a "Known, accepted limitation" (``debug_launch.py``'s
 ``_merge_list_by_identity``).
 
+tan-cli#1020 review widened this sidecar to a THIRD field, ``loadFiles``
+(tan-cli#945) -- the same content-hash record, read by the same
+:meth:`LaunchProvenance.hashes_for`, but consumed by a DIFFERENT merge rule
+(``debug_launch._merge_load_files``, not ``_merge_list_by_identity``): a
+``loadFiles`` this run cannot prove it wrote is left untouched WHOLESALE
+(never appended-to, unlike ``configFiles``/``setupCommands``), because it
+names one deliberate artefact list -- possibly an explicit ``[]`` for
+attach-only -- not a set of independently-owned entries. This module itself
+needed no change for that: `hashes_for`/`updated`/`record` are already
+generic over the field name.
+
 ## Why content hash, and why a sidecar at all
 
 The design decision (tan-cli#518, 2026-08-28) rules out an in-file marker:
@@ -57,6 +68,26 @@ own) is not retroactively cleaned up once the sidecar heals; it stays in
 ``debug_launch.sdk_identity_stranded_appends`` (surfaced by
 ``debug_config_cmd.py`` as ``debug-config.sdk-identity-appended``) for the
 disclosure that names it rather than leaving it silent.
+
+**``loadFiles`` heals the same way for the same reason, but only from ONE
+specific starting point** (tan-cli#1020 re-review): a sidecar loss re-derives
+provenance the instant the field itself is next observed absent from the
+existing entry -- the pre-#945 upgrade shape, and the only case where there
+is provably nothing to protect (``debug_launch._merge_configuration``'s
+key-absent branch records what it just wrote, exactly like a brand-new
+entry). A sidecar lost while the KEY WAS ALREADY PRESENT -- a genuinely
+tan-authored value, or a customer's own -- cannot re-derive provenance from
+observation alone, because ``_merge_load_files``'s protect branch (unlike
+``configFiles``/``setupCommands``'s append) makes no write of its own to
+attribute: recording ownership of an untouched value the sidecar merely
+forgot would be indistinguishable, to the very next run, from recording
+ownership of a customer's own untouched value, which is the exact silent-
+overwrite failure tan-cli#518/#1020's protect rule exists to prevent. So
+that narrower case stays protected -- and disclosed, every run, via
+``debug-config.load-files-preserved`` -- until the customer's own edit (or a
+value that happens to already match the fresh resolution) lets it agree
+again; it does not "heal" the way an appended `configFiles` entry's
+provenance does.
 """
 
 from __future__ import annotations
