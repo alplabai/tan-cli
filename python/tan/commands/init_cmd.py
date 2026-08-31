@@ -146,7 +146,9 @@ from tan.core.scaffold import (
     FlowStyleSomError,
     PlannedFile,
     ScaffoldWriteError,
+    SomBlockUnsupportedError,
     TemplateDataError,
+    UnreadableSomBlockError,
     UnsupportedSomError,
     collect_file_changes,
     is_plain_relative,
@@ -672,15 +674,16 @@ def _plan_from_template(
         raise InitError(
             "init.template-unreadable", str(err), ExitCode.INTERNAL_FAILURE
         ) from err
-    except FlowStyleSomError as err:
-        # tan-cli#1029, defensive: every vendored tree's board.yaml is
+    except SomBlockUnsupportedError as err:
+        # tan-cli#1029/#1041, defensive: every vendored tree's board.yaml is
         # tan's OWN template data (`tan/templates/vendored/`, captured
         # block-style, pinned by `test_scaffold_content_oracle_parity.py`),
-        # never reachable in practice -- a flow-style `som:` here means the
-        # shipped template data itself is broken, not a customer argument,
-        # so this maps to the same code/exit as `TemplateDataError` above
-        # rather than the validation-failure `_plan_from_example` raises for
-        # the customer-reachable copy of this same shape.
+        # never reachable in practice -- ANY of `FlowStyleSomError`'s or
+        # `UnreadableSomBlockError`'s shapes here means the shipped template
+        # data itself is broken, not a customer argument, so this maps to
+        # the same code/exit as `TemplateDataError` above rather than the
+        # validation-failure `_plan_from_example` raises for the
+        # customer-reachable copy of these same shapes.
         raise InitError(
             "init.template-unreadable", str(err), ExitCode.INTERNAL_FAILURE
         ) from err
@@ -946,6 +949,25 @@ def _plan_from_example(
             # are never written rather than written wrong.
             raise InitError(
                 "init.som-flow-style-unsupported",
+                f"Example '{src}' board.yaml: {err}",
+                ExitCode.VALIDATION_FAILURE,
+            ) from err
+        except UnreadableSomBlockError as err:
+            # tan-cli#1041 (the amendment). Same symptom as the flow-style
+            # refusal immediately above -- `--som` silently discarded,
+            # `issues: []`, exit 0 -- for the three shapes that are not
+            # flow-style at all: a `*alias`, an un-overridden `<<:` merge
+            # key (inside the `som:` block or at the document root), and a
+            # flow mapping split across more than one physical line. A
+            # DIFFERENT code from `init.som-flow-style-unsupported`
+            # (rather than folding these into it) because the customer
+            # remediation reads the same but the diagnosis does not -- a
+            # tool consuming this code some day should not have to string-
+            # match the message to tell "your `som:` is flow style" apart
+            # from "your `som:` uses a YAML feature (alias/merge) this
+            # scaffolder does not follow".
+            raise InitError(
+                "init.som-block-unsupported",
                 f"Example '{src}' board.yaml: {err}",
                 ExitCode.VALIDATION_FAILURE,
             ) from err
@@ -1457,14 +1479,16 @@ def init(
             if board_file is not None:
                 try:
                     file_sku, file_hw_rev = vendored_som(board_file.content)
-                except FlowStyleSomError:
-                    # tan-cli#1029. Only reachable here with no `--som` at
-                    # all (a `--som` retarget onto this shape already
-                    # refused earlier, in `_plan_from_example`) -- a
-                    # flow-style `som:` this advisory check cannot read, so
-                    # it degrades the same way an unparsed `--board-yaml`
-                    # already does above: this specific pair is simply not
-                    # judged, not a hard failure.
+                except SomBlockUnsupportedError:
+                    # tan-cli#1029/#1041. Only reachable here with no
+                    # `--som` at all (a `--som` retarget onto any of these
+                    # shapes already refused earlier, in
+                    # `_plan_from_example`) -- a `som:` block this advisory
+                    # check cannot read (flow style, an alias, an
+                    # un-overridden merge key -- see `SomBlockUnsupportedError`'s
+                    # two leaves), so it degrades the same way an unparsed
+                    # `--board-yaml` already does above: this specific pair
+                    # is simply not judged, not a hard failure.
                     file_sku, file_hw_rev = None, None
             else:
                 file_sku, file_hw_rev = None, None

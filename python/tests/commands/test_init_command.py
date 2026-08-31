@@ -946,6 +946,122 @@ def test_from_example_refuses_a_som_retarget_onto_an_anchored_flow_style_som_blo
     assert not (tmp_path / "copy").exists()
 
 
+def test_from_example_refuses_a_som_retarget_onto_a_next_line_flow_som_block(tmp_path):
+    """tan-cli#1041 (the amendment)'s own repro: the flow mapping's `{`
+    opens on the line AFTER `som:`, not on it -- `FlowStyleSomError`'s
+    detector never fires (it only inspects the `som:` line itself), so at
+    the parent commit this call returned `exitCode 0`, `issues: []`, and
+    `copy/board.yaml` byte-for-byte unchanged (still naming E1M-AEN801) --
+    `--som` silently discarded, #1029's own symptom on a sibling shape."""
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    example = sdk / "examples" / "peripheral-io" / "next-line-flow-som"
+    (example / "src").mkdir(parents=True)
+    (example / "board.yaml").write_text(
+        "som:\n  {sku: E1M-AEN801, hw_rev: r1}\ncores:\n  m55_hp:\n    os: zephyr\n",
+        encoding="utf-8",
+    )
+    (example / "src" / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+
+    proc = run_tan(
+        "init",
+        "--from-example",
+        "peripheral-io/next-line-flow-som",
+        "--sdk-root",
+        "./sdk",
+        "--name",
+        "copy",
+        "--som",
+        "E1M-NX9101",
+        "--format",
+        "json",
+        cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.som-block-unsupported"
+    assert issue(env)["severity"] == "error"
+    assert not (tmp_path / "copy").exists()
+
+
+def test_from_example_refuses_a_som_retarget_onto_an_alias_som_value(tmp_path):
+    """tan-cli#1041 (the amendment)'s alias repro: `som: *s` names no
+    literal `sku:` line at all for the writer to find, so at the parent
+    commit this was another silent `--som` discard."""
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    example = sdk / "examples" / "peripheral-io" / "alias-som"
+    (example / "src").mkdir(parents=True)
+    (example / "board.yaml").write_text(
+        "base: &s\n  sku: E1M-AEN801\n  hw_rev: r1\nsom: *s\n"
+        "cores:\n  m55_hp:\n    os: zephyr\n",
+        encoding="utf-8",
+    )
+    (example / "src" / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+
+    proc = run_tan(
+        "init",
+        "--from-example",
+        "peripheral-io/alias-som",
+        "--sdk-root",
+        "./sdk",
+        "--name",
+        "copy",
+        "--som",
+        "E1M-NX9101",
+        "--format",
+        "json",
+        cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.som-block-unsupported"
+    assert not (tmp_path / "copy").exists()
+
+
+def test_from_example_retargets_a_quoted_som_key_correctly(tmp_path):
+    """The one tan-cli#1041 shape that is NOT a refusal: a quoted `"som":`
+    key retargets exactly like its bare spelling, since
+    `top_level_key_name` now unquotes it before the line-oriented scan ever
+    sees it -- `--som` must land in the written file, not merely avoid a
+    silent discard."""
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    example = sdk / "examples" / "peripheral-io" / "quoted-som-key"
+    (example / "src").mkdir(parents=True)
+    (example / "board.yaml").write_text(
+        '"som":\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n  m55_hp:\n    os: zephyr\n',
+        encoding="utf-8",
+    )
+    (example / "src" / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+
+    proc = run_tan(
+        "init",
+        "--from-example",
+        "peripheral-io/quoted-som-key",
+        "--sdk-root",
+        "./sdk",
+        "--name",
+        "copy",
+        "--som",
+        "E1M-NX9101",
+        "--format",
+        "json",
+        cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert env["issues"] == []
+    board = (tmp_path / "copy" / "board.yaml").read_text(encoding="utf-8")
+    assert board == '"som":\n  sku: E1M-NX9101\ncores:\n  m55_hp:\n    os: zephyr\n'
+
+
 def test_a_relative_sdk_root_pin_survives_being_read_back_from_inside_the_project(tmp_path):
     """tan-cli#263, the maintainer's exact repro: `tan init --sdk-root
     .\\alp-sdk --destination .\\blink` run from a parent directory, then a

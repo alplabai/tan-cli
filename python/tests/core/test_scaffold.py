@@ -28,7 +28,9 @@ from tan.core.scaffold import (
     FlowStyleSomError,
     PlannedFile,
     ScaffoldWriteError,
+    SomBlockUnsupportedError,
     TemplateDataError,
+    UnreadableSomBlockError,
     UnsupportedSomError,
     app_core_for_sku,
     infer_runtime_for_core_id,
@@ -41,6 +43,7 @@ from tan.core.scaffold import (
     retarget_board_yaml_som,
     scaffold_tree_preview,
     splice_companion_cores,
+    top_level_key_name,
     vendored_app_core_key,
     vendored_core_ids,
     vendored_som,
@@ -706,6 +709,212 @@ def test_vendored_som_refuses_a_flow_style_som_block_carrying_a_tag_then_an_anch
 
     with pytest.raises(FlowStyleSomError):
         vendored_som(content)
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1041 (the amendment): six more spellings `yaml.safe_load` reads
+# without complaint that used to silently discard `--som` -- a quoted key
+# (`"som":`), a merge key (`<<:`, inside the `som:` block or at the document
+# root), an alias (`som: *s`), and the flow mapping's NEXT-LINE sibling
+# (`som:\n  {...}`, plus a leading comment or an anchor on the `som:` line).
+# The quoted key retargets CORRECTLY (`top_level_key_name` unquotes it); the
+# other five raise `UnreadableSomBlockError`, a new `SomBlockUnsupportedError`
+# leaf alongside `FlowStyleSomError`.
+# ---------------------------------------------------------------------------
+
+
+def test_top_level_key_name_unquotes_a_double_quoted_key():
+    assert top_level_key_name('"som": x') == "som"
+
+
+def test_top_level_key_name_unquotes_a_single_quoted_key():
+    assert top_level_key_name("'som': x") == "som"
+
+
+def test_top_level_key_name_leaves_a_quote_that_is_not_a_key_alone():
+    """The quote-stripping only fires when the closing quote is immediately
+    followed by (optional whitespace then) a `:` -- otherwise this is not a
+    `"key":` shape at all, and the pre-existing colon-split contract
+    (`str.split(":", 1)[0]`) must still hold, quotes and all."""
+    assert top_level_key_name('"not a key, just a quoted string"') == (
+        '"not a key, just a quoted string"'
+    )
+
+
+def test_vendored_som_reads_a_double_quoted_som_key():
+    content = 'som:\n  sku: E1M-AEN801\ncores:\n'
+    quoted = '"som":\n  sku: E1M-AEN801\ncores:\n'
+    assert yaml.safe_load(quoted)["som"] == {"sku": "E1M-AEN801"}
+
+    assert vendored_som(quoted) == vendored_som(content) == ("E1M-AEN801", None)
+
+
+def test_vendored_som_reads_a_single_quoted_som_key():
+    content = "'som':\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    assert vendored_som(content) == ("E1M-AEN801", "r1")
+
+
+def test_retarget_retargets_a_double_quoted_som_key():
+    """The one tan-cli#1041 shape that does NOT refuse -- a quoted `som:`
+    key changes nothing about how the line-oriented scan finds the literal
+    `sku:`/`hw_rev:` children beneath it, only `top_level_key_name`'s own
+    entry point needed to widen."""
+    content = '"som":\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n'
+
+    out = retarget_board_yaml_som(content, "E1M-NX9101")
+
+    assert out == '"som":\n  sku: E1M-NX9101\ncores:\n'
+
+
+def test_retarget_retargets_a_single_quoted_som_key():
+    content = "'som':\n  sku: E1M-AEN801\ncores:\n"
+
+    out = retarget_board_yaml_som(content, "E1M-V2N101")
+
+    assert out == "'som':\n  sku: E1M-V2N101\ncores:\n"
+
+
+def test_vendored_som_refuses_an_alias_som_value():
+    """`som: *s` -- the whole value is an alias to a mapping defined
+    elsewhere. No `sku:` line ever follows the `som:` line at all, so
+    rewriting one in place is not merely unsupported, it is nowhere to
+    write."""
+    content = "base: &s\n  sku: E1M-AEN801\n  hw_rev: r1\nsom: *s\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(UnreadableSomBlockError):
+        vendored_som(content)
+
+
+def test_retarget_refuses_an_alias_som_value_instead_of_discarding_som():
+    """tan-cli#1041's own repro for the alias shape: at the parent commit
+    this call returned the INPUT unchanged, byte-for-byte -- `--som
+    E1M-NX9101` silently discarded."""
+    content = "base: &s\n  sku: E1M-AEN801\n  hw_rev: r1\nsom: *s\ncores:\n"
+
+    with pytest.raises(UnreadableSomBlockError):
+        retarget_board_yaml_som(content, "E1M-NX9101")
+
+
+def test_vendored_som_refuses_a_merge_key_with_no_explicit_sku_override():
+    """`<<: *base` inside the `som:` block, with no literal `sku:` alongside
+    it -- the real `sku:` value lives entirely in whatever `base` points
+    at, not in a line this scanner can find and rewrite."""
+    content = "base: &b\n  sku: E1M-AEN801\n  hw_rev: r1\nsom:\n  <<: *b\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(UnreadableSomBlockError):
+        vendored_som(content)
+
+
+def test_retarget_refuses_a_merge_key_with_no_explicit_sku_override():
+    content = "base: &b\n  sku: E1M-AEN801\n  hw_rev: r1\nsom:\n  <<: *b\ncores:\n"
+
+    with pytest.raises(UnreadableSomBlockError):
+        retarget_board_yaml_som(content, "E1M-NX9101")
+
+
+def test_retarget_retargets_through_a_merge_key_with_an_explicit_sku_override():
+    """The one merge-key shape that is NOT tan-cli#1041's defect: an
+    explicit `sku:` alongside `<<:` is a literal line this scan already
+    finds and rewrites, same as any other block-style `som:` -- YAML's own
+    override rule (an explicit key beats a merged one) means the retargeted
+    file is correct without this scanner needing to understand merge keys
+    at all."""
+    content = "base: &b\n  hw_rev: r1\nsom:\n  <<: *b\n  sku: E1M-AEN801\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    out = retarget_board_yaml_som(content, "E1M-NX9101")
+
+    assert out == "base: &b\n  hw_rev: r1\nsom:\n  <<: *b\n  sku: E1M-NX9101\ncores:\n"
+
+
+def test_vendored_som_refuses_a_document_root_merge_key_that_produces_som():
+    """The OTHER reading of "a merge key": `<<:` at the document ROOT
+    (a SIBLING of `cores:`, not nested under any `som:` line) whose target
+    itself defines `som:`. No `som:` TEXT exists anywhere in this file for
+    the line scan to find -- only `vendored_som`'s own `yaml.safe_load`
+    backstop, run when the scan's own `entered_som` never fired, can see
+    this at all."""
+    content = (
+        "base: &b\n  som:\n    sku: E1M-AEN801\n    hw_rev: r1\n"
+        "<<: *b\ncores:\n"
+    )
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(UnreadableSomBlockError):
+        vendored_som(content)
+
+
+def test_retarget_refuses_a_document_root_merge_key_that_produces_som():
+    content = (
+        "base: &b\n  som:\n    sku: E1M-AEN801\n    hw_rev: r1\n"
+        "<<: *b\ncores:\n"
+    )
+
+    with pytest.raises(UnreadableSomBlockError):
+        retarget_board_yaml_som(content, "E1M-NX9101")
+
+
+def test_vendored_som_refuses_a_next_line_flow_som_block():
+    """The flow mapping's `{` opens on the line AFTER `som:`, not on the
+    `som:` line itself -- `FlowStyleSomError`'s own detector
+    (`_som_flow_style_body`) only ever inspects the `som:` line by design,
+    so this shape falls through it untouched and is caught by the generic
+    "a som: block was entered but no sku: line was found" signal instead."""
+    content = "som:\n  {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(UnreadableSomBlockError):
+        vendored_som(content)
+
+
+def test_retarget_refuses_a_next_line_flow_som_block():
+    content = "som:\n  {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(UnreadableSomBlockError):
+        retarget_board_yaml_som(content, "E1M-NX9101")
+
+
+def test_vendored_som_refuses_a_next_line_flow_som_block_with_a_comment_first():
+    content = "som: # c\n  {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(UnreadableSomBlockError):
+        vendored_som(content)
+
+
+def test_retarget_refuses_a_next_line_flow_som_block_with_a_comment_first():
+    content = "som: # c\n  {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(UnreadableSomBlockError):
+        retarget_board_yaml_som(content, "E1M-NX9101")
+
+
+def test_vendored_som_refuses_a_next_line_flow_som_block_behind_an_anchor():
+    content = "som:\n  &s {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(UnreadableSomBlockError):
+        vendored_som(content)
+
+
+def test_retarget_refuses_a_next_line_flow_som_block_behind_an_anchor():
+    content = "som:\n  &s {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(UnreadableSomBlockError):
+        retarget_board_yaml_som(content, "E1M-NX9101")
+
+
+def test_unreadable_som_block_error_is_a_som_block_unsupported_error():
+    """`init_cmd.py`'s three catch sites all catch the BASE class -- pin
+    that both leaves actually derive from it, so a future third leaf that
+    forgets this inheritance fails here rather than only surfacing as a
+    hard `init` crash the first time it fires."""
+    assert issubclass(UnreadableSomBlockError, SomBlockUnsupportedError)
+    assert issubclass(FlowStyleSomError, SomBlockUnsupportedError)
 
 
 # ---------------------------------------------------------------------------

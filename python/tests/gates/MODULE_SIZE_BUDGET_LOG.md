@@ -706,3 +706,7 @@ several less obvious failures.
     - tan/core/scaffold.py: 1889 -> 1931
 - 2026-08-31 -- tan-cli#1035 review round 4 nits: soften FlowStyleSomError's remediation message so it doesn't imply dropping the som: key's own anchor/tag, and pin the reverse anchor-then-tag property order (!!map &s {...}) alongside the already-pinned anchor-then-tag order
     - tan/core/scaffold.py: 1931 -> 1933
+- 2026-08-31 -- tan-cli#1041: vendored_som's UnreadableSomBlockError/SomBlockUnsupportedError split (quoted-key/merge-key/alias/next-line-flow som: shapes) grows scaffold.py; init_cmd.py's matching catch-site split (init.som-block-unsupported) grows it too
+    - tan/commands/init_cmd.py: 1559 -> 1583
+    - tan/core/scaffold.py: 1933 -> 2111
+    - function_count_budget: 305 -> 306
