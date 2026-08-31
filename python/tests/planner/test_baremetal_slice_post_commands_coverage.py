@@ -63,8 +63,14 @@ def _bound_sdk_root(tmp_path):
     """Bind the planner's SDK root -- preferring the REAL bound checkout
     (`_SDK`, captured at collection time above) over whatever happens to be
     already bound, so THIS module can never be the one that freezes
-    `tan.planner`'s module-level constants at a non-SDK stub for the rest of
-    the process.
+    `tan.planner`'s module-level constants at a non-SDK stub in the
+    `ALP_SDK_ROOT`-bound job, the only job where a real root is available to
+    bind. In the default unbound `gates` job (`_SDK` is None) this fixture is
+    no different from any other binder in the suite: it reuses whatever root
+    is already bound, or falls back to a throwaway `tmp_path` stub, same as
+    the rest -- it does not itself keep a non-SDK stub from being frozen
+    there. See the "Fixed by binding the real checkout FIRST" paragraph below
+    for the precise condition.
 
     Round 1 (this fixture's first revision) did `monkeypatch.setattr(
     planner_root, "_BOUND", None)` before every test and rebound a fresh
