@@ -423,13 +423,16 @@ def _split_cr(line: str) -> tuple[str, str]:
     return (line[:-1], "\r") if line.endswith("\r") else (line, "")
 
 
-def _retargeted_sku_line(indent: str, trimmed: str, sku: str) -> tuple[str, bool]:
-    """Rewrite one `sku:` line body onto `sku`. Returns the new body (no line
-    terminator -- see [`_split_cr`]) and whether a trailing COMMENT was dropped,
-    which is what tells the caller a wrapped comment block has been opened and
-    its continuation lines must go too.
+def _retargeted_sku_line(indent: str, after_key: str, sku: str) -> tuple[str, bool]:
+    """Rewrite one `sku:` line body onto `sku`, given `after_key` -- everything
+    after the child key's colon, as returned by [`_split_child_key`] (so a
+    space before the colon in the SOURCE line, `sku : x`, is already handled
+    by the caller; this function only ever emits a normalized `sku:`, no
+    space, regardless of how the source was spaced). Returns the new body (no
+    line terminator -- see [`_split_cr`]) and whether a trailing COMMENT was
+    dropped, which is what tells the caller a wrapped comment block has been
+    opened and its continuation lines must go too.
     """
-    after_key = trimmed[len("sku:") :]
     stripped = after_key.lstrip(" \t")
     leading_ws = after_key[: len(after_key) - len(stripped)]
     if not stripped or stripped.startswith("#"):
@@ -462,11 +465,122 @@ def _is_wrapped_comment_line(body: str, sku_indent: str) -> bool:
     return len(body) - len(stripped) > len(sku_indent)
 
 
+def top_level_key_name(text: str) -> str:
+    """Everything in `text` before its first `:`, whitespace-trimmed -- the
+    key name of a `<key>:` mapping line, tolerating a space (or more) before
+    the colon (`som :` is valid YAML: `yaml.safe_load("som :\n  sku: x\n")`
+    -> `{"som": {"sku": "x"}}`). Returns the whole (trimmed) `text` when
+    there is no `:` at all, matching `str.split(":", 1)[0]`'s own behaviour
+    on a colon-less string.
+
+    tan-cli#1008 review round 5: this repo now has THREE independent readers
+    of "what is this line's top-level key" --
+    `generate_cmd._scan_som_sku` (`stripped.split(":", 1)[0].strip() ==
+    "som"`), `bootstrap_cmd._scan_board_slice` (`key =
+    stripped.partition(":")[0].strip()`), and this file's own
+    `_is_som_key_line` (round 4's fix, which used a STRICTER
+    `startswith(f"{key}:")` that rejected `som :`). That divergence is
+    exactly how round 4's own bug happened one level up (`_is_som_key_line`
+    vs `vendored_som`'s pre-round-4 exact-match). One rule, in one place;
+    `generate_cmd`/`bootstrap_cmd` import and call THIS instead of keeping
+    their own copies.
+    """
+    return text.split(":", 1)[0].strip()
+
+
+def _is_som_key_line(body: str) -> bool:
+    """Whether `body` is the top-level `som:` line -- unindented, with
+    `som` as [`top_level_key_name`]'s answer for it (so `som :`, a trailing
+    comment, and trailing whitespace all still match -- only indentation and
+    the key name itself are checked).
+
+    tan-cli#1008 review round 4: `retarget_board_yaml_som`'s scan and
+    `vendored_som`'s reader used to apply DIFFERENT rules for this -- the
+    scan matched `trimmed.startswith("som:")` (tolerant of a trailing
+    comment/whitespace), the reader matched an exact `body == "som:"`
+    (strict) -- so a `som:` line carrying a trailing comment or trailing
+    whitespace was recognized by the scan (which retargeted `sku:` inside
+    it) but not by the reader (which then reported `existing_sku` as
+    `None`, so the sibling `hw_rev:`-drop this file exists for silently
+    stood down). One predicate, used by both callers, so a third caller
+    cannot diverge from either again.
+    """
+    return bool(body) and body[0] not in " \t" and top_level_key_name(body) == "som"
+
+
+def _split_child_key(trimmed: str) -> tuple[str, str] | None:
+    """Split an already-indent-stripped CHILD mapping line (one nested under
+    a top-level block, e.g. a `som:` block's `sku:`/`hw_rev:`) into
+    `(key, after_colon)`, using the exact same [`top_level_key_name`] rule
+    the top-level `som:` check applies -- so a space before the colon
+    (`sku :`, `hw_rev :`) is tolerated here too. `None` when `trimmed` has
+    no `:` at all (not a mapping line).
+
+    tan-cli#1008 review round 6: `vendored_som` (the reader) and
+    `retarget_board_yaml_som` (the writer) applied DIFFERENT rules for "is
+    this line a `sku:`/`hw_rev:` child" -- the reader used a tolerant
+    `trimmed.partition(":")`, the writer an exact
+    `trimmed.startswith("hw_rev:")`/`startswith("sku:")`. Round 5 already
+    fixed this exact class of divergence one level up for the top-level
+    `som:` line (`_is_som_key_line`); it did not carry the fix down to the
+    child keys underneath it. Concretely: on `hw_rev : r2` the reader saw
+    the key (arming the cross-family `drop_hw_rev` logic) while the writer's
+    `startswith` did not match the line at all, so a hand-authored spaced
+    `hw_rev :`/`sku :` line was either left un-dropped (major 1) or -- worse
+    -- had its `hw_rev:` deleted by the drop logic while its own `sku :`
+    line went unretargeted, since the writer's `sku:` `startswith` check
+    also failed to match (major 2, a silent `--som` no-op). One rule, in one
+    place, used by both the reader and the writer, so they cannot diverge
+    again.
+    """
+    key, sep, rest = trimmed.partition(":")
+    if not sep:
+        return None
+    return key.strip(), rest
+
+
+#: Mirrors `tan.core.som_buildability._SKU_FAMILY` -- deliberately
+#: duplicated rather than imported, the same call that module's own
+#: docstring already makes for its family-directory map: this file plans
+#: board.yaml content with no SDK checkout to consult (it is SDK-free by
+#: design -- see `test_init_command.py`'s "`tan init` is SDK-free and
+#: cannot tell a ..." precedent), so this needs only the family CODE
+#: encoded in the SKU string itself, never a metadata lookup.
+_SKU_FAMILY_PREFIX = re.compile(r"^E1M-(AEN|V2N|V2M|NX9)")
+
+
+def _same_som_family(a: str, b: str) -> bool:
+    """Whether two SKUs share the SoM family a `hw_rev:` value is scoped to.
+
+    tan-cli#1008 review round 4 minor: an INTRA-family retarget (e.g.
+    `E1M-AEN801` -> `E1M-AEN301`, both `aen`) shares ONE family
+    `hw-revisions.yaml` table, so an explicit `hw_rev:` valid for the source
+    SKU is still a real, declared revision for the target one -- dropping it
+    there (as an unconditional cross-SKU drop would) silently substitutes
+    the new SKU's own `default_hw_rev:`, which can be a DIFFERENT declared
+    revision with different `pad_route_overrides` -- a silent change of
+    which hardware variant gets built, with `tan validate` clean and `tan
+    init` reporting no issue, since both revisions are legitimately known
+    and buildable. That is strictly worse than tan-cli#743's original bug: a
+    loud refusal became a silent substitution. A CROSS-family retarget (the
+    tan-cli#743/#1008 round-3 case: `E1M-AEN801` -> `E1M-NX9101`) still
+    drops it -- the value is from a table that has nothing to do with the
+    new SKU at all, not merely a different declared revision of the same
+    hardware family. Returns `False` (the conservative, already-shipped
+    round-3 behaviour: drop) whenever either SKU does not match the known
+    family pattern -- a shape this function cannot judge safely.
+    """
+    match_a = _SKU_FAMILY_PREFIX.match(a)
+    match_b = _SKU_FAMILY_PREFIX.match(b)
+    return match_a is not None and match_b is not None and match_a.group(1) == match_b.group(1)
+
+
 def retarget_board_yaml_som(content: str, sku: str) -> str:
     """Rewrite the FIRST `som:` -> `sku:` value to `sku`, leaving the rest of
-    that line byte-for-byte alone -- UNLESS the value is actually changing and
-    a trailing comment is present, in which case the comment is dropped, all of
-    it, however many physical lines it spans.
+    that line byte-for-byte alone -- UNLESS the value is actually changing, in
+    which case a trailing comment on that line is dropped (all of it, however
+    many physical lines it spans) and a sibling `hw_rev:` line inside the same
+    `som:` block, if one is present, is dropped outright.
 
     `wizard::retarget_board_yaml_som`. Only the value token moves: the gap
     before a trailing comment is preserved, so a column-aligned inline comment
@@ -496,12 +610,54 @@ def retarget_board_yaml_som(content: str, sku: str) -> str:
     Deliberately anchored to THAT comment, not to any comment near a changed
     `sku:` -- a `sku:` line with no comment of its own opens no block, so a
     comment documenting the next key is never swallowed.
+
+    tan-cli#1008 review round 3: the identical "dropping it is honest,
+    inventing a new one is not this function's job" reasoning applies to an
+    explicit `hw_rev:` sibling. This function previously only ever rewrote
+    `sku:`, so a retarget onto a DIFFERENT SKU used to leave the ORIGINAL
+    example's `hw_rev:` in place verbatim -- a value from a different
+    family's table (or, worse, one that happens to collide with an unrelated
+    revision key in the new family's table), producing a `sku:`/`hw_rev:`
+    pair no family table actually declares. `tan validate` refuses that with
+    "not a known hardware revision", while `tan init` -- before this fix --
+    said nothing at all, or (an earlier round of this same fix) named the
+    WRONG revision: both are the tan-cli#743 contradiction this whole check
+    exists to close, just reached via a stale cross-retarget value instead
+    of an absent one. Dropping the sibling `hw_rev:` on a CROSS-family
+    retarget lets the scaffold fall back to the NEW SoM's own
+    `default_hw_rev:` -- the same resolution rule a board.yaml with no
+    explicit `hw_rev:` at all already follows, and the one `init`'s own
+    `init.hw-rev-not-buildable` check (tan-cli#743) already watches, so a
+    not-buildable default is caught and warned about there rather than
+    surfacing as a DIFFERENT, unexplained `tan validate` refusal three
+    commands later.
+
+    tan-cli#1008 review round 4 minor: an INTRA-family retarget keeps the
+    sibling `hw_rev:` instead -- see `_same_som_family`'s own docstring for
+    the full reasoning (short version: within one family the value is still
+    a real, deliberately-chosen revision, and dropping it there would
+    silently substitute a DIFFERENT declared revision -- possibly with
+    different `pad_route_overrides` -- with no warning at all, which is
+    worse than the bug this fix closes). Also round 4: `retarget_board_yaml_
+    som`'s own scan and `vendored_som`'s reader (used below to learn
+    `existing_sku`) now share ONE `som:`-block-entry predicate
+    (`_is_som_key_line`) -- they used to disagree on a `som:` line carrying
+    a trailing comment or trailing whitespace, which silently reintroduced
+    this same stale-`hw_rev:` defect on exactly that shape of file.
     """
+    existing_sku, _existing_hw_rev = vendored_som(content)
+    changing_sku = existing_sku is not None and existing_sku != sku
+    drop_hw_rev = changing_sku and not _same_som_family(existing_sku, sku)
+
     out: list[str] = []
     in_som = False
-    rewritten = False
-    # The `sku:` line's own indent while a dropped comment's continuation lines
-    # are still being consumed; `None` at every other point.
+    sku_rewritten = False
+    hw_rev_dropped = not drop_hw_rev  # nothing to drop for a no-op or intra-family retarget
+    # The indent of whichever dropped construct's wrapped-comment
+    # continuation lines are still being consumed; `None` at every other
+    # point. Shared by the `sku:` comment drop and the `hw_rev:` line drop
+    # below -- they never overlap, since each anchors a distinct physical
+    # line.
     consuming: str | None = None
     for line in content.split("\n"):
         body, cr = _split_cr(line)
@@ -509,18 +665,26 @@ def retarget_board_yaml_som(content: str, sku: str) -> str:
             if _is_wrapped_comment_line(body, consuming):
                 continue
             consuming = None
-        if not rewritten:
-            trimmed = body.lstrip(" \t")
-            if body and body[0] not in " \t":
-                # A new top-level key: entering `som:`, or leaving it.
-                in_som = trimmed.startswith("som:")
-            elif in_som and trimmed.startswith("sku:"):
-                indent = body[: len(body) - len(trimmed)]
-                new_body, comment_dropped = _retargeted_sku_line(indent, trimmed, sku)
-                out.append(new_body + cr)
-                rewritten = True
-                consuming = indent if comment_dropped else None
-                continue
+        trimmed = body.lstrip(" \t")
+        if body and body[0] not in " \t":
+            # A new top-level key: entering `som:`, or leaving it.
+            in_som = _is_som_key_line(body)
+            out.append(line)
+            continue
+        child = _split_child_key(trimmed) if in_som else None
+        child_key, child_rest = child if child is not None else (None, "")
+        if in_som and not hw_rev_dropped and child_key == "hw_rev":
+            indent = body[: len(body) - len(trimmed)]
+            hw_rev_dropped = True
+            consuming = indent  # also drop any wrapped comment it opened
+            continue
+        elif in_som and not sku_rewritten and child_key == "sku":
+            indent = body[: len(body) - len(trimmed)]
+            new_body, comment_dropped = _retargeted_sku_line(indent, child_rest, sku)
+            out.append(new_body + cr)
+            sku_rewritten = True
+            consuming = indent if comment_dropped else None
+            continue
         out.append(line)
     return "\n".join(out)
 
@@ -754,6 +918,80 @@ def vendored_core_ids(board_yaml: str) -> list[tuple[str, str]]:
             if ids:
                 ids[-1][1] = line[len("    os: ") :]
     return [(core_id, os_value) for core_id, os_value in ids]
+
+
+def _yaml_scalar_value(after_colon: str) -> str | None:
+    """The bare scalar value from the text AFTER a mapping key's `:` --
+    stripped of leading whitespace, a trailing comment, and any surrounding
+    quote characters (`'`/`"`) -- mirroring
+    `generate_cmd._scan_som_sku`/`bootstrap_cmd._scan_board_slice`'s own
+    `.strip().strip("'\"")` rule for this identical scalar.
+
+    tan-cli#1008 review round 5: this function used to keep the quotes,
+    which silently evaded the checks reading its result. A quoted `sku:
+    "E1M-NX9101"` made `_SKU_FAMILY.match('"E1M-NX9101"')`
+    (`som_buildability.py`) fail, so `hw_rev_not_buildable` returned `None`
+    (nothing to judge) -- `tan init` rc 0, `issues: []`, then `tan validate`
+    rc 2 with tan-cli#743's own verbatim message: exactly the contradiction
+    this whole PR closes, reachable again through an unstripped quote. A
+    quoted `hw_rev: "r1"` was worse: `changing_sku` (a bare string compare)
+    read `'"E1M-AEN801"' != "E1M-AEN801"` as TRUE even for a byte-for-byte
+    intra-SKU no-op, so both round three's no-op guard and round four's
+    intra-family guard were defeated at once -- a real `hw_rev:` silently
+    dropped and replaced by the SoM's own `default_hw_rev:`, possibly a
+    DIFFERENT declared revision with different `pad_route_overrides`, with
+    `tan validate` clean and `tan init` reporting no issue.
+
+    `None` for nothing after the colon, or only a comment.
+    """
+    stripped = after_colon.lstrip(" \t")
+    if not stripped or stripped.startswith("#"):
+        return None
+    match = re.search(r"[ \t]", stripped)
+    token = stripped[: match.start()] if match else stripped
+    return token.strip("'\"") or None
+
+
+def vendored_som(board_yaml: str) -> tuple[str | None, str | None]:
+    """The `som:` block's `sku:`/`hw_rev:` scalar values, read the same
+    line-oriented way `vendored_app_core_key`/`vendored_core_ids` read the
+    `cores:` block -- `None` for either key that is absent or carries no
+    value. Tolerates a space before the child key's colon (`sku : x`,
+    round 5, via the shared [`_split_child_key`] -- round 6: this reader and
+    `retarget_board_yaml_som`'s writer now both call it, rather than each
+    keeping its own copy of the rule) and strips surrounding quote
+    characters from the value (round 5, `_yaml_scalar_value`).
+
+    tan-cli#743 majors 1+2: this is what `init`'s hw-rev-not-buildable check
+    reads to name the SoM/hw_rev pair a scaffolded board.yaml ACTUALLY
+    carries, rather than `--som` (silently absent on a bare
+    `--from-example`/`--topology`, even though the copied board.yaml already
+    names a SKU on disk) or an assumed-absent `hw_rev:` (`retarget_board_yaml_som`
+    drops a sibling `hw_rev:` only on a CROSS-family retarget -- tan-cli#1008
+    review rounds 3+4 -- and otherwise leaves it exactly as the source
+    example wrote it, whether that is the ORIGINAL SKU's own value or one
+    surviving a same-family retarget, so it must be read, not presumed
+    absent)."""
+    in_som = False
+    sku: str | None = None
+    hw_rev: str | None = None
+    for line in _rust_lines(board_yaml):
+        body, _cr = _split_cr(line)
+        if not in_som:
+            in_som = _is_som_key_line(body)
+            continue
+        if body and not body[0].isspace():
+            break  # The next top-level key ends the som: block.
+        trimmed = body.lstrip(" \t")
+        child = _split_child_key(trimmed)
+        if child is None:
+            continue
+        child_key, child_rest = child
+        if child_key == "sku":
+            sku = _yaml_scalar_value(child_rest)
+        elif child_key == "hw_rev":
+            hw_rev = _yaml_scalar_value(child_rest)
+    return sku, hw_rev
 
 
 def splice_companion_cores(board_yaml: str, cores: list[tuple[str, str]]) -> str:
