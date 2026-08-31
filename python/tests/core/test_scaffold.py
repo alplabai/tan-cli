@@ -42,6 +42,7 @@ from tan.core.scaffold import (
     splice_companion_cores,
     vendored_app_core_key,
     vendored_core_ids,
+    vendored_som,
     write_files,
 )
 from tan.planner_root import bind_sdk_root
@@ -287,6 +288,256 @@ def test_retarget_ignores_a_sku_outside_the_som_block():
     assert "sku: E1M-V2N101" in out
 
 
+def test_retarget_drops_a_sibling_hw_rev_when_the_sku_changes():
+    """tan-cli#1008 review round 3: this function used to only ever rewrite
+    `sku:`, so a CROSS-family retarget left a stale `hw_rev:` behind
+    verbatim -- a revision from the ORIGINAL SoM's table, meaningless (or
+    actively misleading, if it happens to collide with an unrelated key)
+    against the retargeted one. Dropping it is the same "honest, not
+    inventive" call already made for a stale trailing comment. (An
+    INTRA-family retarget keeps it instead -- see
+    `test_retarget_keeps_an_intra_family_hw_rev_when_the_sku_changes`,
+    review round 4.)"""
+    out = retarget_board_yaml_som(
+        "som:\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n", "E1M-NX9101"
+    )
+
+    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+
+
+def test_retarget_drops_a_sibling_hw_rev_declared_before_the_sku_line():
+    out = retarget_board_yaml_som(
+        "som:\n  hw_rev: r2\n  sku: E1M-AEN801\ncores:\n", "E1M-NX9101"
+    )
+
+    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+
+
+def test_retarget_drops_a_sibling_hw_revs_own_wrapped_comment():
+    out = retarget_board_yaml_som(
+        "som:\n  sku: E1M-AEN801\n  hw_rev: r2  # Alif-only revision\n"
+        "    # continued\ncores:\n",
+        "E1M-NX9101",
+    )
+
+    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+
+
+def test_retarget_keeps_the_sibling_hw_rev_for_a_no_op_sku():
+    """The SKU is not actually changing (retargeting a tree onto its own
+    vendored SKU is a byte-exact no-op, per `test_retarget_is_byte_exact_
+    for_the_trees_own_sku` above) -- an explicit `hw_rev:` alongside it is
+    still valid for THIS SoM and must survive."""
+    original = "som:\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+
+    assert retarget_board_yaml_som(original, "E1M-AEN801") == original
+
+
+def test_retarget_keeps_an_intra_family_hw_rev_when_the_sku_changes():
+    """tan-cli#1008 review round 4 minor: an INTRA-family retarget (both
+    `E1M-AEN801` and `E1M-AEN301` are `aen`) shares one family
+    `hw-revisions.yaml` table, so the SKU changing is not reason enough to
+    drop it -- the value is still a real, declared revision for the new SKU,
+    and dropping it would silently substitute a DIFFERENT one (the new
+    SKU's own `default_hw_rev:`, possibly with different
+    `pad_route_overrides`) with no warning at all. See
+    `_same_som_family`'s own docstring for the full reasoning."""
+    out = retarget_board_yaml_som(
+        "som:\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n", "E1M-AEN301"
+    )
+
+    assert out == "som:\n  sku: E1M-AEN301\n  hw_rev: r1\ncores:\n"
+
+
+def test_retarget_drops_the_hw_rev_for_an_unrecognized_sku_shape():
+    """`_same_som_family` cannot judge a SKU that doesn't match the known
+    `E1M-<FAMILY><n>` pattern -- the conservative choice (drop) applies,
+    matching the already-shipped round-3 behaviour rather than guessing."""
+    out = retarget_board_yaml_som(
+        "som:\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n", "CUSTOM-SKU"
+    )
+
+    assert out == "som:\n  sku: CUSTOM-SKU\ncores:\n"
+
+
+def test_retarget_is_a_no_op_with_no_hw_rev_to_drop():
+    out = retarget_board_yaml_som("som:\n  sku: E1M-AEN801\ncores:\n", "E1M-NX9101")
+
+    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+
+
+def test_retarget_drops_the_sibling_hw_rev_when_the_som_line_has_a_trailing_comment():
+    """tan-cli#1008 review round 4: `retarget_board_yaml_som`'s scan and
+    `vendored_som`'s reader used to disagree on what counts as the top-level
+    `som:` line -- the scan tolerated a trailing comment/whitespace
+    (`trimmed.startswith("som:")`), the reader did not (`body == "som:"`),
+    so `vendored_som` reported no existing SKU here, `changing_sku` came out
+    `False`, and the stale `hw_rev:` this whole fix exists to drop survived
+    -- silently reintroducing all three defects rounds two and three closed,
+    on exactly the kind of file that already carries a trailing comment.
+    One shared predicate (`_is_som_key_line`) now backs both."""
+    out = retarget_board_yaml_som(
+        "som:  # top-level SoM block\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n",
+        "E1M-NX9101",
+    )
+
+    assert out == "som:  # top-level SoM block\n  sku: E1M-NX9101\ncores:\n"
+
+
+def test_retarget_drops_the_sibling_hw_rev_when_the_som_line_has_trailing_whitespace():
+    out = retarget_board_yaml_som(
+        "som: \n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n", "E1M-NX9101"
+    )
+
+    assert out == "som: \n  sku: E1M-NX9101\ncores:\n"
+
+
+def test_vendored_som_reads_a_sku_line_under_a_som_key_with_a_trailing_comment():
+    """The reader side of the same round-4 predicate unification: `vendored_som`
+    used to report `(None, None)` here (its exact `body == "som:"` match
+    failed), even though the block plainly opens on this line."""
+    content = "som:  # top-level SoM block\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n"
+
+    assert vendored_som(content) == ("E1M-AEN801", "r2")
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1008 review round 5: quoted scalars and `som :` (space before colon)
+# ---------------------------------------------------------------------------
+
+
+def test_vendored_som_strips_quotes_from_both_scalars():
+    """tan-cli#1008 review round 5 major: an unstripped quote defeated
+    `hw_rev_not_buildable` outright (`_SKU_FAMILY.match('"E1M-NX9101"')`
+    fails) -- the same `.strip("'\"")` rule
+    `generate_cmd._scan_som_sku`/`bootstrap_cmd._scan_board_slice` already
+    apply to this identical scalar."""
+    content = 'som:\n  sku: "E1M-NX9101"\n  hw_rev: \'r1\'\ncores:\n'
+
+    assert vendored_som(content) == ("E1M-NX9101", "r1")
+
+
+def test_vendored_som_reads_a_som_key_line_with_a_space_before_the_colon():
+    """tan-cli#1008 review round 5 major: `som :` is valid YAML
+    (`yaml.safe_load("som :\n  sku: x\n")` -> `{"som": {"sku": "x"}}`), and
+    both `generate_cmd._scan_som_sku`/`bootstrap_cmd._scan_board_slice`
+    already accepted it -- `vendored_som`'s own `_is_som_key_line` (round 4)
+    used a stricter `startswith("som:")` that rejected it, silently
+    reintroducing every defect rounds two through four closed on this exact
+    shape of file."""
+    content = "som :\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+
+    assert vendored_som(content) == ("E1M-AEN801", "r1")
+
+
+def test_retarget_drops_a_cross_family_hw_rev_with_a_space_before_the_soms_colon():
+    """tan-cli#1008 review round 5 major: `_is_som_key_line`'s `som :` fix
+    (see `test_vendored_som_reads_a_som_key_line_with_a_space_before_the_colon`)
+    must also keep the writer's cross-family `hw_rev:` drop working on a
+    file that opens with a spaced `som :` line -- the drop is anchored to
+    `in_som`, which flips on exactly this predicate."""
+    out = retarget_board_yaml_som(
+        "som :\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n", "E1M-NX9101"
+    )
+
+    assert out == "som :\n  sku: E1M-NX9101\ncores:\n"
+
+
+def test_retarget_treats_a_quoted_existing_sku_as_a_true_no_op():
+    """tan-cli#1008 review round 5 major, the worse of the two consequences:
+    `changing_sku` is a bare string compare, so an unstripped quote made a
+    genuinely NO-OP retarget (`--som` equal to the file's own SKU) look like
+    a cross-SKU one -- dropping a real, valid `hw_rev:` and silently
+    substituting the SoM's own `default_hw_rev:` (a DIFFERENT declared
+    revision, possibly with different `pad_route_overrides`), with `tan
+    validate` clean and `tan init` reporting no issue. Quotes stripped, the
+    comparison sees the same SKU on both sides and keeps `hw_rev:`."""
+    out = retarget_board_yaml_som(
+        'som:\n  sku: "E1M-AEN801"\n  hw_rev: r1\ncores:\n', "E1M-AEN801"
+    )
+
+    assert out == "som:\n  sku: E1M-AEN801\n  hw_rev: r1\ncores:\n"
+
+
+def test_retarget_keeps_an_intra_family_hw_rev_with_a_quoted_existing_sku():
+    out = retarget_board_yaml_som(
+        'som:\n  sku: "E1M-AEN801"\n  hw_rev: r1\ncores:\n', "E1M-AEN301"
+    )
+
+    assert out == "som:\n  sku: E1M-AEN301\n  hw_rev: r1\ncores:\n"
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1008 review round 6: a space before a CHILD key's colon
+# (`hw_rev :`, `sku :`) -- round 5 fixed this for the top-level `som:` line
+# only; the writer's own child-key match stayed a literal
+# `trimmed.startswith("hw_rev:")`/`startswith("sku:")`, silently diverging
+# from the reader's already-tolerant `vendored_som`.
+# ---------------------------------------------------------------------------
+
+
+def test_vendored_som_reads_a_hw_rev_child_key_with_a_space_before_the_colon():
+    """The reader side was already correct going into round 6 (its
+    `partition(":")` rule tolerates the space); pinned here so a future
+    change to the shared `_split_child_key` helper cannot silently regress
+    it back."""
+    content = "som:\n  sku: E1M-NX9101\n  hw_rev : r2\ncores:\n"
+
+    assert vendored_som(content) == ("E1M-NX9101", "r2")
+
+
+def test_retarget_drops_a_spaced_hw_rev_child_key_on_a_cross_family_retarget():
+    """tan-cli#1008 review round 6 major 1: on `hw_rev : r2` (space before
+    the child key's colon) the reader already saw the key and armed the
+    cross-family `drop_hw_rev` logic, but the writer's literal
+    `trimmed.startswith("hw_rev:")` never matched the line, so the stale
+    sibling `hw_rev:` survived a cross-family retarget verbatim -- reopening
+    the exact tan-cli#743 contradiction (`tan validate` refusing a
+    `sku:`/`hw_rev:` pair no family table declares) that round 3 closed.
+    Measured live: `tan init --from-example multicore/spacedhw-probe --som
+    E1M-NX9101` exited 0 with `hw_rev : r2` still in the scaffolded
+    board.yaml, then `tan validate` hard-errored `sdk-compat: SoM
+    E1M-NX9101 hw_rev 'r2' is not a known hardware revision`."""
+    out = retarget_board_yaml_som(
+        "som:\n  sku: E1M-AEN801\n  hw_rev : r2\ncores:\n", "E1M-NX9101"
+    )
+
+    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+
+
+def test_retarget_rewrites_a_spaced_sku_child_key_on_a_cross_family_retarget():
+    """tan-cli#1008 review round 6 major 2, strictly worse than its parent:
+    at the PARENT commit `vendored_som` returned `(None, "r2")` for a
+    `sku :` line, so `changing_sku` came out `False` and the retarget was an
+    untouched no-op -- annoying but harmless. Once round 5 taught the
+    READER to tolerate `sku :`, `vendored_som` started returning the real
+    SKU, `changing_sku` came out `True`, `drop_hw_rev` armed -- but the
+    WRITER's own `trimmed.startswith("sku:")` still never matched `sku :`,
+    so the loop dropped the sibling `hw_rev:` while leaving `sku :
+    E1M-AEN801` completely unretargeted: `--som E1M-NX9101` silently
+    ignored, `issues: []`, `tan validate` rc 0 against the WRONG SoM. That
+    is the silent revision substitution `_same_som_family` was added in
+    round 4 to prevent, reached via a different door."""
+    out = retarget_board_yaml_som(
+        "som:\n  sku : E1M-AEN801\n  hw_rev: r2\ncores:\n", "E1M-NX9101"
+    )
+
+    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+
+
+def test_retarget_keeps_a_spaced_hw_rev_child_key_on_an_intra_family_retarget():
+    """The intra-family counterpart of the two majors above: a spaced
+    `hw_rev :` must survive an intra-family retarget exactly as an unspaced
+    one already does (`test_retarget_keeps_an_intra_family_hw_rev_with_a_
+    quoted_existing_sku`) -- the shared `_split_child_key` helper must not
+    over-correct into dropping every spaced child key unconditionally."""
+    out = retarget_board_yaml_som(
+        "som:\n  sku: E1M-AEN801\n  hw_rev : r1\ncores:\n", "E1M-AEN301"
+    )
+
+    assert out == "som:\n  sku: E1M-AEN301\n  hw_rev : r1\ncores:\n"
+
+
 # ---------------------------------------------------------------------------
 # retarget_board_yaml_som -- tan-cli#404: wrapped comments, and CRLF sources
 # ---------------------------------------------------------------------------
@@ -519,6 +770,39 @@ def test_vendored_app_core_key_skips_a_pre_declared_companion_listed_first():
     ids = dict(vendored_core_ids(content))
     assert ids["a32_cluster"] == '"off"'
     assert ids["m55_hp"] == "zephyr"
+
+
+def test_vendored_som_reads_sku_and_an_explicit_hw_rev():
+    """tan-cli#1008 review majors 1+2: `init`'s hw-rev-not-buildable check
+    reads the SKU/hw_rev this function returns off the PLANNED board.yaml,
+    not `--som`."""
+    content = "som:\n  sku: E1M-NX9101\n  hw_rev: r1\ncores:\n  m33:\n    app: .\n"
+    assert vendored_som(content) == ("E1M-NX9101", "r1")
+
+
+def test_vendored_som_hw_rev_is_none_when_absent():
+    content = "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
+    assert vendored_som(content) == ("E1M-AEN801", None)
+
+
+def test_vendored_som_strips_a_trailing_comment():
+    content = "som:\n  sku: E1M-AEN801  # aligned comment\ncores:\n  m55_hp:\n    app: .\n"
+    assert vendored_som(content) == ("E1M-AEN801", None)
+
+
+def test_vendored_som_reads_a_retargeted_skus_dropped_hw_rev_as_none():
+    """tan-cli#1008 review round 3: `retarget_board_yaml_som` drops a
+    sibling `hw_rev:` when the SKU actually changes -- `vendored_som` reads
+    the result back as `(new_sku, None)`, not the stale original-family
+    value (see `test_retarget_drops_a_sibling_hw_rev_when_the_sku_changes`
+    for the retarget side of this)."""
+    original = "som:\n  sku: E1M-AEN801\n  hw_rev: r2\ncores:\n  m55_hp:\n    app: .\n"
+    retargeted = retarget_board_yaml_som(original, "E1M-NX9101")
+    assert vendored_som(retargeted) == ("E1M-NX9101", None)
+
+
+def test_vendored_som_returns_none_none_with_no_som_block():
+    assert vendored_som("cores:\n  m33:\n    app: .\n") == (None, None)
 
 
 def test_splice_is_a_no_op_with_no_cores():
