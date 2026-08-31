@@ -44,9 +44,12 @@ Expected output:
 ### Real silicon (AEN dual-core, both images built from this project)
 
 The peer-side firmware lives at
-[`examples/multicore/mproc-mailbox/peer/main.c`](peer/main.c) -- HE-side
+[`./peer/main.c`](peer/main.c) -- HE-side
 image that waits on the same mbox, reads the staged shmem
-payload, and writes back an echo via reverse send.
+payload, and writes back an echo via reverse send.  (alp-sdk's own
+upstream copy of this example lives at
+`examples/multicore/mproc-mailbox/peer/main.c`, not part of this
+scaffolded project.)
 
 `board.yaml` declares both `m55_hp` (`app: ./src`) and `m55_he`
 (`app: ./peer`) as real project cores, so one `tan build` now
@@ -66,7 +69,7 @@ west build -b ensemble_e8_dk/ae822fa0e5597ls0/rtss_hp .
 west flash
 
 # HE side.
-west build -b ensemble_e8_dk/ae822fa0e5597ls0/rtss_he examples/multicore/mproc-mailbox/peer
+west build -b ensemble_e8_dk/ae822fa0e5597ls0/rtss_he ./peer
 west flash
 ```
 

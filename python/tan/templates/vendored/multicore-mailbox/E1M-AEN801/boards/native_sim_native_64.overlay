@@ -11,7 +11,8 @@
  *
  * On real AEN silicon the alp-shmem0 alias must point at a
  * reserved-memory carve-out shared between the M55-HP and M55-HE
- * images.  The orchestrator (scripts/alp_orchestrate.py) emits the
+ * images.  The orchestrator (alp-sdk's scripts/alp_orchestrate.py,
+ * not part of this scaffolded project) emits the
  * per-core overlay with the matching alias when the board.yaml v2
  * declares an ipc[] block; until that ships customers can declare
  * the alias by hand in a board overlay following this same shape:
