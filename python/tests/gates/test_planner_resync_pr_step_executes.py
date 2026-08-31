@@ -24,17 +24,30 @@ and `git push --force-with-lease` all execute for real. `gh` is stubbed (a
 tiny script on `PATH`) since actually opening a GitHub PR is out of scope for
 a hermetic test; everything up to and including the push is not stubbed.
 
-Two shapes, matching the review's own repro exactly:
+Four shapes, the first two matching the review's own repro exactly and the
+other two added for tan-cli#1015 (the everyday shapes those two do not
+reach):
 
-* clean (nothing occupies `auto/planner-resync`) -- must reach `git push` and
-  exit 0.
+* clean (`auto/planner-resync` does not exist yet) -- must reach `git push`
+  and exit 0. Only ever the very first run in a repo's history.
 * diverted (`auto/planner-resync` already carries a human commit) -- must
   divert to `auto/planner-resync-<suffix>`, leave the human commit on the
   primary branch untouched, and still exit 0.
+* refresh (`auto/planner-resync` already exists and is automation-owned) --
+  what EVERY run after the first actually hits; must reuse the branch and
+  force-push with the REAL prior tip as the lease, not the empty one the
+  clean shape always exercises.
+* cascaded diversion (`auto/planner-resync` AND its first divert candidate
+  are both occupied by foreign commits) -- must cascade to a third name and
+  credit every occupied branch in the PR body, not just the first
+  (`occupied_count -eq 1` vs. the `credit` loop PR #1014 added).
 
 Mutation-tested against the reviewer's own instruction: re-introducing the
-bare (non-`|| true`, conditionally-written) shape reds the clean-run test on
-its own assertion (`STEP EXIT` != 0), not an incidental exception.
+bare (non-`|| true`, conditionally-written) shape reds BOTH the clean-run
+test and the refresh-shape test on their own assertion (`STEP EXIT` != 0),
+not an incidental exception -- the refresh shape hits the exact same
+conditional-write bug the clean shape does, just on the branch every run
+after the first actually takes.
 
 The other unpinned finding in the same review comment
 (`planner-resync.yml:449,805-807`) gets the same treatment below: the
@@ -63,6 +76,14 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "planner-resync.yml"
 GUARD_SCRIPT = REPO_ROOT / "python" / "scripts" / "planner_resync_branch_guard.py"
 
+#: tan-cli#1015 review nit: every test in this module drives a real `bash`
+#: subprocess (both the PR step and the Verdict step below), unlike every
+#: other bash-driving gate in this suite (e.g.
+#: `tests/gates/test_packaging_path_pr_exercise.py:461`), which already
+#: skips this way. Module-scoped rather than per-test: there is no test here
+#: that does NOT need `bash`.
+pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="no bash to parse with")
+
 _PR_STEP = "Open or refresh the proposal PR"
 
 #: The runner resolves `${{ ... }}` expressions BEFORE bash ever sees the
@@ -70,7 +91,23 @@ _PR_STEP = "Open or refresh the proposal PR"
 #: expressions inside this step's `run:` text span a `}` (they're plain
 #: `github.*` property reads), so a non-greedy single-line match is exact,
 #: not an approximation.
-_GHA_EXPR = re.compile(r"\$\{\{[^}]*\}\}")
+_GHA_EXPR = re.compile(r"\$\{\{(.*?)\}\}")
+
+#: tan-cli#1015 review nit: an earlier version of this substitution was a
+#: bare `_GHA_EXPR.sub("TESTVAL", run)` -- blanking every `${{ }}` expression
+#: indiscriminately with no allow-list, unlike `_render_verdict` below (which
+#: asserts on an unrecognised token for exactly this reason). Exact today --
+#: every expression inside this step's `run:` text is a cosmetic `github.*`
+#: read embedded in an `echo` (a PR-body URL, a run link) -- but a FUTURE
+#: load-bearing token (say `${{ steps.*.outputs.* }}`) would silently run as
+#: the literal string `TESTVAL` and this gate would keep passing. Keyed on
+#: the raw expression text so a rename/reword surfaces as an assertion
+#: failure below, not a silent no-op substitution.
+_PR_STEP_TOKEN_VALUES = {
+    "github.repository": "example/tan-cli",
+    "github.server_url": "https://github.com",
+    "github.run_id": "999999",
+}
 
 
 @functools.cache
@@ -89,7 +126,18 @@ def _pr_step_run() -> str:
     )
     run = step["run"]
     assert isinstance(run, str) and run.strip(), step
-    return _GHA_EXPR.sub("TESTVAL", run)
+
+    def repl(m: re.Match[str]) -> str:
+        inner = m.group(1).strip()
+        assert inner in _PR_STEP_TOKEN_VALUES, (
+            f"unhandled GHA expression in the {_PR_STEP!r} step: {inner!r} -- "
+            f"this token is new (or reworded); add it to "
+            f"{__name__}._PR_STEP_TOKEN_VALUES's substitution map rather "
+            f"than let this test silently blank it to a dummy literal"
+        )
+        return _PR_STEP_TOKEN_VALUES[inner]
+
+    return _GHA_EXPR.sub(repl, run)
 
 
 def _git(root: pathlib.Path, *args: str) -> str:
@@ -193,12 +241,88 @@ def _push_foreign_commit_on(bare: pathlib.Path, branch: str, tmp_path: pathlib.P
     """Seed `origin/<branch>` with a commit a human authored, from a THROWAWAY
     clone -- never through `workspace` itself, so the human commit predates
     anything the step under test does."""
-    scratch = tmp_path / "scratch"
+    scratch = tmp_path / f"scratch-{branch.replace('/', '-')}"
     subprocess.run(
         ["git", "clone", "-q", str(bare), str(scratch)], check=True, capture_output=True
     )
     _git(scratch, "checkout", "-q", "-B", branch, "origin/dev")
     sha = _commit(scratch, "A Human Reviewer", "human@example.com", "hand-port work", "handport.txt")
+    _git(scratch, "push", "-q", "-f", "origin", branch)
+    return sha
+
+
+#: Must match `planner-resync.yml`'s own `AUTOMATION_NAME`/`AUTOMATION_EMAIL`
+#: (the step's `git config user.name`/`user.email`, which is also what it
+#: passes `planner_resync_branch_guard.py --automation-name`/
+#: `--automation-email`) -- a prior run's own commit, for the refresh shape
+#: below.
+_AUTOMATION_NAME = "alp-sdk planner re-sync"
+_AUTOMATION_EMAIL = "noreply@alplab.ai"
+
+
+def _push_automation_commit_on(bare: pathlib.Path, branch: str, tmp_path: pathlib.Path) -> str:
+    """Seed `origin/<branch>` with a commit carrying the AUTOMATION's own
+    identity (both author and committer) -- i.e. what `auto/planner-resync`
+    looks like after a PRIOR run of this exact step, which is the everyday
+    shape every run after the first actually hits. From a THROWAWAY clone,
+    same reasoning as `_push_foreign_commit_on`: the "prior run" must predate
+    anything the step under test does."""
+    scratch = tmp_path / f"scratch-{branch.replace('/', '-')}"
+    subprocess.run(
+        ["git", "clone", "-q", str(bare), str(scratch)], check=True, capture_output=True
+    )
+    _git(scratch, "checkout", "-q", "-B", branch, "origin/dev")
+    sha = _commit(
+        scratch,
+        _AUTOMATION_NAME,
+        _AUTOMATION_EMAIL,
+        "chore(planner): propose the re-sync owed to alp-sdk deadbeef1",
+        "resynced_marker.txt",
+    )
+    _git(scratch, "push", "-q", "-f", "origin", branch)
+    return sha
+
+
+def _push_foreign_commit_with_distinct_committer_on(
+    bare: pathlib.Path, branch: str, tmp_path: pathlib.Path
+) -> str:
+    """Seed `origin/<branch>` with a commit whose AUTHOR is a human but whose
+    COMMITTER is the automation identity -- the `git commit --amend` /
+    `--autosquash fixup!` shape `planner_resync_branch_guard.py`'s own
+    docstring calls out ("THE SIGNAL" section): the commit is still foreign
+    (author-foreign is enough), but a reader who only sees the author would
+    misread it as the automation's own. Exercises the credit loop's
+    `credit = oa, committed by ocommitter` branch (`planner-resync.yml`
+    `:521-524`), not just its `credit = oa` one."""
+    scratch = tmp_path / f"scratch-{branch.replace('/', '-')}"
+    subprocess.run(
+        ["git", "clone", "-q", str(bare), str(scratch)], check=True, capture_output=True
+    )
+    _git(scratch, "checkout", "-q", "-B", branch, "origin/dev")
+    (scratch / "handport.txt").write_text("amended hand-port work\n", encoding="utf-8")
+    _git(scratch, "add", "handport.txt")
+    env = dict(os.environ)
+    env["GIT_AUTHOR_NAME"] = "Another Human"
+    env["GIT_AUTHOR_EMAIL"] = "another-human@example.com"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(scratch),
+            "-c",
+            f"user.name={_AUTOMATION_NAME}",
+            "-c",
+            f"user.email={_AUTOMATION_EMAIL}",
+            "commit",
+            "-q",
+            "-m",
+            "amended hand-port work",
+        ],
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    sha = _git(scratch, "rev-parse", "HEAD").strip()
     _git(scratch, "push", "-q", "-f", "origin", branch)
     return sha
 
@@ -283,6 +407,113 @@ def test_diverted_run_leaves_the_primary_branch_untouched_and_exits_zero(
     assert human_sha in primary_tip, (
         "the human commit on auto/planner-resync must survive untouched:\n" + _fmt(proc)
     )
+
+
+def test_refresh_run_reuses_the_branch_and_force_pushes_with_the_observed_tip(
+    workspace: pathlib.Path, fake_bin: pathlib.Path, tmp_path: pathlib.Path
+):
+    """tan-cli#1015: the shape `test_clean_run_reaches_git_push_and_exits_zero`
+    does NOT cover -- `auto/planner-resync` already exists on origin and is
+    automation-owned (a prior run's own commit sits there, not a human's).
+    This is what EVERY run after the first hits; the "branch absent" clean
+    shape above is only ever the very first run in a repo's history. Must
+    still reach `git push`, must NOT divert (`planner_resync_branch_guard.py`
+    finds no foreign commit), and -- the part the clean shape cannot exercise
+    because there `observed_tip` is always empty -- must force-push with the
+    REAL prior tip as the lease, not an empty one, or a concurrent write to
+    `auto/planner-resync` in the TOCTOU window (tan-cli#1006 minor) would
+    silently be force-pushed over instead of caught by `git push` itself."""
+    bare = tmp_path / "origin.git"
+    prior_sha = _push_automation_commit_on(bare, "auto/planner-resync", tmp_path)
+
+    sdk_sha = "01234567deadbeef"
+    proc = _run_step(workspace, fake_bin, tmp_path, sdk_sha)
+    assert proc.returncode == 0, _fmt(proc)
+    trace = proc.stderr.decode("utf-8", "replace")
+    assert "+ git push" in trace, _fmt(proc)
+    assert f"--force-with-lease=auto/planner-resync:{prior_sha}" in trace, (
+        "the refresh must lease against the PRIOR run's real tip, not an "
+        "empty one (that shape is already covered by the clean-run test):\n"
+        + _fmt(proc)
+    )
+
+    outputs = (tmp_path / "github_output").read_text(encoding="utf-8")
+    assert "branch=auto/planner-resync\n" in outputs, outputs
+    assert "diverted=false\n" in outputs, outputs
+    assert "occupied_count=0\n" in outputs, outputs
+    assert "protected_commit=\n" in outputs, outputs
+
+    new_tip = _git(workspace, "ls-remote", "origin", "refs/heads/auto/planner-resync").strip()
+    assert new_tip, "auto/planner-resync vanished from origin:\n" + _fmt(proc)
+    assert prior_sha not in new_tip, (
+        "the refresh must actually move the branch tip (a fresh commit on "
+        "top of the prior automation commit), not a no-op:\n" + _fmt(proc)
+    )
+
+
+def test_cascaded_diversion_credits_every_occupied_branch_and_exits_zero(
+    workspace: pathlib.Path, fake_bin: pathlib.Path, tmp_path: pathlib.Path
+):
+    """tan-cli#1015: `test_diverted_run_leaves_the_primary_branch_untouched_
+    and_exits_zero` above only ever occupies `auto/planner-resync` itself,
+    which takes the `occupied_count -eq 1` arm (`planner-resync.yml:488`) --
+    it never enters the cascaded `credit` loop PR #1014 added
+    (`:495-525`), reached only when a PRIOR run's own diversion target is
+    ALSO occupied by foreign work by the time this run looks. Seeds BOTH
+    `auto/planner-resync` and its first divert candidate
+    (`auto/planner-resync-<suffix>`) with foreign commits -- the guard must
+    cascade past both to a THIRD name (`-<suffix>-2`), and the PR body's
+    credit loop must name both occupied branches, not just the first.
+
+    The second occupied branch specifically uses a foreign AUTHOR with the
+    AUTOMATION's own committer identity (the `--amend`/`fixup!` shape the
+    guard's own docstring calls "THE SIGNAL") so this also exercises the
+    loop's `credit = oa, committed by ocommitter` line
+    (`planner-resync.yml:521-524`), not only its plain `credit = oa` one."""
+    bare = tmp_path / "origin.git"
+    sdk_sha = "deadbeef87654321"
+    suffix = sdk_sha[:8]
+
+    primary_sha = _push_foreign_commit_on(bare, "auto/planner-resync", tmp_path)
+    divert_sha = _push_foreign_commit_with_distinct_committer_on(
+        bare, f"auto/planner-resync-{suffix}", tmp_path
+    )
+
+    proc = _run_step(workspace, fake_bin, tmp_path, sdk_sha)
+    assert proc.returncode == 0, _fmt(proc)
+    trace = proc.stderr.decode("utf-8", "replace")
+    assert "+ git push" in trace, _fmt(proc)
+
+    outputs = (tmp_path / "github_output").read_text(encoding="utf-8")
+    assert "diverted=true\n" in outputs, outputs
+    assert "occupied_count=2\n" in outputs, (
+        "expected a cascaded diversion (both auto/planner-resync and its "
+        "first divert candidate occupied):\n" + outputs
+    )
+
+    final_branch = f"auto/planner-resync-{suffix}-2"
+    final_tip = _git(workspace, "ls-remote", "origin", f"refs/heads/{final_branch}").strip()
+    assert final_tip, f"{final_branch} was never pushed to origin:\n" + _fmt(proc)
+
+    # Both occupied branches survive untouched -- the whole point of a
+    # cascaded diversion is that NEITHER prior occupant is overwritten.
+    primary_tip = _git(workspace, "ls-remote", "origin", "refs/heads/auto/planner-resync").strip()
+    assert primary_sha in primary_tip, _fmt(proc)
+    divert_tip = _git(
+        workspace, "ls-remote", "origin", f"refs/heads/auto/planner-resync-{suffix}"
+    ).strip()
+    assert divert_sha in divert_tip, _fmt(proc)
+
+    # The PR body's credit loop (`planner-resync.yml:495-527`) must name
+    # BOTH occupied branches, with the second crediting author AND committer
+    # since they differ on that one.
+    body = (tmp_path / "runner_temp" / "body.md").read_text(encoding="utf-8")
+    assert "found **2** branches already" in body, body
+    assert f"`auto/planner-resync` carries `{primary_sha}`" in body, body
+    assert f"`auto/planner-resync-{suffix}` carries `{divert_sha}`" in body, body
+    assert "A Human Reviewer" in body, body
+    assert "Another Human <another-human@example.com>, committed by " in body, body
+    assert _AUTOMATION_NAME in body, body
 
 
 # ---------------------------------------------------------- the Verdict step
