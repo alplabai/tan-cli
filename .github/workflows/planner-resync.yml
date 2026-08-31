@@ -838,7 +838,7 @@ jobs:
           # regardless of which `rc` branch runs -- the incident this closes
           # is specifically `rc == 0` with a diversion, which the `0)` arm
           # below now calls out on its own line too (tan-cli#1006 review,
-          # `:848-857`); the `::warning::` here is kept anyway as the one
+          # `:850-861`); the `::warning::` here is kept anyway as the one
           # line guaranteed to fire ahead of any `case` arm, including a
           # future one that regresses back to the old unconditional "Re-sync
           # clean (or nothing owed)." wording.
