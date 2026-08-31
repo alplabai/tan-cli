@@ -831,6 +831,121 @@ def test_from_example_copies_the_tree_and_retargets_the_som(tmp_path):
     assert pointer["sdkPath"] == expected_sdk
 
 
+def test_from_example_refuses_a_som_retarget_onto_a_flow_style_som_block(tmp_path):
+    """tan-cli#1029's own repro. Before this fix, `--som E1M-NX9101` against
+    this example was silently discarded: `retarget_board_yaml_som` returned
+    the flow-style `som:` line byte-for-byte unchanged, so `tan init` exited
+    0 with `issues: []` and the scaffolded board.yaml still named
+    `E1M-AEN801`. It must now refuse instead -- and write nothing."""
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    example = sdk / "examples" / "peripheral-io" / "flow-style-som"
+    (example / "src").mkdir(parents=True)
+    (example / "board.yaml").write_text(
+        "som: {sku: E1M-AEN801, hw_rev: r1}\ncores:\n  m55_hp:\n    os: zephyr\n",
+        encoding="utf-8",
+    )
+    (example / "src" / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+
+    proc = run_tan(
+        "init",
+        "--from-example",
+        "peripheral-io/flow-style-som",
+        "--sdk-root",
+        "./sdk",
+        "--name",
+        "copy",
+        "--som",
+        "E1M-NX9101",
+        "--format",
+        "json",
+        cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.som-flow-style-unsupported"
+    assert issue(env)["severity"] == "error"
+    assert "flow style" in issue(env)["message"]
+    assert not (tmp_path / "copy").exists()
+
+
+def test_from_example_without_som_tolerates_a_flow_style_som_block(tmp_path):
+    """The counterpart negative: with NO `--som` at all there is nothing to
+    retarget, so a flow-style `som:` block must not block the copy -- it is
+    carried through verbatim, and `init.hw-rev-not-buildable`'s advisory
+    read of it degrades to "cannot judge" rather than raising."""
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    example = sdk / "examples" / "peripheral-io" / "flow-style-som"
+    (example / "src").mkdir(parents=True)
+    board_yaml = "som: {sku: E1M-AEN801, hw_rev: r1}\ncores:\n  m55_hp:\n    os: zephyr\n"
+    (example / "board.yaml").write_text(board_yaml, encoding="utf-8")
+    (example / "src" / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+
+    proc = run_tan(
+        "init",
+        "--from-example",
+        "peripheral-io/flow-style-som",
+        "--sdk-root",
+        "./sdk",
+        "--name",
+        "copy",
+        "--format",
+        "json",
+        cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert (tmp_path / "copy" / "board.yaml").read_text(encoding="utf-8") == board_yaml
+
+
+def test_from_example_refuses_a_som_retarget_onto_an_anchored_flow_style_som_block(tmp_path):
+    """tan-cli#1035 review round 2's own reopen of #1029: round 2's fix
+    narrowed the flow-style detector to `stripped.startswith("{")`, tested
+    against the RAW text after the colon -- so an anchor prefix ahead of a
+    genuine flow mapping (`som: &s {sku: ..., hw_rev: ...}`) no longer
+    started with `{` and escaped the refusal entirely. Measured end-to-end
+    at the reopened head: `exitCode 0`, `issues: []`,
+    `copy/board.yaml == "som: &s {sku: E1M-AEN801, hw_rev: r1}\\n..."` --
+    `--som` silently discarded, #1029's own symptom verbatim. Must now
+    refuse instead, the same as the un-anchored flow shape above."""
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    example = sdk / "examples" / "peripheral-io" / "x"
+    (example / "src").mkdir(parents=True)
+    (example / "board.yaml").write_text(
+        "som: &s {sku: E1M-AEN801, hw_rev: r1}\ncores:\n  m55_hp:\n    os: zephyr\n",
+        encoding="utf-8",
+    )
+    (example / "src" / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+
+    proc = run_tan(
+        "init",
+        "--from-example",
+        "peripheral-io/x",
+        "--sdk-root",
+        "./sdk",
+        "--name",
+        "copy",
+        "--som",
+        "E1M-NX9101",
+        "--format",
+        "json",
+        cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.som-flow-style-unsupported"
+    assert "flow style" in issue(env)["message"]
+    assert not (tmp_path / "copy").exists()
+
+
 def test_a_relative_sdk_root_pin_survives_being_read_back_from_inside_the_project(tmp_path):
     """tan-cli#263, the maintainer's exact repro: `tan init --sdk-root
     .\\alp-sdk --destination .\\blink` run from a parent directory, then a

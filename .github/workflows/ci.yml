@@ -478,12 +478,20 @@ jobs:
       # freshness.py`'s `PINNED_SDK_COMMIT` / `HAND_PORT_PINNED_SDK_COMMIT` --
       # see `parity.yml`'s `PINNED_SDK_TAG` comment for the full
       # per-fixture re-measurement.
+      #
+      # `722320a1` -> `f1b1c9df` (tan-cli#1026), moved in the SAME change as
+      # `parity.yml`'s `PINNED_SDK_TAG` / `PINNED_PLANNER_ORACLE_SDK_REF` and
+      # `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT` /
+      # `HAND_PORT_PINNED_SDK_COMMIT` -- see `parity.yml`'s `PINNED_SDK_TAG`
+      # comment for the full per-fixture re-measurement (this move's
+      # behavioural delta: every board's generated `alp.conf` gains
+      # `CONFIG_ALP_SDK_SOM_HW_REV="<hw_rev>"`, unconditionally).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ inputs.sdk_parity }}
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: 722320a1abe3cea675e99e97300b8a484b4e8464
+          ref: f1b1c9df0edd23988961150439863e70e5d99211
           fetch-tags: true
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
