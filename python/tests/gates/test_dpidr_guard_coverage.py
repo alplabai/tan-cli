@@ -28,7 +28,6 @@ from __future__ import annotations
 from tan.core.flash_plan import (
     DPIDR_GUARD_COVERAGE,
     FLOW_D_METHOD,
-    SWD_PROBE_METHOD,
     registry_keys,
 )
 
@@ -50,13 +49,15 @@ def test_dpidr_guard_coverage_names_every_registered_method():
     )
 
 
-def test_the_two_jlink_methods_are_the_covered_ones():
+def test_flow_d_is_the_covered_method():
     """The coverage set as it stands, pinned so that flipping a method's side
     is a deliberate edit with a diff, not a drive-by.
 
-    Both are methods tan itself composes a J-Link Commander session for, which
+    tan-cli#732 removed the second covered method (`swd_probe`) along with
+    the backend itself, so Flow D is the sole entry on the `True` side today
+    -- the method tan itself composes a J-Link Commander session for, which
     is what `flash_args.expect_dpidr` arms. Widening this set means teaching
     the corresponding backend to run `flow_d_preflight_script` first --
     flipping the flag alone would advertise a guard that does not run."""
     covered = {method for method, on in DPIDR_GUARD_COVERAGE.items() if on}
-    assert covered == {FLOW_D_METHOD, SWD_PROBE_METHOD}, covered
+    assert covered == {FLOW_D_METHOD}, covered
