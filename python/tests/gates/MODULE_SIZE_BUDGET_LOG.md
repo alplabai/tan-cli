@@ -619,6 +619,13 @@ several less obvious failures.
     - tan/commands/debug_config_cmd.py: 2178 -> 2192
     - tan/core/debug_launch.py: 1750 -> 1770
     - function_count_budget: 301 -> 302
+- 2026-08-30 -- tan-cli#790: sdk_cmd.py grew for the new 'sdk remove' verb (target resolution, load-bearing checks, registry pruning, five refusal codes); pure logic split out to new tan/core/sdk_removal.py and tan/core/dir_removal.py (the latter extracted, verbatim, from clean_cmd.py -- clean_cmd shrank) and the registry-prune helper added to tan/core/sdk_default_registry.py, but the command module itself still grew past its prior budget.
+    - tan/commands/sdk_cmd.py: 1060 -> 1421
+    - function_count_budget: 300 -> 302
+- 2026-08-31 -- tan-cli#790 review follow-up, same PR: the existence gate became `os.path.lexists` so a DANGLING link at the target is removed rather than followed, found empty and reported already-absent; and both `~/.alp/sdk-defaults.json` comparisons (the load-bearing refusal and the prune) now fold separators through the new `sdk_default_registry.normalized_sdk_path`, so a hand-edited Windows `sdkPath` spelled with backslashes cannot defeat the refusal and silently orphan the project that registered it. Net effect on the ceiling is a SHRINK against the entry above -- recorded because that entry's number is otherwise the last one a reader sees.
+    - tan/commands/sdk_cmd.py: 1421 -> 1416
+- 2026-08-31 -- tan-cli#790 review follow-up, same PR: refuse removing the SDK cache root itself (every install at once) without --force -- sdk_removal.is_cache_root_itself, sdk_cmd's new sdk.remove-is-cache-root refusal, and its own mutation-proved test
+    - tan/commands/sdk_cmd.py: 1416 -> 1456
 - 2026-08-30 -- tan-cli#1011: ethos_u.py docstring/comment growth documenting the arena-only req_sram_kib contract decision under Sram_Only (no arithmetic change)
     - tan/model/adapters/ethos_u.py: 889 -> 908
 - 2026-08-30 -- PR #1021 review fixes: ethos_u.py's arena-only scope caveat now reaches a fully-specified Sram_Only compile too (tan-cli#1021 review MINOR), not only the defaulted-profile branch, plus the accompanying wording fix and test
@@ -673,3 +680,5 @@ several less obvious failures.
     - tan/commands/init_cmd.py: 1449 -> 1521
     - tan/core/scaffold.py: 1553 -> 1791
     - function_count_budget: 302 -> 303
+    - tan/commands/sdk_cmd.py: 1060 -> 1456
+    - function_count_budget: 301 -> 303
