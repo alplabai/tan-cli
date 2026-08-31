@@ -971,6 +971,29 @@ def _plan_from_example(
                 f"Example '{src}' board.yaml: {err}",
                 ExitCode.VALIDATION_FAILURE,
             ) from err
+        except SomBlockUnsupportedError as err:
+            # tan-cli#1060 review: `SomBlockUnsupportedError`'s own docstring
+            # promises every call site catches THIS base, not either leaf
+            # above, so a THIRD leaf (the next `som:` spelling this file
+            # learns to refuse) needs no call site touched outside
+            # `scaffold.py`. Before this trailing clause that promise was
+            # false here specifically -- the two `except` blocks above catch
+            # only the two leaves that exist today, so an unenumerated third
+            # leaf would fall through uncaught and surface as
+            # `init.internal-failure` (measured with a temporary third leaf:
+            # exit code 5, message "init failed unexpectedly: ..."), loud but
+            # not the customer-actionable `ExitCode.VALIDATION_FAILURE` its
+            # two siblings give today. Same code as the generic
+            # `UnreadableSomBlockError` case just above (the customer
+            # remediation is the same "this `som:` block isn't one tan's
+            # scaffolder can retarget"); a leaf specific enough to need its
+            # own code/message earns its own `except` clause ahead of this
+            # one, same as `UnreadableSomBlockError` did.
+            raise InitError(
+                "init.som-block-unsupported",
+                f"Example '{src}' board.yaml: {err}",
+                ExitCode.VALIDATION_FAILURE,
+            ) from err
     return f"example:{src}", files
 
 

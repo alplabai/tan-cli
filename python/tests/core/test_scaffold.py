@@ -776,6 +776,73 @@ def test_retarget_retargets_a_single_quoted_som_key():
     assert out == "'som':\n  sku: E1M-V2N101\ncores:\n"
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#1060 review finding 1: `_split_child_key`'s docstring claimed it
+# applied "the exact same [`top_level_key_name`] rule the top-level `som:`
+# check applies" while its body stayed a bare `trimmed.partition(":")` that
+# never unquoted a `"sku":`/`'hw_rev':` CHILD key the way `top_level_key_name`
+# already unquotes a quoted top-level `"som":` key above -- the
+# top-level-vs-child divergence tan-cli#1008 round 6 exists to prevent,
+# reopened one call site later. `_split_child_key` now literally calls
+# `top_level_key_name` rather than re-inlining its rule.
+# ---------------------------------------------------------------------------
+
+
+def test_split_child_key_shares_top_level_key_names_quoting_rule():
+    """Direct unit test on the shared helper itself, not just the
+    integration tests below -- pins that `_split_child_key`'s key really is
+    `top_level_key_name`'s answer, so a future re-divergence (a second,
+    stale copy of the quoting rule creeping back into this function) reds
+    here even if some integration test above happens not to exercise it."""
+    assert scaffold_module._split_child_key('"sku": E1M-AEN801') == (
+        "sku",
+        " E1M-AEN801",
+    )
+    assert scaffold_module._split_child_key("'hw_rev': r1") == ("hw_rev", " r1")
+
+
+def test_vendored_som_reads_a_double_quoted_sku_child_key():
+    content = 'som:\n  "sku": E1M-AEN801\ncores:\n'
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801"}
+
+    assert vendored_som(content) == ("E1M-AEN801", None)
+
+
+def test_vendored_som_reads_a_single_quoted_hw_rev_child_key():
+    content = "som:\n  sku: E1M-AEN801\n  'hw_rev': r1\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    assert vendored_som(content) == ("E1M-AEN801", "r1")
+
+
+def test_retarget_retargets_a_double_quoted_sku_child_key():
+    """Before this fix, this shape raised `UnreadableSomBlockError` --
+    `entered_som` True (the top-level `som:` line matches) but
+    `found_sku_key` stuck False forever, because `_split_child_key` returned
+    the still-quoted `'"sku"'` for `child_key`, which never equals the
+    literal `"sku"` the scan compares against. There IS a literal `sku:`
+    line here for the writer to rewrite -- quoting the CHILD key changes
+    nothing about that -- so this must retarget, not refuse, the same as a
+    quoted top-level `som:` key already does above."""
+    content = 'som:\n  "sku": E1M-AEN801\ncores:\n'
+
+    out = retarget_board_yaml_som(content, "E1M-NX9101")
+
+    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+
+
+def test_retarget_drops_a_quoted_hw_rev_child_key_on_a_cross_family_retarget():
+    """The cross-family `drop_hw_rev` path also keys off `child_key ==
+    "hw_rev"` -- must fire for a quoted `'hw_rev':` child exactly as it does
+    for the bare spelling (`test_retarget_drops_a_spaced_hw_rev_child_key_
+    on_a_cross_family_retarget`'s round-6 sibling)."""
+    content = "som:\n  sku: E1M-AEN801\n  'hw_rev': r2\ncores:\n"
+
+    out = retarget_board_yaml_som(content, "E1M-NX9101")
+
+    assert out == "som:\n  sku: E1M-NX9101\ncores:\n"
+
+
 def test_vendored_som_refuses_an_alias_som_value():
     """`som: *s` -- the whole value is an alias to a mapping defined
     elsewhere. No `sku:` line ever follows the `som:` line at all, so

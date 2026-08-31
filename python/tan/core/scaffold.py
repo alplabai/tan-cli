@@ -669,10 +669,12 @@ def _is_som_key_line(body: str) -> bool:
 def _split_child_key(trimmed: str) -> tuple[str, str] | None:
     """Split an already-indent-stripped CHILD mapping line (one nested under
     a top-level block, e.g. a `som:` block's `sku:`/`hw_rev:`) into
-    `(key, after_colon)`, using the exact same [`top_level_key_name`] rule
-    the top-level `som:` check applies -- so a space before the colon
-    (`sku :`, `hw_rev :`) is tolerated here too. `None` when `trimmed` has
-    no `:` at all (not a mapping line).
+    `(key, after_colon)`. `key` is literally [`top_level_key_name`]'s answer
+    for `trimmed` -- not a second implementation of its rule -- so a space
+    before the colon (`sku :`, `hw_rev :`) AND a quoted key (`"sku":`,
+    `'hw_rev':`) are both tolerated here exactly as they are at the
+    top-level `som:` line, because both call sites now run the same code.
+    `None` when `trimmed` has no `:` at all (not a mapping line).
 
     tan-cli#1008 review round 6: `vendored_som` (the reader) and
     `retarget_board_yaml_som` (the writer) applied DIFFERENT rules for "is
@@ -690,11 +692,26 @@ def _split_child_key(trimmed: str) -> tuple[str, str] | None:
     also failed to match (major 2, a silent `--som` no-op). One rule, in one
     place, used by both the reader and the writer, so they cannot diverge
     again.
+
+    tan-cli#1060 review: this docstring used to CLAIM the top-level rule
+    applied here while the body stayed a bare `trimmed.partition(":")` that
+    never unquoted anything -- true the day round 6 landed, false the moment
+    tan-cli#1041 taught `top_level_key_name` to strip a quoted key's `'`/`"`
+    pair and this function did not follow. Consequence: `"som":` (a
+    top-level quoted key) retargeted correctly, but the exact same quoting
+    one level down (`som:` with a `"sku":`/`'hw_rev':` child) did not --
+    `found_sku_key` never set, `entered_som and not found_sku_key` firing
+    `UnreadableSomBlockError` for a shape that has a perfectly literal
+    `sku:` line to rewrite, precisely the top-level-vs-child divergence round
+    6 exists to prevent, reopened one call site later. Calling
+    `top_level_key_name` here rather than re-inlining its rule is what makes
+    that divergence structurally impossible rather than merely undocumented:
+    a future change to the quoting rule only has one function to change.
     """
-    key, sep, rest = trimmed.partition(":")
-    if not sep:
+    if ":" not in trimmed:
         return None
-    return key.strip(), rest
+    _key, _colon, rest = trimmed.partition(":")
+    return top_level_key_name(trimmed), rest
 
 
 #: A single leading YAML node-property token: an anchor (`&name`) or a tag
@@ -1267,6 +1284,27 @@ def vendored_som(board_yaml: str) -> tuple[str | None, str | None]:
       either, and this backstop's whole job is narrower than "validate the
       file" -- it only asks "did a merge manufacture a `som:` this scan is
       blind to".
+
+    tan-cli#1041 asked, verbatim, that reading the `som:` block with a real
+    YAML parse be considered, and that a rejection say why in the code. Here
+    is why: a real parse would tell `retarget_board_yaml_som` (the writer
+    that calls this reader first) THAT a `sku:` exists and what its parsed
+    value is, but not WHICH BYTES on WHICH LINE to rewrite -- a `yaml.Node`
+    carries no reliable back-reference to source position/formatting, and
+    `retarget_board_yaml_som` must reproduce everything this scan does not
+    touch byte-for-byte: a hand-authored comment, a wrapped comment block
+    (`_is_wrapped_comment_line`), inline alignment, the file's own CRLF-vs-LF
+    terminator (`_split_cr`, tan-cli#404). A parse-then-reserialize writer
+    would lose all of that -- exactly the class of regression the module
+    docstring's own "Deliberately NOT reimplemented here" paragraph already
+    refuses for the CMakeLists rewrite, for the identical reason. So the
+    line-oriented scan stays the reader for every shape it CAN see text for,
+    and `yaml.safe_load` is used only as a narrow, read-only DETECTOR for
+    the one shape it cannot -- a document-root merge key -- never as a
+    second source of the `sku`/`hw_rev` values this function returns; those
+    two are always `_yaml_scalar_value` of a literal line, so a value the
+    scan found and one a full parse would find never have a chance to
+    disagree.
     """
     in_som = False
     entered_som = False

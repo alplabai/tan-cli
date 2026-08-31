@@ -710,3 +710,6 @@ several less obvious failures.
     - tan/commands/init_cmd.py: 1559 -> 1583
     - tan/core/scaffold.py: 1933 -> 2111
     - function_count_budget: 305 -> 306
+- 2026-08-31 -- PR #1060 nits: converge _split_child_key with top_level_key_name, add SomBlockUnsupportedError backstop catch in _plan_from_example, document why vendored_som does not do a real YAML parse -- plus their tests
+    - tan/commands/init_cmd.py: 1583 -> 1606
+    - tan/core/scaffold.py: 2111 -> 2149
