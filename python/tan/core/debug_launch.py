@@ -110,6 +110,57 @@ def is_server_supported_for_target(target: str, server: str) -> bool:
     return server in server_choices_for_target(target)
 
 
+#: tan-cli#945: whether STARTING a debug session for this target class writes
+#: program data to the attached target, stated by the producer instead of left
+#: for a consumer to re-derive from the cortex-debug adapter's own schema
+#: knowledge -- its ``loadFiles`` default ("if this property does not exist,
+#: then the executable is used to program the device", `marus25.cortex-debug`
+#: 1.12.1) plus any of thirteen ``*Commands`` lists that could carry a bare
+#: ``load``. alp-sdk-vscode#586/#595 had to reimplement exactly that inference
+#: client-side because neither of its flash gates could see the path -- the
+#: programming happens inside cortex-debug's own spawned `JLinkGDBServerCL` /
+#: `openocd` / `pyocd`, with no `tan` process in the loop to intercept.
+#:
+#: ``True`` for both cortex-debug targets: :func:`create_launch_draft` always
+#: emits ``request: launch`` with a non-empty ``loadFiles`` -- every FRESH
+#: draft this module produces for them programs the executable onto the
+#: target. Keyed on ``targetKind`` alone, not on the ``loadFiles`` a given
+#: WRITE actually lands: after tan-cli#1020's re-review, a MERGE over an
+#: existing entry can protect a customer's own explicit attach-only ``[]``
+#: (see :func:`_merge_load_files`), so a single exit-0 payload can legitimately
+#: carry ``programsDevice: true`` beside a written ``configuration.loadFiles``
+#: of ``[]`` -- the class of session this constant's docstring used to say
+#: could not happen. That is the same fail-safe direction every other caller
+#: of this map already leans on (overstating the write is confusing, not
+#: unsafe), so it is left as-is rather than keyed per-write; a consumer that
+#: needs per-write precision must read ``data.configuration.loadFiles``
+#: itself, not just ``programsDevice``. ``False`` for yocto-userspace: its
+#: ``cppdbg`` ``launch`` request attaches MI to a gdbserver the operator
+#: already started, after their own manual deploy
+#: (``miDebuggerServerAddress``) -- this session issues no write of its own.
+#: ``False`` for native-host: ``lldb`` runs a binary on the HOST machine: there
+#: is no target hardware to program at all.
+PROGRAMS_DEVICE = {
+    ZEPHYR_MCU: True,
+    BAREMETAL_MCU: True,
+    YOCTO_USERSPACE: False,
+    NATIVE_HOST: False,
+}
+
+
+def programs_device(target: str) -> bool:
+    """Whether a launch of ``target`` writes to real hardware (tan-cli#945).
+
+    Defaults to ``False`` for an unrecognised target -- the same "assume it
+    does NOT program" floor every caller of this module already applies to an
+    unresolved target/server pairing elsewhere: overstating the safe case
+    (claiming a write when there is none) is merely confusing, understating it
+    (claiming safety for a session that flashes silicon) is the class of bug
+    this whole issue exists to close.
+    """
+    return PROGRAMS_DEVICE.get(target, False)
+
+
 #: The ``build/system-manifest.yaml`` slice ``os`` a debug target class runs
 #: on, or absent for a target with no per-core build slice keyed by ``os``.
 #: ``native-host`` is exactly that case -- its slice is picked by BOARD target
@@ -358,6 +409,13 @@ def create_launch_draft(
             "request": "launch",
             "cwd": "${workspaceFolder}",
             "executable": "${workspaceFolder}/build/app/zephyr/zephyr.elf",
+            # tan-cli#945: stated explicitly rather than left to
+            # `marus25.cortex-debug`'s own undocumented-on-the-wire schema
+            # default ("if this property does not exist, then the executable
+            # is used to program the device") -- kept identical to
+            # `executable` by `apply_launch_resolution` below, since this
+            # draft has no attach-only shape for a caller to opt into yet.
+            "loadFiles": ["${workspaceFolder}/build/app/zephyr/zephyr.elf"],
             "runToEntryPoint": "main",
             "preLaunchTask": pre_launch_task,
             "svdFile": "<resolved-svd>",
@@ -394,6 +452,9 @@ def create_launch_draft(
             "servertype": server,
             "cwd": "${workspaceFolder}",
             "executable": "${workspaceFolder}/build/baremetal/app.elf",
+            # tan-cli#945: see the ZEPHYR_MCU branch above for why this is
+            # stated explicitly rather than left to the adapter's default.
+            "loadFiles": ["${workspaceFolder}/build/baremetal/app.elf"],
         }
         if server == OPENOCD:
             draft = {
@@ -549,6 +610,12 @@ def apply_launch_resolution(draft: dict[str, Any], resolution: LaunchResolution)
         for key in ("executable", "program"):
             if key in draft:
                 draft[key] = resolution.executable
+        # tan-cli#945: `loadFiles` names the SAME artefact as `executable` --
+        # a real build's own resolved path must replace it there too, or a
+        # per-core slice's ELF and the file cortex-debug actually programs
+        # would silently diverge the moment `_resolve_from_build` finds one.
+        if "loadFiles" in draft:
+            draft["loadFiles"] = [resolution.executable]
     if resolution.device is not None and "device" in draft:
         draft["device"] = resolution.device
     if resolution.target_id is not None and "targetId" in draft:
@@ -726,6 +793,57 @@ def sdk_identity_stranded_appends(
             continue
         out.append((field, _display_value(existing_val), _display_value(incoming_val)))
     return out
+
+
+def load_files_preserved(
+    existing_content: str | None,
+    draft: dict[str, Any],
+    provenance: LaunchProvenance | None = None,
+) -> tuple[str, str] | None:
+    """tan-cli#1020 review: whether writing ``draft`` over ``existing_content``
+    will PROTECT an existing ``loadFiles`` value this run cannot prove is
+    tan's own prior output (see [`_merge_load_files`]) -- i.e. leave a
+    customer's hand-authored artefact list, an explicit attach-only ``[]``
+    included, exactly as it already was instead of the fresh resolution
+    ``draft`` itself carries. Mirrors the SAME merge decision the real write
+    (``create_launch_json_write_plan``, via ``_merge_configuration`` ->
+    ``_merge_load_files``) makes, the same way [`sdk_identity_overwrites`] /
+    [`sdk_identity_stranded_appends`] mirror theirs, so a caller can compute
+    it before a write happens (or without writing at all).
+
+    Returns ``(existing_display, incoming_display)`` when this write
+    protects a DIFFERING existing value -- the disclosure
+    ``debug-config.load-files-preserved`` names, the ``loadFiles`` sibling
+    of ``debug-config.sdk-identity-appended`` -- and ``None`` when there is
+    nothing to disclose: no ``loadFiles`` key on either side, the two
+    already agree, or this run CAN prove the existing value is its own (a
+    real overwrite happens instead, the same "a value resolved from a real
+    build overwrites unconditionally, by design" case every other field in
+    this module already leaves undisclosed).
+    """
+    if "loadFiles" not in draft:
+        return None
+    if provenance is None:
+        provenance = launch_provenance.empty()
+    try:
+        name = _configuration_name(draft)
+        document = _parse_launch_json_or_default(existing_content)
+    except DebugConfigError:
+        return None
+    configs = document.get("configurations")
+    if not isinstance(configs, list):
+        return None
+    existing_entry = _matching_existing_entry(configs, name)
+    if existing_entry is None:
+        return None
+    existing_val = existing_entry.get("loadFiles")
+    incoming_val = draft["loadFiles"]
+    if not isinstance(existing_val, list) or existing_val == incoming_val:
+        return None
+    hashes = provenance.hashes_for(name, "loadFiles")
+    if _load_files_is_tan_owned(existing_val, hashes):
+        return None
+    return (_display_value(existing_val), _display_value(incoming_val))
 
 
 def _matching_existing_entry(configs: list[Any], name: str) -> dict[str, Any] | None:
@@ -1059,6 +1177,75 @@ def _merge_list_field(
     return _merge_list_by_identity(existing, next_value, tan_owned_hashes)
 
 
+def _load_files_is_tan_owned(existing: list[Any], tan_owned_hashes: frozenset[str]) -> bool:
+    """Whether an existing `loadFiles` value is provably tan's own prior
+    output rather than something a customer typed: every entry's content
+    hash is recorded in the `.alp/` sidecar as this field's own last write.
+
+    An EMPTY existing list can never satisfy this. `create_launch_draft`
+    never emits an empty `loadFiles` -- "this draft has no attach-only shape
+    for a caller to opt into yet" (tan-cli#945's own docstring, still true
+    here) -- so a customer's `[]` predates tan ever writing this key at all
+    and is unconditionally hand-authored. Treating it as "vacuously owned"
+    (the naive reading of `all(... for v in [])`) is exactly the tan-cli#1020
+    review blocker: an intentional attach-only `[]` silently turned into a
+    session that programs silicon, at exit 0 with `issues: []`.
+    """
+    if not existing:
+        return False
+    return all(launch_provenance.content_hash(v) in tan_owned_hashes for v in existing)
+
+
+def _merge_load_files(
+    existing: list[Any], incoming: list[Any], tan_owned_hashes: frozenset[str]
+) -> tuple[list[Any], list[Any]]:
+    """`loadFiles`'s own merge rule (tan-cli#1020 review) -- deliberately NOT
+    [`_merge_list_field`]'s identity-plus-positional-append rule its
+    siblings `configFiles`/`setupCommands` use.
+
+    Those two fields hold INDEPENDENT entries a customer and tan can each
+    legitimately contribute one of (a customer's extra `.cfg`, tan's own
+    resolved one), so appending tan's fresh entry beside an existing one
+    provenance cannot confirm is tan's own is the SAFE outcome
+    (tan-cli#518/#982). `loadFiles` is not that shape: it names ONE
+    deliberate artefact list per configuration -- normally the same file
+    `executable` does, or an explicit `[]` a customer wrote to make the
+    session attach-only -- so applying that same "append when unproven"
+    rule here means cortex-debug programs BOTH files when a customer typed
+    their own single entry, and an attach-only `[]` gets a fresh entry
+    appended into it, which is indistinguishable from overwriting the
+    customer's explicit "program nothing" (tan-cli#1020 review, measured:
+    `[]` -> `[<fresh elf>]`, `["custom/app.hex"]` ->
+    `["custom/app.hex", "<fresh elf>"]`, both at exit 0 with `issues: []`).
+
+    So the whole list is the unit, not its elements: a `loadFiles` this run
+    cannot prove it wrote itself (see [`_load_files_is_tan_owned`]) is left
+    EXACTLY as the file already had it -- no merge, no append -- and the
+    returned `owned` list is empty, so a later run still treats it as the
+    customer's, not tan's. A `loadFiles` this run CAN prove is its own prior
+    output (or that already equals the fresh resolution, nothing to change
+    either way) is replaced wholesale, the same "an updated build makes a
+    stale value updateable again" rule every OTHER field in this module
+    already gets from [`_merge_value`] -- and matches what
+    `apply_launch_resolution` already keeps in sync with `executable`.
+
+    This function alone cannot un-protect a value once it lands here: the
+    KEY-ABSENT case that lets `loadFiles` re-establish provenance after a
+    lost sidecar is handled one level up, in
+    [`_merge_configuration`]'s own key-absent branch, before a pair ever
+    reaches this function. See `launch_provenance`'s module docstring
+    ("``loadFiles`` heals the same way for the same reason, but only from
+    ONE specific starting point") for why this function's own protect
+    branch, unlike that branch, can never safely self-heal from a value
+    already sitting in the file.
+    """
+    if existing == incoming:
+        return list(incoming), list(incoming)
+    if _load_files_is_tan_owned(existing, tan_owned_hashes):
+        return list(incoming), list(incoming)
+    return list(existing), []
+
+
 def _merge_value(existing: Any, next_value: Any) -> Any:
     """Merge one incoming SCALAR or nested-DICT value over what the file
     already holds. List pairs never reach here -- [`_merge_configuration`]'s
@@ -1139,10 +1326,54 @@ def _merge_configuration(
         existing_val = existing.get(key)
         if isinstance(value, list) and isinstance(existing_val, list):
             hashes = tan_owned_hashes_for(key) if tan_owned_hashes_for is not None else frozenset()
-            merged_list, owned = _merge_list_field(existing_val, value, hashes)
+            # tan-cli#1020 review: `loadFiles` gets its OWN whole-list merge
+            # rule, not `configFiles`/`setupCommands`' identity-plus-append
+            # one -- see `_merge_load_files`'s own docstring for why the two
+            # shapes are not interchangeable.
+            if key == "loadFiles":
+                merged_list, owned = _merge_load_files(existing_val, value, hashes)
+            else:
+                merged_list, owned = _merge_list_field(existing_val, value, hashes)
             merged[key] = merged_list
             if owned_entries_out is not None and owned:
                 owned_entries_out[key] = owned
+        elif isinstance(value, list) and key not in existing:
+            # tan-cli#1020 re-review: the entry already exists (this is the
+            # MERGE path, not the brand-new-entry branch below), but this
+            # particular list-valued key is genuinely ABSENT from it -- e.g. a
+            # pre-#945 `tan` wrote this configuration before `loadFiles`
+            # existed at all. `key not in existing`, deliberately NOT
+            # `existing_val is None`: `existing.get(key)` returns `None` for
+            # BOTH "the key is absent" and "the key is present holding JSON
+            # `null`", and those are not the same fact -- an explicit
+            # `"loadFiles": null` some tool or hand-edit wrote is a concrete
+            # value sitting in the file, indistinguishable from a customer's
+            # `[]` in every way that matters here (measured pre-fix: an
+            # `is None` check silently overwrote a `null` value AND recorded
+            # it as tan-owned, exactly the "nothing to protect" mistake this
+            # whole branch exists to avoid for the KEY-ABSENT case only).
+            # That is also NOT the same fact as the key being PRESENT and
+            # holding `[]` (a customer's own explicit attach-only marker, or
+            # a value some other run already decided not to touch -- see
+            # `_load_files_is_tan_owned`'s docstring for why those two must
+            # never be conflated), so this is deliberately its own branch
+            # rather than substituting `[]` for `existing_val` and falling
+            # into the branch above.
+            #
+            # With nothing here for a customer to have hand-authored, this
+            # run's fresh value is unambiguously its own -- exactly the same
+            # reasoning `create_launch_json_write_plan`'s brand-new-entry case
+            # already applies to a whole configuration, just at the single-key
+            # level. Recording it now is what lets `_merge_load_files`'s
+            # protect branch heal on the VERY NEXT write instead of pinning a
+            # value it can never afterwards prove is tan's own -- the
+            # permanent-staleness bug the 1020 re-review found: without this,
+            # the first write after upgrading past #945 (or after the `.alp/`
+            # sidecar is lost) leaves `loadFiles` frozen forever, even as
+            # `executable` keeps tracking every fresh build resolution.
+            merged[key] = value
+            if owned_entries_out is not None and value:
+                owned_entries_out[key] = list(value)
         else:
             merged[key] = _merge_value(existing_val, value)
     return merged

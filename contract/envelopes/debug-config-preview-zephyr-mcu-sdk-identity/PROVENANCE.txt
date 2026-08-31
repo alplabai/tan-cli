@@ -153,3 +153,22 @@ already uses.
 1 -- this change is additive to `issues` only, at `info` severity, and does
 not alter `exitCode`/`ok`/`configuration.device` or any other resolved
 field.
+
+Re-recorded on : 2026-08-30
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#945
+Branch         : fix/945-debug-config-programming-intent (off dev @ a0356f8a)
+
+What changed in the golden (second re-record)
+-----------------------------------------------
+Same two additive fields as `debug-config-preview-zephyr-mcu`'s own second
+re-record (see that fixture's `PROVENANCE.txt` for the full rationale).
+`data.schemaVersion` stays `"1"`:
+
+    + "data"."programsDevice": true
+    + "data"."configuration"."loadFiles": ["${workspaceFolder}/build/app/zephyr/zephyr.elf"]
+
+`data` is otherwise byte-identical to the previous recording (the resolved
+`device` this case's fixture SDK fills, and everything else, is unchanged);
+`issues` is unchanged.
