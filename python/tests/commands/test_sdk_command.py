@@ -1783,7 +1783,13 @@ def test_remove_refuses_the_active_install_without_force_and_force_clears_it(
     assert target.exists(), "a refused removal must not touch the filesystem at all"
     # tan-cli#1028: nothing was removed here, so "what resolves after" is
     # simply what resolves NOW -- the still-intact project pin.
-    assert refused["data"]["resolvesToAfter"]["sdkPath"] == str(target).replace("\\", "/")
+    # Host-native, NOT posix-folded: `resolvesToAfter.sdkPath` mirrors `sdk
+    # current`'s own `data.sdkPath` (`resolve_sdk_tiered`'s raw `.path`,
+    # sourced here from `write_pointer`'s verbatim `str(sdk_path)`), which is
+    # asserted the same unfolded way at `test_current_...::doc["data"]
+    # ["sdkPath"] == str(child)` above -- `_abs_posix` folding only applies to
+    # the separate top-level `sdk.root` field, per that test's own comment.
+    assert refused["data"]["resolvesToAfter"]["sdkPath"] == str(target)
     assert refused["data"]["resolvesToAfter"]["sourceTier"] == "projectPin"
 
     forced = envelope(
@@ -1837,7 +1843,10 @@ def test_remove_reports_the_lower_tier_it_falls_through_to_after_a_forced_remova
     assert forced["ok"] is True
     assert forced["data"]["removed"] is True
     assert not pinned.exists()
-    assert forced["data"]["resolvesToAfter"]["sdkPath"] == str(fallback).replace("\\", "/")
+    # Host-native, NOT posix-folded -- same reasoning as the `sdkPath`
+    # assertion in `test_remove_refuses_the_active_install_without_force_and_
+    # force_clears_it` above.
+    assert forced["data"]["resolvesToAfter"]["sdkPath"] == str(fallback)
     assert forced["data"]["resolvesToAfter"]["sourceTier"] == "globalDefault"
     assert forced["data"]["resolvesToAfter"]["readiness"]["state"] == "ready"
 
