@@ -19,7 +19,7 @@
     "tan/commands/model_cmd.py": 1060,
     "tan/commands/new_som_cmd.py": 1379,
     "tan/commands/presets_cmd.py": 1067,
-    "tan/commands/sdk_cmd.py": 1516,
+    "tan/commands/sdk_cmd.py": 1529,
     "tan/commands/size_cmd.py": 940,
     "tan/commands/support_bundle_cmd.py": 1068,
     "tan/commands/validate_cmd.py": 1615,

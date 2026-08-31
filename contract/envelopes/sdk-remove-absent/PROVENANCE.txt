@@ -35,22 +35,33 @@ tan-cli#790 (PR #1022) shipped `sdk remove` reporting WHAT it removed but not
 WHAT NOW RESOLVES in its place — deliberately deferred to this issue rather
 than folded into that PR (see #1022's own body and #790's tracking issue).
 After a force-removal of a load-bearing install (the machine-global default or
-a workspace's project pin), the removal envelope gave no signal what `sdk
-current` would report next; a caller had to make a second `tan sdk current`
-call to find out, with no way to tell from the removal response alone whether
-the workspace is now unpinned, falls through to a different tier, or has
-NOTHING left to resolve — the case a consumer most needs told about.
+a workspace's project pin), the removal envelope gave no signal what resolves
+in its place; a caller had to make a separate `tan sdk current` call to find
+out, with no way to tell from the removal response alone whether the
+workspace falls through to a different tier or has NOTHING left to resolve —
+the case a consumer most needs told about.
 
 `resolvesToAfter` answers that by re-running `resolve_sdk_tiered` (the SAME
-narrow ladder `sdk current` itself calls) for the calling workspace, mirroring
-`sdk current`'s own `data` shape (`sdkPath`, `readiness`, `sourceTier`) rather
-than inventing a fourth one. It is present on EVERY `sdk remove` response —
-idempotent-absent, every refusal, every failure, and a real removal alike —
-not only a load-bearing one: an always-present field is easier for a consumer
-to code against than a conditional one, and this hermetic offline-absent case
-is exactly the shape a fully unpinned, no-SDK-anywhere workspace reports both
-before and after (`sourceTier: "none"`, matching `sdk-current-no-sdk`'s own
-pinned shape). The behavioural cases where it reports something OTHER than
+narrow ladder `remove`'s own load-bearing-removal check already calls) for
+the calling workspace, mirroring `sdk current`'s own `data` SHAPE (`sdkPath`,
+`readiness`, `sourceTier`) rather than inventing a fourth one — NOT
+necessarily the same ANSWER a same-instant `sdk current` call would give:
+`sdk current` additionally falls through to a wide discovery walk and honours
+an explicit `--sdk-root`, neither of which `resolvesToAfter` does (see
+`_resolves_to_after`'s own docstring). It is present on EVERY `sdk remove`
+response — idempotent-absent, every refusal, every failure, and a real
+removal alike — not only a load-bearing one: an always-present field is
+easier for a consumer to code against than a conditional one, and this
+hermetic offline-absent case is exactly the shape a workspace with no pin,
+no registry entry, and no discoverable checkout reports both before and after
+(`sourceTier: "none"`, matching `sdk-current-no-sdk`'s own pinned shape). A
+force-removed workspace PROJECT PIN reports this identical `"none"` shape
+too, but is a DIFFERENT case this golden does not reach: `.alp/sdk-path` is
+left dangling, not cleared, by the removal, so `resolvesToAfter` cannot tell
+that workspace apart from one that was never pinned at all — tracked
+separately as tan-cli#1051, not fixed by this PR.
+
+The behavioural cases where it reports something OTHER than
 `"none"` — a still-live project pin before removal, and falling through to a
 surviving lower tier after a forced one — are covered by
 `test_sdk_command.py::test_remove_refuses_the_active_install_without_force_and_force_clears_it`

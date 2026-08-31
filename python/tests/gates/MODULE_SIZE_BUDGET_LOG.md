@@ -692,3 +692,5 @@ several less obvious failures.
     - function_count_budget: 303 -> 305
 - 2026-08-31 -- tan-cli#1028: sdk remove reports resolvesToAfter (what now resolves post-removal)
     - tan/commands/sdk_cmd.py: 1456 -> 1516
+- 2026-08-31 -- tan-cli#1043 round-2 review: correct _resolves_to_after docstring's sdk-current-equivalence claim + document the dangling-project-pin gap (tan-cli#1051)
+    - tan/commands/sdk_cmd.py: 1516 -> 1529
