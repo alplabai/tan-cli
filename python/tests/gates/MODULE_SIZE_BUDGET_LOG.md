@@ -714,6 +714,13 @@ several less obvious failures.
     - tan/core/bootstrap.py: 2411 -> 2415
 - 2026-08-31 -- tan-cli#427 follow-up in the same change: sdk_cmd.py +1 line replacing a prose reference to the deleted tan/commands/deferred_cmd.py with the fact it is gone.
     - tan/commands/sdk_cmd.py: 1529 -> 1530
+- 2026-08-31 -- tan-cli#1041: vendored_som's UnreadableSomBlockError/SomBlockUnsupportedError split (quoted-key/merge-key/alias/next-line-flow som: shapes) grows scaffold.py; init_cmd.py's matching catch-site split (init.som-block-unsupported) grows it too
+    - tan/commands/init_cmd.py: 1559 -> 1583
+    - tan/core/scaffold.py: 1933 -> 2111
+    - function_count_budget: 305 -> 306
+- 2026-08-31 -- PR #1060 nits: converge _split_child_key with top_level_key_name, add SomBlockUnsupportedError backstop catch in _plan_from_example, document why vendored_som does not do a real YAML parse -- plus their tests
+    - tan/commands/init_cmd.py: 1583 -> 1606
+    - tan/core/scaffold.py: 2111 -> 2149
 - 2026-08-31 -- tan-cli#907: this file is FROZEN as of this entry. Everything
   above (2026-08-11 through this line) stays exactly as written and stays
   enforced append-only by `test_module_size_budget_log_append_only.py`, but

@@ -297,7 +297,24 @@ class UnsupportedSomError(Exception):
         self.sku = sku
 
 
-class FlowStyleSomError(Exception):
+class SomBlockUnsupportedError(Exception):
+    """Base for every reason `vendored_som`/`retarget_board_yaml_som` REFUSE
+    a `som:` block instead of silently discarding `--som` -- catch THIS at
+    every call site (`init_cmd.py`), not either leaf below, so a THIRD leaf
+    added for the next spelling needs no call site touched outside this
+    module.
+
+    tan-cli#1041 review: this class did not exist until the amendment
+    widened tan-cli#1041 from three spellings to six and two of them turned
+    out to need a message that was not about flow style at all
+    (`UnreadableSomBlockError`, below) -- `FlowStyleSomError` alone was
+    already the exact shape `init_cmd.py`'s three `except` clauses wanted,
+    so splitting the raise from the catch (a common base, not a rename) was
+    the smaller, safer change.
+    """
+
+
+class FlowStyleSomError(SomBlockUnsupportedError):
     """The board.yaml's top-level `som:` line opens a YAML FLOW mapping
     (`som: {sku: ..., hw_rev: ...}`, valid YAML but on one physical line)
     rather than the BLOCK style (`som:` alone, `sku:`/`hw_rev:` indented
@@ -325,6 +342,12 @@ class FlowStyleSomError(Exception):
     shape `top_level_key_name`/`_is_som_key_line`/`_split_child_key` already
     hold for tan-cli#1008.
 
+    Only covers the SAME-LINE flow shape (`som: {...}`, `som: &s {...}`,
+    `som: !!map {...}`); a flow mapping whose `{` opens on the NEXT physical
+    line is `UnreadableSomBlockError`'s job (tan-cli#1041) -- this class's
+    own detector (`_som_flow_style_body`) only ever inspects the `som:`
+    line itself, by design (see that function's docstring).
+
     Reachability (tan-cli#1029): 0 of the SDK's 100 tracked `board.yaml`
     files and 0 vendored templates use a flow-style `som:` mapping --
     hand-authored only, same as the spaced/quoted shapes tan-cli#1008 rounds
@@ -342,6 +365,72 @@ class FlowStyleSomError(Exception):
             f"referring to it elsewhere in the file."
         )
         self.flow_body = flow_body
+
+
+class UnreadableSomBlockError(SomBlockUnsupportedError):
+    """`vendored_som` recognized a top-level `som:` entry -- either the
+    line-oriented scan matched a literal `som:`/`"som":` line
+    (`_is_som_key_line`), or a real YAML parse resolved one that no literal
+    `som:` text exists for at all -- but found no LITERAL `sku:` line
+    nested beneath it to read or rewrite.
+
+    tan-cli#1041 (the amendment). Three of the amendment's six named
+    spellings land here, all sharing the identical root cause -- a `som:`
+    (or an effective one, produced by a document-root merge) whose `sku:`
+    is not a plain indented line this scanner can find -- rather than three
+    separate detectors for three separate reasons:
+
+    - a YAML ALIAS (`som: *base`): the whole value is a reference to a
+      mapping defined elsewhere; no child lines follow the `som:` line at
+      all.
+    - a MERGE key (`<<: *base`) inside the `som:` block with no explicit
+      `sku:` override alongside it: the real `sku:` value lives in
+      whatever `base` points at, not in this block. (A merge key WITH an
+      explicit override retargets correctly, same as any other block-style
+      `som:` -- the override line is a literal `sku:` this scan already
+      finds, so it never reaches this class at all.)
+    - a MERGE key at the DOCUMENT ROOT (`<<: *base`, sibling to `som:`
+      rather than nested under it) whose target itself defines `som:`: no
+      `som:` text exists anywhere in the file for the line scan to find, so
+      `vendored_som`'s own scan reports nothing at all -- this is the one
+      shape a real `yaml.safe_load` backstop is needed for (see
+      `vendored_som`'s docstring), not the line scan.
+    - a FLOW mapping split across MORE than one physical line (`som:\\n
+      {sku: ..., hw_rev: ...}`, with or without a leading comment or
+      `&anchor` on the `som:` line itself): `FlowStyleSomError`'s own
+      detector only ever looks at the `som:` line, by design, so this shape
+      falls straight through it and is caught here instead, by the same
+      "a `sku:` line was never found" signal every other shape in this list
+      trips.
+
+    Deliberately ONE generic message rather than a shape-specific one per
+    bullet above: naming "alias" vs "merge key" vs "multi-line flow"
+    correctly would need to re-derive which one this actually is -- the
+    exact per-spelling special-casing tan-cli#1008 (six rounds) and
+    tan-cli#1035 (three rounds) already show costs more than it is worth.
+    What every shape above has in common -- a `som:` this module can see
+    exists, paired with no `sku:` line it can find inside it -- is exactly
+    what the message says, and is enough to tell a customer what to fix.
+
+    Raised from `vendored_som`; `retarget_board_yaml_som` inherits it the
+    same way it already inherits `FlowStyleSomError`, by calling
+    `vendored_som` first.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This board.yaml's `som:` block could not be read: tan found a "
+            "`som:` key but no literal `sku:` line indented directly "
+            "beneath it. A YAML `*alias`, a `<<:` merge key with no "
+            "explicit `sku:` override (whether inside the `som:` block or "
+            "at the top of the file), and a flow mapping split across more "
+            "than one line all look like this to tan's board.yaml "
+            "scaffolder, which edits `som:` blocks line-by-line rather "
+            "than as a parsed document. Rewrite the `som:` block in block "
+            "style, with `sku:` (and `hw_rev:`, if set) each written as "
+            "their own literal line indented beneath `som:`, and try "
+            "again."
+        )
 
 
 class ExampleReadError(Exception):
@@ -531,7 +620,29 @@ def top_level_key_name(text: str) -> str:
     vs `vendored_som`'s pre-round-4 exact-match). One rule, in one place;
     `generate_cmd`/`bootstrap_cmd` import and call THIS instead of keeping
     their own copies.
+
+    tan-cli#1041: also strips a single layer of matching `'`/`"` quotes
+    around the key, so a QUOTED top-level key (`"som":`, `'som':`) resolves
+    to the same name as its bare spelling -- `yaml.safe_load` already treats
+    them identically (`{"som": ...}` either way), and this was the one
+    spelling of the six tan-cli#1041 named where the fix belongs HERE
+    (widening the one shared rule) rather than in a refusal: nothing about a
+    quoted key stops the line-oriented writer beneath it from working, so
+    unlike its five siblings this shape should retarget correctly, not just
+    refuse loudly. Only fires when the closing quote is immediately followed
+    by (optional whitespace then) a `:` -- i.e. this really is `"key":`, not
+    some other quoted scalar that merely starts the text -- so a colon-less
+    string's contract above (return the whole trimmed text) still holds for
+    everything else, quoted or not. No escape handling: `som`/`sku`/`hw_rev`,
+    the only keys any caller of this function ever tests against, contain no
+    character that would ever need one.
     """
+    stripped = text.strip()
+    quote = stripped[:1]
+    if quote in ("'", '"'):
+        end = stripped.find(quote, 1)
+        if end != -1 and stripped[end + 1 :].lstrip(" \t")[:1] == ":":
+            return stripped[1:end]
     return text.split(":", 1)[0].strip()
 
 
@@ -558,10 +669,12 @@ def _is_som_key_line(body: str) -> bool:
 def _split_child_key(trimmed: str) -> tuple[str, str] | None:
     """Split an already-indent-stripped CHILD mapping line (one nested under
     a top-level block, e.g. a `som:` block's `sku:`/`hw_rev:`) into
-    `(key, after_colon)`, using the exact same [`top_level_key_name`] rule
-    the top-level `som:` check applies -- so a space before the colon
-    (`sku :`, `hw_rev :`) is tolerated here too. `None` when `trimmed` has
-    no `:` at all (not a mapping line).
+    `(key, after_colon)`. `key` is literally [`top_level_key_name`]'s answer
+    for `trimmed` -- not a second implementation of its rule -- so a space
+    before the colon (`sku :`, `hw_rev :`) AND a quoted key (`"sku":`,
+    `'hw_rev':`) are both tolerated here exactly as they are at the
+    top-level `som:` line, because both call sites now run the same code.
+    `None` when `trimmed` has no `:` at all (not a mapping line).
 
     tan-cli#1008 review round 6: `vendored_som` (the reader) and
     `retarget_board_yaml_som` (the writer) applied DIFFERENT rules for "is
@@ -579,11 +692,26 @@ def _split_child_key(trimmed: str) -> tuple[str, str] | None:
     also failed to match (major 2, a silent `--som` no-op). One rule, in one
     place, used by both the reader and the writer, so they cannot diverge
     again.
+
+    tan-cli#1060 review: this docstring used to CLAIM the top-level rule
+    applied here while the body stayed a bare `trimmed.partition(":")` that
+    never unquoted anything -- true the day round 6 landed, false the moment
+    tan-cli#1041 taught `top_level_key_name` to strip a quoted key's `'`/`"`
+    pair and this function did not follow. Consequence: `"som":` (a
+    top-level quoted key) retargeted correctly, but the exact same quoting
+    one level down (`som:` with a `"sku":`/`'hw_rev':` child) did not --
+    `found_sku_key` never set, `entered_som and not found_sku_key` firing
+    `UnreadableSomBlockError` for a shape that has a perfectly literal
+    `sku:` line to rewrite, precisely the top-level-vs-child divergence round
+    6 exists to prevent, reopened one call site later. Calling
+    `top_level_key_name` here rather than re-inlining its rule is what makes
+    that divergence structurally impossible rather than merely undocumented:
+    a future change to the quoting rule only has one function to change.
     """
-    key, sep, rest = trimmed.partition(":")
-    if not sep:
+    if ":" not in trimmed:
         return None
-    return key.strip(), rest
+    _key, _colon, rest = trimmed.partition(":")
+    return top_level_key_name(trimmed), rest
 
 
 #: A single leading YAML node-property token: an anchor (`&name`) or a tag
@@ -777,6 +905,18 @@ def retarget_board_yaml_som(content: str, sku: str) -> str:
     (`som: {sku: ..., hw_rev: ...}`) instead of silently returning `content`
     byte-for-byte unchanged -- inherited for free from the `vendored_som`
     call immediately below, which raises first.
+
+    tan-cli#1041: the same inheritance now also covers
+    [`UnreadableSomBlockError`] -- a `som:` block this line-oriented scan
+    (the one below, not `vendored_som`'s) would otherwise silently leave
+    untouched because it never finds a literal `sku:` line to rewrite (a
+    `*alias`, an un-overridden `<<:` merge key inside OR outside the `som:`
+    block, or a flow mapping split across more than one line). A QUOTED
+    `som:`/`"som":` key is NOT one of these: it retargets correctly, same
+    as the bare spelling, because [`top_level_key_name`] (tan-cli#1041)
+    unquotes it before the shared `_is_som_key_line`/`_split_child_key`
+    checks below ever see it -- nothing about a quoted KEY stops the scan
+    from finding a perfectly ordinary literal `sku:` line beneath it.
     """
     existing_sku, _existing_hw_rev = vendored_som(content)
     changing_sku = existing_sku is not None and existing_sku != sku
@@ -1110,8 +1250,65 @@ def vendored_som(board_yaml: str) -> tuple[str | None, str | None]:
     `som:` line turns out to be flow-style rather than block-style --
     `retarget_board_yaml_som` calls this function first and so inherits the
     identical refusal, rather than each guessing independently whether a
-    line it cannot read is safe to treat as "no som: block at all"."""
+    line it cannot read is safe to treat as "no som: block at all".
+
+    Also raises [`UnreadableSomBlockError`] (tan-cli#1041) when a `som:`
+    entry is present -- literally, or (see below) only once the document is
+    actually parsed -- but no LITERAL `sku:` line was found nested beneath
+    it: see that class's own docstring for the four spellings this covers.
+    Two different signals feed it, because only one of them can see a
+    `som:` this scan never finds text for at all:
+
+    - `entered_som`: this scan's OWN `_is_som_key_line` matched a literal
+      `som:`/`"som":` line, so a real block was entered, but the loop below
+      never set `sku`. Covers an alias and an in-block merge key with no
+      override, and -- since `FlowStyleSomError`'s own detector only ever
+      looks at the `som:` line itself -- a flow mapping split across more
+      than one physical line, which this loop's per-line `_split_child_key`
+      also never recognises as a `sku:` child (its first `:` splits on the
+      wrong token, e.g. `{sku` from `  {sku: ..., hw_rev: ...}`).
+    - the `yaml.safe_load` backstop below, run ONLY when `entered_som` is
+      still `False` at the end of the scan (i.e. this scan is about to
+      report "no som: block at all"): a document-root merge key (`<<:
+      *base`, a SIBLING of `som:`, not nested under it) can produce an
+      effective `som:` mapping with no `som:` TEXT anywhere in the file for
+      any line scan to ever find. Deferred, function-local `import yaml` --
+      `tests/gates/test_cli_import_is_lean.py` (tan-cli#810) pins that a
+      bare `tan --version` loads no YAML machinery at all, and this module
+      is reached from `init_cmd`, which `tan/cli.py` static-imports on
+      every invocation -- so the import must stay inside the one branch
+      that is actually reached only from a real `tan init`/`generate` call,
+      never at import time. Swallows a genuine YAML syntax error the same
+      way the rest of this function already tolerates one (as "nothing
+      found"): a document this broken was never going to scan cleanly
+      either, and this backstop's whole job is narrower than "validate the
+      file" -- it only asks "did a merge manufacture a `som:` this scan is
+      blind to".
+
+    tan-cli#1041 asked, verbatim, that reading the `som:` block with a real
+    YAML parse be considered, and that a rejection say why in the code. Here
+    is why: a real parse would tell `retarget_board_yaml_som` (the writer
+    that calls this reader first) THAT a `sku:` exists and what its parsed
+    value is, but not WHICH BYTES on WHICH LINE to rewrite -- a `yaml.Node`
+    carries no reliable back-reference to source position/formatting, and
+    `retarget_board_yaml_som` must reproduce everything this scan does not
+    touch byte-for-byte: a hand-authored comment, a wrapped comment block
+    (`_is_wrapped_comment_line`), inline alignment, the file's own CRLF-vs-LF
+    terminator (`_split_cr`, tan-cli#404). A parse-then-reserialize writer
+    would lose all of that -- exactly the class of regression the module
+    docstring's own "Deliberately NOT reimplemented here" paragraph already
+    refuses for the CMakeLists rewrite, for the identical reason. So the
+    line-oriented scan stays the reader for every shape it CAN see text for,
+    and `yaml.safe_load` is used only as a narrow, read-only DETECTOR for
+    the one shape it cannot -- a document-root merge key -- never as a
+    second source of the `sku`/`hw_rev` values this function returns; those
+    two are always `_yaml_scalar_value` of a literal line, so a value the
+    scan found and one a full parse would find never have a chance to
+    disagree.
+    """
     in_som = False
+    entered_som = False
+    found_sku_key = False
     sku: str | None = None
     hw_rev: str | None = None
     for line in _rust_lines(board_yaml):
@@ -1121,6 +1318,7 @@ def vendored_som(board_yaml: str) -> tuple[str | None, str | None]:
             if flow_body is not None:
                 raise FlowStyleSomError(flow_body)
             in_som = _is_som_key_line(body)
+            entered_som = entered_som or in_som
             continue
         if body and not body[0].isspace():
             break  # The next top-level key ends the som: block.
@@ -1130,9 +1328,27 @@ def vendored_som(board_yaml: str) -> tuple[str | None, str | None]:
             continue
         child_key, child_rest = child
         if child_key == "sku":
+            found_sku_key = True
             sku = _yaml_scalar_value(child_rest)
         elif child_key == "hw_rev":
             hw_rev = _yaml_scalar_value(child_rest)
+    # `found_sku_key`, not `sku is None` -- a bare `sku:`/`sku:  # tbd` (no
+    # value token at all) is a LITERAL `sku:` line this scan found and
+    # `retarget_board_yaml_som` already knows how to fill in
+    # (`_retargeted_sku_line`'s own "nothing after the colon" branch); it
+    # must not be confused with the six tan-cli#1041 shapes where no `sku:`
+    # line exists for the scan to find in the first place.
+    if entered_som and not found_sku_key:
+        raise UnreadableSomBlockError()
+    if not entered_som:
+        import yaml  # noqa: PLC0415  (declared base dep; deferred -- see docstring)
+
+        try:
+            doc = yaml.safe_load(board_yaml)
+        except yaml.YAMLError:
+            doc = None
+        if isinstance(doc, dict) and isinstance(doc.get("som"), dict):
+            raise UnreadableSomBlockError()
     return sku, hw_rev
 
 
