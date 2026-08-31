@@ -166,3 +166,37 @@ def test_docs_ref_is_main_outside_a_git_checkout(tmp_path):
     (root / "metadata" / "sdk_version.yaml").write_text(
         "version: 0.16.0\nstatus:  released\n", encoding="utf-8")
     assert tmpl._docs_ref(root) == "main"
+
+
+# ---------------------------------------------------------------------
+# tan-cli#1037 -- PR #1034 round-two review nit: `sdk_version.yaml` that
+# parses but is not itself a mapping (e.g. a bare list) reached `doc.get(
+# ...)` bare, `AttributeError: 'list' object has no attribute 'get'`
+# instead of the same `main` degrade a missing/unreadable file already
+# gets. A README doc-link decision is not a fatal `--emit scaffold`
+# input, so this degrades rather than raising `TemplateError`.
+# ---------------------------------------------------------------------
+
+def test_a_bare_list_sdk_version_doc_degrades_to_main_not_an_attributeerror(tmp_path):
+    """The review's own repro shape, verbatim: `metadata/sdk_version.yaml`
+    that parses to a bare list must not reach `_docs_ref`'s bare
+    `doc.get("version")` -- degrades to `main` exactly like a missing
+    file does, rather than an uncaught `AttributeError`."""
+    tmpl = _tmpl()
+    root = tmp_path / "bare-list"
+    (root / "metadata").mkdir(parents=True)
+    (root / "metadata" / "sdk_version.yaml").write_text(
+        "- one\n- two\n", encoding="utf-8")
+    assert tmpl._docs_ref(root) == "main"
+
+
+def test_a_bare_scalar_sdk_version_doc_degrades_to_main_not_an_attributeerror(tmp_path):
+    """Same guard, the other bare shape the review measured: a scalar
+    string document -- `AttributeError: 'str' object has no attribute
+    'get'` on the unguarded code."""
+    tmpl = _tmpl()
+    root = tmp_path / "bare-scalar"
+    (root / "metadata").mkdir(parents=True)
+    (root / "metadata" / "sdk_version.yaml").write_text(
+        "just a scalar string\n", encoding="utf-8")
+    assert tmpl._docs_ref(root) == "main"
