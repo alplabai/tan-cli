@@ -584,15 +584,49 @@ def _split_child_key(trimmed: str) -> tuple[str, str] | None:
     return key.strip(), rest
 
 
+#: A single leading YAML node-property token: an anchor (`&name`) or a tag
+#: (`!tag`, `!!type`, or a verbatim `!<...>` URI) -- whatever character
+#: sequence starts at `&`/`!` and runs to the next whitespace. Doesn't
+#: validate the anchor name or tag URI; that is not this scanner's job, only
+#: recognizing that a property token, rather than the value, sits here.
+_NODE_PROPERTY_RE = re.compile(r"^[&!]\S+")
+
+
+def _strip_yaml_node_properties(text: str) -> str:
+    """Strip zero or more leading YAML node-property tokens (an anchor
+    `&name`, a tag `!tag`/`!!type`, or both together, in EITHER order,
+    separated by whitespace) from `text`, returning whatever remains after
+    the last one (with any following whitespace also stripped).
+
+    tan-cli#1035 review round 2 major: separates "what decorations precede
+    the value" from "is the value a flow mapping" -- the two concerns
+    `_som_flow_style_body` conflated when it tested `stripped.startswith("{")`
+    against text that could still carry an anchor/tag prefix. YAML allows an
+    anchor and a tag together, in either order (`&s !!map {...}` and
+    `!!map &s {...}` are both valid), and either alone; this strips as many
+    property tokens as are present, so `_som_flow_style_body`'s own `{` test
+    runs against the actual value, never against a property token that
+    happens to not start with `{`.
+    """
+    remainder = text
+    while True:
+        match = _NODE_PROPERTY_RE.match(remainder)
+        if not match:
+            return remainder
+        remainder = remainder[match.end() :].lstrip(" \t")
+
+
 def _som_flow_style_body(body: str) -> str | None:
     """When `body` is the top-level `som:` line ([`_is_som_key_line`]) AND
-    what follows its colon opens a YAML FLOW mapping (`som: {sku: ...,
-    hw_rev: ...}`) -- i.e. the first non-blank character after the colon is
-    `{` -- return that trailing text verbatim. `None` for an ordinary
-    block-style `som:` line: nothing, only a trailing comment, or a bare
-    anchor/tag (`som: &s`, `som: !!map`) after the colon, all of which are
-    valid YAML that still opens a BLOCK mapping on the lines beneath it, not
-    a non-`som:` line.
+    what follows its colon -- past any anchor/tag prefix
+    ([`_strip_yaml_node_properties`]) -- opens a YAML FLOW mapping (`som:
+    {sku: ..., hw_rev: ...}`, `som: &s {sku: ...}`, `som: !!map {sku: ...}`)
+    -- i.e. the first non-blank character there is `{` -- return the ORIGINAL
+    trailing text (properties included) verbatim, for the error message.
+    `None` for an ordinary block-style `som:` line: nothing, only a trailing
+    comment, or a bare anchor/tag (`som: &s`, `som: !!map`, `som: &s !!map`)
+    with nothing flow-shaped after it, all of which are valid YAML that still
+    opens a BLOCK mapping on the lines beneath it, not a non-`som:` line.
 
     tan-cli#1029: the one signal both `vendored_som` and
     `retarget_board_yaml_som` need to refuse a shape neither actually reads
@@ -602,15 +636,20 @@ def _som_flow_style_body(body: str) -> str | None:
     same shape `top_level_key_name`/`_is_som_key_line`/`_split_child_key`
     already hold for tan-cli#1008.
 
-    tan-cli#1035 review major 1: an earlier version of this function
+    tan-cli#1035 review round 2 major 1: an earlier version of this function
     treated ANY non-comment content after the colon as flow style, which
-    also caught `som: &s` (an anchor) and `som: !!map` (a tag) -- both
-    valid BLOCK-style `som:` lines (`yaml.safe_load` parses either as a
-    mapping with `sku:`/`hw_rev:` read from the indented lines beneath
-    them) that this scanner already reads correctly once past this gate.
-    Only a genuine flow mapping -- content that starts with `{` -- is a
-    shape this scanner cannot read; an anchor/tag prefix falls through to
-    the ordinary block-style path instead of being refused.
+    also caught `som: &s` (an anchor) and `som: !!map` (a tag) -- both valid
+    BLOCK-style `som:` lines -- so it was narrowed to `stripped.startswith
+    ("{")`. That narrowing over-corrected: it tested the RAW text after the
+    colon, so `som: &s {sku: ...}` and `som: !!map {sku: ...}` -- genuine
+    flow mappings carrying an anchor/tag prefix -- no longer started with
+    `{` and escaped the detector entirely, reopening tan-cli#1029's own
+    silent-`--som`-discard symptom on exactly the shape this function exists
+    to refuse. Stripping the anchor/tag prefix FIRST, then testing the
+    remainder, is what lets both prior fixes stay true at once: a bare
+    anchor/tag still falls through to the block path (nothing left to test
+    after stripping), and an anchor/tag ahead of a real `{` is still caught
+    (something starting with `{` left after stripping).
     """
     if not _is_som_key_line(body):
         return None
@@ -618,7 +657,10 @@ def _som_flow_style_body(body: str) -> str | None:
     stripped = rest.lstrip(" \t")
     if not stripped or stripped.startswith("#"):
         return None
-    if not stripped.startswith("{"):
+    remainder = _strip_yaml_node_properties(stripped)
+    if not remainder or remainder.startswith("#"):
+        return None
+    if not remainder.startswith("{"):
         return None
     return stripped
 

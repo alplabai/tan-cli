@@ -636,6 +636,64 @@ def test_retarget_still_retargets_a_som_line_carrying_a_yaml_tag():
     assert result == "som: !!map\n  sku: E1M-NX9101\ncores:\n"
 
 
+def test_vendored_som_refuses_a_flow_style_som_block_carrying_a_yaml_anchor():
+    """tan-cli#1035 review round 2's own reopen of #1029: round 2's fix
+    (`stripped.startswith("{")`) tested the RAW text after the colon, so an
+    anchor prefix ahead of a genuine flow mapping (`som: &s {sku: ...,
+    hw_rev: ...}`) made the check fail and the whole line fall through to
+    the block-style path -- `_som_flow_style_body` never fired at all. Both
+    `som: &s` (previous test, block, must READ) and `som: &s {...}` (this
+    test, flow, must REFUSE) must hold at once."""
+    content = "som: &s {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(FlowStyleSomError) as excinfo:
+        vendored_som(content)
+
+    assert "flow style" in str(excinfo.value)
+
+
+def test_retarget_refuses_a_flow_style_som_block_carrying_a_yaml_anchor():
+    """The writer side of the same reopen: `--som` onto an anchored FLOW
+    `som: &s {...}` block must refuse, not silently return its input
+    byte-for-byte unchanged (#1029's own symptom)."""
+    content = "som: &s {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(FlowStyleSomError):
+        retarget_board_yaml_som(content, "E1M-NX9101")
+
+
+def test_vendored_som_refuses_a_flow_style_som_block_carrying_a_yaml_tag():
+    """Same reopen, the YAML TAG shape (`som: !!map {...}`) instead of an
+    anchor."""
+    content = "som: !!map {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(FlowStyleSomError) as excinfo:
+        vendored_som(content)
+
+    assert "flow style" in str(excinfo.value)
+
+
+def test_retarget_refuses_a_flow_style_som_block_carrying_a_yaml_tag():
+    content = "som: !!map {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(FlowStyleSomError):
+        retarget_board_yaml_som(content, "E1M-NX9101")
+
+
+def test_vendored_som_refuses_a_flow_style_som_block_carrying_an_anchor_and_a_tag():
+    """An anchor AND a tag together, in either order, are both valid YAML
+    node properties ahead of a value (`&s !!map {...}` and `!!map &s {...}`
+    both `yaml.safe_load` the same way) -- `_strip_yaml_node_properties`
+    strips as many property tokens as are present, not just one."""
+    content = "som: &s !!map {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(FlowStyleSomError):
+        vendored_som(content)
+
+
 # ---------------------------------------------------------------------------
 # retarget_board_yaml_som -- tan-cli#404: wrapped comments, and CRLF sources
 # ---------------------------------------------------------------------------

@@ -692,3 +692,5 @@ several less obvious failures.
 - 2026-08-31 -- tan-cli#1035 review: narrow _som_flow_style_body to genuine flow mappings (startswith '{'), let anchor/tag som: lines fall through to the block path, add anchor/tag regression tests, and fix the --from-example --som docstring nit
     - tan/commands/init_cmd.py: 1557 -> 1559
     - tan/core/scaffold.py: 1875 -> 1889
+- 2026-08-31 -- tan-cli#1035 review round 3: strip a leading YAML anchor/tag node-property token before the flow-mapping '{' test (_strip_yaml_node_properties), so som: &s {...} / som: !!map {...} are refused instead of silently falling through to the block path; pin all four block/flow x plain/anchor-tag combinations with new reader+writer+integration tests; fix the contract/issue-codes.json eighth->seventh wording nit
+    - tan/core/scaffold.py: 1889 -> 1931
