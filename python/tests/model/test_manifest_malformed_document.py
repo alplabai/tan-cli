@@ -113,3 +113,68 @@ def test_read_package_surfaces_the_curated_error_not_a_typeerror():
     raw = _raw_container(cbor2.dumps("just a string"))
     with pytest.raises(ValueError, match="expected a CBOR map"):
         read_package(raw)
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1023 review round 2: the document-level guard above stopped one
+# field short of `name`/`src_sha` themselves -- both were still bare
+# subscripts, and `from_cbor`'s `bytes(d["src_sha"])` didn't even raise for
+# a wrong-typed `src_sha`, it silently coerced one (finding 1, major).
+# ---------------------------------------------------------------------------
+
+
+def test_json_manifest_missing_name_raises_a_curated_valueerror_not_a_keyerror():
+    with pytest.raises(ValueError, match=r"missing required field 'name'"):
+        Manifest.from_json('{"src_sha": "00"}')
+
+
+def test_json_manifest_missing_src_sha_raises_a_curated_valueerror_not_a_keyerror():
+    with pytest.raises(ValueError, match=r"missing required field 'src_sha'"):
+        Manifest.from_json('{"name": "x"}')
+
+
+def test_json_manifest_non_string_src_sha_raises_a_curated_valueerror_not_a_typeerror():
+    """Was `TypeError: fromhex() argument must be str, not int` out of the
+    bare `bytes.fromhex(d["src_sha"])` call."""
+    with pytest.raises(ValueError, match=r"field 'src_sha' must be a hex string, got int"):
+        Manifest.from_json('{"name": "x", "src_sha": 7}')
+
+
+def test_json_manifest_non_string_name_raises_a_curated_valueerror():
+    with pytest.raises(ValueError, match=r"field 'name' must be a string, got int"):
+        Manifest.from_json('{"name": 7, "src_sha": "00"}')
+
+
+def test_json_manifest_non_hex_src_sha_raises_a_curated_valueerror():
+    with pytest.raises(ValueError, match=r"field 'src_sha' is not valid hex"):
+        Manifest.from_json('{"name": "x", "src_sha": "not-hex"}')
+
+
+def test_cbor_manifest_missing_name_raises_a_curated_valueerror_not_a_keyerror():
+    with pytest.raises(ValueError, match=r"missing required field 'name'"):
+        Manifest.from_cbor(cbor2.dumps({"src_sha": b"\x00"}))
+
+
+def test_cbor_manifest_missing_src_sha_raises_a_curated_valueerror_not_a_keyerror():
+    with pytest.raises(ValueError, match=r"missing required field 'src_sha'"):
+        Manifest.from_cbor(cbor2.dumps({"name": "x"}))
+
+
+@pytest.mark.parametrize("bad_src_sha,type_name", [
+    (7, "int"),
+    ([1, 2, 3], "list"),
+    (True, "bool"),
+])
+def test_cbor_manifest_wrong_typed_src_sha_raises_instead_of_fabricating_a_hash(bad_src_sha, type_name):
+    """The major finding: `bytes(int)` zero-fills and `bytes(list[int])`
+    byte-wise-constructs, so an unguarded `from_cbor` produced a `Manifest`
+    carrying an INVENTED `src_sha` for exactly this corruption -- a CBOR
+    major-type flip on the model-source identity field -- with no exception
+    at all. Must now raise, not return a wrong value."""
+    with pytest.raises(ValueError, match=rf"field 'src_sha' must be a byte string, got {type_name}"):
+        Manifest.from_cbor(cbor2.dumps({"name": "x", "src_sha": bad_src_sha}))
+
+
+def test_cbor_manifest_non_string_name_raises_a_curated_valueerror():
+    with pytest.raises(ValueError, match=r"field 'name' must be a string, got int"):
+        Manifest.from_cbor(cbor2.dumps({"name": 7, "src_sha": b"\x00"}))

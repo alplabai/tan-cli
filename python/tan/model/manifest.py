@@ -45,6 +45,36 @@ _COV_KEYS = {"backend", "accel_config", "status", "reason"}
 VALID_BLOB_FORMATS = frozenset({"vela_tflite", "tflite", "drpai_dir", "dxnn", "onnx"})
 
 
+def _required_field(d: dict, key: str, expected: type | tuple[type, ...], type_desc: str) -> object:
+    """Look up a required top-level field in a decoded `.alpmodel` manifest
+    document (a JSON object or CBOR map that has already passed the
+    document-level `isinstance(d, dict)` guard in `from_json`/`from_cbor`),
+    raising a curated `ValueError` naming the field instead of letting the
+    bare subscript this replaces escape as a raw `KeyError` (field absent)
+    or, worse, being handed to a coercing constructor that manufactures a
+    wrong value from the wrong type (`from_cbor`'s old `bytes(d["src_sha"])`
+    zero-filled/byte-wise-coerced an int/list/bool `src_sha` into a bogus
+    hash with no diagnostic at all -- tan-cli#1023 review round 2, the
+    document-level guard stopped one field short of `name`/`src_sha`
+    themselves).
+
+    `.alpmodel` packages are machine-generated CBOR/JSON, not hand-authored
+    documents like `board.yaml` -- but `package.py`'s own bounds-checked
+    header reads already treat their bytes as wire data, not trusted
+    first-party output, and a corrupted `src_sha` (the model-source identity
+    field written by `build.py:222`) is exactly the class of corruption this
+    container's own bounds checks exist to catch. Fail loudly here, the same
+    way, rather than degrade silently."""
+    if key not in d:
+        raise ValueError(f"malformed .alpmodel manifest: missing required field {key!r}")
+    v = d[key]
+    if not isinstance(v, expected):
+        raise ValueError(
+            f"malformed .alpmodel manifest: field {key!r} must be {type_desc}, got {type(v).__name__}"
+        )
+    return v
+
+
 def _pick(d: dict, keys: set) -> dict:
     return {k: d[k] for k in keys if k in d}   # drop unknown keys + tolerate missing-known
 
@@ -179,7 +209,19 @@ class Manifest:
             raise ValueError(
                 f"malformed .alpmodel manifest: expected a JSON object, got {type(d).__name__}"
             )
-        d["src_sha"] = bytes.fromhex(d["src_sha"])
+        # `d["name"]`/`d["src_sha"]` were still bare here even after the
+        # document-level guard above -- a manifest missing either raised a
+        # raw KeyError, and a non-string `src_sha` raised a raw
+        # `TypeError: fromhex() argument must be str, not int` out of
+        # `bytes.fromhex` below, neither distinguishable from an unrelated
+        # bug in the call stack (tan-cli#1023 review round 2). `_required_field`
+        # closes both the same way the document guard above does.
+        _required_field(d, "name", str, "a string")
+        src_sha_hex = _required_field(d, "src_sha", str, "a hex string")
+        try:
+            d["src_sha"] = bytes.fromhex(src_sha_hex)
+        except ValueError as exc:
+            raise ValueError(f"malformed .alpmodel manifest: field 'src_sha' is not valid hex: {exc}") from exc
         return cls.from_dict(d)
 
     def to_cbor(self) -> bytes:
@@ -195,9 +237,21 @@ class Manifest:
             raise ValueError(
                 f"malformed .alpmodel manifest: expected a CBOR map, got {type(d).__name__}"
             )
+        # Same gap as `from_json` above, plus a worse failure mode: CBOR
+        # preserves `src_sha`'s wire type (unlike JSON's hex string), so an
+        # unguarded `bytes(d["src_sha"])` didn't raise at all for a
+        # wrong-typed `src_sha` -- `bytes(int)` is a zero-fill constructor
+        # and `bytes(list[int])` a byte-wise one, so a manifest whose
+        # `src_sha` CBOR major type got flipped from byte-string to
+        # unsigned-int/array/bool silently produced a `Manifest` carrying an
+        # INVENTED source hash (tan-cli#1023 review round 2, finding 1).
+        # `_required_field` requires the real wire type before `bytes()`
+        # ever runs on it.
+        _required_field(d, "name", str, "a string")
+        src_sha_raw = _required_field(d, "src_sha", (bytes, bytearray), "a byte string")
         return cls(
             name=d["name"],
-            src_sha=bytes(d["src_sha"]),
+            src_sha=bytes(src_sha_raw),
             inputs=[Tensor(**_pick(t, _TENSOR_KEYS)) for t in d.get("inputs", [])],
             outputs=[Tensor(**_pick(t, _TENSOR_KEYS)) for t in d.get("outputs", [])],
             targets=[Target(**_pick(t, _TARGET_KEYS)) for t in d.get("targets", [])],
