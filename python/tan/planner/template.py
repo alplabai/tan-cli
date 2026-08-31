@@ -323,14 +323,28 @@ def _rendered_bytes(
 
 def _load_som_doc(sku: str, metadata_root: Path) -> dict[str, Any]:
     """Parse metadata/e1m_modules/<sku>.yaml -- shared by
-    `_default_preset_for_sku` (the `default_board:` field) and
-    `_derive_core_renames` (the `topology:` block), so both read the
-    exact same doc for the same `(sku, metadata_root)`."""
+    `_default_preset_for_sku` (the `default_board:` field),
+    `_derive_core_renames` (the `topology:` block), and `_core_board`
+    (also `topology:`), so all three read the exact same doc for the
+    same `(sku, metadata_root)`."""
     som_path = metadata_root / "e1m_modules" / f"{sku}.yaml"
     if not som_path.is_file():
         raise TemplateError(
             f"no metadata/e1m_modules/{sku}.yaml for sku {sku!r}")
-    return yaml.safe_load(som_path.read_text(encoding="utf-8")) or {}
+    doc = yaml.safe_load(som_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(doc, dict):
+        # Mirrors `resolve_targets`'s `preset` guard (tan-cli#1010,
+        # `tan/model/targets.py:311-320`): a SoM YAML that parses but is
+        # not a mapping (e.g. a bare list or a bare scalar) must not
+        # reach a caller's bare `.get(...)` -- every caller of this
+        # function does exactly that -- which raises a raw
+        # AttributeError instead of a curated error a caller can
+        # distinguish from any other such error in the call stack
+        # (tan-cli#1025).
+        raise TemplateError(
+            f"malformed SoM preset at {som_path}: expected a YAML "
+            f"mapping, got {type(doc).__name__}")
+    return doc
 
 
 def _default_preset_for_sku(sku: str, metadata_root: Path) -> str:
