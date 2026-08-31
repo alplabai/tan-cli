@@ -57,7 +57,7 @@
     "tests/commands/test_model_command.py": 942,
     "tests/commands/test_new_som_command.py": 1680,
     "tests/commands/test_presets_command.py": 1253,
-    "tests/commands/test_sdk_command.py": 1960,
+    "tests/commands/test_sdk_command.py": 1967,
     "tests/commands/test_size_command.py": 959,
     "tests/commands/test_support_bundle_command.py": 955,
     "tests/commands/test_validate_command.py": 1234,

@@ -1808,7 +1808,10 @@ def test_remove_refuses_outside_the_cache_root_without_force_and_force_clears_it
     )
     assert refused["ok"] is False
     assert refused["issues"][0]["code"] == "sdk.remove-outside-root"
-    assert str(outside) in refused["issues"][0]["message"]
+    # Posix-folded: every path this CLI reports goes through `_abs_posix`, so the
+    # message is forward-slash on every platform while `str(Path)` is backslash on
+    # Windows -- comparing the raw `str` asserted a spelling the CLI never emits.
+    assert str(outside).replace("\\", "/") in refused["issues"][0]["message"]
     assert outside.exists()
 
     forced = envelope(
@@ -1935,7 +1938,11 @@ def test_remove_prunes_only_the_matching_registry_entries(
     registry = json.loads(registry_file.read_text(encoding="utf-8"))
     assert str(project_a) not in registry
     assert str(project_b) in registry
-    assert registry[str(project_b)]["sdkPath"] == str(kept_target).replace("\\", "/")
+    # VERBATIM, not normalised: the prune drops matching entries and rewrites the
+    # rest exactly as it found them. Normalising a surviving entry would silently
+    # rewrite data this command does not own -- so the expectation is the literal
+    # value `write_registry` stored, which is backslash-spelled on Windows.
+    assert registry[str(project_b)]["sdkPath"] == str(kept_target)
 
 
 def test_remove_named_version_is_looked_up_under_destination(
