@@ -724,3 +724,13 @@ several less obvious failures.
   reasoning for moving to a directory-of-files instead of patching this
   file's own conflict behaviour further live in tan-cli#907 and in
   `scripts/regen_module_size_budget.py`'s module docstring.
+- 2026-08-31 -- tan-cli#907 round-3 correction: this file's own opening
+  paragraph above ("this file carries `merge=union` in the repo's
+  `.gitattributes`") is now false, not just superseded -- as of this same
+  change `.gitattributes` no longer carries that entry at all (it applied
+  only to this file, and this file no longer accepts new entries, so the
+  driver that existed solely to union-merge its tail region has nothing left
+  to do). This is a third, separate correction, no number changed: the FROZEN
+  note directly above corrected the "writes one entry here every time" claim;
+  this corrects the neighbouring `merge=union` claim in that same opening
+  paragraph, which the FROZEN note did not touch.
