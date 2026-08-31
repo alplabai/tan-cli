@@ -144,10 +144,12 @@ create a second list that immediately drifts.
 | `data.checks[].scope` | `doctor` (both invocations); also the `support-bundle` FILE's `doctor.checks[]`, not that command's envelope | `python/tests/gates/test_doctor_check_scope.py` + `test_every_check_on_the_wire_carries_a_scope` — see "`doctor` check scope" below |
 | `data.written` | `build --materialise` | **NOT COVERED.** Reaching it needs a resolvable alp-sdk checkout and a Python spawn; nothing in this suite is allowed either. |
 | `data.releases[].{tag,publishedAt,tarballUrl,releaseNotesSummary,releaseNotes,draft,prerelease}`, `data.subcommand` | `sdk list` | **PUBLISHED key set** (`contract/sdk-list-data-keys.json` → `envelope-contract.json`'s `envelopes.sdk-list`), tan-cli#887. Not a byte golden and not a fixture dir, for the same reason `doctor` is not: the values are whatever alp-sdk has published on GitHub at the moment of the call. Kept in lockstep by `python/tests/conformance/test_sdk_list_contract_key_set.py`, which runs the real command with **only the socket replaced** and fails on an emitted key nobody declared or a declared key the command stopped emitting. It does NOT prove GitHub still sends what tan reads — nothing offline can — only that the payload→wire mapping is the declared one. `draft`/`prerelease` are always real booleans, defaulting to `false` when the payload omits them (tan-cli#122), and `releases` is `[]`, never absent, on the no-`--online` and fetch-failure paths. |
+| `data.{subcommand,removed,path,version,wasActive,freedBytes}` | `sdk remove` | golden `sdk-remove-absent` (tan-cli#790), the one fully offline/hermetic case: an idempotent no-op on a target that was never there, `removed: false`. `data.path` is the resolved absolute target — new to `PATH_KEYS`, so it normalises to `__WORKDIR__` the same way `boardYamlPath`/`launchJsonPath` already do. The six refusal/failure codes (`sdk.remove-missing-argument`, `sdk.remove-outside-root`, `sdk.remove-is-cache-root`, `sdk.remove-active`, `sdk.remove-in-use`, `sdk.remove-permission` — flat, one dash, no dot; `contract/issue-codes.json`'s own entries explain why a nested `sdk.remove.<reason>` shape is not on this wire at all) and a real successful removal all need a filesystem the harness cannot pre-seed hermetically (a real install to delete, a real lock/permission to trip) — covered instead by `python/tests/commands/test_sdk_command.py`'s own removal-behaviour tests, including mutation-proved read-only-directory, `wasActive`-on-refusal, outside-root-refusal, and cache-root-itself-refusal cases. |
 | `data.sku`, `.boardYaml`, `.slices[].{coreId,backend,buildDir,env,command,configArtefacts[].{path,contents}}`, `.sharedArtefacts[].{path,contents}`, `.warnings[].{code,coreId,message}` | `build --plan` | **NOT COVERED, and now permanently unreachable.** tan-cli#427 RETIRED the flag rather than implementing it -- "Two overlapping plan surfaces is worse than one, so the oracle spellings go" (the maintainer's own decision). `tan build --plan --format json` answers `ok:false`, `exitCode:2`, `build.flag-retired`, naming `--plan-from` (plus `--materialise`/`--execute` to act on it) as the replacement in the refusal message itself -- the refusal envelope's `data` carries only that message, never plan data, and never will through this flag. Two different producers sat behind this row before the retirement, and only one of them survives (tan-cli#853): `--plan-from` (reachable today, unchanged by #427; `_acquire_plan`, `build_cmd.py:874`, called at `:1534`) reads the caller's own plan FILE and echoes it verbatim at exit 0 once it parses -- an unreadable file still refuses -- returning BEFORE `apply_plan_token_substitution` runs (`_MODE_PLAN`'s early return); a passthrough of the caller's file, not this emitter, so a golden recorded from it pins whatever fixture it was handed, tokens or not. `--plan` itself would instead have echoed whatever `emit_build_plan` (`python/tan/planner/buildplan.py:375`) renders in-process -- MEASURED, before the retirement, against a real board (`emit('build-plan', ..., board_yaml=examples/multicore/rpmsg-v2n/board.yaml)`): the plan was tagged `"planPathMode": "tokened"` and every slice's `env.ALP_SDK_ROOT` / `envAppendPath.{EXTRA_ZEPHYR_MODULES,PYTHONPATH}` carried a literal, UNSUBSTITUTED `${SDK_ROOT}` token (`buildplan.py:610,620-623,636`) -- emitter facts, not fields this consumer currently binds (`alp-sdk-vscode@dev`'s `BuildPlanData`/`BuildPlanSlice`, `src/ideHub/messages.ts:456-481`, declare neither); the same held for `schemaVersion`, which the TS interface DOES declare but which `packages/alp-core/src/tanPayloadShape.ts`'s `BUILD_PLAN_SHAPE` names explicitly "NOT read on this path". That whole paragraph is kept here as the HISTORICAL record of what this row's `data` shape would have been, not a live description: with `--plan` retired, the in-process planner's own raw JSON is dispatched (not shown) by an ordinary `tan build`, and no other flag echoes it unsubstituted, so nothing above is reachable through any `tan build` invocation any more. `src/ideHub/buildPlanPanel.ts` (tan-cli#200) has nothing left to read from `build --plan`; if a future flag resurrects in-process plan display, re-measure rather than trust this paragraph. |
 | `data.slices[].{core_id,os,status,flash_method,build_dir,board,machine,image,app,reason,output_artefact,log_path}`, `.ipc[].{name,kind,endpoints[],status,reason}`, `.helper_mcus[].{name,chip,flash_method,firmware_path}` | `build --manifest`, `build --manifest-from <path>` | **NOT COVERED, and now permanently unreachable.** tan-cli#427 RETIRED both flags rather than implementing them: a native `tan build` already writes `build/system-manifest.yaml` (plain YAML, readable directly), so neither flag was implemented on top of it. `tan build --manifest --format json` / `--manifest-from <path>` each answer `ok:false`, `exitCode:2`, `build.flag-retired`, naming that file as the replacement in the refusal message itself -- never `cli.command-deferred`/exit 1 any more. Note for whoever freezes `system-manifest.yaml`'s own shape instead (the artefact these flags would have echoed): the extension matches the literal `"TBD"` on `slices[].flash_method`, `helper_mcus.flash_method` and `helper_mcus.firmware_path` to gate its Flash button, and matches `slices[].os === "off"` to decide whether a core participates -- both are load-bearing wire VALUES, not placeholders tan may change freely. |
 | `data.slices[]` keyed by `.core_id`; `.status`, `.flash`, `.ram` (each `{used,total,pct}`, any member `null`), `.budget_note` | `size` | **NOT COVERED.** The command is reachable but needs a built ELF and a manifest -- a bare run answers `ok:false`, `exitCode:1`, `size.manifest-unavailable`. `slices[].status` is matched BY VALUE (`not-built`, `n/a`, `over`, `warn`, `no-budget`; anything else renders as "in budget"), so those strings are wire content. |
 | `data.configuration` (the `launch.json` entry alp-sdk-vscode#342 writes verbatim) | `debug-config` | goldens `debug-config-preview-{zephyr-mcu,zephyr-mcu-sdk-identity,baremetal-mcu,native-host,yocto-userspace}` — one per `--target-kind`, re-recorded against the shipping CLI under tan-cli#502 and no longer `xfail`'d, so an added key or a changed `program`/`executable` reds here. Oracle-parity fixtures additionally covered the bare `zephyr-mcu` invocation (all three servers) and `native-host`, but they consumed `crates/` and were deleted with it in tan-cli#269; these goldens are what survived. |
+| `data.programsDevice` (additive at `schemaVersion` `"1"`), `data.configuration.loadFiles` (cortex-debug targets only) | `debug-config` | same five goldens, second re-record under tan-cli#945 (see "Why the five `debug-config-preview-*` goldens were re-recorded" below). tan-cli#945: a consumer had no way to tell, from the written profile alone, whether starting it programs the attached target — cortex-debug's own `loadFiles` schema default silently falls back to `executable` ("if this property does not exist, then the executable is used to program the device", `marus25.cortex-debug` 1.12.1), which alp-sdk-vscode#586 had to reimplement client-side because neither of its flash gates could see the write happen inside cortex-debug's own spawned probe server. `programsDevice` is `true` for `zephyr-mcu`/`baremetal-mcu`, `false` for `yocto-userspace` (a `cppdbg` attach to an already-deployed gdbserver) and `native-host` (no target hardware exists) — `tan.core.debug_launch.programs_device`, keyed on `targetKind` alone, so it is present on every outcome this command can report, including a validation failure with `configuration: null`. It is not necessarily *correct* on every one of those: the internal-failure backstop paths (`_internal_failure` and its siblings) report a fixed `zephyr-mcu`/`none` placeholder target that never learned what was actually asked for, so `programsDevice` on those is present and CONSERVATIVE (`true`, fail-safe) rather than an answer for the target the caller actually named (tan-cli#1020 review) — understating the write is the bug class this field exists to close; overstating it is merely unhelpful. The same conservative mismatch can also happen on an ordinary, successful write: `programsDevice` is keyed on `targetKind` alone, never on the `loadFiles` this particular write actually lands, so a merge that PROTECTS a customer's own explicit attach-only `[]` (see below) still reports `programsDevice: true` beside `data.configuration.loadFiles: []` in the same exit-0 payload (tan-cli#1020 re-review) — a consumer that needs per-write precision reads `data.configuration.loadFiles` itself rather than trusting `programsDevice` alone for that one case. `loadFiles` is emitted explicitly on every cortex-debug draft, naming the SAME artefact `executable` does, and both are kept in sync by `apply_launch_resolution` once a real build resolves one. A hand-authored `loadFiles` already in the file — an explicit `[]` for attach-only included — is protected on a rerun rather than merged or overwritten unless `.alp/debug-launch-provenance.json` proves tan wrote it itself; see `debug-config.load-files-preserved` below for the disclosure and `tan.core.debug_launch._merge_load_files` for the merge rule (tan-cli#1020 review). |
 
 The four NOT COVERED rows -- `build --materialise`, `build --plan`,
 `build --manifest*` and `size` -- are stated rather than quietly omitted: an
@@ -456,28 +458,35 @@ just the one that captured it:
   `python/tan/core/timestamp.py::generated_at_iso`; set
   unconditionally even though none of the current cases emit a timestamp, so
   a future timestamped case is covered without touching the harness.
-- **No absolute paths in argv** — every case invokes `tan` without
-  `--project`/`--sdk-root`/`--destination`, so path fields the CLI reflects
-  back (`project.root`, `boardYamlPath`, …) come out as `.`/`./board.yaml`
-  rather than an absolute, machine-specific path. Nothing needed a
+- **No absolute paths in argv** — every case invokes `tan` without an
+  absolute `--project`/`--sdk-root`/`--destination`, so path fields the CLI
+  reflects back (`project.root`, `boardYamlPath`, …) come out as
+  `.`/`./board.yaml` rather than a machine-specific one. Nothing needed a
   `__SDKROOT__`-style substitution token (the convention `tests/parity/`
-  uses) as a result.
+  uses) as a result. `sdk-remove-absent` (tan-cli#790) is the first case to
+  pass `--destination` at all — a RELATIVE one (`./sdk-cache`), so the rule
+  still holds — and the first whose `data` reflects an absolute path anyway
+  (`data.path`, the resolved removal target): that field is what made `path`
+  join `PATH_KEYS`, so it normalises through the `__WORKDIR__` substitution
+  below instead of a third token kind.
 - **Scoped path-separator normalization** — the one thing case selection
   can't avoid by construction: Windows path rendering produces
   `./board.yaml` as `.\board.yaml` on Windows. The harness normalizes
   `\` → `/` on the freshly captured side before diffing, but only on the
   known path-shaped fields (`root`, `boardYaml`, `boardYamlPath`,
-  `destination`, `relativePath`, `sdkPath`, `sdkPinned`, `written`,
+  `destination`, `path`, `relativePath`, `sdkPath`, `sdkPinned`, `written`,
   `unchanged`, `launchJsonPath` — see `PATH_KEYS` in the Python conformance
   harness), not every
   string leaf. A blanket rewrite would also launder a real drift inside
   `issues[].message` or any other value that happens to contain a backslash —
   exactly the kind of change this gate exists to catch. Committed goldens are
   authored with forward slashes in those fields, matching the normalized form.
-- **`__WORKDIR__` for a reflected absolute path** — the one case the
+- **`__WORKDIR__` for a reflected absolute path** — the case family the
   "no absolute paths in argv" rule above cannot cover: `debug-config` reports
   the working directory it resolved (`project.root`) and the `launch.json`
-  path it would write, absolute, whatever the argv. Those two fields are
+  path it would write, absolute, whatever the argv; `sdk remove` (tan-cli#790)
+  resolves its `<version|path>` argument against `--destination` and reports
+  that resolved, absolute `data.path` back the same way. Those fields are
   substituted down to the `__WORKDIR__` token on the captured side. The
   substitution anchors on the case's unique scratch-dir marker
   (`tan-contract-<case>-<pid>/root`) rather than on the harness's own
@@ -497,6 +506,7 @@ just the one that captured it:
 | `validate-offline-empty-document` | `validate --offline --format json` (empty fixture `board.yaml`) | 2 | An empty/comment-only document used to report exit 0 "clean" — pins that the shipping Python CLI refuses it, message and exit code alike, as the frozen Rust oracle did when it was recorded. |
 | `sdk-current-no-sdk` | `sdk current --format json` | 0 | Reports `sourceTier: "none"` in a workspace with no SDK configured — offline, host-independent given the isolated `HOME`. |
 | `sdk-unknown-subcommand` | `sdk bogus --format json` | 1 | Runtime-failure envelope shape; the only offline path that exercises exit code 1 in this set. |
+| `sdk-remove-absent` | `sdk remove v0.0.0-nonexistent --destination ./sdk-cache --format json` | 0 | tan-cli#790: idempotent removal of a target that was never there — `removed: false`, `freedBytes: 0`, exit 0 (a no-op is a SUCCESS, matching `sdk current`'s "nothing configured" convention). `--destination ./sdk-cache` is a relative argv token, matching the "no absolute paths in argv" rule below; `data.path` still comes back absolute (the resolved target), which is what makes it the first case to need the `__WORKDIR__` substitution for a field OTHER than `project.root`/`launch.json`. |
 | `generate-board-yaml-missing` | `generate --format json` (no `board.yaml` present) | 2 | `generate`'s `data` schema (`{schemaVersion,targets,written,failed}`) is distinct from `init`'s and was otherwise completely unguarded — this is the first guard clause in `python/tan/commands/generate_cmd.py`, needing no board/SDK/network to reach. |
 | `debug-config-preview-zephyr-mcu` | `debug-config --target-kind zephyr-mcu --server jlink --preview` | 0 | |
 | `debug-config-preview-zephyr-mcu-sdk-identity` | `debug-config --target-kind zephyr-mcu --server jlink --core m55_hp --sdk-root ./sdk --preview` (fixture SDK) | 0 | |
@@ -602,6 +612,24 @@ five matching the retired oracle any more — and re-recording is what stops
 `data.configuration` losing its last envelope-level gate on the three cases
 (`zephyr-mcu-sdk-identity`, `baremetal-mcu`, `yocto-userspace`) that never had
 a parity fixture.
+
+### Second re-record: `data.programsDevice` + `loadFiles` (tan-cli#945)
+
+All five `debug-config-preview-*` goldens were re-recorded a SECOND time, on
+2026-08-30 against `tan 0.6.1-rc1.dev0`, purely additively — `data.
+schemaVersion` stays `"1"` on every one. Two new facts, both explained in
+full in the `data.programsDevice`/`data.configuration.loadFiles` row of the
+frozen-`data`-field-names table above:
+
+- `data.programsDevice: bool` on every case (`true` for the two cortex-debug
+  targets, `false` for `yocto-userspace`/`native-host`).
+- `data.configuration.loadFiles` on the three cortex-debug cases
+  (`zephyr-mcu`, `zephyr-mcu-sdk-identity`, `baremetal-mcu`) only — it is not
+  a field `cppdbg`/`lldb` have any concept of, so `yocto-userspace` and
+  `native-host`'s `configuration` is untouched by this re-record.
+
+Each case's `PROVENANCE.txt` carries its own "second re-record" section with
+the exact diff. `issues[]` is unchanged on all five.
 
 Deliberately **outside the envelope**: nothing, as of tan-cli#399's close-out.
 `faultdecode` was the one verb here — its `--format json` used to print the

@@ -64,13 +64,17 @@ CONTRACT = Path(__file__).resolve().parents[3] / "contract" / "envelopes"
 FIXTURES = sorted(p for p in CONTRACT.iterdir() if p.is_dir()) if CONTRACT.is_dir() else []
 
 #: Envelope fields that carry a filesystem path and so need separator
-#: normalisation. Verbatim from ``PATH_KEYS`` in ``crates/tan-cli/tests/contract.rs``.
+#: normalisation. Originally verbatim from ``PATH_KEYS`` in the now-deleted
+#: ``crates/tan-cli/tests/contract.rs`` (tan-cli#269); ``path`` was added for
+#: ``sdk remove`` (tan-cli#790), whose ``data.path`` is the resolved,
+#: absolute removal target.
 PATH_KEYS = frozenset(
     {
         "root",
         "boardYaml",
         "boardYamlPath",
         "destination",
+        "path",
         "relativePath",
         "sdkPath",
         "sdkPinned",

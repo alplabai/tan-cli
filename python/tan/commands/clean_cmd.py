@@ -79,8 +79,6 @@ a PATH handed to a recursive removal.
 from __future__ import annotations
 
 import os
-import shutil
-import stat
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -90,6 +88,14 @@ import typer
 
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
+from tan.core.dir_removal import (
+    is_link,
+    os_error_text,
+    remove_dir as _remove_dir,
+)
+from tan.core.dir_removal import (
+    _retry_after_clearing_readonly,  # noqa: F401 -- re-exported for tests, see the removal block below
+)
 from tan.core.sdk_discovery import (
     global_default_foreign_project_issue,
     project_pin_issue,
@@ -577,158 +583,20 @@ def _read_manifest(build_root: str) -> tuple[list[dict[str, Any]], str | None]:
 # Removal
 # ---------------------------------------------------------------------------
 
-
-def is_link(path: str) -> bool:
-    """Whether `path` is a link that must not be followed -- a POSIX symlink, a
-    Windows directory symlink, OR a Windows JUNCTION.
-
-    **`os.path.islink` is not this test.** On Windows `ntpath.islink` returns
-    True only for `IO_REPARSE_TAG_SYMLINK`; a junction is
-    `IO_REPARSE_TAG_MOUNT_POINT`, and `stat.S_ISLNK` is False for it as well.
-    Measured on this host: for `build/` junctioned at an out-of-tree directory,
-    `os.path.islink` and `S_ISLNK` both report False while
-    `st_reparse_tag == IO_REPARSE_TAG_MOUNT_POINT`. A guard written on
-    `os.path.islink` therefore lets a junction reach `shutil.rmtree` -- which
-    has its OWN, correct check (`shutil._rmtree_islink`, mirrored here) and
-    refuses, so nothing outside the tree is destroyed, but the junction is then
-    never cleaned and the run reports a spurious `remove-failed`. This was a
-    live defect in the first cut of this port, caught only by diffing against
-    the Rust binary.
-    """
-    try:
-        st = os.lstat(path)
-    except (OSError, ValueError):
-        return False
-    if stat.S_ISLNK(st.st_mode):
-        return True
-    attributes = getattr(st, "st_file_attributes", 0)
-    return bool(
-        attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-        and getattr(st, "st_reparse_tag", 0)
-        == getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", -1)
-    )
-
-
-def os_error_text(err: BaseException) -> str:
-    """An `OSError` rendered the way Rust's `io::Error` Display renders it:
-    `<system message> (os error <code>)`.
-
-    Python's own `str(OSError)` is `[WinError 32] <message>: '<path>'`, which
-    both differs from the oracle and repeats a path the message already names.
-    The Windows error code (`winerror`) is preferred over the translated
-    `errno`, matching Rust, which reports the raw OS code.
-
-    One character still differs on Windows: `FormatMessageW` ends its sentences
-    with a period and Rust keeps it, while Python's `strerror` strips it. Not
-    synthesized here -- guessing at punctuation inside a system message is worse
-    than a documented one-character divergence in a warning string.
-    """
-    if not isinstance(err, OSError):
-        return str(err)
-    code = getattr(err, "winerror", None) or err.errno
-    if err.strerror is None or code is None:
-        return str(err)
-    return f"{err.strerror} (os error {code})"
-
-
-#: The two functions `shutil.rmtree` hands its error hook that CANNOT be called
-#: with one positional argument. On POSIX `rmtree` runs the fd-based
-#: `_rmtree_safe_fd` walk, which reports failures of `os.open` (shutil 3.12
-#: lines 682 and 781) and `os.close` (692/712/791/808) through the same hook as
-#: the one-argument `os.scandir`/`os.unlink`/`os.rmdir`/`os.lstat`. `os.open`
-#: needs `flags` and `os.close` takes an fd, not the path the hook is handed --
-#: so retrying either is a `TypeError`, not a repair. Windows' `_rmtree_unsafe`
-#: never passes these, which is why the crash was POSIX-only.
-_NOT_RETRYABLE_WITH_PATH_ALONE = frozenset({os.open, os.close})
-
-
-def _reraise_removal_failure(func, path, exc) -> None:
-    """Re-raise the failure `shutil.rmtree` reported, so the caller's
-    `except (OSError, ValueError)` sees it and answers `clean.remove-failed`.
-
-    `exc` is the exception under `onexc` and an `exc_info` TUPLE under the
-    deprecated `onerror` (see `_RMTREE_HOOK`), so both shapes are unwrapped
-    here. A hook that has nothing to re-raise still must not return quietly --
-    `rmtree` would then report the tree as removed -- so the fallback states the
-    operation that failed.
-    """
-    if isinstance(exc, tuple) and len(exc) == 3:
-        exc = exc[1]
-    if isinstance(exc, BaseException):
-        raise exc
-    raise OSError(f"{getattr(func, '__name__', func)} failed on {path}")
-
-
-def _retry_after_clearing_readonly(func, path, exc=None) -> None:
-    """`shutil.rmtree` error hook: clear the read-only bit and retry once.
-
-    Rust's `remove_dir_all` deletes a read-only file on Windows outright (it
-    passes `FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE`), where `shutil.rmtree`
-    fails the WHOLE tree with `[WinError 5] Access is denied`. Measured against
-    the Rust binary: one read-only file inside `build/` had Rust remove the
-    build dir and exit 0 while the port left every artefact in place and warned.
-    Read-only build outputs are ordinary -- some toolchains mark generated files
-    that way -- so this is the primary path, not an exotic one.
-
-    `st_mode | S_IWUSR` rather than a bare `S_IWRITE`: on POSIX the latter would
-    replace the whole mode with `0o200` and strip the owner's read/execute bits
-    from a directory mid-walk. A failure here propagates out of `rmtree` and is
-    reported by the caller as `clean.remove-failed`.
-
-    The retry is only attempted for a `func` that a path alone can drive
-    ([`_NOT_RETRYABLE_WITH_PATH_ALONE`]). It used to end in a bare `func(path)`,
-    so a build directory the invoking user OWNS but cannot open -- a
-    `chmod -R a-r` or tar-preserved tree, where `os.chmod` SUCCEEDS and
-    `os.open` is what failed -- raised `TypeError: open() missing required
-    argument 'flags' (pos 2)`. That is neither `OSError` nor `ValueError`, so it
-    sailed past the caller's best-effort guard, aborted the target loop and hit
-    `clean`'s outer catch-all: exit 5, `clean.internal-failure`, and every
-    remaining target (`.alp-build-state.json` and every out-of-tree slice dir)
-    silently skipped. Measured on the oracle for the same tree: exit 0, a
-    `clean.remove-failed` WARNING, and the state file removed -- which is what
-    re-raising the original failure restores.
-    """
-    if func in _NOT_RETRYABLE_WITH_PATH_ALONE:
-        _reraise_removal_failure(func, path, exc)
-    os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
-    try:
-        func(path)
-    except TypeError:
-        # Belt and braces for a future `shutil` that routes one more
-        # many-argument callable through this hook: the removal still failed,
-        # and it must be reported as such rather than escaping as a `TypeError`.
-        _reraise_removal_failure(func, path, exc)
-
-
-#: `shutil.rmtree`'s error-hook keyword. `onerror` is deprecated from 3.12 and
-#: scheduled for removal; `onexc` does not exist before it. Selected once here so
-#: the call site stays a single expression on either interpreter -- the handler
-#: signature is compatible because it ignores its third argument, which is the
-#: only thing the two hooks disagree about (`exc_info` tuple vs exception).
-_RMTREE_HOOK = "onexc" if sys.version_info >= (3, 12) else "onerror"
-
-
-def _remove_dir(path: str) -> None:
-    """Remove a directory target recursively, never following a link out of the
-    tree.
-
-    A link ([`is_link`]) is unlinked ITSELF, exactly as the oracle's
-    `remove_dir_all` does on Windows: verified against the Rust binary with
-    `build/` junctioned at an out-of-tree directory -- the junction goes, the
-    target's contents stay. `shutil.rmtree` handles the ordinary case and never
-    recurses through a link INSIDE the tree, so both arms are contained.
-
-    `os.rmdir` before `os.unlink`: on Windows a junction or directory symlink is
-    removed by `RemoveDirectory`, and `unlink` fails on it; on POSIX `rmdir`
-    fails on a symlink and `unlink` is what removes it.
-    """
-    if is_link(path):
-        try:
-            os.rmdir(path)
-        except OSError:
-            os.unlink(path)
-        return
-    shutil.rmtree(path, **{_RMTREE_HOOK: _retry_after_clearing_readonly})
+# `is_link`/`os_error_text`/`_reraise_removal_failure`/
+# `_retry_after_clearing_readonly`/`_RMTREE_HOOK`/`remove_dir` MOVED to
+# `tan.core.dir_removal` (tan-cli#790, imported at the top of this file):
+# `tan sdk remove` needs the identical read-only-retry/junction-safe removal
+# `tan clean` already carries, and `tan.core` may import no `tan.commands.*`
+# module, so the shared primitives had to live below both rather than inside
+# either. Re-imported under their ORIGINAL names (`_remove_dir` is
+# `remove_dir` aliased), so every internal call site below is unchanged and
+# so the existing test suite's `monkeypatch.setattr(clean_cmd, "_remove_dir",
+# ...)` and `from tan.commands.clean_cmd import is_link, os_error_text,
+# _retry_after_clearing_readonly` keep resolving exactly as before -- a
+# monkeypatch only cares which module ATTRIBUTE it overwrites, never which
+# module originally defined the value that attribute pointed at, and an
+# `import` binds a module-level attribute the same way a `def` would.
 
 
 # ---------------------------------------------------------------------------

@@ -1614,3 +1614,399 @@ def test_the_socks_refusal_names_https_proxy_when_that_is_what_won(monkeypatch):
     assert error is not None
     assert error.startswith("Alp SDK: https_proxy names a socks5h:// proxy")
     assert "Unset https_proxy, or point it at an http:// or https:// proxy" in error
+
+
+# ── sdk remove (tan-cli#790) ─────────────────────────────────────────────────
+#
+# Destructive, so every test here plants a canary directory the removal must
+# NOT touch (`assert_sibling_intact`) alongside the assertion that matters --
+# the same discipline `test_clean_command.py` uses for its own removal paths.
+
+
+def assert_sibling_intact(destination):
+    """A canary sitting BESIDE the removal target, under the same cache root
+    -- proof that a refused or failed removal (or the wrong-path removal a
+    regression could aim at) took out only what it was told to."""
+    assert (destination / "canary" / "scripts" / "alp_project.py").exists()
+
+
+@pytest.fixture
+def cache_with_canary(tmp_path):
+    destination = tmp_path / "sdk-cache"
+    make_sdk_root(destination / "canary", version="canary")
+    return destination
+
+
+def test_remove_absent_target_is_idempotent(tmp_path, isolated_home, cache_with_canary):
+    env = envelope(
+        run_tan(
+            "sdk", "remove", "v9.9.9-never-installed",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert env["ok"] is True
+    assert env["exitCode"] == 0
+    assert env["issues"] == []
+    assert env["data"] == {
+        "subcommand": "remove",
+        "removed": False,
+        "path": str(cache_with_canary / "v9.9.9-never-installed").replace("\\", "/"),
+        "version": "v9.9.9-never-installed",
+        "wasActive": False,
+        "freedBytes": 0,
+    }
+    assert_sibling_intact(cache_with_canary)
+
+
+def test_remove_deletes_a_broken_symlink_rather_than_calling_it_absent(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """A DANGLING link is still on disk, so `remove` must delete it and report
+    `removed: true` -- not follow it, find nothing behind it, and claim the slot
+    was already absent.
+
+    `Path.exists()` follows the link and answers False for exactly this
+    arrangement, which is an ordinary leftover in a cache that has had an
+    install removed out from under a `current ->` style pointer. Reporting it
+    absent breaks the idempotence tan-cli#790 asks for in its own point 3: the
+    rotation script that trusted the success then fails on the NEXT install into
+    a slot whose path already exists. Everything below the existence gate
+    already handled links correctly (`compute_tree_bytes` charges the link's own
+    `lstat` size; `dir_removal.remove_dir` unlinks the link itself rather than
+    recursing through it), so the gate was the single place it was invisible.
+    """
+    stale = cache_with_canary / "v0.15.0"
+    try:
+        stale.symlink_to(tmp_path / "never-existed", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this host cannot create a symlink")
+    assert not stale.exists()      # follows the link: nothing behind it
+    assert os.path.lexists(stale)  # the link ITSELF is on disk
+
+    env = envelope(
+        run_tan(
+            "sdk", "remove", "v0.15.0",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert env["ok"] is True
+    assert env["issues"] == []
+    assert env["data"]["removed"] is True
+    assert not os.path.lexists(stale)
+    assert_sibling_intact(cache_with_canary)
+
+
+def test_remove_deletes_an_install_and_reports_freed_bytes(
+    tmp_path, isolated_home, cache_with_canary
+):
+    target = make_sdk_root(cache_with_canary / "v0.15.0", version="0.15.0")
+    (target / "blob.bin").write_bytes(b"x" * 1000)
+
+    env = envelope(
+        run_tan(
+            "sdk", "remove", "v0.15.0",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert env["ok"] is True
+    assert env["data"]["removed"] is True
+    assert env["data"]["version"] == "v0.15.0"
+    assert env["data"]["freedBytes"] > 1000  # the blob plus the scaffold files
+    assert not target.exists()
+    assert_sibling_intact(cache_with_canary)
+
+    # Idempotent on immediate re-run -- the whole point of the property.
+    again = envelope(
+        run_tan(
+            "sdk", "remove", "v0.15.0",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert again["ok"] is True
+    assert again["data"]["removed"] is False
+    assert again["data"]["freedBytes"] == 0
+
+
+def test_remove_with_no_argument_refuses(tmp_path, isolated_home):
+    env = envelope(run_tan("sdk", "remove", "--format", "json", cwd=tmp_path))
+    assert env["ok"] is False
+    assert env["exitCode"] == 1
+    assert env["issues"] == [
+        {
+            "code": "sdk.remove-missing-argument",
+            "severity": "error",
+            "message": (
+                "`sdk remove` needs a version name (looked up under --destination) "
+                "or an explicit path naming the install to remove."
+            ),
+        }
+    ]
+    assert env["data"]["removed"] is False
+    assert env["data"]["path"] is None
+
+
+def test_remove_refuses_the_active_install_without_force_and_force_clears_it(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#790's central safety bar: silently orphaning the workspace's
+    own active SDK is a worse failure than refusing. `--force` is the
+    prescribed remedy -- proven here to actually clear the refusal, not just
+    be accepted as a flag."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    target = make_sdk_root(cache_with_canary / "v0.16.0", version="0.16.0")
+    write_pointer(workspace / ".alp" / "sdk-path", target)
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", "v0.16.0",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["exitCode"] == 1
+    assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert "active alp-sdk for this workspace" in refused["issues"][0]["message"]
+    assert 'sourceTier "projectPin"' in refused["issues"][0]["message"]
+    assert refused["data"]["wasActive"] is True
+    assert refused["data"]["removed"] is False
+    assert target.exists(), "a refused removal must not touch the filesystem at all"
+
+    forced = envelope(
+        run_tan(
+            "sdk", "remove", "v0.16.0", "--force",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert forced["ok"] is True
+    assert forced["data"]["removed"] is True
+    assert forced["data"]["wasActive"] is True
+    assert not target.exists()
+    assert_sibling_intact(cache_with_canary)
+
+
+def test_remove_refuses_outside_the_cache_root_without_force_and_force_clears_it(
+    tmp_path, isolated_home
+):
+    outside = tmp_path / "elsewhere" / "some-checkout"
+    make_sdk_root(outside, version="stray")
+    destination = tmp_path / "sdk-cache"
+    destination.mkdir()
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", str(outside),
+            "--destination", str(destination), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-outside-root"
+    # Posix-folded: every path this CLI reports goes through `_abs_posix`, so the
+    # message is forward-slash on every platform while `str(Path)` is backslash on
+    # Windows -- comparing the raw `str` asserted a spelling the CLI never emits.
+    assert str(outside).replace("\\", "/") in refused["issues"][0]["message"]
+    assert outside.exists()
+
+    forced = envelope(
+        run_tan(
+            "sdk", "remove", str(outside), "--force",
+            "--destination", str(destination), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert forced["ok"] is True
+    assert forced["data"]["removed"] is True
+    assert not outside.exists()
+
+
+def test_remove_refuses_the_cache_root_itself_without_force_and_force_clears_it(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#790 review follow-up, same PR: naming the cache root EXACTLY
+    (whether by an explicit path equal to `--destination`, or `.` from a cwd
+    inside it) must refuse without `--force` -- it is the single most
+    destructive target `remove` can be pointed at, every install at once, and
+    nothing else in this function catches it: `is_outside_cache_root`
+    deliberately treats `target == destination` as NOT outside, and
+    `_load_bearing_reasons` only ever names a specific version subdirectory,
+    never the root that holds them. Found live during review before this
+    refusal existed: `tan sdk remove .` from inside the (then two-version)
+    cache root deleted the entire cache, `ok: true`, no `--force` needed."""
+    make_sdk_root(cache_with_canary / "v0.20.0", version="0.20.0")
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", str(cache_with_canary),
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-is-cache-root"
+    # Posix-folded, like every other path assertion in this block: the message
+    # renders the target through `_abs_posix` (forward slashes on every platform)
+    # while `str(Path)` is backslash-spelled on Windows.
+    assert str(cache_with_canary).replace("\\", "/") in refused["issues"][0]["message"]
+    assert "--force" in refused["issues"][0]["message"]
+    assert cache_with_canary.exists()
+    assert_sibling_intact(cache_with_canary)
+    assert (cache_with_canary / "v0.20.0").exists()
+
+    forced = envelope(
+        run_tan(
+            "sdk", "remove", str(cache_with_canary), "--force",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert forced["ok"] is True
+    assert forced["data"]["removed"] is True
+    assert not cache_with_canary.exists()
+
+
+def test_remove_refuses_a_path_registered_as_another_projects_global_default(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """The registry axis of load-bearing (tan-cli#466's origin-keyed
+    `~/.alp/sdk-defaults.json`): a workspace with NO pin of its own must
+    still refuse to remove an install some OTHER project registered as its
+    global default -- that is the "pinned by a project" half of the design
+    bar, and it is invisible to `resolve_sdk_tiered` for THIS workspace."""
+    target = make_sdk_root(cache_with_canary / "v0.17.0", version="0.17.0")
+    other_project = tmp_path / "other-project"
+    other_project.mkdir()
+    write_registry(isolated_home, {other_project: target}, dated=True)
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", "v0.17.0",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert str(other_project) in refused["issues"][0]["message"]
+    assert refused["data"]["wasActive"] is False, (
+        "not active for THIS workspace -- only registered for another one"
+    )
+    assert target.exists()
+
+    forced = envelope(
+        run_tan(
+            "sdk", "remove", "v0.17.0", "--force",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert forced["ok"] is True
+    assert not target.exists()
+
+
+def test_remove_refuses_a_backslash_spelled_registry_entry_naming_the_target(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """The SAME refusal as the test above, against a registry that spells the
+    identical directory with backslashes -- the shape a hand edit leaves on
+    Windows, which `parse_registry`'s own contract accommodates.
+
+    `bootstrap_cmd._write_global_sdk_registry` posix-normalises what it writes,
+    so a raw `==` between the stored value and the forward-slash path this
+    codebase computes is True for a tan-written entry and False for a
+    hand-written one -- two names of ONE directory. False here does not merely
+    skip a tidy-up: it means the load-bearing check does not fire, `remove`
+    proceeds without `--force`, and the install another project still points at
+    is silently orphaned. That is precisely the outcome tan-cli#790's first
+    design bar exists to prevent, so it is asserted as a refusal, not as a
+    string comparison.
+
+    Platform-independent by construction: flipping this host's own separators
+    into backslashes round-trips back through `normalized_sdk_path` on every
+    host, so the case is exercised on POSIX rather than only where it bites.
+    """
+    target = make_sdk_root(cache_with_canary / "v0.19.0", version="0.19.0")
+    other_project = tmp_path / "hand-edited-project"
+    other_project.mkdir()
+    write_registry(
+        isolated_home, {other_project: str(target).replace("/", "\\")}, dated=True
+    )
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", "v0.19.0",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert str(other_project) in refused["issues"][0]["message"]
+    assert target.exists(), "the whole point: a missed match would have deleted it"
+    assert_sibling_intact(cache_with_canary)
+
+
+def test_remove_prunes_only_the_matching_registry_entries(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """Keeping tan-cli#905's registry honest (tan-cli#790's own obligation):
+    every entry naming the removed path is dropped, and -- the vacuity check
+    -- an entry naming a DIFFERENT, still-real path survives untouched."""
+    removed_target = make_sdk_root(cache_with_canary / "v0.18.0", version="0.18.0")
+    kept_target = make_sdk_root(tmp_path / "still-here", version="kept")
+    project_a = tmp_path / "project-a"
+    project_a.mkdir()
+    project_b = tmp_path / "project-b"
+    project_b.mkdir()
+    write_registry(
+        isolated_home,
+        {project_a: removed_target, project_b: kept_target},
+        dated=True,
+    )
+
+    forced = envelope(
+        run_tan(
+            "sdk", "remove", "v0.18.0", "--force",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert forced["ok"] is True
+
+    registry_file = isolated_home / ".alp" / "sdk-defaults.json"
+    registry = json.loads(registry_file.read_text(encoding="utf-8"))
+    assert str(project_a) not in registry
+    assert str(project_b) in registry
+    # VERBATIM, not normalised: the prune drops matching entries and rewrites the
+    # rest exactly as it found them. Normalising a surviving entry would silently
+    # rewrite data this command does not own -- so the expectation is the literal
+    # value `write_registry` stored, which is backslash-spelled on Windows.
+    assert registry[str(project_b)]["sdkPath"] == str(kept_target)
+
+
+def test_remove_named_version_is_looked_up_under_destination(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """A bare version name (no path separator) is ALWAYS resolved under
+    `--destination`, never treated as relative-to-cwd -- distinguishing it
+    from `resolve_removal_target`'s explicit-path arm."""
+    target = make_sdk_root(cache_with_canary / "v0.19.0", version="0.19.0")
+    workspace = tmp_path / "unrelated-cwd"
+    workspace.mkdir()
+
+    env = envelope(
+        run_tan(
+            "sdk", "remove", "v0.19.0",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert env["data"]["removed"] is True
+    assert not target.exists()
+    assert not (workspace / "v0.19.0").exists(), "must not have looked under cwd instead"
