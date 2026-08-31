@@ -114,9 +114,10 @@ def test_the_walk_actually_reached_the_whole_surface():
         "change -- do not let a broken walk read as a clean gate."
     )
     assert len(MARKED) >= 100, (
-        f"only {len(MARKED)} inert markers found; expected ~121 (1 `build` "
-        "deferral + `doctor --build` + 2 on `faultdecode` + the ~117 hidden "
-        "oracle-parity flags, tan-cli#427). A collapsed count means the marker "
+        f"only {len(MARKED)} inert markers found; expected ~120 (`doctor "
+        "--build` + 2 on `faultdecode` + the ~117 hidden oracle-parity flags, "
+        "tan-cli#427 -- `build` contributes ZERO now that `--no-auto-bootstrap` "
+        "is retired rather than deferred). A collapsed count means the marker "
         "stopped reaching the built tree, not that tan got tidier."
     )
 

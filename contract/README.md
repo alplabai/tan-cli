@@ -344,18 +344,35 @@ its `--help` text with a marker naming WHICH KIND of inert it is**, rendered by
 `python/tan/core/inert.py` and nothing else:
 
 ```
---no-auto-bootstrap  Accepted by other commands; not implemented for `build`
-                     yet. (inert:deferred:tan-cli#427)
 --build              Accepted for compatibility: ... (inert:compatibility:tan-cli#290)
 --project            Project root. Not read: ... (inert:not-applicable)
 ```
 
-(`--plan` was this section's example for `deferred` before tan-cli#427: it is
-now RETIRED instead, a fifth, actively-read mechanism this closed vocabulary
-does not cover -- see the `build --plan` row above. A retired flag carries no
-`(inert:...)` marker at all; its value selects a real, distinct refusal
-(`build.flag-retired`), which is why it moved out of this example rather than
-keeping its old slot.)
+`deferred` has no live specimen to put in that block: `--no-auto-bootstrap`
+was the last option carrying it, and tan-cli#427 retired that flag outright
+rather than implementing it, so `tan build --help` now carries no
+inert-marked option at all (measured population as of that change: `parity`
+117, `compatibility` 1, `not-applicable` 2, `deferred` 0). This is the
+SECOND time this doc's worked example for `deferred` has emptied out from
+under it — `--plan` was the original specimen, retired by an earlier pass of
+the same issue, and `--no-auto-bootstrap` was repointed to after that. Rather
+than repoint to a third named flag that the next retirement can empty out
+again, the shape is documented straight from the enforcing code instead:
+`inert_help("...", DEFERRED, "tan-cli#NNN")` renders
+`(inert:deferred:tan-cli#NNN)`, where `NNN` is the tracking issue --
+`inert_help` refuses to build one with no ref (`python/tan/core/inert.py`).
+
+The kind itself stays in the closed vocabulary (`INERT_KINDS`) with zero
+current members: it names "a real flag from the v0.4.1 oracle this port has
+not built yet, with an issue tracking its arrival", which is a property of
+individual flags, not of the vocabulary, and can recur for any future oracle
+gap. Retiring the KIND for lack of a current tenant would be a breaking wire
+change in its own right (see "The vocabulary is closed" below) for a problem
+a doc fix can solve instead.
+
+A retired flag, unlike a deferred one, carries no `(inert:...)` marker at
+all — its value selects a real, distinct refusal (`build.flag-retired`); see
+the `build --plan` and `build --no-auto-bootstrap` rows above.
 
 Read it back with, after collapsing runs of whitespace:
 
@@ -393,8 +410,10 @@ which walks the built Click tree (not the source) and fails on an unknown
 kind, a `deferred` with no ref, a hidden inert option of a non-`parity` kind,
 an option that reads as inert in prose but carries no marker, and — the pin
 that matters to this repo's consumer — any change at all to the census of
-**visible** inert options. That census is 15 rows today: the twelve `build`
-deferrals, `doctor --build`, and `faultdecode`'s `--project`/`--sdk-root`.
+**visible** inert options. That census is 3 rows today: `doctor --build` and
+`faultdecode`'s `--project`/`--sdk-root`. `build` used to contribute rows of
+its own (twelve, then one after tan-cli#427's first pass) but now contributes
+none — see "Inert options and their kind" above for why.
 
 ## Fixture shape (`envelopes/<case>/`)
 

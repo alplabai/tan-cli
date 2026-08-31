@@ -1676,6 +1676,67 @@ def test_gate_rejects_a_deliberately_unregistered_code():
     assert fabricated not in offenders_clean
 
 
+def test_every_known_code_forward_entry_is_still_needed(monkeypatch):
+    """`_KNOWN_CODE_FORWARDS` is a static allowlist that only ever answers
+    "is this unresolved site declared" -- it never asks "is this declared
+    entry unresolved anywhere any more", so a stale row (the call site it
+    used to shield renamed, refactored away, or resolved some other way)
+    costs the gate above nothing. Proven by mutation while reviewing
+    tan-cli#427: this change deletes `deferred_cmd.py` and, with it, every
+    call site `("tan/commands/build_cmd.py", "DEFERRED_ISSUE_CODE")` used to
+    shield -- had that row been left in `_KNOWN_CODE_FORWARDS` instead of
+    removed in the same commit,
+    `test_every_emitted_issue_code_is_registered` would have stayed exactly
+    as green, because that gate only ever checks the declared side, never
+    whether the declaration still matches anything real. A gate that cannot
+    go red for carrying a dead row is not pruning itself.
+
+    This is the missing other half. With `_KNOWN_CODE_FORWARDS` temporarily
+    emptied, re-run the SAME whole-tree scan `_all_literal_codes` runs for
+    the real gate, and recover every `(rel, expr)` pair that comes back
+    unresolved without it. Every entry in the real table must appear there --
+    i.e. removing it must make some real `Issue(...)`/`code=` call regress
+    from resolved to unresolved. One that does not is dead: nothing in the
+    tree needs it forwarded any more, and it should be deleted in the same
+    change that made it dead, not left for the next reviewer to notice by
+    hand.
+    """
+    live_forwards = _KNOWN_CODE_FORWARDS
+    monkeypatch.setitem(globals(), "_KNOWN_CODE_FORWARDS", frozenset())
+    _, unresolved_without_forwards = _all_literal_codes()
+
+    # `_literal_codes_in_file`'s own message format ends every unresolved
+    # entry in `({payload})`, following `{rel}:{lineno} -- ...` -- recover
+    # both halves the same way the message was built, not by re-deriving
+    # them from the AST a second time.
+    observed: set[tuple[str, str]] = set()
+    for line in unresolved_without_forwards:
+        rel = line.split(":", 1)[0]
+        expr = line.rsplit(" (", 1)[-1].rstrip(")")
+        observed.add((rel, expr))
+
+    stale = sorted(live_forwards - observed)
+    assert not stale, (
+        f"{len(stale)} _KNOWN_CODE_FORWARDS entr(ies) match no unresolved "
+        "code-position site anywhere in the tree once forwarding is disabled "
+        "for the check -- the call site each one used to shield is gone, "
+        "renamed, or resolves some other way now, so the entry is dead "
+        "weight that would silently swallow a real FUTURE escape sharing the "
+        "same (file, expr) spelling. Delete the stale row(s), in the same "
+        "change that made them dead:\n  "
+        + "\n  ".join(f"{rel!r}, {expr!r}" for rel, expr in stale)
+    )
+
+    # And the negative: with the real table restored, none of ITS entries
+    # read as stale -- proving this is sensitive to the emptied case above,
+    # not unconditionally red regardless of what `_KNOWN_CODE_FORWARDS` holds.
+    monkeypatch.setitem(globals(), "_KNOWN_CODE_FORWARDS", live_forwards)
+    _, unresolved_with_forwards = _all_literal_codes()
+    assert not (live_forwards & {
+        (line.split(":", 1)[0], line.rsplit(" (", 1)[-1].rstrip(")")) for line in unresolved_with_forwards
+    })
+
+
 def test_check_site_counts_flags_a_declared_vs_actual_mismatch():
     """tan-cli#224 review, MAJOR finding: `_check_site_counts` used to be a
     closure inside `_classify_and_resolve`, so nothing could exercise it
