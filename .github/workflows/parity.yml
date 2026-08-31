@@ -2144,11 +2144,12 @@ jobs:
   #   job measures.
   #
   # `--ignore=tests/gates`: NOT because those tests don't matter, but because
-  # they already run, correctly, in seam1 above -- all five files, each bound
-  # to the specific ref that makes its verdict mean something: the frozen audit
-  # commit for three of them (`test_planner_relocation_freshness`,
-  # `test_hand_port_tan_side`, `test_swd_probe_v2n_gd32_jlink_device_freshness`),
-  # no checkout at all for `test_planner_oracle_ref_tracks_pinned_sdk_tag`
+  # they already run, correctly, in seam1 above -- all four files (tan-cli#732
+  # removed the fifth, `test_swd_probe_v2n_gd32_jlink_device_freshness`, along
+  # with the backend it audited), each bound to the specific ref that makes
+  # its verdict mean something: the frozen audit commit for two of them
+  # (`test_planner_relocation_freshness`, `test_hand_port_tan_side`), no
+  # checkout at all for `test_planner_oracle_ref_tracks_pinned_sdk_tag`
   # (tan-cli#897's own gate, unconditional by design -- see seam1's comment),
   # the live checkout for `test_jlink_aen_device_freshness`, plus a live
   # warn-only re-run of `test_planner_relocation_freshness` on dispatch.

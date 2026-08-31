@@ -32,7 +32,7 @@ hw_info: {{sku: E1M-V2N101}}
 slices: []
 helper_mcus:
 - {{name: gd32_bridge, chip: gd32g553, firmware_path: fw.bin,
-   flash_method: swd_probe, flash_args: {{interface: cmsis-dap}}{extra}}}
+   flash_method: zephyr_west_flash, flash_args: {{interface: cmsis-dap}}{extra}}}
 boot_order: []
 """
 
@@ -87,7 +87,7 @@ def test_a_policy_declined_entry_advertises_no_method(tmp_path):
     """`as_dict()` omits a `None` method entirely -- the shape the
     `update_channel` skip has always emitted. An entry nobody was allowed to
     flash must not report the transport it would have used, or a consumer reads
-    `method: swd_probe` on a target that was never a flash target."""
+    `method: zephyr_west_flash` on a target that was never a flash target."""
     _, out, _ = run_flash(
         tmp_path, "--format", "json", manifest=_manifest(policy="factory")
     )
@@ -183,7 +183,7 @@ def test_recover_with_the_named_helper_reaches_dispatch_and_says_so(tmp_path):
     assert exit_code == 0, payload
     entry = _only_entry(payload)
     assert entry["status"] == "ok", payload
-    assert entry["method"] == "swd_probe", payload
+    assert entry["method"] == "zephyr_west_flash", payload
     assert "programmed by Alp Lab in production" not in entry["message"], payload
     assert "flash.recovery-flash-armed" in codes(payload), payload
     armed = [i for i in payload["issues"] if i["code"] == "flash.recovery-flash-armed"]
@@ -355,4 +355,4 @@ def test_a_helper_with_no_policy_at_all_still_dispatches(tmp_path):
     )
     entry = _only_entry(envelope(out))
     assert entry["status"] == "ok", entry
-    assert entry["method"] == "swd_probe", entry
+    assert entry["method"] == "zephyr_west_flash", entry

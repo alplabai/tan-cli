@@ -100,13 +100,6 @@ connect, before ever writing MRAM, and refuses when it doesn't match. Set
 both when your bench has more than one probe, or when a shared/cloned serial
 is a possibility; do not rely on `jlink_serial` alone to disambiguate.
 
-The `swd_probe` backend (the GD32G553 supervisor bridge, not this doc's Flow
-D) gets the identical read-only preflight, but `flash_args.expect_dpidr`
-arms it **alone** there — `swd_probe`'s own `flash_args.jlink_device` already
-names the write's own `-device` profile, so it is not a second, preflight-only
-field the way Flow D's is. Set `flash_args.expect_dpidr` on a `swd_probe`
-entry whenever the same cloned-serial risk applies (tan-cli#520).
-
 `flash_args.expect_dpidr` must be a **full 32-bit SW-DP ID — 8 hex digits**
 (an optional `0x`/`0X` prefix doesn't count towards the 8). `tan` refuses a
 shorter value outright, at plan time (so it surfaces under `--dry-run`, not
@@ -119,30 +112,21 @@ than one board and silently disarm the wrong-board guard (tan-cli#795).
 `flash_args.expect_dpidr` is **optional**, so a write with none set proceeds
 unguarded. Since tan-cli#609 the `flash.dpidr-preflight-unarmed` warning covers
 **every method `tan` itself composes a J-Link Commander session for** — today
-`swd_probe`'s J-Link arm AND Flow D (`alif_mram_jlink`) — rather than
-`swd_probe` alone. The coverage is a table (`DPIDR_GUARD_COVERAGE`) pinned to
-the backend registry by a gate, so a new backend has to declare which side it
-is on instead of inheriting silence.
+Flow D (`alif_mram_jlink`) alone. The coverage is a table
+(`DPIDR_GUARD_COVERAGE`) pinned to the backend registry by a gate, so a new
+backend has to declare which side it is on instead of inheriting silence.
 
-It reached only `swd_probe` before, and that was measured, not theoretical: a
-real AEN MRAM write through `tan flash` on 2026-08-10 emitted `ISSUES = []` —
-no wrong-board guard and no signal that there was none — on a bench where one
-J-Link serial is cloned across two probes.
+It reached only the (now-removed) `swd_probe` backend before #609, and that
+was measured, not theoretical: a real AEN MRAM write through `tan flash` on
+2026-08-10 emitted `ISSUES = []` — no wrong-board guard and no signal that
+there was none — on a bench where one J-Link serial is cloned across two
+probes.
 
 What each path emits:
 
 - **Flow D (`alif_mram_jlink`)** — raises the warning. The remedy names BOTH
   keys, because Flow D pairs `expect_dpidr` with `flash_args.jlink_device`
   (the live-core attach profile, *not* `jlink_flash_device`).
-- **`swd_probe`, J-Link arm** — raises the warning; `expect_dpidr` alone is
-  the remedy there.
-- **`swd_probe`, openocd/pyocd arm** — raises **nothing at all**, by design:
-  the SW-DP ID read is a JLinkExe-only primitive, so there is no guard to be
-  unarmed and "set `expect_dpidr`" would be advice that cannot be taken
-  (`plan_swd_probe` refuses that key on this arm at plan time). This is the arm
-  the shipped `E1M-V2N101`/`V2N102`/`V2M101`/`V2M102` `flash_args` select on a
-  host with no J-Link, i.e. the default path a bricked-bridge recovery takes
-  today. The switch below still refuses it.
 - **Every other method** (`zephyr_west_flash`, `baremetal_cmake_flash`,
   `yocto_wic*`, `xspi_flashwriter`) — raises nothing, because `tan` composes no
   probe session there for `expect_dpidr` to arm. That is not a safety claim
@@ -158,11 +142,12 @@ would not run **fails the entry before anything is spawned**
 (`flash.entry-failed`) instead of proceeding. Unset — the default — nothing
 changes.
 
-Its scope is the same table as the advisory (tan-cli#609): `swd_probe` **and**
-Flow D. It was `swd_probe`-only when tan-cli#589 shipped it, which left the AEN
-MRAM path — the genuine *customer* flash path of the two, the GD32 bridge being
-factory-programmed by Alp Lab — outside both halves of the guard. On Flow D the
-refusal fires ahead of the SETOOLS auto-sign, not merely ahead of the write:
+Its scope is the same table as the advisory (tan-cli#609): Flow D today. It was
+`swd_probe`-only when tan-cli#589 shipped it (that backend was removed by
+tan-cli#732), which left the AEN MRAM path — the genuine *customer* flash path
+of the two, the GD32 bridge being factory-programmed by Alp Lab — outside both
+halves of the guard. On Flow D the refusal fires ahead of the SETOOLS
+auto-sign, not merely ahead of the write:
 `app-gen-toc` appends a block to `build/app-package-map.txt` and rewrites
 `build/AppTocPackage.bin` whole, and tan-cli#512 measured a wrong-board abort
 that correctly left slot0 byte-identical and still left the SETOOLS install
@@ -180,11 +165,24 @@ shipped alp-sdk preset carries a SW-DP ID today, and `tan` is forbidden from
 deriving one — until metadata populates the field, exporting this variable
 refuses these writes rather than guarding them.
 
-A `swd_probe` entry taking the **openocd/pyocd** arm refuses under this switch
-unconditionally — the SW-DP ID read is a JLinkExe-only primitive, so that arm
-cannot be armed at all. `openocd_usb_location` is not a substitute: a USB path
-selects a *probe*, it never confirms which *board* is on the other end of the
-SWD cable (tan-cli#589).
+## GD32 bridge programming: not this backend, not `tan` any more
+
+`tan flash` no longer has a local-write path for the E1M-X V2N/V2M SoMs' GD32
+bridge supervisor MCU (the `swd_probe` backend, removed by tan-cli#732 — GD32
+programming is separating out of `tan` entirely). The GD32's **field-update**
+path is untouched and stays: `helper_firmware[].update_channel:
+alp_ota_spi_bridge` (protocol v0.6 Path A, slot-A/B application bootloader
+with commit and rollback, over the bridge link rather than SWD), which alp-sdk
+still emits and `tan` still projects into `build/system-manifest.yaml`. A
+project that previously relied on `tan flash --helper gd32_bridge` for a local
+SWD write (recovering a bricked bridge, say) has no in-tree `tan` replacement
+as of this change; that gap is tracked separately, not silently dropped — see
+tan-cli#610 (`needs-silicon`, the still-open contradiction over the GD32
+bridge's own SW-DP ID), whose premise — settling `expect_dpidr` for a `tan
+flash` write to the GD32 — no longer applies now that `tan` has no such write
+to arm, but stays open rather than closed over: the underlying SW-DP ID
+contradiction is a real, unresolved bench fact that whatever tool ends up
+programming the GD32 will still need.
 
 ## Related
 
@@ -195,3 +193,5 @@ SWD cable (tan-cli#589).
   the surrounding fixes answer.
 - tan-cli#520, #589, #609 — the wrong-board SW-DP ID guard: the preflight
   itself, the opt-in strict switch, and making both method-independent.
+- tan-cli#732 — removed the `swd_probe` flash backend (GD32 programming
+  separating out of `tan`); #610 above is the open follow-up it leaves.
