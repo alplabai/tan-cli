@@ -1100,8 +1100,63 @@ def _prune_registry_entries_for(target_posix: str) -> None:
         pass
 
 
+def _resolves_to_after(workspace_root: Path) -> dict[str, Any]:
+    """The narrow `resolve_sdk_tiered` answer for `workspace_root` right now
+    -- tan-cli#1028's answer to "what resolves after this removal". This is
+    NOT necessarily what `tan sdk current` would report for the same
+    workspace at the same instant: it reuses `resolve_sdk_tiered`, the SAME
+    narrow ladder `_load_bearing_reasons`'/`active` above already call
+    (`resolve_sdk_tiered(None, workspace_root)`, `sdk_root` never threaded
+    through from the `--sdk-root` flag either), so `remove`'s own load-bearing
+    refusal logic and its `resolvesToAfter` answer are always asking the same
+    question of the same ladder -- but `_run_current` falls through to the
+    WIDE `resolve_sdk_root_ladder` tail when the narrow ladder finds nothing
+    (tan-cli#497 defect 1) and honours an explicit `--sdk-root`. Neither
+    fallback runs here, so this can report a tier -- or `"none"` -- one below
+    what `sdk current` would say for the identical workspace right after this
+    call returns. Consistency with `remove`'s own refusal ladder wins over
+    parity with `sdk current`'s wider answer; a caller that needs the wider
+    answer still makes the separate `sdk current` call.
+
+    Called at EVERY `_remove_data` call site below, not only on a load-bearing
+    removal (tan-cli#1028's own design question, answered: an always-present
+    field is easier for a caller to code against than one that appears only
+    sometimes). Computed FRESH at each call site -- after `remove_sdk_tree` on
+    the branches that actually delete something, unchanged (because nothing on
+    disk changed) on every refusal/idempotent/failed branch -- so it is
+    truthful on both kinds of branch without a second "did this call mutate
+    the tree" flag to keep in sync with the first.
+
+    Mirrors `sdk current`'s own `data` SHAPE (`sdkPath`, `readiness`,
+    `sourceTier`) rather than inventing a fourth shape for the same question
+    -- a caller that already knows how to read `sdk current`'s answer does
+    not have to learn a second shape -- and the no-SDK-resolves case -- the
+    one a caller most needs told about after a load-bearing removal -- comes
+    back exactly as `sdk-current-no-sdk` pins it: `sdkPath: null`, `readiness:
+    null`, `sourceTier: "none"`. That `"none"` reading also covers a
+    force-removed PROJECT PIN whose `.alp/sdk-path` file this command does
+    not clear (tan-cli#1051): the pin is left dangling, not cleared, and this
+    field cannot tell that apart from a workspace that was never pinned --
+    `sdk current` afterward still carries the `sdk.project-pin-unresolved`
+    warning naming the dangling pointer; `sdk remove`'s own envelope does not
+    yet surface that warning.
+    """
+    resolved = resolve_sdk_tiered(None, workspace_root)
+    return {
+        "sdkPath": resolved.path,
+        "readiness": check_sdk_readiness(resolved.path) if resolved.path is not None else None,
+        "sourceTier": resolved.tier,
+    }
+
+
 def _remove_data(
-    *, removed: bool, path: str | None, version: str | None, was_active: bool, freed_bytes: int
+    *,
+    removed: bool,
+    path: str | None,
+    version: str | None,
+    was_active: bool,
+    freed_bytes: int,
+    resolves_to_after: dict[str, Any],
 ) -> dict[str, Any]:
     """`sdk remove`'s payload shape, built at every call site through this one
     function so a field can never drift between the idempotent, refused and
@@ -1113,6 +1168,7 @@ def _remove_data(
         "version": version,
         "wasActive": was_active,
         "freedBytes": freed_bytes,
+        "resolvesToAfter": resolves_to_after,
     }
 
 
@@ -1142,7 +1198,12 @@ def _run_remove(
         _fail(
             json_mode=json_mode,
             data=_remove_data(
-                removed=False, path=None, version=None, was_active=False, freed_bytes=0
+                removed=False,
+                path=None,
+                version=None,
+                was_active=False,
+                freed_bytes=0,
+                resolves_to_after=_resolves_to_after(workspace_root),
             ),
             code="remove-missing-argument",
             message=(
@@ -1184,6 +1245,7 @@ def _run_remove(
                 version=version,
                 was_active=was_active,
                 freed_bytes=0,
+                resolves_to_after=_resolves_to_after(workspace_root),
             ),
             issues=[],
             exit_code=ExitCode.SUCCESS,
@@ -1209,6 +1271,7 @@ def _run_remove(
                 version=version,
                 was_active=was_active,
                 freed_bytes=0,
+                resolves_to_after=_resolves_to_after(workspace_root),
             ),
             code="remove-is-cache-root",
             message=(
@@ -1232,6 +1295,7 @@ def _run_remove(
                 version=version,
                 was_active=was_active,
                 freed_bytes=0,
+                resolves_to_after=_resolves_to_after(workspace_root),
             ),
             code="remove-outside-root",
             message=(
@@ -1258,6 +1322,7 @@ def _run_remove(
                 version=version,
                 was_active=was_active,
                 freed_bytes=0,
+                resolves_to_after=_resolves_to_after(workspace_root),
             ),
             code="remove-active",
             message=(
@@ -1280,6 +1345,13 @@ def _run_remove(
             version=version,
             was_active=was_active,
             freed_bytes=outcome.freed_bytes,
+            # Recomputed AFTER the attempt, not carried from the pre-attempt
+            # `active` above: `remove_sdk_tree` can fail partway through a
+            # multi-entry tree (`outcome.freed_bytes` above is already
+            # partial-attempt-aware for the identical reason), so the
+            # resolution has to be re-read from the filesystem it just
+            # touched rather than assumed unchanged.
+            resolves_to_after=_resolves_to_after(workspace_root),
         )
         # TWO literal `code=` call sites, deliberately not one dynamic
         # `f"remove-{outcome.kind}"`: `test_every_issue_code_is_registered.py`
@@ -1323,6 +1395,7 @@ def _run_remove(
             version=version,
             was_active=was_active,
             freed_bytes=outcome.freed_bytes,
+            resolves_to_after=_resolves_to_after(workspace_root),
         ),
         issues=[],
         exit_code=ExitCode.SUCCESS,
