@@ -664,3 +664,5 @@ several less obvious failures.
 - 2026-08-31 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/sdk_cmd.py: 1060 -> 1456
     - function_count_budget: 301 -> 303
+- 2026-08-31 -- tan-cli#1025 round 2 (PR #1034 review): _topology_for_sku gains outer + per-entry isinstance guards, _default_preset_for_sku gains a default_board string guard
+    - tan/planner/template.py: 1562 -> 1614

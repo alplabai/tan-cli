@@ -15,6 +15,27 @@ to the sibling `preset["silicon"]` read in `tan/model/targets.py`) -- same
 fixture shape, same assertion style, applied to `_load_som_doc`'s shared
 read instead.
 
+**Round 2 (PR #1034 review):** the outer-document guard above left four
+NESTED reads of the SAME `metadata/e1m_modules/<sku>.yaml` document
+unguarded -- a well-formed mapping whose `default_board:` or `topology:`
+(or a `topology:` entry) is itself the wrong shape still reached a bare
+`.lower()`/`.items()`/`.get()`. Measured on the round-1-only code, verbatim
+(the review's own repro):
+
+    default_board: [a, b]      -> _default_preset_for_sku
+                                   AttributeError: 'list' object has no
+                                   attribute 'lower'
+    topology: [m33_sm]         -> _derive_core_renames / _core_board
+                                   AttributeError: 'list' object has no
+                                   attribute 'items' / 'get'
+    topology.m33_sm: [a]       -> _derive_core_renames / _core_board
+                                   AttributeError: 'list' object has no
+                                   attribute 'get'
+
+`_default_preset_for_sku` now type-checks `default_board` directly; a new
+shared `_topology_for_sku` (used by both `_derive_core_renames` and
+`_core_board`) type-checks `topology:` AND every one of its entries.
+
 Importing `tan.planner.template` needs SOME bound alp-sdk root (its package
 `__init__` reads `metadata/registries/*` at import time) -- same
 requirement as `test_find_template_by_cores.py` -- even though these cases
@@ -128,3 +149,85 @@ def test_a_well_formed_mapping_preset_still_resolves_normally(tmp_path):
     root = _metadata_root_with_raw_preset(
         tmp_path, "default_board: E1M-EVK\ntopology:\n  m55_hp: {}\n")
     assert tmpl._default_preset_for_sku(_SKU, root) == "e1m-evk"
+
+
+# ---------------------------------------------------------------------
+# Round 2 (PR #1034 review): the outer document IS a mapping, but a
+# NESTED field the same three functions read is the wrong shape.
+# ---------------------------------------------------------------------
+
+def test_a_non_string_default_board_raises_a_curated_error(tmp_path):
+    """`default_board:` present and truthy but not a scalar string (a
+    bare YAML list) must not reach `_default_preset_for_sku`'s
+    `.lower()` bare -- review-measured:
+    `AttributeError: 'list' object has no attribute 'lower'`."""
+    tmpl = _tmpl()
+    root = _metadata_root_with_raw_preset(
+        tmp_path, "default_board:\n  - a\n  - b\n")
+    with pytest.raises(tmpl.TemplateError, match="default_board must be a string"):
+        tmpl._default_preset_for_sku(_SKU, root)
+
+
+def test_non_string_default_board_names_the_actual_type(tmp_path):
+    tmpl = _tmpl()
+    root = _metadata_root_with_raw_preset(
+        tmp_path, "default_board:\n  - a\n  - b\n")
+    with pytest.raises(tmpl.TemplateError, match="got list"):
+        tmpl._default_preset_for_sku(_SKU, root)
+
+
+def test_a_non_mapping_topology_raises_in_derive_core_renames(tmp_path):
+    """`topology:` present but not itself a mapping (a bare YAML list)
+    must not reach `_derive_core_renames`'s bare `topology.items()` --
+    review-measured: `AttributeError: 'list' object has no attribute
+    'items'`. (A `stale == []` shortcut with no stale core would swallow
+    this silently -- the fixture below uses a core id the fixture's
+    topology does NOT list, to force the `.items()` path.)"""
+    tmpl = _tmpl()
+    root = _metadata_root_with_raw_preset(
+        tmp_path, "default_board: E1M-EVK\ntopology:\n  - m33_sm\n")
+    with pytest.raises(tmpl.TemplateError, match="topology must be a mapping"):
+        tmpl._derive_core_renames(["stale_core"], _SKU, root)
+
+
+def test_a_non_mapping_topology_raises_in_core_board(tmp_path):
+    """Same non-mapping `topology:` shape, `_core_board`'s call site --
+    review-measured: `AttributeError: 'list' object has no attribute
+    'get'`."""
+    tmpl = _tmpl()
+    root = _metadata_root_with_raw_preset(
+        tmp_path, "default_board: E1M-EVK\ntopology:\n  - m33_sm\n")
+    with pytest.raises(tmpl.TemplateError, match="topology must be a mapping"):
+        tmpl._core_board(_SKU, "m33_sm", root)
+
+
+def test_a_non_mapping_topology_entry_raises_in_derive_core_renames(tmp_path):
+    """`topology:` IS a mapping, but one core's own entry is a bare YAML
+    list instead of a mapping -- must not reach `_derive_core_renames`'s
+    bare `spec.get("board")` -- review-measured: `AttributeError: 'list'
+    object has no attribute 'get'`."""
+    tmpl = _tmpl()
+    root = _metadata_root_with_raw_preset(
+        tmp_path, "default_board: E1M-EVK\ntopology:\n  m33_sm:\n    - a\n")
+    with pytest.raises(tmpl.TemplateError, match=r"topology\.m33_sm must be a mapping"):
+        tmpl._derive_core_renames(["stale_core"], _SKU, root)
+
+
+def test_a_non_mapping_topology_entry_raises_in_core_board(tmp_path):
+    """Same malformed-entry shape, `_core_board`'s call site -- review-
+    measured: `AttributeError: 'list' object has no attribute 'get'`."""
+    tmpl = _tmpl()
+    root = _metadata_root_with_raw_preset(
+        tmp_path, "default_board: E1M-EVK\ntopology:\n  m33_sm:\n    - a\n")
+    with pytest.raises(tmpl.TemplateError, match=r"topology\.m33_sm must be a mapping"):
+        tmpl._core_board(_SKU, "m33_sm", root)
+
+
+def test_a_well_formed_topology_entry_still_resolves_normally(tmp_path):
+    """Vacuity check for the round-2 per-entry guard: a legitimate
+    `topology.<core>.board` still resolves."""
+    tmpl = _tmpl()
+    root = _metadata_root_with_raw_preset(
+        tmp_path,
+        "default_board: E1M-EVK\ntopology:\n  m33_sm:\n    board: some/board/id\n")
+    assert tmpl._core_board(_SKU, "m33_sm", root) == "some/board/id"
