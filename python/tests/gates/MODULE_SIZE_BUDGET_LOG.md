@@ -698,3 +698,5 @@ several less obvious failures.
     - tan/core/scaffold.py: 1875 -> 1889
 - 2026-08-31 -- tan-cli#1035 review round 3: strip a leading YAML anchor/tag node-property token before the flow-mapping '{' test (_strip_yaml_node_properties), so som: &s {...} / som: !!map {...} are refused instead of silently falling through to the block path; pin all four block/flow x plain/anchor-tag combinations with new reader+writer+integration tests; fix the contract/issue-codes.json eighth->seventh wording nit
     - tan/core/scaffold.py: 1889 -> 1931
+- 2026-08-31 -- tan-cli#1035 review round 4 nits: soften FlowStyleSomError's remediation message so it doesn't imply dropping the som: key's own anchor/tag, and pin the reverse anchor-then-tag property order (!!map &s {...}) alongside the already-pinned anchor-then-tag order
+    - tan/core/scaffold.py: 1931 -> 1933

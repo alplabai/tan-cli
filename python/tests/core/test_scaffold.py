@@ -683,11 +683,25 @@ def test_retarget_refuses_a_flow_style_som_block_carrying_a_yaml_tag():
 
 
 def test_vendored_som_refuses_a_flow_style_som_block_carrying_an_anchor_and_a_tag():
-    """An anchor AND a tag together, in either order, are both valid YAML
-    node properties ahead of a value (`&s !!map {...}` and `!!map &s {...}`
-    both `yaml.safe_load` the same way) -- `_strip_yaml_node_properties`
-    strips as many property tokens as are present, not just one."""
+    """An anchor AND a tag together are both valid YAML node properties
+    ahead of a value -- `_strip_yaml_node_properties` strips as many
+    property tokens as are present, not just one."""
     content = "som: &s !!map {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+    assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
+
+    with pytest.raises(FlowStyleSomError):
+        vendored_som(content)
+
+
+def test_vendored_som_refuses_a_flow_style_som_block_carrying_a_tag_then_an_anchor():
+    """The REVERSE property order -- `!!map &s {...}` -- since YAML allows
+    an anchor and a tag together in EITHER order (`&s !!map {...}`, the
+    previous test, and `!!map &s {...}`, this one, both `yaml.safe_load`
+    identically). `_strip_yaml_node_properties`'s loop makes no assumption
+    about which property comes first; this pins that the second iteration
+    of the loop is exercised on the OTHER token order too, not just the
+    anchor-then-tag one."""
+    content = "som: !!map &s {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
     assert yaml.safe_load(content)["som"] == {"sku": "E1M-AEN801", "hw_rev": "r1"}
 
     with pytest.raises(FlowStyleSomError):

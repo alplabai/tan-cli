@@ -335,9 +335,11 @@ class FlowStyleSomError(Exception):
         super().__init__(
             f"This board.yaml's `som:` block is written in YAML flow style "
             f"(`som: {flow_body}`), which tan's board.yaml scaffolder does "
-            f"not parse. Rewrite the `som:` block in block style (`som:` on "
-            f"its own line, with `sku:`/`hw_rev:` indented beneath it) and "
-            f"try again."
+            f"not parse. Rewrite the `som:` block in block style (`sku:`/"
+            f"`hw_rev:` each on their own indented line beneath `som:`) and "
+            f"try again -- keep any `&anchor`/`!tag` the `som:` key itself "
+            f"carries where it is: dropping it would silently break a `*alias` "
+            f"referring to it elsewhere in the file."
         )
         self.flow_body = flow_body
 
