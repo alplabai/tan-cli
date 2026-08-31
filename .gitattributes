@@ -64,10 +64,14 @@ install.sh text eol=lf
 # file's real two-branch conflicts resolve themselves: both sides' new lines
 # kept, no conflict markers). It is REMOVED, not merely stale: `union` only
 # ever fixed the LOCAL `git merge` case. GitHub computes a pull request's own
-# mergeable status without applying custom merge drivers at all, so a
-# union-attributed file could still show a PR as CONFLICTING in the GitHub UI
-# even though a local merge of the same two branches would resolve clean --
-# the mitigation never reached the thing that actually blocks a PR. The real
+# mergeable status without applying custom merge drivers at all -- measured on
+# PR #971 (tan-cli#907 comment, 2026-08-28: a real `git merge origin/dev` at
+# that PR's exact head resolved clean with zero conflict markers, while
+# GitHub, polled three times over eight minutes, reported `CONFLICTING` every
+# time) -- so a union-attributed file could still show a PR as CONFLICTING in
+# the GitHub UI even though a local merge of the same two branches would
+# resolve clean -- the mitigation never reached the thing that actually
+# blocks a PR. The real
 # fix (tan-cli#907) is `python/tests/gates/MODULE_SIZE_BUDGET_LOG.d/`: one new
 # file per entry, which needs no merge attribute here at all, because two new,
 # differently-named files are trivially compatible under every merge strategy,

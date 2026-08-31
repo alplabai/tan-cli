@@ -18,9 +18,13 @@ That happened for real on tan-cli#902.
 
 `.gitattributes`' `merge=union` mitigation (tan-cli#939) fixed the LOCAL `git
 merge` case but not the one that actually blocks a PR: GitHub computes a
-pull request's own mergeable status without applying custom merge drivers,
-so a union-attributed single file can still show a PR as CONFLICTING in the
-GitHub UI even though a plain local merge would resolve it clean.
+pull request's own mergeable status without applying custom merge drivers —
+measured on PR #971 (tan-cli#907 comment, 2026-08-28): a real `git merge
+origin/dev` at that PR's exact head resolved clean, zero markers, while
+GitHub itself, polled three times over eight minutes, reported `CONFLICTING`
+every time — so a union-attributed single file can still show a PR as
+CONFLICTING in the GitHub UI even though a plain local merge would resolve it
+clean.
 
 Disjoint files cannot conflict, under any merge strategy, local or
 GitHub-side, with no driver needed at all. One file per entry removes the

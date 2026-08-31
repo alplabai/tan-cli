@@ -103,9 +103,12 @@ SINGLE growing file every regen appended to -- so any two branches that both
 raised a ceiling wrote into the same tail region, and `.gitattributes`'
 `merge=union` mitigation (tan-cli#939) only ever helped the LOCAL `git merge`
 case: GitHub computes a PR's own mergeable status without applying custom
-merge drivers, so a union-attributed file could still show a PR as
-CONFLICTING in the GitHub UI even though a local merge would resolve it
-clean. As of tan-cli#907, `_append_log` below writes each entry as its OWN
+merge drivers -- measured on PR #971 (tan-cli#907 comment, 2026-08-28): a
+clean local `git merge origin/dev` at that PR's exact head, GitHub itself
+polled three times over eight minutes to `CONFLICTING` every time -- so a
+union-attributed file could still show a PR as CONFLICTING in the GitHub UI
+even though a local merge would resolve it clean. As of tan-cli#907,
+`_append_log` below writes each entry as its OWN
 new file under `MODULE_SIZE_BUDGET_LOG.d/` (mirroring `changelog.d/` -- see
 that directory's own README for why one-file-per-entry removes the conflict
 class structurally rather than mitigating it after the fact: two new,
