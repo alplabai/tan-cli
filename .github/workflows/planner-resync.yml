@@ -836,9 +836,12 @@ jobs:
           # Checked BEFORE the `case` below (which can itself `exit 1` on
           # `rc` 1/2, already loud on its own) so a diversion is never lost
           # regardless of which `rc` branch runs -- the incident this closes
-          # is specifically `rc == 0` with a diversion, which the `case`
-          # below would otherwise report as nothing more than "Re-sync clean
-          # (or nothing owed)." and let the job go green on.
+          # is specifically `rc == 0` with a diversion, which the `0)` arm
+          # below now calls out on its own line too (tan-cli#1006 review,
+          # `:850-861`); the `::warning::` here is kept anyway as the one
+          # line guaranteed to fire ahead of any `case` arm, including a
+          # future one that regresses back to the old unconditional "Re-sync
+          # clean (or nothing owed)." wording.
           if [ '${{ steps.pr.outputs.diverted }}' = 'true' ]; then
             echo "::warning::planner-resync diverted away from auto/planner-resync (tan-cli#1002) -- ${{ steps.pr.outputs.occupied_count || 1 }} branch(es) carry a commit this automation did not write and were left completely untouched. A green job here does NOT mean nothing needs attention: see ${{ steps.pr.outputs.url || 'the job summary' }} for what was protected and which branch this proposal actually landed on."
           fi
