@@ -602,3 +602,7 @@ several less obvious failures.
     - tan/commands/model_cmd.py: 1059 -> 1060
     - tan/commands/support_bundle_cmd.py: 1067 -> 1068
     - tan/core/sdk_discovery.py: new entry at 963
+- 2026-08-30 -- tan-cli#1011: ethos_u.py docstring/comment growth documenting the arena-only req_sram_kib contract decision under Sram_Only (no arithmetic change)
+    - tan/model/adapters/ethos_u.py: 889 -> 908
+- 2026-08-30 -- PR #1021 review fixes: ethos_u.py's arena-only scope caveat now reaches a fully-specified Sram_Only compile too (tan-cli#1021 review MINOR), not only the defaulted-profile branch, plus the accompanying wording fix and test
+    - tan/model/adapters/ethos_u.py: 908 -> 959
