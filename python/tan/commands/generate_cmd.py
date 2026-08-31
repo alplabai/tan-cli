@@ -107,6 +107,7 @@ from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
+from tan.core.scaffold import top_level_key_name
 from tan.core.sdk_discovery import (
     _planner_python,
     global_default_foreign_project_issue,
@@ -318,14 +319,19 @@ def _board_sku(path: Path) -> str | None:
 
 def _scan_som_sku(text: str) -> str | None:
     """The no-PyYAML fallback: the `sku:` scalar inside the top-level `som:`
-    block. Deliberately not a YAML parser -- it answers one question."""
+    block. Deliberately not a YAML parser -- it answers one question.
+
+    tan-cli#1008 review round 5: the top-level-key check is
+    `tan.core.scaffold.top_level_key_name`, shared with
+    `bootstrap_cmd._scan_board_slice` and `scaffold._is_som_key_line`
+    rather than a fourth local copy of the same rule."""
     inside = False
     for raw in text.splitlines():
         stripped = raw.strip()
         if not stripped or stripped.startswith("#"):
             continue
         if not raw[:1].isspace():
-            inside = stripped.split(":", 1)[0].strip() == "som"
+            inside = top_level_key_name(stripped) == "som"
             continue
         if inside:
             key, sep, value = stripped.partition(":")
