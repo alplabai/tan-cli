@@ -30,10 +30,22 @@
 # against its own pinned commit -- never "has alp-sdk's latest RELEASE moved
 # past what tan shipped".
 #
+# THE SECOND HOLE (tan-cli#767): "released tan" is not one version, it is TWO.
+# `install.sh`'s own default resolves the newest **non-prerelease** tan
+# release. But alp-sdk-vscode does not run that -- it runs whatever
+# `SUPPORTED_CLI_VERSION` in `src/alpCli/service.ts` names, and that pin has
+# deliberately been a PRERELEASE before (`v0.6.0-rc1`, moved there specifically
+# because tan-cli#639's fix (#688) was not yet in any stable release and no
+# stable tan could build a Renesas SoM). Any time the extension needs a fix
+# that has only landed in a prerelease, `install.sh`'s "latest" and the
+# extension's pin MUST diverge, by construction -- so testing only the former
+# is structural blindness to the combination alp-sdk-vscode's users actually
+# run, not a one-off gap.
+#
 # WHAT THIS RUNS. The documented customer journey, verbatim, on stock
 # ubuntu-latest, for one SKU per SoM family:
 #
-#   install.sh (latest tan release)  ->  clone alp-sdk @ latest release tag
+#   install.sh (a tan release)  ->  clone alp-sdk @ latest release tag
 #     ->  tan init  ->  tan generate  ->  tan build
 #
 #   * E1M-AEN801  (Alif Ensemble)  -- full journey, ELF asserted.
@@ -47,26 +59,61 @@
 #     is itself a signal (the SoM went live and this gate's matrix is stale),
 #     and so is a crash where a controlled refusal belongs.
 #
+# ...run across TWO combinations (tan-cli#767), both against the SAME
+# alp-sdk latest-release-tag axis:
+#
+#   * `latest`       -- install.sh's own default (or the `tan_version`
+#                        workflow_dispatch override). Unchanged from before
+#                        #767; this is the ORIGINAL axis tan-cli#639 added.
+#   * `consumer-pin`  -- alp-sdk-vscode's live `SUPPORTED_CLI_VERSION`
+#                        (resolved by fetching `src/alpCli/service.ts` off its
+#                        `dev` branch and grep'ing the constant -- the exact
+#                        pattern alp-sdk-vscode's own CI uses, widened to keep
+#                        a prerelease suffix rather than truncate it), or the
+#                        `consumer_tan_version` workflow_dispatch override.
+#                        SKIPPED, loudly (an `::notice::`, not silence), when
+#                        this equals the `latest` axis -- most days they agree,
+#                        and running the full journey twice for an identical
+#                        tan binary is wasted runner minutes, not extra
+#                        coverage.
+#
+# The `resolve-consumer-pin` job resolves that pin and decides the skip; the
+# `build-matrix` job turns SKU list x combination list into the single JSON
+# matrix `journey` runs -- one job body, parameter-driven by `matrix.tan_version`
+# / `matrix.alp_sdk_ref` / `matrix.combination`, not two copies of the same
+# ~250 lines of steps. Resolution failure (the constant renamed, moved, or the
+# fetch itself failing) is a hard `::error::` + non-zero exit, never a silent
+# fall-through to "latest" -- that fall-through would silently restore the
+# exact blind spot #767 closes.
+#
 # NOT a required PR check -- it depends on tags neither repo controls the
-# timing of, and a red run here is often "alp-sdk cut a release tan has not
-# caught up to yet", not a bug in the PR under review. VISIBLE regardless:
+# timing of (plus, now, a THIRD repo's pin), and a red run here is often
+# "alp-sdk cut a release tan has not caught up to yet" or "alp-sdk-vscode
+# moved its pin", not a bug in the PR under review. VISIBLE regardless:
 # `schedule` (daily) + `workflow_dispatch`, both of which show up in the
 # Actions tab and can page/notify independently of branch protection.
 #
 # HOW TO PROVE THIS GATE CAN FAIL (superpowers:verification-before-completion
-# -- a gate never observed to go red is not a gate). Two ways, no edit needed:
+# -- a gate never observed to go red is not a gate). No edit needed:
 #
-#   1. Today, for real: dispatch this workflow with both inputs empty. The
+#   1. Today, for real: dispatch this workflow with all inputs empty. The
 #      E1M-V2N101 leg reproduces tan-cli#639 exactly -- `tan build` aborts
 #      Zephyr's configure on the undefined `ALP_SDK_CHIP_NONE` symbol. This is
 #      not a drill; it is the live bug the workflow header above describes.
-#   2. Once #639 ships and that leg goes green, prove the MECHANISM still
-#      works by dispatching with `alp_sdk_ref` pinned to a release that
-#      predates the fix (e.g. `v0.15.0`) while installing the fixed tan (the
-#      default `tan_version`, i.e. whatever install.sh resolves as latest) --
-#      or the mirror image, pinning `tan_version` to `v0.5.1` against a future
-#      alp-sdk release. Either direction reproduces one of the two polarities
-#      this gate exists to catch.
+#   2. Once #639 ships and that leg goes green, prove the LATEST-axis
+#      mechanism still works by dispatching with `alp_sdk_ref` pinned to a
+#      release that predates the fix (e.g. `v0.15.0`) while installing the
+#      fixed tan (the default `tan_version`) -- or the mirror image, pinning
+#      `tan_version` to `v0.5.1` against a future alp-sdk release.
+#   3. Prove the CONSUMER-PIN axis's mechanism (tan-cli#767), independent of
+#      whatever alp-sdk-vscode's live pin happens to be today: dispatch with
+#      `consumer_tan_version: v0.5.1` (and `alp_sdk_ref` empty, i.e. alp-sdk's
+#      real latest release, which by now carries the e6928625 fix). The
+#      override forces the leg to run regardless of the live pin's value, and
+#      the E1M-V2N101 journey reproduces tan-cli#639's exact abort a second
+#      time -- through the NEW leg's wiring this time, proving it actually
+#      executes `tan build` rather than being a check that is satisfied no
+#      matter what it reads.
 
 name: release-combination
 
@@ -79,16 +126,30 @@ on:
     inputs:
       tan_version:
         description: >-
-          tan release to install via install.sh's --version (e.g. v0.5.1).
-          Empty = install.sh's own default (the latest release).
+          tan release to install for the `latest` combination via install.sh's
+          --version (e.g. v0.5.1). Empty = install.sh's own default (the
+          latest non-prerelease release). Does NOT affect the `consumer-pin`
+          combination below -- use consumer_tan_version for that.
+        required: false
+        default: ""
+      consumer_tan_version:
+        description: >-
+          tan-cli#767: override for the `consumer-pin` combination -- the tan
+          release to install in place of alp-sdk-vscode's live
+          SUPPORTED_CLI_VERSION pin. Empty = resolve the pin live from
+          alp-sdk-vscode's dev branch (and skip this combination entirely when
+          it equals the `latest` combination's version). Set this to a
+          deliberately old release (e.g. v0.5.1) to force the leg to run and
+          prove its mechanism can still fail (see the file header).
         required: false
         default: ""
       alp_sdk_ref:
         description: >-
-          alp-sdk ref to clone (tag, branch, or SHA). Empty = alp-sdk's
-          latest release tag, resolved live via the GitHub API. Set this to a
-          deliberately old tag to prove this gate can still fail (see the
-          file header).
+          alp-sdk ref to clone (tag, branch, or SHA), shared by BOTH
+          combinations. Empty = alp-sdk's latest release tag, resolved live
+          via the GitHub API. Set this to a deliberately old tag to prove the
+          `latest` combination's mechanism can still fail (see the file
+          header).
         required: false
         default: ""
 
@@ -103,9 +164,11 @@ concurrency:
 
 permissions:
   # Least privilege (tan-cli#435). The token is used only to lift the
-  # unauthenticated per-IP rate limit on two public-repo GitHub API reads
-  # (alp-sdk's latest release, `west sdk install`'s release listing) -- never
-  # to write anything.
+  # unauthenticated per-IP rate limit on GitHub API reads (alp-sdk's latest
+  # release, tan-cli's own latest release for the consumer-pin skip decision,
+  # `west sdk install`'s release listing) -- never to write anything. The
+  # `src/alpCli/service.ts` fetch is a plain raw.githubusercontent.com GET
+  # against a public repo and needs no token at all.
   contents: read
 
 jobs:
@@ -144,37 +207,165 @@ jobs:
           echo "alp_sdk_ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "::notice::alp-sdk latest release tag: ${ref}"
 
-  journey:
-    needs: resolve-refs
-    name: "${{ matrix.sku }} -- released tan x alp-sdk@${{ needs.resolve-refs.outputs.alp_sdk_ref }}"
+  resolve-consumer-pin:
+    name: resolve alp-sdk-vscode's pinned tan version (tan-cli#767)
     runs-on: ubuntu-latest
-    # `fail-fast: false` -- the whole point is that these three legs can
-    # disagree (AEN green, V2N red) and each verdict must be visible on its
-    # own, not cancelled because a sibling leg failed first.
+    timeout-minutes: 5
+    outputs:
+      consumer_tan_version: ${{ steps.resolve.outputs.consumer_tan_version }}
+      skip: ${{ steps.resolve.outputs.skip }}
+    steps:
+      # Same `env:` indirection reasoning as resolve-refs above.
+      - name: resolve SUPPORTED_CLI_VERSION (dispatch override, else the live pin)
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OVERRIDE_VERSION: ${{ github.event.inputs.consumer_tan_version }}
+        run: |
+          set -euo pipefail
+
+          latest_tan="$(gh api repos/alplabai/tan-cli/releases/latest -q .tag_name)"
+          if [ -z "${latest_tan}" ]; then
+            echo "::error::could not resolve tan-cli's own latest release tag via the GitHub API (needed to decide whether the consumer-pin combination differs from the latest combination)."
+            exit 1
+          fi
+          echo "install.sh's own default (tan-cli's latest release): ${latest_tan}"
+
+          if [ -n "${OVERRIDE_VERSION}" ]; then
+            echo "consumer_tan_version=${OVERRIDE_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::consumer-pin OVERRIDDEN via workflow_dispatch input: ${OVERRIDE_VERSION} -- forced to run regardless of ${latest_tan}, to prove this leg's mechanism can fail (tan-cli#767)."
+            exit 0
+          fi
+
+          # The exact pattern alp-sdk-vscode's own CI uses (its
+          # `test/cliPin.prerelease.test.js` pins every site that resolves
+          # this constant), widened to keep a prerelease suffix rather than
+          # truncate it (an earlier narrower regex silently turned
+          # `0.5.0-rc1` into `0.5.0`, downloading a different tan than the
+          # pin names). `|| true` on the pipeline: a legitimate "the pattern
+          # matched nothing" (grep exit 1) must NOT kill this step via
+          # pipefail before the explicit -z check below gets to turn it into
+          # a deliberate ::error:: -- writing the same failure unconditionally
+          # ourselves is the tan-cli#1013 lesson (a conditionally-written key
+          # exits 1 under pipefail and the step dies with no test ever having
+          # executed the body).
+          pin="$(curl -fsSL https://raw.githubusercontent.com/alplabai/alp-sdk-vscode/dev/src/alpCli/service.ts \
+              | grep -oE 'SUPPORTED_CLI_VERSION = "[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?"' \
+              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' || true)"
+          if [ -z "${pin}" ]; then
+            echo "::error::could not resolve alp-sdk-vscode's SUPPORTED_CLI_VERSION from src/alpCli/service.ts on its dev branch -- the constant may have been renamed, moved, or the fetch failed. Refusing to fall back to 'latest' silently (that fall-through is exactly the blind spot tan-cli#767 closes)."
+            exit 1
+          fi
+          pin="v${pin}"
+          echo "consumer_tan_version=${pin}" >> "$GITHUB_OUTPUT"
+
+          if [ "${pin}" = "${latest_tan}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::alp-sdk-vscode's SUPPORTED_CLI_VERSION (${pin}) == install.sh's latest (${latest_tan}) -- consumer-pin combination == latest combination, nothing extra to test today."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::alp-sdk-vscode's SUPPORTED_CLI_VERSION (${pin}) diverges from install.sh's latest (${latest_tan}) -- running the consumer-pin combination."
+          fi
+
+  build-matrix:
+    name: build the SKU x combination matrix
+    needs: [resolve-refs, resolve-consumer-pin]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      # One SKU catalogue, one place it is written down. Before #767 that
+      # catalogue lived directly in `journey`'s `strategy.matrix.include:`;
+      # now that the same three SKUs need to run once per combination (one or
+      # two combinations, decided above), it is built here instead so there
+      # is exactly one definition to keep in sync, not two copies of the
+      # journey's ~250 steps that could quietly drift apart (tan-cli#1008 /
+      # #1035's dominant defect shape).
+      - name: build the matrix
+        id: build
+        env:
+          ALP_SDK_REF: ${{ needs.resolve-refs.outputs.alp_sdk_ref }}
+          TAN_VERSION_OVERRIDE: ${{ github.event.inputs.tan_version }}
+          CONSUMER_TAN_VERSION: ${{ needs.resolve-consumer-pin.outputs.consumer_tan_version }}
+          CONSUMER_SKIP: ${{ needs.resolve-consumer-pin.outputs.skip }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          alp_sdk_ref = os.environ["ALP_SDK_REF"]
+          tan_override = os.environ.get("TAN_VERSION_OVERRIDE", "")
+          consumer_tan_version = os.environ["CONSUMER_TAN_VERSION"]
+          consumer_skip = os.environ["CONSUMER_SKIP"] == "true"
+
+          skus = [
+              {"sku": "E1M-AEN801", "template": "zephyr-app", "core": "m55_hp", "expect_refuse": False},
+              {"sku": "E1M-V2N101", "template": "zephyr-app", "core": "m33_sm", "expect_refuse": False},
+              {
+                  "sku": "E1M-NX9101",
+                  # `zephyr-app`'s vendored scaffold only has AEN and V2N/V2M
+                  # trees; at a released tan under test here an unrecognised
+                  # family such as E1M-NX9* can silently fall back to the
+                  # Alif tree instead of refusing (`scaffold._family_bucket`)
+                  # -- a mismatched scaffold, not the hw_rev refusal this leg
+                  # exists to prove. `minimal-app` is vendor-neutral and
+                  # scaffolds any SoM, which is what actually reaches
+                  # `tan generate` far enough to hit `SdkRevisionNotBuildable`.
+                  "template": "minimal-app",
+                  "core": "m33",
+                  "expect_refuse": True,
+              },
+          ]
+
+          combinations = [
+              # install.sh's own default (or the `tan_version` dispatch
+              # override) x alp-sdk's latest release tag -- the original axis
+              # tan-cli#639 added.
+              {"combination": "latest", "tan_version": tan_override, "label": "released tan"},
+          ]
+          if not consumer_skip:
+              # tan-cli#767: alp-sdk-vscode's SUPPORTED_CLI_VERSION pin,
+              # resolved live -- the version a consumer of the extension
+              # actually runs, not install.sh's "latest".
+              combinations.append(
+                  {
+                      "combination": "consumer-pin",
+                      "tan_version": consumer_tan_version,
+                      "label": "alp-sdk-vscode's pinned tan",
+                  }
+              )
+
+          include = []
+          for combo in combinations:
+              for s in skus:
+                  entry = dict(s)
+                  entry["alp_sdk_ref"] = alp_sdk_ref
+                  entry["combination"] = combo["combination"]
+                  entry["tan_version"] = combo["tan_version"]
+                  entry["combination_label"] = combo["label"]
+                  include.append(entry)
+
+          matrix = {"include": include}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write("matrix=" + json.dumps(matrix) + "\n")
+          print("resolved matrix:")
+          print(json.dumps(matrix, indent=2))
+          PY
+
+  journey:
+    needs: build-matrix
+    name: "${{ matrix.sku }} (${{ matrix.combination_label }}) -- x alp-sdk@${{ matrix.alp_sdk_ref }}"
+    runs-on: ubuntu-latest
+    # `fail-fast: false` -- the whole point is that these legs can disagree
+    # (AEN green, V2N red; `latest` green, `consumer-pin` red) and each
+    # verdict must be visible on its own, not cancelled because a sibling leg
+    # failed first.
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - sku: E1M-AEN801
-            template: zephyr-app
-            core: m55_hp
-            expect_refuse: false
-          - sku: E1M-V2N101
-            template: zephyr-app
-            core: m33_sm
-            expect_refuse: false
-          - sku: E1M-NX9101
-            # `zephyr-app`'s vendored scaffold only has AEN and V2N/V2M
-            # trees; at the RELEASED tan under test here (v0.5.1) an
-            # unrecognised family such as E1M-NX9* silently falls back to
-            # the Alif tree instead of refusing (`scaffold._family_bucket`)
-            # -- a mismatched scaffold, not the hw_rev refusal this leg
-            # exists to prove. `minimal-app` is vendor-neutral and scaffolds
-            # any SoM, which is what actually reaches `tan generate` far
-            # enough to hit `SdkRevisionNotBuildable`.
-            template: minimal-app
-            core: m33
-            expect_refuse: true
+      matrix: ${{ fromJSON(needs.build-matrix.outputs.matrix) }}
     # The full legs pay for a real `tan bootstrap` + `west sdk install` +
     # ARM Zephyr build (getting-started.yml's own budget is 60 minutes for
     # one SKU); the expect-refuse leg never reaches a toolchain at all.
@@ -208,16 +399,17 @@ jobs:
 
       # THE COMBINATION UNDER TEST, half one: a real release download +
       # sha256 verify, exactly like a customer's shell -- not a source build
-      # of this checkout. `--version` is empty by default (install.sh's own
-      # "latest" resolution); a workflow_dispatch can override it to prove
-      # this gate's mechanism (see the file header).
+      # of this checkout. `matrix.tan_version` carries either the `latest`
+      # combination's dispatch override (or "" for install.sh's own default)
+      # or the `consumer-pin` combination's resolved/overridden version --
+      # see build-matrix above.
       - name: install tan via install.sh (released binary)
         env:
-          TAN_VERSION_OVERRIDE: ${{ github.event.inputs.tan_version }}
+          TAN_VERSION: ${{ matrix.tan_version }}
         run: |
           set -euo pipefail
-          if [ -n "${TAN_VERSION_OVERRIDE}" ]; then
-            ./install.sh --version "${TAN_VERSION_OVERRIDE}"
+          if [ -n "${TAN_VERSION}" ]; then
+            ./install.sh --version "${TAN_VERSION}"
           else
             ./install.sh
           fi
@@ -233,12 +425,12 @@ jobs:
 
       # THE COMBINATION UNDER TEST, half two: alp-sdk at its latest RELEASE
       # TAG (resolved in the job above), not a `dev`/`main` tip and not a
-      # commit pin.
-      - name: clone alp-sdk @ ${{ needs.resolve-refs.outputs.alp_sdk_ref }}
+      # commit pin. Shared by both combinations -- only the tan half varies.
+      - name: clone alp-sdk @ ${{ matrix.alp_sdk_ref }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: alplabai/alp-sdk
-          ref: ${{ needs.resolve-refs.outputs.alp_sdk_ref }}
+          ref: ${{ matrix.alp_sdk_ref }}
           path: release-workspace/alp-sdk
           persist-credentials: false
 
@@ -306,10 +498,12 @@ jobs:
 
       - name: "tan init --som ${{ matrix.sku }}"
         working-directory: release-workspace
+        env:
+          MATRIX_TEMPLATE: ${{ matrix.template }}
         run: |
           set -euo pipefail
           set +e
-          tan init --name my-app --template "${{ matrix.template }}" --som "${SKU}" \
+          tan init --name my-app --template "${MATRIX_TEMPLATE}" --som "${SKU}" \
               --sdk-root ./alp-sdk --format json > /tmp/rc-init-${SKU}.json
           rc=$?
           set -e
@@ -341,6 +535,8 @@ jobs:
       # E1M-NX9101's `SdkRevisionNotBuildable` refusal fires.
       - name: "tan generate"
         working-directory: release-workspace/my-app
+        env:
+          MATRIX_EXPECT_REFUSE: ${{ matrix.expect_refuse }}
         run: |
           set -euo pipefail
           set +e
@@ -352,7 +548,7 @@ jobs:
             echo "::error::[${SKU}] 'tan generate' exited ${rc} without writing an envelope at all (nothing on stdout)."
             exit "$(( rc == 0 ? 1 : rc ))"
           fi
-          python3 - "$SKU" "$rc" "${{ matrix.expect_refuse }}" <<'PY'
+          python3 - "$SKU" "$rc" "${MATRIX_EXPECT_REFUSE}" <<'PY'
           import json, sys
           sku, rc, expect_refuse = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "true"
           path = f"/tmp/rc-generate-{sku}.json"
@@ -447,7 +643,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-combination-${{ matrix.sku }}
+          name: release-combination-${{ matrix.sku }}-${{ matrix.combination }}
           path: |
             /tmp/rc-bootstrap-*.json
             /tmp/rc-bootstrap-*.stderr
