@@ -26,11 +26,18 @@ The numbers now live in `module_size_budget.generated.json`, produced by
 that file is resolved by throwing either side away and re-running the script
 against the merged tree -- it re-measures from source, so the result is
 correct by construction rather than reconciled. `MODULE_SIZE_BUDGET_LOG.md`
-carries the append-only, one-line-per-change record of WHY a ceiling moved,
-in the same "keep both sides" shape that is already correct for
-`CHANGELOG.md` -- unlike the old dict, nothing in that log encodes absolute
-state, so two branches that each grow a module produce two non-conflicting
-lines instead of one contested number.
+carried the append-only, one-line-per-change record of WHY a ceiling moved
+from 2026-08-11 through 2026-08-30, in the same "keep both sides" shape that
+is already correct for `CHANGELOG.md` -- unlike the old dict, nothing in that
+log encoded absolute state, so two branches that each grew a module produced
+two non-conflicting lines instead of one contested number. That file is now
+FROZEN (tan-cli#907): even a single append-only file collided across
+branches often enough (four of five sampled v0.7.0 PRs) that the record of
+WHY was itself at risk from the mechanical conflict resolution meant to fix
+it -- so every new entry is now its own file under the sibling
+`MODULE_SIZE_BUDGET_LOG.d/` directory, mirroring `changelog.d/`, where two
+branches literally cannot collide because they are never touching the same
+path.
 
 ## What this gates, and what it only watches (tan-cli#817)
 
@@ -292,15 +299,20 @@ def test_the_observed_test_tree_is_recorded_not_gated(tmp_path, monkeypatch):
 
     generated = tmp_path / "module_size_budget.generated.json"
     ledger = tmp_path / "LOG.md"
+    ledger_dir = tmp_path / "LOG.d"
     monkeypatch.setattr(target, "PACKAGE", package)
     monkeypatch.setattr(target, "TEST_ROOT", tests_root)
     monkeypatch.setattr(target, "GENERATED_PATH", generated)
     monkeypatch.setattr(target, "LOG_PATH", ledger)
+    monkeypatch.setattr(target, "LOG_DIR", ledger_dir)
+
+    def _entry_files() -> list[Path]:
+        return sorted(ledger_dir.glob("*.md")) if ledger_dir.exists() else []
 
     # 1. Seeding an observed entry: clean, no flag, no ledger.
     assert regen.main([]) == 0
     assert json.loads(generated.read_text())["observed_tests"] == {"tests/test_big.py": 900}
-    assert not ledger.exists(), "seeding the observed record must not touch the ledger"
+    assert not _entry_files(), "seeding the observed record must not touch the ledger"
 
     # 2. The decision itself: that file GROWS past the cap, a lot. Still clean,
     #    still no flag, still nothing in the ledger.
@@ -310,7 +322,7 @@ def test_the_observed_test_tree_is_recorded_not_gated(tmp_path, monkeypatch):
         "turned into a ratchet, which is the decision tan-cli#817 rejected"
     )
     assert json.loads(generated.read_text())["observed_tests"] == {"tests/test_big.py": 2400}
-    assert not ledger.exists(), "observed growth must never write a ledger entry"
+    assert not _entry_files(), "observed growth must never write a ledger entry"
 
     # 3. The contrast, so none of the above passes for the wrong reason: the
     #    SAME growth on the gated side IS refused without a reason.
@@ -320,9 +332,15 @@ def test_the_observed_test_tree_is_recorded_not_gated(tmp_path, monkeypatch):
         "--reason -- then the asymmetry proved above is not a decision, the "
         "ratchet is simply off"
     )
-    assert not ledger.exists()
+    assert not _entry_files()
     assert regen.main(["--reason", "deliberate"]) == 0
-    assert "deliberate" in ledger.read_text(), "the gated side still logs its reasons"
+    # tan-cli#907: a NEW file under LOG_DIR, never an append to LOG_PATH --
+    # the old single-file ledger is frozen and gets nothing written to it any
+    # more (asserted directly here, not just by omission).
+    entries = _entry_files()
+    assert len(entries) == 1, f"expected exactly one new ledger entry file, got {entries}"
+    assert "deliberate" in entries[0].read_text(), "the gated side still logs its reasons"
+    assert not ledger.exists(), "the frozen single-file ledger must never be written to again"
 
 
 def test_check_mode_reds_on_a_stale_sidecar_and_passes_once_resynced(tmp_path, monkeypatch):

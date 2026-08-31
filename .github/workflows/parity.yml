@@ -1372,6 +1372,19 @@ jobs:
             fi
           done
 
+          # tan-cli#907: MODULE_SIZE_BUDGET_LOG.d/'s own immutability gate
+          # has the identical tan-cli#308 shape as the pair above -- it needs
+          # neither ALP_SDK_ROOT nor a resolved PR base ref, and this job's
+          # checkout is always fetch-depth 0, so both of its real tests must
+          # PASS here, never SKIP or fail to collect.
+          for t in test_the_checkout_has_full_history \
+                   test_every_entry_under_module_size_budget_log_d_was_only_ever_added; do
+            if ! grep -qF "test_module_size_budget_log_d_entries_are_immutable.py::${t} PASSED" /tmp/gates.log; then
+              echo "::error::${t} did not PASS in this job -- this gate needs no ALP_SDK_ROOT and no PR/merge-queue base ref, and this job's checkout is always fetch-depth 0, so anything other than PASSED (a SKIP, or a collection failure) is a real finding."
+              exit 1
+            fi
+          done
+
       # test_jlink_aen_device_freshness asks a question the FROZEN audit checkout
       # cannot answer: does tan's JLINK_AEN_DEVICE fallback still agree with the
       # part number alp-sdk ships TODAY. Binding it to the audit commit like the

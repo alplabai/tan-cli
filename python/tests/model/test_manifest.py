@@ -2,6 +2,7 @@
 """Tests for tan.model.manifest round-trip serialisation."""
 import json
 import cbor2
+from tan.model import manifest
 from tan.model.manifest import Tensor, Target, Coverage, Manifest
 
 
@@ -76,3 +77,17 @@ def test_missing_compiler_version_decodes_to_empty_default():
     doc["targets"][0].pop("compiler_version")     # simulate a writer that omitted it
     decoded = Manifest.from_cbor(cbor2.dumps(doc))
     assert decoded.targets[0].compiler_version == ""
+
+
+def test_field_types_maps_stay_in_parity_with_their_required_field_set():
+    """`_decode_list_field` indexes `field_types[field_name]` for every name
+    in `required` with no `.get` fallback (`manifest.py:147` --
+    `expected, type_desc = field_types[field_name]`), so a map that drifts
+    out of sync with its `required` frozenset would surface only as a raw
+    `KeyError` at decode time, not here at collection/import time. All three
+    pairs match today (`grep -rn` for the four map names across `tests/`
+    returned zero hits before this test -- tan-cli#1058 review round 3);
+    this pins the parity so a future drift is caught before decode time."""
+    assert set(manifest._TENSOR_TYPES) == manifest._TENSOR_KEYS
+    assert set(manifest._TARGET_TYPES) == manifest._TARGET_REQUIRED
+    assert set(manifest._COVERAGE_TYPES) == manifest._COV_KEYS

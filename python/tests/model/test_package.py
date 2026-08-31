@@ -306,3 +306,78 @@ def test_read_manifest_file_refuses_a_manifest_region_past_the_end_of_the_file(t
     path.write_bytes(bytes(raw))
     with pytest.raises(ValueError, match="runs past the end"):
         read_manifest_file(path)
+
+
+# --------------------------------------------------------------------------
+# tan-cli#1045 -- `read_package`, the in-memory sibling of
+# `read_manifest_file`, did not bounds-check what it read: `raw[off:off +
+# length]` never raises for an out-of-range `off` or over-long `length`; it
+# silently truncates (`b"AB"[0:999999] == b"AB"`).
+# --------------------------------------------------------------------------
+
+
+def test_read_package_rejects_a_buffer_too_short_to_hold_a_header():
+    with pytest.raises(ValueError, match="truncated container"):
+        read_package(b"ALPM")
+
+
+def test_read_package_refuses_a_manifest_region_past_the_end_of_the_buffer():
+    """The in-memory sibling of
+    `test_read_manifest_file_refuses_a_manifest_region_past_the_end_of_the_file`
+    above -- the same subtraction-style compare (`off > size or length >
+    size - off`), now also made for `read_package`'s slice of an
+    already-loaded buffer."""
+    import struct as _struct
+
+    raw = bytearray(write_package(_mft(), [b"A"]))
+    _struct.pack_into("<I", raw, 12, 0xFFFFFFFF)          # mft_len
+    with pytest.raises(ValueError, match="runs past the end"):
+        read_package(bytes(raw))
+    _struct.pack_into("<I", raw, 12, 4)
+    _struct.pack_into("<I", raw, 8, 0xFFFFFFFF)           # mft_off
+    with pytest.raises(ValueError, match="runs past the end"):
+        read_package(bytes(raw))
+
+
+def test_read_package_refuses_a_blob_table_region_past_the_end_of_the_buffer():
+    import struct as _struct
+
+    raw = bytearray(write_package(_mft(), [b"A"]))
+    _struct.pack_into("<I", raw, 20, 0xFFFFFFFF)          # blob_count
+    with pytest.raises(ValueError, match="blob table region"):
+        read_package(bytes(raw))
+
+
+def test_read_package_refuses_a_blob_entry_past_the_end_of_the_buffer():
+    """tan-cli#1045's own measured failure on the unguarded code:
+
+        off=999999 (past EOF), length=50   -> blobs = [b'']            # no exception, wrong data
+        off=<valid>, length=999999         -> returns 8 bytes silently  # no exception, truncated data
+    """
+    import struct as _struct
+
+    raw = bytearray(write_package(_mft(), [b"A" * 8, b"B" * 8]))
+    _, _, _, _, _, tbl_off, _n = _struct.Struct("<4sHHIIII").unpack_from(bytes(raw), 0)
+    _struct.pack_into("<I", raw, tbl_off, 999999)         # first blob's off, past EOF
+    with pytest.raises(ValueError, match=r"blob 0 region"):
+        read_package(bytes(raw))
+
+
+def test_read_package_refuses_a_blob_entry_whose_length_overruns_the_buffer():
+    import struct as _struct
+
+    raw = bytearray(write_package(_mft(), [b"A" * 8, b"B" * 8]))
+    _, _, _, _, _, tbl_off, _n = _struct.Struct("<4sHHIIII").unpack_from(bytes(raw), 0)
+    _struct.pack_into("<I", raw, tbl_off + 4, 999999)     # first blob's length
+    with pytest.raises(ValueError, match=r"blob 0 region"):
+        read_package(bytes(raw))
+
+
+def test_read_package_still_returns_valid_blobs_when_regions_are_in_bounds():
+    """Non-vacuity: the new bounds checks must not reject well-formed
+    packages -- a second, independent two-blob case beside
+    `test_package_roundtrips_manifest_and_blobs` above."""
+    blobs = [b"A" * 8, b"B" * 4]
+    raw = write_package(_mft(), blobs)
+    _mft_out, got_blobs = read_package(raw)
+    assert got_blobs == blobs
