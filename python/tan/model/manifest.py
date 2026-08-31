@@ -162,6 +162,23 @@ class Manifest:
     @classmethod
     def from_json(cls, text: str) -> "Manifest":
         d = _json.loads(text)
+        if not isinstance(d, dict):
+            # Mirrors the `preset` guard in `targets.resolve_targets`
+            # (tan-cli#1018): a `.alpmodel` manifest that decodes but is
+            # not a JSON object (e.g. a bare list or a bare scalar) must
+            # not reach the bare `d["src_sha"]` subscript below -- that
+            # raises a raw TypeError ("list indices must be integers or
+            # slices, not str" / "string indices must be integers, not
+            # 'str'") instead of a curated error a caller can distinguish
+            # from any other TypeError in the call stack (tan-cli#1023).
+            # `package.py`'s own bounds-checked reads of the untrusted
+            # header already treat manifest bytes as wire data, not
+            # trusted first-party output -- a corrupt/adversarial manifest
+            # fails loudly here for the same reason, rather than being
+            # silently tolerated.
+            raise ValueError(
+                f"malformed .alpmodel manifest: expected a JSON object, got {type(d).__name__}"
+            )
         d["src_sha"] = bytes.fromhex(d["src_sha"])
         return cls.from_dict(d)
 
@@ -171,6 +188,13 @@ class Manifest:
     @classmethod
     def from_cbor(cls, blob: bytes) -> "Manifest":
         d = _cbor2.loads(blob)
+        if not isinstance(d, dict):
+            # See `from_json` above (tan-cli#1023): guard before the bare
+            # `d["name"]` subscript below, reached from both
+            # `package.read_manifest_file` and `package.read_package`.
+            raise ValueError(
+                f"malformed .alpmodel manifest: expected a CBOR map, got {type(d).__name__}"
+            )
         return cls(
             name=d["name"],
             src_sha=bytes(d["src_sha"]),
