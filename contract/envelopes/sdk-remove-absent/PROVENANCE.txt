@@ -1,0 +1,71 @@
+SPDX-License-Identifier: Apache-2.0
+
+PROVENANCE — contract/envelopes/sdk-remove-absent/expected.json
+=================================================================
+
+Re-recorded on : 2026-08-31
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#1028
+Branch         : fix/1028-sdk-remove-resolves-to-after (off dev @ 65417a67)
+
+How it was captured
+--------------------
+Exactly as `python/tests/conformance/test_contract_envelopes.py` invokes it: a
+fresh empty scratch directory nested under its own fresh parent
+(`<temp>/tan-contract-<case>-<pid>/root`), `SOURCE_DATE_EPOCH=0`, and
+`HOME`/`USERPROFILE` pointed at a second fresh directory, running
+
+    python -m tan sdk remove v0.0.0-nonexistent --destination ./sdk-cache \
+        --format json
+
+then normalising through the harness's own `normalise()` (PATH_KEYS `\` ->
+`/`, the scratch path down to `__WORKDIR__`). Python 3.12.3, lane-private
+venv, `tan` resolved from this worktree.
+
+What changed in the golden
+---------------------------
+One additive key, nothing else moved, `expected.exit` still 0:
+
+    + "data"."resolvesToAfter": {"sdkPath": null, "readiness": null, "sourceTier": "none"}
+
+Why the PREVIOUS recording was incomplete, not wrong
+------------------------------------------------------
+tan-cli#790 (PR #1022) shipped `sdk remove` reporting WHAT it removed but not
+WHAT NOW RESOLVES in its place — deliberately deferred to this issue rather
+than folded into that PR (see #1022's own body and #790's tracking issue).
+After a force-removal of a load-bearing install (the machine-global default or
+a workspace's project pin), the removal envelope gave no signal what resolves
+in its place; a caller had to make a separate `tan sdk current` call to find
+out, with no way to tell from the removal response alone whether the
+workspace falls through to a different tier or has NOTHING left to resolve —
+the case a consumer most needs told about.
+
+`resolvesToAfter` answers that by re-running `resolve_sdk_tiered` (the SAME
+narrow ladder `remove`'s own load-bearing-removal check already calls) for
+the calling workspace, mirroring `sdk current`'s own `data` SHAPE (`sdkPath`,
+`readiness`, `sourceTier`) rather than inventing a fourth one — NOT
+necessarily the same ANSWER a same-instant `sdk current` call would give:
+`sdk current` additionally falls through to a wide discovery walk and honours
+an explicit `--sdk-root`, neither of which `resolvesToAfter` does (see
+`_resolves_to_after`'s own docstring). It is present on EVERY `sdk remove`
+response — idempotent-absent, every refusal, every failure, and a real
+removal alike — not only a load-bearing one: an always-present field is
+easier for a consumer to code against than a conditional one, and this
+hermetic offline-absent case is exactly the shape a workspace with no pin,
+no registry entry, and no discoverable checkout reports both before and after
+(`sourceTier: "none"`, matching `sdk-current-no-sdk`'s own pinned shape). A
+force-removed workspace PROJECT PIN reports this identical `"none"` shape
+too, but is a DIFFERENT case this golden does not reach: `.alp/sdk-path` is
+left dangling, not cleared, by the removal, so `resolvesToAfter` cannot tell
+that workspace apart from one that was never pinned at all — tracked
+separately as tan-cli#1051, not fixed by this PR.
+
+The behavioural cases where it reports something OTHER than
+`"none"` — a still-live project pin before removal, and falling through to a
+surviving lower tier after a forced one — are covered by
+`test_sdk_command.py::test_remove_refuses_the_active_install_without_force_and_force_clears_it`
+and
+`test_sdk_command.py::test_remove_reports_the_lower_tier_it_falls_through_to_after_a_forced_removal`,
+neither of which this hermetic golden can reach (both need a real filesystem
+target to remove).

@@ -513,7 +513,7 @@ _MIN_BOUNDED_JOBS = {
     "pin-move-verify.yml": 1,
     "planner-resync.yml": 1,
     "python-binaries.yml": 4,
-    "release-combination.yml": 2,
+    "release-combination.yml": 4,
     "release-lock-update.yml": 1,
     "release.yml": 5,
     "unsharded-python-canary.yml": 1,

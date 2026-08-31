@@ -699,6 +699,10 @@ several less obvious failures.
     - tan/planner/template.py: 1614 -> 1644
 - 2026-08-31 -- tan-cli#1037 PR #1048 review: add the third (per-section) isinstance(list) guard to _board_route_entries, mirroring _topology_for_sku's outer-plus-per-entry shape
     - tan/planner/template.py: 1644 -> 1658
+- 2026-08-31 -- tan-cli#1028: sdk remove reports resolvesToAfter (what now resolves post-removal)
+    - tan/commands/sdk_cmd.py: 1456 -> 1516
+- 2026-08-31 -- tan-cli#1043 round-2 review: correct _resolves_to_after docstring's sdk-current-equivalence claim + document the dangling-project-pin gap (tan-cli#1051)
+    - tan/commands/sdk_cmd.py: 1516 -> 1529
 - 2026-08-31 -- tan-cli#1035 review: narrow _som_flow_style_body to genuine flow mappings (startswith '{'), let anchor/tag som: lines fall through to the block path, add anchor/tag regression tests, and fix the --from-example --som docstring nit
     - tan/commands/init_cmd.py: 1557 -> 1559
     - tan/core/scaffold.py: 1875 -> 1889
