@@ -1826,6 +1826,48 @@ def test_remove_refuses_outside_the_cache_root_without_force_and_force_clears_it
     assert not outside.exists()
 
 
+def test_remove_refuses_the_cache_root_itself_without_force_and_force_clears_it(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#790 review follow-up, same PR: naming the cache root EXACTLY
+    (whether by an explicit path equal to `--destination`, or `.` from a cwd
+    inside it) must refuse without `--force` -- it is the single most
+    destructive target `remove` can be pointed at, every install at once, and
+    nothing else in this function catches it: `is_outside_cache_root`
+    deliberately treats `target == destination` as NOT outside, and
+    `_load_bearing_reasons` only ever names a specific version subdirectory,
+    never the root that holds them. Found live during review before this
+    refusal existed: `tan sdk remove .` from inside the (then two-version)
+    cache root deleted the entire cache, `ok: true`, no `--force` needed."""
+    make_sdk_root(cache_with_canary / "v0.20.0", version="0.20.0")
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", str(cache_with_canary),
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-is-cache-root"
+    assert str(cache_with_canary) in refused["issues"][0]["message"]
+    assert "--force" in refused["issues"][0]["message"]
+    assert cache_with_canary.exists()
+    assert_sibling_intact(cache_with_canary)
+    assert (cache_with_canary / "v0.20.0").exists()
+
+    forced = envelope(
+        run_tan(
+            "sdk", "remove", str(cache_with_canary), "--force",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert forced["ok"] is True
+    assert forced["data"]["removed"] is True
+    assert not cache_with_canary.exists()
+
+
 def test_remove_refuses_a_path_registered_as_another_projects_global_default(
     tmp_path, isolated_home, cache_with_canary
 ):

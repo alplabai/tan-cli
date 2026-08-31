@@ -855,7 +855,13 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # at all (alp-sdk-vscode's `ISSUE_CODE_SHAPE` hard-requires exactly
         # one dot; `test_issue_code_registry_shape.py` caught the first,
         # nested-dot draft of this change).
-        expected_calls=9,
+        # tan-cli#790 review follow-up, same PR: 9 -> 10. `remove-is-cache-root`
+        # added a SIXTH `_fail(...)` call site -- found live during review:
+        # naming the cache root exactly (`target == destination`) was
+        # unguarded, since `remove-outside-root` deliberately answers False for
+        # that equality and `remove-active`'s load-bearing ladder only ever
+        # names a specific version subdirectory, never the root holding them.
+        expected_calls=10,
         sites=1,
     ),
     ("tan/commands/validate_cmd.py", "validate.fail"): dict(

@@ -551,26 +551,33 @@ def test_the_soms_memory_mode_makes_the_refused_target_ship_at_all(
     # (`t->req_sram_kib <= e->arena_sram_kib` reads 0 as fitting ANY arena,
     # src/backends/inference/alp_model_select.c).
     #
-    # KNOWN GAP, deliberately not pinned as correct here: under `Sram_Only`
-    # this figure is the ARENA ONLY. vela files the const/weights region under
-    # `on_chip_flash`, and for the Alif parts that is a pure bookkeeping
-    # rename, not a real placement -- `ethosu/vela/architecture_features.py`
-    # overrides `const_mem_area` from `Sram` to `OnChipFlash` with every
-    # characteristic copied ("This will use the same characteristics as
-    # Sram."), because vela's own validity check forbids naming `Sram` as a
-    # const area while `Sram_Only` puts all three areas on the same port. On
-    # an AEN module that region really is SRAM-resident (alp-sdk's
+    # THE CONTRACT DECISION (tan-cli#1011): under `Sram_Only` this figure is
+    # the ARENA ONLY, and that is correct -- not a gap. `e->arena_sram_kib`
+    # itself is documented as an arena-only budget
+    # (`metadata/schemas/soc-spec-v1.schema.json`'s `inference_arena_sram_kib`:
+    # "Usable SRAM budget (KiB) for an NPU tensor arena on this SoC"), and the
+    # const/weights region vela reports separately is carried in the blob
+    # payload (`model_data`/`model_size`, `src/common/alp_model_loader.c`),
+    # sized by the integrator, never by `req_sram_kib`. vela files that region
+    # under `on_chip_flash` for `Sram_Only` parts as a pure bookkeeping rename,
+    # not a real placement -- `ethosu/vela/architecture_features.py` overrides
+    # `const_mem_area` from `Sram` to `OnChipFlash` with every characteristic
+    # copied ("This will use the same characteristics as Sram."), because
+    # vela's own validity check forbids naming `Sram` as a const area while
+    # `Sram_Only` puts all three areas on the same port. On an AEN module that
+    # region really is SRAM-resident too (alp-sdk's
     # `examples/aen/aen-npu-inference-alp/src/main.c` memcpy's the model into
     # `model_sram[] __attribute__((section("SRAM0")))` with the arena in SRAM0
-    # too). Measured on the real 44-op `person_detect_int8.tflite` at
-    # `ethos-u85-256`: `sram_memory_used = 72.0` and
-    # `on_chip_flash_memory_used = 235.265625`, so real SRAM0 residency is
-    # 307.265625 KiB against a reported `req_sram_kib = 72`. Summing the
-    # columns is NOT the fix -- an integration that XIPs weights from flash
-    # would then be over-reported -- and choosing correctly needs a per-part
-    # statement of where the const region physically lands, which no metadata
-    # in either repo carries yet. That is a maintainer decision; this test
-    # records the gap rather than blessing the number.
+    # beside it) -- real information, just not carried through this field.
+    # Measured on the real 44-op `person_detect_int8.tflite` at
+    # `ethos-u85-256`: `sram_memory_used = 72.0` (the arena; `req_sram_kib`)
+    # and `on_chip_flash_memory_used = 235.265625` (the const/weights region;
+    # the blob payload's own concern). Summing the columns into
+    # `req_sram_kib` would be WRONG, not merely unnecessary: it would inflate
+    # `arena_bytes` by the same amount (both come from one `sram_kib` value),
+    # oversizing the scratch buffer, and for an integration that XIPs weights
+    # from flash instead it would OVER-report and refuse a board that fits.
+    # See `ethos_u._footprint`'s own docstring for the full contract.
     assert target.requires["sram_kib"] > 0
     assert target.arena > 0
     assert any(t.backend == "cpu" for t in mft.targets)     # siblings untouched

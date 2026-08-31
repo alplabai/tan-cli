@@ -13,8 +13,9 @@
  *
  * Hardware: the BMP581 barometer sits on BOARD_I2C_SENSORS on every
  * E1M and E1M-X EVK, strapped to 7-bit address 0x47 (SDO -> VDDIO)
- * on both -- see metadata/boards/e1m-evk.yaml and
- * metadata/boards/e1m-x-evk.yaml `i2c_devices:`.  On a brand-new
+ * on both -- see alp-sdk's metadata/boards/e1m-evk.yaml and
+ * metadata/boards/e1m-x-evk.yaml (not part of this scaffolded
+ * project) `i2c_devices:`.  On a brand-new
  * bring-up you may want to build and run the alp-sdk repo's
  * examples/peripheral-io/i2c-scanner example first to confirm which
  * address ACKs -- it isn't part of this scaffolded project.
@@ -24,7 +25,8 @@
  * opening BOARD_I2C_SENSORS and probing for TMP112 NACKs on real
  * hardware.  On the E1M-AEN family BRD_I2C is additionally the
  * slave-only Alif LPI2C0 -- ADR 0017 -- so the SoC can't master it
- * at all; see examples/v2n/v2n-temp-sensor for the V2N-only
+ * at all; see alp-sdk's examples/v2n/v2n-temp-sensor (not part
+ * of this scaffolded project) for the V2N-only
  * BRD_I2C/TMP112 pattern.)
  *
  * What success looks like (real hardware):
@@ -54,11 +56,13 @@
 #include "alp/board.h"
 
 /* BMP581 7-bit I2C address with SDO -> VDDIO -- the on-board strap
- * on both the E1M EVK (U14) and E1M-X EVK (see
- * metadata/boards/e1m-evk.yaml / e1m-x-evk.yaml `i2c_devices:`).
+ * on both the E1M EVK (U14) and E1M-X EVK (see alp-sdk's
+ * metadata/boards/e1m-evk.yaml / e1m-x-evk.yaml, not part of
+ * this scaffolded project, `i2c_devices:`).
  * SDO -> GND gives 0x46 instead; see the BMP581 datasheet
- * BST-BMP581-DS004 s5.6 or include/alp/chips/bmp581.h if your
- * board straps differently. */
+ * BST-BMP581-DS004 s5.6 or alp-sdk's include/alp/chips/bmp581.h
+ * (not part of this scaffolded project) if your board straps
+ * differently. */
 #define BMP581_ADDR_7BIT BMP581_I2C_ADDR_HIGH /* 0x47 */
 
 /* Number of samples to take before exiting.  Capped so the
@@ -107,7 +111,8 @@ int main(void)
      * (NACK on probe) up-front.  If init fails the example exits
      * cleanly -- maybe the chip isn't populated, maybe the address
      * is wrong, maybe the bus is held low by another device.
-     * examples/peripheral-io/i2c-scanner can confirm which devices ACK. */
+     * alp-sdk's examples/peripheral-io/i2c-scanner (not part of
+     * this scaffolded project) can confirm which devices ACK. */
 	bmp581_t     sensor;
 	alp_status_t s = bmp581_init(&sensor, bus, BMP581_ADDR_7BIT);
 	if (s != ALP_OK) {

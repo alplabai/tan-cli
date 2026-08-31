@@ -1010,17 +1010,18 @@ def test_a_supplied_memory_mode_is_not_reported_as_velas_own_default(tmp_path, m
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
     blob = VelaAdapter().compile(src, accel_config="ethos-u85-256", out_dir=tmp_path,
                                  vela_memory_mode="Sram_Only")
-    # ceil(0.03125) -- and KNOWN INCOMPLETE, the same gap `_footprint`'s own
-    # docstring records: this is `sram_memory_used` alone, so under `Sram_Only`
-    # it omits the const/weights region vela files under
-    # `on_chip_flash_memory_used` as a bookkeeping rename. `arena_bytes` is
-    # deliberately NOT pinned here (tan-cli#789 review MINOR 6): this test's
-    # subject is the caveat WORDING, and `arena_bytes == 32` was the only
-    # assertion in the suite that would red if a maintainer ever closed that
-    # gap -- proved by mutation, summing `sram + on_chip_flash` in `_footprint`
-    # reddened exactly this one test with `arena_bytes 272 != 32`. A tripwire
-    # against the correct fix, sitting in a test about strings.
+    # ceil(0.03125) -- and DELIBERATELY ARENA-ONLY, per the contract
+    # `_footprint`'s own docstring records (tan-cli#1011): this is
+    # `sram_memory_used` alone, so under `Sram_Only` it omits the const/weights
+    # region vela files under `on_chip_flash_memory_used` as a bookkeeping
+    # rename -- that region is carried in the blob payload instead, never in
+    # `req_sram_kib`. `arena_bytes` IS pinned here now that the contract is
+    # settled: both figures come from the same `sram_kib` value, so a future
+    # regression that summed `sram + on_chip_flash` back in would move this
+    # number too (proved by mutation: summing in `_footprint` reddens this
+    # exact assertion with `arena_bytes 272 != 32`).
     assert blob.req_sram_kib == 1
+    assert blob.arena_bytes == 32
     assert len(blob.caveats) == 1
     caveat = blob.caveats[0]
     # Only the system config is attributed to vela ...
@@ -1030,6 +1031,58 @@ def test_a_supplied_memory_mode_is_not_reported_as_velas_own_default(tmp_path, m
     # arena/SRAM numbers now describe this module's memory model, not vela's.
     assert "describe that default memory model" not in caveat
     assert "The arena/SRAM figures are unaffected" in caveat
+    # tan-cli#1011: "unaffected" must not read as "complete" -- the const/
+    # weights region is ALSO SRAM-resident under Sram_Only, and a customer
+    # sizing hardware off this caveat needs to know this figure does not
+    # include it.
+    assert "That SRAM figure is the tensor arena only" in caveat
+    # tan-cli#1021 review NIT: "provisioned separately", never "reported ...
+    # separately" -- nothing in `tan` reports the const/weights region's own
+    # size anywhere (`check.py`'s sizing note, `manifest.Target`, `model_cmd.py`
+    # all omit it); the blob PAYLOAD carries the bytes, not a reported figure.
+    assert "provisioned separately" in caveat
+    assert "is reported and provisioned separately" not in caveat
+
+
+def test_a_fully_specified_sram_only_profile_still_carries_the_arena_only_scope(
+        tmp_path, monkeypatch):
+    """tan-cli#1021 review MINOR: `_default_profile_caveats` returns `()` when
+    vela defaulted NEITHER flag -- exactly the shape a fully module-authored
+    vendor profile takes (`--config <ini> --system-config <name> --memory-mode
+    Sram_Only`, all three or none, per `compile()`'s own comment). Before this
+    fix that meant a fully-specified `Sram_Only` compile -- the path issue
+    #1011 named as live on every Alif Ensemble part -- shipped NO scope
+    statement at all: `requires.sram_kib` reached the customer's `.alpmodel`
+    with nothing beside it saying the figure is the arena only. This stdout
+    names BOTH flags with no "Warning:" line for either, i.e. nothing
+    defaulted."""
+    src = tmp_path / "m.tflite"
+    src.write_bytes(b"TFL3-INPUT")
+
+    def fake_run(cmd, capture_output, text, timeout, env):
+        out = _out_dir_of(cmd)
+        (out / "m_vela.tflite").write_bytes(b"VELA-OUT")
+        (out / "m_summary_Ethos_U85_SRAM_Only.csv").write_text(
+            "sram_memory_used,on_chip_flash_memory_used\n0.03125,0.234375\n", encoding="utf-8")
+        return _FakeProc(stdout=(
+            "System configuration             Ethos_U85_SRAM_Only\n"
+            "Memory mode                                 Sram_Only\n"
+            "CPU operators = 0 (0.0%)\n"
+            "NPU operators = 1 (100.0%)\n"))
+
+    monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
+    # @vela_memory_mode only shapes the argv (asserted elsewhere); what drives
+    # `defaulted`/`system_config`/`memory_mode` here is vela's own stdout
+    # above, parsed identically regardless of which flags `compile()` passed.
+    blob = VelaAdapter().compile(src, accel_config="ethos-u85-256", out_dir=tmp_path,
+                                 vela_memory_mode="Sram_Only")
+    assert len(blob.caveats) == 1
+    caveat = blob.caveats[0]
+    # No "vela used its BUILT-IN default ..." preamble -- nothing was
+    # defaulted, so that framing would be false here.
+    assert "BUILT-IN default" not in caveat
+    assert "That SRAM figure is the tensor arena only" in caveat
+    assert "provisioned separately" in caveat
 
 
 def test_a_defaulted_system_config_is_not_called_harmless_under_shared_sram(
@@ -1069,10 +1122,12 @@ def test_a_defaulted_system_config_is_not_called_harmless_under_shared_sram(
     monkeypatch.setattr("tan.model.adapters.ethos_u.subprocess.run", fake_run)
     blob = VelaAdapter().compile(src, accel_config="ethos-u65-256", out_dir=tmp_path,
                                  vela_memory_mode="Shared_Sram")
-    # ceil(72.734375) -- the arena, and here that is COMPLETE rather than the
-    # `Sram_Only` under-report `_footprint`'s docstring records: under
-    # `Shared_Sram` the const region really is on the other AXI port (`dram`
-    # in this run), so there is nothing of the module's SRAM left out of it.
+    # ceil(72.734375) -- the arena, always all `_footprint` reports
+    # (tan-cli#1011), and under `Shared_Sram` it also happens to be the WHOLE
+    # of the module's SRAM footprint: the const region really is on the other
+    # AXI port (`dram` in this run), so nothing of the module's SRAM is left
+    # out of it here, unlike `Sram_Only` where the const region is also
+    # SRAM-resident but reported (and provisioned) separately.
     assert blob.req_sram_kib == 73
     assert len(blob.caveats) == 1
     caveat = blob.caveats[0]
@@ -1107,19 +1162,19 @@ def test_real_vela_with_the_soms_memory_mode_reports_a_nonzero_sram_footprint(tm
     shutil.copy(_ROOT / "tests/fixtures/models/tiny_int8.tflite", src)
     blob = VelaAdapter().compile(src, accel_config="ethos-u85-256", out_dir=tmp_path,
                                  vela_memory_mode="Sram_Only")
-    # NONZERO is the property, never this particular number -- and the number
-    # is KNOWN INCOMPLETE. `_footprint` reads `sram_memory_used` alone, so
-    # under `Sram_Only` this is the arena and NOT the const/weights region
-    # vela renames into `on_chip_flash_memory_used` as a bookkeeping move
-    # (`architecture_features.py`: "Changing const_mem_area from Sram to
-    # OnChipFlash. This will use the same characteristics as Sram."), which on
-    # an Alif Ensemble part is SRAM0-resident all the same. On the real 44-op
-    # `person_detect_int8.tflite` at `ethos-u85-256` that is 72.0 reported
-    # against 72.0 + 235.265625 = 307.265625 KiB actually resident. See
-    # `_footprint`'s own docstring: the fix needs a per-part statement of where
-    # the const region lands and is a maintainer decision, so this asserts the
-    # property the fit gate needs and deliberately pins no figure that would
-    # bless the under-report as correct.
+    # NONZERO is the property this test pins, deliberately not the exact
+    # figure (that varies with vela's version). `_footprint` reads
+    # `sram_memory_used` alone, so under `Sram_Only` this is the arena and NOT
+    # the const/weights region vela renames into `on_chip_flash_memory_used`
+    # as a bookkeeping move (`architecture_features.py`: "Changing
+    # const_mem_area from Sram to OnChipFlash. This will use the same
+    # characteristics as Sram."), which on an Alif Ensemble part is
+    # SRAM0-resident too -- but carried in the blob payload, not this figure.
+    # On the real 44-op `person_detect_int8.tflite` at `ethos-u85-256` that is
+    # 72.0 reported (`req_sram_kib`) against 235.265625 KiB of const/weights
+    # (the payload's own concern) -- see `_footprint`'s own docstring
+    # (tan-cli#1011) for why summing the two would be wrong, not merely
+    # incomplete.
     assert blob.req_sram_kib > 0
     assert blob.arena_bytes > 0
     assert blob.npu_op_count == 1 and blob.cpu_op_count == 0      # a real NPU placement
