@@ -57,43 +57,42 @@ contract/fixtures/toolchains/** text eol=lf
 # every future contributor's config matching.
 install.sh text eol=lf
 
-# tan-cli#907 interim mitigation: MODULE_SIZE_BUDGET_LOG.md declares itself
-# append-only in its own header (regen_module_size_budget.py only ever adds a
-# line at the end). `union` is git's built-in low-level merge driver -- no
-# `merge.<name>.driver` config needed -- and for a genuinely append-only file
-# it produces exactly what a human resolving the conflict by hand would write:
-# both sides' new lines kept, no conflict markers. Demonstrated 2026-08-27:
-# two branches each appending a different entry merge clean with both entries
-# present; the same scenario without this line conflicts normally.
+# tan-cli#907, superseded: from 2026-08-11 through 2026-08-30 this line read
+# `python/tests/gates/MODULE_SIZE_BUDGET_LOG.md merge=union` (tan-cli#939's
+# interim mitigation -- `union` is git's built-in low-level merge driver, no
+# `merge.<name>.driver` config needed, and it made a genuinely append-only
+# file's real two-branch conflicts resolve themselves: both sides' new lines
+# kept, no conflict markers). It is REMOVED, not merely stale: `union` only
+# ever fixed the LOCAL `git merge` case. GitHub computes a pull request's own
+# mergeable status without applying custom merge drivers at all, so a
+# union-attributed file could still show a PR as CONFLICTING in the GitHub UI
+# even though a local merge of the same two branches would resolve clean --
+# the mitigation never reached the thing that actually blocks a PR. The real
+# fix (tan-cli#907) is `python/tests/gates/MODULE_SIZE_BUDGET_LOG.d/`: one new
+# file per entry, which needs no merge attribute here at all, because two new,
+# differently-named files are trivially compatible under every merge strategy,
+# local or GitHub-side (see that directory's own `README.md`). The now-frozen
+# `MODULE_SIZE_BUDGET_LOG.md` (no future entry ever lands in it again) is
+# plain text with no special attribute, same as any other file that no longer
+# changes -- an accidental future edit to it SHOULD conflict or fail its own
+# append-only gate, not be silently unioned away.
 #
-# Two shapes union gets WRONG, both reachable today because tan-cli#906 (the
-# append-only enforcement) is still open -- nothing stops a non-append edit
-# from reaching this file. Also demonstrated 2026-08-27: (1) both branches
-# edit the SAME existing entry -> both variants land with zero conflict
-# markers, one body duplicated under two headers, no signal anything
-# collided; (2) one branch deletes an entry while the other appends -> the
-# deletion is silently REVERTED, the entry resurrected, no markers. Nothing
-# stands behind either case: nothing parses this `.md`, and
-# `python/tests/gates/test_no_conflict_markers.py` can't fire on a merge that
-# never left a marker. Read this as an argument FOR #906, not against this
-# driver -- union just makes a non-append edit merge more silently than a
-# plain conflict would have, so the enforcement gap matters more now than it
-# did before this line landed.
-#
-# Deliberately NOT applied to the sibling `module_size_budget.generated.json`
-# in the same directory: that file is a JSON object, and union-merging two
-# JSON documents that both add a trailing key can leave two sibling entries
-# with no comma between them (verified: `git merge-file --union` on two
-# divergent copies of a trivial `{"a":1,"b":2}` produces `"c": 3` directly
-# followed by `"d": 4` with no separator, which fails `json.load`). Its
-# correct conflict resolution is "take either side, then rerun
-# `python scripts/regen_module_size_budget.py --merge-resync`" -- see the
-# note at the top of MODULE_SIZE_BUDGET_LOG.md. It does not always reach a
-# visible conflict, either: two edits on disjoint lines of that JSON can
-# text-merge clean with no marker at all, leaving a syntactically valid but
-# semantically STALE file (measured directly: a plain `git merge` of two
-# branches editing different keys of a shared JSON object auto-merges with
-# zero conflict markers). `regen_module_size_budget.py --check` is the
-# backstop for that case, wired into CI as its own step (tan-cli#907) rather
-# than left as a command someone has to remember to run.
-python/tests/gates/MODULE_SIZE_BUDGET_LOG.md merge=union
+# `module_size_budget.generated.json`, the sibling file in the same directory,
+# never carried `merge=union` and still does not: it is a JSON object, and
+# union-merging two JSON documents that both add a trailing key can leave two
+# sibling entries with no comma between them (verified: `git merge-file
+# --union` on two divergent copies of a trivial `{"a":1,"b":2}` produces
+# `"c": 3` directly followed by `"d": 4` with no separator, which fails
+# `json.load`). Its correct conflict resolution is "take either side, then
+# rerun `python scripts/regen_module_size_budget.py --merge-resync`". It does
+# not always reach a visible conflict, either: two edits on disjoint lines of
+# that JSON can text-merge clean with no marker at all, leaving a
+# syntactically valid but semantically STALE file (measured directly: a plain
+# `git merge` of two branches editing different keys of a shared JSON object
+# auto-merges with zero conflict markers). `regen_module_size_budget.py
+# --check` is the backstop for that case, wired into CI as its own step
+# (tan-cli#907) rather than left as a command someone has to remember to run.
+# Splitting that JSON itself (per top-level package, to shrink the collision
+# surface further) is deliberately left for a separate follow-up,
+# tan-cli#1057 -- see `scripts/regen_module_size_budget.py`'s module
+# docstring.

@@ -7,9 +7,12 @@ hand.
 ## Why that was a real gap, not a hypothetical one
 
 `module_size_budget.generated.json` is deliberately NOT `merge=union`'d in
-`.gitattributes` (unlike its sibling `MODULE_SIZE_BUDGET_LOG.md`) -- unioning
-two JSON documents that both add a trailing key can leave two sibling entries
-with no comma between them, which is invalid JSON. So a real `git merge` on
+`.gitattributes` -- unioning two JSON documents that both add a trailing key
+can leave two sibling entries with no comma between them, which is invalid
+JSON. (Its former sibling `MODULE_SIZE_BUDGET_LOG.md` DID carry `merge=union`
+from tan-cli#939 through tan-cli#907, when it was retired: that file is now
+frozen, superseded by the one-file-per-entry `MODULE_SIZE_BUDGET_LOG.d/`,
+which needs no merge attribute at all.) So a real `git merge` on
 it either conflicts visibly, which a human resolves, or -- measured directly,
 a plain `git merge` of two branches editing different keys of a shared JSON
 object -- stitches both DISJOINT edits into one syntactically valid,

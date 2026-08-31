@@ -23,18 +23,20 @@ before). A plain `regen` with no flag NEVER raises a ceiling -- it only ever
 lowers one (a module shrank, or dropped below the cap entirely) or leaves the
 file untouched. Raising one requires an explicit flag, and the two flags are
 deliberately different so the reason a number moved stays visible in the
-`git log` of this file and of MODULE_SIZE_BUDGET_LOG.md:
+`git log` of this file and, as of tan-cli#907, of MODULE_SIZE_BUDGET_LOG.d/
+(one file per entry -- see that directory's README.md):
 
     --reason "text"     a DELIBERATE budget raise -- some module or function
                          genuinely grew and that growth is not being split out
-                         this time. Appends a dated, reasoned line to
-                         MODULE_SIZE_BUDGET_LOG.md.
+                         this time. Writes a new, dated, reasoned entry file
+                         under MODULE_SIZE_BUDGET_LOG.d/ (tan-cli#907; see
+                         that directory's README.md).
 
     --merge-resync       re-measuring a tree that is the union of two already-
                          reviewed branches, each of which already justified
                          its own growth (with its own --reason) before it
                          merged. No new judgement call is being made here, so
-                         the ledger line it writes carries no reason of its
+                         the ledger entry it writes carries no reason of its
                          own -- it records the re-measurement and points at
                          the two commits this merge combined, which is where
                          the reasons already are. (This used to say "no new
@@ -90,11 +92,45 @@ no conflict marker at all. Before this step existed, that shape
 surfaced only as a cluster of unrelated-looking failures deep inside the
 pytest ratchet's own tests; `--check` now catches it directly, in one step,
 before either of those pytest runs even starts.
+
+The `--check` step above closed the "silently stale" half of tan-cli#907; it
+did nothing for the other half, measured on the same issue -- four of five
+v0.7.0-milestone PRs sampled on 2026-08-25 conflicted on
+`module_size_budget.generated.json` and/or `MODULE_SIZE_BUDGET_LOG.md`, and
+the standard resolution on the LEDGER lost a branch's own reasoned entry
+outright (tan-cli#902) because `MODULE_SIZE_BUDGET_LOG.md` was, until now, a
+SINGLE growing file every regen appended to -- so any two branches that both
+raised a ceiling wrote into the same tail region, and `.gitattributes`'
+`merge=union` mitigation (tan-cli#939) only ever helped the LOCAL `git merge`
+case: GitHub computes a PR's own mergeable status without applying custom
+merge drivers, so a union-attributed file could still show a PR as
+CONFLICTING in the GitHub UI even though a local merge would resolve it
+clean. As of tan-cli#907, `_append_log` below writes each entry as its OWN
+new file under `MODULE_SIZE_BUDGET_LOG.d/` (mirroring `changelog.d/` -- see
+that directory's own README for why one-file-per-entry removes the conflict
+class structurally rather than mitigating it after the fact: two new,
+differently-named files need no merge driver at all, local or GitHub-side).
+`MODULE_SIZE_BUDGET_LOG.md` itself is FROZEN as of this change -- its
+historical entries stay, read-only, and
+`test_module_size_budget_log_append_only.py` keeps guarding them, but
+nothing writes into it any more.
+
+The generated JSON's OWN conflict rate is a narrower, separate question this
+change deliberately leaves open. Unlike the ledger, its conflicts are not
+usually about lost reasoning (a stale sidecar is fully recoverable by
+re-running this script), and splitting it per top-level package would still
+leave `function_count_budget`/`function_worst_budget` as whole-tree
+aggregates that almost any substantive change touches -- reducing, not
+removing, the collision surface, at the cost of a gate that has to read
+several files instead of one. Deferred to tan-cli#1057, filed with the
+measurement behind that tradeoff, rather than reshuffled here alongside the
+ledger fix.
 """
 from __future__ import annotations
 
 import argparse
 import datetime
+import secrets
 import sys
 from pathlib import Path
 
@@ -194,7 +230,8 @@ def main(argv: list[str] | None = None) -> int:
         for line in grown:
             print(f"  {line}", file=sys.stderr)
         print(
-            "\nA real growth needs `--reason \"...\"` (logged to MODULE_SIZE_BUDGET_LOG.md).\n"
+            "\nA real growth needs `--reason \"...\"` (logged as a new file under\n"
+            "MODULE_SIZE_BUDGET_LOG.d/).\n"
             "Re-deriving after a merge conflict needs `--merge-resync` (the growth was\n"
             "already reasoned on the branches this merge combined).",
             file=sys.stderr,
@@ -219,13 +256,31 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _append_log(reason: str, grown: list[str]) -> None:
+    """tan-cli#907: writes one NEW file per entry under `core.LOG_DIR`,
+    never an append to `core.LOG_PATH` (frozen -- see this script's module
+    docstring). The filename carries the date for a human scanning the
+    directory chronologically, plus a random 8-hex-char token so two
+    concurrent branches -- or two runs the same day -- can never be made to
+    pick the same path; a sequential counter could not promise that, since
+    two branches unaware of each other could both compute the same next
+    number. `"x"` (exclusive create) mode both proves that and refuses to
+    silently clobber an existing file on the astronomically unlikely token
+    collision -- it raises `FileExistsError`, which is retried with a fresh
+    token rather than swallowed."""
     date = datetime.date.today().isoformat()
     entry = f"- {date} -- {reason}\n"
     for line in grown:
         entry += f"    - {line}\n"
-    with core.LOG_PATH.open("a", encoding="utf-8") as fh:
-        fh.write(entry)
-    print(f"appended to {core.LOG_PATH}")
+    core.LOG_DIR.mkdir(parents=True, exist_ok=True)
+    while True:
+        path = core.LOG_DIR / f"{date}-{secrets.token_hex(4)}.md"
+        try:
+            with path.open("x", encoding="utf-8") as fh:
+                fh.write(entry)
+        except FileExistsError:
+            continue
+        break
+    print(f"wrote {path}")
 
 
 if __name__ == "__main__":
