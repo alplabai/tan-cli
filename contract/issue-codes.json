@@ -1373,6 +1373,54 @@
       "note": "The `sdk.` prefix is applied by `_fail()`. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "sdk.remove-missing-argument",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "note": "tan-cli#790: `sdk remove` with no `<version|path>` argument at all -- the `sdk.` prefix is applied by `_fail()`; `remove-missing-argument` is the literal suffix at that call site. Flat (one dot total), not the nested `sdk.remove.missing-argument` the issue's own prose sketches -- `test_issue_code_registry_shape.py`'s `ISSUE_CODE_SHAPE` (verbatim from alp-sdk-vscode's `findFrozenCodes`) hard-requires exactly one dot, so a genuinely nested code would red the consumer's own contract gate. Registered by tan-cli#224's Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.remove-outside-root",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "note": "tan-cli#790's own proposed refusal (spelled flat, one dot -- see `sdk.remove-missing-argument`'s note for why): refused because the resolved target sits outside `--destination`'s cache root and `--force` was not given -- the footgun guard the issue asks for (\"a remove that can be aimed at an arbitrary directory is a footgun in a script\"). A bare version name can never trip this; only an explicit path argument can (`sdk_removal.is_outside_cache_root`). `--force` clears it. Registered by tan-cli#224's Python-side emit-site gate. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.remove-active",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "note": "tan-cli#790's own proposed refusal (spelled flat, one dot -- see `sdk.remove-missing-argument`'s note for why): refused because the target is currently load-bearing -- the ACTIVE resolution for this workspace (`resolve_sdk_tiered`), the machine-global default (`~/.alp/sdk-default`), or a project's own registered pin (`~/.alp/sdk-defaults.json`, tan-cli#466) -- and `--force` was not given. The message names every reason that applies, not just the first (`sdk_cmd._load_bearing_reasons`); `--force` clears it. Registered by tan-cli#224's Python-side emit-site gate. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.remove-is-cache-root",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "note": "tan-cli#790 review follow-up, same PR: refused because the resolved target IS `--destination` exactly -- every install under the cache root at once, not one of them -- and `--force` was not given (`sdk_removal.is_cache_root_itself`). Found live by measurement during review: `sdk.remove-outside-root` deliberately answers false for `target == destination` (a caller can name the root on purpose), and `sdk.remove-active`'s load-bearing ladder only ever names a specific version subdirectory, never the root that holds them -- so before this code existed, `tan sdk remove .` from inside an otherwise-empty cache root deleted every install with `ok: true` and no `--force` required. `--force` clears it, same as the other two footgun refusals. Registered by tan-cli#224's Python-side emit-site gate. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.remove-in-use",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "note": "tan-cli#790's own proposed shape: the removal failed because another process holds a handle open under the target (POSIX `EBUSY`/`ETXTBSY`, or Windows `ERROR_SHARING_VIOLATION`/`ERROR_LOCK_VIOLATION` -- `sdk_removal.classify_removal_error`). The message names the specific path that was locked, not just the top-level target, when the underlying `OSError` carried one. Registered by tan-cli#224's Python-side emit-site gate. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.remove-permission",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "note": "tan-cli#790's own proposed shape: the removal failed on a permission/attribute `dir_removal.remove_dir`'s own read-only retry (file AND parent-directory write bits, plus the Windows long-path prefix) could not clear -- everything `sdk.remove-in-use`'s handle-based classification does not cover (`sdk_removal.classify_removal_error`'s default arm). Registered by tan-cli#224's Python-side emit-site gate. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "size.budget-unknown",
       "status": "reserved",
       "severity": "info",
