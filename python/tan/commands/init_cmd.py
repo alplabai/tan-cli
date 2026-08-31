@@ -127,6 +127,7 @@ from tan.core.example_catalog import (
     parse_topology_arg,
     unsupported_som,
 )
+from tan.core.som_buildability import hw_rev_not_buildable
 from tan.core.sdk_discovery import (
     global_default_foreign_project_issue,
     resolve_sdk_root_wide,
@@ -156,6 +157,7 @@ from tan.core.scaffold import (
     splice_companion_cores,
     vendored_app_core_key,
     vendored_core_ids,
+    vendored_som,
     write_files,
 )
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -1400,6 +1402,74 @@ def init(
                 f"find a board to build here; pass --board-yaml to add one.",
             )
 
+        # tan-cli#743: a scaffolded board.yaml with no explicit `hw_rev:`
+        # resolves, at validate/build time, to its SoM preset's own
+        # `default_hw_rev:` -- so a SoM whose default revision the SDK
+        # itself marks not-buildable (`status: reserved`/`tbd`/absent)
+        # produces a project whose FIRST `tan validate` hard-errors, with
+        # `init` never having said a word. `--board-yaml` renders customer
+        # content verbatim, whose effective SKU/hw_rev this command does not
+        # parse, so that path is left alone.
+        #
+        # tan-cli#1008 review majors 1+2: the SKU/hw_rev this check judges
+        # are read off the PLANNED board.yaml itself (`vendored_som`), not
+        # `--som`/`DEFAULT_SOM_SKU` -- `--som` alone missed a not-buildable
+        # SKU a bare `--from-example`/`--topology` already writes to disk
+        # (`--som` is `None` there), and `retarget_board_yaml_som` only drops
+        # an example's explicit `hw_rev:` on a CROSS-family retarget (review
+        # round 4) -- an unretargeted example's own value, or one surviving
+        # a same-family retarget, must be read rather than assumed absent.
+        # This also obsoletes the old `is_example_shaped` gate on
+        # `--som`-required-to-know-the-SKU: the file always carries a `sku:`
+        # once one has been planned, on every path (template, example,
+        # topology) alike.
+        hw_rev_issue = None
+        if board_yaml is None and resolved_sdk is not None:
+            board_file = next((f for f in files if f.relative_path == "board.yaml"), None)
+            if board_file is not None:
+                file_sku, file_hw_rev = vendored_som(board_file.content)
+            else:
+                file_sku, file_hw_rev = None, None
+            effective_sku = file_sku if file_sku is not None else (
+                som if is_example_shaped else (som or DEFAULT_SOM_SKU)
+            )
+            if effective_sku is not None:
+                not_buildable = hw_rev_not_buildable(
+                    resolved_sdk.path, effective_sku, file_hw_rev
+                )
+                if not_buildable is not None:
+                    status_repr = (
+                        f"status: {not_buildable.status!r}"
+                        if not_buildable.status is not None
+                        else "carries no `status:` key"
+                    )
+                    if file_hw_rev is not None:
+                        resolution_clause = (
+                            f"the scaffolded board.yaml explicitly sets `hw_rev: "
+                            f"{file_hw_rev}`"
+                        )
+                        promotion_clause = "this hardware revision is promoted"
+                    else:
+                        resolution_clause = (
+                            "the scaffolded board.yaml sets no explicit `hw_rev:` "
+                            "and so resolves to this SoM's default"
+                        )
+                        promotion_clause = "its default hardware revision is promoted"
+                    alternative_clause = (
+                        ", or until board.yaml names a buildable `hw_rev:` explicitly"
+                        if not_buildable.has_buildable_alternative
+                        else ""
+                    )
+                    hw_rev_issue = Issue(
+                        "init.hw-rev-not-buildable",
+                        "warning",
+                        f"SoM {not_buildable.sku} hw_rev {not_buildable.hw_rev!r} "
+                        f"exists but is not buildable ({status_repr}) -- the check "
+                        f"`tan validate` will refuse next, since {resolution_clause}. "
+                        f"The files were still written -- `tan build` will not work "
+                        f"against this SoM until {promotion_clause}{alternative_clause}.",
+                    )
+
         outcome = _finish(
             template_id,
             dest,
@@ -1414,6 +1484,8 @@ def init(
             outcome.issues.append(example_som_issue)
         if missing_board_yaml_issue is not None:
             outcome.issues.append(missing_board_yaml_issue)
+        if hw_rev_issue is not None:
+            outcome.issues.append(hw_rev_issue)
         if divergence_issue is not None:
             outcome.issues.append(divergence_issue)
         if foreign_issue is not None:

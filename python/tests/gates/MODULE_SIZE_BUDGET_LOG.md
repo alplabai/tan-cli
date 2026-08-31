@@ -596,6 +596,8 @@ several less obvious failures.
     - tan/commands/support_bundle_cmd.py: 1067 -> 1068
     - tan/commands/validate_cmd.py: 1611 -> 1615
     - tan/core/sdk_discovery.py: new entry at 963
+- 2026-08-30 -- tan-cli#743: init_cmd.py grows by the default-hw_rev-buildability warning check
+    - tan/commands/init_cmd.py: 1310 -> 1348
 - 2026-08-30 -- merge-resync (growth already reasoned on the merged branches)
     - tan/commands/clean_cmd.py: 1129 -> 1132
     - tan/commands/init_cmd.py: 1445 -> 1449
@@ -606,3 +608,47 @@ several less obvious failures.
     - tan/model/adapters/ethos_u.py: 889 -> 908
 - 2026-08-30 -- PR #1021 review fixes: ethos_u.py's arena-only scope caveat now reaches a fully-specified Sram_Only compile too (tan-cli#1021 review MINOR), not only the defaulted-profile branch, plus the accompanying wording fix and test
     - tan/model/adapters/ethos_u.py: 908 -> 959
+- 2026-08-30 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/init_cmd.py: 1449 -> 1491
+- 2026-08-30 -- tan-cli#1008 review nit, correcting the line directly above:
+  it was mislabeled "merge-resync" at the time -- there was no merge to
+  point at. It is this branch's OWN reasoned growth: tan-cli#743 review,
+  also fixing the from_example-vs-topology sibling-site gap (`--topology`
+  retargets the SoM onto an example exactly like `--from-example` does, but
+  under a different `from_example is None` condition the original fix's
+  gate would have missed), plus a regression test for it. The ledger is
+  append-only, so the mislabeled line above stays verbatim; this entry adds
+  the reason it was missing rather than rewriting it. No size delta of its
+  own.
+- 2026-08-30 -- tan-cli#1008 review majors 1+2: derive the hw-rev-not-buildable check's effective SKU/hw_rev from the planned board.yaml content (tan.core.scaffold.vendored_som) instead of --som/DEFAULT_SOM_SKU, plus the has_buildable_alternative/malformed-entry fixes in som_buildability.py
+    - tan/commands/init_cmd.py: 1491 -> 1520
+    - tan/core/scaffold.py: 1553 -> 1599
+    - function_count_budget: 300 -> 301
+- 2026-08-30 -- tan-cli#1008 review round 3: retarget_board_yaml_som drops a cross-family hw_rev: sibling on SoM retarget (scaffold.py grows for the drop logic + its docstring)
+    - tan/core/scaffold.py: 1599 -> 1631
+- 2026-08-30 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/init_cmd.py: 1520 -> 1521
+    - tan/core/scaffold.py: 1631 -> 1702
+- 2026-08-31 -- merge-resync (growth already reasoned on the merged branches)
+    - tan/commands/bootstrap_cmd.py: 4130 -> 4135
+    - tan/commands/generate_cmd.py: 1431 -> 1437
+    - tan/core/scaffold.py: 1702 -> 1752
+- 2026-08-31 -- tan-cli#1008 review round 6, correcting the two "merge-resync"
+  lines above dated 2026-08-30 and 2026-08-31 that touch `tan/core/scaffold.py`
+  (`1631 -> 1702` and `1702 -> 1752`): `git diff --stat
+  9a960fb1..aa3ac657 -- python/tan/core/scaffold.py` is EMPTY for both --
+  there was no merge on either commit that moved this file. Both deltas are
+  this branch's OWN reasoned growth, mislabeled the same way the round-4/
+  round-3 boundary line above already was (see the 2026-08-30 correction
+  entry for that one). `1631 -> 1702` (+71) is commit `f9984dd3`, "fix(init):
+  unify the som: predicate, keep intra-family hw_rev:, close round-4 gaps"
+  (PR #1008 review round 4: `_is_som_key_line` shared between the writer's
+  scan and the reader, `_same_som_family` for the intra-family keep). `1702
+  -> 1752` (+50 net) is commit `8ac896ee`, "fix(init): strip quotes and
+  unify the som:-key rule across all three readers" (PR #1008 review round
+  5: `_yaml_scalar_value` quote-stripping, `top_level_key_name` shared with
+  `generate_cmd`/`bootstrap_cmd`). The ledger is append-only, so both
+  mislabeled lines stay verbatim; this entry adds the reason they were
+  missing rather than rewriting them. No size delta of its own.
+- 2026-08-31 -- tan-cli#1008 review round 6: extract the shared _split_child_key rule so vendored_som (reader) and retarget_board_yaml_som (writer) cannot diverge on a spaced sku:/hw_rev: child key again
+    - tan/core/scaffold.py: 1752 -> 1791
