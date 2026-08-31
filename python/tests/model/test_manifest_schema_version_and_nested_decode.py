@@ -168,3 +168,121 @@ def test_a_complete_target_element_still_decodes_on_both_readers():
     m2 = Manifest.from_json(doc_json)
     assert m2.targets[0].backend == "cpu"
     assert m2.targets[0].arena == 4096
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1049 -- the element guard above was PRESENCE-ONLY (`expected=object`
+# at `manifest.py:131`): a well-formed element carrying a wrong-typed VALUE
+# was silently accepted --
+#
+#   inputs=[{"dtype": 5, "rank": "nope", "shape": None, "scale": None, "zp": None}]
+#     -> Tensor(dtype=5, rank='nope', shape=None, ...)      no raise
+#
+# `_decode_list_field` now takes a per-field `field_types` map so
+# `_required_field`'s type branch is no longer dead code at this call site.
+# ---------------------------------------------------------------------------
+
+
+def test_cbor_manifest_wrong_typed_input_element_raises_a_curated_valueerror():
+    """The issue's own measured shape. `dtype` sorts first among
+    `_TENSOR_KEYS` (`sorted(required)` is alphabetical), so the wrong-typed
+    `dtype` is the field named."""
+    with pytest.raises(ValueError, match=r"field 'dtype' must be a string, got int in inputs\[0\]"):
+        Manifest.from_cbor(cbor2.dumps({
+            "name": "x", "src_sha": b"\x00",
+            "inputs": [{"dtype": 5, "rank": "nope", "shape": None, "scale": None, "zp": None}],
+        }))
+
+
+def test_json_manifest_wrong_typed_input_element_raises_a_curated_valueerror():
+    with pytest.raises(ValueError, match=r"field 'dtype' must be a string, got int in inputs\[0\]"):
+        Manifest.from_json(
+            '{"name": "x", "src_sha": "00", "inputs": '
+            '[{"dtype": 5, "rank": "nope", "shape": null, "scale": null, "zp": null}]}'
+        )
+
+
+def test_cbor_manifest_wrong_typed_output_rank_raises_a_curated_valueerror():
+    # A well-formed `dtype` this time, so the SECOND field checked (`rank`,
+    # alphabetically) is the one that trips -- proves every required field is
+    # checked, not just the first.
+    with pytest.raises(ValueError, match=r"field 'rank' must be an int, got str in outputs\[0\]"):
+        Manifest.from_cbor(cbor2.dumps({
+            "name": "x", "src_sha": b"\x00",
+            "outputs": [{"dtype": "int8", "rank": "nope", "shape": [1], "scale": 1.0, "zp": 0}],
+        }))
+
+
+def test_json_manifest_wrong_typed_output_rank_raises_a_curated_valueerror():
+    with pytest.raises(ValueError, match=r"field 'rank' must be an int, got str in outputs\[0\]"):
+        Manifest.from_json(
+            '{"name": "x", "src_sha": "00", "outputs": '
+            '[{"dtype": "int8", "rank": "nope", "shape": [1], "scale": 1.0, "zp": 0}]}'
+        )
+
+
+def test_cbor_manifest_wrong_typed_target_arena_raises_a_curated_valueerror():
+    """The field that actually matters (#1049's "why"): `arena` and
+    `requires["sram_kib"]` are exactly the figures
+    `src/backends/inference/alp_model_select.c`'s fit gate reads."""
+    good = {"backend": "cpu", "silicon_ref": "*", "blob_format": "tflite",
+            "accel_config": "", "requires": {"sram_kib": 0}, "blob": 0}
+    with pytest.raises(ValueError, match=r"field 'arena' must be an int, got str in targets\[0\]"):
+        Manifest.from_cbor(cbor2.dumps({
+            "name": "x", "src_sha": b"\x00",
+            "targets": [{**good, "arena": "big"}],
+        }))
+
+
+def test_json_manifest_wrong_typed_target_arena_raises_a_curated_valueerror():
+    with pytest.raises(ValueError, match=r"field 'arena' must be an int, got str in targets\[0\]"):
+        Manifest.from_json(
+            '{"name": "x", "src_sha": "00", "targets": '
+            '[{"backend": "cpu", "silicon_ref": "*", "blob_format": "tflite", '
+            '"accel_config": "", "arena": "big", "requires": {"sram_kib": 0}, "blob": 0}]}'
+        )
+
+
+def test_cbor_manifest_wrong_typed_target_requires_raises_a_curated_valueerror():
+    """`requires` itself must be a mapping -- a list slips `sram_kib` past
+    every other guard and would reach the fit gate as an un-indexable
+    sequence instead of `{"sram_kib": int}`."""
+    good = {"backend": "cpu", "silicon_ref": "*", "blob_format": "tflite",
+            "accel_config": "", "arena": 4096, "blob": 0}
+    with pytest.raises(ValueError, match=r"field 'requires' must be a mapping, got list in targets\[0\]"):
+        Manifest.from_cbor(cbor2.dumps({
+            "name": "x", "src_sha": b"\x00",
+            "targets": [{**good, "requires": ["sram_kib", 512]}],
+        }))
+
+
+def test_cbor_manifest_wrong_typed_coverage_field_raises_a_curated_valueerror():
+    with pytest.raises(ValueError, match=r"field 'status' must be a string, got int in coverage\[0\]"):
+        Manifest.from_cbor(cbor2.dumps({
+            "name": "x", "src_sha": b"\x00",
+            "coverage": [{"backend": "cpu", "accel_config": "", "status": 1, "reason": "x"}],
+        }))
+
+
+def test_a_whole_number_int_scale_is_still_accepted_not_just_float():
+    """Non-vacuity in the other direction: the new type guard must not
+    reject well-formed content that happens to use `int` where the dataclass
+    annotates `float` -- `1` is as valid JSON/CBOR content as `1.0`, and the
+    annotation is not an enforced constraint. This must NOT raise."""
+    good = {"dtype": "int8", "rank": 1, "shape": [1], "scale": 1, "zp": 0}
+    m = Manifest.from_cbor(cbor2.dumps({"name": "x", "src_sha": b"\x00", "inputs": [good]}))
+    assert m.inputs[0].scale == 1
+
+
+def test_a_complete_tensor_element_still_decodes_on_both_readers():
+    good = {"dtype": "int8", "rank": 4, "shape": [1, 224, 224, 3], "scale": 0.0078, "zp": -1}
+    m = Manifest.from_cbor(cbor2.dumps({"name": "x", "src_sha": b"\x00", "inputs": [good]}))
+    assert m.inputs[0].dtype == "int8"
+    assert m.inputs[0].shape == [1, 224, 224, 3]
+
+    doc_json = ('{"name": "x", "src_sha": "00", "inputs": '
+                '[{"dtype": "int8", "rank": 4, "shape": [1, 224, 224, 3], '
+                '"scale": 0.0078, "zp": -1}]}')
+    m2 = Manifest.from_json(doc_json)
+    assert m2.inputs[0].dtype == "int8"
+    assert m2.inputs[0].shape == [1, 224, 224, 3]
