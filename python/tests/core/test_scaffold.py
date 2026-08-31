@@ -25,6 +25,7 @@ from tan.core.scaffold import (
     UNSUPPORTED_SOM_FAMILY_PREFIXES,
     CoresError,
     ExampleReadError,
+    FlowStyleSomError,
     PlannedFile,
     ScaffoldWriteError,
     TemplateDataError,
@@ -536,6 +537,61 @@ def test_retarget_keeps_a_spaced_hw_rev_child_key_on_an_intra_family_retarget():
     )
 
     assert out == "som:\n  sku: E1M-AEN301\n  hw_rev : r1\ncores:\n"
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1029, Refs #1008: a FLOW-style `som:` mapping (`som: {sku: ...,
+# hw_rev: ...}`, valid YAML but on one physical line) is a shape neither
+# `vendored_som` nor `retarget_board_yaml_som` has ever read -- before this
+# fix the reader silently reported `(None, None)` and the writer silently
+# returned its input byte-for-byte unchanged, so `--som` was discarded with
+# no issue and exit 0. Both now raise `FlowStyleSomError`, sharing the one
+# `_som_flow_style_body` rule (the writer inherits it by calling the reader
+# first).
+# ---------------------------------------------------------------------------
+
+
+def test_vendored_som_refuses_a_flow_style_som_block():
+    content = "som: {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(FlowStyleSomError) as excinfo:
+        vendored_som(content)
+
+    message = str(excinfo.value)
+    assert "flow style" in message
+    assert "{sku: E1M-AEN801, hw_rev: r1}" in message
+
+
+def test_retarget_refuses_a_flow_style_som_block_instead_of_discarding_som():
+    """tan-cli#1029's own repro: at the parent commit this call returned the
+    INPUT unchanged, byte-for-byte -- `--som E1M-NX9101` silently discarded,
+    the scaffolded board.yaml still naming `E1M-AEN801`. It must now refuse
+    instead of writing the wrong SKU with no issue."""
+    content = "som: {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(FlowStyleSomError):
+        retarget_board_yaml_som(content, "E1M-NX9101")
+
+
+def test_vendored_som_refuses_a_flow_style_som_block_with_a_space_before_the_colon():
+    """The flow-style refusal must apply through the same `som :` tolerance
+    `_is_som_key_line` already grants the block-style shape (tan-cli#1008
+    round 5) -- a spaced top-level key must not accidentally dodge this
+    refusal by evading `_is_som_key_line` first."""
+    content = "som : {sku: E1M-AEN801, hw_rev: r1}\ncores:\n"
+
+    with pytest.raises(FlowStyleSomError):
+        vendored_som(content)
+
+
+def test_vendored_som_still_reads_a_block_style_som_with_an_inline_flow_looking_comment():
+    """Guards the negative: a block-style `som:` line whose TRAILING COMMENT
+    happens to contain a `{` (a customer explaining the flow alternative in
+    prose, say) must not be misread as flow style -- only real content after
+    the colon, not a comment, triggers the refusal."""
+    content = "som:  # not {sku: ...} style, see below\n  sku: E1M-AEN801\ncores:\n"
+
+    assert vendored_som(content) == ("E1M-AEN801", None)
 
 
 # ---------------------------------------------------------------------------

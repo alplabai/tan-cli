@@ -141,6 +141,7 @@ from tan.core.scaffold import (
     CoresError,
     ExampleReadError,
     FileChange,
+    FlowStyleSomError,
     PlannedFile,
     ScaffoldWriteError,
     TemplateDataError,
@@ -669,6 +670,18 @@ def _plan_from_template(
         raise InitError(
             "init.template-unreadable", str(err), ExitCode.INTERNAL_FAILURE
         ) from err
+    except FlowStyleSomError as err:
+        # tan-cli#1029, defensive: every vendored tree's board.yaml is
+        # tan's OWN template data (`tan/templates/vendored/`, captured
+        # block-style, pinned by `test_scaffold_content_oracle_parity.py`),
+        # never reachable in practice -- a flow-style `som:` here means the
+        # shipped template data itself is broken, not a customer argument,
+        # so this maps to the same code/exit as `TemplateDataError` above
+        # rather than the validation-failure `_plan_from_example` raises for
+        # the customer-reachable copy of this same shape.
+        raise InitError(
+            "init.template-unreadable", str(err), ExitCode.INTERNAL_FAILURE
+        ) from err
 
     try:
         cores = parse_cores(cores_raw)
@@ -915,12 +928,25 @@ def _plan_from_example(
     if som:
         # Retarget the copied board.yaml onto the chosen SoM, so an example can
         # be scaffolded onto the customer's own module rather than the example's.
-        files = [
-            PlannedFile(f.relative_path, retarget_board_yaml_som(f.content, som))
-            if f.relative_path == "board.yaml"
-            else f
-            for f in files
-        ]
+        try:
+            files = [
+                PlannedFile(f.relative_path, retarget_board_yaml_som(f.content, som))
+                if f.relative_path == "board.yaml"
+                else f
+                for f in files
+            ]
+        except FlowStyleSomError as err:
+            # tan-cli#1029. Before this, a flow-style `som:` block
+            # (`som: {sku: ..., hw_rev: ...}`) made `retarget_board_yaml_som`
+            # silently return the example's board.yaml byte-for-byte
+            # unchanged -- `--som` discarded with `issues: []` and exit 0,
+            # indistinguishable from success. Refusing here means the files
+            # are never written rather than written wrong.
+            raise InitError(
+                "init.som-flow-style-unsupported",
+                f"Example '{src}' board.yaml: {err}",
+                ExitCode.VALIDATION_FAILURE,
+            ) from err
     return f"example:{src}", files
 
 
@@ -1427,7 +1453,17 @@ def init(
         if board_yaml is None and resolved_sdk is not None:
             board_file = next((f for f in files if f.relative_path == "board.yaml"), None)
             if board_file is not None:
-                file_sku, file_hw_rev = vendored_som(board_file.content)
+                try:
+                    file_sku, file_hw_rev = vendored_som(board_file.content)
+                except FlowStyleSomError:
+                    # tan-cli#1029. Only reachable here with no `--som` at
+                    # all (a `--som` retarget onto this shape already
+                    # refused earlier, in `_plan_from_example`) -- a
+                    # flow-style `som:` this advisory check cannot read, so
+                    # it degrades the same way an unparsed `--board-yaml`
+                    # already does above: this specific pair is simply not
+                    # judged, not a hard failure.
+                    file_sku, file_hw_rev = None, None
             else:
                 file_sku, file_hw_rev = None, None
             effective_sku = file_sku if file_sku is not None else (

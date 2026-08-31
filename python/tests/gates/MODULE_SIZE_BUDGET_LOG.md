@@ -652,3 +652,6 @@ several less obvious failures.
   missing rather than rewriting them. No size delta of its own.
 - 2026-08-31 -- tan-cli#1008 review round 6: extract the shared _split_child_key rule so vendored_som (reader) and retarget_board_yaml_som (writer) cannot diverge on a spaced sku:/hw_rev: child key again
     - tan/core/scaffold.py: 1752 -> 1791
+- 2026-08-31 -- tan-cli#1029: FlowStyleSomError, the shared _som_flow_style_body detector, and the reader/writer refusal wiring for a flow-style som: block
+    - tan/commands/init_cmd.py: 1521 -> 1557
+    - tan/core/scaffold.py: 1791 -> 1875

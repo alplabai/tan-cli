@@ -297,6 +297,51 @@ class UnsupportedSomError(Exception):
         self.sku = sku
 
 
+class FlowStyleSomError(Exception):
+    """The board.yaml's top-level `som:` line opens a YAML FLOW mapping
+    (`som: {sku: ..., hw_rev: ...}`, valid YAML but on one physical line)
+    rather than the BLOCK style (`som:` alone, `sku:`/`hw_rev:` indented
+    beneath it) `vendored_som`/`retarget_board_yaml_som` understand.
+
+    tan-cli#1029, `Refs #1008`. This module is deliberately NOT a YAML
+    parser (see its own module docstring): it scans line-by-line and edits
+    in place, which is what lets a hand-authored comment, a wrapped comment
+    block, or column alignment survive a `--som` retarget byte-for-byte.
+    Extending that scan to also parse a flow mapping correctly -- telling a
+    comma inside a quoted value apart from one separating two keys, an
+    escaped brace from a real one, a `{`/`}` that itself appears inside a
+    quoted string -- needs a real YAML parser, not a seventh line-oriented
+    special case bolted onto tan-cli#1008's own six-round history of exactly
+    that kind of case. Refusing loudly is the deliberate choice over
+    supporting it: the alternative was `vendored_som` silently reporting
+    `(None, None)` and `retarget_board_yaml_som` silently returning its
+    input byte-for-byte unchanged, so `--som` was discarded with `issues:
+    []` and exit 0 -- indistinguishable from success.
+
+    Raised from `vendored_som` (the reader) the moment it sees this shape;
+    `retarget_board_yaml_som` (the writer) inherits the same raise for free,
+    since it calls `vendored_som` first -- one rule, in one place, so the
+    two cannot diverge on which `som:` lines this module refuses, the same
+    shape `top_level_key_name`/`_is_som_key_line`/`_split_child_key` already
+    hold for tan-cli#1008.
+
+    Reachability (tan-cli#1029): 0 of the SDK's 100 tracked `board.yaml`
+    files and 0 vendored templates use a flow-style `som:` mapping --
+    hand-authored only, same as the spaced/quoted shapes tan-cli#1008 rounds
+    5-6 fixed.
+    """
+
+    def __init__(self, flow_body: str) -> None:
+        super().__init__(
+            f"This board.yaml's `som:` block is written in YAML flow style "
+            f"(`som: {flow_body}`), which tan's board.yaml scaffolder does "
+            f"not parse. Rewrite the `som:` block in block style (`som:` on "
+            f"its own line, with `sku:`/`hw_rev:` indented beneath it) and "
+            f"try again."
+        )
+        self.flow_body = flow_body
+
+
 class ExampleReadError(Exception):
     """`--from-example`'s source directory is missing, or a file in it is not
     readable UTF-8 text. `not_found` separates the two: a missing example is
@@ -539,6 +584,31 @@ def _split_child_key(trimmed: str) -> tuple[str, str] | None:
     return key.strip(), rest
 
 
+def _som_flow_style_body(body: str) -> str | None:
+    """When `body` is the top-level `som:` line ([`_is_som_key_line`]) AND
+    what follows its colon is not empty/comment-only -- i.e. a YAML FLOW
+    mapping (`som: {sku: ..., hw_rev: ...}`) or any other non-block content
+    on that same line -- return that trailing text verbatim. `None` for an
+    ordinary block-style `som:` line (nothing, or only a trailing comment,
+    after the colon) or a non-`som:` line.
+
+    tan-cli#1029: the one signal both `vendored_som` and
+    `retarget_board_yaml_som` need to refuse a shape neither actually reads
+    (see [`FlowStyleSomError`]) -- called from `vendored_som` alone; the
+    writer inherits the same refusal by calling the reader first, so the
+    two share this one rule rather than each guessing independently, the
+    same shape `top_level_key_name`/`_is_som_key_line`/`_split_child_key`
+    already hold for tan-cli#1008.
+    """
+    if not _is_som_key_line(body):
+        return None
+    _key, _colon, rest = body.partition(":")
+    stripped = rest.lstrip(" \t")
+    if not stripped or stripped.startswith("#"):
+        return None
+    return stripped
+
+
 #: Mirrors `tan.core.som_buildability._SKU_FAMILY` -- deliberately
 #: duplicated rather than imported, the same call that module's own
 #: docstring already makes for its family-directory map: this file plans
@@ -644,6 +714,11 @@ def retarget_board_yaml_som(content: str, sku: str) -> str:
     (`_is_som_key_line`) -- they used to disagree on a `som:` line carrying
     a trailing comment or trailing whitespace, which silently reintroduced
     this same stale-`hw_rev:` defect on exactly that shape of file.
+
+    tan-cli#1029: raises [`FlowStyleSomError`] on a flow-style `som:` block
+    (`som: {sku: ..., hw_rev: ...}`) instead of silently returning `content`
+    byte-for-byte unchanged -- inherited for free from the `vendored_som`
+    call immediately below, which raises first.
     """
     existing_sku, _existing_hw_rev = vendored_som(content)
     changing_sku = existing_sku is not None and existing_sku != sku
@@ -971,13 +1046,22 @@ def vendored_som(board_yaml: str) -> tuple[str | None, str | None]:
     review rounds 3+4 -- and otherwise leaves it exactly as the source
     example wrote it, whether that is the ORIGINAL SKU's own value or one
     surviving a same-family retarget, so it must be read, not presumed
-    absent)."""
+    absent).
+
+    Raises [`FlowStyleSomError`] (tan-cli#1029) the moment the top-level
+    `som:` line turns out to be flow-style rather than block-style --
+    `retarget_board_yaml_som` calls this function first and so inherits the
+    identical refusal, rather than each guessing independently whether a
+    line it cannot read is safe to treat as "no som: block at all"."""
     in_som = False
     sku: str | None = None
     hw_rev: str | None = None
     for line in _rust_lines(board_yaml):
         body, _cr = _split_cr(line)
         if not in_som:
+            flow_body = _som_flow_style_body(body)
+            if flow_body is not None:
+                raise FlowStyleSomError(flow_body)
             in_som = _is_som_key_line(body)
             continue
         if body and not body[0].isspace():
