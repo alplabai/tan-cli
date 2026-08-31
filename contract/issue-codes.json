@@ -954,7 +954,6 @@
       "status": "retired",
       "severity": "error",
       "consumer": "none",
-      "emittedBy": "python/tan/commands/deferred_cmd.py",
       "note": "RETIRED by tan-cli#427, which closed the deferral vocabulary entirely: `--no-auto-bootstrap` was the last flag still declaring it (`tan build` has no implicit bootstrap for the flag to switch off, and is not getting one), so once it moved to `build.flag-retired` there was no emission site left anywhere in the tree and `tan/commands/deferred_cmd.py` (this code's home) is deleted. Previously shared by all seven verbs this build stubbed (`scaffold`, `completion`, `diff`, `pinmux`, `inspect`, `trace`, `support-bundle`), each real in the v0.4.1 oracle and deferred to v0.6.0 -- all seven shipped under tan-cli#260 before this retirement. Pre-consumer -- nothing in alp-sdk-vscode matched this code, so retiring it is not a breaking wire change. RESERVED: this spelling must never be reused for a different verdict, which is what the frozen/retired gate asserts."
     },
     {

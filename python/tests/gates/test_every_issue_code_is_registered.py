@@ -1727,14 +1727,29 @@ def test_every_known_code_forward_entry_is_still_needed(monkeypatch):
         + "\n  ".join(f"{rel!r}, {expr!r}" for rel, expr in stale)
     )
 
-    # And the negative: with the real table restored, none of ITS entries
-    # read as stale -- proving this is sensitive to the emptied case above,
-    # not unconditionally red regardless of what `_KNOWN_CODE_FORWARDS` holds.
+    # And the negative -- proven properly, not by construction. Intersecting
+    # `live_forwards` against a scan run WITH `live_forwards` itself bound to
+    # `_KNOWN_CODE_FORWARDS` is empty for ANY table: `_resolve_code_value`'s
+    # forward branch trivially excludes every member of whatever set is
+    # currently bound there from ever landing in `unresolved`, so that
+    # intersection cannot be non-empty no matter what the table holds -- a
+    # check with no way to fail is not a check (round-3 review of
+    # tan-cli#1062). What the stale computation above needs to be shown
+    # capable of is flagging a row that IS genuinely dead: fabricate one
+    # that matches no real call site anywhere in the tree -- the exact shape
+    # a stale row takes -- and confirm the SAME computation reports exactly
+    # it, using the already-computed `observed` (forwards disabled) rather
+    # than re-scanning.
+    fabricated = ("tan/commands/build_cmd.py", "__no_such_forward_target__")
+    assert fabricated not in observed  # sanity: matches nothing real
+    fabricated_stale = sorted((live_forwards | {fabricated}) - observed)
+    assert fabricated_stale == [fabricated], (
+        "a fabricated _KNOWN_CODE_FORWARDS entry matching no real call site "
+        "was not reported stale -- the negative half of this gate cannot "
+        f"fail for any table content:\n  {fabricated_stale!r}"
+    )
+
     monkeypatch.setitem(globals(), "_KNOWN_CODE_FORWARDS", live_forwards)
-    _, unresolved_with_forwards = _all_literal_codes()
-    assert not (live_forwards & {
-        (line.split(":", 1)[0], line.rsplit(" (", 1)[-1].rstrip(")")) for line in unresolved_with_forwards
-    })
 
 
 def test_check_site_counts_flags_a_declared_vs_actual_mismatch():

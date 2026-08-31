@@ -357,8 +357,19 @@ options either: a leading one is relocated across the subcommand boundary, so
 `tan --ci doctor` and `tan doctor --ci` are the same run, while a bare
 `tan --ci` with no subcommand is `No such option: --ci`.
 
-`tan build` parses all ten of the shared flags, but four of them still refuse
-the invocation outright (tan-cli#427): `--plan`, `--manifest`,
+`tan build` accepts all ten of the shared flags (`global_flags.py`'s
+`_GLOBAL_FLAG_SPECS`) — zero of them refuse the invocation. Three —
+`--project`, `--board-yaml`, `--sdk-root` — are already declared by `build`
+itself and pass through untouched. The other seven — `--target`, `--all`,
+`--verbose`, `--quiet`, `--no-color`, `--non-interactive`, `--ci` — are
+accepted and dropped, the SAME `accept_global_flags` mechanism 17 other
+commands already use: the oracle's own `cli.rs` declares them ONLY on the
+shared `GlobalArgs` struct and `build`'s Rust handler never read them either,
+so this is not a narrower stand-in for refusing them, it is the identical
+oracle behaviour.
+
+Separately, four flags LOCAL to `build` — never part of the shared set —
+still refuse the invocation outright (tan-cli#427): `--plan`, `--manifest`,
 `--manifest-from` and `--no-auto-bootstrap`. Each is RETIRED rather than
 deferred or accepted — parsed (never a Click typo error) but refused with
 `build.flag-retired` (exit 2), naming what to do instead directly in the
@@ -368,16 +379,9 @@ opening the file directly for `--manifest-from`, and running `tan bootstrap`
 yourself for `--no-auto-bootstrap` — this port has no implicit "run
 `tan bootstrap` on a missing Zephyr workspace" trigger for that one to
 disable, and is not building one just to give the flag something to switch
-off, so it is retired outright rather than left pending. The other seven —
-`--target`, `--all`, `--verbose`, `--quiet`, `--no-color`,
-`--non-interactive`, `--ci` — are accepted and dropped, the SAME
-`accept_global_flags` mechanism 17 other commands already use: the oracle's
-own `cli.rs` declares them ONLY on the shared `GlobalArgs` struct and
-`build`'s Rust handler never read them either, so this is not a narrower
-stand-in for refusing them, it is the identical oracle behaviour.
-`--project`, `--board-yaml`, `--sdk-root`, `--plan-from`, `--materialise`,
-`--native`, `--execute`, `--build-root`, `--format` and `--pristine` are
-unaffected by either bucket:
+off, so it is retired outright rather than left pending.
+`--plan-from`, `--materialise`, `--native`, `--execute`, `--build-root`,
+`--format` and `--pristine` are unaffected by either bucket:
 
 ```console
 $ tan build --ci --plan-from plan.json --format json
@@ -391,10 +395,11 @@ $ tan build --no-auto-bootstrap --format json
 ```
 
 So a script that adds `--ci` to every tan invocation no longer breaks on
-`build`. The one flag in the shared set that still refuses names itself and
-says what to run instead: `--no-auto-bootstrap` is retired rather than
-pending (tan-cli#427), because `tan build` never bootstraps implicitly.
-Elsewhere `--ci` does three separate things, and only the first is consent:
+`build` — none of the ten shared flags refuse. Of the four BUILD-local flags
+that do refuse, each names itself and says what to run instead:
+`--no-auto-bootstrap` is retired rather than pending (tan-cli#427), because
+`tan build` never bootstraps implicitly. Elsewhere `--ci` does three separate
+things, and only the first is consent:
 
 * **Consent**, on the two commands that read the flag for it — `doctor --fix`
   (`doctor_cmd.py`'s `fix_allowed`) and `scaffold` (`scaffold_cmd.py`'s

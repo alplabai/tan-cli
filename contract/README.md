@@ -115,6 +115,8 @@ with a full `consumerEffect` per entry — this table does not duplicate them.
 | `presets.sdk-root-unresolved` (severity `warning`) | frozen | The New Project wizard silently falls back to its static catalogue, which carries no `cores`, so a **heterogeneous SoM scaffolds single-core with no IPC**. The reference part E1M-AEN801 is multi-core, so that is the default path. |
 | `bootstrap.python-not-runnable` (severity `error`) | frozen | `python`/`python3` resolves on PATH but will not run (a Microsoft Store alias, or similar). Renamed, `alp-sdk-vscode`'s `prerequisitesMissingIssue` (`PREREQ_CODES`, `src/alpCli/service.ts`) no longer recognises tan's own refusal, so the extension spawns the real bootstrap terminal anyway and the customer watches the identical failure scroll past with the install guidance lost — same failure shape as `bootstrap.prerequisites-missing`. Carries no `missingPrerequisites[]` entry: a `{tool, command}` pair cannot represent "the Python you have will not run", so the fix travels only in `issues[].message`. |
 | `bootstrap.python-too-old` (severity `error`) | frozen | The resolved Python is below the SDK tooling's floor (currently >= 3.10). Same consumer and the same failure shape as `bootstrap.python-not-runnable`; also tool-less. |
+| `cli.command-deferred` (severity `error`) | retired | Pre-consumer -- nothing in alp-sdk-vscode ever matched this code. Retired rather than deleted by tan-cli#427 (its emission module, `tan/commands/deferred_cmd.py`, is gone) so the spelling is RESERVED and must never be re-used for a different verdict. |
+| `flash.swd-probe-write-unconfirmed` (severity `warning`) | retired | Pre-consumer -- nothing in alp-sdk-vscode ever matched this code. Retired rather than deleted by tan-cli#732, which removed the `swd_probe` flash backend entirely, so the spelling is RESERVED and must never be re-used for a different verdict. |
 
 `bootstrap.prerequisites-missing`, `bootstrap.python-not-runnable` and
 `bootstrap.python-too-old` are the three codes `alp-sdk-vscode`'s
@@ -347,6 +349,19 @@ its `--help` text with a marker naming WHICH KIND of inert it is**, rendered by
 --build              Accepted for compatibility: ... (inert:compatibility:tan-cli#290)
 --project            Project root. Not read: ... (inert:not-applicable)
 ```
+
+`--build` (`doctor_cmd.py`) is, measured, the ONLY live `compatibility` tenant
+today — the identical single-flag population `deferred`'s worked example had
+right before it emptied out twice (below). It is named directly rather than
+documented from the enforcing code the way `deferred` now is, and
+deliberately so: `COMPATIBILITY` is a `PERMANENT_KINDS` member
+(`python/tan/core/inert.py`) precisely because its flags are kept forever, not
+retired the way a `deferred` flag eventually ships or gets retired outright —
+so `--build` going away here would mean `doctor`'s own compat flag was
+deleted, a change big enough to update this worked example deliberately, not
+the structural churn (`build` retiring flags under tan-cli#427) that emptied
+`deferred`'s twice. If a second `compatibility` tenant ever appears, prefer it
+over `--build` alone so the block stops being read as "the one and only".
 
 `deferred` has no live specimen to put in that block: `--no-auto-bootstrap`
 was the last option carrying it, and tan-cli#427 retired that flag outright

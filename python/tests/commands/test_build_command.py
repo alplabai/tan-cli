@@ -822,8 +822,10 @@ def test_execute_with_the_no_auto_bootstrap_flag_is_refused_as_retired(project):
     only for the three that were superseded.
 
     It also pins that the answer moved: this flag used to refuse at exit 1
-    with ``cli.command-deferred``, and that code no longer exists anywhere in
-    the tree.
+    with ``cli.command-deferred``, and that code no longer has any emission
+    site in the tree -- it stays in ``contract/issue-codes.json`` at
+    ``status: "retired"`` (RESERVED, never reused for a different verdict),
+    but nothing in ``python/`` emits it any more.
     """
     plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
     proc = run_tan(
