@@ -83,20 +83,32 @@ def test_the_marker_survives_rich_rendering_of_real_help():
     """The reason the marker is parenthesised, measured rather than assumed.
 
     Typer runs this app with `rich_markup_mode="rich"`, so `--help` prose is
-    rich MARKUP. A square-bracketed `[inert:deferred:tan-cli#427]` parses as a
-    style tag and renders as nothing at all -- the whole token disappears from
-    the customer's terminal and from the surface alp-sdk-vscode records. This
-    asserts the shipped form does NOT do that, on the real `tan build --help`.
+    rich MARKUP. A square-bracketed `[inert:compatibility:tan-cli#290]` parses
+    as a style tag and renders as nothing at all -- the whole token disappears
+    from the customer's terminal and from the surface alp-sdk-vscode records.
+    This asserts the shipped form does NOT do that, on real rendered help.
+
+    The specimen is `tan doctor --build`. It used to be `tan build
+    --no-auto-bootstrap`, whose `(inert:deferred:tan-cli#427)` marker went away
+    when tan-cli#427 retired that flag instead of implementing it -- `tan build`
+    now carries no inert-marked option at all, so this test had no specimen left
+    there. Measured before repointing, not assumed: `tan doctor --help` renders
+    `(inert:compatibility:tan-cli#290)` and `tan faultdecode --help` renders two
+    `(inert:not-applicable)`, which is the whole live population.
+
+    `doctor` is the better of the two anyway: it carries an ISSUE NUMBER, so it
+    exercises the `#` and the digits as well as the colons -- `not-applicable`
+    has neither, and would leave the longer form untested.
     """
     group = get_command(app)
     ctx = type(group).context_class(group, info_name="tan")
-    build = group.get_command(ctx, "build")
+    doctor = group.get_command(ctx, "doctor")
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        build.get_help(type(ctx)(build, parent=ctx, info_name="build"))
+        doctor.get_help(type(ctx)(doctor, parent=ctx, info_name="doctor"))
     rendered = buffer.getvalue()
-    assert "(inert:deferred:tan-cli#427)" in rendered, (
-        "the marker did not survive rich rendering of `tan build --help`:\n" + rendered
+    assert "(inert:compatibility:tan-cli#290)" in rendered, (
+        "the marker did not survive rich rendering of `tan doctor --help`:\n" + rendered
     )
 
 

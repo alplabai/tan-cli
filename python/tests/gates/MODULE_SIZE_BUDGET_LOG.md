@@ -710,3 +710,7 @@ several less obvious failures.
     - tan/core/scaffold.py: 1889 -> 1931
 - 2026-08-31 -- tan-cli#1035 review round 4 nits: soften FlowStyleSomError's remediation message so it doesn't imply dropping the som: key's own anchor/tag, and pin the reverse anchor-then-tag property order (!!map &s {...}) alongside the already-pinned anchor-then-tag order
     - tan/core/scaffold.py: 1931 -> 1933
+- 2026-08-31 -- tan-cli#427: --no-auto-bootstrap retired rather than implemented; the deferred-flag machinery and tan/commands/deferred_cmd.py are deleted with it.
+    - tan/core/bootstrap.py: 2411 -> 2415
+- 2026-08-31 -- tan-cli#427 follow-up in the same change: sdk_cmd.py +1 line replacing a prose reference to the deleted tan/commands/deferred_cmd.py with the fact it is gone.
+    - tan/commands/sdk_cmd.py: 1529 -> 1530

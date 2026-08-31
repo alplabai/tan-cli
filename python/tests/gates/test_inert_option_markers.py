@@ -54,15 +54,15 @@ EXPECTED_VISIBLE_INERT: frozenset[tuple[str, str, str, str | None]] = frozenset(
     [
         # tan-cli#427: `--plan`/`--target`/`--all`/`--manifest`/
         # `--manifest-from`/`--verbose`/`--quiet`/`--no-color`/
-        # `--non-interactive`/`--ci`/`--pristine` all left this census --
-        # `--pristine` is a real, working option now (no marker at all);
-        # `--plan`/`--manifest`/`--manifest-from` are retired (refused with
-        # `build.flag-retired`, naming their replacement -- not "accepted and
-        # does nothing", so no `inert_help` marker either); the remaining
-        # seven are accept-and-drop via `accept_global_flags`, HIDDEN, so
-        # they show up in the PARITY hidden count instead of here. Only
-        # `--no-auto-bootstrap` is still deferred.
-        ("tan build", "--no-auto-bootstrap", DEFERRED, "tan-cli#427"),
+        # `--non-interactive`/`--ci`/`--pristine`/`--no-auto-bootstrap` all
+        # left this census -- `--pristine` is a real, working option now (no
+        # marker at all); `--plan`/`--manifest`/`--manifest-from`/
+        # `--no-auto-bootstrap` are retired (refused with
+        # `build.flag-retired`, naming the replacement or the explicit command
+        # -- not "accepted and does nothing", so no `inert_help` marker
+        # either); the remaining seven are accept-and-drop via
+        # `accept_global_flags`, HIDDEN, so they show up in the PARITY hidden
+        # count instead of here. `tan build` now declares NOTHING deferred.
         ("tan doctor", "--build", COMPATIBILITY, "tan-cli#290"),
         ("tan faultdecode", "--project", NOT_APPLICABLE, None),
         ("tan faultdecode", "--sdk-root", NOT_APPLICABLE, None),

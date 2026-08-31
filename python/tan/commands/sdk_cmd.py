@@ -927,7 +927,8 @@ def _run_not_ported(*, json_mode: bool, subcommand: str, data: dict[str, Any]) -
 
     Exit 1 (`RuntimeFailure`) -- the same code every other refusal in this
     module already uses (`sdk list` without `--online`, a bare `tan sdk`) and
-    the same one the deferred-verb stubs in `deferred_cmd` settled on.
+    the same one the seven deferred-verb stubs settled on before they shipped
+    (tan-cli#260; their module is gone as of tan-cli#427).
 
     This was exit 5 (`InternalFailure`) until #262, on a docstring that
     justified it as "following `validate_cmd`'s precedent for its own unported

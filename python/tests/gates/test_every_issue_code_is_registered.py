@@ -33,7 +33,8 @@ exists to prevent, applied to this file about itself):
 
   1. LITERAL sites -- `Issue("family.code", ...)`, `code="family.code"`
      anywhere, and `Issue(NAME, ...)` where `NAME` is a module-level constant
-     assigned exactly that literal (`cli.command-deferred`'s actual shape).
+     assigned exactly that literal (`completion.shell-unsupported`'s actual
+     shape, via `completion_cmd.SHELL_UNSUPPORTED_CODE`).
   2. FULL-CODE-CARRYING CALL sites -- [`_FULL_CODE_CALLABLES`]: the port's
      DOMINANT emit idiom is not `Issue("family.code", ...)` directly but a
      per-command error TYPE (`BuildError`, `InitError`, `GenerateError`, ...)
@@ -347,8 +348,8 @@ def _rel(path: pathlib.Path) -> str:
 
 def _module_string_constants(tree: ast.Module) -> dict[str, str]:
     """Module-level `NAME = "literal.with.a.dot"` assignments -- the
-    `cli.command-deferred` shape (`DEFERRED_ISSUE_CODE` in
-    `deferred_cmd.py`), where the whole code is named once and referenced by
+    `completion.shell-unsupported` shape (`SHELL_UNSUPPORTED_CODE` in
+    `completion_cmd.py`), where the whole code is named once and referenced by
     identifier at the `Issue(...)` call site rather than spelled inline.
     Deliberately shallow: only a direct top-level `Assign` to a `Name`
     counts, so a value reassigned or computed elsewhere is correctly left
@@ -417,14 +418,13 @@ _FULL_CODE_CALLABLES: dict[tuple[str, str], int] = {
 #: Every entry's literal IS captured elsewhere in this same scan: an
 #: `except <X>Error as err:` block re-emitting `err.code` (`<X>Error` is
 #: itself in `_FULL_CODE_CALLABLES`, so its OWN construction sites carry the
-#: literal), or a module constant imported from another file (`deferred_cmd
-#: .py`'s `DEFERRED_ISSUE_CODE`, resolved by `_module_string_constants` only
-#: at ITS OWN definition site -- deliberately shallow, per that function's own
-#: docstring -- so the cross-module import here needs its own declared entry).
+#: literal), or a module constant imported from another file, which
+#: `_module_string_constants` resolves only at ITS OWN definition site --
+#: deliberately shallow, per that function's own docstring -- so a
+#: cross-module import needs its own declared entry here.
 _KNOWN_CODE_FORWARDS: frozenset[tuple[str, str]] = frozenset(
     {
         ("tan/commands/build_cmd.py", "err.code"),  # BuildError <- PlanParseError/TokenSubstitutionError
-        ("tan/commands/build_cmd.py", "DEFERRED_ISSUE_CODE"),  # imported from deferred_cmd.py
         # imported from `tan.core.sdk_discovery` (tan-cli#407; the module
         # moved under tan-cli#408, this entry did not need to). Same shape as
         # the line above and covered the same way: `_module_string_constants`

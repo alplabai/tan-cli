@@ -35,7 +35,6 @@ from tan.commands.pinmux_cmd import pinmux
 from tan.commands.scaffold_cmd import scaffold
 from tan.commands.support_bundle_cmd import support_bundle
 from tan.commands.trace_cmd import trace
-from tan.commands.deferred_cmd import DEFERRED_CONTEXT_SETTINGS
 from tan.commands.doctor_cmd import doctor
 from tan.commands.examples_cmd import examples
 from tan.commands.explain_cmd import explain

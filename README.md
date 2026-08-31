@@ -381,14 +381,16 @@ $ tan build --ci --plan-from plan.json --format json
 {"command":"build","ok":true,"exitCode":0,"project":{...},
  "data":{"schemaVersion":1,...},"issues":[]}
 $ tan build --no-auto-bootstrap --format json
-{"command":"build","ok":false,"exitCode":1,...,"data":{"message":"`tan build
- --no-auto-bootstrap` is deferred and not available in this build (see
- https://github.com/alplabai/tan-cli/issues/427)."},"issues":[{"code":"cli.command-deferred",
- "severity":"error","message":"..."}]}
+{"command":"build","ok":false,"exitCode":2,...,"issues":[{"code":"build.flag-retired",
+ "severity":"error","message":"`--no-auto-bootstrap` is retired: `tan build` never
+ bootstraps implicitly, so there is nothing for it to disable — run `tan bootstrap`
+ yourself when a workspace needs preparing."}]}
 ```
 
 So a script that adds `--ci` to every tan invocation no longer breaks on
-`build` — only one flag in the shared set still does, and it names itself.
+`build`. The one flag in the shared set that still refuses names itself and
+says what to run instead: `--no-auto-bootstrap` is retired rather than
+pending (tan-cli#427), because `tan build` never bootstraps implicitly.
 Elsewhere `--ci` does three separate things, and only the first is consent:
 
 * **Consent**, on the two commands that read the flag for it — `doctor --fix`
