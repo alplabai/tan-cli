@@ -47,13 +47,13 @@ The Python `tan` line is now stable: `v0.5.0` shipped general availability and
 `SUPPORTED_CLI_VERSION` moved to it (now `0.5.1`) on `alp-sdk-vscode`'s `main`
 branch — but `main` is not that repo's default branch; `dev` is
 (`alp-sdk-vscode`'s own default-branch setting), and `dev` has already moved
-past it to `SUPPORTED_CLI_VERSION = "0.6.0-rc1"` (`src/alpCli/service.ts:91`
-on `dev`; see `docs/release-contract.md` for the live authority on both).
-`v0.6.0` (2026-08-24) is the newest tagged release — and, as of that tag,
-GitHub's `latest` — and installs by hand the same way `v0.5.0-rc1` did before
-it graduated. `main`'s stable pin has not moved onto it yet, so a default
-(non-pre-release) IDE install still downloads `v0.5.1`. Alp IDE's own stable
-cutover to consume it by default remains `v0.6.x`.
+past it to `SUPPORTED_CLI_VERSION = "0.6.0"` (`src/alpCli/service.ts:98`
+on `dev`, measured 2026-08-31 -- `v0.6.0-rc1` graduated to the stable `v0.6.0`
+tag and `dev`'s pin followed it; see `docs/release-contract.md` for the live
+authority on both). `v0.6.0` (2026-08-24) is the newest tagged release — and,
+as of that tag, GitHub's `latest`. `main`'s stable pin has not moved onto it
+yet, so a default (non-pre-release) IDE install still downloads `v0.5.1`. Alp
+IDE's own stable cutover to consume it by default remains `v0.6.x`.
 
 ### How to tell a beta from a stable Alp IDE build
 
