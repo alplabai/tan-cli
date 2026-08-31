@@ -16,9 +16,11 @@ from pathlib import Path
 from tan.core.sdk_default_registry import (
     deepest_covering_entry,
     load_raw,
+    normalized_sdk_path,
     parse_registry,
     parse_registry_updated_at,
     prune_dead_origins,
+    prune_entries_by_sdk_path,
     registry_path,
     registry_text,
     with_entry,
@@ -532,6 +534,92 @@ def test_prune_dead_origins_never_touches_the_filesystem_itself():
     registry = {"\0invalid\0path": {"sdkPath": "/sdk/a", "updatedAt": "t0"}}
     pruned = prune_dead_origins(registry, origin_exists=lambda _origin: True)
     assert pruned == registry
+
+
+# ── prune_entries_by_sdk_path: keeping the registry honest after a removal ──
+# (tan-cli#790 -- `sdk remove`'s own registry-honesty obligation, the sibling
+# of prune_dead_origins pruning on the ORIGIN axis instead of this one.)
+
+
+def test_prune_entries_by_sdk_path_drops_every_entry_naming_the_removed_path():
+    registry = {
+        "/proj/a": {"sdkPath": "/sdk/removed", "updatedAt": "t0"},
+        "/proj/b": {"sdkPath": "/sdk/removed", "updatedAt": "t1"},
+    }
+    pruned = prune_entries_by_sdk_path(registry, sdk_path="/sdk/removed")
+    assert pruned == {}
+
+
+def test_prune_entries_by_sdk_path_keeps_entries_naming_a_different_path():
+    """The vacuity check: a prune that dropped EVERY entry regardless of
+    `sdk_path` would also pass a test that only ever removed one. This one
+    plants an unrelated entry and asserts it survives verbatim."""
+    registry = {
+        "/proj/a": {"sdkPath": "/sdk/removed", "updatedAt": "t0"},
+        "/proj/keep": {"sdkPath": "/sdk/still-here", "updatedAt": "t1"},
+    }
+    pruned = prune_entries_by_sdk_path(registry, sdk_path="/sdk/removed")
+    assert pruned == {"/proj/keep": {"sdkPath": "/sdk/still-here", "updatedAt": "t1"}}
+
+
+def test_prune_entries_by_sdk_path_empty_registry_is_empty():
+    assert prune_entries_by_sdk_path({}, sdk_path="/sdk/removed") == {}
+
+
+def test_prune_entries_by_sdk_path_no_match_changes_nothing():
+    registry = {"/proj/a": {"sdkPath": "/sdk/other", "updatedAt": "t0"}}
+    assert prune_entries_by_sdk_path(registry, sdk_path="/sdk/removed") == registry
+
+
+def test_prune_entries_by_sdk_path_drops_a_malformed_entry_that_still_matches():
+    """A bare-string entry (no `updatedAt` wrapper) is exactly as prunable as
+    a well-formed one when its `sdkPath`-equivalent value matches -- but a
+    bare string has no `sdkPath` KEY at all (`entry.get("sdkPath")` needs a
+    dict), so this pins the actual, narrower contract: a non-dict entry is
+    left alone by this function (nothing to compare), the same as
+    `parse_registry` already drops it on READ regardless."""
+    registry = {"/proj/a": "/sdk/removed"}
+    pruned = prune_entries_by_sdk_path(registry, sdk_path="/sdk/removed")
+    assert pruned == registry
+
+
+def test_normalized_sdk_path_folds_backslashes_and_leaves_posix_alone():
+    """The write side (`bootstrap_cmd._write_global_sdk_registry`) stores every
+    `sdkPath` posix-normalised, so this is the exact inverse of that write and
+    nothing more: separators fold, everything else -- including case, which
+    NTFS ignores but POSIX does not -- is left exactly as stored."""
+    assert normalized_sdk_path("C:\\Users\\me\\sdk") == "C:/Users/me/sdk"
+    assert normalized_sdk_path("/home/me/sdk") == "/home/me/sdk"
+    assert normalized_sdk_path("C:/Users/me/sdk") == "C:/Users/me/sdk"
+    assert normalized_sdk_path("C:\\Users\\ME\\Sdk") == "C:/Users/ME/Sdk"
+
+
+def test_prune_entries_by_sdk_path_matches_a_backslash_spelled_entry():
+    """A hand-edited registry -- a shape this module's own `parse_registry`
+    contract accommodates -- spells a Windows path with backslashes, while
+    every path this codebase computes is forward-slash. A raw `==` answered
+    False for two names of ONE directory, leaving the entry behind after
+    `tan sdk remove` deleted the tree it points at (tan-cli#790).
+
+    The vacuity guard is the second entry: a genuinely DIFFERENT path, also
+    backslash-spelled, must survive -- so a "fold everything to equal" bug
+    fails this too.
+    """
+    registry = {
+        "C:\\proj\\a": {"sdkPath": "C:\\sdk\\removed", "updatedAt": "t0"},
+        "C:\\proj\\b": {"sdkPath": "C:\\sdk\\kept", "updatedAt": "t1"},
+    }
+    pruned = prune_entries_by_sdk_path(registry, sdk_path="C:/sdk/removed")
+    assert pruned == {"C:\\proj\\b": {"sdkPath": "C:\\sdk\\kept", "updatedAt": "t1"}}
+
+
+def test_prune_entries_by_sdk_path_never_touches_the_filesystem():
+    """Pure function: no injected callable at all, unlike `prune_dead_origins`
+    -- proven here by an origin/path pair no real filesystem call could
+    answer for, which still resolves correctly on string equality alone."""
+    registry = {"\0invalid\0origin": {"sdkPath": "\0invalid\0sdk", "updatedAt": "t0"}}
+    pruned = prune_entries_by_sdk_path(registry, sdk_path="\0invalid\0sdk")
+    assert pruned == {}
 
 
 # ── parse_registry_updated_at: the recency companion of parse_registry ──────
