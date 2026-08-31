@@ -677,6 +677,8 @@ several less obvious failures.
 - 2026-08-31 -- tan-cli#1029: FlowStyleSomError, the shared _som_flow_style_body detector, and the reader/writer refusal wiring for a flow-style som: block
     - tan/commands/init_cmd.py: 1521 -> 1557
     - tan/core/scaffold.py: 1791 -> 1875
+- 2026-08-31 -- tan-cli#1026 planner re-sync to alp-sdk f1b1c9df: kconfig.py ports the unconditional CONFIG_ALP_SDK_SOM_HW_REV emission from alp-sdk#1862
+    - tan/planner/kconfig.py: 2108 -> 2122
 - 2026-08-31 -- tan-cli#1025: _load_som_doc gains an isinstance(dict) guard mirroring targets.py's malformed-preset check
     - tan/planner/template.py: 1548 -> 1562
 - 2026-08-31 -- merge-resync (growth already reasoned on the merged branches)

@@ -29,7 +29,7 @@
     "tan/core/scaffold.py": 1933,
     "tan/core/sdk_discovery.py": 963,
     "tan/model/adapters/ethos_u.py": 959,
-    "tan/planner/kconfig.py": 2108,
+    "tan/planner/kconfig.py": 2122,
     "tan/planner/loader.py": 1410,
     "tan/planner/template.py": 1614,
     "tan/planner/zephyr_board.py": 1494
@@ -67,7 +67,7 @@
     "tests/core/test_template_integrity.py": 924,
     "tests/gates/test_every_issue_code_is_registered.py": 1775,
     "tests/gates/test_module_size_budget_log_append_only.py": 809,
-    "tests/gates/test_planner_relocation_freshness.py": 1418,
+    "tests/gates/test_planner_relocation_freshness.py": 1480,
     "tests/gates/test_subprocess_env_routes_through_the_helper.py": 1026,
     "tests/installers/test_installer_release_layout.py": 2886,
     "tests/model/test_adapters.py": 1605,
