@@ -6,7 +6,8 @@
 # <alp/iot.h> surface, and publish a telemetry reading on a
 # cadence.  All app code stays on <alp/iot.h> -- the transport
 # underneath is the CC3501E Wi-Fi6+BLE coprocessor bridge on the
-# E1M-AEN801 (see docs/cc3501e-bridge.md), selected automatically
+# E1M-AEN801 (see alp-sdk's docs/cc3501e-bridge.md, not part of
+# this scaffolded project), selected automatically
 # by the AEN board emit; no app change is needed to target it.
 #
 # AEN-only by design: the E1M-V2N101's Murata Wi-Fi
