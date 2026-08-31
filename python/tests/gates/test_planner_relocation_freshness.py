@@ -564,7 +564,22 @@ from tests.conftest import sdk_root
 #:
 #: Upstream commits in range touching this table's files:
 #:   - 722320a1 feat(scripts,metadata): --cores template selector and optional per-core toolchain (#1652, #964) (#1835)
-PINNED_SDK_COMMIT = "722320a1abe3cea675e99e97300b8a484b4e8464"  # alp-sdk, 63 commits past v0.16.0, untagged -- see above
+#: AUTOMATED RE-SYNC (mirror / PINNED_HASHES): `722320a1` -> `f1b1c9df`, proposed by
+#: `python/scripts/planner_resync.py`. THIS BLOCK IS MACHINE-WRITTEN and
+#: records only WHAT moved -- it makes no claim about behaviour, and no
+#: claim that anything was audited. Replace it with the audited narrative
+#: (which of the commits below are behavioural, what was ported, what was
+#: re-measured rather than taken on a subject line) before merging. That
+#: narrative is the reviewer's job and is the reason this PR does not
+#: auto-merge.
+#:
+#:   scripts/alp_orchestrate/kconfig.py: merged
+#:   scripts/alp_orchestrate/partition.py: merged
+#:
+#: Upstream commits in range touching this table's files:
+#:   - b3775381 fix(hw_info): warn at boot when the compiled SoM revision disagrees with the module's EEPROM (#1862)
+#:   - ec8be8b9 feat(dts): give the E8 low-power bank, DMA2 event router and BOD a devicetree presence (#1858)
+PINNED_SDK_COMMIT = "f1b1c9df0edd23988961150439863e70e5d99211"  # alp-sdk, 63 commits past v0.16.0, untagged -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -606,7 +621,7 @@ PINNED_HASHES: dict[str, str] = {
     "carveout.py": "c05826e4b784965c332dc662c9aa82b993787d7ab588771c7aee5feaa93feb4e",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "33671fc14bac333da568ca02e42ee872acb70cae31e6b29b4336b51a366a7276",
+    "kconfig.py": "8359c20bbd310749e1b21a9d837c904476bd5af5480fd9a4c211e842756837ae",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
     "loader.py": "136e674d0b2594f99004d99dc0e1c9e116c477f764d759a3919668141182cffe",
@@ -614,7 +629,7 @@ PINNED_HASHES: dict[str, str] = {
     "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
     "models.py": "7e174871caa49f4d7f877dc0229571f1961d29d5c6d2214ced58aa1b86b11585",
     "orchestrator.py": "cb6a38e1a2f4200b16da93c1b11512c6e59b963e8e08279d801b8d38e57c3002",
-    "partition.py": "120f458934f7027175b5d362eec73d34195c282db88f7f0fd41a8c37c9b7a132",
+    "partition.py": "e5b52e5b99971a7ae39805ccb8e6f30f0c304f5e0b09ba550e6eab65ea0047f6",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "db2c6658b421cf862118b468ff164cdeea36debae291af37ad6f840fe9565970",
     "secure.py": "44743b887ab8d29293469f2574b6d88e0d433c9b9ba1f1001709f51104716c0c",
@@ -1000,7 +1015,20 @@ PINNED_HASHES: dict[str, str] = {
 #: Net: all 19 entries are re-hashed against `722320a1` below (12 remain,
 #: 7 retired), and `HAND_PORT_PINNED_SDK_COMMIT` advances to the same
 #: commit as `PINNED_SDK_COMMIT` for the first time since `1a9f753c`.
-HAND_PORT_PINNED_SDK_COMMIT = "722320a1abe3cea675e99e97300b8a484b4e8464"  # alp-sdk, 63 commits past v0.16.0, untagged -- see above (tan-cli#996 closes tan-cli#913)
+#: AUTOMATED RE-SYNC (hand-port / HAND_PORT_HASHES): `722320a1` -> `f1b1c9df`, proposed by
+#: `python/scripts/planner_resync.py`. THIS BLOCK IS MACHINE-WRITTEN and
+#: records only WHAT moved -- it makes no claim about behaviour, and no
+#: claim that anything was audited. Replace it with the audited narrative
+#: (which of the commits below are behavioural, what was ported, what was
+#: re-measured rather than taken on a subject line) before merging. That
+#: narrative is the reviewer's job and is the reason this PR does not
+#: auto-merge.
+#:
+#:   no hand-port source moved in this range; hashes unchanged
+#:
+#: Upstream commits in range touching this table's files:
+#:   (none)
+HAND_PORT_PINNED_SDK_COMMIT = "f1b1c9df0edd23988961150439863e70e5d99211"  # alp-sdk, 63 commits past v0.16.0, untagged -- see above (tan-cli#996 closes tan-cli#913)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
