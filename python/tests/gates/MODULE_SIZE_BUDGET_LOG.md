@@ -609,3 +609,7 @@ several less obvious failures.
     - tan/commands/sdk_cmd.py: 1421 -> 1416
 - 2026-08-31 -- tan-cli#790 review follow-up, same PR: refuse removing the SDK cache root itself (every install at once) without --force -- sdk_removal.is_cache_root_itself, sdk_cmd's new sdk.remove-is-cache-root refusal, and its own mutation-proved test
     - tan/commands/sdk_cmd.py: 1416 -> 1456
+- 2026-08-30 -- tan-cli#1011: ethos_u.py docstring/comment growth documenting the arena-only req_sram_kib contract decision under Sram_Only (no arithmetic change)
+    - tan/model/adapters/ethos_u.py: 889 -> 908
+- 2026-08-30 -- PR #1021 review fixes: ethos_u.py's arena-only scope caveat now reaches a fully-specified Sram_Only compile too (tan-cli#1021 review MINOR), not only the defaulted-profile branch, plus the accompanying wording fix and test
+    - tan/model/adapters/ethos_u.py: 908 -> 959

@@ -405,13 +405,32 @@ def _footprint(used: dict[str, float]) -> tuple[int, int]:
     fallback (measured: `float32_fc.tflite` at `ethos-u85-256` reports 0.0 for
     EVERY memory area), and refused by the caller for anything else.
 
-    KNOWN GAP, OPEN, AND NOT SILENTLY PATCHABLE HERE: under `--memory-mode
-    Sram_Only` this reads the ARENA ONLY. vela files the const/weights region
-    under `on_chip_flash_memory_used`, and on a `Sram_Only` part that is a pure
-    BOOKKEEPING RENAME rather than a placement -- verbatim from
-    `ethosu/vela/architecture_features.py`, when the const area's port maps to
-    SRAM and const/arena/cache are the same area: `"Info: Changing
-    const_mem_area from Sram to OnChipFlash. This will use the same
+    THE CONTRACT DECISION (tan-cli#1011), made once and recorded here rather
+    than re-litigated at the call site: under `--memory-mode Sram_Only` this
+    reads the ARENA ONLY, on purpose, and that is the CORRECT scope, not an
+    open gap. `e->arena_sram_kib` -- what `req_sram_kib` is checked against
+    (`t->req_sram_kib <= e->arena_sram_kib`, `alp_model_select.c`) -- is
+    sourced from the SoC spec's `inference_arena_sram_kib`, whose own schema
+    description (`metadata/schemas/soc-spec-v1.schema.json`) states its scope
+    verbatim: "Usable SRAM budget (KiB) for an NPU tensor arena on this SoC."
+    An ARENA budget, not a whole-model-footprint budget. And the const/weights
+    region this function deliberately leaves out is not sized by
+    `req_sram_kib` on the consumer side either: `alp_inference_open_alpmodel()`
+    hands it to the engine as `model_data`/`model_size`
+    (`src/common/alp_model_loader.c`), entirely separate from
+    `arena`/`arena_bytes` -- a `Sram_Only` integration provisions its storage
+    independently, the way `examples/aen/aen-npu-inference-alp/src/main.c`
+    sizes its own `model_sram[NETWORK_MODEL_LEN]
+    __attribute__((section("SRAM0")))` off the blob's own byte length, never
+    off `req_sram_kib`.
+
+    vela's own bookkeeping obscures this at a glance, which is why the
+    reasoning is recorded rather than assumed correct: it FILES the
+    const/weights region under `on_chip_flash_memory_used`, and on a
+    `Sram_Only` part that is a pure BOOKKEEPING RENAME rather than a placement
+    -- verbatim from `ethosu/vela/architecture_features.py`, when the const
+    area's port maps to SRAM and const/arena/cache are the same area: `"Info:
+    Changing const_mem_area from Sram to OnChipFlash. This will use the same
     characteristics as Sram."`, after which `memory_clock_scales`,
     `memory_burst_length`, `memory_ports_used` and `memory_latency` for
     `OnChipFlash` are all assigned from `Sram`. It happens because
@@ -419,30 +438,28 @@ def _footprint(used: dict[str, float]) -> tuple[int, int]:
     `cache_mem_area` all on `Axi0` (vela 5.1.0's own `vela.ini`) while vela's
     validity check forbids naming SRAM as a const area.
 
-    On an Alif Ensemble module that region really IS SRAM-resident:
-    alp-sdk's `examples/aen/aen-npu-inference-alp/src/main.c` memcpy's the
-    model into `static uint8_t model_sram[NETWORK_MODEL_LEN]
-    __aligned(NPU_ALIGN) __attribute__((section("SRAM0")));` with the tensor
-    arena in SRAM0 beside it, and `src/backends/inference/ethos_u_aen.cpp`
-    pins every NPU access to the SRAM AXI port for exactly this reason --
-    verbatim, "everything a SRAM_Only model touches is SRAM0-resident". So on
-    the real 44-op `person_detect_int8.tflite` at `ethos-u85-256`, measured
-    with `ethos-u-vela` 5.1.0: `sram_memory_used = 72.0` and
-    `on_chip_flash_memory_used = 235.265625`, i.e. 72.0 + 235.265625 =
-    307.265625 KiB genuinely resident in SRAM0 against a reported
-    `req_sram_kib = 72` -- an under-report, which is the one direction this
-    function's own contract above says it must never go.
+    On an Alif Ensemble module that renamed region really IS SRAM-resident too
+    (`src/backends/inference/ethos_u_aen.cpp` pins every NPU access to the
+    SRAM AXI port for exactly this reason -- verbatim, "everything a
+    SRAM_Only model touches is SRAM0-resident"), which is real information a
+    board integrator needs -- just not through THIS field. Measured with
+    `ethos-u-vela` 5.1.0 on the real 44-op `person_detect_int8.tflite` at
+    `ethos-u85-256`: `sram_memory_used = 72.0` (the arena; what `req_sram_kib`
+    reports) and `on_chip_flash_memory_used = 235.265625` (the const/weights
+    region; carried in the blob payload, sized by the integrator, never by
+    this function).
 
-    Summing the columns is NOT the fix and is deliberately not done: an
-    integration that XIPs weights out of flash would then be OVER-reported by
-    the same figure, and a target that does not fit would be refused a board it
-    fits. Getting it right needs a per-part statement of where the const region
-    physically lands, which no metadata in either repo carries today. That is a
-    maintainer decision, not something to guess at here -- so the gap is
-    recorded rather than papered over, and
-    `tests/model/test_build.py::test_the_soms_memory_mode_makes_the_refused_
-    target_ship_at_all` asserts only that the figure is nonzero, never that it
-    is right."""
+    Summing the columns into `req_sram_kib` would be WRONG, not merely
+    unnecessary: both figures this function returns come from the same
+    `sram_kib` value, so summing would inflate `arena_bytes` right along with
+    it, oversizing the caller's scratch buffer for memory the model needs no
+    scratch space for, and it would double-book SRAM the const-storage buffer
+    already reserves on its own. And it is not even a `Sram_Only`-only wrong
+    answer: for an integration whose const region lands on a different AXI
+    port (`Shared_Sram` / `Dedicated_Sram*` -- see the module docstring's
+    `ethos-u65-256` sweep, where 228 KiB of weights moves between
+    `off_chip_flash` and `dram` on the system config alone), summing would
+    OVER-report `req_sram_kib` and refuse a board the model actually fits."""
     sram_kib = used.get("sram", 0.0)
     if sram_kib <= 0:
         return 0, 0
@@ -692,12 +709,59 @@ def _refuse_zero_sram_footprint(*, accel_config: str, npu_ops: int, cpu_ops: int
 # customer sizes hardware from. A run whose summary block named NO memory mode
 # at all gets a fourth, narrower sentence: it says tan cannot tell which of the
 # two happened, rather than picking one.
+#
+# `_default_profile_caveats` returns `()` -- no caveat at all -- ONLY when
+# vela defaulted NEITHER flag, i.e. `compile()` passed a fully module-authored
+# profile straight through. That does not mean the arena-only scope statement
+# stops applying under `Sram_Only`: it is a CONTRACT about what `req_sram_kib`
+# means, true whether or not vela had a flag to default (tan-cli#1021 review
+# MINOR). `compile()` falls back to `_arena_only_scope_caveat` for exactly
+# that case, so the sentence still reaches the fully-specified path -- the one
+# issue #1011 named as live on every Alif Ensemble part.
+def _arena_only_scope_clause(memory_mode: str) -> str:
+    """The `req_sram_kib`/arena-only contract sentence (tan-cli#1011), shared
+    verbatim between `_default_profile_caveats`' defaulted-profile branch and
+    `_arena_only_scope_caveat`'s standalone one -- so a fully-specified
+    compile and a defaulted one never carry two different spellings of the
+    same contract.
+
+    tan-cli#1021 review NIT: says only "provisioned separately", never
+    "reported ... separately" -- nothing in `tan` reports the const/weights
+    region's own size anywhere (`check.py`'s sizing note carries arena+SRAM
+    only, `manifest.Target` carries a blob index with no length, and
+    `model_cmd.py` prints no byte count for it); the blob PAYLOAD carries the
+    bytes, not a reported figure."""
+    return (f"That SRAM figure is the tensor arena only -- this module's const/weights region "
+            f"also lands in SRAM under {memory_mode} but is provisioned separately, never "
+            f"folded into it.")
+
+
+def _arena_only_scope_caveat(memory_mode: str | None) -> tuple[str, ...]:
+    """The arena-only contract (tan-cli#1011), standalone -- for a compile
+    that used a FULLY module-authored profile, where `_default_profile_
+    caveats` returns `()` because vela had nothing left to default.
+
+    tan-cli#1021 review MINOR: the scope statement is a CONTRACT
+    (`req_sram_kib` always means the tensor arena under a `Sram_Only`-shaped
+    memory mode, whether or not vela also had to default a flag), not an
+    artefact of a defaulted profile -- so it must reach a fully-specified
+    `Sram_Only` compile too. That is the path issue #1011 named as live on
+    every Alif Ensemble part; gating the sentence behind `defaulted` being
+    non-empty left it unreachable there. `()` for any other memory mode --
+    only `_AXI0_CONST_MEMORY_MODES` carries this quirk (see the module
+    docstring's `_AXI0_CONST_MEMORY_MODES` note)."""
+    if memory_mode not in _AXI0_CONST_MEMORY_MODES:
+        return ()
+    return (_arena_only_scope_clause(memory_mode),)
+
+
 def _default_profile_caveats(defaulted: frozenset[str], system_config: str | None,
                              memory_mode: str | None) -> tuple[str, ...]:
     """vela's own "may be invalid or non-optimal" verdict, surfaced as a report
     caveat for whichever profile flags it had to default -- so a customer
     cannot mistake a default-profile figure for one authored for this module.
-    `()` when vela defaulted neither.
+    `()` when vela defaulted neither (the caller then falls back to
+    `_arena_only_scope_caveat` for the fully-specified case).
 
     THREE SHAPES -- see the comment block above this function for what each
     says and the measurements behind it.
@@ -724,7 +788,7 @@ def _default_profile_caveats(defaulted: frozenset[str], system_config: str | Non
                 f"scheduling is tuned for that system, not this module's. The arena/SRAM figures "
                 f"are unaffected: they follow --memory-mode {memory_mode}, which came from this "
                 f"module's SoC metadata, whose const/arena/cache areas are all one AXI port every "
-                f"system config maps to SRAM.",)
+                f"system config maps to SRAM. " + _arena_only_scope_clause(memory_mode),)
     if memory_mode is None:
         return (f"vela used its BUILT-IN default {default_of} -- no module-authored one is "
                 f"available -- so its scheduling is tuned for that system, not this module's. "
@@ -883,7 +947,13 @@ class VelaAdapter(CompilerAdapter):
                 system_config=system_config, memory_mode=memory_mode, defaulted=defaulted,
                 vendor_config_filename=vela_vendor_config_filename,
                 soc_declares_dram=soc_declares_dram)
+        # tan-cli#1021 review MINOR: a FULLY module-authored profile (nothing
+        # defaulted) still gets the arena-only scope caveat under
+        # `_AXI0_CONST_MEMORY_MODES` -- `_default_profile_caveats` returns
+        # `()` there, since it exists to flag DEFAULTED flags only.
+        caveats = (_default_profile_caveats(defaulted, system_config, memory_mode)
+                  or _arena_only_scope_caveat(memory_mode))
         return Blob(format="vela_tflite", payload=produced.read_bytes(),
                     arena_bytes=arena, compiler_version=_vela_version(),
                     req_sram_kib=sram_kib, cpu_op_count=cpu_ops, npu_op_count=npu_ops,
-                    caveats=_default_profile_caveats(defaulted, system_config, memory_mode))
+                    caveats=caveats)
