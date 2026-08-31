@@ -690,3 +690,5 @@ several less obvious failures.
     - tan/commands/debug_config_cmd.py: 2114 -> 2192
     - tan/core/debug_launch.py: 1539 -> 1770
     - function_count_budget: 303 -> 305
+- 2026-08-31 -- tan-cli#1028: sdk remove reports resolvesToAfter (what now resolves post-removal)
+    - tan/commands/sdk_cmd.py: 1456 -> 1516

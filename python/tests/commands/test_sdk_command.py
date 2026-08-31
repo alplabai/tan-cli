@@ -1655,6 +1655,11 @@ def test_remove_absent_target_is_idempotent(tmp_path, isolated_home, cache_with_
         "version": "v9.9.9-never-installed",
         "wasActive": False,
         "freedBytes": 0,
+        # `isolated_home` means `resolve_sdk_tiered` has nothing to resolve
+        # for this workspace -- an idempotent no-op removal changes nothing
+        # on disk, so "what resolves after" is the same "nothing" as before
+        # (tan-cli#1028), matching `sdk-current-no-sdk`'s own shape.
+        "resolvesToAfter": {"sdkPath": None, "readiness": None, "sourceTier": "none"},
     }
     assert_sibling_intact(cache_with_canary)
 
@@ -1776,6 +1781,10 @@ def test_remove_refuses_the_active_install_without_force_and_force_clears_it(
     assert refused["data"]["wasActive"] is True
     assert refused["data"]["removed"] is False
     assert target.exists(), "a refused removal must not touch the filesystem at all"
+    # tan-cli#1028: nothing was removed here, so "what resolves after" is
+    # simply what resolves NOW -- the still-intact project pin.
+    assert refused["data"]["resolvesToAfter"]["sdkPath"] == str(target).replace("\\", "/")
+    assert refused["data"]["resolvesToAfter"]["sourceTier"] == "projectPin"
 
     forced = envelope(
         run_tan(
@@ -1789,6 +1798,48 @@ def test_remove_refuses_the_active_install_without_force_and_force_clears_it(
     assert forced["data"]["wasActive"] is True
     assert not target.exists()
     assert_sibling_intact(cache_with_canary)
+    # tan-cli#1028's central case: this WAS the workspace's active SDK (a
+    # project pin) and nothing else resolves after it is force-removed --
+    # the caller does not have to make a separate `sdk current` call to
+    # learn that the workspace is now unpinned with nothing to fall back to.
+    assert forced["data"]["resolvesToAfter"] == {
+        "sdkPath": None,
+        "readiness": None,
+        "sourceTier": "none",
+    }
+
+
+def test_remove_reports_the_lower_tier_it_falls_through_to_after_a_forced_removal(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1028: a forced removal does not always leave nothing behind --
+    when a lower tier still resolves, `resolvesToAfter` must report THAT tier,
+    not just flip to `sourceTier: "none"` unconditionally. Proves the field is
+    computed by re-running the real ladder, not by a shortcut that only
+    handles the "nothing left" case."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    pinned = make_sdk_root(cache_with_canary / "v0.21.0", version="0.21.0")
+    fallback = make_sdk_root(tmp_path / "fallback-sdk", version="fallback")
+    write_pointer(workspace / ".alp" / "sdk-path", pinned)
+    # A global-default registry entry covering this workspace -- outranked by
+    # the project pin while `pinned` still resolves, but the tier
+    # `resolve_sdk_tiered` falls through to the moment it does not.
+    write_registry(isolated_home, {workspace: fallback}, dated=True)
+
+    forced = envelope(
+        run_tan(
+            "sdk", "remove", "v0.21.0", "--force",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert forced["ok"] is True
+    assert forced["data"]["removed"] is True
+    assert not pinned.exists()
+    assert forced["data"]["resolvesToAfter"]["sdkPath"] == str(fallback).replace("\\", "/")
+    assert forced["data"]["resolvesToAfter"]["sourceTier"] == "globalDefault"
+    assert forced["data"]["resolvesToAfter"]["readiness"]["state"] == "ready"
 
 
 def test_remove_refuses_outside_the_cache_root_without_force_and_force_clears_it(
