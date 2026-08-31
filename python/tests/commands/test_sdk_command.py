@@ -1850,7 +1850,10 @@ def test_remove_refuses_the_cache_root_itself_without_force_and_force_clears_it(
     )
     assert refused["ok"] is False
     assert refused["issues"][0]["code"] == "sdk.remove-is-cache-root"
-    assert str(cache_with_canary) in refused["issues"][0]["message"]
+    # Posix-folded, like every other path assertion in this block: the message
+    # renders the target through `_abs_posix` (forward slashes on every platform)
+    # while `str(Path)` is backslash-spelled on Windows.
+    assert str(cache_with_canary).replace("\\", "/") in refused["issues"][0]["message"]
     assert "--force" in refused["issues"][0]["message"]
     assert cache_with_canary.exists()
     assert_sibling_intact(cache_with_canary)
