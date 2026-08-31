@@ -93,14 +93,16 @@ def read_package(raw: bytes) -> tuple[Manifest, list[bytes]]:
 
     Every region this reads (`mft_off`/`mft_len`, the blob table itself, and
     each table entry's `off`/`length`) is bounds-checked against `len(raw)`
-    before the matching slice, mirroring `read_manifest_file`'s subtraction-
-    style compare (`off > size or length > size - off`, chosen there because
-    adding the untrusted u32 offset and length first can wrap) rather than
-    `read_manifest_file`'s `f.read(n)`-allocates-n over-allocation risk --
-    slicing `bytes` cannot over-allocate, but it also does not raise: `b"AB"
-    [0:999999]` is `b"AB"`, silently truncated, not a crash (tan-cli#1045).
-    A corrupted or adversarial header/table entry must be refused here, the
-    same way `read_manifest_file`'s file-based sibling already refuses one."""
+    before the matching slice, using the same subtraction-style compare
+    `read_manifest_file` uses (`off > size or length > size - off`, chosen
+    there because adding the untrusted u32 offset and length first can wrap).
+    The motivation for checking at all differs, though: `read_manifest_file`
+    checks to avoid an over-allocation risk (`f.read(n)` allocates n bytes up
+    front), while slicing `bytes` cannot over-allocate but also does not
+    raise -- `b"AB"[0:999999]` is `b"AB"`, silently truncated, not a crash
+    (tan-cli#1045). A corrupted or adversarial header/table entry must be
+    refused here, the same way `read_manifest_file`'s file-based sibling
+    already refuses one."""
     size = len(raw)
     if size < _HEADER_SIZE:
         raise ValueError(f"truncated container: {size} bytes, header is {_HEADER_SIZE}")

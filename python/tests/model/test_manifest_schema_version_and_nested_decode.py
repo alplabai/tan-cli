@@ -256,6 +256,57 @@ def test_cbor_manifest_wrong_typed_target_requires_raises_a_curated_valueerror()
         }))
 
 
+def test_cbor_manifest_wrong_typed_requires_sram_kib_raises_a_curated_valueerror():
+    """The other half of #1049's own title-named symptom (review round 2):
+    `requires` being a mapping does not mean `requires["sram_kib"]` -- the
+    exact figure `alp_model_select.c`'s fit gate reads alongside `arena` --
+    is the right type. Measured on the pre-fix code: `requires={"sram_kib":
+    "huge"}` decoded to `Target(requires={'sram_kib': 'huge'})`, no raise."""
+    good = {"backend": "cpu", "silicon_ref": "*", "blob_format": "tflite",
+            "accel_config": "", "arena": 4096, "blob": 0}
+    with pytest.raises(ValueError,
+                        match=r"field 'sram_kib' must be an int, got str in targets\[0\]\.requires"):
+        Manifest.from_cbor(cbor2.dumps({
+            "name": "x", "src_sha": b"\x00",
+            "targets": [{**good, "requires": {"sram_kib": "huge"}}],
+        }))
+
+
+def test_json_manifest_wrong_typed_requires_sram_kib_raises_a_curated_valueerror():
+    with pytest.raises(ValueError,
+                        match=r"field 'sram_kib' must be an int, got str in targets\[0\]\.requires"):
+        Manifest.from_json(
+            '{"name": "x", "src_sha": "00", "targets": '
+            '[{"backend": "cpu", "silicon_ref": "*", "blob_format": "tflite", '
+            '"accel_config": "", "arena": 4096, "requires": {"sram_kib": "huge"}, "blob": 0}]}'
+        )
+
+
+def test_cbor_manifest_none_typed_requires_sram_kib_raises_a_curated_valueerror():
+    """The issue's other measured shape: `requires={"sram_kib": None}` also
+    decoded silently on the pre-fix code (`isinstance(None, dict)` guards
+    only the container, not this)."""
+    good = {"backend": "cpu", "silicon_ref": "*", "blob_format": "tflite",
+            "accel_config": "", "arena": 4096, "blob": 0}
+    with pytest.raises(ValueError,
+                        match=r"field 'sram_kib' must be an int, got NoneType in targets\[0\]\.requires"):
+        Manifest.from_cbor(cbor2.dumps({
+            "name": "x", "src_sha": b"\x00",
+            "targets": [{**good, "requires": {"sram_kib": None}}],
+        }))
+
+
+def test_requires_missing_sram_kib_entirely_is_still_accepted():
+    """Non-vacuity in the other direction: `sram_kib` is not a REQUIRED key
+    of `requires` (only `requires` itself, as a mapping, is a required
+    `Target` field) -- a `requires` dict that omits it must decode, not
+    raise, the same way it did before this guard existed."""
+    good = {"backend": "cpu", "silicon_ref": "*", "blob_format": "tflite",
+            "accel_config": "", "arena": 4096, "blob": 0, "requires": {"op_features": []}}
+    m = Manifest.from_cbor(cbor2.dumps({"name": "x", "src_sha": b"\x00", "targets": [good]}))
+    assert m.targets[0].requires == {"op_features": []}
+
+
 def test_cbor_manifest_wrong_typed_coverage_field_raises_a_curated_valueerror():
     with pytest.raises(ValueError, match=r"field 'status' must be a string, got int in coverage\[0\]"):
         Manifest.from_cbor(cbor2.dumps({
