@@ -1715,7 +1715,21 @@ def test_every_known_code_forward_entry_is_still_needed(monkeypatch):
         expr = line.rsplit(" (", 1)[-1].rstrip(")")
         observed.add((rel, expr))
 
-    stale = sorted(live_forwards - observed)
+    # A single callable, not two independently-typed subtraction expressions:
+    # the negative half below calls this SAME function on a different input
+    # rather than re-deriving `forwards - observed` a second time, so a
+    # mutation of the computation itself (not just of one call site) is
+    # visible to both halves. Proven by mutation while reviewing this same
+    # PR's round 3: with the negative half re-deriving its own copy of the
+    # subtraction, replacing this real computation with the always-empty
+    # `live_forwards - live_forwards` left the whole test green -- the
+    # positive assertion below is trivially satisfied by an empty `stale`
+    # regardless of how it was computed, and the re-derived negative half
+    # never touched the mutated line at all.
+    def _stale_forwards(forwards: frozenset[tuple[str, str]]) -> list[tuple[str, str]]:
+        return sorted(forwards - observed)
+
+    stale = _stale_forwards(live_forwards)
     assert not stale, (
         f"{len(stale)} _KNOWN_CODE_FORWARDS entr(ies) match no unresolved "
         "code-position site anywhere in the tree once forwarding is disabled "
@@ -1734,15 +1748,16 @@ def test_every_known_code_forward_entry_is_still_needed(monkeypatch):
     # currently bound there from ever landing in `unresolved`, so that
     # intersection cannot be non-empty no matter what the table holds -- a
     # check with no way to fail is not a check (round-3 review of
-    # tan-cli#1062). What the stale computation above needs to be shown
-    # capable of is flagging a row that IS genuinely dead: fabricate one
-    # that matches no real call site anywhere in the tree -- the exact shape
-    # a stale row takes -- and confirm the SAME computation reports exactly
-    # it, using the already-computed `observed` (forwards disabled) rather
-    # than re-scanning.
+    # tan-cli#1062). What `_stale_forwards` needs to be shown capable of is
+    # flagging a row that IS genuinely dead: fabricate one that matches no
+    # real call site anywhere in the tree -- the exact shape a stale row
+    # takes -- and confirm calling `_stale_forwards` again, on
+    # `live_forwards | {fabricated}`, reports exactly it. This calls the
+    # gate's own `_stale_forwards`, not a re-derived copy of its expression,
+    # so a mutation of that expression fails HERE too, not just above.
     fabricated = ("tan/commands/build_cmd.py", "__no_such_forward_target__")
     assert fabricated not in observed  # sanity: matches nothing real
-    fabricated_stale = sorted((live_forwards | {fabricated}) - observed)
+    fabricated_stale = _stale_forwards(live_forwards | {fabricated})
     assert fabricated_stale == [fabricated], (
         "a fabricated _KNOWN_CODE_FORWARDS entry matching no real call site "
         "was not reported stale -- the negative half of this gate cannot "

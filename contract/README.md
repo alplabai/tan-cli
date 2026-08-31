@@ -115,8 +115,9 @@ with a full `consumerEffect` per entry — this table does not duplicate them.
 | `presets.sdk-root-unresolved` (severity `warning`) | frozen | The New Project wizard silently falls back to its static catalogue, which carries no `cores`, so a **heterogeneous SoM scaffolds single-core with no IPC**. The reference part E1M-AEN801 is multi-core, so that is the default path. |
 | `bootstrap.python-not-runnable` (severity `error`) | frozen | `python`/`python3` resolves on PATH but will not run (a Microsoft Store alias, or similar). Renamed, `alp-sdk-vscode`'s `prerequisitesMissingIssue` (`PREREQ_CODES`, `src/alpCli/service.ts`) no longer recognises tan's own refusal, so the extension spawns the real bootstrap terminal anyway and the customer watches the identical failure scroll past with the install guidance lost — same failure shape as `bootstrap.prerequisites-missing`. Carries no `missingPrerequisites[]` entry: a `{tool, command}` pair cannot represent "the Python you have will not run", so the fix travels only in `issues[].message`. |
 | `bootstrap.python-too-old` (severity `error`) | frozen | The resolved Python is below the SDK tooling's floor (currently >= 3.10). Same consumer and the same failure shape as `bootstrap.python-not-runnable`; also tool-less. |
-| `cli.command-deferred` (severity `error`) | retired | Pre-consumer -- nothing in alp-sdk-vscode ever matched this code. Retired rather than deleted by tan-cli#427 (its emission module, `tan/commands/deferred_cmd.py`, is gone) so the spelling is RESERVED and must never be re-used for a different verdict. |
-| `flash.swd-probe-write-unconfirmed` (severity `warning`) | retired | Pre-consumer -- nothing in alp-sdk-vscode ever matched this code. Retired rather than deleted by tan-cli#732, which removed the `swd_probe` flash backend entirely, so the spelling is RESERVED and must never be re-used for a different verdict. |
+| `cli.parse-error` (severity `error`) | frozen | Reports "this build of the tan CLI doesn't accept the command the extension sent", raises the outcome to error severity (exit 2 alone reads as a board.yaml validation warning), routes the usage dump to the output channel and offers Update CLI. Renamed, the customer sees the raw click usage dump in a warning toast again. |
+| `cli.command-deferred` (severity `error`) | retired | Pre-consumer — nothing in alp-sdk-vscode ever matched this code. Retired rather than deleted by tan-cli#427 (its emission module, `tan/commands/deferred_cmd.py`, is gone) so the spelling is RESERVED and must never be re-used for a different verdict. |
+| `flash.swd-probe-write-unconfirmed` (severity `warning`) | retired | Pre-consumer — nothing in alp-sdk-vscode ever matched this code. Retired rather than deleted by tan-cli#732, which removed the `swd_probe` flash backend entirely, so the spelling is RESERVED and must never be re-used for a different verdict. |
 
 `bootstrap.prerequisites-missing`, `bootstrap.python-not-runnable` and
 `bootstrap.python-too-old` are the three codes `alp-sdk-vscode`'s
@@ -387,7 +388,7 @@ a doc fix can solve instead.
 
 A retired flag, unlike a deferred one, carries no `(inert:...)` marker at
 all — its value selects a real, distinct refusal (`build.flag-retired`); see
-the `build --plan` and `build --no-auto-bootstrap` rows above.
+the `build --plan` row above.
 
 Read it back with, after collapsing runs of whitespace:
 
