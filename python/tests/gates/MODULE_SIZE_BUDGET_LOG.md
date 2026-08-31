@@ -710,6 +710,13 @@ several less obvious failures.
     - tan/core/scaffold.py: 1889 -> 1931
 - 2026-08-31 -- tan-cli#1035 review round 4 nits: soften FlowStyleSomError's remediation message so it doesn't imply dropping the som: key's own anchor/tag, and pin the reverse anchor-then-tag property order (!!map &s {...}) alongside the already-pinned anchor-then-tag order
     - tan/core/scaffold.py: 1931 -> 1933
+- 2026-08-31 -- tan-cli#1041: vendored_som's UnreadableSomBlockError/SomBlockUnsupportedError split (quoted-key/merge-key/alias/next-line-flow som: shapes) grows scaffold.py; init_cmd.py's matching catch-site split (init.som-block-unsupported) grows it too
+    - tan/commands/init_cmd.py: 1559 -> 1583
+    - tan/core/scaffold.py: 1933 -> 2111
+    - function_count_budget: 305 -> 306
+- 2026-08-31 -- PR #1060 nits: converge _split_child_key with top_level_key_name, add SomBlockUnsupportedError backstop catch in _plan_from_example, document why vendored_som does not do a real YAML parse -- plus their tests
+    - tan/commands/init_cmd.py: 1583 -> 1606
+    - tan/core/scaffold.py: 2111 -> 2149
 - 2026-08-31 -- tan-cli#907: this file is FROZEN as of this entry. Everything
   above (2026-08-11 through this line) stays exactly as written and stays
   enforced append-only by `test_module_size_budget_log_append_only.py`, but
