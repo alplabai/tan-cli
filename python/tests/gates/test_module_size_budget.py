@@ -10,7 +10,7 @@ deliberately does not fail every module and function that is already over --
 a gate that is red on the day it lands gets disabled, and then it guards
 nothing at all.
 
-## Where the numbers live (tan-cli#668)
+## Where the numbers live (tan-cli#668, tan-cli#1057)
 
 Until tan-cli#668, the per-module ceilings, the function-count budget and the
 worst-function budget were a hand-maintained Python dict IN THIS FILE, one
@@ -21,23 +21,38 @@ least one entry -- and both naive conflict resolutions (`--ours`, `--theirs`)
 shipped a red gate, because neither side's numbers describe the tree the
 merge actually produced. Only running the gate on the merged tree does.
 
-The numbers now live in `module_size_budget.generated.json`, produced by
-`scripts/regen_module_size_budget.py`, never hand-edited. A merge conflict on
-that file is resolved by throwing either side away and re-running the script
-against the merged tree -- it re-measures from source, so the result is
-correct by construction rather than reconciled. `MODULE_SIZE_BUDGET_LOG.md`
-carried the append-only, one-line-per-change record of WHY a ceiling moved
-from 2026-08-11 through 2026-08-30, in the same "keep both sides" shape that
-is already correct for `CHANGELOG.md` -- unlike the old dict, nothing in that
-log encoded absolute state, so two branches that each grew a module produced
-two non-conflicting lines instead of one contested number. That file is now
-FROZEN (tan-cli#907): even a single append-only file collided across
-branches often enough (four of five sampled v0.7.0 PRs) that the record of
-WHY was itself at risk from the mechanical conflict resolution meant to fix
-it -- so every new entry is now its own file under the sibling
-`MODULE_SIZE_BUDGET_LOG.d/` directory, mirroring `changelog.d/`, where two
-branches literally cannot collide because they are never touching the same
-path.
+tan-cli#668 moved them to a generated sidecar,
+`module_size_budget.generated.json`, produced by
+`scripts/regen_module_size_budget.py` and never hand-edited. That fixed the
+"retyped by hand" half but not the conflict rate: every branch that changed
+any tracked module rewrote the same file, so it still collided on most
+long-lived branches. tan-cli#1057 split it one record file per module, under
+`module_size_budget.d/`, named after the module itself -- the same structural
+fix tan-cli#907 applied to the ledger, and for the same reason: two branches
+touching different modules never write the same path, so there is nothing for
+git or GitHub to call a conflict.
+
+Measured over 93 value-changing commits to the old single file (4278 commit
+pairs): 100% of pairs collided under one file, 61.3% would still collide
+under the per-package split the issue proposed, 22.4% under a per-module
+split that kept the two whole-tree scalars stored, and 12.9% with those
+scalars DERIVED instead. The residual 12.9% is two branches editing the SAME
+module, which is a genuine same-file conflict no split removes.
+
+`function_count_budget` and `function_worst_budget` are therefore no longer
+stored anywhere: each record carries its own module's `long_functions` /
+`worst_function`, and `core.MeasuredState` exposes the two whole-tree numbers
+as a SUM and a MAX over those -- exactly how `measure_current` always
+computed them. The ratchet below still compares whole-tree totals and means
+what it always meant.
+
+A merge conflict on a record file is still resolved the same way: throw
+either side away and re-run the script against the merged tree -- it
+re-measures from source, so the result is correct by construction rather than
+reconciled. `MODULE_SIZE_BUDGET_LOG.md` carried the append-only,
+one-line-per-change record of WHY a ceiling moved from 2026-08-11 through
+2026-08-30; that file is FROZEN (tan-cli#907) and every new entry is its own
+file under `MODULE_SIZE_BUDGET_LOG.d/`.
 
 ## What this gates, and what it only watches (tan-cli#817)
 
@@ -48,12 +63,15 @@ the issue's first complaint was that it was stated nowhere -- "a reader who
 finds test_module_size_budget.py reasonably concludes the repo has file-size
 drift under control", while half the Python in the repo, including its single
 largest file, sat outside every number on this page. It no longer sits outside
-the MEASUREMENT: `observed_tests` in the generated file records every
-`tests/**` file over the cap, so growth shows up in a diff. It still sits
-outside the ENFORCEMENT, deliberately and for a measured reason -- see
-`TEST_ROOT` in `_module_size_budget_core.py`, and
+the MEASUREMENT: every `tests/**` file over the cap has its own `"kind":
+"observed"` record, so growth shows up in a diff. It still sits outside the
+ENFORCEMENT, deliberately and for a measured reason -- see `TEST_ROOT` in
+`_module_size_budget_core.py`, and
 `test_the_observed_test_tree_is_recorded_not_gated` below, which pins the
-decision end-to-end rather than trusting this paragraph.
+decision end-to-end rather than trusting this paragraph. Since tan-cli#1057
+that distinction is machine-checked rather than positional: a record's `kind`
+must agree with the tree its path sits in, or `core` refuses to load it at
+all.
 
 `tan/planner/**` is a third case: inside the walk, named as out of scope
 because it is a hash-audited mirror of upstream.
@@ -68,7 +86,7 @@ next PR with no protection change.
 
 ## How to change these numbers
 
-Do not hand-edit `module_size_budget.generated.json`. Run
+Do not hand-edit anything under `module_size_budget.d/`. Run
 `python scripts/regen_module_size_budget.py` -- see its own module docstring
 for the `--reason` / `--merge-resync` distinction. Lowering a ceiling never
 needs either flag: a module shrinking, or dropping under the cap, is always
@@ -76,7 +94,6 @@ safe and the script applies it without asking.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -86,7 +103,7 @@ from tests.gates import _module_size_budget_core as core
 
 def test_no_module_grows_past_its_recorded_budget():
     """The ratchet. A budgeted module may shrink freely; growing past its
-    recorded size fails and must be answered by regenerating the budget file
+    recorded size fails and must be answered by regenerating the records
     with a reason."""
     budget = core.load_generated()
     grew = []
@@ -100,17 +117,17 @@ def test_no_module_grows_past_its_recorded_budget():
     assert grew == [], (
         "these modules are over budget:\n  "
         + "\n  ".join(grew)
-        + f"\n\nA module not in module_size_budget.generated.json is capped at "
-        f"{core.MODULE_CAP}. Either extract from it, or run "
+        + f"\n\nA module with no `lines` ceiling under module_size_budget.d/ "
+        f"is capped at {core.MODULE_CAP}. Either extract from it, or run "
         "`python scripts/regen_module_size_budget.py --reason \"...\"` to raise "
-        "its entry."
+        "its record."
     )
 
 
 def test_the_module_budget_has_not_gone_stale():
-    """The other direction: a budget entry for a file that has SHRUNK well
-    under its ceiling is a ratchet that stopped ratcheting. Lower it (rerun
-    the regen script -- shrinking never needs a flag) so the next growth is
+    """The other direction: a record for a file that has SHRUNK well under
+    its ceiling is a ratchet that stopped ratcheting. Lower it (rerun the
+    regen script -- shrinking never needs a flag) so the next growth is
     caught at the new level rather than the old one.
 
     The slack allowed is deliberately generous (50 lines). This gate exists
@@ -121,16 +138,16 @@ def test_the_module_budget_has_not_gone_stale():
     for rel, ceiling in sorted(budget.modules.items()):
         path = core.PACKAGE.parent / rel
         if not path.exists():
-            slack.append(f"{rel}: budgeted but no longer exists -- drop the entry")
+            slack.append(f"{rel}: budgeted but no longer exists -- drop the record")
             continue
         lines = len(path.read_text(encoding="utf-8").splitlines())
         if lines <= core.MODULE_CAP:
-            slack.append(f"{rel}: {lines} lines, now under {core.MODULE_CAP} -- drop the entry")
+            slack.append(f"{rel}: {lines} lines, now under {core.MODULE_CAP} -- drop the record")
         elif ceiling - lines > 50:
             slack.append(f"{rel}: {lines} lines, budget {ceiling} -- lower it")
 
     assert slack == [], (
-        "the generated module budget no longer describes the tree (run "
+        "the committed module records no longer describe the tree (run "
         "`python scripts/regen_module_size_budget.py`):\n  " + "\n  ".join(slack)
     )
 
@@ -139,7 +156,13 @@ def test_no_new_long_function_and_none_of_them_grows():
     """Hundreds of functions are already over 50 lines, so enumerating them
     would be a table nobody reads. The COUNT and the WORST are ratcheted
     instead: a new long function moves the count, and an existing one growing
-    moves the worst."""
+    moves the worst.
+
+    Both budgets are DERIVED (tan-cli#1057) -- a sum and a max over the
+    per-module records -- rather than stored scalars two branches could both
+    write. The comparison is still whole-tree on both sides, so a module
+    gaining a long function while another loses one still passes here,
+    exactly as it did when the two numbers were stored."""
     budget = core.load_generated()
     found: list[tuple[int, str]] = []
     for path in core.modules():
@@ -153,13 +176,93 @@ def test_no_new_long_function_and_none_of_them_grows():
     assert len(found) <= budget.function_count, (
         f"{len(found)} functions are over {core.FUNCTION_CAP} lines, budget "
         f"{budget.function_count}. Extract from the one you just grew, or "
-        "regenerate the budget file with a reason. Longest: "
+        "regenerate the records with a reason. Longest: "
         f"{worst[1]} at {worst[0]} lines."
     )
     assert worst[0] <= budget.function_worst, (
         f"{worst[1]} is {worst[0]} lines, past the recorded worst "
         f"({budget.function_worst}). The longest function in the package "
         "getting longer is the exact drift tan-cli#408 reports."
+    )
+
+
+def test_the_recorded_function_facts_match_the_measurement():
+    """The staleness half of the function ratchet, and the thing that makes a
+    DERIVED scalar's inputs auditable per module (tan-cli#1057).
+
+    The test above only asks whether the whole-tree total still bounds the
+    tree. That direction alone cannot see a record whose `long_functions` has
+    been padded upward, or one that has gone stale downward, or one that is
+    missing entirely -- all three leave the derived sum wrong while the `<=`
+    still holds. This compares every module's stored facts to a fresh
+    measurement EXACTLY and names the module, which is precisely what the old
+    single file's `function_count_budget: 300 -> 301` could never do.
+
+    Exact rather than tolerant, unlike the `tests/**` drift window below.
+    That is a real, small tax rather than a free one: measured against 68
+    non-merge `origin/dev` commits touching `python/tan/**.py`, 39 needed a
+    regen under both the old single-file scheme and this one, 15 under the old
+    scheme only, 11 under neither, and **3** are newly taxed here
+    (`8866d7fb5`, `dcf37ae45`, `3ff889093`) -- a whole-tree-neutral per-module
+    function growth, which the old file structurally could not see. The regen
+    those 3 force needs no `--reason` and writes no ledger entry.
+
+    Worth the tax, because it is exactly what makes a padded function record
+    visible: an inflated budget still bounds the tree, so the `<=` ratchet
+    alone cannot catch one. Failing at the local bar instead of on the runner
+    is the whole point of keeping this gate local-first (tan-cli#895)."""
+    measured = core.measure_current().functions
+    recorded = core.load_generated().functions
+    empty = core.ModuleFunctions(count=0, worst=0)
+
+    wrong = []
+    for rel in sorted(set(measured) | set(recorded)):
+        was = recorded.get(rel, empty)
+        now = measured.get(rel, empty)
+        if was == now:
+            continue
+        if rel not in recorded:
+            wrong.append(
+                f"{rel}: has {now.count} function(s) over {core.FUNCTION_CAP} "
+                f"lines (worst {now.worst}) and no record at all"
+            )
+        elif rel not in measured:
+            wrong.append(
+                f"{rel}: recorded {was.count} over-cap function(s) but the "
+                "module now has none"
+            )
+        else:
+            wrong.append(
+                f"{rel}: recorded long_functions {was.count} / worst_function "
+                f"{was.worst}, measured {now.count} / {now.worst}"
+            )
+
+    assert wrong == [], (
+        "the committed per-module function records disagree with the tree, so "
+        "the derived function_count_budget "
+        f"({sum(f.count for f in recorded.values())}) and function_worst_budget "
+        f"({max((f.worst for f in recorded.values()), default=0)}) are not what "
+        "the tree actually measures (run `python "
+        "scripts/regen_module_size_budget.py`):\n  " + "\n  ".join(wrong)
+    )
+
+
+def test_every_record_describes_a_module_that_still_exists():
+    """A record whose module was deleted or renamed is dead weight that still
+    contributes to a derived scalar. `test_the_module_budget_has_not_gone_stale`
+    catches this only for records that carry a `lines` ceiling; most records
+    do not (60 of the 90 gated ones exist purely for their function facts),
+    so without this a deleted module's record could inflate the function
+    budget indefinitely."""
+    orphans = [
+        rel
+        for rel in sorted(core.load_generated().functions)
+        if not (core.PACKAGE.parent / rel).exists()
+    ]
+    assert orphans == [], (
+        "these modules have a record under module_size_budget.d/ but no "
+        "longer exist (run `python scripts/regen_module_size_budget.py`):\n  "
+        + "\n  ".join(orphans)
     )
 
 
@@ -178,8 +281,8 @@ def test_the_mirrored_planner_is_named_as_out_of_scope():
         assert (core.PACKAGE.parent / rel).exists(), f"{rel} is budgeted but missing"
 
 
-#: How far the `observed_tests` record may drift from the tree before it is
-#: called rotten, and both halves are MEASURED rather than picked round
+#: How far an `observed` record may drift from the tree before it is called
+#: rotten, and both halves are MEASURED rather than picked round
 #: (tan-cli#817). Over 60 consecutive `dev` commits, 22 grew a `tests/**` file
 #: already over the cap, by a median of 65 lines, p90 365, max 577.
 #:
@@ -222,8 +325,8 @@ def test_the_observed_test_record_has_not_rotted():
     from the `tan/**` ratchet above, which demands a written reason."""
     recorded = core.load_observed_tests()
     assert recorded, (
-        "`observed_tests` is empty -- tan-cli#817 exists because nothing "
-        "measured python/tests/**, and an empty section is that state again"
+        "no `observed` record exists -- tan-cli#817 exists because nothing "
+        "measured python/tests/**, and an empty record tree is that state again"
     )
 
     rotten = []
@@ -239,13 +342,13 @@ def test_the_observed_test_record_has_not_rotted():
 
     # The membership half: measure the tree, and compare WHICH files are over
     # the cap -- not how big they are, which the drift bound above already
-    # tolerates. Both directions, because both mean the same thing (the file
+    # tolerates. Both directions, because both mean the same thing (a record
     # says something about `tests/**` that the tree does not).
     measured = core.measure_observed_tests()
     for rel in sorted(set(measured) - set(recorded)):
         rotten.append(
             f"{rel}: {measured[rel]} lines, over the {core.MODULE_CAP}-line "
-            "cap and missing from the record entirely"
+            "cap and missing from the record tree entirely"
         )
     for rel in sorted(set(recorded) - set(measured)):
         path = core.PACKAGE.parent / rel
@@ -256,10 +359,33 @@ def test_the_observed_test_record_has_not_rotted():
             )
 
     assert rotten == [], (
-        "the observed python/tests/** record has drifted from the tree (run "
+        "the observed python/tests/** records have drifted from the tree (run "
         "`python scripts/regen_module_size_budget.py` -- no flag, this is not "
         "a budget):\n  " + "\n  ".join(rotten)
     )
+
+
+def _load_regen(name: str):
+    """Load `scripts/regen_module_size_budget.py` by path -- it lives outside
+    the package and is never otherwise imported by this suite."""
+    import importlib.util
+
+    regen_path = core.PACKAGE.parent / "scripts" / "regen_module_size_budget.py"
+    spec = importlib.util.spec_from_file_location(name, regen_path)
+    regen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(regen)
+    return regen
+
+
+def _redirect(target, monkeypatch, tmp_path):
+    """Point every path the script touches into `tmp_path`. `CAPS_PATH` is
+    computed from `RECORD_DIR` at import time, so patching only the directory
+    would leave the caps file pointing at the REAL tree -- and the script
+    writes it on every run."""
+    record_dir = tmp_path / "module_size_budget.d"
+    monkeypatch.setattr(target, "RECORD_DIR", record_dir)
+    monkeypatch.setattr(target, "CAPS_PATH", record_dir / "_caps.json")
+    return record_dir
 
 
 def test_the_observed_test_tree_is_recorded_not_gated(tmp_path, monkeypatch):
@@ -271,12 +397,7 @@ def test_the_observed_test_tree_is_recorded_not_gated(tmp_path, monkeypatch):
     Hermetic: every path the script touches is redirected into `tmp_path`, so
     this neither reads nor writes the real tree.
     """
-    import importlib.util
-
-    regen_path = core.PACKAGE.parent / "scripts" / "regen_module_size_budget.py"
-    spec = importlib.util.spec_from_file_location("_regen_under_test", regen_path)
-    regen = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(regen)
+    regen = _load_regen("_regen_under_test")
     # The script reaches its measurement module through its OWN `sys.path`
     # insert, so `regen.core` is a second module object loaded from the same
     # file -- patching this gate's `core` would not reach the script. Verified
@@ -297,21 +418,24 @@ def test_the_observed_test_tree_is_recorded_not_gated(tmp_path, monkeypatch):
     big_test = tests_root / "test_big.py"
     big_test.write_text("# line\n" * 900, encoding="utf-8")
 
-    generated = tmp_path / "module_size_budget.generated.json"
     ledger = tmp_path / "LOG.md"
     ledger_dir = tmp_path / "LOG.d"
     monkeypatch.setattr(target, "PACKAGE", package)
     monkeypatch.setattr(target, "TEST_ROOT", tests_root)
-    monkeypatch.setattr(target, "GENERATED_PATH", generated)
     monkeypatch.setattr(target, "LOG_PATH", ledger)
     monkeypatch.setattr(target, "LOG_DIR", ledger_dir)
+    record_dir = _redirect(target, monkeypatch, tmp_path)
 
     def _entry_files() -> list[Path]:
         return sorted(ledger_dir.glob("*.md")) if ledger_dir.exists() else []
 
-    # 1. Seeding an observed entry: clean, no flag, no ledger.
+    # 1. Seeding an observed record: clean, no flag, no ledger.
     assert regen.main([]) == 0
-    assert json.loads(generated.read_text())["observed_tests"] == {"tests/test_big.py": 900}
+    assert target.load_observed_tests() == {"tests/test_big.py": 900}
+    assert (record_dir / "tests" / "test_big.py.json").exists(), (
+        "an observed record must land at the path its module names -- that "
+        "path IS its key (tan-cli#1057)"
+    )
     assert not _entry_files(), "seeding the observed record must not touch the ledger"
 
     # 2. The decision itself: that file GROWS past the cap, a lot. Still clean,
@@ -321,7 +445,7 @@ def test_the_observed_test_tree_is_recorded_not_gated(tmp_path, monkeypatch):
         "growing a tests/** file was refused -- the observed record has been "
         "turned into a ratchet, which is the decision tan-cli#817 rejected"
     )
-    assert json.loads(generated.read_text())["observed_tests"] == {"tests/test_big.py": 2400}
+    assert target.load_observed_tests() == {"tests/test_big.py": 2400}
     assert not _entry_files(), "observed growth must never write a ledger entry"
 
     # 3. The contrast, so none of the above passes for the wrong reason: the
@@ -343,33 +467,80 @@ def test_the_observed_test_tree_is_recorded_not_gated(tmp_path, monkeypatch):
     assert not ledger.exists(), "the frozen single-file ledger must never be written to again"
 
 
-def test_check_mode_reds_on_a_stale_sidecar_and_passes_once_resynced(tmp_path, monkeypatch):
+def test_a_whole_tree_neutral_function_move_needs_no_reason(tmp_path, monkeypatch):
+    """tan-cli#1057's meaning-preservation, pinned rather than asserted in
+    prose. The ratchet has always been WHOLE-TREE: one module gaining a long
+    function while another loses one moved neither `function_count_budget`
+    nor `function_worst_budget`, so it needed no `--reason`. Storing those
+    facts per module makes it trivially easy to start judging growth per
+    RECORD instead, which would quietly convert a whole-tree ratchet into a
+    per-module one -- the exact design change tan-cli#1057's issue text said
+    deserves its own review. This is what says no.
+    """
+    regen = _load_regen("_regen_under_test_neutral")
+    target = regen.core
+
+    package = tmp_path / "tan"
+    package.mkdir()
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    ledger_dir = tmp_path / "LOG.d"
+    monkeypatch.setattr(target, "PACKAGE", package)
+    monkeypatch.setattr(target, "TEST_ROOT", tests_root)
+    monkeypatch.setattr(target, "LOG_PATH", tmp_path / "LOG.md")
+    monkeypatch.setattr(target, "LOG_DIR", ledger_dir)
+    _redirect(target, monkeypatch, tmp_path)
+
+    def long_fn(name: str, body_lines: int) -> str:
+        return f"def {name}():\n" + "    pass\n" * body_lines + "\n"
+
+    (package / "a.py").write_text(long_fn("f", 80), encoding="utf-8")
+    (package / "b.py").write_text("x = 1\n", encoding="utf-8")
+    # Seeding a tree that already holds a long function IS whole-tree growth
+    # (0 -> 1), so it legitimately needs a reason; the move below is what
+    # this test is about.
+    assert regen.main(["--reason", "seed the fixture"]) == 0
+    seeded_entries = sorted(ledger_dir.glob("*.md"))
+    before = target.load_generated()
+    assert before.function_count == 1
+
+    # The move: `a.py` loses its long function, `b.py` gains one of the same
+    # span. Per record that is a rise in `b.py`; whole-tree it is a no-op.
+    (package / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (package / "b.py").write_text(long_fn("g", 80), encoding="utf-8")
+    rc = regen.main([])
+    assert rc == 0, (
+        "a whole-tree-neutral function move was refused without --reason -- "
+        "the ratchet has been narrowed to per-module, which is a change to "
+        "what its numbers MEAN, not a storage change (tan-cli#1057)"
+    )
+    assert sorted(ledger_dir.glob("*.md")) == seeded_entries, (
+        "a whole-tree-neutral move must not write a ledger entry either"
+    )
+    after = target.load_generated()
+    assert after.function_count == before.function_count
+    assert after.function_worst == before.function_worst
+    assert set(after.functions) == {"tan/b.py"}
+
+
+def test_check_mode_reds_on_a_stale_record_and_passes_once_resynced(tmp_path, monkeypatch):
     """Direct probe for tan-cli#907's CI wiring: `--check` must RED on a
-    generated file that no longer matches the measured tree, and PASS once
-    the file is regenerated against it.
+    record tree that no longer matches the measured tree, and PASS once it is
+    regenerated against it.
 
     The scenario this reproduces is deliberately the git-mechanics one, not
-    a hand-edit: `.gitattributes` does not carry `merge=union` for
-    `module_size_budget.generated.json` (unioning two JSON documents that
-    both add a key can leave two entries with no comma between them), so a
-    real `git merge` on it either conflicts visibly or -- measured directly,
-    a plain `git merge` of two branches editing different keys of a shared
-    JSON object -- stitches both DISJOINT edits into one syntactically valid,
-    semantically stale JSON object with NO conflict marker at all. There is
-    nothing for a human or `test_no_conflict_markers.py` to catch in that
-    case; `--check` re-measuring and comparing exactly is the only thing
-    that can. Hermetic, same redirection pattern as
-    `test_the_observed_test_tree_is_recorded_not_gated` above -- this
-    changes the OBSERVED side (a `tests/**` file), not the gated `modules`
-    map, specifically so no `--reason`/`--merge-resync` flag is needed to
-    make the fixture's own resync step (below) succeed.
+    a hand-edit. Splitting per module (tan-cli#1057) narrows the shape but
+    does not retire it: a merge that brings in one side's edit to a module
+    together with the other side's record for it leaves a syntactically
+    valid, semantically STALE record with no conflict marker for a human or
+    `test_no_conflict_markers.py` to catch. `--check` re-measuring and
+    comparing exactly is the only thing that can. Hermetic, same redirection
+    pattern as `test_the_observed_test_tree_is_recorded_not_gated` above --
+    this changes the OBSERVED side (a `tests/**` file), not a gated ceiling,
+    specifically so no `--reason`/`--merge-resync` flag is needed to make the
+    fixture's own resync step (below) succeed.
     """
-    import importlib.util
-
-    regen_path = core.PACKAGE.parent / "scripts" / "regen_module_size_budget.py"
-    spec = importlib.util.spec_from_file_location("_regen_under_test_check", regen_path)
-    regen = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(regen)
+    regen = _load_regen("_regen_under_test_check")
     target = regen.core
 
     package = tmp_path / "tan"
@@ -380,51 +551,143 @@ def test_check_mode_reds_on_a_stale_sidecar_and_passes_once_resynced(tmp_path, m
     drifting_test = tests_root / "test_drifts.py"
     drifting_test.write_text("# line\n" * 900, encoding="utf-8")
 
-    generated = tmp_path / "module_size_budget.generated.json"
-    ledger = tmp_path / "LOG.md"
     monkeypatch.setattr(target, "PACKAGE", package)
     monkeypatch.setattr(target, "TEST_ROOT", tests_root)
-    monkeypatch.setattr(target, "GENERATED_PATH", generated)
-    monkeypatch.setattr(target, "LOG_PATH", ledger)
+    monkeypatch.setattr(target, "LOG_PATH", tmp_path / "LOG.md")
+    monkeypatch.setattr(target, "LOG_DIR", tmp_path / "LOG.d")
+    _redirect(target, monkeypatch, tmp_path)
 
-    # Seed a generated file that matches the (fake) tree exactly.
+    # Seed records that match the (fake) tree exactly.
     assert regen.main([]) == 0
-    assert regen.main(["--check"]) == 0, "a freshly regenerated sidecar must pass --check"
+    assert regen.main(["--check"]) == 0, "freshly regenerated records must pass --check"
 
     # A sibling branch's edit lands on the tree, but nobody reruns the
-    # regen script for it -- exactly what a clean, marker-free text merge of
-    # two disjoint JSON edits leaves behind: a committed sidecar that no
-    # longer describes the tree it sits next to.
+    # regen script for it -- exactly what a clean, marker-free merge leaves
+    # behind: a committed record that no longer describes the file it names.
     drifting_test.write_text("# line\n" * 2400, encoding="utf-8")
     rc_stale = regen.main(["--check"])
-    assert rc_stale == 1, f"a stale sidecar must RED --check, got rc={rc_stale}"
+    assert rc_stale == 1, f"a stale record must RED --check, got rc={rc_stale}"
 
     # The merge-resync fix: re-run the regen script (no flag needed here --
     # only the OBSERVED side moved, see the docstring above).
     assert regen.main([]) == 0
     rc_fresh = regen.main(["--check"])
-    assert rc_fresh == 0, f"a freshly-resynced sidecar must PASS --check, got rc={rc_fresh}"
+    assert rc_fresh == 0, f"freshly-resynced records must PASS --check, got rc={rc_fresh}"
 
 
-def test_the_generated_budget_has_no_duplicate_module_keys():
-    """A duplicate key in `modules` is invisible to every other test in this
-    file, because JSON (like the Python dict literal it replaced) collapses a
-    duplicate on parse -- the LAST spelling wins and the earlier one is dead
-    text (tan-cli#586's class of defect, which this design does not get for
-    free just by moving to JSON)."""
+def test_a_padded_record_reds_check_and_names_its_module(tmp_path, monkeypatch):
+    """The defect tan-cli#668 exists to make structurally impossible, at the
+    new storage's granularity: a hand-edited value that no real measurement
+    produced. Padding one record's `long_functions` inflates the DERIVED
+    `function_count_budget` -- which the `<=` ratchet alone cannot see,
+    because a too-generous budget still bounds the tree -- so this pins that
+    both `--check` and `test_the_recorded_function_facts_match_the_measurement`
+    catch it, and that the message names the module rather than a whole-tree
+    scalar."""
+    import json
+
+    regen = _load_regen("_regen_under_test_padded")
+    target = regen.core
+
+    package = tmp_path / "tan"
+    package.mkdir()
+    (package / "a.py").write_text("def f():\n" + "    pass\n" * 80, encoding="utf-8")
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    monkeypatch.setattr(target, "PACKAGE", package)
+    monkeypatch.setattr(target, "TEST_ROOT", tests_root)
+    monkeypatch.setattr(target, "LOG_PATH", tmp_path / "LOG.md")
+    monkeypatch.setattr(target, "LOG_DIR", tmp_path / "LOG.d")
+    record_dir = _redirect(target, monkeypatch, tmp_path)
+
+    assert regen.main(["--reason", "seed the fixture"]) == 0
+    assert regen.main(["--check"]) == 0
+
+    record = record_dir / "tan" / "a.py.json"
+    data = json.loads(record.read_text(encoding="utf-8"))
+    data["long_functions"] = 99
+    record.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    assert regen.main(["--check"]) == 1, "a padded record must RED --check"
+    assert target.load_generated().function_count == 99
+    measured = target.measure_current()
+    assert measured.function_count == 1, (
+        "the measurement is unaffected by the padded record -- measure_current "
+        "never reads the committed records, which is tan-cli#668's constraint"
+    )
+
+
+def test_a_record_that_disagrees_with_its_own_path_or_kind_is_refused(tmp_path, monkeypatch):
+    """The cross-file half of `_load_json`'s duplicate-key guard (tan-cli#586).
+
+    With one file there was exactly one way to spell a module key twice, and
+    `object_pairs_hook` caught it. With a file per module the same silent
+    last-write-wins is reachable by copying a record to a second path, and by
+    a record claiming the wrong `kind` -- which would let a `tests/**`
+    MEASUREMENT be read as a `tan/**` ceiling, inverting tan-cli#817. Both
+    raise; neither is coerced."""
+    import json
+
+    regen = _load_regen("_regen_under_test_identity")
+    target = regen.core
+
+    package = tmp_path / "tan"
+    package.mkdir()
+    (package / "a.py").write_text("def f():\n" + "    pass\n" * 80, encoding="utf-8")
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    monkeypatch.setattr(target, "PACKAGE", package)
+    monkeypatch.setattr(target, "TEST_ROOT", tests_root)
+    monkeypatch.setattr(target, "LOG_PATH", tmp_path / "LOG.md")
+    monkeypatch.setattr(target, "LOG_DIR", tmp_path / "LOG.d")
+    record_dir = _redirect(target, monkeypatch, tmp_path)
+    assert regen.main(["--reason", "seed the fixture"]) == 0
+
+    record = record_dir / "tan" / "a.py.json"
+    original = record.read_text(encoding="utf-8")
+
+    # A copy at a second path still claiming the first path's module.
+    copy = record_dir / "tan" / "b.py.json"
+    copy.write_text(original, encoding="utf-8")
+    with pytest.raises(ValueError, match="its path says"):
+        target.load_generated()
+    copy.unlink()
+
+    # A record whose kind contradicts the tree its path sits in.
+    data = json.loads(original)
+    data["kind"] = target.KIND_OBSERVED
+    record.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="must be 'budget'"):
+        target.load_generated()
+    record.write_text(original, encoding="utf-8")
+
+    # A stray file that is neither a record nor one of the two known
+    # non-record files must not be silently skipped.
+    (record_dir / "stray.txt").write_text("hello\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="neither records nor"):
+        target.load_generated()
+
+
+def test_the_records_have_no_duplicate_module_keys():
+    """A duplicate key inside a record is invisible to every other test in
+    this file, because JSON (like the Python dict literal it replaced)
+    collapses a duplicate on parse -- the LAST spelling wins and the earlier
+    one is dead text (tan-cli#586's class of defect, which this design does
+    not get for free just by moving to JSON, nor by splitting the JSON into
+    many files)."""
     try:
         core.load_generated()
+        core.load_observed_tests()
     except ValueError as err:
         pytest.fail(str(err))
 
 
-def test_the_generated_file_declares_the_caps_this_gate_uses():
-    """`module_size_budget.generated.json` carries its own `module_cap`/
-    `function_cap` fields alongside the measured data, so the file is
-    self-describing without a second source. They must agree with the
-    constants this gate actually enforces -- a drift here would mean the
-    committed file and the running gate silently disagree about the policy,
-    not just the measurements."""
-    data = json.loads(core.GENERATED_PATH.read_text(encoding="utf-8"))
-    assert data["module_cap"] == core.MODULE_CAP
-    assert data["function_cap"] == core.FUNCTION_CAP
+def test_the_record_tree_declares_the_caps_this_gate_uses():
+    """`module_size_budget.d/_caps.json` carries the caps the records were
+    measured against, so the record tree is self-describing without a second
+    source. They must agree with the constants this gate actually enforces --
+    a drift here would mean the committed records and the running gate
+    silently disagree about the policy, not just the measurements."""
+    caps = core.load_caps()
+    assert caps["module_cap"] == core.MODULE_CAP
+    assert caps["function_cap"] == core.FUNCTION_CAP
