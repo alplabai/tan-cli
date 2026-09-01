@@ -447,9 +447,22 @@ class Manifest:
         # understand, and must be refused as loudly as `v=2` already was.
         if type(v) is not int or v != MANIFEST_SCHEMA_VERSION:
             raise ValueError(f"unsupported manifest version {v!r}; expected {MANIFEST_SCHEMA_VERSION}")
+        # `name`/`src_sha` were still bare subscripts here even after
+        # `from_json`/`from_cbor`'s own document-level + field-level guards
+        # (tan-cli#1074): a `from_dict` mapping missing either key raised a
+        # raw `KeyError` naming only the key, not the curated `ValueError`
+        # every other field in this module raises -- no context, no "malformed
+        # .alpmodel manifest" framing, nothing a caller could route on
+        # alongside the rest of this module's error contract. `from_dict` is
+        # the shared POST-NORMALISATION entry point both `from_json` (hex
+        # str -> bytes) and `from_cbor` (bytearray -> bytes) route through
+        # after decoding their own wire form of `src_sha` -- its own contract
+        # is therefore `bytes`, matching what both callers, and the direct
+        # round-trip caller in `tests/model/test_manifest.py`, already hand
+        # it.
         return cls(
-            name=d["name"],
-            src_sha=d["src_sha"],  # raw bytes pass-through; JSON/text callers must decode to bytes first
+            name=_required_field(d, "name", str, "a string"),
+            src_sha=_required_field(d, "src_sha", bytes, "a bytes object"),
             inputs=_decode_list_field(d, "inputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor, _TENSOR_TYPES,
                                        element_types=_TENSOR_ELEMENT_TYPES),
             outputs=_decode_list_field(d, "outputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor, _TENSOR_TYPES,

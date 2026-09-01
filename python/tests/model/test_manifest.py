@@ -2,6 +2,7 @@
 """Tests for tan.model.manifest round-trip serialisation."""
 import json
 import cbor2
+import pytest
 from tan.model import manifest
 from tan.model.manifest import Tensor, Target, Coverage, Manifest
 
@@ -97,6 +98,30 @@ def test_field_types_maps_stay_in_parity_with_their_whole_key_set():
     assert set(manifest._TENSOR_TYPES) == manifest._TENSOR_KEYS
     assert set(manifest._TARGET_TYPES) == manifest._TARGET_KEYS
     assert set(manifest._COVERAGE_TYPES) == manifest._COV_KEYS
+
+
+def test_from_dict_missing_name_raises_curated_value_error_not_keyerror():
+    # tan-cli#1074: a `from_dict` mapping missing `name` used to raise a bare
+    # `KeyError('name')`, not the curated `ValueError` this module's contract
+    # promises everywhere else.
+    d = _sample().to_dict()
+    del d["name"]
+    with pytest.raises(ValueError, match=r"missing required field 'name'"):
+        Manifest.from_dict(d)
+
+
+def test_from_dict_missing_src_sha_raises_curated_value_error_not_keyerror():
+    d = _sample().to_dict()
+    del d["src_sha"]
+    with pytest.raises(ValueError, match=r"missing required field 'src_sha'"):
+        Manifest.from_dict(d)
+
+
+def test_from_dict_wrong_typed_src_sha_raises_curated_value_error():
+    d = _sample().to_dict()
+    d["src_sha"] = "not-bytes"    # from_dict's contract is post-normalisation bytes
+    with pytest.raises(ValueError, match=r"field 'src_sha' must be a bytes object"):
+        Manifest.from_dict(d)
 
 
 def test_element_type_maps_only_name_fields_declared_as_lists():
