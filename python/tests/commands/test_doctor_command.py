@@ -3417,19 +3417,31 @@ _REAL_PROVENANCE = json.loads(
 
 
 def _prereq_env(tmp_path, monkeypatch, prerequisites, **top_level):
-    """`_collect`'s `hostPrerequisites` check for a manifest this test wrote.
+    """Every `_collect` check for a manifest this test wrote.
 
     POSIX + nothing on PATH, so every declared tool is missing and the entries
     are always populated -- the same deterministic forcing
     `test_doctor_contract_key_set.py` uses (`force_missing=True`), done here
     without a subprocess.
+
+    Returns the whole list rather than just `hostPrerequisites`: the
+    tan-cli#1066 review's finding is about a SECOND check (`bootstrapManifest`,
+    the visibility channel a silent degrade was bypassing), and a helper that
+    could only hand back one of them is how that channel went unnoticed in the
+    first place.
     """
     monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
     monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
     _write_bootstrap_json(tmp_path, prerequisites, **top_level)
     monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
-    checks = doctor_cmd._collect(str(tmp_path))
-    return next(c for c in checks if c.name == "hostPrerequisites")
+    return doctor_cmd._collect(str(tmp_path))
+
+
+def _named(checks, name):
+    """The one check called `name`, or `None` -- `bootstrapManifest` is absent
+    entirely when there is nothing to report, which is itself a fact tests
+    here assert."""
+    return next((c for c in checks if c.name == name), None)
 
 
 def test_missing_prerequisites_carry_the_provenance_alp_sdk_publishes(
@@ -3438,12 +3450,16 @@ def test_missing_prerequisites_carry_the_provenance_alp_sdk_publishes(
     """The ask, end to end through `_collect`: alp-sdk v0.16.0's
     `artifactProvenance` reaches `data.missingPrerequisites[]`, joined on
     `tool` -- the identity the entry already carried."""
-    check = _prereq_env(
+    checks = _prereq_env(
         tmp_path,
         monkeypatch,
         {"posix": ["cmake", "ninja"], "pythonMinVersion": "3.10", "install": {}},
         artifactProvenance=_REAL_PROVENANCE,
     )
+    check = _named(checks, "hostPrerequisites")
+    # A block tan read cleanly says NOTHING -- the warn below is reserved for a
+    # block that is present and broken.
+    assert _named(checks, "bootstrapManifest") is None
     by_tool = {entry["tool"]: entry for entry in check.missing}
     assert set(by_tool) == {"cmake", "ninja"}
     for tool, entry in by_tool.items():
@@ -3466,11 +3482,14 @@ def test_fix_missing_carries_the_provenance_too_unlike_the_command_guard(
 ):
     """`available`'s tan-cli#760 split is about what tan may promise to RUN.
     A licence is not a promise, so it rides on BOTH halves."""
-    check = _prereq_env(
-        tmp_path,
-        monkeypatch,
-        {"posix": ["cmake"], "pythonMinVersion": "3.10", "install": {}},
-        artifactProvenance=_REAL_PROVENANCE,
+    check = _named(
+        _prereq_env(
+            tmp_path,
+            monkeypatch,
+            {"posix": ["cmake"], "pythonMinVersion": "3.10", "install": {}},
+            artifactProvenance=_REAL_PROVENANCE,
+        ),
+        "hostPrerequisites",
     )
     assert check.missing[0]["licence"] == "BSD-3-Clause"
     assert check.fix_missing[0]["licence"] == "BSD-3-Clause"
@@ -3509,33 +3528,48 @@ def test_an_sdk_predating_artifact_provenance_reports_nulls_not_an_error(
 ):
     """alp-sdk v0.16.0-rc1 and earlier carry no block at all. That is a normal
     shape, not a malformed one: same four `null`s, same key set, no issue."""
-    check = _prereq_env(
+    checks = _prereq_env(
         tmp_path,
         monkeypatch,
         {"posix": ["cmake"], "pythonMinVersion": "3.10", "install": {}},
     )
+    check = _named(checks, "hostPrerequisites")
     assert check.status == "fail"
     assert check.missing == [_prereq("cmake", None)]
+    # SILENT, and deliberately so (tan-cli#1066 review): no `artifactProvenance`
+    # KEY at all is every SDK before v0.16.0, a normal shape, not a producer
+    # defect -- warning about it would cry wolf on every older SDK. The
+    # present-but-broken case below is the one that must be loud.
+    assert _named(checks, "bootstrapManifest") is None
 
 
 @pytest.mark.parametrize(
-    "block",
+    "block, warns",
     [
-        pytest.param([], id="block-is-a-list"),
-        pytest.param("cmake", id="block-is-a-string"),
-        pytest.param(7, id="block-is-a-number"),
-        pytest.param(None, id="block-is-null"),
-        pytest.param({"cmake": "https://cmake.org/"}, id="entry-is-a-string"),
-        pytest.param({"cmake": ["A"]}, id="entry-is-a-list"),
-        pytest.param({"cmake": {}}, id="entry-is-empty"),
-        pytest.param({"cmake": {"tier": "A"}}, id="licence-missing"),
-        pytest.param({"cmake": {"licence": "BSD-3-Clause"}}, id="tier-missing"),
-        pytest.param({"cmake": {"tier": 1, "licence": ["MIT"]}}, id="non-string-values"),
-        pytest.param({"cmake": {"sizeBytes": True}}, id="size-is-a-bool"),
+        # DECLARED and unreadable -- a producer defect, and loud.
+        pytest.param([], True, id="block-is-a-list"),
+        pytest.param("cmake", True, id="block-is-a-string"),
+        pytest.param(7, True, id="block-is-a-number"),
+        # Present as a KEY, so loud: no alp-sdk has ever emitted a null block,
+        # and this is exactly the generator regression the warn exists for.
+        pytest.param(None, True, id="block-is-null"),
+        pytest.param({"cmake": "https://cmake.org/"}, True, id="entry-is-a-string"),
+        pytest.param({"cmake": ["A"]}, True, id="entry-is-a-list"),
+        pytest.param({"cmake": {"tier": 1, "licence": ["MIT"]}}, True, id="non-string-values"),
+        pytest.param({"cmake": {"sizeBytes": True}}, True, id="size-is-a-bool"),
+        pytest.param({"cmake": {"sizeBytes": -4096}}, True, id="size-is-negative"),
+        # ABSENT fields, not unreadable ones -- silent. `xz`/`7zip` really do
+        # declare no licence and every `sizeBytes` is null today, so a missing
+        # or null field is a normal shape and warning about it would cry wolf
+        # on the pinned SDK itself.
+        pytest.param({"cmake": {}}, False, id="entry-is-empty"),
+        pytest.param({"cmake": {"tier": "A"}}, False, id="licence-missing"),
+        pytest.param({"cmake": {"licence": "BSD-3-Clause"}}, False, id="tier-missing"),
+        pytest.param({"cmake": {"tier": "A", "sizeBytes": None}}, False, id="size-is-null"),
     ],
 )
 def test_a_malformed_artifact_provenance_block_never_breaks_doctor(
-    tmp_path, monkeypatch, block
+    tmp_path, monkeypatch, block, warns
 ):
     """`doctor`'s whole job is to report on a broken environment; it must not
     itself fall over on a bad `bootstrap.json`. This block is the least
@@ -3548,12 +3582,13 @@ def test_a_malformed_artifact_provenance_block_never_breaks_doctor(
     list, no `bootstrapManifest` warning), the missing tool is still reported,
     and the entry still carries all six keys.
     """
-    check = _prereq_env(
+    checks = _prereq_env(
         tmp_path,
         monkeypatch,
         {"posix": ["cmake"], "pythonMinVersion": "3.10", "install": {}},
         artifactProvenance=block,
     )
+    check = _named(checks, "hostPrerequisites")
     assert check.status == "fail"
     assert check.code == "bootstrap.prerequisites-missing"
     entry = check.missing[0]
@@ -3566,6 +3601,32 @@ def test_a_malformed_artifact_provenance_block_never_breaks_doctor(
         assert entry[field] is None, (field, block)
     assert entry["tier"] in (None, "A")
     assert entry["licence"] in (None, "BSD-3-Clause")
+
+    # tan-cli#1066 REVIEW: degrading is right, degrading SILENTLY is not.
+    # A block that is present and unreadable must reach the channel that
+    # already exists for an unparseable manifest -- `bootstrapManifest` warn,
+    # which `checks_to_issues` renders as `doctor.bootstrap-manifest` -- so an
+    # alp-sdk generator regression is visible from here instead of looking
+    # byte-identical to a pre-v0.16.0 SDK. Absent fields stay silent.
+    manifest_check = _named(checks, "bootstrapManifest")
+    if not warns:
+        assert manifest_check is None, (block, manifest_check)
+        return
+    assert manifest_check is not None, block
+    assert manifest_check.status == "warn"
+    assert "artifactProvenance" in manifest_check.detail
+    # NOT the rejected-manifest arm's wording: this manifest was read fine and
+    # nothing fell back, so claiming a stale built-in list would be false.
+    assert "Falling back to tan" not in manifest_check.detail
+    assert "prerequisite list itself is unaffected" in manifest_check.detail
+    assert [i.code for i in doctor_cmd.checks_to_issues(checks)].count(
+        "doctor.bootstrap-manifest"
+    ) == 1
+    # The warn changes NOTHING else: same exit code, same entries. `warn` is
+    # not `fail`, and `exit_code_for` only counts failures.
+    assert doctor_cmd.exit_code_for(checks) == doctor_cmd.exit_code_for(
+        [c for c in checks if c.name != "bootstrapManifest"]
+    )
 
 
 def test_a_malformed_block_does_not_downgrade_the_manifest_to_the_fallback(tmp_path):
@@ -3580,9 +3641,26 @@ def test_a_malformed_block_does_not_downgrade_the_manifest_to_the_fallback(tmp_p
     )
     loaded = doctor_cmd._load_manifest(str(tmp_path))
     assert loaded.is_real is True
-    assert loaded.error is None
     assert loaded.facts["posix"] == ["cmake"]
     assert loaded.facts["_artifactProvenance"] == {}
+    # `error` stays None -- that field means "this manifest was REJECTED and
+    # the built-in fallback list is in play", which is exactly what must not
+    # happen here. The problem travels on its own field instead, and it is
+    # NOT None: silence was the tan-cli#1066 review finding.
+    assert loaded.error is None
+    assert loaded.provenance_error == "`artifactProvenance` is list, not an object"
+
+
+def test_an_absent_block_leaves_both_error_fields_clear(tmp_path):
+    """The other half of the same decision. An SDK predating alp-sdk v0.16.0
+    has no `artifactProvenance` key at all, and that must stay completely
+    silent -- a warn here would fire on every older SDK, which is how a real
+    signal gets trained out of a reader."""
+    _write_bootstrap_json(tmp_path, {"posix": ["cmake"], "pythonMinVersion": "3.10"})
+    loaded = doctor_cmd._load_manifest(str(tmp_path))
+    assert loaded.is_real is True
+    assert loaded.error is None
+    assert loaded.provenance_error is None
 
 
 def test_missing_prerequisites_key_is_present_and_null_when_the_check_is_clean():

@@ -50,6 +50,23 @@ So every malformed shape -- a non-mapping block, a non-mapping entry, a
 missing or wrongly-typed field -- collapses to the SAME `null` an absent SDK
 key yields, per FIELD rather than per block: a `cmake` entry whose `sizeBytes`
 is the string `"12"` still reports its real `tier`/`licence`/`sourceUrl`.
+
+**Degrading is not the same as saying nothing** (tan-cli#1066 review).
+Silently, a corrupt block and an SDK predating the block produce byte-identical
+envelopes -- so an alp-sdk generator regression would render "not reported" on
+every consent screen with `tan doctor` saying nothing at all, which is the
+failure mode `doctor` exists to prevent. `problems_in` (below) is what makes it
+sayable: `doctor_cmd` raises its EXISTING `bootstrapManifest` warn and
+`doctor.bootstrap-manifest` issue for a block that is present and unreadable,
+and stays silent for one that is merely absent. Nothing about the entries or
+the exit code changes -- the four keys are still there, still `null`.
+
+Its report is DERIVED from these parsers, never a second opinion about types: a
+field is called unreadable exactly when the manifest declared a value (not
+`null`, not absent) and the real reader still answered `None`. Tightening
+`_count` -- the negative-size refusal, say -- starts being reported with no
+change to `problems_in` at all; loosening it stops being reported. A test pins
+that coupling rather than trusting this paragraph.
 """
 from __future__ import annotations
 
@@ -108,8 +125,15 @@ def _count(value: Any) -> int | None:
     `True == 1` in Python, so `"sizeBytes": true` would otherwise report a size
     of one byte. A float is rejected rather than truncated -- alp-sdk emits
     `null` or an integer, and a truncation here would be tan inventing a
-    precision the manifest never claimed."""
-    if isinstance(value, bool) or not isinstance(value, int):
+    precision the manifest never claimed.
+
+    A NEGATIVE int is refused for the same reason as the float: `-4096` is not
+    a download size, and rendering "-4 KB" on a consent screen is the same
+    class of nonsense as rendering a truncated float. `0` is kept -- an empty
+    artefact is silly but arithmetically meaningful, and `null` already exists
+    for "not reported", so coercing `0` would erase a distinction the manifest
+    can actually draw."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
 
@@ -144,6 +168,67 @@ def parse_table(raw: Any) -> dict[str, ArtifactProvenance]:
     return {
         tool: entry_from_doc(doc) for tool, doc in raw.items() if isinstance(tool, str)
     }
+
+
+def _entry_problems(tool: str, entry: Any) -> list[str]:
+    """One tool's row: everything the manifest DECLARED there that the real
+    readers could not read, named `<tool>.<manifest key>`.
+
+    Derived from `entry_from_doc`'s own answer rather than a second copy of the
+    type rules, so it cannot drift from what the parse actually accepts (see
+    the module docstring's "Malformed input" section)."""
+    if not isinstance(entry, dict):
+        kind = "null" if entry is None else type(entry).__name__
+        return [f"`{tool}` is {kind}, not an object"]
+    parsed = entry_from_doc(entry)
+    return [
+        f"`{tool}.{key}` is not readable ({entry[key]!r})"
+        for key, read in (
+            ("tier", parsed.tier),
+            ("licence", parsed.licence),
+            (SDK_SOURCE_KEY, parsed.source_url),
+            ("sizeBytes", parsed.size_bytes),
+        )
+        # DECLARED and unreadable. An absent key and an explicit `null` are
+        # both "not reported", the normal shape (`xz`/`7zip` licence, every
+        # `sizeBytes` today), and neither is a problem.
+        if entry.get(key) is not None and read is None
+    ]
+
+
+def problems_in(doc: dict[str, Any]) -> str | None:
+    """What in `doc`'s `artifactProvenance` block tan could not read, as ONE
+    human-readable line, or `None` when there is nothing to say.
+
+    Takes the whole parsed manifest, not the block, because the distinction it
+    draws is about the KEY: an absent `artifactProvenance` is every SDK before
+    v0.16.0 and stays silent, while a key that IS present and unreadable --
+    `"artifactProvenance": null` included, which no alp-sdk has ever emitted --
+    is a producer defect worth naming. It reports; it never refuses and never
+    changes what the entries carry. See the module docstring for why silence
+    was not an option and which channel this feeds.
+    """
+    if BLOCK_KEY not in doc:
+        return None
+    raw = doc[BLOCK_KEY]
+    if not isinstance(raw, dict):
+        kind = "null" if raw is None else type(raw).__name__
+        return f"`{BLOCK_KEY}` is {kind}, not an object"
+
+    problems: list[str] = []
+    for tool, entry in raw.items():
+        if not isinstance(tool, str):
+            problems.append(f"`{BLOCK_KEY}` has a non-string key ({tool!r})")
+            continue
+        problems.extend(_entry_problems(tool, entry))
+    if not problems:
+        return None
+    # Bounded: a wholly corrupt block would otherwise put dozens of clauses
+    # into one `doctor` line. The count stays exact, so nothing is hidden.
+    head = "; ".join(problems[:3])
+    if len(problems) > 3:
+        head += f"; and {len(problems) - 3} more"
+    return head
 
 
 def for_tool(table: dict[str, ArtifactProvenance] | None, tool: str) -> ArtifactProvenance:

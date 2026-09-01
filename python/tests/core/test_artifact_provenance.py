@@ -165,11 +165,15 @@ def test_a_non_string_field_is_null_and_is_never_coerced():
     }
 
 
-def test_size_bytes_takes_an_int_and_refuses_bool_and_float():
+def test_size_bytes_takes_an_int_and_refuses_bool_float_and_negative():
     """`True == 1` in Python -- the same trap `parse_bootstrap_manifest` and
     `_load_manifest` already exclude `bool` for on `schemaVersion`. A float is
     refused rather than truncated: alp-sdk emits `null` or an integer, and
-    truncating would claim a precision the manifest never did."""
+    truncating would claim a precision the manifest never did. A NEGATIVE int
+    is refused for the same reason (tan-cli#1066 review nit): `-4096` is not a
+    download size, and "-4 KB" on a consent screen is the same nonsense a
+    truncated float would be. `0` survives -- silly but meaningful, and `null`
+    already spells "not reported"."""
     def size(value):
         return artifact_provenance.parse_table({"x": {"sizeBytes": value}})["x"].size_bytes
 
@@ -180,6 +184,8 @@ def test_size_bytes_takes_an_int_and_refuses_bool_and_float():
     assert size(False) is None
     assert size(1024.0) is None
     assert size("1024") is None
+    assert size(-1) is None
+    assert size(-4096) is None
 
 
 def test_a_non_string_key_is_dropped_rather_than_widening_the_table():
@@ -188,3 +194,100 @@ def test_a_non_string_key_is_dropped_rather_than_widening_the_table():
     handing `parse_table` an already-built dict can.)"""
     table = artifact_provenance.parse_table({7: {"tier": "A"}, "cmake": {"tier": "A"}})
     assert set(table) == {"cmake"}
+
+
+# --------------------------------------------------------------------------
+# tan-cli#1066 review: the degrade must be VISIBLE, not just correct.
+# --------------------------------------------------------------------------
+
+
+def test_the_pinned_manifest_reports_no_problems_at_all():
+    """The positive control, and the one that keeps this from crying wolf: the
+    real block at `PINNED_SDK_TAG` -- eight entries, two with `licence: null`,
+    every `sizeBytes` null -- must be completely silent. A diagnostic that
+    fires on the SDK tan actually ships against trains its own reader to
+    ignore it."""
+    assert artifact_provenance.problems_in(REAL_MANIFEST) is None
+
+
+def test_an_absent_block_is_silent_but_a_declared_one_is_not():
+    """The whole distinction, in one test. No `artifactProvenance` KEY is every
+    SDK before alp-sdk v0.16.0 -- normal, silent. A key that IS present and
+    unreadable is a producer defect, and before the review finding it produced
+    output byte-identical to the silent case, which made an alp-sdk generator
+    regression undetectable from the consumer side."""
+    assert artifact_provenance.problems_in({"schemaVersion": 1}) is None
+    # `null` is NOT absence here: no alp-sdk has ever emitted a null block, so
+    # a key carrying one is a defect, not an older SDK.
+    assert artifact_provenance.problems_in({"artifactProvenance": None}) == (
+        "`artifactProvenance` is null, not an object"
+    )
+
+
+def test_a_non_mapping_block_is_named_by_its_actual_type():
+    assert artifact_provenance.problems_in({"artifactProvenance": []}) == (
+        "`artifactProvenance` is list, not an object"
+    )
+    assert artifact_provenance.problems_in({"artifactProvenance": "cmake"}) == (
+        "`artifactProvenance` is str, not an object"
+    )
+
+
+def test_a_non_mapping_entry_names_the_tool_it_belongs_to():
+    """`doctor` prints this line to a human who then has to file it against
+    alp-sdk -- "something is wrong" is not a bug report."""
+    assert artifact_provenance.problems_in(
+        {"artifactProvenance": {"cmake": "https://cmake.org/"}}
+    ) == "`cmake` is str, not an object"
+    assert artifact_provenance.problems_in(
+        {"artifactProvenance": {7: {"tier": "A"}}}
+    ) == "`artifactProvenance` has a non-string key (7)"
+
+
+def test_a_declared_but_unreadable_field_is_named_with_the_manifests_own_key():
+    """`source`, not `sourceUrl`: this line describes what is wrong in
+    alp-sdk's FILE, and pointing a reader at a key their file does not contain
+    would send them looking for the wrong thing. The rename lives on the wire
+    only."""
+    assert artifact_provenance.problems_in(
+        {"artifactProvenance": {"cmake": {"source": 7}}}
+    ) == "`cmake.source` is not readable (7)"
+
+
+def test_an_absent_or_null_field_is_not_a_problem():
+    """A field the manifest never declared, or declared as `null`, is the
+    normal shape (`xz`/`7zip` licence, every `sizeBytes` today) -- reported as
+    `null` on the wire and silent here. Only a value tan could not READ is a
+    problem."""
+    assert artifact_provenance.problems_in({"artifactProvenance": {"xz": {}}}) is None
+    assert artifact_provenance.problems_in(
+        {"artifactProvenance": {"xz": {"tier": "A", "licence": None, "sizeBytes": None}}}
+    ) is None
+
+
+def test_the_problem_report_is_derived_from_the_parser_not_a_second_opinion():
+    """The anti-drift property, asserted rather than described: a field is
+    reported unreadable EXACTLY when the manifest declared a value and the real
+    reader still answered `None`. `-4096` is the live proof -- it is a
+    perfectly good int that only `_count`'s own (newer) negative refusal
+    rejects, so a hand-written duplicate of the type rules here would have
+    missed it."""
+    doc = {"artifactProvenance": {"cmake": {"sizeBytes": -4096}}}
+    assert artifact_provenance.parse_table(doc["artifactProvenance"])["cmake"].size_bytes is None
+    assert artifact_provenance.problems_in(doc) == "`cmake.sizeBytes` is not readable (-4096)"
+
+
+def test_many_problems_are_bounded_but_the_count_stays_exact():
+    """A wholly corrupt block would otherwise put dozens of clauses into one
+    `doctor` line. Truncating without a count would hide how bad it is."""
+    line = artifact_provenance.problems_in(
+        {
+            "artifactProvenance": {
+                "cmake": {"tier": 1, "licence": [], "source": 2, "sizeBytes": "x"},
+                "ninja": {"tier": 3},
+            }
+        }
+    )
+    assert line.startswith("`cmake.tier` is not readable (1); ")
+    assert line.endswith("; and 2 more")
+    assert line.count(";") == 3

@@ -2769,6 +2769,17 @@ class ManifestLoad:
     source: str
     error: str | None
     is_real: bool
+    #: tan-cli#1066 review: what was unreadable inside a manifest that was
+    #: otherwise read FINE -- today only the `artifactProvenance` block. A
+    #: SECOND field rather than reusing `error`, because the two mean opposite
+    #: things to the caller: `error` says "this manifest was rejected and the
+    #: built-in fallback list is in play", which would be false here (the tool
+    #: list, the floor and the install commands were all read normally, and
+    #: `is_real` stays true). Both raise the same `bootstrapManifest` warn and
+    #: the same `doctor.bootstrap-manifest` issue -- they differ only in what
+    #: the line says, and saying the wrong one would send a customer hunting a
+    #: prerequisite list that is not actually stale.
+    provenance_error: str | None = None
 
 
 def _load_manifest(sdk_root: str | None) -> ManifestLoad:
@@ -2879,7 +2890,18 @@ def _load_manifest(sdk_root: str | None) -> ManifestLoad:
             facts.get(artifact_provenance.BLOCK_KEY)
         ),
     }
-    return ManifestLoad(prerequisites, f"facts from alp-sdk {path}", None, is_real=True)
+    return ManifestLoad(
+        prerequisites,
+        f"facts from alp-sdk {path}",
+        None,
+        is_real=True,
+        # Reported, never refused: a corrupt provenance block must not cost
+        # this customer their diagnosis (tan-cli#1066), and must not cost the
+        # NEXT one the ability to see that alp-sdk's generator regressed
+        # (#1066 review -- a silent degrade is byte-identical to a pre-v0.16.0
+        # SDK, so the producer bug is undetectable from here).
+        provenance_error=artifact_provenance.problems_in(facts),
+    )
 
 
 def _manifest_floor_from_facts(facts: dict) -> tuple[int, int]:
@@ -3434,6 +3456,31 @@ def _resolve_prerequisites_environment(
             f"tan's built-in prerequisite list, which may not match this SDK.",
             "Update `tan` or pin an SDK whose metadata/bootstrap.json this "
             "version understands; `tan bootstrap` will refuse outright until then.",
+            scope="project",
+        )
+    elif loaded.provenance_error is not None:
+        # tan-cli#1066 review. SAME check name and SAME issue code as the
+        # rejected-manifest arm above -- a consumer keying on
+        # `doctor.bootstrap-manifest` sees both -- but its own wording, because
+        # this manifest was NOT rejected: the tool list, the floor and the
+        # install commands were all read normally and `is_real` is true, so
+        # borrowing the "falling back to tan's built-in prerequisite list"
+        # sentence would send the reader hunting a staleness that does not
+        # exist. `warn`, never `fail`: the exit code and every reported entry
+        # are byte-identical to a run with no provenance at all (the four keys
+        # are still there, still `null`) -- what changes is that the failure is
+        # now SAYABLE. `elif`: a manifest that was rejected outright never had
+        # its provenance parsed in the first place, and the bigger fact wins.
+        bootstrap_manifest_check = Check(
+            "bootstrapManifest",
+            "warn",
+            f"metadata/bootstrap.json was read, but its artifactProvenance "
+            f"block is not readable: {loaded.provenance_error}. Affected "
+            f"missingPrerequisites[] entries report tier/licence/sourceUrl/"
+            f"sizeBytes as null; the prerequisite list itself is unaffected.",
+            "Report this against alp-sdk -- its metadata/bootstrap.json "
+            "generator produced the block, and `tan` needs no change. Nothing "
+            "else in this report is affected.",
             scope="project",
         )
 
