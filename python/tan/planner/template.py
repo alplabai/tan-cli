@@ -366,12 +366,30 @@ def _require_field(value: Any, kind: type, *, doc: Any, field: str) -> Any:
     the field and the actual type, matching the register
     `tan/model/targets.py:312-323` established.
 
-    Deliberately NOT stricter than the schema: callers pass the value
-    they already normalised (`doc.get(field) or <empty>`), so an absent
-    field, an explicit `null`, and a legal-but-empty `[]`/`{}` all
-    arrive as the empty container and pass -- `pins:` is `type: array`
-    with no `minItems`, and rejecting `pins: []` would be a new
-    refusal, not a fixed crash.
+    This helper checks EXACTLY what it is handed; how an absent field is
+    normalised is the caller's decision, and the two callers differ on
+    purpose:
+
+    * The example `board.yaml` sites normalise **`None` only** --
+      `[] if raw is None else raw`. An absent field and an explicit
+      `null` pass; a PRESENT but illegal falsy scalar (`pins: 0`,
+      `pins: false`, `pins: ''`, `cores: 0`) is refused, because it is
+      just as illegal against `board.schema.json` as `pins: 3` and
+      refusing one while silently emptying the other is an asymmetry
+      nothing would pin (tan-cli#1052 review).
+    * The SoM-preset and board-metadata sites keep their pre-existing
+      `doc.get(field) or <empty>`, which collapses EVERY falsy value
+      before this helper sees it, so `topology: 0` /
+      `e1m_routes.gpio: 0` still degrade silently. That asymmetry is
+      #1048's own recorded decision and is pinned by a live test
+      (`test_board_route_entries_malformed_board.py::
+      test_a_falsy_scalar_section_value_still_degrades_silently`);
+      changing it is a behaviour change to two documents tan-cli#1052
+      does not name, so it is deliberately NOT made here.
+
+    Not stricter than the schema either way: `pins:` is `type: array`
+    with no `minItems`, so `pins: []` still renders -- rejecting it
+    would be a new refusal, not a fixed crash.
     """
     if not isinstance(value, kind):
         raise TemplateError(
@@ -1606,14 +1624,26 @@ def render_to_envelope(
     # `type: array` with no `minItems`, so `pins: []` (and an absent or
     # `null` `pins:`) still passes, as does `preset:` being absent -- it
     # is optional, and only consulted when `pins:` is non-empty.
+    #
+    # Each read normalises `None` ONLY -- `[] if raw is None else raw`,
+    # never the `raw or []` the other two documents use. `or` collapses
+    # every falsy value, so a PRESENT but illegal scalar would be
+    # emptied instead of refused; measured on the first cut of this fix
+    # (tan-cli#1052 review), `pins: 0` / `pins: false` / `pins: ''` /
+    # `cores: 0` all rendered while `pins: 3` and `pins: true` raised.
+    # That degrades to empty rather than to garbage, but it is exactly
+    # the unpinned residual sibling this PR exists to stop leaving
+    # behind, so the falsy scalars are refused too.
     example_doc = _require_mapping_doc(
         yaml.safe_load(board_yaml_text) or {},
         path=board_yaml_path, what="template example board.yaml")
+    raw_cores = example_doc.get("cores")
     original_core_ids = list(_require_field(
-        example_doc.get("cores") or {}, dict,
+        {} if raw_cores is None else raw_cores, dict,
         doc=board_yaml_path, field="cores").keys())
+    raw_som = example_doc.get("som")
     example_sku = _require_field(
-        example_doc.get("som") or {}, dict,
+        {} if raw_som is None else raw_som, dict,
         doc=board_yaml_path, field="som").get("sku", "")
     core_renames = _derive_core_renames(original_core_ids, sku, metadata_root)
     # `pins:` re-derivation (issue #876): each entry is either a bare
@@ -1622,8 +1652,9 @@ def render_to_envelope(
     # example's OWN preset (not an inline board def -- no catalog
     # template ships one today) has a metadata/boards/<preset>.yaml to
     # re-derive against.
+    raw_pins = example_doc.get("pins")
     original_pins = list(_require_field(
-        example_doc.get("pins") or [], list,
+        [] if raw_pins is None else raw_pins, list,
         doc=board_yaml_path, field="pins"))
     source_preset = example_doc.get("preset")
     if source_preset is not None:

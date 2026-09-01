@@ -280,6 +280,9 @@ def test_a_nonlist_pins_raises_a_curated_error_not_a_typeerror(
 # Level 5: `preset:` -- curated pre-fix, but untrue.
 # ---------------------------------------------------------------------
 
+_PINS_BLOCK = "pins:\n  - E1M_GPIO_IO4\n"
+
+
 @pytest.mark.parametrize(
     ("value", "typename"), [("[a]", "list"), ("3", "int"), ("{a: b}", "dict")])
 def test_a_nonstring_preset_names_the_field_not_a_missing_file(
@@ -288,11 +291,87 @@ def test_a_nonstring_preset_names_the_field_not_a_missing_file(
     ['a'].yaml for board ['a']` -- curated, but describing a missing file
     instead of the malformed field that produced the path. Same shape
     `default_board:` already had one document over
-    (`_default_preset_for_sku`)."""
-    msg = _raises(tmp_path, _swap("preset", value))
+    (`_default_preset_for_sku`).
+
+    The `pins:` block is LOAD-BEARING for that provenance and is appended
+    here deliberately: `source_preset` was only ever consulted when
+    `pins:` was non-empty, so the quoted error is what THIS document
+    produced on `dev`, re-driven (tan-cli#1052 review). The no-`pins:`
+    document is a different, honestly-different case -- see the test
+    below."""
+    msg = _raises(tmp_path, _swap("preset", value) + _PINS_BLOCK)
     assert "board.yaml" in msg
     assert f"preset must be a string, got {typename}" in msg
     assert "no metadata/boards/" not in msg
+
+
+def test_a_nonstring_preset_is_a_new_refusal_when_there_are_no_pins(tmp_path):
+    """The honest other half. With NO `pins:` key, `source_preset` was
+    never consulted at all, so `preset: [a]` did not raise on `dev` -- it
+    RENDERED, emitting a board.yaml with `preset:` rewritten to the target
+    board and the malformed value silently discarded (re-driven against
+    `origin/dev`'s own `template.py` with this exact document, tan-cli#1052
+    review).
+
+    For this document the guard is therefore a NEW refusal of a
+    previously-rendering input, not a re-wording of an existing one. That
+    is schema-correct -- `board.schema.json` gives `preset:` `"type":
+    "string"`, so a list was never legal -- and it is the same call the
+    falsy-scalar cases above make, but it is a different claim from the
+    one the test above pins and is asserted separately rather than folded
+    in."""
+    msg = _raises(tmp_path, _swap("preset", "[a]"))
+    assert "preset must be a string, got list" in msg
+
+
+# ---------------------------------------------------------------------
+# Falsy but ILLEGAL -- refused, not silently emptied (tan-cli#1052 review).
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("field", "value", "noun", "typename"),
+    [
+        ("pins", "0", "a list", "int"),
+        ("pins", "false", "a list", "bool"),
+        ("pins", "''", "a list", "str"),
+        ("cores", "0", "a mapping", "int"),
+        ("cores", "false", "a mapping", "bool"),
+        ("som", "0", "a mapping", "int"),
+        ("som", "false", "a mapping", "bool"),
+    ],
+)
+def test_a_falsy_but_illegal_value_is_refused_not_emptied(
+        tmp_path, field, value, noun, typename):
+    """The first cut of this fix guarded AFTER the `or []`/`or {}`
+    normalisation, so a falsy-but-illegal scalar collapsed to the empty
+    container before the guard ever saw it. Measured on that cut
+    (tan-cli#1052 review, re-driven here):
+
+        pins: false  -> rendered; _derive_pin_renames never called
+        pins: 0      -> rendered; _derive_pin_renames never called
+        pins: ''     -> rendered; _derive_pin_renames never called
+        cores: 0     -> collapsed to {}
+        som: 0       -> collapsed to {} (then failed one field later on
+                        the empty `som.sku`, a different rule entirely)
+
+    So `pins: 3` and `pins: true` were refused while `pins: 0` and
+    `pins: false` were not, and nothing pinned the asymmetry. All of them
+    are equally illegal against `board.schema.json` (`pins:` is `"type":
+    "array"`, `cores:`/`som:` are `"type": "object"`). Degrading to EMPTY
+    rather than to garbage made it a nit rather than a regression -- and
+    an unpinned nit of exactly this shape is what every previous round of
+    this family was filed about, so it is closed here rather than left.
+
+    The sibling documents keep the opposite behaviour on purpose: their
+    `doc.get(field) or <empty>` still empties a falsy scalar, which is
+    #1048's own recorded decision and is pinned by
+    `test_board_route_entries_malformed_board.py::
+    test_a_falsy_scalar_section_value_still_degrades_silently`. Changing
+    that is a behaviour change to two documents tan-cli#1052 does not
+    name."""
+    msg = _raises(tmp_path, _swap(field, value))
+    assert "board.yaml" in msg
+    assert f"{field} must be {noun}, got {typename}" in msg
 
 
 # ---------------------------------------------------------------------
