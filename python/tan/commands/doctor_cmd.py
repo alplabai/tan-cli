@@ -133,6 +133,8 @@ from tan.commands.sdk_cmd import (
     global_default_pointer_fix_hint,
     parse_sdk_version_yaml,
 )
+from tan.core import artifact_provenance
+from tan.core.artifact_provenance import ArtifactProvenance
 from tan.core.bootstrap import (
     BOOTSTRAP_MANIFEST_SCHEMA_VERSION,
     MissingPrerequisite,
@@ -330,8 +332,10 @@ class Check:
     detail: str
     fix: str | None = None
     code: str | None = None
-    missing: list[dict[str, str | None]] | None = None
-    fix_missing: list[dict[str, str | None]] | None = None
+    #: `str | int | None` values since tan-cli#1066: an entry carries
+    #: `sizeBytes` (an int, or `null`) alongside its two string fields.
+    missing: list[dict[str, str | int | None]] | None = None
+    fix_missing: list[dict[str, str | int | None]] | None = None
     scope: str = field(kw_only=True)
 
     def __post_init__(self) -> None:
@@ -768,6 +772,7 @@ def prerequisites_check(
     venv_refusal: PrereqFailure | None = None,
     *,
     available: Callable[[str], bool] | None = None,
+    provenance: dict[str, ArtifactProvenance] | None = None,
 ) -> Check:
     """`hostPrerequisites` -- the manifest's own tool list, on PATH, PLUS
     (Linux only) whether the interpreter's `venv` module can actually create
@@ -799,6 +804,16 @@ def prerequisites_check(
     this function) means `missing` and `fix_missing` are identical -- no
     guard at all, matching this function's pre-#760 behaviour exactly.
 
+    `provenance` (tan-cli#1066) is the manifest's own `artifactProvenance`
+    table, `tool -> {tier, licence, sourceUrl, sizeBytes}`, joined onto each
+    entry by `tool` -- the identity the entry already carries. It reaches BOTH
+    `missing` and `fix_missing`, unlike `available` above: the two differ over
+    what tan may promise to RUN, and a licence is not a promise. `None` (every
+    caller before #1066, and the fallback manifest, which publishes no
+    provenance at all) reports the same `null`s a tool with no entry does --
+    `west`, `zephyrSdk`, `setools`, `jlink` and `python3-venv` have none in
+    alp-sdk v0.16.0, and that gap is alp-sdk#1574's, not tan's to fill in.
+
     This split exists because `run_fix` has done its OWN on_path resolution
     and reported `doctor.fix-installer-not-found` since tan-cli#360: handing
     it the CONFIRMED (already-nulled) dict instead of the raw one would make
@@ -807,8 +822,18 @@ def prerequisites_check(
     Homebrew, a Windows image with no usable winget) #360 exists for
     (tan-cli#760 review, MAJOR 1).
     """
-    raw_entries = tuple(MissingPrerequisite(tool, install.get(tool)) for tool in missing)
+    raw_entries = tuple(
+        MissingPrerequisite(
+            tool, install.get(tool), artifact_provenance.for_tool(provenance, tool)
+        )
+        for tool in missing
+    )
     if venv_refusal is not None:
+        # `posix_venv_unusable()`'s own entry keeps its `UNKNOWN` provenance:
+        # `python3-venv` is a Debian PACKAGE name, not one of alp-sdk's
+        # `artifactProvenance` keys, so there is nothing to join and a
+        # near-miss join (`python3`'s row) would attribute one artefact's
+        # licence to another (tan-cli#1066).
         raw_entries = raw_entries + venv_refusal.missing
     fix_missing = reported_missing(raw_entries)
 
@@ -2744,6 +2769,17 @@ class ManifestLoad:
     source: str
     error: str | None
     is_real: bool
+    #: tan-cli#1066 review: what was unreadable inside a manifest that was
+    #: otherwise read FINE -- today only the `artifactProvenance` block. A
+    #: SECOND field rather than reusing `error`, because the two mean opposite
+    #: things to the caller: `error` says "this manifest was rejected and the
+    #: built-in fallback list is in play", which would be false here (the tool
+    #: list, the floor and the install commands were all read normally, and
+    #: `is_real` stays true). Both raise the same `bootstrapManifest` warn and
+    #: the same `doctor.bootstrap-manifest` issue -- they differ only in what
+    #: the line says, and saying the wrong one would send a customer hunting a
+    #: prerequisite list that is not actually stale.
+    provenance_error: str | None = None
 
 
 def _load_manifest(sdk_root: str | None) -> ManifestLoad:
@@ -2840,7 +2876,32 @@ def _load_manifest(sdk_root: str | None) -> ManifestLoad:
             **prerequisites,
             "_zephyrPythonMinVersion": zephyr["pythonMinVersion"],
         }
-    return ManifestLoad(prerequisites, f"facts from alp-sdk {path}", None, is_real=True)
+    # tan-cli#1066: `artifactProvenance` is TOP-LEVEL in the manifest
+    # (alp-sdk#1574) while everything else this reader returns lives under
+    # `prerequisites` -- injected onto the returned dict the same way
+    # `_pipSpec` and `_zephyrPythonMinVersion` are, so `prerequisites_check`
+    # has one place to read it from and this file keeps its single parse.
+    # ALWAYS injected, even when absent/malformed: `parse_table` answers `{}`
+    # for both, and `{}` is the same "nothing reported" a tool with no entry
+    # gets -- so no caller has to branch on whether the key was there.
+    prerequisites = {
+        **prerequisites,
+        "_artifactProvenance": artifact_provenance.parse_table(
+            facts.get(artifact_provenance.BLOCK_KEY)
+        ),
+    }
+    return ManifestLoad(
+        prerequisites,
+        f"facts from alp-sdk {path}",
+        None,
+        is_real=True,
+        # Reported, never refused: a corrupt provenance block must not cost
+        # this customer their diagnosis (tan-cli#1066), and must not cost the
+        # NEXT one the ability to see that alp-sdk's generator regressed
+        # (#1066 review -- a silent degrade is byte-identical to a pre-v0.16.0
+        # SDK, so the producer bug is undetectable from here).
+        provenance_error=artifact_provenance.problems_in(facts),
+    )
 
 
 def _manifest_floor_from_facts(facts: dict) -> tuple[int, int]:
@@ -3115,7 +3176,7 @@ def _running_as_root() -> bool:
 
 
 def run_fix(
-    missing: list[dict[str, str | None]],
+    missing: list[dict[str, str | int | None]],
     on_check: Callable[[Check], None] | None = None,
 ) -> list[Check]:
     """`--fix`'s ADR 0021 executor (tan-cli#91): for each tool
@@ -3397,6 +3458,31 @@ def _resolve_prerequisites_environment(
             "version understands; `tan bootstrap` will refuse outright until then.",
             scope="project",
         )
+    elif loaded.provenance_error is not None:
+        # tan-cli#1066 review. SAME check name and SAME issue code as the
+        # rejected-manifest arm above -- a consumer keying on
+        # `doctor.bootstrap-manifest` sees both -- but its own wording, because
+        # this manifest was NOT rejected: the tool list, the floor and the
+        # install commands were all read normally and `is_real` is true, so
+        # borrowing the "falling back to tan's built-in prerequisite list"
+        # sentence would send the reader hunting a staleness that does not
+        # exist. `warn`, never `fail`: the exit code and every reported entry
+        # are byte-identical to a run with no provenance at all (the four keys
+        # are still there, still `null`) -- what changes is that the failure is
+        # now SAYABLE. `elif`: a manifest that was rejected outright never had
+        # its provenance parsed in the first place, and the bigger fact wins.
+        bootstrap_manifest_check = Check(
+            "bootstrapManifest",
+            "warn",
+            f"metadata/bootstrap.json was read, but its artifactProvenance "
+            f"block is not readable: {loaded.provenance_error}. Any affected "
+            f"missingPrerequisites[] entries report tier/licence/sourceUrl/"
+            f"sizeBytes as null; the prerequisite list itself is unaffected.",
+            "Report this against alp-sdk -- its metadata/bootstrap.json "
+            "generator produced the block, and `tan` needs no change. Nothing "
+            "else in this report is affected.",
+            scope="project",
+        )
 
     manifest_floor = _manifest_floor_from_facts(facts)
     # tan-cli#301 (second half): read the SAME resolved workspace `zephyrWorkspace`
@@ -3499,6 +3585,11 @@ def _resolve_prerequisites_environment(
         # against THIS host's real PATH walk (`on_path`, already used
         # above for the tool-presence probe itself).
         available=lambda binary: on_path(binary) is not None,
+        # tan-cli#1066. `facts` is the manifest `_load_manifest` already
+        # parsed and already resolved the SDK root for -- the join happens
+        # in the ONE process that holds both halves, which is the whole
+        # reason this lives in tan and not in the consumer.
+        provenance=facts.get("_artifactProvenance"),
     )
 
     return _PrerequisitesEnvironment(

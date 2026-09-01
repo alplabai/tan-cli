@@ -965,13 +965,23 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # pin adoption path (`_host_toolchain_matching_pin`), a `pass`
         # alongside the existing stamp-verified `pass`. Still literally named
         # `"toolchain"`, so still `doctor.toolchain`; no new code registered.
+        #
+        # 71 as of tan-cli#1066 review: `_resolve_prerequisites_environment`
+        # grew a SECOND `bootstrapManifest` arm -- a manifest that was read
+        # fine but whose `artifactProvenance` block is present and unreadable
+        # (a silent degrade there made an alp-sdk generator regression
+        # indistinguishable from a pre-v0.16.0 SDK). Literally named
+        # `"bootstrapManifest"`, same as the rejected-manifest arm beside it,
+        # so it emits the SAME already-registered `doctor.bootstrap-manifest`
+        # and no registry entry is added: one more call site, no new code --
+        # exactly the shape the `63 as of tan-cli#727` bump above describes.
         prefix="doctor.",
         expr="kebab_check_name(check.name)",
         name="Check",
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=70,
+        expected_calls=71,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(
