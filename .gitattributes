@@ -81,22 +81,28 @@ install.sh text eol=lf
 # changes -- an accidental future edit to it SHOULD conflict or fail its own
 # append-only gate, not be silently unioned away.
 #
-# `module_size_budget.generated.json`, the sibling file in the same directory,
-# never carried `merge=union` and still does not: it is a JSON object, and
-# union-merging two JSON documents that both add a trailing key can leave two
-# sibling entries with no comma between them (verified: `git merge-file
-# --union` on two divergent copies of a trivial `{"a":1,"b":2}` produces
-# `"c": 3` directly followed by `"d": 4` with no separator, which fails
-# `json.load`). Its correct conflict resolution is "take either side, then
-# rerun `python scripts/regen_module_size_budget.py --merge-resync`". It does
-# not always reach a visible conflict, either: two edits on disjoint lines of
-# that JSON can text-merge clean with no marker at all, leaving a
-# syntactically valid but semantically STALE file (measured directly: a plain
-# `git merge` of two branches editing different keys of a shared JSON object
-# auto-merges with zero conflict markers). `regen_module_size_budget.py
-# --check` is the backstop for that case, wired into CI as its own step
-# (tan-cli#907) rather than left as a command someone has to remember to run.
-# Splitting that JSON itself (per top-level package, to shrink the collision
-# surface further) is deliberately left for a separate follow-up,
-# tan-cli#1057 -- see `scripts/regen_module_size_budget.py`'s module
-# docstring.
+# `module_size_budget.generated.json`, the sibling file that used to sit in
+# the same directory, never carried `merge=union` and never could: it was a
+# JSON object, and union-merging two JSON documents that both add a trailing
+# key can leave two sibling entries with no comma between them (verified:
+# `git merge-file --union` on two divergent copies of a trivial
+# `{"a":1,"b":2}` produces `"c": 3` directly followed by `"d": 4` with no
+# separator, which fails `json.load`). tan-cli#1057 retired that file the
+# same way tan-cli#907 retired the single-file ledger above -- one record
+# file per measured module under
+# `python/tests/gates/module_size_budget.d/`, so two branches touching
+# different modules write different paths and have nothing to conflict over,
+# with no merge attribute needed here at all. Measured before committing to
+# it, over 93 value-changing commits to the old file (4278 pairs): 100% of
+# pairs collided under one file, 61.3% would still collide under a
+# per-top-level-package split, and 12.9% do under the per-module split with
+# the two whole-tree scalars derived rather than stored. That residual 12.9%
+# is two branches editing the SAME module, and its correct resolution is
+# unchanged: "take either side, then rerun `python
+# scripts/regen_module_size_budget.py --merge-resync`" -- never hand-edit a
+# value, and never interpolate between two committed numbers. A merge can
+# still leave a record semantically STALE with no marker at all (one side's
+# edit to a module, the other side's record for it);
+# `regen_module_size_budget.py --check` is the backstop for that case, wired
+# into CI as its own step (tan-cli#907) rather than left as a command someone
+# has to remember to run.

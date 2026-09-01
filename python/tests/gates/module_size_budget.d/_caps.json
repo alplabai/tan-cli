@@ -1,0 +1,5 @@
+{
+  "$schema": "The house guidelines module_size_budget.d/'s records were measured against, kept here so the record tree is self-describing. Produced by `python scripts/regen_module_size_budget.py`; must agree with MODULE_CAP / FUNCTION_CAP in _module_size_budget_core.py.",
+  "module_cap": 800,
+  "function_cap": 50
+}
