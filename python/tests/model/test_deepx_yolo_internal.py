@@ -16,12 +16,23 @@ engine is tan's now. A proof living in alp-sdk would detect that break late, in
 a different repo, on a different release train.
 
 Because this test only ever runs on a maintainer's box, it is one release away
-from being no proof at all if nobody runs it. NOTE: whether
-`cutting-a-tan-release`'s checklist asserts this test (and its Vela sibling)
-report PASSED, not skipped, before a release is cut is a release-checklist
-change still OWED to that skill (it lives in the alp-lab plugin, outside this
-repo) -- not yet made, so no release gate currently enforces that either test
-ran. Today this test running is a maintainer choice, not a guarantee.
+from being no proof at all if nobody runs it. `cutting-a-tan-release`'s
+checklist closes that in alplabai/alp-lab-plugin#65 (tan-cli#785; companion
+PRs, merged together -- re-check that one is IN before trusting this): its
+"real-model proofs" section -- grep the skill for that phrase, not for its
+heading, which carries an em dash this ASCII docstring cannot reproduce --
+names this test's node ID and its Vela sibling's two, and requires the releaser
+RUN all three with `-v`
+and RECORD the per-node-id result before a tag. A SKIP does not block the tag
+-- this test cannot pass without the licensed `dx-com` wheel (the binary it
+puts on PATH, and what the skipif probes, is `dxcom`), the private fixture, AND
+host RAM over dxcom's ~15 GiB floor. That last one is not merely "not
+guaranteed": `_host_mem_avail_gib()` below reads `/proc/meminfo` and returns
+`0.0` on OSError, so on macOS and Windows -- where that file does not exist --
+the RAM skipif is unconditionally true and this node ID can NEVER pass, however
+much RAM is installed. A release cut on a darwin box will always record this
+one as SKIPPED, correctly. But an UNRECORDED result DOES block. Running it is
+no longer a maintainer choice that leaves no trace either way.
 
 NOTE: a real yolo11n compile takes ~5 min at dxcom's default opt_level.
 

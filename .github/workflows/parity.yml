@@ -2330,12 +2330,23 @@ jobs:
           # job binds ALP_SDK_ROOT, so it is where tests/model/test_tensorio.py's
           # tflite parse path AND tests/model/test_vela_yolo_internal.py's real
           # Ethos-U/Vela compile of the public person_detect_int8.tflite fixture
-          # (alp-sdk#1471) actually get exercised instead of perpetually skipping
-          # in every tan CI run. `ethos-u-vela` ships cp312 wheels for exactly
+          # (alp-sdk#1470) WILL get exercised instead of perpetually skipping --
+          # once that PR merges. It has not: measured 2026-09-01, #1470 is OPEN
+          # and CONFLICTING, and `tests/fixtures/models/` both on alp-sdk `dev`
+          # and at this workflow's own PINNED_SDK_TAG carries only
+          # gen_tiny_model.py, gen_tiny_onnx.py, tiny_cnn.onnx and
+          # tiny_int8.tflite -- the 712-byte toy test_vela_yolo_internal.py
+          # deliberately refuses. So the vela leg installed here still SKIPS in
+          # every tan CI run today; installing the toolchain is necessary, not
+          # sufficient. (tan-cli#785. The earlier `alp-sdk#1471` here was the
+          # wrong PR -- that one is the bootstrap prerequisites.install.linux
+          # re-key, merged 2026-08-15.) `ethos-u-vela` ships cp312 wheels for
+          # exactly
           # this job's OS matrix (manylinux x86_64, win_amd64, macosx arm64) at
           # ~2 MB and is Apache-2.0 -- verified before adding it here, not
           # assumed. DEEPX's `dxcom` and DRP-AI's TVM stay license-gated vendor
-          # toolchains with no PyPI wheel to pin, so `test_deepx_yolo_internal.py`
+          # toolchains with no PyPI wheel to pin, so
+          # `test_deepx_yolo_internal.py`
           # keeps skipping in CI (see this job's own model-compile comment in
           # pyproject.toml).
           python -m pip install --quiet -e ".[monitor,model-compile]" pytest pytest-shard

@@ -24,13 +24,25 @@ test_adapters.py.
 
 Moved here from alp-sdk's tests/scripts/test_vela_yolo_internal.py (ADR-0028
 Task 6) -- see test_deepx_yolo_internal.py's docstring for why. The
-release-checklist change this docstring used to record as OWED has since been
-made: `cutting-a-tan-release` ("The model proofs must have RUN -- a SKIP is not
-a PASS") names both of this test's node IDs and its DeepX sibling's, and has
-the releaser run them with `-rA` and require `grep -c '^PASSED'` == 3 and
-`grep -c '^SKIPPED'` == 0. So a skip here is READ at a cut, and every skip
-condition in this file has to be worth reading -- which is why the public
-fixture is named rather than globbed below.
+release-checklist change this docstring first recorded as OWED, then wrongly
+recorded as already made, is made in alplabai/alp-lab-plugin#65 (tan-cli#785;
+that PR and this one describe each other and merge together, so re-check it is
+IN before trusting this paragraph): `cutting-a-tan-release`'s "real-model
+proofs" section -- grep the skill for that phrase, not for its heading, which
+carries an em dash this ASCII docstring cannot reproduce -- names all three
+node IDs (this test's two, plus its DeepX sibling's)
+and has the releaser run them with `-v` and RECORD the per-node-id result. A
+SKIP does not block the tag; an UNRECORDED result does. So a skip here is READ
+at a cut, and every skip condition in this file has to be worth reading --
+which is why the public fixture is named rather than globbed below.
+
+The grading shape the stale version of this docstring proposed -- `-rA`, then
+`grep -c '^PASSED'` == 3 and `grep -c '^SKIPPED'` == 0 -- was NOT adopted,
+because that second count is not a test count: `-rA` groups skips by
+(location, reason), so this file's two node IDs share ONE `SKIPPED [2] ...`
+line and a fully-skipped run of all three prints 2, not 3. Measured, not
+reasoned. The checklist reads per-node-id `-v` lines instead, which are one
+per test by construction.
 
 Run (with an alp-sdk checkout beside this one, vela on PATH):
     ALP_SDK_ROOT=../alp-sdk \\
@@ -82,10 +94,10 @@ def _internal_root() -> Path:
 #:
 #: i.e. one half of the pair went red for the right reason while the OTHER
 #: half reported PASSED on a 712-byte toy -- and `cutting-a-tan-release`'s
-#: release checklist reads exactly that word (`grep -c '^PASSED'` MUST be 3,
-#: `grep -c '^SKIPPED'` MUST be 0) as the evidence that the real-model proofs
-#: ran. Naming the file makes the absent case a SKIP the checklist counts,
-#: instead of a pass it cannot distinguish from the real thing.
+#: release checklist reads exactly that word, PER NODE ID, as the evidence
+#: that the real-model proofs ran. Naming the file makes the absent case a
+#: SKIP the releaser has to record, instead of a pass nothing downstream can
+#: distinguish from the real thing.
 _PUBLIC_REAL_MODEL = (
     (_SDK / "tests/fixtures/models/person_detect_int8.tflite") if _SDK is not None else None
 )
