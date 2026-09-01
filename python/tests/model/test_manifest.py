@@ -124,6 +124,36 @@ def test_from_dict_wrong_typed_src_sha_raises_curated_value_error():
         Manifest.from_dict(d)
 
 
+def test_unknown_blob_format_is_rejected_with_the_valid_set_named():
+    # tan-cli#1074: a manifest naming an unlisted format (a typo'd "dxnn",
+    # here "vela_tflite_v2") used to decode clean -- nothing compared a
+    # decoded `blob_format` against `VALID_BLOB_FORMATS`. The message must
+    # name the offending value AND list the accepted set, so a typo is
+    # diagnosable from the error alone.
+    d = _sample().to_dict()
+    d["targets"][0]["blob_format"] = "vela_tflite_v2"
+    with pytest.raises(ValueError, match=r"field 'blob_format' must be one of .*'vela_tflite_v2'.*targets\[0\]"):
+        Manifest.from_dict(d)
+
+
+@pytest.mark.parametrize("blob_format", sorted(manifest.VALID_BLOB_FORMATS))
+def test_every_valid_blob_format_round_trips_through_dict_and_cbor(blob_format):
+    # Acceptance bar for tan-cli#1074 part 1: enforcing membership must not
+    # reject any format a real producer emits today. Parametrized over the
+    # RECONCILED set (not a hand-picked subset) so a future addition to
+    # `VALID_BLOB_FORMATS` is covered automatically -- "executorch" is the
+    # member that would have regressed had enforcement landed against the
+    # stale 5-member set (`adapters/executorch.py` emits it, registered by
+    # default in `build.py`'s `_ADAPTERS`); "onnx" has no compiler-adapter
+    # producer but is real too (`_gen_fixture.py`'s `_onnx_cpu_manifest`,
+    # the issue #1254 regression fixture alp-sdk's on-device reader decodes).
+    tgt = Target(backend="cpu", silicon_ref="*", blob_format=blob_format, accel_config="",
+                 arena=0, requires={"sram_kib": 0, "op_features": []}, blob=0)
+    m = Manifest(name="m", src_sha=bytes(32), targets=[tgt])
+    assert Manifest.from_dict(m.to_dict()) == m
+    assert Manifest.from_cbor(m.to_cbor()) == m
+
+
 def test_element_type_maps_only_name_fields_declared_as_lists():
     """tan-cli#1063: `_check_element_types` is reached only after
     `_check_element_fields` has already confirmed the field's own value is a

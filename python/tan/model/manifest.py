@@ -40,13 +40,21 @@ _TARGET_KEYS = {"backend", "silicon_ref", "blob_format", "accel_config",
                 "arena", "requires", "blob", "compiler_version", "caveats"}
 _COV_KEYS = {"backend", "accel_config", "status", "reason"}
 
-# The blob formats the SDK can describe, as of today. NOT enforced at decode:
-# `_TARGET_TYPES["blob_format"]` checks only that the value is a `str`, and
-# nothing compares a decoded value against this set, so a manifest naming an
-# unlisted format decodes clean. Kept as a real constant rather than prose
-# because it is the list a writer should pick from -- but do not read it as a
-# guard (tan-cli#1074).
-VALID_BLOB_FORMATS = frozenset({"vela_tflite", "tflite", "drpai_dir", "dxnn", "onnx"})
+# The blob formats the SDK can describe, ENFORCED at decode (tan-cli#1074):
+# `from_dict` rejects a `targets[]` entry whose `blob_format` is not a member
+# of this set, naming the offending value and the accepted set. Reconciled
+# against every real producer on `dev` at the time this became enforced --
+# `adapters/cpu.py` ("tflite"), `adapters/ethos_u.py` ("vela_tflite"),
+# `adapters/drpai.py` ("drpai_dir"), `adapters/deepx.py` ("dxnn"),
+# `adapters/executorch.py` ("executorch") -- plus `_gen_fixture.py`'s
+# `_onnx_cpu_manifest` ("onnx", the issue #1254 regression fixture decoded by
+# alp-sdk's real on-device reader, `tests/yocto/onnx_cpu_fixture.h`). The
+# omission of "executorch" from this set is exactly why enforcement was
+# deferred past the four other guards PR #1068 closed in the same module: the
+# set itself had already drifted out of sync with a live, default-registered
+# adapter, and an unenforced constant cannot be wrong loudly -- it silently
+# stopped meaning what its own comment claimed.
+VALID_BLOB_FORMATS = frozenset({"vela_tflite", "tflite", "drpai_dir", "dxnn", "onnx", "executorch"})
 
 
 def _check_type(v: object, expected: type | tuple[type, ...], type_desc: str,
@@ -170,6 +178,30 @@ def _check_element_types(value: list, expected: type | tuple[type, ...], type_de
     entry is the corrupted one is as wrong as one whose first is."""
     for i, elem in enumerate(value):
         _check_type(elem, expected, type_desc, f"element {i}", context)
+
+
+def _check_blob_formats(targets: list["Target"]) -> None:
+    """`_TARGET_TYPES["blob_format"]` (used by `_check_element_fields` while
+    decoding `targets`) only confirms each target's `blob_format` is a `str`
+    -- it says nothing about WHICH string. `VALID_BLOB_FORMATS` was a real
+    constant instead of a comment for exactly the reason this function now
+    exists: so a new backend cannot silently invent a format string no reader
+    has a decoder for (tan-cli#1074).
+
+    Called from `from_dict` once every target is already a `Target`
+    instance, rather than threaded through `_check_element_fields` as a
+    fourth kind of per-field check (type / nested / element) -- membership
+    against a closed value set is the only check in this module that is not
+    a shape check, and a purpose-built function reads more plainly than a new
+    parameter every OTHER `_decode_list_field` caller would have to pass
+    `None` for."""
+    for i, t in enumerate(targets):
+        if t.blob_format not in VALID_BLOB_FORMATS:
+            raise ValueError(
+                f"malformed .alpmodel manifest: field 'blob_format' must be "
+                f"one of {sorted(VALID_BLOB_FORMATS)}, got {t.blob_format!r} "
+                f"in targets[{i}]"
+            )
 
 
 def _check_element_fields(elem: dict, item_keys: set, required: frozenset,
@@ -367,7 +399,7 @@ class Tensor:
 class Target:
     backend: str            # cpu | ethos_u | drpai | deepx_dxm1
     silicon_ref: str        # e.g. "alif:ensemble:e8" or "*"
-    blob_format: str        # conventionally one of VALID_BLOB_FORMATS; not enforced
+    blob_format: str        # one of VALID_BLOB_FORMATS; enforced by Manifest.from_dict
     accel_config: str       # "" when N/A
     arena: int
     requires: dict[str, object]  # {"sram_kib": int, "op_features": list[str]}
@@ -460,6 +492,10 @@ class Manifest:
         # is therefore `bytes`, matching what both callers, and the direct
         # round-trip caller in `tests/model/test_manifest.py`, already hand
         # it.
+        targets = _decode_list_field(d, "targets", _TARGET_KEYS, _TARGET_REQUIRED, Target, _TARGET_TYPES,
+                                      nested_types={"requires": _REQUIRES_TYPES},
+                                      element_types=_TARGET_ELEMENT_TYPES)
+        _check_blob_formats(targets)      # tan-cli#1074: reject an unlisted blob_format
         return cls(
             name=_required_field(d, "name", str, "a string"),
             src_sha=_required_field(d, "src_sha", bytes, "a bytes object"),
@@ -467,9 +503,7 @@ class Manifest:
                                        element_types=_TENSOR_ELEMENT_TYPES),
             outputs=_decode_list_field(d, "outputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor, _TENSOR_TYPES,
                                         element_types=_TENSOR_ELEMENT_TYPES),
-            targets=_decode_list_field(d, "targets", _TARGET_KEYS, _TARGET_REQUIRED, Target, _TARGET_TYPES,
-                                        nested_types={"requires": _REQUIRES_TYPES},
-                                        element_types=_TARGET_ELEMENT_TYPES),
+            targets=targets,
             coverage=_decode_list_field(d, "coverage", _COV_KEYS, _COV_KEYS, Coverage, _COVERAGE_TYPES),
         )
 
