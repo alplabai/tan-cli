@@ -2,7 +2,7 @@
   "$schema": "One module's entry in the tan-cli#668 size ratchet, produced by `python scripts/regen_module_size_budget.py` -- see module_size_budget.d/README.md. Do not hand-edit; a value that does not match a real measurement fails `regen_module_size_budget.py --check` and the gate.",
   "module": "tan/commands/sdk_cmd.py",
   "kind": "budget",
-  "lines": 1530,
+  "lines": 1620,
   "long_functions": 5,
-  "worst_function": 229
+  "worst_function": 248
 }

@@ -57,9 +57,17 @@ no registry entry, and no discoverable checkout reports both before and after
 (`sourceTier: "none"`, matching `sdk-current-no-sdk`'s own pinned shape). A
 force-removed workspace PROJECT PIN reports this identical `"none"` shape
 too, but is a DIFFERENT case this golden does not reach: `.alp/sdk-path` is
-left dangling, not cleared, by the removal, so `resolvesToAfter` cannot tell
-that workspace apart from one that was never pinned at all — tracked
-separately as tan-cli#1051, not fixed by this PR.
+left dangling, not cleared, by the removal, so `resolvesToAfter` ALONE
+cannot tell that workspace apart from one that was never pinned at all.
+tan-cli#1051 closed that gap BESIDE the payload rather than inside it: `sdk
+remove` now also carries the `sdk.project-pin-unresolved` warning on
+`issues[]` whenever the calling workspace has a pin that no longer resolves
+— the same issue, from the same `project_pin_issue` helper, that `sdk
+current` already emits for the same state. This golden's workspace has no
+`.alp/sdk-path` at all, so its `issues` stays `[]` and the recorded envelope
+is unchanged by that fix; the behavioural coverage for it lives in
+`test_sdk_command.py`'s dangling-pin cases, which this hermetic golden
+cannot reach.
 
 The behavioural cases where it reports something OTHER than
 `"none"` — a still-live project pin before removal, and falling through to a

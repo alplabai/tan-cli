@@ -491,8 +491,11 @@ def normalized_sdk_path(value: str) -> str:
     the write, and nothing more. Case folding is NOT applied either: NTFS is
     case-insensitive in practice, so two entries differing only in case name
     one directory there too, but folding case would make this function wrong on
-    the case-SENSITIVE POSIX side, and the fix for that belongs with a
-    platform-aware comparison rather than smuggled in here.
+    the case-SENSITIVE POSIX side. That fix landed where it belongs, as the
+    platform-aware comparison this result is FED INTO rather than smuggled in
+    here -- `sdk_removal.names_the_same_directory` (tan-cli#1053), which folds
+    case only where the platform does and consults the filesystem itself when
+    the lexical answer misses.
     """
     return value.replace("\\", "/")
 

@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tan.core.dir_removal import os_error_text, remove_dir
+from tan.core.sdk_default_registry import _is_absolute_either_platform
 
 
 def looks_like_path(raw: str) -> bool:
@@ -128,6 +129,91 @@ def is_cache_root_itself(target: Path, destination: Path) -> bool:
     root = Path(os.path.abspath(str(destination)))
     candidate = Path(os.path.abspath(str(target)))
     return candidate == root
+
+
+# ── comparing two path spellings (tan-cli#1053) ─────────────────────────────
+#
+# Every load-bearing `sdk remove` refusal asks one question -- "do these two
+# spellings name the same directory?" -- and through `dev` asked it four
+# separate times with a plain string `==`. Every one of those failed in the
+# UNSAFE direction: a miss does not merely skip a tidy-up, it means the
+# refusal never fires, `remove` proceeds without `--force`, and the install
+# another project still points at is silently orphaned -- exactly the outcome
+# tan-cli#790's first design bar exists to prevent. So the helper below errs
+# toward MATCHING: a false positive is a refusal `--force` overrides; a false
+# negative is an orphaned project with no signal at all.
+#
+# TWO ARMS, because neither primitive answers this alone.
+#
+#   * `os.path.normcase` -- the stdlib's own platform-aware spelling fold. On
+#     Windows (`ntpath`) it lowercases AND flips separators, so
+#     `C:/Users/Me/sdk` and `c:/users/me/sdk` compare equal there; on POSIX
+#     (`posixpath`) it is the IDENTITY, so `/home/me/sdk` and `/home/Me/sdk`
+#     stay the two genuinely different directories they really are. That is
+#     why the fold belongs here and NOT inside
+#     `sdk_default_registry.normalized_sdk_path`, whose own docstring makes
+#     the same argument: that helper folds SEPARATORS, and a case fold there
+#     would simply be wrong on POSIX.
+#   * `os.path.samefile` -- consulted only when the lexical arm missed.
+#     `normcase` alone is NOT the fix, because it is the identity on darwin
+#     too while macOS's DEFAULT APFS volume is case-INSENSITIVE: the
+#     maintainer laptop this was measured on would still have orphaned the
+#     project. A blanket "fold on darwin" would be wrong in the other
+#     direction (macOS can be formatted case-sensitively), and probing the
+#     volume by writing a differently-cased test file mutates a filesystem
+#     this command is about to delete from, needs write permission it may not
+#     have, and cannot answer for a path that is already gone. `samefile` IS
+#     that probe, narrowed to exactly the pair being compared and mutating
+#     nothing: identical `st_dev`/`st_ino` is the filesystem's own answer to
+#     "one directory?", correct on a case-sensitive volume (two real
+#     directories have two inodes) and on a case-insensitive one alike.
+#
+# WHAT IT STILL GETS WRONG, stated rather than discovered later:
+#
+#   * `samefile` RAISES for a path that does not exist -- and a removal target
+#     legitimately stops existing partway through this command -- so that arm
+#     degrades to the lexical answer rather than propagating. On a
+#     case-insensitive volume a comparison against an ALREADY-ABSENT path
+#     still misses. Narrow by construction: `_run_remove` only reaches its
+#     load-bearing ladder after `os.path.lexists(target)`, and a counterpart
+#     that no longer exists is not load-bearing -- removing the target cannot
+#     orphan it any further than it already is.
+#   * The `samefile` arm is skipped entirely unless BOTH sides are absolute
+#     (under either platform's flavour, since the registry it compares values
+#     from is one file shared by every `tan` on the host). A relative stored
+#     value would otherwise be anchored to the REMOVING process's cwd and
+#     invent a match its writer never wrote -- the precise hazard
+#     `normalized_sdk_path` refuses `_abs_posix` for.
+#   * `samefile` FOLLOWS symlinks; `_abs_posix` deliberately does not. So an
+#     install reached through a link now matches the link's target, which a
+#     plain `==` let through. A widening in the SAFE direction -- removing the
+#     target really would orphan the workspace resolving through the link --
+#     but it IS a behaviour change: `--force` is now required there.
+#   * `ntpath.normcase` folds case unconditionally, including inside a
+#     directory carrying Windows' per-directory case-sensitivity flag
+#     (`fsutil file setCaseSensitiveInfo`). Two genuinely distinct
+#     directories there compare equal and the removal refuses -- an
+#     over-refusal, recoverable with `--force`, taken over the silent-orphan
+#     alternative.
+
+
+def names_the_same_directory(left: str, right: str) -> bool:
+    """Whether two already-normalised path spellings name ONE directory --
+    the single comparison every load-bearing `sdk remove` refusal makes,
+    replacing four independent `==`. See the section banner above for why it
+    has two arms, and for the four things it still gets wrong.
+    """
+    if os.path.normcase(left) == os.path.normcase(right):
+        return True
+    if not (_is_absolute_either_platform(left) and _is_absolute_either_platform(right)):
+        return False
+    try:
+        return os.path.samefile(left, right)
+    except (OSError, ValueError):
+        # Missing, unreadable, or containing a NUL -- the same best-effort
+        # degrade every other filesystem read in this module applies. `False`
+        # here is the lexical arm's answer, already computed above.
+        return False
 
 
 def compute_tree_bytes(path: Path) -> int:

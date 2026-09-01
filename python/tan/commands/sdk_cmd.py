@@ -82,7 +82,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:  # pragma: no cover
     # Type-checker only. `urllib.request` is deferred into the two functions
@@ -137,6 +137,7 @@ from tan.core.sdk_removal import (
     RemovalOutcome,
     is_cache_root_itself,
     is_outside_cache_root,
+    names_the_same_directory,
     remove_sdk_tree,
     resolve_removal_target,
 )
@@ -725,14 +726,25 @@ def _fail(
     message: str,
     text_lines: list[str],
     exit_code: ExitCode = ExitCode.RUNTIME_FAILURE,
+    issues: list[Issue] | None = None,
 ) -> None:
-    """A refusal: the given payload plus exactly one `sdk.<code>` error issue.
+    """A refusal: the given payload plus the `sdk.<code>` error issue.
     `exit_code` reaches the envelope as well as the process, so `ok` and
-    `exitCode` can never disagree."""
+    `exitCode` can never disagree.
+
+    `issues` is ADDITIVE, and always FOLLOWS the refusal (tan-cli#1051): the
+    error a caller is being refused for stays `issues[0]` on every branch, so
+    the `issues[0]["code"] == "sdk.<...>"` reading every existing test and
+    consumer does keeps meaning "the reason this failed" rather than
+    "whichever warning happened to be computed first". Its one caller so far
+    is `sdk remove`, carrying the `sdk.project-pin-unresolved` warning for a
+    `.alp/sdk-path` that no longer resolves -- a fact about the workspace that
+    is equally true whether the removal was refused, idempotent, or done, and
+    that must therefore reach the refusal branches too."""
     _emit(
         json_mode=json_mode,
         data=data,
-        issues=[Issue(f"sdk.{code}", "error", message)],
+        issues=[Issue(f"sdk.{code}", "error", message), *(issues or [])],
         exit_code=exit_code,
         text_lines=text_lines,
     )
@@ -1015,6 +1027,39 @@ def _run_unknown(*, json_mode: bool, subcommand: str | None) -> None:
 #     issue's own bar: "the refusal messages must name what blocked it and
 #     what to do instead".
 #
+# TWO follow-ups closed on top of that design, both about the same refusal.
+#
+# tan-cli#1053 -- the four comparisons behind it were a plain string `==`,
+# which answers the question the CALLER asked rather than the one the
+# FILESYSTEM would answer. On a case-INSENSITIVE volume (NTFS, and macOS's
+# DEFAULT APFS volume -- so this reproduced on a maintainer laptop, not only
+# on Windows) two spellings name ONE directory and compare unequal, so the
+# refusal never fired and the install was removed without `--force`. All four
+# now go through `sdk_removal.names_the_same_directory`, whose own section
+# banner carries the platform reasoning and the limits it still has.
+#
+# tan-cli#1051 -- `remove` deletes the install a workspace's `.alp/sdk-path`
+# names but never touches that FILE, so a forced removal leaves the pin
+# dangling, and `data.resolvesToAfter` then reports `sourceTier: "none"` --
+# which is also what a workspace that was never pinned reports. Measured: the
+# removal came back `issues: []` while `sdk current` in the same directory a
+# moment later carried `sdk.project-pin-unresolved` naming the dangling
+# pointer; two commands disagreeing about one workspace was the defect. Every
+# `_emit`/`_fail` call site below now carries that same warning (`_fail`
+# takes an ADDITIVE `issues` list for it, after the refusal, so `issues[0]`
+# still names what blocked the removal) on EVERY branch -- refusal,
+# idempotent no-op, removal failure, success -- because a dangling pin is a
+# fact about the workspace, not about whether this call deleted anything.
+#
+# REPORTING, not repair, deliberately: clearing `.alp/sdk-path` was the other
+# live option and is rejected. `--force` on `remove <version>` is consent to
+# delete THAT INSTALL, not consent to rewrite a workspace config file the
+# caller never named, and every refusal above fires BEFORE any filesystem
+# write precisely so the target is the only thing this verb touches. Repair
+# would also be structurally partial -- `remove` can only reach the ONE
+# workspace it ran in, while every OTHER project on the host pinned at the
+# same install stays dangling either way, and only a report can reach those.
+#
 # `sdk list`'s proposed `managed`/`active` columns (tan-cli#790's own "related
 # gap" aside) are deliberately OUT of this change: `sdk list` today reports
 # UPSTREAM GitHub releases, not local installs, so a per-release
@@ -1049,11 +1094,16 @@ def _registered_origins_for(target_posix: str) -> list[str]:
     return sorted(
         origin
         for origin, sdk_path in registry.items()
-        # Separator-folded, not a raw `==`: a hand-edited registry on Windows
-        # spells the same directory with backslashes, and missing the match
-        # here means this removal does NOT refuse and silently orphans that
-        # project -- see `normalized_sdk_path`'s own docstring.
-        if normalized_sdk_path(sdk_path) == target_posix
+        # Separator-folded AND platform-compared, never a raw `==` (which is
+        # what this was through tan-cli#1053): a hand-edited registry on
+        # Windows spells the same directory with backslashes,
+        # `normalized_sdk_path` folds those; a case-INSENSITIVE volume (NTFS,
+        # or macOS's default APFS) spells it in another case, and a symlinked
+        # cache spells it through the link -- `names_the_same_directory` is
+        # what answers those. Missing the match here does not merely skip a
+        # tidy-up: this removal then does NOT refuse and silently orphans that
+        # project.
+        if names_the_same_directory(normalized_sdk_path(sdk_path), target_posix)
     )
 
 
@@ -1067,10 +1117,17 @@ def _load_bearing_reasons(target_posix: str, active: ActiveSdk) -> list[str]:
     than only the first.
     """
     reasons: list[str] = []
-    if active.path is not None and _abs_posix(active.path) == target_posix:
+    # `names_the_same_directory`, not `==` (tan-cli#1053) -- on a
+    # case-insensitive volume, or through a symlinked cache, two spellings
+    # name ONE directory and a raw string compare answers this in the UNSAFE
+    # direction: no reason is collected, nothing refuses, the workspace is
+    # orphaned.
+    if active.path is not None and names_the_same_directory(_abs_posix(active.path), target_posix):
         reasons.append(f'the active alp-sdk for this workspace (sourceTier "{active.tier}")')
     default_target = _sdk_default_pointer_target()
-    if default_target is not None and _abs_posix(default_target) == target_posix:
+    if default_target is not None and names_the_same_directory(
+        _abs_posix(default_target), target_posix
+    ):
         reasons.append("the machine-global default SDK (~/.alp/sdk-default)")
     for origin in _registered_origins_for(target_posix):
         reasons.append(f'the registered global default for project "{origin}"')
@@ -1101,7 +1158,18 @@ def _prune_registry_entries_for(target_posix: str) -> None:
         pass
 
 
-def _resolves_to_after(workspace_root: Path) -> dict[str, Any]:
+class _AfterRemoval(NamedTuple):
+    """What `sdk remove` reports about the workspace once this call is done:
+    the `data.resolvesToAfter` payload, and the issues that payload alone
+    cannot express (tan-cli#1051). Paired in ONE return value so a call site
+    physically cannot take the payload and drop the warning -- the shape the
+    defect had before this."""
+
+    data: dict[str, Any]
+    issues: list[Issue]
+
+
+def _resolves_to_after(workspace_root: Path) -> _AfterRemoval:
     """The narrow `resolve_sdk_tiered` answer for `workspace_root` right now
     -- tan-cli#1028's answer to "what resolves after this removal". This is
     NOT necessarily what `tan sdk current` would report for the same
@@ -1123,10 +1191,9 @@ def _resolves_to_after(workspace_root: Path) -> dict[str, Any]:
     removal (tan-cli#1028's own design question, answered: an always-present
     field is easier for a caller to code against than one that appears only
     sometimes). Computed FRESH at each call site -- after `remove_sdk_tree` on
-    the branches that actually delete something, unchanged (because nothing on
-    disk changed) on every refusal/idempotent/failed branch -- so it is
-    truthful on both kinds of branch without a second "did this call mutate
-    the tree" flag to keep in sync with the first.
+    the branches that delete something, unchanged on every
+    refusal/idempotent/failed branch -- so it is truthful on both without a
+    second "did this call mutate the tree" flag to keep in sync with the first.
 
     Mirrors `sdk current`'s own `data` SHAPE (`sdkPath`, `readiness`,
     `sourceTier`) rather than inventing a fourth shape for the same question
@@ -1134,20 +1201,24 @@ def _resolves_to_after(workspace_root: Path) -> dict[str, Any]:
     not have to learn a second shape -- and the no-SDK-resolves case -- the
     one a caller most needs told about after a load-bearing removal -- comes
     back exactly as `sdk-current-no-sdk` pins it: `sdkPath: null`, `readiness:
-    null`, `sourceTier: "none"`. That `"none"` reading also covers a
-    force-removed PROJECT PIN whose `.alp/sdk-path` file this command does
-    not clear (tan-cli#1051): the pin is left dangling, not cleared, and this
-    field cannot tell that apart from a workspace that was never pinned --
-    `sdk current` afterward still carries the `sdk.project-pin-unresolved`
-    warning naming the dangling pointer; `sdk remove`'s own envelope does not
-    yet surface that warning.
+    null`, `sourceTier: "none"`.
+
+    That `"none"` reading is also why this returns ISSUES beside the payload
+    (tan-cli#1051): a force-removed project pin is left DANGLING, and
+    `"none"` alone cannot be told apart from a never-pinned workspace. The
+    SAME `project_pin_issue` helper `sdk current` uses is called on the SAME
+    `ActiveSdk` this payload is built from -- one resolution, one rule, no
+    second copy to drift. Section banner above: the measurement, and why this
+    REPORTS rather than clears the file.
     """
     resolved = resolve_sdk_tiered(None, workspace_root)
-    return {
+    data = {
         "sdkPath": resolved.path,
         "readiness": check_sdk_readiness(resolved.path) if resolved.path is not None else None,
         "sourceTier": resolved.tier,
     }
+    pin_issue = project_pin_issue(resolved.broken_project_pin, resolved.tier)
+    return _AfterRemoval(data, [pin_issue] if pin_issue is not None else [])
 
 
 def _remove_data(
@@ -1196,6 +1267,7 @@ def _run_remove(
     """
     raw_arg = (arg or "").strip()
     if not raw_arg:
+        after = _resolves_to_after(workspace_root)
         _fail(
             json_mode=json_mode,
             data=_remove_data(
@@ -1204,8 +1276,9 @@ def _run_remove(
                 version=None,
                 was_active=False,
                 freed_bytes=0,
-                resolves_to_after=_resolves_to_after(workspace_root),
+                resolves_to_after=after.data,
             ),
+            issues=after.issues,
             code="remove-missing-argument",
             message=(
                 "`sdk remove` needs a version name (looked up under --destination) "
@@ -1224,7 +1297,13 @@ def _run_remove(
     version = raw_arg if resolution.is_named_version else None
 
     active = resolve_sdk_tiered(None, workspace_root)
-    was_active = active.path is not None and _abs_posix(active.path) == target_posix
+    # The SAME helper `_load_bearing_reasons` compares with (tan-cli#1053), not
+    # a second rule: this one is reporting-only, but two comparisons of one
+    # fact that can disagree are a defect waiting to be re-found.
+    active_posix = _abs_posix(active.path) if active.path is not None else None
+    was_active = active_posix is not None and names_the_same_directory(
+        active_posix, target_posix
+    )
 
     # `os.path.lexists`, NOT `target.exists()`: the latter FOLLOWS a link, so a
     # BROKEN symlink or a junction whose target is gone -- an ordinary leftover in
@@ -1238,6 +1317,7 @@ def _run_remove(
     # `dir_removal.remove_dir` unlinks the link itself rather than following it --
     # so this predicate was the single place the link was invisible.
     if not os.path.lexists(target):
+        after = _resolves_to_after(workspace_root)
         _emit(
             json_mode=json_mode,
             data=_remove_data(
@@ -1246,9 +1326,9 @@ def _run_remove(
                 version=version,
                 was_active=was_active,
                 freed_bytes=0,
-                resolves_to_after=_resolves_to_after(workspace_root),
+                resolves_to_after=after.data,
             ),
-            issues=[],
+            issues=after.issues,
             exit_code=ExitCode.SUCCESS,
             text_lines=[f"sdk remove: nothing at {target_posix} -- already absent."],
         )
@@ -1264,6 +1344,7 @@ def _run_remove(
     # (`tan sdk remove .` from inside an otherwise-empty cache root, `ok:
     # true`, no `--force`) -- see `sdk_removal.is_cache_root_itself`.
     if is_cache_root_itself(target, destination) and not force:
+        after = _resolves_to_after(workspace_root)
         _fail(
             json_mode=json_mode,
             data=_remove_data(
@@ -1272,8 +1353,9 @@ def _run_remove(
                 version=version,
                 was_active=was_active,
                 freed_bytes=0,
-                resolves_to_after=_resolves_to_after(workspace_root),
+                resolves_to_after=after.data,
             ),
+            issues=after.issues,
             code="remove-is-cache-root",
             message=(
                 f'"{target_posix}" IS the SDK cache root itself; removing it '
@@ -1288,6 +1370,7 @@ def _run_remove(
         return
 
     if is_outside_cache_root(target, destination) and not force:
+        after = _resolves_to_after(workspace_root)
         _fail(
             json_mode=json_mode,
             data=_remove_data(
@@ -1296,8 +1379,9 @@ def _run_remove(
                 version=version,
                 was_active=was_active,
                 freed_bytes=0,
-                resolves_to_after=_resolves_to_after(workspace_root),
+                resolves_to_after=after.data,
             ),
+            issues=after.issues,
             code="remove-outside-root",
             message=(
                 f'"{target_posix}" is outside the SDK cache root '
@@ -1315,6 +1399,7 @@ def _run_remove(
 
     reasons = _load_bearing_reasons(target_posix, active)
     if reasons and not force:
+        after = _resolves_to_after(workspace_root)
         _fail(
             json_mode=json_mode,
             data=_remove_data(
@@ -1323,8 +1408,9 @@ def _run_remove(
                 version=version,
                 was_active=was_active,
                 freed_bytes=0,
-                resolves_to_after=_resolves_to_after(workspace_root),
+                resolves_to_after=after.data,
             ),
+            issues=after.issues,
             code="remove-active",
             message=(
                 f'"{target_posix}" is currently load-bearing: it is '
@@ -1340,6 +1426,7 @@ def _run_remove(
     outcome: RemovalOutcome = remove_sdk_tree(target)
     if not outcome.ok:
         failing = (outcome.failing_path or target_posix).replace("\\", "/")
+        after = _resolves_to_after(workspace_root)
         failure_data = _remove_data(
             removed=False,
             path=target_posix,
@@ -1352,7 +1439,7 @@ def _run_remove(
             # partial-attempt-aware for the identical reason), so the
             # resolution has to be re-read from the filesystem it just
             # touched rather than assumed unchanged.
-            resolves_to_after=_resolves_to_after(workspace_root),
+            resolves_to_after=after.data,
         )
         # TWO literal `code=` call sites, deliberately not one dynamic
         # `f"remove-{outcome.kind}"`: `test_every_issue_code_is_registered.py`
@@ -1364,6 +1451,7 @@ def _run_remove(
             _fail(
                 json_mode=json_mode,
                 data=failure_data,
+                issues=after.issues,
                 code="remove-in-use",
                 message=(
                     f"could not remove {failing}: {outcome.detail} -- another "
@@ -1376,6 +1464,7 @@ def _run_remove(
             _fail(
                 json_mode=json_mode,
                 data=failure_data,
+                issues=after.issues,
                 code="remove-permission",
                 message=(
                     f"could not remove {failing}: {outcome.detail} -- tan could "
@@ -1388,6 +1477,7 @@ def _run_remove(
         return
 
     _prune_registry_entries_for(target_posix)
+    after = _resolves_to_after(workspace_root)
     _emit(
         json_mode=json_mode,
         data=_remove_data(
@@ -1396,9 +1486,9 @@ def _run_remove(
             version=version,
             was_active=was_active,
             freed_bytes=outcome.freed_bytes,
-            resolves_to_after=_resolves_to_after(workspace_root),
+            resolves_to_after=after.data,
         ),
-        issues=[],
+        issues=after.issues,
         exit_code=ExitCode.SUCCESS,
         text_lines=[f"sdk remove: removed {target_posix} ({outcome.freed_bytes} bytes freed)."],
     )

@@ -2014,6 +2014,155 @@ def test_remove_refuses_a_backslash_spelled_registry_entry_naming_the_target(
     assert_sibling_intact(cache_with_canary)
 
 
+def _symlinked_spelling(link: Path, real: Path) -> Path:
+    """`link` created as a symlink to `real`, or the test skipped. Gives a
+    SECOND absolute spelling of one directory on a case-sensitive host, which
+    is the only way this box can exercise the tan-cli#1053 class -- the
+    originally-reported spelling pair (`.../SdkVersion` vs `.../sdkversion`
+    on macOS's default case-insensitive APFS volume) cannot exist here at
+    all. `os.path.samefile` is True for both arrangements, for the same
+    `st_dev`/`st_ino` reason, so the code path under test is identical."""
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this host cannot create a symlink")
+    return link
+
+
+def test_remove_refuses_a_registry_entry_naming_the_target_under_another_spelling(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1053, the site that orphans a project: a registered global
+    default spelled as a DIFFERENT string for the SAME directory.
+
+    Through `dev` this comparison was a plain `==`, so the registry lookup
+    came back empty, `_load_bearing_reasons` collected nothing, and the
+    removal proceeded with no `--force` -- measured, and the exact outcome
+    tan-cli#790's first design bar exists to prevent ("silently orphaning any
+    of the three is a worse failure than a refusal that names exactly what
+    would break"). The maintainer measured it on macOS as a case difference;
+    it is measured here as a symlinked cache, which is the same one-inode,
+    two-strings arrangement and reproduces on this case-sensitive host.
+
+    Asserted as a REFUSAL, not as a string comparison -- a `==` that happened
+    to be fixed somewhere else would still have to make this envelope come
+    back `ok: false`."""
+    target = make_sdk_root(cache_with_canary / "v0.19.0", version="0.19.0")
+    linked_cache = _symlinked_spelling(tmp_path / "cache-link", cache_with_canary)
+    other_project = tmp_path / "project-a"
+    other_project.mkdir()
+    # The registry records the OTHER spelling of the very directory below.
+    write_registry(isolated_home, {other_project: linked_cache / "v0.19.0"}, dated=True)
+    assert str(linked_cache / "v0.19.0") != str(target), "the fixture would be vacuous"
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", "v0.19.0",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert str(other_project) in refused["issues"][0]["message"]
+    assert target.exists(), "the whole point: a missed match would have deleted it"
+    assert_sibling_intact(cache_with_canary)
+
+
+def test_remove_refuses_the_active_install_named_under_another_spelling(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1053 at the other two sites that matter, in one arrangement:
+    the workspace's own project pin spells the install through a symlinked
+    cache while `remove` is handed the direct spelling.
+
+    Covers BOTH the refusal (`_load_bearing_reasons`' active-SDK arm -- a
+    miss removes the workspace's own SDK with no `--force`) and the
+    reporting-only `data.wasActive`, which through `dev` answered `false` for
+    an install that was unambiguously active. A consumer reading `wasActive`
+    to decide whether to re-bootstrap would have been told nothing
+    happened."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    target = make_sdk_root(cache_with_canary / "v0.22.0", version="0.22.0")
+    linked_cache = _symlinked_spelling(tmp_path / "cache-link", cache_with_canary)
+    write_pointer(workspace / ".alp" / "sdk-path", linked_cache / "v0.22.0")
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", "v0.22.0",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert "the active alp-sdk for this workspace" in refused["issues"][0]["message"]
+    assert refused["data"]["wasActive"] is True
+    assert target.exists()
+    assert_sibling_intact(cache_with_canary)
+
+
+def test_remove_refuses_the_machine_global_default_named_under_another_spelling(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1053's third site: `~/.alp/sdk-default`, read directly rather
+    than through the tier ladder precisely because it can name a checkout
+    THIS workspace never resolves through while still being what every OTHER
+    project on the host falls back to. A missed comparison there removes the
+    machine-global default without `--force`."""
+    target = make_sdk_root(cache_with_canary / "v0.23.0", version="0.23.0")
+    linked_cache = _symlinked_spelling(tmp_path / "cache-link", cache_with_canary)
+    write_pointer(isolated_home / ".alp" / "sdk-default", linked_cache / "v0.23.0")
+    # A workspace with its own, DIFFERENT pin, so the refusal cannot be the
+    # active-SDK arm firing by accident.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    write_pointer(workspace / ".alp" / "sdk-path", make_sdk_root(tmp_path / "other-sdk"))
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", "v0.23.0",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert "the machine-global default SDK (~/.alp/sdk-default)" in refused["issues"][0]["message"]
+    assert refused["data"]["wasActive"] is False, "it is NOT this workspace's active SDK"
+    assert target.exists()
+    assert_sibling_intact(cache_with_canary)
+
+
+def test_remove_still_deletes_an_unrelated_install_beside_a_registered_one(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1053's safe direction, which the four fixes must not break: a
+    guard that over-refuses is its own bug. A genuinely DIFFERENT directory
+    -- sitting in the same cache, next to one that IS registered, with both
+    on disk so the filesystem arm of the comparison really runs -- stays
+    removable with no `--force` at all."""
+    registered = make_sdk_root(cache_with_canary / "v0.24.0", version="0.24.0")
+    unrelated = make_sdk_root(cache_with_canary / "v0.25.0", version="0.25.0")
+    other_project = tmp_path / "project-a"
+    other_project.mkdir()
+    write_registry(isolated_home, {other_project: registered}, dated=True)
+
+    env = envelope(
+        run_tan(
+            "sdk", "remove", "v0.25.0",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert env["ok"] is True, f"spurious refusal: {env['issues']}"
+    assert env["data"]["removed"] is True
+    assert not unrelated.exists()
+    assert registered.exists(), "and it took out only what it was told to"
+    assert_sibling_intact(cache_with_canary)
+
+
 def test_remove_prunes_only_the_matching_registry_entries(
     tmp_path, isolated_home, cache_with_canary
 ):
@@ -2050,6 +2199,120 @@ def test_remove_prunes_only_the_matching_registry_entries(
     # rewrite data this command does not own -- so the expectation is the literal
     # value `write_registry` stored, which is backslash-spelled on Windows.
     assert registry[str(project_b)]["sdkPath"] == str(kept_target)
+
+
+def _pin_issue(env):
+    """The `sdk.project-pin-unresolved` issue on an envelope, or `None`."""
+    return next((i for i in env["issues"] if i["code"] == "sdk.project-pin-unresolved"), None)
+
+
+def test_remove_warns_that_a_force_removed_project_pin_is_left_dangling(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1051. `sdk remove` never touches `.alp/sdk-path`, so
+    force-removing the install a workspace is pinned at leaves that pin
+    DANGLING rather than cleared -- and `resolvesToAfter` then reports
+    `sourceTier: "none"`, which is also exactly what a workspace that was
+    never pinned reports. Measured on `dev`: `issues: []` from this command,
+    while `tan sdk current` in the same directory a moment later carried
+    `sdk.project-pin-unresolved` naming the dangling pointer. Two commands
+    disagreeing about one workspace is the defect.
+
+    Reporting is deliberately the fix rather than clearing the file:
+    `--force` on `remove <version>` is consent to delete THAT INSTALL, not to
+    rewrite a workspace config the caller never named, and `remove` could
+    only ever reach the one workspace it ran in while every other project
+    pinned at the same install stays dangling regardless.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    pinned = make_sdk_root(cache_with_canary / "v0.21.0", version="0.21.0")
+    write_pointer(workspace / ".alp" / "sdk-path", pinned)
+
+    forced = envelope(
+        run_tan(
+            "sdk", "remove", "v0.21.0", "--force",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert forced["ok"] is True
+    assert forced["data"]["removed"] is True
+    assert forced["data"]["resolvesToAfter"]["sourceTier"] == "none"
+
+    issue = _pin_issue(forced)
+    assert issue is not None, "the dangling pin is invisible in this envelope"
+    assert issue["severity"] == "warning"
+    assert str(pinned) in issue["message"] or str(pinned).replace("\\", "/") in issue["message"]
+
+    # The file really is still there -- this warning is a report, not a repair.
+    assert (workspace / ".alp" / "sdk-path").is_file()
+
+    # ...and the two commands now agree about the same workspace, which is the
+    # bar the issue actually sets.
+    current = envelope(
+        run_tan("sdk", "current", "--format", "json", cwd=workspace)
+    )
+    assert _pin_issue(current) == issue
+
+
+def test_the_dangling_pin_warning_reaches_a_refusal_branch_behind_the_refusal(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1051's "on EVERY branch" half: a dangling pin is a fact about
+    the workspace, not about whether this call deleted anything, so a
+    REFUSED removal has to carry it too.
+
+    Ordering is asserted, not incidental: `_fail`'s additive `issues` follow
+    the refusal, so `issues[0]` stays the error the caller was refused for --
+    the reading every existing test and consumer already does."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    # A pin that is ALREADY dangling (its target was never an SDK checkout)...
+    write_pointer(workspace / ".alp" / "sdk-path", tmp_path / "not-an-sdk")
+    # ...while the removal is refused for an unrelated reason.
+    outside = make_sdk_root(tmp_path / "elsewhere" / "stray", version="stray")
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", str(outside),
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-outside-root"
+    assert refused["issues"][1]["code"] == "sdk.project-pin-unresolved"
+    assert outside.exists()
+    assert_sibling_intact(cache_with_canary)
+
+
+def test_remove_carries_no_pin_warning_when_the_project_pin_still_resolves(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """The vacuity check for tan-cli#1051: the warning must describe the
+    workspace, not decorate every `sdk remove` response. A workspace whose
+    pin still resolves after the removal gets no warning at all -- otherwise
+    the assertions above would pass against a helper that returned the issue
+    unconditionally."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    still_pinned = make_sdk_root(tmp_path / "kept-sdk", version="kept")
+    write_pointer(workspace / ".alp" / "sdk-path", still_pinned)
+    unrelated = make_sdk_root(cache_with_canary / "v0.26.0", version="0.26.0")
+
+    env = envelope(
+        run_tan(
+            "sdk", "remove", "v0.26.0",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert env["ok"] is True
+    assert env["data"]["removed"] is True
+    assert not unrelated.exists()
+    assert env["issues"] == []
+    assert env["data"]["resolvesToAfter"]["sourceTier"] == "projectPin"
 
 
 def test_remove_named_version_is_looked_up_under_destination(
