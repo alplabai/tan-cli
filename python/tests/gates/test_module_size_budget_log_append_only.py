@@ -188,6 +188,7 @@ of any more.
 """
 from __future__ import annotations
 
+import ast
 import os
 import subprocess
 from pathlib import Path
@@ -564,10 +565,28 @@ def _enforce(
     `f77f4818` repro proved the function WORKS; nothing proved it was
     CALLED, and those are different claims. `test_the_enforcement_path_
     itself_rejects_a_theirs_resolution` now drives this function on a
-    throwaway repo, so removing either assertion below reds. (The sibling
-    `..._log_d_entries_are_immutable.py` never had this gap: its
-    equivalent check lives INSIDE `entry_violations`, which every hermetic
-    test drives.)"""
+    throwaway repo, so removing either assertion BELOW, or the
+    `merge_loss_violations`/`ledger_violations` call feeding it, reds.
+
+    That covers everything inside this function and nothing outside it. The
+    remaining link -- the one CALL that connects this function to the real
+    repository's own ledger, in
+    `test_the_ledger_only_ever_appends_since_the_prs_base` -- is out of reach
+    of any runtime test here, because this repo's ledger is clean, so the
+    call passing and the call being absent look identical. Measured
+    (tan-cli#1065 review round 3, mutant W1b): replacing that single line with
+    `pass` left the whole of `tests/gates/` at `875 passed, 6 skipped`, its
+    exact baseline. It is pinned instead by
+    `test_the_real_enforcement_test_calls_enforce_on_this_repos_own_ledger`,
+    a source-level assertion in this repo's own established idiom
+    (`test_subprocess_env_routes_through_the_helper.py`). The regress stops
+    there for the same reason it stops in
+    `test_module_size_budget_check_is_wired_into_ci.py`: a source-level
+    "is it wired in" assertion cannot itself be satisfied vacuously -- delete
+    it and the deletion is the diff. (The sibling
+    `..._log_d_entries_are_immutable.py` never had the inner half of this
+    gap: its equivalent check lives INSIDE `entry_violations`, which every
+    hermetic test drives.)"""
     if base_ref is not None:
         violations = ledger_violations(cwd, rel_path, current_lines, base=base_ref)
         diagnostic_commits = _commits_since_base(cwd, base_ref)
@@ -1303,19 +1322,129 @@ def test_the_enforcement_path_itself_rejects_a_theirs_resolution(tmp_path):
     assert "- tan-cli#427 feature's own reasoned entry" in message, (
         f"the failure must name the line that was actually lost -- got: {message}"
     )
-    # Both halves of the S3 escape hatch, asserted separately: a first pass
-    # at this test pinned only the second, and a mutant that deleted the
-    # other clause stayed GREEN (measured -- W2, `38 passed`). Two fragments
-    # so a partial deletion cannot slip through either.
-    assert "do NOT paste the old line back" in message, (
-        "the failure must warn an S4/S2 author OFF the paste-it-back remedy, "
-        "which would park a superseded entry in an append-only ledger next "
-        f"to its own replacement -- got: {message}"
+    # The remedies, pinned as a case -> remedy MAPPING rather than as a bag
+    # of strings. Two earlier versions of this were too weak, both measured
+    # GREEN under a mutant before being replaced:
+    #   * W2 (round 2): only one fragment of remedy 2 was asserted, so
+    #     deleting the other clause left the suite at `38 passed`.
+    #   * W4/W5 (round 3): both fragments were asserted but nothing tied
+    #     either to its own case, so deleting remedy 1 outright (`38 passed`)
+    #     and SWAPPING which case each remedy attached to (`38 passed`) both
+    #     stayed green -- the swap being the worse of the two, since it tells
+    #     an S4 author to paste the superseded draft back and tells a
+    #     tan-cli#902 victim NOT to restore their colleague's destroyed
+    #     entry. Two correct strings in the wrong order is worse advice than
+    #     one missing string.
+    # So: each case label must appear, its own remedy must follow it, and
+    # that remedy must come BEFORE the next case label -- i.e. each remedy
+    # sits inside its own case's block. This test states the expected
+    # mapping itself, in its own literals, rather than importing it from the
+    # message it is checking.
+    expected_mapping = [
+        ("Somebody ELSE's entry", ["add the missing line(s) back verbatim"]),
+        (
+            "YOUR OWN entry that you deliberately reworded or superseded",
+            [
+                "do NOT paste the old line back",
+                "ORDINARY, single-parent commit after the merge",
+            ],
+        ),
+    ]
+    for position, (case_label, remedies) in enumerate(expected_mapping):
+        assert case_label in message, (
+            f"the failure must name the case {case_label!r} -- an author "
+            "cannot pick the right remedy from a message that does not say "
+            f"which situation it is for. Got: {message}"
+        )
+        block_start = message.index(case_label)
+        following = expected_mapping[position + 1 :]
+        block_end = (
+            message.index(following[0][0]) if following and following[0][0] in message
+            else len(message)
+        )
+        for remedy in remedies:
+            assert remedy in message, (
+                f"the remedy {remedy!r} for case {case_label!r} is missing "
+                f"entirely from the failure text. Got: {message}"
+            )
+            assert block_start < message.index(remedy) < block_end, (
+                f"the remedy {remedy!r} must sit inside the block for case "
+                f"{case_label!r} (offsets {block_start}..{block_end}), not "
+                "attached to a different case -- both strings being present "
+                "somewhere is not enough, the MAPPING is what carries the "
+                f"advice. Got: {message}"
+            )
+
+
+#: The one test whose job is to run the enforcement against THIS repository's
+#: real ledger. Named as a constant because the source-level gate below has to
+#: find it by name, and a rename that silently orphaned that gate would be
+#: exactly the drift the gate exists to catch.
+_ENFORCEMENT_TEST = "test_the_ledger_only_ever_appends_since_the_prs_base"
+
+
+def test_the_real_enforcement_test_calls_enforce_on_this_repos_own_ledger():
+    """tan-cli#1065 review round 3, major 1: the LAST unpinned link.
+
+    Every decision this file makes lives in `ledger_violations`,
+    `merge_loss_violations` and `_enforce`, and all three are driven by
+    hermetic tests, so a mutant inside any of them reds. The one thing no
+    runtime test here can reach is the single line that connects `_enforce`
+    to the real repository -- because this repo's own ledger is CLEAN, an
+    `_enforce(REPO, LOG_REL, ...)` that runs and an `_enforce` that is never
+    called are indistinguishable at runtime. Measured (mutant W1b): replacing
+    that one line with `pass` left the whole of `tests/gates/` at
+    `875 passed, 6 skipped`, byte-identical to its baseline, with
+    `test_the_ledger_only_ever_appends_since_the_prs_base` reduced to "the
+    checkout is not shallow and a base ref resolves" while keeping its name.
+
+    So it is pinned at the SOURCE level, in this repo's own established idiom
+    for exactly this question -- `test_subprocess_env_routes_through_the_
+    helper.py` (AST introspection over code that must call a specific
+    helper) and `test_module_size_budget_check_is_wired_into_ci.py` (an
+    "is it actually wired in" gate for this very budget system). The regress
+    stops here and does not need a gate-for-the-gate: an assertion whose only
+    failure mode is being deleted outright cannot be satisfied vacuously --
+    deleting it IS the diff, which is what code review reads.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"), filename=__file__)
+    defs = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == _ENFORCEMENT_TEST
+    ]
+    assert len(defs) == 1, (
+        f"expected exactly one `def {_ENFORCEMENT_TEST}` in {Path(__file__).name}, "
+        f"found {len(defs)} -- if it was renamed, `_ENFORCEMENT_TEST` must be "
+        "renamed with it, or this gate silently stops watching anything."
     )
-    assert "ORDINARY, single-parent commit after the merge" in message, (
-        "the failure must also print the S3 escape hatch itself, or an "
-        "author whose own superseded entry was flagged has no correct remedy "
-        f"shown at all -- got: {message}"
+
+    calls = [
+        node
+        for node in ast.walk(defs[0])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_enforce"
+    ]
+    assert calls, (
+        f"`{_ENFORCEMENT_TEST}` no longer calls `_enforce` at all, so nothing "
+        "in this suite checks THIS repository's own MODULE_SIZE_BUDGET_LOG.md "
+        "any more -- every other test here builds a throwaway repo. The test "
+        "would still pass its name, its shallow-checkout guard and its base-"
+        "ref resolution, and the suite would stay green with the ledger "
+        "entirely unenforced (measured: 875 passed, 6 skipped, the exact "
+        "baseline)."
+    )
+
+    positional = {
+        arg.id for call in calls for arg in call.args if isinstance(arg, ast.Name)
+    }
+    assert {"REPO", "LOG_REL"} <= positional, (
+        f"`{_ENFORCEMENT_TEST}` calls `_enforce`, but not on this repository's "
+        f"own ledger: expected REPO and LOG_REL among its positional "
+        f"arguments, got {sorted(positional)}. An `_enforce` aimed at a "
+        "throwaway repo here would leave the real ledger unchecked just as "
+        "completely as no call at all."
     )
 
 
