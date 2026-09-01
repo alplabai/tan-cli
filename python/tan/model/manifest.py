@@ -40,8 +40,12 @@ _TARGET_KEYS = {"backend", "silicon_ref", "blob_format", "accel_config",
                 "arena", "requires", "blob", "compiler_version", "caveats"}
 _COV_KEYS = {"backend", "accel_config", "status", "reason"}
 
-# The blob formats the SDK can describe. A real constant, not a comment, so a
-# new backend cannot silently invent a format string.
+# The blob formats the SDK can describe, as of today. NOT enforced at decode:
+# `_TARGET_TYPES["blob_format"]` checks only that the value is a `str`, and
+# nothing compares a decoded value against this set, so a manifest naming an
+# unlisted format decodes clean. Kept as a real constant rather than prose
+# because it is the list a writer should pick from -- but do not read it as a
+# guard (tan-cli#1074).
 VALID_BLOB_FORMATS = frozenset({"vela_tflite", "tflite", "drpai_dir", "dxnn", "onnx"})
 
 
@@ -363,7 +367,7 @@ class Tensor:
 class Target:
     backend: str            # cpu | ethos_u | drpai | deepx_dxm1
     silicon_ref: str        # e.g. "alif:ensemble:e8" or "*"
-    blob_format: str        # one of VALID_BLOB_FORMATS
+    blob_format: str        # conventionally one of VALID_BLOB_FORMATS; not enforced
     accel_config: str       # "" when N/A
     arena: int
     requires: dict[str, object]  # {"sram_kib": int, "op_features": list[str]}
@@ -497,22 +501,21 @@ class Manifest:
     def to_cbor(self) -> bytes:
         return _cbor2.dumps(self.to_dict())
 
+    # tan-cli#1055: cbor2's decode exceptions (`CBORDecodeEOF` and its
+    # siblings, common base `CBORDecodeError`) are NOT `ValueError`
+    # subclasses, while `from_json`'s `json.JSONDecodeError` IS -- so a caller
+    # catching `ValueError` around a `.alpmodel` read, the contract every other
+    # guard in this module exists to honour, caught a malformed JSON manifest
+    # and missed a malformed CBOR one, on the PRODUCTION reader path.
+    # `package.read_package`/`read_manifest_file` bounds-check the manifest
+    # region's offset and length (tan-cli#1045) but never that its bytes are
+    # well-formed CBOR: a bit flip, a truncated write or plain non-CBOR bytes
+    # land in the `except` below.
     @classmethod
     def from_cbor(cls, blob: bytes) -> "Manifest":
         try:
             d = _cbor2.loads(blob)
         except _cbor2.CBORDecodeError as exc:
-            # tan-cli#1055: cbor2's decode exceptions (`CBORDecodeEOF` and
-            # its siblings, common base `CBORDecodeError`) are NOT
-            # `ValueError` subclasses, while `from_json`'s
-            # `json.JSONDecodeError` IS -- so a caller catching `ValueError`
-            # around a `.alpmodel` read, the contract every other guard in
-            # this module exists to honour, caught a malformed JSON manifest
-            # and missed a malformed CBOR one, on the PRODUCTION reader path.
-            # `package.read_package`/`read_manifest_file` bounds-check the
-            # manifest region's offset and length (tan-cli#1045) but never
-            # that its bytes are well-formed CBOR: a bit flip, a truncated
-            # write or plain non-CBOR bytes land exactly here.
             raise ValueError(
                 f"malformed .alpmodel manifest: not valid CBOR "
                 f"({type(exc).__name__}: {exc})"
