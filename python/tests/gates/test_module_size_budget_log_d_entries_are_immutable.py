@@ -217,7 +217,17 @@ def entry_violations(cwd: Path, dir_rel: str) -> dict[str, list[str]]:
     name-status walk did or didn't record for it. Neither half alone closes
     the gap -- `--full-history` without the tree check still misses the
     merge's missing "D"; the tree check without `--full-history` never even
-    sees the "A" to cross-check against -- only the pair does.
+    sees the "A" to cross-check against -- only the pair does. This tree
+    check runs for every path missing from HEAD's tree, including one check
+    1 already flagged for an unrelated reason (an ordinary modify, say,
+    later dropped by a separate merge) -- it APPENDS the "missing from
+    HEAD's tree" reason to that path's existing record list rather than
+    skipping it, so a caller reading `violations[path]` sees every reason a
+    path is broken, not just whichever check happened to notice first
+    (tan-cli#1099 review: an earlier version of this loop skipped a path
+    already in `violations`, so a path that was both modified and later
+    merge-dropped carried only the modify's records and looked, from the
+    outside, like it was never removed at all).
 
     Path membership is still not the whole promise, though: a merge commit
     can rewrite an already-added entry's *content* while leaving its path in
@@ -403,17 +413,34 @@ def entry_violations(cwd: Path, dir_rel: str) -> dict[str, list[str]]:
             f"{tree_result.stderr!r}"
         )
     present = set(tree_result.stdout.splitlines())
+    _MISSING_FROM_TREE = (
+        "missing from HEAD's tree despite an add record (dropped during a "
+        "merge)"
+    )
     for path, seen in statuses.items():
-        if path in violations or path in present:
+        if path in present:
             continue
         # Every path here was matched by `_is_entry_path` and has at least
-        # one "A" record, yet is absent from HEAD's own tree -- a merge
+        # one recorded status, yet is absent from HEAD's own tree -- a merge
         # commit dropped it without ever recording a "D" for it (see the
         # docstring above). Flag it the same way a directly-observed delete
-        # is flagged.
+        # is flagged -- and APPEND, not skip, when check 1 already flagged
+        # this path for an unrelated reason (an ordinary modify, say): a
+        # path can be both modified AND later dropped by a merge, and a
+        # caller reading `violations[path]` needs the removal signal too,
+        # not just whichever check happened to run first (tan-cli#1099
+        # review: an add/modify/merge-drop history read as MODIFY-only
+        # because this loop used to `continue` on `path in violations`
+        # before ever looking at tree membership, so the one signal that
+        # says "this was removed" never reached a path check 1 had already
+        # touched).
+        if path in violations:
+            if _MISSING_FROM_TREE not in violations[path]:
+                violations[path].append(_MISSING_FROM_TREE)
+            continue
         violations[path] = [
             f"{status} at {commit}" for status, commit in seen
-        ] + ["missing from HEAD's tree despite an add record (dropped during a merge)"]
+        ] + [_MISSING_FROM_TREE]
 
     # Third check: a path can pass BOTH checks above (exactly one "A"
     # record, still present in HEAD's tree) and still have had its content
@@ -538,18 +565,27 @@ def test_the_checkout_has_full_history():
     )
 
 
-#: tan-cli#1093. A violating path's own record list (the strings
-#: `entry_violations` attaches to it) says DELETE when the path was ever
-#: actually removed: an explicit `D` `git log --name-status` record (check
-#: 1), or check 2's synthetic "dropped during a merge" line for a merge that
-#: dropped the path without ever emitting one. Everything else this gate can
-#: flag -- a lone `M` record, or checks 3/4's "content ... differs" sentences
-#: -- only ever fires while the path is STILL present in HEAD's own tree, so
-#: it is a MODIFY: the path was never removed, only its content changed
-#: under it. The two shapes get different remediation text below because the
-#: obvious recovery attempt differs (re-add the file vs. restore its bytes),
-#: not because either one actually clears the check -- neither does; see
-#: `_violation_failure_message`'s own docstring.
+#: tan-cli#1093 (review round 2). A violating path's own record list (the
+#: strings `entry_violations` attaches to it) says DELETE when the path was
+#: ever actually removed: an explicit `D` `git log --name-status` record
+#: (check 1), or check 2's "dropped during a merge" marker. That marker is
+#: now APPENDED to a path's record list whenever the path is absent from
+#: HEAD's own tree, even when check 1 already flagged the same path for an
+#: unrelated reason (a modify, say, later dropped by a separate merge) --
+#: see `entry_violations`'s check 2. Before that fix this classifier read a
+#: since-merge-dropped, previously-modified path as MODIFY-only (its records
+#: were `['A ...', 'M ...']` with no removal signal at all, because check 2
+#: used to skip any path check 1 had already flagged), which is why the
+#: fix lives in `entry_violations` itself and not just in the string match
+#: below. Everything that is NOT delete-shaped by that test -- a lone `M`
+#: record, or checks 3/4's "content ... differs" sentences -- fires only
+#: while the path is present in HEAD's tree AND was never dropped by any
+#: merge reachable from HEAD, so it is a genuine MODIFY: the path still
+#: exists, only its content changed under it. The two shapes get different
+#: remediation text below because the obvious recovery attempt differs
+#: (re-add the file vs. restore its bytes), not because either one actually
+#: clears the check -- neither does; see `_violation_failure_message`'s own
+#: docstring.
 def _is_delete_shaped(records: list[str]) -> bool:
     return any(
         record.startswith("D ") or "missing from HEAD's tree" in record
@@ -563,9 +599,13 @@ _MODIFY_REMEDY = (
     "the original bytes does NOT clear this -- check 1 counts every record "
     "the path has ever had, and the restoring commit is itself a new one, "
     "so 'A', 'M', 'M' stays flagged exactly like 'A', 'M' already was. The "
-    "fix is `git rebase -i`, dropping or rewording the commit(s) that "
-    "changed it after it was added, so history ends with a single clean "
-    "'A' and nothing else."
+    "fix is `git rebase -i`: `drop` the commit(s) that changed it "
+    "(discarding the change, leaving the entry exactly as it was first "
+    "added), or `fixup`/`squash` them into the add commit (keeping the "
+    "correction, folded into that one commit) -- never `reword`, which "
+    "edits only the commit message and leaves the tree change, and the "
+    "extra record, in place. Either way history must end with a single "
+    "clean 'A' and nothing else."
 )
 
 _DELETE_REMEDY = (
@@ -573,9 +613,9 @@ _DELETE_REMEDY = (
     "during a merge, after being committed): restoring the file forward "
     "does NOT clear this either -- it adds a THIRD record ('A', 'D', 'A'), "
     "not a clean one, because check 1 counts records, not current content. "
-    "The fix is `git rebase -i`, dropping the commit that deleted it (and "
-    "any later commit that tried to re-add it) -- do not add a new commit "
-    "that recreates the file."
+    "The fix is `git rebase -i`: `drop` the commit that deleted it (and any "
+    "later commit that tried to re-add it) -- do not add a new commit that "
+    "recreates the file."
 )
 
 
@@ -598,9 +638,20 @@ def _violation_failure_message(violations: dict[str, list[str]]) -> str:
     reason a delete's re-add is. So this message does not tell either shape
     "add a follow-up commit and you are done" -- neither shape has that
     escape. What differs between the two branches below is only which
-    commit a `git rebase -i` needs to drop or fix up; both funnel through
-    the same explanation of why, appended once regardless of which shape(s)
-    are present.
+    commit a `git rebase -i` needs to drop, fixup, or squash; both funnel
+    through the same explanation of why, appended once regardless of which
+    shape(s) are present.
+
+    An alternative to this whole design was considered and rejected, and is
+    recorded HERE -- not only in the runtime string this function returns --
+    so it survives a refactor of that string: evaluate the immutability
+    check against the squash-equivalent tree (the diff `dev` would actually
+    receive) instead of walking full branch history. That would make a
+    branch agree with `dev` without ever needing a rebase. It is rejected
+    because it would also make a genuine delete invisible until the PR
+    merges -- the opposite failure from what this gate exists to catch. See
+    `test_the_squash_equivalent_tree_alternative_is_recorded_and_rejected`
+    for the pin.
     """
     shapes = [_is_delete_shaped(records) for records in violations.values()]
     modify_shaped = any(not shape for shape in shapes)
@@ -652,10 +703,10 @@ def test_every_entry_under_module_size_budget_log_d_was_only_ever_added():
 def test_the_failure_message_names_the_rebase_remedy_for_a_delete_shaped_violation():
     violations = {"LOG.d/2026-01-01-aaaaaaaa.md": ["A at abc1234", "D at def5678"]}
     message = _violation_failure_message(violations)
-    assert "dropping the commit that deleted it" in message, (
+    assert "`drop` the commit that deleted it" in message, (
         f"a delete-shaped violation must name the rebase-drop remedy, got: {message}"
     )
-    assert "dropping or rewording the commit(s) that changed it" not in message, (
+    assert "`drop` the commit(s) that changed it" not in message, (
         "a purely delete-shaped violation must not also carry the modify "
         f"arm's remedy text, got: {message}"
     )
@@ -664,10 +715,10 @@ def test_the_failure_message_names_the_rebase_remedy_for_a_delete_shaped_violati
 def test_the_failure_message_names_the_rebase_remedy_for_a_modify_shaped_violation():
     violations = {"LOG.d/2026-01-01-aaaaaaaa.md": ["A at abc1234", "M at def5678"]}
     message = _violation_failure_message(violations)
-    assert "dropping or rewording the commit(s) that changed it" in message, (
+    assert "`drop` the commit(s) that changed it" in message, (
         f"a modify-shaped violation must name the rebase-reword remedy, got: {message}"
     )
-    assert "dropping the commit that deleted it" not in message, (
+    assert "`drop` the commit that deleted it" not in message, (
         "a purely modify-shaped violation must not also carry the delete "
         f"arm's remedy text, got: {message}"
     )
@@ -685,8 +736,8 @@ def test_the_failure_message_treats_a_merge_dropped_entry_as_delete_shaped():
         ]
     }
     message = _violation_failure_message(violations)
-    assert "dropping the commit that deleted it" in message
-    assert "dropping or rewording the commit(s) that changed it" not in message
+    assert "`drop` the commit that deleted it" in message
+    assert "`drop` the commit(s) that changed it" not in message
 
 
 def test_the_failure_message_treats_a_merge_rewritten_content_mismatch_as_modify_shaped():
@@ -703,21 +754,32 @@ def test_the_failure_message_treats_a_merge_rewritten_content_mismatch_as_modify
         ]
     }
     message = _violation_failure_message(violations)
-    assert "dropping or rewording the commit(s) that changed it" in message
-    assert "dropping the commit that deleted it" not in message
+    assert "`drop` the commit(s) that changed it" in message
+    assert "`drop` the commit that deleted it" not in message
 
 
 def test_the_failure_message_carries_both_remedies_exactly_once_when_both_shapes_are_present():
-    """Two violating paths, one of each shape, in a single run -- both
-    remedy paragraphs must appear, and neither is duplicated per violating
-    path (the remedy is about the SHAPE, not the path count)."""
+    """Three violating paths -- TWO delete-shaped, one modify-shaped -- in a
+    single run. Both remedy paragraphs must appear, and neither is
+    duplicated: the remedy is about the SHAPE, not the path count, so two
+    delete-shaped paths must still yield exactly one copy of the delete
+    remedy, not one per path.
+
+    A fixture with only one path per shape (this test's original form)
+    cannot tell "the remedy is per-shape" apart from "the remedy happens to
+    be per-path, and there is only one path of each shape here" -- both
+    read `count == 1`. Measured: rewriting `_violation_failure_message` to
+    append a remedy once per violating path, instead of once per shape
+    present, left the single-path-per-shape fixture at `23 passed`; it only
+    reds once a shape has TWO paths, which is why this fixture needs one."""
     violations = {
         "LOG.d/2026-01-01-aaaaaaaa.md": ["A at abc1234", "D at def5678"],
+        "LOG.d/2026-01-02-cccccccc.md": ["A at 3333333", "D at 4444444"],
         "LOG.d/2026-01-02-bbbbbbbb.md": ["A at 1111111", "M at 2222222"],
     }
     message = _violation_failure_message(violations)
-    assert message.count("dropping the commit that deleted it") == 1, message
-    assert message.count("dropping or rewording the commit(s) that changed it") == 1, message
+    assert message.count("`drop` the commit that deleted it") == 1, message
+    assert message.count("`drop` the commit(s) that changed it") == 1, message
 
 
 def test_the_failure_message_names_the_reason_dev_never_sees_either_shape():
@@ -727,6 +789,32 @@ def test_the_failure_message_names_the_reason_dev_never_sees_either_shape():
     violations = {"LOG.d/2026-01-01-aaaaaaaa.md": ["A at abc1234", "D at def5678"]}
     message = _violation_failure_message(violations)
     assert "squash-merge" in message and "dev" in message, message
+
+
+def test_the_squash_equivalent_tree_alternative_is_recorded_and_rejected():
+    """tan-cli#1093 review (minor 2): the rejected "check the squash-
+    equivalent tree instead of branch history" alternative must be pinned
+    in TWO places, not one -- `_violation_failure_message`'s own docstring
+    (read by the next person before they re-litigate the design, not only
+    on a red run) AND the runtime string it returns (what an author
+    actually sees when the gate fires). Deleting either copy must fail
+    exactly this test."""
+    doc = _violation_failure_message.__doc__ or ""
+    assert "squash-equivalent tree" in doc, (
+        f"the rejected alternative is missing from the docstring: {doc!r}"
+    )
+    assert "opposite failure" in doc, (
+        f"the docstring must say WHY it was rejected, not just name it: {doc!r}"
+    )
+
+    violations = {"LOG.d/2026-01-01-aaaaaaaa.md": ["A at abc1234", "D at def5678"]}
+    message = _violation_failure_message(violations)
+    assert "squash-equivalent tree" in message, (
+        f"the rejected alternative is missing from the runtime message: {message!r}"
+    )
+    assert "opposite failure" in message, (
+        f"the runtime message must say WHY it was rejected, not just name it: {message!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -919,6 +1007,68 @@ def test_a_merge_commit_that_drops_one_sides_already_added_entry_is_caught(tmp_p
     assert "LOG.d/2026-08-27-22222222.md" in violations, (
         "a merge commit that drops one side's already-added entry must be "
         f"flagged, but got: {violations}"
+    )
+
+
+def test_an_entry_added_then_modified_then_dropped_by_a_merge_is_classified_as_delete_shaped(tmp_path):
+    """tan-cli#1093 review round 2, major 2: the shape neither original arm
+    was built for. An entry is added, then modified by an ORDINARY commit
+    on this same branch (check 1 already flags it here -- `['A ...', 'M
+    ...']`, no removal signal yet), and only THEN dropped by a separate
+    merge commit that never emits its own "D" record. Before the
+    `entry_violations` fix this shipped with, check 2's tree-membership pass
+    skipped any path already in `violations`, so the merge-drop's "missing
+    from HEAD's tree" marker never reached this path -- `_is_delete_shaped`
+    saw only `['A ...', 'M ...']` and routed it to the MODIFY remedy, which
+    told the author "the path was never removed", a false statement to
+    their face for a path that, by construction, no longer exists."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+
+    entry_dir = repo / "LOG.d"
+    entry_dir.mkdir()
+    _write(entry_dir, "2026-08-30-ffffffff.md", ["- 2026-08-30 -- first reason"])
+    _commit(repo, "add an entry")
+
+    _write(entry_dir, "2026-08-30-ffffffff.md", ["- 2026-08-30 -- REWRITTEN reason"])
+    _commit(repo, "an ordinary commit modifies its own just-added entry")
+
+    _git(repo, "checkout", "-q", "-b", "other")
+    _write(repo, "unrelated.txt", ["noise"])
+    _commit(repo, "unrelated commit on the other branch")
+
+    _git(repo, "checkout", "-q", "main")
+    # `--no-ff` is load-bearing: `other` is a pure fast-forward of `main`
+    # here (nothing diverged on `main`'s own side), so a plain `git merge`
+    # would just move the branch pointer with NO merge commit at all --
+    # `--no-ff` forces a real 2-parent commit to amend below.
+    merge = _git(repo, "merge", "--no-ff", "--no-edit", "other", check=False)
+    assert merge.returncode == 0, f"setup merge must succeed clean -- stderr: {merge.stderr}"
+
+    # Fold the drop into the merge commit itself (no independent "D" record
+    # anywhere in the path's history), mirroring the sibling #902-shape test
+    # above.
+    (entry_dir / "2026-08-30-ffffffff.md").unlink()
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--amend", "--no-edit")
+
+    assert not (entry_dir / "2026-08-30-ffffffff.md").exists()
+
+    violations = entry_violations(repo, "LOG.d")
+    records = violations.get("LOG.d/2026-08-30-ffffffff.md")
+    assert records is not None, (
+        f"a modified-then-merge-dropped entry must still be flagged, got: {violations}"
+    )
+    assert _is_delete_shaped(records), (
+        "an entry a merge later dropped must classify as DELETE-shaped even "
+        f"though an earlier ordinary commit also modified it, got: {records}"
+    )
+
+    message = _violation_failure_message(violations)
+    assert "`drop` the commit that deleted it" in message, message
+    assert "the path was never removed" not in message, (
+        f"a removed path must not be told it was never removed: {message}"
     )
 
 
