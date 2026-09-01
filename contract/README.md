@@ -311,11 +311,25 @@ Every tagged release carries **`envelope-contract.json`** beside the binaries:
   "envelopes": {
     "presets-heterogeneous-som": { "args": [...], "exitCode": 0, "envelope": { ... } },
     // …one entry per golden case
+    // A case that pins host state carries its `env.json` too (tan-cli#253), so
+    // the entry is replayable: WITHOUT it, replaying `model-doctor-no-sdk`'s
+    // `args` on a box that has `vela` reports `ethos_u.available: true` and
+    // diffs against the `envelope` published right beside it.
+    "model-doctor-no-sdk": { "args": [...], "exitCode": 0, "envelope": { ... },
+                             "env": { "PATH": "__WORKDIR__", "ALP_VELA_CONFIG": null } },
     "doctor": { "args": [...], "dataKeys": { /* contract/doctor-data-keys.json's dataKeys, verbatim */ } },
     "sdk-list": { "args": [...], "dataKeys": { /* contract/sdk-list-data-keys.json's dataKeys, verbatim */ } }
   }
 }
 ```
+
+**`env` is present only on a case that carries one** (one case today), and its
+semantics are the fixture's own: a **`null` UNSETS** the variable, a string
+**SETS** it, and **`__WORKDIR__` expands to the directory the command is run
+from** — so a consumer replaying an entry applies the block on top of its own
+environment before spawning `tan`, and reproduces the `envelope` beside it.
+An entry with no `env` key needs no environment beyond the isolation any
+replay already wants (a scratch cwd, an isolated `HOME`).
 
 Built by the `Bundle the envelope contract` step in
 `.github/workflows/release.yml` — pure re-packaging of committed files gated by
@@ -738,9 +752,16 @@ purpose:
 1. Run the case's `args.txt` through the **shipping Python CLI** by hand from an
    empty directory, with `SOURCE_DATE_EPOCH=0` and `HOME`/`USERPROFILE` pointed
    at another empty directory, `--format json`. (Reuse the conformance
-   harness's own `fresh_dir` / `copy_fixture_inputs` / `normalise` if you can —
-   that is how the tan-cli#502 re-record was captured, and it removes any chance
-   of the recording and the comparison disagreeing about isolation.)
+   harness's own `fresh_dir` / `copy_fixture_inputs` / **`case_env`** /
+   `normalise` if you can — that is how the tan-cli#502 re-record and the
+   tan-cli#253 `model` recordings were captured, and it removes any chance of
+   the recording and the comparison disagreeing about isolation.)
+   **`case_env` is not optional for a case that ships an `env.json`.** It is
+   what applies that pin, and skipping it re-records the RECORDING BOX: on a
+   host with `vela` installed, `model-doctor-no-sdk` would be blessed with
+   `ethos_u.available: true` and would then fail on every box without it —
+   the exact hole tan-cli#253 closed. Assembling the environment by hand
+   instead of calling `case_env` has the same effect.
 2. Copy the printed envelope into `expected.json`, converting any `\` path
    separator to `/` (Windows only — Unix output is already normalized).
 3. Update `expected.exit` if the exit code changed.

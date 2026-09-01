@@ -274,8 +274,20 @@ def case_env(case_dir, work_dir, home_dir):
     for name, value in overrides.items():
         if value is None:
             env.pop(name, None)
-        else:
-            env[name] = str(value).replace(WORK_DIR_TOKEN, str(work_dir))
+            continue
+        # `str(value)` instead would quietly accept every other JSON scalar and
+        # render it Python-side: `{"FOO": true}` becomes `FOO=True`, `{"FOO": 1}`
+        # becomes `FOO=1`, and `{"FOO": []}` becomes `FOO=[]` -- none of which is
+        # what the author meant, and all of which would be spelled that way in a
+        # golden nobody would think to question. A pin nobody can misread by
+        # accident is the whole point of this file.
+        if not isinstance(value, str):
+            raise AssertionError(
+                f"{case_dir.name}/{CASE_ENV}: {name!r} is {type(value).__name__}, not a "
+                "string or null -- an environment variable is text; write the value you "
+                "mean (`\"1\"`, `\"true\"`) or `null` to unset"
+            )
+        env[name] = value.replace(WORK_DIR_TOKEN, str(work_dir))
     return env
 
 
@@ -407,6 +419,18 @@ def test_case_env_refuses_a_case_that_re_pins_a_harness_owned_variable(tmp_path)
         json.dumps({"HOME": "/tmp/mine", "PATH": WORK_DIR_TOKEN}), encoding="utf-8"
     )
     with pytest.raises(AssertionError, match=r"re-pins harness-owned variable\(s\) \['HOME'\]"):
+        case_env(case_dir, tmp_path / "work", tmp_path / "home")
+
+
+def test_case_env_refuses_a_non_string_value(tmp_path):
+    """`str(value)` would have rendered `true` as the literal `True` and `1` as
+    `1`, so a typo'd pin would silently become a real (wrong) variable rather
+    than a failure -- and would then be spelled that way in a committed golden
+    nobody would think to question."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / CASE_ENV).write_text(json.dumps({"ALP_VELA_CONFIG": True}), encoding="utf-8")
+    with pytest.raises(AssertionError, match="is bool, not a string or null"):
         case_env(case_dir, tmp_path / "work", tmp_path / "home")
 
 

@@ -64,8 +64,14 @@ this file:
                    ('drpai', False, None), ('deepx_dxm1', True, None)]
                   | optional: [('ethos_u', True)]
 
-Three flips against the golden. With `env.json` applied, all six model cases
-pass on that same polluted host.
+Three flips against the golden -- and that UNDERCOUNTS by one. `drpai` held at
+`False` here only because the `ALP_DRPAI_TVM_HOME` used for the measurement had
+no `tutorials/compile_onnx_model_quant.py` under it; `_drpai_status`
+(`model_cmd.py`) reports `True` once that script is present and a `python3` is
+on PATH, which is the state a real DRP-AI TVM install is in. So FOUR of the
+five reported rows are host-dependent, not three (measured independently in
+review). With `env.json` applied, all six model cases pass on that same
+polluted host.
 
 The environment is PINNED rather than the rows NORMALISED, deliberately:
 `normalise()` is scoped to `PATH_KEYS` for the reason its own docstring gives
@@ -78,7 +84,18 @@ nothing about the payload it was written for.
 holds only this fixture's copied inputs -- i.e. nothing) rather than to `""`.
 Both make `shutil.which` answer `None`, but an empty `PATH` also strips the
 launcher's own search path on a Windows runner, and a harness that cannot spawn
-the child would report a contract failure it never measured. The three
-environment variables are UNSET (`null`), which is what their absent state
-actually is -- setting them to `""` would take a different branch in
-`_vela_vendor_config_status`.
+the child would report a contract failure it never measured.
+
+The three environment variables are UNSET (`null`) rather than set to `""`.
+NOT because the two differ to the code: every probe that reads them tests
+FALSINESS, not presence -- `_vela_vendor_config_status`'s `if not raw:`,
+`_vendor_config_path`'s `if not raw:` (`tan/model/adapters/ethos_u.py`),
+`_tvm_home`'s `if root and ...` (`tan/model/adapters/drpai.py`) and
+`_deepx_dxm1_status`'s `if sdk_home and ...` -- so `""` and unset take the
+IDENTICAL branch today. `null` is chosen because it is the state it claims to
+be: this case describes a host on which the vendor toolchains are not
+installed, and on such a host those variables are absent, not empty. Pinning
+`""` instead would make the golden depend on all four probes CONTINUING to
+treat empty as absent -- a falsiness check tightened to `is None` in any one of
+them would flip a row here with nothing in the fixture explaining why it ever
+relied on that.
