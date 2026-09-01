@@ -466,7 +466,7 @@ def test_a_partial_pin_set_is_refused_even_when_the_other_branch_diverged(tmp_pa
     )
 
 
-def test_the_fetch_retries_a_transient_while_a_404_still_fails_fast(tmp_path):
+def test_both_fetches_carry_the_retry_flags_and_a_404_is_still_fatal(tmp_path):
     """PR #1088 review, the retry judgement call.
 
     Fatal-on-failure is right for a 404 or a renamed constant (real signal),
@@ -475,6 +475,23 @@ def test_the_fetch_retries_a_transient_while_a_404_still_fails_fast(tmp_path):
     the number of fetches that can trip it. `--retry 3 --retry-connrefused`
     splits those cases the way curl already splits them: transient failures
     (connection errors, 408/429/5xx) are retried, a 404 is not.
+
+    NAMED FOR WHAT IT CHECKS. This test asserts the flags reach both fetches
+    and that the 404 path stays fatal; it does NOT serve a transient, because
+    retry-on-5xx-but-not-on-404 is curl's contract, not this workflow's, and
+    stubbing it here would only re-assert the stub. That contract was measured
+    directly during the #1088 review against a request-counting local server,
+    on curl 8.5.0 -- the ubuntu-24.04 runner's version -- with these exact
+    flags:
+
+        HTTP 404: exit=22  attempts=1  elapsed=0.0s   <- NOT retried
+        HTTP 503: exit=22  attempts=4  elapsed=3.0s
+        HTTP 429: exit=22  attempts=4  elapsed=3.0s
+        HTTP 408: exit=22  attempts=4  elapsed=3.0s
+        HTTP 200: exit= 0  attempts=1  elapsed=0.0s
+
+    An earlier name promised the transient behaviour this body does not
+    exercise; renamed rather than left overclaiming.
     """
     proc, _ = _run_resolve(tmp_path, latest_tan="v0.6.0", dev="0.6.0", main="0.6.0")
     assert proc.returncode == 0, proc.stdout + proc.stderr
