@@ -54,6 +54,13 @@ _COV_KEYS = {"backend", "accel_config", "status", "reason"}
 # set itself had already drifted out of sync with a live, default-registered
 # adapter, and an unenforced constant cannot be wrong loudly -- it silently
 # stopped meaning what its own comment claimed.
+#
+# The authoritative ACCEPTOR of these six strings is alp-sdk's own
+# `src/backends/inference/alp_model_select.c` `_fmt_enum()` -- this set is
+# duplicated truth across two repos with no parity gate between them. If
+# alp-sdk's reader ever adds or drops a case, this set has to move to match
+# it (not the other way around): `_fmt_enum()` runs on real hardware, this
+# set only decides what `tan` will hand it.
 VALID_BLOB_FORMATS = frozenset({"vela_tflite", "tflite", "drpai_dir", "dxnn", "onnx", "executorch"})
 
 
@@ -180,13 +187,45 @@ def _check_element_types(value: list, expected: type | tuple[type, ...], type_de
         _check_type(elem, expected, type_desc, f"element {i}", context)
 
 
+def _check_schema_version(d: dict) -> None:
+    """Both `from_json` and `from_cbor` route through `from_dict` (tan-cli#1039)
+    -- this check is therefore written ONCE and enforced on both reader
+    paths, rather than living only in the JSON-era code `from_dict` used to
+    be (`from_cbor` built a `Manifest` directly and never called `from_dict`
+    at all, so a future manifest version read by an older `tan` over CBOR --
+    the PRODUCTION reader path for `.alpmodel` packages -- was silently
+    parsed as v1 instead of refused).
+
+    `type(v) is not int`, NOT `isinstance` (tan-cli#1064): `bool` is an
+    `int` subclass and `True == 1`, so the bare comparison accepted `v=True`
+    as v1 -- and float `1.0` too. This is the one comparison in this module
+    that reads a decoded value without routing through
+    `_required_field`/`_check_type`, so it restates their `bool` rule in its
+    own terms rather than inheriting it. A future manifest version written
+    as `1.0` or `True` is a manifest this reader does not understand, and
+    must be refused as loudly as `v=2` already was."""
+    v = d.get("v", MANIFEST_SCHEMA_VERSION)
+    if type(v) is not int or v != MANIFEST_SCHEMA_VERSION:
+        raise ValueError(f"unsupported manifest version {v!r}; expected {MANIFEST_SCHEMA_VERSION}")
+
+
 def _check_blob_formats(targets: list["Target"]) -> None:
     """`_TARGET_TYPES["blob_format"]` (used by `_check_element_fields` while
     decoding `targets`) only confirms each target's `blob_format` is a `str`
     -- it says nothing about WHICH string. `VALID_BLOB_FORMATS` was a real
     constant instead of a comment for exactly the reason this function now
-    exists: so a new backend cannot silently invent a format string no reader
-    has a decoder for (tan-cli#1074).
+    exists: an unlisted `blob_format` is now rejected ON DECODE (tan-cli#1074).
+
+    This is a READ-side guard only, not a write-side one -- `build.py`'s
+    `Blob(format=...)` construction never consults `VALID_BLOB_FORMATS` at
+    all, so a new adapter can still WRITE an unlisted format; it can no
+    longer do so silently, because the package this function's caller
+    guards is the same one every reader -- `tan model check`, flash, deploy
+    -- decodes. `python/tests/gates/test_blob_format_producers_stay_in_valid_blob_formats.py`
+    is the write-side half: it walks the adapter/fixture SOURCE for every
+    literal `blob_format` a producer emits and fails if one is missing from
+    this set, which is what actually keeps a new backend from shipping
+    silently -- this function alone only refuses to read the result back.
 
     Called from `from_dict` once every target is already a `Target`
     instance, rather than threaded through `_check_element_fields` as a
@@ -459,26 +498,7 @@ class Manifest:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Manifest":
-        # Both `from_json` and `from_cbor` route through here (tan-cli#1039)
-        # -- the version check and the guarded nested-list decode below are
-        # therefore each written ONCE and enforced on both reader paths,
-        # rather than the version check living only in the JSON-era code
-        # this method used to be (`from_cbor` built a `Manifest` directly
-        # and never called this method at all, so a future manifest version
-        # read by an older `tan` over CBOR -- the PRODUCTION reader path for
-        # `.alpmodel` packages -- was silently parsed as v1 instead of
-        # refused).
-        v = d.get("v", MANIFEST_SCHEMA_VERSION)
-        # `type(v) is not int`, NOT `isinstance` (tan-cli#1064): `bool` is an
-        # `int` subclass and `True == 1`, so the bare comparison accepted
-        # `v=True` as v1 -- and float `1.0` too. This is the one comparison in
-        # this module that reads a decoded value without routing through
-        # `_required_field`/`_check_type`, so it restates their `bool` rule in
-        # its own terms rather than inheriting it. A future manifest version
-        # written as `1.0` or `True` is a manifest this reader does not
-        # understand, and must be refused as loudly as `v=2` already was.
-        if type(v) is not int or v != MANIFEST_SCHEMA_VERSION:
-            raise ValueError(f"unsupported manifest version {v!r}; expected {MANIFEST_SCHEMA_VERSION}")
+        _check_schema_version(d)
         # `name`/`src_sha` were still bare subscripts here even after
         # `from_json`/`from_cbor`'s own document-level + field-level guards
         # (tan-cli#1074): a `from_dict` mapping missing either key raised a
@@ -492,20 +512,27 @@ class Manifest:
         # is therefore `bytes`, matching what both callers, and the direct
         # round-trip caller in `tests/model/test_manifest.py`, already hand
         # it.
+        # Computed as locals, in the SAME left-to-right order the original
+        # `cls(...)` keyword-argument list used (name, src_sha, inputs,
+        # outputs, targets, coverage) -- `targets` needs to exist as a local
+        # before `_check_blob_formats` can run on it, but that must not
+        # change WHICH error a malformed document reports first: a manifest
+        # missing `name` AND carrying a bad target still reports the
+        # missing `name`, the document's own required field, ahead of a
+        # nested element's (PR #1098 review nit).
+        name = _required_field(d, "name", str, "a string")
+        src_sha = _required_field(d, "src_sha", bytes, "a bytes object")
+        inputs = _decode_list_field(d, "inputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor, _TENSOR_TYPES,
+                                     element_types=_TENSOR_ELEMENT_TYPES)
+        outputs = _decode_list_field(d, "outputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor, _TENSOR_TYPES,
+                                      element_types=_TENSOR_ELEMENT_TYPES)
         targets = _decode_list_field(d, "targets", _TARGET_KEYS, _TARGET_REQUIRED, Target, _TARGET_TYPES,
                                       nested_types={"requires": _REQUIRES_TYPES},
                                       element_types=_TARGET_ELEMENT_TYPES)
         _check_blob_formats(targets)      # tan-cli#1074: reject an unlisted blob_format
-        return cls(
-            name=_required_field(d, "name", str, "a string"),
-            src_sha=_required_field(d, "src_sha", bytes, "a bytes object"),
-            inputs=_decode_list_field(d, "inputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor, _TENSOR_TYPES,
-                                       element_types=_TENSOR_ELEMENT_TYPES),
-            outputs=_decode_list_field(d, "outputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor, _TENSOR_TYPES,
-                                        element_types=_TENSOR_ELEMENT_TYPES),
-            targets=targets,
-            coverage=_decode_list_field(d, "coverage", _COV_KEYS, _COV_KEYS, Coverage, _COVERAGE_TYPES),
-        )
+        coverage = _decode_list_field(d, "coverage", _COV_KEYS, _COV_KEYS, Coverage, _COVERAGE_TYPES)
+        return cls(name=name, src_sha=src_sha, inputs=inputs, outputs=outputs,
+                   targets=targets, coverage=coverage)
 
     def to_json(self) -> str:
         return _json.dumps(_json_default(self.to_dict()), indent=2)

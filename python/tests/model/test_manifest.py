@@ -136,6 +136,18 @@ def test_unknown_blob_format_is_rejected_with_the_valid_set_named():
         Manifest.from_dict(d)
 
 
+def test_missing_name_is_reported_ahead_of_a_bad_nested_target():
+    # PR #1098 review nit: from_dict computes name/src_sha as locals BEFORE
+    # targets (matching the original cls(...) keyword-argument order), so a
+    # document missing a document-level required field still reports THAT,
+    # not a nested target's blob_format -- even when both are wrong at once.
+    d = _sample().to_dict()
+    del d["name"]
+    d["targets"][0]["blob_format"] = "vela_tflite_v2"
+    with pytest.raises(ValueError, match=r"missing required field 'name'"):
+        Manifest.from_dict(d)
+
+
 @pytest.mark.parametrize("blob_format", sorted(manifest.VALID_BLOB_FORMATS))
 def test_every_valid_blob_format_round_trips_through_dict_and_cbor(blob_format):
     # Acceptance bar for tan-cli#1074 part 1: enforcing membership must not
