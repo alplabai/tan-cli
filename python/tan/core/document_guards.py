@@ -211,18 +211,24 @@ class DocumentGuards:
         """`metadata/templates/catalog-v1.json`, decoded and known to be a
         JSON object -- the read BOTH catalog readers do.
 
-        `except OSError`, not a pre-flight `is_file()`, so a
-        present-but-unreadable path (a directory, a permissions error) is
-        named too, not only a missing one. `json.JSONDecodeError` is a
-        `ValueError`, so an `except TemplateError` never caught it and a
-        half-written catalog reached the user as a traceback.
+        `except (OSError, UnicodeDecodeError)`, not a pre-flight `is_file()`,
+        so a present-but-unreadable path (a directory, a permissions error)
+        is named too, not only a missing one. `UnicodeDecodeError` is a
+        `ValueError`, NOT an `OSError` -- catching only `OSError` (tan-cli#1096
+        review) let a non-UTF-8 catalog escape `unsupported_som`'s own
+        "Never raises" contract and `_plan_from_topology`'s two handlers
+        alike, straight past `except MalformedCatalogError`, the same
+        `text=True`-decode trap `error_catalog.py`/`scaffold.py` already
+        guard against. `json.JSONDecodeError` is a `ValueError` too, so an
+        `except TemplateError` never caught it and a half-written catalog
+        reached the user as a traceback.
         """
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise self.error(
                 f"cannot read template catalog at {path}: "
-                f"{exc.strerror or exc}") from exc
+                f"{getattr(exc, 'strerror', None) or exc}") from exc
         try:
             doc = json.loads(text)
         except json.JSONDecodeError as exc:

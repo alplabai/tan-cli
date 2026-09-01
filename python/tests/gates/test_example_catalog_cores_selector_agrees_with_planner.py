@@ -339,6 +339,7 @@ def test_both_selectors_are_bound_to_the_same_register_objects():
         assert getattr(type(tmpl._GUARDS), name) is getattr(DocumentGuards, name)
         assert getattr(type(ec._GUARDS), name) is getattr(DocumentGuards, name)
 
+    assert tmpl._require_mapping_doc.__func__ is DocumentGuards.require_mapping_doc
     assert tmpl._require_field.__func__ is DocumentGuards.require_field
     assert tmpl._require_key.__func__ is DocumentGuards.require_key
     assert tmpl._catalog_templates.__func__ is DocumentGuards.catalog_templates

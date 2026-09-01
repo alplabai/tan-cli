@@ -170,6 +170,22 @@ def test_a_catalog_that_is_not_valid_json_is_curated_not_a_decodeerror(tmp_path)
         f"malformed template catalog at {_catalog_path(root)}: not valid JSON (")
 
 
+def test_a_non_utf8_catalog_is_curated_not_a_unicodedecodeerror(tmp_path):
+    """tan-cli#1096 review (BLOCKER): `read_catalog_document` caught
+    `except OSError` only, and `UnicodeDecodeError` is a `ValueError`, NOT an
+    `OSError` -- a byte a catalog author never intended (a stray `0xff`, a
+    Windows-editor mis-save) escaped `find_example_by_cores` as a raw
+    traceback instead of the same curated `MalformedCatalogError` every other
+    unreadable-document row on this page gets."""
+    root = _tree(tmp_path, None)
+    _catalog_path(root).write_bytes(b"\xff\xfe not valid utf-8")
+    with pytest.raises(ec.MalformedCatalogError) as exc:
+        ec.find_example_by_cores(root, _CORES)
+    assert str(exc.value).startswith(
+        f"cannot read template catalog at {_catalog_path(root)}: ")
+    assert "codec can't decode" in str(exc.value)
+
+
 @pytest.mark.parametrize("text,kind", [("[1, 2]", "list"), ('"nope"', "str"),
                                        ("3", "int"), ("null", "NoneType")])
 def test_a_nonobject_catalog_raises_a_curated_error(tmp_path, text, kind):
@@ -409,6 +425,21 @@ def test_unsupported_som_no_longer_raises_on_a_nonmapping_supported(tmp_path):
     """dev: `AttributeError: 'int' object has no attribute 'get'`, from
     `(record.get("supported") or {}).get("som_skus")`."""
     root = _one(tmp_path, supported=3)
+    assert ec.unsupported_som(root, _SRC, "E1M-OTHER") is None
+
+
+def test_unsupported_som_no_longer_raises_on_a_non_utf8_catalog(tmp_path):
+    """tan-cli#1096 review (BLOCKER), the exact case measured end to end
+    against `tan init --from-example`: a catalog with one non-UTF-8 byte
+    raised `UnicodeDecodeError` straight through `read_catalog_document`
+    (only `OSError` was caught there), past this function's own
+    `except MalformedCatalogError`, out of a function whose docstring
+    promises "a scaffold must not fail because a catalog could not be
+    read" -- `init_cmd.py` called it bare, so the raw traceback surfaced as
+    `init.internal-failure` instead of the silent `None` every other
+    unreadable-catalog row in this section already gets."""
+    root = _tree(tmp_path, None)
+    _catalog_path(root).write_bytes(b"\xff\xfe not valid utf-8")
     assert ec.unsupported_som(root, _SRC, "E1M-OTHER") is None
 
 
