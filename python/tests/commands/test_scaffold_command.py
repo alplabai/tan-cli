@@ -476,6 +476,12 @@ def test_project_resolution_finds_the_board_yaml(tmp_path):
 
     assert env["project"]["boardYaml"] == str(proj / "board.yaml")
     assert board_line(proj, "probesens") == "// Board context: E1M-AEN801 / <unset>"
+    # tan-cli#1031, found on windows-latest: `root` and `boardYaml` must be ONE
+    # spelling of one directory. `str(Path)` is host-native on both sides of
+    # the assertion above, so this holds without a `\`/`/` fold -- and this
+    # line states the invariant directly, host-independently, in case a future
+    # change makes the two literals agree for the wrong reason.
+    assert env["project"]["boardYaml"].startswith(env["project"]["root"])
 
 
 def test_an_explicit_board_yaml_overrides_project_resolution(tmp_path):

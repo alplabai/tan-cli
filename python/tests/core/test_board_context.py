@@ -21,7 +21,10 @@ below:
 """
 from __future__ import annotations
 
+import ntpath
+import posixpath
 import sys
+from pathlib import PureWindowsPath
 
 import pytest
 
@@ -79,6 +82,105 @@ def test_a_relative_board_yaml_flag_joins_onto_the_root():
 def test_a_root_that_already_ends_in_a_separator_does_not_double_it():
     """A drive root (`C:/`) would otherwise emit `C://board.yaml`."""
     assert resolve_board_path("C:/", None) == ("C:/", "C:/board.yaml")
+    assert resolve_board_path("C:\\", None) == ("C:\\", "C:\\board.yaml")
+
+
+# ---------------------------------------------------------------------------
+# ... and the separator follows the ROOT (tan-cli#1031, found on windows-latest)
+# ---------------------------------------------------------------------------
+#
+# WHY THESE RUN ANYWHERE. `resolve_board_path` picks its separator from the
+# root STRING, never from `os.sep`, so a Windows-spelled root exercises the
+# Windows branch identically on Linux -- these are real executions of the
+# shipped code path, not a simulation. What CANNOT be reached from Linux is
+# `os.path.isabs`, which is host-aware by design (whether `C:\x\y` is
+# absolute genuinely IS a host question); the flag-override tests above stay
+# on host-absolute inputs for that reason.
+#
+# THE INVARIANT: `boardYaml == root + <sep> + <leaf>`, in the root's own
+# spelling. Every other reporter of this pair already satisfies it --
+# `test_build_command.py:1182`, `test_presets_command.py:702` and
+# `test_inspect_command.py:163` each assert `f"{root}/board.yaml"`, reading
+# `/` only because their root is posix-normalised upstream. This resolver
+# reports the root the caller TYPED, so its separator has to follow.
+
+
+def test_a_windows_root_joins_with_a_backslash_not_a_mixed_path():
+    """The CI failure, reduced. A hardcoded `/` answered the MIXED
+    `C:\\w\\proj/board.yaml` for a root reported as `C:\\w\\proj` --
+    two spellings of one directory in one envelope. `ntpath.join` is the
+    oracle here, not a hand-typed literal."""
+    root, board = resolve_board_path("C:\\w\\proj", None)
+    assert (root, board) == ("C:\\w\\proj", "C:\\w\\proj\\board.yaml")
+    assert board == ntpath.join(root, "board.yaml")
+    assert "/" not in board, "a native root must not produce a mixed path"
+
+
+def test_a_relative_windows_root_joins_with_a_backslash_too():
+    """Not only absolute roots: `--project sub\\p` is reported verbatim, so
+    its board path has to be spelled the same way."""
+    root, board = resolve_board_path("sub\\p", None)
+    assert board == ntpath.join(root, "board.yaml") == "sub\\p\\board.yaml"
+
+
+def test_a_windows_root_and_a_relative_board_yaml_flag_agree_too():
+    root, board = resolve_board_path("C:\\w\\proj", "alt.yaml")
+    assert board == ntpath.join(root, "alt.yaml")
+
+
+def test_a_posix_root_still_joins_with_a_forward_slash():
+    """`posixpath.join` is the oracle on this side -- the fix must be a
+    complete no-op for every posix-spelled root, which is every root the
+    committed conformance goldens and the whole Linux/macOS surface use."""
+    root, board = resolve_board_path("/w/proj", None)
+    assert board == posixpath.join(root, "board.yaml") == "/w/proj/board.yaml"
+
+
+def test_a_separatorless_root_keeps_the_forward_slash_on_every_platform():
+    """`"."` and a bare name carry no separator to follow, so they keep `/`
+    and stay byte-identical across hosts. Deliberately NOT `ntpath.join`,
+    which would answer `.\\board.yaml`: the conformance goldens pin
+    `"./board.yaml"`, and a platform-identical handshake is worth more here
+    than matching a join function on a root that has nothing to match."""
+    assert resolve_board_path(".", None)[1] == "./board.yaml"
+    assert resolve_board_path("proj", None)[1] == "proj/board.yaml"
+    assert ntpath.join(".", "board.yaml") == ".\\board.yaml"  # what we do NOT do
+
+
+def test_a_caller_mixed_root_is_left_alone_and_not_made_worse():
+    """A root the caller spelled with both separators is their own mix; `/`
+    wins so the result is never MORE mixed than the input was."""
+    assert resolve_board_path("C:/w\\proj", None)[1] == "C:/w\\proj/board.yaml"
+
+
+def test_the_end_to_end_assertion_holds_under_windows_path_semantics():
+    """`tests/commands/test_scaffold_command.py` asserts the envelope equals
+    `str(proj / "board.yaml")`, where `proj` is a `tmp_path`. This is the
+    strongest proof available from a Linux box that the assertion is right on
+    Windows too: under `PureWindowsPath`, `str(proj / leaf)` IS
+    `ntpath.join(root, leaf)`, which is exactly what this resolver answers for
+    a natively spelled root. Before the fix the resolver answered
+    `C:\\w\\proj/board.yaml` and that equality failed -- which is the CI
+    failure, reproduced here without a Windows runner."""
+    root = "C:\\Users\\runner\\AppData\\Local\\Temp\\pytest-0\\proj"
+    expected = str(PureWindowsPath(root) / "board.yaml")
+    assert expected == ntpath.join(root, "board.yaml")
+    assert resolve_board_path(root, None)[1] == expected
+
+
+@pytest.mark.parametrize(
+    "root",
+    ["/w/proj", "C:\\w\\proj", "sub\\p", "proj", ".", "C:/", "C:\\", "C:/w/proj"],
+)
+def test_the_board_path_always_starts_with_the_reported_root(root):
+    """The invariant itself, over every root shape above: whatever `project.
+    root` says, `project.boardYaml` is that string plus one separator plus the
+    leaf -- so the two can never disagree about where the project is."""
+    reported_root, board = resolve_board_path(root, None)
+    assert reported_root == root
+    assert board.startswith(root)
+    tail = board[len(root):]
+    assert tail in ("board.yaml", "/board.yaml", "\\board.yaml"), tail
 
 
 # ---------------------------------------------------------------------------

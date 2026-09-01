@@ -86,6 +86,41 @@ Two halves of the same question, and both had a copy-per-command problem:
   alp-sdk-vscode generator's, kept verbatim so a module scaffolded from the
   extension and one scaffolded by `tan` carry the same bytes.
 
+**One spelling per envelope: the separator follows the ROOT** (tan-cli#1031,
+found by CI on `windows-latest`; this box is Linux and cannot reproduce it).
+[`resolve_board_path`] used to join the leaf with a hardcoded `/`, which is
+right only while the root is posix-spelled. Given `--project C:\\w\\proj`
+it answered the MIXED `C:\\w\\proj/board.yaml` while `project.root` stayed
+`C:\\w\\proj` -- one envelope carrying two spellings of one directory, and
+`C:\\w\\proj/board.yaml` is a spelling nothing contracts for and nobody
+asked for. `tan validate` had emitted it since long before `scaffold` existed;
+`scaffold`'s tests are simply the first to pass an absolute `--project`.
+
+The invariant every OTHER reporter of this pair already satisfies is
+`project.boardYaml == project.root + <sep> + <leaf>` -- asserted verbatim as
+`f"{root}/board.yaml"` by `test_build_command.py:1182`,
+`test_presets_command.py:702` and `test_inspect_command.py:163`. Those three
+read `/` because THEIR root is posix-normalised upstream
+(`build_output.to_posix`, `presets_cmd._posix`, `inspect_cmd._abs_posix`), NOT
+because the leaf is posix by contract. So the fix is to derive the separator
+from the root, not to posix the leaf.
+
+`root` itself is deliberately NOT normalised here: `validate` and `scaffold`
+report the string the caller TYPED (`generate` does the same), and re-spelling
+it would be a behaviour change to a shipped command that no defect asks for.
+A root with no separator at all (`"."`, `"proj"`) keeps `/` on every platform,
+so `"./board.yaml"` -- what every committed conformance golden captures --
+stays byte-identical across hosts. A root the caller spelled with BOTH
+separators is left alone, `/` winning, so the answer is never more mixed than
+the input.
+
+The choice reads the root STRING, never `os.sep`, so the Windows branch is
+fully exercised by a Linux run: `tests/core/test_board_context.py` drives it
+against `ntpath.join`/`posixpath.join` as oracles. The Windows behaviour here
+is therefore reasoned and unit-tested, not executed on Windows. Only
+`os.path.isabs` stays host-aware, which is correct -- whether `C:\\x\\y` is
+absolute genuinely IS a host question.
+
 **What a reported path does and does not promise.** `tan.envelope.Project.
 resolved` is the seam that turns a resolved path into `project.boardYaml`, and
 it gates on `os.path.exists`, which is true for a DIRECTORY -- so a directory
@@ -170,6 +205,10 @@ def resolve_board_path(project: str | None, board_yaml: str | None) -> tuple[str
     would strip the path out of the very message that names it.
     `tan.envelope.Project.resolved` is the seam that checks -- its own
     docstring documents that split.
+
+    The separator follows the ROOT's own spelling -- see "One spelling per
+    envelope" in the module docstring for why, and for what the alternatives
+    cost.
     """
     root = project if project else "."
     if board_yaml and os.path.isabs(board_yaml):
@@ -178,7 +217,12 @@ def resolve_board_path(project: str | None, board_yaml: str | None) -> tuple[str
     # Joined as STRINGS, not via pathlib: `Path(".") / "board.yaml"` normalises
     # to `board.yaml`, but Rust's `Path::new(".").join("board.yaml")` keeps the
     # `./`, and the conformance fixtures pin `"./board.yaml"`.
-    sep = "" if root.endswith(("/", "\\")) else "/"
+    if root.endswith(("/", "\\")):
+        sep = ""
+    elif "\\" in root and "/" not in root:
+        sep = "\\"
+    else:
+        sep = "/"
     return root, f"{root}{sep}{leaf}"
 
 
