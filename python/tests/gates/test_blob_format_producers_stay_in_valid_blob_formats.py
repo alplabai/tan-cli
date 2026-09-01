@@ -56,11 +56,27 @@ dynamic attribute read, not a string literal) and so is invisible to the
 since `blob.format` is already covered by tracing IT back to whichever
 adapter constructed the `Blob`.
 
-Only a literal `ast.Constant` string is collected; anything computed
-(f-string, variable, attribute access) is silently skipped rather than
-flagged, because a non-literal producer cannot be reconciled by static
-inspection at all -- that is a limit of this gate, not a gap it claims to
-close."""
+Both producer shapes are resolved through the SAME two steps, deliberately
+symmetric (PR #1098 review round 2 found the walk asymmetric: the `Target`
+branch already read a positional argument, the `Blob` branch did not):
+
+* the CALLEE may be a bare name (`Blob(...)`) or an attribute-qualified one
+  (`adapters.Blob(...)`, `self._blob_cls(...)`) -- only the callee's own
+  `.attr`/`.id` is compared, so an import alias or a qualified reference is
+  not a way to hide a literal from this walk;
+* the FORMAT argument may be passed by keyword (`format=`/`blob_format=`) or
+  positionally, in the field's own dataclass slot (`Blob`'s `format` is
+  field 0, `Target`'s `blob_format` is field 2) -- matching how a real
+  `Target(...)` call in this same file already had to be read positionally.
+
+If that argument is found but is NOT a literal string -- computed
+(f-string, variable, attribute access, `**`-splat) -- this is a HARD
+FAILURE, not a silent skip: a producer this gate cannot statically verify
+is exactly as unsafe as one it never looked at, and a skip that reads as
+"nothing to report" is the same false-confidence shape as the unenforced
+`VALID_BLOB_FORMATS` this whole file exists to stop recurring. Extend this
+gate (teach it the new shape) or make the producer's own construction a
+literal -- do not silence the failure."""
 from __future__ import annotations
 import ast
 from pathlib import Path
@@ -77,29 +93,68 @@ def _string_constant(node: ast.expr) -> str | None:
     return None
 
 
+def _callee_name(func: ast.expr) -> str | None:
+    """Resolves a call's callee to its bare name for both an ordinary
+    `Blob(...)` (an `ast.Name`) and an attribute-qualified
+    `adapters.Blob(...)` (an `ast.Attribute`) -- PR #1098 review round 2
+    found the walk below dropped the second shape entirely by requiring
+    `isinstance(node.func, ast.Name)`."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _format_argument(node: ast.Call, keyword: str, position: int) -> ast.expr | None:
+    """The format-carrying argument expression for one `Blob`/`Target` call,
+    by keyword first (the shape every current producer uses), else the same
+    field's own positional slot (`Blob`'s `format` is dataclass field 0,
+    `Target`'s `blob_format` is field 2) -- the `Target` branch already had
+    to read positionally; the `Blob` branch did not, which is exactly the
+    asymmetry PR #1098 review round 2 caught (`Blob("positional_fmt", b"")`
+    is an ordinary construction, not an exotic one)."""
+    for kw in node.keywords:
+        if kw.arg == keyword:
+            return kw.value
+    if len(node.args) > position:
+        return node.args[position]
+    return None
+
+
 def _literal_blob_formats(path: Path) -> list[tuple[str, int]]:
     """Every literal `blob_format` string `path` constructs, as
-    `(value, lineno)` pairs -- see the two producer shapes in the module
-    docstring above."""
+    `(value, lineno)` pairs -- see the module docstring above for the two
+    producer shapes and the callee/argument resolution both go through.
+
+    Raises (does not silently skip) if a `Blob`/`Target` call supplies a
+    format argument that is present but NOT a literal string -- see the
+    module docstring's "HARD FAILURE" paragraph for why a silent skip is
+    the wrong default here."""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     found: list[tuple[str, int]] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+        if not isinstance(node, ast.Call):
             continue
-        if node.func.id == "Blob":
-            for kw in node.keywords:
-                if kw.arg == "format":
-                    value = _string_constant(kw.value)
-                    if value is not None:
-                        found.append((value, node.lineno))
-        elif node.func.id == "Target":
-            value_node = next((kw.value for kw in node.keywords if kw.arg == "blob_format"), None)
-            if value_node is None and len(node.args) > 2:
-                value_node = node.args[2]
-            if value_node is not None:
-                value = _string_constant(value_node)
-                if value is not None:
-                    found.append((value, node.lineno))
+        name = _callee_name(node.func)
+        if name == "Blob":
+            arg = _format_argument(node, "format", 0)
+        elif name == "Target":
+            arg = _format_argument(node, "blob_format", 2)
+        else:
+            continue
+        if arg is None:
+            continue
+        value = _string_constant(arg)
+        if value is None:
+            raise AssertionError(
+                f"{path}:{node.lineno} constructs {name}(...) with a "
+                f"non-literal format/blob_format argument -- this gate "
+                f"cannot verify it statically. Make the argument a literal "
+                f"string, or extend this gate to resolve the new shape "
+                f"(see the module docstring's \"HARD FAILURE\" paragraph)."
+            )
+        found.append((value, node.lineno))
     return found
 
 
@@ -130,4 +185,11 @@ def test_producer_sweep_finds_the_known_producers():
     under the glob, would make `test_every_producer_literal_blob_format_is_in_valid_blob_formats`
     vacuously pass by finding nothing to check. Fails loudly instead."""
     all_found = {value for path in _producer_files() for value, _ in _literal_blob_formats(path)}
-    assert all_found == {"tflite", "vela_tflite", "drpai_dir", "dxnn", "executorch", "onnx"}
+    assert all_found == {"tflite", "vela_tflite", "drpai_dir", "dxnn", "executorch", "onnx"}, (
+        "the producer sweep found a different set of literal blob_formats than "
+        "this test pins -- if this is a LEGITIMATE new producer, add its format "
+        "to this literal set (and to VALID_BLOB_FORMATS in tan.model.manifest, "
+        "if it is not there already); if the sweep found nothing new, a producer "
+        "file was probably renamed or moved out from under _ADAPTERS_DIR/"
+        "_GEN_FIXTURE above"
+    )
