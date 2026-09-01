@@ -610,7 +610,76 @@ from tests.conftest import sdk_root
 #: Upstream commits in range touching this table's files:
 #:   - b3775381 fix(hw_info): warn at boot when the compiled SoM revision disagrees with the module's EEPROM (#1862)
 #:   - ec8be8b9 feat(dts): give the E8 low-power bank, DMA2 event router and BOD a devicetree presence (#1858)
-PINNED_SDK_COMMIT = "f1b1c9df0edd23988961150439863e70e5d99211"  # alp-sdk, 78 commits past v0.16.0, untagged -- see above
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `f1b1c9df` -> `0914da38`
+#: (tan-cli#1103, auditing `auto/planner-resync`'s machine proposal, PR #1103,
+#: against a real `0914da38` checkout). Three upstream commits touch this
+#: table's files in the range:
+#:
+#:   - `1d695037` fix(orchestrate): refuse an app-less baremetal core at
+#:     validate, not at build (#1897) -- touches `validate.py` ONLY, and IS
+#:     behavioural: `_enforce_loader_rules`'s `os: baremetal` arm now refuses
+#:     a slice whose (inherited or explicit) `app:` is one of the two stock
+#:     tokens (`alp-stock-shim`/`alp-image-edge`) instead of letting it
+#:     reach the executor as a real, wrong-target build command. Applied
+#:     cleanly on the tan side too (+48/-0, same shape); the extracted
+#:     `_enforce_baremetal_app_rule` sibling (split for the 50-line
+#:     function-count budget, tan-cli#1103) and
+#:     `tests/planner/test_baremetal_plan_emit_coverage.py`'s new
+#:     `test_a_baremetal_core_carrying_a_stock_token_is_refused_not_built`
+#:     port the upstream `tests/scripts/test_orchestrate_baremetal_slice.py`
+#:     coverage this commit shipped alongside itself.
+#:   - `f5c7ff5b` fix(orchestrate): an unresolved cores[].type yields
+#:     unresolved, not a crash and not a guess (#1852) (#1888) -- touches
+#:     `kconfig.py` + `topology.py`. This is alp-sdk BACK-PORTING tan's own
+#:     fix: the diff's own comments cite `tan-cli#914`/`#957`/`#962` by
+#:     name. Confirmed, not assumed -- all five upstream `isinstance`-guard
+#:     sites already have a behaviourally-equivalent guard on the tan side,
+#:     just relocated by tan-cli#870's `tan.core.os_class` extraction:
+#:
+#:       * `topology.py::_default_os_from_core_type` <->
+#:         `tan.core.os_class.default_os_from_core_type` -- same
+#:         `t = core_type.lower() if isinstance(core_type, str) else ""`.
+#:       * `topology.py::_runtime_class` <->
+#:         `tan.planner.topology._runtime_class` -- same idiom.
+#:       * `topology.py::_allowed_os_for_core` <->
+#:         `tan.core.os_class.allowed_os_for_core` -- same
+#:         `if not isinstance(core_type, str) or not core_type: return []`.
+#:       * `topology.py::core_os_topology`'s `soc_types` dict comprehension
+#:         <-> `tan.planner.topology.core_os_topology`'s `soc_types` -- same
+#:         `c["type"] if isinstance(c.get("type"), str) else ""`.
+#:       * `kconfig.py::_emit_inference`'s `vec`/`ctype` <->
+#:         `tan.planner.kconfig._emit_inference`'s `raw_vec`/`raw_type`
+#:         locals -- same `isinstance` guard.
+#:
+#:     So this half of the diff is a 3-way MERGE CONFLICT, not a judgement
+#:     call: `planner_resync.py` correctly refused to write either file
+#:     (the lines upstream edited no longer live where upstream edits them,
+#:     because tan refactored them out under #870), and nothing on the tan
+#:     side needed to change -- the equivalence above IS the audit.
+#:
+#: MEASURED, not assumed: `python scripts/capture_planner_oracle.py --sdk
+#: <checkout> --sdk-ref 0914da38ebbecac3c1546064dd506f7fafe0bfa7` produces a
+#: ZERO-file diff against the existing `tests/fixtures/planner_oracle/`
+#: fixture (99 boards, 693 emits, 1,129,537 bytes, unchanged) -- confirmed
+#: by scanning every `examples/**/board.yaml` at both `f1b1c9df` and
+#: `0914da38` for `os: baremetal`: zero hits at either ref, so #1897's new
+#: refusal has nothing in the corpus to fire on, and #1888's guards change
+#: no valid-input output. Only `PROVENANCE.txt`'s own `alp-sdk ref` line
+#: moved.
+#:
+#: The other eighteen `PINNED_HASHES` entries are unchanged in this range
+#: (only `kconfig.py`, `topology.py` and `validate.py` appear in
+#: `git diff --stat f1b1c9df..0914da38 -- scripts/alp_orchestrate/`), so
+#: nothing else is re-frozen past an unaudited delta.
+#:
+#:   scripts/alp_orchestrate/kconfig.py: 3-way conflict, resolved -- see above (inert for tan)
+#:   scripts/alp_orchestrate/topology.py: 3-way conflict, resolved -- see above (inert for tan)
+#:   scripts/alp_orchestrate/validate.py: merged (behavioural -- see above)
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 1d695037 fix(orchestrate): refuse an app-less baremetal core at validate, not at build (#1897)
+#:   - f5c7ff5b fix(orchestrate): an unresolved cores[].type yields unresolved, not a crash and not a guess (#1852) (#1888)
+PINNED_SDK_COMMIT = "0914da38ebbecac3c1546064dd506f7fafe0bfa7"  # alp-sdk, past f1b1c9df -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -652,7 +721,7 @@ PINNED_HASHES: dict[str, str] = {
     "carveout.py": "c05826e4b784965c332dc662c9aa82b993787d7ab588771c7aee5feaa93feb4e",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "8359c20bbd310749e1b21a9d837c904476bd5af5480fd9a4c211e842756837ae",
+    "kconfig.py": "897a4e86f74b2c5633d640a00968cf1feaf9ea2a733b0eea5904115d91489ecc",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
     "loader.py": "136e674d0b2594f99004d99dc0e1c9e116c477f764d759a3919668141182cffe",
@@ -665,8 +734,8 @@ PINNED_HASHES: dict[str, str] = {
     "sdk_compat.py": "db2c6658b421cf862118b468ff164cdeea36debae291af37ad6f840fe9565970",
     "secure.py": "44743b887ab8d29293469f2574b6d88e0d433c9b9ba1f1001709f51104716c0c",
     "slugs.py": "93b94c2e950f47bca303cf06894f03a3bc04b4323f7627af7c0836e7c4949355",
-    "topology.py": "da07b0af6e66f9e49f33dcb482729b2a6d210395e14990fa257dc0ee3eb7f781",
-    "validate.py": "b3aad05cb4d5a63bbe0cb96e47c4cb41ce552cc8c05dc296f4ca1099cdc48a90",
+    "topology.py": "fcd81eaaaeeb116151229ca118c2991f0befa13b4e1039d11a0ee65056eb9015",
+    "validate.py": "3a8458d1ab417559532b5dd9dce7853820482d0af42534431a970e76f1002360",
 }
 
 #: alp-sdk commit the SDK-SIDE SOURCE FILES in HAND_PORT_HASHES were last
@@ -1062,7 +1131,23 @@ PINNED_HASHES: dict[str, str] = {
 #:
 #: Upstream commits in range touching this table's files:
 #:   (none)
-HAND_PORT_PINNED_SDK_COMMIT = "f1b1c9df0edd23988961150439863e70e5d99211"  # alp-sdk, 78 commits past v0.16.0, untagged -- see above (tan-cli#996 closes tan-cli#913)
+#: AUDITED RE-SYNC (hand-port / HAND_PORT_HASHES): `f1b1c9df` -> `0914da38`
+#: (tan-cli#1103). Neither of the two range commits (`1d695037`, `f5c7ff5b`,
+#: see the `PINNED_SDK_COMMIT` paragraph above) touches any file this table
+#: pins -- `gh api repos/alplabai/alp-sdk/compare/f1b1c9df...0914da38`'s
+#: full changed-file list has no path under any of the 12 remaining
+#: `HAND_PORT_HASHES` prefixes (`scripts/gen_zephyr_board.py`,
+#: `scripts/sentinels.py`, `scripts/alp_project_loader.py`,
+#: `scripts/alp_template.py`, `scripts/alp_project_emit/*`,
+#: `scripts/alp_cli/{diagnostic_format,validator}.py`). This pin moves in
+#: lockstep with `PINNED_SDK_COMMIT` even though nothing in its own surface
+#: moved, per this table's own "moves in lockstep" rule above.
+#:
+#:   no hand-port source moved in this range; hashes unchanged
+#:
+#: Upstream commits in range touching this table's files:
+#:   (none)
+HAND_PORT_PINNED_SDK_COMMIT = "0914da38ebbecac3c1546064dd506f7fafe0bfa7"  # alp-sdk, past f1b1c9df -- see above (tan-cli#996 closes tan-cli#913)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
