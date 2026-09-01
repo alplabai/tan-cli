@@ -1,0 +1,6 @@
+{
+  "$schema": "One python/tests/** MEASUREMENT, never a ceiling (tan-cli#817). Nothing compares it to a threshold and its growth needs no --reason; the only failure it can cause is going stale, which a plain `python scripts/regen_module_size_budget.py` fixes. See `TEST_ROOT` in _module_size_budget_core.py for why this tree is observed rather than gated.",
+  "module": "tests/commands/test_support_bundle_command.py",
+  "kind": "observed",
+  "lines": 955
+}

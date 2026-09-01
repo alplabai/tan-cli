@@ -96,7 +96,8 @@ applicable".
 
 - [ ] `.github/workflows/**` changed → `zizmor` clean, and every new job carries `timeout-minutes`.
 - [ ] A module grew → `python/tests/gates/test_module_size_budget.py`. Regenerate with
-      `python/scripts/regen_module_size_budget.py --reason ...`; never hand-edit the JSON or the log.
+      `python/scripts/regen_module_size_budget.py --reason ...`; never hand-edit a record under
+      `python/tests/gates/module_size_budget.d/` or the log.
       A ratchet bump needs a reason in the PR, not just in the file.
 - [ ] Planner port → `test_planner_relocation_freshness.py`. Do NOT move
       `PINNED_SDK_COMMIT` / `HAND_PORT_PINNED_SDK_COMMIT` without a measured diff:

@@ -6,26 +6,36 @@ hand.
 
 ## Why that was a real gap, not a hypothetical one
 
-`module_size_budget.generated.json` is deliberately NOT `merge=union`'d in
-`.gitattributes` -- unioning two JSON documents that both add a trailing key
-can leave two sibling entries with no comma between them, which is invalid
-JSON. (Its former sibling `MODULE_SIZE_BUDGET_LOG.md` DID carry `merge=union`
-from tan-cli#939 through tan-cli#907, when it was retired: that file is now
-frozen, superseded by the one-file-per-entry `MODULE_SIZE_BUDGET_LOG.d/`,
-which needs no merge attribute at all.) So a real `git merge` on
-it either conflicts visibly, which a human resolves, or -- measured directly,
-a plain `git merge` of two branches editing different keys of a shared JSON
-object -- stitches both DISJOINT edits into one syntactically valid,
-semantically STALE JSON object with NO conflict marker at all. There is
+`module_size_budget.generated.json` was a single JSON object, deliberately NOT
+`merge=union`'d in `.gitattributes` -- unioning two JSON documents that both
+add a trailing key can leave two sibling entries with no comma between them,
+which is invalid JSON. (Its former sibling `MODULE_SIZE_BUDGET_LOG.md` DID
+carry `merge=union` from tan-cli#939 through tan-cli#907, when it was retired:
+that file is now frozen, superseded by the one-file-per-entry
+`MODULE_SIZE_BUDGET_LOG.d/`, which needs no merge attribute at all.) So a real
+`git merge` on it either conflicted visibly, which a human resolves, or --
+measured directly, a plain `git merge` of two branches editing different keys
+of a shared JSON object -- stitched both DISJOINT edits into one syntactically
+valid, semantically STALE JSON object with NO conflict marker at all. There is
 nothing for `test_no_conflict_markers.py` to catch and nothing for a
 conflict-resolving human to notice, because there is no conflict to resolve.
+
+tan-cli#1057 replaced that file with one record per measured module under
+`module_size_budget.d/`, which removes the COMMON case (two branches touching
+different modules now write different paths) but not this step's reason to
+exist. The silent-staleness shape survives the split: a merge that takes one
+side's edit to a module together with the other side's record for it produces
+exactly the same marker-free, semantically stale result, and only a
+re-measurement can see it. The step's `run:` line is unchanged; only its
+`name:` moved off the retired filename.
 
 The existing ratchet tests in `test_module_size_budget.py` do eventually
 catch that drift -- but as a cluster of unrelated-looking failures spread
 across several of that file's own tests, in whichever of the two CI legs
 happens to run `tests/gates`, rather than one targeted diagnostic. `--check`
 catches the SAME drift directly, in one step, with one message ("... is
-stale: ... Run `python scripts/regen_module_size_budget.py` to refresh it")
+stale: ... Run `python scripts/regen_module_size_budget.py` to refresh it"),
+naming the module whose record moved
 -- before either leg's `tests/gates` collection even starts.
 
 ## What this file pins
