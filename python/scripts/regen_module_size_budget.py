@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Regenerate `tests/gates/module_size_budget.generated.json` (tan-cli#668).
+"""Regenerate `tests/gates/module_size_budget.d/` (tan-cli#668, tan-cli#1057).
 
 `test_module_size_budget.py`'s ratchet used to be a hand-maintained Python
 dict: one entry per over-budget module, its line count, and a paragraph
@@ -11,20 +11,20 @@ shipped a red gate, because neither side's numbers describe the MERGED tree.
 
 This script is the fix: the numbers are no longer typed by hand, they are
 MEASURED, by this script, from the tree it is run against. A merge conflict on
-the generated file is resolved by throwing either side away (the content does
-not matter -- see below) and running this script again against the already-
-merged tree; the numbers it writes are correct by construction because they
-come from `ast`-walking the real merged source, not from reconciling two
-committed opinions about a tree that no longer exists.
+a record file is resolved by throwing either side away (the content does not
+matter -- see below) and running this script again against the already-merged
+tree; the numbers it writes are correct by construction because they come from
+`ast`-walking the real merged source, not from reconciling two committed
+opinions about a tree that no longer exists.
 
 Growth is still gated, on purpose (tan-cli#668's hard constraint: a padded or
 guessed value must not pass silently, and this ratchet has caught real growth
 before). A plain `regen` with no flag NEVER raises a ceiling -- it only ever
 lowers one (a module shrank, or dropped below the cap entirely) or leaves the
-file untouched. Raising one requires an explicit flag, and the two flags are
-deliberately different so the reason a number moved stays visible in the
-`git log` of this file and, as of tan-cli#907, of MODULE_SIZE_BUDGET_LOG.d/
-(one file per entry -- see that directory's README.md):
+records untouched. Raising one requires an explicit flag, and the two flags
+are deliberately different so the reason a number moved stays visible in the
+`git log` and, as of tan-cli#907, in MODULE_SIZE_BUDGET_LOG.d/ (one file per
+entry -- see that directory's README.md):
 
     --reason "text"     a DELIBERATE budget raise -- some module or function
                          genuinely grew and that growth is not being split out
@@ -53,81 +53,89 @@ Usage:
                                                                   stale, write
                                                                   nothing
 
-The file also carries an `observed_tests` section (tan-cli#817): line counts
-for `python/tests/**` over the cap. Those are a RECORD, not a budget. They are
-refreshed by every plain run above, they never require `--reason`, and they
-never write a ledger line -- growing a test file is not a ceiling raise. See
-`TEST_ROOT` in `tests/gates/_module_size_budget_core.py` for the scope
-decision and the measurements behind it.
+## Where the records live, and what is DERIVED (tan-cli#1057)
 
-Two consequences of that section being refreshed UNCONDITIONALLY, on every
-write path, worth knowing before you run this (review of #875):
+Through 2026-08-31 all of this lived in one file,
+`tests/gates/module_size_budget.generated.json`. Every branch that changed any
+tracked module rewrote it, so it conflicted on most long-lived branches -- the
+friction half of tan-cli#907, deliberately deferred there and closed here.
+
+It is now one record file per measured module under
+`tests/gates/module_size_budget.d/`, named after the module itself
+(`module_size_budget.d/tan/commands/build_cmd.py.json`) -- the same structural
+fix tan-cli#907 applied to the ledger, for the same reason: two branches that
+touch different modules are never writing the same path, so there is nothing
+to conflict over, with no merge driver needed local or GitHub-side.
+
+The issue proposed splitting per TOP-LEVEL PACKAGE and asked for a larger
+sample before committing to a schema change. Measured over 93 value-changing
+commits to the old single file (4278 commit pairs):
+
+    single file (today)                  4278/4278  = 100.0%
+    per-package (the issue's proposal)   2621/4278  =  61.3%
+    per-module, scalars still stored      958/4278  =  22.4%
+    per-module + derived scalars          553/4278  =  12.9%
+
+Per-package loses most of its value to one bucket: 69% of those commits touch
+`tan/commands/` and 58% touch more than one package at all. And 34% of them
+moved a WHOLE-TREE scalar -- which the issue's four-PR sample happened to
+find none of -- so leaving the two scalars stored anywhere shared costs 22.4%
+instead of 12.9%.
+
+So they are not stored. `function_count_budget` was always exactly a SUM over
+modules and `function_worst_budget` exactly a MAX over modules (see
+`measure_current` in `tests/gates/_module_size_budget_core.py`: `len(found)`
+and `max(span for span, _ in found)` over a list accumulated per module), so
+each record carries its own module's `long_functions` / `worst_function` and
+`MeasuredState` exposes the two whole-tree numbers as computed properties.
+The ratchet still compares whole-tree totals and still means exactly what it
+meant; there is simply no longer a stored number two branches can both write.
+
+The residual 12.9% is real and is not claimed away: two branches that both
+change the SAME module still write the same record file and still conflict.
+Nothing short of not committing the measurement at all removes that, and the
+resolution is the cheap one it has always been -- delete either side, re-run
+this script.
+
+`observed_tests` (tan-cli#817) got the same treatment, for the same measured
+reason: those entries collide by the same mechanism and are inside the sample
+above. They stay a RECORD, not a budget -- refreshed by every plain run,
+never requiring `--reason`, never writing a ledger line. The distinction used
+to be positional (a separate section of one file); it is now explicit and
+machine-checked, `"kind": "observed"` on every such record, rejected by
+`_load_records` if it disagrees with the tree the record's path sits in.
+
+Two consequences of the observed side being refreshed UNCONDITIONALLY, on
+every write path, worth knowing before you run this (review of #875):
 
 * A contributor raising a `tan/**` ceiling with `--reason` also commits
-  whatever `tests/**` drift has accumulated on `dev` since the last refresh,
-  in the same file. That is live, not hypothetical -- and it is the same
-  absolute-measurement conflict surface tan-cli#668 created this file to
-  remove. `--merge-resync` resolves it for the observed section exactly as it
-  does for the budgeted one: re-measure the merged tree and record it, no new
-  judgement call.
+  whatever `tests/**` drift has accumulated on `dev` since the last refresh.
+  As of tan-cli#1057 that lands in the drifted files' OWN records rather than
+  in the same file as the ceiling, so it no longer widens the raise's
+  conflict surface -- but it is still committed in the same PR.
 * `--check` and the pytest gate do not agree on what "stale" means, on
   purpose. `--check` compares EXACTLY and reds on a one-line drift;
-  `tests/gates/test_module_size_budget.py` tolerates `max(200, 10%)` of the
-  recorded count so an ordinary PR is not taxed, and only demands agreement
-  on WHICH files are over the cap. A tree can therefore satisfy the gate and
-  still be `--check`-stale -- do not read a green `pytest` as a green
-  `--check`.
+  `tests/gates/test_module_size_budget.py` tolerates `max(200, 10%)` of a
+  recorded `tests/**` count so an ordinary PR is not taxed, and only demands
+  agreement on WHICH files are over the cap. A tree can therefore satisfy
+  that tolerance and still be `--check`-stale -- do not read a green `pytest`
+  as a green `--check`. (The gated `tan/**` side is tighter: its function
+  facts are compared exactly by the gate too, because `--check` is a required
+  CI step and would demand the same regen anyway -- better to fail at the
+  local bar.)
 
-As of tan-cli#907, `--check` is no longer merely a local convenience: it runs
-as its own early step in both `.github/workflows/ci.yml`'s `python` job and
+As of tan-cli#907, `--check` is not merely a local convenience: it runs as
+its own early step in both `.github/workflows/ci.yml`'s `python` job and
 `.github/workflows/parity.yml`'s `seam1-plan-shape` job (the only two CI legs
-that run `tests/gates` at all). That closes a real gap, not a hypothetical
-one -- `module_size_budget.generated.json` is deliberately NOT
-`merge=union`'d (see `.gitattributes`; unioning two JSON documents that both
-add a key can leave two entries with no comma between them), so a real `git
-merge` on it either conflicts visibly or -- measured directly, `git merge`
-of two branches editing different keys of a shared JSON object -- stitches
-both edits into one syntactically valid, semantically STALE JSON object with
-no conflict marker at all. Before this step existed, that shape
-surfaced only as a cluster of unrelated-looking failures deep inside the
-pytest ratchet's own tests; `--check` now catches it directly, in one step,
-before either of those pytest runs even starts.
-
-The `--check` step above closed the "silently stale" half of tan-cli#907; it
-did nothing for the other half, measured on the same issue -- four of five
-v0.7.0-milestone PRs sampled on 2026-08-25 conflicted on
-`module_size_budget.generated.json` and/or `MODULE_SIZE_BUDGET_LOG.md`, and
-the standard resolution on the LEDGER lost a branch's own reasoned entry
-outright (tan-cli#902) because `MODULE_SIZE_BUDGET_LOG.md` was, until now, a
-SINGLE growing file every regen appended to -- so any two branches that both
-raised a ceiling wrote into the same tail region, and `.gitattributes`'
-`merge=union` mitigation (tan-cli#939) only ever helped the LOCAL `git merge`
-case: GitHub computes a PR's own mergeable status without applying custom
-merge drivers -- measured on PR #971 (tan-cli#907 comment, 2026-08-28): a
-clean local `git merge origin/dev` at that PR's exact head, GitHub itself
-polled three times over eight minutes to `CONFLICTING` every time -- so a
-union-attributed file could still show a PR as CONFLICTING in the GitHub UI
-even though a local merge would resolve it clean. As of tan-cli#907,
-`_append_log` below writes each entry as its OWN
-new file under `MODULE_SIZE_BUDGET_LOG.d/` (mirroring `changelog.d/` -- see
-that directory's own README for why one-file-per-entry removes the conflict
-class structurally rather than mitigating it after the fact: two new,
-differently-named files need no merge driver at all, local or GitHub-side).
-`MODULE_SIZE_BUDGET_LOG.md` itself is FROZEN as of this change -- its
-historical entries stay, read-only, and
-`test_module_size_budget_log_append_only.py` keeps guarding them, but
-nothing writes into it any more.
-
-The generated JSON's OWN conflict rate is a narrower, separate question this
-change deliberately leaves open. Unlike the ledger, its conflicts are not
-usually about lost reasoning (a stale sidecar is fully recoverable by
-re-running this script), and splitting it per top-level package would still
-leave `function_count_budget`/`function_worst_budget` as whole-tree
-aggregates that almost any substantive change touches -- reducing, not
-removing, the collision surface, at the cost of a gate that has to read
-several files instead of one. Deferred to tan-cli#1057, filed with the
-measurement behind that tradeoff, rather than reshuffled here alongside the
-ledger fix.
+that run `tests/gates` at all). That closed a real gap, not a hypothetical
+one -- the old single JSON file was deliberately NOT `merge=union`'d, so a
+real `git merge` on it either conflicted visibly or -- measured directly --
+stitched two disjoint edits into one syntactically valid, semantically STALE
+JSON object with no conflict marker at all. The split narrows that shape (two
+branches editing different modules now edit different files) but does not
+retire the step: the same silent-staleness is still reachable whenever a
+merge brings in a tree change without the matching record, which is every
+merge where one side edited a module the other side's records describe.
 """
 from __future__ import annotations
 
@@ -142,7 +150,7 @@ import _module_size_budget_core as core  # noqa: E402
 
 
 def _deltas(old: dict[str, int], new: dict[str, int]) -> tuple[list[str], list[str]]:
-    """(grown, shrunk-or-removed) description lines, module map only."""
+    """(grown, shrunk-or-removed) description lines, module ceilings only."""
     grown: list[str] = []
     shrunk: list[str] = []
     for name in sorted(set(old) | set(new)):
@@ -169,6 +177,35 @@ def _scalar_delta(name: str, before: int, after: int) -> tuple[list[str], list[s
     return [], []
 
 
+def _function_record_deltas(
+    old: dict[str, core.ModuleFunctions], new: dict[str, core.ModuleFunctions]
+) -> list[str]:
+    """Per-module function-fact drift, reported but deliberately NOT folded
+    into `grown`.
+
+    tan-cli#1057's meaning-preservation hinges on exactly this. The ratchet
+    has always been WHOLE-TREE: a module gaining a long function while
+    another loses one moved neither `function_count_budget` nor
+    `function_worst_budget`, and needed no `--reason`. Now that the same
+    facts are stored per module, judging growth per RECORD would silently
+    convert the whole-tree ratchet into a per-module one -- so growth is
+    still judged on the two DERIVED scalars (see `main`), and these lines are
+    the storage detail that says WHICH module moved, which the old single
+    file's `function_count_budget: 300 -> 301` never could."""
+    out: list[str] = []
+    empty = core.ModuleFunctions(count=0, worst=0)
+    for name in sorted(set(old) | set(new)):
+        before = old.get(name, empty)
+        after = new.get(name, empty)
+        if before == after:
+            continue
+        out.append(
+            f"{name}: long_functions {before.count} -> {after.count}, "
+            f"worst_function {before.worst} -> {after.worst}"
+        )
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = parser.add_mutually_exclusive_group()
@@ -176,29 +213,28 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument(
         "--merge-resync",
         action="store_true",
-        help="re-measure after resolving a conflict on the generated file",
+        help="re-measure after resolving a conflict on a record file",
     )
     parser.add_argument(
         "--check",
         action="store_true",
-        help="exit 1 if the committed file does not match a fresh measurement; write nothing",
+        help="exit 1 if the committed records do not match a fresh measurement; write nothing",
     )
     args = parser.parse_args(argv)
 
     current = core.measure_current()
     observed = core.measure_observed_tests()
-    if core.GENERATED_PATH.exists():
-        try:
-            committed = core.load_generated()
-            committed_observed = core.load_observed_tests()
-        except ValueError as err:
-            print(f"error: {err}", file=sys.stderr)
-            return 1
-    else:
-        committed = core.MeasuredState(modules={}, function_count=0, function_worst=0)
-        committed_observed = {}
+    try:
+        committed = core.load_generated()
+        committed_observed = core.load_observed_tests()
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
 
     module_grown, module_shrunk = _deltas(committed.modules, current.modules)
+    # Judged on the DERIVED whole-tree numbers on both sides, which is what
+    # keeps the ratchet's meaning identical to the pre-split one -- see
+    # `_function_record_deltas` above for why not per record.
     count_grown, count_shrunk = _scalar_delta(
         "function_count_budget", committed.function_count, current.function_count
     )
@@ -207,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     grown = module_grown + count_grown + worst_grown
     shrunk = module_shrunk + count_shrunk + worst_shrunk
+    function_records = _function_record_deltas(committed.functions, current.functions)
 
     # tan-cli#817: the observed `tests/**` deltas are computed and REPORTED,
     # and deliberately kept out of `grown`/`shrunk` above. Those two lists are
@@ -215,16 +252,31 @@ def main(argv: list[str] | None = None) -> int:
     # decision rejected -- see `TEST_ROOT` in _module_size_budget_core.py.
     observed_moved, observed_settled = _deltas(committed_observed, observed)
 
-    if not grown and not shrunk and not observed_moved and not observed_settled:
-        print("module_size_budget.generated.json already matches the measured tree.")
+    stale_caps = not core.CAPS_PATH.exists() or core.CAPS_PATH.read_text(
+        encoding="utf-8"
+    ) != core.dump_caps()
+
+    if not (
+        grown
+        or shrunk
+        or function_records
+        or observed_moved
+        or observed_settled
+        or stale_caps
+    ):
+        print("module_size_budget.d/ already matches the measured tree.")
         return 0
 
     if args.check:
-        print("module_size_budget.generated.json is stale:")
+        print("module_size_budget.d/ is stale:")
         for line in grown + shrunk:
             print(f"  {line}")
+        for line in function_records:
+            print(f"  record: {line}")
         for line in observed_moved + observed_settled:
             print(f"  observed: {line}")
+        if stale_caps:
+            print("  _caps.json does not match MODULE_CAP/FUNCTION_CAP")
         print("Run `python scripts/regen_module_size_budget.py` to refresh it.")
         return 1
 
@@ -241,12 +293,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    core.GENERATED_PATH.write_text(core.dump_generated(current, observed), encoding="utf-8")
-    print(f"wrote {core.GENERATED_PATH}")
+    core.write_records(current, observed)
+    print(f"wrote {core.RECORD_DIR}")
     for line in shrunk:
         print(f"  shrunk: {line}")
     for line in grown:
         print(f"  grown:  {line}")
+    for line in function_records:
+        print(f"  record: {line}")
     for line in observed_settled + observed_moved:
         print(f"  observed (tests/, not gated): {line}")
 
