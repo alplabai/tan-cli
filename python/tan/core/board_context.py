@@ -6,35 +6,68 @@ Two halves of the same question, and both had a copy-per-command problem:
 
 * [`resolve_board_path`] is `validate_cmd._resolve_board_path`, MOVED here
   rather than re-typed. `tan scaffold` needed exactly what `tan validate`
-  already does (tan-cli#1031), and this repo already carries FIVE
-  envelope-facing project/board resolvers --
-  `presets_cmd.resolve_project_paths`, `build_output.resolve_project_context`,
-  `flash_cmd._resolve_project`, `generate_cmd._resolve_board_path`, and this
-  one. A SIXTH, written for `scaffold`, is precisely the drift
+  already does (tan-cli#1031), and this repo already carries SIX project/board
+  resolvers. A SEVENTH, written for `scaffold`, is precisely the drift
   `tan.core.shapes`' own docstring is about; and it would be the same drift
   alp-sdk-vscode#601/#633 had just finished deleting a second copy of THIS
   generator to escape (the README's `## Wiring` section went missing on the
   extension's side because a second copy existed at all). So the function
   moved to a binding-free home both commands import.
 
-  The count did NOT go down: it was five before this change and is five
-  after, because the fifth is validate's, relocated. Each of the five is
-  pinned to a different oracle's reported shape, so they are distinct answers
-  rather than duplicates and unifying them is not this change's job. What
-  this change bought is that `scaffold` did not make it six.
+  **The criterion, stated so the next reader can CHECK the membership instead
+  of re-deriving it** -- this count has now been revised three times in a
+  docstring whose whole thesis is drift, which is its own argument for naming
+  the rule rather than the number. A member is a NAMED, REUSABLE function
+  under `python/tan/**` that turns the `--project`/`--board-yaml` pair into
+  the `board.yaml` path a command works from. Per-command inline joins do not
+  count; neither does anything under `tan/planner/**`, which resolves a board
+  DOCUMENT out of metadata rather than a path out of two flags. The six, with
+  the commands each serves:
+
+    tan/core/board_context.py:resolve_board_path      validate, scaffold
+    presets_cmd.py:resolve_project_paths              presets, pinmux, kconfig,
+                                                      diff, clean, bootstrap
+    build_output.py:resolve_project_context           size, image, model, west,
+                                                      debug-config
+    inspect_cmd.py:resolve_debug_project_context      inspect, trace,
+                                                      support-bundle
+    flash_cmd.py:_resolve_project                     flash
+    generate_cmd.py:_resolve_board_path               generate
+
+  FIVE of the six feed `tan.envelope.Project.resolved`, the reporting seam.
+  `generate_cmd._resolve_board_path` is the one that does not, deliberately:
+  `generate` reports the AS-GIVEN strings, built inline, because existence-
+  checking them against the real cwd is wrong the moment `--project` differs
+  from it (its own call site says so, citing tan-cli#236), and this resolver
+  answers only the path it READS. It is on the list anyway because it answers
+  the same question; a criterion of "uses `Project.resolved`" would have
+  admitted it by accident and excluded nothing. An earlier revision of this
+  paragraph did the reverse -- it listed `generate_cmd`, the loosest match,
+  and omitted `inspect_cmd`, which does use the seam.
+
+  The count did NOT go down: six before this change and six after, because
+  the sixth is validate's, relocated. Each is pinned to a different oracle's
+  reported shape, so they are distinct answers rather than duplicates, and
+  unifying them is not this change's job. What this change bought is that
+  `scaffold` did not make it seven.
 
   **"One definition" here is prose, not a gate, and stays prose until
-  tan-cli#1081.** `tests/gates/test_shared_helpers_have_one_definition.py`
+  tan-cli#1091.** `tests/gates/test_shared_helpers_have_one_definition.py`
   hard-asserts that every helper it owns lives in `tan/core/shapes.py`, and
   it reads its ownership list out of that one file, so `resolve_board_path`
   cannot join it without generalising the gate from "shapes owns these" to a
-  `{name -> home module}` map. tan-cli#1081 is the open issue for that class
-  of extension, and its sibling
+  `{name -> home module}` map. tan-cli#1091 is the issue for exactly that,
+  seeded with this function; its sibling
   `tests/gates/test_shared_test_helpers_have_one_definition.py` (tan-cli#1083)
-  is the narrow allow-list shape to copy. Doing it here would put a gate
-  refactor inside a bugfix. Until it lands, a sixth private
-  `_resolve_board_path` would land all-green, and this paragraph is the only
-  thing in its way.
+  already IS a `{name -> home module}` allow-list and is the shape to copy.
+  NOT tan-cli#1081, which an earlier revision of this paragraph pointed at:
+  #1081's durable half already landed as #1083 and it is held open solely for
+  an outstanding `bound_sdk*` binder audit that touches none of `TAN_ROOT`,
+  `_OWNED_BY_SHAPES`, or the `rel == "tan/core/shapes.py"` assertion -- so
+  closing it would have left this invariant unguarded behind a dead pointer.
+  Doing the gate work here would put a refactor inside a bugfix. Until #1091
+  lands, a seventh private `_resolve_board_path` would land all-green, and
+  this paragraph is the only thing in its way.
 
 * [`read_board_context`] is the content of the generated module's
   `// Board context: ...` line. Its wire spelling -- `<sku> / <os>`, with
