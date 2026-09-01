@@ -28,14 +28,24 @@ no heuristic that promotes a name into scope; scope is exactly the dict below.
 
 That narrowness is the whole design, and it was measured before it was chosen.
 Dropping the allow-list -- asserting one definition for every name the walk
-above returns -- is red the day it lands. Measured on this tree at `4f51674a`
-by running `_module_level_definitions()` itself: 176 names have more than one
-module-level definition, 731 definitions in total, worst `SDK` 47, `runner`
-27, `pytestmark` 24, `PACKAGE_ROOT` 23, `REPO_ROOT` 21, `app` 17, `envelope`
-16, `sdk_root` 15. Restricting the same walk to `def`s only -- dropping the
-module-level constants, which are the least interesting half -- still leaves
-121 names and 406 definitions: `envelope` 16, `sdk_root` 15, `write` 15,
-`bound_sdk` 14, `run_tan` 13, `run` 11, `project` 10.
+above returns -- is red the day it lands. Every figure here is `dev` at
+`8b4e3f43` WITH THIS FILE EXCLUDED from the walk, i.e. the tree the gate
+would have landed onto, measured by running `_module_level_definitions()`
+itself: 173 names have more than one module-level definition, 725 definitions
+in total, worst `SDK` 47, `runner` 27, `pytestmark` 24, `PACKAGE_ROOT` 23,
+`REPO_ROOT` 21, `app` 17, `envelope` 16, `sdk_root` 15. Restricting the same
+walk to `def`s only -- dropping the module-level constants, which are the
+least interesting half -- still leaves 121 names and 406 definitions:
+`envelope` 16, `sdk_root` 15, `write` 15, `bound_sdk` 14, `run_tan` 13, `run`
+11, `project` 10.
+
+Including this file moves those to 176/731 and 123/410: `_module_level_
+definitions` and `test_the_walk_actually_finds_definitions` are names the
+`python/tan/**` sibling gate already defines, so this file is itself a
+three-name contributor to the count it cites. That is a fact about test-gate
+boilerplate sharing a shape, not a helper anyone should import -- and it is
+one more reason the allow-list is a hand-written dict rather than anything
+derived from the walk.
 
 Nearly every one of those is legitimate. A per-module `_envelope()` that
 shells one command and parses its JSON is not a shared helper somebody forgot
@@ -135,7 +145,19 @@ def _module_level_definitions() -> dict[str, tuple[tuple[str, str], ...]]:
             # would re-raise it with a `<unknown>:25` location and attribute a
             # pre-existing lint in someone else's module to this gate.
             warnings.simplefilter("ignore", SyntaxWarning)
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError as exc:
+                # `python/tests/**` is not all test modules: it already holds
+                # `tests/oracle_captures.py` and the `tests/fixtures/models/
+                # gen_*.py` generators, and a malformed fixture added later
+                # would otherwise fail this gate with a bare `SyntaxError` and
+                # no hint that the file is unrelated to helper duplication.
+                raise AssertionError(
+                    f"{rel} does not parse, so this gate cannot walk "
+                    f"python/tests/** at all: {exc}. Fix the file, or move it "
+                    "out of the test tree if it is not meant to be Python."
+                ) from exc
         for node in tree.body:
             names: list[str] = []
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -224,14 +246,38 @@ def test_the_underscore_folding_is_live():
     )
 
 
+def test_the_allow_list_is_not_empty():
+    """Anti-vacuity for the LIST, which is a separate hole from anti-vacuity
+    for the walk below.
+
+    Every enforcing assertion in this file is a `parametrize` over
+    `_SHARED_TEST_HELPERS`. Emptying that dict does not red anything: pytest
+    turns an empty parameter set into a SKIP, `-q` swallows the
+    `got empty parameter set` note, and the suite is `2 passed, 1 skipped`,
+    rc 0. `empty_parameter_set_mark` is not configured in
+    `python/pyproject.toml`, so nothing upgrades that skip to a failure. A
+    gate one line from a silent no-op is the shape this repo has been bitten
+    by repeatedly (tan-cli#275 most explicitly), so the list gets its own
+    non-parametrised assertion.
+    """
+    assert _SHARED_TEST_HELPERS, (
+        "_SHARED_TEST_HELPERS is empty, so the parametrised check above has "
+        "no cases and this whole file enforces nothing while still reporting "
+        "green. Removing the last entry has to be deliberate: if the seeded "
+        "helper was retired, seed the next shared test helper in the same "
+        "change or delete this file outright."
+    )
+
+
 def test_the_walk_actually_finds_definitions():
     """Anti-vacuity. Every assertion above counts what the AST walk returned,
     so a walk that silently found nothing -- a moved test root, a glob that
     stopped matching -- would report a pass having measured an empty dict."""
     defs = _module_level_definitions()
-    # 5710 folded names at `4f51674a`; the floor is deliberately far below
-    # that, since it is guarding against a walk that collapsed to one
-    # subdirectory or to nothing, not ratcheting the tree's size.
+    # 5736 folded names on this branch (5732 on `dev` at `8b4e3f43` without
+    # this file); the floor is deliberately far below that, since it is
+    # guarding against a walk that collapsed to one subdirectory or to
+    # nothing, not ratcheting the tree's size.
     assert len(defs) > 2000, f"only {len(defs)} module-level names found under {TESTS_ROOT}"
     assert "bind_planner_sdk_root" in defs, sorted(defs)[:20]
     assert defs["bind_planner_sdk_root"] == (
