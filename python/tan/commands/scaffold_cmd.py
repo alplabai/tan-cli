@@ -1,16 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """`tan scaffold` -- scaffold one module (a source/header pair + README) into
 an EXISTING tan project. Distinct from `tan init`, which scaffolds a whole new
-project: this command never touches `board.yaml`, never resolves an SDK, and
+project: this command never WRITES `board.yaml`, never resolves an SDK, and
 its template id space (`tan.core.module_template.MODULE_TEMPLATE_IDS`) is a
 different, smaller registry than `tan init`'s own six.
 
+It does now READ one (tan-cli#1031). Until then it never looked, so
+`project.boardYaml` was hardcoded `null` and every generated module carried
+`// Board context: unavailable` -- including a run that passed
+`--board-yaml <p>/board.yaml`, whose own help text promises it "overrides
+project resolution". That mattered beyond the comment: alp-sdk-vscode had just
+DELETED its own TypeScript copy of this generator (alp-sdk-vscode#601/#633,
+because a second copy is what let that copy's README lose its `## Wiring`
+section and ship modules that never compiled), and that copy DID read
+`board.yaml`. So the capability comes from here or from nowhere. The read goes
+through `tan.core.board_context` -- `tan validate`'s own resolver, moved to a
+shared home rather than cloned into a fourth one.
+
 Composition, not logic: resolve the module name + template + destination
 (`--name`/`--template`/`--destination`, and `tan.core.module_template`'s
-registry), ask it for the planned three files, diff them against disk
+registry) and the project's `board.yaml`, ask the registry for the planned
+three files, diff them against disk
 (`tan.core.scaffold.collect_file_changes`), then preview / guard / write --
 folding whatever comes back into exactly one envelope. Mirrors
-`crates/tan-cli/src/commands/scaffold.rs`.
+`crates/tan-cli/src/commands/scaffold.rs`, which the board read is a
+deliberate, argued divergence from.
 
 **`--name` is REQUIRED, with NO non-interactive default.** Unlike `tan init`'s
 `--template` (defaults to `zephyr-app`) or `--name` (defaults to an empty
@@ -52,6 +66,7 @@ from pathlib import Path
 import click
 import typer
 
+from tan.core.board_context import read_board_context, resolve_board_path
 from tan.core.consent import can_prompt
 from tan.core.module_template import (
     DEFAULT_MODULE_TEMPLATE_ID,
@@ -248,8 +263,13 @@ def _emit_error(json_mode: bool, err: ScaffoldError) -> None:
     raise typer.Exit(int(err.exit_code))
 
 
-def _emit_outcome(json_mode: bool, outcome: _Outcome) -> None:
-    project = Project(root=outcome.destination, board_yaml=None)
+def _emit_outcome(json_mode: bool, outcome: _Outcome, board_yaml: str | None) -> None:
+    """*board_yaml* is the RESOLVED path (tan-cli#1031): a PROJECT fact,
+    identical across all three outcome shapes, so not an `_Outcome` field.
+    `Project.resolved` is the blessed seam -- a path that resolved but is not
+    there reports `null`, as it does for `tan validate`. `_emit_error` keeps
+    its hardcoded `(None, None)`; that is the frozen error shape."""
+    project = Project.resolved(outcome.destination, board_yaml)
     if json_mode:
         emit(
             Envelope(
@@ -360,15 +380,11 @@ def scaffold(
     ),
 ) -> None:
     """Scaffold a module into an existing project."""
-    # `--board-yaml`/`--sdk-root`/`--target`/`--all`/`--verbose`/`--quiet`/
-    # `--no-color` are members of the oracle's clap `GlobalArgs` (`global =
-    # true`), so the real `tan scaffold` parses and lists all of them in
-    # `--help` -- but `crates/tan-cli/src/commands/scaffold.rs::run` reads
-    # only `g.project` and `g.can_prompt()` (non_interactive/ci/format).
-    # Declared (not `hidden=True`) so `tan scaffold --help` matches the
-    # oracle's own listing; genuinely unread otherwise, matching `init_cmd`'s
-    # identical block for its own five ignored globals.
-    del board_yaml, sdk_root, target, all_targets, verbose, quiet, no_color
+    # `--sdk-root`/`--target`/`--all`/`--verbose`/`--quiet`/`--no-color` are
+    # `GlobalArgs` members the oracle's `scaffold.rs::run` never reads;
+    # declared (not `hidden=True`) so `--help` matches its listing.
+    # `--board-yaml` was in this list until tan-cli#1031 and is READ now.
+    del sdk_root, target, all_targets, verbose, quiet, no_color
 
     resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
@@ -380,9 +396,13 @@ def scaffold(
 
         dest = destination if destination else (project if project else ".")
         project_root = Path(dest)
+        # tan-cli#1031. `tan validate`'s own resolver, MOVED to
+        # `tan.core.board_context` and called here -- not a second strategy.
+        _, board_path = resolve_board_path(dest, board_yaml)
+        board_context = read_board_context(board_path)
 
         try:
-            plan = create_module_scaffold_plan(template_id, module_name)
+            plan = create_module_scaffold_plan(template_id, module_name, board_context)
         except ValueError as err:
             # Re-raised as `ScaffoldError`, never emitted from here directly:
             # this `except` is still lexically INSIDE the outer `try` below,
@@ -467,4 +487,4 @@ def scaffold(
         )
         return
 
-    _emit_outcome(json_mode, outcome)
+    _emit_outcome(json_mode, outcome, board_path)

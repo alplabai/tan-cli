@@ -287,6 +287,13 @@ from tan.commands.doctor_cmd import resolve_manifest_python_floor
 # third copy here would make it the pattern.
 from tan.commands.generate_cmd import _python_too_old
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+# tan-cli#1031: this resolver MOVED to `tan.core.board_context` so `tan
+# scaffold` could reuse it instead of growing a fourth project/board
+# resolver. Aliased to the private name this module's call site (and
+# `test_validate_command.py`'s prose) already spells; an alias is not a
+# second definition, which `tests/gates/test_shared_helpers_have_one_
+# definition.py` documents at length.
+from tan.core.board_context import resolve_board_path as _resolve_board_path
 from tan.core.global_flags import accept_global_flags
 from tan.core.sdk_discovery import (
     _planner_python_resolution,
@@ -843,24 +850,6 @@ def _synthesised_finding(
     if tail:
         message = f"{message} Last line of validator output: {tail[-1]}"
     return _Finding("error", message)
-
-
-def _resolve_board_path(project: str | None, board_yaml: str | None) -> tuple[str, str]:
-    """Return `(project_root, board_yaml_path)`, both as the CLI reports them.
-
-    Mirrors `resolve_offline_board_path`: the root defaults to the literal `"."`
-    and the board path stays RELATIVE, which the conformance fixtures pin
-    (`project.root == "."`, `boardYamlPath == "./board.yaml"`).
-    """
-    root = project if project else "."
-    if board_yaml and os.path.isabs(board_yaml):
-        return root, board_yaml
-    leaf = board_yaml or "board.yaml"
-    # Joined as STRINGS, not via pathlib: `Path(".") / "board.yaml"` normalises
-    # to `board.yaml`, but Rust's `Path::new(".").join("board.yaml")` keeps the
-    # `./`, and the conformance fixtures pin `"./board.yaml"`.
-    sep = "" if root.endswith(("/", "\\")) else "/"
-    return root, f"{root}{sep}{leaf}"
 
 
 #: The position both exporters fall back to when NOTHING located the finding:

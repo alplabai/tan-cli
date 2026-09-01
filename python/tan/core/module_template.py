@@ -163,14 +163,29 @@ def _header(prefix: str, nm: str) -> str:
     )
 
 
-def _source(prefix: str, nm: str) -> str:
-    """`gen_module_c`, ported."""
+def _source(prefix: str, nm: str, board_context: str | None) -> str:
+    """`gen_module_c`, ported, with tan-cli#1031's RESOLVED board line.
+
+    *board_context* is `"<som.sku> / <os>"` as
+    `tan.core.board_context.read_board_context` reads it out of the project's
+    own `board.yaml`, or `None` when no board resolved. `None` renders the
+    `unavailable` placeholder this line has carried since the Rust oracle --
+    unchanged bytes, but it now means "there is genuinely no board.yaml here"
+    instead of "this command never looked", which is the whole of tan-cli#1031:
+    every project got `unavailable`, including one that passed
+    `--board-yaml <p>/board.yaml` explicitly.
+
+    Not read from disk here: this module plans FILE CONTENT and has no IO, the
+    same split `plan_module_files` keeps for diffing and writing (see the
+    module docstring). The command resolves, this renders.
+    """
+    hint = board_context if board_context else "unavailable"
     return (
         "// SPDX-License-Identifier: Apache-2.0\n"
         "\n"
         f'#include "modules/{nm}.h"\n'
         "\n"
-        "// Board context: unavailable\n"
+        f"// Board context: {hint}\n"
         "\n"
         f"int {prefix}_{nm}_init(void) {{\n"
         "  // TODO: initialize module dependencies.\n"
@@ -273,14 +288,23 @@ def _readme(definition: ModuleTemplateDefinition, nm: str) -> str:
     )
 
 
-def plan_module_files(definition: ModuleTemplateDefinition, nm: str) -> list[PlannedFile]:
+def plan_module_files(
+    definition: ModuleTemplateDefinition, nm: str, board_context: str | None = None
+) -> list[PlannedFile]:
     """The three files a module template lays down: a header, its source, and
     a README. `gen_module_files`, ported -- same relative paths, same order
     (the order the oracle's own `data.fileChanges[]` lists them in, and what
-    `contract`-style byte-for-byte JSON comparison depends on)."""
+    `contract`-style byte-for-byte JSON comparison depends on).
+
+    *board_context*: see [`_source`]. Defaults to `None` (the `unavailable`
+    line) so a caller with no project in hand -- every existing one but
+    `scaffold_cmd` -- is unchanged."""
     return [
         PlannedFile(f"include/modules/{nm}.h", _header(definition.function_prefix, nm)),
-        PlannedFile(f"src/modules/{nm}/{nm}.c", _source(definition.function_prefix, nm)),
+        PlannedFile(
+            f"src/modules/{nm}/{nm}.c",
+            _source(definition.function_prefix, nm, board_context),
+        ),
         PlannedFile(f"src/modules/{nm}/README.md", _readme(definition, nm)),
     ]
 
@@ -295,15 +319,22 @@ class ModuleScaffoldPlan:
     files: list[PlannedFile]
 
 
-def create_module_scaffold_plan(template_id: str, module_name: str) -> ModuleScaffoldPlan:
+def create_module_scaffold_plan(
+    template_id: str, module_name: str, board_context: str | None = None
+) -> ModuleScaffoldPlan:
     """Normalize `module_name`, then plan its three-file set against
     `template_id`. Raises `ValueError` when the name normalizes to empty
     (`normalize_module_name`); a `template_id` outside `MODULE_TEMPLATE_IDS`
     is a caller bug, not a user error -- `scaffold_cmd` validates it against
     the registry BEFORE calling this, so `KeyError` here would mean that
     validation was skipped. `create_module_scaffold_plan`, ported.
+
+    *board_context* is threaded straight through to [`plan_module_files`] and
+    is the only input here that is not derivable from the two required
+    arguments -- it is a fact about the PROJECT, which this registry has no
+    way to reach and (per its own module docstring) no business reading.
     """
     normalized = normalize_module_name(module_name)
     definition = _BY_ID[template_id]
-    files = plan_module_files(definition, normalized)
+    files = plan_module_files(definition, normalized, board_context)
     return ModuleScaffoldPlan(template_id=template_id, normalized_name=normalized, files=files)
