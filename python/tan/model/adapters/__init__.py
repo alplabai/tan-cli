@@ -9,8 +9,16 @@ from pathlib import Path
 @dataclass
 class Blob:
     """One compiled artifact + the manifest metadata the writer needs."""
-    format: str                 # one of manifest.VALID_BLOB_FORMATS
-                                 # (vela_tflite | tflite | drpai_dir | dxnn | onnx)
+    format: str                 # conventionally one of manifest.VALID_BLOB_FORMATS
+                                 # (vela_tflite | tflite | drpai_dir | dxnn |
+                                 # onnx | executorch); this is a WRITE-side
+                                 # field and is never itself validated -- an
+                                 # unlisted format here is rejected only when
+                                 # the package is later DECODED
+                                 # (Manifest.from_dict), and
+                                 # tests/gates/test_blob_format_producers_stay_in_valid_blob_formats.py
+                                 # is what actually keeps a producer's own
+                                 # literal in sync with the set.
     payload: bytes
     arena_bytes: int = 0
     compiler_version: str = ""

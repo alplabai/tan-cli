@@ -2,6 +2,7 @@
 """Tests for tan.model.manifest round-trip serialisation."""
 import json
 import cbor2
+import pytest
 from tan.model import manifest
 from tan.model.manifest import Tensor, Target, Coverage, Manifest
 
@@ -97,6 +98,72 @@ def test_field_types_maps_stay_in_parity_with_their_whole_key_set():
     assert set(manifest._TENSOR_TYPES) == manifest._TENSOR_KEYS
     assert set(manifest._TARGET_TYPES) == manifest._TARGET_KEYS
     assert set(manifest._COVERAGE_TYPES) == manifest._COV_KEYS
+
+
+def test_from_dict_missing_name_raises_curated_value_error_not_keyerror():
+    # tan-cli#1074: a `from_dict` mapping missing `name` used to raise a bare
+    # `KeyError('name')`, not the curated `ValueError` this module's contract
+    # promises everywhere else.
+    d = _sample().to_dict()
+    del d["name"]
+    with pytest.raises(ValueError, match=r"missing required field 'name'"):
+        Manifest.from_dict(d)
+
+
+def test_from_dict_missing_src_sha_raises_curated_value_error_not_keyerror():
+    d = _sample().to_dict()
+    del d["src_sha"]
+    with pytest.raises(ValueError, match=r"missing required field 'src_sha'"):
+        Manifest.from_dict(d)
+
+
+def test_from_dict_wrong_typed_src_sha_raises_curated_value_error():
+    d = _sample().to_dict()
+    d["src_sha"] = "not-bytes"    # from_dict's contract is post-normalisation bytes
+    with pytest.raises(ValueError, match=r"field 'src_sha' must be a bytes object"):
+        Manifest.from_dict(d)
+
+
+def test_unknown_blob_format_is_rejected_with_the_valid_set_named():
+    # tan-cli#1074: a manifest naming an unlisted format (a typo'd "dxnn",
+    # here "vela_tflite_v2") used to decode clean -- nothing compared a
+    # decoded `blob_format` against `VALID_BLOB_FORMATS`. The message must
+    # name the offending value AND list the accepted set, so a typo is
+    # diagnosable from the error alone.
+    d = _sample().to_dict()
+    d["targets"][0]["blob_format"] = "vela_tflite_v2"
+    with pytest.raises(ValueError, match=r"field 'blob_format' must be one of .*'vela_tflite_v2'.*targets\[0\]"):
+        Manifest.from_dict(d)
+
+
+def test_missing_name_is_reported_ahead_of_a_bad_nested_target():
+    # PR #1098 review nit: from_dict computes name/src_sha as locals BEFORE
+    # targets (matching the original cls(...) keyword-argument order), so a
+    # document missing a document-level required field still reports THAT,
+    # not a nested target's blob_format -- even when both are wrong at once.
+    d = _sample().to_dict()
+    del d["name"]
+    d["targets"][0]["blob_format"] = "vela_tflite_v2"
+    with pytest.raises(ValueError, match=r"missing required field 'name'"):
+        Manifest.from_dict(d)
+
+
+@pytest.mark.parametrize("blob_format", sorted(manifest.VALID_BLOB_FORMATS))
+def test_every_valid_blob_format_round_trips_through_dict_and_cbor(blob_format):
+    # Acceptance bar for tan-cli#1074 part 1: enforcing membership must not
+    # reject any format a real producer emits today. Parametrized over the
+    # RECONCILED set (not a hand-picked subset) so a future addition to
+    # `VALID_BLOB_FORMATS` is covered automatically -- "executorch" is the
+    # member that would have regressed had enforcement landed against the
+    # stale 5-member set (`adapters/executorch.py` emits it, registered by
+    # default in `build.py`'s `_ADAPTERS`); "onnx" has no compiler-adapter
+    # producer but is real too (`_gen_fixture.py`'s `_onnx_cpu_manifest`,
+    # the issue #1254 regression fixture alp-sdk's on-device reader decodes).
+    tgt = Target(backend="cpu", silicon_ref="*", blob_format=blob_format, accel_config="",
+                 arena=0, requires={"sram_kib": 0, "op_features": []}, blob=0)
+    m = Manifest(name="m", src_sha=bytes(32), targets=[tgt])
+    assert Manifest.from_dict(m.to_dict()) == m
+    assert Manifest.from_cbor(m.to_cbor()) == m
 
 
 def test_element_type_maps_only_name_fields_declared_as_lists():
