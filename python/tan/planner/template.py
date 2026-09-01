@@ -385,7 +385,12 @@ def _require_field(value: Any, kind: type, *, doc: Any, field: str) -> Any:
       (`test_board_route_entries_malformed_board.py::
       test_a_falsy_scalar_section_value_still_degrades_silently`);
       changing it is a behaviour change to two documents tan-cli#1052
-      does not name, so it is deliberately NOT made here.
+      does not name, so it is deliberately NOT made here. It is also
+      defensible on BEHAVIOUR: there a falsy section degrades to `[]`
+      and is then caught by `_resolve_pin_target`'s curated `has no
+      unambiguous 'board_alias:'`, so nothing silently wrong escapes --
+      where `pins: 0` here reached NO downstream guard at all. Remove
+      that catch and this asymmetry stops being correct.
 
     Not stricter than the schema either way: `pins:` is `type: array`
     with no `minItems`, so `pins: []` still renders -- rejecting it
