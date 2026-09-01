@@ -65,6 +65,62 @@ that one line, so nothing here duplicates planner LOGIC -- and the lookup
 below is by `example` path, which the mirror does not do at all (it looks
 records up by `id`).
 
+WHY BOTH READS GO THROUGH `tan/core/document_guards.py` (tan-cli#1084)
+----------------------------------------------------------------------
+
+A second implementation of a read is only safe while the two answer the same
+question the same way, and this one had stopped. tan-cli#1073 extracted a
+malformed-document register into `tan/planner/template.py` and tan-cli#1077
+extended it to the catalog, so THAT reader refuses a malformed
+`catalog-v1.json` with a curated error naming the file, the field and the
+type -- while this one still decoded it through a bare `json.loads` and then
+`.get`/subscripted the result. Re-derived on `dev@be3a44b6` before fixing
+(`tests/core/test_example_catalog_malformed_catalog.py` carries the full
+table): nine shapes crashed RAW here (`JSONDecodeError`, `AttributeError`,
+`TypeError`, `KeyError`, `FileNotFoundError`) where the planner refused
+cleanly, four more were SILENTLY MIS-READ, and two of them escaped
+`unsupported_som`'s own written "Never raises" contract.
+
+Worse than either: `tests/gates/
+test_example_catalog_cores_selector_agrees_with_planner.py` asserts the two
+selectors AGREE, and covered only well-formed input -- so the divergence was
+invisible to CI. Two implementations of one read that agree on good input and
+diverge on bad, with a test asserting they agree.
+
+The register therefore MOVED to `tan/core/document_guards.py` -- a module with
+no `tan.planner` in its import closure, so the constraint above still holds
+and nothing here is a copy. `template.py` binds the same objects, so its call
+sites are byte-identical to what #1073/#1077 landed, and neutering one method
+there reds tests on BOTH sides. The message shapes, the exception TYPE each
+side raises, and what deliberately did NOT move (tan-cli#1085) are all
+documented in that module.
+
+THE ONE REMAINING DIVERGENCE, AND THE TWO NEW REFUSALS (tan-cli#1084)
+----------------------------------------------------------------------
+
+`find_example_by_cores` excludes a record with no (or a falsy) `example:`
+from its match set; `find_template_by_cores` does not filter on that field at
+all, because it returns the RECORD where this returns the PATH. So on a
+hand-edited catalog whose matching record has no `example:`, the planner still
+answers "found" and this answers "not found". That gap is dev's, is unreachable
+against a schema-valid catalog (`example` is `required`, `pattern`
+`^examples/...`), and is left ALONE here -- closing it would change this
+function's documented contract and is a selection question, not the strictness
+question #1084 is about. What changed is that it is no longer undocumented:
+`test_the_example_field_is_the_one_documented_divergence` pins it by name.
+
+Two refusals ARE new, both of documents the schema never accepted, and both
+taken to MATCH the planner rather than invented here:
+
+* the matched record's `id:` is resolved before the ambiguity test, as
+  `find_template_by_cores` has done since tan-cli#1077 -- so a unique match
+  with a missing or non-string `id:` refuses where dev returned it happily.
+  `id` is `required` on every record.
+* the matched record's `example:` must be a string. dev ran it through
+  `str(...)`, so a record carrying `example: 3` resolved to the literal src
+  `'3'` and `tan init` went looking for a directory of that name -- silent,
+  and the worst outcome in the whole re-derived table.
+
 WHY A WARNING AND NOT A REFUSAL
 --------------------------------
 
@@ -80,11 +136,53 @@ CHECKED, and that is what the warning fixes.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+from typing import Any
+
+from tan.core.document_guards import DocumentGuards
 
 #: The catalog, relative to an alp-sdk checkout root.
 CATALOG_RELATIVE = Path("metadata") / "templates" / "catalog-v1.json"
+
+
+class CoresTopologyError(Exception):
+    """Base for every refusal this module's catalog reads raise -- never a
+    bare KeyError/ValueError/TypeError escapes to a caller. `init_cmd.py`
+    catches each subclass and turns it into an `InitError` with the right
+    issue code for that case."""
+
+
+class MalformedCatalogError(CoresTopologyError, ValueError):
+    """`metadata/templates/catalog-v1.json` is not the shape its schema
+    declares -- unreadable, not JSON, not a JSON object, or a record/field
+    of the wrong type (tan-cli#1084).
+
+    A `ValueError` as well, so the curated message lands in the same family
+    as the register `tan/model/targets.py:312-323` established; a
+    `CoresTopologyError` as well, so a caller that catches only this
+    module's base still cannot be handed a raw traceback. Measured before
+    adding the second base: nothing between `find_example_by_cores` and
+    `init()` catches a bare `ValueError` (`init_cmd.py:846` and `:1119`
+    both do, and neither encloses `_plan_from_topology`'s call), so the MI
+    cannot make a refusal disappear into an unrelated handler --
+    `test_a_malformed_catalog_is_not_swallowed_by_an_unrelated_handler`
+    pins that.
+
+    `find_example_by_cores` RAISES it; `unsupported_som` catches it and
+    returns None, which is that function's whole documented contract.
+    """
+
+
+#: This module's binding of the shared malformed-document register --
+#: literally the same three checks + two catalog readers
+#: `tan/planner/template.py` uses, differing only in the exception class each
+#: side's caller contracts for (`init_cmd._plan_from_topology` catches
+#: `CoresTopologyError`; `planner/cli._emit_scaffold` catches
+#: `TemplateError`). Every curated message below is therefore byte-identical
+#: to the planner's for the same malformed document, which is what
+#: `tests/gates/test_example_catalog_cores_selector_agrees_with_planner.py`
+#: now asserts directly rather than assuming.
+_GUARDS = DocumentGuards(MalformedCatalogError)
 
 
 def unsupported_som(sdk_root: Path, example_src: str, sku: str) -> tuple[str, ...] | None:
@@ -104,43 +202,62 @@ def unsupported_som(sdk_root: Path, example_src: str, sku: str) -> tuple[str, ..
 
     Never raises: a scaffold must not fail because a catalog could not be
     read. The caller reports the returned set as a warning.
+
+    tan-cli#1084: that contract was WRITTEN but not held -- measured on
+    `dev@be3a44b6`, `templates: 3` escaped as `TypeError: 'int' object is
+    not iterable` and a record with `supported: 3` as `AttributeError:
+    'int' object has no attribute 'get'`. Both are now curated by the
+    shared register and caught here, so every listed reason really does
+    return None. No outcome that was already `None` or a support set
+    changes; only the two that raised.
     """
     catalog = sdk_root / CATALOG_RELATIVE
-    try:
-        doc = json.loads(catalog.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(doc, dict):
-        return None
-
     # The catalog spells it `examples/<src>`; `--from-example` takes `<src>`.
     # Compared with `/` separators on both sides -- `example_src` is already
     # validated as a plain relative path by the caller, and the catalog is
     # authored with forward slashes regardless of host.
     wanted = f"examples/{example_src.strip().strip('/')}"
-    for record in doc.get("templates") or ():
-        if not isinstance(record, dict):
+    try:
+        supported = _declared_som_skus(catalog, wanted)
+    except MalformedCatalogError:
+        return None
+    if not supported or sku in supported:
+        return None
+    return tuple(str(s) for s in supported)
+
+
+def _declared_som_skus(catalog: Path, wanted: str) -> list[Any] | None:
+    """`supported.som_skus` of the record whose `example` is @wanted, or
+    None when no record claims it. Raises `MalformedCatalogError` for a
+    catalog-level shape problem, or for a malformed MATCH.
+
+    A record whose own `example` cannot be read is SKIPPED rather than
+    fatal -- the scan is looking for one specific path, and a record it
+    cannot read is not that record. That is exactly what dev's
+    `isinstance(record, dict)` + `str(record.get("example", ""))` coercion
+    did, kept deliberately so a malformed record cannot silence a warning
+    a well-formed one later in the list would have produced.
+    """
+    doc = _GUARDS.read_catalog_document(catalog)
+    for index, record in enumerate(_GUARDS.catalog_templates(doc, path=catalog)):
+        field = f"templates[{index}]"
+        try:
+            example = _GUARDS.require_key(record, "example", str,
+                                          doc=catalog, field=field)
+        except MalformedCatalogError:
             continue
-        if str(record.get("example", "")).strip().strip("/") != wanted:
+        if example.strip().strip("/") != wanted:
             continue
-        supported = ((record.get("supported") or {}).get("som_skus")) or ()
-        if not isinstance(supported, (list, tuple)) or not supported:
-            return None
-        if sku in supported:
-            return None
-        return tuple(str(s) for s in supported)
+        return _GUARDS.require_key(
+            _GUARDS.require_key(record, "supported", dict,
+                                doc=catalog, field=field),
+            "som_skus", list, doc=catalog, field=f"{field}.supported")
     return None
 
 
 # ---------------------------------------------------------------------------
 # `--topology`: select a catalog record BY its cores: hardware topology
 # ---------------------------------------------------------------------------
-
-
-class CoresTopologyError(Exception):
-    """Base for `find_example_by_cores`'s two refusals. Never a bare
-    ValueError/KeyError -- `init_cmd.py` catches this one type and turns it
-    into an `InitError` with the right issue code for each case."""
 
 
 class CoresTopologyNotFoundError(CoresTopologyError):
@@ -181,44 +298,78 @@ class AmbiguousCoresTopologyError(CoresTopologyError):
         )
 
 
+def _topology(record: Any, index: int, catalog: Path) -> dict[str, str]:
+    """One record's `cores:` topology (core id -> os), every shape checked
+    on the shared register.
+
+    A LINE-FOR-LINE mirror of `find_template_by_cores`'s own `_topology`
+    (`tan/planner/template.py`), down to the `templates[i].cores[j]` field
+    labels -- so a malformed record produces the byte-identical curated
+    message on both sides. tan-cli#1084: this was
+    `{c["id"]: c["os"] for c in record.get("cores") or ()}`, which raised
+    `KeyError`/`TypeError` on four shapes and silently mis-read a
+    non-string `id` into a topology that could never match.
+
+    `record.get("cores", [])`, not dev's `or ()`: an ABSENT `cores:` still
+    degrades to `{}` exactly as before, but a present `cores: null` is
+    refused as `got NoneType` rather than silently emptied -- the planner's
+    behaviour, and `cores` is `required` with `minItems: 1` in the schema,
+    so no catalog that was ever valid stops loading.
+    """
+    field = f"templates[{index}]"
+    _GUARDS.require_field(record, dict, doc=catalog, field=field)
+    entries = _GUARDS.require_field(record.get("cores", []), list,
+                                    doc=catalog, field=f"{field}.cores")
+    return {
+        _GUARDS.require_key(core, "id", str, doc=catalog,
+                            field=f"{field}.cores[{j}]"):
+        _GUARDS.require_key(core, "os", str, doc=catalog,
+                            field=f"{field}.cores[{j}]")
+        for j, core in enumerate(entries)}
+
+
 def find_example_by_cores(sdk_root: Path, cores: dict[str, str]) -> str:
     """The `--from-example`-compatible `src` (e.g. `multicore/mailbox`, no
     leading `examples/`) whose catalog record's `cores:` topology is EXACTLY
     `cores` -- `tan init --topology`'s resolution step.
 
-    Raises `CoresTopologyNotFoundError` (no exact match) or
-    `AmbiguousCoresTopologyError` (more than one) -- both refuse rather than
-    guess, unlike `unsupported_som` above, which is a best-effort warning
-    path. There is no project yet to scaffold without a real answer here:
-    "which template" is not a fact `init` can degrade silently on the way
-    "is this SoM supported" can.
+    Raises `CoresTopologyNotFoundError` (no exact match),
+    `AmbiguousCoresTopologyError` (more than one) or
+    `MalformedCatalogError` (the catalog is not the shape its schema
+    declares) -- all three refuse rather than guess, unlike
+    `unsupported_som` above, which is a best-effort warning path. There is
+    no project yet to scaffold without a real answer here: "which template"
+    is not a fact `init` can degrade silently on the way "is this SoM
+    supported" can.
 
-    A catalog record with no declared `example` (schema requires it, so this
-    is only reachable against a hand-edited or corrupted catalog) is
-    excluded from the match set entirely rather than raising -- the same
-    "cannot tell means silent" posture `unsupported_som` takes, scoped here
-    to just that one record instead of the whole call.
+    A record with no declared `example` is excluded from the match set
+    rather than raising -- the ONE place the two selectors deliberately
+    still differ, and dev's own behaviour, kept rather than changed. It and
+    the two new refusals this function does add are set out under THE ONE
+    REMAINING DIVERGENCE in the module docstring.
     """
     catalog = sdk_root / CATALOG_RELATIVE
-    doc = json.loads(catalog.read_text(encoding="utf-8"))
-    records = [r for r in (doc.get("templates") or ()) if isinstance(r, dict)]
-
-    def _topology(record: dict) -> dict[str, str]:
-        return {c["id"]: c["os"] for c in record.get("cores") or ()}
-
-    matches = [
-        r for r in records
-        if r.get("example") and _topology(r) == cores
-    ]
+    doc = _GUARDS.read_catalog_document(catalog)
+    indexed = list(enumerate(_GUARDS.catalog_templates(doc, path=catalog)))
+    topologies = {index: _topology(rec, index, catalog)
+                  for index, rec in indexed}
+    matches = [(index, rec) for index, rec in indexed
+               if rec.get("example") and topologies[index] == cores]
     if not matches:
         known = sorted(
-            {tuple(sorted(_topology(r).items())) for r in records}
+            {tuple(sorted(topo.items())) for topo in topologies.values()}
         )
         raise CoresTopologyNotFoundError(cores, known)
+    ids = sorted(
+        _GUARDS.require_key(rec, "id", str, doc=catalog,
+                            field=f"templates[{index}]")
+        for index, rec in matches)
     if len(matches) > 1:
-        ids = sorted(str(r.get("id", "?")) for r in matches)
         raise AmbiguousCoresTopologyError(cores, ids)
-    return str(matches[0]["example"]).strip().strip("/").removeprefix("examples/")
+    index, record = matches[0]
+    example = _GUARDS.require_key(record, "example", str, doc=catalog,
+                                  field=f"templates[{index}]")
+    return example.strip().strip("/").removeprefix("examples/")
 
 
 def parse_topology_arg(raw: str) -> dict[str, str]:

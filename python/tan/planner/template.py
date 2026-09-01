@@ -55,6 +55,7 @@ from typing import Any
 
 import yaml
 
+from tan.core.document_guards import SHAPE_NOUN, DocumentGuards
 from tan.core.subprocess_env import spawn_env
 
 from .orchestrator import _zephyr_app_dir
@@ -159,22 +160,14 @@ def load_catalog(catalog_path: Path | None = None) -> dict[str, Any]:
     the claim is gone. `except OSError`, not a pre-flight `is_file()`: a
     present-but-unreadable path (a directory, a permissions error) is named
     too, not only a missing one.
+
+    tan-cli#1084: the read itself is `DocumentGuards.read_catalog_document`
+    now -- the SAME body, moved to `tan/core/document_guards.py` so
+    `tan/core/example_catalog.py`'s second implementation of this read
+    produces byte-identical messages instead of the raw
+    `FileNotFoundError`/`JSONDecodeError`/`AttributeError` it used to.
     """
-    path = catalog_path or CATALOG
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise TemplateError(
-            f"cannot read template catalog at {path}: "
-            f"{exc.strerror or exc}") from exc
-    try:
-        doc = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise TemplateError(
-            f"malformed template catalog at {path}: not valid JSON "
-            f"({exc.msg}, line {exc.lineno} column {exc.colno})") from exc
-    return _require_mapping_doc(
-        doc, path=path, what="template catalog", noun="a JSON object")
+    return _GUARDS.read_catalog_document(catalog_path or CATALOG)
 
 
 def find_template(
@@ -491,164 +484,35 @@ def _rendered_bytes(
 # --emit scaffold (issue #864): in-memory, SKU-parameterised capture
 # ---------------------------------------------------------------------
 
-#: `isinstance` kind -> the noun `_require_field`'s curated message uses.
-#: Four shapes cover every field guard in this module: a mapping, a list, a
-#: scalar string, and -- since tan-cli#1077 reached `constraints.minimum` /
-#: `constraints.maximum`, the only numeric fields anything here subscripts --
-#: an integer. `bool` satisfies `int` in Python, so `minimum: true` passes
-#: this guard and behaves as `minimum: 1`; that is a curated
-#: `ParameterError` rather than a crash, and JSON `true` is refused upstream
-#: by the schema's own `"type": "integer"` (alp-sdk
-#: `check_template_catalog.py`), so it is not worth a special case here.
-_SHAPE_NOUN: dict[type, str] = {
-    dict: "a mapping", list: "a list", str: "a string", int: "an integer"}
+#: The malformed-document register, bound to THIS module's error class.
+#:
+#: tan-cli#1084 MOVED the register itself to `tan/core/document_guards.py`
+#: (definitions, message shapes, schema-strictness claim and the recorded
+#: falsy-value asymmetry all live in that module's docstring). It did not
+#: change a single one of them, and it did not change a call site: the names
+#: below are the SAME objects this module has used since tan-cli#1073/#1077,
+#: so every `_require_field(...)` / `_require_key(...)` / `_catalog_templates
+#: (...)` call in this file is byte-identical to what those PRs landed.
+#:
+#: The move exists because `tan/core/example_catalog.py` is a DELIBERATE
+#: second implementation of the catalog read (`tan.planner` binds its SDK root
+#: at module-import time, so `tan init`'s SDK-free path cannot import this
+#: module at all -- see that file's own docstring) and, after tan-cli#1077,
+#: this module refused a malformed catalog with a curated error while that one
+#: still crashed raw. One register, two callers, one exception class each:
+#: `cli._emit_scaffold` catches `TemplateError` and nothing else, so the class
+#: is a constructor argument rather than a fixed type.
+#:
+#: `_require_constraints` below did NOT move -- it guards `$defs/parameter`'s
+#: bounds, which only this module's parameter resolution reads, so it has no
+#: second caller to prove it shared (tan-cli#1085 tracks the full extraction).
+_GUARDS = DocumentGuards(TemplateError)
 
-
-def _require_mapping_doc(
-    doc: Any, *, path: Any, what: str, noun: str = "a YAML mapping",
-) -> dict[str, Any]:
-    """The OUTER-document half of this module's malformed-YAML register.
-
-    Every function here that `yaml.safe_load`s one of the SDK's own
-    documents then bare-`.get(...)`s the result needs the same check: a
-    document that parses (legal YAML) but is not a mapping (illegal
-    against its schema) must not reach that `.get(...)`, which raises a
-    raw `AttributeError` a CLI user sees as a traceback instead of a
-    curated `TemplateError` naming the file and the actual type.
-
-    Extracted, rather than written a fourth time, because that fourth
-    time is exactly what tan-cli#1052 was filed about: the SoM preset
-    (tan-cli#1025), the board metadata (tan-cli#1037) and the template
-    example's own `board.yaml` (tan-cli#1052) are three different
-    documents whose guards were three separate rounds of the same
-    finding. The message register is byte-identical to the two that
-    landed first -- this is a de-duplication, not a re-wording.
-
-    @noun is the ONE word that is not shared. It defaults to "a YAML
-    mapping" -- byte-identical to what tan-cli#1034/#1048/#1052 landed for
-    the three YAML documents -- and `load_catalog` passes "a JSON object",
-    because `metadata/templates/catalog-v1.json` is JSON and calling its
-    top level a YAML mapping would be a curated message that is not true
-    (tan-cli#1077). A parameter, not a fourth copy of the block.
-    """
-    if not isinstance(doc, dict):
-        raise TemplateError(
-            f"malformed {what} at {path}: expected {noun}, "
-            f"got {type(doc).__name__}")
-    return doc
-
-
-def _require_field(value: Any, kind: type, *, doc: Any, field: str) -> Any:
-    """The NESTED-field half of the same register: `field` of `doc` is
-    required to be `kind` before the caller indexes/iterates it.
-
-    An outer `_require_mapping_doc` says nothing about what is INSIDE
-    the mapping, and every round of this family so far
-    (tan-cli#1025 -> #1034 -> #1037/#1048 -> #1052) found its next
-    sibling exactly one level in: `default_board:`, `topology:`,
-    `topology.<core>`, `e1m_routes:`, `e1m_routes.<section>`, and now
-    `cores:`/`som:`/`pins:`/`preset:` on the example `board.yaml`.
-    Nine call sites, one rule, one message shape -- naming the file,
-    the field and the actual type, matching the register
-    `tan/model/targets.py:312-323` established.
-
-    This helper checks EXACTLY what it is handed; how an absent field is
-    normalised is the caller's decision, and the two callers differ on
-    purpose:
-
-    * The example `board.yaml` sites normalise **`None` only** --
-      `[] if raw is None else raw`. An absent field and an explicit
-      `null` pass; a PRESENT but illegal falsy scalar (`pins: 0`,
-      `pins: false`, `pins: ''`, `cores: 0`) is refused, because it is
-      just as illegal against `board.schema.json` as `pins: 3` and
-      refusing one while silently emptying the other is an asymmetry
-      nothing would pin (tan-cli#1052 review).
-    * The SoM-preset and board-metadata sites keep their pre-existing
-      `doc.get(field) or <empty>`, which collapses EVERY falsy value
-      before this helper sees it, so `topology: 0` /
-      `e1m_routes.gpio: 0` still degrade silently. That asymmetry is
-      #1048's own recorded decision and is pinned by a live test
-      (`test_board_route_entries_malformed_board.py::
-      test_a_falsy_scalar_section_value_still_degrades_silently`);
-      changing it is a behaviour change to two documents tan-cli#1052
-      does not name, so it is deliberately NOT made here. It is also
-      defensible on BEHAVIOUR: there a falsy section degrades to `[]`
-      and is then caught by `_resolve_pin_target`'s curated `has no
-      unambiguous 'board_alias:'`, so nothing silently wrong escapes --
-      where `pins: 0` here reached NO downstream guard at all. Remove
-      that catch and this asymmetry stops being correct.
-
-    Not stricter than the schema either way: `pins:` is `type: array`
-    with no `minItems`, so `pins: []` still renders -- rejecting it
-    would be a new refusal, not a fixed crash.
-    """
-    if not isinstance(value, kind):
-        raise TemplateError(
-            f"{doc} {field} must be {_SHAPE_NOUN[kind]}, got "
-            f"{type(value).__name__}")
-    return value
-
-
-def _require_key(
-    mapping: Any, key: str, kind: type | None = None, *, doc: Any, field: str,
-) -> Any:
-    """The MISSING-KEY third of the same register (tan-cli#1077).
-
-    `metadata/templates/catalog-v1.json` is the module's fourth document
-    and its only JSON one, and it is read by BARE SUBSCRIPT at sixteen
-    sites -- so its failure mode is `KeyError`, not the
-    `AttributeError`/`TypeError` a bare `.get`-then-iterate produces on
-    the three YAML documents above. A `KeyError` is exactly as raw a
-    traceback to a CLI user (`cli._emit_scaffold` catches `TemplateError`
-    and nothing else), but neither helper above can express it: one
-    checks a whole document, the other checks a value already in hand.
-
-    So this adds the one check that was missing and DELEGATES both type
-    checks to `_require_field` -- the container must be a mapping before
-    `key in` means anything, and the value must be @kind before the
-    caller indexes/iterates it. The register keeps ONE definition; the
-    only new message is the missing-key line itself. Neutering
-    `_require_field` therefore reds this document's tests too, which is
-    the proof the extension is genuinely on the shared rule rather than a
-    fourth hand-rolled copy.
-
-    @kind is optional because `$defs/parameter`'s `default:` is the one
-    schema-required key with NO declared type (any JSON value is legal
-    there) -- `kind=None` requires presence only, never a shape the
-    schema does not.
-
-    Every key this is used on is `required` in
-    `metadata/schemas/template-catalog-v1.schema.json`, so requiring it
-    is never stricter than that schema.
-    """
-    _require_field(mapping, dict, doc=doc, field=field)
-    if key not in mapping:
-        raise TemplateError(
-            f"{doc} {field} is missing required key {key!r}")
-    value = mapping[key]
-    if kind is None:
-        return value
-    return _require_field(value, kind, doc=doc, field=f"{field}.{key}")
-
-
-def _catalog_templates(doc: Any, *, path: Any) -> list[Any]:
-    """`templates:` as a real list, on a catalog that is really a mapping.
-
-    The three `doc.get("templates", [])` sites (tan-cli#1077 `:123`,
-    `:168`, `:173`) each iterated whatever was there, and the `.get`
-    itself assumed a mapping: `templates: 3` was `TypeError: 'int' object
-    is not iterable` and a bare-list catalog was `AttributeError: 'list'
-    object has no attribute 'get'`.
-
-    ABSENT still degrades to `[]` -- the pre-existing `.get(..., [])`
-    default, which `find_template` already answers with its own
-    `TemplateNotFoundError (known: )`. Only a PRESENT non-list is
-    refused, so nothing that rendered before stops rendering.
-    """
-    _require_mapping_doc(doc, path=path, what="template catalog",
-                         noun="a JSON object")
-    return _require_field(doc.get("templates", []), list,
-                          doc=path, field="templates")
+_SHAPE_NOUN = SHAPE_NOUN
+_require_mapping_doc = _GUARDS.require_mapping_doc
+_require_field = _GUARDS.require_field
+_require_key = _GUARDS.require_key
+_catalog_templates = _GUARDS.catalog_templates
 
 
 def _record_parameters(record: Any, *, doc: Any, field: str) -> list[Any]:
