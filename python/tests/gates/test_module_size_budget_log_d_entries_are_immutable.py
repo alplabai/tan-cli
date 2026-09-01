@@ -312,7 +312,7 @@ def entry_violations(cwd: Path, dir_rel: str) -> dict[str, list[str]]:
     `test_an_entry_introduced_by_a_merge_commit_and_never_touched_again_
     passes_clean` as the other negative half.
 
-        Squash-merges are a DIFFERENT, unfixable-by-any-git-log-walk gap, called
+    Squash-merges are a DIFFERENT, unfixable-by-any-git-log-walk gap, called
     out here rather than left implicit: if a branch adds an entry and the
     merge into the branch this gate walks is a GitHub "Squash and merge"
     (the strategy `dev` actually uses) that never staged that file into the
@@ -1017,6 +1017,18 @@ def _merge_introduced_then_merge_dropped(repo: Path) -> Path:
         "neither the introducing merge nor the dropping merge may emit a "
         "--name-status record, or this is not the shape being composed"
     )
+    # The module docstring's exclusion 2, pinned exactly where it is built
+    # rather than walked past by both callers: at THIS point the entry is in
+    # neither of `entry_violations`' two inputs, so it is invisible -- the
+    # documented never-re-added gap. A future widening that started flagging
+    # (or raising on) it would surface here, in the helper, instead of
+    # silently changing what the docstring promises.
+    assert entry_violations(repo, "LOG.d") == {}, (
+        "merge-introduced + merge-dropped + never re-added is a DOCUMENTED "
+        "exclusion (module docstring, 'What is deliberately excluded' item "
+        "2); if it is now caught, that is a real improvement -- but the "
+        "docstring and this assertion must move with it"
+    )
     return entry_dir
 
 
@@ -1062,7 +1074,15 @@ def test_the_add_commit_anchor_still_catches_what_the_introduction_anchor_cannot
     introduces X, a merge drops it, an ordinary commit re-adds Z, and a THIRD
     merge rewrites Z back to X. `_introducing_commit` and HEAD then both read
     X, so the introduction anchor sees nothing; only the add-commit anchor
-    can tell that content Z was committed and silently rewritten."""
+    can tell that content Z was committed and silently rewritten.
+
+    Guard this one carefully: it is check 3's SOLE remaining unique coverage.
+    Since the widening, the older
+    `test_an_evil_merge_that_rewrites_an_already_added_entrys_content_is_caught`
+    passes under check 4 as well, so deleting check 3 reds exactly this test
+    and nothing else (measured -- mutant N2: `1 failed, 16 passed`). Weaken
+    or delete this test and check 3 becomes dead code that no mutant can
+    detect."""
     repo = tmp_path / "repo"
     entry_dir = _merge_introduced_then_merge_dropped(repo)
 
