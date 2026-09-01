@@ -1,0 +1,1 @@
+{"command":"model","ok":false,"exitCode":1,"project":{"root":null,"boardYaml":null},"data":{"schemaVersion":"1","sku":null,"built":[]},"issues":[{"code":"model.unknown-subcommand","severity":"error","message":"Unknown model subcommand: bogus. Available: build, doctor, check."}]}

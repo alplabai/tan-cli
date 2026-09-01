@@ -705,7 +705,7 @@ jobs:
           registry = json.loads((root / "issue-codes.json").read_text(encoding="utf-8"))
           envelopes = {}
           for case in sorted(p for p in (root / "envelopes").iterdir() if p.is_dir()):
-              envelopes[case.name] = {
+              entry = {
                   "args": [
                       line.strip()
                       for line in (case / "args.txt").read_text(encoding="utf-8").splitlines()
@@ -714,6 +714,19 @@ jobs:
                   "exitCode": int((case / "expected.exit").read_text(encoding="utf-8").strip()),
                   "envelope": json.loads((case / "expected.json").read_text(encoding="utf-8")),
               }
+              # tan-cli#253: a case whose command reads the HOST rather than its
+              # own inputs pins the host facts it reads in `env.json`
+              # (`model-doctor-no-sdk` is the only one today: `model doctor`'s
+              # whole payload is "is this vendor NPU compiler installed").
+              # Publishing `args`/`envelope` WITHOUT it would advertise an
+              # envelope a consumer replaying those args cannot reproduce --
+              # the entry is only as replayable as the environment it names.
+              # Additive; `schemaVersion` stays 1 and a consumer that does not
+              # know the key ignores it.
+              env_file = case / "env.json"
+              if env_file.is_file():
+                  entry["env"] = json.loads(env_file.read_text(encoding="utf-8"))
+              envelopes[case.name] = entry
           # tan-cli#664: `doctor`'s data VALUES are host facts (installed tool
           # versions, absolute paths, which checks even apply), so it cannot be
           # a byte golden like every entry above -- it carries `dataKeys`

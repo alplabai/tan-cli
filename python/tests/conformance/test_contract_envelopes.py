@@ -30,6 +30,17 @@ as "differs somehow".
 * ``HOME``/``USERPROFILE`` point at a second fresh directory so a developer's
   real ``~/.alp/sdk-default`` cannot change what ``sdk current`` reports, and
   ``SOURCE_DATE_EPOCH=0`` pins any timestamped output.
+* A case that answers from the HOST rather than from its own inputs may pin the
+  host facts it reads in an optional ``env.json`` (:func:`case_env`). Only
+  ``model-doctor-no-sdk`` needs one today: ``model doctor``'s whole payload is
+  "is this vendor NPU compiler installed", read via ``shutil.which('vela')`` /
+  ``shutil.which('dxcom')`` and the ``ALP_DRPAI_TVM_HOME`` / ``ALP_DEEPX_SDK_HOME``
+  / ``ALP_VELA_CONFIG`` environment variables, so a golden recorded on a
+  toolchain-less box would go RED on a developer who ran the repo's own
+  documented ``pip install alp-tan[model-compile]`` -- which installs ``vela``.
+  Pinning the environment is what makes that golden mean the same thing on every
+  box; normalising the rows instead would erase the only fields the case exists
+  to gate.
 * Fixture inputs are copied into the scratch dir RECURSIVELY (that is what lets
   a case ship a synthetic ``sdk/`` checkout and pass ``--sdk-root ./sdk``); only
   the harness metadata files (``CASE_METADATA``) are skipped, and only at the
@@ -95,7 +106,31 @@ WORK_DIR_TOKEN = "__WORKDIR__"
 #: input any case's command reads, so skipping it cannot produce a false diff.
 #: (The retired Rust harness's own metadata list predated it and copied it into
 #: the scratch directory instead, harmlessly, for the same reason.)
-CASE_METADATA = frozenset({"args.txt", "expected.json", "expected.exit", "PROVENANCE.txt"})
+CASE_METADATA = frozenset(
+    {"args.txt", "expected.json", "expected.exit", "PROVENANCE.txt", "env.json"}
+)
+
+#: Optional per-case environment pin -- a JSON object of ``NAME -> value``,
+#: where ``null`` UNSETS the variable and a string SETS it, applied on top of
+#: the harness's own isolation vars. ``__WORKDIR__`` inside a value expands to
+#: the case's scratch directory, the same token the goldens spell it with, so a
+#: case can point a host-searched variable at a directory that provably holds
+#: nothing (``{"PATH": "__WORKDIR__"}``) rather than at the empty string --
+#: ``PATH=""`` would also make ``shutil.which`` answer ``None`` everywhere, but
+#: it strips the launcher's own search path from a Windows runner too, and a
+#: harness that cannot spawn the child reports a contract failure it never
+#: measured.
+#:
+#: Opt-in and absent for 25 of the 26 cases: every one of those answers from its
+#: OWN copied inputs, and pinning host state they never read would only hide a
+#: real regression in how they read it.
+CASE_ENV = "env.json"
+
+#: The isolation vars the harness itself owns. A case may not re-pin them from
+#: ``env.json``: they are what makes every case hermetic and what makes ``python
+#: -m tan`` resolvable at all, so a case that could override them could quietly
+#: opt itself out of the isolation every other case is held to.
+HARNESS_OWNED_ENV = frozenset({"SOURCE_DATE_EPOCH", "HOME", "USERPROFILE", "PYTHONPATH"})
 
 #: Fixtures whose COMMAND the Python port has not landed yet. The MVP's scope is
 #: ``build``; nothing in the committed golden set exercises ``build`` (see
@@ -206,6 +241,44 @@ def fresh_dir(tag):
     return work
 
 
+def case_env(case_dir, work_dir, home_dir):
+    """The child's environment: the harness's own isolation vars, then the
+    case's optional ``env.json`` overrides (:data:`CASE_ENV`).
+
+    Factored out of the test body so the RECORDING procedure
+    (``contract/README.md``, "Regenerating a golden") can import and call this
+    exact function: a golden must be recorded under the same environment it is
+    later compared under, and a recorder that assembles its own env is how a
+    fixture ends up pinning the recording box instead of the contract.
+    """
+    env = {
+        **os.environ,
+        "SOURCE_DATE_EPOCH": "0",
+        "HOME": str(home_dir),
+        "USERPROFILE": str(home_dir),
+        "PYTHONPATH": os.pathsep.join(
+            [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
+        ),
+    }
+    overrides_file = case_dir / CASE_ENV
+    if not overrides_file.is_file():
+        return env
+    overrides = json.loads(overrides_file.read_text(encoding="utf-8"))
+    owned = sorted(HARNESS_OWNED_ENV.intersection(overrides))
+    if owned:
+        raise AssertionError(
+            f"{case_dir.name}/{CASE_ENV} re-pins harness-owned variable(s) {owned}; "
+            "the harness owns the isolation vars, a case owns only the host facts "
+            "its command reads"
+        )
+    for name, value in overrides.items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = str(value).replace(WORK_DIR_TOKEN, str(work_dir))
+    return env
+
+
 def copy_fixture_inputs(case_dir, work_dir):
     for entry in case_dir.iterdir():
         if entry.name in CASE_METADATA:
@@ -262,15 +335,7 @@ def test_envelope_matches_expected(fixture):
     home_dir = fresh_dir(f"{case}-home")
     copy_fixture_inputs(fixture, work_dir)
 
-    env = {
-        **os.environ,
-        "SOURCE_DATE_EPOCH": "0",
-        "HOME": str(home_dir),
-        "USERPROFILE": str(home_dir),
-        "PYTHONPATH": os.pathsep.join(
-            [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
-        ),
-    }
+    env = case_env(fixture, work_dir, home_dir)
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "tan", *argv],
@@ -305,4 +370,54 @@ def test_envelope_matches_expected(fixture):
         "CLI and write its PROVENANCE.txt (see contract/README.md, "
         "'Regenerating a golden'), don't just fix the assertion and don't "
         "declare it in DELIBERATE_DIVERGENCE -- that pins only 'differs somehow'"
+    )
+
+
+def test_case_env_sets_unsets_and_expands_workdir(tmp_path, monkeypatch):
+    """`env.json` is the only thing standing between `model-doctor-no-sdk` and a
+    golden that pins the recording box, so the mechanism itself needs a gate: an
+    `env.json` that silently stopped being read would leave that case passing on
+    a toolchain-less CI runner and failing on a developer who installed `vela`.
+    """
+    monkeypatch.setenv("ALP_VELA_CONFIG", "/somewhere/vendor.ini")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / CASE_ENV).write_text(
+        json.dumps({"PATH": WORK_DIR_TOKEN, "ALP_VELA_CONFIG": None}), encoding="utf-8"
+    )
+    work_dir = tmp_path / "work"
+    env = case_env(case_dir, work_dir, tmp_path / "home")
+
+    assert env["PATH"] == str(work_dir), "__WORKDIR__ must expand to the case's scratch dir"
+    assert "ALP_VELA_CONFIG" not in env, "a null value UNSETS, it does not set the empty string"
+    # The harness's own isolation vars survive the overlay untouched.
+    assert env["SOURCE_DATE_EPOCH"] == "0"
+    assert env["HOME"] == str(tmp_path / "home")
+    assert str(PACKAGE_ROOT) in env["PYTHONPATH"]
+
+
+def test_case_env_refuses_a_case_that_re_pins_a_harness_owned_variable(tmp_path):
+    """A case that could set its own `HOME`/`PYTHONPATH` could opt itself out of
+    the isolation every other case is held to -- and the failure would look like
+    a passing fixture, not a broken one."""
+    case_dir = tmp_path / "case"
+    case_dir.mkdir()
+    (case_dir / CASE_ENV).write_text(
+        json.dumps({"HOME": "/tmp/mine", "PATH": WORK_DIR_TOKEN}), encoding="utf-8"
+    )
+    with pytest.raises(AssertionError, match=r"re-pins harness-owned variable\(s\) \['HOME'\]"):
+        case_env(case_dir, tmp_path / "work", tmp_path / "home")
+
+
+def test_no_case_ships_an_env_json_it_does_not_need():
+    """`env.json` is a LAST RESORT, the same way `DELIBERATE_DIVERGENCE` is: a
+    case that pins host state it never reads has quietly narrowed what it gates.
+    Exactly one case needs one today, and a second must be argued for in its own
+    PROVENANCE.txt rather than added silently."""
+    carrying = sorted(f.name for f in FIXTURES if (f / CASE_ENV).is_file())
+    assert carrying == ["model-doctor-no-sdk"], (
+        "a new env.json appeared -- justify it in that case's PROVENANCE.txt and "
+        "under 'Pinning host state a case reads' in contract/README.md, then add "
+        "it here; pinning host state a case does not read only hides regressions"
     )
