@@ -31,7 +31,7 @@
     "tan/model/adapters/ethos_u.py": 959,
     "tan/planner/kconfig.py": 2122,
     "tan/planner/loader.py": 1410,
-    "tan/planner/template.py": 2148,
+    "tan/planner/template.py": 2156,
     "tan/planner/zephyr_board.py": 1494
   },
   "function_count_budget": 300,

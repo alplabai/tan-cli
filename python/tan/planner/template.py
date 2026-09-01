@@ -311,12 +311,20 @@ def _coerce(spec: dict[str, Any], raw: Any) -> Any:
     both keys on every spec. Guarding them a second time here would be a
     second register for the same fact.
 
-    That reasoning covers `_check_constraints`'s `spec.get("constraints")`
-    and its `constraints["enum"]` / `["minimum"]` / `["maximum"]` reads
-    too, but ONLY since `_require_constraints` joined `_record_parameters`
-    -- before that this docstring's claim was written while a sixth
-    unguarded subscript sat one function over (tan-cli#1077 review,
-    MAJOR 1)."""
+    That reasoning covers the SHAPE of `_check_constraints`'s
+    `spec.get("constraints")` and its `constraints["enum"]` /
+    `["minimum"]` / `["maximum"]` reads -- and only their shape, and only
+    since `_require_constraints` joined `_record_parameters`. Before that,
+    this docstring's claim was written while a sixth unguarded subscript
+    sat one function over (tan-cli#1077 review, MAJOR 1).
+
+    It does NOT cover what `_check_constraints` then DOES with them: a
+    schema-VALID `type: string` (or `enum`) parameter carrying
+    `constraints.minimum`/`maximum` is legal per `$defs/parameter`, and
+    `_require_constraints` guarantees the `int` that makes the resulting
+    `"a" < 5` raise a bare `TypeError`. Latent only because no shipped
+    catalog declares such a parameter. Tracked at tan-cli#1087 -- do not
+    read this paragraph as claiming otherwise."""
     if not isinstance(raw, str):
         return raw
     ptype = spec["type"]
