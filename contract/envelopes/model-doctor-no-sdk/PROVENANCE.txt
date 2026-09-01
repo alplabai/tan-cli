@@ -1,0 +1,101 @@
+SPDX-License-Identifier: Apache-2.0
+
+PROVENANCE — contract/envelopes/model-doctor-no-sdk/expected.json
+=================================================================
+
+Recorded on    : 2026-09-01
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#253
+Branch         : feat/253-model-envelope-fixtures (off dev @ b3c40619)
+
+This is a NEW golden, not a re-recording: there was no previous recording to
+be wrong. `tan model` shipped three subcommands (`SUBCOMMANDS = ("build",
+"doctor", "check")`, `python/tan/commands/model_cmd.py`) with zero
+`contract/envelopes` coverage while every other command surface had some —
+the gap tan-cli#253 was re-scoped onto after the Rust oracle it originally
+named was deleted in `2883cdf4`.
+
+How it was captured
+--------------------
+Exactly as `python/tests/conformance/test_contract_envelopes.py` invokes it: a
+fresh empty scratch directory nested under its own fresh parent
+(`<temp>/tan-contract-<case>-<pid>/root`), the case's inputs copied in,
+`SOURCE_DATE_EPOCH=0`, `HOME`/`USERPROFILE` pointed at a second fresh
+directory, then normalised through the harness's own `normalise()` (PATH_KEYS
+`\` -> `/`, the scratch path down to `__WORKDIR__`). The recording reused the
+harness's own `fresh_dir` / `copy_fixture_inputs` / `case_env` / `normalise`
+rather than reimplementing them (contract/README.md, "Regenerating a golden"
+step 1). Python 3.12.3, lane-private venv, Linux, `tan` resolved from this
+worktree.
+
+What this case pins
+--------------------
+`tan model doctor --format json` from a directory with no board.yaml and no
+resolvable alp-sdk checkout: `ok: true` / `exitCode: 0` (an absent vendor
+toolchain is a REPORTED row, never a failure -- `_run_doctor` returns
+`ExitCode.SUCCESS` unconditionally), the four `data.backends[]` rows in
+REGISTRY order (`cpu`, `ethos_u`, `drpai`, `deepx_dxm1` -- the order
+`registry_backends(_ADAPTERS)` yields and the order the text renderer prints),
+the five-key row shape (`backend`/`tool`/`available`/`version`/`reason`), the
+separate `data.optional[]` array carrying the `ALP_VELA_CONFIG` row, and the
+single `model.doctor-sdk-unresolved` WARNING (not the `model.sdk-root-unresolved`
+ERROR `build`/`check` raise for the same non-resolution).
+
+Why this case carries an `env.json` -- the toolchain-presence problem
+----------------------------------------------------------------------
+Three of the four backend rows read the HOST, not this case's inputs:
+
+    ethos_u     shutil.which("vela")
+    deepx_dxm1  shutil.which("dxcom"), then ALP_DEEPX_SDK_HOME
+    drpai       ALP_DRPAI_TVM_HOME
+    optional    ALP_VELA_CONFIG
+
+so a golden recorded on a toolchain-less box would go RED the moment anyone ran
+it on a box that HAS them -- and the repo's own unavailable-reason string tells
+a customer to install one (`"vela not on PATH; pip install
+alp-tan[model-compile]"`). That is a latent CI failure, not coverage.
+
+MEASURED, on this box, with a `vela` and a `dxcom` on PATH and
+`ALP_VELA_CONFIG`/`ALP_DEEPX_SDK_HOME` set, running the harness's env WITHOUT
+this file:
+
+    CONTROL rows: [('cpu', True, None), ('ethos_u', True, None),
+                   ('drpai', False, None), ('deepx_dxm1', True, None)]
+                  | optional: [('ethos_u', True)]
+
+Three flips against the golden -- and that UNDERCOUNTS by one. `drpai` held at
+`False` here only because the `ALP_DRPAI_TVM_HOME` used for the measurement had
+no `tutorials/compile_onnx_model_quant.py` under it; `_drpai_status`
+(`model_cmd.py`) reports `True` once that script is present and a `python3` is
+on PATH, which is the state a real DRP-AI TVM install is in. So FOUR of the
+five reported rows are host-dependent, not three (measured independently in
+review). With `env.json` applied, all six model cases pass on that same
+polluted host.
+
+The environment is PINNED rather than the rows NORMALISED, deliberately:
+`normalise()` is scoped to `PATH_KEYS` for the reason its own docstring gives
+("a blanket rewrite over every string leaf would launder a real drift inside
+`issues[].message`"), and `available`/`reason` are the only fields this case
+exists to gate -- normalising them away would leave a fixture that asserts
+nothing about the payload it was written for.
+
+`PATH` is pinned to `__WORKDIR__` (the case's own scratch directory, which
+holds only this fixture's copied inputs -- i.e. nothing) rather than to `""`.
+Both make `shutil.which` answer `None`, but an empty `PATH` also strips the
+launcher's own search path on a Windows runner, and a harness that cannot spawn
+the child would report a contract failure it never measured.
+
+The three environment variables are UNSET (`null`) rather than set to `""`.
+NOT because the two differ to the code: every probe that reads them tests
+FALSINESS, not presence -- `_vela_vendor_config_status`'s `if not raw:`,
+`_vendor_config_path`'s `if not raw:` (`tan/model/adapters/ethos_u.py`),
+`_tvm_home`'s `if root and ...` (`tan/model/adapters/drpai.py`) and
+`_deepx_dxm1_status`'s `if sdk_home and ...` -- so `""` and unset take the
+IDENTICAL branch today. `null` is chosen because it is the state it claims to
+be: this case describes a host on which the vendor toolchains are not
+installed, and on such a host those variables are absent, not empty. Pinning
+`""` instead would make the golden depend on all four probes CONTINUING to
+treat empty as absent -- a falsiness check tightened to `is None` in any one of
+them would flip a row here with nothing in the fixture explaining why it ever
+relied on that.

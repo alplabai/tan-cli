@@ -1,0 +1,44 @@
+SPDX-License-Identifier: Apache-2.0
+
+PROVENANCE — contract/envelopes/model-unknown-subcommand/expected.json
+=================================================================
+
+Recorded on    : 2026-09-01
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#253
+Branch         : feat/253-model-envelope-fixtures (off dev @ b3c40619)
+
+This is a NEW golden, not a re-recording: there was no previous recording to
+be wrong. `tan model` shipped three subcommands (`SUBCOMMANDS = ("build",
+"doctor", "check")`, `python/tan/commands/model_cmd.py`) with zero
+`contract/envelopes` coverage while every other command surface had some —
+the gap tan-cli#253 was re-scoped onto after the Rust oracle it originally
+named was deleted in `2883cdf4`.
+
+How it was captured
+--------------------
+Exactly as `python/tests/conformance/test_contract_envelopes.py` invokes it: a
+fresh empty scratch directory nested under its own fresh parent
+(`<temp>/tan-contract-<case>-<pid>/root`), the case's inputs copied in,
+`SOURCE_DATE_EPOCH=0`, `HOME`/`USERPROFILE` pointed at a second fresh
+directory, then normalised through the harness's own `normalise()` (PATH_KEYS
+`\` -> `/`, the scratch path down to `__WORKDIR__`). The recording reused the
+harness's own `fresh_dir` / `copy_fixture_inputs` / `case_env` / `normalise`
+rather than reimplementing them (contract/README.md, "Regenerating a golden"
+step 1). Python 3.12.3, lane-private venv, Linux, `tan` resolved from this
+worktree.
+
+What this case pins
+--------------------
+`tan model bogus --format json` -- the direct analogue of the existing
+`sdk-unknown-subcommand` case: `ok: false`, `exitCode: 1`
+(`ExitCode.RUNTIME_FAILURE`), `project` both-null (the refusal is raised before
+any project context is resolved), the `model.unknown-subcommand` issue
+(`model_cmd.py`), and the message's TRAILING INVENTORY -- "Available: build,
+doctor, check." -- which is rendered from `SUBCOMMANDS` itself, so this golden
+also pins the shipped subcommand list. `data` is `_empty_data(None)`'s
+`build`-shaped payload (`sku`/`built`), which is what an unrecognised
+subcommand falls back to.
+
+Fully deterministic: nothing on this path reads the host, so no `env.json`.
