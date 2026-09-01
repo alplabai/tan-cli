@@ -8,7 +8,9 @@ behaviour (refusals, idempotence, registry pruning) lives in
 from __future__ import annotations
 
 import errno
+import ntpath
 import os
+import posixpath
 import stat
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from tan.core.sdk_removal import (
     compute_tree_bytes,
     is_outside_cache_root,
     looks_like_path,
+    removal_would_take_out,
     remove_sdk_tree,
     resolve_removal_target,
 )
@@ -232,3 +235,167 @@ def test_remove_sdk_tree_reports_a_partial_freed_amount_on_failure(tmp_path, mon
     # measured post-failure, not just echoed from the pre-size.
     assert outcome.freed_bytes == 0
     assert root.exists()
+
+
+# ── removal_would_take_out (tan-cli#1053) ───────────────────────────────────
+#
+# The four `sdk remove` comparisons this replaces all failed in the UNSAFE
+# direction -- a miss meant the load-bearing refusal never fired and the
+# install another project still pointed at was silently removed without
+# `--force`. So both directions are asserted here: the matches that must now
+# be found, AND the non-matches that must NOT become spurious refusals.
+
+
+def test_two_spellings_of_one_directory_match_even_though_the_strings_differ(tmp_path):
+    """The defect class, reproduced HOST-NATIVELY on a case-sensitive
+    filesystem where the originally-reported case-insensitive spelling cannot
+    be: a symlinked cache gives two string-unequal absolute paths that name
+    ONE directory, exactly as `<cache>/SdkVersion` and `<cache>/sdkversion`
+    do on macOS's default APFS volume. `os.path.samefile` answers True for
+    both arrangements for the same reason -- one `st_dev`/`st_ino` -- which
+    is why one helper covers both."""
+    real = tmp_path / "cache" / "v0.19.0"
+    real.mkdir(parents=True)
+    try:
+        (tmp_path / "cache-link").symlink_to(tmp_path / "cache", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this host cannot create a symlink")
+    through_link = str(tmp_path / "cache-link" / "v0.19.0")
+
+    assert str(real) != through_link, "the fixture would be vacuous otherwise"
+    assert os.path.samefile(str(real), through_link), "the fixture must be ONE directory"
+    # Both directions, and both are the SAME verdict here on purpose: the link
+    # is an INTERMEDIATE component (`cache-link/`), so neither side's FINAL
+    # component is a link and `remove_dir` really would delete the real
+    # directory whichever spelling it is handed. The asymmetric case -- a
+    # target whose own final component is the link -- is the next test.
+    assert removal_would_take_out(str(real), through_link)
+    assert removal_would_take_out(through_link, str(real))
+
+
+def test_removing_a_symlink_does_not_take_out_what_it_points_at(tmp_path):
+    """The asymmetry, and the over-refusal the first version of this change
+    shipped (tan-cli#1053 review, major 1).
+
+    `dir_removal.remove_dir` UNLINKS a link it is handed and never follows
+    it, so removing `<cache>/current` destroys nothing behind it -- but
+    `os.path.samefile` follows links on BOTH sides and answered True, so the
+    workspace pinned at the real `<cache>/v0.19.0` was reported as orphaned
+    by a removal that could not touch it. Asserted in both directions,
+    because getting only one of them right is exactly the defect."""
+    real = tmp_path / "v0.19.0"
+    real.mkdir()
+    link = tmp_path / "current"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this host cannot create a symlink")
+    assert os.path.samefile(str(link), str(real)), "samefile alone would say yes"
+
+    # Removing the LINK cannot destroy the real directory.
+    assert not removal_would_take_out(str(real), str(link))
+    # Removing the REAL directory does orphan whoever resolves through the link.
+    assert removal_would_take_out(str(link), str(real))
+    # ...and naming the link itself on both sides is still the same path.
+    assert removal_would_take_out(str(link), str(link))
+
+
+def test_removing_a_link_does_take_out_the_same_link_under_another_spelling(tmp_path):
+    """The other half of the asymmetry, and the under-refusal a BLANKET
+    `return False` on `islink(target)` shipped (tan-cli#1053 review, round 2).
+
+    Removing a link takes out that link -- so a workspace pinned at the SAME
+    link under a different spelling really is orphaned, and really is owed a
+    refusal. Measured on the blanket version: with `cache/current ->
+    v0.19.0` and `alias -> cache`, a pin at `<T>/alias/current` went
+    `projectPin` -> `none` on a `tan sdk remove <cache>/current` that needed
+    no `--force` at all. `os.path.samestat` over two `os.lstat`s follows
+    neither final component, so two spellings of one link share an inode
+    while a link and its own target do not."""
+    real = tmp_path / "cache" / "v0.19.0"
+    real.mkdir(parents=True)
+    try:
+        (tmp_path / "cache" / "current").symlink_to(real, target_is_directory=True)
+        (tmp_path / "alias").symlink_to(tmp_path / "cache", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this host cannot create a symlink")
+    direct = str(tmp_path / "cache" / "current")
+    aliased = str(tmp_path / "alias" / "current")
+    assert direct != aliased, "the fixture would be vacuous otherwise"
+
+    # One link under two spellings: removing it orphans the other spelling.
+    assert removal_would_take_out(aliased, direct)
+    assert removal_would_take_out(direct, aliased)
+    # ...while the link and what it POINTS AT stay distinct, both ways.
+    assert not removal_would_take_out(str(real), direct)
+    assert removal_would_take_out(direct, str(real))
+
+
+def test_two_genuinely_different_directories_still_do_not_match(tmp_path):
+    """The SAFE direction, and the reason this helper cannot just answer True.
+    A guard that over-refuses is its own bug: an unrelated install has to stay
+    removable without `--force`. Both sides EXIST here, so the `samefile` arm
+    really runs and really has to say no -- a fixture of two absent paths
+    would pass on the lexical arm alone and prove nothing."""
+    left = tmp_path / "v0.19.0"
+    right = tmp_path / "v0.20.0"
+    left.mkdir()
+    right.mkdir()
+
+    assert not removal_would_take_out(str(left), str(right))
+
+
+def test_a_pair_that_does_not_exist_degrades_to_the_lexical_answer(tmp_path):
+    """`os.path.samefile` RAISES for a path that is not there, and a removal
+    target legitimately stops existing partway through this command -- so the
+    filesystem arm must degrade, never propagate. Equal spellings still
+    match; different ones answer False rather than exploding."""
+    gone = str(tmp_path / "already-removed")
+    assert not os.path.exists(gone)
+
+    assert removal_would_take_out(gone, gone)
+    assert not removal_would_take_out(gone, str(tmp_path / "something-else"))
+
+
+@pytest.mark.skipif(WINDOWS, reason="the POSIX flavour is what is being asserted")
+def test_case_is_not_folded_on_a_case_sensitive_posix_host(tmp_path):
+    """The whole reason the fold does NOT live in
+    `sdk_default_registry.normalized_sdk_path`: on case-sensitive POSIX
+    `/home/me/sdk` and `/home/Me/sdk` really are two directories, and a
+    blanket case fold would refuse a removal that is perfectly safe."""
+    assert posixpath.normcase("/home/Me/sdk") == "/home/Me/sdk"
+    assert not removal_would_take_out("/home/me/sdk", "/home/Me/sdk")
+
+
+def test_the_case_fold_is_the_stdlib_normcase_so_windows_folds_and_posix_does_not(monkeypatch):
+    """The platform half this Linux host cannot execute, asserted through the
+    stdlib function that decides it. `os.path.normcase` IS `ntpath.normcase`
+    on Windows and `posixpath.normcase` on POSIX, so pinning both flavours
+    plus the helper's delegation to whichever one `os.path` exposes covers
+    the Windows behaviour without a Windows box.
+
+    Also the reason `normcase` alone is not the fix: it is the IDENTITY on
+    darwin, whose default APFS volume is case-INSENSITIVE -- which is why the
+    `samefile` arm above exists at all."""
+    assert ntpath.normcase("C:/Users/Me/sdk") == ntpath.normcase("c:/users/me/sdk")
+    assert posixpath.normcase("/Users/Me") != posixpath.normcase("/users/me")
+
+    monkeypatch.setattr(os.path, "normcase", ntpath.normcase)
+    assert removal_would_take_out("C:/Users/Me/sdk", "c:/users/me/sdk")
+
+
+def test_a_relative_spelling_is_never_anchored_to_the_removing_processs_cwd(
+    tmp_path, monkeypatch
+):
+    """`normalized_sdk_path`'s own invariant, preserved: a registry `sdkPath`
+    that was stored RELATIVE must not be resolved against whatever directory
+    the removing process happens to be sitting in, or the comparison invents
+    a match its writer never wrote. The `samefile` arm is skipped unless both
+    sides are absolute, so this pair -- which `samefile` alone would call one
+    directory -- answers False."""
+    target = tmp_path / "v0.19.0"
+    target.mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    assert os.path.samefile("v0.19.0", str(target)), "the hazard is real from this cwd"
+    assert not removal_would_take_out("v0.19.0", str(target))
