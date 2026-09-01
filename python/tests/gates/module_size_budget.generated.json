@@ -49,7 +49,7 @@
     "tests/commands/test_execute.py": 2093,
     "tests/commands/test_explain_command.py": 993,
     "tests/commands/test_faultdecode_command.py": 1453,
-    "tests/commands/test_flash_command.py": 5889,
+    "tests/commands/test_flash_command.py": 5902,
     "tests/commands/test_generate_command.py": 2078,
     "tests/commands/test_image_command.py": 834,
     "tests/commands/test_init_command.py": 2655,
