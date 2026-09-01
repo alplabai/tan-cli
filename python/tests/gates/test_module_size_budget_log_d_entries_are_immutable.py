@@ -29,17 +29,22 @@ does not depend on any base ref -- "once this exact path is added to the
 repository, by any commit, it is never modified or removed by any later
 commit reachable from here" -- so the check is a walk of `git log
 --name-status` over `MODULE_SIZE_BUDGET_LOG.d/`, cross-checked against both
-`git ls-tree`'s listing of HEAD's own tree AND a direct blob compare between
-the path's add-commit and HEAD (see `entry_violations`'s own docstring for
+`git ls-tree`'s listing of HEAD's own tree AND a direct blob compare, for
+EVERY entry-shaped path in that tree, between the content it was introduced
+with and the content at HEAD (see `entry_violations`'s own docstring for
 why the name-status walk alone is not enough: a merge commit that drops one
 side's already-added entry while resolving a conflict emits no diff record
 for that path at all, and neither does a merge commit that instead REWRITES
-the entry's content -- `git log --name-status` with none of `-m`/`-c`/`--cc`
-given never emits a diff for a merge commit, period, so the tree-membership
-check and the blob compare are each load-bearing for a different half of
-"a merge commit touched this path", not redundant with each other). All
-three checks are entirely self-contained, with the same answer locally and
-in CI, on a `pull_request` run, a `merge_group` run, or a bare `push`. There
+the entry's content, nor one that INTRODUCES it -- `git log --name-status`
+with none of `-m`/`-c`/`--cc` given never emits a diff for a merge commit,
+period, so the tree-membership check and the blob compare are each
+load-bearing for a different half of "a merge commit touched this path",
+not redundant with each other). Driving the blob compare off HEAD's tree
+rather than off the walk's add-set is tan-cli#1065: an entry whose only
+introducing commit is a merge has no "A" record for the add-set to hold, so
+an add-set-driven compare never looked at it at all. All of these checks are
+entirely self-contained, with the same answer locally and in CI, on a
+`pull_request` run, a `merge_group` run, or a bare `push`. There
 is no base-ref resolution to get wrong, so there is no equivalent gap: a
 same-branch rewrite of a file that branch itself just added is caught the
 same way a same-branch rewrite of a line already on `dev` is -- both are
@@ -49,9 +54,10 @@ within-branch edits. A per-entry file is meant to be finished the moment it
 is written; nothing about this ledger's purpose argues for tolerating a
 self-correction the way free-form prose might. (A squash-merge that drops
 an entry before it is ever committed to this branch's history is a
-different, NOT-covered gap -- see "What is deliberately excluded" below and
+different, NOT-covered gap, as is a merge-introduced entry that a later
+merge drops -- see "What is deliberately excluded" below and
 `entry_violations`'s own docstring for why no git-log-based walk can close
-it.)
+either of them.)
 
 ## What is deliberately excluded
 
@@ -69,11 +75,30 @@ branch adds an entry and the merge into this branch is a GitHub "Squash and
 merge" (`dev`'s own real merge strategy) that omits that file from the
 squash commit's diff, this branch's history never contains a commit that
 added the path at all: squash discards the branch's own per-commit history,
-so there is no "A" record anywhere reachable from HEAD, and the tree/blob
-checks below both depend on one existing. This is a real, unclosed gap in
-what a git-log walk can see -- not a design choice this file is making on
-purpose the way the README.md filter is -- see `entry_violations`'s own
+so there is no "A" record anywhere reachable from HEAD, and the path is not
+in HEAD's tree either, so neither of `entry_violations`' two inputs (the
+walk's records, HEAD's tree) ever mentions it. This is a real, unclosed gap
+in what a git-log walk can see -- not a design choice this file is making
+on purpose the way the README.md filter is -- see `entry_violations`'s own
 docstring for the full reasoning on why no addition to the walk closes it.
+Note that an ordinary squash-merge that DOES carry the entry is fully
+covered and always was: a squash commit is an ordinary single-parent commit,
+so it emits a normal "A" record like any other add.
+
+One narrower relative of that gap is excluded for the same structural
+reason, and is named here rather than left implicit (tan-cli#1065's own
+scope note: a third UNDOCUMENTED blind spot in a file called
+`..._entries_are_immutable` is the thing to avoid): an entry that a merge
+commit INTRODUCED -- so it has no "A" record, the tan-cli#1065 case fixed
+below -- and that a later merge commit then DROPPED, so it is not in HEAD's
+tree either. Neither of `entry_violations`' two inputs mentions it, exactly
+as for the squash case, so there is no path for it to check. What IS covered
+as of tan-cli#1065 is the same merge-introduced entry while it remains in
+HEAD's tree: its content is compared against the merge that introduced it,
+so a rewrite by any later commit, merge or not, is caught. Closing the
+dropped variant too would mean enumerating every tree in the history instead
+of walking records plus HEAD's tree -- a materially more expensive check for
+a shape whose ingredients are two separate conflict-resolution amends.
 """
 from __future__ import annotations
 
@@ -108,11 +133,54 @@ def _is_entry_path(path: str, dir_rel: str) -> bool:
     return bool(_ENTRY_NAME.match(path.rsplit("/", 1)[-1]))
 
 
+def _blob_oid(cwd: Path, rev: str, path: str) -> str | None:
+    """The blob sha `path` resolves to at `rev`, or `None` when `rev`'s tree
+    does not contain `path` at all -- a legitimate answer here (the commit
+    predates the entry), not an error."""
+    result = _git_ok("rev-parse", f"{rev}:{path}", cwd=cwd)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _introducing_commit(cwd: Path, path: str) -> tuple[str, str] | None:
+    """`(commit, blob sha)` for the earliest commit reachable from HEAD whose
+    own tree actually contains `path` -- i.e. the commit that INTRODUCED it,
+    resolved without needing a `--name-status` "A" record for it (tan-cli#1065:
+    a merge commit introducing an entry emits no such record, so
+    `entry_violations`' walk never sees one). `None` only when no reachable
+    commit contains the path, which cannot happen for a path read out of
+    HEAD's own tree and which the caller therefore treats as a hard git
+    failure rather than a pass.
+
+    `--full-history` is what makes this work for the merge case: it keeps a
+    merge commit in a path-limited walk instead of simplifying it away, and
+    a merge that introduces a path present in NEITHER parent is TREESAME to
+    neither, so it is listed. `--reverse` puts the oldest listed commit
+    first; the loop still checks tree membership rather than trusting the
+    first line, so a history whose oldest listed commit is a delete (an
+    add/drop/re-add cycle) resolves to the right commit instead of raising.
+    """
+    result = _git_ok(
+        "rev-list", "--full-history", "--reverse", "HEAD", "--", path, cwd=cwd
+    )
+    if result.returncode != 0:
+        raise GitCommandFailed(
+            f"git rev-list --full-history -- {path} failed in {cwd}: "
+            f"{result.stderr!r}"
+        )
+    for commit in result.stdout.splitlines():
+        oid = _blob_oid(cwd, commit, path)
+        if oid is not None:
+            return commit, oid
+    return None
+
+
 def entry_violations(cwd: Path, dir_rel: str) -> dict[str, list[str]]:
-    """path -> every git status code (other than a single leading "A") ever
-    recorded for it, reachable from HEAD -- empty when every entry under
-    `dir_rel` was added exactly once, is still present in HEAD's own tree,
-    and was never touched again.
+    """path -> what is wrong with it -- empty when every entry under
+    `dir_rel` was added exactly once (or introduced by a merge commit, which
+    records nothing), is still present in HEAD's own tree, and still holds
+    byte-for-byte the content it was introduced with.
 
     Uses `--name-status` (not `--follow`, not `-M` rename detection): an
     entry is content-addressed by nothing but its own filename, and this
@@ -180,6 +248,50 @@ def entry_violations(cwd: Path, dir_rel: str) -> dict[str, list[str]]:
     "diff an arbitrary pair of revisions for a single path" cheaper than
     `rev-parse`'s O(1) blob lookup at each of the two revisions.
 
+    That blob compare originally ran only for paths the walk had seen an
+    "A" record for, which left one more door into the same "a merge commit
+    emits no --name-status record" root cause open (tan-cli#1065): an entry
+    whose ONLY introducing commit is a MERGE commit has no "A" record
+    anywhere -- the introducing merge emits no diff for it, exactly like the
+    dropping and rewriting merges above -- so the path never enters
+    `statuses` at all and none of the three checks so far ever looks at it.
+    Measured directly in a throwaway repo, both halves of the pair:
+
+        entry introduced by a merge commit, then rewritten by a second merge
+          tree_has_entry = True
+          violations     = {}          <- not caught
+        same shape, but followed by a NORMAL delete
+          tree_has_entry = False
+          violations     = {'LOG.d/2026-08-27-22222222.md': ['D at 8d659323']}
+
+    -- the second row being caught only because a NON-merge commit does emit
+    its "D" record. So the blob compare is driven by HEAD's own TREE rather
+    than by the walk's add-set: every entry-shaped path in HEAD's tree is
+    compared against the content it was introduced with, whether or not the
+    walk recorded an add for it. For the paths that do have an "A" record
+    that is the add commit, unchanged; for a path with none, the introducing
+    commit is resolved by `_introducing_commit` -- the earliest commit
+    reachable from HEAD whose tree actually contains the path, which for a
+    merge-introduced entry IS the introducing merge (`git rev-list
+    --full-history` does list a merge that is TREESAME to no parent for the
+    path, and a merge that introduces a path present in neither parent is by
+    definition TREESAME to neither).
+
+    This tree-driven pass cannot fire on the ordinary squash-merge shape
+    `dev` actually uses -- the thing tan-cli#1065's scope note is emphatic it
+    must not be turned into a false-positive machine. A squash commit is an
+    ordinary SINGLE-parent commit, so it emits a normal "A" record for every
+    entry it carries; a squash-merged entry therefore has an add record and
+    goes down exactly the add-commit compare it always did. The tree-driven
+    branch engages only for a path in HEAD's tree with ZERO name-status
+    records, which no single-parent commit can produce -- only a merge can.
+    Proven hermetically, not argued:
+    `test_a_squash_merged_entry_passes_clean` and
+    `test_an_entry_introduced_by_a_merge_commit_and_never_touched_again_
+    passes_clean` are the negative half of
+    `test_an_entry_introduced_by_a_merge_commit_and_rewritten_by_a_second_
+    merge_is_caught`.
+
     Squash-merges are a DIFFERENT, unfixable-by-any-git-log-walk gap, called
     out here rather than left implicit: if a branch adds an entry and the
     merge into the branch this gate walks is a GitHub "Squash and merge"
@@ -203,6 +315,20 @@ def entry_violations(cwd: Path, dir_rel: str) -> dict[str, list[str]]:
     which is out of scope for a gate that -- by design (see "Why this needs
     no PR/merge-queue base ref at all" above) -- only ever looks at commits
     already reachable from HEAD.
+
+    One narrower relative of that gap survives the tree-driven pass above
+    and is excluded for the same structural reason, named here rather than
+    left implicit: an entry that a merge commit INTRODUCED and a later merge
+    commit then DROPPED. It has no "A" record (the introducing merge emits
+    none) and it is not in HEAD's tree (the dropping merge removed it,
+    emitting none either), so it appears in NEITHER of this function's two
+    inputs -- there is no path for it to check, the same way there is none
+    for the squash case. Closing it would mean enumerating every tree in the
+    history rather than walking records plus HEAD's tree, a materially more
+    expensive check for a shape that needs two separate conflict-resolution
+    amends where the tan-cli#1065 case fixed above needs only the
+    introducing one. Everything that IS in HEAD's tree keeps the full
+    content promise.
     """
     result = _git_ok(
         "log",
@@ -302,6 +428,44 @@ def entry_violations(cwd: Path, dir_rel: str) -> dict[str, list[str]]:
                 f"add commit ({add_oid}) despite no recorded modify -- a "
                 "merge commit rewrote it without leaving a --name-status "
                 "record",
+            ]
+
+    # Fourth check (tan-cli#1065): the three above all start from the walk's
+    # own records, so an entry with NO record at all -- one a MERGE commit
+    # introduced, since a merge emits no --name-status diff for anything --
+    # is invisible to every one of them, and a second merge can then rewrite
+    # it for free. Drive the same content promise off HEAD's TREE instead:
+    # every entry-shaped path present at HEAD that the walk never recorded
+    # is compared against the commit that introduced it. A squash commit is
+    # single-parent and emits a normal "A" record, so a squash-merged entry
+    # never reaches this branch (see the docstring above).
+    for path in sorted(present):
+        if path in statuses or path in violations:
+            continue
+        if not _is_entry_path(path, dir_rel):
+            continue
+        introduced = _introducing_commit(cwd, path)
+        if introduced is None:
+            raise GitCommandFailed(
+                f"{path} is present in HEAD's tree but no commit reachable "
+                f"from HEAD contains it, in {cwd} -- git history is "
+                "inconsistent; this must not be read as a clean entry"
+            )
+        intro_commit, intro_oid = introduced
+        head_oid = _blob_oid(cwd, "HEAD", path)
+        if head_oid is None:
+            raise GitCommandFailed(
+                f"git rev-parse HEAD:{path} failed in {cwd} for a path "
+                "`git ls-tree HEAD` just listed"
+            )
+        if intro_oid != head_oid:
+            violations[path] = [
+                f"introduced at {intro_commit} with no --name-status record "
+                "(a merge commit introduced it)",
+                f"content at HEAD ({head_oid}) differs from content at the "
+                f"introducing commit ({intro_oid}) -- an entry a merge "
+                "commit introduced was rewritten later, and neither commit "
+                "left a --name-status record",
             ]
     return violations
 
@@ -597,6 +761,188 @@ def test_an_evil_merge_that_rewrites_an_already_added_entrys_content_is_caught(t
     assert "LOG.d/2026-08-27-22222222.md" in violations, (
         "a merge commit that rewrites an already-added entry's content "
         f"must be flagged, but got: {violations}"
+    )
+
+
+def _walk_records_for(repo: Path, path: str) -> list[str]:
+    """Every `--name-status` record the gate's own walk emits for `path` --
+    the shape assertions below use to prove a scenario really is the
+    no-record blind spot (or, for the squash case, really is NOT)."""
+    out = _git(
+        repo,
+        "log",
+        "--reverse",
+        "--full-history",
+        "--no-renames",
+        "--name-status",
+        "--pretty=format:%x01%H",
+        "--",
+        "LOG.d",
+    ).stdout
+    return [line for line in out.splitlines() if line.endswith(f"\t{path}")]
+
+
+def _entry_introduced_by_a_merge_commit(repo: Path) -> Path:
+    """Builds the tan-cli#1065 setup: an entry whose ONLY introducing commit
+    is a real two-parent MERGE commit, so the name-status walk has no "A"
+    record for it anywhere. Two branches diverge on unrelated files, merge
+    cleanly, and the merge commit is amended to carry an entry present in
+    neither parent -- an "evil merge" that ADDS, which is what an
+    over-eager conflict resolution that retypes a lost file produces.
+    Returns the entry directory."""
+    repo.mkdir()
+    _init_repo(repo)
+
+    entry_dir = repo / "LOG.d"
+    entry_dir.mkdir()
+    _write(entry_dir, "2026-08-25-11111111.md", ["- 2026-08-25 -- base entry"])
+    _commit(repo, "base")
+
+    _git(repo, "checkout", "-q", "-b", "feature")
+    _write(repo, "feature.txt", ["feature unrelated"])
+    _commit(repo, "feature unrelated change")
+
+    _git(repo, "checkout", "-q", "main")
+    _write(repo, "main.txt", ["main unrelated, diverges"])
+    _commit(repo, "main unrelated change")
+
+    _git(repo, "checkout", "-q", "feature")
+    merge = _git(repo, "merge", "--no-edit", "main", check=False)
+    assert merge.returncode == 0, f"setup merge must succeed clean -- stderr: {merge.stderr}"
+    assert len(_git(repo, "rev-parse", "HEAD^@").stdout.splitlines()) == 2, (
+        "setup must produce a real two-parent merge commit, not a "
+        "fast-forward, or this reproduces nothing"
+    )
+
+    _write(entry_dir, "2026-08-27-22222222.md", ["- 2026-08-27 -- introduced by the merge commit itself"])
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--amend", "--no-edit")
+
+    assert _walk_records_for(repo, "LOG.d/2026-08-27-22222222.md") == [], (
+        "the whole point of this setup is that the merge commit which "
+        "introduced the entry emits NO --name-status record for it; if the "
+        "walk sees one, the scenario is not the tan-cli#1065 blind spot"
+    )
+    return entry_dir
+
+
+def test_an_entry_introduced_by_a_merge_commit_and_rewritten_by_a_second_merge_is_caught(tmp_path):
+    """tan-cli#1065, the measured row: an entry whose only introducing commit
+    is a merge has no "A" record, so the add-set-driven blob compare added in
+    tan-cli#907 round 3 never looked at it, and a SECOND merge could then
+    rewrite it for free -- `tree_has_entry = True, violations = {}`, while the
+    same shape followed by a NORMAL (single-parent) delete was caught, because
+    only a non-merge commit emits a record. Fixed by driving the blob compare
+    off HEAD's tree rather than off the add-set."""
+    repo = tmp_path / "repo"
+    entry_dir = _entry_introduced_by_a_merge_commit(repo)
+
+    # Diverge and merge a SECOND time, and rewrite the merge-introduced entry
+    # in that merge commit -- again a shape no --name-status record exists for,
+    # on either end.
+    _git(repo, "checkout", "-q", "-b", "other")
+    _write(repo, "other.txt", ["other unrelated"])
+    _commit(repo, "other unrelated change")
+
+    _git(repo, "checkout", "-q", "feature")
+    _write(repo, "feature2.txt", ["feature diverges again"])
+    _commit(repo, "feature unrelated change 2")
+
+    merge = _git(repo, "merge", "--no-edit", "other", check=False)
+    assert merge.returncode == 0, f"second setup merge must succeed clean -- stderr: {merge.stderr}"
+    assert len(_git(repo, "rev-parse", "HEAD^@").stdout.splitlines()) == 2, (
+        "the second setup merge must also be a real two-parent merge commit"
+    )
+
+    _write(entry_dir, "2026-08-27-22222222.md", ["- 2026-08-27 -- REWRITTEN by the second merge"])
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--amend", "--no-edit")
+
+    tree = _git(repo, "ls-tree", "-r", "--name-only", "HEAD", "--", "LOG.d").stdout.splitlines()
+    assert "LOG.d/2026-08-27-22222222.md" in tree, (
+        "the rewritten entry must still be in HEAD's tree -- the tree "
+        "cross-check must have nothing to flag, or this is the already-fixed "
+        "merge-DROP case rather than tan-cli#1065"
+    )
+    assert _walk_records_for(repo, "LOG.d/2026-08-27-22222222.md") == [], (
+        "neither the introducing merge nor the rewriting merge may emit a "
+        "--name-status record, or this is not the blind spot being closed"
+    )
+
+    violations = entry_violations(repo, "LOG.d")
+    assert "LOG.d/2026-08-27-22222222.md" in violations, (
+        "an entry introduced by a merge commit and then rewritten by a "
+        f"second merge must be flagged, but got: {violations}"
+    )
+
+
+def test_an_entry_introduced_by_a_merge_commit_and_never_touched_again_passes_clean(tmp_path):
+    """The negative half of the test above, and the reason tan-cli#1065 is
+    closed with a content compare rather than by flagging every record-less
+    path outright: an entry a merge commit introduced and nothing touched
+    again has kept its content, which is the whole promise. Flagging it would
+    make the gate red on a shape that lost nothing."""
+    repo = tmp_path / "repo"
+    entry_dir = _entry_introduced_by_a_merge_commit(repo)
+
+    _write(repo, "unrelated.txt", ["noise"])
+    _commit(repo, "an unrelated follow-up commit")
+
+    assert (entry_dir / "2026-08-27-22222222.md").read_text(encoding="utf-8") == (
+        "- 2026-08-27 -- introduced by the merge commit itself\n"
+    )
+    violations = entry_violations(repo, "LOG.d")
+    assert violations == {}, (
+        "a merge-introduced entry that was never touched again kept its "
+        f"content and must not be flagged, but got: {violations}"
+    )
+
+
+def test_a_squash_merged_entry_passes_clean(tmp_path):
+    """The shape `dev` actually lands, asserted rather than assumed: GitHub
+    "Squash and merge" is what this repo's PRs use, so the tan-cli#1065 fix
+    would be a false-positive machine if the tree-driven pass could fire on
+    it. It cannot, and the mechanism is asserted directly here, not just in
+    the docstring: a squash commit is an ordinary SINGLE-parent commit, so it
+    emits a normal "A" record for the entry it carries, which sends that
+    entry down the unchanged add-commit compare and never into the
+    record-less branch at all."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+
+    entry_dir = repo / "LOG.d"
+    entry_dir.mkdir()
+    _write(entry_dir, "2026-08-25-11111111.md", ["- 2026-08-25 -- base entry"])
+    _commit(repo, "base")
+
+    _git(repo, "checkout", "-q", "-b", "feature")
+    _write(repo, "src.py", ["def a():", "    return 1"])
+    _commit(repo, "feature: the code change that raised the ceiling")
+    _write(entry_dir, "2026-08-27-22222222.md", ["- 2026-08-27 -- feature's own reasoned entry"])
+    _commit(repo, "feature: regen the module size budget")
+
+    _git(repo, "checkout", "-q", "main")
+    squash = _git(repo, "merge", "--squash", "feature", check=False)
+    assert squash.returncode == 0, f"squash merge must apply clean -- stderr: {squash.stderr}"
+    _commit(repo, "feature: the code change that raised the ceiling (#1234)")
+
+    assert len(_git(repo, "rev-parse", "HEAD^@").stdout.splitlines()) == 1, (
+        "a squash merge must produce a SINGLE-parent commit -- that is "
+        "exactly why it still emits a --name-status record"
+    )
+    assert _walk_records_for(repo, "LOG.d/2026-08-27-22222222.md") == [
+        "A\tLOG.d/2026-08-27-22222222.md"
+    ], (
+        "a squash-merged entry must arrive with a normal single 'A' record, "
+        "so it goes down the add-commit compare and never reaches the "
+        "tree-driven pass tan-cli#1065 added"
+    )
+
+    violations = entry_violations(repo, "LOG.d")
+    assert violations == {}, (
+        "the ordinary squash-merge shape `dev` uses must stay clean, but "
+        f"got: {violations}"
     )
 
 
