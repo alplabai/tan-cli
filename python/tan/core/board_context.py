@@ -62,23 +62,25 @@ Two halves of the same question, and both had a copy-per-command problem:
   unifying them is not this change's job. What this change bought is that
   `scaffold` did not make it seven.
 
-  **"One definition" here is prose, not a gate, and stays prose until
-  tan-cli#1091.** `tests/gates/test_shared_helpers_have_one_definition.py`
-  hard-asserts that every helper it owns lives in `tan/core/shapes.py`, and
-  it reads its ownership list out of that one file, so `resolve_board_path`
-  cannot join it without generalising the gate from "shapes owns these" to a
-  `{name -> home module}` map. tan-cli#1091 is the issue for exactly that,
-  seeded with this function; its sibling
-  `tests/gates/test_shared_test_helpers_have_one_definition.py` (tan-cli#1083)
-  already IS a `{name -> home module}` allow-list and is the shape to copy.
+  **"One definition" here is now a gate, not prose (tan-cli#1091).**
+  `tests/gates/test_shared_helpers_have_one_definition.py` used to hard-assert
+  that every helper it owns lives in `tan/core/shapes.py`, reading its
+  ownership list out of that one file, so `resolve_board_path` could not join
+  it without generalising the gate from "shapes owns these" to a
+  `{name -> home module}` map. tan-cli#1091 did exactly that: the map is
+  `_SHARED_HELPERS` now, `resolve_board_path` is seeded in it pointed at this
+  module, and the per-helper assertion compares each entry against its OWN
+  declared home rather than a hard-coded `tan/core/shapes.py` literal. Its
+  sibling `tests/gates/test_shared_test_helpers_have_one_definition.py`
+  (tan-cli#1083) was already that shape and is what tan-cli#1091 copied.
   NOT tan-cli#1081, which an earlier revision of this paragraph pointed at:
   #1081's durable half already landed as #1083 and it is held open solely for
   an outstanding `bound_sdk*` binder audit that touches none of `TAN_ROOT`,
-  `_OWNED_BY_SHAPES`, or the `rel == "tan/core/shapes.py"` assertion -- so
-  closing it would have left this invariant unguarded behind a dead pointer.
-  Doing the gate work here would put a refactor inside a bugfix. Until #1091
-  lands, a seventh private `_resolve_board_path` would land all-green, and
-  this paragraph is the only thing in its way.
+  `_SHARED_HELPERS`, or the per-entry home assertion. A seventh private
+  `_resolve_board_path` -- or a private redefinition of this module's own --
+  now REDS `test_a_shared_helper_is_defined_exactly_once[resolve_board_path]`,
+  naming both files; this paragraph recorded the gap while it existed rather
+  than claiming it was already closed.
 
 * [`read_board_context`] is the content of the generated module's
   `// Board context: ...` line. Its wire spelling -- `<sku> / <os>`, with

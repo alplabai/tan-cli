@@ -34,9 +34,11 @@ a second private `_resolve_board_path` the next day would have left every test
 in this file green. `_SHARED_HELPERS` below generalises the check to
 `{name: (home module, why one definition matters)}` for exactly that reason.
 The six pre-existing entries still point at `tan/core/shapes.py`, unchanged in
-behaviour; `_SHARED_HELPERS` is simply where a helper homed elsewhere would be
-added next -- see the comment above that dict for why `resolve_board_path`
-itself is not seeded yet.
+behaviour; `_SHARED_HELPERS` now also carries `resolve_board_path`, homed at
+`tan/core/board_context.py` -- the seed tan-cli#1091 was written for, added in
+the same change that rebased onto PR #1090's merge. See the comment above the
+dict for how the one genuinely different lookalike (`generate_cmd.py`'s
+private copy) is carved out rather than folded in.
 
 WHAT THIS ASSERTS, and why it is name-based, and why it is opt-in. For each
 name in `_SHARED_HELPERS` below -- an explicit allow-list -- there is exactly
@@ -57,8 +59,10 @@ AST walk itself, `_module_level_definitions()`, covers every file under
 file acts on) and no heuristic that promotes a name into scope.
 
 That narrowness is measured, not assumed. Run over `python/tan/**` -- this
-file's own tree, with this file's own node-shape rules -- at `c2412dfa`: 91
-names have more than one module-level definition, 232 definitions in total.
+file's own tree, with this file's own node-shape rules -- re-derived after
+rebasing onto #1090's merge and adding the `resolve_board_path` seed below:
+still 91 names have more than one module-level definition, 232 definitions in
+total.
 A blanket version of this check, asserting one definition for every name the
 walk returns instead of the opt-in `_SHARED_HELPERS` list, is red on the day
 it lands over THIS tree, not just some other one. (PR #1083's sibling gate
@@ -103,23 +107,24 @@ TAN_ROOT = pathlib.Path(__file__).resolve().parents[2] / "tan"
 #: what a failure should say WHY, because "duplicate definition" alone does
 #: not tell the reader which copy is the real one.
 #:
-#: All six entries below are owned by `tan/core/shapes.py`, unchanged from
-#: before this file generalised past a single hard-coded home (tan-cli#1091).
+#: The first six entries below are owned by `tan/core/shapes.py`, unchanged
+#: from before this file generalised past a single hard-coded home
+#: (tan-cli#1091).
 #:
-#: `resolve_board_path` (PR #1090's new `tan/core/board_context.py`, moved out
-#: of `validate_cmd.py`'s `_resolve_board_path` so `scaffold` could share it)
-#: is the seed tan-cli#1091 named -- but is NOT added below, on purpose, as of
-#: this change: PR #1090 has not merged to `dev`, so `tan/core/board_context.py`
-#: does not exist yet, and seeding a home that does not exist would fail this
-#: file's own "passes on the tree as it stands" bar. It is not simply absent
-#: either -- the CURRENT tree already carries two private, deliberately
-#: different `_resolve_board_path` functions (`tan/commands/validate_cmd.py`,
-#: `tan/commands/generate_cmd.py`: different signatures, different questions,
-#: same shape as the six live resolvers `board_context.py`'s own docstring
-#: will enumerate once #1090 lands), so seeding the bare name today would
-#: also need a `_NOT_THE_SAME_HELPER` carve-out for both of them, for a home
-#: module that is not there to own the real one. Add `resolve_board_path` here
-#: in the same change that merges #1090, pointed at `tan/core/board_context.py`.
+#: `resolve_board_path` is the seed tan-cli#1091 was written for: PR #1090
+#: moved `validate_cmd.py`'s private `_resolve_board_path` to the new
+#: `tan/core/board_context.py` so `tan scaffold` could share it, rather than
+#: growing a SEVENTH project/board resolver (`board_context.py`'s own
+#: docstring names the other five and explains why they stay separate). Its
+#: `validate_cmd.py` call site now reads
+#: `from tan.core.board_context import resolve_board_path as _resolve_board_path`
+#: -- an `ImportFrom`, not a definition, so this file's AST walk never sees it
+#: at all (see ALIASING IS NOT A DEFINITION above). Verified against the real
+#: merged tree, not assumed: `tan/commands/generate_cmd.py:938` is the ONLY
+#: other module-level site either spelling resolves to, and it answers a
+#: genuinely different question (see `_NOT_THE_SAME_HELPER` below) -- so this
+#: seed needs exactly one carve-out, not the two it would have needed against
+#: `validate_cmd.py`'s old private copy.
 _SHARED_HELPERS: dict[str, tuple[str, str]] = {
     "SDK_MARKER": (
         "tan/core/shapes.py",
@@ -145,6 +150,13 @@ _SHARED_HELPERS: dict[str, tuple[str, str]] = {
         "tan/core/shapes.py",
         "the short YAML-ish type name for an error message",
     ),
+    "resolve_board_path": (
+        "tan/core/board_context.py",
+        "turns `--project`/`--board-yaml` into the `board.yaml` path "
+        "`validate` and `scaffold` both read; a private re-implementation "
+        "re-opens the drift #1090 closed (alp-sdk-vscode#601/#633 shipped "
+        "modules that never compiled from exactly this kind of second copy)",
+    ),
 }
 
 #: Definitions that LOOK like a second copy and are not. Each entry names a
@@ -156,6 +168,18 @@ _NOT_THE_SAME_HELPER: dict[tuple[str, str], str] = {
         "takes an `os.DirEntry`, not a path, and FOLLOWS symlinks to match the "
         "oracle's `Path::is_dir()`. A different predicate with its own "
         "documented divergence"
+    ),
+    ("tan/commands/generate_cmd.py", "_resolve_board_path"): (
+        "answers `(board_yaml, workspace_root) -> Path` via pathlib, always "
+        "returning a path that EXISTS-or-not against `workspace_root` -- a "
+        "different question from `board_context.resolve_board_path`'s "
+        "`(project, board_yaml) -> (str, str)`, which joins as strings on "
+        "purpose so the leading `./` the conformance fixtures pin survives. "
+        "`tan/commands/validate_cmd.py`'s former copy of this same private "
+        "name is not a THIRD site: PR #1090 replaced it with `from "
+        "tan.core.board_context import resolve_board_path as "
+        "_resolve_board_path`, an `ImportFrom` this file's AST walk never "
+        "sees as a definition"
     ),
 }
 
