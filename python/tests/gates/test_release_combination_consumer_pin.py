@@ -149,10 +149,29 @@ def test_both_alp_sdk_vscode_branches_are_fetched(branch: str):
     assert url in body, "the per-branch raw.githubusercontent.com fetch was rewritten"
 
 
-def test_a_failed_fetch_is_fatal_not_a_silent_skip():
-    body = _only_step_run(_RESOLVE_JOB)
-    assert "Refusing to continue with a partial pin set" in body
-    assert "return 1" in body
+def test_the_workflow_stays_schedule_and_dispatch_only():
+    """The scope decision tan-cli#639/#767/#1050 all restate in prose, pinned.
+
+    This gate depends on release tags in two other repos and a pin in a third;
+    it is deliberately NOT a required PR check, and the header says so three
+    times. Nothing asserted it. Adding `pull_request:` here would put a
+    ~60-minute-per-leg journey (three to nine legs) on every PR and make a
+    third repo's pin move able to block an unrelated merge.
+    """
+    # YAML 1.1 parses a bare `on:` key as the boolean True; both spellings are
+    # accepted so this cannot rot on a PyYAML/loader change.
+    raw = _workflow()
+    triggers = raw.get("on", raw.get(True))
+    assert set(triggers) == {"schedule", "workflow_dispatch"}, (
+        f"release-combination.yml's triggers are now {sorted(triggers)}. It is "
+        "`schedule` + `workflow_dispatch` ONLY by design -- see the file "
+        "header's NOT-a-required-PR-check paragraph."
+    )
+    assert set(triggers["workflow_dispatch"]["inputs"]) == {
+        "tan_version",
+        "consumer_tan_version",
+        "alp_sdk_ref",
+    }
 
 
 # --------------------------------------------------------------------------
@@ -167,24 +186,62 @@ export const RENESAS_BUILD_CLI_VERSION = "0.6.0-rc1";
 """
 
 
+#: The ONE GitHub API question this job is allowed to ask. The dedup baseline
+#: is "the version the `latest` leg will actually install", which comes from
+#: **tan-cli's** own latest release -- not alp-sdk's, not alp-sdk-vscode's.
+#: Review of PR #1088 measured what an argv-blind `gh` stub costs: repointing
+#: this endpoint to `repos/alplabai/alp-sdk/releases/latest` (an alp-sdk tag,
+#: which no consumer pin can ever equal) left the gate at 22/22 GREEN while
+#: making `skip=true` unreachable and adding six extra ~60-minute journey legs
+#: to every scheduled run, forever -- the exact inverse of tan-cli#1050. A
+#: stub that answers every question the same way cannot prove which question
+#: was asked, so this one refuses anything else.
+_EXPECTED_GH_ARGV = "api repos/alplabai/tan-cli/releases/latest -q .tag_name"
+
+#: Same reasoning for `curl`: the stub serves a branch fixture, so it must
+#: first prove the URL it was handed is the per-branch `service.ts` on
+#: alp-sdk-vscode and nothing else.
+_EXPECTED_CURL_URL_RE = (
+    "^https://raw[.]githubusercontent[.]com/alplabai/alp-sdk-vscode/"
+    "(dev|main)/src/alpCli/service[.]ts$"
+)
+
+
 def _stub_bin(tmp_path: pathlib.Path, *, latest_tan: str, dev: str | None, main: str | None) -> pathlib.Path:
-    """A `PATH` dir with a `curl` and a `gh` that answer from fixtures.
+    """A `PATH` dir with a `curl` and a `gh` that ASSERT their argv, then
+    answer from fixtures.
 
     `dev`/`main` are the raw `service.ts` bodies to serve for that branch;
-    `None` means "this branch 404s", which the real `curl -fsSL` reports as a
-    non-zero exit and an empty body.
+    `None` means "this branch 404s", which the real
+    `curl -fsSL --retry 3 --retry-connrefused` reports as a non-zero exit and
+    an empty body (a 404 is not a transient, so curl does not retry it).
+
+    Every invocation is appended to `<tmp_path>/calls.log` as `<tool> <argv>`
+    so a test can assert not just the answer but the flags the caller passed.
     """
     bindir = tmp_path / "bin"
-    bindir.mkdir()
+    bindir.mkdir(exist_ok=True)
     served = tmp_path / "served"
-    served.mkdir()
+    served.mkdir(exist_ok=True)
+    calls = tmp_path / "calls.log"
+    # Idempotent: a test may drive the step body twice under one `tmp_path`
+    # (e.g. transient-vs-404). Each set-up starts from a clean fixture set and
+    # an empty call log, so `_calls()` only ever describes the latest run.
+    calls.unlink(missing_ok=True)
+    for stale in served.iterdir():
+        stale.unlink()
     for branch, content in (("dev", dev), ("main", main)):
         if content is not None:
             (served / branch).write_text(content, encoding="utf-8")
 
     (bindir / "curl").write_text(
         "#!/usr/bin/env bash\n"
-        "url=\"${@: -1}\"\n"
+        f'printf "curl %s\\n" "$*" >> "{calls}"\n'
+        'url="${@: -1}"\n'
+        f'if ! printf "%s" "$url" | grep -qE \'{_EXPECTED_CURL_URL_RE}\'; then\n'
+        '  echo "STUB-REFUSED: curl was asked for an unexpected URL: $url" >&2\n'
+        "  exit 99\n"
+        "fi\n"
         f'branch="$(printf "%s" "$url" | sed -E "s#.*/alp-sdk-vscode/([^/]+)/.*#\\1#")"\n'
         f'f="{served}/$branch"\n'
         'if [ ! -f "$f" ]; then exit 22; fi\n'
@@ -192,7 +249,14 @@ def _stub_bin(tmp_path: pathlib.Path, *, latest_tan: str, dev: str | None, main:
         encoding="utf-8",
     )
     (bindir / "gh").write_text(
-        f"#!/usr/bin/env bash\nprintf '%s\\n' '{latest_tan}'\n",
+        "#!/usr/bin/env bash\n"
+        f'printf "gh %s\\n" "$*" >> "{calls}"\n'
+        f'if [ "$*" != "{_EXPECTED_GH_ARGV}" ]; then\n'
+        '  echo "STUB-REFUSED: the dedup baseline must come from '
+        f'\'{_EXPECTED_GH_ARGV}\', got: $*" >&2\n'
+        "  exit 98\n"
+        "fi\n"
+        f"printf '%s\\n' '{latest_tan}'\n",
         encoding="utf-8",
     )
     for f in bindir.iterdir():
@@ -240,8 +304,30 @@ def _run_resolve(
     return proc, parsed
 
 
-def _combinations(parsed: dict[str, str]) -> list[tuple[str, str]]:
-    return [(e["combination"], e["tan_version"]) for e in json.loads(parsed["consumer_matrix"])]
+def _combinations(parsed: dict[str, str]) -> list[tuple[str, str, str]]:
+    """`(combination, tan_version, label)` per resolved leg.
+
+    The LABEL is in here deliberately (PR #1088 review, hole 2). It is not
+    cosmetic: `journey`'s `name:` is
+    `"${{ matrix.sku }} (${{ matrix.combination_label }}) -- ..."`, so two legs
+    sharing a label are two runs a human cannot tell apart in the Actions tab
+    -- and the six-case dedup table this module pins distinguishes its cases
+    by exactly that string. Asserting only the version count leaves the table
+    unpinned; a mutant that gives both legs the label
+    `alp-sdk-vscode's pinned tan` passed the first version of this gate.
+    """
+    return [
+        (e["combination"], e["tan_version"], e["label"])
+        for e in json.loads(parsed["consumer_matrix"])
+    ]
+
+
+def _calls(tmp_path: pathlib.Path, tool: str) -> list[str]:
+    """Every `curl`/`gh` invocation the step body made, argv included."""
+    log = tmp_path / "calls.log"
+    if not log.exists():
+        return []
+    return [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.startswith(f"{tool} ")]
 
 
 def test_all_three_equal_skips_loudly_with_no_extra_leg(tmp_path):
@@ -257,7 +343,9 @@ def test_both_branches_agree_but_differ_from_latest_gives_one_credited_leg(tmp_p
     proc, parsed = _run_resolve(tmp_path, latest_tan="v0.7.0", dev="0.6.0", main="0.6.0")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert parsed["skip"] == "false"
-    assert _combinations(parsed) == [("consumer-pin-dev+main", "v0.6.0")], (
+    assert _combinations(parsed) == [
+        ("consumer-pin-dev+main", "v0.6.0", "alp-sdk-vscode@dev+main's pinned tan")
+    ], (
         "one tan binary must produce ONE journey, credited to both branches -- not "
         "two identical ~250-step journeys"
     )
@@ -270,8 +358,8 @@ def test_all_three_differ_gives_two_legs(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert parsed["skip"] == "false"
     assert _combinations(parsed) == [
-        ("consumer-pin-dev", "v0.6.0"),
-        ("consumer-pin-main", "v0.5.1"),
+        ("consumer-pin-dev", "v0.6.0", "alp-sdk-vscode@dev's pinned tan"),
+        ("consumer-pin-main", "v0.5.1", "alp-sdk-vscode@main's pinned tan"),
     ]
 
 
@@ -281,7 +369,9 @@ def test_dev_equals_latest_still_runs_mains_shipped_pin(tmp_path):
     proc, parsed = _run_resolve(tmp_path, latest_tan="v0.6.0", dev="0.6.0", main="0.5.1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert parsed["skip"] == "false"
-    assert _combinations(parsed) == [("consumer-pin-main", "v0.5.1")], (
+    assert _combinations(parsed) == [
+        ("consumer-pin-main", "v0.5.1", "alp-sdk-vscode@main's pinned tan")
+    ], (
         "with `dev` == `latest`, #767's resolution skipped the whole leg; `main`'s "
         "shipped pin (RED against alp-sdk v0.16.0, run 33397989209) must still run"
     )
@@ -290,7 +380,9 @@ def test_dev_equals_latest_still_runs_mains_shipped_pin(tmp_path):
 def test_main_equals_latest_still_runs_devs_next_pin(tmp_path):
     proc, parsed = _run_resolve(tmp_path, latest_tan="v0.5.1", dev="0.6.0", main="0.5.1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert _combinations(parsed) == [("consumer-pin-dev", "v0.6.0")]
+    assert _combinations(parsed) == [
+        ("consumer-pin-dev", "v0.6.0", "alp-sdk-vscode@dev's pinned tan")
+    ]
 
 
 def test_a_prerelease_suffix_survives_resolution(tmp_path):
@@ -298,7 +390,9 @@ def test_a_prerelease_suffix_survives_resolution(tmp_path):
     `0.5.0` and installed a different tan than the pin names."""
     proc, parsed = _run_resolve(tmp_path, latest_tan="v0.6.0", dev="0.6.0-rc1", main="0.6.0-rc1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert _combinations(parsed) == [("consumer-pin-dev+main", "v0.6.0-rc1")]
+    assert _combinations(parsed) == [
+        ("consumer-pin-dev+main", "v0.6.0-rc1", "alp-sdk-vscode@dev+main's pinned tan")
+    ]
 
 
 def test_the_tan_version_dispatch_override_is_what_the_pins_dedup_against(tmp_path):
@@ -308,7 +402,9 @@ def test_the_tan_version_dispatch_override_is_what_the_pins_dedup_against(tmp_pa
         tmp_path, latest_tan="v0.6.0", dev="0.6.0", main="0.6.0", tan_version_override="v0.5.1"
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert _combinations(parsed) == [("consumer-pin-dev+main", "v0.6.0")]
+    assert _combinations(parsed) == [
+        ("consumer-pin-dev+main", "v0.6.0", "alp-sdk-vscode@dev+main's pinned tan")
+    ]
 
 
 def test_the_consumer_override_fetches_neither_branch(tmp_path):
@@ -317,7 +413,7 @@ def test_the_consumer_override_fetches_neither_branch(tmp_path):
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert parsed["skip"] == "false"
-    assert _combinations(parsed) == [("consumer-pin-override", "v0.5.1")]
+    assert _combinations(parsed) == [("consumer-pin-override", "v0.5.1", "overridden consumer pin")]
 
 
 @pytest.mark.parametrize("missing", ["dev", "main"])
@@ -331,6 +427,68 @@ def test_a_fetch_failure_on_either_branch_is_fatal(tmp_path, missing: str):
     )
     assert f"::error::could not fetch src/alpCli/service.ts from alp-sdk-vscode@{missing}" in proc.stdout
     assert "consumer_matrix" not in parsed
+
+
+def test_the_dedup_baseline_is_tan_clis_own_latest_release(tmp_path):
+    """PR #1088 review, hole 1 -- pin WHICH release the dedup compares against.
+
+    The baseline must be tan-cli's own latest release, because that is what
+    `install.sh` will install on the `latest` leg. Repointed at alp-sdk's
+    latest release tag instead, every comparison would be pin-vs-an-alp-sdk-tag
+    -- never equal -- so `skip=true` becomes unreachable and every scheduled
+    run grows six extra ~60-minute legs, forever. That is tan-cli#1050 inverted
+    (a leg that always runs rather than never), and an argv-blind stub is green
+    on it.
+    """
+    proc, parsed = _run_resolve(tmp_path, latest_tan="v0.6.0", dev="0.6.0", main="0.6.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _calls(tmp_path, "gh") == [f"gh {_EXPECTED_GH_ARGV}"], (
+        "the dedup baseline is no longer read from tan-cli's own latest release"
+    )
+    assert parsed["skip"] == "true"
+
+
+def test_a_partial_pin_set_is_refused_even_when_the_other_branch_diverged(tmp_path):
+    """The fatal verdict must hold in the case where continuing is TEMPTING.
+
+    `dev` resolves cleanly to a version that genuinely differs from `latest`,
+    so there is a real leg that could be run -- and `main`, the branch carrying
+    the SHIPPED pin, is unreachable. Running dev's leg alone here is precisely
+    #767's behaviour and precisely tan-cli#1050's defect: a green-looking run
+    that never tested what users have installed. Refuse the whole job instead.
+    """
+    proc, parsed = _run_resolve(tmp_path, latest_tan="v0.7.0", dev="0.6.0", main=None)
+    assert proc.returncode != 0
+    assert "Refusing to continue with a partial pin set" in proc.stdout
+    assert parsed.get("consumer_matrix") is None and parsed.get("skip") is None, (
+        f"a partial resolution still published outputs ({parsed}) -- build-matrix "
+        "would have fanned out a set that silently omits main's shipped pin"
+    )
+
+
+def test_the_fetch_retries_a_transient_while_a_404_still_fails_fast(tmp_path):
+    """PR #1088 review, the retry judgement call.
+
+    Fatal-on-failure is right for a 404 or a renamed constant (real signal),
+    but this verdict fails the WHOLE job -- including tan-cli#639's `latest`
+    axis, which has nothing to do with the consumer pin -- and #1050 doubled
+    the number of fetches that can trip it. `--retry 3 --retry-connrefused`
+    splits those cases the way curl already splits them: transient failures
+    (connection errors, 408/429/5xx) are retried, a 404 is not.
+    """
+    proc, _ = _run_resolve(tmp_path, latest_tan="v0.6.0", dev="0.6.0", main="0.6.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    curl_calls = _calls(tmp_path, "curl")
+    assert len(curl_calls) == 2, f"expected one fetch per branch, got {curl_calls}"
+    for call in curl_calls:
+        assert "--retry 3" in call and "--retry-connrefused" in call, (
+            f"a fetch whose failure reds the whole daily run does not retry: {call}"
+        )
+    # ...and the 404 path is unaffected: still exactly one attempt from the
+    # step's point of view, still fatal.
+    proc, _ = _run_resolve(tmp_path, latest_tan="v0.6.0", dev="0.6.0", main=None)
+    assert proc.returncode != 0
+    assert len(_calls(tmp_path, "curl")) == 2
 
 
 @pytest.mark.parametrize("renamed", ["dev", "main"])
@@ -395,6 +553,7 @@ def test_no_survivors_leaves_only_the_latest_combination(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert [e["sku"] for e in matrix["include"]] == list(_SKUS)
     assert {e["combination"] for e in matrix["include"]} == {"latest"}
+    assert {e["combination_label"] for e in matrix["include"]} == {"released tan"}
 
 
 @pytest.mark.parametrize("n", [1, 2])
@@ -424,9 +583,27 @@ def test_each_surviving_version_gets_its_own_full_sku_sweep(tmp_path, n: int):
         assert [e["sku"] for e in legs] == list(_SKUS)
         assert {e["tan_version"] for e in legs} == {entry["tan_version"]}
         assert {e["alp_sdk_ref"] for e in legs} == {"v0.16.0"}
+        # PR #1088 review, hole 2: the resolved label must survive the fan-out
+        # UNCHANGED. `build-matrix` copies it into `combination_label`, which
+        # is the only part of `journey`'s `name:` that distinguishes one
+        # combination from another.
+        assert {e["combination_label"] for e in legs} == {entry["label"]}, (
+            f"{entry['combination']}'s legs lost or rewrote their label -- "
+            "`journey`'s job name is built from `matrix.combination_label`, so "
+            "this is what a human reads in the Actions tab"
+        )
     # `matrix.combination` is the upload-artifact name suffix; a duplicate
     # would collide two legs' logs into one artifact.
     assert len(set(combos)) == 1 + n
+    # ...and a duplicate LABEL is the same defect one layer up: two legs
+    # rendering an identical `journey` job name. Distinct per combination,
+    # constant within one.
+    labels = {e["combination"]: e["combination_label"] for e in include}
+    assert len(set(labels.values())) == len(labels), (
+        f"two combinations share a `combination_label` ({labels}) -- their "
+        "`journey` job names are indistinguishable in the Actions tab, and the "
+        "six-case dedup table this module pins is keyed on that string"
+    )
 
 
 def test_build_matrix_refuses_a_skip_that_disagrees_with_the_resolved_set(tmp_path):

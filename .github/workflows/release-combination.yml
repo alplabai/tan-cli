@@ -334,17 +334,30 @@ jobs:
           # variable instead of the log.
           RESOLVED_PIN=""
           resolve_pin() {
-            branch="$1"
+            local branch="$1"
             RESOLVED_PIN=""
             # `|| true` on both pipelines below: a legitimate "the fetch
-            # 404'd" / "the pattern matched nothing" (curl exit 22, grep exit
+            # failed" / "the pattern matched nothing" (curl exit 22, grep exit
             # 1) must NOT kill this step via `pipefail` before the explicit
             # `-z` checks turn it into a deliberate `::error::` naming the
             # branch. Writing the failure ourselves, unconditionally, is the
             # tan-cli#1013/#1014 lesson: a `grep` that legitimately finds
             # nothing exits 1 under restored `set -e` and the step dies with
             # no message anyone can act on.
-            raw="$(curl -fsSL "https://raw.githubusercontent.com/alplabai/alp-sdk-vscode/${branch}/src/alpCli/service.ts" || true)"
+            #
+            # `--retry 3 --retry-connrefused`: the verdict below is fatal for
+            # the WHOLE job -- including the `latest` axis, which is
+            # tan-cli#639's original gate and has nothing to do with the
+            # consumer pin -- and this job now makes TWO of these fetches, so
+            # one transient raw.githubusercontent.com blip would red the
+            # entire daily run twice as often as before tan-cli#1050. A 404
+            # or a renamed constant is real signal and must stay fatal; a
+            # network flake is not signal at all. curl's `--retry` covers
+            # exactly that split: it retries transient failures (connection
+            # errors, 408/429/5xx) and, with `--retry-connrefused`, a refused
+            # connection -- but it does NOT retry a 404, so a genuinely
+            # renamed branch or moved file still fails fast on the first try.
+            raw="$(curl -fsSL --retry 3 --retry-connrefused "https://raw.githubusercontent.com/alplabai/alp-sdk-vscode/${branch}/src/alpCli/service.ts" || true)"
             if [ -z "${raw}" ]; then
               # Deliberately fatal, not a silent skip of this branch. A
               # renamed branch or a moved file that quietly dropped one of
@@ -374,6 +387,16 @@ jobs:
             # to `$GITHUB_OUTPUT` and the runner rejects the file command
             # with "Invalid format" instead of the deliberate `::error::`
             # every other failure mode here gets. Assert exactly one match.
+            # `|| true` is the tan-cli#1013-class hardening on THIS line: the
+            # original had none, and `grep -c` exits 1 when it counts zero.
+            # That zero is unreachable today (the `-z "${pin}"` check above
+            # already returned), so the guard is for the next edit that
+            # loosens or reorders that check -- without it, a zero-count
+            # `grep` dies under `pipefail` mid-assignment with no `::error::`
+            # at all, which is exactly how #1013 shipped. The comparison is a
+            # string `!=` rather than `-ne` for the same reason: `-ne` on an
+            # empty `pin_count` would be a `unary operator expected` crash
+            # instead of the message below.
             pin_count="$(printf '%s\n' "${pin}" | grep -c . || true)"
             if [ "${pin_count}" != "1" ]; then
               echo "::error::resolved ${pin_count} candidate SUPPORTED_CLI_VERSION values from src/alpCli/service.ts on its ${branch} branch (expected exactly 1) -- refusing to guess which one is the real pin: ${pin}"
