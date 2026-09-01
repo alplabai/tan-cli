@@ -104,10 +104,11 @@ substring `bound_sdk` in the name (the same folding this gate already does),
 `dev` carried six such folded names:
 
   * `bound_sdk` -- FIFTEEN module-level definitions, all spelled `_bound_sdk`,
-    all byte-identical (`bind_sdk_root(SDK); yield` under
-    `@pytest.fixture(autouse=True)`, one with an extra docstring). A genuine
-    duplicate by this file's own bar -- same signature, same body, no
-    context-specific variation -- so it was consolidated into
+    fourteen byte-identical (`bind_sdk_root(SDK); yield` under
+    `@pytest.fixture(autouse=True)`) and the fifteenth differing only by an
+    extra three-line docstring on the same decorator/signature/body. A
+    genuine duplicate by this file's own bar -- same signature, same body,
+    no context-specific variation -- so it was consolidated into
     `tests/planner/_bound_sdk_fixture.py` and every consumer now imports it
     for its fixture-registration side effect instead of redefining it. Seeded
     above as `bound_sdk` (the folded spelling; every actual definition is
@@ -229,13 +230,14 @@ def test_a_shared_test_helper_is_defined_exactly_once(helper):
         f"_SHARED_TEST_HELPERS in the same change; an allow-list entry for a "
         f"name that no longer exists enforces nothing and reads as if it does."
     )
+    home_module = home[:-len(".py")].replace("/", ".")
     assert len(sites) == 1, (
         f"`{helper}` has {len(sites)} module-level definitions under "
         "python/tests/:\n  "
         + "\n  ".join(f"{rel}: {spelling}" for rel, spelling in sites)
         + f"\n\nIt is owned by {home} -- it {why}. Import it from there instead "
         "of re-implementing it; if a private module-level name is load-bearing, "
-        f"alias it (`from tests.planner._baremetal_support import {helper} as "
+        f"alias it (`from {home_module} import {helper} as "
         f"_{helper}`) rather than redefining, which this walk allows on "
         "purpose. A second copy is byte-identical on the day it lands and "
         "drifts on the day somebody edits one of them -- that is tan-cli#1081, "
@@ -312,12 +314,14 @@ def test_the_walk_actually_finds_definitions():
     so a walk that silently found nothing -- a moved test root, a glob that
     stopped matching -- would report a pass having measured an empty dict."""
     defs = _module_level_definitions()
-    # 5879 folded names on this branch (5732 on `dev` at `8b4e3f43` without
-    # this file; the tree has grown and tan-cli#1081's `_bound_sdk`
-    # consolidation removed fourteen of those definitions along the way).
-    # The floor is deliberately far below either figure, since it is
-    # guarding against a walk that collapsed to one subdirectory or to
-    # nothing, not ratcheting the tree's size.
+    # 5879 folded names on this branch, same as on `dev` at `400e9e27`
+    # (this branch's own base) -- tan-cli#1081's `_bound_sdk` consolidation
+    # removed fourteen DEFINITIONS of that one already-counted folded name,
+    # which does not move this count at all. (5732 on `dev` at `8b4e3f43`,
+    # an older commit predating this file, for the unrelated reason the
+    # module docstring cites it.) The floor is deliberately far below either
+    # figure, since it is guarding against a walk that collapsed to one
+    # subdirectory or to nothing, not ratcheting the tree's size.
     assert len(defs) > 2000, f"only {len(defs)} module-level names found under {TESTS_ROOT}"
     assert "bind_planner_sdk_root" in defs, sorted(defs)[:20]
     assert defs["bind_planner_sdk_root"] == (

@@ -31,11 +31,14 @@ fallback -- there is no case where `SDK` is `None` and this fixture still
 runs.
 
 WHY THIS FILE EXISTS. Fifteen test modules under `python/tests/**` each
-defined their own `_bound_sdk` -- byte-identical, `bind_sdk_root(SDK);
-yield` -- because pytest fixture registration is per-module (or per
-`conftest.py`), so "reuse" without a shared conftest.py meant either
-literally retyping the body or importing a shared definition for its side
-effect. A `tests/planner/conftest.py` autouse fixture was rejected for the
+defined their own `_bound_sdk` -- fourteen byte-identical
+(`bind_sdk_root(SDK); yield` under the same decorator and signature), and
+the fifteenth differing only by an extra docstring on that same
+decorator/signature/body -- because pytest fixture registration is
+per-module (or per `conftest.py`), so "reuse" without a shared conftest.py
+meant either literally retyping the body or importing a shared definition
+for its side effect. A `tests/planner/conftest.py` autouse fixture was
+rejected for the
 same reason `_baremetal_support.py` rejects it for `bound_sdk_root`: it
 would make the binding automatic for every module under `tests/planner/`,
 including ones that bind differently on purpose (e.g.

@@ -66,6 +66,7 @@ AEN301_PRESET = "e1m_modules/E1M-AEN301.yaml"
 E8_SOC = "socs/alif/ensemble/e8.json"
 E3_SOC = "socs/alif/ensemble/e3.json"
 
+
 def _emit(*args):
     """Imported inside the call so the module imports before `bind_sdk_root`
     has run (collection order), the same reason `paths` is imported lazily

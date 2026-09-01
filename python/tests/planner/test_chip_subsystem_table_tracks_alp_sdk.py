@@ -64,6 +64,7 @@ _SOM_INTRINSIC = {
     "gd32g553": ("SPI", "I2C"),
 }
 
+
 def _upstream_table() -> dict[str, tuple[str, ...]]:
     """`_CHIP_SUBSYSTEMS` as alp-sdk declares it, read as a literal.
 
