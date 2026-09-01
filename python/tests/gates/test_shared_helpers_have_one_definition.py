@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""tan-cli#815: a helper `tan/core/shapes.py` owns must not be re-implemented
-privately in a command module.
+"""tan-cli#815: a shared helper must not be re-implemented privately in a
+command module, wherever it is homed.
 
 `shapes.py` exists because `_is_sdk_root` had three copies and `_yaml_kind`
 two, and the copies had drifted in TYPE -- "which is exactly how a 'same'
@@ -51,14 +51,24 @@ public-name-only check would miss the exact regression this file exists for.
 WHAT THIS DOES NOT ASSERT, deliberately. It says nothing about any name not
 in `_SHARED_HELPERS`. A helper duplicated across two `tan/**` modules under a
 name nobody has seeded here is invisible to this gate and stays invisible
-until somebody adds it -- there is no walk over `tan/**` at large and no
-heuristic that promotes a name into scope. That narrowness is what makes
-widening this file to a second home safe: PR #1083's sibling gate over
-`python/tests/**` measured a blanket name-based walk at 173 names with more
-than one module-level definition (725 definitions total) on the same tree
-this file would otherwise walk, and a gate that is red the day it lands gets
-disabled. `_SHARED_HELPERS` stays a hand-written, opt-in dict for the same
-reason that one is.
+until somebody adds it -- there is no walk over `tan/**` NAMES at large (the
+AST walk itself, `_module_level_definitions()`, covers every file under
+`python/tan/**` on every run; what is narrow is which of its findings this
+file acts on) and no heuristic that promotes a name into scope.
+
+That narrowness is measured, not assumed. Run over `python/tan/**` -- this
+file's own tree, with this file's own node-shape rules -- at `c2412dfa`: 91
+names have more than one module-level definition, 232 definitions in total.
+A blanket version of this check, asserting one definition for every name the
+walk returns instead of the opt-in `_SHARED_HELPERS` list, is red on the day
+it lands over THIS tree, not just some other one. (PR #1083's sibling gate
+made the same case first, over the DIFFERENT tree `python/tests/**`: 173
+names / 725 definitions at `dev` `8b4e3f43`, 176 names / 700 definitions at
+this tip -- cited here as the sibling gate's own tree and commit, not this
+file's, because both trees drift and a number belongs to the tree and commit
+it was measured on.) A gate that is red the day it lands gets disabled, so
+`_SHARED_HELPERS` stays a hand-written, opt-in dict for the same reason
+#1083's `_SHARED_TEST_HELPERS` is.
 
 ALIASING IS NOT A DEFINITION, in either spelling, and both must stay allowed:
 
@@ -213,7 +223,10 @@ def test_a_shared_helper_is_defined_exactly_once(helper):
     assert rel == home, (
         f"`{helper}` is defined once, but in {rel} rather than {home}. "
         f"_SHARED_HELPERS names {home} as its home -- move the definition "
-        "back or update the entry."
+        "back or update the entry. A legal home must not itself import from "
+        "`tan/commands/`, the constraint `tan/core/shapes.py` satisfies today "
+        "-- otherwise a command module importing the shared helper can cycle "
+        "back through its own package."
     )
 
 
@@ -296,4 +309,8 @@ def test_the_walk_actually_finds_definitions():
     defs = _module_level_definitions()
     assert len(defs) > 500, f"only {len(defs)} module-level names found under {TAN_ROOT}"
     assert "SDK_MARKER" in defs, sorted(defs)[:20]
-    assert defs["SDK_MARKER"] == ("tan/core/shapes.py",), defs["SDK_MARKER"]
+    # Read the expected home from _SHARED_HELPERS itself, not a literal --
+    # relocating SDK_MARKER and updating the map correctly should never make
+    # THIS assertion the one that reds; it still would, with a message about
+    # the walk rather than the map, if the walk itself broke.
+    assert defs["SDK_MARKER"] == (_SHARED_HELPERS["SDK_MARKER"][0],), defs["SDK_MARKER"]
