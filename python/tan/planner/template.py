@@ -321,6 +321,65 @@ def _rendered_bytes(
 # --emit scaffold (issue #864): in-memory, SKU-parameterised capture
 # ---------------------------------------------------------------------
 
+#: `isinstance` kind -> the noun `_require_field`'s curated message uses.
+#: Three shapes cover every field guard in this module: a YAML mapping, a
+#: YAML list, and a scalar string.
+_SHAPE_NOUN: dict[type, str] = {dict: "a mapping", list: "a list", str: "a string"}
+
+
+def _require_mapping_doc(doc: Any, *, path: Any, what: str) -> dict[str, Any]:
+    """The OUTER-document half of this module's malformed-YAML register.
+
+    Every function here that `yaml.safe_load`s one of the SDK's own
+    documents then bare-`.get(...)`s the result needs the same check: a
+    document that parses (legal YAML) but is not a mapping (illegal
+    against its schema) must not reach that `.get(...)`, which raises a
+    raw `AttributeError` a CLI user sees as a traceback instead of a
+    curated `TemplateError` naming the file and the actual type.
+
+    Extracted, rather than written a fourth time, because that fourth
+    time is exactly what tan-cli#1052 was filed about: the SoM preset
+    (tan-cli#1025), the board metadata (tan-cli#1037) and the template
+    example's own `board.yaml` (tan-cli#1052) are three different
+    documents whose guards were three separate rounds of the same
+    finding. The message register is byte-identical to the two that
+    landed first -- this is a de-duplication, not a re-wording.
+    """
+    if not isinstance(doc, dict):
+        raise TemplateError(
+            f"malformed {what} at {path}: expected a YAML "
+            f"mapping, got {type(doc).__name__}")
+    return doc
+
+
+def _require_field(value: Any, kind: type, *, doc: Any, field: str) -> Any:
+    """The NESTED-field half of the same register: `field` of `doc` is
+    required to be `kind` before the caller indexes/iterates it.
+
+    An outer `_require_mapping_doc` says nothing about what is INSIDE
+    the mapping, and every round of this family so far
+    (tan-cli#1025 -> #1034 -> #1037/#1048 -> #1052) found its next
+    sibling exactly one level in: `default_board:`, `topology:`,
+    `topology.<core>`, `e1m_routes:`, `e1m_routes.<section>`, and now
+    `cores:`/`som:`/`pins:`/`preset:` on the example `board.yaml`.
+    Nine call sites, one rule, one message shape -- naming the file,
+    the field and the actual type, matching the register
+    `tan/model/targets.py:312-323` established.
+
+    Deliberately NOT stricter than the schema: callers pass the value
+    they already normalised (`doc.get(field) or <empty>`), so an absent
+    field, an explicit `null`, and a legal-but-empty `[]`/`{}` all
+    arrive as the empty container and pass -- `pins:` is `type: array`
+    with no `minItems`, and rejecting `pins: []` would be a new
+    refusal, not a fixed crash.
+    """
+    if not isinstance(value, kind):
+        raise TemplateError(
+            f"{doc} {field} must be {_SHAPE_NOUN[kind]}, got "
+            f"{type(value).__name__}")
+    return value
+
+
 def _load_som_doc(sku: str, metadata_root: Path) -> dict[str, Any]:
     """Parse metadata/e1m_modules/<sku>.yaml -- shared by
     `_default_preset_for_sku` (the `default_board:` field),
@@ -331,20 +390,18 @@ def _load_som_doc(sku: str, metadata_root: Path) -> dict[str, Any]:
     if not som_path.is_file():
         raise TemplateError(
             f"no metadata/e1m_modules/{sku}.yaml for sku {sku!r}")
-    doc = yaml.safe_load(som_path.read_text(encoding="utf-8")) or {}
-    if not isinstance(doc, dict):
-        # Mirrors `resolve_targets`'s `preset` guard (tan-cli#1010,
-        # `tan/model/targets.py:312-323`): a SoM YAML that parses but is
-        # not a mapping (e.g. a bare list or a bare scalar) must not
-        # reach a caller's bare `.get(...)` -- every caller of this
-        # function does exactly that -- which raises a raw
-        # AttributeError instead of a curated error a caller can
-        # distinguish from any other such error in the call stack
-        # (tan-cli#1025).
-        raise TemplateError(
-            f"malformed SoM preset at {som_path}: expected a YAML "
-            f"mapping, got {type(doc).__name__}")
-    return doc
+    # Mirrors `resolve_targets`'s `preset` guard (tan-cli#1010,
+    # `tan/model/targets.py:312-323`): a SoM YAML that parses but is not
+    # a mapping (e.g. a bare list or a bare scalar) must not reach a
+    # caller's bare `.get(...)` -- every caller of this function does
+    # exactly that -- which raises a raw AttributeError instead of a
+    # curated error a caller can distinguish from any other such error
+    # in the call stack (tan-cli#1025). Shared with the module's two
+    # other outer-document reads since tan-cli#1052; the message is
+    # unchanged.
+    return _require_mapping_doc(
+        yaml.safe_load(som_path.read_text(encoding="utf-8")) or {},
+        path=som_path, what="SoM preset")
 
 
 def _default_preset_for_sku(sku: str, metadata_root: Path) -> str:
@@ -360,15 +417,13 @@ def _default_preset_for_sku(sku: str, metadata_root: Path) -> str:
     if not board:
         raise TemplateError(
             f"metadata/e1m_modules/{sku}.yaml has no default_board")
-    if not isinstance(board, str):
-        # Same document-class guard as `_load_som_doc` itself
-        # (tan-cli#1025 sweep): a `default_board:` that parses but isn't
-        # a scalar string (e.g. a YAML list) must not reach `.lower()`
-        # bare -- that raises `AttributeError: 'list' object has no
-        # attribute 'lower'` instead of a curated error naming the file.
-        raise TemplateError(
-            f"metadata/e1m_modules/{sku}.yaml default_board must be a "
-            f"string, got {type(board).__name__}")
+    # Same document-class guard as `_load_som_doc` itself (tan-cli#1025
+    # sweep): a `default_board:` that parses but isn't a scalar string
+    # (e.g. a YAML list) must not reach `.lower()` bare -- that raises
+    # `AttributeError: 'list' object has no attribute 'lower'` instead
+    # of a curated error naming the file.
+    _require_field(board, str, doc=f"metadata/e1m_modules/{sku}.yaml",
+                   field="default_board")
     return board.lower()
 
 
@@ -402,16 +457,12 @@ def _topology_for_sku(sku: str, metadata_root: Path) -> dict[str, Any]:
     those bare `.get()` calls unguarded -- validating every entry here,
     once, closes that for both callers the same way the outer check
     does."""
-    topology = _load_som_doc(sku, metadata_root).get("topology") or {}
-    if not isinstance(topology, dict):
-        raise TemplateError(
-            f"metadata/e1m_modules/{sku}.yaml topology must be a "
-            f"mapping, got {type(topology).__name__}")
+    som_yaml = f"metadata/e1m_modules/{sku}.yaml"
+    topology = _require_field(
+        _load_som_doc(sku, metadata_root).get("topology") or {}, dict,
+        doc=som_yaml, field="topology")
     for core_id, spec in topology.items():
-        if not isinstance(spec, dict):
-            raise TemplateError(
-                f"metadata/e1m_modules/{sku}.yaml topology.{core_id} "
-                f"must be a mapping, got {type(spec).__name__}")
+        _require_field(spec, dict, doc=som_yaml, field=f"topology.{core_id}")
     return topology
 
 
@@ -521,22 +572,14 @@ def _board_route_entries(board_name: str, metadata_root: Path) -> list[dict[str,
     if not board_path.is_file():
         raise TemplateError(
             f"no metadata/boards/{board_name}.yaml for board {board_name!r}")
-    doc = yaml.safe_load(board_path.read_text(encoding="utf-8")) or {}
-    if not isinstance(doc, dict):
-        raise TemplateError(
-            f"malformed board metadata at {board_path}: expected a YAML "
-            f"mapping, got {type(doc).__name__}")
-    routes = doc.get("e1m_routes") or {}
-    if not isinstance(routes, dict):
-        raise TemplateError(
-            f"{board_path} e1m_routes must be a mapping, got "
-            f"{type(routes).__name__}")
+    doc = _require_mapping_doc(
+        yaml.safe_load(board_path.read_text(encoding="utf-8")) or {},
+        path=board_path, what="board metadata")
+    routes = _require_field(doc.get("e1m_routes") or {}, dict,
+                            doc=board_path, field="e1m_routes")
     for section in _ROUTE_SECTIONS:
-        section_entries = routes.get(section) or []
-        if not isinstance(section_entries, list):
-            raise TemplateError(
-                f"{board_path} e1m_routes.{section} must be a list, got "
-                f"{type(section_entries).__name__}")
+        _require_field(routes.get(section) or [], list,
+                       doc=board_path, field=f"e1m_routes.{section}")
     return [
         entry for section in _ROUTE_SECTIONS
         for entry in (routes.get(section) or [])
@@ -1537,10 +1580,41 @@ def render_to_envelope(
     preset = _default_preset_for_sku(sku, metadata_root)
 
     example_dir = _safe_join(base, record["example"], what="template example directory")
-    board_yaml_text = (example_dir / "board.yaml").read_text(encoding="utf-8")
-    example_doc = yaml.safe_load(board_yaml_text) or {}
-    original_core_ids = list((example_doc.get("cores") or {}).keys())
-    example_sku = (example_doc.get("som") or {}).get("sku", "")
+    board_yaml_path = example_dir / "board.yaml"
+    board_yaml_text = board_yaml_path.read_text(encoding="utf-8")
+    # tan-cli#1052: the fifth sibling of the same malformed-YAML family
+    # tan-cli#1025 -> #1034 -> #1037/#1048 swept through the SoM preset
+    # and the board metadata. THIS document is the catalog template's
+    # own `examples/<...>/board.yaml`, and every one of the four reads
+    # below was bare -- all four reachable from one command, `--emit
+    # scaffold --template peripheral --sku E1M-V2N101`. Measured on the
+    # pre-fix tree:
+    #
+    #     <doc> = "- one\n- two\n"  -> AttributeError: 'list' object has
+    #                                    no attribute 'get'   (:1542)
+    #     cores: 3                   -> AttributeError: 'int' object has
+    #                                    no attribute 'keys'  (:1542)
+    #     som: 3                     -> AttributeError: 'int' object has
+    #                                    no attribute 'get'   (:1543)
+    #     pins: 3                    -> TypeError: 'int' object is not
+    #                                    iterable              (:1551)
+    #
+    # Guarded through the same `_require_mapping_doc`/`_require_field`
+    # register the other two documents now use, so the next field added
+    # here inherits the rule instead of starting a sixth round. NOT
+    # stricter than `metadata/schemas/board.schema.json`: `pins:` is
+    # `type: array` with no `minItems`, so `pins: []` (and an absent or
+    # `null` `pins:`) still passes, as does `preset:` being absent -- it
+    # is optional, and only consulted when `pins:` is non-empty.
+    example_doc = _require_mapping_doc(
+        yaml.safe_load(board_yaml_text) or {},
+        path=board_yaml_path, what="template example board.yaml")
+    original_core_ids = list(_require_field(
+        example_doc.get("cores") or {}, dict,
+        doc=board_yaml_path, field="cores").keys())
+    example_sku = _require_field(
+        example_doc.get("som") or {}, dict,
+        doc=board_yaml_path, field="som").get("sku", "")
     core_renames = _derive_core_renames(original_core_ids, sku, metadata_root)
     # `pins:` re-derivation (issue #876): each entry is either a bare
     # pad string or a `{e1m, macro?, doc?}` mapping (same shape
@@ -1548,8 +1622,20 @@ def render_to_envelope(
     # example's OWN preset (not an inline board def -- no catalog
     # template ships one today) has a metadata/boards/<preset>.yaml to
     # re-derive against.
-    original_pins = list(example_doc.get("pins") or [])
+    original_pins = list(_require_field(
+        example_doc.get("pins") or [], list,
+        doc=board_yaml_path, field="pins"))
     source_preset = example_doc.get("preset")
+    if source_preset is not None:
+        # Same shape as `default_board:` one document over: a `preset:`
+        # that isn't a string reaches `metadata/boards/<preset>.yaml`
+        # as a path component and surfaces a curated-but-untrue message
+        # (measured pre-fix: `no metadata/boards/['a'].yaml for board
+        # ['a']`, which reads like a missing file rather than a
+        # malformed field). `None` is legal -- an inline board def, or
+        # a template with no `pins:` to re-derive.
+        _require_field(source_preset, str,
+                       doc=board_yaml_path, field="preset")
     pin_renames = (
         _derive_pin_renames(original_pins, sku, source_preset, metadata_root)
         if original_pins else {}
