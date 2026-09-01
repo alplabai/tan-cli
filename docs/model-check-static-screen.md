@@ -9,17 +9,21 @@ backend `som.sku` actually ships (`metadata/npu_ops/<backend>/`).
 
 By default it is a **screen**, not a compile: nothing an ordinary run reports
 proves that anything will execute on the NPU. (`--exact` can cross that line
-for one backend — see below — and says so in the report's `basis`.) This page exists so that the words it prints are not
-read as stronger claims than they are.
+for one backend — see below — and says so in the report's `basis`.)
+This page exists so that the words it prints are not read as stronger
+claims than they are.
 
 > **`metadata/npu_ops/` is not on alp-sdk `dev` yet.** All three tables --
 > `ethos_u/u85@vela-5.1.0.json`, `ethos_u/u55-u65@vela-5.1.0.json` and
-> `drpai/onnx-i8@translator-1.12.json` — arrive with **alp-sdk#1470, which
+> `drpai/onnx-i8@translator-1.12.json` -- arrive with **alp-sdk#1470, which
 > is OPEN and `mergeable_state: dirty` (CONFLICTING)**. Against an alp-sdk
 > checkout that does not carry them, no table resolves for any backend and
-> every report comes back `undetermined` with the "absence of data, not
-> evidence of no support" note. That is the correct answer for a missing
-> table — but it is not the screen working; it is the screen having nothing
+> every report comes back `undetermined`. The accompanying `reason` varies:
+> `no-table-for-backend` ("absence of data, not evidence of no support") in
+> the ordinary case, but `format-not-accepted` where the source-format gate
+> refuses first and short-circuits before any table lookup. That is the
+> correct answer for a missing table — but it is not the screen working; it
+> is the screen having nothing
 > to screen against. Everything below describes the command once those
 > tables are reachable.
 
@@ -65,12 +69,15 @@ different vocabularies out of the same key:
 | `npuCoverage` | At which `basis` | Means |
 | --- | --- | --- |
 | `full-eligible` | `static-screen` | Every screened operator is `npu-eligible`. |
-| `partial` | any | Some operators on the NPU, some on the CPU. |
+| `partial` | `static-screen` | Some screened operators are `npu-eligible`, some are `cpu-certain`. **Not a placement claim** -- see the capped positive above. |
+| `partial` | `compiled` / `bench` | A real placement put some operators on the NPU and some on the CPU. |
 | `cpu-only` | any | Nothing on the NPU. |
 | `undetermined` | `static-screen` | Nothing was screened. **Absence of data, not evidence of no support.** |
 | `fits` | `compiled` / `bench` **only** | A real placement put **every** operator on the NPU. |
 
-A consumer matching exhaustively on this key must handle all five. `fits`
+Five distinct values, listed above in six rows because `partial` means a
+different thing at each basis. A consumer matching exhaustively on this key
+must handle all five. `fits`
 cannot appear on an ordinary run, but it can appear on a `--exact` run that
 reached a real compile, and on a report re-based on a published bench point —
 see the next two sections for the boundary.
