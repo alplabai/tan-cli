@@ -79,15 +79,35 @@ def test_missing_compiler_version_decodes_to_empty_default():
     assert decoded.targets[0].compiler_version == ""
 
 
-def test_field_types_maps_stay_in_parity_with_their_required_field_set():
-    """`_decode_list_field` indexes `field_types[field_name]` for every name
-    in `required` with no `.get` fallback (`manifest.py:147` --
-    `expected, type_desc = field_types[field_name]`), so a map that drifts
-    out of sync with its `required` frozenset would surface only as a raw
-    `KeyError` at decode time, not here at collection/import time. All three
-    pairs match today (`grep -rn` for the four map names across `tests/`
-    returned zero hits before this test -- tan-cli#1058 review round 3);
-    this pins the parity so a future drift is caught before decode time."""
+def test_field_types_maps_stay_in_parity_with_their_whole_key_set():
+    """`_check_element_fields` indexes `field_types[field_name]` for every
+    name in `item_keys` with no `.get` fallback, so a map that drifts out of
+    sync would surface only as a raw `KeyError` at decode time, not here at
+    collection/import time. All three pairs match today (`grep -rn` for the
+    four map names across `tests/` returned zero hits before this test --
+    tan-cli#1058 review round 3); this pins the parity so a future drift is
+    caught before decode time.
+
+    The compared set is `item_keys`, not `required` (tan-cli#1056): the two
+    were the same thing for `Tensor`/`Coverage` and are still, but
+    `_TARGET_TYPES` now also covers the OPTIONAL `compiler_version`/`caveats`
+    that `_optional_field` type-checks. Asserting against `_TARGET_REQUIRED`
+    here would fail the parity it exists to protect the moment those entries
+    landed -- which is exactly what it did."""
     assert set(manifest._TENSOR_TYPES) == manifest._TENSOR_KEYS
-    assert set(manifest._TARGET_TYPES) == manifest._TARGET_REQUIRED
+    assert set(manifest._TARGET_TYPES) == manifest._TARGET_KEYS
     assert set(manifest._COVERAGE_TYPES) == manifest._COV_KEYS
+
+
+def test_element_type_maps_only_name_fields_declared_as_lists():
+    """tan-cli#1063: `_check_element_types` is reached only after
+    `_check_element_fields` has already confirmed the field's own value is a
+    `list`, so an element-type entry for a field whose `field_types` entry is
+    NOT `list` would be unreachable dead configuration -- and, worse, would
+    read as a guard that exists. Pins that every element map is a subset of
+    its field map AND names only `list`-typed fields."""
+    for element_map, field_map in ((manifest._TENSOR_ELEMENT_TYPES, manifest._TENSOR_TYPES),
+                                    (manifest._TARGET_ELEMENT_TYPES, manifest._TARGET_TYPES)):
+        assert set(element_map) <= set(field_map)
+        for name in element_map:
+            assert field_map[name][0] is list, f"{name} is not declared as a list"
