@@ -147,6 +147,26 @@ def test_a_separatorless_root_keeps_the_forward_slash_on_every_platform():
     assert ntpath.join(".", "board.yaml") == ".\\board.yaml"  # what we do NOT do
 
 
+def test_a_bare_drive_letter_is_the_carve_outs_interesting_root():
+    """`"C:"` is the ONE separator-less root where declining `ntpath.join`
+    picks a different DIRECTORY rather than a different spelling, so it is
+    pinned separately from `"."`/`"proj"` above, where the divergence is
+    cosmetic:
+
+        this rule   -> `C:/board.yaml`   the root OF drive C:
+        ntpath.join -> `C:board.yaml`    drive-RELATIVE: the cwd ON C:
+
+    `--project C:` is a drive letter, not a project, so the input is
+    pathological and both answers are defensible for it. It is pinned because
+    it is the only root in a ten-shape sweep where this rule and the
+    platform's own join name different places, and an unpinned divergence of
+    that kind is exactly what a reader checking the rule would trip over."""
+    root, board = resolve_board_path("C:", None)
+    assert (root, board) == ("C:", "C:/board.yaml")
+    assert ntpath.join("C:", "board.yaml") == "C:board.yaml"  # what we do NOT do
+    assert board != ntpath.join(root, "board.yaml")
+
+
 def test_a_caller_mixed_root_is_left_alone_and_not_made_worse():
     """A root the caller spelled with both separators is their own mix; `/`
     wins so the result is never MORE mixed than the input was."""
@@ -170,7 +190,26 @@ def test_the_end_to_end_assertion_holds_under_windows_path_semantics():
 
 @pytest.mark.parametrize(
     "root",
-    ["/w/proj", "C:\\w\\proj", "sub\\p", "proj", ".", "C:/", "C:\\", "C:/w/proj"],
+    [
+        "/w/proj",
+        "C:\\w\\proj",
+        "sub\\p",
+        "proj",
+        ".",
+        "C:/",
+        "C:\\",
+        "C:/w/proj",
+        # The carve-out's interesting root -- see the test above: this is the
+        # only shape here where the answer (`C:/board.yaml`, the root of C:)
+        # names a different directory than `ntpath.join` would
+        # (`C:board.yaml`, the cwd on C:). The invariant below still holds.
+        "C:",
+        # UNC, and its share root: both take `\\` and agree with `ntpath.join`.
+        "\\\\server\\share\\proj",
+        "\\\\server\\share",
+        # Extended-length prefix.
+        "\\\\?\\C:\\w\\proj",
+    ],
 )
 def test_the_board_path_always_starts_with_the_reported_root(root):
     """The invariant itself, over every root shape above: whatever `project.

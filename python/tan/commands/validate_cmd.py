@@ -911,6 +911,13 @@ def _issue_to_diagnostic(issue: Issue, finding: _Finding, board_path: str) -> di
     `= see:` line is no longer discarded on the way past -- that URL is the
     child's, not tan's, and it exists."""
     diagnostic = {
+        # tan-cli#1097: a filesystem PATH where LSP requires a URI reference.
+        # On Windows this is `C:\w\proj\board.yaml`, which no editor matches
+        # by document URI -- the diagnostic attaches to nothing, silently.
+        # Pre-existing: tan-cli#1031 made the separator follow the root (this
+        # was the mixed `C:\w\proj/board.yaml`), which is neither more nor
+        # less valid as a URI. Fix is `Path(...).as_uri()`, here and at the
+        # SARIF `artifactLocation` below -- not in the path resolver.
         "uri": board_path,
         "range": _lsp_range(finding),
         "severity": issue.severity,
@@ -990,6 +997,10 @@ def _sarif_document(
                 "locations": [
                     {
                         "physicalLocation": {
+                            # tan-cli#1097, the same defect as the LSP `uri`
+                            # above: SARIF 2.1.0 requires a URI reference, and
+                            # a consumer resolving this path against
+                            # `originalUriBaseIds` silently resolves it wrong.
                             "artifactLocation": {"uri": board_path},
                             "region": _sarif_region(finding),
                         }

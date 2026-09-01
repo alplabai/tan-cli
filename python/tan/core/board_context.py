@@ -108,11 +108,22 @@ from the root, not to posix the leaf.
 `root` itself is deliberately NOT normalised here: `validate` and `scaffold`
 report the string the caller TYPED (`generate` does the same), and re-spelling
 it would be a behaviour change to a shipped command that no defect asks for.
-A root with no separator at all (`"."`, `"proj"`) keeps `/` on every platform,
-so `"./board.yaml"` -- what every committed conformance golden captures --
-stays byte-identical across hosts. A root the caller spelled with BOTH
-separators is left alone, `/` winning, so the answer is never more mixed than
-the input.
+A root with no separator at all (`"."`, `"proj"`, `"C:"`) keeps `/` on every
+platform, so `"./board.yaml"` -- what every committed conformance golden
+captures -- stays byte-identical across hosts. A root the caller spelled with
+BOTH separators is left alone, `/` winning, so the answer is never more mixed
+than the input.
+
+`"C:"` is the one separator-less root where declining `ntpath.join` is not
+merely a spelling difference but a DIFFERENT DIRECTORY, so it is called out
+rather than left implicit (measured): this rule answers `C:/board.yaml`, the
+root OF drive C:, while `ntpath.join("C:", "board.yaml")` answers
+`C:board.yaml`, the drive-RELATIVE path naming the cwd ON C:. The input is
+pathological -- `--project C:` is a drive letter, not a project -- and both
+answers are defensible for it, but the divergence is real and a reader
+checking this rule against the platform's own join deserves to meet it here
+instead of discovering it. `tests/core/test_board_context.py` pins both
+spellings.
 
 The choice reads the root STRING, never `os.sep`, so the Windows branch is
 fully exercised by a Linux run: `tests/core/test_board_context.py` drives it
