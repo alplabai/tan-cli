@@ -3000,8 +3000,12 @@ def test_flow_d_preflight_wrong_dp_id_names_the_actual_id_too(monkeypatch, tmp_p
     although it took this exact `_dp_id_reported(banner)` branch and
     therefore had the value in hand. On a bench where two probes share a
     cloned USB serial (measured: `603000869` answers both a real E1M-AEN801
-    at `0x4C013477` and a GD32 bridge at `0x0BE12477`), the actual ID is the
-    single most useful datum for telling which board actually answered."""
+    at `0x4C013477` and the GD32 bridge), the actual ID is the single most
+    useful datum for telling which board actually answered.
+
+    The AEN's `0x4C013477` is confirmed on silicon (2026-08-10) and is not in
+    dispute. The GD32 bridge's own SW-DP ID is UNVERIFIED and deliberately not
+    named here -- see tan-cli#610."""
     _stub_flow_d_probe(
         monkeypatch,
         tmp_path,
@@ -3143,6 +3147,14 @@ def test_flow_d_preflight_a_wrong_jlink_serial_keeps_the_wiring_message(monkeypa
     assert "CLONED serial" not in message
 
 
+# `0x0BE12477` is used throughout the tests below purely as an arbitrary,
+# well-formed 32-bit SW-DP IDR literal -- it is NOT a sourced identification of
+# any board on this bench. tan-cli#589's bench table records it for the GD32
+# bridge while alp-sdk (`metadata/chips/gd32_swd.yaml:49`, and its recovery
+# tutorial) records `0x6BA02477`; the two cannot both be right and only a
+# read on the real probe can settle it (tan-cli#610). Do not copy this value
+# into a shipped `expect_dpidr` -- an `expect_dpidr` armed from the wrong
+# source can pass on the very board the guard exists to exclude.
 def test_flow_d_preflight_expect_dpidr_round_trips_a_bare_yaml_integer():
     """tan-cli#795(a): an UNQUOTED `expect_dpidr: 0x0BE12477` in a manifest or
     SoM-preset YAML parses (PyYAML's `0x...` handling, `yaml.safe_load`) to
@@ -3215,10 +3227,11 @@ def test_the_expected_id_appearing_elsewhere_in_the_banner_is_not_a_match():
     `expected` value appearing anywhere -- a selected-device echo, a path, a
     firmware string -- accepted the board whatever the DP actually reported.
 
-    This banner is that shape, and the real pair measured on a bench where
-    both answer the cloned probe serial `603000869`: it names `0x4C013477`
-    (the AEN801) in a device-selection line, while the SW-DP that actually
-    answered is `0x0BE12477` (the GD32 bridge). `_DP_ID_RE`'s
+    This banner is that shape: it names `0x4C013477` (the AEN801, confirmed
+    on silicon 2026-08-10) in a device-selection line, while the SW-DP that
+    actually answered reports a different ID. The `0x0BE12477` literal is an
+    arbitrary distinct value chosen to be unequal to the selected-device echo,
+    NOT a sourced identification of any board -- see tan-cli#610. `_DP_ID_RE`'s
     `(?:with\\s+ID|DPIDR)` anchor means `_dp_id_matches` extracts only the
     DP-ID line's capture, so an expected value that merely appears elsewhere
     in the banner must not match."""

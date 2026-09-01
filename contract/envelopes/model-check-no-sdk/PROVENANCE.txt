@@ -1,0 +1,42 @@
+SPDX-License-Identifier: Apache-2.0
+
+PROVENANCE — contract/envelopes/model-check-no-sdk/expected.json
+=================================================================
+
+Recorded on    : 2026-09-01
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#253
+Branch         : feat/253-model-envelope-fixtures (off dev @ b3c40619)
+
+This is a NEW golden, not a re-recording: there was no previous recording to
+be wrong. `tan model` shipped three subcommands (`SUBCOMMANDS = ("build",
+"doctor", "check")`, `python/tan/commands/model_cmd.py`) with zero
+`contract/envelopes` coverage while every other command surface had some —
+the gap tan-cli#253 was re-scoped onto after the Rust oracle it originally
+named was deleted in `2883cdf4`.
+
+How it was captured
+--------------------
+Exactly as `python/tests/conformance/test_contract_envelopes.py` invokes it: a
+fresh empty scratch directory nested under its own fresh parent
+(`<temp>/tan-contract-<case>-<pid>/root`), the case's inputs copied in,
+`SOURCE_DATE_EPOCH=0`, `HOME`/`USERPROFILE` pointed at a second fresh
+directory, then normalised through the harness's own `normalise()` (PATH_KEYS
+`\` -> `/`, the scratch path down to `__WORKDIR__`). The recording reused the
+harness's own `fresh_dir` / `copy_fixture_inputs` / `case_env` / `normalise`
+rather than reimplementing them (contract/README.md, "Regenerating a golden"
+step 1). Python 3.12.3, lane-private venv, Linux, `tan` resolved from this
+worktree.
+
+What this case pins
+--------------------
+`tan model check --format json` from an empty directory: the same
+`model.sdk-root-unresolved` ERROR / `exitCode: 2` refusal `model-build-no-sdk`
+records, but with `check`'s OWN empty `data` payload -- `sku`/`exact`/`models`,
+not `build`'s `sku`/`built`. That difference is the point of the pair: the two
+subcommands share a refusal path and `_empty_data` shapes the payload per
+subcommand, so a regression that collapsed them onto one shape would be
+invisible with only one of these two cases committed.
+
+Fully deterministic: no host state is read, so no `env.json`.

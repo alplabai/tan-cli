@@ -152,7 +152,7 @@ Plus two non-binary assets, carrying the same build-provenance attestation:
 | Asset | Contents |
 | --- | --- |
 | `checksums.txt` | sha256 of every other asset. |
-| `envelope-contract.json` | The JSON envelope contract — the frozen issue codes (`contract/issue-codes.json`) plus one entry per command family: a byte golden envelope (`contract/envelopes/`) for most of them, and `doctor`'s `dataKeys` key-set entry (`contract/doctor-data-keys.json`, tan-cli#664 — `doctor`'s `data` values are host facts, so it cannot be a golden) — so a consumer's contract test diffs against a published artefact instead of a hand-copied fixture that drifts. See [`contract/README.md`](../contract/README.md). |
+| `envelope-contract.json` | The JSON envelope contract — the frozen issue codes (`contract/issue-codes.json`) plus one entry per command family: a byte golden envelope (`contract/envelopes/`) for most of them, and `doctor`'s `dataKeys` key-set entry (`contract/doctor-data-keys.json`, tan-cli#664 — `doctor`'s `data` values are host facts, so it cannot be a golden) — so a consumer's contract test diffs against a published artefact instead of a hand-copied fixture that drifts. A golden entry whose command reads the HOST rather than its own inputs also carries an **`env`** block, the case's `env.json` verbatim (tan-cli#253, `model-doctor-no-sdk` is the only one today): a `null` UNSETS the variable, a string SETS it, and `__WORKDIR__` expands to the directory the command is replayed from. Apply it before spawning `tan`, or the replay reports whichever vendor NPU compilers the replaying box happens to have installed and diffs against the `envelope` published beside it. See [`contract/README.md`](../contract/README.md). |
 
 ## Which shape a release publishes
 

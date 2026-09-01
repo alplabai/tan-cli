@@ -311,11 +311,25 @@ Every tagged release carries **`envelope-contract.json`** beside the binaries:
   "envelopes": {
     "presets-heterogeneous-som": { "args": [...], "exitCode": 0, "envelope": { ... } },
     // …one entry per golden case
+    // A case that pins host state carries its `env.json` too (tan-cli#253), so
+    // the entry is replayable: WITHOUT it, replaying `model-doctor-no-sdk`'s
+    // `args` on a box that has `vela` reports `ethos_u.available: true` and
+    // diffs against the `envelope` published right beside it.
+    "model-doctor-no-sdk": { "args": [...], "exitCode": 0, "envelope": { ... },
+                             "env": { "PATH": "__WORKDIR__", "ALP_VELA_CONFIG": null } },
     "doctor": { "args": [...], "dataKeys": { /* contract/doctor-data-keys.json's dataKeys, verbatim */ } },
     "sdk-list": { "args": [...], "dataKeys": { /* contract/sdk-list-data-keys.json's dataKeys, verbatim */ } }
   }
 }
 ```
+
+**`env` is present only on a case that carries one** (one case today), and its
+semantics are the fixture's own: a **`null` UNSETS** the variable, a string
+**SETS** it, and **`__WORKDIR__` expands to the directory the command is run
+from** — so a consumer replaying an entry applies the block on top of its own
+environment before spawning `tan`, and reproduces the `envelope` beside it.
+An entry with no `env` key needs no environment beyond the isolation any
+replay already wants (a scratch cwd, an isolated `HOME`).
 
 Built by the `Bundle the envelope contract` step in
 `.github/workflows/release.yml` — pure re-packaging of committed files gated by
@@ -441,6 +455,7 @@ One directory per case, mirroring the retired `cli-rs/contract` harness:
 | `expected.json` | The full golden envelope, normalized (see below). |
 | `expected.exit` | The golden process exit code, as a bare integer. |
 | *(when re-recorded)* `PROVENANCE.txt` | Why this golden was re-recorded, when, against which `tan` version, what moved, and why the previous recording was wrong. **Required on any golden re-recorded against the shipping CLI** — a re-recorded golden with no provenance is indistinguishable from a laundered one. Harness metadata, like the three rows above: skipped when fixture inputs are copied (`CASE_METADATA`). |
+| *(optional)* `env.json` | Environment overrides for cases whose command reads the **host** rather than its own inputs: a JSON object of `NAME` → value, where `null` UNSETS and a string SETS, and `__WORKDIR__` inside a value expands to the case's scratch directory. Applied on top of the harness's own isolation vars, which a case may NOT re-pin (`HARNESS_OWNED_ENV`). Only `model-doctor-no-sdk` carries one today — see "Pinning host state a case reads" under Determinism. Harness metadata: skipped when fixture inputs are copied (`CASE_METADATA`). |
 | *(optional)* `board.yaml` / other fixture inputs | Copied into the isolated working directory the case runs in before `tan` is spawned. **Directories are copied recursively**, which is what lets a case ship a synthetic `sdk/` checkout (`scripts/alp_project.py` + `metadata/…` + `examples/…`) and pass `--sdk-root ./sdk`. That relative argv keeps the "no absolute paths in argv" rule intact — `data.sdkRoot` comes back as the literal `./sdk` on every platform. |
 
 `contract/fixtures/` (sibling directory) is not an envelope-golden directory.
@@ -529,6 +544,28 @@ just the one that captured it:
   `std::env::current_dir()` resolves through (`/var/…` → `/private/var/…`) and
   a whole-prefix comparison would silently stop matching there. Like the
   separator rewrite, it applies to `PATH_KEYS` fields only.
+- **Pinning host state a case reads (`env.json`, tan-cli#253)** — every rule
+  above isolates a case from the FILESYSTEM. `model doctor` is the first
+  command whose entire payload is a fact about the HOST: each
+  `data.backends[]` row answers "is this vendor NPU compiler installed",
+  resolved through `shutil.which("vela")` / `shutil.which("dxcom")` and the
+  `ALP_DRPAI_TVM_HOME` / `ALP_DEEPX_SDK_HOME` / `ALP_VELA_CONFIG` environment
+  variables. A golden recorded on a toolchain-less box would therefore go RED
+  on a box that has them — and the repo's own unavailable-reason string tells
+  the reader to install one (`"vela not on PATH; pip install
+  alp-tan[model-compile]"`). Measured on a host carrying a `vela`, a `dxcom`
+  and `ALP_VELA_CONFIG`/`ALP_DEEPX_SDK_HOME`, three of the five reported rows
+  flip. `model-doctor-no-sdk` therefore ships an `env.json` pinning `PATH` to
+  its own (empty) scratch directory and unsetting the three variables, so the
+  case measures the CONTRACT rather than the recording box. **Pinning, not
+  normalising**: `available`/`reason` are the only fields that case exists to
+  gate, and `normalise()` is deliberately scoped to `PATH_KEYS` for the reason
+  its own docstring gives. `PATH` is pinned to `__WORKDIR__` rather than `""`
+  because an empty `PATH` also strips a Windows runner's launcher search path,
+  and a harness that cannot spawn the child reports a contract failure it never
+  measured. The other twenty-five cases answer from their own copied inputs and
+  carry no `env.json`; pinning host state they never read would only hide a
+  real regression in how they read it.
 
 ## Cases pinned today
 
@@ -542,6 +579,12 @@ just the one that captured it:
 | `sdk-current-no-sdk` | `sdk current --format json` | 0 | Reports `sourceTier: "none"` in a workspace with no SDK configured — offline, host-independent given the isolated `HOME`. |
 | `sdk-unknown-subcommand` | `sdk bogus --format json` | 1 | Runtime-failure envelope shape; the only offline path that exercises exit code 1 in this set. |
 | `sdk-remove-absent` | `sdk remove v0.0.0-nonexistent --destination ./sdk-cache --format json` | 0 | tan-cli#790: idempotent removal of a target that was never there — `removed: false`, `freedBytes: 0`, exit 0 (a no-op is a SUCCESS, matching `sdk current`'s "nothing configured" convention). `--destination ./sdk-cache` is a relative argv token, matching the "no absolute paths in argv" rule below; `data.path` still comes back absolute (the resolved target), which is what makes it the first case to need the `__WORKDIR__` substitution for a field OTHER than `project.root`/`launch.json`. Re-recorded for tan-cli#1028 (`PROVENANCE.txt`): `data.resolvesToAfter` is `{sdkPath: null, readiness: null, sourceTier: "none"}` here — the isolated `HOME` this case runs under means nothing resolves for the workspace either before or after the (idempotent) no-op. |
+| `model-doctor-no-sdk` | `model doctor --format json` (no SDK, `env.json`) | 0 | tan-cli#253, and the first `model` case of any kind — the three shipped `model` subcommands had ZERO envelope coverage while every other command surface had some. Pins that an absent vendor toolchain is a REPORTED row and never a failure (`ok: true`, exit 0 — `_run_doctor` returns `SUCCESS` unconditionally), the four `data.backends[]` rows in REGISTRY order (`cpu`, `ethos_u`, `drpai`, `deepx_dxm1`), the five-key row shape (`backend`/`tool`/`available`/`version`/`reason`), the separate `data.optional[]` array carrying the `ALP_VELA_CONFIG` row — kept out of `backends[]` so a licensed-only enhancement cannot read as a broken backend — and the `model.doctor-sdk-unresolved` WARNING, which is `doctor`'s deliberate softening of the `model.sdk-root-unresolved` ERROR the other two subcommands raise for the identical non-resolution. The one case in this set that reads the host, hence the `env.json`; see "Pinning host state a case reads" below. |
+| `model-unknown-subcommand` | `model bogus --format json` | 1 | tan-cli#253; the direct analogue of `sdk-unknown-subcommand`. Also pins the shipped subcommand inventory, since the message's "Available: build, doctor, check." is rendered from `SUBCOMMANDS` itself. |
+| `model-build-no-sdk` | `model build --format json` (no SDK resolvable) | 2 | tan-cli#253. `model build`'s refusal when no alp-sdk checkout resolves, captured the way `presets-no-sdk` / `generate-board-yaml-missing` capture theirs. Pins that `data` still carries `build`'s OWN empty payload (`schemaVersion`/`sku`/`built`) on a refusal, not a generic stand-in. The refusal fires before the board.yaml is read, which is also why it is the deterministic one — the `model.board-yaml-missing` alternative embeds an absolute path in `issues[].message`, which `normalise()` deliberately does not rewrite. |
+| `model-check-no-sdk` | `model check --format json` (no SDK resolvable) | 2 | tan-cli#253. The same refusal as the row above with `check`'s OWN empty payload (`sku`/`exact`/`models`, not `sku`/`built`). The pair is the point: both subcommands share a refusal path and `_empty_data` shapes it per subcommand, so a regression that collapsed them onto one shape would be invisible with only one of the two committed. |
+| `model-build-no-models` | `model build --sdk-root ./sdk --format json` (fixture SDK, board with no `models:`) | 0 | tan-cli#253. The clean EMPTY success: nothing declared is not an error. Pins `data.sku` read off the board, `data.built: []`, `issues: []`, and the `sdk` block (`root: "./sdk"`, `sourceTier: "sdkRootFlag"`) — the resolution `model` reported nowhere at all before tan-cli#497. Deterministic on a box with no NPU compiler because no adapter is ever reached. |
+| `model-check-no-models` | `model check --sdk-root ./sdk --format json` (fixture SDK, board with no `models:`) | 0 | tan-cli#253. `check`'s own empty success shape, and the pin on `exact: false` as the default of the `--exact` flag this case does not pass. |
 | `generate-board-yaml-missing` | `generate --format json` (no `board.yaml` present) | 2 | `generate`'s `data` schema (`{schemaVersion,targets,written,failed}`) is distinct from `init`'s and was otherwise completely unguarded — this is the first guard clause in `python/tan/commands/generate_cmd.py`, needing no board/SDK/network to reach. |
 | `debug-config-preview-zephyr-mcu` | `debug-config --target-kind zephyr-mcu --server jlink --preview` | 0 | |
 | `debug-config-preview-zephyr-mcu-sdk-identity` | `debug-config --target-kind zephyr-mcu --server jlink --core m55_hp --sdk-root ./sdk --preview` (fixture SDK) | 0 | |
@@ -709,9 +752,16 @@ purpose:
 1. Run the case's `args.txt` through the **shipping Python CLI** by hand from an
    empty directory, with `SOURCE_DATE_EPOCH=0` and `HOME`/`USERPROFILE` pointed
    at another empty directory, `--format json`. (Reuse the conformance
-   harness's own `fresh_dir` / `copy_fixture_inputs` / `normalise` if you can —
-   that is how the tan-cli#502 re-record was captured, and it removes any chance
-   of the recording and the comparison disagreeing about isolation.)
+   harness's own `fresh_dir` / `copy_fixture_inputs` / **`case_env`** /
+   `normalise` if you can — that is how the tan-cli#502 re-record and the
+   tan-cli#253 `model` recordings were captured, and it removes any chance of
+   the recording and the comparison disagreeing about isolation.)
+   **`case_env` is not optional for a case that ships an `env.json`.** It is
+   what applies that pin, and skipping it re-records the RECORDING BOX: on a
+   host with `vela` installed, `model-doctor-no-sdk` would be blessed with
+   `ethos_u.available: true` and would then fail on every box without it —
+   the exact hole tan-cli#253 closed. Assembling the environment by hand
+   instead of calling `case_env` has the same effect.
 2. Copy the printed envelope into `expected.json`, converting any `\` path
    separator to `/` (Windows only — Unix output is already normalized).
 3. Update `expected.exit` if the exit code changed.

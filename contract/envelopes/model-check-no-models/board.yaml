@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# The minimum `model build`/`model check` read: a `som.sku` (reported as
+# `data.sku`) and no `models:` block at all, which is the "nothing declared"
+# state both subcommands report as a clean, empty success.
+som:
+  sku: E1M-AEN801
