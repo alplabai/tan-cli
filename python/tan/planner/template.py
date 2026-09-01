@@ -148,16 +148,27 @@ def load_catalog(catalog_path: Path | None = None) -> dict[str, Any]:
     of THIS document. The three YAML callers keep their default and their
     byte-identical message.
 
-    NOT guarded here, deliberately: `path.read_text` on a catalog that does
-    not exist still raises `FileNotFoundError`. That is the ABSENT-document
-    class `_load_som_doc`/`_default_preset_for_sku` answer with an explicit
-    `is_file()` check, not the malformed-document class tan-cli#1077 names,
-    and it belongs to whichever issue takes that class across all four
-    documents at once.
+    The ABSENT-document half is curated here too (tan-cli#1077 review). The
+    first cut deferred it as "equally true of all four documents this
+    module reads"; measured, it was not -- `_load_som_doc` and
+    `_board_route_entries` carry an `is_file()` check and `_docs_ref` an
+    `except OSError`, so three of the module's five reads were ALREADY
+    handled and only this one and `render_to_envelope`'s example
+    `board.yaml` were bare. A false symmetry claim in a docstring is the
+    same defect class this round exists to close, so both are guarded and
+    the claim is gone. `except OSError`, not a pre-flight `is_file()`: a
+    present-but-unreadable path (a directory, a permissions error) is named
+    too, not only a missing one.
     """
     path = catalog_path or CATALOG
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise TemplateError(
+            f"cannot read template catalog at {path}: "
+            f"{exc.strerror or exc}") from exc
+    try:
+        doc = json.loads(text)
     except json.JSONDecodeError as exc:
         raise TemplateError(
             f"malformed template catalog at {path}: not valid JSON "
@@ -175,9 +186,19 @@ def find_template(
     the not-found message -- so a `templates:` entry with no `id:` (or one
     that is not a mapping at all) raised `KeyError: 'id'` / `TypeError`
     instead of a curated error naming the catalog, the record and the
-    type. @path is a MESSAGE LABEL only, never read: it defaults to the
-    bound checkout's own `CATALOG`, which is exactly the file
-    `load_catalog()` read when no caller overrode it.
+    type. @path is a MESSAGE LABEL only, never read.
+
+    Its `CATALOG` default is the bound checkout's own catalog -- exactly
+    the file `load_catalog()` reads when no caller overrode IT, so the two
+    defaults agree and the label cannot lie for the one caller that omits
+    it (`tan/planner/cli.py:182`, whose `load_catalog()` is also
+    default-pathed). It CAN lie for a caller that passes a custom
+    `catalog_path` to `load_catalog` and then omits `path` here; there is
+    no such caller today (`render_to_envelope` threads the resolved path
+    through, and every test that asserts on the file name passes it
+    explicitly), and making it required would mean editing `cli.py` and
+    the pre-existing `test_find_template_by_cores.py` fixtures for a label
+    (tan-cli#1077 review nit -- recorded rather than silently accepted).
 
     Every id is resolved up front, as the not-found path always did (and
     as the match scan did for every record up to the match). A record
@@ -231,6 +252,10 @@ def find_template_by_cores(
     1:1) actually calls, and the one `HAND_PORT_HASHES` audits against
     alp-sdk's original.
 
+    @path is the same message-label-only keyword `find_template` takes,
+    with the same `CATALOG` default and the same caveat -- see its
+    docstring.
+
     tan-cli#1077: `_topology`'s `{c["id"]: c["os"] ...}` and the ambiguous
     branch's `rec["id"]` were bare subscripts on catalog-sourced mappings,
     and all three `doc.get("templates", [])` iterations were unguarded.
@@ -281,9 +306,17 @@ def _coerce(spec: dict[str, Any], raw: Any) -> Any:
 
     `spec["type"]` / `spec["name"]` stay BARE subscripts on purpose
     (tan-cli#1077): this function and `_check_constraints` are reached
-    only from `_resolve_params`, and only after `_record_parameters` has
-    required both keys on every spec. Guarding them a second time here
-    would be a second register for the same fact."""
+    only from `_resolve_params` (`:346` and `:347`, verified by the
+    tan-cli#1077 review), and only after `_record_parameters` has required
+    both keys on every spec. Guarding them a second time here would be a
+    second register for the same fact.
+
+    That reasoning covers `_check_constraints`'s `spec.get("constraints")`
+    and its `constraints["enum"]` / `["minimum"]` / `["maximum"]` reads
+    too, but ONLY since `_require_constraints` joined `_record_parameters`
+    -- before that this docstring's claim was written while a sixth
+    unguarded subscript sat one function over (tan-cli#1077 review,
+    MAJOR 1)."""
     if not isinstance(raw, str):
         return raw
     ptype = spec["type"]
@@ -451,9 +484,16 @@ def _rendered_bytes(
 # ---------------------------------------------------------------------
 
 #: `isinstance` kind -> the noun `_require_field`'s curated message uses.
-#: Three shapes cover every field guard in this module: a YAML mapping, a
-#: YAML list, and a scalar string.
-_SHAPE_NOUN: dict[type, str] = {dict: "a mapping", list: "a list", str: "a string"}
+#: Four shapes cover every field guard in this module: a mapping, a list, a
+#: scalar string, and -- since tan-cli#1077 reached `constraints.minimum` /
+#: `constraints.maximum`, the only numeric fields anything here subscripts --
+#: an integer. `bool` satisfies `int` in Python, so `minimum: true` passes
+#: this guard and behaves as `minimum: 1`; that is a curated
+#: `ParameterError` rather than a crash, and JSON `true` is refused upstream
+#: by the schema's own `"type": "integer"` (alp-sdk
+#: `check_template_catalog.py`), so it is not worth a special case here.
+_SHAPE_NOUN: dict[type, str] = {
+    dict: "a mapping", list: "a list", str: "a string", int: "an integer"}
 
 
 def _require_mapping_doc(
@@ -616,6 +656,11 @@ def _record_parameters(record: Any, *, doc: Any, field: str) -> list[Any]:
     here either -- guarding a key nobody subscripts would be exactly the
     stricter-than-the-schema this issue rules out.
 
+    `constraints:` is checked here too, via `_require_constraints` --
+    tan-cli#1077 review MAJOR 1, whose six measured failures (five raw
+    `TypeError`s and one SILENT dropped bound) that helper's own docstring
+    records.
+
     Called by BOTH `_resolve_params` and `_substitutions_for`, which each
     walked the same list bare; the check is idempotent, so the second
     call re-proves what the first did rather than trusting a caller.
@@ -628,7 +673,54 @@ def _record_parameters(record: Any, *, doc: Any, field: str) -> list[Any]:
         _require_key(spec, "name", str, doc=doc, field=spec_field)
         _require_key(spec, "type", str, doc=doc, field=spec_field)
         _require_key(spec, "default", doc=doc, field=spec_field)
+        _require_constraints(spec, doc=doc, field=spec_field)
     return specs
+
+
+def _require_constraints(spec: dict[str, Any], *, doc: Any, field: str) -> None:
+    """`constraints:` and the three bounds `_check_constraints` reads.
+
+    OPTIONAL in the schema, so an absent block is legal and this returns
+    without a word; only a PRESENT one is shape-checked, against
+    `$defs/parameter`'s own `constraints` object (`enum` an array,
+    `minimum`/`maximum` integers).
+
+    tan-cli#1077 review MAJOR 1: `_check_constraints` read
+    `spec.get("constraints") or {}` and then membership-tested and
+    subscripted it, INSIDE a function the first sweep table declared
+    cleared. Re-driven verbatim on the tree this PR opened with:
+
+        constraints: 3              TypeError: argument of type 'int' is
+                                      not iterable                   :307
+        constraints: ['enum']       TypeError: list indices must be
+                                      integers or slices, not str    :307
+        constraints: ['minimum']    same                             :311
+        constraints: ['maximum']    same                             :315
+        constraints: {enum: 3}      TypeError: argument of type 'int' is
+                                      not iterable                   :307
+        constraints: {minimum: 'a'} TypeError: '<' not supported between
+                                      instances of 'int' and 'str'   :311
+        constraints: 'abc'          RENDERS -- every bound DROPPED
+
+    The last row is the serious one, and the same shape as the
+    `pins: 'E1M_GPIO_IO4'` character-iteration bug tan-cli#1052 found on
+    this file: no exception, wrong behaviour. `"enum" in "abc"` is a
+    SUBSTRING test, so every bound evaluated False and an out-of-range
+    override was ACCEPTED. The behaviour even depended on the spelling of
+    the junk -- `constraints: 'an enum'` DOES contain the substring and
+    took the `TypeError` branch instead.
+    """
+    raw = spec.get("constraints")
+    if raw is None:
+        return
+    cons_field = f"{field}.constraints"
+    _require_field(raw, dict, doc=doc, field=cons_field)
+    if "enum" in raw:
+        _require_field(raw["enum"], list, doc=doc, field=f"{cons_field}.enum")
+    for bound in ("minimum", "maximum"):
+        if bound in raw:
+            _require_field(raw[bound], int, doc=doc,
+                           field=f"{cons_field}.{bound}")
 
 
 def _load_som_doc(sku: str, metadata_root: Path) -> dict[str, Any]:
@@ -1866,7 +1958,18 @@ def render_to_envelope(
                                doc=catalog, field=rec_field)
     example_dir = _safe_join(base, example_rel, what="template example directory")
     board_yaml_path = example_dir / "board.yaml"
-    board_yaml_text = board_yaml_path.read_text(encoding="utf-8")
+    # The other half of the ABSENT-document pair (tan-cli#1077 review) --
+    # see `load_catalog`'s docstring for the five-site measurement. The
+    # catalog's `example:` is drift-checked by alp-sdk's own
+    # `check_template_catalog.py`, but that gate runs on the SDK, not here,
+    # so a hand-edited catalog pointing at a directory with no `board.yaml`
+    # reached the user as a raw `FileNotFoundError`.
+    try:
+        board_yaml_text = board_yaml_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise TemplateError(
+            f"cannot read template example board.yaml at "
+            f"{board_yaml_path}: {exc.strerror or exc}") from exc
     # tan-cli#1052: the fifth sibling of the same malformed-YAML family
     # tan-cli#1025 -> #1034 -> #1037/#1048 swept through the SoM preset
     # and the board metadata. THIS document is the catalog template's

@@ -250,13 +250,15 @@ def test_load_catalog_itself_refuses_a_nonobject_document(tmp_path):
     render-path case passing, because `_catalog_templates` re-guards the
     same document one call later, inside both selectors.
 
-    That redundancy is deliberate -- `load_catalog` is PUBLIC, and two
-    callers `.get("templates", ...)` its return value WITHOUT going through
-    a selector (`tan/planner/cli.py:182` hands it straight to
-    `find_template_by_cores`, and `tests/gates/test_example_catalog_cores_
-    selector_agrees_with_planner.py::_known_topologies` walks it itself) --
-    but an unpinned guard is not a guard. This asserts it at its own call
-    site, so M15 reds like every other mutant."""
+    That redundancy is deliberate -- `load_catalog` is PUBLIC and its
+    return value is walked directly, without a selector, by
+    `tests/gates/test_example_catalog_cores_selector_agrees_with_planner.py
+    ::_known_topologies` (`doc.get("templates", [])`, then `c["id"]` /
+    `c["os"]` per record). `tan/planner/cli.py:182` does NOT belong on that
+    list -- it hands the doc straight to `find_template_by_cores`, i.e.
+    through a selector, and the first version of this docstring claimed
+    otherwise (tan-cli#1077 review nit). One caller, not two; the guard is
+    still worth pinning, because an unpinned guard is not a guard."""
     m = _tmpl()
     catalog, _base, _metadata = _tree(tmp_path, "[1, 2]")
     with pytest.raises(m.TemplateError) as excinfo:
@@ -271,6 +273,54 @@ def test_the_json_decode_error_is_not_a_valueerror_subclass_escape(tmp_path):
     m = _tmpl()
     with pytest.raises(m.TemplateError):
         _render(tmp_path, "{")
+
+
+def test_a_missing_catalog_file_is_curated_not_a_filenotfounderror(tmp_path):
+    """The ABSENT-document half (review MAJOR 2). The first cut deferred
+    this on the ground that an unguarded `read_text` was "equally true of
+    all four documents this module reads"; it was not -- `_load_som_doc`
+    and `_board_route_entries` carry an `is_file()` check and `_docs_ref`
+    an `except OSError`, so three of the module's five reads were already
+    handled and the deferral had no ground. `except OSError`, not a
+    pre-flight `is_file()`, so a present-but-unreadable path is named
+    too."""
+    m = _tmpl()
+    with pytest.raises(m.TemplateError) as excinfo:
+        m.load_catalog(tmp_path / "nope" / "catalog-v1.json")
+    msg = str(excinfo.value)
+    assert "cannot read template catalog at" in msg
+    assert "catalog-v1.json" in msg
+    assert "No such file or directory" in msg
+
+
+def test_an_unreadable_catalog_path_is_curated_too(tmp_path):
+    """`except OSError`, not `except FileNotFoundError`: a path that
+    resolves to a DIRECTORY is present but unreadable, and used to escape
+    as `IsADirectoryError`."""
+    m = _tmpl()
+    (tmp_path / "catalog-v1.json").mkdir()
+    with pytest.raises(m.TemplateError) as excinfo:
+        m.load_catalog(tmp_path / "catalog-v1.json")
+    assert "cannot read template catalog at" in str(excinfo.value)
+
+
+def test_a_missing_example_board_yaml_is_curated_not_a_filenotfounderror(
+        tmp_path):
+    """The OTHER unguarded read of the pair. The catalog's `example:` is
+    drift-checked by alp-sdk's `check_template_catalog.py`, but that gate
+    runs on the SDK, not here, so a hand-edited catalog pointing at a
+    directory with no `board.yaml` reached the user as a raw
+    `FileNotFoundError` from `render_to_envelope`."""
+    m = _tmpl()
+    catalog, base, metadata = _tree(tmp_path, _catalog(_record()))
+    (base / _EXAMPLE / "board.yaml").unlink()
+    with pytest.raises(m.TemplateError) as excinfo:
+        m.render_to_envelope(
+            _TEMPLATE, _SKU, catalog_path=catalog, base_dir=base,
+            metadata_root=metadata)
+    msg = str(excinfo.value)
+    assert "cannot read template example board.yaml at" in msg
+    assert "No such file or directory" in msg
 
 
 # ---------------------------------------------------------------------
@@ -591,6 +641,137 @@ def test_a_parameter_default_may_be_any_json_value(tmp_path):
         assert [rel for rel, _ in out] == ["board.yaml"], repr(default)
 
 
+# ---------------------------------------------------------------------
+# `constraints:` -- the sixth subscript, one function over (review MAJOR 1).
+# ---------------------------------------------------------------------
+
+def _constrained(constraints, *, default=5, ptype="integer"):
+    spec = {"name": "knob", "type": ptype, "description": "d",
+            "default": default}
+    if constraints is not ...:
+        spec["constraints"] = constraints
+    return _catalog(_record(parameters=[spec]))
+
+
+@pytest.mark.parametrize(
+    ("value", "typename"),
+    [(3, "int"), ("abc", "str"), (["enum"], "list"), (["minimum"], "list"),
+     (["maximum"], "list")],
+)
+def test_a_nonmapping_constraints_raises_a_curated_error(
+        tmp_path, value, typename):
+    """`_check_constraints` read `spec.get("constraints") or {}` and then
+    membership-tested and subscripted it. Re-driven verbatim on the tree
+    this PR opened with:
+
+        constraints: 3            TypeError: argument of type 'int' is
+                                    not iterable                  :307
+        constraints: ['enum']     TypeError: list indices must be
+                                    integers or slices, not str   :307
+        constraints: ['minimum']  same                            :311
+        constraints: ['maximum']  same                            :315
+        constraints: 'abc'        RENDERS -- every bound DROPPED
+
+    Inside a function the first sweep table declared cleared, which is the
+    finding: `_coerce`'s "reached only from `_resolve_params`" reasoning was
+    written while a sixth unguarded subscript sat one function over."""
+    msg = _raises(tmp_path, _constrained(value), params={"knob": "99"})
+    assert "catalog-v1.json" in msg
+    assert (f"templates['fake1077'].parameters[0].constraints must be a "
+            f"mapping, got {typename}" in msg)
+
+
+def test_a_string_constraints_dropped_every_bound_silently(tmp_path):
+    """THE SILENT HALF, and the serious one -- the same shape as the
+    `pins: 'E1M_GPIO_IO4'` character-iteration bug tan-cli#1052 found on
+    this file: no exception, wrong behaviour.
+
+    `"enum" in "abc"` is a SUBSTRING test, so every bound evaluated False
+    and an out-of-range override was ACCEPTED. Asserted as a pair, because
+    "it raises now" alone would not show a bound was ever dropped: the
+    well-formed document REFUSES `knob=zzz`, and the malformed one used to
+    render it. (The behaviour even depended on the spelling of the junk --
+    a string that DOES contain the substring, `constraints: 'an enum'`,
+    took the `TypeError` branch instead.)"""
+    m = _tmpl()
+
+    # Control: the same bound, well-formed, refuses the override.
+    with pytest.raises(m.ParameterError) as excinfo:
+        _render(tmp_path / "good", _constrained({"enum": ["a", "b"]},
+                                                default="a", ptype="string"),
+                params={"knob": "zzz"})
+    assert "not in ['a', 'b']" in str(excinfo.value)
+
+    # The defect: the same override, with the bound spelled as a string.
+    msg = _raises(tmp_path / "bad",
+                  _constrained("enum: [a, b]", default="a", ptype="string"),
+                  params={"knob": "zzz"})
+    assert "constraints must be a mapping, got str" in msg
+
+
+@pytest.mark.parametrize(
+    ("bound", "value", "noun", "typename"),
+    [("enum", 3, "a list", "int"), ("enum", "ab", "a list", "str"),
+     ("minimum", "a", "an integer", "str"),
+     ("maximum", [1], "an integer", "list")],
+)
+def test_a_misshapen_constraint_bound_raises(
+        tmp_path, bound, value, noun, typename):
+    """One level further in, and reachable past the mapping guard:
+    `constraints: {enum: 3}` was `TypeError: argument of type 'int' is not
+    iterable` and `constraints: {minimum: 'a'}` was `TypeError: '<' not
+    supported between instances of 'int' and 'str'`. The schema gives
+    `enum` `"type": "array"` and both bounds `"type": "integer"`."""
+    msg = _raises(tmp_path, _constrained({bound: value}),
+                  params={"knob": "99"})
+    assert (f"templates['fake1077'].parameters[0].constraints.{bound} must "
+            f"be {noun}, got {typename}" in msg)
+
+
+@pytest.mark.parametrize(
+    ("label", "constraints"),
+    [
+        ("no constraints: key at all", ...),
+        ("constraints: null", None),
+        ("constraints: {}", {}),
+        ("only a minimum", {"minimum": 0}),
+        ("only a maximum", {"maximum": 99}),
+        ("an enum on a string knob", {"enum": ["a"]}),
+    ],
+)
+def test_a_wellformed_or_absent_constraints_still_renders(
+        tmp_path, label, constraints):
+    """NOT STRICTER THAN THE SCHEMA. `constraints:` is OPTIONAL in
+    `$defs/parameter`, its own `additionalProperties: false` object carries
+    no `required` list, and every bound in it is individually optional --
+    so an absent block, an explicit null, an empty mapping and any single
+    bound must all still render."""
+    default = "a" if constraints not in (..., None, {}) and \
+        "enum" in constraints else 5
+    ptype = "string" if default == "a" else "integer"
+    out = _render(tmp_path, _constrained(constraints, default=default,
+                                         ptype=ptype))
+    assert [rel for rel, _ in out] == ["board.yaml"], label
+
+
+def test_a_boolean_bound_is_accepted_because_bool_is_an_int(tmp_path):
+    """A stated limit, not an oversight. `isinstance(True, int)` is True in
+    Python, so `minimum: true` passes `_require_field(..., int)` and behaves
+    as `minimum: 1` -- a curated `ParameterError`, never a crash. JSON
+    `true` is not an `"type": "integer"`, so alp-sdk's own
+    `check_template_catalog.py` refuses it upstream; special-casing it here
+    would be a rule the schema does not have."""
+    m = _tmpl()
+    with pytest.raises(m.ParameterError) as excinfo:
+        _render(tmp_path, _constrained({"minimum": True}, default=5),
+                params={"knob": "0"})
+    assert "< minimum True" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------
+# Sites :258-266 -- `substitute:`.
+# ---------------------------------------------------------------------
+
 def test_a_substitute_block_with_no_file_key_raises(tmp_path):
     """`sub["file"]` (`:266`) was bare. The schema FORBIDS `substitute:`
     outright (`additionalProperties: false` on `$defs/parameter`), so no
@@ -816,6 +997,74 @@ def test_the_three_yaml_documents_keep_the_yaml_wording(tmp_path):
         assert "expected a YAML mapping, got list" in str(excinfo.value)
 
     assert "expected a JSON object, got list" in _raises(tmp_path, "[1, 2]")
+
+
+# ---------------------------------------------------------------------
+# Redundant guard PAIRS -- both halves pinned (review MINOR 3).
+#
+# Three guards in this fix sit downstream of an identical guard on the same
+# value, so reverting either one alone left the whole scope GREEN. That is
+# the exact shape M15 had (`load_catalog` vs `_catalog_templates`), found
+# once by this branch and twice more by the review. The redundancy is worth
+# keeping -- each of these three functions is reachable on its own, and a
+# guard that only holds because a caller happened to check first is a guard
+# one refactor from vanishing -- but an unpinned guard is not a guard, so
+# each downstream half is asserted at its OWN call site below.
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("doc", [3, "x", ["templates"], None])
+def test_the_selectors_refuse_a_nonmapping_doc_handed_to_them_directly(doc):
+    """MC -- `_catalog_templates`'s own `_require_mapping_doc`, the literal
+    mirror of M15 one call over. Every render-path case reaches these
+    selectors through `load_catalog`, which has already refused a
+    non-mapping document, so reverting this half changed nothing observable.
+
+    Both selectors take `doc` as a PARAMETER, though, and both are called
+    with a doc the caller built (`tan/planner/cli.py:182`, and every
+    synthetic-`doc` case in `test_find_template_by_cores.py`), so the guard
+    is genuinely load-bearing on its own."""
+    m = _tmpl()
+    for call in (lambda: m.find_template(doc, "x"),
+                 lambda: m.find_template_by_cores(doc, {})):
+        with pytest.raises(m.TemplateError) as excinfo:
+            call()
+        assert "expected a JSON object" in str(excinfo.value)
+
+
+def test_rendered_bytes_refuses_a_record_with_no_example_of_its_own(tmp_path):
+    """MA -- `_rendered_bytes`'s `_require_key(record, "example", str)`.
+    `render_to_envelope` resolves the same key ~25 lines earlier, so
+    reverting this half left every end-to-end case green. `_rendered_bytes`
+    takes the record as a parameter and does its own `_safe_join` on it, so
+    it is checked where it is used, not only where it happens to have been
+    checked already."""
+    m = _tmpl()
+    with pytest.raises(m.TemplateError) as excinfo:
+        m._rendered_bytes(
+            _TEMPLATE, {"files": {"user_owned": []}}, (), {}, tmp_path,
+            doc="metadata/templates/catalog-v1.json",
+            field="templates['fake1077']")
+    assert ("templates['fake1077'] is missing required key 'example'"
+            in str(excinfo.value))
+
+
+def test_substitutions_for_shape_checks_the_parameters_list_of_its_own(
+        tmp_path):
+    """MB -- `_substitutions_for`'s `_record_parameters` call.
+    `_resolve_params` has already walked the same list on every render
+    path, so reverting this half left the scope green. The two functions
+    take the record independently and neither documents an ordering
+    contract with the other, so the second walk re-proves the shape rather
+    than trusting the first -- which is what `_record_parameters`'s own
+    docstring claims, and this is what makes that claim true."""
+    m = _tmpl()
+    with pytest.raises(m.TemplateError) as excinfo:
+        m._substitutions_for(
+            {"parameters": 3}, {},
+            doc="metadata/templates/catalog-v1.json",
+            field="templates['fake1077']")
+    assert ("templates['fake1077'].parameters must be a list, got int"
+            in str(excinfo.value))
 
 
 def test_require_key_accepts_no_kind_for_an_untyped_schema_field():
