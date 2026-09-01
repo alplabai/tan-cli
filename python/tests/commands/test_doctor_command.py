@@ -3629,6 +3629,57 @@ def test_a_malformed_artifact_provenance_block_never_breaks_doctor(
     )
 
 
+def test_a_broken_provenance_entry_for_a_tool_that_is_not_missing_still_warns_truthfully(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1066 review (fix round, second pass): the warn's own wording
+    must stay true even when the broken `artifactProvenance` entry belongs to
+    a tool that is NOT itself missing. Here `cmake.licence` is malformed but
+    `cmake` is on PATH, and `ninja` is the only missing tool -- with its own
+    entry fully populated. `missingPrerequisites[]` therefore carries no
+    affected entry at all, so the old "Affected missingPrerequisites[]
+    entries report ... as null" sentence was false: there are none. Warning
+    is still correct regardless -- a malformed manifest is worth reporting
+    whether or not it currently touches a missing prerequisite -- only the
+    sentence's truth was at stake, and this pins the fix (`Any affected ...`,
+    true whether or not any exist).
+    """
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    broken_provenance = {**_REAL_PROVENANCE, "cmake": {**_REAL_PROVENANCE["cmake"], "licence": ["MIT"]}}
+    _write_bootstrap_json(
+        tmp_path,
+        {"posix": ["cmake", "ninja"], "pythonMinVersion": "3.10", "install": {}},
+        artifactProvenance=broken_provenance,
+    )
+    # Unlike `_prereq_env` (everything missing), `cmake` is deliberately ON
+    # PATH here -- the whole point is a broken entry for a tool that is NOT
+    # in `missingPrerequisites[]`.
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda name: "/usr/bin/cmake" if name == "cmake" else None)
+    checks = doctor_cmd._collect(str(tmp_path))
+
+    check = _named(checks, "hostPrerequisites")
+    assert check.status == "fail"
+    by_tool = {entry["tool"]: entry for entry in check.missing}
+    # `cmake` -- the broken entry -- is not missing at all; `ninja` is, and its
+    # entry is fully populated from the (unaffected) manifest.
+    assert set(by_tool) == {"ninja"}
+    declared = _REAL_PROVENANCE["ninja"]
+    assert by_tool["ninja"]["tier"] == declared["tier"]
+    assert by_tool["ninja"]["licence"] == declared["licence"]
+    assert by_tool["ninja"]["sourceUrl"] == declared["source"]
+    assert by_tool["ninja"]["sizeBytes"] == declared["sizeBytes"]
+
+    manifest_check = _named(checks, "bootstrapManifest")
+    assert manifest_check is not None
+    assert manifest_check.status == "warn"
+    assert "`cmake.licence` is not readable" in manifest_check.detail
+    # The fixed sentence: true whether or not any `missingPrerequisites[]`
+    # entry is actually affected -- here none is.
+    assert "Any affected missingPrerequisites[] entries report" in manifest_check.detail
+    assert "Affected missingPrerequisites[] entries report" not in manifest_check.detail
+
+
 def test_a_malformed_block_does_not_downgrade_the_manifest_to_the_fallback(tmp_path):
     """The degrade is scoped to the block. `_load_manifest` must still report
     `is_real` and still hand back the SDK's own tool list -- a provenance typo

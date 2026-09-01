@@ -3475,7 +3475,7 @@ def _resolve_prerequisites_environment(
             "bootstrapManifest",
             "warn",
             f"metadata/bootstrap.json was read, but its artifactProvenance "
-            f"block is not readable: {loaded.provenance_error}. Affected "
+            f"block is not readable: {loaded.provenance_error}. Any affected "
             f"missingPrerequisites[] entries report tier/licence/sourceUrl/"
             f"sizeBytes as null; the prerequisite list itself is unaffected.",
             "Report this against alp-sdk -- its metadata/bootstrap.json "
