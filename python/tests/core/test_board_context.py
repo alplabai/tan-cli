@@ -111,9 +111,11 @@ def test_a_v2_core_declared_os_is_read(tmp_path):
 
 def test_a_parked_core_is_not_a_runtime(tmp_path):
     """`os: "off"` disables a core. 51 of the 53 alp-sdk v0.16.0 example
-    board.yaml files that declare `os:` at all declare exactly this, so
-    reading the first declared value blindly would report `off` as the board
-    context for most real projects."""
+    board.yaml files that declare `os:` at all declare ONLY this, so reading
+    the first declared value blindly would report `off` as the board context
+    for most real projects. This mixed shape is not hypothetical: it is
+    `examples/power-timing/power-managed-sensor/board.yaml`, one of exactly
+    two example boards in that release that name a real runtime."""
     ctx = read_board_context(
         write(
             tmp_path,
@@ -197,9 +199,12 @@ def test_an_undecodable_byte_is_unavailable(tmp_path):
 
 
 def test_no_pyyaml_is_unavailable_not_an_import_error(tmp_path, monkeypatch):
-    """tan ships no YAML dependency of its own. Its absence degrades to
-    "nothing resolved", the same shape `debug_config_cmd._load_yaml` takes.
-    `None` in `sys.modules` is what makes `import yaml` raise `ImportError`
-    without unloading a real PyYAML the rest of the session needs."""
+    """PyYAML is a declared BASE dependency (`pyproject.toml`), so this is not
+    an "optional dep" path -- it is the stale-venv/broken-freeze case
+    `tan.core.system_manifest._import_yaml` guards for too, degraded here to
+    "nothing resolved" because this is a comment line rather than a manifest
+    read. `None` in `sys.modules` is what makes `import yaml` raise
+    `ImportError` without unloading a real PyYAML the rest of the session
+    needs."""
     monkeypatch.setitem(sys.modules, "yaml", None)
     assert read_board_context(write(tmp_path, V2_NO_OS)) is None

@@ -6,21 +6,52 @@ Two halves of the same question, and both had a copy-per-command problem:
 
 * [`resolve_board_path`] is `validate_cmd._resolve_board_path`, MOVED here
   rather than re-typed. `tan scaffold` needed exactly what `tan validate`
-  already does (tan-cli#1031), and this repo already carries three
-  project/board resolvers -- `presets_cmd.resolve_project_paths`,
-  `build_output.resolve_project_context`, and this one. A FOURTH, written for
-  `scaffold`, is precisely the drift `tan.core.shapes`' own docstring is
-  about; and it would be the same drift alp-sdk-vscode#601/#633 had just
-  finished deleting a second copy of THIS generator to escape (the README's
-  `## Wiring` section went missing on the extension's side because a second
-  copy existed at all). So the function moved to a binding-free home both
-  commands import.
+  already does (tan-cli#1031), and this repo already carries FIVE
+  envelope-facing project/board resolvers --
+  `presets_cmd.resolve_project_paths`, `build_output.resolve_project_context`,
+  `flash_cmd._resolve_project`, `generate_cmd._resolve_board_path`, and this
+  one. A SIXTH, written for `scaffold`, is precisely the drift
+  `tan.core.shapes`' own docstring is about; and it would be the same drift
+  alp-sdk-vscode#601/#633 had just finished deleting a second copy of THIS
+  generator to escape (the README's `## Wiring` section went missing on the
+  extension's side because a second copy existed at all). So the function
+  moved to a binding-free home both commands import.
+
+  The count did NOT go down: it was five before this change and is five
+  after, because the fifth is validate's, relocated. Each of the five is
+  pinned to a different oracle's reported shape, so they are distinct answers
+  rather than duplicates and unifying them is not this change's job. What
+  this change bought is that `scaffold` did not make it six.
+
+  **"One definition" here is prose, not a gate, and stays prose until
+  tan-cli#1081.** `tests/gates/test_shared_helpers_have_one_definition.py`
+  hard-asserts that every helper it owns lives in `tan/core/shapes.py`, and
+  it reads its ownership list out of that one file, so `resolve_board_path`
+  cannot join it without generalising the gate from "shapes owns these" to a
+  `{name -> home module}` map. tan-cli#1081 is the open issue for that class
+  of extension, and its sibling
+  `tests/gates/test_shared_test_helpers_have_one_definition.py` (tan-cli#1083)
+  is the narrow allow-list shape to copy. Doing it here would put a gate
+  refactor inside a bugfix. Until it lands, a sixth private
+  `_resolve_board_path` would land all-green, and this paragraph is the only
+  thing in its way.
 
 * [`read_board_context`] is the content of the generated module's
   `// Board context: ...` line. Its wire spelling -- `<sku> / <os>`, with
   [`UNSET`] for a half the document does not declare -- is the retired
   alp-sdk-vscode generator's, kept verbatim so a module scaffolded from the
   extension and one scaffolded by `tan` carry the same bytes.
+
+**What a reported path does and does not promise.** `tan.envelope.Project.
+resolved` is the seam that turns a resolved path into `project.boardYaml`, and
+it gates on `os.path.exists`, which is true for a DIRECTORY -- so a directory
+named `board.yaml` reports a non-null path despite that method's own "only when
+a file is really there". Pre-existing, and shared with `tan validate` and `tan
+flash` (all three report through the same seam), so it is recorded here rather
+than fixed asymmetrically in one command. It costs this module nothing:
+[`read_board_context`] answers `unavailable` for that input either way, because
+reading a directory raises and lands on the file-failure arm
+(`test_a_directory_where_the_file_should_be_is_unavailable`).
 
 **`board.yaml` ONLY, no SDK -- deliberately.** `tan scaffold` resolves no
 alp-sdk checkout (its own module docstring says so, and one of tan-cli#1031's
@@ -51,10 +82,21 @@ from typing import Any
 UNSET = "<unset>"
 
 #: A `cores.<id>.os` value that PARKS a core rather than naming a runtime, so
-#: it can never be the project's OS. Not a nicety: of the 99 example
-#: `board.yaml` files in alp-sdk v0.16.0, 53 declare `os:` at all and 51 of
-#: those declare exactly this -- reading the first declared value blindly
-#: would report `off` as the board context for most real projects.
+#: it can never be the project's OS. Not a nicety: of the 100 example
+#: `board.yaml` files in alp-sdk v0.16.0 (tag `v0.16.0`, `eb96112ba` -- an
+#: earlier count of 99 here was measured off a stale `dev` working tree, not
+#: the tag it cited), 53 declare `os:` at all and 51 of those declare ONLY
+#: this -- reading the first declared value blindly would report `off` as the
+#: board context for most real projects. Zero of the 100 carry a top-level
+#: `os:`.
+#:
+#: The two that name a real runtime are the whole population this module can
+#: answer without an SDK, so they are named rather than counted:
+#: `examples/connectivity/modbus-server/board.yaml` (one core, `os: zephyr`)
+#: and `examples/power-timing/power-managed-sensor/board.yaml` (`os: "off"`
+#: on the parked HP core AND `os: zephyr` on the HE core -- the mixed shape
+#: this constant exists for, and the one `test_a_parked_core_is_not_a_runtime`
+#: pins). Every other example board renders the [`UNSET`] half.
 OS_OFF = "off"
 
 #: `cores.<id>.os` values that are declared but carry no runtime name. `""`
@@ -113,9 +155,14 @@ def _board_mapping(board_yaml_path: str | None) -> dict[str, Any] | None:
     `tan model` as a traceback for exactly that reason (tan-cli#396). Nothing
     upstream of here has validated this file.
 
-    tan ships no YAML dependency of its own, so PyYAML is used when importable
-    and its absence degrades to "nothing resolved" -- the same shape
-    `debug_config_cmd._load_yaml` takes for the build's own output files.
+    PyYAML is a DECLARED BASE dependency (`python/pyproject.toml`'s
+    `dependencies = [... "pyyaml>=6" ...]`, which
+    `tests/gates/test_declared_dependencies.py` enforces) -- an earlier version
+    of this note claimed "tan ships no YAML dependency of its own", which is
+    simply false. The `except ImportError` is still right, for the reason
+    `tan.core.system_manifest._import_yaml` gives for its own copy: a frozen
+    `tan` built from a stale venv. It answers "nothing resolved" rather than a
+    coded envelope only because this is a comment line, not a manifest read.
     """
     if not board_yaml_path:
         return None

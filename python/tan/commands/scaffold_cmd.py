@@ -15,7 +15,7 @@ because a second copy is what let that copy's README lose its `## Wiring`
 section and ship modules that never compiled), and that copy DID read
 `board.yaml`. So the capability comes from here or from nowhere. The read goes
 through `tan.core.board_context` -- `tan validate`'s own resolver, moved to a
-shared home rather than cloned into a fourth one.
+shared home rather than cloned into a sixth one.
 
 Composition, not logic: resolve the module name + template + destination
 (`--name`/`--template`/`--destination`, and `tan.core.module_template`'s

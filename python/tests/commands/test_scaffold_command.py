@@ -581,3 +581,60 @@ def test_a_broken_board_yaml_scaffolds_anyway(tmp_path, label, text):
     # missing file instead of a broken one.
     assert env["project"]["boardYaml"] == "./board.yaml", label
     assert board_line(tmp_path, "broken") == "// Board context: unavailable", label
+
+
+# ---------------------------------------------------------------------------
+# --destination vs --project: which one the board is resolved against
+# ---------------------------------------------------------------------------
+#
+# Untested at the time tan-cli#1031 landed; pinned here because it is a real
+# fork and the answer is not self-evident from the issue. Board resolution
+# follows `dest` -- `--destination` if given, else `--project`, else `"."` --
+# which is the SAME value the envelope reports as `project.root`, so the
+# board reported and the root reported can never disagree. `--destination`'s
+# own help calls it "Destination project root", so a caller who passes one
+# has named a different project root, not merely a different output folder.
+
+
+def test_the_board_follows_destination_when_it_and_project_disagree(tmp_path):
+    """`--project <p> --destination <p>/sub`: `<p>/sub/board.yaml` wins, not
+    `<p>/board.yaml`. The two files name different SKUs, so a run that
+    resolved against `--project` reports `E1M-AEN801` and reds here."""
+    proj = tmp_path / "proj"
+    (proj / "sub").mkdir(parents=True)
+    (proj / "board.yaml").write_text(BOARD_YAML, encoding="utf-8")
+    (proj / "sub" / "board.yaml").write_text(OTHER_BOARD_YAML, encoding="utf-8")
+
+    env = envelope(
+        run_tan(
+            "scaffold", "--project", str(proj), "--destination", str(proj / "sub"),
+            "--template", "sensor-driver", "--name", "destwins",
+            "--format", "json", cwd=tmp_path,
+        )
+    )
+
+    assert env["project"]["root"] == str(proj / "sub")
+    assert env["project"]["boardYaml"] == str(proj / "sub" / "board.yaml")
+    assert board_line(proj / "sub", "destwins") == "// Board context: E1M-V2N101 / yocto"
+
+
+def test_a_destination_with_no_board_does_not_fall_back_to_project(tmp_path):
+    """The other half of the same fork: `--destination` names a project root
+    that holds no `board.yaml`, and the answer is `null`/`unavailable` rather
+    than silently reaching back to `--project`'s. Reporting `<p>/board.yaml`
+    here would contradict the `project.root` in the same envelope."""
+    proj = tmp_path / "proj"
+    (proj / "sub").mkdir(parents=True)
+    (proj / "board.yaml").write_text(BOARD_YAML, encoding="utf-8")
+
+    env = envelope(
+        run_tan(
+            "scaffold", "--project", str(proj), "--destination", str(proj / "sub"),
+            "--template", "sensor-driver", "--name", "noreach",
+            "--format", "json", cwd=tmp_path,
+        )
+    )
+
+    assert env["project"]["root"] == str(proj / "sub")
+    assert env["project"]["boardYaml"] is None
+    assert board_line(proj / "sub", "noreach") == "// Board context: unavailable"
