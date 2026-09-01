@@ -7,9 +7,21 @@ definitely cannot?** It walks the operators of every model your `board.yaml`
 declares against the operator-support table alp-sdk publishes for every NPU
 backend `som.sku` actually ships (`metadata/npu_ops/<backend>/`).
 
-It is a **screen**, not a compile. Nothing it reports proves that anything
-will execute on the NPU. This page exists so that the words it prints are not
+By default it is a **screen**, not a compile: nothing an ordinary run reports
+proves that anything will execute on the NPU. (`--exact` can cross that line
+for one backend — see below — and says so in the report's `basis`.) This page exists so that the words it prints are not
 read as stronger claims than they are.
+
+> **`metadata/npu_ops/` is not on alp-sdk `dev` yet.** All three tables --
+> `ethos_u/u85@vela-5.1.0.json`, `ethos_u/u55-u65@vela-5.1.0.json` and
+> `drpai/onnx-i8@translator-1.12.json` — arrive with **alp-sdk#1470, which
+> is OPEN and `mergeable_state: dirty` (CONFLICTING)**. Against an alp-sdk
+> checkout that does not carry them, no table resolves for any backend and
+> every report comes back `undetermined` with the "absence of data, not
+> evidence of no support" note. That is the correct answer for a missing
+> table — but it is not the screen working; it is the screen having nothing
+> to screen against. Everything below describes the command once those
+> tables are reachable.
 
 ```sh
 tan model check                 # text
@@ -19,10 +31,14 @@ tan model check --exact         # attempt a real vela compile (Ethos-U only)
 
 `ok` and the exit code stay `0` for any run that completed, whatever the
 verdicts read — reporting `partial`, `cpu-only` or `undetermined` **is** the
-feature, never a failure. Only a run that could not complete is non-zero: an
-unresolvable `som.sku` (`model.check-sku-unresolved`, board-level, refuses the
-whole run) or an unreadable model source (`model.check-failed`, per-model, so
-one bad model does not abort the batch).
+feature, never a failure. A run that could not complete is non-zero. The two
+codes specific to `check` are `model.check-sku-unresolved` (board-level:
+`som.sku`'s NPU backends could not be resolved, so the whole run refuses) and
+`model.check-failed` (per-model: an unreadable or unparseable source, so one
+bad model does not abort the batch). The codes `model` shares across its
+subcommands can also fire — `model.board-yaml-missing`,
+`model.board-yaml-invalid`, `model.sdk-root-unresolved`,
+`model.unknown-subcommand`, `model.internal-failure`.
 
 ## The vocabulary
 
@@ -42,14 +58,22 @@ Each verdict carries a `reason`: `op-not-in-table` (the sound negative),
 `constraint-unchecked` (the capped positive — see the next section),
 `no-table-for-backend` or `format-not-accepted` (the two `unknown` paths).
 
-Per backend — `data.models[].backends[].npuCoverage`:
+Per backend — `data.models[].backends[].npuCoverage`. **The value is only
+readable together with the report's `basis`**, because the two bases speak
+different vocabularies out of the same key:
 
-| `npuCoverage` | Means |
-| --- | --- |
-| `full-eligible` | Every screened operator is `npu-eligible`. |
-| `partial` | Some are, some are `cpu-certain`. |
-| `cpu-only` | Every screened operator is `cpu-certain`. |
-| `undetermined` | Nothing was screened. **Absence of data, not evidence of no support.** |
+| `npuCoverage` | At which `basis` | Means |
+| --- | --- | --- |
+| `full-eligible` | `static-screen` | Every screened operator is `npu-eligible`. |
+| `partial` | any | Some operators on the NPU, some on the CPU. |
+| `cpu-only` | any | Nothing on the NPU. |
+| `undetermined` | `static-screen` | Nothing was screened. **Absence of data, not evidence of no support.** |
+| `fits` | `compiled` / `bench` **only** | A real placement put **every** operator on the NPU. |
+
+A consumer matching exhaustively on this key must handle all five. `fits`
+cannot appear on an ordinary run, but it can appear on a `--exact` run that
+reached a real compile, and on a report re-based on a published bench point —
+see the next two sections for the boundary.
 
 `undetermined` is deliberate and load-bearing. A backend that ingests a
 different source format than the one you handed it, or one that ships no
@@ -61,29 +85,45 @@ can produce. A `.tflite` model checked against a V2N/V2M SKU therefore reports
 `drpai`/`deepx_dxm1` as `undetermined` with `reason: "format-not-accepted"`:
 that is a verdict on the format/backend pairing, not on the model.
 
-### `fits` is not in this vocabulary
+### Where `fits` may and may not appear
 
-`tan model check`'s static screen **never** emits `fits`. The word is reserved
-for `basis: "compiled"` (a real compile actually placed the whole model on the
-NPU) and `basis: "bench"` (a matched measurement in
-`metadata/model_perf/`) — the only two surfaces that have the evidence for it.
+**The static screen never emits `fits`.** The word is reserved for
+`basis: "compiled"` (a real compile actually placed the whole model on the
+NPU) and `basis: "bench"` (a matched measurement in `metadata/model_perf/`) —
+the only two surfaces that have the evidence for it. Both derive it from one
+function (`tan.model.perf.coverage_from_placement`), which returns `"fits"`
+only when a real placement reports at least one operator and **zero** CPU
+operators, so the guard on the word binds to a live rule rather than to a copy
+of it.
 
-The reason is specific to the silicon toolchains. Vela attaches Generic
-constraints — quantization, per-axis quant, dtype, zero-point, shape — to
-every operator and Specific constraints to 30 of its 70; DRP-AI gates
-acceptance on enumerated kernel × stride × padding × dilation × groups. The
-same operator name is accepted or rejected on tensor shape alone. A screen
-that compares operator **names** cannot see any of that, so it must not claim
-it did.
+The boundary matters for a consumer: seeing `fits` is not a contradiction of
+this page, it is the report telling you it is no longer a screen. Read `basis`
+first; `npuCoverage` means what that basis licenses it to mean.
+
+The reason a screen cannot deliver `fits` is specific to the silicon
+toolchains. Vela attaches Generic constraints — quantization, per-axis quant,
+dtype, zero-point, shape — to **every** operator, and further
+operator-specific constraints on top of those; DRP-AI gates acceptance on
+enumerated kernel × stride × padding × dilation × groups. The same operator
+name is therefore accepted or rejected on tensor shape alone. A check that
+compares operator **names** cannot see any of that, so it must not claim it
+did.
 
 ## `basis` and `confidence`
 
 Every backend report carries both:
 
-- `basis` — `"static-screen"`, `"compiled"`, or `"bench"`. On an ordinary run
-  it is always `"static-screen"`.
-- `confidence` — `"screening"` or `"certain"`. On an ordinary run it is
-  always `"screening"`.
+- `basis` — `"static-screen"`, `"compiled"`, or `"bench"`.
+- `confidence` — `"screening"` or `"certain"`. `"screening"` pairs with
+  `"static-screen"`; `"certain"` pairs with `"compiled"` and `"bench"`.
+
+A plain run reports `"static-screen"` / `"screening"`. Two things move a
+report off that pairing, and **neither needs a flag you did not pass**:
+`--exact` reaching a real vela compile (`"compiled"`), and alp-sdk publishing
+a `metadata/model_perf/` point that matches your model's sha256, SKU, `hw_rev`
+and backend (`"bench"`). No alp-sdk has published a `model_perf/` tree yet, so
+the bench path is dormant today rather than absent — do not code against
+`basis` being a constant.
 
 At `basis: "static-screen"` the six footprint and latency fields —
 `arenaBytes`, `reqSramKib`, `latencyMsMean`, `latencyMsP95`, `latencyRuns`,
@@ -94,7 +134,9 @@ measurement. If you are sizing a module, these fields are where the number
 would be; their absence is the answer.
 
 The engine states the caveat in the report's own `notes` too, on every scored
-report:
+report. The word in parentheses is the resolved table's own `stance` field
+(`"screening"` in all three tables alp-sdk#1470 publishes), defaulting to
+`"screening"` when a table omits it — it is table-sourced, not a literal:
 
 > static screen (screening): operator-name membership against
 > `<variant>@<toolchain>-<ver>.json` only. Eligible ops still carry unchecked
@@ -149,11 +191,21 @@ source it returns `[]` today — ONNX operator extraction is out of scope for
 this slice (tan-cli#782) and is a follow-on.
 
 The consequence is concrete: an ONNX model checked against a V2N/V2M SKU
-passes `drpai`/`deepx_dxm1`'s format gate (both ingest ONNX), then finds no
-operators to score, and so reports `npuCoverage: "undetermined"` with the note
-*"no operators were extracted for this source; nothing to score, so no
-coverage verdict is reported."* That is the honest answer — not a weaker one
-than the model deserves, and emphatically not `cpu-only`.
+passes `drpai`/`deepx_dxm1`'s format gate (both accept only `onnx`), and both
+report `npuCoverage: "undetermined"` — but by two different routes, with two
+different notes:
+
+- **`drpai`** resolves its table (`drpai/onnx-i8@translator-1.12.json`), then
+  finds no operators to score:
+  *"no operators were extracted for this source; nothing to score, so no
+  coverage verdict is reported."*
+- **`deepx_dxm1`** never gets that far — it ships no table at all, by
+  decision:
+  *"no NPU-ops support table for this backend/variant -- absence of data, not
+  evidence of no support."*
+
+Either way the verdict is the honest one — not a weaker answer than the model
+deserves, and emphatically not `cpu-only`.
 
 An **unreadable** source is a different thing and is not silently folded into
 this: both extractors read the bytes before any format-dependent
@@ -183,7 +235,8 @@ than reading as "this model genuinely has no operators".
           "backend": "ethos_u" | "drpai" | "deepx_dxm1",
           "variant": "u55" | "u65" | "u85" | null,
           "table": "<path to the table that answered>" | null,
-          "npuCoverage": "full-eligible" | "partial" | "cpu-only" | "undetermined",
+          "npuCoverage": "full-eligible" | "partial" | "cpu-only" | "undetermined"
+                         | "fits",          // "fits" only at basis compiled/bench
           "computeOnNpuPctMax": <0-100> | null,
           "npuPlacementPctReal": <0-100> | null,
           "uncostedCpuOpCount": <int>,
@@ -206,6 +259,10 @@ than reading as "this model genuinely has no operators".
   ]
 }
 ```
+
+`variant` is `null` for every backend but `ethos_u`. `table` is `null`
+whenever no table resolved — including on every run against an alp-sdk that
+does not yet carry `metadata/npu_ops/` (see the note at the top).
 
 `data.schemaVersion` is versioned independently of `tan model build`'s and
 `tan model doctor`'s — all three are different `data` shapes.
