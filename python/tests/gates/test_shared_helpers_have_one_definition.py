@@ -23,7 +23,11 @@ that reaches one copy and not the other, on a refusal message nine commands
 share and on the I-31 checkout marker.
 
 WHAT THIS ASSERTS, and why it is name-based. Each shared helper may have
-exactly one module-level definition under `python/tan/`, counting the
+exactly one module-level definition under `python/tan/` -- that scope, and no
+other. `python/tests/**` is out of scope here and always was; its narrow
+allow-list counterpart is
+`tests/gates/test_shared_test_helpers_have_one_definition.py` (tan-cli#1081).
+The check counts the
 underscore-prefixed spelling as the same helper -- a re-introduced private copy
 is called `_is_file`, never `is_file`, so a public-name-only check would miss
 the exact regression this file exists for.
