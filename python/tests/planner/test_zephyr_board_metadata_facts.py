@@ -38,10 +38,7 @@ from pathlib import Path
 
 import pytest
 
-from tan.planner_root import bind_sdk_root
-from tests.conftest import sdk_root
-
-SDK = sdk_root()
+from tests.planner._bound_sdk_fixture import SDK, _bound_sdk  # noqa: F401 -- `_bound_sdk` imported for its side effect (fixture registration)
 
 pytestmark = pytest.mark.skipif(
     SDK is None,
@@ -66,16 +63,6 @@ AEN801_PRESET = "e1m_modules/E1M-AEN801.yaml"
 AEN301_PRESET = "e1m_modules/E1M-AEN301.yaml"
 E8_SOC = "socs/alif/ensemble/e8.json"
 E3_SOC = "socs/alif/ensemble/e3.json"
-
-
-@pytest.fixture(autouse=True)
-def _bound_sdk():
-    """`tan/planner` refuses to resolve `metadata/**` before an SDK root is
-    bound (`planner_root.py`), and `_resolve_sku`'s error path renders a
-    path relative to it -- so bind before importing anything that reads."""
-    bind_sdk_root(SDK)
-    yield
-
 
 def _emit(*args):
     """Imported inside the call so the module imports before `bind_sdk_root`

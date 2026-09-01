@@ -3,7 +3,7 @@
 module must not be re-implemented privately in another test module.
 
 WHAT THIS ASSERTS, and nothing wider. For each name in `_SHARED_TEST_HELPERS`
-below -- an explicit, opt-in allow-list, currently one entry -- there is
+below -- an explicit, opt-in allow-list, currently two entries -- there is
 exactly one module-level definition anywhere under `python/tests/**`, and it
 is in the module this file declares as its home. "Module-level definition"
 means, precisely: a top-level `def`/`async def`; a top-level `Assign` to a
@@ -96,6 +96,33 @@ neither should move; the fixture simply is not a name this gate can carry.
 keeps the reason for the omission executable and because it is the only
 standing proof that the folding rule -- the half that catches a copy spelled
 `_bind_planner_sdk_root` -- is doing anything at all.
+
+THE tan-cli#1081 SWEEP OF THE OTHER `bound_sdk*` NAMES. The issue asked for a
+census of every `bound_sdk*`-shaped binder under `python/tests/**`, not just
+`bind_planner_sdk_root`. Folding leading underscores and matching on
+substring `bound_sdk` in the name (the same folding this gate already does),
+`dev` carried six such folded names:
+
+  * `bound_sdk` -- FIFTEEN module-level definitions, all spelled `_bound_sdk`,
+    all byte-identical (`bind_sdk_root(SDK); yield` under
+    `@pytest.fixture(autouse=True)`, one with an extra docstring). A genuine
+    duplicate by this file's own bar -- same signature, same body, no
+    context-specific variation -- so it was consolidated into
+    `tests/planner/_bound_sdk_fixture.py` and every consumer now imports it
+    for its fixture-registration side effect instead of redefining it. Seeded
+    above as `bound_sdk` (the folded spelling; every actual definition is
+    written `_bound_sdk`).
+  * `bound_sdk_root` -- two definitions (the fixture + `tests/conftest.py`'s
+    `_bound_sdk_root`). Already covered above: legitimately distinct, and the
+    reason it cannot be seeded is the paragraph just before this one.
+  * `needs_bound_sdk`, `test_a_bound_sdk_root_still_ships_the_planner_oracle`,
+    `test_jlink_aen_device_fallback_matches_the_bound_sdk_metadata`,
+    `warn_when_the_bound_sdk_disagrees_with_the_pins` -- one module-level
+    definition each. Nothing to consolidate; each merely happens to contain
+    the substring `bound_sdk` (a `pytest.mark.skipif` object, two test
+    function names, and conftest's disagreement-warning fixture, in order).
+    Recorded here so a future sweep does not re-run this same census from
+    scratch only to find the same four singletons again.
 """
 from __future__ import annotations
 
@@ -119,6 +146,17 @@ _SHARED_TEST_HELPERS: dict[str, tuple[str, str]] = {
         "the session freezes `paths.REPO`/`METADATA_ROOT` for the whole "
         "process; a copy that drifts from this one re-enables tan-cli#1044's "
         "round-2 failure (139 errors under a real bound checkout)",
+    ),
+    "bound_sdk": (
+        "tests/planner/_bound_sdk_fixture.py",
+        "is the plain `bind_sdk_root(SDK); yield` autouse fixture that "
+        "fifteen real-SDK-gated modules each defined byte-identically "
+        "before tan-cli#1081's sweep consolidated them; the risk is "
+        "smaller than `bind_planner_sdk_root`'s (there is no fallback "
+        "dance to drift), but a lone straggler that stops importing this "
+        "module and starts redefining the fixture is exactly the shape "
+        "this gate exists to catch, not a hypothetical it is seeded "
+        "against speculatively",
     ),
 }
 
@@ -274,8 +312,10 @@ def test_the_walk_actually_finds_definitions():
     so a walk that silently found nothing -- a moved test root, a glob that
     stopped matching -- would report a pass having measured an empty dict."""
     defs = _module_level_definitions()
-    # 5736 folded names on this branch (5732 on `dev` at `8b4e3f43` without
-    # this file); the floor is deliberately far below that, since it is
+    # 5879 folded names on this branch (5732 on `dev` at `8b4e3f43` without
+    # this file; the tree has grown and tan-cli#1081's `_bound_sdk`
+    # consolidation removed fourteen of those definitions along the way).
+    # The floor is deliberately far below either figure, since it is
     # guarding against a walk that collapsed to one subdirectory or to
     # nothing, not ratcheting the tree's size.
     assert len(defs) > 2000, f"only {len(defs)} module-level names found under {TESTS_ROOT}"
