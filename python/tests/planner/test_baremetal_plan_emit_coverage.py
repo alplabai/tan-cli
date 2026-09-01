@@ -166,7 +166,10 @@ def test_a_yocto_slice_reports_no_artefact_paths_at_all():
 
 
 # ---------------------------------------------------------------------
-# validate.py:297-300 -- `_enforce_loader_rules`' baremetal refusal
+# validate.py:299-350 -- `_enforce_loader_rules`' baremetal refusal, incl.
+# `_enforce_baremetal_app_rule`'s stock-token arm (alp-sdk#1889 /
+# tan-cli#1103 planner re-sync -- porting alp-sdk's
+# tests/scripts/test_orchestrate_baremetal_slice.py)
 # ---------------------------------------------------------------------
 
 
@@ -190,6 +193,55 @@ def test_a_baremetal_core_with_no_app_is_refused(base_dir):
 def test_a_baremetal_core_with_an_app_is_accepted(base_dir):
     """The other half of the same arm: `app:` present is the whole
     requirement -- no `board:`, no `image:`, no `recipe:`."""
+    from tan.planner.validate import _enforce_loader_rules
+
+    assert _enforce_loader_rules(
+        slice_of("baremetal", app="./src"), base_dir / "metadata") is None
+
+
+@pytest.mark.parametrize(
+    ("stock_app", "other_os"),
+    [
+        ("alp-stock-shim", "zephyr"),
+        ("alp-image-edge", "yocto"),
+    ],
+)
+def test_a_baremetal_core_carrying_a_stock_token_is_refused_not_built(
+        base_dir, stock_app, other_os):
+    """alp-sdk#1889 / tan-cli#1103: a core with no `app:` of its own still
+    resolves one -- `loader.py`'s `_resolve_topology_for_core` merges the
+    SoM topology default OVER a project entry that omits `app:`, and every
+    topology default is one of the two stock tokens parametrized above. The
+    plain `not slice_.app` check above this one is always False for that
+    inherited token (it is truthy), so without this arm a baremetal core
+    silently carried a real, wrong-target Zephyr/Yocto build command instead
+    of being refused. `stock_app` here stands in for that inherited token --
+    `slice_of` takes `app=` directly, so this needs no SoM preset merge to
+    reach the arm, only the resolved value the merge would have produced.
+    """
+    from tan.planner.models import OrchestratorError
+    from tan.planner.orchestrator import STOCK_IMAGE_APP, STOCK_SHIM_APP
+    from tan.planner.validate import _enforce_loader_rules
+
+    assert stock_app in (STOCK_SHIM_APP, STOCK_IMAGE_APP)
+
+    with pytest.raises(OrchestratorError) as excinfo:
+        _enforce_loader_rules(
+            slice_of("baremetal", app=stock_app), base_dir / "metadata")
+
+    assert str(excinfo.value) == (
+        f"core 'm55_he': os: baremetal requires `app:` pointing at a "
+        f"CMakeLists.txt directory -- `{stock_app}` is the {other_os} "
+        f"stock default (whether inherited from the SoM topology preset "
+        f"when no `app:` was given, or set explicitly), and there is no "
+        f"bare-metal stock default to fall back to")
+
+
+def test_a_baremetal_core_with_a_real_app_that_merely_shares_no_tokens_is_accepted(
+        base_dir):
+    """The control for the parametrized refusal above: an ordinary `app:`
+    that isn't either stock token still passes -- this arm must not over-fire
+    on every non-empty `app:`, only the two literal tokens."""
     from tan.planner.validate import _enforce_loader_rules
 
     assert _enforce_loader_rules(

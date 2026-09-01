@@ -286,6 +286,43 @@ def _enforce_os_matches_core_class(slice_: Slice, core_type: str) -> None:
             f"disable it or 'baremetal' for no-OS firmware -- got os: '{slice_.os}'.")
 
 
+def _enforce_baremetal_app_rule(slice_: Slice) -> None:
+    """`os: baremetal`'s own `app:` rule -- split out of
+    `_enforce_loader_rules` to keep that function under the 50-line
+    function-count budget (tan-cli#1103); same single-purpose-sibling shape
+    as `manifest.py`'s `_check_blob_formats`/`_check_schema_version`
+    (tan-cli#1074).
+
+    alp-sdk#1889: a baremetal core with no `app:` of its own still resolves
+    one -- `_resolve_topology_for_core` (loader.py) merges the SoM topology
+    default OVER a project entry that omits `app:`, and every topology
+    default is one of the two stock tokens checked below (`alp-stock-shim`
+    for Cortex-M, `alp-image-edge` for Cortex-A; see every
+    metadata/e1m_modules/<SKU>.yaml `topology:` block). Neither is a
+    bare-metal app, and there is no bare-metal-flavoured stock default
+    anywhere in the tree, so `not slice_.app` alone never caught this -- the
+    inherited token is truthy.
+
+    Before this refusal existed the slice was NOT silently dropped: it
+    reached the executor with a real, wrong-target build command (`cmake -S
+    .../alp-stock-shim -B .` for the Cortex-M case, a nonexistent
+    `alp-image-edge` source dir for the Cortex-A one) that failed
+    downstream with a confusing, off-target CMake error instead of this
+    explicit one."""
+    if slice_.app in (STOCK_SHIM_APP, STOCK_IMAGE_APP):
+        other_os = "zephyr" if slice_.app == STOCK_SHIM_APP else "yocto"
+        raise OrchestratorError(
+            f"core '{slice_.core_id}': os: baremetal requires `app:` "
+            f"pointing at a CMakeLists.txt directory -- `{slice_.app}` is "
+            f"the {other_os} stock default (whether inherited from the SoM "
+            f"topology preset when no `app:` was given, or set explicitly), "
+            f"and there is no bare-metal stock default to fall back to")
+    if not slice_.app:
+        raise OrchestratorError(
+            f"core '{slice_.core_id}': os: baremetal requires `app:` "
+            f"pointing at a CMakeLists.txt directory")
+
+
 def _enforce_loader_rules(slice_: Slice, metadata_root: Path) -> None:
     """Loader rules from spec §4.5: every non-off slice must declare
     enough to actually build."""
@@ -297,57 +334,7 @@ def _enforce_loader_rules(slice_: Slice, metadata_root: Path) -> None:
                 f"core '{slice_.core_id}': os: zephyr requires `app:` "
                 f"pointing at a prj.conf / CMakeLists.txt directory")
     elif slice_.os == "baremetal":
-        # #1889: a core with no `app:` of its own still resolves one --
-        # `_resolve_topology_for_core` (loader.py) merges the SoM
-        # topology default OVER a project entry that omits `app:`, and
-        # every topology default is one of the two stock tokens below
-        # (`alp-stock-shim` for a Cortex-M slot, `alp-image-edge` for a
-        # Cortex-A slot) -- see every metadata/e1m_modules/<SKU>.yaml
-        # `topology:` block. Neither is a bare-metal app (the shim's
-        # CMakeLists.txt is `find_package(Zephyr REQUIRED)`; the image
-        # token is a bitbake recipe name, not a directory), and there is
-        # no third, bare-metal-flavoured stock default anywhere in the
-        # tree. Left unchecked, `not slice_.app` is always False here --
-        # the inherited token is truthy -- so this whole branch never
-        # fires for a preset-backed core.
-        #
-        # It is NOT a quiet skip, though: reran the exact #1889 fixture
-        # (`m55_he: os: baremetal`, no `app:`, under `preset: e1m-evk`)
-        # through `emit_build_plan` on the pre-fix parent commit
-        # (1c3c8e46) and confirmed `orchestrator._slice_command` does
-        # NOT return None here -- `slice_.app` is truthy, so the
-        # baremetal branch's `if not slice_.app: return None` guard
-        # never triggers either. Instead `_resolve_app_path` resolves
-        # `alp-stock-shim` to the real `${SDK_ROOT}/firmware/alp-stock-shim`
-        # directory (the Cortex-M shim's own zephyr app) and the branch
-        # emits a genuine, non-null `cmake -S
-        # ${SDK_ROOT}/firmware/alp-stock-shim -B .` configure command plus
-        # a `cmake --build .` postCommand -- a wrong-target build, not a
-        # skip. Running that emitted configure line for real dies loudly
-        # inside the shim's own `find_package(Zephyr REQUIRED)`
-        # (CMakeLists.txt calls it) with `CMake Error: BOARD is not being
-        # defined`, because a bare `cmake` invocation carries none of the
-        # `west build -b <board>` context Zephyr's CMake package needs.
-        # The Cortex-A / `alp-image-edge` shape fails the same way for a
-        # different reason: `_resolve_app_path` has no special case for
-        # it, so it resolves to the literal, nonexistent
-        # `${PROJECT_ROOT}/alp-image-edge` directory and the configure
-        # dies on "source directory does not exist" instead. Either way
-        # the slice reaches the executor with a real command and fails
-        # there -- confusingly, on the wrong target -- rather than being
-        # carried as `command: null` and silently dropped.
-        if slice_.app in (STOCK_SHIM_APP, STOCK_IMAGE_APP):
-            other_os = "zephyr" if slice_.app == STOCK_SHIM_APP else "yocto"
-            raise OrchestratorError(
-                f"core '{slice_.core_id}': os: baremetal requires `app:` "
-                f"pointing at a CMakeLists.txt directory -- `{slice_.app}` "
-                f"is the {other_os} stock default (inherited from the SoM "
-                f"topology preset when no `app:` was given), and there is "
-                f"no bare-metal stock default to fall back to")
-        if not slice_.app:
-            raise OrchestratorError(
-                f"core '{slice_.core_id}': os: baremetal requires `app:` "
-                f"pointing at a CMakeLists.txt directory")
+        _enforce_baremetal_app_rule(slice_)
     elif slice_.os == "yocto":
         if not slice_.app and not slice_.image:
             raise OrchestratorError(

@@ -660,7 +660,27 @@ env:
   # file gaining exactly one `CONFIG_ALP_SDK_SOM_HW_REV` line per core slice
   # in its embedded `alp.conf`, and nothing else -- no host path, timestamp
   # or other volatile value survived normalisation.
-  PINNED_SDK_TAG: f1b1c9df0edd23988961150439863e70e5d99211
+  #
+  # `f1b1c9df` -> `0914da38` (tan-cli#1103): moved together with that pin,
+  # with `ci.yml`'s `sdk_parity` `ref:`, and with
+  # `PINNED_PLANNER_ORACLE_SDK_REF` below. The range's only
+  # `scripts/alp_orchestrate/` changes are `kconfig.py` (+12/-2),
+  # `topology.py` (+52/-5) and `validate.py` (+48/-0) -- `kconfig.py` and
+  # `topology.py` add `isinstance` type-guards alp-sdk#1888 back-ports FROM
+  # tan (tan's `tan.core.os_class` already carries the equivalent guards
+  # since tan-cli#870/#914/#957/#962, so this side is inert for tan) and
+  # `validate.py` adds a genuinely new refusal (alp-sdk#1897): a baremetal
+  # core that resolved `alp-stock-shim`/`alp-image-edge` from its SoM
+  # topology default (never a real `app:`) is now refused at validate
+  # instead of silently emitting a wrong-target build command. Re-measured
+  # against `0914da38`: `python scripts/capture_planner_oracle.py --sdk
+  # <checkout> --sdk-ref 0914da38ebbecac3c1546064dd506f7fafe0bfa7` produces
+  # a ZERO-file diff (99 boards, 693 emits, 1,129,537 bytes, unchanged) --
+  # no `examples/**/board.yaml` at either ref uses `os: baremetal`, so the
+  # new refusal has nothing to fire on in this corpus, and the isinstance
+  # guards change no valid-input output. Only `PROVENANCE.txt`'s own `alp-sdk
+  # ref` line moves.
+  PINNED_SDK_TAG: 0914da38ebbecac3c1546064dd506f7fafe0bfa7
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -745,7 +765,18 @@ env:
   # lvgl-dashboard-x-evk`, has an A55/Yocto-only slice (`local.conf`, not
   # `alp.conf`) so the Kconfig line never reaches it). See `PINNED_SDK_TAG`'s
   # own comment above for what moved and why.
-  PINNED_PLANNER_ORACLE_SDK_REF: f1b1c9df0edd23988961150439863e70e5d99211
+  #
+  # `f1b1c9df` -> `0914da38` (tan-cli#1103), moved in lockstep with
+  # `PINNED_SDK_TAG` above -- #270 has not landed. `python
+  # scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+  # 0914da38ebbecac3c1546064dd506f7fafe0bfa7` regenerated `tests/fixtures/
+  # planner_oracle` and `PROVENANCE.txt`: board/emit counts AND byte count
+  # unchanged (99 boards, 693 emits, 7 error-contract, 1,129,537 bytes) --
+  # `git status` on the fixture tree after the capture shows only
+  # `PROVENANCE.txt`'s own `alp-sdk ref` line moved. See `PINNED_SDK_TAG`'s
+  # own comment above for why: no board in the corpus exercises either
+  # upstream change.
+  PINNED_PLANNER_ORACLE_SDK_REF: 0914da38ebbecac3c1546064dd506f7fafe0bfa7
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this
