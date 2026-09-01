@@ -94,9 +94,9 @@ def test_every_tests_gates_leg_runs_regen_check():
             f"{workflow.name}'s {job_id!r} job must run "
             "`regen_module_size_budget.py --check` (tan-cli#907) -- this is "
             "one of the only two CI legs that runs python/tests/gates, and "
-            "without this step a git-merge-stale module_size_budget."
-            "generated.json surfaces only as a cluster of unrelated-looking "
-            "ratchet-test failures instead of one targeted diagnostic"
+            "without this step a git-merge-stale module_size_budget.d/ record "
+            "surfaces only as a cluster of unrelated-looking ratchet-test "
+            "failures instead of one targeted diagnostic"
         )
 
 

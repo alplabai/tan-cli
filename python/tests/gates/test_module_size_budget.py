@@ -198,11 +198,19 @@ def test_the_recorded_function_facts_match_the_measurement():
     measurement EXACTLY and names the module, which is precisely what the old
     single file's `function_count_budget: 300 -> 301` could never do.
 
-    Exact rather than tolerant, unlike the `tests/**` drift window below, and
-    that costs an ordinary PR nothing new: `regen --check` is a required step
-    in both CI legs and already demands the same regen for the same drift.
-    Failing at the local bar instead of on the runner is the whole point of
-    keeping this gate local-first (tan-cli#895)."""
+    Exact rather than tolerant, unlike the `tests/**` drift window below.
+    That is a real, small tax rather than a free one: measured against 68
+    non-merge `origin/dev` commits touching `python/tan/**.py`, 39 needed a
+    regen under both the old single-file scheme and this one, 15 under the old
+    scheme only, 11 under neither, and **3** are newly taxed here
+    (`8866d7fb5`, `dcf37ae45`, `3ff889093`) -- a whole-tree-neutral per-module
+    function growth, which the old file structurally could not see. The regen
+    those 3 force needs no `--reason` and writes no ledger entry.
+
+    Worth the tax, because it is exactly what makes a padded function record
+    visible: an inflated budget still bounds the tree, so the `<=` ratchet
+    alone cannot catch one. Failing at the local bar instead of on the runner
+    is the whole point of keeping this gate local-first (tan-cli#895)."""
     measured = core.measure_current().functions
     recorded = core.load_generated().functions
     empty = core.ModuleFunctions(count=0, worst=0)
