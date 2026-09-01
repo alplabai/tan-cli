@@ -181,6 +181,32 @@ def test_a_nonobject_catalog_raises_a_curated_error(tmp_path, text, kind):
         f"a JSON object, got {kind}")
 
 
+def test_read_catalog_document_itself_refuses_a_nonobject_document(tmp_path):
+    """The REDUNDANT-GUARD half, pinned at its own call site.
+
+    `catalog_templates` re-checks the outer shape one call later, so
+    reverting the guard inside `read_catalog_document` alone changes nothing
+    observable through `find_example_by_cores` -- exactly the pair that
+    stayed green twice in PR #1082's review. The redundancy is worth keeping
+    (each takes the value as a parameter and is reachable on its own), but an
+    unpinned guard is not a guard."""
+    root = _tree(tmp_path, "[1, 2]")
+    with pytest.raises(ec.MalformedCatalogError) as exc:
+        ec._GUARDS.read_catalog_document(_catalog_path(root))
+    assert str(exc.value) == (
+        f"malformed template catalog at {_catalog_path(root)}: expected "
+        f"a JSON object, got list")
+
+
+def test_catalog_templates_itself_refuses_a_nonobject_document(tmp_path):
+    """The OTHER half of the same pair, for the same reason."""
+    with pytest.raises(ec.MalformedCatalogError) as exc:
+        ec._GUARDS.catalog_templates([1, 2], path="catalog")
+    assert str(exc.value) == (
+        "malformed template catalog at catalog: expected a JSON object, "
+        "got list")
+
+
 # ---------------------------------------------------------------------------
 # catalog_templates: `templates:` itself
 # ---------------------------------------------------------------------------
