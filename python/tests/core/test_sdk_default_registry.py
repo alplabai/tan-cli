@@ -536,6 +536,16 @@ def test_prune_dead_origins_never_touches_the_filesystem_itself():
     assert pruned == registry
 
 
+def _equal(stored: str, target: str) -> bool:
+    """The plain string equality these cases were written against, injected
+    explicitly now that `prune_entries_by_sdk_path` takes its comparison from
+    the caller (tan-cli#1053 review). Keeping it here rather than defaulting
+    it in the function means no PRODUCTION caller can reach this behaviour by
+    omission -- which is exactly how the fifth site of that defect survived.
+    """
+    return stored == target
+
+
 # ── prune_entries_by_sdk_path: keeping the registry honest after a removal ──
 # (tan-cli#790 -- `sdk remove`'s own registry-honesty obligation, the sibling
 # of prune_dead_origins pruning on the ORIGIN axis instead of this one.)
@@ -560,16 +570,6 @@ def test_prune_entries_by_sdk_path_keeps_entries_naming_a_different_path():
     }
     pruned = prune_entries_by_sdk_path(registry, matches=_equal, sdk_path="/sdk/removed")
     assert pruned == {"/proj/keep": {"sdkPath": "/sdk/still-here", "updatedAt": "t1"}}
-
-
-def _equal(stored: str, target: str) -> bool:
-    """The plain string equality these cases were written against, injected
-    explicitly now that `prune_entries_by_sdk_path` takes its comparison from
-    the caller (tan-cli#1053 review). Keeping it here rather than defaulting
-    it in the function means no PRODUCTION caller can reach this behaviour by
-    omission -- which is exactly how the fifth site of that defect survived.
-    """
-    return stored == target
 
 
 def test_prune_entries_by_sdk_path_empty_registry_is_empty():

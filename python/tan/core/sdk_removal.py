@@ -163,20 +163,30 @@ def is_cache_root_itself(target: Path, destination: Path) -> bool:
 #      would simply be wrong on POSIX. Checked FIRST and unconditionally, so
 #      naming the identical path always answers True -- including when that
 #      path is itself a link, which the next arm would otherwise veto.
-#   2. `os.path.islink(target)` -- STOP, answer False. Removing a symlink
+#   2. `os.path.islink(target)` -- switch to `os.path.samestat` over two
+#      `os.lstat`s, which follows NEITHER final component. Removing a symlink
 #      unlinks the link and leaves everything behind it exactly where it was
 #      (`dir_removal.remove_dir`, and `compute_tree_bytes` charging the link's
-#      own `lstat` size, are already built on that same fact), so nothing that
-#      merely resolves THROUGH the target can be orphaned by removing it and
-#      no refusal is owed. Without this arm the `samefile` arm below fires in
-#      the wrong direction: measured on the first version of this change, a
-#      cache holding `v0.19.0` plus `current -> v0.19.0` with the workspace
-#      pinned at the REAL directory refused `tan sdk remove <cache>/current`
-#      as "the active alp-sdk for this workspace", and reported
-#      `data.wasActive: true`, in the very same envelope whose
-#      `resolvesToAfter` said the workspace still resolved at `projectPin` to
-#      a live SDK. `--force` then proved the refusal empty: the link was
-#      unlinked and both the install and the pin survived untouched.
+#      own `lstat` size, are already built on that same fact), so the only
+#      thing such a removal CAN take out is that same link under another
+#      spelling. Without this arm the `samefile` arm below fires in the wrong
+#      direction: measured on the first version of this change, a cache
+#      holding `v0.19.0` plus `current -> v0.19.0` with the workspace pinned
+#      at the REAL directory refused `tan sdk remove <cache>/current` as "the
+#      active alp-sdk for this workspace", and reported `data.wasActive:
+#      true`, in the very same envelope whose `resolvesToAfter` said the
+#      workspace still resolved at `projectPin` to a live SDK. `--force` then
+#      proved the refusal empty: the link was unlinked and both the install
+#      and the pin survived untouched.
+#
+#      A blanket `return False` here was the SECOND version, and it was too
+#      wide in the other direction (review, round 2): with `cache/current ->
+#      v0.19.0` and `alias -> cache`, a workspace pinned at
+#      `<T>/alias/current` -- the SAME link, spelled through the alias -- lost
+#      it to `tan sdk remove <cache>/current` with no `--force` at all, going
+#      `projectPin` -> `none`. `samestat` over `lstat` keeps the harmless
+#      case allowed and refuses that one: two spellings of one LINK share an
+#      inode, a link and its own target do not.
 #   3. `os.path.samefile` -- consulted only when the lexical arm missed and
 #      the target is not a link. `normcase` alone is NOT the fix, because it
 #      is the identity on darwin too while macOS's DEFAULT APFS volume is
@@ -230,17 +240,22 @@ def removal_would_take_out(candidate: str, target: str) -> bool:
     comparison every load-bearing `sdk remove` refusal makes, replacing five
     independent `==`. ASYMMETRIC on purpose: `removal_would_take_out(link,
     real_dir)` is True while `removal_would_take_out(real_dir, link)` is
-    False, because unlinking a link destroys nothing behind it. See the
+    False, because unlinking a link destroys nothing behind it -- while two
+    spellings of the SAME link are still one thing, and still True. See the
     section banner above for the three arms and for what this still gets
     wrong.
     """
     if os.path.normcase(candidate) == os.path.normcase(target):
         return True
-    if os.path.islink(target):
-        return False
     if not (is_absolute_either_platform(candidate) and is_absolute_either_platform(target)):
         return False
     try:
+        if os.path.islink(target):
+            # Removing a link unlinks the LINK, so the only thing this
+            # removal can take out is that same link under another spelling
+            # -- `lstat` on BOTH sides, which follows neither final
+            # component, and never `samefile`, which follows both.
+            return os.path.samestat(os.lstat(candidate), os.lstat(target))
         return os.path.samefile(candidate, target)
     except (OSError, ValueError):
         # Missing, unreadable, or containing a NUL -- the same best-effort

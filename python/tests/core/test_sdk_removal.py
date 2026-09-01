@@ -300,6 +300,37 @@ def test_removing_a_symlink_does_not_take_out_what_it_points_at(tmp_path):
     assert removal_would_take_out(str(link), str(link))
 
 
+def test_removing_a_link_does_take_out_the_same_link_under_another_spelling(tmp_path):
+    """The other half of the asymmetry, and the under-refusal a BLANKET
+    `return False` on `islink(target)` shipped (tan-cli#1053 review, round 2).
+
+    Removing a link takes out that link -- so a workspace pinned at the SAME
+    link under a different spelling really is orphaned, and really is owed a
+    refusal. Measured on the blanket version: with `cache/current ->
+    v0.19.0` and `alias -> cache`, a pin at `<T>/alias/current` went
+    `projectPin` -> `none` on a `tan sdk remove <cache>/current` that needed
+    no `--force` at all. `os.path.samestat` over two `os.lstat`s follows
+    neither final component, so two spellings of one link share an inode
+    while a link and its own target do not."""
+    real = tmp_path / "cache" / "v0.19.0"
+    real.mkdir(parents=True)
+    try:
+        (tmp_path / "cache" / "current").symlink_to(real, target_is_directory=True)
+        (tmp_path / "alias").symlink_to(tmp_path / "cache", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this host cannot create a symlink")
+    direct = str(tmp_path / "cache" / "current")
+    aliased = str(tmp_path / "alias" / "current")
+    assert direct != aliased, "the fixture would be vacuous otherwise"
+
+    # One link under two spellings: removing it orphans the other spelling.
+    assert removal_would_take_out(aliased, direct)
+    assert removal_would_take_out(direct, aliased)
+    # ...while the link and what it POINTS AT stay distinct, both ways.
+    assert not removal_would_take_out(str(real), direct)
+    assert removal_would_take_out(direct, str(real))
+
+
 def test_two_genuinely_different_directories_still_do_not_match(tmp_path):
     """The SAFE direction, and the reason this helper cannot just answer True.
     A guard that over-refuses is its own bug: an unrelated install has to stay

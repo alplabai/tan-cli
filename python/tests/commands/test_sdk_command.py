@@ -2180,6 +2180,43 @@ def test_remove_deletes_a_cache_alias_link_without_refusing_for_what_it_points_a
     assert_sibling_intact(cache_with_canary)
 
 
+def test_remove_refuses_a_pin_naming_the_same_link_under_another_spelling(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1053 review, round 2 -- the under-refusal a BLANKET
+    `islink(target) -> False` veto shipped, and the exact counterpart of the
+    over-refusal in the test above.
+
+    `<cache>/current -> v0.19.0`, plus `alias -> <cache>`, with the workspace
+    pinned at `<alias>/current` -- the SAME link, spelled through the alias.
+    Removing `<cache>/current` really does unlink what that pin names, so it
+    really is owed a refusal. Measured on the blanket version: `ok true,
+    removed true, wasActive false`, and the pin went `projectPin` -> `none`.
+    Orphaned with no refusal at all."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    real = make_sdk_root(cache_with_canary / "v0.19.0", version="0.19.0")
+    direct = _symlinked_spelling(cache_with_canary / "current", real)
+    alias = _symlinked_spelling(tmp_path / "alias", cache_with_canary)
+    write_pointer(workspace / ".alp" / "sdk-path", alias / "current")
+
+    refused = envelope(
+        run_tan(
+            "sdk", "remove", str(direct),
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert refused["ok"] is False
+    assert refused["issues"][0]["code"] == "sdk.remove-active"
+    assert "the active alp-sdk for this workspace" in refused["issues"][0]["message"]
+    assert refused["data"]["wasActive"] is True
+    assert os.path.lexists(direct), "the link the pin names must survive the refusal"
+    # The pin still resolves, which is what the refusal was protecting.
+    assert refused["data"]["resolvesToAfter"]["sourceTier"] == "projectPin"
+    assert_sibling_intact(cache_with_canary)
+
+
 def test_remove_prunes_a_registry_entry_that_named_the_target_under_another_spelling(
     tmp_path, isolated_home, cache_with_canary
 ):
