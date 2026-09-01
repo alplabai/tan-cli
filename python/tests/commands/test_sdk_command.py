@@ -2135,6 +2135,101 @@ def test_remove_refuses_the_machine_global_default_named_under_another_spelling(
     assert_sibling_intact(cache_with_canary)
 
 
+def test_remove_deletes_a_cache_alias_link_without_refusing_for_what_it_points_at(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1053 review, major 1 -- the over-refusal the first version of
+    this change shipped, and the reason `removal_would_take_out` is
+    asymmetric rather than a "same directory" predicate.
+
+    A cache holding `v0.19.0` plus a `current -> v0.19.0` alias link, with
+    the workspace pinned at the REAL directory. `remove_dir` unlinks a link
+    it is handed and never follows it, so removing the alias cannot orphan
+    anything -- `dev` correctly allowed it. The `samefile` arm follows links
+    on BOTH sides, so it refused, called the alias "the active alp-sdk for
+    this workspace", and reported `data.wasActive: true` in the very envelope
+    whose `resolvesToAfter` said the workspace still resolved at `projectPin`
+    to a live SDK.
+
+    The pin resolving UNCHANGED afterwards is the assertion that makes this
+    more than a spelling check: it is the proof the refusal would have been
+    empty."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    real = make_sdk_root(cache_with_canary / "v0.19.0", version="0.19.0")
+    alias = _symlinked_spelling(cache_with_canary / "current", real)
+    write_pointer(workspace / ".alp" / "sdk-path", real)
+
+    env = envelope(
+        run_tan(
+            "sdk", "remove", str(alias),
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    assert env["ok"] is True, f"spurious refusal: {env['issues']}"
+    assert env["data"]["removed"] is True
+    assert env["data"]["wasActive"] is False, "removing the alias never took out the pin"
+    assert not os.path.lexists(alias), "the link itself is gone"
+    assert real.exists(), "and what it pointed at is untouched"
+    # The pin still resolves, which is what proves the refusal would have been
+    # empty rather than merely inconvenient.
+    assert env["data"]["resolvesToAfter"]["sourceTier"] == "projectPin"
+    assert env["data"]["resolvesToAfter"]["readiness"]["state"] == "ready"
+    assert env["issues"] == []
+    assert_sibling_intact(cache_with_canary)
+
+
+def test_remove_prunes_a_registry_entry_that_named_the_target_under_another_spelling(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1053 review, minor 1 -- the FIFTH comparison of the same
+    question, in `prune_entries_by_sdk_path`.
+
+    The refusal half landed first and the prune half did not, so an
+    alias-spelled entry was correctly REFUSED without `--force` and then, on
+    the `--force` run, left behind naming a checkout the same call had just
+    deleted. Measured that way on the first version of this change. It is a
+    safe degrade (`deepest_covering_entry` gates a hit on `has_loader_script`,
+    so a dead entry mis-resolves nobody) but the table in the issue frames the
+    miss as "neither refused NOR pruned", and only the refused half had
+    landed.
+
+    The fix is not simply routing the prune through the same predicate: this
+    runs AFTER `remove_sdk_tree`, so the target directory is gone and the
+    filesystem arm has no inodes left to compare. The match set is captured
+    before the removal and threaded through."""
+    target = make_sdk_root(cache_with_canary / "v0.19.0", version="0.19.0")
+    linked_cache = _symlinked_spelling(tmp_path / "cache-link", cache_with_canary)
+    other_project = tmp_path / "project-a"
+    other_project.mkdir()
+    kept = make_sdk_root(tmp_path / "still-here", version="kept")
+    kept_project = tmp_path / "project-b"
+    kept_project.mkdir()
+    write_registry(
+        isolated_home,
+        {other_project: linked_cache / "v0.19.0", kept_project: kept},
+        dated=True,
+    )
+
+    forced = envelope(
+        run_tan(
+            "sdk", "remove", "v0.19.0", "--force",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=tmp_path,
+        )
+    )
+    assert forced["ok"] is True
+    assert forced["data"]["removed"] is True
+    assert not target.exists()
+
+    registry = json.loads(
+        (isolated_home / ".alp" / "sdk-defaults.json").read_text(encoding="utf-8")
+    )
+    assert str(other_project) not in registry, "the alias-spelled entry survived the prune"
+    assert str(kept_project) in registry, "and an unrelated entry must NOT be pruned"
+
+
 def test_remove_still_deletes_an_unrelated_install_beside_a_registered_one(
     tmp_path, isolated_home, cache_with_canary
 ):
@@ -2145,6 +2240,10 @@ def test_remove_still_deletes_an_unrelated_install_beside_a_registered_one(
     removable with no `--force` at all."""
     registered = make_sdk_root(cache_with_canary / "v0.24.0", version="0.24.0")
     unrelated = make_sdk_root(cache_with_canary / "v0.25.0", version="0.25.0")
+    assert registered.name.lower() != unrelated.name.lower(), (
+        "these differ by more than case, so a case-fold regression alone cannot "
+        "conflate them -- the guard this test defends is the whole predicate"
+    )
     other_project = tmp_path / "project-a"
     other_project.mkdir()
     write_registry(isolated_home, {other_project: registered}, dated=True)
@@ -2248,12 +2347,74 @@ def test_remove_warns_that_a_force_removed_project_pin_is_left_dangling(
     # The file really is still there -- this warning is a report, not a repair.
     assert (workspace / ".alp" / "sdk-path").is_file()
 
-    # ...and the two commands now agree about the same workspace, which is the
-    # bar the issue actually sets.
+    # Both commands now warn about the same workspace, which is the bar the
+    # issue sets -- `sdk remove` no longer stays silent. The tier WORD can
+    # differ; that is pinned separately, below, where it is not vacuous.
     current = envelope(
         run_tan("sdk", "current", "--format", "json", cwd=workspace)
     )
-    assert _pin_issue(current) == issue
+    current_issue = _pin_issue(current)
+    assert current_issue is not None
+    assert current_issue["code"] == issue["code"]
+    assert str(pinned) in current_issue["message"] or (
+        str(pinned).replace("\\", "/") in current_issue["message"]
+    )
+
+
+def test_the_pin_warning_carries_removes_own_narrow_tier_not_sdk_currents_wide_one(
+    tmp_path, isolated_home, cache_with_canary
+):
+    """tan-cli#1053 review, major 2. An earlier draft of this change claimed
+    `sdk remove` emits the BYTE-IDENTICAL issue `sdk current` does, and pinned
+    it in a fixture with no discoverable checkout -- where both commands
+    answer `none` and the assertion passes vacuously.
+
+    They can differ, and this is the shape that makes them: the tan-cli#497
+    workspace, with a CHILD `<ws>/alp-sdk` that only `sdk current`'s WIDE
+    `resolve_sdk_root_ladder` tail finds. `remove` reports the NARROW ladder
+    -- deliberately, since tan-cli#1028, so that what it reports comes from
+    the same ladder its own refusal consulted. Measured:
+
+        sdk remove --force : "... falling through to the none tier instead."
+        sdk current        : "... falling through to the discovery tier ..."
+
+    What must hold is not equality but INTERNAL consistency: the tier the
+    warning names is the tier `data.resolvesToAfter` names, in the same
+    envelope. Feeding the warning the wide tier instead would have one
+    response saying `"none"` in `data` and "discovery" in `issues[]`."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    pinned = make_sdk_root(cache_with_canary / "v0.27.0", version="0.27.0")
+    write_pointer(workspace / ".alp" / "sdk-path", pinned)
+    # The tan-cli#497 candidate: a CHILD checkout the narrow ladder cannot see.
+    child = make_sdk_root(workspace / "alp-sdk", version="child")
+
+    forced = envelope(
+        run_tan(
+            "sdk", "remove", "v0.27.0", "--force",
+            "--destination", str(cache_with_canary), "--format", "json",
+            cwd=workspace,
+        )
+    )
+    current = envelope(run_tan("sdk", "current", "--format", "json", cwd=workspace))
+
+    remove_issue = _pin_issue(forced)
+    current_issue = _pin_issue(current)
+    assert remove_issue is not None and current_issue is not None
+
+    # The fixture is NON-VACUOUS: the two ladders really do answer differently.
+    assert forced["data"]["resolvesToAfter"]["sourceTier"] == "none"
+    assert current["data"]["sourceTier"] == "discovery"
+    assert current["data"]["sdkPath"] == str(child)
+    assert remove_issue != current_issue, (
+        "if these ever become equal the fixture has stopped exercising the "
+        "narrow-vs-wide divergence and this test is vacuous again"
+    )
+
+    # The invariant that DOES hold: each command's warning names its own
+    # reported tier, so no single envelope contradicts itself.
+    assert "falling through to the none tier" in remove_issue["message"]
+    assert "falling through to the discovery tier" in current_issue["message"]
 
 
 def test_the_dangling_pin_warning_reaches_a_refusal_branch_behind_the_refusal(

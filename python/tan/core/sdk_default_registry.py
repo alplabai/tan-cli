@@ -242,14 +242,19 @@ def load_raw(raw: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _is_absolute_either_platform(value: str) -> bool:
+def is_absolute_either_platform(value: str) -> bool:
     """Mirrors `sdk_discovery._pointer_written_for`'s own cross-platform absolute
     check, for the same reason: this registry is one file shared by every
     `tan` on the host, and a bare `Path(value).is_absolute()` is answered by
     whichever pathlib flavour the READING platform picked. A relative,
     empty, or drive-relative origin (a hand-edited registry, or a future
     writer bug) is rejected under BOTH flavours rather than accepted under
-    whichever one the reader happens to be running."""
+    whichever one the reader happens to be running.
+
+    PUBLIC (no leading underscore) because `sdk_removal.removal_would_take_out`
+    needs the identical judgement before it will consult the filesystem about a
+    stored value, and a cross-module import of a private name is a worse
+    dependency than an exported one (tan-cli#1053 review)."""
     return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
 
 
@@ -341,7 +346,7 @@ def deepest_covering_entry(
     best_depth = -1
     best_updated_at = ""
     for origin, sdk_path in registry.items():
-        if not _is_absolute_either_platform(origin):
+        if not is_absolute_either_platform(origin):
             continue
         if not covers(workspace_root, origin):
             continue
@@ -493,15 +498,18 @@ def normalized_sdk_path(value: str) -> str:
     one directory there too, but folding case would make this function wrong on
     the case-SENSITIVE POSIX side. That fix landed where it belongs, as the
     platform-aware comparison this result is FED INTO rather than smuggled in
-    here -- `sdk_removal.names_the_same_directory` (tan-cli#1053), which folds
+    here -- `sdk_removal.removal_would_take_out` (tan-cli#1053), which folds
     case only where the platform does and consults the filesystem itself when
     the lexical answer misses.
     """
     return value.replace("\\", "/")
 
 
-def prune_entries_by_sdk_path(registry: dict[str, Any], *, sdk_path: str) -> dict[str, Any]:
-    """`registry` with every entry whose `sdkPath` equals `sdk_path` dropped --
+def prune_entries_by_sdk_path(
+    registry: dict[str, Any], *, sdk_path: str, matches: Callable[[str, str], bool]
+) -> dict[str, Any]:
+    """`registry` with every entry whose `sdkPath` NAMES `sdk_path` -- per
+    `matches`, not a raw `==`; see below -- dropped --
     `tan sdk remove`'s own honesty obligation (tan-cli#790), the sibling of
     [`prune_dead_origins`] pruning on the OTHER axis: that function drops an
     entry whose ORIGIN (the project that registered it) no longer exists;
@@ -509,37 +517,41 @@ def prune_entries_by_sdk_path(registry: dict[str, Any], *, sdk_path: str) -> dic
     just deleted by this very command.
 
     Without this, a removed install stays registered as SOME other project's
-    machine-global default: that project's very next `sdk current`/`tan
-    build` would still answer `sourceTier: "globalDefault"` naming a path
-    that is now gone, degrading only as far as `check_sdk_readiness`'s
-    `state: "missing"` -- correctly REPORTED, but never repaired, and never
-    falling through to a lower tier the way a dead `~/.alp/sdk-default`
-    pointer already does (`resolve_sdk_tiered`'s `_has_loader_script` gate on
-    that pointer). `deepest_covering_entry` applies the identical
+    machine-global default: that project's next `sdk current`/`tan build`
+    would still answer `sourceTier: "globalDefault"` naming a path that is
+    gone, degrading only as far as `check_sdk_readiness`'s `state:
+    "missing"` -- correctly REPORTED, never repaired, and never falling
+    through to a lower tier the way a dead `~/.alp/sdk-default` pointer
+    already does. `deepest_covering_entry` applies the identical
     `has_loader_script` gate to a registry hit too, so leaving a dead entry
     in place would not silently mis-resolve anyone -- it would just leave a
-    permanently-unusable entry sitting in a file tan-cli#905 already exists to
-    keep bounded, for a project whose bootstrap the very next re-run repairs
-    for free regardless. This function closes the gap anyway, on the same
-    reasoning tan-cli#905's own docstring gives for pruning eagerly rather
-    than waiting for staleness to matter: the registry is honest about what
-    still resolves, not just eventually self-correcting about it.
+    permanently-unusable entry in a file tan-cli#905 exists to keep bounded.
+    This closes the gap anyway, on tan-cli#905's own reasoning for pruning
+    eagerly: the registry is honest about what still resolves, not merely
+    eventually self-correcting about it.
 
     `sdk_path` is the caller's to normalise (`sdk_discovery._abs_posix`,
     posix-normalised the same way [`with_entry`]'s own `sdk_root` argument
     already is) -- this module has no opinion on path normalisation, the same
     division every other function here draws.
 
+    `matches` is the comparison, INJECTED rather than the raw `==` this was
+    (tan-cli#1053 review: the fifth site of that defect -- an alias-spelled
+    entry was correctly refused and then NOT pruned). Injected rather than
+    imported for the reason `deepest_covering_entry` takes `covers`/
+    `has_loader_script` that way: the real comparison touches the filesystem
+    and lives in a module that already imports THIS one. Required, not
+    defaulted -- a default would hand a caller back the defect.
+
     Compares only entries whose `sdkPath` is present and a string; anything
     shaped too oddly for `parse_registry` to have kept either cannot name
-    `sdk_path` at all (no string to compare) or is exactly as findable by
-    [`prune_dead_origins`]'s own broader sweep -- this function narrows on
-    purpose, to the one axis its caller actually knows just changed.
+    `sdk_path` at all or is as findable by [`prune_dead_origins`]'s broader
+    sweep -- this narrows on purpose, to the one axis its caller knows changed.
     """
     result: dict[str, Any] = {}
     for origin, entry in registry.items():
         path = entry.get("sdkPath") if isinstance(entry, dict) else None
-        if isinstance(path, str) and normalized_sdk_path(path) == sdk_path:
+        if isinstance(path, str) and matches(normalized_sdk_path(path), sdk_path):
             continue
         result[origin] = entry
     return result

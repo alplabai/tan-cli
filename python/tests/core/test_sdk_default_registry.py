@@ -546,7 +546,7 @@ def test_prune_entries_by_sdk_path_drops_every_entry_naming_the_removed_path():
         "/proj/a": {"sdkPath": "/sdk/removed", "updatedAt": "t0"},
         "/proj/b": {"sdkPath": "/sdk/removed", "updatedAt": "t1"},
     }
-    pruned = prune_entries_by_sdk_path(registry, sdk_path="/sdk/removed")
+    pruned = prune_entries_by_sdk_path(registry, matches=_equal, sdk_path="/sdk/removed")
     assert pruned == {}
 
 
@@ -558,17 +558,27 @@ def test_prune_entries_by_sdk_path_keeps_entries_naming_a_different_path():
         "/proj/a": {"sdkPath": "/sdk/removed", "updatedAt": "t0"},
         "/proj/keep": {"sdkPath": "/sdk/still-here", "updatedAt": "t1"},
     }
-    pruned = prune_entries_by_sdk_path(registry, sdk_path="/sdk/removed")
+    pruned = prune_entries_by_sdk_path(registry, matches=_equal, sdk_path="/sdk/removed")
     assert pruned == {"/proj/keep": {"sdkPath": "/sdk/still-here", "updatedAt": "t1"}}
 
 
+def _equal(stored: str, target: str) -> bool:
+    """The plain string equality these cases were written against, injected
+    explicitly now that `prune_entries_by_sdk_path` takes its comparison from
+    the caller (tan-cli#1053 review). Keeping it here rather than defaulting
+    it in the function means no PRODUCTION caller can reach this behaviour by
+    omission -- which is exactly how the fifth site of that defect survived.
+    """
+    return stored == target
+
+
 def test_prune_entries_by_sdk_path_empty_registry_is_empty():
-    assert prune_entries_by_sdk_path({}, sdk_path="/sdk/removed") == {}
+    assert prune_entries_by_sdk_path({}, matches=_equal, sdk_path="/sdk/removed") == {}
 
 
 def test_prune_entries_by_sdk_path_no_match_changes_nothing():
     registry = {"/proj/a": {"sdkPath": "/sdk/other", "updatedAt": "t0"}}
-    assert prune_entries_by_sdk_path(registry, sdk_path="/sdk/removed") == registry
+    assert prune_entries_by_sdk_path(registry, matches=_equal, sdk_path="/sdk/removed") == registry
 
 
 def test_prune_entries_by_sdk_path_drops_a_malformed_entry_that_still_matches():
@@ -579,7 +589,7 @@ def test_prune_entries_by_sdk_path_drops_a_malformed_entry_that_still_matches():
     left alone by this function (nothing to compare), the same as
     `parse_registry` already drops it on READ regardless."""
     registry = {"/proj/a": "/sdk/removed"}
-    pruned = prune_entries_by_sdk_path(registry, sdk_path="/sdk/removed")
+    pruned = prune_entries_by_sdk_path(registry, matches=_equal, sdk_path="/sdk/removed")
     assert pruned == registry
 
 
@@ -609,17 +619,43 @@ def test_prune_entries_by_sdk_path_matches_a_backslash_spelled_entry():
         "C:\\proj\\a": {"sdkPath": "C:\\sdk\\removed", "updatedAt": "t0"},
         "C:\\proj\\b": {"sdkPath": "C:\\sdk\\kept", "updatedAt": "t1"},
     }
-    pruned = prune_entries_by_sdk_path(registry, sdk_path="C:/sdk/removed")
+    pruned = prune_entries_by_sdk_path(registry, matches=_equal, sdk_path="C:/sdk/removed")
     assert pruned == {"C:\\proj\\b": {"sdkPath": "C:\\sdk\\kept", "updatedAt": "t1"}}
 
 
 def test_prune_entries_by_sdk_path_never_touches_the_filesystem():
-    """Pure function: no injected callable at all, unlike `prune_dead_origins`
-    -- proven here by an origin/path pair no real filesystem call could
-    answer for, which still resolves correctly on string equality alone."""
+    """Still a pure function, and now pure BY CONSTRUCTION: the comparison
+    arrives as `matches` from outside (tan-cli#1053 review), so this module
+    cannot reach a filesystem even by accident -- the real caller injects
+    `sdk_removal.removal_would_take_out`, which does. Proven here by an
+    origin/path pair no real filesystem call could answer for, which still
+    resolves correctly under a caller-supplied string equality."""
     registry = {"\0invalid\0origin": {"sdkPath": "\0invalid\0sdk", "updatedAt": "t0"}}
-    pruned = prune_entries_by_sdk_path(registry, sdk_path="\0invalid\0sdk")
+    pruned = prune_entries_by_sdk_path(registry, matches=_equal, sdk_path="\0invalid\0sdk")
     assert pruned == {}
+
+
+def test_prune_entries_by_sdk_path_uses_the_injected_comparison_not_equality():
+    """`matches` is not decoration: an entry that string-equality would KEEP
+    is dropped when the injected predicate says the removal took it out.
+
+    This is the mechanism behind tan-cli#1053's fifth site -- an
+    alias-spelled entry naming the just-removed install was refused and then,
+    with a raw `==` here, not pruned. Required rather than defaulted for
+    exactly this reason: a default would hand a caller back the defect.
+    """
+    registry = {
+        "/proj/a": {"sdkPath": "/alias/spelling", "updatedAt": "t0"},
+        "/proj/b": {"sdkPath": "/sdk/unrelated", "updatedAt": "t1"},
+    }
+
+    def alias_aware(stored: str, target: str) -> bool:
+        return stored == target or stored == "/alias/spelling"
+
+    pruned = prune_entries_by_sdk_path(
+        registry, matches=alias_aware, sdk_path="/sdk/removed"
+    )
+    assert pruned == {"/proj/b": {"sdkPath": "/sdk/unrelated", "updatedAt": "t1"}}
 
 
 # ── parse_registry_updated_at: the recency companion of parse_registry ──────

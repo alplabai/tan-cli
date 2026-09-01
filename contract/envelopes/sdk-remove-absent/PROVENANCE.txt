@@ -61,9 +61,11 @@ left dangling, not cleared, by the removal, so `resolvesToAfter` ALONE
 cannot tell that workspace apart from one that was never pinned at all.
 tan-cli#1051 closed that gap BESIDE the payload rather than inside it: `sdk
 remove` now also carries the `sdk.project-pin-unresolved` warning on
-`issues[]` whenever the calling workspace has a pin that no longer resolves
-— the same issue, from the same `project_pin_issue` helper, that `sdk
-current` already emits for the same state. This golden's workspace has no
+`issues[]` whenever the calling workspace has a pin that no longer resolves,
+from the same `project_pin_issue` helper `sdk current` uses. Not necessarily
+the byte-identical issue `sdk current` emits: `remove`'s warning names
+`resolvesToAfter`'s own narrow tier, `sdk current` names the wide ladder's
+(tan-cli#497), so the two can differ by the tier word for one workspace. This golden's workspace has no
 `.alp/sdk-path` at all, so its `issues` stays `[]` and the recorded envelope
 is unchanged by that fix; the behavioural coverage for it lives in
 `test_sdk_command.py`'s dangling-pin cases, which this hermetic golden
