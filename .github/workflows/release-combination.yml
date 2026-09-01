@@ -64,46 +64,67 @@
 #     is itself a signal (the SoM went live and this gate's matrix is stale),
 #     and so is a crash where a controlled refusal belongs.
 #
-# ...run across TWO combinations (tan-cli#767), both against the SAME
-# alp-sdk latest-release-tag axis:
+# THE THIRD HOLE (tan-cli#1050): "the consumer's pin" is not one version
+# either, it is TWO -- one per alp-sdk-vscode branch. #767 read only `dev`,
+# which is what #767 itself proposed, but `dev` is structurally the one branch
+# whose pin CANNOT stay diverged from tan's `latest`: it moves to the newest
+# pin as soon as one is cut. `main` carries the pin alp-sdk-vscode actually
+# SHIPS. Measured 2026-08-31: `dev` = `0.6.0` (== `latest`, so the whole #767
+# leg skipped on every scheduled run) while `main` = `0.5.1`, and PR #1047's
+# own dispatched proof (run 33397989209) shows `0.5.1` x alp-sdk `v0.16.0` is
+# RED on both buildable SKUs -- a gate that never ran, hiding a shipped
+# combination that was broken. (`main` caught up to `0.6.0` on 2026-09-01 via
+# alp-sdk-vscode#647, so all three agree again TODAY and this job skips
+# loudly; the divergence is structural and recurs on every release, which is
+# why it needs a mechanism rather than a diary entry.)
 #
-#   * `latest`       -- install.sh's own default (or the `tan_version`
-#                        workflow_dispatch override). Unchanged from before
-#                        #767; this is the ORIGINAL axis tan-cli#639 added.
-#   * `consumer-pin`  -- alp-sdk-vscode's live `SUPPORTED_CLI_VERSION`
-#                        (resolved by fetching `src/alpCli/service.ts` off its
-#                        `dev` branch and grep'ing the constant -- the exact
-#                        pattern alp-sdk-vscode's own CI uses, widened to keep
-#                        a prerelease suffix rather than truncate it), or the
-#                        `consumer_tan_version` workflow_dispatch override.
-#                        SKIPPED, loudly (an `::notice::`, not silence), when
-#                        this equals the `latest` axis -- most days they agree,
-#                        and running the full journey twice for an identical
-#                        tan binary is wasted runner minutes, not extra
-#                        coverage.
+# ...so the journey runs across ONE TO THREE combinations, all against the
+# SAME alp-sdk latest-release-tag axis:
 #
-#                        KNOWN GAP (tan-cli#1050): this reads `dev`, exactly
-#                        as tan-cli#767 proposed, but `dev`'s pin is what
-#                        alp-sdk-vscode will ship NEXT, not what it ships
-#                        TODAY -- that is `main`'s `SUPPORTED_CLI_VERSION`,
-#                        which this job never reads. Measured 2026-08-31:
-#                        `dev` = `0.6.0` (== `latest`, so this leg skips on
-#                        every scheduled run right now) while `main` =
-#                        `0.5.1`, and PR #1047's own dispatched proof (run
-#                        33397989209) shows `0.5.1` x alp-sdk's latest release
-#                        is RED on both buildable SKUs. The untested-and-
-#                        broken combination lives on the branch this job does
-#                        not read. See tan-cli#1050 for the fix (resolve both
-#                        branches' pins, dedup the set).
+#   * `latest`               -- install.sh's own default (or the `tan_version`
+#                               workflow_dispatch override). Unchanged from
+#                               before #767; the ORIGINAL axis tan-cli#639
+#                               added. ALWAYS runs.
+#   * `consumer-pin-<...>`   -- alp-sdk-vscode's live `SUPPORTED_CLI_VERSION`,
+#                               resolved by fetching `src/alpCli/service.ts`
+#                               off BOTH its `dev` and its `main` branch and
+#                               grep'ing the constant (the exact pattern
+#                               alp-sdk-vscode's own CI uses, widened to keep
+#                               a prerelease suffix rather than truncate it),
+#                               or the `consumer_tan_version` workflow_dispatch
+#                               override.
 #
-# The `resolve-consumer-pin` job resolves that pin and decides the skip; the
-# `build-matrix` job turns SKU list x combination list into the single JSON
-# matrix `journey` runs -- one job body, parameter-driven by `matrix.tan_version`
-# / `matrix.alp_sdk_ref` / `matrix.combination`, not two copies of the same
-# ~250 lines of steps. Resolution failure (the constant renamed, moved, or the
-# fetch itself failing) is a hard `::error::` + non-zero exit, never a silent
-# fall-through to "latest" -- that fall-through would silently restore the
-# exact blind spot #767 closes.
+# THE DEDUP. At most three versions are ever in play (`dev`'s pin, `main`'s
+# pin, the `latest` leg's effective version) and the journey runs ONCE PER
+# DISTINCT VERSION not already covered by the `latest` leg:
+#
+#   * all three equal      -> no extra leg. `skip=true`, ONE `::notice::`
+#                             saying so -- loud absence, never silence. This
+#                             is the common day (and today).
+#   * `dev` == `main`, both != `latest`
+#                          -> ONE extra leg, `consumer-pin-dev+main`,
+#                             crediting both branches. Not two identical
+#                             journeys for one tan binary.
+#   * all three differ     -> TWO extra legs, `consumer-pin-dev` and
+#                             `consumer-pin-main`. This is the 2026-08-31
+#                             shape: `main` still on the shipped pin while
+#                             `dev` has already moved to the next one.
+#   * (one-sided) `dev` == `latest` != `main`
+#                          -> just `consumer-pin-main`; and symmetrically
+#                             `main` == `latest` != `dev` -> just
+#                             `consumer-pin-dev`.
+#
+# The `resolve-consumer-pin` job resolves both pins, does the dedup, and emits
+# the surviving set as JSON; the `build-matrix` job turns SKU list x
+# combination list into the single JSON matrix `journey` runs -- one job body,
+# parameter-driven by `matrix.tan_version` / `matrix.alp_sdk_ref` /
+# `matrix.combination`, not N copies of the same ~250 lines of steps.
+# Resolution failure ON EITHER BRANCH (the constant renamed, the file moved,
+# the branch renamed, or the fetch itself failing) is a hard `::error::` +
+# non-zero exit that fails the whole job -- never a silent fall-through to
+# "latest" and never a silent skip of just the branch that failed. Continuing
+# with a partial pin set would recreate tan-cli#1050 exactly: a leg that does
+# not run, hiding a shipped combination.
 #
 # NOT a required PR check -- it depends on tags neither repo controls the
 # timing of (plus, now, a THIRD repo's pin), and a red run here is often
@@ -127,15 +148,29 @@
 #      fix. That is expected, not proof of anything by itself -- it only
 #      confirms the fixed tan still builds; step 1 above is what proves the
 #      mechanism can fail.
-#   3. Prove the CONSUMER-PIN axis's mechanism (tan-cli#767), independent of
-#      whatever alp-sdk-vscode's live pin happens to be today: dispatch with
+#   3. Prove the CONSUMER-PIN axis's mechanism (tan-cli#767/#1050),
+#      independent of whatever alp-sdk-vscode's live pins happen to be today
+#      -- as of 2026-09-01 BOTH branches read `0.6.0` (alp-sdk-vscode#647
+#      promoted `dev` to `main`), so the dedup collapses to one and the
+#      scheduled run legitimately skips: dispatch with
 #      `consumer_tan_version: v0.5.1` (and `alp_sdk_ref` empty, i.e. alp-sdk's
 #      real latest release, which by now carries the e6928625 fix). The
-#      override forces the leg to run regardless of the live pin's value, and
+#      override forces one leg to run regardless of the live pins' values, and
 #      the E1M-V2N101 journey reproduces tan-cli#639's exact abort a second
-#      time -- through the NEW leg's wiring this time, proving it actually
-#      executes `tan build` rather than being a check that is satisfied no
-#      matter what it reads.
+#      time -- through the consumer-pin leg's wiring this time, proving it
+#      actually executes `tan build` rather than being a check that is
+#      satisfied no matter what it reads.
+#   4. Prove the DEDUP/BOTH-BRANCHES half (tan-cli#1050) without waiting for
+#      alp-sdk-vscode to diverge: dispatch with `tan_version: v0.5.1` and
+#      `consumer_tan_version` empty. That moves the `latest` leg's effective
+#      version off both live pins, so `0.6.0` survives the dedup on both
+#      branches and collapses into ONE extra leg named
+#      `consumer-pin-dev+main` -- the "both branches agree, neither equals
+#      latest" case, visibly running rather than skipping. The static half of
+#      this (all three dedup cases, the fetch-failure verdict, the matrix
+#      shape) is pinned hermetically by
+#      `python/tests/gates/test_release_combination_consumer_pin.py`, which
+#      executes this job's own `run:` body under a stubbed `curl`/`gh`.
 
 name: release-combination
 
@@ -150,19 +185,21 @@ on:
         description: >-
           tan release to install for the `latest` combination via install.sh's
           --version (e.g. v0.5.1). Empty = install.sh's own default (the
-          latest non-prerelease release). Does NOT affect the `consumer-pin`
-          combination below -- use consumer_tan_version for that.
+          latest non-prerelease release). Does NOT affect the `consumer-pin-*`
+          combinations below -- use consumer_tan_version for that.
         required: false
         default: ""
       consumer_tan_version:
         description: >-
-          tan-cli#767: override for the `consumer-pin` combination -- the tan
-          release to install in place of alp-sdk-vscode's live
-          SUPPORTED_CLI_VERSION pin. Empty = resolve the pin live from
-          alp-sdk-vscode's dev branch (and skip this combination entirely when
-          it equals the `latest` combination's version). Set this to a
-          deliberately old release (e.g. v0.5.1) to force the leg to run and
-          prove its mechanism can still fail (see the file header).
+          tan-cli#767/#1050: override for the `consumer-pin-*` combinations --
+          the tan release to install in place of alp-sdk-vscode's live
+          SUPPORTED_CLI_VERSION pins. Empty = resolve the pins live from BOTH
+          alp-sdk-vscode's dev and main branches, dedup them against the
+          `latest` combination's version, and run the journey once per
+          distinct survivor (skipping entirely, loudly, when none survive).
+          Set this to a deliberately old release (e.g. v0.5.1) to force one
+          leg to run -- neither branch is fetched then -- and prove the
+          mechanism can still fail (see the file header).
         required: false
         default: ""
       alp_sdk_ref:
@@ -187,10 +224,11 @@ concurrency:
 permissions:
   # Least privilege (tan-cli#435). The token is used only to lift the
   # unauthenticated per-IP rate limit on GitHub API reads (alp-sdk's latest
-  # release, tan-cli's own latest release for the consumer-pin skip decision,
+  # release, tan-cli's own latest release for the consumer-pin dedup,
   # `west sdk install`'s release listing) -- never to write anything. The
-  # `src/alpCli/service.ts` fetch is a plain raw.githubusercontent.com GET
-  # against a public repo and needs no token at all.
+  # `src/alpCli/service.ts` fetches (one per alp-sdk-vscode branch) are plain
+  # raw.githubusercontent.com GETs against a public repo and need no token at
+  # all.
   contents: read
 
 jobs:
@@ -230,15 +268,17 @@ jobs:
           echo "::notice::alp-sdk latest release tag: ${ref}"
 
   resolve-consumer-pin:
-    name: resolve alp-sdk-vscode's pinned tan version (tan-cli#767)
+    name: resolve alp-sdk-vscode's pinned tan versions (tan-cli#767, #1050)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      consumer_tan_version: ${{ steps.resolve.outputs.consumer_tan_version }}
+      # tan-cli#1050: no longer ONE version. A JSON array of the deduped
+      # extra combinations to run (possibly empty) -- see the step below.
+      consumer_matrix: ${{ steps.resolve.outputs.consumer_matrix }}
       skip: ${{ steps.resolve.outputs.skip }}
     steps:
       # Same `env:` indirection reasoning as resolve-refs above.
-      - name: resolve SUPPORTED_CLI_VERSION (dispatch override, else the live pin)
+      - name: resolve SUPPORTED_CLI_VERSION on dev AND main (dispatch override, else the live pins)
         id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
@@ -249,7 +289,7 @@ jobs:
 
           latest_tan="$(gh api repos/alplabai/tan-cli/releases/latest -q .tag_name)"
           if [ -z "${latest_tan}" ]; then
-            echo "::error::could not resolve tan-cli's own latest release tag via the GitHub API (needed to decide whether the consumer-pin combination differs from the latest combination)."
+            echo "::error::could not resolve tan-cli's own latest release tag via the GitHub API (needed to decide whether either consumer pin differs from the latest combination)."
             exit 1
           fi
           echo "install.sh's own default (tan-cli's latest release): ${latest_tan}"
@@ -257,12 +297,11 @@ jobs:
           # The `latest` combination's `journey` leg installs
           # `matrix.tan_version`, which is `TAN_VERSION_OVERRIDE` when the
           # caller set it -- not always `latest_tan` above. Comparing the
-          # consumer pin against `latest_tan` unconditionally would give
-          # `skip=true` (one tan version tested) on a dispatch that pinned
-          # `tan_version` to something else while the pin happens to equal
-          # `latest_tan`, silently dropping the second version the operator
-          # asked for. Compare against what the `latest` leg will actually
-          # install.
+          # consumer pins against `latest_tan` unconditionally would drop a
+          # leg (one tan version tested) on a dispatch that pinned
+          # `tan_version` to something else while a pin happens to equal
+          # `latest_tan`, silently dropping a version the operator asked
+          # for. Compare against what the `latest` leg will actually install.
           if [ -n "${TAN_VERSION_OVERRIDE}" ]; then
             effective_latest="${TAN_VERSION_OVERRIDE}"
             echo "latest leg's effective version (tan_version dispatch override): ${effective_latest}"
@@ -271,54 +310,155 @@ jobs:
           fi
 
           if [ -n "${OVERRIDE_VERSION}" ]; then
-            echo "consumer_tan_version=${OVERRIDE_VERSION}" >> "$GITHUB_OUTPUT"
+            # The override names one version explicitly, so there is nothing
+            # to resolve and nothing to dedup -- neither branch is fetched.
+            printf 'consumer_matrix=[{"combination":"consumer-pin-override","tan_version":"%s","label":"overridden consumer pin","branches":"override"}]\n' \
+              "${OVERRIDE_VERSION}" >> "$GITHUB_OUTPUT"
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "::notice::consumer-pin OVERRIDDEN via workflow_dispatch input: ${OVERRIDE_VERSION} -- forced to run regardless of ${effective_latest}, to prove this leg's mechanism can fail (tan-cli#767)."
             exit 0
           fi
 
-          # The exact pattern alp-sdk-vscode's own CI uses (its
-          # `test/cliPin.prerelease.test.js` pins every site that resolves
-          # this constant), widened to keep a prerelease suffix rather than
-          # truncate it (an earlier narrower regex silently turned
-          # `0.5.0-rc1` into `0.5.0`, downloading a different tan than the
-          # pin names). `|| true` on the pipeline: a legitimate "the pattern
-          # matched nothing" (grep exit 1) must NOT kill this step via
-          # pipefail before the explicit -z check below gets to turn it into
-          # a deliberate ::error:: -- writing the same failure unconditionally
-          # ourselves is the tan-cli#1013 lesson (a conditionally-written key
-          # exits 1 under pipefail and the step dies with no test ever having
-          # executed the body).
-          pin="$(curl -fsSL https://raw.githubusercontent.com/alplabai/alp-sdk-vscode/dev/src/alpCli/service.ts \
-              | grep -oE 'SUPPORTED_CLI_VERSION = "[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?"' \
-              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' || true)"
-          if [ -z "${pin}" ]; then
-            echo "::error::could not resolve alp-sdk-vscode's SUPPORTED_CLI_VERSION from src/alpCli/service.ts on its dev branch -- the constant may have been renamed, moved, or the fetch failed. Refusing to fall back to 'latest' silently (that fall-through is exactly the blind spot tan-cli#767 closes)."
-            exit 1
-          fi
-          # `service.ts` is not just the assignment: the block a few lines up
-          # quotes pin values verbatim in comments (e.g. `RENESAS_BUILD_CLI_
-          # VERSION`'s `0.6.0-rc1`). If a future comment ever reads
-          # `SUPPORTED_CLI_VERSION = "..."` too, both greps above match twice
-          # and `pin` becomes multi-line -- write that straight to
-          # `$GITHUB_OUTPUT` and the runner rejects the file command with
-          # "Invalid format" instead of the deliberate ::error:: every other
-          # failure mode here gets. Assert exactly one match first.
-          pin_count="$(printf '%s\n' "${pin}" | grep -c .)"
-          if [ "${pin_count}" -ne 1 ]; then
-            echo "::error::resolved ${pin_count} candidate SUPPORTED_CLI_VERSION values from src/alpCli/service.ts on its dev branch (expected exactly 1) -- refusing to guess which one is the real pin: ${pin}"
-            exit 1
-          fi
-          pin="v${pin}"
-          echo "consumer_tan_version=${pin}" >> "$GITHUB_OUTPUT"
+          # tan-cli#1050: BOTH branches, not just `dev`. `dev` carries the pin
+          # alp-sdk-vscode will ship NEXT; `main` carries the pin it ships
+          # TODAY, and #767's original single-branch read never looked at it
+          # -- so on 2026-08-31 `dev` (`0.6.0`) equalled `latest` and made
+          # this whole leg skip on every scheduled run, while `main`
+          # (`0.5.1`) named a combination PR #1047's own dispatched proof had
+          # already measured RED on both buildable SKUs.
+          #
+          # RESOLVED_PIN is a global set by the function rather than the
+          # function's stdout captured through `$(...)`: the `::error::`
+          # workflow commands below must reach the runner's log on stdout,
+          # and command substitution would swallow them into the caller's
+          # variable instead of the log.
+          RESOLVED_PIN=""
+          resolve_pin() {
+            branch="$1"
+            RESOLVED_PIN=""
+            # `|| true` on both pipelines below: a legitimate "the fetch
+            # 404'd" / "the pattern matched nothing" (curl exit 22, grep exit
+            # 1) must NOT kill this step via `pipefail` before the explicit
+            # `-z` checks turn it into a deliberate `::error::` naming the
+            # branch. Writing the failure ourselves, unconditionally, is the
+            # tan-cli#1013/#1014 lesson: a `grep` that legitimately finds
+            # nothing exits 1 under restored `set -e` and the step dies with
+            # no message anyone can act on.
+            raw="$(curl -fsSL "https://raw.githubusercontent.com/alplabai/alp-sdk-vscode/${branch}/src/alpCli/service.ts" || true)"
+            if [ -z "${raw}" ]; then
+              # Deliberately fatal, not a silent skip of this branch. A
+              # renamed branch or a moved file that quietly dropped one of
+              # the two pins would recreate tan-cli#1050 exactly: a leg that
+              # never runs, hiding a shipped combination.
+              echo "::error::could not fetch src/alpCli/service.ts from alp-sdk-vscode@${branch} (branch renamed, file moved, or the fetch itself failed). Refusing to continue with a partial pin set -- resolving only one of the two branches is the tan-cli#1050 blind spot."
+              return 1
+            fi
+            # The exact pattern alp-sdk-vscode's own CI uses (its
+            # `test/cliPin.prerelease.test.js` pins every site that resolves
+            # this constant), widened to keep a prerelease suffix rather than
+            # truncate it (an earlier narrower regex silently turned
+            # `0.5.0-rc1` into `0.5.0`, downloading a different tan than the
+            # pin names).
+            pin="$(printf '%s\n' "${raw}" \
+                | grep -oE 'SUPPORTED_CLI_VERSION = "[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?"' \
+                | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' || true)"
+            if [ -z "${pin}" ]; then
+              echo "::error::could not resolve alp-sdk-vscode's SUPPORTED_CLI_VERSION from src/alpCli/service.ts on its ${branch} branch -- the constant may have been renamed or moved. Refusing to fall back to 'latest' silently (that fall-through is exactly the blind spot tan-cli#767 closes)."
+              return 1
+            fi
+            # `service.ts` is not just the assignment: the block a few lines
+            # up quotes pin values verbatim in comments (e.g.
+            # `RENESAS_BUILD_CLI_VERSION`'s `0.6.0-rc1`). If a future comment
+            # ever reads `SUPPORTED_CLI_VERSION = "..."` too, both greps
+            # match twice and `pin` becomes multi-line -- write that straight
+            # to `$GITHUB_OUTPUT` and the runner rejects the file command
+            # with "Invalid format" instead of the deliberate `::error::`
+            # every other failure mode here gets. Assert exactly one match.
+            pin_count="$(printf '%s\n' "${pin}" | grep -c . || true)"
+            if [ "${pin_count}" != "1" ]; then
+              echo "::error::resolved ${pin_count} candidate SUPPORTED_CLI_VERSION values from src/alpCli/service.ts on its ${branch} branch (expected exactly 1) -- refusing to guess which one is the real pin: ${pin}"
+              return 1
+            fi
+            RESOLVED_PIN="v${pin}"
+          }
 
-          if [ "${pin}" = "${effective_latest}" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::alp-sdk-vscode's SUPPORTED_CLI_VERSION (${pin}) == the latest leg's effective version (${effective_latest}) -- consumer-pin combination == latest combination, nothing extra to test today."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::alp-sdk-vscode's SUPPORTED_CLI_VERSION (${pin}) diverges from the latest leg's effective version (${effective_latest}) -- running the consumer-pin combination."
-          fi
+          resolve_pin dev
+          pin_dev="${RESOLVED_PIN}"
+          resolve_pin main
+          pin_main="${RESOLVED_PIN}"
+          echo "alp-sdk-vscode@dev  SUPPORTED_CLI_VERSION: ${pin_dev}"
+          echo "alp-sdk-vscode@main SUPPORTED_CLI_VERSION: ${pin_main}"
+
+          # THE DEDUP (tan-cli#1050). At most three versions are in play --
+          # `dev`'s pin, `main`'s pin, and the `latest` leg's effective
+          # version -- and the journey runs ONCE PER DISTINCT VERSION that is
+          # not already covered by the `latest` leg:
+          #
+          #   * all three equal (the common day, and today):
+          #     nothing survives -> `skip=true`, one `::notice::`, only the
+          #     `latest` combination runs.
+          #   * `dev` == `main` != `latest` (the extension has shipped a pin
+          #     tan's `latest` has moved past, or not yet reached): ONE extra
+          #     leg, `consumer-pin-dev+main`, crediting both branches -- not
+          #     two identical journeys for one tan binary.
+          #   * all three differ (`main` still on the shipped pin while `dev`
+          #     has already moved to the next one -- the 2026-08-31
+          #     measurement in tan-cli#1050): TWO extra legs,
+          #     `consumer-pin-dev` and `consumer-pin-main`.
+          #
+          # (And the two one-sided cases: `dev` == `latest` != `main` gives
+          # just `consumer-pin-main`; `main` == `latest` != `dev` gives just
+          # `consumer-pin-dev`.)
+          export PIN_DEV="${pin_dev}" PIN_MAIN="${pin_main}" EFFECTIVE_LATEST="${effective_latest}"
+          python3 - <<'PY'
+          import json
+          import os
+
+          effective_latest = os.environ["EFFECTIVE_LATEST"]
+          resolved = [("dev", os.environ["PIN_DEV"]), ("main", os.environ["PIN_MAIN"])]
+
+          # Insertion-ordered so `dev` sorts before `main` deterministically;
+          # a version seen on both branches collapses into one entry that
+          # credits both, rather than a second identical journey.
+          by_version: dict[str, list[str]] = {}
+          for branch, version in resolved:
+              if version == effective_latest:
+                  continue
+              by_version.setdefault(version, []).append(branch)
+
+          entries = []
+          for version, branches in by_version.items():
+              joined = "+".join(branches)
+              entries.append(
+                  {
+                      "combination": f"consumer-pin-{joined}",
+                      "tan_version": version,
+                      "label": f"alp-sdk-vscode@{joined}'s pinned tan",
+                      "branches": joined,
+                  }
+              )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("consumer_matrix=" + json.dumps(entries) + "\n")
+              fh.write("skip=" + ("true" if not entries else "false") + "\n")
+
+          if not entries:
+              print(
+                  "::notice::alp-sdk-vscode's SUPPORTED_CLI_VERSION is "
+                  f"{os.environ['PIN_DEV']} on dev and {os.environ['PIN_MAIN']} on main, "
+                  f"both == the latest leg's effective version ({effective_latest}) -- "
+                  "consumer-pin combinations == latest combination, nothing extra to test today."
+              )
+          else:
+              for entry in entries:
+                  print(
+                      f"::notice::alp-sdk-vscode@{entry['branches']}'s SUPPORTED_CLI_VERSION "
+                      f"({entry['tan_version']}) diverges from the latest leg's effective version "
+                      f"({effective_latest}) -- running combination {entry['combination']}."
+                  )
+          print("resolved consumer combinations:")
+          print(json.dumps(entries, indent=2))
+          PY
 
   build-matrix:
     name: build the SKU x combination matrix
@@ -340,7 +480,7 @@ jobs:
         env:
           ALP_SDK_REF: ${{ needs.resolve-refs.outputs.alp_sdk_ref }}
           TAN_VERSION_OVERRIDE: ${{ github.event.inputs.tan_version }}
-          CONSUMER_TAN_VERSION: ${{ needs.resolve-consumer-pin.outputs.consumer_tan_version }}
+          CONSUMER_MATRIX: ${{ needs.resolve-consumer-pin.outputs.consumer_matrix }}
           CONSUMER_SKIP: ${{ needs.resolve-consumer-pin.outputs.skip }}
         run: |
           set -euo pipefail
@@ -350,8 +490,17 @@ jobs:
 
           alp_sdk_ref = os.environ["ALP_SDK_REF"]
           tan_override = os.environ.get("TAN_VERSION_OVERRIDE", "")
-          consumer_tan_version = os.environ["CONSUMER_TAN_VERSION"]
+          consumer_entries = json.loads(os.environ["CONSUMER_MATRIX"])
           consumer_skip = os.environ["CONSUMER_SKIP"] == "true"
+
+          # The two outputs must agree, or one of the two branches' pins got
+          # dropped between the jobs. `skip` is the human-readable half; the
+          # array is what actually drives the matrix.
+          if consumer_skip != (not consumer_entries):
+              raise SystemExit(
+                  f"::error::resolve-consumer-pin disagreed with itself: skip={consumer_skip} "
+                  f"but {len(consumer_entries)} consumer combination(s) were resolved."
+              )
 
           skus = [
               {"sku": "E1M-AEN801", "template": "zephyr-app", "core": "m55_hp", "expect_refuse": False},
@@ -378,15 +527,20 @@ jobs:
               # tan-cli#639 added.
               {"combination": "latest", "tan_version": tan_override, "label": "released tan"},
           ]
-          if not consumer_skip:
-              # tan-cli#767: alp-sdk-vscode's SUPPORTED_CLI_VERSION pin,
-              # resolved live -- the version a consumer of the extension
-              # actually runs, not install.sh's "latest".
+          # tan-cli#767 + #1050: one entry per DISTINCT tan version
+          # alp-sdk-vscode pins on `dev` or `main` that the `latest` leg does
+          # not already cover -- the version a consumer of the extension
+          # actually runs, not install.sh's "latest". Zero entries (every pin
+          # already == `latest`), one (both branches agree, or only one
+          # diverges), or two (the branches disagree AND both differ from
+          # `latest`). The dedup itself happens in `resolve-consumer-pin`,
+          # which is where the pins are read; this job only fans it out.
+          for entry in consumer_entries:
               combinations.append(
                   {
-                      "combination": "consumer-pin",
-                      "tan_version": consumer_tan_version,
-                      "label": "alp-sdk-vscode's pinned tan",
+                      "combination": entry["combination"],
+                      "tan_version": entry["tan_version"],
+                      "label": entry["label"],
                   }
               )
 
@@ -412,7 +566,7 @@ jobs:
     name: "${{ matrix.sku }} (${{ matrix.combination_label }}) -- x alp-sdk@${{ matrix.alp_sdk_ref }}"
     runs-on: ubuntu-latest
     # `fail-fast: false` -- the whole point is that these legs can disagree
-    # (AEN green, V2N red; `latest` green, `consumer-pin` red) and each
+    # (AEN green, V2N red; `latest` green, `consumer-pin-main` red) and each
     # verdict must be visible on its own, not cancelled because a sibling leg
     # failed first.
     strategy:
@@ -453,7 +607,7 @@ jobs:
       # sha256 verify, exactly like a customer's shell -- not a source build
       # of this checkout. `matrix.tan_version` carries either the `latest`
       # combination's dispatch override (or "" for install.sh's own default)
-      # or the `consumer-pin` combination's resolved/overridden version --
+      # or a `consumer-pin-*` combination's resolved/overridden version --
       # see build-matrix above.
       - name: install tan via install.sh (released binary)
         env:

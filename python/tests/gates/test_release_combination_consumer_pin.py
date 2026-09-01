@@ -1,0 +1,446 @@
+# SPDX-License-Identifier: Apache-2.0
+"""EXECUTE `release-combination.yml`'s consumer-pin resolution and dedup --
+tan-cli#1050.
+
+`release-combination.yml` is `schedule` + `workflow_dispatch` only, so nothing
+in this suite can exercise it end to end and no PR run ever will. That is
+exactly how tan-cli#1050 survived review and a green CI: #767's
+`resolve-consumer-pin` read alp-sdk-vscode's `SUPPORTED_CLI_VERSION` off its
+`dev` branch alone, and `dev` is structurally the one branch whose pin cannot
+stay diverged from tan's own `latest` (it moves to the newest pin as soon as
+one is cut). So `skip=true` fired on EVERY scheduled run, the leg #767 added
+executed on no day at all, and the pin alp-sdk-vscode actually SHIPS -- on
+`main`, `0.5.1` on 2026-08-31, proven RED against alp-sdk `v0.16.0` by PR
+#1047's own dispatched run 33397989209 -- was read by nothing.
+
+This module is the only proof available for the fix. It does two things:
+
+1. STATIC: `yaml.safe_load`s the workflow and asserts the job graph is what
+   the header claims -- the four jobs, their `needs:` edges, the outputs
+   `build-matrix` consumes, that `resolve-consumer-pin` fetches BOTH
+   `/dev/` and `/main/` copies of `src/alpCli/service.ts`, and that `journey`
+   is driven off `fromJSON(needs.build-matrix.outputs.matrix)`.
+
+2. DYNAMIC: extracts the `run:` bodies of `resolve-consumer-pin`'s and
+   `build-matrix`'s steps VERBATIM out of the YAML (the mechanism
+   `test_planner_resync_pr_step_executes.py` uses, so this cannot drift from
+   the workflow) and runs them under a real `bash` with `curl` and `gh`
+   stubbed on `PATH` and a real `$GITHUB_OUTPUT` file. Every dedup case the
+   header enumerates is asserted on the ACTUAL emitted
+   `consumer_matrix`/`skip`, not on a re-implementation of the logic:
+
+   * all three versions equal        -> `skip=true`, `consumer_matrix=[]`
+   * `dev` == `main` != `latest`     -> ONE leg, `consumer-pin-dev+main`
+   * all three differ                -> TWO legs, `consumer-pin-dev` and
+                                        `consumer-pin-main`
+   * `dev` == `latest` != `main`     -> just `consumer-pin-main`
+   * `main` == `latest` != `dev`     -> just `consumer-pin-dev`
+
+   ...plus the failure verdicts, which are the half that must not degrade
+   quietly: a fetch that 404s on EITHER branch, a renamed constant on either
+   branch, and a `service.ts` carrying two `SUPPORTED_CLI_VERSION = "..."`
+   matches all exit non-zero with an `::error::` that names the branch.
+   Continuing on a partial pin set would recreate #1050 exactly -- a leg that
+   does not run, hiding a shipped combination.
+
+Both `run:` bodies are pure `env:` indirection (zizmor's template-injection
+rule), so neither contains a `${{ }}` expression the runner would have
+resolved before bash saw it -- there is nothing to substitute here, unlike
+`test_planner_resync_pr_step_executes.py`. That is asserted below rather than
+assumed, so a future `${{ }}` added to either body cannot silently run as
+literal text.
+"""
+
+from __future__ import annotations
+
+import functools
+import json
+import pathlib
+import shutil
+import subprocess
+
+import pytest
+import yaml
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-combination.yml"
+
+pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="no bash to run the step body with")
+
+_RESOLVE_JOB = "resolve-consumer-pin"
+_MATRIX_JOB = "build-matrix"
+
+#: The three SKUs `build-matrix` fans every combination across. Named here so
+#: a SKU silently vanishing from the catalogue reds this gate too, rather than
+#: shrinking the matrix invisibly.
+_SKUS = ("E1M-AEN801", "E1M-V2N101", "E1M-NX9101")
+
+
+@functools.cache
+def _workflow() -> dict:
+    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+
+
+def _only_step_run(job: str) -> str:
+    steps = _workflow()["jobs"][job]["steps"]
+    runs = [s["run"] for s in steps if "run" in s]
+    assert len(runs) == 1, f"expected exactly one `run:` step in `{job}`, found {len(runs)}"
+    body = runs[0]
+    assert "${{" not in body, (
+        f"`{job}`'s `run:` body now contains a `${{{{ }}}}` expression. The GitHub "
+        "Actions runner resolves those before bash ever sees the script; this gate "
+        "runs the body under a plain bash, where it would execute as literal text "
+        "and prove nothing. Move it to `env:` (which is also what zizmor's "
+        "template-injection audit wants), or teach this gate to substitute it."
+    )
+    return body
+
+
+# --------------------------------------------------------------------------
+# 1. STATIC: the job graph is what the header claims
+# --------------------------------------------------------------------------
+
+
+def test_the_four_jobs_and_their_needs_edges():
+    jobs = _workflow()["jobs"]
+    assert set(jobs) == {"resolve-refs", _RESOLVE_JOB, _MATRIX_JOB, "journey"}
+    assert jobs[_MATRIX_JOB]["needs"] == ["resolve-refs", _RESOLVE_JOB]
+    assert jobs["journey"]["needs"] == _MATRIX_JOB
+    assert _RESOLVE_JOB not in (jobs["resolve-refs"].get("needs") or []), (
+        "resolve-refs must stay independent of the consumer-pin resolution"
+    )
+    for name, job in jobs.items():
+        assert "timeout-minutes" in job, f"{name} is unbounded"
+
+
+def test_resolve_consumer_pin_publishes_the_matrix_build_matrix_consumes():
+    jobs = _workflow()["jobs"]
+    outputs = jobs[_RESOLVE_JOB]["outputs"]
+    assert set(outputs) == {"consumer_matrix", "skip"}, (
+        "tan-cli#1050 replaced the single `consumer_tan_version` output with a JSON "
+        f"array of deduped combinations; got {sorted(outputs)}"
+    )
+    env = jobs[_MATRIX_JOB]["steps"][0]["env"]
+    assert env["CONSUMER_MATRIX"] == f"${{{{ needs.{_RESOLVE_JOB}.outputs.consumer_matrix }}}}"
+    assert env["CONSUMER_SKIP"] == f"${{{{ needs.{_RESOLVE_JOB}.outputs.skip }}}}"
+    assert jobs["journey"]["strategy"]["matrix"] == (
+        f"${{{{ fromJSON(needs.{_MATRIX_JOB}.outputs.matrix) }}}}"
+    )
+
+
+@pytest.mark.parametrize("branch", ["dev", "main"])
+def test_both_alp_sdk_vscode_branches_are_fetched(branch: str):
+    """THE tan-cli#1050 invariant, stated statically.
+
+    #767 fetched `/dev/` and nothing else. If a future edit drops either
+    branch from the resolution, the version alp-sdk-vscode ships (`main`) or
+    the version it is about to ship (`dev`) stops being tested and the skip
+    notice goes back to being unconditionally true.
+    """
+    body = _only_step_run(_RESOLVE_JOB)
+    url = f"https://raw.githubusercontent.com/alplabai/alp-sdk-vscode/${{branch}}/src/alpCli/service.ts"
+    assert f"resolve_pin {branch}" in body, (
+        "`resolve-consumer-pin` no longer resolves BOTH alp-sdk-vscode branches "
+        f"(looking for `resolve_pin {branch}`) -- that is tan-cli#1050 exactly: "
+        "`dev`'s pin tracks tan's own `latest` by construction, so reading it "
+        "alone makes the consumer-pin leg skip on every scheduled run while "
+        "`main` carries the pin actually shipped to users."
+    )
+    assert url in body, "the per-branch raw.githubusercontent.com fetch was rewritten"
+
+
+def test_a_failed_fetch_is_fatal_not_a_silent_skip():
+    body = _only_step_run(_RESOLVE_JOB)
+    assert "Refusing to continue with a partial pin set" in body
+    assert "return 1" in body
+
+
+# --------------------------------------------------------------------------
+# 2. DYNAMIC: run the bodies
+# --------------------------------------------------------------------------
+
+_SERVICE_TS = """\
+// unrelated preamble
+export const SOMETHING_ELSE = "1.2.3";
+export const SUPPORTED_CLI_VERSION = "{version}";
+export const RENESAS_BUILD_CLI_VERSION = "0.6.0-rc1";
+"""
+
+
+def _stub_bin(tmp_path: pathlib.Path, *, latest_tan: str, dev: str | None, main: str | None) -> pathlib.Path:
+    """A `PATH` dir with a `curl` and a `gh` that answer from fixtures.
+
+    `dev`/`main` are the raw `service.ts` bodies to serve for that branch;
+    `None` means "this branch 404s", which the real `curl -fsSL` reports as a
+    non-zero exit and an empty body.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    served = tmp_path / "served"
+    served.mkdir()
+    for branch, content in (("dev", dev), ("main", main)):
+        if content is not None:
+            (served / branch).write_text(content, encoding="utf-8")
+
+    (bindir / "curl").write_text(
+        "#!/usr/bin/env bash\n"
+        "url=\"${@: -1}\"\n"
+        f'branch="$(printf "%s" "$url" | sed -E "s#.*/alp-sdk-vscode/([^/]+)/.*#\\1#")"\n'
+        f'f="{served}/$branch"\n'
+        'if [ ! -f "$f" ]; then exit 22; fi\n'
+        'cat "$f"\n',
+        encoding="utf-8",
+    )
+    (bindir / "gh").write_text(
+        f"#!/usr/bin/env bash\nprintf '%s\\n' '{latest_tan}'\n",
+        encoding="utf-8",
+    )
+    for f in bindir.iterdir():
+        f.chmod(0o755)
+    return bindir
+
+
+def _run_resolve(
+    tmp_path: pathlib.Path,
+    *,
+    latest_tan: str = "v0.6.0",
+    dev: str | None = "0.6.0",
+    main: str | None = "0.6.0",
+    dev_raw: str | None = None,
+    main_raw: str | None = None,
+    override_version: str = "",
+    tan_version_override: str = "",
+) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
+    dev_body = dev_raw if dev_raw is not None else (None if dev is None else _SERVICE_TS.format(version=dev))
+    main_body = main_raw if main_raw is not None else (None if main is None else _SERVICE_TS.format(version=main))
+    bindir = _stub_bin(tmp_path, latest_tan=latest_tan, dev=dev_body, main=main_body)
+    gh_output = tmp_path / "github_output"
+    gh_output.touch()
+    script = tmp_path / "resolve.sh"
+    script.write_text(_only_step_run(_RESOLVE_JOB), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(script)],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={
+            "PATH": f"{bindir}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "GITHUB_OUTPUT": str(gh_output),
+            "GH_TOKEN": "stub",
+            "OVERRIDE_VERSION": override_version,
+            "TAN_VERSION_OVERRIDE": tan_version_override,
+        },
+    )
+    parsed: dict[str, str] = {}
+    for line in gh_output.read_text(encoding="utf-8").splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            parsed[key] = value
+    return proc, parsed
+
+
+def _combinations(parsed: dict[str, str]) -> list[tuple[str, str]]:
+    return [(e["combination"], e["tan_version"]) for e in json.loads(parsed["consumer_matrix"])]
+
+
+def test_all_three_equal_skips_loudly_with_no_extra_leg(tmp_path):
+    proc, parsed = _run_resolve(tmp_path, latest_tan="v0.6.0", dev="0.6.0", main="0.6.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert parsed["skip"] == "true"
+    assert _combinations(parsed) == []
+    assert "::notice::" in proc.stdout, "the skip must be LOUD -- a silent skip is tan-cli#1050"
+    assert "nothing extra to test today" in proc.stdout
+
+
+def test_both_branches_agree_but_differ_from_latest_gives_one_credited_leg(tmp_path):
+    proc, parsed = _run_resolve(tmp_path, latest_tan="v0.7.0", dev="0.6.0", main="0.6.0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert parsed["skip"] == "false"
+    assert _combinations(parsed) == [("consumer-pin-dev+main", "v0.6.0")], (
+        "one tan binary must produce ONE journey, credited to both branches -- not "
+        "two identical ~250-step journeys"
+    )
+
+
+def test_all_three_differ_gives_two_legs(tmp_path):
+    """The 2026-08-31 shape from tan-cli#1050: `main` on the shipped pin,
+    `dev` already moved to the next one, `latest` a third value."""
+    proc, parsed = _run_resolve(tmp_path, latest_tan="v0.7.0", dev="0.6.0", main="0.5.1")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert parsed["skip"] == "false"
+    assert _combinations(parsed) == [
+        ("consumer-pin-dev", "v0.6.0"),
+        ("consumer-pin-main", "v0.5.1"),
+    ]
+
+
+def test_dev_equals_latest_still_runs_mains_shipped_pin(tmp_path):
+    """The exact configuration tan-cli#1050 measured on 2026-08-31, and the
+    one #767's single-branch read produced NO leg at all for."""
+    proc, parsed = _run_resolve(tmp_path, latest_tan="v0.6.0", dev="0.6.0", main="0.5.1")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert parsed["skip"] == "false"
+    assert _combinations(parsed) == [("consumer-pin-main", "v0.5.1")], (
+        "with `dev` == `latest`, #767's resolution skipped the whole leg; `main`'s "
+        "shipped pin (RED against alp-sdk v0.16.0, run 33397989209) must still run"
+    )
+
+
+def test_main_equals_latest_still_runs_devs_next_pin(tmp_path):
+    proc, parsed = _run_resolve(tmp_path, latest_tan="v0.5.1", dev="0.6.0", main="0.5.1")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _combinations(parsed) == [("consumer-pin-dev", "v0.6.0")]
+
+
+def test_a_prerelease_suffix_survives_resolution(tmp_path):
+    """tan-cli#767's own trap: a narrower regex truncated `0.5.0-rc1` to
+    `0.5.0` and installed a different tan than the pin names."""
+    proc, parsed = _run_resolve(tmp_path, latest_tan="v0.6.0", dev="0.6.0-rc1", main="0.6.0-rc1")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _combinations(parsed) == [("consumer-pin-dev+main", "v0.6.0-rc1")]
+
+
+def test_the_tan_version_dispatch_override_is_what_the_pins_dedup_against(tmp_path):
+    """`latest`'s leg installs the override when set, so the dedup must
+    compare against that, not against install.sh's own latest."""
+    proc, parsed = _run_resolve(
+        tmp_path, latest_tan="v0.6.0", dev="0.6.0", main="0.6.0", tan_version_override="v0.5.1"
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _combinations(parsed) == [("consumer-pin-dev+main", "v0.6.0")]
+
+
+def test_the_consumer_override_fetches_neither_branch(tmp_path):
+    proc, parsed = _run_resolve(
+        tmp_path, latest_tan="v0.6.0", dev=None, main=None, override_version="v0.5.1"
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert parsed["skip"] == "false"
+    assert _combinations(parsed) == [("consumer-pin-override", "v0.5.1")]
+
+
+@pytest.mark.parametrize("missing", ["dev", "main"])
+def test_a_fetch_failure_on_either_branch_is_fatal(tmp_path, missing: str):
+    kwargs = {"dev": "0.6.0", "main": "0.6.0"}
+    kwargs[missing] = None
+    proc, parsed = _run_resolve(tmp_path, latest_tan="v0.6.0", **kwargs)
+    assert proc.returncode != 0, (
+        f"a 404 on alp-sdk-vscode@{missing} exited 0 -- a silently-skipped branch is "
+        "the tan-cli#1050 defect, not a degraded-but-acceptable run"
+    )
+    assert f"::error::could not fetch src/alpCli/service.ts from alp-sdk-vscode@{missing}" in proc.stdout
+    assert "consumer_matrix" not in parsed
+
+
+@pytest.mark.parametrize("renamed", ["dev", "main"])
+def test_a_renamed_constant_on_either_branch_is_fatal(tmp_path, renamed: str):
+    kwargs: dict[str, object] = {"dev": "0.6.0", "main": "0.6.0"}
+    kwargs[f"{renamed}_raw"] = 'export const CLI_PIN = "0.6.0";\n'
+    proc, _ = _run_resolve(tmp_path, latest_tan="v0.6.0", **kwargs)  # type: ignore[arg-type]
+    assert proc.returncode != 0
+    assert f"on its {renamed} branch" in proc.stdout
+    assert "Refusing to fall back to 'latest' silently" in proc.stdout
+
+
+def test_two_matching_constants_are_fatal_rather_than_a_multiline_output(tmp_path):
+    """A second `SUPPORTED_CLI_VERSION = "..."`-shaped line (a comment quoting
+    the pin verbatim) would otherwise write a multi-line value to
+    `$GITHUB_OUTPUT` and blow the runner's file command up with "Invalid
+    format" instead of a deliberate `::error::`."""
+    two = 'export const SUPPORTED_CLI_VERSION = "0.6.0";\n// SUPPORTED_CLI_VERSION = "0.5.1"\n'
+    proc, _ = _run_resolve(tmp_path, latest_tan="v0.6.0", dev="0.6.0", main_raw=two)
+    assert proc.returncode != 0
+    assert "resolved 2 candidate SUPPORTED_CLI_VERSION values" in proc.stdout
+    assert "on its main branch" in proc.stdout
+
+
+# --------------------------------------------------------------------------
+# 3. DYNAMIC: build-matrix fans the surviving set across the SKUs
+# --------------------------------------------------------------------------
+
+
+def _run_build_matrix(
+    tmp_path: pathlib.Path, *, consumer_matrix: list[dict], skip: bool, tan_override: str = ""
+) -> tuple[subprocess.CompletedProcess[str], dict]:
+    gh_output = tmp_path / "github_output"
+    gh_output.touch()
+    script = tmp_path / "matrix.sh"
+    script.write_text(_only_step_run(_MATRIX_JOB), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(script)],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "GITHUB_OUTPUT": str(gh_output),
+            "ALP_SDK_REF": "v0.16.0",
+            "TAN_VERSION_OVERRIDE": tan_override,
+            "CONSUMER_MATRIX": json.dumps(consumer_matrix),
+            "CONSUMER_SKIP": "true" if skip else "false",
+        },
+    )
+    text = gh_output.read_text(encoding="utf-8")
+    matrix = {}
+    for line in text.splitlines():
+        if line.startswith("matrix="):
+            matrix = json.loads(line[len("matrix=") :])
+    return proc, matrix
+
+
+def test_no_survivors_leaves_only_the_latest_combination(tmp_path):
+    proc, matrix = _run_build_matrix(tmp_path, consumer_matrix=[], skip=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert [e["sku"] for e in matrix["include"]] == list(_SKUS)
+    assert {e["combination"] for e in matrix["include"]} == {"latest"}
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_each_surviving_version_gets_its_own_full_sku_sweep(tmp_path, n: int):
+    entries = [
+        {
+            "combination": "consumer-pin-dev",
+            "tan_version": "v0.6.0",
+            "label": "alp-sdk-vscode@dev's pinned tan",
+            "branches": "dev",
+        },
+        {
+            "combination": "consumer-pin-main",
+            "tan_version": "v0.5.1",
+            "label": "alp-sdk-vscode@main's pinned tan",
+            "branches": "main",
+        },
+    ][:n]
+    proc, matrix = _run_build_matrix(tmp_path, consumer_matrix=entries, skip=False)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    include = matrix["include"]
+    assert len(include) == len(_SKUS) * (1 + n)
+    combos = [e["combination"] for e in include]
+    assert combos.count("latest") == len(_SKUS)
+    for entry in entries:
+        legs = [e for e in include if e["combination"] == entry["combination"]]
+        assert [e["sku"] for e in legs] == list(_SKUS)
+        assert {e["tan_version"] for e in legs} == {entry["tan_version"]}
+        assert {e["alp_sdk_ref"] for e in legs} == {"v0.16.0"}
+    # `matrix.combination` is the upload-artifact name suffix; a duplicate
+    # would collide two legs' logs into one artifact.
+    assert len(set(combos)) == 1 + n
+
+
+def test_build_matrix_refuses_a_skip_that_disagrees_with_the_resolved_set(tmp_path):
+    """`skip` and `consumer_matrix` come from the same step; if they ever
+    disagree, one branch's pin was dropped between the two jobs and the run
+    would quietly test fewer versions than it resolved."""
+    entries = [
+        {
+            "combination": "consumer-pin-main",
+            "tan_version": "v0.5.1",
+            "label": "alp-sdk-vscode@main's pinned tan",
+            "branches": "main",
+        }
+    ]
+    proc, _ = _run_build_matrix(tmp_path, consumer_matrix=entries, skip=True)
+    assert proc.returncode != 0
+    assert "resolve-consumer-pin disagreed with itself" in proc.stdout + proc.stderr
