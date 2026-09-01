@@ -36,6 +36,7 @@ from typer.testing import CliRunner
 
 from tan.cli import app
 from tan.commands import doctor_cmd
+from tan.core import artifact_provenance
 from tan.core.bootstrap import venv_layout, workspace_sdk_record_json
 from tan.core.tool_lookup import ToolResolution
 
@@ -324,14 +325,40 @@ def test_no_skew_check_when_the_two_floors_agree():
 # --------------------------------------------------------------------------
 
 
-def _write_bootstrap_json(root: Path, prerequisites: dict) -> Path:
+def _prereq(tool: str, command: str | None, **provenance) -> dict:
+    """One `missingPrerequisites[]` entry, all six keys (tan-cli#1066).
+
+    The four provenance keys default to `None` -- the "not reported" spelling
+    -- so a test that is not ABOUT provenance says so by omission while still
+    asserting a full-equality compare rather than a subset one. A test that IS
+    about it passes the values it expects. `**provenance` is spelled out per
+    key on purpose: a typo'd `licence=` would silently become an extra key
+    here, and the equality compare catches it.
+    """
+    entry = {"tool": tool, "command": command}
+    entry.update(
+        {"tier": None, "licence": None, "sourceUrl": None, "sizeBytes": None}
+    )
+    for key, value in provenance.items():
+        assert key in entry, f"unknown provenance key {key!r}"
+        entry[key] = value
+    return entry
+
+
+def _write_bootstrap_json(root: Path, prerequisites: dict, **top_level) -> Path:
+    """`**top_level` writes SIBLINGS of `prerequisites` -- alp-sdk puts
+    `artifactProvenance` (tan-cli#1066) at the manifest's top level, not inside
+    `prerequisites`, and a helper that could only nest would quietly test the
+    wrong shape. `json.dumps` is given the raw value, so a test may write a
+    deliberately malformed one (a list, a string, `None`)."""
     path = root / "metadata" / "bootstrap.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     # `schemaVersion` is required (tan-cli#488 defect 3): `_load_manifest`
     # reads it FIRST, same as `tan.core.bootstrap.parse_bootstrap_manifest`,
     # and refuses a manifest that omits or misdeclares it.
     path.write_text(
-        json.dumps({"schemaVersion": 1, "prerequisites": prerequisites}), encoding="utf-8"
+        json.dumps({"schemaVersion": 1, "prerequisites": prerequisites, **top_level}),
+        encoding="utf-8",
     )
     return path
 
@@ -502,10 +529,8 @@ def test_prerequisites_check_available_guards_missing_but_not_fix_missing():
         source="alp-sdk metadata/bootstrap.json",
         available=lambda _binary: False,
     )
-    assert check.missing == [{"tool": "ninja", "command": None}]
-    assert check.fix_missing == [
-        {"tool": "ninja", "command": "sudo apt-get install -y ninja-build"}
-    ]
+    assert check.missing == [_prereq("ninja", None)]
+    assert check.fix_missing == [_prereq("ninja", "sudo apt-get install -y ninja-build")]
 
 
 def test_check_built_with_only_missing_falls_back_to_it_for_fix_missing():
@@ -730,10 +755,8 @@ def test_collect_separates_the_envelope_from_fixs_own_input(tmp_path, monkeypatc
 
     checks = doctor_cmd._collect(str(tmp_path))
     prereq = next(c for c in checks if c.name == "hostPrerequisites")
-    assert prereq.missing == [{"tool": "cmake", "command": None}]
-    assert prereq.fix_missing == [
-        {"tool": "cmake", "command": "sudo apt-get install -y cmake"}
-    ]
+    assert prereq.missing == [_prereq("cmake", None)]
+    assert prereq.fix_missing == [_prereq("cmake", "sudo apt-get install -y cmake")]
 
 
 def test_fix_still_reports_installer_not_found_on_the_host_the_guard_covers(
@@ -3326,7 +3349,7 @@ def test_prerequisites_check_distinguishes_a_clean_host_from_a_venv_unusable_one
     assert "ensurepip" in unusable.detail
     # tan-cli#294 finding 4: the structured pair rides on the SAME check.
     assert unusable.missing == [
-        {"tool": "python3-venv", "command": "sudo apt-get install -y python3-venv"}
+        _prereq("python3-venv", "sudo apt-get install -y python3-venv")
     ]
 
 
@@ -3344,8 +3367,8 @@ def test_prerequisites_check_tool_missing_outranks_venv_unusable():
     assert check.code == "bootstrap.prerequisites-missing"
     assert "cmake" in check.detail
     assert check.missing == [
-        {"tool": "cmake", "command": "sudo apt-get install -y cmake"},
-        {"tool": "python3-venv", "command": "sudo apt-get install -y python3-venv"},
+        _prereq("cmake", "sudo apt-get install -y cmake"),
+        _prereq("python3-venv", "sudo apt-get install -y python3-venv"),
     ]
 
 
@@ -3366,6 +3389,200 @@ def test_missing_prerequisites_key_is_populated_on_a_scrubbed_host(tmp_path):
     for entry in missing:
         assert entry["tool"]
         assert "command" in entry  # present, possibly null -- never absent
+        # tan-cli#1066: the four provenance keys are REQUIRED, never omitted.
+        # This host resolved no SDK at all (`run_tan` with a scrubbed PATH), so
+        # they are all `null` here -- which is the point: the key set does not
+        # depend on which SDK, or whether an SDK, was in front of tan.
+        assert entry["tier"] is None
+        assert entry["licence"] is None
+        assert entry["sourceUrl"] is None
+        assert entry["sizeBytes"] is None
+
+
+# --------------------------------------------------------------------------
+# tan-cli#1066 -- `artifactProvenance` on `data.missingPrerequisites[]`
+# (alp-sdk#1574, alp-sdk-vscode#467).
+# --------------------------------------------------------------------------
+
+#: The pinned SDK's own block, read from the vendored producer output rather
+#: than re-typed -- same rule and same file `test_bootstrap_command.
+#: REAL_MANIFEST` follows. Tests write it into their temp manifest and assert
+#: the join against this same source, so neither half can drift alone.
+_REAL_PROVENANCE = json.loads(
+    (
+        Path(__file__).resolve().parents[3]
+        / "contract" / "fixtures" / "bootstrap" / "manifest.json"
+    ).read_text(encoding="utf-8")
+)["artifactProvenance"]
+
+
+def _prereq_env(tmp_path, monkeypatch, prerequisites, **top_level):
+    """`_collect`'s `hostPrerequisites` check for a manifest this test wrote.
+
+    POSIX + nothing on PATH, so every declared tool is missing and the entries
+    are always populated -- the same deterministic forcing
+    `test_doctor_contract_key_set.py` uses (`force_missing=True`), done here
+    without a subprocess.
+    """
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.setattr(doctor_cmd.sys, "platform", "linux")
+    _write_bootstrap_json(tmp_path, prerequisites, **top_level)
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
+    checks = doctor_cmd._collect(str(tmp_path))
+    return next(c for c in checks if c.name == "hostPrerequisites")
+
+
+def test_missing_prerequisites_carry_the_provenance_alp_sdk_publishes(
+    tmp_path, monkeypatch
+):
+    """The ask, end to end through `_collect`: alp-sdk v0.16.0's
+    `artifactProvenance` reaches `data.missingPrerequisites[]`, joined on
+    `tool` -- the identity the entry already carried."""
+    check = _prereq_env(
+        tmp_path,
+        monkeypatch,
+        {"posix": ["cmake", "ninja"], "pythonMinVersion": "3.10", "install": {}},
+        artifactProvenance=_REAL_PROVENANCE,
+    )
+    by_tool = {entry["tool"]: entry for entry in check.missing}
+    assert set(by_tool) == {"cmake", "ninja"}
+    for tool, entry in by_tool.items():
+        declared = _REAL_PROVENANCE[tool]
+        assert entry["tier"] == declared["tier"]
+        assert entry["licence"] == declared["licence"]
+        # alp-sdk spells it `source`; the wire spells it `sourceUrl` -- the
+        # consumer's `source` column already means "what will actually run".
+        assert entry["sourceUrl"] == declared["source"]
+        assert entry["sizeBytes"] == declared["sizeBytes"]
+        assert "source" not in entry
+    # Not a hollow pass on all-`None`s: the pinned SDK really does publish
+    # these, and the licensing claim is the whole point of the feature.
+    assert by_tool["cmake"]["licence"] == "BSD-3-Clause"
+    assert by_tool["ninja"]["licence"] == "Apache-2.0"
+
+
+def test_fix_missing_carries_the_provenance_too_unlike_the_command_guard(
+    tmp_path, monkeypatch
+):
+    """`available`'s tan-cli#760 split is about what tan may promise to RUN.
+    A licence is not a promise, so it rides on BOTH halves."""
+    check = _prereq_env(
+        tmp_path,
+        monkeypatch,
+        {"posix": ["cmake"], "pythonMinVersion": "3.10", "install": {}},
+        artifactProvenance=_REAL_PROVENANCE,
+    )
+    assert check.missing[0]["licence"] == "BSD-3-Clause"
+    assert check.fix_missing[0]["licence"] == "BSD-3-Clause"
+
+
+def test_an_unconfirmed_command_is_nulled_without_losing_its_provenance():
+    """`confirm_missing` nulls the COMMAND and nothing else. Rebuilding the
+    entry from two of its fields (what it did before tan-cli#1066) dropped the
+    provenance on exactly the hosts this guard fires on -- a Fedora box reading
+    alp-sdk's apt table -- so the consent screen lost the licence it needs at
+    the moment the Fix button disappeared."""
+    check = doctor_cmd.prerequisites_check(
+        checked=["cmake"],
+        missing=["cmake"],
+        install={"cmake": "sudo apt-get install -y cmake"},
+        source="alp-sdk metadata/bootstrap.json",
+        available=lambda _binary: False,
+        provenance=artifact_provenance.parse_table(_REAL_PROVENANCE),
+    )
+    assert check.missing == [
+        _prereq(
+            "cmake",
+            None,
+            tier="A",
+            licence="BSD-3-Clause",
+            sourceUrl="https://cmake.org/",
+        )
+    ]
+    # The raw twin keeps the command AND the provenance.
+    assert check.fix_missing[0]["command"] == "sudo apt-get install -y cmake"
+    assert check.fix_missing[0]["licence"] == "BSD-3-Clause"
+
+
+def test_an_sdk_predating_artifact_provenance_reports_nulls_not_an_error(
+    tmp_path, monkeypatch
+):
+    """alp-sdk v0.16.0-rc1 and earlier carry no block at all. That is a normal
+    shape, not a malformed one: same four `null`s, same key set, no issue."""
+    check = _prereq_env(
+        tmp_path,
+        monkeypatch,
+        {"posix": ["cmake"], "pythonMinVersion": "3.10", "install": {}},
+    )
+    assert check.status == "fail"
+    assert check.missing == [_prereq("cmake", None)]
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param([], id="block-is-a-list"),
+        pytest.param("cmake", id="block-is-a-string"),
+        pytest.param(7, id="block-is-a-number"),
+        pytest.param(None, id="block-is-null"),
+        pytest.param({"cmake": "https://cmake.org/"}, id="entry-is-a-string"),
+        pytest.param({"cmake": ["A"]}, id="entry-is-a-list"),
+        pytest.param({"cmake": {}}, id="entry-is-empty"),
+        pytest.param({"cmake": {"tier": "A"}}, id="licence-missing"),
+        pytest.param({"cmake": {"licence": "BSD-3-Clause"}}, id="tier-missing"),
+        pytest.param({"cmake": {"tier": 1, "licence": ["MIT"]}}, id="non-string-values"),
+        pytest.param({"cmake": {"sizeBytes": True}}, id="size-is-a-bool"),
+    ],
+)
+def test_a_malformed_artifact_provenance_block_never_breaks_doctor(
+    tmp_path, monkeypatch, block
+):
+    """`doctor`'s whole job is to report on a broken environment; it must not
+    itself fall over on a bad `bootstrap.json`. This block is the least
+    load-bearing thing in that file -- advisory display metadata -- so it
+    DEGRADES to the same `null` an absent key yields rather than refusing the
+    way `planner.template`'s curated-error register does for a document the
+    command cannot proceed without.
+
+    What must survive every row: the manifest is still REAL (no fallback tool
+    list, no `bootstrapManifest` warning), the missing tool is still reported,
+    and the entry still carries all six keys.
+    """
+    check = _prereq_env(
+        tmp_path,
+        monkeypatch,
+        {"posix": ["cmake"], "pythonMinVersion": "3.10", "install": {}},
+        artifactProvenance=block,
+    )
+    assert check.status == "fail"
+    assert check.code == "bootstrap.prerequisites-missing"
+    entry = check.missing[0]
+    assert entry["tool"] == "cmake"
+    assert set(entry) == {"tool", "command", "tier", "licence", "sourceUrl", "sizeBytes"}
+    # Every malformed shape reads as "not reported" -- never a coerced value,
+    # never a partial key set. The one row that legitimately keeps a field is
+    # `licence-missing`/`tier-missing`, which still reports the OTHER one.
+    for field in ("sourceUrl", "sizeBytes"):
+        assert entry[field] is None, (field, block)
+    assert entry["tier"] in (None, "A")
+    assert entry["licence"] in (None, "BSD-3-Clause")
+
+
+def test_a_malformed_block_does_not_downgrade_the_manifest_to_the_fallback(tmp_path):
+    """The degrade is scoped to the block. `_load_manifest` must still report
+    `is_real` and still hand back the SDK's own tool list -- a provenance typo
+    that silently swapped in tan's built-in fallback list would change which
+    TOOLS a host is checked for, which is a far bigger lie than a null."""
+    _write_bootstrap_json(
+        tmp_path,
+        {"posix": ["cmake"], "pythonMinVersion": "3.10"},
+        artifactProvenance=["not", "a", "mapping"],
+    )
+    loaded = doctor_cmd._load_manifest(str(tmp_path))
+    assert loaded.is_real is True
+    assert loaded.error is None
+    assert loaded.facts["posix"] == ["cmake"]
+    assert loaded.facts["_artifactProvenance"] == {}
 
 
 def test_missing_prerequisites_key_is_present_and_null_when_the_check_is_clean():

@@ -618,8 +618,94 @@ def test_missing_prerequisites_is_null_or_populated_but_never_an_empty_list(tmp_
     )
     assert refused["exitCode"] == 1  # RuntimeFailure, matching the oracle
     assert codes(refused)[-1] == "bootstrap.prerequisites-missing"
+    # tan-cli#1066: `bootstrap`'s entries carry the same six keys `doctor`'s
+    # do. This fixture SDK's manifest names no such tool in
+    # `artifactProvenance`, so all four are `null` -- present, never omitted.
     assert refused["data"]["missingPrerequisites"] == [
-        {"tool": "tan-no-such-tool-xyz", "command": None}
+        {
+            "tool": "tan-no-such-tool-xyz",
+            "command": None,
+            "tier": None,
+            "licence": None,
+            "sourceUrl": None,
+            "sizeBytes": None,
+        }
+    ]
+
+
+def test_bootstrap_missing_prerequisites_carry_the_manifests_provenance(tmp_path):
+    """tan-cli#1066: `bootstrap`'s `missingPrerequisites[]` carries the same six
+    keys `doctor`'s does, from the same `MissingPrerequisite.as_dict`.
+
+    One field name must not mean two shapes depending on which command a
+    consumer read it from. The absent tool is given its OWN `artifactProvenance`
+    row here (rather than leaning on a real tool that happens to be absent on
+    this runner) so the join is deterministic on every host.
+    """
+    doc = json.loads(REAL_MANIFEST)
+    doc["artifactProvenance"]["tan-no-such-tool-xyz"] = {
+        "tier": "A",
+        "source": "https://example.invalid/tool",
+        "sizeBytes": 4096,
+        "licence": "Apache-2.0",
+    }
+    refused = envelope(
+        run_tan(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(
+                make_sdk(
+                    tmp_path / "p",
+                    manifest=json.dumps(doc, indent=2),
+                    tools=["tan-no-such-tool-xyz"],
+                )
+            ),
+            cwd=tmp_path / "p" / "ws",
+        )
+    )
+    assert codes(refused)[-1] == "bootstrap.prerequisites-missing"
+    assert refused["data"]["missingPrerequisites"] == [
+        {
+            "tool": "tan-no-such-tool-xyz",
+            "command": None,
+            "tier": "A",
+            "licence": "Apache-2.0",
+            "sourceUrl": "https://example.invalid/tool",
+            # An int survives as an int -- the only field of the four that is
+            # not a string, and the one a `bool`/float guard exists for.
+            "sizeBytes": 4096,
+        }
+    ]
+
+
+def test_bootstrap_survives_a_manifest_whose_provenance_block_is_malformed(tmp_path):
+    """A bad `artifactProvenance` must not cost a customer their bootstrap. The
+    block is advisory display metadata; the refusal it rides on is the load-
+    bearing part, and it still arrives intact with all six keys."""
+    doc = json.loads(REAL_MANIFEST)
+    doc["artifactProvenance"] = ["not", "a", "mapping"]
+    refused = envelope(
+        run_tan(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(
+                make_sdk(
+                    tmp_path / "q",
+                    manifest=json.dumps(doc, indent=2),
+                    tools=["tan-no-such-tool-xyz"],
+                )
+            ),
+            cwd=tmp_path / "q" / "ws",
+        )
+    )
+    assert codes(refused)[-1] == "bootstrap.prerequisites-missing"
+    assert refused["data"]["missingPrerequisites"] == [
+        {
+            "tool": "tan-no-such-tool-xyz",
+            "command": None,
+            "tier": None,
+            "licence": None,
+            "sourceUrl": None,
+            "sizeBytes": None,
+        }
     ]
 
 
@@ -2584,9 +2670,27 @@ def test_the_fallback_constants_match_the_real_manifest_field_for_field():
     manifest = parse_bootstrap_manifest(REAL_MANIFEST)
     fallback = fallback_facts(manifest.python_min_version)
     for field in vars(manifest):
-        if field == "from_manifest":
+        if field in ("from_manifest", "artifact_provenance"):
             continue
         assert getattr(fallback, field) == getattr(manifest, field), field
+
+    # `artifact_provenance` is the second exemption, and unlike `from_manifest`
+    # (a flag that differs by construction) it is a DELIBERATE divergence
+    # (tan-cli#1066). Every other field here is a stale-by-default
+    # transcription of the manifest, which is a safe thing to be wrong about:
+    # a stale tool list refuses a host that would have passed. A stale
+    # PROVENANCE entry is different in kind -- it is tan asserting a LICENCE,
+    # from a build-time constant, about an artefact this SDK never described.
+    # An SDK with no manifest publishes no such claim, so neither does tan;
+    # the empty table reports `null` for every field, which is true.
+    # Self-cancelling, like the `install` exemption before it: if anyone fills
+    # the fallback in, this fires instead of passing quietly.
+    assert fallback.artifact_provenance == {}
+    assert manifest.artifact_provenance, (
+        "the pinned manifest carries no artifactProvenance at all -- if "
+        "PINNED_SDK_TAG moved BACK before alp-sdk v0.16.0 this exemption is "
+        "vacuous and should be re-examined, not left asserting nothing"
+    )
 
     # Named explicitly on top of the loop above: `install` is the one field
     # that has been exempted before, and a nested dict compares equal on the
@@ -3229,8 +3333,21 @@ def test_the_tool_less_refusals_carry_their_own_codes_and_report_null():
     # button needs something runnable.
     unusable = posix_venv_unusable()
     assert unusable.code == "venv-unusable"
+    # tan-cli#1066: `python3-venv` is a Debian PACKAGE name, not one of
+    # alp-sdk's `artifactProvenance` keys -- so all four provenance fields are
+    # `null` here, the same spelling an SDK predating the block yields. Pinned
+    # rather than loosened to a subset compare: a near-miss join onto
+    # `python3`'s row would attribute PSF-2.0 to a Debian package, and that
+    # would be a fabricated licensing claim, not a cosmetic slip.
     assert reported_missing(unusable.missing) == [
-        {"tool": "python3-venv", "command": "sudo apt-get install -y python3-venv"}
+        {
+            "tool": "python3-venv",
+            "command": "sudo apt-get install -y python3-venv",
+            "tier": None,
+            "licence": None,
+            "sourceUrl": None,
+            "sizeBytes": None,
+        }
     ]
     assert reported_missing(()) is None
 

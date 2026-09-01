@@ -538,7 +538,11 @@ def check_prerequisites(
     ]
     if missing:
         refuse = windows_refusal if is_windows else posix_refusal
-        return None, refuse(missing, install)
+        # tan-cli#1066: `bootstrap`'s `missingPrerequisites[]` carries the same
+        # six keys `doctor`'s does. One field name, one shape, whichever command
+        # a consumer read it from -- `facts` is the SAME manifest doctor joins
+        # against, so nothing here re-resolves an SDK to get it.
+        return None, refuse(missing, install, facts.artifact_provenance)
 
     # Probe against the floor that will actually be ENFORCED. Probing to a lower
     # bar would stop at the first candidate clearing 3.10 (`py -3`, often the
@@ -2256,7 +2260,7 @@ def _data(
     paths: RunPaths | None,
     facts: BootstrapFacts,
     pin: str,
-    missing: list[dict[str, str | None]] | None = None,
+    missing: list[dict[str, str | int | None]] | None = None,
     planned: list[list[str]] | None = None,
 ) -> dict[str, object]:
     """The `data` payload.
