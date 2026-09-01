@@ -565,8 +565,17 @@ def _enforce(
     `f77f4818` repro proved the function WORKS; nothing proved it was
     CALLED, and those are different claims. `test_the_enforcement_path_
     itself_rejects_a_theirs_resolution` now drives this function on a
-    throwaway repo, so removing either assertion BELOW, or the
-    `merge_loss_violations`/`ledger_violations` call feeding it, reds.
+    throwaway repo, so removing the merge-loss assertion below, or the
+    `merge_loss_violations` call feeding it, reds.
+
+    Deliberately NOT claimed: the `ledger_violations` half. That repro is
+    chosen precisely BECAUSE `ledger_violations` is blind to it -- its
+    sibling asserts `ledger_violations(...) == []` as the premise -- so
+    deleting the second assertion, or stubbing both `ledger_violations`
+    calls to `[]`, leaves this pair at `39 passed`. Every other
+    `ledger_violations` test calls it directly rather than through here.
+    That gap predates `_enforce` and is tracked separately (tan-cli#1080);
+    do not read this docstring as covering it.
 
     That covers everything inside this function and nothing outside it. The
     remaining link -- the one CALL that connects this function to the real
@@ -1366,6 +1375,18 @@ def test_the_enforcement_path_itself_rejects_a_theirs_resolution(tmp_path):
             assert remedy in message, (
                 f"the remedy {remedy!r} for case {case_label!r} is missing "
                 f"entirely from the failure text. Got: {message}"
+            )
+            # `index()` finds the FIRST occurrence, so a remedy duplicated
+            # into another case's block would satisfy the interval check
+            # below while the message still gave that case the wrong advice
+            # -- the W5 harm reached by adding a sentence rather than moving
+            # one. Uniqueness is what makes the offset meaningful.
+            assert message.count(remedy) == 1, (
+                f"the remedy {remedy!r} appears {message.count(remedy)} times "
+                f"in the failure text. It must appear exactly once, under "
+                f"case {case_label!r}: a second copy under another case makes "
+                "the interval check below pass while the message tells that "
+                f"case to do the opposite of what it should. Got: {message}"
             )
             assert block_start < message.index(remedy) < block_end, (
                 f"the remedy {remedy!r} must sit inside the block for case "
