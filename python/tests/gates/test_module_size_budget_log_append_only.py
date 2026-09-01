@@ -99,11 +99,14 @@ git parents individually for everything else, unchanged from before blocker
 2 -- see `test_a_checkout_theirs_resolution_that_drops_a_branchs_own_entry_is_caught`,
 which is that exact single-hop case and needed no change) and the CURRENT
 content. Nothing in between is ever consulted for the decision. A line the
-PR's own branch added and later dropped WITHIN ITS OWN unmerged history (not
-inherited from the base) is deliberately not this gate's concern any more --
-that is exactly the `tan-cli#971` shape, a PR correcting its own draft
-content before it ever reaches `dev`, and the ledger's promise to `dev` is
-about `dev`'s own lines, not a branch's private editing history.
+PR's own branch added and later dropped by an ORDINARY, single-parent commit
+within its own unmerged history (not inherited from the base) is deliberately
+not this gate's concern -- that is exactly the `tan-cli#971` shape, a PR
+correcting its own draft content before it ever reaches `dev`, and the
+ledger's promise to `dev` is about `dev`'s own lines, not a branch's private
+editing history. This sentence used to carry no "by an ordinary, single-parent
+commit" clause; without it, it was too broad -- see the tan-cli#1065 section
+below, which narrows it.
 
 The per-commit walk from round 2 is kept, but demoted: `_locate_dropping_commit`
 runs ONLY after `ledger_violations` has already found a violation, purely to
@@ -130,6 +133,40 @@ And the complementary probe that motivates the whole redesign:
   line is dropped, then a later commit in the same range puts it back,
   verbatim, in order. Must PASS: the ledger is intact by the time HEAD is
   reached, which is what "append-only" actually promises.
+
+## tan-cli#1065 -- the branch's OWN committed lines, when a MERGE drops them
+
+The paragraph above is right about a branch revising its own draft, and was
+wrong as a blanket rule. `ledger_violations` only ever asserts that the
+ANCHOR's lines survive; on a `pull_request` run the anchor is the PR's base
+(`dev`), and a line the BRANCH committed is by construction never one of the
+base's lines -- so discarding it costs that check nothing to detect. Measured
+against PR #1062's real pre-merge head `f77f4818` merged with `1f06a426`
+(`dev` as it stood then), the `MODULE_SIZE_BUDGET_LOG.md` conflict resolved
+with `git checkout --theirs`: four committed lines gone,
+`ledger_violations(base='1f06a426')` -> `[]`, whole file `14 passed in 0.59s`
+under `GITHUB_EVENT_NAME=pull_request`. That is the tan-cli#902 incident, in
+the one context where it matters.
+
+`merge_loss_violations` closes it WITHOUT re-opening the tan-cli#971
+false-positive, by splitting on which commit dropped the line: an ordinary,
+single-parent commit is a deliberate revision (allowed); a MERGE commit is a
+conflict resolution silently discarding an already-committed entry the other
+parent never had to weigh against (never allowed). See that function's own
+docstring for why both of its conditions -- missing from the merge's own
+content AND still missing at HEAD -- are load-bearing, and for the one respect
+in which it is deliberately narrower than `ledger_violations`.
+
+Still reachable, measured, not assumed: `MODULE_SIZE_BUDGET_LOG.md` is frozen
+against `regen_module_size_budget.py`, not against people. Two of the four
+`dev` commits after tan-cli#907 landed appended to it by hand -- `1f06a426`
+(#1060, +7) and `b3c40619` (#1062, +4), both correction notes in the same tail
+region -- and tan-cli#907 also removed this file's `merge=union` attribute, so
+those appends now conflict outright rather than union-merging. The conflict
+whose RESOLUTION this gate guards is more likely today, not less.
+(`MODULE_SIZE_BUDGET_LOG.d/` needs none of this: a merge that drops an entry
+FILE is caught by `test_module_size_budget_log_d_entries_are_immutable.py`'s
+tree cross-check, which is not anchored on a base ref at all.)
 
 ## Two shapes this deliberately does NOT try to catch
 
@@ -255,6 +292,88 @@ def ledger_violations(
             continue
         if not _is_ordered_subsequence(anchor_lines, current_lines):
             violations.extend(anchor_lines)
+    return violations
+
+
+def merge_loss_violations(
+    cwd: Path,
+    rel_path: str,
+    current_lines: list[str],
+    commits: list[str],
+) -> list[tuple[str, str, list[str]]]:
+    """THE SECOND decision (tan-cli#1065). `ledger_violations` above only ever
+    asserts that the ANCHOR's lines survive, and on a `pull_request` run the
+    anchor is the PR's base (`dev`). A line the BRANCH itself committed is,
+    by construction, never one of the base's lines -- so discarding it costs
+    that check nothing to detect. Measured against PR #1062's real pre-merge
+    head `f77f4818` merged with `1f06a426` (`dev` as it stood at the time),
+    the `MODULE_SIZE_BUDGET_LOG.md` conflict resolved with
+    `git checkout --theirs`: four lines the branch had committed (two
+    tan-cli#427 entries and their sub-bullets) are absent at HEAD, and
+    `ledger_violations(base='1f06a426')` returns `[]` -- the whole gate file
+    `14 passed in 0.59s` under `GITHUB_EVENT_NAME=pull_request`. That is the
+    tan-cli#902 incident shape, exactly, in the CI context that matters.
+
+    Closing it needs a check that does NOT re-open the tan-cli#971
+    false-positive the round-3 major fix exists to prevent. The two shapes
+    look superficially alike -- in both, a line this branch committed is gone
+    at HEAD -- but they differ in WHICH commit dropped it, and that
+    difference is the whole distinction:
+
+    * a branch DELIBERATELY revising its own draft entry does it in an
+      ordinary, single-parent commit. Legitimate (tan-cli#971); the ledger's
+      promise to `dev` is about `dev`'s own lines, and a branch may correct
+      its own not-yet-merged prose.
+    * a branch SILENTLY LOSING a committed entry to a bad conflict
+      resolution does it in a MERGE commit -- `git checkout --theirs` takes
+      the other side's whole file, and the loss lands in the merge commit's
+      own tree. Never legitimate: the entry was already committed, and the
+      other parent never had it to weigh against.
+
+    So this check only ever looks at MERGE commits in the given range, and
+    flags a parent's line only when it is missing from the MERGE COMMIT'S
+    OWN content AND still missing from `current_lines`. Both conditions are
+    load-bearing:
+
+    * "missing from the merge's own content" is what excludes the tan-cli#971
+      shape: a later ordinary commit rewording an entry leaves the merge
+      itself intact, so nothing is flagged.
+    * "still missing at HEAD" preserves round 3's NET-STATE principle: a
+      merge that dropped a line which a later commit restored is clean, so
+      the prescribed fix (restore the line in a normal follow-up commit)
+      actually clears the failure and no history rewrite is ever required.
+
+    Deliberately narrower than `ledger_violations` in one respect: membership,
+    not ordered subsequence. A merge that REORDERS lines without losing any is
+    not flagged here. What this exists to catch is a committed entry silently
+    discarded; a pure reorder inside a merge loses no reasoning, and requiring
+    order across two independently-appending parents would red legitimate
+    resolutions that interleave both sides. Order relative to the BASE is
+    still enforced, unchanged, by `ledger_violations`.
+
+    Returns `(merge commit, parent, lost lines)` triples -- empty when clean.
+    """
+    violations: list[tuple[str, str, list[str]]] = []
+    for commit in commits:
+        parents = _parents_of(cwd, commit)
+        if len(parents) < 2:
+            # Not a merge: an ordinary commit's edit of a line this branch
+            # itself added is the tan-cli#971 case, deliberately allowed.
+            continue
+        commit_lines = _content_at(cwd, commit, rel_path)
+        if commit_lines is None:
+            continue
+        for parent in parents:
+            parent_lines = _content_at(cwd, parent, rel_path)
+            if parent_lines is None:
+                continue
+            lost = [
+                line
+                for line in parent_lines
+                if line.strip() and line not in commit_lines and line not in current_lines
+            ]
+            if lost:
+                violations.append((commit, parent, lost))
     return violations
 
 
@@ -426,6 +545,26 @@ def test_the_ledger_only_ever_appends_since_the_prs_base():
         violations = ledger_violations(REPO, LOG_REL, current)
         diagnostic_commits = ["HEAD"]
         window_desc = "relative to its parent commit(s) (no PR/merge-queue base ref applies to this run)"
+
+    # tan-cli#1065: the check above protects the ANCHOR's lines only, so a
+    # merge commit that discarded lines THIS BRANCH committed passes it
+    # clean on a `pull_request` run (`dev` never had those lines). Scanned
+    # separately, over the same window -- see `merge_loss_violations`.
+    merge_losses = merge_loss_violations(REPO, LOG_REL, current, diagnostic_commits)
+    assert not merge_losses, (
+        f"a MERGE commit in this run's window dropped {LOG_REL} line(s) that "
+        "one of its own parents had already committed, and nothing since has "
+        f"restored them: {merge_losses}. This is the tan-cli#902 shape -- a "
+        "conflict resolution (classically `git checkout --theirs`) taking one "
+        "side of the file wholesale and silently discarding the other side's "
+        "own reasoned entries. The ledger is append-only across a merge too: "
+        "a resolution must keep BOTH parents' lines. Fix it in a normal "
+        "follow-up commit that adds the missing line(s) back verbatim -- this "
+        "check only asks whether they are present at HEAD, so no history "
+        "rewrite is needed. (An ordinary, single-parent commit revising an "
+        "entry this branch itself added is NOT flagged here; that is the "
+        "tan-cli#971 case and stays deliberately allowed.)"
+    )
 
     if not violations:
         return
@@ -792,6 +931,138 @@ def test_a_legitimate_union_merge_of_two_divergent_appends_passes_clean(tmp_path
     assert violations == [], (
         "a legitimate union merge of two independent appends must pass "
         f"clean, but was flagged: {violations}"
+    )
+
+
+def _theirs_resolution_repo(repo: Path) -> None:
+    """The tan-cli#902 shape as a PR would produce it: `feature` commits its
+    own reasoned entry, `main` (standing in for `dev`) appends a different
+    one, and the conflict is resolved with `git checkout --theirs` -- taking
+    `dev`'s file wholesale and discarding `feature`'s own committed entry.
+    Leaves HEAD on `feature`, at the damaging merge commit."""
+    repo.mkdir()
+    _init_repo(repo)
+
+    _write(repo, "LOG.md", ["- base entry"])
+    _commit(repo, "base")
+
+    _git(repo, "checkout", "-q", "-b", "feature")
+    _write(repo, "LOG.md", ["- base entry", "- tan-cli#427 feature's own reasoned entry"])
+    _commit(repo, "feature appends its own reasoned entry")
+
+    _git(repo, "checkout", "-q", "main")
+    _write(repo, "LOG.md", ["- base entry", "- dev's own entry"])
+    _commit(repo, "dev appends its own entry")
+
+    _git(repo, "checkout", "-q", "feature")
+    merge = _git(repo, "merge", "--no-edit", "main", check=False)
+    assert merge.returncode != 0, "expected a real conflict with no merge=union driver configured"
+    _git(repo, "checkout", "--theirs", "LOG.md")
+    _git(repo, "add", "LOG.md")
+    _git(repo, "commit", "-q", "--no-edit")
+
+    current = (repo / "LOG.md").read_text(encoding="utf-8").splitlines()
+    assert "- tan-cli#427 feature's own reasoned entry" not in current, (
+        "the --theirs resolution should have dropped the branch's own entry"
+    )
+
+
+def test_a_pull_request_run_still_catches_a_merge_that_dropped_the_branchs_own_entry(tmp_path):
+    """tan-cli#1065's third blind spot. The sibling test above proves the
+    same `--theirs` loss is caught on the anchor-is-HEAD's-parents path -- but
+    that path is exactly the one a `pull_request` run does NOT take. With a
+    base ref resolved (`dev`), `ledger_violations` compares only the BASE's
+    lines against HEAD, and the branch's own entry is by construction not one
+    of them, so it returns `[]` and the whole gate file passed `14 passed`
+    green with the entry gone. Measured against PR #1062's real pre-merge head
+    as well as here. `merge_loss_violations` is what closes it."""
+    repo = tmp_path / "repo"
+    _theirs_resolution_repo(repo)
+    current = (repo / "LOG.md").read_text(encoding="utf-8").splitlines()
+
+    assert ledger_violations(repo, "LOG.md", current, base="main") == [], (
+        "this test is only meaningful while the base-anchored check is blind "
+        "to the loss -- if this ever fails, the boundary moved and this "
+        "test's premise needs re-deriving, not silently satisfying"
+    )
+
+    losses = merge_loss_violations(repo, "LOG.md", current, _commits_since_base(repo, "main"))
+    assert losses, (
+        "a merge commit discarded the branch's own already-committed entry "
+        "and the pull_request-shaped check did not flag it -- this is the "
+        "exact tan-cli#902 incident in the CI context that matters"
+    )
+    assert any(
+        "- tan-cli#427 feature's own reasoned entry" in lost
+        for _commit_sha, _parent, lost in losses
+    ), f"the flagged lines must name the entry that was actually lost, got: {losses}"
+
+
+def test_a_branch_revising_its_own_entry_in_an_ordinary_commit_after_a_merge_is_not_flagged(tmp_path):
+    """The tan-cli#971 shape, which the round-3 major fix deliberately allows
+    and which this widening must not re-break: the branch commits an entry,
+    merges `dev` cleanly (nothing lost in the merge), and only THEN rewords
+    its own not-yet-merged entry in an ordinary, single-parent commit. The
+    reworded line is gone from HEAD and was present at the merge's own parent,
+    so a naive "every merge parent's lines must survive to HEAD" rule would
+    red it. The merge's own content is what is compared instead, precisely to
+    keep this legitimate."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+
+    _write(repo, "LOG.md", ["- base entry"])
+    _commit(repo, "base")
+
+    _git(repo, "checkout", "-q", "-b", "feature")
+    _write(repo, "LOG.md", ["- base entry", "- feature's own DRAFT entry"])
+    _commit(repo, "feature appends a draft entry")
+
+    _git(repo, "checkout", "-q", "main")
+    _write(repo, "LOG.md", ["- base entry", "- dev's own entry"])
+    _commit(repo, "dev appends its own entry")
+
+    _git(repo, "checkout", "-q", "feature")
+    merge = _git(repo, "merge", "--no-edit", "main", check=False)
+    if merge.returncode != 0:
+        # Resolved the RIGHT way -- both sides kept. The loss this gate hunts
+        # is the resolution that drops one side, not the conflict itself.
+        _write(repo, "LOG.md", ["- base entry", "- feature's own DRAFT entry", "- dev's own entry"])
+        _git(repo, "add", "LOG.md")
+        _git(repo, "commit", "-q", "--no-edit")
+
+    _write(repo, "LOG.md", ["- base entry", "- feature's own REWORDED entry", "- dev's own entry"])
+    _commit(repo, "feature rewords its own not-yet-merged entry")
+
+    current = (repo / "LOG.md").read_text(encoding="utf-8").splitlines()
+    assert "- feature's own DRAFT entry" not in current
+
+    losses = merge_loss_violations(repo, "LOG.md", current, _commits_since_base(repo, "main"))
+    assert losses == [], (
+        "a branch revising its OWN not-yet-merged entry in an ordinary "
+        "commit is the tan-cli#971 case and must stay legitimate, but got: "
+        f"{losses}"
+    )
+
+
+def test_a_merge_dropped_line_restored_by_a_later_commit_is_not_flagged(tmp_path):
+    """Round 3's NET-STATE principle, preserved by the new check: a merge
+    that dropped a line which a later commit put back verbatim is clean, so
+    the failure message's prescribed fix ("add the missing line back in a
+    normal follow-up commit") actually clears the failure. A per-merge-commit
+    rule with no HEAD condition would stay red forever and force a history
+    rewrite -- the exact defect round 3 removed from this gate."""
+    repo = tmp_path / "repo"
+    _theirs_resolution_repo(repo)
+
+    _write(repo, "LOG.md", ["- base entry", "- dev's own entry", "- tan-cli#427 feature's own reasoned entry"])
+    _commit(repo, "restore the entry the merge resolution dropped")
+
+    current = (repo / "LOG.md").read_text(encoding="utf-8").splitlines()
+    losses = merge_loss_violations(repo, "LOG.md", current, _commits_since_base(repo, "main"))
+    assert losses == [], (
+        "a merge-dropped line restored verbatim by a later commit must clear "
+        f"the check without a history rewrite, but got: {losses}"
     )
 
 

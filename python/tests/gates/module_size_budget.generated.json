@@ -66,7 +66,7 @@
     "tests/core/test_scaffold.py": 2143,
     "tests/core/test_template_integrity.py": 924,
     "tests/gates/test_every_issue_code_is_registered.py": 1866,
-    "tests/gates/test_module_size_budget_log_append_only.py": 831,
+    "tests/gates/test_module_size_budget_log_append_only.py": 1102,
     "tests/gates/test_module_size_budget_log_d_entries_are_immutable.py": 1132,
     "tests/gates/test_planner_relocation_freshness.py": 1480,
     "tests/gates/test_subprocess_env_routes_through_the_helper.py": 1026,
