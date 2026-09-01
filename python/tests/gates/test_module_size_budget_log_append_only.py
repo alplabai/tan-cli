@@ -568,14 +568,20 @@ def _enforce(
     throwaway repo, so removing the merge-loss assertion below, or the
     `merge_loss_violations` call feeding it, reds.
 
-    Deliberately NOT claimed: the `ledger_violations` half. That repro is
+    The `ledger_violations` half is claimed too, but it needs its OWN
+    scenario: the `--theirs` repro cannot cover it, because that repro is
     chosen precisely BECAUSE `ledger_violations` is blind to it -- its
-    sibling asserts `ledger_violations(...) == []` as the premise -- so
-    deleting the second assertion, or stubbing both `ledger_violations`
-    calls to `[]`, leaves this pair at `39 passed`. Every other
-    `ledger_violations` test calls it directly rather than through here.
-    That gap predates `_enforce` and is tracked separately (tan-cli#1080);
-    do not read this docstring as covering it.
+    sibling asserts `ledger_violations(...) == []` as the premise of the
+    whole exercise. Measured while that was the only scenario reaching here
+    (tan-cli#1080): deleting the ledger assertion below, and separately
+    stubbing both `ledger_violations` calls to `[]`, each left this pair at
+    `39 passed`. `test_the_enforcement_path_itself_rejects_a_dropped_base_
+    entry` closes that -- an ordinary tan-cli#907/#970 loss (a base entry
+    deleted outright, with no merge anywhere, so the merge-loss half has
+    nothing to look at), driven through this function on BOTH branches below
+    by parametrising `base_ref` over a resolved base ref and `None` -- so
+    removing the ledger assertion below, or either `ledger_violations` call
+    feeding it, reds.
 
     That covers everything inside this function and nothing outside it. The
     remaining link -- the one CALL that connects this function to the real
@@ -760,19 +766,32 @@ def test_a_direct_edit_of_an_existing_entry_with_no_merge_involved_is_caught(tmp
     assert violations, "an existing line was rewritten in place and must be flagged"
 
 
-def test_an_existing_entry_deleted_outright_with_no_replacement_is_caught(tmp_path):
-    """Pure deletion, no edit and no append to obscure it -- the simplest
-    possible loss (tan-cli#970 round 2 review, preserve probe 2, reproduced
-    hermetically rather than only against the real ledger)."""
-    repo = tmp_path / "repo"
+def _dropped_base_entry_repo(repo: Path) -> None:
+    """The ordinary append-only violation (tan-cli#907/#970), in the shape a
+    PR produces: `main` (standing in for `dev`) holds three entries and
+    `feature` deletes the middle one outright. Nothing else is touched and
+    there is no merge anywhere, so `merge_loss_violations` has nothing to
+    look at and only `ledger_violations` can catch it -- which is exactly
+    what makes it the complement of `_theirs_resolution_repo` below. Leaves
+    HEAD on `feature`, at the deleting commit."""
     repo.mkdir()
     _init_repo(repo)
 
     _write(repo, "LOG.md", ["- first entry", "- second entry", "- third entry"])
     _commit(repo, "base")
 
+    _git(repo, "checkout", "-q", "-b", "feature")
     _write(repo, "LOG.md", ["- first entry", "- third entry"])
     _commit(repo, "deletes the middle entry outright")
+
+
+def test_an_existing_entry_deleted_outright_with_no_replacement_is_caught(tmp_path):
+    """Pure deletion, no edit and no append to obscure it -- the simplest
+    possible loss (tan-cli#970 round 2 review, preserve probe 2, reproduced
+    hermetically rather than only against the real ledger). No `base=` given,
+    so this is the fallback path (HEAD's own immediate parent)."""
+    repo = tmp_path / "repo"
+    _dropped_base_entry_repo(repo)
 
     current = (repo / "LOG.md").read_text(encoding="utf-8").splitlines()
     violations = ledger_violations(repo, "LOG.md", current)
@@ -1395,6 +1414,52 @@ def test_the_enforcement_path_itself_rejects_a_theirs_resolution(tmp_path):
                 "somewhere is not enough, the MAPPING is what carries the "
                 f"advice. Got: {message}"
             )
+
+
+@pytest.mark.parametrize("base_ref", ["main", None])
+def test_the_enforcement_path_itself_rejects_a_dropped_base_entry(tmp_path, base_ref):
+    """tan-cli#1080: the OTHER half of the same wiring the sibling above
+    pins. That test's `--theirs` repro cannot cover this half -- it is chosen
+    precisely because `ledger_violations` is blind to it -- so nothing drove
+    a scenario through `_enforce` that only `ledger_violations` catches, and
+    two mutants stayed green on the pair (re-derived on this branch, both
+    `39 passed`): deleting `_enforce`'s ledger assertion, and stubbing both
+    its `ledger_violations` calls to `[]`. Parametrised over both `base_ref`
+    shapes so neither call can be stubbed alone and stay green."""
+    repo = tmp_path / "repo"
+    _dropped_base_entry_repo(repo)
+    current = (repo / "LOG.md").read_text(encoding="utf-8").splitlines()
+
+    assert merge_loss_violations(
+        repo, "LOG.md", current, ["HEAD", *_commits_since_base(repo, "main")]
+    ) == [], (
+        "this test is only meaningful while the merge-loss half is blind to "
+        "this shape -- there is no merge commit in this repo at all, on "
+        "either window `_enforce` can use. If this ever fails, the boundary "
+        "moved and this test's premise needs re-deriving, not silently "
+        "satisfying"
+    )
+
+    with pytest.raises(AssertionError) as excinfo:
+        _enforce(repo, "LOG.md", current, base_ref)
+
+    message = str(excinfo.value)
+    marker, terminator = "Missing/reordered line(s): ", "The ledger is append-only"
+    assert "lost or reordered content" in message and marker in message and terminator in message, (
+        "the enforcement path must reject this through the ledger assertion "
+        f"specifically, not some other one -- got: {message}"
+    )
+    # Read the LISTING's own span, not the whole message: `str(excinfo.value)`
+    # also carries pytest's rewritten repr of the bare `not violations`
+    # expression, which names the lost lines by itself -- so a plain
+    # `"- second entry" in message` stayed GREEN with the message's own
+    # `{violations}` interpolation replaced by a literal (measured,
+    # tan-cli#1080 mutant Y3b). Same interval idiom as the sibling above.
+    listing = message[message.index(marker) + len(marker) : message.index(terminator)]
+    assert "- second entry" in listing, (
+        "the failure's own listing must name the line that was actually "
+        f"lost, not leave it to pytest's repr -- got: {listing!r}"
+    )
 
 
 #: The one test whose job is to run the enforcement against THIS repository's
