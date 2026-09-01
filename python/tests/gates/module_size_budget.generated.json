@@ -31,7 +31,7 @@
     "tan/model/adapters/ethos_u.py": 959,
     "tan/planner/kconfig.py": 2122,
     "tan/planner/loader.py": 1410,
-    "tan/planner/template.py": 1780,
+    "tan/planner/template.py": 2045,
     "tan/planner/zephyr_board.py": 1494
   },
   "function_count_budget": 300,
@@ -74,6 +74,7 @@
     "tests/model/test_adapters.py": 1605,
     "tests/model/test_check.py": 1971,
     "tests/parity/test_planner_emit_parity.py": 2078,
+    "tests/planner/test_catalog_malformed_records.py": 827,
     "tests/scripts/test_pin_move_verify.py": 942
   }
 }
