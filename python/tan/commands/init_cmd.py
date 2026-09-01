@@ -125,6 +125,7 @@ from tan.core.global_flags import accept_global_flags
 from tan.core.example_catalog import (
     AmbiguousCoresTopologyError,
     CoresTopologyNotFoundError,
+    MalformedCatalogError,
     find_example_by_cores,
     parse_topology_arg,
     unsupported_som,
@@ -1020,6 +1021,14 @@ def _plan_from_topology(
         )
     try:
         src = find_example_by_cores(sdk.path, cores)
+    except MalformedCatalogError as err:
+        # tan-cli#1084: a malformed catalog escaped BOTH handlers below as a
+        # raw traceback. Handled on its own class, not on the shared
+        # `CoresTopologyError` base, so the envelope names the catalog
+        # rather than implying the requested topology was the problem.
+        raise InitError(
+            "init.catalog-malformed", str(err), ExitCode.VALIDATION_FAILURE
+        ) from err
     except CoresTopologyNotFoundError as err:
         raise InitError(
             "init.topology-not-found", str(err), ExitCode.VALIDATION_FAILURE

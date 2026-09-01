@@ -1362,6 +1362,41 @@ def test_from_example_survives_an_sdk_with_no_catalog_at_all(tmp_path):
     assert (tmp_path / "board.yaml").is_file()
 
 
+def test_from_example_survives_a_non_utf8_catalog(tmp_path):
+    """tan-cli#1096 review (BLOCKER), measured end to end on `dev@4e2bf5af`
+    before this fix existed and reproduced on this branch before it was
+    applied: `document_guards.read_catalog_document` caught `except OSError`
+    only, and `UnicodeDecodeError` is a `ValueError`, NOT an `OSError` --
+    the one exception `unsupported_som`'s own `except MalformedCatalogError`
+    could not catch. A catalog with a single non-UTF-8 byte therefore escaped
+    that "Never raises" function as a raw `UnicodeDecodeError`, past
+    `init_cmd.py`'s bare call site (no try/except of its own), and out as
+    `init.internal-failure` -- no files written at all. This is the exact
+    case that broke; it must not be able to break silently again. Same shape
+    as `test_from_example_survives_an_sdk_with_no_catalog_at_all` above, but
+    for an UNREADABLE catalog rather than an ABSENT one."""
+    sdk = _sdk_with_catalog(tmp_path)
+    example_dir = sdk / "examples" / "multicore" / "mproc-mailbox"
+    (example_dir / "src").mkdir(parents=True)
+    (example_dir / "src" / "main.c").write_text(
+        "int main(void) { return 0; }\n", encoding="utf-8")
+    (sdk / "metadata" / "templates" / "catalog-v1.json").write_bytes(
+        b"\xff\xfe not valid utf-8")
+
+    proc = run_tan(
+        "init", "--from-example", "multicore/mproc-mailbox", "--sdk-root", "./sdk",
+        "--som", "E1M-AEN301", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert env["issues"] == [], env["issues"]
+    assert "init.internal-failure" not in [i["code"] for i in env["issues"]]
+    assert (tmp_path / ".alp").is_dir()
+    assert (tmp_path / "board.yaml").is_file()
+    assert (tmp_path / "src" / "main.c").is_file()
+
+
 def test_from_example_without_som_never_warns(tmp_path):
     """No `--som` means no retarget: the example keeps its own SKU, which is
     by definition one the example was written for."""
@@ -2617,6 +2652,32 @@ def test_topology_malformed_entries_are_a_coded_issue(raw, tmp_path):
 
     assert proc.returncode == 2, (raw, env)
     assert issue(env)["code"] == "init.invalid-topology", raw
+
+
+def test_topology_a_non_utf8_catalog_is_the_coded_malformed_issue(tmp_path):
+    """tan-cli#1096 review: unlike `--from-example`'s `unsupported_som`
+    (silent by contract, see `test_from_example_survives_a_non_utf8_catalog`),
+    `--topology` resolves THROUGH the catalog via `find_example_by_cores`,
+    whose `except MalformedCatalogError` in `_plan_from_topology` is the one
+    place a malformed document becomes a coded refusal rather than a crash.
+    Before the `document_guards.py` fix this `UnicodeDecodeError` (a
+    `ValueError`, not an `OSError`) missed that handler too and fell through
+    to `init.internal-failure`. `contract/issue-codes.json`'s
+    `init.catalog-malformed` note says its condition is "absent or
+    unreadable" -- this is the "unreadable" half, now actually reached."""
+    _sdk_with_topology_catalog(tmp_path, [("gateway-demo", {"m33_sm": "zephyr"})])
+    (tmp_path / "sdk" / "metadata" / "templates" / "catalog-v1.json").write_bytes(
+        b"\xff\xfe not valid utf-8")
+
+    proc = run_tan(
+        "init", "--topology", "m33_sm:zephyr", "--sdk-root", "./sdk",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2, env
+    assert issue(env)["code"] == "init.catalog-malformed", env
+    assert not (tmp_path / "board.yaml").exists()
 
 
 def test_topology_resolved_example_still_gets_the_som_support_check(tmp_path):
