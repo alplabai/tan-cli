@@ -40,10 +40,21 @@ Two halves of the same question, and both had a copy-per-command problem:
   checking them against the real cwd is wrong the moment `--project` differs
   from it (its own call site says so, citing tan-cli#236), and this resolver
   answers only the path it READS. It is on the list anyway because it answers
-  the same question; a criterion of "uses `Project.resolved`" would have
-  admitted it by accident and excluded nothing. An earlier revision of this
-  paragraph did the reverse -- it listed `generate_cmd`, the loosest match,
-  and omitted `inspect_cmd`, which does use the seam.
+  the same question. A criterion of "uses `Project.resolved`" would have got
+  this exactly backwards on both ends: it would have EXCLUDED `generate_cmd`,
+  the one resolver that answers the question without the seam, while
+  ADMITTING a dozen things that are not resolvers at all -- measured at this
+  commit, there are 20 `Project.resolved(` call sites across 16 modules
+  (excluding the definition at `tan/envelope.py:222`), mostly command
+  callbacks doing an inline join. Hence the criterion above keys on what a
+  function DOES, not on which helper it happens to call.
+
+  Two earlier revisions of this paragraph were wrong in two different
+  directions -- one listed `generate_cmd`, the loosest match, while omitting
+  `inspect_cmd`, which does use the seam; the next inverted the reason above.
+  Three wrong revisions of one claim in a docstring whose subject is drift is
+  itself the argument for tan-cli#1091: prose does not hold a boundary, a
+  gate does.
 
   The count did NOT go down: six before this change and six after, because
   the sixth is validate's, relocated. Each is pinned to a different oracle's
