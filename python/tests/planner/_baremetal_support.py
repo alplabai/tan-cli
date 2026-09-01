@@ -20,10 +20,13 @@ three fixed: a stale copy reuses the non-SDK stub
 `tests/core/test_flow_d_manifest_fields.py::_bind_stub_sdk_root` leaves bound,
 imports the real `tan.planner` under it, freezes `paths.REPO` there for the
 rest of the process, and every later `bind_sdk_root(<real SDK>)` raises.
-Nothing gates that: `tests/gates/test_shared_helpers_have_one_definition.py`
-scopes its walk to `python/tan/**` and never looks at `tests/`, so "one
-definition" here is a convention this module enforces by being the only place
-that has one.
+That is now gated, by name:
+`tests/gates/test_shared_test_helpers_have_one_definition.py` seeds its
+allow-list with `bind_planner_sdk_root` and fails if a second module-level
+definition of it (in either spelling) appears anywhere under `python/tests/**`
+(tan-cli#1081). Until then nothing did -- the older
+`tests/gates/test_shared_helpers_have_one_definition.py` scopes its walk to
+`python/tan/**` and still never looks at `tests/`.
 
 Nothing in this module may import `tan.planner` (or any submodule of it) at
 module scope: `tan/planner/paths.py` evaluates `REPO = sdk_root()` at ITS OWN
