@@ -58,19 +58,25 @@ AST walk itself, `_module_level_definitions()`, covers every file under
 `python/tan/**` on every run; what is narrow is which of its findings this
 file acts on) and no heuristic that promotes a name into scope.
 
-That narrowness is measured, not assumed. Run over `python/tan/**` -- this
-file's own tree, with this file's own node-shape rules -- re-derived after
-rebasing onto #1090's merge and adding the `resolve_board_path` seed below:
-still 91 names have more than one module-level definition, 232 definitions in
-total.
-A blanket version of this check, asserting one definition for every name the
-walk returns instead of the opt-in `_SHARED_HELPERS` list, is red on the day
-it lands over THIS tree, not just some other one. (PR #1083's sibling gate
-made the same case first, over the DIFFERENT tree `python/tests/**`: 173
-names / 725 definitions at `dev` `8b4e3f43`, 176 names / 700 definitions at
-this tip -- cited here as the sibling gate's own tree and commit, not this
-file's, because both trees drift and a number belongs to the tree and commit
-it was measured on.) A gate that is red the day it lands gets disabled, so
+That narrowness is measured, not assumed -- and pinned to an explicit commit
+rather than "this tip", because a number that decays with the next unrelated
+merge is worse than no number: PR #1094 landed between the previous
+measurement here and this one and moved it just by adding
+`tan/core/artifact_provenance.py`. Run over `python/tan/**` -- this file's
+own tree, with this file's own node-shape rules -- at `e9ce848e` (this fix's
+own rebased parent; the edits on top of it in this same change add no
+top-level name that collides with an existing one, so the count is identical
+measured either side of them): 92 names have more than one module-level
+definition, 235 definitions in total. A blanket version of this check,
+asserting one definition for every name the walk returns instead of the
+opt-in `_SHARED_HELPERS` list, is red on the day it lands over THIS tree, not
+just some other one. (PR #1083's sibling gate made the same case first, over
+the DIFFERENT tree `python/tests/**`: 173 names / 725 definitions at `dev`
+`8b4e3f43`; re-run the same way at `e9ce848e` for this file's own citation
+below, it is 177 names / 703 definitions -- cited here as the sibling gate's
+own tree, not this file's, because both trees drift and a number belongs to
+the tree and commit it was measured on, never to "the tip".) A gate that is
+red the day it lands gets disabled, so
 `_SHARED_HELPERS` stays a hand-written, opt-in dict for the same reason
 #1083's `_SHARED_TEST_HELPERS` is.
 
@@ -170,8 +176,7 @@ _NOT_THE_SAME_HELPER: dict[tuple[str, str], str] = {
         "documented divergence"
     ),
     ("tan/commands/generate_cmd.py", "_resolve_board_path"): (
-        "answers `(board_yaml, workspace_root) -> Path` via pathlib, always "
-        "returning a path that EXISTS-or-not against `workspace_root` -- a "
+        "answers `(board_yaml, workspace_root) -> Path` via pathlib -- a "
         "different question from `board_context.resolve_board_path`'s "
         "`(project, board_yaml) -> (str, str)`, which joins as strings on "
         "purpose so the leading `./` the conformance fixtures pin survives. "
@@ -219,12 +224,23 @@ def _module_level_definitions() -> dict[str, tuple[str, ...]]:
 def test_a_shared_helper_is_defined_exactly_once(helper):
     home, why = _SHARED_HELPERS[helper]
     defs = _module_level_definitions()
-    sites = [
-        (rel, spelling)
-        for spelling in (helper, f"_{helper}")
-        for rel in defs.get(spelling, [])
-        if (rel, spelling) not in _NOT_THE_SAME_HELPER
-    ]
+    # `_NOT_THE_SAME_HELPER` exempts a (file, spelling) PAIR, not a count: it
+    # answers "is this the one known lookalike", not "how many are there". A
+    # naive `(rel, spelling) not in _NOT_THE_SAME_HELPER` filter exempts EVERY
+    # occurrence of a carved-out pair, so a genuine second private definition
+    # landing in the SAME already-exempted file would pass silently -- proven
+    # in review: a second `_resolve_board_path` inside `generate_cmd.py` left
+    # this test green. Each carve-out excuses exactly one definition; a repeat
+    # of that same (file, spelling) pair counts as a real site instead.
+    exempted_once: set[tuple[str, str]] = set()
+    sites: list[tuple[str, str]] = []
+    for spelling in (helper, f"_{helper}"):
+        for rel in defs.get(spelling, []):
+            key = (rel, spelling)
+            if key in _NOT_THE_SAME_HELPER and key not in exempted_once:
+                exempted_once.add(key)
+                continue
+            sites.append((rel, spelling))
 
     assert sites, (
         f"`{helper}` is defined nowhere under python/tan/. It is supposed to "
@@ -248,9 +264,46 @@ def test_a_shared_helper_is_defined_exactly_once(helper):
         f"`{helper}` is defined once, but in {rel} rather than {home}. "
         f"_SHARED_HELPERS names {home} as its home -- move the definition "
         "back or update the entry. A legal home must not itself import from "
-        "`tan/commands/`, the constraint `tan/core/shapes.py` satisfies today "
-        "-- otherwise a command module importing the shared helper can cycle "
-        "back through its own package."
+        "`tan/commands/` -- otherwise a command module importing the shared "
+        "helper can cycle back through its own package -- enforced below by "
+        "test_every_declared_home_avoids_importing_from_tan_commands, not "
+        "just stated here."
+    )
+
+
+def test_every_declared_home_avoids_importing_from_tan_commands():
+    """Enforces the cycle-freedom rule the `assert rel == home` message above
+    only STATES: a legal home must not itself import from `tan/commands/`,
+    because `tan/commands/**` imports `tan/core/**` deliberately, so a home
+    under `tan/commands/` could let a command module importing the shared
+    helper cycle back through its own package. This file's own thesis is
+    "prose does not hold a boundary, a gate does" -- so the rule earns a real
+    check rather than staying a claim in an assertion message nobody re-verifies.
+
+    Checked at the AST level (`ast.Import`/`ast.ImportFrom` anywhere in the
+    module, not just at module level, since an import inside a function still
+    creates the same cycle risk at call time) against every DISTINCT home
+    `_SHARED_HELPERS` currently declares, so a future entry homed under
+    `tan/commands/` reds here before its first use rather than only failing
+    once cyclic imports actually blow up at runtime.
+    """
+    homes = sorted({home for home, _why in _SHARED_HELPERS.values()})
+    violations = []
+    for home in homes:
+        tree = ast.parse((TAN_ROOT.parent / home).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+                "tan.commands"
+            ):
+                violations.append(f"{home}: from {node.module} import ...")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("tan.commands"):
+                        violations.append(f"{home}: import {alias.name}")
+    assert not violations, (
+        "these declared homes import from tan/commands/, so a command module "
+        "importing the shared helper they own can cycle back through its own "
+        "package:\n  " + "\n  ".join(violations)
     )
 
 

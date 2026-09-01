@@ -74,10 +74,11 @@ Two halves of the same question, and both had a copy-per-command problem:
   sibling `tests/gates/test_shared_test_helpers_have_one_definition.py`
   (tan-cli#1083) was already that shape and is what tan-cli#1091 copied.
   NOT tan-cli#1081, which an earlier revision of this paragraph pointed at:
-  #1081's durable half already landed as #1083 and it is held open solely for
-  an outstanding `bound_sdk*` binder audit that touches none of `TAN_ROOT`,
-  `_SHARED_HELPERS`, or the per-entry home assertion. A seventh private
-  `_resolve_board_path` -- or a private redefinition of this module's own --
+  #1081's durable half already landed as #1083; the remainder of #1081's
+  scope (an outstanding `bound_sdk*` binder audit, tracked by PR #1102)
+  touches none of `TAN_ROOT`, `_SHARED_HELPERS`, or the per-entry home
+  assertion. A seventh private `_resolve_board_path` -- or a private
+  redefinition of this module's own --
   now REDS `test_a_shared_helper_is_defined_exactly_once[resolve_board_path]`,
   naming both files; this paragraph recorded the gap while it existed rather
   than claiming it was already closed.
