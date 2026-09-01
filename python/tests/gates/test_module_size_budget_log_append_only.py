@@ -1343,12 +1343,23 @@ def test_the_enforcement_path_itself_rejects_a_theirs_resolution(tmp_path):
         _enforce(repo, "LOG.md", current, "main")
 
     message = str(excinfo.value)
-    assert "MERGE commit" in message and "tan-cli#902" in message, (
+    marker, terminator = "restored them: ", ". This is the tan-cli#902 shape"
+    assert "MERGE commit" in message and marker in message and terminator in message, (
         "the enforcement path must reject this through the merge-loss "
         f"assertion specifically, not some other one -- got: {message}"
     )
-    assert "- tan-cli#427 feature's own reasoned entry" in message, (
-        f"the failure must name the line that was actually lost -- got: {message}"
+    # Read the LISTING's own span, not the whole message -- the same trap the
+    # tan-cli#1080 sibling below was hardened against, live here too until
+    # then. `str(excinfo.value)` carries pytest's rewritten repr of the bare
+    # `not merge_losses` expression, which names the lost entry by itself:
+    # measured (mutant C1), replacing the message's `{merge_losses}`
+    # interpolation with a literal left the pair at `41 passed` while the
+    # production text an author actually reads named nothing at all -- and
+    # naming the destroyed entry is the whole point of this message.
+    listing = message[message.index(marker) + len(marker) : message.index(terminator)]
+    assert "- tan-cli#427 feature's own reasoned entry" in listing, (
+        "the failure's own listing must name the line that was actually "
+        f"lost, not leave it to pytest's repr -- got: {listing!r}"
     )
     # The remedies, pinned as a case -> remedy MAPPING rather than as a bag
     # of strings. Two earlier versions of this were too weak, both measured
@@ -1425,7 +1436,15 @@ def test_the_enforcement_path_itself_rejects_a_dropped_base_entry(tmp_path, base
     two mutants stayed green on the pair (re-derived on this branch, both
     `39 passed`): deleting `_enforce`'s ledger assertion, and stubbing both
     its `ledger_violations` calls to `[]`. Parametrised over both `base_ref`
-    shapes so neither call can be stubbed alone and stay green."""
+    shapes so neither call can be stubbed alone and stay green.
+
+    Scoped exactly: `[None]` pins the fallback CALL SITE, not the fallback's
+    WINDOW SEMANTICS. In `_dropped_base_entry_repo`, `main` and HEAD's own
+    parent are the same commit, so a mutant flipping the else branch to
+    `base="main"` leaves both parametrisations green -- read this as covering
+    "the call happens and its result is asserted on", nothing wider. What
+    distinguishes the two windows is exercised directly by the
+    `ledger_violations` tests above, which is where it belongs."""
     repo = tmp_path / "repo"
     _dropped_base_entry_repo(repo)
     current = (repo / "LOG.md").read_text(encoding="utf-8").splitlines()
