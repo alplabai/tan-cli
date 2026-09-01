@@ -123,7 +123,7 @@ def _bound_sdk_root(environ: Mapping[str, str] | None = None) -> tuple[str, Path
 # -- and the failure belongs to the pin, not to the branch.
 #
 # That is not hypothetical. `.github/workflows/ci.yml`'s `sdk_parity` checkout
-# `ref:` and `parity.yml`'s `PINNED_SDK_TAG` are both `f1b1c9df`, which
+# `ref:` and `parity.yml`'s `PINNED_SDK_TAG` are both `0914da38`, which
 # predates every artefact ADR-0028 publishes on the alp-sdk side. alp-sdk#1470
 # is still OPEN, so there is no post-merge SHA to move the pin to yet, and
 # until there is, twelve tests under `tests/model/` measure a tree that cannot
@@ -263,7 +263,7 @@ needs_sdk_vela_profile = pytest.mark.skipif(
         "vela_memory_mode=None for every Ethos-U part and this test asserts "
         "against metadata the bound tree does not carry. EXPECTED while "
         "ci.yml's sdk_parity `ref:` and parity.yml's PINNED_SDK_TAG sit at "
-        "f1b1c9df; once that pin moves this test RUNS, and a failure here "
+        "0914da38; once that pin moves this test RUNS, and a failure here "
         "then is a regression, not this skip."
     ),
 )
@@ -277,7 +277,7 @@ needs_sdk_npu_op_tables = pytest.mark.skipif(
         "analyze_backend() resolves table=None for every backend and this "
         "test asserts against real committed op vocabularies the bound tree "
         "does not carry. EXPECTED while ci.yml's sdk_parity `ref:` and "
-        "parity.yml's PINNED_SDK_TAG sit at f1b1c9df; once that pin moves "
+        "parity.yml's PINNED_SDK_TAG sit at 0914da38; once that pin moves "
         "this test RUNS, and a failure here then is a regression, not this "
         "skip."
     ),
@@ -294,7 +294,7 @@ needs_sdk_after_the_model_engine_relocation = pytest.mark.skipif(
         "`python -m alp_model._gen_fixture`, which this relocated generator "
         "no longer emits and must not. The CONTAINER BYTES are unaffected and "
         "stay asserted unconditionally next door. EXPECTED while ci.yml's "
-        "sdk_parity `ref:` and parity.yml's PINNED_SDK_TAG sit at f1b1c9df; "
+        "sdk_parity `ref:` and parity.yml's PINNED_SDK_TAG sit at 0914da38; "
         "once that pin moves this test RUNS, and a failure here then is a "
         "regression, not this skip."
     ),
@@ -326,7 +326,7 @@ needs_sdk_model_perf_fixture = pytest.mark.skipif(
         f"point: it predates alp-sdk fe56ff1d ({_SDK_PR}, still open), so "
         "there is no real fixture document for this test to prove tan REFUSES. "
         "EXPECTED while ci.yml's sdk_parity `ref:` and parity.yml's "
-        "PINNED_SDK_TAG sit at f1b1c9df; once that pin moves this test RUNS, "
+        "PINNED_SDK_TAG sit at 0914da38; once that pin moves this test RUNS, "
         "and a failure here then is a regression, not this skip."
     ),
 )

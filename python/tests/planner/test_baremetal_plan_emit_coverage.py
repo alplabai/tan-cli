@@ -237,15 +237,32 @@ def test_a_baremetal_core_carrying_a_stock_token_is_refused_not_built(
         f"bare-metal stock default to fall back to")
 
 
-def test_a_baremetal_core_with_a_real_app_that_merely_shares_no_tokens_is_accepted(
-        base_dir):
-    """The control for the parametrized refusal above: an ordinary `app:`
-    that isn't either stock token still passes -- this arm must not over-fire
-    on every non-empty `app:`, only the two literal tokens."""
+@pytest.mark.parametrize(
+    "app",
+    [
+        "./vendor/alp-stock-shim-derived",
+        "./vendor/derived-alp-image-edge",
+    ],
+)
+def test_a_baremetal_core_whose_app_merely_contains_a_stock_token_is_accepted(
+        base_dir, app):
+    """Pins EXACT-match semantics on the refusal above, replacing a control
+    that duplicated `test_a_baremetal_core_with_an_app_is_accepted`'s input
+    (`app="./src"`) byte-for-byte and so discriminated nothing the suite
+    did not already cover (tan-cli#1103 review round 2).
+
+    A real customer shape: a vendored or forked copy of the stock shim,
+    named after it, is not uncommon -- `./vendor/alp-stock-shim-derived`
+    CONTAINS `STOCK_SHIM_APP` as a substring but is not equal to it, and
+    must build, not refuse. The check above is `slice_.app in (STOCK_SHIM_APP,
+    STOCK_IMAGE_APP)` -- a two-element membership test -- not `any(token in
+    slice_.app for token in (...))`, a substring test; mutating the former
+    into the latter must turn this red, which is what proves this test is
+    pinning the right one."""
     from tan.planner.validate import _enforce_loader_rules
 
     assert _enforce_loader_rules(
-        slice_of("baremetal", app="./src"), base_dir / "metadata") is None
+        slice_of("baremetal", app=app), base_dir / "metadata") is None
 
 
 @pytest.mark.parametrize(
