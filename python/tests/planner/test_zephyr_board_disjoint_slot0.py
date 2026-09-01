@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import pytest
 
-from tests.planner._bound_sdk_fixture import SDK, _bound_sdk  # noqa: F401 -- `_bound_sdk` imported for its side effect (fixture registration)
+# `_bound_sdk` is a pytest fixture, imported for its side effect -- the
+# same idiom `_baremetal_support`'s consumers use for `bound_sdk_root`.
+from tests.planner._bound_sdk_fixture import SDK, _bound_sdk  # noqa: F401
 
 pytestmark = pytest.mark.skipif(
     SDK is None,
