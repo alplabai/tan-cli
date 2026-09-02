@@ -3,6 +3,6 @@
   "module": "tan/core/metadata_schema.py",
   "kind": "budget",
   "lines": null,
-  "long_functions": 1,
-  "worst_function": 52
+  "long_functions": 2,
+  "worst_function": 61
 }

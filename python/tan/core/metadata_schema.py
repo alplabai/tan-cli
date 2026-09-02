@@ -201,8 +201,27 @@ def validate_document(doc: object, schema_path: Path, source: Path | str) -> lis
     caller of this function has a real file on disk to name; the one caller
     that does not (`new_som_cmd`'s in-memory self-check) calls `schema_errors`
     directly instead, precisely because it has no `source` to give.
+
+    tan-cli#1116: the ABSENT check above is not a bare `is_file()` -- that
+    used to be the whole check, and `Path.is_file()` swallows only
+    `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` (`pathlib`'s `_IGNORED_ERRNOS`), NOT
+    `EACCES`. A schema file behind a permission-denied ancestor directory
+    therefore raised a raw `PermissionError` straight out of this function's
+    own "never raises" contract (measured) -- the exact `document_guards.
+    read_catalog_document` trap, on the ABSENT half's `is_file()` instead of
+    the EXISTS half's read. Such a path is exactly the second bullet's
+    "cannot be read" case, not the first bullet's "not there": treated as
+    present-but-unreadable so it earns the synthetic message, not silence.
     """
-    if not Path(schema_path).is_file():
+    try:
+        exists = Path(schema_path).is_file()
+    except OSError:
+        # Cannot even tell whether it exists (its own directory refused a
+        # stat) -- that is "cannot be read", not "absent"; fall through to
+        # the real read below, whose broad `except OSError` produces the
+        # synthetic message this same failure deserves.
+        exists = True
+    if not exists:
         return []
     try:
         return schema_errors(doc, schema_path, source=source)

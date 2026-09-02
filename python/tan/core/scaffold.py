@@ -2022,8 +2022,22 @@ def read_example_tree(source_dir: Path) -> list[PlannedFile]:
     `ExampleReadError` instead of being copied corrupt. All shipped examples are
     text today -- and with build output pruned, that is true of a built-in-place
     checkout too.
+
+    tan-cli#1116: the `is_dir()` pre-flight is itself guarded. `Path.is_dir()`
+    swallows only `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` (`pathlib`'s
+    `_IGNORED_ERRNOS`), NOT `EACCES` -- an example whose PARENT directory the
+    caller cannot traverse raised a raw `PermissionError` straight out of this
+    function (measured), never reaching the `except (OSError,
+    UnicodeDecodeError)` two lines below because the raise happened before
+    that `try` even opened. `not_found=False`, not `True`: a directory this
+    cannot even stat is not the user's typo, it is the same "unreadable"
+    runtime failure the class's own docstring already names for that arm.
     """
-    if not source_dir.is_dir():
+    try:
+        is_source_dir = source_dir.is_dir()
+    except OSError as err:
+        raise ExampleReadError(str(err), not_found=False) from err
+    if not is_source_dir:
         raise ExampleReadError(f"'{source_dir}' is not a directory.", not_found=True)
     files: list[PlannedFile] = []
     try:
