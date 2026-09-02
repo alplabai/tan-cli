@@ -169,9 +169,10 @@ class BackendReport:
     # own sentence back.
     #
     # The three latency fields and `perf_ref` are set at `basis: "bench"` --
-    # a compile reports no wall-clock, and only a bench point cites a raw
-    # capture (`capture.reference`, e.g. `alp-sdk-internal:bench/captures/
-    # ...`) -- OR, informationally, on a `basis: "compiled"` report that names
+    # a compile reports no wall-clock, and only a bench point names the bench
+    # it was measured on (`capture.bench_id`, e.g. `"e1m-aen-evk-01"` -- a rig
+    # identifier, not a capture artefact's own citation) -- OR, informationally,
+    # on a `basis: "compiled"` report that names
     # a disagreeing bench point in its notes
     # (`tan.model.perf_apply.apply_perf_point`'s Decision 1: the customer's
     # own compile still wins on coverage/arena/SRAM, but Alp Lab's own

@@ -22,6 +22,7 @@ import pytest
 
 from tan.model import analyze as analyze_mod
 from tan.model import check as check_mod
+from tan.model import perf as perf_mod
 from tan.model import perf_apply as perf_apply_mod
 from tan.model.adapters import Blob
 from tan.model.adapters.ethos_u import VelaFootprintRefused, _refuse_zero_sram_footprint
@@ -971,6 +972,23 @@ def _check(meta: Path, *, exact: bool = False, hw_rev: str | None = None) -> Bac
                                  metadata_root=meta, exact=exact, hw_rev=hw_rev)[0]
 
 
+def test_a_matched_point_is_found_at_a_yaml_suffixed_filename_too(tmp_path):
+    """`tan.model.perf`'s `_PERF_POINT_GLOBS` accepts `.json` on the
+    production discovery path -- a documented asymmetry, since alp-sdk never
+    actually publishes `.json` (see that module's own comment on the
+    constant) -- which means most of THIS file's own tier-2 suite, defaulting
+    to `_write_perf_point`'s `.json` filename, exercises the `.json` branch
+    almost exclusively. This is the one case in this file that instead
+    proves the REAL `.yaml` production path end to end, through
+    `check_model_backends` rather than `tan.model.perf` in isolation
+    (`tests/model/test_perf.py::test_a_yaml_suffixed_point_is_discovered_
+    not_just_a_json_one` already proves it at the reader level alone)."""
+    _u55_tree(tmp_path)
+    _write_perf_point(tmp_path, filename="aaaaaaaaaaaaaaaa.yaml")
+    rep = _check(tmp_path)
+    assert rep.basis == "bench"
+
+
 def test_a_matched_perf_point_reports_bench_with_the_measured_figures(tmp_path):
     """The whole commercial premise: no toolchain, no silicon, an exact answer
     for SRAM/arena/latency.
@@ -1023,12 +1041,12 @@ def test_a_point_for_a_backend_with_no_memory_profile_says_nothing_about_one(tmp
     _write_soc(tmp_path, "fake:soc:multi", [{"type": "drp-ai3", "subtype": "drp",
                                               "mac_per_cycle": 1}])
     _write_perf_point(tmp_path, backend="drpai", accel_config="",
-                      toolchain="translator", version="1.12",
-                      filename="tiny-int8-aaaa@translator-1.12+r2+a55_cluster+44136fa355b3.json")
+                      toolchain="drp-ai_tvm", version="1.12",
+                      filename="tiny-int8-aaaa@drp-ai_tvm-1.12+r2+a55_cluster+44136fa355b3.json")
     rep = check_model_backends(backends=["drpai"], sku="E1M-FAKE", source=_FIXTURE,
                                 metadata_root=tmp_path, exact=False)[0]
     assert rep.basis == "bench"
-    assert "with translator 1.12 --" in rep.notes[0]
+    assert "with drp-ai_tvm 1.12 --" in rep.notes[0]
     assert "()" not in rep.notes[0]
 
 
@@ -1051,8 +1069,8 @@ def test_a_drpai_points_stray_ethos_u_profile_fields_are_never_printed(tmp_path)
     _write_soc(tmp_path, "fake:soc:multi", [{"type": "drp-ai3", "subtype": "drp",
                                               "mac_per_cycle": 1}])
     path = _write_perf_point(tmp_path, backend="drpai", accel_config="",
-                             toolchain="translator", version="1.12",
-                             filename="tiny-int8-aaaa@translator-1.12+r2+m55_hp+cccccccccccc.json")
+                             toolchain="drp-ai_tvm", version="1.12",
+                             filename="tiny-int8-aaaa@drp-ai_tvm-1.12+r2+m55_hp+cccccccccccc.json")
     doc = json.loads(path.read_text(encoding="utf-8"))
     doc["vela"] = {"system_config": "Ethos_U85_SYS_DRAM_Mid",
                     "memory_mode": "Dedicated_Sram_384KB"}
@@ -1062,7 +1080,7 @@ def test_a_drpai_points_stray_ethos_u_profile_fields_are_never_printed(tmp_path)
     assert rep.basis == "bench"
     assert "Ethos_U85_SYS_DRAM_Mid" not in rep.notes[0]
     assert "Dedicated_Sram_384KB" not in rep.notes[0]
-    assert "with translator 1.12 --" in rep.notes[0]      # identity still ends cleanly
+    assert "with drp-ai_tvm 1.12 --" in rep.notes[0]      # identity still ends cleanly
     assert "()" not in rep.notes[0]
 
 
@@ -1081,34 +1099,43 @@ def test_a_foreign_multiline_capture_citation_cannot_break_the_one_line_note(tmp
     assert "\n" not in rep.notes[0] and "\t" not in rep.notes[0]
 
 
-def test_a_lone_bench_point_carries_the_static_screens_own_coverage_and_ops_unchanged(tmp_path):
-    """RETIRED, tan-cli#1115: `test_a_partial_bench_point_keeps_the_static_
-    per_op_verdicts` asserted `npu_coverage == "partial"`/`npu_placement_
-    pct_real == 50.0` off a `measured: {npu_ops: 1, cpu_ops: 1}` fictional
-    field pair that alp-sdk's real `model-perf-v1` schema has never carried
-    (see `tan.model.perf`'s module docstring, "DEAD FIELDS") -- there is no
-    real document shape left that could produce that assertion, so the test
-    is retired rather than migrated.
+def test_a_lone_bench_point_withholds_coverage_rather_than_borrowing_the_static_screens(
+        tmp_path):
+    """RETIRED PREMISE, tan-cli#1115 PR review BLOCKER 1: an earlier version of
+    this test (`..._carries_the_static_screens_own_coverage_and_ops_
+    unchanged`, itself already a tan-cli#1115 replacement for `test_a_
+    partial_bench_point_keeps_the_static_per_op_verdicts`) asserted that a
+    LONE bench point's rebased report carries `npu_coverage`/`ops`/
+    `uncosted_cpu_op_count`/`npu_placement_pct_real` UNCHANGED from the
+    static screen underneath. That is wrong: `docs/model-check-static-
+    screen.md`'s own vocabulary calls the static screen's `partial`/
+    `full-eligible` explicitly "Not a placement claim", so carrying one
+    forward under `basis: "bench", confidence: "certain"` launders a
+    name-level estimate into something that reads as measured -- the exact
+    failure `compute_on_npu_pct_max` was ALREADY being forced to `None` to
+    avoid, just not (yet) applied to `npu_coverage` too.
 
-    What replaces it: a LONE bench point (no `--exact` run alongside it) has
-    no placement data of its own to contribute at all, so `npu_coverage`/
-    `ops`/`uncosted_cpu_op_count`/`npu_placement_pct_real` on the rebased
-    report are exactly the STATIC SCREEN's own verdicts, untouched --
-    `tan.model.perf_apply._perf_point_report` carries them from @report
-    verbatim rather than inventing or erasing them. `arena_bytes`/
-    `req_sram_kib` still move to the point's own measured figures."""
+    What actually happens: a LONE bench point (no `--exact` run corroborating
+    it) has no placement data of its own -- alp-sdk's real schema carries
+    none, ever (`tan.model.perf`'s "DEAD FIELDS") -- so the coverage word is
+    WITHHELD to `"undetermined"`, `ops` to `[]`, `uncosted_cpu_op_count` to
+    `0`, `npu_placement_pct_real` to `None`, regardless of what the static
+    screen said underneath. `arena_bytes`/`req_sram_kib` still move to the
+    point's own measured figures, and `confidence` stays `"certain"` for
+    those -- the figures ARE certain; the coverage word is not."""
     pytest.importorskip("tflite", reason=_MODEL_IO_SKIP_REASON)
     _u55_tree(tmp_path)
     screened = _check(tmp_path)
+    assert screened.npu_coverage in ("full-eligible", "partial")   # the estimate this must NOT leak
     _write_perf_point(tmp_path, perf={"arena_bytes": 64, "req_sram_kib": 2})
     rep = _check(tmp_path)
     assert rep.basis == "bench"
-    assert rep.npu_coverage == screened.npu_coverage
-    assert rep.npu_placement_pct_real == screened.npu_placement_pct_real
-    assert rep.uncosted_cpu_op_count == screened.uncosted_cpu_op_count
-    assert rep.ops == screened.ops
-    assert rep.ops and rep.ops[0].op == "FULLY_CONNECTED"
-    assert (rep.arena_bytes, rep.req_sram_kib) == (64, 2)      # the point's own figures
+    assert rep.confidence == "certain"
+    assert rep.npu_coverage == "undetermined"        # withheld, not the static screen's estimate
+    assert rep.npu_placement_pct_real is None
+    assert rep.uncosted_cpu_op_count == 0
+    assert rep.ops == []
+    assert (rep.arena_bytes, rep.req_sram_kib) == (64, 2)      # the point's own figures -- still certain
 
 
 # ---------------------------------------------------------------------------
@@ -1631,6 +1658,65 @@ def test_a_backend_with_no_named_toolchain_is_never_asked_for_a_point(tmp_path):
     assert set(perf_apply_mod._PERF_TOOLCHAIN) == {"ethos_u", "drpai", "deepx_dxm1"}
 
 
+#: The REAL `target.compiler_version` strings alp-sdk's three compile
+#: adapters actually emit -- verbatim (version-substituted) from their own
+#: format templates, measured directly against a local alp-sdk checkout for
+#: tan-cli#1115 PR review BLOCKER 4:
+#:   `scripts/alp_model/adapters/ethos_u.py:21-24` `_vela_version()`
+#:     `f"vela {version('ethos-u-vela')}"`             -> "vela 4.1.0"
+#:   `scripts/alp_model/adapters/drpai.py:96-110` `_compiler_version()`
+#:     `f"drp-ai_tvm {m.group(0)}"`                     -> "drp-ai_tvm 3.0.1"
+#:   `scripts/alp_model/adapters/deepx.py:38-45` `_dxcom_version()`
+#:     `f"DX-COM {m.group(1)}"`                         -> "DX-COM 2.3.0"
+_REAL_COMPILER_VERSIONS = {
+    "ethos_u": "vela 4.1.0",
+    "drpai": "drp-ai_tvm 3.0.1",
+    "deepx_dxm1": "DX-COM 2.3.0",
+}
+
+
+def test_perf_toolchain_matches_the_real_producer_strings(tmp_path):
+    """tan-cli#1115 PR review BLOCKER 4 + MAJOR: `_PERF_TOOLCHAIN`'s values
+    used to be `translator`/`dxcom` -- the op-support-TABLE filename
+    vocabulary (`npu_ops/drpai/onnx-i8@translator-1.12.json`) and an
+    unverified guess, respectively, neither of which is the string
+    `target.compiler_version` -- and therefore `find_perf_points`' own
+    `toolchain` query -- actually carries for `drpai`/`deepx_dxm1`. A
+    published point for either backend would have been found by path/SKU/
+    hw_rev/model matching and then silently discarded on the toolchain-name
+    check alone: the issue's own failure mode (a reader that passes
+    structurally without understanding the real document) one level down.
+
+    Pinned against the CITED, real literal format strings above rather than
+    re-invented ones -- `test_check.py`'s own `_write_perf_point` cannot
+    stand in for this proof, because it fabricates `f"{toolchain} {version}"`
+    from `perf_apply_mod._PERF_TOOLCHAIN`'s own values and would therefore
+    agree with any (even a wrong) dict by construction."""
+    for backend, real_compiler_version in _REAL_COMPILER_VERSIONS.items():
+        configured = perf_apply_mod._PERF_TOOLCHAIN[backend]
+        assert perf_mod._toolchain_name(real_compiler_version).casefold() == configured.casefold(), (
+            f"{backend}: _PERF_TOOLCHAIN[{backend!r}] = {configured!r} does not "
+            f"match the real producer string {real_compiler_version!r}"
+        )
+    # The regression this closes, made concrete: the OLD values matched
+    # NEITHER real drpai/deepx_dxm1 string.
+    assert perf_mod._toolchain_name(_REAL_COMPILER_VERSIONS["drpai"]) != "translator"
+    assert perf_mod._toolchain_name(_REAL_COMPILER_VERSIONS["deepx_dxm1"]).casefold() != "dxcom"
+
+    # End-to-end proof through the production path: a real drpai point,
+    # keyed exactly the way `drpai.py::_compiler_version()` would write it,
+    # is now FOUND -- it was not, before this fix.
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:multi", default_hw_rev="r2")
+    _write_soc(tmp_path, "fake:soc:multi", [{"type": "drp-ai3", "subtype": "drp",
+                                              "mac_per_cycle": 1}])
+    _write_perf_point(tmp_path, backend="drpai", accel_config="",
+                      toolchain="drp-ai_tvm", version="3.0.1",
+                      filename="tiny-int8-aaaa@drp-ai_tvm-3.0.1+r2+a55_cluster+deadbeefcafe.json")
+    rep = check_model_backends(backends=["drpai"], sku="E1M-FAKE", source=_FIXTURE,
+                                metadata_root=tmp_path, exact=False)[0]
+    assert rep.basis == "bench"
+
+
 # ---------------------------------------------------------------------------
 # DECISION 1: a perf point vs the customer's OWN `--exact` compile.
 # ---------------------------------------------------------------------------
@@ -1747,9 +1833,20 @@ def test_agreeing_arena_and_sram_win_the_point_even_when_placement_differs(tmp_p
 
 
 def test_a_figure_only_one_side_reported_is_never_a_disagreement(tmp_path, monkeypatch):
-    # Absence is not evidence here any more than anywhere else in this tier:
-    # a point that omitted `req_sram_kib` does not disagree with a compile
-    # that reported one.
+    """Absence is not evidence here any more than anywhere else in this tier:
+    a point that omitted `req_sram_kib` does not disagree with a compile that
+    reported one -- the agreement path taken, not the disagreement one.
+
+    CORRECTED, tan-cli#1115 PR review BLOCKER 3: this test used to assert
+    `rep.req_sram_kib is None` here -- the point supplied none, and the old
+    unconditional overwrite in `_perf_point_report` BLANKED the real
+    compile's own measured `307` with it. That is the exact bug the blocker
+    reproduced (a matched point erasing a real `--exact` compile's own
+    figures) reproduced live in-suite rather than only in the review's own
+    repro. `_merge_figure`'s per-field, most-specific-wins rule means the
+    compile's own real `307` now SURVIVES a point that said nothing about
+    SRAM -- "nothing was invented" now also means "and nothing real was
+    erased either"."""
     _u55_tree(tmp_path)
     _write_perf_point(tmp_path, perf={"arena_bytes": 32})
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
@@ -1757,7 +1854,36 @@ def test_a_figure_only_one_side_reported_is_never_a_disagreement(tmp_path, monke
                         _fake_blob_compile(arena=32, sram=307, npu=1, cpu=0))
     rep = _check(tmp_path, exact=True)
     assert rep.basis == "bench"                     # agreement, not disagreement
-    assert rep.req_sram_kib is None                 # ... and nothing was invented
+    assert rep.req_sram_kib == 307                  # the compile's own real figure SURVIVES
+
+
+def test_a_latency_only_point_does_not_blank_a_real_compiles_arena_and_sram(tmp_path, monkeypatch):
+    """tan-cli#1115 PR review BLOCKER 3, reproduced at the exact figures the
+    review measured: a matched point recording ONLY `latency_ms` (no
+    `arena_bytes`/`req_sram_kib` at all -- schema-legal at the reader level,
+    see `tan.model.perf::test_a_missing_or_malformed_perf_block_still_reads_
+    the_identity`) used to erase a real `--exact` compile's own
+    `arenaBytes=123456`/`reqSramKib=121` to `None`/`None` under `basis:
+    "bench", confidence: "certain"` -- the customer's own measured numbers
+    replaced by "not measured", directly contradicting `apply_perf_point`'s
+    own promise that an under-informative point "cannot degrade a report by
+    even a note". `_merge_figure` fixes this: a figure the point does not
+    carry falls back to whatever the pre-rebase report already had, so the
+    compile's real arena/SRAM survive, and the point's own latency (which the
+    compile has none of) is the only thing that actually moves."""
+    _u55_tree(tmp_path)
+    _write_perf_point(tmp_path, perf={
+        "latency_ms": {"mean": 0.7, "p50": 0.7, "p95": 0.9, "runs": 50}})
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile",
+                        _fake_blob_compile(arena=123456, sram=121, npu=1, cpu=0))
+    rep = _check(tmp_path, exact=True)
+    assert rep.basis == "bench"                      # agreement: the point has no arena/SRAM to disagree with
+    assert rep.confidence == "certain"
+    assert (rep.arena_bytes, rep.req_sram_kib) == (123456, 121)   # the compile's own figures SURVIVE
+    assert rep.latency_ms_mean == 0.7                              # the point's own, only new figure
+    assert rep.latency_ms_p95 == 0.9
+    assert rep.latency_runs == 50
 
 
 def test_a_degraded_exact_run_still_gets_the_bench_point(tmp_path, monkeypatch):
@@ -1796,8 +1922,8 @@ def test_a_license_gated_note_survives_a_bench_match_without_its_false_tail(tmp_
     onnx_source.write_bytes(b"not-a-real-onnx-file")
     sha = hashlib.sha256(onnx_source.read_bytes()).hexdigest()
     _write_perf_point(tmp_path, backend="deepx_dxm1", accel_config="",
-                      toolchain="dxcom", version="2.3.0", sha256=sha,
-                      filename="model-aaaa@dxcom-2.3.0+r2+m55_hp+eeeeeeeeeeee.json")
+                      toolchain="DX-COM", version="2.3.0", sha256=sha,
+                      filename="model-aaaa@DX-COM-2.3.0+r2+m55_hp+eeeeeeeeeeee.json")
     rep = check_model_backends(backends=["deepx_dxm1"], sku="E1M-FAKE", source=onnx_source,
                                metadata_root=tmp_path, exact=True)[0]
     assert rep.basis == "bench"

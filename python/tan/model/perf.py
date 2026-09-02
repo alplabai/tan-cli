@@ -240,7 +240,9 @@ class PerfPoint:
     model_format: str              # model.format -- "tflite" | "onnx"
     capture_date: str              # capture.date
     capture_operator: str          # capture.operator
-    capture_bench_id: str          # capture.bench_id -- the raw capture's citation
+    capture_bench_id: str          # capture.bench_id -- WHICH bench/rig captured this,
+                                    # e.g. "e1m-aen-evk-01" -- a RIG identifier,
+                                    # never a capture artefact's own citation
     # The MEMORY PROFILE the figures describe. `None` for a backend that has
     # none (only `ethos_u` points ever carry a `vela:` block at all), never
     # for the reason vela itself matters: invoked flagless, `ethos-u-vela`
@@ -264,17 +266,42 @@ class PerfPoint:
 
 def _toolchain_name(compiler_version: str) -> str:
     """The leading whitespace-delimited token of @compiler_version -- `"vela"`
-    out of `"vela 4.1.0"`, or the whole string when it carries no space (e.g.
-    `"passthrough"`, the schema's own example for a backend with no real
-    compile step).
+    out of `"vela 4.1.0"`, `"drp-ai_tvm"` out of `"drp-ai_tvm 3.0.1"`,
+    `"DX-COM"` out of `"DX-COM 2.3.0"` (alp-sdk `scripts/alp_model/adapters/
+    ethos_u.py::_vela_version`, `drpai.py::_compiler_version`,
+    `deepx.py::_dxcom_version` -- the exact producers of this field, measured
+    tan-cli#1115 PR review), or the whole string when it carries no space
+    (e.g. `"passthrough"`, the schema's own example for a backend with no
+    real compile step; also each adapter's own OWN degraded fallback when a
+    version could not be probed -- `"vela"`, `"drp-ai_tvm"` unchanged, but
+    `deepx.py::_dxcom_version` falls back to the differently-spelled bare
+    `"dxcom"` (no hyphen) rather than `"DX-COM"` with one, which this
+    function -- a plain leading-token split -- cannot reconcile with the
+    normal, versioned form. That fallback is intentionally not chased: a real
+    bench capture is expected to run against a working, version-probable
+    toolchain install, and `deepx_dxm1`'s failure spelling differs by more
+    than case (`.split(None, 1)`, not `.casefold()`, is what would be needed
+    to normalise whitespace here, and neither operation makes `"dxcom"` and
+    `"DX-COM"` the same token).
+
+    `.split(None, 1)`, not `.split(" ", 1)`: a literal single-space split
+    treats a tab or a run of spaces between the name and the version as part
+    of the name, silently refusing a real document over incidental
+    whitespace; `None` splits on ANY whitespace run, matching `str.strip()`'s
+    own notion of a separator.
 
     `compiler_version` is the ONE wire field; there is no separate stored
     toolchain-name attribute to drift from it. Used only to narrow
     `find_perf_points`' own `toolchain` query field (a bare name a caller
     already knows, e.g. `tan.model.perf_apply._PERF_TOOLCHAIN`'s values)
     against a point actually captured by that tool, without inventing a
-    second identity field the schema doesn't have."""
-    return compiler_version.split(" ", 1)[0]
+    second identity field the schema doesn't have. Compared case-foldedly by
+    the caller (`find_perf_points`, below) -- alp-sdk's own three real
+    producers do not agree on case (`vela`/`drp-ai_tvm` lowercase, `DX-COM`
+    upper) and nothing about that spelling is part of a measurement's
+    identity, the same reasoning `model.src_sha`'s own hex-case tolerance
+    already applies elsewhere in this module."""
+    return compiler_version.split(None, 1)[0]
 
 
 def coverage_from_placement(npu_ops: int | None, cpu_ops: int | None) -> str | None:
@@ -293,10 +320,13 @@ def coverage_from_placement(npu_ops: int | None, cpu_ops: int | None) -> str | N
     (`blob.npu_op_count`/`cpu_op_count`). It is deliberately NOT called from
     `tan.model.perf_apply` any more (tan-cli#1115): alp-sdk's real
     `model-perf-v1` schema carries no per-operator placement counts on a bench
-    point at all (see `tan.model.perf`'s module docstring, "DEAD FIELDS"), so
-    there is no bench-side npu_ops/cpu_ops pair to feed this with. A matched
-    bench point instead inherits whatever `npu_coverage` the report already
-    had -- see `tan.model.perf_apply.apply_perf_point`."""
+    point at all (see this module's own docstring, "DEAD FIELDS"), so there is
+    no bench-side npu_ops/cpu_ops pair to feed this with. A matched bench
+    point WITHHOLDS `npu_coverage` to `"undetermined"` unless the report it is
+    rebasing already carries a REAL placement from a prior `--exact` compile
+    (`basis == "compiled"`) -- it never inherits a static screen's name-level
+    estimate as if it were a measurement -- see
+    `tan.model.perf_apply.apply_perf_point`/`_perf_point_report`."""
     if npu_ops is None or cpu_ops is None:
         return None
     if npu_ops + cpu_ops == 0:
@@ -324,11 +354,23 @@ def has_perf_points(metadata_root: Path) -> bool:
 
 
 #: `.yaml` is what alp-sdk actually publishes; `.json` is additionally
-#: discovered because tan's own test suite writes JSON synthetic points.
-#: `.yml` is deliberately NOT globbed -- alp-sdk's own `_collect_model_perf_
-#: files` rejects it too ("extension `.yml` is not `.yaml`"), so a point
-#: spelled that way is invisible on the publishing side already; matching it
-#: here would let tan accept a shape alp-sdk's own gate would reject.
+#: discovered because tan's own test suite writes JSON synthetic points
+#: (`tests/model/test_check.py::_write_perf_point`'s own default, and most of
+#: `tests/model/test_perf.py`) -- an ASYMMETRIC exception to the `.yml`
+#: reasoning right below, named honestly rather than silently: `.yml` is
+#: excluded because alp-sdk's own `_collect_model_perf_files` rejects it too
+#: ("extension `.yml` is not `.yaml`"), so a point spelled that way is
+#: invisible on the publishing side already and matching it here would let
+#: tan accept a shape alp-sdk's own gate would reject -- but NOTHING alp-sdk
+#: publishes is ever `.json` either, so `.json` support exists purely to let
+#: tan's OWN synthetic fixtures skip a `yaml.safe_dump` round-trip, not
+#: because a real document could be shaped that way. The consequence is real
+#: and acknowledged, not hidden: most of this file's own test coverage
+#: exercises the `.json` branch, and `test_a_yaml_suffixed_point_is_
+#: discovered_not_just_a_json_one` (this module's own suite) plus
+#: `tests/model/test_check.py::test_a_matched_point_is_found_at_a_yaml_
+#: suffixed_filename_too` are what actually prove the `.yaml` branch this
+#: reader depends on in production.
 _PERF_POINT_GLOBS = ("*.yaml", "*.json")
 
 
@@ -424,13 +466,13 @@ def read_perf_point(path: Path) -> PerfPoint | None:
     """
     import yaml  # noqa: PLC0415 (tan-cli#810: single-use, kept off `tan --version`)
 
-    # `ValueError` is required alongside `yaml.YAMLError`, not redundant with
-    # it: `path.read_text(encoding="utf-8")` raises `UnicodeDecodeError` (a
-    # `ValueError` subclass) on non-UTF-8 bytes, BEFORE the parser ever runs,
-    # and `yaml.YAMLError` does not cover it.
     if _FIXTURE_MARKER in path.parent.name or _FIXTURE_MARKER in path.name:
         return None
     try:
+        # `ValueError` is required alongside `yaml.YAMLError`, not redundant
+        # with it: `path.read_text(encoding="utf-8")` raises
+        # `UnicodeDecodeError` (a `ValueError` subclass) on non-UTF-8 bytes,
+        # BEFORE the parser ever runs, and `yaml.YAMLError` does not cover it.
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, yaml.YAMLError):
         return None
@@ -536,11 +578,15 @@ def find_perf_points(*, sku: str, backend: str, accel_config: str,
     because a truncated or prefix digest is the near-miss that would let two
     models share one measurement.
 
-    @toolchain is the toolchain NAME (`vela`, `dxcom`, `translator`), compared
-    against the LEADING token of the point's own `compiler_version` (there is
-    no separate name field on the wire -- see `_toolchain_name`) -- it comes
-    from the caller rather than being derived from @backend, so this function
-    never invents one for a backend nobody has benched.
+    @toolchain is the toolchain NAME (`vela`, `drp-ai_tvm`, `DX-COM` --
+    alp-sdk's own real producer strings, tan-cli#1115 PR review; NOT
+    `dxcom`/`translator`, an earlier, unverified guess that matched nothing a
+    real document could ever carry), compared CASE-FOLDEDLY against the
+    LEADING token of the point's own `compiler_version` (there is no separate
+    name field on the wire -- see `_toolchain_name`, whose own docstring
+    explains why case-folding and not the whole story). It comes from the
+    caller rather than being derived from @backend, so this function never
+    invents one for a backend nobody has benched.
 
     @hw_rev is required-but-nullable and `None` matches NOTHING: see above.
     @core narrows only when given. @compiler_version, when given, narrows on
@@ -570,7 +616,7 @@ def find_perf_points(*, sku: str, backend: str, accel_config: str,
         and point.backend == backend
         and point.accel_config == accel_config
         and point.model_src_sha.lower() == wanted
-        and _toolchain_name(point.compiler_version) == toolchain
+        and _toolchain_name(point.compiler_version).casefold() == toolchain.casefold()
         and (core is None or point.core == core)
         and (compiler_version is None or point.compiler_version == compiler_version)
     ]
