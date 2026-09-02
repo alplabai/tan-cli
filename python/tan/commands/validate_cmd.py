@@ -1032,22 +1032,11 @@ def _sarif_document(
     caller-supplied `--project` symlink loop; see `tan.core.uri_reference`'s
     module docstring for that account and how this version avoids both.
 
-    `sarif_base` is a PRECOMPUTED value -- `validate()`'s own
-    `cwd_base_uri_or_none()` call, made once before any guard in that
-    function's body can fire -- never this function's own filesystem call.
-    Review round 2 found the first version called [`cwd_base_uri`] directly
-    from here, which reaches the process's own working directory
-    (`Path.cwd()`) and can raise `FileNotFoundError` if that directory has
-    been removed; `_sarif_document` is reached from `validate()`'s own
-    `except Exception as err:` handler on the failure path, so that raise
-    DOUBLE-FAULTED inside the handler that exists specifically to keep this
-    command's output an envelope rather than a bare traceback -- the exact
-    class of crash tan-cli#1117 was filed to fix, reintroduced through a
-    filesystem call that happens not to be caller-supplied rather than one
-    that is. `sarif_base is None` (the CWD was unavailable, or absent by
-    construction for an absolute `board_path`, which never sets `base_
-    needed` below regardless of `sarif_base`) reports the SAME thing `dev`
-    gave before this issue: a relative `uri` with no declared base."""
+    `sarif_base` is PRECOMPUTED -- see `cwd_base_uri_or_none`'s own
+    docstring for why this function never calls it (or [`cwd_base_uri`])
+    itself. `None` (CWD unavailable, or an absolute `board_path`, which never
+    sets `base_needed` below regardless) reports the same thing `dev` gave
+    before tan-cli#1117: a relative `uri` with no declared base."""
     rules: dict[str, dict[str, str]] = {}
     results = []
     base_needed = False
@@ -1143,11 +1132,12 @@ def _emit(
     command_line: str = "",
     sdk: SdkInfo | None = None,
     findings: tuple[_Finding, ...] | None = None,
-    # tan-cli#1117 review round 2: PRECOMPUTED by `validate()`'s own
-    # `cwd_base_uri_or_none()` call, made once before any guard in that
-    # function's body can fire -- `_emit`/`_sarif_document` never touch the
-    # filesystem for this themselves. See `_sarif_document`'s own docstring.
-    sarif_base: str | None = None,
+    # tan-cli#1117 review round 3: NO DEFAULT, deliberately -- see
+    # `cwd_base_uri_or_none`'s own docstring for why this is precomputed
+    # rather than read here. A dropped `sarif_base=` kwarg at any of the
+    # three call sites below is a `TypeError` at the call, not a silently
+    # base-less document.
+    sarif_base: str | None,
 ) -> None:
     # tan-cli#478 review: `issues` may now carry the SDK-resolution pair
     # (`sdk.project-pin-unresolved`, `sdk.global-default-foreign-project`)
@@ -1355,15 +1345,8 @@ def validate(
     """
     root, board_path = _resolve_board_path(project, board_yaml)
 
-    # tan-cli#1117 review round 2: computed ONCE, here, before any guard
-    # below can fire -- `cwd_base_uri_or_none()` is already guarded against
-    # its own one raise (the process's CWD removed), so this call itself
-    # cannot raise either. Every `_emit(...)` call below threads this same
-    # value through to `_sarif_document`, so nothing downstream of this line
-    # touches the filesystem for the SARIF base again, on any exit path
-    # including the `except Exception as err:` handler at the bottom of this
-    # function -- the double-fault review round 2 measured is structurally
-    # impossible once the value is plain data instead of a fresh call.
+    # tan-cli#1117 review round 2: computed ONCE, here -- see
+    # `cwd_base_uri_or_none`'s own docstring for why.
     sarif_base = cwd_base_uri_or_none()
 
     # tan-cli#488 defect 8: the identical unguarded prologue `build_cmd.build`
@@ -1705,11 +1688,7 @@ def validate(
                 )
             ],
             exit_code=ExitCode.INTERNAL_FAILURE,
-            # `sarif_base` was computed BEFORE this try block -- plain data
-            # by the time any exception reaches here, so referencing it in
-            # this handler cannot reintroduce the double-fault this same
-            # handler suffered from an unguarded `cwd_base_uri()` call
-            # inside `_sarif_document` (tan-cli#1117 review round 2).
+            # Plain data by now -- see `cwd_base_uri_or_none`'s docstring.
             sarif_base=sarif_base,
         )
 

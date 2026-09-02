@@ -1409,6 +1409,19 @@ def test_the_rich_fields_reach_both_machine_documents(tmp_path, monkeypatch):
         "endLine": 2,
         "endColumn": 18,
     }
+    # tan-cli#1117 review round 3 MAJOR: the only assertions on this
+    # PRIMARY production SARIF path (a real, non-`--offline` `tan validate`)
+    # used to stop at `region` -- `artifactLocation` itself, the field this
+    # whole issue is about, was asserted only on `--offline` runs routed
+    # through `fail()`. Proven as the same urljoin + `samefile` property the
+    # `--offline` tests use, against the real spawn-path project directory.
+    location = run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+    assert location["uri"] == "./board.yaml"
+    assert location["uriBaseId"] == "%CWD%"
+    base = run["originalUriBaseIds"]["%CWD%"]["uri"]
+    resolved_local = Path(unquote(urlsplit(urljoin(base, location["uri"])).path))
+    assert resolved_local.exists()
+    assert resolved_local.samefile(second / "project" / "board.yaml")
 
 
 # ───────────────── #376's acceptance criterion, on a REAL SDK ─────────────────

@@ -284,6 +284,26 @@ def test_a_relative_posix_path_with_a_hash_is_percent_encoded():
     assert path_to_uri_reference("./board#1.yaml") == "./board%231.yaml"
 
 
+def test_a_literal_colon_in_a_relative_path_is_percent_encoded():
+    """tan-cli#1117 review round 3 MINOR: the SOUNDNESS INVARIANT
+    [`is_absolute_path_reference`]'s delegation depends on, pinned directly
+    rather than left to be inferred from three docstrings that call it
+    load-bearing. `quote(path, safe="/")` treating `:` as UNSAFE is what
+    keeps a literal `"file:"` substring in a RELATIVE reference from ever
+    masquerading as [`path_to_uri_reference`]'s own absolute-only `file:`
+    scheme prefix. Widening the safe set to `"/:"`  -- `quote(path, safe=
+    "/:")` -- is GREEN across both this file and `test_validate_command.py`
+    on its own (no existing assertion pins the colon's own encoding), and
+    end-to-end it turns `--project 'file:sub'` into `uri: "file:sub/board
+    .yaml"`, misclassified ABSOLUTE by [`is_absolute_path_reference`] --
+    silently dropping `uriBaseId`/`originalUriBaseIds` on caller-supplied
+    input, reverting this issue's whole fix without any test noticing.
+    Measured directly against the real oracle: `path_to_uri_reference(
+    "file:sub/board.yaml") == "file%3Asub/board.yaml"`."""
+    assert path_to_uri_reference("file:sub/board.yaml") == "file%3Asub/board.yaml"
+    assert not is_absolute_path_reference("file:sub/board.yaml")
+
+
 def test_percent_encoding_does_not_touch_the_separator():
     """`quote(..., safe="/")` -- the separator itself must survive, or every
     relative path collapses to one percent-encoded segment."""
