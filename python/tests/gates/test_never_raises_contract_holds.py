@@ -357,8 +357,11 @@ _SEEDED_CONTRACTS: dict[str, str] = {
         "found in the round-2 re-triage: 'None when the directory is "
         "missing' is its whole contract, but its per-file except clause "
         "(yaml.YAMLError, UnicodeDecodeError) dropped OSError entirely, so "
-        "a per-FILE chmod 000 (distinct from the containing directory its "
-        "own is_dir() guard covers) escaped raw; fixed in the same change"
+        "a per-FILE chmod 000 (distinct from the containing-directory "
+        "listing failure, originally gated by a boards_dir.is_dir() "
+        "pre-flight and now by the except OSError around the os.listdir "
+        "call tan-cli#1127 replaced it with) escaped raw; fixed in the "
+        "same change"
     ),
     "new_som_cmd._family_hw_revisions": (
         "found in the round-2 re-triage: same shape and same fix as "
@@ -1201,6 +1204,36 @@ class TestHwRevNotBuildable:
 # ---------------------------------------------------------------------------
 
 
+class TestIsYamlBoardFile:
+    """tan-cli#1127 review round 2: `_is_yaml_board_file` must match what
+    `boards_dir.glob("*.yaml")` used to match before the `os.listdir` swap
+    -- case-sensitively on POSIX, case-INSENSITIVELY on Windows (`Path.
+    glob`'s own `case_sensitive=None` default) -- not a narrower,
+    always-case-sensitive suffix compare that happens to agree with `glob`
+    only on POSIX. Not a `_SEEDED_CONTRACTS` entry (it is a platform-casing
+    predicate, not a quiet-return/curated-raise contract), so no `@_covers`.
+    Every expectation below is a literal, independently-stated boolean --
+    never a second call into `Path.glob` or any other re-derivation of the
+    function under test.
+    """
+
+    def test_posix_is_case_sensitive(self, monkeypatch):
+        monkeypatch.setattr(new_som_cmd.os, "name", "posix")
+        assert new_som_cmd._is_yaml_board_file("lower.yaml") is True
+        assert new_som_cmd._is_yaml_board_file("upper.YAML") is False
+        assert new_som_cmd._is_yaml_board_file("Mixed.YaML") is False
+        assert new_som_cmd._is_yaml_board_file("not-yaml.txt") is False
+        assert new_som_cmd._is_yaml_board_file("no-suffix") is False
+
+    def test_windows_is_case_insensitive(self, monkeypatch):
+        monkeypatch.setattr(new_som_cmd.os, "name", "nt")
+        assert new_som_cmd._is_yaml_board_file("lower.yaml") is True
+        assert new_som_cmd._is_yaml_board_file("upper.YAML") is True
+        assert new_som_cmd._is_yaml_board_file("Mixed.YaML") is True
+        assert new_som_cmd._is_yaml_board_file("not-yaml.txt") is False
+        assert new_som_cmd._is_yaml_board_file("no-suffix") is False
+
+
 @_covers("new_som_cmd._known_board_names")
 class TestKnownBoardNames:
     def _boards_dir(self, sdk_root: Path) -> Path:
@@ -1275,6 +1308,20 @@ class TestKnownBoardNames:
         boards.mkdir(parents=True)
         _malformed(boards / "x.yaml", "a: [1, 2")
         assert new_som_cmd._known_board_names(tmp_path) is None
+
+    def test_uppercase_yaml_suffix_matches_only_on_windows(self, tmp_path, monkeypatch):
+        # tan-cli#1127 review round 2: pins the CASING DECISION end-to-end,
+        # not just `_is_yaml_board_file` in isolation. `Path.glob`'s own
+        # `case_sensitive=None` default matched a `Foo.YAML` board file on
+        # Windows before the `os.listdir` swap; this proves the swap did
+        # not silently narrow that to a case-sensitive-everywhere match.
+        boards = self._boards_dir(tmp_path)
+        boards.mkdir(parents=True)
+        (boards / "Upper.YAML").write_text("name: UPPER\n")
+        monkeypatch.setattr(new_som_cmd.os, "name", "posix")
+        assert new_som_cmd._known_board_names(tmp_path) is None
+        monkeypatch.setattr(new_som_cmd.os, "name", "nt")
+        assert new_som_cmd._known_board_names(tmp_path) == {"UPPER"}
 
 
 @_covers("new_som_cmd._family_hw_revisions")

@@ -347,6 +347,23 @@ def _current_sku_pattern(schema_path: Path) -> str:
     return schema["properties"]["sku"]["pattern"]
 
 
+def _is_yaml_board_file(name: str) -> bool:
+    """True if @name has a ``.yaml`` suffix -- case-sensitively on POSIX,
+    case-INSENSITIVELY on Windows, matching ``Path.glob``'s own
+    ``case_sensitive=None`` default (platform casing rules) exactly.
+
+    tan-cli#1127 review round 2: replacing ``boards_dir.glob("*.yaml")``
+    with ``os.listdir`` plus a plain ``entry.endswith(".yaml")`` would have
+    silently NARROWED the match on Windows -- a ``Foo.YAML`` board file
+    that ``glob`` used to enumerate there is invisible to a case-sensitive
+    suffix compare, dropping its ``name:`` from the known set and turning a
+    legitimate ``--default-board`` into a hard scaffold failure. This
+    exists so the listing helper below matches exactly what it replaced,
+    not a narrower set that happens to agree on POSIX.
+    """
+    return name.lower().endswith(".yaml") if os.name == "nt" else name.endswith(".yaml")
+
+
 def _known_board_names(sdk_root: Path) -> set[str] | None:
     """Board ``name:`` values from ``<sdk_root>/metadata/boards/``, or
     ``None`` when the directory is missing OR listable-but-empty/degenerate
@@ -379,6 +396,22 @@ def _known_board_names(sdk_root: Path) -> set[str] | None:
     OSError`` below is genuinely load-bearing on every supported
     interpreter now, not only 3.12; nothing about this function's
     permission-handling remains interpreter-dependent.
+
+    Review round 2 (PR #1129) caught a second, independent way the
+    primitive swap could have silently changed behaviour: ``Path.glob``'s
+    default ``case_sensitive=None`` matches by PLATFORM casing rules --
+    case-sensitive on POSIX, case-INSENSITIVE on Windows -- so
+    ``boards_dir.glob("*.yaml")`` used to enumerate a ``Foo.YAML`` on
+    Windows, and a plain ``entry.endswith(".yaml")`` over ``os.listdir``
+    would not (measured identically on all three interpreters run on this
+    POSIX box: ``glob("*.yaml")`` -> ``['lower.yaml']``,
+    ``glob("*.yaml", case_sensitive=False)`` -> ``['lower.yaml',
+    'upper.YAML']``, a plain ``endswith(".yaml")`` -> ``['lower.yaml']`` only).
+    ``_is_yaml_board_file`` below case-folds on ``os.name == "nt"``
+    specifically to preserve that old Windows matching exactly -- this
+    function's contract is "list what `Path.glob("*.yaml")` used to list,
+    correctly, on every interpreter", not "list what a case-sensitive
+    suffix compare finds".
     """
     boards_dir = sdk_root / "metadata" / "boards"
     import yaml  # noqa: PLC0415 -- deferred, see `_yaml_scalar` (tan-cli#810)
@@ -387,7 +420,9 @@ def _known_board_names(sdk_root: Path) -> set[str] | None:
         entries = os.listdir(boards_dir)
     except OSError:
         return None
-    candidates = sorted(boards_dir / entry for entry in entries if entry.endswith(".yaml"))
+    candidates = sorted(
+        boards_dir / entry for entry in entries if _is_yaml_board_file(entry)
+    )
     names: set[str] = set()
     for path in candidates:
         try:
