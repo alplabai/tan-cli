@@ -111,7 +111,7 @@ from tan.core.sdk_discovery import (
     project_pin_issue,
     resolve_sdk_tiered,
 )
-from tan.core.shapes import SDK_MARKER, rejected_sdk_root_message
+from tan.core.shapes import SDK_MARKER, matches_glob_suffix, rejected_sdk_root_message
 from tan.env import stderr_is_tty, stdin_is_tty
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -359,9 +359,13 @@ def _is_yaml_board_file(name: str) -> bool:
     suffix compare, dropping its ``name:`` from the known set and turning a
     legitimate ``--default-board`` into a hard scaffold failure. This
     exists so the listing helper below matches exactly what it replaced,
-    not a narrower set that happens to agree on POSIX.
+    not a narrower set that happens to agree on POSIX. tan-cli#1132 hit the
+    identical question twice more (``*.conf``/``*.overlay``, ``*.json``), so
+    the RULE itself now lives once in ``shapes.matches_glob_suffix`` and this
+    is its ``.yaml`` application -- name, signature and contract unchanged;
+    only the place the casing decision is written moved.
     """
-    return name.lower().endswith(".yaml") if os.name == "nt" else name.endswith(".yaml")
+    return matches_glob_suffix(name, ".yaml")
 
 
 def _known_board_names(sdk_root: Path) -> set[str] | None:
@@ -407,11 +411,11 @@ def _known_board_names(sdk_root: Path) -> set[str] | None:
     POSIX box: ``glob("*.yaml")`` -> ``['lower.yaml']``,
     ``glob("*.yaml", case_sensitive=False)`` -> ``['lower.yaml',
     'upper.YAML']``, a plain ``endswith(".yaml")`` -> ``['lower.yaml']`` only).
-    ``_is_yaml_board_file`` below case-folds on ``os.name == "nt"``
-    specifically to preserve that old Windows matching exactly -- this
-    function's contract is "list what `Path.glob("*.yaml")` used to list,
-    correctly, on every interpreter", not "list what a case-sensitive
-    suffix compare finds".
+    ``_is_yaml_board_file`` above preserves that Windows matching exactly,
+    by delegating to ``shapes.matches_glob_suffix`` (tan-cli#1132, where
+    the case-fold moved) -- this function's contract is "list what
+    `Path.glob("*.yaml")` used to list, correctly, on every interpreter",
+    not "list what a case-sensitive suffix compare finds".
     """
     boards_dir = sdk_root / "metadata" / "boards"
     import yaml  # noqa: PLC0415 -- deferred, see `_yaml_scalar` (tan-cli#810)

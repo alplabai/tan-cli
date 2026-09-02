@@ -15,12 +15,16 @@ bump alone triggers a reconfigure) -- this module exists only for the set-
 membership change that mechanism cannot see."""
 from __future__ import annotations
 
-from pathlib import Path
+import os
+from pathlib import Path, PurePath
+
+from tan.core.shapes import is_file, matches_glob_suffix
 
 __all__ = [
     "configure_inputs_stamp_path",
     "discover_configure_inputs",
     "read_configure_inputs_stamp",
+    "relative_key",
     "resolve_zephyr_discovery_dir",
     "write_configure_inputs_stamp",
 ]
@@ -30,28 +34,6 @@ __all__ = [
 #: this stamp atomically along with the CMake cache it describes -- it can
 #: never outlive or misdescribe a build dir that no longer exists.
 _CONFIGURE_INPUTS_STAMP_FILE = ".tan-configure-inputs"
-
-#: The two auto-discovery families `cmake/modules/configuration_files.cmake`
-#: resolves `if(NOT DEFINED ...)`: Kconfig fragments (`CONF_FILE`, `NAMES
-#: "prj.conf"` at the app root plus `boards/`/`socs/` qualifiers) and
-#: devicetree overlays (`DTC_OVERLAY_FILE`, `NAMES "app.overlay"` plus the
-#: same `boards/`/`socs/` qualifiers). Not an attempt to reproduce Zephyr's
-#: exact per-qualifier candidate-name algorithm (board revision, `SUFFIX`,
-#: sysbuild image scoping -- all of which drift across Zephyr versions);
-#: tracking every `*.conf`/`*.overlay` at these locations is a superset that
-#: stays correct even when it over-tracks a file Zephyr itself would not have
-#: picked for THIS exact board target -- an extra reset is harmless, a missed
-#: one is the bug this module exists to close. `**` matches zero or more
-#: directories, so `boards/**/*.conf` also matches a file directly in
-#: `boards/`, not only nested ones.
-_CANDIDATE_GLOBS = (
-    "*.conf",
-    "*.overlay",
-    "boards/**/*.conf",
-    "boards/**/*.overlay",
-    "socs/**/*.conf",
-    "socs/**/*.overlay",
-)
 
 
 def resolve_zephyr_discovery_dir(app_dir: str, build_root: Path) -> Path:
@@ -96,27 +78,145 @@ def resolve_zephyr_discovery_dir(app_dir: str, build_root: Path) -> Path:
     return app_dir_path
 
 
+#: The two auto-discovery families `cmake/modules/configuration_files.cmake`
+#: resolves `if(NOT DEFINED ...)`: Kconfig fragments (`CONF_FILE`, `NAMES
+#: "prj.conf"` at the app root plus `boards/`/`socs/` qualifiers) and
+#: devicetree overlays (`DTC_OVERLAY_FILE`, `NAMES "app.overlay"` plus the
+#: same `boards/`/`socs/` qualifiers). Not an attempt to reproduce Zephyr's
+#: exact per-qualifier candidate-name algorithm (board revision, `SUFFIX`,
+#: sysbuild image scoping -- all of which drift across Zephyr versions);
+#: tracking every `*.conf`/`*.overlay` at these locations is a superset that
+#: stays correct even when it over-tracks a file Zephyr itself would not have
+#: picked for THIS exact board target -- an extra reset is harmless, a missed
+#: one is the bug this module exists to close.
+_CANDIDATE_SUFFIXES = (".conf", ".overlay")
+
+#: The two qualifier subtrees, walked to ANY depth below themselves -- the
+#: `boards/**/*.conf` half of what this module used to express as six
+#: `Path.glob` patterns. `**` matched zero or more directories, so a file
+#: directly in `boards/` counted too; the walk below reproduces that by
+#: starting at the subtree root itself, not at its children.
+_CANDIDATE_SUBTREES = ("boards", "socs")
+
+# WHY `os.scandir` AND NOT `Path.glob` (tan-cli#1132, following tan-cli#1127's
+# identical swap in `new_som_cmd._known_board_names`).
+#
+# This module used to iterate `app_dir.glob(pattern)` OUTSIDE the `try` that
+# was supposed to guard it:
+#
+#     try:
+#         matches = app_dir.glob(pattern)   # lazy: builds a generator
+#     except OSError:
+#         continue
+#     for path in matches:                  # the filesystem work happens HERE
+#
+# `Path.glob` is lazy, so the guarded statement could not fail and the
+# `except OSError` was dead on every interpreter -- it wrapped the
+# construction of a generator. Forcing iteration inside the `try` would have
+# fixed the escape but not the contract, because `Path.glob` does not raise
+# uniformly. Measured on this tree, non-root, for the two denied shapes
+# (`app_dir` itself `chmod 000`, and `app_dir`'s PARENT `chmod 000`):
+#
+#   primitive                      self-denied            ancestor-denied
+#   Path.is_dir()                  True   / True  / True  RAISE / RAISE / False
+#   list(Path.glob("*.conf"))      []     / []    / []    RAISE / []    / []
+#   os.listdir() / os.scandir()    RAISE  / RAISE / RAISE RAISE / RAISE / RAISE
+#                                  (3.12.3 / 3.13.15 / 3.14.7)
+#
+# So `Path.glob` never raises at all for a self-denied directory, and raises
+# for a denied ancestor only on 3.12.3 -- an `except OSError` around it is
+# dead code on 3.13.15 and 3.14.7. `os.scandir` raises `PermissionError` for
+# both shapes on all three, which is what makes the single `except OSError`
+# in `discover_configure_inputs` load-bearing everywhere rather than on one
+# interpreter by accident. The `if not app_dir.is_dir()` pre-flight is gone
+# for the same reason (tan-cli#1127, and PR #1110/#1121 before it): it
+# raised `PermissionError` on 3.12.3/3.13.15 for a denied ancestor and
+# answered `False` on 3.14.7, so it could not be the thing that decides this
+# function's contract. The real exception classifies it now.
+
+
+def relative_key(path: PurePath, base: PurePath) -> str:
+    """@path relative to @base, spelled with forward slashes -- THE stamp
+    file's key, and the one expression `_candidate_files` uses to build one.
+
+    A separate function so the Windows spelling can be DRIVEN rather than
+    restated (tan-cli#1132 review): this repo has no Windows host, and
+    `os.scandir` hands back a backslash-separated `entry.path` there, so the
+    key must be proven to normalise. Taking `PurePath` (not `Path`) is what
+    makes that possible without touching a filesystem -- a test passes real
+    `PureWindowsPath` values through THIS function, so a future edit here
+    (say, to `os.path.relpath`, which would leave backslashes in) reds the
+    oracle instead of sailing past a restatement of the old expression. The
+    keys are compared across runs, so a changed spelling would report every
+    tracked file as new on the first build after an upgrade."""
+    return path.relative_to(base).as_posix()
+
+
+def _candidate_files(directory: Path, base: Path, *, recurse: bool) -> set[str]:
+    """Relative-POSIX paths (to @base) of the regular files directly in
+    @directory -- and, when @recurse, at any depth below it -- whose name
+    matches `_CANDIDATE_SUFFIXES`.
+
+    Raises `OSError` (`PermissionError`, `FileNotFoundError`,
+    `NotADirectoryError`, ...) for any directory it cannot list; the single
+    caller classifies. See the block comment above for why that is
+    `os.scandir` and not `Path.glob`.
+
+    Three `Path.glob` behaviours this deliberately reproduces rather than
+    quietly improving on:
+
+    * A symlinked directory is NOT descended into -- `**` does not follow
+      symlinks on any supported interpreter (3.13's own
+      `recurse_symlinks=False` default), which is what
+      `entry.is_dir(follow_symlinks=False)` preserves.
+    * A name matching a candidate suffix that is a DIRECTORY is not a match,
+      the old code's `path.is_file()` filter.
+    * A per-entry stat failure SKIPS that entry rather than failing the
+      walk. That is why the file test is `shapes.is_file` and not
+      `entry.is_file()`: measured on 3.12.3, 3.13.15 and 3.14.7 alike, a
+      self-referential `loop.conf -> loop.conf` symlink makes
+      `os.DirEntry.is_file()` raise `OSError(ELOOP)` where `Path.is_file()`
+      -- what the `glob` version called -- returns `False` and keeps the
+      rest of the set. Only the DIRECTORY LISTING is allowed to fail the
+      walk, and `os.scandir` above is the call that does it.
+
+    Symlinks are otherwise followed for the file test, so a symlink TO a
+    fragment still counts, exactly as it did through `glob` + `is_file()`."""
+    found: set[str] = set()
+    pending = [directory]
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                if recurse and entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+                elif matches_glob_suffix(entry.name, *_CANDIDATE_SUFFIXES) and is_file(entry.path):
+                    found.add(relative_key(Path(entry.path), base))
+    return found
+
+
 def discover_configure_inputs(app_dir: Path) -> frozenset[str]:
     """The set of configure-time Kconfig-fragment/devicetree-overlay paths
     (relative POSIX, to `app_dir`) currently present under `app_dir` at one
     of Zephyr's own auto-discovery locations. Returns the empty set for a
-    missing/unreadable `app_dir` -- "nothing discoverable" is the same
-    honest answer a real Zephyr configure would reach, not an error this
-    best-effort tracker should raise."""
-    if not app_dir.is_dir():
-        return frozenset()
+    missing or unreadable `app_dir`, and for an unreadable `boards/`/`socs/`
+    subtree under it -- "nothing discoverable" is the same honest answer a
+    real Zephyr configure would reach, not an error this best-effort tracker
+    should raise.
+
+    An ABSENT `boards/`/`socs/` is the ordinary case, not a failure: it
+    contributes nothing and the app-root fragments still come back. That is
+    the inner handler's whole job, and it is why the outer one cannot simply
+    swallow every `OSError` from the whole walk."""
     found: set[str] = set()
-    for pattern in _CANDIDATE_GLOBS:
-        try:
-            matches = app_dir.glob(pattern)
-        except OSError:
-            continue
-        for path in matches:
+    try:
+        found |= _candidate_files(app_dir, app_dir, recurse=False)
+        for subtree in _CANDIDATE_SUBTREES:
             try:
-                if path.is_file():
-                    found.add(path.relative_to(app_dir).as_posix())
-            except OSError:
+                found |= _candidate_files(app_dir / subtree, app_dir, recurse=True)
+            except (FileNotFoundError, NotADirectoryError):
                 continue
+    except OSError:
+        return frozenset()
     return frozenset(found)
 
 

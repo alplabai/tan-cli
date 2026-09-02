@@ -32,9 +32,12 @@ ambient SDK checkout -- `tan.model` stays self-contained
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from tan.core.shapes import matches_glob_suffix
 
 from .adapters import CompilerAdapter
 from .adapters.cpu import CpuAdapter
@@ -328,16 +331,55 @@ def _table_supported_ops(doc: dict) -> list[str] | None:
     return supported_ops
 
 
+# WHY `os.listdir` AND NOT `Path.glob` HERE (tan-cli#1132, the same swap
+# tan-cli#1127 made in `new_som_cmd._known_board_names`, measured the same
+# way -- non-root, on 3.12.3 / 3.13.15 / 3.14.7 side by side).
+#
+# `_resolve_table` used to open with `if not table_dir.is_dir(): return None`
+# and then `sorted(table_dir.glob("*.json"))` with no guard at all, so a
+# permission-denied ANCESTOR of `metadata/npu_ops/<backend>/` raised
+# `PermissionError` straight out of this function on 3.12.3 and 3.13.15 and
+# returned `None` on 3.14.7 -- the docstring's "None when the backend has no
+# table directory at all" held on exactly one of the three. Measured:
+#
+#   primitive                      self-denied            ancestor-denied
+#   Path.is_dir()                  True   / True  / True  RAISE / RAISE / False
+#   list(Path.glob("*.json"))      []     / []    / []    RAISE / []    / []
+#   os.listdir()                   RAISE  / RAISE / RAISE RAISE / RAISE / RAISE
+#                                  (3.12.3 / 3.13.15 / 3.14.7)
+#
+# `os.listdir` is the only one of the three that answers the same way on all
+# three interpreters and both shapes, which is what lets ONE `except OSError`
+# below carry the whole contract -- an `except` around `Path.glob` would be
+# dead code on 3.13.15 and 3.14.7 (and, for the self-denied shape, on 3.12.3
+# too). A missing directory and a non-directory in its place come through the
+# same handler: `FileNotFoundError`/`NotADirectoryError` are `OSError`, and
+# all of them mean `None` here.
+
+
+def _is_table_file(name: str) -> bool:
+    """True if @name is a support-table filename -- `.json`, matched
+    case-sensitively on POSIX and case-INSENSITIVELY on Windows, exactly as
+    the `table_dir.glob("*.json")` this replaced did (tan-cli#1132; see
+    `shapes.matches_glob_suffix` for the rule and tan-cli#1127 review round
+    2 for why a plain `endswith` would have silently narrowed it)."""
+    return matches_glob_suffix(name, ".json")
+
+
 def _resolve_table(metadata_root: Path, backend: str, variant: str | None) -> tuple[Path, dict] | None:
     """Pick the `metadata/npu_ops/<backend>/<variant>@<toolchain>-<ver>.json`
-    whose `applies_to.variant` covers @variant. None when the backend has no
-    table directory at all (e.g. `deepx_dxm1`, by decision) or no table in it
-    covers @variant -- both cases are the caller's `undetermined`, never a
-    negative verdict manufactured from absent data."""
+    whose `applies_to.variant` covers @variant. None when the backend's table
+    directory is missing, unreadable, or not a directory at all (e.g.
+    `deepx_dxm1`, by decision), or when no table in it covers @variant -- all
+    of these are the caller's `undetermined`, never a negative verdict
+    manufactured from absent data, and none of them is an error this static
+    screen should raise at its caller."""
     table_dir = Path(metadata_root) / "npu_ops" / backend
-    if not table_dir.is_dir():
+    try:
+        entries = os.listdir(table_dir)
+    except OSError:
         return None
-    candidates = sorted(table_dir.glob("*.json"))
+    candidates = sorted(table_dir / entry for entry in entries if _is_table_file(entry))
     if not candidates:
         return None
     if variant is None:
