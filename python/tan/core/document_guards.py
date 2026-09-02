@@ -120,30 +120,62 @@ tan-cli#1085 closed the CROSS-MODULE half of this family that was still
 duplicated by hand (`require_readable_text`, the read-half shape
 `render_to_envelope`'s example `board.yaml` read shared with
 `read_catalog_document`). It did not shrink `template.py` back toward its
-pre-sweep size -- the module grew net +405 lines against its 1658-line
-tan-cli#1025 starting point across the five rounds this family's own PRs
-record (#1073 +122, #1082 +376, #1084 -136, plus the smaller PRs since), and
-this module only ever absorbed the pieces two MODULES both needed. This
-module is that document-agnostic register, and no more:
+pre-family size: **1548** lines at tan-cli#1001 (`156582e`, before #1025
+opened this family at all) -> **1658** at the end of #1025/#1034/#1037/
+#1048 -> `1780` (#1073, +122) -> `2156` (#1082, +376) -> `2020` (#1084,
+-136) -> `2051 -> 2066` (smaller rounds since) -> `2063` (this PR, -3).
+**Net +515 over the true 1548-line baseline; #1084 is still the only round
+before this one that ever removed anything.** This module is the piece of
+that growth two CONSUMER modules (`template.py` and `example_catalog.py`)
+both call into through the same curated-raise contract, and no more:
 
 * `_require_constraints` stays in `template.py`. It guards `$defs/parameter`'s
   `constraints:` bounds, which only the planner's parameter resolution reads;
   `example_catalog.py` has no parameter path at all, so moving it would be
-  extraction for its own sake with no second MODULE to prove it shared.
+  extraction for its own sake with no second consumer to prove it shared.
   tan-cli#1087 (PR #1123) kept `_check_constraints`'s `ParameterError` local
   for the identical reason.
-* `_load_som_doc` and `_board_route_entries` stay in `template.py` too, but
-  NOT because either has only one caller -- each has two, WITHIN
+* `_require_mapping_doc`/`_require_field`/`_require_key`/`require_readable_
+  text` belong here because `template.py` and `example_catalog.py` -- two
+  DIFFERENT CONSUMER modules -- both reach them (directly, or by delegation
+  through `read_catalog_document`/`catalog_templates`, which both consumers
+  call directly), through the SAME injected `self.error`, and neutering any
+  one reds tests in both consumers' suites. That is the actual bar: a
+  shared call reached from more than one consumer through one contract --
+  not "more than one caller" on its own, which this module's OWN methods
+  calling each other would satisfy trivially and prove nothing.
+* `_load_som_doc` and `_board_route_entries` do NOT clear that bar, but not
+  because they lack a second caller -- they have two each, WITHIN
   `template.py` (`_load_som_doc`: `_default_preset_for_sku` and
   `_topology_for_sku`; `_board_route_entries`: `_board_alias_to_entry` and
   `_resolve_pin_target`), which is exactly why each is its own function
-  instead of two inlined reads. The register's bar is a caller in a
-  DIFFERENT MODULE -- proof that a second, independent implementation is the
-  live alternative to sharing -- and neither has one: no other module reads
-  `metadata/e1m_modules/<sku>.yaml` or a board's `e1m_routes:` at all, let
-  alone by hand. `_docs_ref` stays for a different reason again: it has one
-  caller and degrades to `"main"` rather than curated-raising at all, a
-  different shape from everything else in this file.
+  instead of two inlined reads. The two documents they read ARE read
+  independently elsewhere -- `tan/model/targets.py::resolve_targets`
+  (`template.py:643-644`'s own comment already says so) re-implements
+  `_load_som_doc`'s exact `is_file()`-then-`yaml.safe_load`-then-mapping-
+  check shape, but raises bare `FileNotFoundError`/`ValueError`, pinned by
+  `tests/model/test_targets_malformed_preset.py`; `tan/core/
+  som_buildability.py`'s `_safe_load_mapping`-backed read is a THIRD
+  implementation, contracted to return `None` on every failure instead
+  ("Never raises"), seeded into `tests/gates/
+  test_never_raises_contract_holds.py`. `tan/planner/loader.py` (the same
+  eight-section `_ROUTE_SECTIONS` tuple, inline) and `tan/planner/
+  project_emit/bom_netlist.py` (the same `e1m_routes:` flatten) likewise
+  reimplement `_board_route_entries`'s read, with no type guard at all --
+  both consume a project document already schema-validated upstream, a
+  different situation from `template.py`'s scaffold-time raw-metadata read.
+  So the duplication this module exists to close IS live for both
+  functions -- but each rival was built to a DIFFERENT, independently
+  pinned contract (a distinct exception type, a quiet-`None` degrade, or no
+  guard because the input is pre-validated), and folding five contracts
+  into the one `self.error`-per-caller shape this register offers would
+  change `targets.py`'s and `som_buildability.py`'s existing, tested
+  behaviour -- a real redesign, not the move #1085 scoped. Left local, with
+  the real rivals named here instead of an unqualified "no other module
+  reads it" claim, for a follow-up to weigh on purpose rather than by
+  default. `_docs_ref` stays for a third reason again: it has one caller
+  and degrades to `"main"` rather than curated-raising at all, a different
+  shape from everything else in this file.
 
   Staying local is a scope claim, not a soundness one: `_load_som_doc` and
   `_board_route_entries` still guard their OWN absence with a pre-flight
@@ -151,9 +183,9 @@ module is that document-agnostic register, and no more:
   narrow_except_contracts.py`'s too-narrow-a-`try` sweep cannot see it) --
   a real, live gap of the SAME #1116 class `require_readable_text` closes
   for the catalog and the example `board.yaml`, reachable through `emit_
-  scaffold`'s `except TemplateError` and nothing else. #1085 is an
+  scaffold`'s `except TemplateError` and nothing else. tan-cli#1085 is an
   extraction issue, not a guard sweep, so this PR does not fix that gap;
-  it is filed and tracked separately.
+  tan-cli#1133 tracks it.
 * The `SkuNotSupportedError` / `CoresTopologyNotFoundError` selection
   semantics stay with their own modules. This register answers "is this
   document the shape it claims to be", never "which record did you mean".
