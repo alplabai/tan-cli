@@ -275,6 +275,65 @@ def test_render_markdown_says_hand_ports_were_flagged_not_copied():
     assert "never automatic" in strict_row
 
 
+# ------------------------------------------------ tan-cli#1109 fault-1/text
+
+
+def test_up_to_date_reason_names_the_range_and_why():
+    """The explicit "log why" line for an `up-to-date` verdict -- printed to
+    stderr by `main()` so a silent run (rc=0, no PR) reads as a measurement
+    in the run LOG, not only in the job summary markdown."""
+    rep = _verdict([_fv("m/a.py", "unchanged")], head="b" * 40)
+    reason = pr.up_to_date_reason(rep)
+    assert pr.MIRROR_DIR in reason
+    assert rep.mirror_base[:8] in reason
+    assert rep.sdk_head[:8] in reason
+    assert "nothing to propose" in reason
+
+
+def test_main_prints_the_up_to_date_reason_to_stderr_only_when_up_to_date(
+    mini, capsys
+):
+    sdk, repo = mini
+    base = _head(sdk)
+    _write_gate(repo, sdk, base)
+
+    assert pr.main(["--sdk-root", str(sdk), "--to", base, "--repo-root", str(repo)]) == 0
+    err = capsys.readouterr().err
+    assert "up to date" in err
+    assert base[:8] in err
+
+    # A run that DOES have something to propose must not print the
+    # up-to-date reason -- it would be actively misleading on a `clean` verdict.
+    (sdk / "scripts" / "alp_orchestrate" / "mirror.py").write_text(
+        MINI_MIRROR + "line-d\n"
+    )
+    _run(sdk, "commit", "-qam", "feat: append line-d")
+    head = _head(sdk)
+    assert pr.main(["--sdk-root", str(sdk), "--to", head, "--repo-root", str(repo)]) == 0
+    err2 = capsys.readouterr().err
+    assert "up to date" not in err2
+
+
+def test_partial_headline_does_not_claim_the_freshness_gate_goes_red():
+    """tan-cli#1109: the old wording ("so the freshness gate stays RED on
+    purpose") was measured false during PR #1103's review --
+    `planner-resync.yml`'s own "Run the freshness gate" step binds each pin's
+    checkout to a worktree pinned at that SAME unmoved commit, so it compares
+    the pin to itself and passes by construction. The corrected text must
+    say what actually stays red (this workflow's own recurring run), not the
+    gate."""
+    headline = pr._HEADLINE["partial"]
+    assert "so the freshness gate stays RED on purpose" not in headline
+    assert "passes" in headline or "trivially passes" in headline
+    assert "workflow" in headline.lower()
+
+
+def test_hand_port_moves_docstring_does_not_claim_the_gate_goes_red():
+    doc = pr.Report.hand_port_moves.__doc__ or ""
+    normalized = " ".join(doc.split())
+    assert "gate stays red" not in normalized, doc
+
+
 # ------------------------------------------------------- integration (git)
 
 

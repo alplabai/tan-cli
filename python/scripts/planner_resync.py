@@ -408,8 +408,10 @@ class Report:
         and only as part of a re-sync the mirror half is already carrying.
 
         There is no "clean" hand-port re-sync: a changed hand-port source is
-        by construction a human's job, so the pin stays where it is and the
-        gate stays red. `strict` counts as a blocker here because advancing
+        by construction a human's job, so the pin stays where it is -- which
+        keeps this script reporting `partial` (and `planner-resync.yml`
+        re-running and exiting 1) on every subsequent run. `strict`
+        counts as a blocker here because advancing
         HAND_PORT_PINNED_SDK_COMMIT past an unported `strict_loaders.py`
         change would be the same re-freeze in a different table.
 
@@ -620,7 +622,17 @@ def classify(
 _HEADLINE = {
     "up-to-date": "UP TO DATE -- `tan/planner/` is level with the bound alp-sdk; nothing to propose.",
     "clean": "RE-SYNC APPLIED -- every tracked file resolved; the pin(s) below moved. A human still reads the diff: a clean merge can carry behavioural change.",
-    "partial": "NEEDS A HUMAN -- part of this re-sync could not be applied. The pin(s) covering it did NOT move, so the freshness gate stays RED on purpose.",
+    # tan-cli#1109: the pin(s) covering the unresolved half staying put does
+    # NOT mean `test_planner_relocation_freshness.py` itself goes red -- it
+    # doesn't: `planner-resync.yml`'s "Run the freshness gate" step binds
+    # each pin's checkout to a worktree pinned at that SAME unmoved commit,
+    # so the gate compares the pin to itself and passes by construction
+    # (measured during #1103's review). What stays red is this WORKFLOW's
+    # own run: a blocked pin means the next scheduled/dispatched run
+    # recomputes the same "needs a human" verdict and exits 1 again -- so the
+    # reminder persists (merging a partial proposal does not silence it,
+    # since a partial re-sync never moves the blocked pin either).
+    "partial": "NEEDS A HUMAN -- part of this re-sync could not be applied. The pin(s) covering it did NOT move -- not because the freshness gate goes red (it doesn't: it re-hashes against a worktree pinned at that same unmoved commit, so it trivially passes), but because THIS workflow keeps re-running and exiting 1 on every scheduled/dispatched run until someone ports the work, which merging this proposal does not silence.",
 }
 
 
@@ -774,6 +786,25 @@ def apply(repo: pathlib.Path, gate: Gate, rep: Report) -> list[str]:
     return touched
 
 
+def up_to_date_reason(rep: Report) -> str:
+    """The explicit "why" for an `up-to-date` verdict -- tan-cli#1109 fault 1.
+
+    `render_markdown`'s headline already says "UP TO DATE" in the job
+    summary, but the step that decides whether to push anything used to log
+    only a generic "Nothing to propose" with no reason attached -- legible
+    only by clicking into the summary. This is printed straight to the run
+    log (stderr, so it survives even when `--markdown`/`--json` redirect the
+    report elsewhere) so a silent run reads as a measurement, not an absence
+    of one.
+    """
+    return (
+        f"planner_resync: up to date -- no file under {MIRROR_DIR}/ (nor any "
+        f"tracked hand-port source) changed between the pinned audit "
+        f"{rep.mirror_base[:8]} and the target {rep.sdk_head[:8]}; nothing to "
+        "propose."
+    )
+
+
 def to_json(rep: Report, applied: bool, touched: list[str]) -> dict:
     return {
         "verdict": rep.verdict,
@@ -857,6 +888,9 @@ def main(argv: list[str] | None = None) -> int:
                 encoding="utf-8",
             )
         return 2
+
+    if rep.verdict == "up-to-date":
+        sys.stderr.write(up_to_date_reason(rep) + "\n")
 
     md = render_markdown(rep, args.apply)
     if args.markdown:
