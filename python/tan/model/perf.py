@@ -66,10 +66,25 @@ surfaces permitted to say it -- a real compile and a bench point -- answer the
 same question from the same kind of evidence (a real per-operator placement,
 measured, not screened). One site is what makes the guard on that word
 (`tests/model/test_check.py`) bind to the live rule for both.
+
+ONE PARSER, BOTH FORMATS. `read_perf_point` parses with `yaml.safe_load`, not
+`json.loads`: alp-sdk publishes its tier-2 perf points as YAML
+(`metadata/model_perf/<sku>/<hash>.yaml`, per `model-perf-v1.schema.json`'s
+own `$id`/title, and the `tests/fixtures/model_perf/` synthetic alongside
+it), while every document `tan`'s own test suite writes for this reader is
+JSON. Valid JSON is valid YAML, so ONE parser reads both, with no
+format-sniff or extension check of its own to drift from what either side
+actually writes -- a reader pinned to `json.loads` in one place while the
+real documents are YAML is exactly how tan-cli#1105 happened (the fixture
+discovery predicate in `tests/conftest.py` globbed for `*.json` against a
+`*.yaml` file and permanently skipped, hiding that this reader could not
+have parsed it either). `yaml` is imported inside `read_perf_point`, not at
+module scope, because `tan.model.perf` sits on `tan.cli`'s eager import
+graph (via `tan/commands/model_cmd.py`) and PyYAML is single-use here
+(tan-cli#810, enforced by `tests/gates/test_cli_import_is_lean.py`).
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -259,15 +274,21 @@ def read_perf_point(path: Path) -> PerfPoint | None:
     """Parse ONE perf-point file, or `None` for anything this reader will not
     treat as a measurement.
 
-    `None` covers: unreadable/unparseable bytes, a document that is not a JSON
-    object, a `_fixture`-bannered synthetic, a `stance` that is not
-    `bench-measured`, and any document missing an identity field. Never raises
-    -- see the module docstring on why a consumer stays quiet where the
-    producing repository's own gate is loud.
+    Parsed with `yaml.safe_load` -- see the module docstring's "ONE PARSER,
+    BOTH FORMATS" note for why, and why the import is deferred to here rather
+    than module scope.
+
+    `None` covers: unreadable bytes, a document this parser cannot make sense
+    of at all, a document that is not a mapping, a `_fixture`-bannered
+    synthetic, a `stance` that is not `bench-measured`, and any document
+    missing an identity field. Never raises -- see the module docstring on why
+    a consumer stays quiet where the producing repository's own gate is loud.
     """
+    import yaml  # noqa: PLC0415 (tan-cli#810: single-use, kept off `tan --version`)
+
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
         return None
     if not isinstance(doc, dict) or _FIXTURE_KEY in doc:
         return None

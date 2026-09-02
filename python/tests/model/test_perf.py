@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tan.model.perf import (
     coverage_from_placement,
@@ -440,15 +441,30 @@ pytestmark_real_sdk = pytest.mark.skipif(
 @pytestmark_real_sdk
 @needs_sdk_model_perf_fixture
 def test_alp_sdks_own_synthetic_fixture_point_is_refused_by_this_reader():
-    """Not tan's IDEA of a fixture -- the actual `_fixture`-bannered document
-    alp-sdk ships. Its identity fields are real (a real sha256 of a real
-    model) while every figure under `measured` is a placeholder, which is
-    exactly the shape that would be catastrophic to report as `bench`."""
-    fixtures = sorted((SDK / "tests" / "fixtures" / "model_perf").rglob("*.json"))
+    """The actual illustrative document alp-sdk ships under
+    `tests/fixtures/model_perf/` (alp-sdk `fe56ff1d`, issue #1520) -- a
+    schema-valid, semantic-check-clean point whose figures are explicitly
+    NOT a real bench capture (its own header comment says so). Published as
+    YAML, per `model-perf-v1.schema.json`'s own `$id`/title.
+
+    alp-sdk's `_fixture` marker guards the PUBLISHED `metadata/model_perf/`
+    tree and is a PATH convention there (a `_fixture`-suffixed SKU directory
+    or filename, `scripts/validate_metadata.py`'s
+    `_MODEL_PERF_FIXTURE_MARKER`) -- never a document key, and this specific
+    document carries no such key. This reader refuses it anyway, today,
+    because its shape (no top-level `stance`, no `measured_on`/`measured`
+    blocks -- alp-sdk's real schema nests identity under `sku`/`hw_rev`/
+    `target` and figures under `perf`) does not match ANYTHING
+    `read_perf_point` currently recognises as a point, fixture or not. That
+    is a real, separate schema-drift gap this test does not close (tracked
+    for a follow-up, not tan-cli#1105's scope: fixing the glob/parse format
+    alone must not silently promise the reader also matches alp-sdk's
+    CURRENT field names, which it does not yet)."""
+    fixtures = sorted((SDK / "tests" / "fixtures" / "model_perf").rglob("*.yaml"))
     assert fixtures, "the capability mark should have skipped this"
     for path in fixtures:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-        assert "_fixture" in doc, f"{path} is not a fixture point"
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert isinstance(doc, dict), f"{path} did not parse to a mapping"
         assert read_perf_point(path) is None, (
             f"{path}: a placeholder document must never be readable as a "
             f"measurement"

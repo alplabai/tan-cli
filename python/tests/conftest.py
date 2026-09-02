@@ -225,8 +225,15 @@ def sdk_publishes_model_perf_points(sdk: Path) -> bool:
     the alternative is a test that asserts against data nobody has measured.
     Presence of a real point, not "would this assertion pass", so it cannot
     fire once the campaign publishes one.
+
+    Globs both `*.yaml` and `*.json`: `model-perf-v1.schema.json`'s own
+    `$id`/title names the published path as `<sku>/<hash>.yaml`, so a
+    `*.json`-only glob here would be the exact tan-cli#1105 shape again --
+    a predicate that can never fire because it looks for the wrong
+    extension -- the day the bench campaign actually publishes a point.
     """
-    return any((sdk / "metadata" / "model_perf").rglob("*.json"))
+    perf_root = sdk / "metadata" / "model_perf"
+    return any(perf_root.rglob("*.yaml")) or any(perf_root.rglob("*.json"))
 
 
 def sdk_ships_the_model_perf_fixture(sdk: Path) -> bool:
@@ -239,8 +246,14 @@ def sdk_ships_the_model_perf_fixture(sdk: Path) -> bool:
     (alp-sdk `fe56ff1d`) while a published point does not. Folding the two
     into one switch would skip the refusal proof for the next several months
     on the strength of an unrelated absence.
+
+    Globs both `*.yaml` and `*.json`: alp-sdk ships this specific fixture as
+    `e1m_aen801_ethos_u55_hp.yaml` (tan-cli#1105 -- a `*.json`-only glob here
+    was permanently unsatisfiable against that real filename, so this test
+    skipped on every run including every green CI run).
     """
-    return any((sdk / "tests" / "fixtures" / "model_perf").rglob("*.json"))
+    fixture_root = sdk / "tests" / "fixtures" / "model_perf"
+    return any(fixture_root.rglob("*.yaml")) or any(fixture_root.rglob("*.json"))
 
 
 #: Resolved once, here, at conftest import -- i.e. at the same moment a test
