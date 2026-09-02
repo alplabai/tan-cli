@@ -24,44 +24,40 @@ on purpose -- `tests/commands/test_validate_command.py`'s
 `test_absolute_board_yaml_uri_is_a_file_uri_but_boardyamlpath_stays_host_
 native` asserts that split so a future "tidy this up" sweep does not unify
 the two contracts (NOT this module's own test file -- that file proves
-[`path_to_uri_reference`]/[`root_to_base_uri`] in isolation and has no
-`boardYamlPath` of its own to assert against).
+[`path_to_uri_reference`] in isolation and has no `boardYamlPath` of its own
+to assert against).
 
-## The relative case is NOT one answer for both consumers (review round 1)
+## The relative case is left relative -- deliberately, and scoped narrowly
 
 A relative `path` (`resolve_board_path`'s own default, `"./board.yaml"`) is
-returned as a relative reference rather than absolutised -- but what that
-buys each consumer differs, and round 1 of this PR's review found the first
-version of this module claimed one uniform justification ("no consumer-
-facing gain") that was true for only one of them:
+returned as a relative reference rather than absolutised. It is already a
+legal relative URI reference per RFC 3986 SS4.2 -- both SARIF 2.1.0's
+`artifactLocation.uri` and this repo's own `diagnostic-v1.schema.json` accept
+one -- and absolutising it here would (a) move the pre-existing pinned golden
+(`test_validate_command.py`'s `"./board.yaml"` pins) and (b) bake the
+process's CWD into an otherwise portable document.
 
-* **SARIF** -- a relative `artifactLocation.uri` is permitted and schema-
-  valid (`format: uri-reference`), and `validate_cmd._sarif_document` now
-  declares `runs[].originalUriBaseIds` / `results[].locations[].
-  physicalLocation.artifactLocation.uriBaseId` (`%SRCROOT%`, via
-  [`root_to_base_uri`]) so the relative reference has a defined base rather
-  than being left to whatever a given consumer's CWD happens to be. This is
-  the "zero-cost" fix: it moves no pinned golden (the `uri` value itself is
-  untouched) and turns the comment beside it from an unverified claim into
-  one the emitted document actually backs.
-* **LSP** -- `DocumentUri` is a URI WITH A SCHEME by the LSP spec, and there
-  is no LSP analogue of `uriBaseId`: a client that receives `"./board.yaml"`
-  cannot resolve it against anything this document declares, so it will not
-  match an open buffer's own absolute URI. Absolutising it here would fix
-  that but would also (a) move the pre-existing pinned golden
-  (`test_validate_command.py`'s `"./board.yaml"` pins, present since before
-  this module existed) and (b) bake the process's CWD into the diagnostic.
-  Neither this module nor `validate_cmd._issue_to_diagnostic` claims the LSP
-  relative case is fully resolved -- it is a known, documented limitation:
-  an LSP client consuming `tan validate --format diagnostic-v1` is expected
-  to resolve a relative `uri` against ITS OWN notion of the workspace root
-  (normally the same directory `tan validate` was invoked from), not treated
-  as already resolvable in isolation.
+**This module makes NO claim about how a relative reference gets resolved.**
+An earlier version of this docstring (tan-cli#1097 review round 1) tried to
+close that gap by having `validate_cmd._sarif_document` declare a SARIF
+`originalUriBaseIds`/`uriBaseId` pair -- round 2 review found that addition
+declared a base that did not actually resolve the reference in the default
+case (an anchoring mismatch between `root` and the CWD `board_path` is
+actually relative to, compounded by a missing trailing slash), and reached
+that wrong answer through an unguarded `Path.resolve()` that could raise on
+a caller-supplied `--project` containing a symlink loop, crashing the
+command it touched. Declaring an authoritatively WRONG base is worse than
+declaring none -- round 1's undefined base at least let a spec-conformant
+consumer fall back to its own CWD and succeed. That work was reverted; the
+base-declaration question (where SARIF's base should be anchored, and how to
+resolve it soundly for both `root="."` and a `--board-yaml`/`--project`
+override) is tracked as a separate, standalone follow-up rather than bolted
+onto this fix.
 """
 from __future__ import annotations
 
 import re
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import PurePosixPath, PureWindowsPath
 from urllib.parse import quote
 
 #: A Windows drive letter at the string's own start (`C:...`, no backslash
@@ -75,6 +71,19 @@ from urllib.parse import quote
 #: consumer parses as a scheme. `test_a_forward_slash_spelled_drive_path_
 #: is_still_judged_windows` pins that input; see this module's own test
 #: file for the per-branch (not whole-function) mutation that catches it.
+#:
+#: The leading `^` here is REDUNDANT with `.match()` (`_is_windows_spelled`
+#: below uses `.match()`, not `.search()`) -- `re.Pattern.match()` already
+#: only tries at the string's own start regardless of `^`, so removing `^`
+#: alone changes nothing for any input (round 1 review round 2 measured
+#: this directly: un-anchoring the compiled pattern is behaviourally
+#: indistinguishable from the original under `.match()` for every input
+#: tried). A genuine misclassification of a mid-string colon (e.g.
+#: `"sub/board:1.yaml"`) needs BOTH the anchor removed from the pattern AND
+#: the call switched to `.search()` at once -- this property is doubly
+#: defended, not fragile, and `test_a_colon_later_in_a_relative_path_does_
+#: not_misclassify_it_as_windows` (this module's test file) states it
+#: directly rather than chasing a single-line mutation that does not exist.
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
 
@@ -166,21 +175,3 @@ def path_to_uri_reference(path: str) -> str:
     if posix.is_absolute():
         return posix.as_uri()
     return quote(path, safe="/")
-
-
-def root_to_base_uri(root: str) -> str:
-    """An absolute `file:` URI for `root`, THIS PROCESS'S OWN notion of it
-    -- used only for SARIF's `originalUriBaseIds` (review round 1 MAJOR 3),
-    never for [`path_to_uri_reference`]'s job.
-
-    The two functions are not interchangeable and must not be merged:
-    [`path_to_uri_reference`] renders a CALLER-SUPPLIED string that might be
-    Windows-spelled on a POSIX host (`--board-yaml` is caller data), so it
-    has to pick its oracle from the STRING alone and never touch the
-    filesystem. `root_to_base_uri` answers a different question -- "where is
-    this running process, really" -- which has exactly one honest answer on
-    whatever host it is asked on, so it uses the REAL, concrete `pathlib.
-    Path` (not a `Pure*Path` string oracle) and lets `Path.resolve()` walk
-    the real filesystem (`strict=False` by default -- it does not require
-    `root` to exist)."""
-    return Path(root).resolve().as_uri()

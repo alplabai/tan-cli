@@ -52,7 +52,6 @@ from typer.testing import CliRunner
 
 from tan.cli import app
 from tan.commands import sdk_cmd, validate_cmd
-from tan.core.uri_reference import root_to_base_uri
 from tan.exit_codes import ExitCode
 from tan.version import TAN_VERSION
 from tests.conftest import sdk_root
@@ -174,15 +173,17 @@ def test_sarif_shape(tmp_path, monkeypatch):
     }
     artifact_location = result_entry["locations"][0]["physicalLocation"]["artifactLocation"]
     assert artifact_location["uri"] == "./board.yaml"
-    # tan-cli#1097 review round 1 MAJOR 3: a RELATIVE `uri` must carry a
-    # `uriBaseId` that resolves against a declared `originalUriBaseIds`
-    # entry -- otherwise the base is implementation-defined, which is the
-    # "resolves it wrong" failure mode the comment beside the emitting code
-    # claims to have closed.
-    assert artifact_location["uriBaseId"] == "%SRCROOT%"
-    assert run["originalUriBaseIds"] == {
-        "%SRCROOT%": {"uri": root_to_base_uri(".")},
-    }
+    # tan-cli#1097 review round 2: a round-1 attempt at this PR declared
+    # `uriBaseId`/`originalUriBaseIds` here so the relative reference above
+    # had a base to resolve against. That declaration turned out to be
+    # authoritatively WRONG for this exact default case (an anchoring
+    # mismatch -- see `_sarif_document`'s own docstring) and reached it
+    # through code that could crash the command on a caller-supplied
+    # `--project`; it was reverted rather than patched in place. NEITHER key
+    # is present today -- the base is left implementation-defined, same as
+    # `dev` before this PR.
+    assert "uriBaseId" not in artifact_location
+    assert "originalUriBaseIds" not in run
 
 
 def test_sarif_rules_are_deduped_by_code(tmp_path, monkeypatch):
@@ -253,9 +254,8 @@ def test_absolute_board_yaml_uri_is_a_file_uri_but_boardyamlpath_stays_host_nati
         "artifactLocation"
     ]
     assert sarif_location["uri"] == uri
-    # tan-cli#1097 review round 1 MAJOR 3: `uriBaseId`/`originalUriBaseIds`
-    # only have meaning for a RELATIVE reference -- an absolute `file:` URI
-    # (this case) must carry neither.
+    # Neither key is emitted at all today (see `test_sarif_shape` for why);
+    # restated here for the absolute case too so both are covered.
     assert "uriBaseId" not in sarif_location
     assert "originalUriBaseIds" not in sarif_run
 

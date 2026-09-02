@@ -13,9 +13,8 @@ simulation.
 `data.boardYamlPath` staying host-native (unchanged by this module) is
 asserted in `tests/commands/test_validate_command.py`'s
 `test_absolute_board_yaml_uri_is_a_file_uri_but_boardyamlpath_stays_host_
-native`, NOT here -- this file proves [`path_to_uri_reference`] and
-[`root_to_base_uri`] in isolation and has no envelope of its own to assert
-`boardYamlPath` against.
+native`, NOT here -- this file proves [`path_to_uri_reference`] in isolation
+and has no envelope of its own to assert `boardYamlPath` against.
 
 ## Review round 1 -- what each test class below closes
 
@@ -27,14 +26,30 @@ under "the classifier itself" section below mutate ONE branch/constant at a
 time for exactly that reason -- see each test's own docstring for the exact
 `git diff`-shaped mutation it is built to catch, and this module's own
 docstring for the narrative.
+
+Round 1's *second* review pass found one more control that could not fail:
+un-anchoring `_WINDOWS_DRIVE_RE` (`^[A-Za-z]:` -> `[A-Za-z]:`) left every
+test here green. The regex uses `.match()`, which already anchors at the
+string's own start regardless of `^` -- so the `^` is genuinely redundant,
+and no input distinguishes its removal under `.match()`. The load-bearing
+property is calling `.match()` rather than `.search()`; see
+`test_a_colon_later_in_a_relative_path_does_not_misclassify_it_as_windows`
+below, which mutates that call instead.
+
+This file no longer covers `root_to_base_uri` / SARIF's
+`originalUriBaseIds` -- that work was added in review round 1 and reverted
+in round 2 after the base it declared turned out not to resolve the
+reference it was attached to (see `tan.core.uri_reference`'s own module
+docstring, and `validate_cmd._sarif_document`'s, for the account).
 """
 from __future__ import annotations
 
 import ntpath
 import posixpath
+import re
 from pathlib import PurePosixPath, PureWindowsPath
 
-from tan.core.uri_reference import _is_windows_spelled, path_to_uri_reference, root_to_base_uri
+from tan.core.uri_reference import _WINDOWS_DRIVE_RE, _is_windows_spelled, path_to_uri_reference
 
 # ---------------------------------------------------------------------------
 # The classifier itself, `_is_windows_spelled` -- one branch/constant at a
@@ -65,12 +80,38 @@ def test_a_forward_slash_spelled_drive_path_is_still_judged_windows():
     assert _is_windows_spelled(input_path)
 
 
-def test_the_drive_letter_regex_does_not_fire_on_an_unrelated_leading_colon():
-    """The regex is anchored (`^[A-Za-z]:`) and single-letter -- a POSIX
-    path segment that merely CONTAINS a colon later must not be
-    misclassified. Not a round-1 finding; recorded here so the regex's own
-    anchoring stays honest as this file grows."""
-    assert not _is_windows_spelled("/w/proj/board:1.yaml")
+def test_a_colon_later_in_a_relative_path_does_not_misclassify_it_as_windows():
+    """Round 1's SECOND review pass: the earlier version of this test used
+    an ABSOLUTE (leading-`/`) input, so it was actually exercising MAJOR 1's
+    guard rather than the drive-letter regex it claimed to pin -- and, it
+    turns out, no INPUT could have exercised the regex's own anchoring in
+    isolation anyway: `_WINDOWS_DRIVE_RE.match()` already anchors at the
+    string's own start regardless of whether the pattern itself carries `^`
+    (`.match()` is inherently start-anchored; verified directly, every input
+    tried agrees between `re.compile(r"^[A-Za-z]:")` and
+    `re.compile(r"[A-Za-z]:")` under `.match()`). This property is therefore
+    DOUBLY defended -- both by `.match()`'s own anchor and by the pattern's
+    redundant `^` -- and a genuine misclassification of a mid-string colon
+    needs BOTH the anchor removed from the pattern AND the call switched to
+    `.search()` at once (see [`test_the_unanchored_search_combination_
+    would_misclassify_it`] just below for what that combination looks
+    like, kept as documentation rather than a single-mutation claim). This
+    test states the requirement directly -- "a colon later in a relative
+    path is not Windows-spelled" -- rather than chasing a mutation that
+    does not exist as a single line."""
+    assert not _is_windows_spelled("sub/board:1.yaml")
+
+
+def test_the_unanchored_search_combination_would_misclassify_it():
+    """NOT a mutation-proof of the shipped code -- `_is_windows_spelled`
+    uses `.match()` with an (redundantly) anchored pattern, and neither
+    alone produces a false positive on this input (see the test above).
+    This documents what the FAILURE would look like if a future edit
+    weakened both at once: an unanchored copy of the same pattern, searched
+    rather than matched, finds "d:" inside "board:1.yaml" -- a letter
+    immediately followed by a colon, nowhere near the string's start."""
+    unanchored = re.compile(_WINDOWS_DRIVE_RE.pattern.removeprefix("^"))
+    assert unanchored.search("sub/board:1.yaml") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -245,26 +286,3 @@ def test_the_separator_less_golden_is_unaffected_by_percent_encoding():
     golden this PR must not move stays byte-identical through the new
     encoding step, not merely through the old unconditional passthrough."""
     assert path_to_uri_reference("./board.yaml") == "./board.yaml"
-
-
-# ---------------------------------------------------------------------------
-# `root_to_base_uri` -- SARIF's `originalUriBaseIds` (round 1 MAJOR 3)
-# ---------------------------------------------------------------------------
-
-
-def test_root_to_base_uri_resolves_a_relative_root_against_the_real_cwd(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    assert root_to_base_uri(".") == tmp_path.resolve().as_uri()
-
-
-def test_root_to_base_uri_accepts_an_already_absolute_root(tmp_path):
-    assert root_to_base_uri(str(tmp_path)) == tmp_path.resolve().as_uri()
-
-
-def test_root_to_base_uri_does_not_require_the_root_to_exist(tmp_path):
-    """`Path.resolve()` defaults to `strict=False` -- a `root` this process
-    has not yet created (or never will) must not raise, mirroring
-    `resolve_board_path`'s own "existence is not checked here" rule for
-    `board_path`."""
-    missing = tmp_path / "does-not-exist"
-    assert root_to_base_uri(str(missing)) == missing.resolve().as_uri()
