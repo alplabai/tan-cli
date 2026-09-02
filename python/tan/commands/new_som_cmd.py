@@ -94,6 +94,7 @@ before anything is rendered, so a stale literal here fails LOUD --
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -348,50 +349,45 @@ def _current_sku_pattern(schema_path: Path) -> str:
 
 def _known_board_names(sdk_root: Path) -> set[str] | None:
     """Board ``name:`` values from ``<sdk_root>/metadata/boards/``, or
-    ``None`` when the directory is missing -- the closed set of shared
-    carrier boards lives in the SDK checkout, not under ``--output-root``.
+    ``None`` when the directory is missing OR listable-but-empty/degenerate
+    (see the ``return names or None`` note below) -- the closed set of
+    shared carrier boards lives in the SDK checkout, not under
+    ``--output-root``.
 
-    tan-cli#1116 review round 2/3: NOT a ``boards_dir.is_dir()`` pre-flight
-    -- that used to gate the glob below, and ``Path.is_dir()`` on a
-    permission-denied PARENT directory raises a raw ``PermissionError`` on
-    3.12.3 AND 3.13.15 (measured escaping before this fix on both; this is
-    ``EACCES`` on the directory ``is_dir()`` itself needs to stat, not the
-    swallowed-errno family the other round-2 fixes describe) -- NOT "every
-    supported interpreter" as an earlier draft of this note claimed: on
-    3.14.7 ``is_dir()`` itself already returns ``False`` for the same
-    shape, so the pre-flight would have been silently wrong there in the
-    OPPOSITE direction (masking a real permission failure as "no boards
-    here") even before this fix removed it.
+    tan-cli#1116 review round 2/3 replaced a ``boards_dir.is_dir()``
+    pre-flight with ``boards_dir.glob("*.yaml")`` wrapped in one ``except
+    OSError``. That primitive choice was itself only ACCIDENTALLY correct,
+    tan-cli#1127 found: ``Path.glob`` raises ``PermissionError`` for a
+    permission-denied parent OR grandparent directory on 3.12.3, so the
+    ``except OSError`` here was genuinely load-bearing THERE -- but on
+    3.13.15 AND 3.14.7 ``glob`` instead returns an EMPTY iterator for the
+    identical shape, silently (measured; driven against real
+    ``python-build-standalone`` 3.13.15/3.14.7 builds plus this project's
+    pinned 3.12.3). On those two interpreters the ``except OSError`` clause
+    never fired at all, and this function still answered ``None`` only
+    because ``return names or None`` below happens to treat "found nothing"
+    and "permission denied" as the same outcome. A refactor touching only
+    that return line (``return names or None`` -> ``return names``, which
+    reads as a harmless tidy-up) would have silently reintroduced the
+    escaping-``PermissionError`` defect on 3.13/3.14 while staying green on
+    3.12 -- nothing at the call site would have said why.
 
-    The replacement wraps ``boards_dir.glob("*.yaml")`` itself in one
-    ``except OSError`` rather than gating it with a stat call -- but SAY
-    PLAINLY what that guard actually buys, rather than overclaiming it
-    (round 3 correction: an earlier draft of this note claimed the
-    exception fires for "parent denied" on every interpreter; measured,
-    it does not). ``Path.glob`` RAISES ``PermissionError`` for a
-    permission-denied parent OR grandparent on 3.12.3 -- the ``except
-    OSError`` here is genuinely load-bearing there. On 3.13.15 AND 3.14.7,
-    ``glob`` instead returns an EMPTY iterator for that same shape, silently
-    -- the ``except OSError`` clause never fires on either interpreter, and
-    this function still answers ``None`` only because the pre-existing
-    ``return names or None`` below already treats "found nothing" and
-    "permission denied" as the same outcome. Correctness on 3.13/3.14 is
-    ACCIDENTAL, inherited from a fallback this function needed anyway for
-    the ordinary "no boards yet" case, not delivered by this guard. Genuine
-    ``OSError``-raising coverage on those two interpreters would need
-    ``os.scandir``/``os.listdir`` in place of ``Path.glob``, which raise
-    for a denied ancestor on all three measured interpreters; left as-is
-    here because the outcome the caller sees (``None``) is already correct
-    on all three, and swapping the primitive is a larger, unrelated change
-    this fix does not make.
+    tan-cli#1127 makes the correctness deliberate: the listing now goes
+    through ``os.listdir``, which raises ``OSError`` (``PermissionError``
+    included) for a permission-denied ancestor -- parent or grandparent --
+    on all three measured interpreters, unlike ``Path.glob``. The ``except
+    OSError`` below is genuinely load-bearing on every supported
+    interpreter now, not only 3.12; nothing about this function's
+    permission-handling remains interpreter-dependent.
     """
     boards_dir = sdk_root / "metadata" / "boards"
     import yaml  # noqa: PLC0415 -- deferred, see `_yaml_scalar` (tan-cli#810)
 
     try:
-        candidates = sorted(boards_dir.glob("*.yaml"))
+        entries = os.listdir(boards_dir)
     except OSError:
         return None
+    candidates = sorted(boards_dir / entry for entry in entries if entry.endswith(".yaml"))
     names: set[str] = set()
     for path in candidates:
         try:
@@ -403,14 +399,24 @@ def _known_board_names(sdk_root: Path) -> set[str] | None:
             # skipped the same way an unparseable one already is.
             #
             # tan-cli#1116 review round 2: `OSError` is caught too -- a file
-            # this glob enumerated but cannot itself be READ (a per-file
-            # `chmod 000`, distinct from the containing directory this
-            # function's own `boards_dir.is_dir()` guard already covers)
-            # raised a raw `PermissionError` past this same best-effort scan
-            # (measured escaping before this fix).
+            # this listing enumerated but cannot itself be READ (a per-file
+            # `chmod 000`, distinct from the containing-directory failure
+            # the `except OSError` around `os.listdir` above already
+            # covers) raised a raw `PermissionError` past this same
+            # best-effort scan (measured escaping before this fix).
             continue
         if isinstance(doc, dict) and isinstance(doc.get("name"), str):
             names.add(doc["name"])
+    # tan-cli#1127: still doing real work, not a vestige of the retired
+    # `Path.glob` accident. `os.listdir` above already turns "denied
+    # ancestor" into an explicit `None` via `except OSError`; this line's
+    # remaining job is coalescing a LISTABLE-BUT-EMPTY result (no `.yaml`
+    # files at all, or every one present failed to parse / carried no
+    # `name:`) into that same "not resolvable" `None` -- the caller
+    # (`board_names is not None and default_board not in board_names`)
+    # treats `None` as "can't verify, don't gate on it" and would otherwise
+    # hard-fail every scaffold against an empty `known:` list for a
+    # directory that is present but genuinely has nothing in it yet.
     return names or None
 
 
@@ -471,6 +477,20 @@ def _family_hw_revisions(
     there and IS the one for this SKU, so it stops the search with ``None``
     rather than silently trying a second root that was never going to be
     the right answer.
+
+    tan-cli#1127 re-checked this function against the ``_known_board_names``
+    finding next door and found it does NOT need the same
+    ``Path.glob``-to-``os.listdir`` swap: this function never calls
+    ``Path.glob`` (or any other directory-listing primitive) in the first
+    place -- it reads ``path.read_text()`` directly, with no stat-based
+    pre-flight, which is exactly the "read straight through" shape the
+    paragraph above already describes. ``Path.read_text()`` raises
+    ``PermissionError`` for a permission-denied ancestor identically on
+    3.12.3, 3.13.15 and 3.14.7 (measured, both for the immediate parent and
+    a grandparent directory denied) -- unlike ``Path.glob``/``Path.is_dir()``/
+    ``Path.is_file()``, plain reads were never subject to that version skew.
+    This function's permission-handling was ALREADY deliberate, not
+    accidental, before tan-cli#1127; nothing here changed.
     """
     family_dir = _resolve_sku_family(sku, sdk_root)
     if family_dir is None:
