@@ -245,6 +245,16 @@ jobs:
     # is worse -- flipped on now that the divergence it was off for is closed.
     with:
       sdk_parity: true
+      # tan-cli#1126: skip `ci.yml`'s `python-newest`, the job that floats
+      # `python-version: "3.x"`. Everything else in that workflow pins the
+      # `requires-python` floor, so this call stays fully deterministic. A
+      # floating interpreter on THIS path is the `v0.5.0-rc3` shape again
+      # (#319): a CPython minor shipping between the last PR run and the tag
+      # reds a job, `build` below skips, and an immutable tag is spent with no
+      # Release behind it -- for a reason no code change here could have
+      # prevented and no re-run can fix. The ceiling verdict for this exact
+      # commit already exists, from the PR/merge-queue runs that merged it.
+      skip_ceiling_interpreter: true
     # A called workflow inherits the caller's permissions; the gates compile
     # third-party deps and need no write on the release.
     permissions:

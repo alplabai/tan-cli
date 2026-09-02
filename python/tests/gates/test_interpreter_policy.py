@@ -25,11 +25,21 @@ It has caught two real defects that a uniform `"3.12"` would have shipped:
   encoded `ntpath.isabs`'s pre-3.13 answer for a rooted-but-driveless Windows
   path as a universal stdlib fact.
 
-Three measured `pathlib`/`ntpath` behaviour differences now exist across the
-supported range (`_IGNORED_ERRNOS`, `Path.resolve(strict=False)` on a symlink
-loop, `ntpath.isabs`), and none of the three is guessable from the others --
-each needed a real interpreter to settle. Pinning the ceiling away would not
-make them stop existing; it would only move the discovery to a customer.
+FOUR measured `pathlib`/`ntpath` behaviour differences now exist across the
+supported range (`_IGNORED_ERRNOS`; `Path.resolve(strict=False)` on a symlink
+loop; `ntpath.isabs`; and `tan/core/bootstrap.py`'s `resolve_workspace_target`,
+where a rooted-but-driveless `--workspace` relocates a checkout into a literal
+`\\proj\\ws` on 3.12.3 and raises `ValueError` from 3.13.15 on -- found in PR
+#1137's review, real and user-visible, filed separately). None of the four is
+guessable from the others; each needed a real interpreter to settle. Pinning
+the ceiling away would not make them stop existing; it would only move the
+discovery to a customer.
+
+The fourth also marks this gate's standing limit, so it is recorded here rather
+than left to be rediscovered: an interpreter leg reports only what some test
+asserts. `resolve_workspace_target`'s divergence has no test pinning it, so no
+amount of interpreter coverage would have surfaced it -- a reviewer running the
+function by hand did.
 
 The COST is stated where it is paid (`ci.yml`'s `python-newest` comment): a new
 CPython minor release moves `"3.x"` under an unrelated PR and can red it. That
@@ -38,9 +48,10 @@ is the report doing its job.
 ## What this gate actually enforces, and why each half exists
 
 The spread on its own was NOT enough, and that is the defect tan-cli#1126
-found. `seam1-plan-shape` was the ONLY job floating `"3.x"`, and it runs
-`tests/gates` alone -- so the full suite sat red on 3.14.7 for two tests while
-all five required contexts stayed green. A check that runs, is required, and
+found. `seam1-plan-shape` was the ONLY job floating `"3.x"`, and its selection
+is `tests/gates` plus two `tests/parity` seam files and the SDK emit parity
+steps -- not `tests/core`, where the failures were -- so the full suite sat red
+on 3.14.7 for two tests while all five required contexts stayed green. A check that runs, is required, and
 cannot report the thing it would catch is exactly the shape this milestone
 spent a week clearing. `ci.yml`'s `python-newest` job is the closure: same
 floating `"3.x"`, the WHOLE suite.
@@ -59,7 +70,35 @@ So four invariants, each guarding a way that could quietly come undone:
 4. `python-newest` still selects the WHOLE suite. Narrowing it to a subset
    (`tests/gates`, a `-k`, an `--ignore`) reproduces the original defect
    precisely, and would otherwise be invisible -- the job would still exist,
-   still float, still be green.
+   still float, still be green. "Whole" here is the SELECTION, not the
+   executed set: with no `ALP_SDK_ROOT` bound, 1268 of 7669 collected tests
+   skip on that job (measured on 3.14.7; 1365 skip in total, the other 97
+   being ordinary host/toolchain gates). That gap is stated in the job's own
+   comment and is not this gate's to close;
+5. the ceiling job stays OFF the release path. `release.yml`'s `gates` job
+   calls `ci.yml`, so without a guard a CPython minor shipping between the
+   last PR run and a tag reds `python-newest`, skips `build`, and spends an
+   immutable tag -- the `v0.5.0-rc3` / #319 shape, with CPython in place of
+   alp-sdk `dev`. Deleting the `if:` or the call-site opt-out is one line in
+   either of two files, and neither would fail anything else.
+
+## Why the ENDPOINTS only, and what that costs
+
+`>=3.12` promises 3.13 as much as it promises 3.14, and 3.13 is precisely where
+the `ntpath.isabs` boundary moved -- a 3.13 leg would have caught tan-cli#1126 a
+release earlier. Measured on the interior at this commit: the full suite on
+3.13.15 is `6305 passed, 1365 skipped, 1 xfailed` -- identical to 3.14.7's, and
+to 3.12.3's once its four no-controlling-terminal xdist artefacts are run
+serially. Green, but by luck rather than by gate, and once the ceiling advances
+to 3.15 both 3.13 and 3.14 become permanently unmeasured.
+
+The endpoints are still what the JOBS run, because a third full-suite leg is
+~10 minutes of runner time per PR (measured: `python-newest` took 10m20s on
+PR #1137's own run) for an interior whose behaviour is bracketed by the two
+legs either side of it. But the POLICY no longer FORBIDS an interior pin the
+way an earlier draft of this file did -- `INTERIOR_PINS` below is the declared,
+currently-empty extension point, and the moment a divergence is found INSIDE
+the range (rather than at an endpoint) that is where the answer goes.
 
 Nothing here runs a workflow or an interpreter: it reads the YAML and the
 `pyproject.toml`, so a drift fails in `tests/gates` rather than on whichever
@@ -106,7 +145,26 @@ FLOATING_JOBS = {
 #: narrowing this (`--ignore=`, `-k`, `tests/gates`, a shard flag) changes this
 #: string, and every one of them restores the tan-cli#1126 blind spot.
 FULL_SUITE_JOB = "python-newest"
+
+#: The `workflow_call` input `release.yml`'s `gates` call passes to keep the
+#: ceiling job off the tag path. Named once, asserted in three places (the
+#: declaration, the job's `if:`, the call site) by
+#: [`test_the_ceiling_job_is_kept_off_the_release_path`].
+RELEASE_OPT_OUT_INPUT = "skip_ceiling_interpreter"
+
 FULL_SUITE_COMMAND = "python -m pytest tests -q"
+
+#: `python-version` values allowed BETWEEN the floor and the ceiling, each one
+#: a deliberate decision recorded here rather than a pin that appeared in a
+#: workflow. Empty today, and that emptiness is the claim: no interior
+#: interpreter is measured by any job. See "Why the ENDPOINTS only" in this
+#: module's docstring for the cost of that -- 3.13 is where the tan-cli#1126
+#: boundary actually moved, and nothing tests it.
+#:
+#: An entry here is a `"X.Y"` string strictly above the floor. Adding one is
+#: half the work: the pin also has to exist in a job that runs something, or
+#: this set becomes a list of interpreters the repo believes it tests.
+INTERIOR_PINS: frozenset[str] = frozenset()
 
 #: The marker each floating pin's own file must carry near it. The acceptance
 #: criterion tan-cli#1126 wrote was not only "decide the policy" but "make it
@@ -117,10 +175,15 @@ FULL_SUITE_COMMAND = "python -m pytest tests -q"
 #: asserted here.
 POLICY_MARKER = "INTERPRETER POLICY"
 
-#: How far above a floating pin the marker may sit. Wide enough for the real
-#: comment block (~30 lines) plus the `uses:`/`with:` lines between them, tight
-#: enough that a marker elsewhere in a 3000-line workflow does not count.
-POLICY_MARKER_WINDOW = 45
+#: How far above a floating pin the marker may sit. Measured distances today:
+#: 35 lines in `parity.yml` (marker 976, pin 1011) and 5 in `ci.yml`. 45 left
+#: only ten lines of headroom above a comment block this policy had just
+#: written at 34 lines -- the next person extending that prose would have hit a
+#: failure saying the marker is missing when it is in fact present, which is a
+#: worse outcome than a slightly loose window. 90 is comfortably wider than any
+#: plausible block and still far narrower than either file (773 and 3014
+#: lines), so a marker elsewhere in the workflow cannot satisfy it.
+POLICY_MARKER_WINDOW = 90
 
 
 @functools.cache
@@ -216,18 +279,27 @@ def test_every_setup_python_declares_a_version(workflow: str, job: str):
         )
 
 
-def test_every_declared_version_is_the_floor_or_the_ceiling():
-    """Two values, no third. A `"3.13"` pinned somewhere for a one-off reason
-    is a version this repo neither promises nor measures anywhere else, and it
-    would drift out of the policy the moment either end moved.
+def test_every_declared_version_is_the_floor_the_ceiling_or_a_declared_interior():
+    """The floor, the ceiling, or an interior version DECLARED in
+    `INTERIOR_PINS` -- never a value that simply appeared.
+
+    An earlier draft of this test allowed exactly two values and said a
+    `"3.13"` pin would be "a version this repo neither promises nor measures".
+    Half of that is wrong: `>=3.12` DOES promise 3.13, and 3.13 is exactly
+    where the boundary tan-cli#1126 is about actually moved. Forbidding the
+    one version most worth adding a leg for is not a policy, it is an
+    accident. The set is empty today (see the docstring section on why the
+    endpoints are what the jobs run), so this behaves identically to the
+    two-value rule until someone makes the decision explicitly.
     """
-    allowed = {_floor(), CEILING}
+    allowed = {_floor(), CEILING} | set(INTERIOR_PINS)
     wrong = [(wf, job, version) for wf, job, version in _pins() if version not in allowed]
     assert not wrong, (
         f"python-version values outside the policy {sorted(allowed)}: {wrong}. "
         "The floor is derived from python/pyproject.toml's requires-python; the "
-        f"ceiling is {CEILING!r}. A third value needs a reason recorded in this "
-        "file, not a quiet pin in a workflow."
+        f"ceiling is {CEILING!r}. An interior version is allowed but must be "
+        "declared in INTERIOR_PINS in this file, with the reason, not appear as "
+        "a quiet pin in a workflow."
     )
 
 
@@ -239,11 +311,35 @@ def test_the_floor_pin_tracks_requires_python():
     and measuring the wrong thing.
     """
     floor = _floor()
-    pinned = {version for _, _, version in _pins() if version != CEILING}
+    pinned = {
+        version
+        for _, _, version in _pins()
+        if version != CEILING and version not in INTERIOR_PINS
+    }
     assert pinned == {floor}, (
         f"workflows pin {sorted(pinned)} as the floor; python/pyproject.toml "
         f"declares {floor!r}. Move them in the same change."
     )
+
+
+def test_a_declared_interior_pin_sits_above_the_floor():
+    """`INTERIOR_PINS` is "between the endpoints", and the floor end of that is
+    checkable here (the ceiling end is not -- `"3.x"` has no number until a
+    runner resolves it). An entry at or below the floor is not an interior
+    version at all; it is either a duplicate of the floor or an interpreter
+    this package does not support. Vacuous while the set is empty, and that is
+    fine: it exists so the first entry cannot be wrong quietly.
+    """
+    floor = tuple(int(part) for part in _floor().split("."))
+    for pin in sorted(INTERIOR_PINS):
+        parts = pin.split(".")
+        assert len(parts) == 2 and all(part.isdigit() for part in parts), (
+            f"INTERIOR_PINS entry {pin!r} is not an `X.Y` version string"
+        )
+        assert tuple(int(part) for part in parts) > floor, (
+            f"INTERIOR_PINS entry {pin!r} is at or below the requires-python "
+            f"floor {_floor()!r} -- that is the floor leg, not an interior one"
+        )
 
 
 def test_exactly_the_named_jobs_float_the_ceiling():
@@ -298,13 +394,74 @@ def test_the_ceiling_job_still_runs_the_whole_suite():
     )
 
 
-@pytest.mark.parametrize(("workflow", "job"), sorted(FLOATING_JOBS))
-def test_each_floating_pin_carries_the_policy_note(workflow: str, job: str):
+def test_the_ceiling_job_is_kept_off_the_release_path():
+    """A floating interpreter must not be able to spend a tag.
+
+    `release.yml`'s `gates` job is `uses: ./.github/workflows/ci.yml`, and
+    `build` (`needs: [verify-version, gates, python-gates]`) does not run if
+    `gates` fails -- so an unguarded `python-newest` puts "whatever CPython
+    ships this week" on the release path. A minor release landing between the
+    last PR run and the tag would red it, skip `build`, and spend an immutable
+    tag with no Release behind it, for a reason no change to this repo could
+    have prevented and no re-run can fix. That is not a hypothesis: it is
+    `v0.5.0-rc3` (#319), which died in exactly that shape against alp-sdk
+    `dev` rather than against CPython, and it is why the alp-sdk `ref:` in
+    `ci.yml`'s `python` job is pinned.
+
+    Three things have to hold together, in two files, and each is one line to
+    undo: the input exists and defaults to NOT skipping (so PRs keep the job),
+    the job is guarded by it, and the release call passes `true`. PR #1137's
+    review found this; nothing else in the repo would have.
+
+    `github.event_name` is deliberately NOT the discriminator: in a called
+    workflow the `github` context is the CALLER's, so a tag run reads `push`,
+    never `workflow_call`, and such a guard would never fire.
+    """
+    ci = _load(WORKFLOWS / "ci.yml")
+    triggers = ci.get("on", ci.get(True))
+    declared = triggers["workflow_call"]["inputs"][RELEASE_OPT_OUT_INPUT]
+    assert declared["type"] == "boolean" and declared["default"] is False, (
+        f"ci.yml's {RELEASE_OPT_OUT_INPUT} must default to False -- an input "
+        "that defaults to 'run it' reads null (falsy) on pull_request/push/"
+        "merge_group, where `inputs` does not exist, and the job would vanish "
+        "from every run it exists for"
+    )
+
+    guard = str(ci["jobs"][FULL_SUITE_JOB].get("if", ""))
+    assert RELEASE_OPT_OUT_INPUT in guard, (
+        f"ci.yml:{FULL_SUITE_JOB} has no `if:` naming {RELEASE_OPT_OUT_INPUT} "
+        f"(found {guard!r}) -- the floating interpreter is back on the release "
+        "path, where a CPython release can spend a tag"
+    )
+
+    release = _load(WORKFLOWS / "release.yml")
+    gates = release["jobs"]["gates"]
+    assert str(gates.get("uses", "")).endswith("ci.yml"), (
+        "release.yml's `gates` job no longer calls ci.yml -- this gate's whole "
+        "premise moved and needs re-deriving, not deleting"
+    )
+    assert (gates.get("with") or {}).get(RELEASE_OPT_OUT_INPUT) is True, (
+        f"release.yml's `gates` call must pass {RELEASE_OPT_OUT_INPUT}: true. "
+        "Without it the guard above is inert and the tag path floats again."
+    )
+
+
+@pytest.mark.parametrize("workflow", sorted({workflow for workflow, _ in FLOATING_JOBS}))
+def test_each_floating_pin_carries_the_policy_note(workflow: str):
     """"Make it legible" was an acceptance criterion in its own right, because
     before this change the entire difference between a job that tests the
     ceiling and one that tests the floor was one character, in one file, with
     nothing next to it saying so. Prose nothing checks is prose a tidy-up
     deletes.
+
+    Parametrized by FILE, not by `(file, job)` as a first version was: the body
+    scans the whole file for `python-version: "3.x"` literals and asserts a
+    marker above each, so a `job` parameter advertised a per-job assertion this
+    makes no attempt at (PR #1137 review) -- and if both floating jobs ever
+    landed in one file, the identical check would have run twice under two
+    names. The per-JOB half is
+    [`test_exactly_the_named_jobs_float_the_ceiling`]'s, which is where it
+    belongs.
     """
     lines = (WORKFLOWS / workflow).read_text(encoding="utf-8").splitlines()
     pin_lines = [i for i, line in enumerate(lines) if f'python-version: "{CEILING}"' in line]
