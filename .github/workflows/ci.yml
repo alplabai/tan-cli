@@ -154,8 +154,8 @@ jobs:
   # `seam1-plan-shape` job and in `python-newest` below -- both also
   # `ubuntu-latest` only, so the non-Linux claim above is untouched by either).
   # Recorded as a decision, not an oversight: `tests/gates` is pure source
-  # parsing (`ast`
-  # over `python/tan/**`, text scans over the same), with no OS-dependent
+  # parsing (`ast` over `python/tan/**`, text scans over the same), with no
+  # OS-dependent
   # behaviour to lose by staying single-platform -- the path handling it does
   # do is verified platform-clean (`_rel` in `test_frozen_issue_codes.py`
   # normalises `\`->`/`; every cross-file assembled suffix resolves via
@@ -638,27 +638,58 @@ jobs:
   #
   # WHAT IT DOES NOT COVER, stated plainly rather than implied by the word
   # "whole". The SELECTION is the whole suite (`pytest tests`), but this job
-  # binds no `ALP_SDK_ROOT`, so measured on 3.14.7: 7669 collected, 1365
-  # skipped (17.8%), of which 1268 (16.5%) are SDK-gated and 97 are ordinary
-  # host/toolchain gates (Windows-only `install.ps1`, vela, tflite, a
-  # not-yet-built binary) that every leg skips alike. Those 1268 are NOT
-  # "tests about another repository" -- an earlier draft of this comment said
-  # that and it was wrong. They exercise `tan/planner/`'s OWN relocated code;
-  # they need a bound alp-sdk checkout only as DATA. So the honest claim is:
-  # the ceiling runs the SDK-free ~82%, and the planner families are measured
-  # at the FLOOR only.
+  # binds no fixture roots, so measured on 3.14.7: 7671 collected, 1365
+  # skipped (17.8%), which splits into THREE groups, not two:
   #
-  # Not fixed here, deliberately. Binding a checkout would put a THIRD copy of
-  # the alp-sdk pin in this repo's workflows (`ci.yml`'s `python` job and
-  # `parity.yml`'s `PINNED_SDK_TAG` are the two, and their "MUST be bumped
-  # together" rule has already been broken twice -- tan-cli#320/#485, and
-  # tan-cli#895 for the sibling oracle pin). Trading a known 18% coverage gap
-  # for a drift class that has actually spent a tag is a bad trade at this
-  # size. Those suites do run per-push at the floor, `ALP_SDK_ROOT`-bound, on
-  # three OSes (`parity.yml`'s `python-tests-shard`) -- unmeasured on the
-  # ceiling, not unmeasured. Revisit if a planner-family divergence is ever
-  # found across interpreters; that would change the trade, and nothing about
-  # this comment should be read as claiming it cannot happen.
+  #     696 (9.1%)  name `ALP_PLANNER_ORACLE_ROOT`
+  #     572 (7.5%)  name `ALP_SDK_ROOT`/`ALP_SDK_PARITY_ROOT` (or "a real
+  #                 alp-sdk checkout")
+  #      97 (1.3%)  ordinary host/toolchain gates -- Windows-only
+  #                 `install.ps1`, vela, tflite, a not-yet-built binary,
+  #                 `ALP_SDK_INTERNAL`, `ALP_DRPAI_TVM_HOME`, `ALP_E2E_ROOT`
+  #                 -- which every leg skips alike, at every interpreter
+  #
+  # (Classification rule, so the number is reproducible: `pytest -rs`, oracle
+  # first, then SDK, then everything else. An earlier draft of this comment
+  # said "1268 SDK-gated", which merged the first two groups and made
+  # `ALP_SDK_ROOT` look like it closes 16.5% when it closes 7.5%. It also
+  # called them "tests about another repository", which was wrong in a
+  # different way: they exercise `tan/planner/`'s OWN relocated code and need
+  # a bound checkout only as DATA.)
+  #
+  # So the honest claim is: the ceiling runs the fixture-free ~82%, and the
+  # planner families are measured at the FLOOR only.
+  #
+  # Not fixed here, deliberately, and NOT for the reason an earlier draft
+  # gave. That draft said binding would add "a THIRD copy of the alp-sdk pin",
+  # which is false twice over: there are already three literal SHAs
+  # (`ci.yml:535`, `parity.yml:683`, `parity.yml:779`), and binding needs NO
+  # copy at all -- `getting-started.yml:318-328` and
+  # `unsharded-python-canary.yml:170` read `PINNED_SDK_TAG` out of
+  # `parity.yml` with `sed` at runtime, and the first of those even errors
+  # with "do NOT add a second copy of the SHA here". The real reasons:
+  #
+  #   * a single `ALP_SDK_ROOT` bind buys 7.5%, not the 18% the merged number
+  #     suggested. The BIGGER half needs `ALP_PLANNER_ORACLE_ROOT`, and that
+  #     one wants an alp-sdk checkout at `PINNED_PLANNER_ORACLE_SDK_REF`
+  #     specifically (`tests/fixtures/planner_oracle/PROVENANCE.txt` names
+  #     it) -- a SECOND pin, which exists as a separate pin precisely because
+  #     it can drift from the first. tan-cli#895 is that drift: 19 cases
+  #     across 19 boards red on a stale oracle ref, after two sign-offs.
+  #   * a ceiling job wired to both inherits both drift modes, and a red
+  #     there would then mean "the two pins disagree", not "the newest
+  #     CPython disagrees". That is the failure this repo already names in
+  #     `clean-host.yml`: "A gate that goes red for a reason unrelated to its
+  #     subject stops being read." This job's whole value is that its red
+  #     means one thing.
+  #   * the families are also the slow ones -- `parity.yml` shards them four
+  #     ways per OS with a dedicated `parity, whole` leg beside that -- and
+  #     they already run per push at the floor, `ALP_SDK_ROOT`-bound, on
+  #     three OSes. Unmeasured on the CEILING, not unmeasured.
+  #
+  # Revisit if a planner-family divergence is ever found across interpreters;
+  # that changes the trade, and nothing here should be read as claiming it
+  # cannot happen.
   #
   # The size-ratchet/version checks are omitted for a different and settled
   # reason: they are genuinely interpreter-independent (`ast` over source,

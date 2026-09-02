@@ -84,10 +84,13 @@ So four invariants, each guarding a way that could quietly come undone:
    (`tests/gates`, a `-k`, an `--ignore`) reproduces the original defect
    precisely, and would otherwise be invisible -- the job would still exist,
    still float, still be green. "Whole" here is the SELECTION, not the
-   executed set: with no `ALP_SDK_ROOT` bound, 1268 of 7669 collected tests
-   skip on that job (measured on 3.14.7; 1365 skip in total, the other 97
-   being ordinary host/toolchain gates). That gap is stated in the job's own
-   comment and is not this gate's to close;
+   executed set: with no fixture roots bound, 1365 of 7671 collected tests
+   skip on that job (measured on 3.14.7 -- 696 name `ALP_PLANNER_ORACLE_ROOT`,
+   572 name `ALP_SDK_ROOT`, 97 are ordinary host/toolchain gates every leg
+   skips alike). The bigger half is the ORACLE root, not the SDK root, which
+   is why "just bind `ALP_SDK_ROOT`" closes 7.5% rather than the 18% a merged
+   count suggests. That gap is stated in the job's own comment and is not this
+   gate's to close;
 5. the ceiling job stays OFF the release path. `release.yml`'s `gates` job
    calls `ci.yml`, so without a guard a CPython minor shipping between the
    last PR run and a tag reds `python-newest`, skips `build`, and spends an
@@ -165,6 +168,26 @@ FULL_SUITE_JOB = "python-newest"
 #: [`test_the_ceiling_job_is_kept_off_the_release_path`].
 RELEASE_OPT_OUT_INPUT = "skip_ceiling_interpreter"
 
+#: The ceiling job's `if:` expression, compared EXACTLY -- not searched for the
+#: input's name.
+#:
+#: The first version of this gate asserted `RELEASE_OPT_OUT_INPUT in guard`, a
+#: substring test, and PR #1137's re-review showed what that buys: deleting the
+#: `!` (`${{ !inputs.skip_ceiling_interpreter }}` ->
+#: `${{ inputs.skip_ceiling_interpreter }}`) left the whole file at `32 passed`.
+#: One character, and it inverts the guard completely -- the job disappears from
+#: every PR AND runs on the tag path, which is both failures this gate was
+#: written to prevent, at once. A gate that pins the presence of a mechanism
+#: while its POLARITY is free is not a gate; it is a comment with an assert
+#: around it, and this repo has now shipped that shape four times
+#: (tan-cli#1059, #1062, #1070).
+#:
+#: Exact, therefore. A semantically-equivalent rewrite (`${{ ! inputs.x }}`,
+#: `${{ inputs.x != true }}`) reds here deliberately: rewriting a guard whose
+#: polarity is this consequential should be a decision someone records in this
+#: constant, not a diff that slips through on "it means the same thing".
+RELEASE_GUARD_EXPRESSION = "${{ !inputs." + RELEASE_OPT_OUT_INPUT + " }}"
+
 FULL_SUITE_COMMAND = "python -m pytest tests -q"
 
 #: `python-version` values allowed BETWEEN the floor and the ceiling, each one
@@ -176,7 +199,11 @@ FULL_SUITE_COMMAND = "python -m pytest tests -q"
 #:
 #: An entry here is a `"X.Y"` string strictly above the floor. Adding one is
 #: half the work: the pin also has to exist in a job that runs something, or
-#: this set becomes a list of interpreters the repo believes it tests.
+#: this set becomes a list of interpreters the repo believes it tests -- and
+#: that second half is ASSERTED below
+#: ([`test_a_declared_interior_pin_is_actually_pinned_by_a_job`]), not left as
+#: advice, because a claim about coverage that nothing checks is the shape
+#: this whole file exists to remove.
 INTERIOR_PINS: frozenset[str] = frozenset()
 
 #: The marker each floating pin's own file must carry near it. The acceptance
@@ -194,8 +221,9 @@ POLICY_MARKER = "INTERPRETER POLICY"
 #: written at 34 lines -- the next person extending that prose would have hit a
 #: failure saying the marker is missing when it is in fact present, which is a
 #: worse outcome than a slightly loose window. 90 is comfortably wider than any
-#: plausible block and still far narrower than either file (773 and 3014
-#: lines), so a marker elsewhere in the workflow cannot satisfy it.
+#: plausible block and still far narrower than either file (962 and 3012
+#: lines, measured at this commit), so a marker elsewhere in the workflow
+#: cannot satisfy it.
 POLICY_MARKER_WINDOW = 90
 
 
@@ -355,6 +383,24 @@ def test_a_declared_interior_pin_sits_above_the_floor():
         )
 
 
+def test_a_declared_interior_pin_is_actually_pinned_by_a_job():
+    """The half `INTERIOR_PINS`' own comment claims and nothing checked.
+
+    A version listed there but pinned by no job is worse than no entry at all:
+    it reads as "this repo measures 3.13" to anyone auditing the policy, while
+    no runner ever resolves it. Vacuous while the set is empty -- deliberately,
+    so that the first entry cannot be half-added quietly.
+    """
+    pinned = {version for _, _, version in _pins()}
+    unused = sorted(set(INTERIOR_PINS) - pinned)
+    assert not unused, (
+        f"INTERIOR_PINS declares {unused} but no actions/setup-python step pins "
+        "them, so nothing runs on them. Either wire a job to the version or "
+        "drop it from the set -- a declared interpreter nothing executes is a "
+        "coverage claim with no coverage behind it."
+    )
+
+
 def test_exactly_the_named_jobs_float_the_ceiling():
     """Both directions.
 
@@ -440,11 +486,14 @@ def test_the_ceiling_job_is_kept_off_the_release_path():
         "from every run it exists for"
     )
 
-    guard = str(ci["jobs"][FULL_SUITE_JOB].get("if", ""))
-    assert RELEASE_OPT_OUT_INPUT in guard, (
-        f"ci.yml:{FULL_SUITE_JOB} has no `if:` naming {RELEASE_OPT_OUT_INPUT} "
-        f"(found {guard!r}) -- the floating interpreter is back on the release "
-        "path, where a CPython release can spend a tag"
+    guard = str(ci["jobs"][FULL_SUITE_JOB].get("if", "")).strip()
+    assert guard == RELEASE_GUARD_EXPRESSION, (
+        f"ci.yml:{FULL_SUITE_JOB}'s `if:` is {guard!r}, expected "
+        f"{RELEASE_GUARD_EXPRESSION!r}. Compared EXACTLY, and the reason is the "
+        "polarity: dropping the `!` reads as a tidy-up, passes a substring "
+        "check, and simultaneously deletes this job from every PR and puts the "
+        "floating interpreter back on the tag path. If the rewrite is "
+        "deliberate, move RELEASE_GUARD_EXPRESSION with it."
     )
 
     release = _load(WORKFLOWS / "release.yml")
