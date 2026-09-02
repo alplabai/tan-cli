@@ -249,6 +249,28 @@ this: portable `python-build-standalone` builds of 3.13.15 and 3.14.7
 (the exact patch release `seam1` reported) alongside the repo's pinned
 3.12.3, side by side -- every seeded shape green on all three, not
 asserted here, run (`tests/gates`: `1027 passed, 34 skipped` on each).
+
+TAN-CLI#1127 FOLLOW-UP: `new_som_cmd._known_board_names`'s own primitive
+choice -- `boards_dir.glob("*.yaml")` wrapped in `except OSError` -- turned
+out to have the SAME version-skew shape THE VERSION-INDEPENDENCE LESSON
+describes for `is_file()`/`is_dir()`, just one level further down the
+`pathlib` stack: `Path.glob` raises for a permission-denied ancestor on
+3.12.3, but returns an empty iterator SILENTLY for the identical shape on
+3.13.15 and 3.14.7 (measured). Its `except OSError` was dead code on those
+two interpreters; the function stayed correct only because `return names or
+None` already treated "found nothing" the same as "permission denied" --
+an accident, not a contract. `_known_board_names` now uses `os.listdir`
+instead, which raises on all three measured interpreters for the same
+shape, making the `except OSError` load-bearing everywhere. Its neighbour
+`_family_hw_revisions` was re-checked against the same question and does
+NOT share the defect: it never called `Path.glob` (or any stat-based
+pre-flight) to begin with, only `Path.read_text()`, which raises
+`PermissionError` for a permission-denied ancestor identically on all
+three interpreters -- confirmed by measurement, not left as an inference
+from the `_known_board_names` finding next door. `TestKnownBoardNames.
+test_permission_denied_ancestor` seeds the new shape;
+`TestFamilyHwRevisions.test_permission_denied` (unchanged) already covered
+`_family_hw_revisions`'s equivalent case correctly before this issue.
 """
 from __future__ import annotations
 
@@ -335,8 +357,11 @@ _SEEDED_CONTRACTS: dict[str, str] = {
         "found in the round-2 re-triage: 'None when the directory is "
         "missing' is its whole contract, but its per-file except clause "
         "(yaml.YAMLError, UnicodeDecodeError) dropped OSError entirely, so "
-        "a per-FILE chmod 000 (distinct from the containing directory its "
-        "own is_dir() guard covers) escaped raw; fixed in the same change"
+        "a per-FILE chmod 000 (distinct from the containing-directory "
+        "listing failure, originally gated by a boards_dir.is_dir() "
+        "pre-flight and now by the except OSError around the os.listdir "
+        "call tan-cli#1127 replaced it with) escaped raw; fixed in the "
+        "same change"
     ),
     "new_som_cmd._family_hw_revisions": (
         "found in the round-2 re-triage: same shape and same fix as "
@@ -1179,6 +1204,36 @@ class TestHwRevNotBuildable:
 # ---------------------------------------------------------------------------
 
 
+class TestIsYamlBoardFile:
+    """tan-cli#1127 review round 2: `_is_yaml_board_file` must match what
+    `boards_dir.glob("*.yaml")` used to match before the `os.listdir` swap
+    -- case-sensitively on POSIX, case-INSENSITIVELY on Windows (`Path.
+    glob`'s own `case_sensitive=None` default) -- not a narrower,
+    always-case-sensitive suffix compare that happens to agree with `glob`
+    only on POSIX. Not a `_SEEDED_CONTRACTS` entry (it is a platform-casing
+    predicate, not a quiet-return/curated-raise contract), so no `@_covers`.
+    Every expectation below is a literal, independently-stated boolean --
+    never a second call into `Path.glob` or any other re-derivation of the
+    function under test.
+    """
+
+    def test_posix_is_case_sensitive(self, monkeypatch):
+        monkeypatch.setattr(new_som_cmd.os, "name", "posix")
+        assert new_som_cmd._is_yaml_board_file("lower.yaml") is True
+        assert new_som_cmd._is_yaml_board_file("upper.YAML") is False
+        assert new_som_cmd._is_yaml_board_file("Mixed.YaML") is False
+        assert new_som_cmd._is_yaml_board_file("not-yaml.txt") is False
+        assert new_som_cmd._is_yaml_board_file("no-suffix") is False
+
+    def test_windows_is_case_insensitive(self, monkeypatch):
+        monkeypatch.setattr(new_som_cmd.os, "name", "nt")
+        assert new_som_cmd._is_yaml_board_file("lower.yaml") is True
+        assert new_som_cmd._is_yaml_board_file("upper.YAML") is True
+        assert new_som_cmd._is_yaml_board_file("Mixed.YaML") is True
+        assert new_som_cmd._is_yaml_board_file("not-yaml.txt") is False
+        assert new_som_cmd._is_yaml_board_file("no-suffix") is False
+
+
 @_covers("new_som_cmd._known_board_names")
 class TestKnownBoardNames:
     def _boards_dir(self, sdk_root: Path) -> Path:
@@ -1214,7 +1269,8 @@ class TestKnownBoardNames:
     @_skip_as_root
     def test_permission_denied(self, tmp_path):
         # Per-FILE chmod, containing directory stays listable -- the exact
-        # shape that escaped raw before this fix (measured).
+        # shape that escaped raw past the per-file `except` before this fix
+        # (measured).
         boards = self._boards_dir(tmp_path)
         boards.mkdir(parents=True)
         path = boards / "x.yaml"
@@ -1222,11 +1278,50 @@ class TestKnownBoardNames:
         with _permission_denied_file(path):
             assert new_som_cmd._known_board_names(tmp_path) is None
 
+    @_skip_as_root
+    def test_permission_denied_ancestor(self, tmp_path):
+        # tan-cli#1127: the directory-LISTING's own `except OSError`, not
+        # the per-file one above -- deny `boards_dir`'s PARENT (`metadata/`)
+        # so the listing call itself fails. This is the exact shape
+        # `Path.glob` answered SILENTLY with an empty iterator on 3.13.15
+        # and 3.14.7 instead of raising (measured; tan-cli#1127), which
+        # left the top-level `except OSError` dead code on those two
+        # interpreters -- `os.listdir` raises here on all three measured
+        # interpreters instead, so this must go red on all three if the
+        # `except OSError` around it is ever removed.
+        boards = self._boards_dir(tmp_path)
+        boards.mkdir(parents=True)
+        (boards / "x.yaml").write_text("name: FOO\n")
+        with _permission_denied(boards.parent):
+            assert new_som_cmd._known_board_names(tmp_path) is None
+
+    def test_empty_directory(self, tmp_path):
+        # `return names or None`'s remaining job (tan-cli#1127): a listable
+        # directory with nothing usable in it is "not resolvable", same as
+        # a missing one -- not an empty-but-real `set()` the caller would
+        # otherwise hard-fail every `--default-board` against.
+        self._boards_dir(tmp_path).mkdir(parents=True)
+        assert new_som_cmd._known_board_names(tmp_path) is None
+
     def test_malformed_document(self, tmp_path):
         boards = self._boards_dir(tmp_path)
         boards.mkdir(parents=True)
         _malformed(boards / "x.yaml", "a: [1, 2")
         assert new_som_cmd._known_board_names(tmp_path) is None
+
+    def test_uppercase_yaml_suffix_matches_only_on_windows(self, tmp_path, monkeypatch):
+        # tan-cli#1127 review round 2: pins the CASING DECISION end-to-end,
+        # not just `_is_yaml_board_file` in isolation. `Path.glob`'s own
+        # `case_sensitive=None` default matched a `Foo.YAML` board file on
+        # Windows before the `os.listdir` swap; this proves the swap did
+        # not silently narrow that to a case-sensitive-everywhere match.
+        boards = self._boards_dir(tmp_path)
+        boards.mkdir(parents=True)
+        (boards / "Upper.YAML").write_text("name: UPPER\n")
+        monkeypatch.setattr(new_som_cmd.os, "name", "posix")
+        assert new_som_cmd._known_board_names(tmp_path) is None
+        monkeypatch.setattr(new_som_cmd.os, "name", "nt")
+        assert new_som_cmd._known_board_names(tmp_path) == {"UPPER"}
 
 
 @_covers("new_som_cmd._family_hw_revisions")
