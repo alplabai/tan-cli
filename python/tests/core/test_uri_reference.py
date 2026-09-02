@@ -429,14 +429,33 @@ def test_cwd_base_uri_resolves_a_nested_relative_reference_to_the_real_file(
 
 def test_cwd_base_uri_does_not_double_the_slash_at_a_filesystem_root(monkeypatch):
     """tan-cli#1117 review round 2 minor: `Path("/").as_uri()` is already
-    `"file:///"` (measured) -- APPENDING unconditionally doubles it
-    (`"file:////"`), and SARIF 2.1.0 SS3.14.14 requires the value "SHALL end
-    with a single forward slash". Mutating the conditional back to `+ "/"`
-    unconditionally reds this exact assertion; every OTHER test in this
-    section stays green either way (none of them chdir to an actual
-    filesystem root), which is why this one exists on its own."""
+    slash-terminated (measured on POSIX: `"file:///"`) -- APPENDING
+    unconditionally doubles it (`"file:////"`), and SARIF 2.1.0 SS3.14.14
+    requires the value "SHALL end with a single forward slash". Mutating the
+    conditional back to `+ "/"` unconditionally reds this exact assertion;
+    every OTHER test in this section stays green either way (none of them
+    chdir to an actual filesystem root), which is why this one exists on
+    its own.
+
+    tan-cli#1117 review round 4: asserted as a PROPERTY relative to
+    `Path.cwd().as_uri()` (an INDEPENDENT stdlib call, never `cwd_base_uri`
+    itself), not the POSIX-specific literal `"file:///"` -- `os.chdir("/")`
+    reaches "a filesystem root" on every platform, but not the same root
+    STRING: on Windows it is the root of the CURRENT drive (`ntpath`'s own
+    `/` semantics), so `cwd_base_uri()` there measured `"file:///D:/"` (the
+    CI checkout's drive), not `"file:///"` -- and a plain `not endswith(
+    "//")` check is ALSO wrong for the POSIX literal itself: `"file:///"`
+    (scheme + empty authority `//` + root `/`) legitimately contains `"//"`
+    as its own trailing substring while still carrying exactly ONE
+    semantically-trailing slash. The property that survives both platforms:
+    `Path.cwd().as_uri()` already ends in `/` on both (empty-authority
+    POSIX root and Windows drive root both do), so `cwd_base_uri()` must
+    equal it EXACTLY -- no character appended -- rather than needing a
+    slash guessed onto it."""
     monkeypatch.chdir("/")
-    assert cwd_base_uri() == "file:///"
+    raw = Path.cwd().as_uri()
+    assert raw.endswith("/"), "test assumption: a filesystem root's own as_uri() is slash-terminated"
+    assert cwd_base_uri() == raw
 
 
 def test_cwd_base_uri_or_none_agrees_with_cwd_base_uri_on_the_happy_path(tmp_path, monkeypatch):
