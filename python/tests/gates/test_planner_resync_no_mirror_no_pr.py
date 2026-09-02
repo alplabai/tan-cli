@@ -21,10 +21,26 @@ legitimate re-syncs land on `dev` after this file does.
 
 Skipped, not failed, without a bound alp-sdk checkout -- same convention as
 every other real-SDK-gated test in this suite (`tests.conftest.sdk_root()`).
-Bind `ALP_SDK_ROOT` at a checkout with `0914da38ebbecac3c1546064dd506f7fafe0bfa7`
-and `5c33ef046670029e59f013b65e4aaae8f03fc5be` (and their shared history back to
-`26b0040e9a762c16aff5c7c53b2e19cc7583b2a4`, `STRICT_LOADERS_PINNED_SDK_COMMIT`
-at that same historical gate revision) both reachable to run it for real.
+With one bound, this test does NOT require the checkout to already carry the
+three fixed historical SHAs it proves against -- `seam1 -- plan-shape parity`
+(a required `dev` context) binds `ALP_SDK_ROOT` at `parity.yml`'s own
+`fetch-depth: 1` clone, pinned at whatever `PINNED_SDK_TAG` currently is
+(`0914da38...` as of this writing) with NO ancestor or descendant history at
+all -- so `5c33ef04...` (six commits forward) and `26b0040e...` (the much
+older `STRICT_LOADERS_PINNED_SDK_COMMIT`) are simply absent there by
+construction, not reachable-but-unfetched. `_ensure_commit_fetched` below
+pulls each of the three SHAs this test needs into the bound checkout
+independently, on demand, `--depth 1` each -- `classify()` only ever reads a
+BLOB at each exact commit (`git show <sha>:<path>`) and never needs
+connectivity between them (a `git log <a>..<b>` failure already degrades to
+an empty commit list, `planner_resync.py`'s `git_log_subjects`), so three
+independent shallow fetches are both correct and cheap for what this test
+actually exercises. Proven working against the real `origin` remote
+`actions/checkout` leaves configured -- `parity.yml`'s own "pin freshness"
+step already does the identical `git fetch ... origin <ref>` against this
+same checkout later in the same job. Only a genuine fetch failure (no
+network, or no `origin` remote at all) still skips, loudly, naming which SHA
+and why -- never a silent no-op.
 """
 
 from __future__ import annotations
@@ -52,6 +68,13 @@ GATE_REL = "python/tests/gates/test_planner_relocation_freshness.py"
 _TAN_CLI_GATE_COMMIT = "0d6f13611f1b7978943727a5ac13cf7c6edb3278"
 _MIRROR_BASE = "0914da38ebbecac3c1546064dd506f7fafe0bfa7"
 _TARGET = "5c33ef046670029e59f013b65e4aaae8f03fc5be"
+#: `STRICT_LOADERS_PINNED_SDK_COMMIT` at the same historical gate revision --
+#: much older than the other two (it names the commit that INTRODUCED
+#: `scripts/strict_loaders.py`), so it is never reachable from a shallow
+#: fetch of either `_MIRROR_BASE` or `_TARGET`. Fetched independently by
+#: `_ensure_commit_fetched` below for the same reason: `classify()` reads its
+#: blob directly, never walks to it from the other two.
+_STRICT_LOADERS_BASE = "26b0040e9a762c16aff5c7c53b2e19cc7583b2a4"
 
 SDK = sdk_root()
 
@@ -66,6 +89,36 @@ def _load():
 
 
 pr = _load()
+
+
+def _ensure_commit_fetched(sdk: pathlib.Path, sha: str) -> None:
+    """Best-effort: pull `sha` into the bound alp-sdk checkout if it is not
+    already present, rather than assume the checkout's own history already
+    reaches it. See the module docstring for why this is needed at all
+    (`seam1`'s own checkout is `fetch-depth: 1`, exactly one commit, no
+    ancestors or descendants) and why `--depth 1` per SHA is sufficient
+    (`classify()` never needs connectivity between them).
+
+    Only a genuine fetch failure skips -- never a bare "not present", and
+    never silently: the skip reason names the exact SHA and the git error,
+    so a broken `origin` remote or a real network outage reads as a skip
+    with a cause, not as this test quietly not running."""
+    present = subprocess.run(
+        ["git", "-C", str(sdk), "cat-file", "-e", f"{sha}^{{commit}}"],
+        capture_output=True,
+    )
+    if present.returncode == 0:
+        return
+    fetch = subprocess.run(
+        ["git", "-C", str(sdk), "fetch", "--quiet", "--depth", "1", "origin", sha],
+        capture_output=True,
+    )
+    if fetch.returncode != 0:
+        pytest.skip(
+            f"{sha} is not present in the bound alp-sdk checkout at {sdk} and "
+            "could not be fetched (no network, or 'origin' is not alp-sdk's "
+            f"real remote): {fetch.stderr.decode('utf-8', 'replace').strip()}"
+        )
 
 
 @pytest.mark.skipif(
@@ -90,6 +143,19 @@ def test_the_0914da38_to_5c33ef04_range_proves_zero_mirror_changes_and_no_pr():
         "re-derive _TAN_CLI_GATE_COMMIT rather than silently proving a "
         "different range than tan-cli#1109's own reproduction"
     )
+    assert gate.strict_loaders_pinned_sdk_commit == _STRICT_LOADERS_BASE, (
+        "this fixture's STRICT_LOADERS_PINNED_SDK_COMMIT drifted from "
+        "_STRICT_LOADERS_BASE -- update the constant to match rather than "
+        "let _ensure_commit_fetched fetch a SHA classify() never reads"
+    )
+
+    # seam1's own alp-sdk checkout (parity.yml's "clone alp-sdk" step) is
+    # `fetch-depth: 1` at whatever PINNED_SDK_TAG currently is -- see the
+    # module docstring. Make each of the three fixed SHAs this proof needs
+    # present before classify() ever tries to read a blob at one of them.
+    _ensure_commit_fetched(SDK, _MIRROR_BASE)
+    _ensure_commit_fetched(SDK, _TARGET)
+    _ensure_commit_fetched(SDK, _STRICT_LOADERS_BASE)
 
     rep = pr.classify(SDK, REPO_ROOT, gate, _TARGET)
 

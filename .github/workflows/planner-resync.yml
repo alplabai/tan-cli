@@ -256,9 +256,10 @@ jobs:
       # tree as it stood before PR #1103 merged, because nothing re-read
       # `origin/dev` between checkout and regeneration. `-B`, not a bare
       # `checkout dev`: the initial checkout may have left `dev` detached
-      # rather than as a local branch, and `-B` creates-or-resets it either
-      # way. `reset --hard`, not `merge`/`rebase`: nothing has run yet that
-      # could have left a local commit worth preserving here.
+      # rather than as a local branch, and `git checkout -B dev origin/dev`
+      # creates-or-resets the local `dev` branch to point exactly at
+      # `origin/dev`'s tip either way -- not a `merge`/`rebase`: nothing has
+      # run yet that could have left a local commit worth preserving here.
       - name: Pin the tan-cli dev tip this run regenerates against
         id: devtip
         shell: bash
@@ -403,7 +404,19 @@ jobs:
             exit 1
           fi
           if [ -z "$(git status --porcelain -- python/)" ]; then
-            echo "Nothing to propose -- planner_resync.py verdict is '${RESYNC_VERDICT}' for alp-sdk ${SDK_SHA}: no file under scripts/alp_orchestrate/ (nor a tracked hand-port source) changed enough to write anything under python/. See the job summary for the full report."
+            # tan-cli#1109 review (minor): `planner_resync.py` returns 2
+            # (REFUSED) BEFORE it ever writes `verdict=` to $GITHUB_OUTPUT --
+            # its `except Refused` branch is above that write. `RESYNC_VERDICT`
+            # is therefore EMPTY on this path, and asserting "no file ...
+            # changed enough" would claim a measurement the script never made:
+            # a refusal means it never got far enough to classify anything at
+            # all. `RC` (unlike `RESYNC_VERDICT`) IS set on every path, so
+            # branch on that instead of asserting a cause from an empty string.
+            if [ "${RC}" = "2" ]; then
+              echo "Nothing to propose -- planner_resync.py REFUSED to propose anything for alp-sdk ${SDK_SHA} (a pin disagrees with its own hash table, or the alp-sdk checkout is unusable) -- it never got far enough to classify a single file. See the job summary for the refusal reason."
+            else
+              echo "Nothing to propose -- planner_resync.py verdict is '${RESYNC_VERDICT}' for alp-sdk ${SDK_SHA}: no file under scripts/alp_orchestrate/ (nor a tracked hand-port source) changed enough to write anything under python/. See the job summary for the full report."
+            fi
             echo "opened=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -413,7 +426,14 @@ jobs:
           # merging reverts something -- surfaced explicitly rather than
           # left for a reviewer to `git diff` themselves.
           changed_files="$(git status --porcelain -- python/ | wc -l | tr -d ' ')"
-          changed_list="$(git status --porcelain -- python/ | awk '{print $2}')"
+          # tan-cli#1109 review (nit): `awk '{print $2}'` splits on
+          # WHITESPACE, so a path containing a space -- or a staged rename's
+          # `old -> new` porcelain form, which is itself space-separated --
+          # prints truncated. `cut -c4-` instead: `git status --porcelain`
+          # lines are exactly two status characters, one space, then the
+          # (possibly `old -> new`) path -- column 4 onward is the whole
+          # rest of the line, untouched by any space it contains.
+          changed_list="$(git status --porcelain -- python/ | cut -c4-)"
           short="${SDK_SHA:0:8}"
 
           # tan-cli#1006 review (nit): this is the ONE place the automation's
@@ -679,10 +699,37 @@ jobs:
           # job (tan-cli#920): a transient `gh` error must not be read as "no
           # other proposal exists" and fall through to leaving a stale one
           # open.
+          #
+          # tan-cli#1109 review (major): the head-branch prefix alone is not
+          # enough -- `auto/planner-resync` is the exact branch the #1002/#996
+          # incident put a HUMAN'S hand-port commit on (the branch-clobber
+          # guard above protects the COMMIT by diverting, but a human could
+          # just as well open their own PR from a branch already named
+          # `auto/planner-resync-<whatever>`), and this step's own body at
+          # `:552` promises that work "is still there" -- it would not be, if
+          # this closed the PR carrying it. `select(.author.login ==
+          # "app/github-actions")` restricts to PRs THIS WORKFLOW'S TOKEN
+          # opened -- measured against every real `auto/planner-resync*` PR
+          # this repo has ever opened (`gh pr view <n> --json author`):
+          # `{"is_bot":true,"login":"app/github-actions"}`, exactly. The
+          # `isCrossRepository == false` check is defence in depth: a fork PR
+          # cannot forge that author identity, but there is no reason to rely
+          # on that alone when the field is free to check.
+          # tan-cli#1109 review (nit): `--limit 100`, same reasoning as the
+          # "Surface the owed work..." / "Close the tracking issue..." steps'
+          # own `gh issue list --limit 100` further down -- `gh pr list` with
+          # no `--limit` defaults to a 30-item, newest-first page, so past 30
+          # open PRs a proposal this cap is supposed to supersede can age off
+          # page 1 and this step silently under-delivers instead of finding
+          # it. 100 is this repo's own established ceiling for that lookup;
+          # not measured as a live problem today (5 open PRs total), same as
+          # the un-`--limit`ed `gh pr list --head` a few lines above -- but
+          # cheap to fix here alongside the rest of this round.
           set +e
           others="$(gh pr list --repo "${GITHUB_REPOSITORY}" --state open \
-                      --json number,headRefName \
-                      --jq ".[] | select(.headRefName | startswith(\"auto/planner-resync\")) | select(.headRefName != \"${KEEP_BRANCH}\") | .number")"
+                      --limit 100 \
+                      --json number,headRefName,author,isCrossRepository \
+                      --jq ".[] | select(.headRefName | startswith(\"auto/planner-resync\")) | select(.headRefName != \"${KEEP_BRANCH}\") | select(.author.login == \"app/github-actions\") | select(.isCrossRepository == false) | .number")"
           lookup_rc=$?
           set -e
           if [ "${lookup_rc}" -ne 0 ]; then
@@ -960,6 +1007,20 @@ jobs:
           # clean (or nothing owed)." wording.
           if [ '${{ steps.pr.outputs.diverted }}' = 'true' ]; then
             echo "::warning::planner-resync diverted away from auto/planner-resync (tan-cli#1002) -- ${{ steps.pr.outputs.occupied_count || 1 }} branch(es) carry a commit this automation did not write and were left completely untouched. A green job here does NOT mean nothing needs attention: see ${{ steps.pr.outputs.url || 'the job summary' }} for what was protected and which branch this proposal actually landed on."
+          fi
+          # tan-cli#1109 review (minor): `stale=true` used to be written by
+          # the "Open or refresh the proposal PR" step's staleness abort and
+          # never READ anywhere -- that step's own `exit 1` already fails the
+          # JOB (this step still runs, `if: !cancelled()`), but with `rc`
+          # left at whatever `steps.resync.outputs.rc` was (commonly `0`),
+          # the `case` below's `0)` arm printed "Re-sync clean (or nothing
+          # owed)." directly under a run that aborted mid-flight and pushed
+          # nothing -- a green-sounding line on a red job, checked BEFORE the
+          # `case` for the same reason the diversion warning above is: never
+          # lost regardless of which `rc` branch would otherwise run.
+          if [ '${{ steps.pr.outputs.stale }}' = 'true' ]; then
+            echo "::error::this run's proposal was computed against a base that went stale before it could be pushed (tan-cli#1109) -- origin/dev's tan/planner/ (or the freshness gate's pins) moved while this run was regenerating, so nothing was pushed or opened. This is NOT the same as 'Re-sync clean': a future scheduled or dispatched run regenerates against the fresh tip."
+            exit 1
           fi
           rc='${{ steps.resync.outputs.rc }}'
           case "${rc}" in

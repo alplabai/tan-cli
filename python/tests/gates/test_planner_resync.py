@@ -290,6 +290,24 @@ def test_up_to_date_reason_names_the_range_and_why():
     assert "nothing to propose" in reason
 
 
+def test_up_to_date_reason_names_the_hand_port_base_too_when_it_differs():
+    """tan-cli#1109 review (minor): the mirror half and the hand-port half
+    are audited from two DIFFERENT pins that drift at different rates by
+    design (tan-cli#296) -- attributing "nothing changed" to the mirror
+    base alone would misreport the hand-port half whenever they differ."""
+    rep = pr.Report(
+        sdk_head="b" * 40,
+        mirror_base="a" * 40,
+        hand_port_base="d" * 40,
+        strict_base="c" * 40,
+        mirror=[_fv("m/a.py", "unchanged")],
+    )
+    reason = pr.up_to_date_reason(rep)
+    assert rep.mirror_base[:8] in reason
+    assert rep.hand_port_base[:8] in reason
+    assert rep.mirror_base[:8] != rep.hand_port_base[:8]
+
+
 def test_main_prints_the_up_to_date_reason_to_stderr_only_when_up_to_date(
     mini, capsys
 ):

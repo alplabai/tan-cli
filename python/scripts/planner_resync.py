@@ -796,12 +796,20 @@ def up_to_date_reason(rep: Report) -> str:
     log (stderr, so it survives even when `--markdown`/`--json` redirect the
     report elsewhere) so a silent run reads as a measurement, not an absence
     of one.
+
+    Names BOTH bases (tan-cli#1109 review): the mirror half and the
+    hand-port half are audited from two DIFFERENT pins
+    (`PINNED_SDK_COMMIT` / `HAND_PORT_PINNED_SDK_COMMIT`) that drift at
+    different rates by design (`Report.hand_port_moves`'s own docstring,
+    tan-cli#296) -- attributing "nothing changed" to a single base would
+    misreport the hand-port half whenever the two pins differ.
     """
     return (
-        f"planner_resync: up to date -- no file under {MIRROR_DIR}/ (nor any "
-        f"tracked hand-port source) changed between the pinned audit "
-        f"{rep.mirror_base[:8]} and the target {rep.sdk_head[:8]}; nothing to "
-        "propose."
+        f"planner_resync: up to date -- no file under {MIRROR_DIR}/ changed "
+        f"between the pinned mirror audit {rep.mirror_base[:8]} and the "
+        f"target {rep.sdk_head[:8]}, and no tracked hand-port source changed "
+        f"between the pinned hand-port audit {rep.hand_port_base[:8]} and "
+        "that same target; nothing to propose."
     )
 
 

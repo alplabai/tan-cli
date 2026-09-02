@@ -339,6 +339,7 @@ def _run_step(
     *,
     dev_sha: str | None = None,
     resync_verdict: str = "clean",
+    rc: str = "0",
 ) -> subprocess.CompletedProcess[bytes]:
     github_output = tmp_path / "github_output"
     github_output.write_text("", encoding="utf-8")
@@ -351,7 +352,7 @@ def _run_step(
     env["GITHUB_WORKSPACE"] = str(workspace)
     env["RUNNER_TEMP"] = str(runner_temp)
     env["SDK_SHA"] = sdk_sha
-    env["RC"] = "0"
+    env["RC"] = rc
     env["GATE_VERDICT"] = "PASS"
     env["GH_TOKEN"] = "fake-token"
     # tan-cli#1109: the step now re-fetches `origin/dev` for itself and
@@ -556,21 +557,43 @@ def _advance_dev_with_a_landed_change(
     return sha
 
 
+#: tan-cli#1109 review (minor): the staleness check's path LIST is the
+#: revert-risk surface, not just "some file under python/tan/planner" --
+#: `apply()` writes exactly `python/tan/planner/<mod>` AND `GATE_REL`
+#: (`planner_resync.py:738-786`), so a change confined to the GATE FILE alone
+#: (a hand-authored pin move, say) is just as revert-risky as one confined to
+#: a mirror module, and dropping it from the `git diff --quiet` path list
+#: would leave this exact test green while only asserting half the surface.
+#: Parametrized over both paths rather than duplicated, so the two cases
+#: cannot drift apart the way two independently-hand-kept tests eventually do.
+@pytest.mark.parametrize(
+    "rel_path,tag",
+    [
+        ("python/tan/planner/validate.py", "mirror-touch"),
+        (
+            "python/tests/gates/test_planner_relocation_freshness.py",
+            "gate-file-touch",
+        ),
+    ],
+)
 def test_stale_dev_between_regen_and_push_aborts_without_pushing_anything(
-    workspace: pathlib.Path, fake_bin: pathlib.Path, tmp_path: pathlib.Path
+    workspace: pathlib.Path,
+    fake_bin: pathlib.Path,
+    tmp_path: pathlib.Path,
+    rel_path: str,
+    tag: str,
 ):
-    """tan-cli#1109 fault 2, half two: `origin/dev`'s `tan/planner/` moved
-    (a landed fix, exactly PR #1103's shape) between when this run
-    regenerated (`DEV_SHA`, what `steps.devtip.outputs.sha` names on the real
-    runner) and when this step is about to push -- must abort before EVER
-    reaching `git push`, must leave `auto/planner-resync` completely
-    unpushed, and must set both `opened=false` and `stale=true`."""
+    """tan-cli#1109 fault 2, half two: `origin/dev`'s `tan/planner/` (or the
+    freshness gate's own pin file) moved (a landed fix, exactly PR #1103's
+    shape) between when this run regenerated (`DEV_SHA`, what
+    `steps.devtip.outputs.sha` names on the real runner) and when this step
+    is about to push -- must abort before EVER reaching `git push`, must
+    leave `auto/planner-resync` completely unpushed, and must set both
+    `opened=false` and `stale=true`."""
     bare = tmp_path / "origin.git"
     stale_dev_sha = _dev_tip(workspace)
 
-    _advance_dev_with_a_landed_change(
-        bare, tmp_path, "python/tan/planner/validate.py", "mirror-touch"
-    )
+    _advance_dev_with_a_landed_change(bare, tmp_path, rel_path, tag)
 
     proc = _run_step(
         workspace, fake_bin, tmp_path, "cafef00d12345678", dev_sha=stale_dev_sha
@@ -634,6 +657,51 @@ def test_nothing_to_propose_logs_the_planner_resync_verdict(
     assert "opened=false\n" in outputs, outputs
 
 
+def test_nothing_to_propose_on_a_refusal_does_not_assert_a_cause_it_never_measured(
+    workspace: pathlib.Path, fake_bin: pathlib.Path, tmp_path: pathlib.Path
+):
+    """tan-cli#1109 review (minor): `planner_resync.py` returns 2 (REFUSED)
+    BEFORE it ever writes `verdict=` to $GITHUB_OUTPUT -- `RESYNC_VERDICT` is
+    empty on this path, so the "no file ... changed enough" wording would
+    assert a measurement the script never made. `RC == '2'` must instead say
+    the script refused, not fabricate a verdict from an empty string."""
+    (workspace / "python" / "resynced_marker.txt").unlink()
+
+    proc = _run_step(
+        workspace,
+        fake_bin,
+        tmp_path,
+        "cafef00d12345678",
+        resync_verdict="",
+        rc="2",
+    )
+    assert proc.returncode == 0, _fmt(proc)
+    assert b"Nothing to propose" in proc.stdout, _fmt(proc)
+    assert b"REFUSED" in proc.stdout, _fmt(proc)
+    assert b"changed enough to write anything" not in proc.stdout, (
+        "a refusal must not claim it measured that nothing changed -- it "
+        "never got far enough to classify a single file:\n" + _fmt(proc)
+    )
+
+
+def test_diff_against_dev_lists_a_path_with_a_space_untruncated(
+    workspace: pathlib.Path, fake_bin: pathlib.Path, tmp_path: pathlib.Path
+):
+    """tan-cli#1109 review (nit): `awk '{print $2}'` splits on whitespace, so
+    a changed path containing a space prints truncated in the "Diff against
+    `dev`" block -- `cut -c4-` takes the whole rest of each `git status
+    --porcelain` line instead."""
+    (workspace / "python" / "a file with spaces.txt").write_text(
+        "proposed delta\n", encoding="utf-8"
+    )
+
+    proc = _run_step(workspace, fake_bin, tmp_path, "cafef00d12345678")
+    assert proc.returncode == 0, _fmt(proc)
+
+    body = (tmp_path / "runner_temp" / "body.md").read_text(encoding="utf-8")
+    assert "python/a file with spaces.txt" in body, body
+
+
 # ---------------------------------------------------------- the Verdict step
 
 
@@ -648,6 +716,7 @@ _VERDICT_TOKEN_ORDER = (
     "steps.pr.outputs.diverted",
     "steps.pr.outputs.occupied_count || 1",
     "steps.pr.outputs.url || 'the job summary'",
+    "steps.pr.outputs.stale",
     "steps.resync.outputs.rc",
     "steps.pr.outputs.url || steps.issue.outputs.url || 'the job summary'",
     "steps.gate.outputs.verdict",
@@ -676,13 +745,15 @@ def _render_verdict(
     verdict: str = "PASS",
     opened: str = "true",
     url: str = "https://github.com/example/tan-cli/pull/1",
+    stale: bool = False,
 ) -> str:
     values = {
         "steps.pr.outputs.diverted": "true" if diverted else "false",
         "steps.pr.outputs.occupied_count || 1": "1",
         "steps.pr.outputs.url || 'the job summary'": url,
-        "steps.pr.outputs.url || steps.issue.outputs.url || 'the job summary'": url,
+        "steps.pr.outputs.stale": "true" if stale else "false",
         "steps.resync.outputs.rc": rc,
+        "steps.pr.outputs.url || steps.issue.outputs.url || 'the job summary'": url,
         "steps.gate.outputs.verdict": verdict,
         "steps.pr.outputs.opened": opened,
     }
@@ -720,6 +791,28 @@ def test_verdict_warns_exactly_when_diverted_is_true(tmp_path: pathlib.Path):
     clean_proc = _run_bash(_render_verdict(diverted=False, rc="0"))
     assert clean_proc.returncode == 0, clean_proc.stderr.decode("utf-8", "replace")
     assert b"::warning::" not in clean_proc.stdout, clean_proc.stdout.decode("utf-8", "replace")
+    assert b"Re-sync clean (or nothing owed)." in clean_proc.stdout, (
+        clean_proc.stdout.decode("utf-8", "replace")
+    )
+
+
+def test_verdict_errors_on_a_stale_abort_instead_of_reporting_clean(
+    tmp_path: pathlib.Path,
+):
+    """tan-cli#1109 review (minor): `steps.pr.outputs.stale` used to be
+    written and never read -- with `rc` left at whatever the resync step
+    reported (commonly `0`), a stale-aborted run fell straight into the `0)`
+    arm and printed "Re-sync clean (or nothing owed)." on a run that pushed
+    nothing. Checked before the `rc` case, same reason the diversion warning
+    is: never lost regardless of which `rc` branch would otherwise fire."""
+    proc = _run_bash(_render_verdict(diverted=False, rc="0", stale=True))
+    assert proc.returncode != 0, proc.stderr.decode("utf-8", "replace")
+    assert b"::error::" in proc.stdout, proc.stdout.decode("utf-8", "replace")
+    assert b"tan-cli#1109" in proc.stdout, proc.stdout.decode("utf-8", "replace")
+    assert b"Re-sync clean (or nothing owed)." not in proc.stdout, (
+        "a stale-aborted run must never read as clean:\n"
+        + proc.stdout.decode("utf-8", "replace")
+    )
 
 
 # ------------------------ tan-cli#1109 fault 3: cap at one open PR
@@ -752,7 +845,12 @@ def _close_step_run() -> str:
 
 
 def _run_close_step(
-    tmp_path: pathlib.Path, gh_script: str, *, keep_branch: str, keep_url: str
+    tmp_path: pathlib.Path,
+    gh_script: str,
+    *,
+    keep_branch: str,
+    keep_url: str,
+    pr_list_fixture: str = "[]",
 ) -> tuple[subprocess.CompletedProcess[bytes], pathlib.Path]:
     bindir = tmp_path / "close-bin"
     bindir.mkdir()
@@ -761,6 +859,8 @@ def _run_close_step(
     gh_stub.chmod(0o755)
     call_log = tmp_path / "gh_calls.log"
     call_log.write_text("", encoding="utf-8")
+    fixture = tmp_path / "pr_list_fixture.json"
+    fixture.write_text(pr_list_fixture, encoding="utf-8")
 
     env = dict(os.environ)
     env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
@@ -769,6 +869,7 @@ def _run_close_step(
     env["KEEP_BRANCH"] = keep_branch
     env["KEEP_URL"] = keep_url
     env["GH_CALL_LOG"] = str(call_log)
+    env["GH_PR_LIST_FIXTURE"] = str(fixture)
 
     proc = subprocess.run(
         ["bash", "-x", "-c", _close_step_run()], env=env, capture_output=True
@@ -776,13 +877,35 @@ def _run_close_step(
     return proc, call_log
 
 
-#: `pr list` answers with two "other" PR numbers (simulating tonight's
-#: #1106/#1107 still open alongside the just-opened/refreshed #1108); every
-#: other subcommand this step calls just logs its full argv so the test can
-#: assert on exactly which PR numbers were acted on.
-_FAKE_GH_TWO_OTHERS = """#!/usr/bin/env bash
+#: tan-cli#1109 review (major): the earlier version of this fake answered
+#: `pr list` with a hardcoded number list regardless of argv, so the real
+#: `--jq` expression the step passes -- the `startswith("auto/planner-
+#: resync")` prefix match, the `!= KEEP_BRANCH` self-exclusion, and (this
+#: round) the `author.login == "app/github-actions"` + `isCrossRepository ==
+#: false` filters that stop a HUMAN's PR from being closed -- never actually
+#: ran. This fake instead extracts the real `--jq` argument out of `gh`'s own
+#: argv and applies it with the REAL `jq` binary against a JSON fixture
+#: (`GH_PR_LIST_FIXTURE`), the same shape `gh pr list --json ... --jq ...`
+#: itself returns -- so a typo or a dropped `select()` in the step's own
+#: string is caught here, not waved through by a fake that always answers
+#: "correctly" no matter what was asked.
+_FAKE_GH_ARGV_AWARE = """#!/usr/bin/env bash
 case "$1 $2" in
-  "pr list") echo "1106"; echo "1107" ;;
+  "pr list")
+    jq_expr=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--jq" ]; then
+        jq_expr="$arg"
+      fi
+      prev="$arg"
+    done
+    if [ -z "$jq_expr" ]; then
+      echo "fake gh: pr list called with no --jq argument: $*" >&2
+      exit 1
+    fi
+    jq -r "$jq_expr" "$GH_PR_LIST_FIXTURE"
+    ;;
   "pr comment") echo "$*" >> "$GH_CALL_LOG"; exit 0 ;;
   "pr close") echo "$*" >> "$GH_CALL_LOG"; exit 0 ;;
   *) echo "fake gh: unhandled invocation: $*" >&2; exit 1 ;;
@@ -796,34 +919,76 @@ case "$1 $2" in
 esac
 """
 
+#: A realistic `gh pr list --json number,headRefName,author,isCrossRepository`
+#: page, mirroring the real shapes this repo has actually produced (`gh pr
+#: view <n> --json author` on a genuine bot PR: `{"is_bot":true,"login":
+#: "app/github-actions"}`, measured tan-cli#1109 review) plus the two shapes
+#: this round's guard exists to refuse:
+#:   * #1106/#1107 -- bot-authored, same-repo, diverted proposals: MUST close.
+#:   * #2001 -- a HUMAN'S PR on a branch that also happens to start with
+#:     `auto/planner-resync` (the literal #1002/#996 "hand-port work parked
+#:     on this branch name" shape): MUST NOT close.
+#:   * #2002 -- author claims to be the bot but `isCrossRepository` is true (a
+#:     fork cannot really forge the author identity, but the check is free):
+#:     MUST NOT close.
+#:   * #1108 -- the branch this run just opened/refreshed (`KEEP_BRANCH`
+#:     below): MUST NOT close itself.
+_PR_LIST_FIXTURE_MIXED = """[
+  {"number": 1106, "headRefName": "auto/planner-resync-eaa79695",
+   "author": {"login": "app/github-actions", "is_bot": true},
+   "isCrossRepository": false},
+  {"number": 1107, "headRefName": "auto/planner-resync-bbfc6c5a",
+   "author": {"login": "app/github-actions", "is_bot": true},
+   "isCrossRepository": false},
+  {"number": 2001, "headRefName": "auto/planner-resync-humanwork",
+   "author": {"login": "a-human-reviewer", "is_bot": false},
+   "isCrossRepository": false},
+  {"number": 2002, "headRefName": "auto/planner-resync-forked",
+   "author": {"login": "app/github-actions", "is_bot": true},
+   "isCrossRepository": true},
+  {"number": 1108, "headRefName": "auto/planner-resync-5c33ef04",
+   "author": {"login": "app/github-actions", "is_bot": true},
+   "isCrossRepository": false}
+]"""
 
-def test_close_step_closes_every_other_open_planner_resync_pr(tmp_path: pathlib.Path):
-    """tan-cli#1109 fault 3: once one proposal is open/refreshed, every OTHER
-    open PR whose head starts with `auto/planner-resync` gets a comment
-    pointing at the kept one and is closed -- the literal shape of tonight's
-    #1106/#1107/#1108 (three diverted branches, each with its own PR,
-    protecting the same human commit)."""
+
+def test_close_step_closes_bot_prs_but_never_a_human_or_cross_repo_one(
+    tmp_path: pathlib.Path,
+):
+    """tan-cli#1109 fault 3 + review (major): once one proposal is
+    open/refreshed, every OTHER open, BOT-AUTHORED, same-repo PR whose head
+    starts with `auto/planner-resync` is superseded and closed (#1106/#1107 --
+    the literal shape of tonight's #1106/#1107/#1108); a PR that merely
+    shares the branch prefix but is NOT the bot's own -- a human's hand-port
+    work (#2001, the #1002/#996 shape this whole guard exists to protect) or
+    a cross-repo PR (#2002) -- is never touched. Both directions asserted."""
     proc, call_log = _run_close_step(
         tmp_path,
-        _FAKE_GH_TWO_OTHERS,
+        _FAKE_GH_ARGV_AWARE,
         keep_branch="auto/planner-resync-5c33ef04",
         keep_url="https://github.com/example/tan-cli/pull/1108",
+        pr_list_fixture=_PR_LIST_FIXTURE_MIXED,
     )
     assert proc.returncode == 0, _fmt(proc)
     calls = call_log.read_text(encoding="utf-8")
+
+    # Direction 1: the bot's own OTHER proposals are superseded and closed.
     assert "pr comment 1106" in calls, calls
     assert "pr comment 1107" in calls, calls
     assert "pr close 1106" in calls, calls
     assert "pr close 1107" in calls, calls
-    # The kept branch's own PR (#1108, named only inside KEEP_URL's comment
-    # text above) must never itself be closed or commented on -- the fake
-    # `gh pr list` above already excludes it (mirroring the step's own
-    # `select(.headRefName != "${KEEP_BRANCH}")`), so this is really
-    # asserting the fake never gets a spurious "pr close 1108"/"pr comment
-    # 1108" call, not that "1108" is absent from the log altogether (it is,
-    # legitimately, inside the superseding URL).
-    assert "pr close 1108" not in calls, calls
+
+    # Direction 2: a human's PR (same branch prefix, foreign author) must
+    # never be closed or commented on, no matter how it got that branch name.
+    assert "pr comment 2001" not in calls, calls
+    assert "pr close 2001" not in calls, calls
+    # ...and neither must a cross-repository PR, even one claiming the bot's
+    # own author identity.
+    assert "pr comment 2002" not in calls, calls
+    assert "pr close 2002" not in calls, calls
+    # ...nor the branch this very run just opened/refreshed.
     assert "pr comment 1108" not in calls, calls
+    assert "pr close 1108" not in calls, calls
 
 
 def test_close_step_refuses_to_guess_when_gh_pr_list_fails(tmp_path: pathlib.Path):
@@ -842,11 +1007,4 @@ def test_close_step_refuses_to_guess_when_gh_pr_list_fails(tmp_path: pathlib.Pat
     assert call_log.read_text(encoding="utf-8") == "", (
         "no pr comment/close call may happen once the lookup itself failed:\n"
         + _fmt(proc)
-    )
-
-    clean_proc = _run_bash(_render_verdict(diverted=False, rc="0"))
-    assert clean_proc.returncode == 0, clean_proc.stderr.decode("utf-8", "replace")
-    assert b"::warning::" not in clean_proc.stdout, clean_proc.stdout.decode("utf-8", "replace")
-    assert b"Re-sync clean (or nothing owed)." in clean_proc.stdout, (
-        clean_proc.stdout.decode("utf-8", "replace")
     )
