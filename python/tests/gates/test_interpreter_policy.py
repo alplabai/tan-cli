@@ -84,14 +84,27 @@ So four invariants, each guarding a way that could quietly come undone:
    (`tests/gates`, a `-k`, an `--ignore`) reproduces the original defect
    precisely, and would otherwise be invisible -- the job would still exist,
    still float, still be green. "Whole" here is the SELECTION, not the
-   executed set: with no fixture roots bound, 1365 of 7671 collected tests
+   executed set: with no fixture roots bound, 1365 of 7673 collected tests
    skip on that job (measured on 3.14.7 -- 696 name `ALP_PLANNER_ORACLE_ROOT`,
    572 name `ALP_SDK_ROOT`, 97 are ordinary host/toolchain gates every leg
    skips alike). The bigger half is the ORACLE root, not the SDK root, which
    is why "just bind `ALP_SDK_ROOT`" closes 7.5% rather than the 18% a merged
    count suggests. That gap is stated in the job's own comment and is not this
    gate's to close;
-5. the ceiling job stays OFF the release path. `release.yml`'s `gates` job
+5. the ceiling job is still BLOCKING -- no `continue-on-error` on the job or
+   any of its steps, and no step-level `if:` on the pytest step. This is the
+   ring outside invariant 4, and it is the more likely edit: invariant 4 stops
+   the job being narrowed, invariant 5 stops it being NEUTERED. All three of
+   those one-line edits leave the job present, floating, named and green while
+   it either ignores its own failure or never runs pytest at all -- and the
+   first time `"3.x"` moves and reds a PR at an awkward moment,
+   `continue-on-error: true` is the standard reach. This repo's own record
+   says so: `getting-started.yml:133-138` is a job that floated `"3.x"`, red
+   for a reason no change here could fix, and the resolution there was to stop
+   floating. A gate that pins a mechanism's existence while its blocking-ness
+   is free pins nothing -- the same lesson as the guard's polarity one level
+   up, found the same way (PR #1137 review, rounds 2 and 3);
+6. the ceiling job stays OFF the release path. `release.yml`'s `gates` job
    calls `ci.yml`, so without a guard a CPython minor shipping between the
    last PR run and a tag reds `python-newest`, skips `build`, and spends an
    immutable tag -- the `v0.5.0-rc3` / #319 shape, with CPython in place of
@@ -190,6 +203,16 @@ RELEASE_GUARD_EXPRESSION = "${{ !inputs." + RELEASE_OPT_OUT_INPUT + " }}"
 
 FULL_SUITE_COMMAND = "python -m pytest tests -q"
 
+#: `env` keys the ceiling job's pytest step may carry. An allow-list rather
+#: than "no env at all", because that step legitimately binds one
+#: (`TAN_MERGE_GROUP_BASE_REF`, mirroring the `python` job). The reason it is
+#: checked at all: `PYTEST_ADDOPTS` is a fourth neutering form in the same
+#: family as `continue-on-error` -- `env: {PYTEST_ADDOPTS: "--ignore=tests/
+#: core"}` narrows the selection without touching the command string
+#: [`FULL_SUITE_COMMAND`] compares, so the selection assertion would still
+#: pass while the divergence went unrun.
+CEILING_PYTEST_ENV = frozenset({"TAN_MERGE_GROUP_BASE_REF"})
+
 #: `python-version` values allowed BETWEEN the floor and the ceiling, each one
 #: a deliberate decision recorded here rather than a pin that appeared in a
 #: workflow. Empty today, and that emptiness is the claim: no interior
@@ -221,9 +244,12 @@ POLICY_MARKER = "INTERPRETER POLICY"
 #: written at 34 lines -- the next person extending that prose would have hit a
 #: failure saying the marker is missing when it is in fact present, which is a
 #: worse outcome than a slightly loose window. 90 is comfortably wider than any
-#: plausible block and still far narrower than either file (962 and 3012
-#: lines, measured at this commit), so a marker elsewhere in the workflow
-#: cannot satisfy it.
+#: plausible block -- 2.6x the largest measured distance -- and still an order
+#: of magnitude narrower than either workflow file, so a marker elsewhere in the
+#: file cannot satisfy it. No line count is written here on purpose: the last
+#: two revisions of this comment each recorded one (`773`, then `962`) that the
+#: very commit writing it invalidated, which is the same self-invalidating shape
+#: as a test asserting its own tree's size. Measure with `wc -l` if you need it.
 POLICY_MARKER_WINDOW = 90
 
 
@@ -279,6 +305,26 @@ def _pins() -> list[tuple[str, str, str]]:
         (workflow, job, str((step.get("with") or {}).get("python-version")))
         for workflow, job, step in _setup_python_steps()
     ]
+
+
+def _ceiling_pytest_step(job: dict) -> dict:
+    """The ceiling job's one pytest step.
+
+    Shared by the selection test and the neutering test rather than re-derived
+    in each: two copies of "which step is the pytest one" is two chances for
+    them to disagree about which step they are asserting on, which is precisely
+    how a gate ends up defending a step nothing runs.
+    """
+    steps = [
+        step
+        for step in job["steps"]
+        if "pytest" in str(step.get("run", "")) and step.get("name") == "pytest"
+    ]
+    assert len(steps) == 1, (
+        f"ci.yml:{FULL_SUITE_JOB} has {len(steps)} steps named 'pytest' -- this "
+        "gate reads exactly one to check the selection and its blocking-ness"
+    )
+    return steps[0]
 
 
 def test_the_walk_finds_the_interpreters_it_claims_to_police():
@@ -429,27 +475,87 @@ def test_the_ceiling_job_still_runs_the_whole_suite():
     still floats the ceiling, still reports green.
     """
     job = _load(WORKFLOWS / "ci.yml")["jobs"][FULL_SUITE_JOB]
-    pytest_steps = [
-        step
-        for step in job["steps"]
-        if "pytest" in str(step.get("run", "")) and step.get("name") == "pytest"
-    ]
-    assert len(pytest_steps) == 1, (
-        f"ci.yml:{FULL_SUITE_JOB} has {len(pytest_steps)} steps named 'pytest' -- "
-        "this gate reads exactly one to check the selection"
-    )
-    command = pytest_steps[0]["run"].strip()
+    pytest_step = _ceiling_pytest_step(job)
+    command = pytest_step["run"].strip()
     assert command == FULL_SUITE_COMMAND, (
         f"ci.yml:{FULL_SUITE_JOB}'s pytest step runs {command!r}, not "
         f"{FULL_SUITE_COMMAND!r}. Any narrowing (--ignore, -k, a subdirectory, a "
         "shard flag) puts the newest interpreter back where tan-cli#1126 found "
         "it: exercised by a slice too small to contain the divergence."
     )
-    assert pytest_steps[0].get("working-directory") == "python", (
+    assert pytest_step.get("working-directory") == "python", (
         f"ci.yml:{FULL_SUITE_JOB}'s pytest step must run from `python/` -- "
         "`tests` resolves to nothing from the repo root, and pytest exits 4 "
         "(usage error), which is not the same as a green suite but is easy to "
         "mistake for one in a log"
+    )
+
+
+def test_the_ceiling_job_cannot_be_neutered_without_being_removed():
+    """Present, floating and named is not the same as BLOCKING.
+
+    PR #1137's third review round measured what the rest of this file did not
+    see. Each of these left every other test here green (`33 passed`):
+
+        continue-on-error: true       on the job
+        continue-on-error: true       on the pytest step
+        if: ${{ inputs.skip_ceiling_interpreter }}   on the pytest step
+
+    while `|| true` appended to the command was caught, because
+    [`FULL_SUITE_COMMAND`] is compared exactly. So the file pinned the job
+    against being REMOVED or NARROWED and left it one line from being
+    silenced -- and silenced is worse than removed, because a removed job is
+    visible in the checks list by its absence and a `continue-on-error` one
+    reports a green tick having failed.
+
+    Foreseeable, not theoretical, and this PR's own argument is why: a
+    floating `"3.x"` reds for reasons no change to this repo can fix
+    (`getting-started.yml:133-138` is the recorded instance), and
+    `continue-on-error: true` is the standard response to a job that reds for
+    reasons you cannot fix. The person who reaches for it will not be doing
+    anything obviously wrong; that is exactly when a gate has to be the thing
+    that objects.
+
+    Scoped to the ceiling job only. `continue-on-error` is a legitimate tool
+    elsewhere in this repo, and this test says nothing about those uses.
+    """
+    job = _load(WORKFLOWS / "ci.yml")["jobs"][FULL_SUITE_JOB]
+
+    assert job.get("continue-on-error") is not True, (
+        f"ci.yml:{FULL_SUITE_JOB} carries `continue-on-error: true` at JOB level "
+        "-- it now reports success whatever the suite does, which is the "
+        "silent-check shape tan-cli#1126 exists to remove, wearing the job's own "
+        "name. If the newest interpreter has become too noisy to block on, that "
+        "is a policy change: record it in this file (see INTERIOR_PINS and the "
+        "docstring's endpoints section), do not soften the job."
+    )
+
+    for index, step in enumerate(job["steps"]):
+        label = step.get("name") or step.get("uses") or f"step {index}"
+        assert step.get("continue-on-error") is not True, (
+            f"ci.yml:{FULL_SUITE_JOB}'s step {label!r} carries "
+            "`continue-on-error: true`. A failure there is swallowed and the job "
+            "still reports green -- on the pytest step that is the whole gate; "
+            "on a setup step it means the suite runs against a half-built "
+            "environment and says nothing about the interpreter."
+        )
+
+    pytest_step = _ceiling_pytest_step(job)
+    assert "if" not in pytest_step, (
+        f"ci.yml:{FULL_SUITE_JOB}'s pytest step carries a step-level `if:` "
+        f"({pytest_step.get('if')!r}). The job's own guard is the ONLY condition "
+        "allowed here: a step-level one lets the job run, install everything, "
+        "skip pytest and report success -- the guard-polarity trap one level "
+        "down, and indistinguishable from a real green in the checks list."
+    )
+
+    env_keys = set(pytest_step.get("env") or {})
+    assert env_keys <= CEILING_PYTEST_ENV, (
+        f"ci.yml:{FULL_SUITE_JOB}'s pytest step binds "
+        f"{sorted(env_keys - CEILING_PYTEST_ENV)}, outside the allow-list "
+        f"{sorted(CEILING_PYTEST_ENV)}. `PYTEST_ADDOPTS` in particular narrows "
+        "the selection without changing the command this gate compares. Add the "
+        "key to CEILING_PYTEST_ENV deliberately if it is genuinely needed."
     )
 
 
