@@ -136,46 +136,71 @@ both call into through the same curated-raise contract, and no more:
   tan-cli#1087 (PR #1123) kept `_check_constraints`'s `ParameterError` local
   for the identical reason.
 * `_require_mapping_doc`/`_require_field`/`_require_key`/`require_readable_
-  text` belong here because `template.py` and `example_catalog.py` -- two
-  DIFFERENT CONSUMER modules -- both reach them (directly, or by delegation
-  through `read_catalog_document`/`catalog_templates`, which both consumers
-  call directly), through the SAME injected `self.error`, and neutering any
-  one reds tests in both consumers' suites. That is the actual bar: a
-  shared call reached from more than one consumer through one contract --
-  not "more than one caller" on its own, which this module's OWN methods
-  calling each other would satisfy trivially and prove nothing.
+  text` belong here. The bar is not "more than one caller" (this module's
+  OWN methods calling each other satisfy that trivially and prove nothing)
+  and not "a caller in a different module" either (`resolve_targets` below
+  never calls `_load_som_doc` at all -- it reimplements it -- so a rule
+  keyed on CALLING would wrongly admit that as sharing). The bar is a
+  MEMBERSHIP property: **a shape RUN BY more than one consumer module that
+  can be unified without changing any consumer's pinned contract.** All
+  four here clear it: `template.py` and `example_catalog.py` both run
+  `require_mapping_doc` (`template.py` directly; `example_catalog.py` only
+  via `read_catalog_document`/`catalog_templates`, which it calls directly
+  -- the delegation is load-bearing, confirmed by neutering `require_
+  mapping_doc` alone and watching `example_catalog`'s own suite red through
+  that path and no other). `require_readable_text` is the newest member and
+  the clearest case: the day before this change it was two INLINE copies,
+  one in this module and one in `template.py`, both already on the exact
+  same `self.error`-injected contract -- nothing to change to unify them,
+  which is why they did.
 * `_load_som_doc` and `_board_route_entries` do NOT clear that bar, but not
   because they lack a second caller -- they have two each, WITHIN
   `template.py` (`_load_som_doc`: `_default_preset_for_sku` and
   `_topology_for_sku`; `_board_route_entries`: `_board_alias_to_entry` and
   `_resolve_pin_target`), which is exactly why each is its own function
-  instead of two inlined reads. The two documents they read ARE read
-  independently elsewhere -- `tan/model/targets.py::resolve_targets`
-  (`template.py:643-644`'s own comment already says so) re-implements
-  `_load_som_doc`'s exact `is_file()`-then-`yaml.safe_load`-then-mapping-
-  check shape, but raises bare `FileNotFoundError`/`ValueError`, pinned by
-  `tests/model/test_targets_malformed_preset.py`; `tan/core/
-  som_buildability.py`'s `_safe_load_mapping`-backed read is a THIRD
-  implementation, contracted to return `None` on every failure instead
-  ("Never raises"), seeded into `tests/gates/
-  test_never_raises_contract_holds.py`. `tan/planner/loader.py` (the same
-  eight-section `_ROUTE_SECTIONS` tuple, inline) and `tan/planner/
-  project_emit/bom_netlist.py` (the same `e1m_routes:` flatten) likewise
-  reimplement `_board_route_entries`'s read, with no type guard at all --
-  both consume a project document already schema-validated upstream, a
-  different situation from `template.py`'s scaffold-time raw-metadata read.
-  So the duplication this module exists to close IS live for both
-  functions -- but each rival was built to a DIFFERENT, independently
-  pinned contract (a distinct exception type, a quiet-`None` degrade, or no
-  guard because the input is pre-validated), and folding five contracts
-  into the one `self.error`-per-caller shape this register offers would
-  change `targets.py`'s and `som_buildability.py`'s existing, tested
-  behaviour -- a real redesign, not the move #1085 scoped. Left local, with
-  the real rivals named here instead of an unqualified "no other module
-  reads it" claim, for a follow-up to weigh on purpose rather than by
-  default. `_docs_ref` stays for a third reason again: it has one caller
-  and degrades to `"main"` rather than curated-raising at all, a different
-  shape from everything else in this file.
+  instead of two inlined reads. The documents they read ARE read
+  independently elsewhere, but "independently" is the operative word --
+  none of the rivals below is RUN from this module or from `template.py`;
+  each is its own, separately-evolved implementation with its own
+  contract, so the membership bar excludes all of them even before the
+  "unify without changing a pinned contract" half is reached:
+  `tan/model/targets.py::resolve_targets` (`template.py:643-644`'s own
+  comment already names it) reimplements `_load_som_doc`'s exact
+  `is_file()`-then-`yaml.safe_load`-then-mapping-check shape, but raises a
+  bare `FileNotFoundError` for the missing-file case and a bare `ValueError`
+  for the malformed case. Only the `ValueError` half is pinned by a test
+  (`tests/model/test_targets_malformed_preset.py`, `match="expected a YAML
+  mapping"`/`match="malformed SoM preset"`); `grep -rn "no SoM preset for
+  SKU" python/tests/` is empty, so the `FileNotFoundError` half's exact
+  message is NOT test-pinned today -- only its TYPE is implied by
+  `resolve_targets`'s own signature and callers, so this claim covers the
+  half that is actually proven and no more. `tan/core/som_buildability.py`'s
+  `_safe_load_mapping`-backed read is a THIRD implementation, contracted to
+  return `None` on every failure instead ("Never raises"), seeded into
+  `tests/gates/test_never_raises_contract_holds.py`. `tan/planner/
+  loader.py` (the same eight-section `_ROUTE_SECTIONS` tuple, inline) and
+  `tan/planner/project_emit/bom_netlist.py` (the same `e1m_routes:`
+  flatten) reimplement `_board_route_entries`'s read too, each to a FOURTH
+  contract: neither raises OR returns `None` on a wrong shape -- both
+  silently SKIP the one malformed entry and keep the rest
+  (`bom_netlist.py:76,78,81`'s three `if not isinstance(...): continue`
+  filters; `loader.py:1078`'s `if isinstance(e1m, str) and isinstance(
+  macro, str):` value-level filter) -- because both consume a project
+  document already schema-validated upstream, a different situation from
+  `template.py`'s scaffold-time raw-metadata read. A silent per-entry skip
+  is not "no guard at all"; it is its own distinct contract, and one MORE
+  reason four independently-evolved readers cannot fold into one shared
+  primitive without changing at least one of them: `targets.py`'s
+  `FileNotFoundError`/`ValueError`, `som_buildability.py`'s whole-function
+  `None`, and `loader.py`/`bom_netlist.py`'s per-entry silent skip are
+  four genuinely different answers to "what happens on a malformed read",
+  and this register offers exactly one (`self.error`, injected once per
+  caller). Left local, with the real rivals named here instead of an
+  unqualified "no other module reads it" claim, for a follow-up to weigh
+  on purpose rather than by default. `_docs_ref` stays for a third reason
+  again: it has one caller and degrades to `"main"` rather than
+  curated-raising at all, a different shape from everything else in this
+  file.
 
   Staying local is a scope claim, not a soundness one: `_load_som_doc` and
   `_board_route_entries` still guard their OWN absence with a pre-flight
