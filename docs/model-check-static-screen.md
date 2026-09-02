@@ -70,17 +70,25 @@ different vocabularies out of the same key:
 | --- | --- | --- |
 | `full-eligible` | `static-screen` | Every screened operator is `npu-eligible`. |
 | `partial` | `static-screen` | Some screened operators are `npu-eligible`, some are `cpu-certain`. **Not a placement claim** -- see the capped positive above. |
-| `partial` | `compiled` / `bench` | A real placement put some operators on the NPU and some on the CPU. |
-| `cpu-only` | any | Nothing on the NPU. |
+| `partial` / `fits` / `cpu-only` | `compiled` | A real vela placement put some, all, or none of the operators on the NPU. |
+| `partial` / `fits` / `cpu-only` | `bench`, corroborated | A published `metadata/model_perf/` point matched AND a real `--exact` compile also ran for the same identity: the report carries the COMPILE's real placement (the bench point has no placement data of its own to contribute -- see below), corroborated by the bench point's own arena/SRAM figures. |
+| `undetermined` | `bench`, uncorroborated | A published point matched but no `--exact` compile ran alongside it (the ordinary case). alp-sdk's `metadata/model_perf/` schema carries no per-operator placement split for a bench point to report on its own, so the coverage word is withheld rather than borrowed from the static screen underneath -- `arenaBytes`/`reqSramKib`/latency are still real, `confidence: "certain"` measurements; the coverage word honestly is not. |
+| `cpu-only` | `static-screen` | Nothing screened is `npu-eligible`. |
 | `undetermined` | `static-screen` | Nothing was screened. **Absence of data, not evidence of no support.** |
-| `fits` | `compiled` / `bench` **only** | A real placement put **every** operator on the NPU. |
 
-Five distinct values, listed above in six rows because `partial` means a
-different thing at each basis. A consumer matching exhaustively on this key
-must handle all five. `fits`
-cannot appear on an ordinary run, but it can appear on a `--exact` run that
-reached a real compile, and on a report re-based on a published bench point —
-see the next two sections for the boundary.
+Five distinct values, listed above in seven rows because `partial` (three
+ways) and `cpu-only` (two ways) mean a different thing at each basis, exactly
+as `partial`/`fits` at `basis: "bench"` never originate there -- they only
+ever arrive already-measured, riding along from a corroborating `--exact`
+compile. A bench point that is NOT corroborated
+by one (the common case: alp-sdk publishes no `--exact` toolchain requirement
+alongside a point, and most `check` runs never pass `--exact` at all) reports
+`undetermined`, not whatever the static screen guessed. A consumer matching
+exhaustively on `(npuCoverage, basis)` pairs must therefore not assume
+`basis: "bench"` implies a placement verdict -- read `confidence` for whether
+the FIGURES are certain, and treat `npuCoverage: "undetermined"` at
+`basis: "bench"` as "SRAM/latency are measured; placement is not" rather than
+as the static-screen meaning of the same word.
 
 `undetermined` is deliberate and load-bearing. A backend that ingests a
 different source format than the one you handed it, or one that ships no
@@ -96,12 +104,16 @@ that is a verdict on the format/backend pairing, not on the model.
 
 **The static screen never emits `fits`.** The word is reserved for
 `basis: "compiled"` (a real compile actually placed the whole model on the
-NPU) and `basis: "bench"` (a matched measurement in `metadata/model_perf/`) —
-the only two surfaces that have the evidence for it. Both derive it from one
-function (`tan.model.perf.coverage_from_placement`), which returns `"fits"`
-only when a real placement reports at least one operator and **zero** CPU
-operators, so the guard on the word binds to a live rule rather than to a copy
-of it.
+NPU) and `basis: "bench"` (a matched measurement in `metadata/model_perf/`
+that ALSO corroborates a real `--exact` compile — see the table above; a bench
+point alone never independently earns it). Only the `compiled` path DERIVES
+it, from `tan.model.perf.coverage_from_placement` (the one function in tan
+that may return `"fits"`, off a real vela compile's own "CPU/NPU operators = N"
+summary) — the `bench` path never calls that function at all
+(`tan.model.perf_apply` has no per-operator placement data to feed it, ever;
+see `tan.model.perf`'s own module docstring, "DEAD FIELDS"). A `bench` report
+that shows `"fits"` is CARRYING a `compiled` report's own real verdict
+forward, not deriving a second one.
 
 The boundary matters for a consumer: seeing `fits` is not a contradiction of
 this page, it is the report telling you it is no longer a screen. Read `basis`
@@ -187,7 +199,11 @@ Two structured caveats travel with the number:
   command exists to surface.
 - **`npuPlacementPctReal` is a different number.** It is the *real*
   NPU-vs-CPU **op-count** placement ratio, set only where a placement was
-  measured (`basis: "compiled"` or `"bench"`). An op-count ratio and a
+  actually measured -- `basis: "compiled"` always, or `basis: "bench"` ONLY
+  when a bench point corroborates a real `--exact` compile that ran alongside
+  it (see "Where `fits` may and may not appear" above). An uncorroborated
+  bench point (the ordinary case) has no placement of its own to report and
+  leaves this `null`, same as the static screen. An op-count ratio and a
   MAC-weighted ratio answer different questions, so they are separate keys and
   are never both non-`null` on the same report.
 
@@ -254,7 +270,7 @@ than reading as "this model genuinely has no operators".
           "latencyMsMean": <float> | null,
           "latencyMsP95": <float> | null,
           "latencyRuns": <int> | null,
-          "perfRef": "<capture reference>" | null,
+          "perfRef": "<bench/rig id, e.g. e1m-aen-evk-01>" | null,
           "notes": ["..."],
           "ops": [
             {"op": "CONV_2D", "status": "npu-eligible",
