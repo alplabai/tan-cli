@@ -46,7 +46,8 @@ import os
 import re
 import sys
 from pathlib import Path
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit
+from urllib.request import url2pathname
 
 import pytest
 from typer.testing import CliRunner
@@ -231,7 +232,7 @@ def test_a_relative_sarif_uri_resolves_to_the_real_file(tmp_path, monkeypatch):
     assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
     location, run = _sarif_artifact_location(result.output)
     base = run["originalUriBaseIds"][location["uriBaseId"]]["uri"]
-    resolved_local = Path(unquote(urlsplit(urljoin(base, location["uri"])).path))
+    resolved_local = Path(url2pathname(urlsplit(urljoin(base, location["uri"])).path))
     assert resolved_local.exists()
     assert resolved_local.samefile(tmp_path / "board.yaml")
 
@@ -255,7 +256,7 @@ def test_a_project_relative_sarif_uri_resolves_to_the_real_file(tmp_path, monkey
     assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
     location, run = _sarif_artifact_location(result.output)
     base = run["originalUriBaseIds"][location["uriBaseId"]]["uri"]
-    resolved_local = Path(unquote(urlsplit(urljoin(base, location["uri"])).path))
+    resolved_local = Path(url2pathname(urlsplit(urljoin(base, location["uri"])).path))
     assert resolved_local.exists()
     assert resolved_local.samefile(sub / "board.yaml")
 
@@ -279,7 +280,7 @@ def test_an_absolute_board_yaml_sarif_uri_names_the_real_file_with_no_base(
     location, run = _sarif_artifact_location(result.output)
     assert "uriBaseId" not in location
     assert "originalUriBaseIds" not in run
-    resolved_local = Path(unquote(urlsplit(location["uri"]).path))
+    resolved_local = Path(url2pathname(urlsplit(location["uri"]).path))
     assert resolved_local.exists()
     assert resolved_local.samefile(board)
 
@@ -306,7 +307,7 @@ def test_an_absolute_project_sarif_uri_also_names_the_real_file_with_no_base(
     location, run = _sarif_artifact_location(result.output)
     assert "uriBaseId" not in location
     assert "originalUriBaseIds" not in run
-    resolved_local = Path(unquote(urlsplit(location["uri"]).path))
+    resolved_local = Path(url2pathname(urlsplit(location["uri"]).path))
     assert resolved_local.exists()
     assert resolved_local.samefile(project_dir / "board.yaml")
 
@@ -590,7 +591,7 @@ def test_a_symlink_loop_project_yields_a_clean_document_not_a_traceback(tmp_path
     base = run["originalUriBaseIds"]["%CWD%"]["uri"]
     assert base.startswith("file://")
     assert base.endswith("/")
-    local_cwd = Path(unquote(urlsplit(base).path))
+    local_cwd = Path(url2pathname(urlsplit(base).path))
     assert local_cwd.samefile(tmp_path)
 
 
@@ -605,16 +606,26 @@ def test_a_removed_cwd_yields_a_clean_document_not_a_traceback(tmp_path, monkeyp
     envelope at all -- `dev` gives exit 2 with a document). `validate()` now
     computes the base via `cwd_base_uri_or_none()` ONCE, before this guard
     or any other can fire, so a removed CWD degrades to the SAME no-base
-    document `dev` gave before tan-cli#1117 rather than crashing."""
-    gone = tmp_path / "gone"
-    gone.mkdir()
-    monkeypatch.chdir(gone)
-    gone.rmdir()
-    try:
-        result = runner.invoke(app, ["validate", "--offline", "--format", "sarif"])
-    finally:
-        # Leave the process CWD somewhere real for whatever test runs next.
-        monkeypatch.chdir(tmp_path)
+    document `dev` gave before tan-cli#1117 rather than crashing.
+
+    tan-cli#1117 review round 4: `os.getcwd()` is made to raise via
+    `monkeypatch.setattr` rather than by `os.rmdir`-ing the real CWD --
+    POSIX allows deleting a process's own working directory, Windows does
+    not (`os.rmdir` on the process CWD raises `PermissionError [WinError
+    32]`, measured failing this exact test on `windows-latest` CI). `chdir`
+    to a REAL, still-existing `tmp_path` supplies the "no `board.yaml`
+    here" half portably (a relative `Path("./board.yaml").exists()` asks
+    the OS to resolve against the process's real CWD, not `os.getcwd()`, so
+    it is unaffected by the patch below); patching `os.getcwd` supplies the
+    "the base computation itself fails" half `cwd_base_uri_or_none` is
+    actually about, without touching a real directory at all."""
+    monkeypatch.chdir(tmp_path)
+
+    def _raise_removed_cwd() -> str:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(os, "getcwd", _raise_removed_cwd)
+    result = runner.invoke(app, ["validate", "--offline", "--format", "sarif"])
     assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
     doc = json.loads(result.output)
     run = doc["runs"][0]
@@ -1419,7 +1430,7 @@ def test_the_rich_fields_reach_both_machine_documents(tmp_path, monkeypatch):
     assert location["uri"] == "./board.yaml"
     assert location["uriBaseId"] == "%CWD%"
     base = run["originalUriBaseIds"]["%CWD%"]["uri"]
-    resolved_local = Path(unquote(urlsplit(urljoin(base, location["uri"])).path))
+    resolved_local = Path(url2pathname(urlsplit(urljoin(base, location["uri"])).path))
     assert resolved_local.exists()
     assert resolved_local.samefile(second / "project" / "board.yaml")
 

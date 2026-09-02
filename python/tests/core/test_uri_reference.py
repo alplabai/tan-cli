@@ -48,10 +48,12 @@ file already does.
 from __future__ import annotations
 
 import ntpath
+import os
 import posixpath
 import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit
+from urllib.request import url2pathname
 
 import pytest
 
@@ -402,7 +404,7 @@ def test_cwd_base_uri_resolves_a_relative_reference_to_the_real_file(tmp_path, m
     monkeypatch.chdir(tmp_path)
     (tmp_path / "board.yaml").write_text("som: E1M-AEN701\n", encoding="utf-8")
     resolved = urljoin(cwd_base_uri(), "./board.yaml")
-    local_path = Path(unquote(urlsplit(resolved).path))
+    local_path = Path(url2pathname(urlsplit(resolved).path))
     assert local_path.exists()
     assert local_path.samefile(tmp_path / "board.yaml")
 
@@ -420,7 +422,7 @@ def test_cwd_base_uri_resolves_a_nested_relative_reference_to_the_real_file(
     sub.mkdir()
     (sub / "board.yaml").write_text("som: E1M-AEN701\n", encoding="utf-8")
     resolved = urljoin(cwd_base_uri(), "sub/board.yaml")
-    local_path = Path(unquote(urlsplit(resolved).path))
+    local_path = Path(url2pathname(urlsplit(resolved).path))
     assert local_path.exists()
     assert local_path.samefile(sub / "board.yaml")
 
@@ -442,29 +444,90 @@ def test_cwd_base_uri_or_none_agrees_with_cwd_base_uri_on_the_happy_path(tmp_pat
     assert cwd_base_uri_or_none() == cwd_base_uri()
 
 
-def test_cwd_base_uri_or_none_returns_none_when_the_cwd_has_been_removed(tmp_path, monkeypatch):
+def test_cwd_base_uri_or_none_returns_none_when_the_cwd_has_been_removed(monkeypatch):
     """tan-cli#1117 review round 2 BLOCKER: `cwd_base_uri()` calls
     `Path.cwd()` -> `os.getcwd()`, which raises `FileNotFoundError` when the
     process's own working directory has been removed out from under it --
-    a real, reproducible condition, not a caller-supplied one. Measured
-    directly: `cwd_base_uri()` itself still raises here (asserted below, so
-    a FUTURE change that swallows the exception inside `cwd_base_uri` itself
-    -- moving the guard to the wrong function -- reds this line); the
-    GUARDED wrapper this test is really about, [`cwd_base_uri_or_none`],
-    catches it and returns `None` instead. Mutating its `except OSError:
-    return None` to re-raise reds this test's own final assertion; mutating
-    it to catch `Exception` broadly instead of `OSError` specifically
-    changes nothing observable here (still red on the same input either
-    way) but is exercised as the narrower, correct type deliberately."""
-    gone = tmp_path / "gone"
-    gone.mkdir()
-    monkeypatch.chdir(gone)
-    gone.rmdir()
-    try:
-        with pytest.raises(OSError):
-            cwd_base_uri()
-        assert cwd_base_uri_or_none() is None
-    finally:
-        # Leave the process's CWD somewhere real again, or every test that
-        # runs after this one in the same process inherits a dead directory.
-        monkeypatch.chdir(tmp_path)
+    a real, reproducible condition, not a caller-supplied one. The GUARDED
+    wrapper this test is really about, [`cwd_base_uri_or_none`], catches it
+    and returns `None` instead. Mutating its `except OSError: return None`
+    to re-raise reds this test's own final assertion; mutating it to catch
+    `Exception` broadly instead of `OSError` specifically changes nothing
+    observable here (still red on the same input either way) but is
+    exercised as the narrower, correct type deliberately.
+
+    tan-cli#1117 review round 4: `os.getcwd()` is made to raise via
+    `monkeypatch.setattr`, NOT by `os.rmdir`-ing the real CWD -- POSIX lets
+    a process delete its own working directory (`gone.rmdir()`'s old shape
+    here), Windows does not (`os.rmdir` on the process CWD raises
+    `PermissionError [WinError 32]`, measured on `windows-latest` CI: this
+    exact test failed there under the removed-directory version). Patching
+    `os.getcwd` directly reproduces the SAME contract this function depends
+    on -- `Path.cwd()` calls `os.getcwd()` internally on every pathlib
+    version this repo tests (3.12/3.13/3.14, measured directly) -- without
+    touching a real directory or depending on platform-specific
+    CWD-deletion semantics at all. This repo's own rule (tests/core/
+    test_board_context.py's header, restated in this file's own module
+    docstring): no Windows host, so a platform difference is verified by an
+    oracle/mechanism that behaves identically everywhere, not by a real
+    filesystem operation whose semantics diverge."""
+    def _raise_removed_cwd() -> str:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(os, "getcwd", _raise_removed_cwd)
+    with pytest.raises(OSError):
+        cwd_base_uri()
+    assert cwd_base_uri_or_none() is None
+
+
+# ---------------------------------------------------------------------------
+# The urljoin-property tests' own OWN reversal helper -- pinned against the
+# real Windows oracle (tan-cli#1117 review round 4)
+# ---------------------------------------------------------------------------
+
+
+def test_a_windows_file_uri_path_component_round_trips_through_nturl2path():
+    """This module and `test_validate_command.py`'s urljoin-property tests
+    each reverse a resolved `file:` URI back to a filesystem path with
+    `Path(url2pathname(urlsplit(...).path))`, so their `os.path.exists`/
+    `Path.samefile` assertions mean something. Round 4 found the PRE-fix
+    version of that reversal (`Path(unquote(urlsplit(...).path))`, no
+    `url2pathname`) failed for real on `windows-latest` CI -- `nturl2path`
+    (the module Python's own `os.name`-dispatched `urllib.request.
+    url2pathname` delegates to on Windows) strips the leading `/` a `file:
+    ///C:/...` URI's path component carries before the drive letter;
+    plain `unquote` does not, so `Path("/C:/Users/.../board.yaml")` names a
+    ROOT-relative path whose first SEGMENT is literally `"C:"` -- not the
+    drive -- and never exists.
+
+    This is `tan`'s OWN code doing nothing wrong: `cwd_base_uri()`'s
+    `file:///C:/...` output is exactly the standard `file:` URI spelling
+    for a Windows absolute path (RFC 8089 appendix E; every browser, editor
+    and SARIF consumer parses it the same way) -- the defect was entirely
+    in these TEST files' own reversal helper, never in product code, which
+    is why no `tan/core/uri_reference.py` line changed for this fix.
+
+    `nturl2path` is importable and exercised on ANY host (pure Python, no
+    OS syscalls) -- this repo's own rule (no Windows host; Windows
+    behaviour verified via an `ntpath`/`PureWindowsPath`-shaped oracle, not
+    real filesystem operations) applies here exactly as it does to
+    [`_is_windows_spelled`] above. Reverting either test file's
+    `url2pathname` import back to `unquote` does not red anything ON THIS
+    HOST (Linux never takes the leading-slash-before-drive branch), which
+    is precisely why this assertion exists: it pins the STDLIB oracle's own
+    behaviour for the one input shape a Linux run can never otherwise
+    exercise."""
+    import nturl2path
+
+    # `dev` here stands in for the real CI account this defect was measured
+    # against (`tests/gates/test_no_leaked_host_paths.py`'s own placeholder
+    # set) -- the shape (leading `/` before the drive letter, nested nested
+    # segments) is what matters, not the literal account name.
+    assert (
+        nturl2path.url2pathname(
+            "/C:/Users/dev/AppData/Local/Temp/pytest-of-dev/"
+            "pytest-1/test_a_relative_sarif_uri_reso0/board.yaml"
+        )
+        == "C:\\Users\\dev\\AppData\\Local\\Temp\\pytest-of-dev"
+        "\\pytest-1\\test_a_relative_sarif_uri_reso0\\board.yaml"
+    )
