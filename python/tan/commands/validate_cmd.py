@@ -302,7 +302,7 @@ from tan.core.sdk_discovery import (
 )
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.subprocess_env import spawn_env
-from tan.core.uri_reference import path_to_uri_reference
+from tan.core.uri_reference import path_to_uri_reference, root_to_base_uri
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, ValidateOutputFormat
@@ -918,7 +918,12 @@ def _issue_to_diagnostic(issue: Issue, finding: _Finding, board_path: str) -> di
         # by document URI, so the diagnostic attached to nothing, silently).
         # Fixed at the exporter, here and at the SARIF `artifactLocation`
         # below -- not in the path resolver; see `tan.core.uri_reference`'s
-        # module docstring for the relative-vs-absolute split.
+        # module docstring for the relative-vs-absolute split, INCLUDING the
+        # part that split has to be honest about: unlike SARIF (which gets
+        # `originalUriBaseIds` below), LSP has no base-id mechanism, so a
+        # RELATIVE `uri` here still relies on the client resolving it
+        # against its own workspace root -- this only fully closes the
+        # defect for an ABSOLUTE board path.
         "uri": path_to_uri_reference(board_path),
         "range": _lsp_range(finding),
         "severity": issue.severity,
@@ -966,18 +971,43 @@ def _sarif_region(finding: _Finding) -> dict[str, int]:
     }
 
 
+#: The `uriBaseId` name this module declares in `runs[].originalUriBaseIds`
+#: and references from every RELATIVE `artifactLocation.uri` (tan-cli#1097
+#: review round 1 MAJOR 3). An absolute `file:` URI never carries this key
+#: -- SARIF only gives `uriBaseId` meaning for a relative reference, and an
+#: absolute one already names its own location.
+_SARIF_URI_BASE_ID = "%SRCROOT%"
+
+
 def _sarif_document(
-    reported: list[tuple[Issue, _Finding]], board_path: str
+    reported: list[tuple[Issue, _Finding]], board_path: str, root: str
 ) -> dict[str, Any]:
     """SARIF 2.1.0 (`runs[].results[]`), mirroring
-    `scripts/alp_cli/diagnostic_format.py:to_sarif`. A separate artefact from
+    `scripts/alp_cli/diagnostic_format.py:to_sarif` for everything except
+    `uri`/`originalUriBaseIds` -- see below. A separate artefact from
     `diagnostic-v1.schema.json` -- SARIF `region` is one-based by spec, so it
     does not reuse [`_lsp_range`].
 
     `helpUri` follows `documentationUri` exactly: present on a rule whose
     validator named a `= see:` page, absent otherwise. tan invents none for
     its own codes (it has no landing pages), and `helpUri` is optional in the
-    SARIF 2.1.0 schema."""
+    SARIF 2.1.0 schema.
+
+    tan-cli#1097 review round 1 MAJOR 3 measured that alp-sdk's own
+    `to_sarif`/`_uri` -- what "mirroring" above still means for shape --
+    emits `artifactLocation.uri` bare, with no `originalUriBaseIds` at all;
+    this function's `uri`/base-id handling has diverged from it on purpose.
+    alp-sdk owes the same fix -- tracked as alp-sdk#1909, not fixed here
+    (a different repo, different release cadence)."""
+    board_uri = path_to_uri_reference(board_path)
+    # Only a RELATIVE reference needs a base to resolve against -- an
+    # absolute `file:` URI (this module's `as_uri()` output starts with
+    # `file://` unconditionally, never a bare relative string) already names
+    # its own location and SARIF gives `uriBaseId` no meaning on one.
+    board_uri_is_relative = not board_uri.startswith("file://")
+    artifact_location: dict[str, str] = {"uri": board_uri}
+    if board_uri_is_relative:
+        artifact_location["uriBaseId"] = _SARIF_URI_BASE_ID
     rules: dict[str, dict[str, str]] = {}
     results = []
     for issue, finding in reported:
@@ -998,34 +1028,46 @@ def _sarif_document(
                 "locations": [
                     {
                         "physicalLocation": {
-                            # tan-cli#1097, the same defect and the same fix
-                            # as the LSP `uri` above: SARIF 2.1.0 requires a
-                            # URI reference, and a consumer resolving this
-                            # path against `originalUriBaseIds` silently
-                            # resolves it wrong otherwise.
-                            "artifactLocation": {"uri": path_to_uri_reference(board_path)},
+                            # tan-cli#1097: `artifactLocation` is a URI
+                            # reference (SARIF 2.1.0), never the bare
+                            # filesystem path this used to emit. When
+                            # `board_uri` is RELATIVE, `uriBaseId` above
+                            # points a consumer at `originalUriBaseIds`
+                            # below (`%SRCROOT%`) rather than leaving the
+                            # base implementation-defined -- round 1 found
+                            # the previous version of this comment claimed
+                            # that resolution without actually declaring
+                            # the base id this depends on.
+                            "artifactLocation": dict(artifact_location),
                             "region": _sarif_region(finding),
                         }
                     }
                 ],
             }
         )
+    run: dict[str, Any] = {
+        "tool": {
+            "driver": {
+                "name": "tan",
+                "informationUri": "https://github.com/alplabai/tan-cli",
+                "version": TAN_VERSION,
+                "rules": list(rules.values()),
+            }
+        },
+        "results": results,
+    }
+    if board_uri_is_relative:
+        # `root_to_base_uri` -- NOT `path_to_uri_reference` -- because this
+        # is describing where THIS PROCESS actually is (a real, concrete
+        # `pathlib.Path.resolve()`), not rendering a caller-supplied string
+        # that might be Windows-spelled on a POSIX host. See
+        # `tan.core.uri_reference`'s own docstring for why the two must not
+        # be merged.
+        run["originalUriBaseIds"] = {_SARIF_URI_BASE_ID: {"uri": root_to_base_uri(root)}}
     return {
         "$schema": _SARIF_SCHEMA_URI,
         "version": "2.1.0",
-        "runs": [
-            {
-                "tool": {
-                    "driver": {
-                        "name": "tan",
-                        "informationUri": "https://github.com/alplabai/tan-cli",
-                        "version": TAN_VERSION,
-                        "rules": list(rules.values()),
-                    }
-                },
-                "results": results,
-            }
-        ],
+        "runs": [run],
     }
 
 
@@ -1157,7 +1199,7 @@ def _emit(
         typer.echo(json.dumps(_diagnostic_v1_document(reported, board_path), indent=2))
     elif output_format == ValidateOutputFormat.SARIF:
         # indent=2, matching scripts/alp_cli/validate.py:36.
-        typer.echo(json.dumps(_sarif_document(reported, board_path), indent=2))
+        typer.echo(json.dumps(_sarif_document(reported, board_path, root), indent=2))
     else:
         stream = typer.get_text_stream("stderr")
         if len(reportable) == 1 and reportable[0].code == "validate.board-yaml-missing":
