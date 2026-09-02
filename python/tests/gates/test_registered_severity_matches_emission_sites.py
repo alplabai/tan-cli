@@ -56,16 +56,23 @@ FOUR MECHANISM KINDS, each independently AST-verified in [`_verify`]:
     keeps the old value still changes the multiset and reds, and so does a
     call SITE disappearing (the multiset shrinks) even if the surviving
     site(s) still nominally cover the same severity SET.
-  * `"raise:<ClassName>"` -- every `<ClassName>(code, ...)` construction
-    (`BuildError`, `TokenSubstitutionError`) whose CODE is the seeded
-    literal, inside one named `(file, qualname)`. Counted, not just present
-    -- pins exactly how many such raises exist there.
-  * `"forward:<Source>-><Target>"` -- every `<Target>(<name>.code, ...)`
-    construction inside an `except <Source> as <name>:` handler, inside one
-    named `(file, qualname)` -- the shape `build_cmd.py::_build` uses to
-    re-tag a caught `TokenSubstitutionError` as a `BuildError`. Counted, not
-    code-specific (the forward does not know which code is flowing through
-    it; it is pinned once per code whose flow genuinely depends on it, so its
+  * `"raise:<ClassName>"` -- every `raise <ClassName>(code, ...)` -- an
+    ACTUAL `ast.Raise`, not merely a construction (`_unused =
+    BuildError(code, ...)` does NOT count; see `_Index.raised_ids`'s own
+    docstring for why that distinction is load-bearing, not pedantic: PR
+    #1120 review round 2 measured that without it, deleting the entire
+    `executionPolicy.missingTool=fail` arm at `build_cmd.py:1189` -- which
+    makes `tan build` under that policy exit 0 with a `warning` instead of
+    failing -- left every test in this file green) -- whose CODE is the
+    seeded literal, inside one named `(file, qualname)`. Counted, not just
+    present -- pins exactly how many such raises exist there.
+  * `"forward:<Source>-><Target>"` -- every `raise <Target>(<name>.code,
+    ...)` -- again an ACTUAL raise, same reason as above -- inside an
+    `except <Source> as <name>:` handler, inside one named `(file,
+    qualname)` -- the shape `build_cmd.py::_build` uses to re-tag a caught
+    `TokenSubstitutionError` as a `BuildError`. Counted, not code-specific
+    (the forward does not know which code is flowing through it; it is
+    pinned once per code whose flow genuinely depends on it, so its
     disappearance breaks that code's own mechanism list).
   * `"deliver:<ClassName>"` -- every `Issue(<name>.code, <severity>, ...)`
     construction inside an `except <ClassName> as <name>:` handler, inside
@@ -113,10 +120,40 @@ WHAT REMAINS INVISIBLE, stated plainly (the PR #1120 review's own bar):
     gate has ever looked at: `commands/build_cmd.py`, `commands/clean_cmd.py`,
     `commands/flash_cmd.py`, `commands/run_cmd.py`,
     `commands/build/token_substitution.py`.
-  * A code/severity argument passed as a hoisted module constant or via
-    `**kwargs` -- not silently PASSED (see the paragraph above: it changes a
-    pinned count/multiset and reds), but not RESOLVED either: the failure
-    message names a count mismatch, not the real value that escaped.
+  * A CODE argument passed as a hoisted module constant or via `**kwargs`
+    -- not silently PASSED (it changes a pinned count/multiset and reds:
+    `_code_from_node` returns `None` for either shape, so that call simply
+    stops matching its mechanism's `code` filter), but not RESOLVED either:
+    the failure message names a count/multiset mismatch, not the real value
+    that escaped. A SEVERITY argument in either shape is NOT in this bullet
+    -- `_severity_from_node` returns `None` for both, which `_verify` raises
+    as a HARD FAILURE naming the file, qualname AND line (measured, PR #1120
+    review round 2: both a hoisted-constant severity and a `**kwargs`
+    severity on an already-matched code produce `"...:<line> constructs
+    Issue(...) with a severity this gate cannot resolve statically"`, not a
+    silent skip).
+  * A SEVERITY SWAP between two call sites inside the SAME `(file,
+    qualname, kind)` -- e.g. `clean_cmd.py:852` and `:864` trading values --
+    is invisible to `"direct"`'s MULTISET comparison, which is severity-only
+    and carries no per-site IDENTITY (deliberately: a lineno-keyed identity
+    is exactly what broke `test_every_issue_code_is_registered.py`'s own
+    `_RESOLVABLE_HELPERS` table once already, tan-cli#224, dev's fc88ca1).
+    Measured, PR #1120 review round 2: swapping `clean_cmd.py:852`'s
+    `"warning"` and `:864`'s `"error"` -- so the best-effort
+    `rmtree(ignore_errors=True)` directory removal now claims `error` and the
+    must-succeed `os.remove` state-file removal now claims `warning`, while
+    `exit_code = ExitCode.RUNTIME_FAILURE` stays on the ORIGINAL (now
+    mis-labelled) branch -- leaves every test in this file green, because the
+    multiset `{"error", "warning"}` is unchanged. A single value FLIPPING
+    (one call's severity changes, the multiset's contents change) DOES red,
+    confirmed above and by `test_every_seeded_mechanism_holds` -- only a
+    two-for-two SWAP survives. Applies to every `"direct"` mechanism with
+    more than one call site: `clean.remove-failed` and `flash.nothing-matched`
+    today. Traded deliberately for the qualname/line-shift robustness the
+    multiset design buys everywhere else; not fixed, because the fix (a
+    stable per-call-site identity that is not a lineno) is exactly the
+    problem `_RESOLVABLE_HELPERS` already shows is not free, and no swap of
+    this shape has happened in this tree's real history.
 
 DUAL SEVERITY IS SUPPORTED, ON PURPOSE -- do not read this file as an
 argument for one-severity-per-code. `flash.nothing-matched` and
@@ -240,16 +277,34 @@ class _Index:
     in (the same `_prefix_templates`-style walk `test_every_issue_code_is_
     registered.py` uses, and for the same reason: a qualname survives a
     line-shift a lineno-keyed table would not, tan-cli#224's own dev fc88ca1
-    lesson)."""
+    lesson).
+
+    `raised_ids` -- `id(...)` of every `Call` node that is an `ast.Raise`'s
+    own `.exc` -- is what lets `_verify`'s `"raise:"`/`"forward:"` kinds tell
+    a REAL `raise BuildError(...)` apart from a bare construction
+    (`_unused = BuildError(...)`, or any other non-raised use): PR #1120
+    review round 2 measured that without this, rewriting `build_cmd.py:1189`
+    from `raise BuildError(...)` to `_unused = BuildError(...)` -- which
+    deletes the entire `executionPolicy.missingTool=fail` arm, so `tan build`
+    under that policy exits 0 with a `warning` instead of failing -- left
+    every test in this file green. `id()` is safe to key on here (rather
+    than the node itself, which `ast` gives no `__hash__`/`__eq__` worth
+    using) because the SAME `Call` OBJECT that is one `ast.Raise`'s `.exc` is
+    also the object `_walk` appends to `calls[qualname]` when it visits that
+    Call node itself -- `calls` already keeps it alive for `_Index`'s whole
+    lifetime, so its `id()` cannot be reused by an unrelated object in the
+    meantime."""
 
     calls: dict[str, list[ast.Call]]
     handlers: dict[str, list[ast.ExceptHandler]]
+    raised_ids: frozenset[int]
 
 
 def _index(path: Path) -> _Index:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     calls: dict[str, list[ast.Call]] = {}
     handlers: dict[str, list[ast.ExceptHandler]] = {}
+    raised_ids: set[int] = set()
     stack: list[str] = []
 
     def _qualname() -> str:
@@ -266,11 +321,13 @@ def _index(path: Path) -> _Index:
             calls.setdefault(_qualname(), []).append(node)
         elif isinstance(node, ast.ExceptHandler):
             handlers.setdefault(_qualname(), []).append(node)
+        elif isinstance(node, ast.Raise) and node.exc is not None:
+            raised_ids.add(id(node.exc))
         for child in ast.iter_child_nodes(node):
             _walk(child)
 
     _walk(tree)
-    return _Index(calls=calls, handlers=handlers)
+    return _Index(calls=calls, handlers=handlers, raised_ids=frozenset(raised_ids))
 
 
 @dataclass(frozen=True)
@@ -320,11 +377,14 @@ def _verify(code: str, m: Mechanism) -> None:
         count = sum(
             1
             for call in calls
-            if _callee_name(call.func) == cls and _code_from_node(_call_arg(call, 0, "code")) == code
+            if _callee_name(call.func) == cls
+            and _code_from_node(_call_arg(call, 0, "code")) == code
+            and id(call) in idx.raised_ids
         )
         assert count == m.expected, (
-            f"{site} -- found {count} {cls}({code!r}, ...) raise site(s), expected "
-            f"{m.expected} -- {m.why}"
+            f"{site} -- found {count} `raise {cls}({code!r}, ...)` raise site(s) "
+            f"(a mere construction, e.g. `_unused = {cls}({code!r}, ...)`, does NOT "
+            f"count -- see _Index.raised_ids), expected {m.expected} -- {m.why}"
         )
         return
 
@@ -340,11 +400,13 @@ def _verify(code: str, m: Mechanism) -> None:
                     isinstance(node, ast.Call)
                     and _callee_name(node.func) == tgt
                     and _is_attr_code(_call_arg(node, 0, "code"), exc_name)
+                    and id(node) in idx.raised_ids
                 ):
                     count += 1
         assert count == m.expected, (
-            f"{site} -- found {count} `except {src} as <name>: {tgt}(<name>.code, ...)` "
-            f"forward site(s), expected {m.expected} -- {m.why}"
+            f"{site} -- found {count} `raise {tgt}(<name>.code, ...)` inside "
+            f"`except {src} as <name>:` forward site(s) (a mere construction does "
+            f"NOT count -- see _Index.raised_ids), expected {m.expected} -- {m.why}"
         )
         return
 
