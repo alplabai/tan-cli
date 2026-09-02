@@ -216,24 +216,27 @@ def sdk_publishes_model_perf_points(sdk: Path) -> bool:
     This one is a step further out than its three siblings above: the others
     gate on metadata that EXISTS on `alplabai/alp-sdk#1470` and is merely
     absent from the pin, whereas `metadata/model_perf/` exists in NO alp-sdk
-    at all yet. The contract landed (alp-sdk `fe56ff1d`: the schema, the
-    validator semantics, the capture recipe and ONE synthetic fixture point
-    under `tests/fixtures/`), but the directory this reads stays empty until
-    the bench campaign that is Task 5 of the tier-2 plan runs on real silicon.
-    So a test carrying this mark skips EVERYWHERE today, including against a
-    bound `origin/dev`, and that is the honest state rather than a defect --
-    the alternative is a test that asserts against data nobody has measured.
-    Presence of a real point, not "would this assertion pass", so it cannot
-    fire once the campaign publishes one.
+    at all yet. The contract landed (alp-sdk `9b466018`, "feat(metadata):
+    tier-2 model-perf perf-point contract (Refs #1520) (#1884)": the schema,
+    the validator semantics, the capture recipe and ONE synthetic fixture
+    point under `tests/fixtures/`), but the directory this reads stays empty
+    until the bench campaign that is Task 5 of the tier-2 plan runs on real
+    silicon. So a test carrying this mark skips EVERYWHERE today, including
+    against a bound `origin/dev`, and that is the honest state rather than a
+    defect -- the alternative is a test that asserts against data nobody has
+    measured. Presence of a real point, not "would this assertion pass", so
+    it cannot fire once the campaign publishes one.
 
-    Globs both `*.yaml` and `*.json`: `model-perf-v1.schema.json`'s own
-    `$id`/title names the published path as `<sku>/<hash>.yaml`, so a
-    `*.json`-only glob here would be the exact tan-cli#1105 shape again --
-    a predicate that can never fire because it looks for the wrong
-    extension -- the day the bench campaign actually publishes a point.
+    Globs `*.yaml` ONLY, deliberately narrower than its
+    `sdk_ships_the_model_perf_fixture` sibling below (tan-cli#1114 review
+    nit): `model-perf-v1.schema.json`'s own `$id`/title names the *published*
+    path as `<sku>/<hash>.yaml`, and `scripts/validate_metadata.py`'s
+    `_collect_model_perf_files` FAILS any file under this tree that is not
+    exactly that shape -- a `*.json` document could never legitimately reach
+    here, so accepting one would fire this predicate on something alp-sdk's
+    own gate would already have rejected.
     """
-    perf_root = sdk / "metadata" / "model_perf"
-    return any(perf_root.rglob("*.yaml")) or any(perf_root.rglob("*.json"))
+    return any((sdk / "metadata" / "model_perf").rglob("*.yaml"))
 
 
 def sdk_ships_the_model_perf_fixture(sdk: Path) -> bool:
@@ -243,9 +246,10 @@ def sdk_ships_the_model_perf_fixture(sdk: Path) -> bool:
     A SEPARATE artefact from the published tree above and therefore a separate
     predicate, not a broader one: a test that proves tan REFUSES a fixture
     point needs a real fixture document to refuse, and that exists today
-    (alp-sdk `fe56ff1d`) while a published point does not. Folding the two
-    into one switch would skip the refusal proof for the next several months
-    on the strength of an unrelated absence.
+    (alp-sdk `9b466018`, "feat(metadata): tier-2 model-perf perf-point
+    contract (Refs #1520) (#1884)") while a published point does not. Folding
+    the two into one switch would skip the refusal proof for the next several
+    months on the strength of an unrelated absence.
 
     Globs both `*.yaml` and `*.json`: alp-sdk ships this specific fixture as
     `e1m_aen801_ethos_u55_hp.yaml` (tan-cli#1105 -- a `*.json`-only glob here
@@ -318,8 +322,9 @@ needs_sdk_model_perf_points = pytest.mark.skipif(
     _BOUND_SDK is not None and not sdk_publishes_model_perf_points(_BOUND_SDK),
     reason=(
         "the bound alp-sdk publishes no metadata/model_perf/ perf points: the "
-        "tier-2 CONTRACT landed (alp-sdk fe56ff1d -- schema, validator "
-        "semantics, capture recipe, one synthetic fixture) but the published "
+        "tier-2 CONTRACT landed (alp-sdk `9b466018`, \"feat(metadata): tier-2 "
+        "model-perf perf-point contract (Refs #1520) (#1884)\" -- schema, "
+        "validator semantics, capture recipe, one synthetic fixture) but the published "
         "tree stays empty until the bench campaign that is Task 5 of "
         "docs/superpowers/plans/2026-08-16-model-perf-tier2.md runs on real "
         "silicon. EXPECTED everywhere today, including against a bound "
@@ -336,11 +341,15 @@ needs_sdk_model_perf_fixture = pytest.mark.skipif(
     _BOUND_SDK is not None and not sdk_ships_the_model_perf_fixture(_BOUND_SDK),
     reason=(
         "the bound alp-sdk ships no tests/fixtures/model_perf/ synthetic perf "
-        f"point: it predates alp-sdk fe56ff1d ({_SDK_PR}, still open), so "
-        "there is no real fixture document for this test to prove tan REFUSES. "
-        "EXPECTED while ci.yml's sdk_parity `ref:` and parity.yml's "
-        "PINNED_SDK_TAG sit at 0914da38; once that pin moves this test RUNS, "
-        "and a failure here then is a regression, not this skip."
+        "point: it predates alp-sdk `9b466018` (\"feat(metadata): tier-2 "
+        "model-perf perf-point contract (Refs #1520) (#1884)\", already on "
+        "origin/dev -- unrelated to the still-open "
+        f"{_SDK_PR} the three marks above this one gate on), so there is no "
+        "real fixture document for this test to prove tan REFUSES. Already "
+        "present at ci.yml's sdk_parity `ref:` / parity.yml's "
+        "PINNED_SDK_TAG (0914da38); EXPECTED only against a checkout older "
+        "than `9b466018`, and a failure here against one that has it is a "
+        "regression, not this skip."
     ),
 )
 
