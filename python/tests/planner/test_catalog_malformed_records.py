@@ -738,7 +738,14 @@ def test_a_wellformed_or_absent_constraints_still_renders(
     `$defs/parameter`, its own `additionalProperties: false` object carries
     no `required` list, and every bound in it is individually optional --
     so an absent block, an explicit null, an empty mapping and any single
-    bound must all still render."""
+    bound must all still render.
+
+    tan-cli#1087's `test_a_numeric_bound_on_a_nonint_parameter_raises_a_
+    curated_error` below departs from this file's own principle on
+    purpose -- a `minimum`/`maximum` on a non-`integer` parameter IS
+    schema-valid and used to still render (via a bare `TypeError`, not
+    cleanly), and the fix refuses it. Named here so the departure reads as
+    deliberate, not as this docstring's principle having been missed."""
     default = "a" if constraints not in (..., None, {}) and \
         "enum" in constraints else 5
     ptype = "string" if default == "a" else "integer"
