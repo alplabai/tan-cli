@@ -45,6 +45,19 @@ The COST is stated where it is paid (`ci.yml`'s `python-newest` comment): a new
 CPython minor release moves `"3.x"` under an unrelated PR and can red it. That
 is the report doing its job.
 
+That cost is not hypothetical here, and the counter-example is already in the
+repo: `getting-started.yml` USED to float `"3.x"` and pinned `"3.12"` after the
+float resolved to 3.14.6 and Zephyr's own requirements install failed on it,
+leaving `patoolib` absent and killing `west sdk install` two steps later
+(`getting-started.yml:133-138`). Nothing there was a tan defect -- an upstream
+project simply did not support the newest CPython yet. So a floating leg can
+red for a reason no change to this repo can fix, which is (a) why `python-newest`
+is kept off the release path, where that red would spend a tag, and (b) why a
+pinned job's `"3.12"` is not always "the floor because floor": that one is
+pinned because Zephyr v4.4.1's requirements are built against it, a reason of
+its own that happens to coincide. This gate checks the VALUE, never the reason;
+the reason belongs in the job that holds the pin.
+
 ## What this gate actually enforces, and why each half exists
 
 The spread on its own was NOT enough, and that is the defect tan-cli#1126
