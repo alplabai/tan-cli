@@ -708,34 +708,78 @@ def test_a_rooted_path_is_never_joined_onto_cwd_even_if_both_oracles_go_quiet(
         bootstrap.resolve_workspace_target("\\\\srv\\share", os.path.join(os.sep, "cwd"))
 
 
+#: The three outcomes `resolve_workspace_target` can produce, named so the
+#: table below can assert WHICH one happened and with what value -- not merely
+#: that something came back. `_ABSOLUTE` means "returned normalised, `cwd`
+#: ignored"; `_JOINED` means "resolved against `cwd`"; `_REFUSED` means the
+#: `ValueError`.
+_REFUSED = "refused"
+_ABSOLUTE = "absolute"
+_JOINED = "joined"
+
+
 @pytest.mark.parametrize(
-    ("raw", "refused"),
+    ("raw", "outcome"),
     [
         # Rooted, no drive -- refused on every host, both spellings on Windows.
-        ("\\proj\\ws", True),
-        ("\\", True),
+        ("\\proj\\ws", _REFUSED),
+        ("\\", _REFUSED),
         # A UNC root or a device path carries the drive's equivalent: absolute.
-        ("\\\\srv\\share\\ws", False),
-        ("\\\\?\\C:\\ws", False),
+        ("\\\\srv\\share\\ws", _ABSOLUTE),
+        ("\\\\?\\C:\\ws", _ABSOLUTE),
         # A drive-absolute path, and an ordinary relative one.
-        ("C:\\proj\\ws", False),
-        ("sub\\ws", False),
+        ("C:\\proj\\ws", _ABSOLUTE),
+        ("sub\\ws", _JOINED),
     ],
 )
-def test_the_windows_spelled_decision_table_is_interpreter_independent(raw, refused):
+def test_the_windows_spelled_decision_table_is_interpreter_independent(raw, outcome):
     """Pins the whole Windows-spelled table, not just the defect's own input,
     so a future narrowing of the leading-separator regex cannot trade the fix
     for a UNC-path regression. `\\\\srv\\share\\ws` and `\\\\?\\C:\\ws` are the
     two shapes a naive "starts with a separator" test would break.
 
+    Asserts the returned VALUE, never truthiness. An earlier draft asserted
+    only `assert resolve_workspace_target(raw, ...)`, and a mutant that
+    replaced the absolute branch's `return os.path.normpath(trimmed)` with
+    `os.path.normpath(os.path.join(cwd, trimmed))` -- silently relocating
+    EVERY Windows-spelled absolute `--workspace` into `cwd`, `\\\\srv\\share\\ws`
+    becoming `<cwd>/\\\\srv\\share\\ws` -- passed the whole suite. This function's
+    contract is WHERE a checkout lands, so a test of it that cannot see a
+    relocation is the same dead-guard shape #1139 is about, one ring out.
+
+    `cwd`-independence is asserted separately from the value, because it is
+    the half a value comparison alone can satisfy by coincidence: an absolute
+    `--workspace` must resolve to the same place whatever directory `tan`
+    happened to be run from, and a relative one must not.
+
+    That relocation mutant is caught OFF Windows only, and that is the whole
+    of where it does harm rather than a gap: on Windows `ntpath.join(cwd,
+    r"C:\\proj\\ws")` already discards `cwd` and returns the absolute path, so
+    the mutation is inert there -- measured, the mutant passes all six rows
+    under a `ntpath`/`os.name='nt'` simulation. Off Windows `posixpath.join`
+    does not absorb it, because those spellings are not POSIX-absolute, and
+    that is exactly the host this defect class lives on.
+
     Measured identical on 3.12.3, 3.13.15 and 3.14.7."""
     from tan.core.bootstrap import resolve_workspace_target
 
-    if refused:
+    cwd = os.path.join(os.sep, "cwd")
+    other_cwd = os.path.join(os.sep, "elsewhere")
+
+    if outcome == _REFUSED:
         with pytest.raises(ValueError, match="has a root but no drive"):
-            resolve_workspace_target(raw, os.path.join(os.sep, "cwd"))
+            resolve_workspace_target(raw, cwd)
+        return
+
+    got = resolve_workspace_target(raw, cwd)
+
+    if outcome == _ABSOLUTE:
+        assert got == os.path.normpath(raw)
+        assert got == resolve_workspace_target(raw, other_cwd)
+        assert cwd not in got
     else:
-        assert resolve_workspace_target(raw, os.path.join(os.sep, "cwd"))
+        assert got == os.path.normpath(os.path.join(cwd, raw))
+        assert got != resolve_workspace_target(raw, other_cwd)
 
 
 @pytest.mark.parametrize("raw", ["\\proj\\x", "/proj/x", "\\", "/"])

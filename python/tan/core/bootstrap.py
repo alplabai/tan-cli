@@ -555,16 +555,14 @@ def ntpath_isabs(raw: str) -> bool:
     checked on EVERY host: the manifest is authored once and consumed on all
     three, so a POSIX `os.path.isabs` alone would wave `C:\\Windows` through.
 
-    NOT version-stable, and deliberately left that way (tan-cli#1139):
-    `ntpath.isabs` returns `True` on 3.12.3 and `False` on 3.13.15/3.14.7 for a
-    rooted-but-driveless path (`\\x`, `/x`, `\\`, `/`) -- the boundary is 3.13,
-    where CPython made it agree with `PureWindowsPath.is_absolute()`. Both
-    interpreters are supported (`requires-python = ">=3.12"`). Its only two
-    callers absorb that: `is_plain_relative` above is indifferent (its
-    component scan rejects every divergent input anyway, measured on all
-    three), and `resolve_workspace_target` decides the shape up front in
-    `_is_rooted_no_drive` before ever asking this. A THIRD caller would have
-    to do the same -- do not read a version-stable answer out of this."""
+    NOT version-stable, and deliberately left that way (tan-cli#1139): its
+    answer for a rooted-but-driveless path flips at CPython 3.13, and both
+    sides are supported. Its only two callers absorb that -- `is_plain_relative`
+    above is indifferent (its component scan rejects every divergent input
+    anyway), and `resolve_workspace_target` decides the shape up front in
+    `_is_rooted_no_drive`, which owns the measurement and the reasoning. A
+    THIRD caller would have to do the same: do not read a version-stable
+    answer out of this."""
     import ntpath  # noqa: PLC0415 -- one call site
 
     return ntpath.isabs(raw) or bool(re.match(r"^[A-Za-z]:", raw))
@@ -1944,11 +1942,13 @@ def resolve_workspace_target(raw: str, cwd: str) -> str:
     if os.path.isabs(trimmed) or ntpath_isabs(trimmed):
         return os.path.normpath(trimmed)
     if trimmed.startswith(("/", "\\")):
-        # Not reachable through any input measured on 3.12.3/3.13.15/3.14.7 --
-        # a single leading separator is refused above, and a doubled one is
-        # `ntpath_isabs`-absolute on all three. Kept so the invariant "a rooted
-        # path is NEVER silently joined onto `cwd`" is total rather than
-        # contingent on what a future `ntpath.isabs` says about `\\srv\share`.
+        # Not reachable through any input measured on 3.12.3/3.13.15/3.14.7: a
+        # single leading separator is refused above on Windows and for any
+        # `\`-led input, and is POSIX-absolute on the LINE ABOVE otherwise
+        # (`/proj/x` is never refused on POSIX); a doubled one is
+        # `ntpath_isabs`-absolute on all three. Kept so "a rooted path is NEVER
+        # silently joined onto `cwd`" is total rather than contingent on what a
+        # future `ntpath.isabs` says (tan-cli#1139).
         raise ValueError(_rooted_no_drive(trimmed))
     return os.path.normpath(os.path.join(cwd, trimmed))
 
@@ -1970,64 +1970,49 @@ def _is_drive_relative(raw: str) -> bool:
     there as a "plain relative" name to be joined onto the workspace.
 
     CONFIRMED post-3.13 (tan-cli#1139), which is not a given: `ntpath.isabs`
-    changed in that release. It did not change for `"C:ws"` -- `False` on
-    3.12.3, 3.13.15 and 3.14.7 alike -- so the sentence above still describes
-    the live code, and `ntpath_isabs`'s regex is still the only thing refusing
-    `C:ws` at the OTHER call site.
-
-    What that reasoning does NOT cover is the second, distinct divergence
-    `_is_rooted_no_drive` was added for. `ntpath_isabs` really does change
-    answer at 3.13 for a rooted-but-driveless path, and that one is fixed at
-    the call site for a DIFFERENT reason: not because the two callers want
-    opposite answers, but because -- measured on all three interpreters --
-    `is_plain_relative` is INDIFFERENT to it. Every input on which the helper
-    diverges (`\\proj\\x`, `/proj/x`, `\\`, `/`) is already rejected there by
-    the component scan, which sees the leading separator as an empty part, so
-    `is_plain_relative` answers `False` on both sides of the boundary either
-    way. Narrowing the shared helper would therefore have been SAFE here, and
-    was still not done: it would have bought nothing at `:547` while quietly
-    reshaping a manifest guard, and it could not have expressed the thing
-    `resolve_workspace_target` actually needs -- that a leading `/` is
-    absolute on POSIX and ambiguous on Windows, a host question no `isabs`
-    oracle answers on its own.
+    changed in that release, but not for `"C:ws"` -- `False` on 3.12.3,
+    3.13.15 and 3.14.7 alike -- so the paragraph above still describes the
+    live code. It does NOT cover the second, distinct divergence, which is
+    also fixed at a call site but for a different reason; see
+    `_is_rooted_no_drive`.
     """
     return bool(re.match(r"^[A-Za-z]:(?![\\/])", raw))
 
 
 def _is_rooted_no_drive(raw: str) -> bool:
     """`\\proj\\ws` -- a SINGLE leading separator, so a root but no drive
-    (tan-cli#1139 defect; the fourth measured `pathlib`/`ntpath` difference
-    across this repo's supported interpreter range, after tan-cli#1126's three).
+    (tan-cli#1139; the fourth measured `pathlib`/`ntpath` difference across
+    this repo's supported range, after tan-cli#1126's three). THE canonical
+    site for that measurement -- `ntpath_isabs`, `_is_drive_relative` and
+    `resolve_workspace_target`'s tail comment point here, not restate it.
 
     Asked as a REGEX over the string rather than as an `isabs` question, and
-    asked ahead of the absoluteness branch in `resolve_workspace_target`,
-    because `ntpath.isabs` answers this exact shape differently on either side
-    of CPython 3.13 while `PureWindowsPath.is_absolute()` has said `False`
-    throughout -- measured, not assumed:
+    ahead of `resolve_workspace_target`'s absoluteness branch, because
+    `ntpath.isabs` answers this shape differently either side of CPython 3.13
+    while `PureWindowsPath.is_absolute()` has said `False` throughout --
+    measured, not assumed:
 
         interpreter   ntpath.isabs(r"\\proj\\x")   PureWindowsPath(...).is_absolute()
         3.12.3        True                      False
         3.13.15       False                     False
         3.14.7        False                     False
 
-    3.13 is the boundary (CPython made `ntpath.isabs` agree with pathlib
-    there), NOT 3.14. `pyproject.toml` pins `requires-python = ">=3.12"`, so
-    both answers are live for real users. With the check nested inside the
-    absoluteness branch it inherited that split: off Windows on 3.12,
-    `ntpath_isabs(r"\\proj\\ws")` was `True`, the branch's own `os.name == "nt"`
-    sub-test was `False`, and the value fell through to `normpath` -- so
-    `--workspace \\proj\\ws` RELOCATED a customer's checkout into a literal
-    `\\proj\\ws` directory instead of raising the refusal the guard was written
-    to give. On 3.13/3.14 the same input missed the branch entirely and hit
-    the rooted-path refusal below it. Same command, two outcomes, decided by
-    the interpreter.
+    The regex is not merely SUFFICIENT for the shapes someone thought to
+    probe, it is EQUIVALENT to the divergence: over a 40-input corpus, on all
+    three interpreters, `ntpath.isabs` differs across the boundary iff the
+    string matches `^[\\/](?![\\/])` -- zero mismatches in either direction.
+    So this covers the whole class, tripled and mixed separators included.
+
+    `requires-python = ">=3.12"`, so both answers are live. Nested inside the
+    absoluteness branch the guard inherited the split and was DEAD off Windows
+    on 3.12: `--workspace \\proj\\ws` fell through to `normpath` and relocated a
+    checkout into a literal `\\proj\\ws` directory instead of raising.
 
     Host-aware, because the two separators are not the same fact: a leading
     `/` IS a genuine absolute path on POSIX and must keep resolving there,
     while a leading `\\` names no drive on any host and `/` names none on
-    Windows either. TWO leading separators are excluded -- that is a UNC root
-    (`\\\\srv\\share`) or a device path (`\\\\?\\C:\\ws`), which carry the drive's
-    equivalent with them and are absolute on all three interpreters.
+    Windows. TWO leading separators are excluded -- a UNC root or a device
+    path (`\\\\srv\\share`, `\\\\?\\C:\\ws`), absolute on all three.
     """
     if not re.match(r"^[\\/](?![\\/])", raw):
         return False
