@@ -1,79 +1,138 @@
 # SPDX-License-Identifier: Apache-2.0
 """tan-cli#1112: ties a registered `contract/issue-codes.json` `severity` to
-the severity its own emission sites actually construct -- the gate that did
-not exist when `clean.remove-failed` and `build.toolchain-root-unresolved`
-drifted (registered `warning`-only, emitted `error` at a real site too) and
-sat undetected until a manual grep during an unrelated review (PR #1110)
-surfaced it.
+the severity its own emission MECHANISMS actually construct -- the gate that
+did not exist when `clean.remove-failed` and `build.toolchain-root-unresolved`
+drifted (registered `warning`-only, emitted `error` too) and sat undetected
+until a manual grep during an unrelated review (PR #1110) surfaced it.
 
-WHAT THIS ASSERTS, and nothing wider. For each code in `_SEEDED_SEVERITIES`
-below -- an explicit, opt-in allow-list, seeded with exactly the four codes
-this repo has measured to be GENUINELY dual-severity today (not a
-one-severity-per-code sweep; see "dual severity is supported" below) -- three
-things must all agree:
+WHAT A "MECHANISM" IS, AND WHY THIS IS NOT A SET UNION. An earlier version of
+this file walked every `Issue(` construction in three files and asserted the
+UNION of resolved severities equalled the registry. That was vacuous for
+`build.toolchain-root-unresolved` specifically (PR #1120 review, tan-cli#1112
+follow-up): that ONE code is constructed through FIVE independent origins
+converging on TWO delivery sites --
 
-  1. `_SEEDED_SEVERITIES[code]`'s own declared expectation (independently
-     written by a human, not derived from either side below, so the registry
-     and the source cannot silently drift to the same wrong answer together);
-  2. `contract/issue-codes.json`'s registered `severity` for that code,
-     normalised (`"error or warning"` -> `{"error", "warning"}`, else a
-     singleton set);
-  3. every severity [`_emitted_severities_for`] can prove that code is
-     actually constructed with, AST-walking the THREE files below.
+  * a direct `Issue(code, "error" if failed else "warning", ...)` ternary
+    (`build_cmd.py::_dispatch`) -- by itself already both severities;
+  * a direct `Issue(code, "warning", ...)` (`build_cmd.py::_demoted_artefact_issues`);
+  * `raise BuildError(code, ...)` in that same function's FAIL arm
+    (`build_cmd.py::_demoted_artefact_issues`);
+  * `raise TokenSubstitutionError(code, ...)` in a DIFFERENT file
+    (`build/token_substitution.py::apply_plan_token_substitution`), forwarded
+    into a `BuildError` by `build_cmd.py::_build`'s own
+    `except TokenSubstitutionError as err: raise BuildError(err.code, ...)`;
+  * and TWO separate `except BuildError as err: ... Issue(err.code, "error",
+    ...)` DELIVERY sites -- `build_cmd.py::build` (the `tan build` dispatcher)
+    and `run_cmd.py::_run` (`tan run` shares the same `_build` engine,
+    tan-cli#1112 review finding).
 
-WHAT THIS DOES NOT ASSERT, deliberately. Nothing about any code not in
-`_SEEDED_SEVERITIES` -- a drift on an unseeded code is exactly as invisible to
-this gate as it was before this file existed. Nothing about any file other
-than `commands/build_cmd.py`, `commands/clean_cmd.py`, `commands/flash_cmd.py`
--- the three real emission homes of the four seeded codes; a fifth home this
-gate has never heard of is not scanned. And nothing at all about a severity
-argument that is dynamic (a bare variable, an f-string) UNLESS the CODE
-argument at that same call site is itself one of the four seeded literals --
-an unrelated call elsewhere in these three files with a severity this gate
-cannot resolve is silently out of scope, not a failure, by design (see
-`_emitted_severities_for`'s own docstring for exactly which shapes resolve and
-which don't).
+A UNION-of-all-sites set is blind to any ONE of these vanishing as long as
+ANOTHER still supplies the same severity value: collapsing the `_dispatch`
+ternary to a bare `"warning"` (a real regression -- `tan build` under
+`executionPolicy.missingTool=fail`'s OTHER code path would still deliver
+`error` via the `BuildError` chain) left a union-based gate green, and so did
+deleting the `BuildError` delivery entirely (the `_dispatch` ternary still
+supplies `"error"` on its own). Both were measured, independently, on PR
+#1120.
 
-Building the seeded set WIDER than these four -- scanning every `Issue(`
-construction site in these three files and asserting registered-equals-
-emitted for ALL of them -- was tried and measured RED on arrival, which is
-exactly the failure mode "seeded (opt-in) with these codes" exists to avoid:
-`build.missing-tool` (`build_cmd.py:1020`, `"error" if failed else
-"warning"`) is a FIFTH code that is ALSO genuinely dual-severity in source but
-registered `"error"`-only -- a real, pre-existing drift this issue's own scope
-does not cover (tan-cli#1112 named exactly `clean.remove-failed` and
-`build.toolchain-root-unresolved`). Seeding it here would fix nothing (this
-file only ASSERTS, it does not edit the registry) and would instead red this
-gate the moment it landed on a code nobody asked this change to touch --
-follow-up work, not silently absorbed here.
+So this file asserts EACH mechanism SEPARATELY -- [`_SEEDED_MECHANISMS`] is a
+`{code: (Mechanism, ...)}` table, and every entry is checked on its own via
+[`_verify`]: losing ANY ONE of them reds by name, regardless of whether a
+DIFFERENT mechanism for the same code still happens to cover the same
+severity value. The union (`_aggregate_expected`) is still computed and still
+checked against the registry -- that half of the contract (does the
+REGISTRY match what the code as a WHOLE constructs) is real and worth
+keeping -- but it is no longer the only thing enforced.
 
-DUAL SEVERITY IS SUPPORTED, ON PURPOSE -- do not read this file as an argument
-for one-severity-per-code. `flash.nothing-matched` and `build.unknown-backend`
-are already correctly registered `"error or warning"` (tan-cli#807, tan-cli
-review) and are seeded here NOT because they needed fixing, but so a LATER
-sweep cannot flatten them back to a single severity without this gate naming
-the exact site and both severities it would be dropping -- see
-`test_dual_severity_codes_stay_dual` below, which mutates the normaliser
+FOUR MECHANISM KINDS, each independently AST-verified in [`_verify`]:
+
+  * `"direct"` -- every `Issue(code, <severity>, ...)` call whose CODE is the
+    seeded literal, inside one named `(file, qualname)`. `<severity>` may be
+    a plain string constant or a `"error" if <cond> else "warning"` ternary
+    (resolved the same way [`_severity_from_node`] always has). Compared as
+    a SORTED MULTISET (a call site can repeat inside one function, e.g.
+    `clean_cmd.py::_run`'s two `Issue("clean.remove-failed", ...)` sites) --
+    not a set -- so a severity value FLIPPING at one call while another site
+    keeps the old value still changes the multiset and reds, and so does a
+    call SITE disappearing (the multiset shrinks) even if the surviving
+    site(s) still nominally cover the same severity SET.
+  * `"raise:<ClassName>"` -- every `<ClassName>(code, ...)` construction
+    (`BuildError`, `TokenSubstitutionError`) whose CODE is the seeded
+    literal, inside one named `(file, qualname)`. Counted, not just present
+    -- pins exactly how many such raises exist there.
+  * `"forward:<Source>-><Target>"` -- every `<Target>(<name>.code, ...)`
+    construction inside an `except <Source> as <name>:` handler, inside one
+    named `(file, qualname)` -- the shape `build_cmd.py::_build` uses to
+    re-tag a caught `TokenSubstitutionError` as a `BuildError`. Counted, not
+    code-specific (the forward does not know which code is flowing through
+    it; it is pinned once per code whose flow genuinely depends on it, so its
+    disappearance breaks that code's own mechanism list).
+  * `"deliver:<ClassName>"` -- every `Issue(<name>.code, <severity>, ...)`
+    construction inside an `except <ClassName> as <name>:` handler, inside
+    one named `(file, qualname)`. Requires EXACTLY ONE such construction
+    (reds by name if zero -- the handler stopped forwarding -- or more than
+    one) and resolves its severity the same way `"direct"` does.
+
+Argument resolution accepts BOTH shapes for every code/severity-position
+argument this file inspects -- positional (`Issue("code", "severity")`) or
+the matching keyword (`Issue(code="code", severity="severity")`) -- and the
+callee may be a bare name (`Issue(...)`) or attribute-qualified
+(`envelope.Issue(...)`). This closes the four SILENT-skip shapes a reviewer
+measured against the union-based predecessor of this file (a `severity=`
+keyword, an attribute-qualified callee, a code hoisted to a module constant,
+a `**kwargs` splat): none of those shapes resolves as a match for a
+mechanism's own `(file, qualname)` lookup, so a real call site REWRITTEN into
+one of them stops counting as a match at that key -- and because every
+mechanism's expected count/multiset is PINNED exactly, that changes what
+[`_verify`] finds and reds on a COUNT/multiset mismatch, even for the two
+shapes (hoisted constant, `**kwargs`) this file does not attempt to resolve
+the value of. A severity argument that IS resolvable in shape but not in
+VALUE (a variable, an f-string, a ternary with a non-literal branch) is a
+HARD FAILURE, never a silent skip -- same discipline
+`test_blob_format_producers_stay_in_valid_blob_formats.py` (tan-cli#1074)
+established for this class of gate.
+
+WHAT REMAINS INVISIBLE, stated plainly (the PR #1120 review's own bar):
+
+  * Any code not a key in `_SEEDED_MECHANISMS` (4 today: `clean.remove-failed`,
+    `build.toolchain-root-unresolved`, `build.unknown-backend`,
+    `flash.nothing-matched`) -- `build.missing-tool` (`build_cmd.py:1019`) is
+    measured to be JUST as genuinely dual-severity in source as the four
+    seeded here, and registered `error`-only, and this file does not catch
+    it -- deliberately: fixing it is out of tan-cli#1112's own named scope
+    (`clean.remove-failed` and `build.toolchain-root-unresolved` only), and
+    seeding an assertion this PR does not also fix would either red on
+    landing or require silently laundering a THIRD registry fix into a
+    two-code issue. Left as the concrete, measured proof that widening the
+    seed list past what an issue actually fixes reds on arrival.
+  * A construction site in a `(file, qualname)` NOT named by any
+    `Mechanism` for that code -- a brand-new fifth origin or third delivery
+    site, in a function this table has never heard of, is exactly as
+    invisible as it was before this file existed. `_SCANNED_FILES` (derived
+    from the table, not hand-maintained separately) names every file this
+    gate has ever looked at: `commands/build_cmd.py`, `commands/clean_cmd.py`,
+    `commands/flash_cmd.py`, `commands/run_cmd.py`,
+    `commands/build/token_substitution.py`.
+  * A code/severity argument passed as a hoisted module constant or via
+    `**kwargs` -- not silently PASSED (see the paragraph above: it changes a
+    pinned count/multiset and reds), but not RESOLVED either: the failure
+    message names a count mismatch, not the real value that escaped.
+
+DUAL SEVERITY IS SUPPORTED, ON PURPOSE -- do not read this file as an
+argument for one-severity-per-code. `flash.nothing-matched` and
+`build.unknown-backend` are already correctly registered `"error or warning"`
+(tan-cli#807, tan-cli review) and are seeded here NOT because they needed
+fixing, but so a LATER sweep cannot flatten them back to a single severity
+without this gate naming the exact mechanism it would be dropping --
+[`test_dual_severity_codes_stay_dual`] mutates the registry-string normaliser
 itself to prove that protection is not vacuous.
-
-HOW EMISSION IS RESOLVED -- see [`_emitted_severities_for`]'s own docstring
-for the two shapes it reads (a literal `Issue("code", "severity", ...)`, and
-a `"error" if <cond> else "warning"` ternary in the severity position) and the
-one FORWARDING shape it follows (a `raise BuildError("code", ...)` inside a
-scanned file, resolved through that SAME file's own
-`except BuildError as err: ... Issue(err.code, <severity>, ...)` handler --
-`build_cmd.py`'s top-level dispatcher, which is what actually turns
-`build.toolchain-root-unresolved`'s `executionPolicy.missingTool=fail` arm
-into a delivered `error`). Every one of these is read from the real AST, not
-assumed or hand-copied -- a rewrap of any of these call sites changes nothing
-this gate checks, only a change to WHICH severities a site constructs does.
 """
 
 from __future__ import annotations
 
 import ast
-import functools
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -82,14 +141,6 @@ import pytest
 #: use: `contract/` sits three levels above this file (gates -> tests -> python -> repo root).
 REGISTRY = Path(__file__).resolve().parents[3] / "contract" / "issue-codes.json"
 TAN = Path(__file__).resolve().parents[2] / "tan"
-
-#: The three real emission homes of every code seeded below -- see the module
-#: docstring's "WHAT THIS ASSERTS" for why this list is not wider.
-_SCANNED_FILES = (
-    TAN / "commands" / "build_cmd.py",
-    TAN / "commands" / "clean_cmd.py",
-    TAN / "commands" / "flash_cmd.py",
-)
 
 _SEVERITY_VALUES = frozenset({"error", "warning", "info"})
 
@@ -115,16 +166,11 @@ def _severity_set(raw: str) -> frozenset[str]:
 
 def _severity_from_node(node: ast.expr | None) -> frozenset[str] | None:
     """Resolve a severity ARGUMENT expression to the set of literal severity
-    strings it can evaluate to at runtime.
-
-    Two shapes resolve: a plain string constant (`"error"`) resolves to a
-    singleton set; a `"error" if <cond> else "warning"` ternary -- the exact
-    idiom `build_cmd.py` uses for BOTH `build.toolchain-root-unresolved` and
-    `build.unknown-backend` -- resolves to the union of both branches WHEN
-    both are themselves literal strings. Anything else (a variable, an
-    f-string, a ternary with a non-literal branch) is unresolved (`None`),
-    never guessed at.
-    """
+    strings it can evaluate to at runtime. Two shapes resolve: a plain string
+    constant, or a `"error" if <cond> else "warning"` ternary with both
+    branches literal (resolves to the union of both). Anything else -- a
+    variable, an f-string, a ternary with a non-literal branch -- is
+    unresolved (`None`), never guessed at."""
     if node is None:
         return None
     if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in _SEVERITY_VALUES:
@@ -139,19 +185,46 @@ def _severity_from_node(node: ast.expr | None) -> frozenset[str] | None:
 
 def _code_from_node(node: ast.expr | None) -> str | None:
     """The literal code string at a code-position argument, when it IS one
-    (a `Constant` string shaped like `family.name` -- has a dot). A
-    non-literal code argument (`err.code`) is not this function's concern --
-    see `_emitted_severities_for`'s BuildError-forwarding pass for how that
-    shape is followed instead."""
+    (a `Constant` string shaped like `family.name` -- has a dot). A hoisted
+    module constant or a non-literal expression is NOT resolved here -- see
+    the module docstring's "WHAT REMAINS INVISIBLE" for why that is still
+    safe: it changes a pinned mechanism's match count rather than passing
+    silently."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str) and "." in node.value:
         return node.value
     return None
 
 
-def _is_err_code_attribute(node: ast.expr | None, exc_name: str) -> bool:
-    """True for `<exc_name>.code` -- the shape `except BuildError as <exc_name>:
-    ... Issue(<exc_name>.code, <severity>, ...)` re-emits a caught error's own
-    code under, e.g. `err.code`."""
+def _callee_name(func: ast.expr) -> str | None:
+    """A call's callee, resolved to its bare name for both `Issue(...)` (an
+    `ast.Name`) and an attribute-qualified `envelope.Issue(...)`
+    (`ast.Attribute`) -- closes the silent-skip shape a reviewer measured
+    against this file's predecessor (PR #1120 review)."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _call_arg(call: ast.Call, index: int, keyword: str) -> ast.expr | None:
+    """The argument at `index` positionally, else the matching `keyword=`
+    -- `Issue`/`BuildError`/`TokenSubstitutionError` all name their fields
+    `code`/`severity`/`message`, so a keyword call is a real, legal shape,
+    not a hypothetical -- closes the second silent-skip shape a reviewer
+    measured (PR #1120 review)."""
+    if index < len(call.args):
+        return call.args[index]
+    for kw in call.keywords:
+        if kw.arg == keyword:
+            return kw.value
+    return None
+
+
+def _is_attr_code(node: ast.expr | None, exc_name: str) -> bool:
+    """True for `<exc_name>.code` -- the shape `except <Class> as <exc_name>:
+    ... Issue(<exc_name>.code, ...)` / `... <OtherClass>(<exc_name>.code,
+    ...)` re-emits a caught error's own code under."""
     return (
         isinstance(node, ast.Attribute)
         and node.attr == "code"
@@ -160,232 +233,375 @@ def _is_err_code_attribute(node: ast.expr | None, exc_name: str) -> bool:
     )
 
 
-def _emitted_severities_for(path: Path, seeded: frozenset[str]) -> dict[str, tuple[frozenset[str], int]]:
-    """`{code: (severities, site count)}` for every code in `seeded` that
-    `path`'s AST shows being constructed -- restricted to `seeded` so a
-    hard-failure below can never fire over an unrelated, unseeded call site
-    in one of the three scanned files (see the module docstring's "WHAT THIS
-    DOES NOT ASSERT").
+@dataclass(frozen=True)
+class _Index:
+    """Every `Call` and `ExceptHandler` node in one file's AST, keyed by the
+    dotted qualname of the innermost enclosing function/method/class it sits
+    in (the same `_prefix_templates`-style walk `test_every_issue_code_is_
+    registered.py` uses, and for the same reason: a qualname survives a
+    line-shift a lineno-keyed table would not, tan-cli#224's own dev fc88ca1
+    lesson)."""
 
-    Three passes, in order:
+    calls: dict[str, list[ast.Call]]
+    handlers: dict[str, list[ast.ExceptHandler]]
 
-      1. Every direct `Issue(<literal code>, <severity>, ...)` call whose
-         code IS one of `seeded` -- `_severity_from_node` resolves the
-         severity (literal or ternary-of-literals). Unresolved is a HARD
-         FAILURE (never a silent skip) -- the same "cannot verify
-         statically, do not pass anyway" discipline
-         `test_blob_format_producers_stay_in_valid_blob_formats.py`
-         (tan-cli#1074) established for this shape of gate.
-      2. Every `BuildError(<literal code>, ...)` construction (`raise
-         BuildError(...)`, or any other call -- the shape does not care)
-         whose code is one of `seeded`, recorded so pass 3 can attribute a
-         severity to it.
-      3. This SAME FILE's own `except BuildError as <name>:` handler(s):
-         whatever severity they forward through `Issue(<name>.code,
-         <severity>, ...)` applies to EVERY seeded code found via pass 2 in
-         THIS file, since the handler catches by exception TYPE, not by
-         code -- it cannot distinguish which code it is re-emitting.
-         Unresolved is again a hard failure, but ONLY if pass 2 found at
-         least one seeded code that could reach it (an unresolved severity
-         in a handler that forwards no seeded code is out of scope, same
-         restriction as pass 1).
 
-    Site count is every AST node pass 1 or pass 2 matched for that code --
-    not the number of distinct severities -- so `test_the_scan_actually_
-    finds_the_expected_sites` can catch a site silently vanishing (a rewrite
-    that still produces the same severities from FEWER call sites is a
-    real change worth noticing, even though it does not change the set this
-    gate's main assertion compares).
-    """
+def _index(path: Path) -> _Index:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    severities: dict[str, set[str]] = {}
-    counts: dict[str, int] = {}
-    raised_via_builderror: set[str] = set()
+    calls: dict[str, list[ast.Call]] = {}
+    handlers: dict[str, list[ast.ExceptHandler]] = {}
+    stack: list[str] = []
 
-    def _record(code: str, sevs: frozenset[str]) -> None:
-        severities.setdefault(code, set()).update(sevs)
-        counts[code] = counts.get(code, 0) + 1
+    def _qualname() -> str:
+        return ".".join(stack) if stack else "<module>"
 
-    # Pass 1 + pass 2.
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
-            continue
-        if node.func.id == "Issue" and len(node.args) >= 2:
-            code = _code_from_node(node.args[0])
-            if code is None or code not in seeded:
+    def _walk(node: ast.AST) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            stack.append(node.name)
+            for child in ast.iter_child_nodes(node):
+                _walk(child)
+            stack.pop()
+            return
+        if isinstance(node, ast.Call):
+            calls.setdefault(_qualname(), []).append(node)
+        elif isinstance(node, ast.ExceptHandler):
+            handlers.setdefault(_qualname(), []).append(node)
+        for child in ast.iter_child_nodes(node):
+            _walk(child)
+
+    _walk(tree)
+    return _Index(calls=calls, handlers=handlers)
+
+
+@dataclass(frozen=True)
+class Mechanism:
+    file: str  # relative to TAN's parent, e.g. "tan/commands/build_cmd.py"
+    qualname: str
+    kind: str  # "direct" | "raise:<Class>" | "forward:<Src>-><Tgt>" | "deliver:<Class>"
+    expected: object
+    why: str
+
+
+def _verify(code: str, m: Mechanism) -> None:
+    """Independently AST-verifies ONE mechanism for ONE code -- see the
+    module docstring's "FOUR MECHANISM KINDS" for what each `kind` checks and
+    why each is asserted on its own rather than folded into a union."""
+    path = TAN.parent / m.file
+    idx = _index(path)
+    site = f"{m.file}::{m.qualname}"
+    calls = idx.calls.get(m.qualname, [])
+    handlers = idx.handlers.get(m.qualname, [])
+
+    if m.kind == "direct":
+        found: list[tuple[str, ...]] = []
+        for call in calls:
+            if _callee_name(call.func) != "Issue":
                 continue
-            sevs = _severity_from_node(node.args[1])
+            code_arg = _call_arg(call, 0, "code")
+            if _code_from_node(code_arg) != code:
+                continue
+            sev_arg = _call_arg(call, 1, "severity")
+            sevs = _severity_from_node(sev_arg)
             if sevs is None:
                 raise AssertionError(
-                    f"{path}:{node.lineno} constructs Issue({code!r}, ...) with a "
-                    f"severity argument this gate cannot resolve statically -- "
-                    f"extend _severity_from_node, or make the argument a literal "
-                    f"or a ternary of literals."
+                    f"{site}:{call.lineno} constructs Issue({code!r}, ...) with a "
+                    f"severity this gate cannot resolve statically -- {m.why}"
                 )
-            _record(code, sevs)
-        elif node.func.id == "BuildError" and node.args:
-            code = _code_from_node(node.args[0])
-            if code is not None and code in seeded:
-                raised_via_builderror.add(code)
-                counts[code] = counts.get(code, 0) + 1
+            found.append(tuple(sorted(sevs)))
+        actual = tuple(sorted(found))
+        assert actual == m.expected, (
+            f"{site} -- direct Issue({code!r}, ...) call(s) now construct {actual}, "
+            f"expected {m.expected} -- {m.why}"
+        )
+        return
 
-    # Pass 3: this file's own `except BuildError as <name>:` forwarding.
-    if raised_via_builderror:
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ExceptHandler):
+    if m.kind.startswith("raise:"):
+        cls = m.kind.split(":", 1)[1]
+        count = sum(
+            1
+            for call in calls
+            if _callee_name(call.func) == cls and _code_from_node(_call_arg(call, 0, "code")) == code
+        )
+        assert count == m.expected, (
+            f"{site} -- found {count} {cls}({code!r}, ...) raise site(s), expected "
+            f"{m.expected} -- {m.why}"
+        )
+        return
+
+    if m.kind.startswith("forward:"):
+        src, tgt = m.kind.split(":", 1)[1].split("->")
+        count = 0
+        for h in handlers:
+            if not (isinstance(h.type, ast.Name) and h.type.id == src and h.name):
                 continue
-            if not (isinstance(node.type, ast.Name) and node.type.id == "BuildError" and node.name):
+            exc_name = h.name
+            for node in ast.walk(h):
+                if (
+                    isinstance(node, ast.Call)
+                    and _callee_name(node.func) == tgt
+                    and _is_attr_code(_call_arg(node, 0, "code"), exc_name)
+                ):
+                    count += 1
+        assert count == m.expected, (
+            f"{site} -- found {count} `except {src} as <name>: {tgt}(<name>.code, ...)` "
+            f"forward site(s), expected {m.expected} -- {m.why}"
+        )
+        return
+
+    if m.kind.startswith("deliver:"):
+        cls = m.kind.split(":", 1)[1]
+        sevs: set[str] = set()
+        matches = 0
+        for h in handlers:
+            if not (isinstance(h.type, ast.Name) and h.type.id == cls and h.name):
                 continue
-            exc_name = node.name
-            for inner in ast.walk(node):
+            exc_name = h.name
+            for node in ast.walk(h):
                 if not (
-                    isinstance(inner, ast.Call)
-                    and isinstance(inner.func, ast.Name)
-                    and inner.func.id == "Issue"
-                    and len(inner.args) >= 2
-                    and _is_err_code_attribute(inner.args[0], exc_name)
+                    isinstance(node, ast.Call)
+                    and _callee_name(node.func) == "Issue"
+                    and _is_attr_code(_call_arg(node, 0, "code"), exc_name)
                 ):
                     continue
-                sevs = _severity_from_node(inner.args[1])
-                if sevs is None:
+                sev_arg = _call_arg(node, 1, "severity")
+                resolved = _severity_from_node(sev_arg)
+                if resolved is None:
                     raise AssertionError(
-                        f"{path}:{inner.lineno} forwards a caught BuildError "
-                        f"through Issue({exc_name}.code, ...) with a severity "
-                        f"this gate cannot resolve statically, and at least one "
-                        f"seeded code ({sorted(raised_via_builderror)}) is "
-                        f"raised via BuildError(...) in this same file."
+                        f"{site}:{node.lineno} forwards a caught {cls} through "
+                        f"Issue({exc_name}.code, ...) with a severity this gate cannot "
+                        f"resolve statically -- {m.why}"
                     )
-                for code in raised_via_builderror:
-                    severities.setdefault(code, set()).update(sevs)
+                sevs |= resolved
+                matches += 1
+        assert matches == 1, (
+            f"{site} -- found {matches} `except {cls} as <name>: Issue(<name>.code, ...)` "
+            f"delivery site(s), expected exactly 1 -- {m.why}"
+        )
+        assert frozenset(sevs) == m.expected, (
+            f"{site} -- delivers {cls} at severities {sorted(sevs)}, expected "
+            f"{sorted(m.expected)} -- {m.why}"
+        )
+        return
 
-    return {code: (frozenset(sevs), counts.get(code, 0)) for code, sevs in severities.items()}
-
-
-@functools.cache
-def _emitted_by_code() -> dict[str, tuple[frozenset[str], int]]:
-    merged_sevs: dict[str, set[str]] = {}
-    merged_counts: dict[str, int] = {}
-    for path in _SCANNED_FILES:
-        for code, (sevs, count) in _emitted_severities_for(path, frozenset(_SEEDED_SEVERITIES)).items():
-            merged_sevs.setdefault(code, set()).update(sevs)
-            merged_counts[code] = merged_counts.get(code, 0) + count
-    return {code: (frozenset(sevs), merged_counts[code]) for code, sevs in merged_sevs.items()}
+    raise AssertionError(f"{m!r}: unknown mechanism kind")
 
 
 #: Opt-in: a code is in scope for this gate if and only if it is a key here.
-#: `(expected severities, expected AST site count across _SCANNED_FILES, why)`
-#: -- the independently-declared truth this gate checks BOTH the registry and
-#: the real emission sites against, so the two sides cannot silently drift to
-#: the same wrong answer together. See the module docstring for why exactly
-#: these four and no more.
-_SEEDED_SEVERITIES: dict[str, tuple[frozenset[str], int, str]] = {
+#: See the module docstring's "FOUR MECHANISM KINDS" for the shape of each
+#: entry and "WHAT REMAINS INVISIBLE" for the boundary of what this table
+#: does NOT cover.
+_SEEDED_MECHANISMS: dict[str, tuple[Mechanism, ...]] = {
     "clean.remove-failed": (
-        frozenset({"warning", "error"}),
-        2,
-        "tan-cli#1112: was registered `warning`-only -- drift, not the true "
-        "shape. clean_cmd.py's best-effort DIRECTORY removal (matching "
-        "rmtree(ignore_errors=True), clean_cmd.py:852) warns and does not "
-        "fail the command; its NOT-ignore-errors STATE-FILE removal "
-        "(os.remove, clean_cmd.py:864) fails the command outright. Both arms "
-        "are genuine -- fixed by registering `error or warning`.",
+        Mechanism(
+            "tan/commands/clean_cmd.py",
+            "_run",
+            "direct",
+            (("error",), ("warning",)),
+            "tan-cli#1112: clean_cmd.py's best-effort DIRECTORY removal "
+            "(matching rmtree(ignore_errors=True), :852) warns; its "
+            "NOT-ignore-errors STATE-FILE removal (os.remove, :864) fails the "
+            "command outright. Both arms genuine -- registered `error or "
+            "warning`.",
+        ),
     ),
     "build.toolchain-root-unresolved": (
-        frozenset({"warning", "error"}),
-        3,
-        "tan-cli#1112: was registered `warning`-only -- drift, not the true "
-        "shape. build_cmd.py demotes a slice to `warning` under "
-        "executionPolicy.missingTool=skip (the default) and to `error` under "
-        "=fail -- either directly (a held-outcome retry's own `\"error\" if "
-        "failed else \"warning\"`) or via `raise BuildError(...)`, caught and "
-        "re-emitted `error` by this command's own top-level handler. "
-        "Policy-driven, like its build.unknown-backend sibling -- fixed by "
-        "registering `error or warning`.",
+        Mechanism(
+            "tan/commands/build_cmd.py",
+            "_dispatch",
+            "direct",
+            (("error", "warning"),),
+            "tan-cli#1112: the held-outcome retry path's own "
+            "`\"error\" if failed else \"warning\"` ternary (:799) -- both "
+            "severities from one call site.",
+        ),
+        Mechanism(
+            "tan/commands/build_cmd.py",
+            "_demoted_artefact_issues",
+            "direct",
+            (("warning",),),
+            "tan-cli#1112: the default executionPolicy.missingTool=skip arm "
+            "(:1196) -- the warning half of this code's dual severity.",
+        ),
+        Mechanism(
+            "tan/commands/build_cmd.py",
+            "_demoted_artefact_issues",
+            "raise:BuildError",
+            1,
+            "tan-cli#1112: the executionPolicy.missingTool=fail arm (:1189) "
+            "raises BuildError directly -- one of two origins that reach "
+            "`error` (the other is the TokenSubstitutionError forward below).",
+        ),
+        Mechanism(
+            "tan/commands/build/token_substitution.py",
+            "apply_plan_token_substitution",
+            "raise:TokenSubstitutionError",
+            1,
+            "tan-cli#1112 (PR #1120 review, finding 4): the SECOND origin of "
+            "this code's `error` arm -- an unresolved ${TOOLCHAIN_ROOT} token "
+            "(:259) -- lives in a DIFFERENT file than the rest of this code's "
+            "mechanisms and was invisible to this gate's predecessor.",
+        ),
+        Mechanism(
+            "tan/commands/build_cmd.py",
+            "_build",
+            "forward:TokenSubstitutionError->BuildError",
+            1,
+            "tan-cli#1112 (PR #1120 review, finding 4): `_build`'s own "
+            "`except TokenSubstitutionError as err: raise BuildError(err.code, "
+            "...)` (:1251-1256) is what lets the token_substitution.py origin "
+            "above reach BuildError's delivery sites at all.",
+        ),
+        Mechanism(
+            "tan/commands/build_cmd.py",
+            "build",
+            "deliver:BuildError",
+            frozenset({"error"}),
+            "tan-cli#1112 (PR #1120 review, finding 3): `tan build`'s own "
+            "`except BuildError as err: ... Issue(err.code, \"error\", ...)` "
+            "(:1804-1805) -- the mechanism a reviewer measured could be "
+            "deleted outright without reddening the union-based predecessor "
+            "of this gate, because the _dispatch ternary above independently "
+            "covers `error` too. Asserted on its own so THAT deletion reds by "
+            "name regardless.",
+        ),
+        Mechanism(
+            "tan/commands/run_cmd.py",
+            "_run",
+            "deliver:BuildError",
+            frozenset({"error"}),
+            "tan-cli#1112 (PR #1120 review, finding 1): `tan run` reuses "
+            "`build_cmd._build` (the same engine `tan build` calls) and has "
+            "its OWN `except BuildError as err: ... Issue(err.code, \"error\", "
+            "...)` (:281-289) -- a real, separate emission home this gate's "
+            "predecessor never scanned.",
+        ),
     ),
     "build.unknown-backend": (
-        frozenset({"warning", "error"}),
-        1,
-        "already correctly registered `error or warning` -- seeded here so a "
-        "LATER sweep cannot flatten it back to one severity without this "
-        "gate naming the exact site and both severities being dropped "
-        "(tan-cli#1112).",
+        Mechanism(
+            "tan/commands/build_cmd.py",
+            "_backend_issues",
+            "direct",
+            (("error", "warning"),),
+            "already correctly registered `error or warning` -- seeded here "
+            "so a LATER sweep cannot flatten it back to one severity without "
+            "this gate naming the exact site (tan-cli#1112).",
+        ),
     ),
     "flash.nothing-matched": (
-        frozenset({"warning", "error"}),
-        2,
-        "already correctly registered `error or warning` (tan-cli#807) -- "
-        "seeded here for the same reason as build.unknown-backend "
-        "(tan-cli#1112).",
+        Mechanism(
+            "tan/commands/flash_cmd.py",
+            "_run",
+            "direct",
+            (("error",), ("warning",)),
+            "already correctly registered `error or warning` (tan-cli#807) -- "
+            "seeded here for the same reason as build.unknown-backend "
+            "(tan-cli#1112).",
+        ),
     ),
 }
 
+#: Every file any Mechanism above names -- see the module docstring's "WHAT
+#: REMAINS INVISIBLE" for why a file NOT in this set is exactly that.
+_SCANNED_FILES: frozenset[str] = frozenset(m.file for ms in _SEEDED_MECHANISMS.values() for m in ms)
 
-@pytest.mark.parametrize("code", sorted(_SEEDED_SEVERITIES), ids=lambda c: c)
-def test_registered_severity_matches_every_emission_site(code):
-    expected, _expected_sites, why = _SEEDED_SEVERITIES[code]
+#: Total mechanism-table entries across every seeded code -- anti-vacuity for
+#: the TABLE itself (a `Mechanism` silently removed from `_SEEDED_MECHANISMS`
+#: is simply not parametrised below, which is not a red; this pin is what
+#: catches THAT, the same role `EXPECTED_TEMPLATE_COUNT` plays in `test_
+#: every_issue_code_is_registered.py`).
+_EXPECTED_MECHANISM_COUNT = 10
+
+
+def _aggregate_expected(code: str) -> frozenset[str]:
+    """The severities `code`'s OWN mechanism list, taken as a whole, expects
+    to be constructible -- every `"direct"` multiset's members, plus every
+    `"deliver:<Class>"` mechanism's severities (a `"raise:"` / `"forward:"`
+    entry contributes no severity of its own; it only proves a PATH exists
+    for a `"deliver:"` entry's severity to actually apply). This is the
+    UNION half of the contract -- still checked against the registry, but no
+    longer the ONLY thing checked (see the module docstring)."""
+    sevs: set[str] = set()
+    for m in _SEEDED_MECHANISMS[code]:
+        if m.kind == "direct":
+            for entry in m.expected:
+                sevs.update(entry)
+        elif m.kind.startswith("deliver:"):
+            sevs.update(m.expected)
+    return frozenset(sevs)
+
+
+@pytest.mark.parametrize("code", sorted(_SEEDED_MECHANISMS), ids=lambda c: c)
+def test_registered_severity_matches_the_aggregate_of_every_mechanism(code):
     registry = _registry_entries()
-    assert code in registry, (
-        f"{code!r} is seeded in _SEEDED_SEVERITIES but is not registered in "
-        f"{REGISTRY} at all -- {why}"
-    )
+    assert code in registry, f"{code!r} is seeded in _SEEDED_MECHANISMS but is not registered in {REGISTRY} at all."
     registered = _severity_set(registry[code])
+    expected = _aggregate_expected(code)
     assert registered == expected, (
-        f"{REGISTRY} registers {code!r} at severity {registry[code]!r} "
-        f"(-> {sorted(registered)}), but this gate's own seeded expectation "
-        f"is {sorted(expected)} -- {why}\n\n"
-        f"If the real emission genuinely changed, update _SEEDED_SEVERITIES "
-        f"in the same change as the registry edit; if the registry drifted "
-        f"from the emission sites, fix the registry instead."
-    )
-
-    emitted, _site_count = _emitted_by_code().get(code, (frozenset(), 0))
-    assert emitted == expected, (
-        f"{code!r} is constructed at severities {sorted(emitted)} across "
-        f"{', '.join(str(p.relative_to(TAN.parents[1])) for p in _SCANNED_FILES)}, "
-        f"but this gate's seeded expectation (and the registry) says "
-        f"{sorted(expected)} -- {why}\n\n"
-        f"A construction site's severity changed without updating "
-        f"_SEEDED_SEVERITIES (or this IS the drift the registry now needs to "
-        f"catch up to -- contract/issue-codes.json's own `severity` field for "
-        f"{code!r} is the wire contract)."
+        f"{REGISTRY} registers {code!r} at severity {registry[code]!r} (-> "
+        f"{sorted(registered)}), but this gate's own seeded mechanisms "
+        f"together expect {sorted(expected)}. If the real emission genuinely "
+        f"changed, update _SEEDED_MECHANISMS in the same change as the "
+        f"registry edit; if the registry drifted from the emission sites, "
+        f"fix the registry instead."
     )
 
 
-def test_the_scan_actually_finds_the_expected_sites():
-    """Anti-vacuity, the AST-COUNT half: a walk that silently stopped
-    matching (a rename, a rewrap that moved the call out of a shape this
-    file resolves) could still leave the SET comparison above green by
-    accident if the surviving sites happen to still cover both severities.
-    Pins the exact site count per seeded code instead, so a site vanishing
-    -- even one that does not change the resulting severity SET -- is its
-    own loud failure. See `_emitted_severities_for`'s own docstring for what
-    counts as a site.
-    """
-    emitted = _emitted_by_code()
-    mismatched = []
-    for code, (_expected_sevs, expected_sites, _why) in sorted(_SEEDED_SEVERITIES.items()):
-        _sevs, actual_sites = emitted.get(code, (frozenset(), 0))
-        if actual_sites != expected_sites:
-            mismatched.append(f"{code}: expected {expected_sites} site(s), found {actual_sites}")
-    assert mismatched == [], (
-        "the AST walk found a different number of construction sites than "
-        "_SEEDED_SEVERITIES pins for at least one seeded code -- a site was "
-        "added, removed, or rewritten into a shape this gate no longer "
-        "resolves (bump the count after confirming the new total is a real, "
-        "already-registered set of sites):\n  " + "\n  ".join(mismatched)
+_MECHANISM_CASES = [(code, m) for code in sorted(_SEEDED_MECHANISMS) for m in _SEEDED_MECHANISMS[code]]
+
+
+@pytest.mark.parametrize(
+    "code,mechanism",
+    _MECHANISM_CASES,
+    ids=[f"{code}::{m.file}::{m.qualname}::{m.kind}" for code, m in _MECHANISM_CASES],
+)
+def test_every_seeded_mechanism_holds(code, mechanism):
+    _verify(code, mechanism)
+
+
+def test_the_mechanism_table_size_is_pinned():
+    """Anti-vacuity for the TABLE, not just for the parametrised checks above
+    -- see `_EXPECTED_MECHANISM_COUNT`'s own docstring for why a removed
+    entry needs its own tripwire."""
+    total = sum(len(ms) for ms in _SEEDED_MECHANISMS.values())
+    assert total == _EXPECTED_MECHANISM_COUNT, (
+        f"_SEEDED_MECHANISMS now declares {total} mechanism entries across "
+        f"{sorted(_SEEDED_MECHANISMS)}, not {_EXPECTED_MECHANISM_COUNT} -- if "
+        f"an entry was added or removed on purpose, update this pin (and, if "
+        f"removed, confirm the removal is not silently dropping coverage of "
+        f"a real construction site)."
     )
 
 
 def test_the_seeded_table_is_not_empty():
     """Anti-vacuity for the LIST itself -- emptying it would make the
-    parametrised check above collect zero cases (pytest turns that into a
-    silent skip, not a failure -- tan-cli#275's standing lesson, cited by
-    every sibling gate in this file's family)."""
-    assert _SEEDED_SEVERITIES, (
-        "_SEEDED_SEVERITIES is empty, so the parametrised check above has no "
-        "cases and this whole file enforces nothing while still reporting "
+    parametrised checks above collect zero cases (pytest turns that into a
+    silent skip, not a failure -- tan-cli#275's standing lesson)."""
+    assert _SEEDED_MECHANISMS, (
+        "_SEEDED_MECHANISMS is empty, so the parametrised checks above have "
+        "no cases and this whole file enforces nothing while still reporting "
         "green. If every seeded code was genuinely retired, delete this file "
         "outright rather than leaving an empty allow-list behind."
     )
+    for code, mechanisms in _SEEDED_MECHANISMS.items():
+        assert mechanisms, f"{code!r} is seeded with an empty mechanism tuple -- it enforces nothing."
+
+
+def test_the_scanned_files_are_not_empty():
+    """Anti-vacuity for `_SCANNED_FILES`: derived from the table above, so an
+    empty table (already caught by the previous test) would also make this
+    one vacuous; kept as its own assertion because `_SCANNED_FILES` is what
+    the module docstring's "WHAT REMAINS INVISIBLE" promise is measured
+    against, and a silent derivation bug (a typo in `Mechanism.file`) could
+    in principle diverge the two even with a non-empty table."""
+    assert _SCANNED_FILES == frozenset(
+        {
+            "tan/commands/build_cmd.py",
+            "tan/commands/clean_cmd.py",
+            "tan/commands/flash_cmd.py",
+            "tan/commands/run_cmd.py",
+            "tan/commands/build/token_substitution.py",
+        }
+    ), sorted(_SCANNED_FILES)
 
 
 def test_dual_severity_codes_stay_dual():
@@ -396,17 +612,9 @@ def test_dual_severity_codes_stay_dual():
     (this repo's own recurring defect class: #1059, #1062, PR #1070's :1350,
     and four tests on PR #1111 -- a protection that cannot fail is not a
     protection).
-
-    Drives the two ACTUAL dual registrations through the parser and asserts
-    each resolves to BOTH severities, then asserts the parser does NOT
-    collapse a genuinely single-severity string into that same two-member
-    set -- the mutation this test exists to catch is `_severity_set` (or a
-    future edit to it) treating `"error or warning"` and a plain `"error"`
-    as indistinguishable.
     """
     for code in ("build.unknown-backend", "flash.nothing-matched"):
-        expected, _sites, _why = _SEEDED_SEVERITIES[code]
-        assert expected == frozenset({"error", "warning"}), (
+        assert _aggregate_expected(code) == frozenset({"error", "warning"}), (
             f"{code} is no longer seeded as genuinely dual in this file's own "
             f"table -- update the table or this test together with whatever "
             f"changed its real emission shape."
