@@ -329,13 +329,15 @@ def test_both_selectors_are_bound_to_the_same_register_objects():
     from tan.core.document_guards import DocumentGuards
 
     for name in ("require_mapping_doc", "require_field", "require_key",
-                 "read_catalog_document", "catalog_templates"):
+                 "require_readable_text", "read_catalog_document",
+                 "catalog_templates"):
         assert getattr(type(tmpl._GUARDS), name) is getattr(DocumentGuards, name)
         assert getattr(type(ec._GUARDS), name) is getattr(DocumentGuards, name)
 
     assert tmpl._require_mapping_doc.__func__ is DocumentGuards.require_mapping_doc
     assert tmpl._require_field.__func__ is DocumentGuards.require_field
     assert tmpl._require_key.__func__ is DocumentGuards.require_key
+    assert tmpl._require_readable_text.__func__ is DocumentGuards.require_readable_text
     assert tmpl._catalog_templates.__func__ is DocumentGuards.catalog_templates
 
     # One register, two exception classes -- deliberately, because

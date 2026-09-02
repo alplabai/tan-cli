@@ -69,6 +69,18 @@ before the caller indexes it. One definition of the type half, one new message
 value is legal there -- so `kind=None` requires presence only, never a shape
 the schema does not.
 
+`require_readable_text` (tan-cli#1085) is the FOURTH shape: not a type check
+at all, but the curated-raise half of "read this file's bytes", shared by
+`read_catalog_document` below and by `tan/planner/template.py::
+render_to_envelope`'s template-example `board.yaml` read. Both used to run
+the identical `except (OSError, UnicodeDecodeError)` body by hand -- one
+inside this module, one still in `template.py` after tan-cli#1116 fixed its
+narrowed `except OSError` to match -- naming a different `what` but otherwise
+byte-for-byte the same. `read_catalog_document` now calls it instead of
+inlining the read, so the two curated "cannot read X at Y: Z" messages this
+module produces come from one definition instead of two that happened to
+still agree.
+
 HOW AN ABSENT FIELD IS NORMALISED IS THE CALLER'S DECISION (tan-cli#1052
 review), and `require_field` deliberately checks EXACTLY what it is handed.
 The two callers in `template.py` differ on purpose and both are pinned by live
@@ -101,22 +113,25 @@ NOT STRICTER THAN THE SCHEMAS. Every key `require_key` is used on is
 an empty list still renders -- rejecting it would be a new refusal, not a
 fixed crash.
 
-WHAT IS DELIBERATELY NOT HERE (left to tan-cli#1085)
-----------------------------------------------------
+WHAT IS DELIBERATELY NOT HERE
+------------------------------
 
-#1085 tracks the FULL extraction of this family into a shared reader. This
-module is the minimum that makes the register importable from both catalog
-readers, and no more:
+tan-cli#1085 closed the FULL extraction of this family; this module is the
+document-agnostic register both catalog readers import, plus `require_
+readable_text` (the read-half shape `render_to_envelope`'s example
+`board.yaml` read shares with `read_catalog_document`), and no more:
 
 * `_require_constraints` stays in `template.py`. It guards `$defs/parameter`'s
   `constraints:` bounds, which only the planner's parameter resolution reads;
   `example_catalog.py` has no parameter path at all, so moving it would be
   extraction for its own sake with no second caller to prove it shared.
-* The two catalog readers themselves (`read_catalog_document`,
-  `catalog_templates`) came across because BOTH sides call them and their
-  messages must be byte-identical; the three YAML documents' readers
-  (`_load_som_doc`, `_board_route_entries`, `_docs_ref`) did not, because they
-  still have exactly one caller each.
+  tan-cli#1087 (PR #1123) kept `_check_constraints`'s `ParameterError` local
+  for the identical reason.
+* `_load_som_doc`, `_board_route_entries` and `_docs_ref` stay in
+  `template.py` too: each still has exactly one caller, and `_docs_ref`
+  degrades to `"main"` rather than curated-raising at all, a different shape
+  from everything else in this file. A single caller with no sibling to prove
+  the sharing is not what this register is for.
 * The `SkuNotSupportedError` / `CoresTopologyNotFoundError` selection
   semantics stay with their own modules. This register answers "is this
   document the shape it claims to be", never "which record did you mean".
@@ -207,28 +222,38 @@ class DocumentGuards:
             return value
         return self.require_field(value, kind, doc=doc, field=f"{field}.{key}")
 
-    def read_catalog_document(self, path: Any) -> dict[str, Any]:
-        """`metadata/templates/catalog-v1.json`, decoded and known to be a
-        JSON object -- the read BOTH catalog readers do.
+    def require_readable_text(self, path: Any, *, what: str) -> str:
+        """@path, decoded as UTF-8 text, or the injected curated error --
+        the read-half tan-cli#1085 pulled out of `read_catalog_document`
+        below once `render_to_envelope`'s example `board.yaml` read
+        (`tan/planner/template.py`) turned out to run the identical body by
+        hand, naming a different @what.
 
         `except (OSError, UnicodeDecodeError)`, not a pre-flight `is_file()`,
         so a present-but-unreadable path (a directory, a permissions error)
         is named too, not only a missing one. `UnicodeDecodeError` is a
         `ValueError`, NOT an `OSError` -- catching only `OSError` (tan-cli#1096
-        review) let a non-UTF-8 catalog escape `unsupported_som`'s own
-        "Never raises" contract and `_plan_from_topology`'s two handlers
-        alike, straight past `except MalformedCatalogError`, the same
-        `text=True`-decode trap `error_catalog.py`/`scaffold.py` already
-        guard against. `json.JSONDecodeError` is a `ValueError` too, so an
-        `except TemplateError` never caught it and a half-written catalog
-        reached the user as a traceback.
+        review, and tan-cli#1116's own repeat of the same trap in
+        `render_to_envelope`) let a non-UTF-8 document escape past a curated
+        `except` clause that thought it already covered every failure.
         """
         try:
-            text = path.read_text(encoding="utf-8")
+            return path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             raise self.error(
-                f"cannot read template catalog at {path}: "
+                f"cannot read {what} at {path}: "
                 f"{getattr(exc, 'strerror', None) or exc}") from exc
+
+    def read_catalog_document(self, path: Any) -> dict[str, Any]:
+        """`metadata/templates/catalog-v1.json`, decoded and known to be a
+        JSON object -- the read BOTH catalog readers do.
+
+        The file-read half is `require_readable_text` above; `json.
+        JSONDecodeError` is a `ValueError` too, so an `except TemplateError`
+        never caught it and a half-written catalog reached the user as a
+        traceback.
+        """
+        text = self.require_readable_text(path, what="template catalog")
         try:
             doc = json.loads(text)
         except json.JSONDecodeError as exc:
