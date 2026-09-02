@@ -116,6 +116,25 @@ landing on `origin/<branch>` in that window is invisible to a bare `git push
 push --force-with-lease="${branch}":"${observed_tip}"` (the documented way to
 require "still exactly this sha", or "still does not exist" for an empty
 value) instead of `-f`.
+
+`--check-branch BRANCH` (tan-cli#1119) is a SEPARATE mode that answers a
+different question -- "does BRANCH carry a commit the automation did not
+write, RIGHT NOW" -- for a caller that is not choosing a force-push target
+at all (`planner-resync.yml`'s "Close superseded planner-resync proposals"
+step, deciding per open PR whether its head branch is safe to close). It
+does not force-push anything and writes no `$GITHUB_OUTPUT` keys of its own.
+Exit codes in this mode: 0 = not occupied (safe to close), 1 = occupied
+(protected; must not be closed), 2 = refused (could not determine). This is
+deliberately NOT served by `--branch`/`decide_branch`: that function only
+ever evaluates candidates ITS OWN cascade generates in THIS invocation
+(`primary_branch`, `<primary_branch>-<divert_suffix>`, `-2`, ...) -- a
+PREVIOUS run's diverted branch name is never one of those candidates, so a
+caller that only consulted a `decide_branch` result (or, worse, a snapshot
+of one computed earlier in the same run) can neither see a human's takeover
+of that older name nor react to one that happens after the snapshot was
+taken. Asking `--check-branch` fresh, immediately before the destructive
+action, answers both: it is not limited to a fixed candidate set, and there
+is no snapshot to go stale.
 """
 
 from __future__ import annotations
@@ -415,6 +434,47 @@ def decide_branch(
         )
 
 
+def branch_currently_occupied(
+    root: pathlib.Path,
+    base_ref: str,
+    branch: str,
+    automation_name: str,
+    automation_email: str,
+) -> ForeignCommit | None:
+    """Ask this guard's own authorship test about an ARBITRARY existing
+    branch (e.g. an open PR's head), right now, rather than trusting a list
+    built earlier in the run.
+
+    tan-cli#1119: `decide_branch` only ever answers for the handful of
+    candidate names IT tries THIS run (`primary_branch`, then
+    `<primary_branch>-<divert_suffix>`, then `-2`, ...) -- a PREVIOUS run's
+    diverted branch name is never one of those candidates, so a human who
+    adopts THAT branch (pushes a commit onto it between runs) is invisible
+    to a caller that only consults `decide_branch`'s own `occupied` list.
+    This function instead re-runs the identical `_foreign_commits` check
+    against `branch` directly, at the moment it is called -- the same
+    question `decide_branch` asks of each candidate it tries, just asked of
+    a caller-supplied name instead of a name this module generated itself.
+    Calling it immediately before a destructive action (rather than
+    consulting a snapshot computed earlier in the run) also closes the
+    TOCTOU window a snapshot leaves open: a branch adopted in the interval
+    between an earlier snapshot and the destructive action is caught here,
+    because there is no snapshot to go stale.
+
+    Returns the first foreign commit found on `branch`, or `None` if the
+    branch does not exist on `origin` (nothing to protect) or carries no
+    commit outside the automation's own identity -- mirroring exactly what
+    `decide_branch` treats as "safe" for a candidate it tries itself.
+    """
+    if not _remote_branch_exists(root, branch):
+        return None
+    tracking_ref = _fetch_branch_tip(root, branch)
+    foreign = _foreign_commits(
+        root, base_ref, tracking_ref, automation_name, automation_email
+    )
+    return foreign[0] if foreign else None
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Refuse to force-push auto/planner-resync over a "
@@ -425,15 +485,75 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--branch", default="auto/planner-resync")
     ap.add_argument(
         "--divert-suffix",
-        required=True,
+        default=None,
         help="short alp-sdk sha used to name a diverted branch when "
-        "--branch carries non-automation commits",
+        "--branch carries non-automation commits -- required unless "
+        "--check-branch is given",
     )
     ap.add_argument("--automation-name", default="alp-sdk planner re-sync")
     ap.add_argument("--automation-email", default="noreply@alplab.ai")
+    # tan-cli#1119: a second, independent mode -- ask whether ONE existing
+    # branch (an open PR's head, say) carries a foreign commit RIGHT NOW,
+    # rather than picking a branch to force-push to. See
+    # `branch_currently_occupied`'s docstring for why this must be a live
+    # per-branch question, not a snapshot `decide_branch` built earlier in
+    # the run: `decide_branch`'s own candidate walk never tries a PREVIOUS
+    # run's diverted name, so a caller that only ever consulted that walk's
+    # `occupied` list would miss a human who adopted such a branch, and
+    # would also be reading a stale snapshot rather than the live truth by
+    # the time a caller acts on it (the TOCTOU window).
+    ap.add_argument(
+        "--check-branch",
+        default=None,
+        metavar="BRANCH",
+        help="instead of deciding where to force-push, report (via exit "
+        "code) whether BRANCH currently carries a commit the automation "
+        "did not write; does not force-push or write force-push-related "
+        "$GITHUB_OUTPUT keys",
+    )
     args = ap.parse_args(argv)
 
     root = args.repo_root.resolve()
+
+    if args.check_branch is not None:
+        try:
+            commit = branch_currently_occupied(
+                root,
+                args.base_ref,
+                args.check_branch,
+                args.automation_name,
+                args.automation_email,
+            )
+        except BranchGuardError as exc:
+            sys.stderr.write(f"planner_resync_branch_guard: REFUSED: {exc}\n")
+            return 2
+        if commit is not None:
+            identity = f"{commit.author_name} <{commit.author_email}>"
+            if (commit.author_name, commit.author_email) != (
+                commit.committer_name,
+                commit.committer_email,
+            ):
+                identity += (
+                    f", committed by {commit.committer_name} "
+                    f"<{commit.committer_email}>"
+                )
+            sys.stdout.write(
+                f"planner_resync_branch_guard: {args.check_branch!r} "
+                f"carries {commit.sha[:8]} ({commit.subject!r}, by "
+                f"{identity}), which the automation did not write -- "
+                f"occupied.\n"
+            )
+            return 1
+        sys.stdout.write(
+            f"planner_resync_branch_guard: {args.check_branch!r} carries no "
+            f"commit outside the automation identity (or does not exist) "
+            f"-- not occupied.\n"
+        )
+        return 0
+
+    if args.divert_suffix is None:
+        ap.error("--divert-suffix is required unless --check-branch is given")
+
     try:
         decision = decide_branch(
             root,

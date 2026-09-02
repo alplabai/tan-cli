@@ -633,3 +633,157 @@ def test_gives_up_after_max_attempts_rather_than_looping_forever(repo: pathlib.P
             AUTOMATION_EMAIL,
             max_attempts=1,
         )
+
+
+# -------------------------------------------- tan-cli#1119: --check-branch
+
+
+def test_branch_currently_occupied_is_none_when_the_branch_does_not_exist(
+    repo: pathlib.Path,
+):
+    """Mirrors what `decide_branch` treats as "safe" for a candidate it
+    tries itself: a branch that has never been pushed at all is not
+    occupied -- nothing to protect."""
+    assert (
+        guard.branch_currently_occupied(
+            repo, "dev", "auto/planner-resync-neverexisted", AUTOMATION_NAME, AUTOMATION_EMAIL
+        )
+        is None
+    )
+
+
+def test_branch_currently_occupied_is_none_for_an_automation_only_branch(
+    repo: pathlib.Path,
+):
+    """A branch that exists but carries only the automation's own commits
+    (a prior run's own push) is not occupied."""
+    _push_branch_from_dev(repo, "auto/planner-resync")
+    _commit(repo, AUTOMATION_NAME, AUTOMATION_EMAIL, "prior run's own commit", "a.txt")
+    _run(repo, "push", "-q", "-f", "origin", "auto/planner-resync")
+
+    assert (
+        guard.branch_currently_occupied(
+            repo, "dev", "auto/planner-resync", AUTOMATION_NAME, AUTOMATION_EMAIL
+        )
+        is None
+    )
+
+
+def test_branch_currently_occupied_finds_a_foreign_commit_on_a_branch_this_run_never_named(
+    repo: pathlib.Path,
+):
+    """tan-cli#1119's whole point: `decide_branch` never tries
+    `auto/planner-resync-eaa79695` in a run whose own divert suffix is
+    something else entirely -- `branch_currently_occupied` still answers
+    correctly about it, because it does not depend on `decide_branch` having
+    tried the name."""
+    _push_branch_from_dev(repo, "auto/planner-resync-eaa79695")
+    sha = _commit(repo, HUMAN_NAME, HUMAN_EMAIL, "a human adopted this old name", "a.txt")
+    _run(repo, "push", "-q", "-f", "origin", "auto/planner-resync-eaa79695")
+
+    commit = guard.branch_currently_occupied(
+        repo, "dev", "auto/planner-resync-eaa79695", AUTOMATION_NAME, AUTOMATION_EMAIL
+    )
+    assert commit is not None
+    assert commit.sha == sha
+    assert commit.author_name == HUMAN_NAME
+
+
+def test_branch_currently_occupied_raises_rather_than_guessing_when_it_cannot_tell(
+    tmp_path: pathlib.Path,
+):
+    """Same fail-closed contract as `decide_branch`'s own existence check --
+    an ambiguous `git ls-remote` failure (no `origin` configured) must not
+    be read as "not occupied"."""
+    orphan = tmp_path / "no_origin"
+    orphan.mkdir()
+    _run(orphan, "init", "-q")
+    with pytest.raises(guard.BranchGuardError):
+        guard.branch_currently_occupied(
+            orphan, "dev", "auto/planner-resync", AUTOMATION_NAME, AUTOMATION_EMAIL
+        )
+
+
+def test_cli_check_branch_returns_0_when_not_occupied(repo: pathlib.Path):
+    rc = guard.main(
+        [
+            "--repo-root",
+            str(repo),
+            "--base-ref",
+            "dev",
+            "--check-branch",
+            "auto/planner-resync-never-pushed",
+        ]
+    )
+    assert rc == 0
+
+
+def test_cli_check_branch_returns_1_and_names_the_commit_when_occupied(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+):
+    _push_branch_from_dev(repo, "auto/planner-resync-eaa79695")
+    _commit(repo, HUMAN_NAME, HUMAN_EMAIL, "adopted a prior run's diversion", "a.txt")
+    _run(repo, "push", "-q", "-f", "origin", "auto/planner-resync-eaa79695")
+
+    rc = guard.main(
+        [
+            "--repo-root",
+            str(repo),
+            "--base-ref",
+            "dev",
+            "--check-branch",
+            "auto/planner-resync-eaa79695",
+        ]
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert HUMAN_NAME in out
+    assert HUMAN_EMAIL in out
+
+
+def test_cli_check_branch_returns_2_when_existence_cannot_be_determined(
+    tmp_path: pathlib.Path,
+):
+    orphan = tmp_path / "no_origin"
+    orphan.mkdir()
+    _run(orphan, "init", "-q")
+    rc = guard.main(
+        [
+            "--repo-root",
+            str(orphan),
+            "--base-ref",
+            "dev",
+            "--check-branch",
+            "auto/planner-resync",
+        ]
+    )
+    assert rc == 2
+
+
+def test_cli_check_branch_does_not_require_divert_suffix(repo: pathlib.Path):
+    """`--divert-suffix` is only meaningful for the force-push-target mode
+    (`decide_branch`) -- `--check-branch` must not force a caller to invent
+    one it will never use."""
+    rc = guard.main(
+        [
+            "--repo-root",
+            str(repo),
+            "--base-ref",
+            "dev",
+            "--check-branch",
+            "auto/planner-resync-never-pushed",
+        ]
+    )
+    assert rc == 0
+
+
+def test_cli_requires_divert_suffix_when_not_checking_a_branch(
+    repo: pathlib.Path, capsys: pytest.CaptureFixture[str]
+):
+    """The force-push-target mode still needs `--divert-suffix` -- dropping
+    the requirement for `--check-branch` must not silently drop it for the
+    everyday `decide_branch` path too."""
+    with pytest.raises(SystemExit) as excinfo:
+        guard.main(["--repo-root", str(repo), "--branch", "auto/planner-resync"])
+    assert excinfo.value.code == 2
+    assert "--divert-suffix is required" in capsys.readouterr().err

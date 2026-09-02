@@ -692,16 +692,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           KEEP_BRANCH: ${{ steps.pr.outputs.branch }}
           KEEP_URL: ${{ steps.pr.outputs.url }}
-          # tan-cli#1109 review round 2 (major): the full occupied set THIS
-          # RUN's own branch-clobber guard invocation found, space-separated
-          # (`planner_resync_branch_guard.py`'s `occupied_branches=` --
-          # unconditional, empty when nothing is occupied). See the `others=`
-          # filter below for why this is load-bearing, not decorative.
-          OCCUPIED_BRANCHES: ${{ steps.pr.outputs.occupied_branches }}
         shell: bash
         run: |
           set -euo pipefail
-          # tan-cli#1109 review round 3 (nit): this step's own two LOCAL `jq`
+          # tan-cli#1109 review round 3 (nit): this step's own LOCAL `jq`
           # calls below (unlike the `gh pr list` lookup, which already checks
           # `list_rc` explicitly) had no presence/failure guard of their own.
           # Measured: with `jq` missing, each call exits 127 inside a `$(...)`
@@ -715,7 +709,7 @@ jobs:
           # wrapping each individually -- both calls need the same binary, so
           # one loud refusal covers both.
           if ! command -v jq >/dev/null 2>&1; then
-            echo "::error::jq is not on PATH -- this step needs it to build the occupied-branch exclusion and filter the open-PR list, and cannot safely guess which PRs to close without it. Refusing to guess (see tan-cli#1109 review round 3) rather than silently closing nothing and leaving a stale proposal open with no signal."
+            echo "::error::jq is not on PATH -- this step needs it to filter the open-PR list, and cannot safely guess which PRs to close without it. Refusing to guess (see tan-cli#1109 review round 3) rather than silently closing nothing and leaving a stale proposal open with no signal."
             exit 1
           fi
           # Same fail-closed shape as every other `gh ... | jq` lookup in this
@@ -739,23 +733,38 @@ jobs:
           # cannot forge that author identity, but there is no reason to rely
           # on that alone when the field is free to check.
           #
-          # tan-cli#1109 review round 2 (major): the author filter alone
-          # STILL closes the case this repo actually had -- a BOT-authored
-          # PR whose branch a human took over (exactly #1103: opened by
-          # `app/github-actions`, then a human pushed a hand-port commit onto
-          # `auto/planner-resync` on top of it). The guard's own diversion is
-          # what protects the COMMIT; this exclusion is what stops this step
-          # closing the PR SITTING on that same protected branch. Excluding
-          # every branch THIS RUN's own guard invocation reported occupied
-          # (not a fixed name -- `auto/planner-resync` today, but whichever
-          # candidate the cascade actually protected) is precise: a prior
-          # run's own diverted SIBLING (say `auto/planner-resync-eaa79695`,
-          # not occupied by anything foreign) is not in this set and still
-          # gets closed, so the cap still works. Do NOT skip this whole step
-          # on `diverted == true` instead -- diversion is exactly the run
-          # where accumulation happens, so that would disable the cap
-          # precisely when it is needed.
-          occupied_json="$(printf '%s' "${OCCUPIED_BRANCHES}" | jq -Rsc 'split(" ") | map(select(length > 0))')"
+          # tan-cli#1109 review round 2 (major) / tan-cli#1119: the author
+          # filter alone STILL closes the case this repo actually had -- a
+          # BOT-authored PR whose branch a human took over (exactly #1103:
+          # opened by `app/github-actions`, then a human pushed a hand-port
+          # commit onto `auto/planner-resync` on top of it). tan-cli#1109
+          # first closed this by excluding every branch THIS RUN's own
+          # branch-clobber guard invocation reported occupied -- but that
+          # `occupied_branches` value is a SNAPSHOT of THIS run's own
+          # candidate walk (`primary`, `primary-<this run's suffix>`, `-2`,
+          # ...), computed at the guard step above and consulted here,
+          # later. tan-cli#1119: that leaves two gaps a snapshot can never
+          # close -- a PREVIOUS run's diverted branch name (never one of
+          # this run's own candidates, so never in the snapshot) that a
+          # human has since adopted, and a TOCTOU window (a branch adopted
+          # in the interval between the guard step computing the snapshot
+          # and this step acting on it). Both close the same way: ask the
+          # guard's own authorship test PER CANDIDATE BRANCH, right now,
+          # instead of consulting a list built earlier in the run
+          # (`planner_resync_branch_guard.py --check-branch`, which reruns
+          # exactly the `_foreign_commits` check `decide_branch` applies to
+          # its own candidates, just against a caller-supplied name -- see
+          # that function's docstring). There is no snapshot left to go
+          # stale, and a prior run's diverted name is exactly as reachable
+          # as this run's own `auto/planner-resync` -- neither is special-
+          # cased. A prior run's own diverted SIBLING that nothing has
+          # adopted (say `auto/planner-resync-eaa79695`, not occupied by
+          # anything foreign) still answers "not occupied" and still gets
+          # closed, so the cap still works. Do NOT skip this whole step on
+          # `diverted == true` instead -- diversion is exactly the run where
+          # accumulation happens, so that would disable the cap precisely
+          # when it is needed.
+          #
           # tan-cli#1109 review (nit): `--limit 100`, same reasoning as the
           # "Surface the owed work..." / "Close the tracking issue..." steps'
           # own `gh issue list --limit 100` further down -- `gh pr list` with
@@ -784,13 +793,51 @@ jobs:
           if [ "${raw_count}" = "100" ]; then
             echo "::warning::gh pr list returned exactly 100 open PRs (the --limit ceiling) while looking for other planner-resync proposals to supersede -- there may be MORE open PRs this page did not include, and any auto/planner-resync* PR sitting past page 1 would be silently missed by this step's cap. Investigate if this repo's open-PR count keeps climbing."
           fi
-          others="$(printf '%s' "${raw}" | jq -r --argjson occupied "${occupied_json}" \
-                      ".[] | select(.headRefName | startswith(\"auto/planner-resync\")) | select(.headRefName != \"${KEEP_BRANCH}\") | select(.author.login == \"app/github-actions\") | select(.isCrossRepository == false) | select(.headRefName as \$h | (\$occupied | index(\$h)) == null) | .number")"
-          for n in ${others}; do
+          # Prefix/self/author/cross-repo only -- the occupied check moved to
+          # a live per-branch question below, so it is no longer part of
+          # this filter. `@tsv` (not bare `.number`): the per-branch check
+          # needs each candidate's `headRefName` too, and jq's own field
+          # access keeps that value out of any shell/jq FILTER TEXT --
+          # unlike `${KEEP_BRANCH}` above (a value this workflow itself
+          # produced two steps ago, not attacker-reachable), a GitHub PR's
+          # `headRefName` is exactly the kind of externally-influenced string
+          # this repo's own `_LOG_SEP`-splitting/`--argjson` conventions
+          # exist to keep out of an interpolated filter or shell command;
+          # `read -r` below and `--check-branch "${branch}"` (a real argv
+          # value, never eval'd or spliced into a jq program) keep it that
+          # way through this loop too.
+          others="$(printf '%s' "${raw}" | jq -r \
+                      ".[] | select(.headRefName | startswith(\"auto/planner-resync\")) | select(.headRefName != \"${KEEP_BRANCH}\") | select(.author.login == \"app/github-actions\") | select(.isCrossRepository == false) | [.number, .headRefName] | @tsv")"
+          while IFS=$'\t' read -r n branch; do
+            if [ -z "${n}" ]; then
+              continue
+            fi
+            # Asked FRESH, immediately before acting -- not read back out of
+            # a snapshot computed at the guard step above. See the tan-cli#1119
+            # comment above for why that distinction is the whole fix.
+            set +e
+            python python/scripts/planner_resync_branch_guard.py \
+              --check-branch "${branch}" \
+              --repo-root "${GITHUB_WORKSPACE}" \
+              --base-ref dev \
+              --automation-name "alp-sdk planner re-sync" \
+              --automation-email "noreply@alplab.ai"
+            check_rc=$?
+            set -e
+            if [ "${check_rc}" -eq 2 ]; then
+              echo "::error::could not determine whether ${branch} (PR #${n}) currently carries a commit this automation did not write -- refusing to guess whether it is safe to close. See the step log above for the git failure this raised."
+              exit 1
+            fi
+            if [ "${check_rc}" -eq 1 ]; then
+              # Occupied -- exactly the PR this exclusion exists to protect
+              # (#1103's shape, or a prior run's diverted branch a human has
+              # since adopted); leave it alone.
+              continue
+            fi
             gh pr comment "${n}" --repo "${GITHUB_REPOSITORY}" \
               --body "Superseded by ${KEEP_URL} (tan-cli#1109: at most one open \`auto/planner-resync-*\` proposal at a time). Closing."
             gh pr close "${n}" --repo "${GITHUB_REPOSITORY}"
-          done
+          done <<< "${others}"
 
       # tan-cli#911: the step above's own gate ("is there a mirror diff to
       # commit") is not the same question as "does a human need to act", and
