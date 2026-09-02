@@ -104,9 +104,11 @@ jobs:
   # workflow, so a tag published a PyInstaller freeze of code no CI step had
   # ever imported, let alone tested. The cargo jobs that used to sit above it
   # could not see it -- they compiled a different language in a different
-  # directory -- and tan-cli#269 has since deleted them outright. THIS job and
-  # parity.yml's `python-tests` matrix are now the whole of the correctness
-  # gate; there is nothing else left to hide behind.
+  # directory -- and tan-cli#269 has since deleted them outright. THIS job,
+  # the `python-newest` job below it (the same selection on the newest
+  # CPython rather than the `requires-python` floor this job pins --
+  # tan-cli#1126) and parity.yml's `python-tests` matrix are now the whole of
+  # the correctness gate; there is nothing else left to hide behind.
   #
   # Zero failures is the gate, not a count. The suite is still growing as ports
   # land (~1149 passed / 81 skipped / 4 xfailed at the time of writing), and
@@ -119,7 +121,9 @@ jobs:
   # on a non-Linux host -- and it does not, since this job is `ubuntu-latest`
   # only. `parity.yml`'s cross-OS `python-tests` job explicitly
   # `--ignore=tests/gates` (that suite already runs, always, in `parity.yml`'s
-  # `seam1-plan-shape` job -- also `ubuntu-latest` only). Recorded as a
+  # `seam1-plan-shape` job and in `python-newest` below -- both also
+  # `ubuntu-latest` only, so the non-Linux claim above is untouched by either).
+  # Recorded as a
   # decision, not an oversight: `tests/gates` is pure source parsing (`ast`
   # over `python/tan/**`, text scans over the same), with no OS-dependent
   # behaviour to lose by staying single-platform -- the path handling it does
@@ -545,6 +549,104 @@ jobs:
           # on every other trigger (`push`, `workflow_call`), which is
           # exactly when that gate's own fallback -- no PR/merge-queue base
           # applies to this run -- is the correct answer.
+          TAN_MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+        run: python -m pytest tests -q
+
+  # THE OTHER HALF OF THE INTERPRETER POLICY (tan-cli#1126). The `python` job
+  # above pins `"3.12"`, the `requires-python` FLOOR; `parity.yml`'s
+  # `seam1-plan-shape` floats `"3.x"`, the CEILING -- see that job's own
+  # `python-version` block for why the spread is deliberate and what it has
+  # caught. This job closes the hole the spread had: seam1 runs `tests/gates`
+  # ONLY, so for two tests the full suite was RED on 3.14.7 while every
+  # required context stayed green, and it stayed that way until somebody
+  # happened to run the whole suite on the newer interpreter by hand. A check
+  # that cannot report the thing it exists to catch is the shape this
+  # milestone has spent a week removing.
+  #
+  # So: the same floating `"3.x"`, the WHOLE suite, one ubuntu leg. Not a
+  # matrix -- the cross-OS dimension is already covered at the floor by
+  # parity.yml's 15-leg `python-tests-shard`, and this job is answering a
+  # different question ("does the newest interpreter agree with the floor?"),
+  # which one host answers as well as three for a repo whose interpreter-
+  # dependent surface is pure `pathlib`/`ntpath` string logic. Two of the
+  # three known divergences to date (`_IGNORED_ERRNOS`, `Path.resolve
+  # (strict=False)` symlink loops, `ntpath.isabs`) were measured identically
+  # on POSIX for exactly that reason.
+  #
+  # NOT `continue-on-error`, and deliberately so. A non-blocking divergence
+  # reporter is the same silent shape in a new costume: it would go orange in
+  # a corner of the checks list and be scrolled past. When a new CPython minor
+  # ships and reds this job on an unrelated PR, that is the policy working --
+  # fix the code, or record an explicit exception with a reason. Do not pin
+  # this to a version to make it quiet; pinning is a decision that belongs in
+  # `python/tests/gates/test_interpreter_policy.py`, where it has to be stated.
+  #
+  # Kept deliberately CLOSE to the `python` job's shape -- same zsh install,
+  # same `pip install -e ./python`, same whole-`tests` selection -- because a
+  # divergence reporter that runs a DIFFERENT selection than the job it is
+  # compared against cannot tell "3.14 disagrees" from "these two jobs do not
+  # run the same thing". What it deliberately does NOT do is bind
+  # `ALP_SDK_ROOT` or re-run the size-ratchet/version checks: those are
+  # interpreter-independent (`ast` over source, JSON compare) and already run
+  # in the `python` job, and an alp-sdk checkout here would cost minutes to
+  # re-measure facts about a different repository.
+  python-newest:
+    name: "python · pytest on the newest CPython"
+    runs-on: ubuntu-latest
+    # The `python` job measures 6-11 min for the same selection at the floor
+    # (see its own comment). 30 is the same hang catcher it uses on the PR leg,
+    # not a budget.
+    timeout-minutes: 30
+    steps:
+      # `fetch-depth: 0` for the same reason the `python` job takes it:
+      # `tests/gates/test_module_size_budget_log_append_only.py` walks real git
+      # ancestry and SKIPS silently on a depth-1 graft.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # THE INTERPRETER POLICY, ceiling half -- see this job's header comment
+      # above, parity.yml's seam1 block, and the gate that enforces the pair,
+      # python/tests/gates/test_interpreter_policy.py.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x" # ceiling -- NOT the floor every other job pins
+      # Reported, not assumed: `"3.x"` resolves on GitHub's schedule, so the
+      # run log has to say which interpreter this verdict is about, or a red
+      # here is un-diagnosable six weeks later. Also the fail-fast on the
+      # degenerate case -- if `"3.x"` ever resolved to the floor itself, this
+      # job would be a duplicate of `python` and would report agreement it
+      # never tested.
+      - name: report (and require) an interpreter above the floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -c 'import sys; print("resolved interpreter:", sys.version)'
+          floor="$(python -c 'import re,tomllib;print(re.search(r">=\s*([0-9]+\.[0-9]+)",tomllib.load(open("python/pyproject.toml","rb"))["project"]["requires-python"]).group(1))')"
+          have="$(python -c 'import sys;print("%d.%d" % sys.version_info[:2])')"
+          echo "requires-python floor: ${floor}; this job: ${have}"
+          if [ "${have}" = "${floor}" ]; then
+            echo "::error::\"3.x\" resolved to ${have}, which IS the declared floor -- this job would duplicate the \`python\` job and report agreement it never tested. Either a newer CPython is not yet available to setup-python (wait), or the floor has been raised to meet the ceiling, in which case the spread is over and python/tests/gates/test_interpreter_policy.py is where that decision gets recorded."
+            exit 1
+          fi
+      # Same reason as the `python` job: without zsh the zsh-driven completion
+      # cases SKIP, and a skip on this leg against a run on the other is a
+      # difference in SELECTION masquerading as agreement.
+      - name: ensure zsh is on PATH (zsh-driven completion tests)
+        run: |
+          if ! command -v zsh >/dev/null 2>&1; then
+            bash scripts/ci/apt-bounded.sh update
+            bash scripts/ci/apt-bounded.sh install -y --no-install-recommends zsh
+          fi
+      - name: install the declared package
+        run: pip install -e ./python
+      - name: install the test runner
+        run: pip install pytest pytest-xdist
+      - name: pytest
+        working-directory: python
+        env:
+          # `merge_group` does not populate `GITHUB_BASE_REF` -- same binding
+          # the `python` job makes, same gate depending on it.
           TAN_MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
         run: python -m pytest tests -q
 

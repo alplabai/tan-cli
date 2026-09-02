@@ -51,6 +51,7 @@ import ntpath
 import os
 import posixpath
 import re
+import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import urljoin, urlsplit
 from urllib.request import url2pathname
@@ -65,6 +66,42 @@ from tan.core.uri_reference import (
     is_absolute_path_reference,
     path_to_uri_reference,
 )
+
+#: Whether THIS interpreter's `ntpath.isabs` calls a ROOTED-BUT-DRIVELESS
+#: Windows path (`"\proj\x"`, `"/w/proj/x"` -- a root with no drive letter in
+#: front of it) absolute.
+#:
+#: tan-cli#1126: this is not a fixed stdlib fact, it is an interpreter-VERSION
+#: one, and the two tests below used to assert the pre-3.13 answer as though it
+#: were universal. They were the whole of what the full suite failed on 3.14.7
+#: while staying green on 3.12.3 -- invisible until someone ran it, because
+#: `parity.yml`'s seam1 was the only job resolving a floating `3.x` and it runs
+#: `tests/gates` only. See that file's `python-version` block and
+#: `tests/gates/test_interpreter_policy.py` for the policy that now REPORTS
+#: this class of divergence instead of waiting to be tripped over.
+#:
+#: Measured directly on real python-build-standalone builds of each, on this
+#: POSIX box -- `ntpath` is pure string logic with no filesystem or `os.name`
+#: input, so the host is irrelevant to the answer (the same property that makes
+#: this whole module testable without a Windows runner):
+#:
+#:     3.12.3     ntpath.isabs(r"\proj\x") True    .is_absolute() False
+#:     3.13.15    ntpath.isabs(r"\proj\x") False   .is_absolute() False
+#:     3.14.7     ntpath.isabs(r"\proj\x") False   .is_absolute() False
+#:
+#: The boundary is **3.13**, not 3.14 -- CPython made `ntpath.isabs` agree with
+#: `PureWindowsPath.is_absolute()` there, and 3.14.7 is merely where this repo
+#: happened to notice. Getting that release wrong is the same off-by-one the
+#: `_IGNORED_ERRNOS` note in tan-cli#1121 needed a measurement to correct (the
+#: constant vanished in 3.13, the raising behaviour survived to 3.13.15 and
+#: changed in 3.14); the two facts are neighbours and neither is guessable from
+#: the other.
+#:
+#: Deliberately NOT a `pytest.mark.skipif` and not a `>=`-shaped tolerance:
+#: every site below asserts `is` this value, so an interpreter that flips the
+#: answer BACK still reds here rather than quietly skipping. Only the version
+#: test may vary; the assertion never stops running.
+_NTPATH_ISABS_ACCEPTS_A_DRIVELESS_ROOT = sys.version_info < (3, 13)
 
 # ---------------------------------------------------------------------------
 # The classifier itself, `_is_windows_spelled` -- one branch/constant at a
@@ -202,28 +239,71 @@ def test_a_windows_unc_path_becomes_a_file_uri():
 def test_a_forward_slash_only_absolute_root_is_judged_posix_not_windows():
     """No backslash and no drive letter -- `_is_windows_spelled` must read
     this as POSIX. This also documents WHY the gate is `.is_absolute()` and
-    not `ntpath.isabs`: `ntpath.isabs("/w/proj/board.yaml")` is `True`
-    ("absolute on the current drive"), but `PureWindowsPath(...)
-    .is_absolute()` is `False` (pathlib requires a drive too), and calling
-    `.as_uri()` after trusting `ntpath.isabs` alone raises."""
+    not `ntpath.isabs`: `PureWindowsPath("/w/proj/board.yaml")
+    .is_absolute()` is `False` on every supported interpreter (pathlib
+    requires a drive too), and calling `.as_uri()` after trusting a
+    predicate that says otherwise raises.
+
+    tan-cli#1126 corrected the `ntpath.isabs` half of that sentence, which
+    used to read "is `True`" flat: it is `True` only below 3.13 (see
+    [`_NTPATH_ISABS_ACCEPTS_A_DRIVELESS_ROOT`] for the measurement), and
+    asserting the 3.12 answer as universal is what failed this test on
+    3.14.7. The `.is_absolute()` line below is the one that has never
+    moved, which is the actual argument for gating on it."""
     uri = path_to_uri_reference("/w/proj/board.yaml")
     assert uri == PurePosixPath("/w/proj/board.yaml").as_uri()
-    assert ntpath.isabs("/w/proj/board.yaml")
+    assert ntpath.isabs("/w/proj/board.yaml") is _NTPATH_ISABS_ACCEPTS_A_DRIVELESS_ROOT
     assert not PureWindowsPath("/w/proj/board.yaml").is_absolute()
 
 
 def test_a_windows_rooted_but_driveless_path_does_not_raise_and_stays_slash_swapped():
-    """`ntpath.isabs(r"\\proj\\x")` is `True` -- "absolute on the current
-    drive" -- but there is no drive to resolve it against, and
-    `PureWindowsPath(...).as_uri()` refuses it (`is_absolute()` requires
+    """`r"\\proj\\x"` is rooted with no drive to resolve that root against,
+    and `PureWindowsPath(...).as_uri()` refuses it (`is_absolute()` requires
     drive AND root). Gating on `.is_absolute()` routes this to the
     backslash-swap branch instead of crashing; the result is a legal
     relative-ref (RFC 3986's `path-absolute` form: leading `/`, no scheme),
-    not a claim about which drive it is rooted on."""
+    not a claim about which drive it is rooted on.
+
+    tan-cli#1126: this docstring used to open by stating that
+    `ntpath.isabs` answers it `True` -- "absolute on the current drive" --
+    as a flat fact, and the test asserted the same. Both were the 3.12
+    answer only; from 3.13 `ntpath.isabs` agrees with pathlib and says
+    `False` ([`_NTPATH_ISABS_ACCEPTS_A_DRIVELESS_ROOT`]). What this test
+    actually pins -- the rendered output on the last line -- is identical
+    on every measured interpreter, which is the point: this module's ANSWER
+    never depended on the interpreter, only this piece of documentation
+    did."""
     path = "\\proj\\board.yaml"
-    assert ntpath.isabs(path)
+    assert ntpath.isabs(path) is _NTPATH_ISABS_ACCEPTS_A_DRIVELESS_ROOT
     assert not PureWindowsPath(path).is_absolute()
     assert path_to_uri_reference(path) == "/proj/board.yaml"
+
+
+def test_the_absolute_gate_survives_every_supported_interpreter_ntpath_does_not():
+    """tan-cli#1126, stated as a property of the SUPPORTED INTERPRETER
+    RANGE rather than of whichever one happens to be running.
+
+    `requires-python` is `>=3.12` and CI runs both ends of it deliberately
+    (`parity.yml`'s seam1 and `ci.yml`'s `python-newest` float to the newest
+    release; every other job pins the 3.12 floor -- see
+    `tests/gates/test_interpreter_policy.py`), so "absolute" has to mean one
+    thing across that whole range or this module's OUTPUT is
+    interpreter-dependent. Its output is a SARIF `artifactLocation.uri` a
+    consumer resolves against a base, not a detail.
+
+    `ntpath.isabs` cannot be that predicate: it answers a driveless root
+    `True` on 3.12 and `False` from 3.13.
+    `PureWindowsPath(...).is_absolute()` answers `False` on all three
+    measured interpreters and -- the load-bearing half -- IS the predicate
+    `.as_uri()` itself enforces, so gate and exporter cannot drift apart on
+    any interpreter, present or future. "The two happen to disagree today"
+    was only ever the symptom that made the choice visible."""
+    for path in ("\\proj\\board.yaml", "/w/proj/board.yaml"):
+        assert not PureWindowsPath(path).is_absolute()
+        assert ntpath.isabs(path) is _NTPATH_ISABS_ACCEPTS_A_DRIVELESS_ROOT
+    # The rendered answers -- the thing that must not vary by interpreter.
+    assert path_to_uri_reference("\\proj\\board.yaml") == "/proj/board.yaml"
+    assert path_to_uri_reference("/w/proj/board.yaml") == "file:///w/proj/board.yaml"
 
 
 def test_a_relative_windows_spelled_path_gets_its_backslashes_swapped_for_slashes():

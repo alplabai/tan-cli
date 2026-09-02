@@ -973,9 +973,42 @@ jobs:
           fi
           echo "::warning::PINNED_SDK_TAG is ${behind} contract-surface commit(s) behind alp-sdk dev (${head}). Both seams are green against a pin that no longer reflects the planner. Re-bump PINNED_SDK_TAG in .github/workflows/parity.yml."
 
+      # THE INTERPRETER POLICY -- `"3.x"` here is DELIBERATE and load-bearing,
+      # not a typo for the `"3.12"` every other job in this repo pins
+      # (tan-cli#1126). Do not "make it consistent".
+      #
+      # `pyproject.toml` declares `requires-python = ">=3.12"`, so this repo
+      # promises to work on an OPEN-ENDED range, and a range nothing tests at
+      # both ends is a range this repo is guessing about. Every other job pins
+      # the FLOOR (`"3.12"`, the oldest we promise); this job resolves the
+      # CEILING (`"3.x"` = the newest CPython setup-python can serve, 3.14.7 at
+      # the time of writing). The spread is the only coverage the upper end has.
+      #
+      # It has already paid for itself twice, which is the reason it stays:
+      #   * tan-cli#1116 -- an `is_dir()` pre-flight guard that was DEAD on
+      #     3.14 while load-bearing on 3.12 (see `new_som_cmd._known_board_
+      #     names`, corrected in tan-cli#1127/#1129).
+      #   * tan-cli#1126 -- two `tests/core/test_uri_reference.py` tests that
+      #     had encoded `ntpath.isabs`'s pre-3.13 answer for a rooted-but-
+      #     driveless Windows path as though it were universal.
+      # Pinning this to `"3.12"` would have bought consistency and lost both.
+      #
+      # The COST of keeping it, stated plainly: when CPython ships a new minor
+      # release, `"3.x"` moves under an unrelated PR and can red it. That IS
+      # the report -- the answer is to fix the code (or record an explicit,
+      # reasoned exception), not to pin this back.
+      #
+      # What this job alone could NOT do is REPORT that divergence: it runs
+      # `tests/gates` only, so the full suite stayed red on 3.14.7 for two
+      # tests while this required context was green. `ci.yml`'s `python-newest`
+      # job is the other half of the policy -- it floats the same `"3.x"` and
+      # runs the WHOLE suite on it. Neither half is optional, and
+      # `python/tests/gates/test_interpreter_policy.py` enforces the pair
+      # (which jobs may float, which must pin, and that the floating full-suite
+      # job still selects the whole suite).
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.x"
+          python-version: "3.x" # ceiling -- see the policy note above
 
       # alp_orchestrate's emit path hard-requires PyYAML and jsonschema (it
       # aborts with "<pkg> is required" otherwise). setup-python ships a bare
