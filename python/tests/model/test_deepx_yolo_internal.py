@@ -17,13 +17,13 @@ a different repo, on a different release train.
 
 Because this test only ever runs on a maintainer's box, it is one release away
 from being no proof at all if nobody runs it. `cutting-a-tan-release`'s
-checklist closes that in alplabai/alp-lab-plugin#65 (tan-cli#785; companion
-PRs, merged together -- re-check that one is IN before trusting this): its
-"real-model proofs" section -- grep the skill for that phrase, not for its
-heading, which carries an em dash this ASCII docstring cannot reproduce --
-names this test's node ID and its Vela sibling's two, and requires the releaser
-RUN all three with `-v`
-and RECORD the per-node-id result before a tag. A SKIP does not block the tag
+checklist closes that in alplabai/alp-lab-plugin#65, landed as `99bdb4e9`
+(tan-cli#785). Its pre-tag row names this test's node ID and its Vela
+sibling's two, and requires the releaser RUN all three with `-v` and RECORD the
+per-node-id result before a tag. To find that row in the skill, grep for
+`test_deepx_compiles_real_yolo11n` rather than for prose: a heading can be
+reworded silently from the other repo, a node ID cannot drift without this
+file's own tests failing first. A SKIP does not block the tag
 -- this test cannot pass without the licensed `dx-com` wheel (the binary it
 puts on PATH, and what the skipif probes, is `dxcom`), the private fixture, AND
 host RAM over dxcom's ~15 GiB floor. That last one is not merely "not

@@ -25,13 +25,14 @@ test_adapters.py.
 Moved here from alp-sdk's tests/scripts/test_vela_yolo_internal.py (ADR-0028
 Task 6) -- see test_deepx_yolo_internal.py's docstring for why. The
 release-checklist change this docstring first recorded as OWED, then wrongly
-recorded as already made, is made in alplabai/alp-lab-plugin#65 (tan-cli#785;
-that PR and this one describe each other and merge together, so re-check it is
-IN before trusting this paragraph): `cutting-a-tan-release`'s "real-model
-proofs" section -- grep the skill for that phrase, not for its heading, which
-carries an em dash this ASCII docstring cannot reproduce -- names all three
-node IDs (this test's two, plus its DeepX sibling's)
-and has the releaser run them with `-v` and RECORD the per-node-id result. A
+recorded as already made, is made in alplabai/alp-lab-plugin#65, landed as
+`99bdb4e9` (tan-cli#785). `cutting-a-tan-release`'s pre-tag checklist names all
+three node IDs -- this test's two, plus its DeepX sibling's -- and has the
+releaser run them with `-v` and RECORD the per-node-id result. To find that row
+in the skill, grep for
+`test_vela_compiles_real_model_for_e8` rather than for prose: a heading can be
+reworded silently from the other repo, a node ID cannot drift without this
+file's own tests failing first. A
 SKIP does not block the tag; an UNRECORDED result does. So a skip here is READ
 at a cut, and every skip condition in this file has to be worth reading --
 which is why the public fixture is named rather than globbed below.

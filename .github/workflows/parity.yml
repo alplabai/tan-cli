@@ -2341,13 +2341,12 @@ jobs:
           # sufficient. (tan-cli#785. The earlier `alp-sdk#1471` here was the
           # wrong PR -- that one is the bootstrap prerequisites.install.linux
           # re-key, merged 2026-08-15.) `ethos-u-vela` ships cp312 wheels for
-          # exactly
-          # this job's OS matrix (manylinux x86_64, win_amd64, macosx arm64) at
-          # ~2 MB and is Apache-2.0 -- verified before adding it here, not
+          # exactly this job's OS matrix (manylinux x86_64, win_amd64, macosx
+          # arm64) at ~2 MB and is Apache-2.0 -- verified before adding it, not
           # assumed. DEEPX's `dxcom` and DRP-AI's TVM stay license-gated vendor
           # toolchains with no PyPI wheel to pin, so
-          # `test_deepx_yolo_internal.py`
-          # keeps skipping in CI (see this job's own model-compile comment in
+          # `test_deepx_yolo_internal.py` keeps skipping in CI (see this job's
+          # own model-compile comment in
           # pyproject.toml).
           python -m pip install --quiet -e ".[monitor,model-compile]" pytest pytest-shard
 
