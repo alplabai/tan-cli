@@ -411,11 +411,11 @@ def _known_board_names(sdk_root: Path) -> set[str] | None:
     POSIX box: ``glob("*.yaml")`` -> ``['lower.yaml']``,
     ``glob("*.yaml", case_sensitive=False)`` -> ``['lower.yaml',
     'upper.YAML']``, a plain ``endswith(".yaml")`` -> ``['lower.yaml']`` only).
-    ``_is_yaml_board_file`` below case-folds on ``os.name == "nt"``
-    specifically to preserve that old Windows matching exactly -- this
-    function's contract is "list what `Path.glob("*.yaml")` used to list,
-    correctly, on every interpreter", not "list what a case-sensitive
-    suffix compare finds".
+    ``_is_yaml_board_file`` above preserves that Windows matching exactly,
+    by delegating to ``shapes.matches_glob_suffix`` (tan-cli#1132, where
+    the case-fold moved) -- this function's contract is "list what
+    `Path.glob("*.yaml")` used to list, correctly, on every interpreter",
+    not "list what a case-sensitive suffix compare finds".
     """
     boards_dir = sdk_root / "metadata" / "boards"
     import yaml  # noqa: PLC0415 -- deferred, see `_yaml_scalar` (tan-cli#810)

@@ -16,7 +16,7 @@ membership change that mechanism cannot see."""
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from tan.core.shapes import is_file, matches_glob_suffix
 
@@ -24,6 +24,7 @@ __all__ = [
     "configure_inputs_stamp_path",
     "discover_configure_inputs",
     "read_configure_inputs_stamp",
+    "relative_key",
     "resolve_zephyr_discovery_dir",
     "write_configure_inputs_stamp",
 ]
@@ -134,6 +135,23 @@ _CANDIDATE_SUBTREES = ("boards", "socs")
 # function's contract. The real exception classifies it now.
 
 
+def relative_key(path: PurePath, base: PurePath) -> str:
+    """@path relative to @base, spelled with forward slashes -- THE stamp
+    file's key, and the one expression `_candidate_files` uses to build one.
+
+    A separate function so the Windows spelling can be DRIVEN rather than
+    restated (tan-cli#1132 review): this repo has no Windows host, and
+    `os.scandir` hands back a backslash-separated `entry.path` there, so the
+    key must be proven to normalise. Taking `PurePath` (not `Path`) is what
+    makes that possible without touching a filesystem -- a test passes real
+    `PureWindowsPath` values through THIS function, so a future edit here
+    (say, to `os.path.relpath`, which would leave backslashes in) reds the
+    oracle instead of sailing past a restatement of the old expression. The
+    keys are compared across runs, so a changed spelling would report every
+    tracked file as new on the first build after an upgrade."""
+    return path.relative_to(base).as_posix()
+
+
 def _candidate_files(directory: Path, base: Path, *, recurse: bool) -> set[str]:
     """Relative-POSIX paths (to @base) of the regular files directly in
     @directory -- and, when @recurse, at any depth below it -- whose name
@@ -172,7 +190,7 @@ def _candidate_files(directory: Path, base: Path, *, recurse: bool) -> set[str]:
                 if recurse and entry.is_dir(follow_symlinks=False):
                     pending.append(Path(entry.path))
                 elif matches_glob_suffix(entry.name, *_CANDIDATE_SUFFIXES) and is_file(entry.path):
-                    found.add(Path(entry.path).relative_to(base).as_posix())
+                    found.add(relative_key(Path(entry.path), base))
     return found
 
 

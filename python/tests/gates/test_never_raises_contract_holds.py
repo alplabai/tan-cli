@@ -488,19 +488,26 @@ _skip_as_root = pytest.mark.skipif(
 class _OsWithName:
     """The real `os` module with ONE attribute overridden: `name`.
 
-    tan-cli#1132: the obvious way to ask a platform-casing question --
-    `monkeypatch.setattr(shapes, "os", _OsWithName("nt"))`, what `TestIsYamlBoardFile`
-    and `TestKnownBoardNames` above do -- mutates the REAL `os` module, and
-    `pathlib` reads `os.name` at construction time to choose between
-    `PosixPath` and `WindowsPath`. Any function that builds a fresh `Path`
-    after that patch therefore dies with `NotImplementedError: cannot
-    instantiate 'WindowsPath' on your system` instead of exercising the rule
-    under test. Both tan-cli#1132 sites do build one (`analyze._resolve_
-    table`'s `Path(metadata_root)`, the walk's `Path(entry.path)`), so those
-    two test groups shadow the `os` NAME inside `tan.core.shapes` with this
-    instead -- `shapes.matches_glob_suffix` is the only reader of `os.name`
-    on either path, and `os.path` and everything else still resolve to the
-    real module through `__getattr__`.
+    tan-cli#1132: the obvious way to ask a platform-casing question is
+    `monkeypatch.setattr(new_som_cmd.os, "name", "nt")` -- what
+    `TestIsYamlBoardFile` (line 1304) and `TestKnownBoardNames` above
+    spell, and correctly so for them. But `new_som_cmd.os` IS the real `os`
+    module object, so that mutates `os.name` process-wide, and `pathlib`
+    reads `os.name` at construction time to choose between `PosixPath` and
+    `WindowsPath`. Any function that builds a FRESH `Path` under that patch
+    therefore dies with `NotImplementedError: cannot instantiate
+    'WindowsPath' on your system` instead of exercising the rule under
+    test. `_known_board_names` never does (`boards_dir / entry` reuses the
+    existing class), which is why the older spelling is fine there; both
+    tan-cli#1132 sites DO (`analyze._resolve_table`'s `Path(metadata_root)`,
+    the walk's `Path(entry.path)`) -- measured, both reds were exactly that
+    `NotImplementedError`.
+
+    So the two #1132 groups rebind the `os` NAME inside `tan.core.shapes`
+    to this object instead of mutating the module: `shapes.
+    matches_glob_suffix` is the only reader of `os.name` on either path,
+    and `os.path` and everything else still resolve to the real module
+    through `__getattr__`.
     """
 
     def __init__(self, name: str) -> None:

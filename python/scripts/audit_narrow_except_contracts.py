@@ -51,9 +51,18 @@ WHAT SHAPE 2 DOES NOT CLAIM, spelled out because an overclaiming docstring
 here is the same defect class the tool reports:
 
   * It is NAME-based, like `RISKY_ATTRS` above -- `x.glob(...)` matches
-    whatever `x` is, and a lazy call reached through an alias this walk does
-    not model (a walrus binding, a helper that returns the iterator) is
-    invisible.
+    whatever `x` is.
+  * An alias or a forcing spelling this walk does not model errs in BOTH
+    directions, not only toward silence (measured on synthetic input):
+    a lazy call reached through a helper (`m = _lazy(d)`) is a false
+    NEGATIVE, invisible; a WALRUS binding (`if (m := d.glob(...)):` then
+    `list(m)` inside the same `try`) is a false POSITIVE, because
+    `_forced_within` reconciles names only against `ast.Assign` and
+    `ast.With` bindings; and so is forcing spelled as a method rather than
+    one of `FORCING_CALLS` (`",".join(d.glob(...))`). Both false-positive
+    shapes report as escapes they are not. Pinned either way in
+    `tests/scripts/test_audit_narrow_except_contracts.py`, so the gap is a
+    recorded limit rather than a surprise.
   * Membership in that name set is not a claim that all five are lazy on
     every interpreter, and MEASUREMENT SAYS THEY ARE NOT. Non-root, on
     3.12.3 / 3.13.15 / 3.14.7 side by side, against a `chmod 000` directory:
