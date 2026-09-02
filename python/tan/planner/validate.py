@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Optional
 
 from . import libraries as _library_layer
 from .models import OrchestratorError, Slice
+from .orchestrator import STOCK_IMAGE_APP, STOCK_SHIM_APP
 from .paths import METADATA_ROOT, REPO
 from .topology import _core_os_choices, _cross_class_os
 
@@ -285,6 +286,43 @@ def _enforce_os_matches_core_class(slice_: Slice, core_type: str) -> None:
             f"disable it or 'baremetal' for no-OS firmware -- got os: '{slice_.os}'.")
 
 
+def _enforce_baremetal_app_rule(slice_: Slice) -> None:
+    """`os: baremetal`'s own `app:` rule -- split out of
+    `_enforce_loader_rules` to keep that function under the 50-line
+    function-count budget (tan-cli#1103); same single-purpose-sibling shape
+    as `manifest.py`'s `_check_blob_formats`/`_check_schema_version`
+    (tan-cli#1074).
+
+    alp-sdk#1889: a baremetal core with no `app:` of its own still resolves
+    one -- `_resolve_topology_for_core` (loader.py) merges the SoM topology
+    default OVER a project entry that omits `app:`, and every topology
+    default is one of the two stock tokens checked below (`alp-stock-shim`
+    for Cortex-M, `alp-image-edge` for Cortex-A; see every
+    metadata/e1m_modules/<SKU>.yaml `topology:` block). Neither is a
+    bare-metal app, and there is no bare-metal-flavoured stock default
+    anywhere in the tree, so `not slice_.app` alone never caught this -- the
+    inherited token is truthy.
+
+    Before this refusal existed the slice was NOT silently dropped: it
+    reached the executor with a real, wrong-target build command (`cmake -S
+    .../alp-stock-shim -B .` for the Cortex-M case, a nonexistent
+    `alp-image-edge` source dir for the Cortex-A one) that failed
+    downstream with a confusing, off-target CMake error instead of this
+    explicit one."""
+    if slice_.app in (STOCK_SHIM_APP, STOCK_IMAGE_APP):
+        other_os = "zephyr" if slice_.app == STOCK_SHIM_APP else "yocto"
+        raise OrchestratorError(
+            f"core '{slice_.core_id}': os: baremetal requires `app:` "
+            f"pointing at a CMakeLists.txt directory -- `{slice_.app}` is "
+            f"the {other_os} stock default (whether inherited from the SoM "
+            f"topology preset when no `app:` was given, or set explicitly), "
+            f"and there is no bare-metal stock default to fall back to")
+    if not slice_.app:
+        raise OrchestratorError(
+            f"core '{slice_.core_id}': os: baremetal requires `app:` "
+            f"pointing at a CMakeLists.txt directory")
+
+
 def _enforce_loader_rules(slice_: Slice, metadata_root: Path) -> None:
     """Loader rules from spec §4.5: every non-off slice must declare
     enough to actually build."""
@@ -296,10 +334,7 @@ def _enforce_loader_rules(slice_: Slice, metadata_root: Path) -> None:
                 f"core '{slice_.core_id}': os: zephyr requires `app:` "
                 f"pointing at a prj.conf / CMakeLists.txt directory")
     elif slice_.os == "baremetal":
-        if not slice_.app:
-            raise OrchestratorError(
-                f"core '{slice_.core_id}': os: baremetal requires `app:` "
-                f"pointing at a CMakeLists.txt directory")
+        _enforce_baremetal_app_rule(slice_)
     elif slice_.os == "yocto":
         if not slice_.app and not slice_.image:
             raise OrchestratorError(

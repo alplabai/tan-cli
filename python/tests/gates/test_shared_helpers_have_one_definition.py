@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""tan-cli#815: a helper `tan/core/shapes.py` owns must not be re-implemented
-privately in a command module.
+"""tan-cli#815: a shared helper must not be re-implemented privately in a
+command module, wherever it is homed.
 
 `shapes.py` exists because `_is_sdk_root` had three copies and `_yaml_kind`
 two, and the copies had drifted in TYPE -- "which is exactly how a 'same'
@@ -22,11 +22,63 @@ test could tell. That is the whole hazard: the cost is paid later, by the edit
 that reaches one copy and not the other, on a refusal message nine commands
 share and on the I-31 checkout marker.
 
-WHAT THIS ASSERTS, and why it is name-based. Each shared helper may have
-exactly one module-level definition under `python/tan/`, counting the
-underscore-prefixed spelling as the same helper -- a re-introduced private copy
-is called `_is_file`, never `is_file`, so a public-name-only check would miss
-the exact regression this file exists for.
+## From "owned by shapes.py" to a `{name: home}` map (tan-cli#1091)
+
+Through tan-cli#1091 this file could only express "owned by
+`tan/core/shapes.py`" -- the per-helper assertion hard-coded that path, so a
+helper deliberately homed anywhere ELSE could not join this gate at all. That
+bit PR #1090 directly: it moved `validate`'s board.yaml resolver into a new
+`tan/core/board_context.py` so `scaffold` could share it -- a real
+one-definition move, verified by hand -- but nothing MECHANICAL held it there;
+a second private `_resolve_board_path` the next day would have left every test
+in this file green. `_SHARED_HELPERS` below generalises the check to
+`{name: (home module, why one definition matters)}` for exactly that reason.
+The six pre-existing entries still point at `tan/core/shapes.py`, unchanged in
+behaviour; `_SHARED_HELPERS` now also carries `resolve_board_path`, homed at
+`tan/core/board_context.py` -- the seed tan-cli#1091 was written for, added in
+the same change that rebased onto PR #1090's merge. See the comment above the
+dict for how the one genuinely different lookalike (`generate_cmd.py`'s
+private copy) is carved out rather than folded in.
+
+WHAT THIS ASSERTS, and why it is name-based, and why it is opt-in. For each
+name in `_SHARED_HELPERS` below -- an explicit allow-list -- there is exactly
+one module-level definition anywhere under `python/tan/`, and it is in the
+module that entry declares as its home. `python/tests/**` is out of scope
+here and always was; its narrow allow-list counterpart is
+`tests/gates/test_shared_test_helpers_have_one_definition.py` (tan-cli#1081).
+The check counts the underscore-prefixed spelling as the same helper -- a
+re-introduced private copy is called `_is_file`, never `is_file`, so a
+public-name-only check would miss the exact regression this file exists for.
+
+WHAT THIS DOES NOT ASSERT, deliberately. It says nothing about any name not
+in `_SHARED_HELPERS`. A helper duplicated across two `tan/**` modules under a
+name nobody has seeded here is invisible to this gate and stays invisible
+until somebody adds it -- there is no walk over `tan/**` NAMES at large (the
+AST walk itself, `_module_level_definitions()`, covers every file under
+`python/tan/**` on every run; what is narrow is which of its findings this
+file acts on) and no heuristic that promotes a name into scope.
+
+That narrowness is measured, not assumed -- and pinned to an explicit commit
+rather than "this tip", because a number that decays with the next unrelated
+merge is worse than no number: PR #1094 landed between the previous
+measurement here and this one and moved it just by adding
+`tan/core/artifact_provenance.py`. Run over `python/tan/**` -- this file's
+own tree, with this file's own node-shape rules -- at `e9ce848e` (this fix's
+own rebased parent; the edits on top of it in this same change add no
+top-level name that collides with an existing one, so the count is identical
+measured either side of them): 92 names have more than one module-level
+definition, 235 definitions in total. A blanket version of this check,
+asserting one definition for every name the walk returns instead of the
+opt-in `_SHARED_HELPERS` list, is red on the day it lands over THIS tree, not
+just some other one. (PR #1083's sibling gate made the same case first, over
+the DIFFERENT tree `python/tests/**`: 173 names / 725 definitions at `dev`
+`8b4e3f43`; re-run the same way at `e9ce848e` for this file's own citation
+below, it is 177 names / 703 definitions -- cited here as the sibling gate's
+own tree, not this file's, because both trees drift and a number belongs to
+the tree and commit it was measured on, never to "the tip".) A gate that is
+red the day it lands gets disabled, so
+`_SHARED_HELPERS` stays a hand-written, opt-in dict for the same reason
+#1083's `_SHARED_TEST_HELPERS` is.
 
 ALIASING IS NOT A DEFINITION, in either spelling, and both must stay allowed:
 
@@ -55,16 +107,62 @@ import pytest
 
 TAN_ROOT = pathlib.Path(__file__).resolve().parents[2] / "tan"
 
-#: Helpers `tan/core/shapes.py` owns. The value is what a failure should tell
-#: the reader to do, because "duplicate definition" alone does not say which
-#: copy is the real one.
-_OWNED_BY_SHAPES: dict[str, str] = {
-    "SDK_MARKER": "the I-31 checkout marker; relocating it must be a one-line change",
-    "is_sdk_root": "the loader-marker probe, raise-proof by contract",
-    "is_file": "raise-proof `os.path.isfile`, `Path | str`",
-    "is_dir": "raise-proof `os.path.isdir`, `Path | str`",
-    "rejected_sdk_root_message": "the `<command>.sdk-root-unresolved` text nine commands share",
-    "yaml_kind": "the short YAML-ish type name for an error message",
+#: Shared helpers this gate protects, opt-in by name --
+#: `{name: (home module, why one definition matters)}`. The first element of
+#: the value is where a failure should say the real copy lives; the second is
+#: what a failure should say WHY, because "duplicate definition" alone does
+#: not tell the reader which copy is the real one.
+#:
+#: The first six entries below are owned by `tan/core/shapes.py`, unchanged
+#: from before this file generalised past a single hard-coded home
+#: (tan-cli#1091).
+#:
+#: `resolve_board_path` is the seed tan-cli#1091 was written for: PR #1090
+#: moved `validate_cmd.py`'s private `_resolve_board_path` to the new
+#: `tan/core/board_context.py` so `tan scaffold` could share it, rather than
+#: growing a SEVENTH project/board resolver (`board_context.py`'s own
+#: docstring names the other five and explains why they stay separate). Its
+#: `validate_cmd.py` call site now reads
+#: `from tan.core.board_context import resolve_board_path as _resolve_board_path`
+#: -- an `ImportFrom`, not a definition, so this file's AST walk never sees it
+#: at all (see ALIASING IS NOT A DEFINITION above). Verified against the real
+#: merged tree, not assumed: `tan/commands/generate_cmd.py:938` is the ONLY
+#: other module-level site either spelling resolves to, and it answers a
+#: genuinely different question (see `_NOT_THE_SAME_HELPER` below) -- so this
+#: seed needs exactly one carve-out, not the two it would have needed against
+#: `validate_cmd.py`'s old private copy.
+_SHARED_HELPERS: dict[str, tuple[str, str]] = {
+    "SDK_MARKER": (
+        "tan/core/shapes.py",
+        "the I-31 checkout marker; relocating it must be a one-line change",
+    ),
+    "is_sdk_root": (
+        "tan/core/shapes.py",
+        "the loader-marker probe, raise-proof by contract",
+    ),
+    "is_file": (
+        "tan/core/shapes.py",
+        "raise-proof `os.path.isfile`, `Path | str`",
+    ),
+    "is_dir": (
+        "tan/core/shapes.py",
+        "raise-proof `os.path.isdir`, `Path | str`",
+    ),
+    "rejected_sdk_root_message": (
+        "tan/core/shapes.py",
+        "the `<command>.sdk-root-unresolved` text nine commands share",
+    ),
+    "yaml_kind": (
+        "tan/core/shapes.py",
+        "the short YAML-ish type name for an error message",
+    ),
+    "resolve_board_path": (
+        "tan/core/board_context.py",
+        "turns `--project`/`--board-yaml` into the `board.yaml` path "
+        "`validate` and `scaffold` both read; a private re-implementation "
+        "re-opens the drift #1090 closed (alp-sdk-vscode#601/#633 shipped "
+        "modules that never compiled from exactly this kind of second copy)",
+    ),
 }
 
 #: Definitions that LOOK like a second copy and are not. Each entry names a
@@ -76,6 +174,17 @@ _NOT_THE_SAME_HELPER: dict[tuple[str, str], str] = {
         "takes an `os.DirEntry`, not a path, and FOLLOWS symlinks to match the "
         "oracle's `Path::is_dir()`. A different predicate with its own "
         "documented divergence"
+    ),
+    ("tan/commands/generate_cmd.py", "_resolve_board_path"): (
+        "answers `(board_yaml, workspace_root) -> Path` via pathlib -- a "
+        "different question from `board_context.resolve_board_path`'s "
+        "`(project, board_yaml) -> (str, str)`, which joins as strings on "
+        "purpose so the leading `./` the conformance fixtures pin survives. "
+        "`tan/commands/validate_cmd.py`'s former copy of this same private "
+        "name is not a THIRD site: PR #1090 replaced it with `from "
+        "tan.core.board_context import resolve_board_path as "
+        "_resolve_board_path`, an `ImportFrom` this file's AST walk never "
+        "sees as a definition"
     ),
 }
 
@@ -111,51 +220,109 @@ def _module_level_definitions() -> dict[str, tuple[str, ...]]:
     return {name: tuple(rels) for name, rels in found.items()}
 
 
-@pytest.mark.parametrize("helper", sorted(_OWNED_BY_SHAPES), ids=lambda h: h)
-def test_a_shapes_helper_is_defined_exactly_once(helper):
+@pytest.mark.parametrize("helper", sorted(_SHARED_HELPERS), ids=lambda h: h)
+def test_a_shared_helper_is_defined_exactly_once(helper):
+    home, why = _SHARED_HELPERS[helper]
     defs = _module_level_definitions()
-    sites = [
-        (rel, spelling)
-        for spelling in (helper, f"_{helper}")
-        for rel in defs.get(spelling, [])
-        if (rel, spelling) not in _NOT_THE_SAME_HELPER
-    ]
+    # `_NOT_THE_SAME_HELPER` exempts a (file, spelling) PAIR, not a count: it
+    # answers "is this the one known lookalike", not "how many are there". A
+    # naive `(rel, spelling) not in _NOT_THE_SAME_HELPER` filter exempts EVERY
+    # occurrence of a carved-out pair, so a genuine second private definition
+    # landing in the SAME already-exempted file would pass silently -- proven
+    # in review: a second `_resolve_board_path` inside `generate_cmd.py` left
+    # this test green. Each carve-out excuses exactly one definition; a repeat
+    # of that same (file, spelling) pair counts as a real site instead.
+    exempted_once: set[tuple[str, str]] = set()
+    sites: list[tuple[str, str]] = []
+    for spelling in (helper, f"_{helper}"):
+        for rel in defs.get(spelling, []):
+            key = (rel, spelling)
+            if key in _NOT_THE_SAME_HELPER and key not in exempted_once:
+                exempted_once.add(key)
+                continue
+            sites.append((rel, spelling))
 
     assert sites, (
         f"`{helper}` is defined nowhere under python/tan/. It is supposed to "
-        f"live in tan/core/shapes.py -- {_OWNED_BY_SHAPES[helper]}. If it was "
-        f"renamed or retired, update _OWNED_BY_SHAPES in the same change."
+        f"live in {home} -- {why}. If it was renamed or retired, update "
+        f"_SHARED_HELPERS in the same change."
     )
     assert len(sites) == 1, (
         f"`{helper}` has {len(sites)} module-level definitions:\n  "
         + "\n  ".join(f"{rel}: {spelling}" for rel, spelling in sites)
-        + f"\n\nIt is owned by tan/core/shapes.py -- {_OWNED_BY_SHAPES[helper]}. "
+        + f"\n\nIt is owned by {home} -- {why}. "
         "Import it from there instead of re-implementing it; if the private "
         "name is load-bearing (an injected predicate, a test import), alias it "
-        "with `from tan.core.shapes import x as _x` rather than redefining. "
-        "A second copy is byte-identical on the day it lands and drifts on the "
-        "day somebody edits one of them (tan-cli#815). If the new one genuinely "
-        "answers a DIFFERENT question, declare it in _NOT_THE_SAME_HELPER with "
-        "the reason."
+        f"with `from {home.removesuffix('.py').replace('/', '.')} import x as "
+        "_x` rather than redefining. A second copy is byte-identical on the day "
+        "it lands and drifts on the day somebody edits one of them "
+        "(tan-cli#815). If the new one genuinely answers a DIFFERENT "
+        "question, declare it in _NOT_THE_SAME_HELPER with the reason."
     )
     rel, _spelling = sites[0]
-    assert rel == "tan/core/shapes.py", (
-        f"`{helper}` is defined once, but in {rel} rather than "
-        f"tan/core/shapes.py. tan.core imports no command module, so that is "
-        f"the only direction that cannot cycle."
+    assert rel == home, (
+        f"`{helper}` is defined once, but in {rel} rather than {home}. "
+        f"_SHARED_HELPERS names {home} as its home -- move the definition "
+        "back or update the entry. A legal home must not itself import from "
+        "`tan/commands/` -- otherwise a command module importing the shared "
+        "helper can cycle back through its own package -- enforced below by "
+        "test_every_declared_home_avoids_importing_from_tan_commands, not "
+        "just stated here."
+    )
+
+
+def test_every_declared_home_avoids_importing_from_tan_commands():
+    """Enforces the cycle-freedom rule the `assert rel == home` message above
+    only STATES: a legal home must not itself import from `tan/commands/`,
+    because `tan/commands/**` imports `tan/core/**` deliberately, so a home
+    under `tan/commands/` could let a command module importing the shared
+    helper cycle back through its own package. This file's own thesis is
+    "prose does not hold a boundary, a gate does" -- so the rule earns a real
+    check rather than staying a claim in an assertion message nobody re-verifies.
+
+    Checked at the AST level (`ast.Import`/`ast.ImportFrom` anywhere in the
+    module, not just at module level, since an import inside a function still
+    creates the same cycle risk at call time) against every DISTINCT home
+    `_SHARED_HELPERS` currently declares, so a future entry homed under
+    `tan/commands/` reds here before its first use rather than only failing
+    once cyclic imports actually blow up at runtime.
+    """
+    homes = sorted({home for home, _why in _SHARED_HELPERS.values()})
+    violations = []
+    for home in homes:
+        tree = ast.parse((TAN_ROOT.parent / home).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+                "tan.commands"
+            ):
+                violations.append(f"{home}: from {node.module} import ...")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("tan.commands"):
+                        violations.append(f"{home}: import {alias.name}")
+    assert not violations, (
+        "these declared homes import from tan/commands/, so a command module "
+        "importing the shared helper they own can cycle back through its own "
+        "package:\n  " + "\n  ".join(violations)
     )
 
 
 def test_the_ownership_list_covers_everything_shapes_actually_owns():
-    """Anti-rot for `_OWNED_BY_SHAPES` itself -- the one input this file had
-    with neither anti-rot nor anti-vacuity.
+    """Anti-rot for the `tan/core/shapes.py`-homed slice of `_SHARED_HELPERS`
+    -- the one input this file had with neither anti-rot nor anti-vacuity.
 
-    A hand-maintained list protects today's six helpers and nothing added
-    tomorrow, which is the tan-cli#275 pattern this file's own docstring
-    cites. Demonstrated in review: adding `def is_symlink` to `shapes.py` AND
-    a private `def _is_symlink` to `size_cmd.py` left all eight tests green,
-    because the new helper was in neither list. Reading the ownership from
-    `shapes.py` closes that: a new helper there reds until it is declared.
+    A hand-maintained list protects today's six `shapes.py` helpers and
+    nothing added tomorrow, which is the tan-cli#275 pattern this file's own
+    docstring cites. Demonstrated in review: adding `def is_symlink` to
+    `shapes.py` AND a private `def _is_symlink` to `size_cmd.py` left all
+    eight tests green, because the new helper was in neither list. Reading
+    the ownership from `shapes.py` -- a real source, not a literal copied by
+    hand -- closes that: a new helper there reds until it is declared.
+
+    Scoped to `shapes.py` on purpose: `_SHARED_HELPERS` entries homed
+    elsewhere (once any exist) point at a module that is not "everything
+    shared lives here" the way `shapes.py` is, so there is no equivalent
+    exhaustiveness claim to make about them here.
     """
     shapes = ast.parse(
         (TAN_ROOT / "core" / "shapes.py").read_text(encoding="utf-8")
@@ -171,9 +338,15 @@ def test_the_ownership_list_covers_everything_shapes_actually_owns():
     # Module-private helpers of `shapes.py` itself are not shared surface.
     owned = {name for name in owned if not name.startswith("_")}
 
-    undeclared = sorted(owned - set(_OWNED_BY_SHAPES))
+    declared_for_shapes = {
+        name
+        for name, (home, _why) in _SHARED_HELPERS.items()
+        if home == "tan/core/shapes.py"
+    }
+
+    undeclared = sorted(owned - declared_for_shapes)
     assert not undeclared, (
-        "tan/core/shapes.py defines these and _OWNED_BY_SHAPES does not claim "
+        "tan/core/shapes.py defines these and _SHARED_HELPERS does not claim "
         f"them, so nothing stops a private copy appearing beside a caller:\n  "
         + "\n  ".join(undeclared)
         + "\n\nAdd each with a one-line note saying what it is for -- the note "
@@ -181,10 +354,11 @@ def test_the_ownership_list_covers_everything_shapes_actually_owns():
         "not tell the reader which copy is the real one."
     )
 
-    retired = sorted(set(_OWNED_BY_SHAPES) - owned)
+    retired = sorted(declared_for_shapes - owned)
     assert not retired, (
-        "_OWNED_BY_SHAPES claims these and tan/core/shapes.py no longer "
-        f"defines them -- drop them in the same change:\n  " + "\n  ".join(retired)
+        "_SHARED_HELPERS claims these are owned by tan/core/shapes.py and "
+        f"tan/core/shapes.py no longer defines them -- drop them in the same "
+        "change:\n  " + "\n  ".join(retired)
     )
 
 
@@ -212,4 +386,8 @@ def test_the_walk_actually_finds_definitions():
     defs = _module_level_definitions()
     assert len(defs) > 500, f"only {len(defs)} module-level names found under {TAN_ROOT}"
     assert "SDK_MARKER" in defs, sorted(defs)[:20]
-    assert defs["SDK_MARKER"] == ("tan/core/shapes.py",), defs["SDK_MARKER"]
+    # Read the expected home from _SHARED_HELPERS itself, not a literal --
+    # relocating SDK_MARKER and updating the map correctly should never make
+    # THIS assertion the one that reds; it still would, with a message about
+    # the walk rather than the map, if the walk itself broke.
+    assert defs["SDK_MARKER"] == (_SHARED_HELPERS["SDK_MARKER"][0],), defs["SDK_MARKER"]

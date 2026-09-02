@@ -123,7 +123,7 @@ def _bound_sdk_root(environ: Mapping[str, str] | None = None) -> tuple[str, Path
 # -- and the failure belongs to the pin, not to the branch.
 #
 # That is not hypothetical. `.github/workflows/ci.yml`'s `sdk_parity` checkout
-# `ref:` and `parity.yml`'s `PINNED_SDK_TAG` are both `f1b1c9df`, which
+# `ref:` and `parity.yml`'s `PINNED_SDK_TAG` are both `0914da38`, which
 # predates every artefact ADR-0028 publishes on the alp-sdk side. alp-sdk#1470
 # is still OPEN, so there is no post-merge SHA to move the pin to yet, and
 # until there is, twelve tests under `tests/model/` measure a tree that cannot
@@ -216,31 +216,53 @@ def sdk_publishes_model_perf_points(sdk: Path) -> bool:
     This one is a step further out than its three siblings above: the others
     gate on metadata that EXISTS on `alplabai/alp-sdk#1470` and is merely
     absent from the pin, whereas `metadata/model_perf/` exists in NO alp-sdk
-    at all yet. The contract landed (alp-sdk `fe56ff1d`: the schema, the
-    validator semantics, the capture recipe and ONE synthetic fixture point
-    under `tests/fixtures/`), but the directory this reads stays empty until
-    the bench campaign that is Task 5 of the tier-2 plan runs on real silicon.
-    So a test carrying this mark skips EVERYWHERE today, including against a
-    bound `origin/dev`, and that is the honest state rather than a defect --
-    the alternative is a test that asserts against data nobody has measured.
-    Presence of a real point, not "would this assertion pass", so it cannot
-    fire once the campaign publishes one.
+    at all yet. The contract landed (alp-sdk `9b466018`, "feat(metadata):
+    tier-2 model-perf perf-point contract (Refs #1520) (#1884)": the schema,
+    the validator semantics, the capture recipe and ONE synthetic fixture
+    point under `tests/fixtures/`), but the directory this reads stays empty
+    until the bench campaign that is Task 5 of the tier-2 plan runs on real
+    silicon. So a test carrying this mark skips EVERYWHERE today, including
+    against a bound `origin/dev`, and that is the honest state rather than a
+    defect -- the alternative is a test that asserts against data nobody has
+    measured. Presence of a real point, not "would this assertion pass", so
+    it cannot fire once the campaign publishes one.
+
+    Globs `*.yaml` ONLY, deliberately narrower than its
+    `sdk_ships_the_model_perf_fixture` sibling below (tan-cli#1114 review
+    nit): `model-perf-v1.schema.json`'s own `$id`/title names the *published*
+    path as `<sku>/<hash>.yaml`, and `scripts/validate_metadata.py`'s
+    `_collect_model_perf_files` FAILS any file under this tree that is not
+    exactly that shape -- a `*.json` document could never legitimately reach
+    here, so accepting one would fire this predicate on something alp-sdk's
+    own gate would already have rejected.
     """
-    return any((sdk / "metadata" / "model_perf").rglob("*.json"))
+    return any((sdk / "metadata" / "model_perf").rglob("*.yaml"))
 
 
 def sdk_ships_the_model_perf_fixture(sdk: Path) -> bool:
     """True when ``<sdk>/tests/fixtures/model_perf/`` holds at least one
-    synthetic perf point -- alp-sdk's own `_fixture`-bannered document.
+    synthetic perf point -- a schema-valid, illustrative document alp-sdk
+    ships for exercising its own validator (NOT `_fixture`-marked in any way
+    itself: alp-sdk's `_MODEL_PERF_FIXTURE_MARKER` guards the *published*
+    `metadata/model_perf/` tree against a stray fixture landing there by
+    accident, and this document lives under `tests/fixtures/` instead,
+    where no such marker is ever checked -- tan-cli#1115).
 
     A SEPARATE artefact from the published tree above and therefore a separate
-    predicate, not a broader one: a test that proves tan REFUSES a fixture
-    point needs a real fixture document to refuse, and that exists today
-    (alp-sdk `fe56ff1d`) while a published point does not. Folding the two
-    into one switch would skip the refusal proof for the next several months
-    on the strength of an unrelated absence.
+    predicate, not a broader one: a test that proves tan can READ a real,
+    schema-shaped point needs a real document to read, and that exists today
+    (alp-sdk `9b466018`, "feat(metadata): tier-2 model-perf perf-point
+    contract (Refs #1520) (#1884)") while a published point does not. Folding
+    the two into one switch would skip that proof for the next several
+    months on the strength of an unrelated absence.
+
+    Globs both `*.yaml` and `*.json`: alp-sdk ships this specific fixture as
+    `e1m_aen801_ethos_u55_hp.yaml` (tan-cli#1105 -- a `*.json`-only glob here
+    was permanently unsatisfiable against that real filename, so this test
+    skipped on every run including every green CI run).
     """
-    return any((sdk / "tests" / "fixtures" / "model_perf").rglob("*.json"))
+    fixture_root = sdk / "tests" / "fixtures" / "model_perf"
+    return any(fixture_root.rglob("*.yaml")) or any(fixture_root.rglob("*.json"))
 
 
 #: Resolved once, here, at conftest import -- i.e. at the same moment a test
@@ -263,7 +285,7 @@ needs_sdk_vela_profile = pytest.mark.skipif(
         "vela_memory_mode=None for every Ethos-U part and this test asserts "
         "against metadata the bound tree does not carry. EXPECTED while "
         "ci.yml's sdk_parity `ref:` and parity.yml's PINNED_SDK_TAG sit at "
-        "f1b1c9df; once that pin moves this test RUNS, and a failure here "
+        "0914da38; once that pin moves this test RUNS, and a failure here "
         "then is a regression, not this skip."
     ),
 )
@@ -277,7 +299,7 @@ needs_sdk_npu_op_tables = pytest.mark.skipif(
         "analyze_backend() resolves table=None for every backend and this "
         "test asserts against real committed op vocabularies the bound tree "
         "does not carry. EXPECTED while ci.yml's sdk_parity `ref:` and "
-        "parity.yml's PINNED_SDK_TAG sit at f1b1c9df; once that pin moves "
+        "parity.yml's PINNED_SDK_TAG sit at 0914da38; once that pin moves "
         "this test RUNS, and a failure here then is a regression, not this "
         "skip."
     ),
@@ -294,7 +316,7 @@ needs_sdk_after_the_model_engine_relocation = pytest.mark.skipif(
         "`python -m alp_model._gen_fixture`, which this relocated generator "
         "no longer emits and must not. The CONTAINER BYTES are unaffected and "
         "stay asserted unconditionally next door. EXPECTED while ci.yml's "
-        "sdk_parity `ref:` and parity.yml's PINNED_SDK_TAG sit at f1b1c9df; "
+        "sdk_parity `ref:` and parity.yml's PINNED_SDK_TAG sit at 0914da38; "
         "once that pin moves this test RUNS, and a failure here then is a "
         "regression, not this skip."
     ),
@@ -305,8 +327,9 @@ needs_sdk_model_perf_points = pytest.mark.skipif(
     _BOUND_SDK is not None and not sdk_publishes_model_perf_points(_BOUND_SDK),
     reason=(
         "the bound alp-sdk publishes no metadata/model_perf/ perf points: the "
-        "tier-2 CONTRACT landed (alp-sdk fe56ff1d -- schema, validator "
-        "semantics, capture recipe, one synthetic fixture) but the published "
+        "tier-2 CONTRACT landed (alp-sdk `9b466018`, \"feat(metadata): tier-2 "
+        "model-perf perf-point contract (Refs #1520) (#1884)\" -- schema, "
+        "validator semantics, capture recipe, one synthetic fixture) but the published "
         "tree stays empty until the bench campaign that is Task 5 of "
         "docs/superpowers/plans/2026-08-16-model-perf-tier2.md runs on real "
         "silicon. EXPECTED everywhere today, including against a bound "
@@ -323,11 +346,16 @@ needs_sdk_model_perf_fixture = pytest.mark.skipif(
     _BOUND_SDK is not None and not sdk_ships_the_model_perf_fixture(_BOUND_SDK),
     reason=(
         "the bound alp-sdk ships no tests/fixtures/model_perf/ synthetic perf "
-        f"point: it predates alp-sdk fe56ff1d ({_SDK_PR}, still open), so "
-        "there is no real fixture document for this test to prove tan REFUSES. "
-        "EXPECTED while ci.yml's sdk_parity `ref:` and parity.yml's "
-        "PINNED_SDK_TAG sit at f1b1c9df; once that pin moves this test RUNS, "
-        "and a failure here then is a regression, not this skip."
+        "point: it predates alp-sdk `9b466018` (\"feat(metadata): tier-2 "
+        "model-perf perf-point contract (Refs #1520) (#1884)\", already on "
+        "origin/dev -- unrelated to the still-open "
+        f"{_SDK_PR} the three marks above this one gate on), so there is no "
+        "real fixture document for this test to read (tan-cli#1115: this "
+        "reader now consumes that fixture by its actual fields rather than "
+        "refusing it). Already present at ci.yml's sdk_parity `ref:` / parity.yml's "
+        "PINNED_SDK_TAG (0914da38); EXPECTED only against a checkout older "
+        "than `9b466018`, and a failure here against one that has it is a "
+        "regression, not this skip."
     ),
 )
 

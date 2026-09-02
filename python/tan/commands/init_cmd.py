@@ -125,6 +125,8 @@ from tan.core.global_flags import accept_global_flags
 from tan.core.example_catalog import (
     AmbiguousCoresTopologyError,
     CoresTopologyNotFoundError,
+    MalformedCatalogError,
+    catalog_unreadable,
     find_example_by_cores,
     parse_topology_arg,
     unsupported_som,
@@ -627,6 +629,56 @@ def _sdk_root_flag_unresolved_issue(
     )
 
 
+def _example_som_catalog_issue(
+    resolved_sdk: _Sdk, example_src: str, som: str, subject_label: str
+) -> Issue | None:
+    """tan-cli#890/#1101: whether `--som som` against the SDK scaffold
+    catalog's record for `example_src` is (a) declared unsupported, (b)
+    could not be checked at all, or (c) neither -- extracted out of
+    `init()` itself (tan-cli#1101 review minor: this was inline and pushed
+    `init()` to the 6th-largest function in the tree) since the whole block
+    is exactly this seam: four already-resolved values in, one optional
+    `Issue` out, no other state.
+
+    `unsupported_som` returning `None` is ambiguous by its own documented
+    contract -- EITHER "checked, --som is fine (or there was no record to
+    check against)" OR "could not check at all". This second, narrower read
+    (`catalog_unreadable`) distinguishes the two, and returns its reason
+    ALREADY led correctly for which of its two shapes actually happened (a
+    genuinely unreadable catalog document vs. one that read fine but whose
+    matching record did not) -- see that function's own docstring, and the
+    module docstring section it points at, rather than re-deriving either
+    lead here. `ok`/`exitCode` and the scaffold itself stay exactly as they
+    are either way (refusing here would be the tightening tan-cli#1084
+    promised not to do) -- this only stops the envelope from claiming a
+    check that never ran.
+    """
+    supported = unsupported_som(resolved_sdk.path, example_src, som)
+    if supported is not None:
+        return Issue(
+            "init.example-som-unsupported",
+            "warning",
+            f"{subject_label} declares supported.som_skus "
+            f"{list(supported)} in the SDK scaffold catalog; --som "
+            f"'{som}' is outside that set, and `alp_project.py --emit "
+            f"scaffold` refuses the same pair. The files were still "
+            f"written -- check the scaffolded board.yaml against your "
+            f"SoM's topology before building, or widen som_skus in "
+            f"the catalog if the example really does support it.",
+        )
+    check_skipped_reason = catalog_unreadable(resolved_sdk.path, example_src)
+    if check_skipped_reason is not None:
+        return Issue(
+            "init.example-som-unchecked",
+            "warning",
+            f"{subject_label}: {check_skipped_reason}, so whether --som "
+            f"'{som}' is supported could not be checked. The files were "
+            f"still written -- verify '{som}' against {subject_label}'s "
+            f"supported SoMs before building.",
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # The two planning paths
 # ---------------------------------------------------------------------------
@@ -1020,6 +1072,14 @@ def _plan_from_topology(
         )
     try:
         src = find_example_by_cores(sdk.path, cores)
+    except MalformedCatalogError as err:
+        # tan-cli#1084: a malformed catalog escaped BOTH handlers below as a
+        # raw traceback. Handled on its own class, not on the shared
+        # `CoresTopologyError` base, so the envelope names the catalog
+        # rather than implying the requested topology was the problem.
+        raise InitError(
+            "init.catalog-malformed", str(err), ExitCode.VALIDATION_FAILURE
+        ) from err
     except CoresTopologyNotFoundError as err:
         raise InitError(
             "init.topology-not-found", str(err), ExitCode.VALIDATION_FAILURE
@@ -1452,19 +1512,9 @@ def init(
         example_som_issue = None
         if is_example_shaped and som is not None and resolved_sdk is not None:
             example_src = template_id[len("example:") :]
-            supported = unsupported_som(resolved_sdk.path, example_src, som)
-            if supported is not None:
-                example_som_issue = Issue(
-                    "init.example-som-unsupported",
-                    "warning",
-                    f"{subject_label} declares supported.som_skus "
-                    f"{list(supported)} in the SDK scaffold catalog; --som "
-                    f"'{som}' is outside that set, and `alp_project.py --emit "
-                    f"scaffold` refuses the same pair. The files were still "
-                    f"written -- check the scaffolded board.yaml against your "
-                    f"SoM's topology before building, or widen som_skus in "
-                    f"the catalog if the example really does support it.",
-                )
+            example_som_issue = _example_som_catalog_issue(
+                resolved_sdk, example_src, som, subject_label
+            )
 
         missing_board_yaml_issue = None
         if is_example_shaped and not any(f.relative_path == "board.yaml" for f in files):

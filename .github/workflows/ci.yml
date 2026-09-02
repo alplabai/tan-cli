@@ -187,31 +187,29 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12" # pyproject's requires-python floor
-      # tan-cli#907: `module_size_budget.generated.json` is a JSON object, so
-      # `.gitattributes` deliberately does NOT carry `merge=union` for it
-      # (union-merging two JSON documents that both add a trailing key can
-      # leave two sibling entries with no comma between them -- invalid
-      # JSON). A plain `git merge` on it therefore either conflicts, which a
-      # human sees, or -- measured directly, `git merge` of two branches that
-      # each edit a DIFFERENT key of a shared JSON object -- stitches both
-      # edits into one syntactically valid JSON object with no conflict
-      # marker at all, which is semantically STALE against the merged tree
-      # (neither side's numbers describe the union) and nothing about a text
-      # merge can know that. `regen_module_size_budget.py --check` is the one
-      # thing that re-measures the checked-out tree and compares it EXACTLY
-      # (not the ratchet's tolerant drift window) against the committed
-      # sidecar -- but until this step existed, it ran in NO workflow at all
-      # (its own module docstring said so, verbatim), so a stale-merge case
-      # would surface only as a cluster of unrelated-looking failures deep
-      # inside `test_module_size_budget.py`'s several ratchet tests, instead
-      # of one targeted diagnostic. Run early, before installing anything
-      # else this job needs, so a
-      # stale sidecar fails FAST with ONE targeted message ("... is stale:
-      # ... Run `python scripts/regen_module_size_budget.py` to refresh it")
-      # instead of several. Needs nothing but the checkout + this Python
-      # (stdlib only: argparse/ast/json/pathlib) -- no package install, no
-      # alp-sdk checkout.
-      - name: module_size_budget.generated.json matches the checked-out tree (regen --check)
+      # tan-cli#907 wired this step in; tan-cli#1057 split the data it
+      # checks into `python/tests/gates/module_size_budget.d/`, one record
+      # file per measured module, which is why the step no longer names a
+      # single JSON file. The split removes the COMMON conflict shape (two
+      # branches touching different modules now write different paths) but
+      # not the reason this step exists: a merge that brings in one side's
+      # edit to a module together with the other side's record for it leaves
+      # a syntactically valid, semantically STALE record with no conflict
+      # marker at all, and nothing about a text merge can know that.
+      # `regen_module_size_budget.py --check` is the one thing that
+      # re-measures the checked-out tree and compares it EXACTLY (not the
+      # ratchet's tolerant drift window) against the committed records --
+      # and until this step existed it ran in NO workflow at all (its own
+      # module docstring said so, verbatim), so a stale-merge case would
+      # surface only as a cluster of unrelated-looking failures deep inside
+      # `test_module_size_budget.py`'s several ratchet tests, instead of one
+      # targeted diagnostic. Run early, before installing anything else this
+      # job needs, so stale records fail FAST with ONE targeted message
+      # ("... is stale: ... Run `python scripts/regen_module_size_budget.py`
+      # to refresh it") instead of several. Needs nothing but the checkout +
+      # this Python (stdlib only: argparse/ast/json/pathlib) -- no package
+      # install, no alp-sdk checkout.
+      - name: module_size_budget.d/ matches the checked-out tree (regen --check)
         working-directory: python
         run: python scripts/regen_module_size_budget.py --check
       # tan-cli#503: `tests/commands/test_completion_command.py`'s zsh-driven
@@ -479,19 +477,28 @@ jobs:
       # see `parity.yml`'s `PINNED_SDK_TAG` comment for the full
       # per-fixture re-measurement.
       #
-      # `722320a1` -> `f1b1c9df` (tan-cli#1026), moved in the SAME change as
+      # `f1b1c9df` -> `0914da38` (tan-cli#1103), moved in the SAME change as
       # `parity.yml`'s `PINNED_SDK_TAG` / `PINNED_PLANNER_ORACLE_SDK_REF` and
       # `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT` /
       # `HAND_PORT_PINNED_SDK_COMMIT` -- see `parity.yml`'s `PINNED_SDK_TAG`
-      # comment for the full per-fixture re-measurement (this move's
-      # behavioural delta: every board's generated `alp.conf` gains
-      # `CONFIG_ALP_SDK_SOM_HW_REV="<hw_rev>"`, unconditionally).
+      # comment for the full per-fixture re-measurement. `tests/fixtures/
+      # planner_oracle/` WAS re-captured against `0914da38` (required to
+      # keep `PINNED_PLANNER_ORACLE_SDK_REF` and `PROVENANCE.txt` in the
+      # lockstep `test_planner_oracle_ref_tracks_pinned_sdk_tag.py`
+      # enforces), but this move's own
+      # `scripts/alp_orchestrate/{kconfig,topology,validate}.py` delta is
+      # NOT a byte-emission change: no `test_planner_emit_parity` board
+      # exercises the new `os: baremetal` stock-token refusal
+      # (`validate.py`) or the `isinstance` guards (`kconfig.py`/
+      # `topology.py`, already present on tan's side via `tan.core.os_class`,
+      # tan-cli#870/#914/#957/#962), so the recapture is a zero-file diff --
+      # only `PROVENANCE.txt`'s own `alp-sdk ref` line moved.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ inputs.sdk_parity }}
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: f1b1c9df0edd23988961150439863e70e5d99211
+          ref: 0914da38ebbecac3c1546064dd506f7fafe0bfa7
           fetch-tags: true
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`

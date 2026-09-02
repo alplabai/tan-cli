@@ -27,16 +27,57 @@ therefore returns @report ITSELF on every non-match path rather than a
 rebuilt copy, with no exception: "unchanged" is structural rather than a
 promise.
 
-A point's `measured_on.core` is one of the fields that non-match rule
-protects (tan-cli#791 round-2 review item 1 / round-3's evidence-driven
-narrowing). The die a SoC spec describes may pair a given NPU to a specific
-core, or may not -- alp-sdk's own schema says a shared SoC-level NPU
-legitimately declares no `paired_core` at all -- and `_resolve_perf_point`
-enforces exactly that DECLARED fact about the accelerator actually being
-screened, never a fact borrowed from a sibling NPU of the same backend that
-happens to declare one. See `_resolve_perf_point`'s own docstring for the
-sourced silicon evidence (the E8's Ethos-U85) that makes the distinction
-concrete.
+A point's `target.core` is one of the fields that non-match rule protects
+(tan-cli#791 round-2 review item 1 / round-3's evidence-driven narrowing). The
+die a SoC spec describes may pair a given NPU to a specific core, or may not --
+alp-sdk's own schema says a shared SoC-level NPU legitimately declares no
+`paired_core` at all -- and `_resolve_perf_point` enforces exactly that
+DECLARED fact about the accelerator actually being screened, never a fact
+borrowed from a sibling NPU of the same backend that happens to declare one.
+See `_resolve_perf_point`'s own docstring for the sourced silicon evidence
+(the E8's Ethos-U85) that makes the distinction concrete.
+
+A BENCH POINT CANNOT CLAIM A COVERAGE VERDICT (tan-cli#1115). Reconciling
+`tan.model.perf.PerfPoint` against alp-sdk's REAL `model-perf-v1` schema
+removed `npu_ops`/`cpu_ops` -- fields the schema never actually carries (see
+that module's docstring, "DEAD FIELDS") -- so this module can no longer ask
+`coverage_from_placement` for a bench-derived `npu_coverage`. A matched point
+overlays only the figures alp-sdk's schema actually publishes today:
+`arena_bytes`, `req_sram_kib`, and latency once a capture campaign times one
+(merged per field, most-specific-wins, against whatever @report already had --
+`_merge_figure`, PR review blocker 3: a point that measured only latency must
+not blank a real `--exact` compile's own `arena_bytes`/`req_sram_kib`). This
+is a real, deliberate narrowing of what tier 2 claims versus an earlier,
+unreconciled version of this module (which asked a fictional
+`measured.npu_ops`/`cpu_ops` pair for a "fits"/"partial"/"cpu-only" verdict no
+alp-sdk document has ever actually carried): the schema's own description of
+`perf.latency_ms` says a capture campaign "can record fit/SRAM alone until a
+timing harness exists", and there is likewise no wire representation of an
+op-by-op NPU/CPU split for `apply_perf_point` to have been reading in the
+first place.
+
+COVERAGE ITSELF IS WITHHELD, NOT INHERITED, UNLESS @report ALREADY CARRIES A
+REAL PLACEMENT (PR review blocker 1 -- an earlier version of this PR
+inherited `npu_coverage`/`ops`/`uncosted_cpu_op_count`/`npu_placement_
+pct_real` from @report UNCONDITIONALLY, which silently promoted the static
+screen's name-level, capped-positive ESTIMATE -- `docs/model-check-static-
+screen.md`'s own vocabulary calls `partial`/`full-eligible` at
+`basis: "static-screen"` explicitly "Not a placement claim" -- into a
+`basis: "bench", confidence: "certain"` report, exactly the estimate-wearing-
+a-measurement's-clothes failure this module's `compute_on_npu_pct_max`
+handling already refuses two paragraphs down in `_perf_point_report`). The
+rule: those four fields carry forward from @report ONLY when `report.basis ==
+"compiled"` (a real, `--exact`-measured placement, safe to keep under
+`confidence: "certain"`); otherwise the rebased report states
+`npu_coverage: "undetermined"`, `ops: []`, `uncosted_cpu_op_count: 0`,
+`npu_placement_pct_real: None` -- the SRAM/arena/latency figures are still
+certain measurements, the coverage word honestly is not, and
+`docs/model-check-static-screen.md` documents this exact combination as
+legitimate. The one way `npu_coverage` still reaches `"fits"` at `basis:
+"bench"` is DECISION 1's agreement path below: the customer's own `--exact`
+compile already measured `"fits"` for real, the bench point corroborates it
+on arena/SRAM, and the rebased report inherits that real, `--exact`-measured
+verdict rather than a bench-authored one.
 """
 from __future__ import annotations
 
@@ -60,12 +101,15 @@ def _placement_outcome(report: BackendReport, npu_ops: int | None,
     uncosted-cpu-op count -- a real partial/0% result must erase neither
     (MINOR review).
 
-    Takes the two COUNTS rather than a `Blob`, so the identical keep/drop
-    policy serves both measured surfaces: a real vela compile
-    (`tan.model.check._report_from_vela_compile`) and a bench perf point
-    (`_perf_point_report` below). The coverage word itself comes from
-    `tan.model.perf.coverage_from_placement` -- the one site in tan allowed to
-    return `"fits"`."""
+    Takes the two COUNTS rather than a `Blob`: today's ONLY caller is
+    `tan.model.check._report_from_vela_compile`, off a real vela compile's own
+    "CPU/NPU operators = N" summary. It is NOT called for a bench perf point
+    any more (tan-cli#1115) -- alp-sdk's real schema carries no per-operator
+    placement counts on a published point, so there is nothing to feed this
+    with on that path; see this module's own docstring, "A BENCH POINT CANNOT
+    CLAIM A COVERAGE VERDICT". The coverage word itself comes from
+    `tan.model.perf.coverage_from_placement` -- the one function in tan
+    allowed to return `"fits"`."""
     coverage = coverage_from_placement(npu_ops, cpu_ops)
     if coverage is None:
         return None
@@ -74,26 +118,50 @@ def _placement_outcome(report: BackendReport, npu_ops: int | None,
     return coverage, report.ops, report.uncosted_cpu_op_count
 
 
-#: backend -> the toolchain name whose measurements that backend's perf points
-#: carry. These are alp-sdk's OWN established tool names -- the same ones its
-#: op-support tables are keyed by (`npu_ops/ethos_u/u85@vela-5.1.0.json`,
-#: `npu_ops/drpai/onnx-i8@translator-1.12.json`) and the three the perf-point
-#: schema names -- not names tan invents. `cpu` is deliberately ABSENT rather
-#: than mapped to a made-up name: a backend with no entry here is simply never
-#: asked for a point, which is the right behaviour for one nobody benches.
+#: backend -> the leading token of the REAL `target.compiler_version` string
+#: that backend's compile adapter actually writes into a `.alpmodel` manifest
+#: (and, by the same vocabulary, into a bench point -- `model-perf-v1.schema.
+#: json`'s own description pins `compiler_version` to that manifest field).
+#: Measured directly against alp-sdk's producers, not the op-support-table
+#: filename vocabulary (`npu_ops/drpai/onnx-i8@translator-1.12.json`'s
+#: `translator` is a DIFFERENT namespace -- a table-authoring convention, not
+#: a compiler-identity string -- and an earlier version of this dict
+#: conflated the two, matching NEITHER of `drpai`/`deepx_dxm1`'s real points:
+#: tan-cli#1115 PR review, the issue's own failure mode one level down):
 #:
-#: `cpu` STAYS absent on purpose (tan-cli#791 review, item 6): the schema's
-#: `measured_on.backend` enum includes it, so alp-sdk COULD publish a
-#: CPU-baseline campaign, but `resolve_check_backends` (`tan.model.check`)
-#: already excludes `cpu` from what `tan model check` screens at all --
-#: "how much of this model can target the NPU" has nothing to say about the
-#: fallback CPU path itself, and that decision predates tier 2. Wiring `cpu`
-#: in here without also revisiting that exclusion would publish points this
-#: reader can never be asked for, which is worse than not wiring it: a
-#: campaign planner who greps this dict for "which backends does tier 2 read"
-#: gets a true, complete answer as of THIS decision, made here rather than
-#: rediscovered from a silent no-op.
-_PERF_TOOLCHAIN = {"ethos_u": "vela", "drpai": "translator", "deepx_dxm1": "dxcom"}
+#:   ethos_u     `_vela_version()`      "vela {version}" / "vela"
+#:               (ethos_u.py:21-24)
+#:   drpai       `_compiler_version()`  "drp-ai_tvm {version}" / "drp-ai_tvm"
+#:               (drpai.py:96-110)
+#:   deepx_dxm1  `_dxcom_version()`     "DX-COM {version}" / "dxcom" (bare,
+#:               (deepx.py:38-45)        differently-spelled fallback -- see
+#:                                        `tan.model.perf._toolchain_name`'s
+#:                                        own docstring for why that spelling
+#:                                        is not chased)
+#:
+#: Compared case-foldedly by `find_perf_points` (alp-sdk's three real
+#: producers do not agree on case -- `vela`/`drp-ai_tvm` lowercase, `DX-COM`
+#: upper -- and case is not part of a measurement's identity), so this dict's
+#: own values only need to be A correctly-spelled casing, not the specific
+#: one a given point happens to carry; `test_check.py`'s
+#: `test_perf_toolchain_matches_the_real_producer_strings` pins all three
+#: against these cited literal format strings.
+#:
+#: `cpu` is deliberately ABSENT rather than mapped to a made-up name: a
+#: backend with no entry here is simply never asked for a point, which is the
+#: right behaviour for one nobody benches. `cpu` STAYS absent on purpose
+#: (tan-cli#791 review, item 6): the schema's `target.backend` enum includes
+#: it, so alp-sdk COULD publish a CPU-baseline campaign, but
+#: `resolve_check_backends` (`tan.model.check`) already excludes `cpu` from
+#: what `tan model check` screens at all -- "how much of this model can
+#: target the NPU" has nothing to say about the fallback CPU path itself, and
+#: that decision predates tier 2. Wiring `cpu` in here without also
+#: revisiting that exclusion would publish points this reader can never be
+#: asked for, which is worse than not wiring it: a campaign planner who greps
+#: this dict for "which backends does tier 2 read" gets a true, complete
+#: answer as of THIS decision, made here rather than rediscovered from a
+#: silent no-op.
+_PERF_TOOLCHAIN = {"ethos_u": "vela", "drpai": "drp-ai_tvm", "deepx_dxm1": "DX-COM"}
 
 
 def _model_sha256(source: Path) -> str:
@@ -128,6 +196,33 @@ def _resolve_hw_rev(sku: str, metadata_root: Path, declared: str | None) -> str 
     Soft-fail on a preset that does not exist or does not parse, matching
     `resolve_ethos_u_variant`'s stance next door.
 
+    tan-cli#1116: NOT a pre-flight `preset_path.is_file()` -- that used to
+    gate the read below, and on Python <= 3.13 `Path.is_file()` RAISES for a
+    permission-denied ancestor -- `PermissionError`, `errno=13`, measured on
+    both 3.12.3 and 3.13.15 -- swallowing only `ENOENT`/`ENOTDIR`/`EBADF`/
+    `ELOOP` there. `pathlib`'s `_IGNORED_ERRNOS` CONSTANT that names those
+    four is itself gone a release earlier (3.13, `AttributeError` probing
+    for it), but the raising BEHAVIOUR it used to name outlives the constant
+    by one release and only actually changes in 3.14: there `is_file()`
+    swallows EVERY `OSError`, `EACCES` included, and returns `False`
+    instead (tan-cli#1116 review round 2 -- a pre-flight guard is dead on
+    3.14+ regardless of what it catches, and reasoning from either "the
+    constant still exists" or "I measured the raise" picks the wrong
+    boundary, since the two diverge for exactly the 3.13 release). NOT
+    `EACCES`, so a
+    preset whose CONTAINING directory the caller cannot traverse raised a raw
+    `PermissionError` right there, past this function's own "Soft-fail"
+    contract -- the exact `document_guards.read_catalog_document` trap ("not
+    a pre-flight `is_file()`"), just via `is_file()` instead of
+    `Path.exists()`. Reading straight through the `try` below answers the
+    same three cases (absent, a directory, no permission) through `OSError`
+    alone -- on EVERY supported interpreter, since it never calls `is_file()`
+    at all -- so the pre-flight added nothing a plain `FileNotFoundError`
+    from the read did not already give it. `UnicodeDecodeError` is also now
+    caught explicitly: it is a `ValueError`, not an `OSError` and not a
+    `yaml.YAMLError`, so a non-UTF-8 preset used to escape raw past this same
+    contract (measured, tan-cli#1116).
+
     `declared` reaching here as `None` is itself a FAIL-CLOSED answer from the
     caller, not a "customer said nothing" default: `tan.commands.model_cmd.
     _declared_hw_rev` refuses the whole run outright (a `model.board-yaml-
@@ -140,13 +235,11 @@ def _resolve_hw_rev(sku: str, metadata_root: Path, declared: str | None) -> str 
     if declared:
         return declared
     preset_path = Path(metadata_root) / "e1m_modules" / f"{sku}.yaml"
-    if not preset_path.is_file():
-        return None
     import yaml  # noqa: PLC0415 -- deferred (tan-cli#810); see sdk_cmd's `_releases_opener`
 
     try:
         preset = yaml.safe_load(preset_path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return None
     value = preset.get("default_hw_rev") if isinstance(preset, dict) else None
     return str(value) if value else None
@@ -193,8 +286,8 @@ def _profile_matches_the_part(point: PerfPoint, target: TargetSpec) -> bool:
     alone cannot distinguish "nothing declared" from "declared and disagrees",
     and only the caller knows which failure mode it is currently guarding."""
     system_config = target.vela_system_config or target.vela_vendor_system_config
-    checks = [(target.vela_memory_mode, point.toolchain_memory_mode),
-              (system_config, point.toolchain_system_config)]
+    checks = [(target.vela_memory_mode, point.vela_memory_mode),
+              (system_config, point.vela_system_config)]
     stated = [(declared, measured) for declared, measured in checks if declared]
     return bool(stated) and all(declared == measured for declared, measured in stated)
 
@@ -202,8 +295,10 @@ def _profile_matches_the_part(point: PerfPoint, target: TargetSpec) -> bool:
 def _topology_core_ids(sku: str, metadata_root: Path) -> set[str]:
     """Every core id @sku's OWN SoM preset `topology:` map declares -- the
     physical cores this module actually has, keyed exactly as a perf point's
-    `measured_on.core` must be (`docs/bench/model-perf-capture.md`: "the core
-    that drove the inference, keyed as in the SKU preset's `topology:` map").
+    `target.core` must be (`metadata/schemas/model-perf-v1.schema.json`'s own
+    `target.core` description: "The SoM `topology:` role ... that issued this
+    measurement -- the core running the inference call, whether or not it
+    also owns the NPU doing the compute").
 
     LEVEL 1 of the core check (tan-cli#791 round-2 review item 1). Applied
     UNCONDITIONALLY, for every backend, regardless of whether the exact-match
@@ -226,6 +321,12 @@ def _topology_core_ids(sku: str, metadata_root: Path) -> set[str]:
     real, checkable fact -- unlike `paired_core`, which is genuinely absent
     for some accelerators by design.
 
+    `UnicodeDecodeError` is caught explicitly (tan-cli#1116, measured
+    escaping before this fix): it is a `ValueError`, not an `OSError` and
+    not a `yaml.YAMLError`, so a non-UTF-8 preset used to raise raw past
+    this function's own "refuses [to] `set()`" contract, same shape as
+    `_resolve_hw_rev`'s sibling fix next door.
+
     By the time this runs, @sku's preset is already known to exist and parse
     (`resolve_check_backends` -> `resolve_targets` succeeded before a single
     backend was screened, reading the SAME file), so this re-reads it rather
@@ -242,7 +343,7 @@ def _topology_core_ids(sku: str, metadata_root: Path) -> set[str]:
 
     try:
         preset = yaml.safe_load(preset_path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return set()
     topology = preset.get("topology") if isinstance(preset, dict) else None
     return set(topology) if isinstance(topology, dict) else set()
@@ -260,49 +361,52 @@ def _one_line(text: str) -> str:
 
 
 def _perf_measured_clauses(point: PerfPoint) -> list[str]:
-    """The `measured` figures @point actually carries, as note clauses.
+    """The `perf` figures @point actually carries, as note clauses.
 
     A figure the point omits produces NO clause -- it was not measured, and
     the note must not imply a zero. `latency_runs` travels with the latency
     for the same reason the schema requires it: a latency without a run count
-    is a single shot wearing a measurement's clothes."""
-    total = (point.npu_ops or 0) + (point.cpu_ops or 0)
-    clauses = [f"{point.npu_ops}/{total} operators on the NPU"]
+    is a single shot wearing a measurement's clothes. NO operator-placement
+    clause: alp-sdk's real schema carries no per-op NPU/CPU split (tan-cli
+    #1115) -- see this module's own docstring, "A BENCH POINT CANNOT CLAIM A
+    COVERAGE VERDICT" -- so there is nothing sourced to phrase one from."""
+    clauses = []
     if point.arena_bytes is not None:
         clauses.append(f"arena {point.arena_bytes} bytes")
     if point.req_sram_kib is not None:
         clauses.append(f"{point.req_sram_kib} KiB resident SRAM")
-    if point.latency_ms_mean is not None and point.runs is not None:
+    if point.latency_ms_mean is not None and point.latency_runs is not None:
         latency = f"{point.latency_ms_mean} ms mean"
         if point.latency_ms_p95 is not None:
             latency += f", {point.latency_ms_p95} ms p95"
-        clauses.append(f"{latency} over {point.runs} runs")
+        clauses.append(f"{latency} over {point.latency_runs} runs")
     return clauses
 
 
 def _perf_identity(point: PerfPoint) -> str:
     """The measurement identity, as one readable clause -- module, hardware
-    revision, driving core, accelerator target, toolchain AND its version, and
+    revision, driving core, accelerator target, the exact compiler build, and
     the memory profile the figures describe. Every one of them is in the note
     because every one of them CHANGES THE NUMBER (alp-sdk `f724d3e4`), and a
     customer sizing hardware has to be able to see which machine was measured.
 
-    The CORE and the VERSION are the two the match rule may leave unnarrowed --
-    where the SPECIFIC accelerator being screened declares no `paired_core` of
-    its own (every drpai/deepx_dxm1 SoM; E1M-NX9101/imx93's lone `ethos-u65`;
-    and the E8's Ethos-U85, genuinely shared silicon rather than core-private
-    -- see `_resolve_perf_point`), and always for the version, since the
-    tier-2 customer has no local toolchain to state one -- so stating them
-    here is the only way the customer learns which one this point actually
-    describes. The PROFILE is there for the reason the schema makes it
-    required on an Ethos-U point at all: an arena captured under a
-    DRAM-backed profile is exactly measured and describes the wrong machine,
-    and hiding it would re-open on the reading side the ambiguity the schema
-    closed on the writing side.
+    The CORE is the one the match rule may leave unnarrowed -- where the
+    SPECIFIC accelerator being screened declares no `paired_core` of its own
+    (every drpai/deepx_dxm1 SoM; E1M-NX9101/imx93's lone `ethos-u65`; and the
+    E8's Ethos-U85, genuinely shared silicon rather than core-private -- see
+    `_resolve_perf_point`) -- so stating it here is the only way the customer
+    learns which one this point actually describes. `compiler_version` is
+    always stated verbatim (e.g. `"vela 4.1.0"`): the tier-2 customer has no
+    local toolchain to compare it against, so the exact build this point was
+    captured under is the only fact they get. The PROFILE is there for the
+    reason the schema makes it required on an Ethos-U point at all: an arena
+    captured under a DRAM-backed profile is exactly measured and describes the
+    wrong machine, and hiding it would re-open on the reading side the
+    ambiguity the schema closed on the writing side.
 
     THE PROFILE CLAUSE IS `ethos_u`-ONLY (tan-cli#791 round-2 review item 5).
-    `toolchain_system_config`/`toolchain_memory_mode` are only ever narrowed
-    or verified against silicon for `ethos_u` -- `_part_declares_a_profile`/
+    `vela_system_config`/`vela_memory_mode` are only ever narrowed or
+    verified against silicon for `ethos_u` -- `_part_declares_a_profile`/
     `_profile_matches_the_part` run only when `target is not None`, and
     `target` is `None` for every OTHER backend by construction
     (`tan.model.check.check_model_backends` only resolves one for
@@ -318,43 +422,48 @@ def _perf_identity(point: PerfPoint) -> str:
     target = point.accel_config or point.backend
     profile = ("" if point.backend != "ethos_u" else
                ", ".join(_one_line(p) for p in
-                        (point.toolchain_system_config, point.toolchain_memory_mode) if p))
+                        (point.vela_system_config, point.vela_memory_mode) if p))
     return (f"{point.sku} {_one_line(point.hw_rev)} (core {_one_line(point.core)}) "
-            f"at {_one_line(target)} with {_one_line(point.toolchain)} "
-            f"{_one_line(point.toolchain_version)}"
+            f"at {_one_line(target)} with {_one_line(point.compiler_version)}"
             + (f" ({profile})" if profile else ""))
 
 
 def _perf_point_note(point: PerfPoint, *, corroborated: bool) -> str:
     """The one-line note a `basis: "bench"` report leads with.
 
-    Carries `capture.reference` verbatim (whitespace-collapsed) because a
-    number nobody can trace back to a run is not reproducible, and a perf point
-    is worth exactly what its reproducibility is. Closes by saying that a local
-    compile can differ -- true for every backend, unlike an `--exact`
-    suggestion, which would be wrong advice on the two license-gated ones."""
+    Carries `capture.bench_id` verbatim (whitespace-collapsed) -- WHICH
+    physical bench/rig captured this point (e.g. `"e1m-aen-evk-01"`), not a
+    capture artefact's own citation (that mislabel, "raw capture", used to be
+    the note's own wording -- tan-cli#1115 PR review minor) -- because a
+    number nobody can trace back to a specific rig is not reproducible, and a
+    perf point is worth exactly what its reproducibility is. Closes by saying
+    that a local compile can differ -- true for every backend, unlike an
+    `--exact` suggestion, which would be wrong advice on the two
+    license-gated ones."""
     tail = ("This host's own compile agrees with it." if corroborated else
             "A compile on your own host can differ if its toolchain profile "
             "differs from the one recorded here.")
     return (f"bench: Alp Lab measured this exact model on {_perf_identity(point)} "
             f"-- {'; '.join(_perf_measured_clauses(point))}. Captured "
-            f"{_one_line(point.capture_date)}, raw capture "
-            f"{_one_line(point.capture_reference)}. {tail}")
+            f"{_one_line(point.capture_date)} on bench "
+            f"{_one_line(point.capture_bench_id)}. {tail}")
 
 
-def _perf_disagreements(point: PerfPoint, coverage: str,
-                         report: BackendReport) -> list[str]:
+def _perf_disagreements(point: PerfPoint, report: BackendReport) -> list[str]:
     """Every concrete way @point and the customer's OWN `basis: "compiled"`
     @report differ -- empty when they agree on everything both measured.
 
-    "Disagrees" is defined on the three figures BOTH sides really produce: the
-    placement verdict, the tensor arena, and the resident SRAM. Nothing else is
-    compared -- latency has no compiled counterpart to disagree with -- and a
-    figure EITHER side did not report is never a disagreement: absence is not
-    evidence here any more than anywhere else in this tier."""
+    "Disagrees" is defined on the two figures BOTH sides really produce: the
+    tensor arena and the resident SRAM. NOT the placement verdict any more
+    (tan-cli#1115): alp-sdk's real schema carries no bench-measured
+    operator-placement split for a bench point to disagree about (see this
+    module's own docstring, "A BENCH POINT CANNOT CLAIM A COVERAGE VERDICT")
+    -- `report.npu_coverage` is a real `--exact` compile's OWN verdict either
+    way, so there is nothing left to compare it against. Latency has no
+    compiled counterpart to disagree with either, and a figure EITHER side
+    did not report is never a disagreement: absence is not evidence here any
+    more than anywhere else in this tier."""
     diffs: list[str] = []
-    if coverage != report.npu_coverage:
-        diffs.append(f"placement (bench {coverage}, local compile {report.npu_coverage})")
     for label, unit, measured, compiled in (
             ("arena", "bytes", point.arena_bytes, report.arena_bytes),
             ("SRAM", "KiB", point.req_sram_kib, report.req_sram_kib)):
@@ -367,7 +476,7 @@ def _perf_disagreement_note(point: PerfPoint, diffs: list[str]) -> str:
     """Why the customer's own compile is being reported and OUR measurement is
     not -- with the measurement still named, so nothing is hidden."""
     return (f"--exact wins here: Alp Lab's bench point for this exact model on "
-            f"{_perf_identity(point)} ({_one_line(point.capture_reference)}) "
+            f"{_perf_identity(point)} ({_one_line(point.capture_bench_id)}) "
             f"disagrees with this host's own compile -- {'; '.join(diffs)}. The "
             f"LOCAL compile is what is reported above: it ran this host's own "
             f"toolchain and profile, which is what a build here would produce.")
@@ -391,8 +500,33 @@ def _perf_disagreement_note(point: PerfPoint, diffs: list[str]) -> str:
 _EXACT_HOST_NOTE_PREFIX = "--exact"
 
 
-def _perf_point_report(report: BackendReport, point: PerfPoint,
-                        outcome: tuple[str, list[OpVerdict], int]) -> BackendReport:
+def _merge_figure(point_value, report_value):
+    """THE MERGE RULE for every footprint/latency figure a rebase touches
+    (tan-cli#1115 PR review blocker 3): @point's own value when it has one,
+    else whatever @report already carried -- MOST-SPECIFIC-WINS, per field,
+    never a blanket "the point's block replaces the report's".
+
+    A matched bench point is not guaranteed to carry every figure (the
+    schema's `perf.latency_ms` is optional even where `req_sram_kib`/
+    `arena_bytes` are schema-required, and this reader stays defensive
+    against a malformed point missing even those -- see `tan.model.perf`'s
+    own `test_a_missing_or_malformed_perf_block_still_reads_the_identity`),
+    so a rebase that unconditionally overwrote every figure with @point's
+    (`None` included) blanked a REAL `--exact` compile's own measured
+    `arenaBytes`/`reqSramKib` the moment a matched point recorded only
+    latency -- reproduced: a compiled report's `arena_bytes=123456,
+    req_sram_kib=121` became `None, None` under `basis: "bench", confidence:
+    "certain"`, directly contradicting `apply_perf_point`'s own promise that
+    an under-informative point "cannot degrade a report by even a note".
+    Applied uniformly to every figure below, not only the two that were
+    reproduced: a bench point's latency is likewise never allowed to blank a
+    real compile's (today impossible in practice -- `_report_from_vela_
+    compile` never sets latency -- but the rule is stated once, for every
+    field, rather than fixed only at the two sites a repro happened to hit."""
+    return point_value if point_value is not None else report_value
+
+
+def _perf_point_report(report: BackendReport, point: PerfPoint) -> BackendReport:
     """@report re-based on @point: `basis: "bench"`, `confidence: "certain"`.
 
     Drops @report's BASIS-describing notes and leads with the bench note,
@@ -400,25 +534,33 @@ def _perf_point_report(report: BackendReport, point: PerfPoint,
     compile -- those notes describe a basis this report no longer has. Notes
     that instead describe the HOST/toolchain environment for a `--exact`
     request (`_EXACT_HOST_NOTE_PREFIX`) are still true of this run and are
-    KEPT, appended after the bench note (tan-cli#791 review item 4) --
-    dropping them silently un-answers a customer's own `--exact` ask the
-    moment a bench point happens to exist.
+    KEPT, appended after the bench note (tan-cli#791 review item 4).
 
-    `compute_on_npu_pct_max` stays `None` (it is MAC-weighted by contract and
-    a placement carries no MAC breakdown); the real op-count ratio goes to
-    `npu_placement_pct_real`, the same split the compiled path makes."""
-    coverage, ops, uncosted = outcome
-    total = (point.npu_ops or 0) + (point.cpu_ops or 0)
+    Two rules, both spelled out in full in this module's own docstring
+    ("A BENCH POINT CANNOT CLAIM A COVERAGE VERDICT" -- read that first):
+    footprint/latency figures merge PER FIELD, most-specific-wins
+    (`_merge_figure`, PR review blocker 3); coverage/placement fields carry
+    from @report ONLY when `report.basis == "compiled"`, else `npu_coverage`
+    is withheld to `"undetermined"` (PR review blocker 1). `compute_on_npu_
+    pct_max` is FORCED to `None` regardless -- `analyze.BackendReport`'s own
+    field comment: that MAC-weighted figure is "ONLY at basis: static-screen",
+    same reason it is already `None` at `basis: "compiled"`."""
     host_notes = [n for n in report.notes if n.startswith(_EXACT_HOST_NOTE_PREFIX)]
+    real_placement = report.basis == "compiled"
     return BackendReport(
         backend=report.backend, variant=report.variant, table=report.table,
-        npu_coverage=coverage, compute_on_npu_pct_max=None,
-        npu_placement_pct_real=100.0 * (point.npu_ops or 0) / total,
-        uncosted_cpu_op_count=uncosted, ops=ops,
+        npu_coverage=report.npu_coverage if real_placement else "undetermined",
+        compute_on_npu_pct_max=None,
+        npu_placement_pct_real=report.npu_placement_pct_real if real_placement else None,
+        uncosted_cpu_op_count=report.uncosted_cpu_op_count if real_placement else 0,
+        ops=report.ops if real_placement else [],
         basis="bench", confidence="certain",
-        arena_bytes=point.arena_bytes, req_sram_kib=point.req_sram_kib,
-        latency_ms_mean=point.latency_ms_mean, latency_ms_p95=point.latency_ms_p95,
-        latency_runs=point.runs, perf_ref=point.capture_reference,
+        arena_bytes=_merge_figure(point.arena_bytes, report.arena_bytes),
+        req_sram_kib=_merge_figure(point.req_sram_kib, report.req_sram_kib),
+        latency_ms_mean=_merge_figure(point.latency_ms_mean, report.latency_ms_mean),
+        latency_ms_p95=_merge_figure(point.latency_ms_p95, report.latency_ms_p95),
+        latency_runs=_merge_figure(point.latency_runs, report.latency_runs),
+        perf_ref=point.capture_bench_id,
         notes=[_perf_point_note(point, corroborated=report.basis == "compiled"), *host_notes],
     )
 
@@ -526,47 +668,45 @@ def apply_perf_point(report: BackendReport, *, backend: str, sku: str,
     """Tier 2, or @report untouched.
 
     Every early return hands back the SAME object, with no exception: an
-    absent, ambiguous, fixture-marked or placement-less point cannot degrade
-    a report by even a note. The last of those is the subtle one and is
-    deliberate: a point that measured latency but recorded no operator
-    placement cannot answer what `npu_coverage` asks, and re-basing on it
-    would have to either invent a coverage or downgrade a real static verdict
-    to `undetermined` -- both worse than the report the customer already had.
+    absent, ambiguous, fixture-marked, or empty point cannot degrade a report
+    by even a note. The last of those is the subtle one: a point that carries
+    none of `arena_bytes`/`req_sram_kib`/`latency_ms_mean` -- schema-legal but
+    with nothing left for this function to actually contribute -- must not
+    re-base the report to `basis: "bench"` over an empty note; that would
+    claim a measurement said something it didn't.
+
+    A MATCHED POINT NEVER DETERMINES `npu_coverage` ITSELF -- see this
+    module's own docstring ("A BENCH POINT CANNOT CLAIM A COVERAGE VERDICT")
+    and `_perf_point_report`'s for the full withhold-unless-`"compiled"` rule.
 
     DECISION 1 (tier-2 plan, Task 4): a `basis: "compiled"` report -- the
-    customer really does hold the toolchain and really did compile -- WINS over
-    a disagreeing point, and the point is named in a note instead. Their
-    profile may not be ours, and the number they can act on is the one their own
-    machine produced. THE POINT'S OWN LATENCY AND CAPTURE REFERENCE ARE STILL
-    CARRIED AS FIELDS on that disagreement report (tan-cli#791 review item 3):
-    a compile has no wall-clock or raw-capture counterpart to disagree WITH, so
-    `perf_ref`/`latency_ms_mean`/`latency_ms_p95`/`latency_runs` are never part
-    of `_perf_disagreements`' comparison -- they are Alp Lab's own measured
-    figures, offered alongside the LOCAL compile's coverage/arena/SRAM numbers
-    that won on those three, not competing with them. Without this the
-    `perfRef` the note's own prose quotes was `null` in the very same envelope,
-    forcing a consumer to parse tan's own sentence back to recover it --
-    precisely the second, silently-drifting spelling the comment right above
-    `tan.model.check._report_from_vela_compile` already refuses to create for
-    `arena_bytes`/`req_sram_kib`.
+    customer really does hold the toolchain and really did compile -- WINS
+    over a disagreeing point, named in a note instead; their profile may not
+    be ours, and the number they can act on is the one their machine
+    produced. THE POINT'S OWN LATENCY AND CAPTURE CITATION STILL RIDE AS
+    FIELDS on that disagreement report (tan-cli#791 review item 3): a compile
+    has no wall-clock or raw-capture counterpart to disagree WITH, so they
+    are never part of `_perf_disagreements`' comparison, only offered
+    alongside the winning LOCAL numbers -- without this `perfRef` was `null`
+    in the same envelope whose own note prose quoted it.
 
     When the two AGREE the point wins, because it adds measured wall-clock
-    latency and a traceable capture that no compile can produce, and the local
+    latency and a traceable capture no compile can produce, and the local
     compile corroborating it is said out loud."""
     point = _resolve_perf_point(backend=backend, sku=sku, model_sha256=model_sha256,
                                  hw_rev=hw_rev, metadata_root=metadata_root, target=target)
     if point is None:
         return report
-    outcome = _placement_outcome(report, point.npu_ops, point.cpu_ops)
-    if outcome is None:
+    if (point.arena_bytes is None and point.req_sram_kib is None
+            and point.latency_ms_mean is None):
         return report
     if report.basis == "compiled":
-        diffs = _perf_disagreements(point, outcome[0], report)
+        diffs = _perf_disagreements(point, report)
         if diffs:
             return replace(
                 report, notes=[*report.notes, _perf_disagreement_note(point, diffs)],
-                perf_ref=point.capture_reference,
+                perf_ref=point.capture_bench_id,
                 latency_ms_mean=point.latency_ms_mean,
                 latency_ms_p95=point.latency_ms_p95,
-                latency_runs=point.runs)
-    return _perf_point_report(report, point, outcome)
+                latency_runs=point.latency_runs)
+    return _perf_point_report(report, point)

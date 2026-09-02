@@ -287,6 +287,13 @@ from tan.commands.doctor_cmd import resolve_manifest_python_floor
 # third copy here would make it the pattern.
 from tan.commands.generate_cmd import _python_too_old
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+# tan-cli#1031: this resolver MOVED to `tan.core.board_context` so `tan
+# scaffold` could reuse it instead of growing a fourth project/board
+# resolver. Aliased to the private name this module's call site (and
+# `test_validate_command.py`'s prose) already spells; an alias is not a
+# second definition, which `tests/gates/test_shared_helpers_have_one_
+# definition.py` documents at length.
+from tan.core.board_context import resolve_board_path as _resolve_board_path
 from tan.core.global_flags import accept_global_flags
 from tan.core.sdk_discovery import (
     _planner_python_resolution,
@@ -295,6 +302,11 @@ from tan.core.sdk_discovery import (
 )
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.subprocess_env import spawn_env
+from tan.core.uri_reference import (
+    cwd_base_uri_or_none,
+    is_absolute_path_reference,
+    path_to_uri_reference,
+)
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, ValidateOutputFormat
@@ -359,6 +371,15 @@ _SARIF_SCHEMA_URI = (
     "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/"
     "sarif-schema-2.1.0.json"
 )
+
+#: The SARIF `originalUriBaseIds` key `_sarif_document` declares for its
+#: `sarif_base` parameter (tan-cli#1117, computed by
+#: `tan.core.uri_reference.cwd_base_uri_or_none`). SARIF 2.1.0 SS3.4.4
+#: (EXAMPLE 2, `"uriBaseId": "%srcroot%"`) notes a `uriBaseId` "can be any
+#: string" and does not require the `%` wrapping, but its own example uses
+#: it and this repo invents no other convention to match, so the same
+#: spelling is followed.
+_SARIF_URI_BASE_ID = "%CWD%"
 
 #: Outcome strings, verbatim from `tan_core::validate::Outcome::as_str`. The
 #: issue code is `validate.<outcome>`, so these strings are wire contract.
@@ -845,24 +866,6 @@ def _synthesised_finding(
     return _Finding("error", message)
 
 
-def _resolve_board_path(project: str | None, board_yaml: str | None) -> tuple[str, str]:
-    """Return `(project_root, board_yaml_path)`, both as the CLI reports them.
-
-    Mirrors `resolve_offline_board_path`: the root defaults to the literal `"."`
-    and the board path stays RELATIVE, which the conformance fixtures pin
-    (`project.root == "."`, `boardYamlPath == "./board.yaml"`).
-    """
-    root = project if project else "."
-    if board_yaml and os.path.isabs(board_yaml):
-        return root, board_yaml
-    leaf = board_yaml or "board.yaml"
-    # Joined as STRINGS, not via pathlib: `Path(".") / "board.yaml"` normalises
-    # to `board.yaml`, but Rust's `Path::new(".").join("board.yaml")` keeps the
-    # `./`, and the conformance fixtures pin `"./board.yaml"`.
-    sep = "" if root.endswith(("/", "\\")) else "/"
-    return root, f"{root}{sep}{leaf}"
-
-
 #: The position both exporters fall back to when NOTHING located the finding:
 #: every offline structural check (`board.yaml` parses fine; the finding is
 #: about the whole document), a legacy `FAIL`/`WARN` line, and any rich block
@@ -922,7 +925,19 @@ def _issue_to_diagnostic(issue: Issue, finding: _Finding, board_path: str) -> di
     `= see:` line is no longer discarded on the way past -- that URL is the
     child's, not tan's, and it exists."""
     diagnostic = {
-        "uri": board_path,
+        # tan-cli#1097: rendered through `path_to_uri_reference`, not
+        # `board_path` bare -- a filesystem PATH is not a URI reference (on
+        # Windows this was `C:\w\proj\board.yaml`, which no editor matches
+        # by document URI, so the diagnostic attached to nothing, silently).
+        # Fixed at the exporter, here and at the SARIF `artifactLocation`
+        # below -- not in the path resolver; see `tan.core.uri_reference`'s
+        # module docstring for the relative-vs-absolute split. This closes
+        # the defect for an ABSOLUTE board path; a RELATIVE `uri` here is
+        # left as a legal relative reference with no base declared -- this
+        # module makes no claim about how a consumer resolves it (see the
+        # module docstring's own note on why an earlier attempt at that,
+        # tied to SARIF's `originalUriBaseIds`, was reverted).
+        "uri": path_to_uri_reference(board_path),
         "range": _lsp_range(finding),
         "severity": issue.severity,
         "code": _diagnostic_code(issue, finding),
@@ -946,7 +961,19 @@ def _diagnostic_v1_document(
     reported: list[tuple[Issue, _Finding]], board_path: str
 ) -> dict[str, Any]:
     """`metadata/schemas/diagnostic-v1.schema.json`, mirroring
-    `scripts/alp_cli/diagnostic_format.py:to_machine_json`'s shape."""
+    `scripts/alp_cli/diagnostic_format.py:to_machine_json`'s shape.
+
+    tan-cli#1117 is deliberately scoped to `--format sarif` ONLY. LSP has no
+    `originalUriBaseIds` equivalent -- a relative `uri` here is resolved by
+    the CLIENT against whatever document root the editor/language server
+    protocol negotiated, not by a base this document could declare -- so a
+    relative `uri` stays exactly as tan-cli#1097 left it: unresolved,
+    undocumented beyond this note. Resolution for the one consumer that
+    matters, `alp-sdk-vscode`, falls to the WRAPPER
+    (`src/alpCli/service.ts`), which shells this CLI and parses its output,
+    not to an LSP client here parsing a protocol tan does not speak. Nothing
+    in this function changed for tan-cli#1117; this docstring paragraph is
+    the missing "say so" tan-cli#1117's own scope item asked for."""
     return {
         "schemaVersion": _DIAGNOSTIC_SCHEMA_VERSION,
         "tool": {"name": "tan", "version": TAN_VERSION},
@@ -970,7 +997,7 @@ def _sarif_region(finding: _Finding) -> dict[str, int]:
 
 
 def _sarif_document(
-    reported: list[tuple[Issue, _Finding]], board_path: str
+    reported: list[tuple[Issue, _Finding]], board_path: str, sarif_base: str | None
 ) -> dict[str, Any]:
     """SARIF 2.1.0 (`runs[].results[]`), mirroring
     `scripts/alp_cli/diagnostic_format.py:to_sarif`. A separate artefact from
@@ -980,9 +1007,39 @@ def _sarif_document(
     `helpUri` follows `documentationUri` exactly: present on a rule whose
     validator named a `= see:` page, absent otherwise. tan invents none for
     its own codes (it has no landing pages), and `helpUri` is optional in the
-    SARIF 2.1.0 schema."""
+    SARIF 2.1.0 schema.
+
+    tan-cli#1097 review measured that alp-sdk's own `to_sarif`/`_uri` --
+    what "mirroring" above still means for shape -- emits `artifactLocation
+    .uri` bare, with no scheme; this function's `uri` handling has diverged
+    from it on purpose (see [`path_to_uri_reference`]). alp-sdk owes the
+    same fix -- tracked as alp-sdk#1909, not fixed here (a different repo,
+    different release cadence).
+
+    tan-cli#1117: a RELATIVE `artifactLocation.uri` now carries a
+    `uriBaseId` naming `_SARIF_URI_BASE_ID`, and the `run` declares that id
+    in `originalUriBaseIds` pointing at `sarif_base` -- so a spec-conformant
+    consumer resolves the reference the same way regardless of its own CWD,
+    instead of falling back to it by luck. `originalUriBaseIds` is only
+    ADDED when at least one location actually uses it: an absolute
+    `--board-yaml` reference already resolves on its own, and SARIF 2.1.0
+    SS3.4.4 says a location whose `uri` is absolute must NOT also carry a
+    `uriBaseId` -- gated by [`is_absolute_path_reference`], not by sniffing
+    the rendered string (see that function's own docstring for why sniffing
+    is unsound for a driveless Windows path). A round-1 attempt at this PR
+    tried the same shape and got the base itself wrong (anchored on `root`,
+    missing a trailing slash) through code that could crash the command on a
+    caller-supplied `--project` symlink loop; see `tan.core.uri_reference`'s
+    module docstring for that account and how this version avoids both.
+
+    `sarif_base` is PRECOMPUTED -- see `cwd_base_uri_or_none`'s own
+    docstring for why this function never calls it (or [`cwd_base_uri`])
+    itself. `None` (CWD unavailable, or an absolute `board_path`, which never
+    sets `base_needed` below regardless) reports the same thing `dev` gave
+    before tan-cli#1117: a relative `uri` with no declared base."""
     rules: dict[str, dict[str, str]] = {}
     results = []
+    base_needed = False
     for issue, finding in reported:
         code = _diagnostic_code(issue, finding)
         if code not in rules:
@@ -990,6 +1047,14 @@ def _sarif_document(
             if finding.doc_uri:
                 rule["helpUri"] = finding.doc_uri
             rules[code] = rule
+        # tan-cli#1097: `artifactLocation` is a URI reference (SARIF 2.1.0),
+        # never the bare filesystem path this used to emit -- see this
+        # function's own docstring for what is, and is not, resolved by
+        # this fix alone.
+        artifact_location: dict[str, str] = {"uri": path_to_uri_reference(board_path)}
+        if sarif_base is not None and not is_absolute_path_reference(board_path):
+            artifact_location["uriBaseId"] = _SARIF_URI_BASE_ID
+            base_needed = True
         results.append(
             {
                 "ruleId": code,
@@ -1001,29 +1066,35 @@ def _sarif_document(
                 "locations": [
                     {
                         "physicalLocation": {
-                            "artifactLocation": {"uri": board_path},
+                            "artifactLocation": artifact_location,
                             "region": _sarif_region(finding),
                         }
                     }
                 ],
             }
         )
+    run: dict[str, Any] = {
+        "tool": {
+            "driver": {
+                "name": "tan",
+                "informationUri": "https://github.com/alplabai/tan-cli",
+                "version": TAN_VERSION,
+                "rules": list(rules.values()),
+            }
+        },
+        "results": results,
+    }
+    if base_needed:
+        # tan-cli#1117: declared once per RUN, not per result -- every
+        # relative `board_path` in one invocation names the same file, so
+        # one base entry covers every location that references it.
+        # `sarif_base` cannot be `None` here: `base_needed` is only ever
+        # set inside the `sarif_base is not None` branch above.
+        run["originalUriBaseIds"] = {_SARIF_URI_BASE_ID: {"uri": sarif_base}}
     return {
         "$schema": _SARIF_SCHEMA_URI,
         "version": "2.1.0",
-        "runs": [
-            {
-                "tool": {
-                    "driver": {
-                        "name": "tan",
-                        "informationUri": "https://github.com/alplabai/tan-cli",
-                        "version": TAN_VERSION,
-                        "rules": list(rules.values()),
-                    }
-                },
-                "results": results,
-            }
-        ],
+        "runs": [run],
     }
 
 
@@ -1061,6 +1132,12 @@ def _emit(
     command_line: str = "",
     sdk: SdkInfo | None = None,
     findings: tuple[_Finding, ...] | None = None,
+    # tan-cli#1117 review round 3: NO DEFAULT, deliberately -- see
+    # `cwd_base_uri_or_none`'s own docstring for why this is precomputed
+    # rather than read here. A dropped `sarif_base=` kwarg at any of the
+    # three call sites below is a `TypeError` at the call, not a silently
+    # base-less document.
+    sarif_base: str | None,
 ) -> None:
     # tan-cli#478 review: `issues` may now carry the SDK-resolution pair
     # (`sdk.project-pin-unresolved`, `sdk.global-default-foreign-project`)
@@ -1155,7 +1232,7 @@ def _emit(
         typer.echo(json.dumps(_diagnostic_v1_document(reported, board_path), indent=2))
     elif output_format == ValidateOutputFormat.SARIF:
         # indent=2, matching scripts/alp_cli/validate.py:36.
-        typer.echo(json.dumps(_sarif_document(reported, board_path), indent=2))
+        typer.echo(json.dumps(_sarif_document(reported, board_path, sarif_base), indent=2))
     else:
         stream = typer.get_text_stream("stderr")
         if len(reportable) == 1 and reportable[0].code == "validate.board-yaml-missing":
@@ -1268,6 +1345,10 @@ def validate(
     """
     root, board_path = _resolve_board_path(project, board_yaml)
 
+    # tan-cli#1117 review round 2: computed ONCE, here -- see
+    # `cwd_base_uri_or_none`'s own docstring for why.
+    sarif_base = cwd_base_uri_or_none()
+
     # tan-cli#488 defect 8: the identical unguarded prologue `build_cmd.build`
     # had (see its own comment there) -- everything below this point is now
     # inside a try, so a raise from ANYWHERE in it (guard resolution, the SDK
@@ -1338,6 +1419,7 @@ def validate(
                 issues=[*sdk_context_issues, Issue(f"validate.{code}", "error", message)],
                 exit_code=exit_code,
                 sdk=sdk_info,
+                sarif_base=sarif_base,
             )
 
         if not Path(board_path).exists():
@@ -1588,6 +1670,7 @@ def validate(
             # diagnostic-v1/SARIF documents read the ALP code, hint,
             # documentation URI and range off these.
             findings=result.findings,
+            sarif_base=sarif_base,
         )
     except typer.Exit:
         raise
@@ -1605,6 +1688,8 @@ def validate(
                 )
             ],
             exit_code=ExitCode.INTERNAL_FAILURE,
+            # Plain data by now -- see `cwd_base_uri_or_none`'s docstring.
+            sarif_base=sarif_base,
         )
 
 

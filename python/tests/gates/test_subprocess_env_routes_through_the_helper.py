@@ -201,7 +201,7 @@ Beyond rule 3's own wrapper-body check:
   name to `_TRUSTED_CALL_NAMES` without the corresponding body-verification
   test also being added, the gate would trust it unconditionally. This is a
   hand-maintained allowlist, the same shape (and the same limitation)
-  `test_shared_helpers_have_one_definition.py`'s `_OWNED_BY_SHAPES` already
+  `test_shared_helpers_have_one_definition.py`'s `_SHARED_HELPERS` already
   accepts in this repo.
 * **`os.spawnv`/`os.spawnve`/`os.posix_spawn`.** Not used anywhere under
   `python/tan/` today (this gate's own `test_no_os_level_spawn_bypasses_the_check`

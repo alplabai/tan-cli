@@ -22,6 +22,7 @@ import pytest
 
 from tan.model import analyze as analyze_mod
 from tan.model import check as check_mod
+from tan.model import perf as perf_mod
 from tan.model import perf_apply as perf_apply_mod
 from tan.model.adapters import Blob
 from tan.model.adapters.ethos_u import VelaFootprintRefused, _refuse_zero_sram_footprint
@@ -901,37 +902,44 @@ def _write_perf_point(meta: Path, *, sku: str = "E1M-FAKE", hw_rev: str = "r2",
                       accel_config: str = "ethos-u55-256",
                       sha256: str | None = None, toolchain: str = "vela",
                       version: str = "5.1.0", memory_mode: str = "Sram_Only",
-                      measured: dict | None = None,
-                      filename: str = "tiny-int8-aaaa@vela-5.1.0+r2+m55_hp+aaaaaaaaaaaa.json",
+                      perf: dict | None = None,
+                      filename: str = "aaaaaaaaaaaa.json",
                       **extra) -> Path:
-    """One published-shaped perf point at the path its own body claims
-    (alp-sdk `f724d3e4`'s stem: `...@<toolchain>-<version>+<hw_rev>+<core>+
-    <profile12>.json`). Nothing in tan parses that stem -- the body is the
-    truth -- so these filenames only ever have to be DISTINCT, which is exactly
-    the collision property those segments were added for."""
+    """One REAL-shaped perf point (`metadata/schemas/model-perf-v1.schema.json`
+    -- top-level `sku`/`hw_rev`, `model`/`target`/`vela`/`perf`/`capture`
+    blocks, NO `stance`/`measured_on`/`measured` -- tan-cli#1115) at the path
+    alp-sdk actually publishes to: `metadata/model_perf/<SKU>/<hash>.yaml`
+    (or, here, `.json` -- tan's own reader accepts both, see
+    `tan.model.perf`'s module docstring), exactly two segments below root.
+    `filename` only ever has to be DISTINCT across the points one test
+    writes -- this reader does not parse alp-sdk's own content-hash filename
+    convention back out of the path ("the path is an index, the body is the
+    truth", `tan.model.perf`'s own block comment) -- so a plain per-test
+    label is enough; it need not reproduce alp-sdk's real
+    `_model_perf_identity_hash()`."""
     doc = {
-        "stance": "bench-measured",
-        "measured_on": {"sku": sku, "hw_rev": hw_rev, "core": core,
-                        "backend": backend, "accel_config": accel_config},
-        "model": {"slug": "tiny-int8", "sha256": sha256 or _FIXTURE_SHA,
-                   "size_bytes": _FIXTURE.stat().st_size,
-                   "source": "tests/fixtures/models/tiny_int8.tflite"},
-        # `system_config`/`memory_mode` are REQUIRED on an `ethos_u` point by
-        # alp-sdk's own validator, so the fixture carries them: a flagless vela
-        # picks a DRAM-backed default and the arena figures then describe THAT
-        # profile rather than the module.
-        "toolchain": ({"name": toolchain, "version": version,
-                        "system_config": "Ethos_U55_High_End_Embedded",
-                        "memory_mode": memory_mode} if backend == "ethos_u"
-                       else {"name": toolchain, "version": version}),
-        "measured": measured if measured is not None else {
-            "npu_ops": 1, "cpu_ops": 0, "arena_bytes": 32, "req_sram_kib": 1,
-            "latency_ms_mean": 0.4, "latency_ms_p95": 0.5, "runs": 100},
+        "schema_version": 1,
+        "sku": sku, "hw_rev": hw_rev,
+        "model": {"name": "tiny-int8", "src_sha": sha256 or _FIXTURE_SHA,
+                   "format": "tflite"},
+        "target": {"backend": backend, "accel_config": accel_config, "core": core,
+                    "compiler_version": f"{toolchain} {version}"},
         "capture": {"date": "2026-08-16", "operator": "alpCaner",
-                     "reference": "alp-sdk-internal:bench/captures/tiny.log"},
+                     "bench_id": "alp-sdk-internal:bench/captures/tiny.log"},
+        "perf": perf if perf is not None else {
+            "arena_bytes": 32, "req_sram_kib": 1,
+            "latency_ms": {"mean": 0.4, "p50": 0.4, "p95": 0.5, "runs": 100}},
         **extra,
     }
-    d = meta / "model_perf" / sku / (accel_config or backend)
+    # `vela:` is REQUIRED on an `ethos_u` point by alp-sdk's own validator, so
+    # the fixture carries it there and nowhere else: a flagless vela picks a
+    # DRAM-backed default and the arena figures then describe THAT profile
+    # rather than the module; a `vela:` block on a non-ethos_u point is
+    # meaningless (alp-sdk's own semantic gate refuses it).
+    if backend == "ethos_u" and "vela" not in extra:
+        doc["vela"] = {"system_config": "Ethos_U55_High_End_Embedded",
+                        "memory_mode": memory_mode}
+    d = meta / "model_perf" / sku
     d.mkdir(parents=True, exist_ok=True)
     path = d / filename
     path.write_text(json.dumps(doc), encoding="utf-8")
@@ -964,13 +972,35 @@ def _check(meta: Path, *, exact: bool = False, hw_rev: str | None = None) -> Bac
                                  metadata_root=meta, exact=exact, hw_rev=hw_rev)[0]
 
 
+def test_a_matched_point_is_found_at_a_yaml_suffixed_filename_too(tmp_path):
+    """`tan.model.perf`'s `_PERF_POINT_GLOBS` accepts `.json` on the
+    production discovery path -- a documented asymmetry, since alp-sdk never
+    actually publishes `.json` (see that module's own comment on the
+    constant) -- which means most of THIS file's own tier-2 suite, defaulting
+    to `_write_perf_point`'s `.json` filename, exercises the `.json` branch
+    almost exclusively. This is the one case in this file that instead
+    proves the REAL `.yaml` production path end to end, through
+    `check_model_backends` rather than `tan.model.perf` in isolation
+    (`tests/model/test_perf.py::test_a_yaml_suffixed_point_is_discovered_
+    not_just_a_json_one` already proves it at the reader level alone)."""
+    _u55_tree(tmp_path)
+    _write_perf_point(tmp_path, filename="aaaaaaaaaaaaaaaa.yaml")
+    rep = _check(tmp_path)
+    assert rep.basis == "bench"
+
+
 def test_a_matched_perf_point_reports_bench_with_the_measured_figures(tmp_path):
-    """The whole commercial premise: no toolchain, no silicon, an exact answer.
+    """The whole commercial premise: no toolchain, no silicon, an exact answer
+    for SRAM/arena/latency.
 
     Nothing is monkeypatched here -- no vela, no compile, `exact=False` -- and
     the report still carries a measured arena, a measured resident SRAM and a
     measured latency, because Alp Lab already ran this exact model on this
-    exact module."""
+    exact module. `npu_placement_pct_real` stays `None` here (tan-cli#1115):
+    alp-sdk's real schema carries no bench-measured operator-placement split
+    for a lone bench point (no `--exact` run alongside it) to report one from
+    -- see `tan.model.perf_apply`'s module docstring, "A BENCH POINT CANNOT
+    CLAIM A COVERAGE VERDICT"."""
     _u55_tree(tmp_path)
     _write_perf_point(tmp_path)
     rep = _check(tmp_path)
@@ -979,7 +1009,7 @@ def test_a_matched_perf_point_reports_bench_with_the_measured_figures(tmp_path):
     assert (rep.arena_bytes, rep.req_sram_kib) == (32, 1)
     assert (rep.latency_ms_mean, rep.latency_ms_p95, rep.latency_runs) == (0.4, 0.5, 100)
     assert rep.perf_ref == "alp-sdk-internal:bench/captures/tiny.log"
-    assert rep.npu_placement_pct_real == 100.0
+    assert rep.npu_placement_pct_real is None       # no bench-measured placement; see above
     assert rep.compute_on_npu_pct_max is None      # MAC-weighted: never set at a placement basis
 
 
@@ -998,7 +1028,6 @@ def test_the_bench_note_is_one_line_and_traces_back_to_its_capture(tmp_path):
     # DRAM-backed profile is exactly measured and describes the wrong machine,
     # which is why alp-sdk's schema makes both required on an Ethos-U point.
     assert "(Ethos_U55_High_End_Embedded, Sram_Only)" in note
-    assert "1/1 operators on the NPU" in note
     assert "arena 32 bytes" in note and "1 KiB resident SRAM" in note
     assert "0.4 ms mean, 0.5 ms p95 over 100 runs" in note
     assert "Alp Lab" in note and "ALP Lab" not in note
@@ -1012,12 +1041,12 @@ def test_a_point_for_a_backend_with_no_memory_profile_says_nothing_about_one(tmp
     _write_soc(tmp_path, "fake:soc:multi", [{"type": "drp-ai3", "subtype": "drp",
                                               "mac_per_cycle": 1}])
     _write_perf_point(tmp_path, backend="drpai", accel_config="",
-                      toolchain="translator", version="1.12",
-                      filename="tiny-int8-aaaa@translator-1.12+r2+a55_cluster+44136fa355b3.json")
+                      toolchain="drp-ai_tvm", version="1.12",
+                      filename="tiny-int8-aaaa@drp-ai_tvm-1.12+r2+a55_cluster+44136fa355b3.json")
     rep = check_model_backends(backends=["drpai"], sku="E1M-FAKE", source=_FIXTURE,
                                 metadata_root=tmp_path, exact=False)[0]
     assert rep.basis == "bench"
-    assert "with translator 1.12 --" in rep.notes[0]
+    assert "with drp-ai_tvm 1.12 --" in rep.notes[0]
     assert "()" not in rep.notes[0]
 
 
@@ -1030,57 +1059,83 @@ def test_a_drpai_points_stray_ethos_u_profile_fields_are_never_printed(tmp_path)
     of this point's identity. Measured (the review's own repro): a drpai
     point carrying a stray Ethos-U85 profile pair printed
     "(Ethos_U85_SYS_DRAM_Mid, Dedicated_Sram_384KB)" verbatim into the
-    customer-facing note. `_write_perf_point` cannot express this shape
-    directly (its `toolchain` dict is hardcoded per-backend), so this
-    round-trips the file through JSON the same way
+    customer-facing note. `_write_perf_point` never writes a `vela:` block
+    for a non-`ethos_u` point (alp-sdk's own validator refuses one there), so
+    this round-trips the file through JSON the same way
     `test_a_foreign_multiline_capture_citation_cannot_break_the_one_line_
-    note` does below."""
+    note` does below to construct the shape a hand-edited or pre-validation
+    document could still carry."""
     _write_som(tmp_path, "E1M-FAKE", "fake:soc:multi", default_hw_rev="r2")
     _write_soc(tmp_path, "fake:soc:multi", [{"type": "drp-ai3", "subtype": "drp",
                                               "mac_per_cycle": 1}])
     path = _write_perf_point(tmp_path, backend="drpai", accel_config="",
-                             toolchain="translator", version="1.12",
-                             filename="tiny-int8-aaaa@translator-1.12+r2+m55_hp+cccccccccccc.json")
+                             toolchain="drp-ai_tvm", version="1.12",
+                             filename="tiny-int8-aaaa@drp-ai_tvm-1.12+r2+m55_hp+cccccccccccc.json")
     doc = json.loads(path.read_text(encoding="utf-8"))
-    doc["toolchain"]["system_config"] = "Ethos_U85_SYS_DRAM_Mid"
-    doc["toolchain"]["memory_mode"] = "Dedicated_Sram_384KB"
+    doc["vela"] = {"system_config": "Ethos_U85_SYS_DRAM_Mid",
+                    "memory_mode": "Dedicated_Sram_384KB"}
     path.write_text(json.dumps(doc), encoding="utf-8")
     rep = check_model_backends(backends=["drpai"], sku="E1M-FAKE", source=_FIXTURE,
                                 metadata_root=tmp_path, exact=False)[0]
     assert rep.basis == "bench"
     assert "Ethos_U85_SYS_DRAM_Mid" not in rep.notes[0]
     assert "Dedicated_Sram_384KB" not in rep.notes[0]
-    assert "with translator 1.12 --" in rep.notes[0]      # identity still ends cleanly
+    assert "with drp-ai_tvm 1.12 --" in rep.notes[0]      # identity still ends cleanly
     assert "()" not in rep.notes[0]
 
 
 def test_a_foreign_multiline_capture_citation_cannot_break_the_one_line_note(tmp_path):
-    # `capture.reference` comes out of a document in ANOTHER repository that
+    # `capture.bench_id` comes out of a document in ANOTHER repository that
     # this reader deliberately does not schema-validate -- a note is one line
     # in the text report AND the JSON envelope by contract either way.
     _u55_tree(tmp_path)
     _write_perf_point(tmp_path)
     path = next((tmp_path / "model_perf").rglob("*.json"))
     doc = json.loads(path.read_text(encoding="utf-8"))
-    doc["capture"]["reference"] = "alp-sdk-internal:bench/\n  captures/\ttiny.log"
+    doc["capture"]["bench_id"] = "alp-sdk-internal:bench/\n  captures/\ttiny.log"
     path.write_text(json.dumps(doc), encoding="utf-8")
     rep = _check(tmp_path)
     assert rep.basis == "bench"
     assert "\n" not in rep.notes[0] and "\t" not in rep.notes[0]
 
 
-def test_a_partial_bench_point_keeps_the_static_per_op_verdicts(tmp_path):
-    # Same rule the compiled path already follows: a real partial result must
-    # erase neither the static verdicts nor the uncosted-op caveat.
+def test_a_lone_bench_point_withholds_coverage_rather_than_borrowing_the_static_screens(
+        tmp_path):
+    """RETIRED PREMISE, tan-cli#1115 PR review BLOCKER 1: an earlier version of
+    this test (`..._carries_the_static_screens_own_coverage_and_ops_
+    unchanged`, itself already a tan-cli#1115 replacement for `test_a_
+    partial_bench_point_keeps_the_static_per_op_verdicts`) asserted that a
+    LONE bench point's rebased report carries `npu_coverage`/`ops`/
+    `uncosted_cpu_op_count`/`npu_placement_pct_real` UNCHANGED from the
+    static screen underneath. That is wrong: `docs/model-check-static-
+    screen.md`'s own vocabulary calls the static screen's `partial`/
+    `full-eligible` explicitly "Not a placement claim", so carrying one
+    forward under `basis: "bench", confidence: "certain"` launders a
+    name-level estimate into something that reads as measured -- the exact
+    failure `compute_on_npu_pct_max` was ALREADY being forced to `None` to
+    avoid, just not (yet) applied to `npu_coverage` too.
+
+    What actually happens: a LONE bench point (no `--exact` run corroborating
+    it) has no placement data of its own -- alp-sdk's real schema carries
+    none, ever (`tan.model.perf`'s "DEAD FIELDS") -- so the coverage word is
+    WITHHELD to `"undetermined"`, `ops` to `[]`, `uncosted_cpu_op_count` to
+    `0`, `npu_placement_pct_real` to `None`, regardless of what the static
+    screen said underneath. `arena_bytes`/`req_sram_kib` still move to the
+    point's own measured figures, and `confidence` stays `"certain"` for
+    those -- the figures ARE certain; the coverage word is not."""
     pytest.importorskip("tflite", reason=_MODEL_IO_SKIP_REASON)
     _u55_tree(tmp_path)
-    _write_perf_point(tmp_path, measured={"npu_ops": 1, "cpu_ops": 1,
-                                           "arena_bytes": 64, "req_sram_kib": 2})
+    screened = _check(tmp_path)
+    assert screened.npu_coverage in ("full-eligible", "partial")   # the estimate this must NOT leak
+    _write_perf_point(tmp_path, perf={"arena_bytes": 64, "req_sram_kib": 2})
     rep = _check(tmp_path)
     assert rep.basis == "bench"
-    assert rep.npu_coverage == "partial"
-    assert rep.npu_placement_pct_real == 50.0
-    assert rep.ops and rep.ops[0].op == "FULLY_CONNECTED"
+    assert rep.confidence == "certain"
+    assert rep.npu_coverage == "undetermined"        # withheld, not the static screen's estimate
+    assert rep.npu_placement_pct_real is None
+    assert rep.uncosted_cpu_op_count == 0
+    assert rep.ops == []
+    assert (rep.arena_bytes, rep.req_sram_kib) == (64, 2)      # the point's own figures -- still certain
 
 
 # ---------------------------------------------------------------------------
@@ -1107,12 +1162,18 @@ def test_a_point_for_another_identity_leaves_the_report_exactly_as_it_was(
     assert not any("bench" in n.lower() for n in after.notes)
 
 
-def test_a_fixture_bannered_point_never_reaches_the_report(tmp_path):
-    # Its `measured` figures are PLACEHOLDERS. Reporting one at `confidence:
-    # "certain"` is the single worst output this tier can produce.
+def test_a_fixture_marked_path_never_reaches_the_report(tmp_path):
+    """The fixture rule is PATH-based, adopted verbatim from alp-sdk's own
+    `_MODEL_PERF_FIXTURE_MARKER` (tan-cli#1115) -- not a document key the way
+    a pre-reconciliation version of this test wrote one (`_fixture: "..."` in
+    the body, which the OLD reader's own `_FIXTURE_KEY` check refused on; the
+    real reader refuses on the PATH alone and would have accepted that body
+    outright). Its figures could be exactly measured and it would still never
+    reach the report -- reporting a fixture at `confidence: "certain"` is the
+    single worst output this tier can produce."""
     _u55_tree(tmp_path)
     baseline = _check(tmp_path)
-    _write_perf_point(tmp_path, _fixture="SYNTHETIC TEST FIXTURE -- NOT A MEASUREMENT")
+    _write_perf_point(tmp_path, filename="aaaaaaaaaaaa._fixture.json")
     assert _check(tmp_path) == baseline
 
 
@@ -1124,14 +1185,38 @@ def test_two_points_for_one_identity_leave_the_report_exactly_as_it_was(tmp_path
     assert _check(tmp_path) == baseline
 
 
-def test_a_point_that_measured_no_placement_leaves_the_report_exactly_as_it_was(tmp_path):
-    """A point with latency but no operator placement cannot answer what
-    `npu_coverage` asks. Re-basing on it would have to invent a coverage or
-    downgrade a real static verdict to `undetermined` -- both worse than the
-    report the customer already had."""
+def test_a_point_with_latency_but_no_sram_or_arena_still_applies(tmp_path):
+    """RETIRED premise, tan-cli#1115: the pre-reconciliation reader treated
+    "no operator placement" as a SPECIAL degenerate case that must leave the
+    report untouched. Under alp-sdk's real schema NO bench point ever carries
+    a placement (see `tan.model.perf`'s module docstring, "DEAD FIELDS"), so
+    that is no longer a special case at all -- it is the ONLY case, and
+    `apply_perf_point` no longer treats placement absence as a reason to
+    refuse. What DOES still make a point refuse outright is carrying no
+    figure `apply_perf_point` could contribute at all -- covered separately
+    by `test_a_point_with_nothing_measured_at_all_leaves_the_report_exactly_
+    as_it_was` below. A point with ONLY latency (no `arena_bytes`/
+    `req_sram_kib`, both schema-optional at the reader level even though
+    alp-sdk's own schema requires `perf.arena_bytes`/`req_sram_kib`
+    unconditionally -- this reader stays defensive rather than re-implementing
+    that requirement) still applies, contributing exactly the figure it has."""
+    _u55_tree(tmp_path)
+    _write_perf_point(tmp_path, perf={"latency_ms": {"mean": 0.4, "p50": 0.4,
+                                                       "p95": 0.5, "runs": 100}})
+    rep = _check(tmp_path)
+    assert rep.basis == "bench"
+    assert (rep.arena_bytes, rep.req_sram_kib) == (None, None)
+    assert (rep.latency_ms_mean, rep.latency_ms_p95, rep.latency_runs) == (0.4, 0.5, 100)
+
+
+def test_a_point_with_nothing_measured_at_all_leaves_the_report_exactly_as_it_was(tmp_path):
+    """A point matching on identity but carrying NONE of `arena_bytes`/
+    `req_sram_kib`/`latency_ms.mean` has nothing for `apply_perf_point` to
+    contribute -- re-basing it to `basis: "bench"` anyway would claim a
+    measurement said something it didn't."""
     _u55_tree(tmp_path)
     baseline = _check(tmp_path)
-    _write_perf_point(tmp_path, measured={"latency_ms_mean": 0.4, "runs": 100})
+    _write_perf_point(tmp_path, perf={})
     assert _check(tmp_path) == baseline
 
 
@@ -1509,11 +1594,11 @@ def test_two_profiles_are_separated_by_the_profile_this_part_declares(tmp_path):
     `tan model build` would compile this part under, not the one that sorted
     first."""
     _u55_tree(tmp_path, memory_mode="Sram_Only")
-    _write_perf_point(tmp_path, memory_mode="Sram_Only", measured={
-        "npu_ops": 1, "cpu_ops": 0, "arena_bytes": 32, "req_sram_kib": 1},
+    _write_perf_point(tmp_path, memory_mode="Sram_Only", perf={
+        "arena_bytes": 32, "req_sram_kib": 1},
         filename="a@vela-5.1.0+r2+m55_hp+aaaaaaaaaaaa.json")
-    _write_perf_point(tmp_path, memory_mode="Dedicated_Sram_384KB", measured={
-        "npu_ops": 1, "cpu_ops": 0, "arena_bytes": 999999, "req_sram_kib": 0},
+    _write_perf_point(tmp_path, memory_mode="Dedicated_Sram_384KB", perf={
+        "arena_bytes": 999999, "req_sram_kib": 0},
         filename="b@vela-5.1.0+r2+m55_hp+bbbbbbbbbbbb.json")
     rep = _check(tmp_path)
     assert rep.basis == "bench"
@@ -1573,6 +1658,65 @@ def test_a_backend_with_no_named_toolchain_is_never_asked_for_a_point(tmp_path):
     assert set(perf_apply_mod._PERF_TOOLCHAIN) == {"ethos_u", "drpai", "deepx_dxm1"}
 
 
+#: The REAL `target.compiler_version` strings alp-sdk's three compile
+#: adapters actually emit -- verbatim (version-substituted) from their own
+#: format templates, measured directly against a local alp-sdk checkout for
+#: tan-cli#1115 PR review BLOCKER 4:
+#:   `scripts/alp_model/adapters/ethos_u.py:21-24` `_vela_version()`
+#:     `f"vela {version('ethos-u-vela')}"`             -> "vela 4.1.0"
+#:   `scripts/alp_model/adapters/drpai.py:96-110` `_compiler_version()`
+#:     `f"drp-ai_tvm {m.group(0)}"`                     -> "drp-ai_tvm 3.0.1"
+#:   `scripts/alp_model/adapters/deepx.py:38-45` `_dxcom_version()`
+#:     `f"DX-COM {m.group(1)}"`                         -> "DX-COM 2.3.0"
+_REAL_COMPILER_VERSIONS = {
+    "ethos_u": "vela 4.1.0",
+    "drpai": "drp-ai_tvm 3.0.1",
+    "deepx_dxm1": "DX-COM 2.3.0",
+}
+
+
+def test_perf_toolchain_matches_the_real_producer_strings(tmp_path):
+    """tan-cli#1115 PR review BLOCKER 4 + MAJOR: `_PERF_TOOLCHAIN`'s values
+    used to be `translator`/`dxcom` -- the op-support-TABLE filename
+    vocabulary (`npu_ops/drpai/onnx-i8@translator-1.12.json`) and an
+    unverified guess, respectively, neither of which is the string
+    `target.compiler_version` -- and therefore `find_perf_points`' own
+    `toolchain` query -- actually carries for `drpai`/`deepx_dxm1`. A
+    published point for either backend would have been found by path/SKU/
+    hw_rev/model matching and then silently discarded on the toolchain-name
+    check alone: the issue's own failure mode (a reader that passes
+    structurally without understanding the real document) one level down.
+
+    Pinned against the CITED, real literal format strings above rather than
+    re-invented ones -- `test_check.py`'s own `_write_perf_point` cannot
+    stand in for this proof, because it fabricates `f"{toolchain} {version}"`
+    from `perf_apply_mod._PERF_TOOLCHAIN`'s own values and would therefore
+    agree with any (even a wrong) dict by construction."""
+    for backend, real_compiler_version in _REAL_COMPILER_VERSIONS.items():
+        configured = perf_apply_mod._PERF_TOOLCHAIN[backend]
+        assert perf_mod._toolchain_name(real_compiler_version).casefold() == configured.casefold(), (
+            f"{backend}: _PERF_TOOLCHAIN[{backend!r}] = {configured!r} does not "
+            f"match the real producer string {real_compiler_version!r}"
+        )
+    # The regression this closes, made concrete: the OLD values matched
+    # NEITHER real drpai/deepx_dxm1 string.
+    assert perf_mod._toolchain_name(_REAL_COMPILER_VERSIONS["drpai"]) != "translator"
+    assert perf_mod._toolchain_name(_REAL_COMPILER_VERSIONS["deepx_dxm1"]).casefold() != "dxcom"
+
+    # End-to-end proof through the production path: a real drpai point,
+    # keyed exactly the way `drpai.py::_compiler_version()` would write it,
+    # is now FOUND -- it was not, before this fix.
+    _write_som(tmp_path, "E1M-FAKE", "fake:soc:multi", default_hw_rev="r2")
+    _write_soc(tmp_path, "fake:soc:multi", [{"type": "drp-ai3", "subtype": "drp",
+                                              "mac_per_cycle": 1}])
+    _write_perf_point(tmp_path, backend="drpai", accel_config="",
+                      toolchain="drp-ai_tvm", version="3.0.1",
+                      filename="tiny-int8-aaaa@drp-ai_tvm-3.0.1+r2+a55_cluster+deadbeefcafe.json")
+    rep = check_model_backends(backends=["drpai"], sku="E1M-FAKE", source=_FIXTURE,
+                                metadata_root=tmp_path, exact=False)[0]
+    assert rep.basis == "bench"
+
+
 # ---------------------------------------------------------------------------
 # DECISION 1: a perf point vs the customer's OWN `--exact` compile.
 # ---------------------------------------------------------------------------
@@ -1621,8 +1765,6 @@ def test_an_agreeing_exact_compile_lets_the_bench_point_win_and_says_so(tmp_path
 
 
 @pytest.mark.parametrize("blob_kwargs,expected_diff", [
-    pytest.param(dict(arena=32, sram=1, npu=0, cpu=1),
-                 "placement (bench fits, local compile cpu-only)", id="placement"),
     pytest.param(dict(arena=99999, sram=1, npu=1, cpu=0),
                  "arena (bench 32 bytes, local compile 99999 bytes)", id="arena"),
     pytest.param(dict(arena=32, sram=307, npu=1, cpu=0),
@@ -1632,12 +1774,14 @@ def test_a_disagreeing_exact_compile_wins_over_the_bench_point(
         tmp_path, monkeypatch, blob_kwargs, expected_diff):
     """Decision 1, disagreement half -- and what "disagrees" means concretely.
 
-    Defined on the three figures BOTH sides really produce: the placement
-    verdict, the tensor arena, and the resident SRAM. When any of them differ,
-    the customer's own compile is what gets reported: their vela profile may
-    not be ours, and the number they can act on is the one their machine
-    produced. Ours is still NAMED in a note, so nothing is hidden and the
-    disagreement is visible rather than silently resolved."""
+    Defined on the two figures BOTH sides really produce: the tensor arena
+    and the resident SRAM (tan-cli#1115 dropped the placement leg of this --
+    see `test_agreeing_arena_and_sram_win_the_point_even_when_placement_
+    differs` below for why). When either differs, the customer's own compile
+    is what gets reported: their vela profile may not be ours, and the
+    number they can act on is the one their machine produced. Ours is still
+    NAMED in a note, so nothing is hidden and the disagreement is visible
+    rather than silently resolved."""
     _u55_tree(tmp_path)
     _write_perf_point(tmp_path)
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
@@ -1664,18 +1808,82 @@ def test_a_disagreeing_exact_compile_wins_over_the_bench_point(
     assert rep.req_sram_kib == blob_kwargs["sram"]
 
 
-def test_a_figure_only_one_side_reported_is_never_a_disagreement(tmp_path, monkeypatch):
-    # Absence is not evidence here any more than anywhere else in this tier:
-    # a point that omitted `req_sram_kib` does not disagree with a compile
-    # that reported one.
+def test_agreeing_arena_and_sram_win_the_point_even_when_placement_differs(tmp_path, monkeypatch):
+    """RETIRED premise, tan-cli#1115: a pre-reconciliation version of this
+    suite treated a differing PLACEMENT verdict (bench `"fits"` vs a local
+    compile's real `"cpu-only"`) as its own disagreement, sourced from a
+    fictional `measured.npu_ops`/`cpu_ops` pair alp-sdk's real schema has
+    never carried (see `tan.model.perf_apply`'s module docstring, "A BENCH
+    POINT CANNOT CLAIM A COVERAGE VERDICT") -- there is nothing left for a
+    bench point to have "said" about placement, so nothing is left to
+    disagree with. `_perf_disagreements` compares only arena/SRAM now: when
+    BOTH agree, the bench point wins (DECISION 1's agreement path) even
+    though the local compile's OWN placement was `"cpu-only"`, and the
+    rebased report carries that real, `--exact`-measured coverage forward
+    unchanged rather than the point silently overriding it."""
     _u55_tree(tmp_path)
-    _write_perf_point(tmp_path, measured={"npu_ops": 1, "cpu_ops": 0, "arena_bytes": 32})
+    _write_perf_point(tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile",
+                        _fake_blob_compile(arena=32, sram=1, npu=0, cpu=1))
+    rep = _check(tmp_path, exact=True)
+    assert rep.basis == "bench"                      # the point wins: arena/SRAM agree
+    assert rep.npu_coverage == "cpu-only"             # ... but the real compiled placement survives
+    assert "This host's own compile agrees with it." in rep.notes[0]
+
+
+def test_a_figure_only_one_side_reported_is_never_a_disagreement(tmp_path, monkeypatch):
+    """Absence is not evidence here any more than anywhere else in this tier:
+    a point that omitted `req_sram_kib` does not disagree with a compile that
+    reported one -- the agreement path taken, not the disagreement one.
+
+    CORRECTED, tan-cli#1115 PR review BLOCKER 3: this test used to assert
+    `rep.req_sram_kib is None` here -- the point supplied none, and the old
+    unconditional overwrite in `_perf_point_report` BLANKED the real
+    compile's own measured `307` with it. That is the exact bug the blocker
+    reproduced (a matched point erasing a real `--exact` compile's own
+    figures) reproduced live in-suite rather than only in the review's own
+    repro. `_merge_figure`'s per-field, most-specific-wins rule means the
+    compile's own real `307` now SURVIVES a point that said nothing about
+    SRAM -- "nothing was invented" now also means "and nothing real was
+    erased either"."""
+    _u55_tree(tmp_path)
+    _write_perf_point(tmp_path, perf={"arena_bytes": 32})
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
     monkeypatch.setattr(check_mod.VelaAdapter, "compile",
                         _fake_blob_compile(arena=32, sram=307, npu=1, cpu=0))
     rep = _check(tmp_path, exact=True)
     assert rep.basis == "bench"                     # agreement, not disagreement
-    assert rep.req_sram_kib is None                 # ... and nothing was invented
+    assert rep.req_sram_kib == 307                  # the compile's own real figure SURVIVES
+
+
+def test_a_latency_only_point_does_not_blank_a_real_compiles_arena_and_sram(tmp_path, monkeypatch):
+    """tan-cli#1115 PR review BLOCKER 3, reproduced at the exact figures the
+    review measured: a matched point recording ONLY `latency_ms` (no
+    `arena_bytes`/`req_sram_kib` at all -- schema-legal at the reader level,
+    see `tan.model.perf::test_a_missing_or_malformed_perf_block_still_reads_
+    the_identity`) used to erase a real `--exact` compile's own
+    `arenaBytes=123456`/`reqSramKib=121` to `None`/`None` under `basis:
+    "bench", confidence: "certain"` -- the customer's own measured numbers
+    replaced by "not measured", directly contradicting `apply_perf_point`'s
+    own promise that an under-informative point "cannot degrade a report by
+    even a note". `_merge_figure` fixes this: a figure the point does not
+    carry falls back to whatever the pre-rebase report already had, so the
+    compile's real arena/SRAM survive, and the point's own latency (which the
+    compile has none of) is the only thing that actually moves."""
+    _u55_tree(tmp_path)
+    _write_perf_point(tmp_path, perf={
+        "latency_ms": {"mean": 0.7, "p50": 0.7, "p95": 0.9, "runs": 50}})
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile",
+                        _fake_blob_compile(arena=123456, sram=121, npu=1, cpu=0))
+    rep = _check(tmp_path, exact=True)
+    assert rep.basis == "bench"                      # agreement: the point has no arena/SRAM to disagree with
+    assert rep.confidence == "certain"
+    assert (rep.arena_bytes, rep.req_sram_kib) == (123456, 121)   # the compile's own figures SURVIVE
+    assert rep.latency_ms_mean == 0.7                              # the point's own, only new figure
+    assert rep.latency_ms_p95 == 0.9
+    assert rep.latency_runs == 50
 
 
 def test_a_degraded_exact_run_still_gets_the_bench_point(tmp_path, monkeypatch):
@@ -1714,8 +1922,8 @@ def test_a_license_gated_note_survives_a_bench_match_without_its_false_tail(tmp_
     onnx_source.write_bytes(b"not-a-real-onnx-file")
     sha = hashlib.sha256(onnx_source.read_bytes()).hexdigest()
     _write_perf_point(tmp_path, backend="deepx_dxm1", accel_config="",
-                      toolchain="dxcom", version="2.3.0", sha256=sha,
-                      filename="model-aaaa@dxcom-2.3.0+r2+m55_hp+eeeeeeeeeeee.json")
+                      toolchain="DX-COM", version="2.3.0", sha256=sha,
+                      filename="model-aaaa@DX-COM-2.3.0+r2+m55_hp+eeeeeeeeeeee.json")
     rep = check_model_backends(backends=["deepx_dxm1"], sku="E1M-FAKE", source=onnx_source,
                                metadata_root=tmp_path, exact=True)[0]
     assert rep.basis == "bench"
@@ -1836,10 +2044,20 @@ def test_the_static_screen_engine_cannot_produce_the_word_at_all():
         assert analyze_mod._coverage_label(verdicts) != "fits"
 
 
-def test_fits_may_appear_at_basis_bench_and_may_not_at_basis_static_screen(tmp_path):
-    """The end-to-end pair, through the production path both times: the SAME
-    tree, the SAME model, and the only thing that differs is whether a point
-    for this exact identity exists."""
+def test_fits_may_appear_at_basis_bench_only_via_a_corroborating_exact_compile(
+        tmp_path, monkeypatch):
+    """RETIRED PREMISE, tan-cli#1115: a pre-reconciliation version of this
+    test let a LONE bench point independently claim `npu_coverage: "fits"`,
+    sourced from a fictional `measured.npu_ops`/`cpu_ops` pair alp-sdk's real
+    schema has never carried (see `tan.model.perf_apply`'s module docstring,
+    "A BENCH POINT CANNOT CLAIM A COVERAGE VERDICT"). A lone bench point
+    (no `--exact` compile alongside it) now INHERITS the static screen's own
+    coverage, and the static screen can never itself report `"fits"`
+    (`tan.model.analyze`'s own module docstring: "no backend can deliver
+    `fits` statically") -- so `"fits"` reaches `basis: "bench"` ONLY the way
+    DECISION 1's agreement path produces it: a real `--exact` compile
+    independently measures `"fits"`, and a matching bench point corroborates
+    it on arena/SRAM."""
     _u55_tree(tmp_path)
     screened = _check(tmp_path)
     assert screened.basis == "static-screen"
@@ -1847,11 +2065,18 @@ def test_fits_may_appear_at_basis_bench_and_may_not_at_basis_static_screen(tmp_p
     assert not any("fits" in n.lower() for n in screened.notes)
 
     _write_perf_point(tmp_path)
-    benched = _check(tmp_path)
-    assert benched.basis == "bench"
-    assert benched.npu_coverage == "fits"           # permitted here, and only here
-    assert benched.ops == []                         # nothing fell back; no verdict to add
-    assert benched.uncosted_cpu_op_count == 0
+    lone = _check(tmp_path)
+    assert lone.basis == "bench"
+    assert lone.npu_coverage != "fits"        # inherited from the static screen -- never "fits" alone
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile",
+                        _fake_blob_compile(arena=32, sram=1, npu=1, cpu=0))
+    corroborated = _check(tmp_path, exact=True)
+    assert corroborated.basis == "bench"
+    assert corroborated.npu_coverage == "fits"       # permitted here: a REAL compile said so, corroborated
+    assert corroborated.ops == []
+    assert corroborated.uncosted_cpu_op_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1965,7 +2190,6 @@ def test_real_imx93_through_tan_model_check_refuses_a_core_it_does_not_have(tmp_
     baseline = _screen()
     _write_perf_point(tmp_path, sku="E1M-NX9101", hw_rev="r1", core="m55_hp",
                       backend="ethos_u", accel_config="ethos-u65-256",
-                      measured={"npu_ops": 1, "cpu_ops": 0, "arena_bytes": 999999,
-                                "req_sram_kib": 777},
+                      perf={"arena_bytes": 999999, "req_sram_kib": 777},
                       filename="tiny-int8-aaaa@vela-5.1.0+r1+m55_hp+aaaaaaaaaaaa.json")
     assert _screen() == baseline                  # refused, not the bogus 999999/777

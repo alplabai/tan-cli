@@ -283,6 +283,13 @@ corresponding `west alp-*` commands: `migrate` requires `--check`,
 `--preview`, or `--apply`; `quality` requires `--profile`. The other
 commands run directly in `tan`.
 
+`tan model check` statically screens a declared model's NPU eligibility with
+no NPU toolchain installed. It reports `npu-eligible` | `cpu-certain` |
+`undetermined` -- deliberately never `fits`, which is reserved for a real
+compile or a bench measurement. For what those words do and do not claim, and
+for the MAC-weighted `computeOnNpuPctMax` figure, see
+[`docs/model-check-static-screen.md`](docs/model-check-static-screen.md).
+
 For Alif Ensemble MRAM flashing with SETOOLS, see
 [`docs/setools.md`](docs/setools.md).
 
@@ -501,6 +508,7 @@ survives as the frozen captures under `python/tests/fixtures/oracle_captures/`.
 ## More documentation
 
 - [Release assets and verification](docs/release-contract.md)
+- [`tan model check` and the static NPU-eligibility screen](docs/model-check-static-screen.md)
 - [SETOOLS setup](docs/setools.md)
 - [Development roadmap](docs/ROADMAP.md)
 - [Changelog](CHANGELOG.md)

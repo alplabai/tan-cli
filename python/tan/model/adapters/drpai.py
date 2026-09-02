@@ -98,12 +98,19 @@ def _compiler_version(tvm_home: Path) -> str:
     """Best-effort toolchain version from the DRP-AI TVM checkout.
 
     Reads the repo's setup version file when present; falls back to a plain
-    'drp-ai_tvm' tag. Never raises -- version reporting is non-fatal."""
+    'drp-ai_tvm' tag. Never raises -- version reporting is non-fatal.
+
+    `UnicodeDecodeError` is caught alongside `OSError` (tan-cli#1116,
+    measured escaping before this fix): it is a `ValueError`, not an
+    `OSError`, so a non-UTF-8 version file used to raise raw past this
+    function's own "Never raises" contract instead of falling through to
+    the next candidate the same way a missing or unreadable one already
+    does."""
     for rel in ("setup/version", "version", "VERSION"):
         vf = tvm_home / rel
         try:
             txt = vf.read_text(encoding="utf-8").strip()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         m = re.search(r"\d+\.\d+(?:\.\d+)?", txt)
         if m:

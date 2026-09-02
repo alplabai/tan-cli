@@ -38,10 +38,12 @@ import os
 import re
 import shlex
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from tan.core import artifact_provenance
+from tan.core.artifact_provenance import ArtifactProvenance
 from tan.core.timestamp import generated_at_iso
 
 # ---------------------------------------------------------------------------
@@ -393,6 +395,14 @@ class BootstrapFacts:
     #: `normalize_linux_install`/`_fallback_install_commands`). Use
     #: `install_for_host`, never this field directly.
     install: dict[str, dict[str, str] | dict[str, dict[str, str]]]
+    #: `artifactProvenance`, tool -> tier/licence/upstream page/size, already
+    #: normalised (tan-cli#1066, alp-sdk#1574). TOP-LEVEL in the manifest, not
+    #: under `prerequisites`, even though its keys are the prerequisite tool
+    #: vocabulary. EMPTY for an SDK predating alp-sdk v0.16.0, and empty for a
+    #: malformed block -- never an error: this is advisory metadata for a
+    #: consumer's consent screen, and refusing to bootstrap over it would trade
+    #: a working host for a display fact. See `tan.core.artifact_provenance`.
+    artifact_provenance: dict[str, ArtifactProvenance]
     west_pip_spec: str
     west_init_args: tuple[str, ...]
     west_update_args: tuple[str, ...]
@@ -658,6 +668,11 @@ def parse_bootstrap_manifest(text: str) -> BootstrapFacts:
         python_min_version=python_min_version,
         zephyr_python_min_version=zephyr_python_min_version,
         install=_resolve_install_commands(prerequisites.get("install")),
+        # Read off `doc`, not `prerequisites`: alp-sdk#1574 put the block at
+        # the manifest's TOP level. Never `_require`d -- see the field comment.
+        artifact_provenance=artifact_provenance.parse_table(
+            doc.get(artifact_provenance.BLOCK_KEY)
+        ),
         west_pip_spec=_require(west, "pipSpec", str, "west"),
         west_init_args=_str_list(_require(west, "initArgs", list, "west"), "west.initArgs"),
         west_update_args=_str_list(
@@ -911,6 +926,11 @@ def fallback_facts(min_python: tuple[int, int]) -> BootstrapFacts:
         # not be conflated here either.
         zephyr_python_min_version=(3, 12),
         install=_fallback_install_commands(),
+        # No fallback provenance, deliberately: an SDK with no manifest at all
+        # publishes no licensing claim, and transcribing one here would be tan
+        # ASSERTING a licence nobody handed it -- the one thing the `null`
+        # spelling exists to avoid (tan-cli#1066).
+        artifact_provenance={},
         west_pip_spec=WEST_REQUIREMENT,
         west_init_args=("init", "-l"),
         west_update_args=("update", "--narrow", "-o=--depth=1"),
@@ -1041,13 +1061,34 @@ class MissingPrerequisite:
     command for: a consumer renders this field as something it can RUN, and
     prose in a runnable-command field is a button that fails. The generic advice
     belongs in the printed line (`hint_line`) only.
+
+    `provenance` (tan-cli#1066) is the same manifest's `artifactProvenance`
+    entry for this tool: the tier, licence, upstream page and size alp-sdk
+    v0.16.0 publishes (alplabai/alp-sdk#1574). It rides on the ENTRY rather
+    than as a sibling map on `data` because the join is by `tool`, an identity
+    the entry already carries -- a consumer must not have to re-join two
+    arrays, and a consumer that resolved its own SDK checkout must not join
+    tan's commands against a DIFFERENT checkout's provenance (a real risk:
+    `tan bootstrap` relocates the alp-sdk checkout to
+    `<parent>/alp-workspace/<name>`). Defaults to `UNKNOWN` -- all four fields
+    `null` -- for every caller with no table to hand, which is exactly what a
+    tool with no entry reports; see `tan.core.artifact_provenance`.
     """
 
     tool: str
     command: str | None
+    provenance: ArtifactProvenance = artifact_provenance.UNKNOWN
 
-    def as_dict(self) -> dict[str, str | None]:
-        return {"tool": self.tool, "command": self.command}
+    def as_dict(self) -> dict[str, str | int | None]:
+        """`{tool, command}` plus provenance's four keys, ALWAYS all six: the
+        provenance keys are never omitted and never defaulted, so
+        `contract/doctor-data-keys.json` can declare one item shape for every
+        SDK (an older one simply reports `null`s)."""
+        return {
+            "tool": self.tool,
+            "command": self.command,
+            **self.provenance.as_dict(),
+        }
 
 
 @dataclass(frozen=True)
@@ -1207,16 +1248,37 @@ def confirm_missing(
     out: list[MissingPrerequisite] = []
     for m in missing:
         if m.command is not None and not _confirmed(m.command, available):
-            out.append(MissingPrerequisite(m.tool, None))
+            # `replace`, not `MissingPrerequisite(m.tool, None)`: this guard
+            # nulls the COMMAND and nothing else. Rebuilding the entry from two
+            # of its fields silently dropped the third the moment `provenance`
+            # existed (tan-cli#1066) -- so an unconfirmable installer would
+            # have cost the customer the licence/tier the consent screen needs
+            # to render, on exactly the hosts (a Fedora box reading alp-sdk's
+            # apt table) where this guard fires.
+            out.append(replace(m, command=None))
         else:
             out.append(m)
     return tuple(out)
 
 
 def _structured_missing(
-    missing: list[str], install: dict[str, str]
+    missing: list[str],
+    install: dict[str, str],
+    provenance: dict[str, ArtifactProvenance] | None = None,
 ) -> tuple[MissingPrerequisite, ...]:
-    return tuple(MissingPrerequisite(tool, install.get(tool)) for tool in missing)
+    """The `{tool, command, <provenance>}` entries for a refusal.
+
+    `provenance` defaults to `None` -- "no table", indistinguishable
+    downstream from "no entry for this tool" (`artifact_provenance.for_tool`)
+    -- so a caller that has not resolved a manifest (and every pre-tan-cli#1066
+    unit test of the refusal builders) keeps reporting the same `null`s an SDK
+    predating `artifactProvenance` yields."""
+    return tuple(
+        MissingPrerequisite(
+            tool, install.get(tool), artifact_provenance.for_tool(provenance, tool)
+        )
+        for tool in missing
+    )
 
 
 def hint_line(tool: str, install: dict[str, str]) -> str:
@@ -1309,9 +1371,18 @@ def _doctor_fix_hint(missing: list[str], install: dict[str, str]) -> str:
     )
 
 
-def windows_refusal(missing: list[str], install: dict[str, str]) -> PrereqFailure:
+def windows_refusal(
+    missing: list[str],
+    install: dict[str, str],
+    provenance: dict[str, ArtifactProvenance] | None = None,
+) -> PrereqFailure:
     """`bootstrap.ps1`'s `$Prereqs` loop: header, one `hint_line` each, the
-    reopen-PowerShell tail."""
+    reopen-PowerShell tail.
+
+    `provenance` reaches only the STRUCTURED half (`missingPrerequisites[]`),
+    never the printed lines -- tan-cli#1066 carries a licensing fact for a
+    consumer's consent screen; it does not re-word a refusal the oracle's
+    wording is pinned against."""
     lines = ["Missing required tools:"]
     lines.extend(hint_line(tool, install) for tool in missing)
     lines.append("Install the tools above (then reopen PowerShell) and re-run.")
@@ -1323,11 +1394,17 @@ def windows_refusal(missing: list[str], install: dict[str, str]) -> PrereqFailur
     # is alp-sdk's to change and this reads what it actually says.
     lines.append(_doctor_fix_hint(missing, install))
     return PrereqFailure(
-        "prerequisites-missing", tuple(lines), _structured_missing(missing, install)
+        "prerequisites-missing",
+        tuple(lines),
+        _structured_missing(missing, install, provenance),
     )
 
 
-def posix_refusal(missing: list[str], install: dict[str, str]) -> PrereqFailure:
+def posix_refusal(
+    missing: list[str],
+    install: dict[str, str],
+    provenance: dict[str, ArtifactProvenance] | None = None,
+) -> PrereqFailure:
     """`bootstrap.sh`'s one line: the tool names and nothing else -- TWO spaces
     before "Install". The oracle prints no per-tool commands and neither may
     this; alp-sdk#959 changed what the STRUCTURED half carries, not what a POSIX
@@ -1353,14 +1430,15 @@ def posix_refusal(missing: list[str], install: dict[str, str]) -> PrereqFailure:
 
     The per-tool commands themselves still stay OUT of the prose -- that half of
     the original constraint holds, and they remain where alp-sdk#959 put them,
-    in the structured payload's `{tool, command}` pairs."""
+    in the structured payload's `{tool, command}` pairs -- which is also where
+    tan-cli#1066's `provenance` goes, and only there (see `windows_refusal`)."""
     return PrereqFailure(
         "prerequisites-missing",
         (
             f"Missing required tools: {' '.join(missing)}.  Install them and re-run.",
             _doctor_fix_hint(missing, install),
         ),
-        _structured_missing(missing, install),
+        _structured_missing(missing, install, provenance),
     )
 
 
@@ -1670,7 +1748,7 @@ def posix_venv_unusable() -> PrereqFailure:
 
 def reported_missing(
     missing: tuple[MissingPrerequisite, ...],
-) -> list[dict[str, str | None]] | None:
+) -> list[dict[str, str | int | None]] | None:
     """The envelope form: `None` when the refusal names no tool.
 
     `[]` is NEVER a value here. The Python-floor refusals reach this empty, and

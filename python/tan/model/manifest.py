@@ -40,9 +40,58 @@ _TARGET_KEYS = {"backend", "silicon_ref", "blob_format", "accel_config",
                 "arena", "requires", "blob", "compiler_version", "caveats"}
 _COV_KEYS = {"backend", "accel_config", "status", "reason"}
 
-# The blob formats the SDK can describe. A real constant, not a comment, so a
-# new backend cannot silently invent a format string.
-VALID_BLOB_FORMATS = frozenset({"vela_tflite", "tflite", "drpai_dir", "dxnn", "onnx"})
+# The blob formats the SDK can describe, ENFORCED at decode (tan-cli#1074):
+# `from_dict` rejects a `targets[]` entry whose `blob_format` is not a member
+# of this set, naming the offending value and the accepted set. Reconciled
+# against every real producer on `dev` at the time this became enforced --
+# `adapters/cpu.py` ("tflite"), `adapters/ethos_u.py` ("vela_tflite"),
+# `adapters/drpai.py` ("drpai_dir"), `adapters/deepx.py` ("dxnn"),
+# `adapters/executorch.py` ("executorch") -- plus `_gen_fixture.py`'s
+# `_onnx_cpu_manifest` ("onnx", the issue #1254 regression fixture decoded by
+# alp-sdk's real on-device reader, `tests/yocto/onnx_cpu_fixture.h`). The
+# omission of "executorch" from this set is exactly why enforcement was
+# deferred past the four other guards PR #1068 closed in the same module: the
+# set itself had already drifted out of sync with a live, default-registered
+# adapter, and an unenforced constant cannot be wrong loudly -- it silently
+# stopped meaning what its own comment claimed.
+#
+# The authoritative ACCEPTOR of these six strings is alp-sdk's own
+# `src/backends/inference/alp_model_select.c` `_fmt_enum()` -- this set is
+# duplicated truth across two repos with no parity gate between them. If
+# alp-sdk's reader ever adds or drops a case, this set has to move to match
+# it (not the other way around): `_fmt_enum()` runs on real hardware, this
+# set only decides what `tan` will hand it.
+VALID_BLOB_FORMATS = frozenset({"vela_tflite", "tflite", "drpai_dir", "dxnn", "onnx", "executorch"})
+
+
+def _check_type(v: object, expected: type | tuple[type, ...], type_desc: str,
+                 label: str, context: str) -> None:
+    """The single type gate every guard in this module routes through --
+    shared by `_required_field` (a mapping key that must be there),
+    `_optional_field` (one that may not be) and `_check_element_types` (a
+    list element), so the curated message shape and the `bool` rule below are
+    written once rather than per call site.
+
+    `bool` is rejected whenever `expected` names `int` but not `bool` itself
+    (tan-cli#1058 review round 3): Python's `bool` is an `int` subclass, so
+    `isinstance(True, int)` is `True` and a plain `isinstance` check would
+    otherwise let `arena=True` / `requires["sram_kib"]=True` / `shape=[True]`
+    decode silently -- re-emitted on the CBOR wire as byte `0xf5` (major type
+    7, "true"), not an unsigned int -- straight into
+    `src/backends/inference/alp_model_select.c`'s fit gate as
+    `t->req_sram_kib`. A mechanism check here, not a per-field one, so every
+    current and future `(int, ...)` entry in `_TENSOR_TYPES`/`_TARGET_TYPES`/
+    `_REQUIRES_TYPES`/`_COVERAGE_TYPES`/`_TENSOR_ELEMENT_TYPES`/
+    `_TARGET_ELEMENT_TYPES` inherits it automatically. The one comparison in
+    this module that does NOT route through here is `from_dict`'s
+    schema-version gate, which therefore restates the rule in its own terms
+    (tan-cli#1064)."""
+    expected_types = expected if isinstance(expected, tuple) else (expected,)
+    if not isinstance(v, expected) or (isinstance(v, bool) and bool not in expected_types):
+        where = f" in {context}" if context else ""
+        raise ValueError(
+            f"malformed .alpmodel manifest: {label} must be {type_desc}, got {type(v).__name__}{where}"
+        )
 
 
 def _required_field(d: dict, key: str, expected: type | tuple[type, ...], type_desc: str,
@@ -74,27 +123,35 @@ def _required_field(d: dict, key: str, expected: type | tuple[type, ...], type_d
     container's own bounds checks exist to catch. Fail loudly here, the same
     way, rather than degrade silently.
 
-    `bool` is rejected whenever `expected` names `int` but not `bool` itself
-    (tan-cli#1058 review round 3): Python's `bool` is an `int` subclass, so
-    `isinstance(True, int)` is `True` and the plain `isinstance` check below
-    would otherwise let `arena=True` / `requires["sram_kib"]=True` decode
-    silently -- re-emitted on the CBOR wire as byte `0xf5` (major type 7,
-    "true"), not an unsigned int -- straight into
-    `src/backends/inference/alp_model_select.c`'s fit gate as `t->req_sram_kib`.
-    A mechanism check here, not a per-field one, so every current and future
-    `(int, ...)` entry in `_TENSOR_TYPES`/`_TARGET_TYPES`/`_REQUIRES_TYPES`/
-    `_COVERAGE_TYPES` inherits it automatically."""
-    where = f" in {context}" if context else ""
+    The type half of the check lives in `_check_type` above, shared with
+    `_optional_field` and `_check_element_types`."""
     if key not in d:
+        where = f" in {context}" if context else ""
         raise ValueError(f"malformed .alpmodel manifest: missing required field {key!r}{where}")
-    v = d[key]
-    expected_types = expected if isinstance(expected, tuple) else (expected,)
-    wrong_type = not isinstance(v, expected) or (isinstance(v, bool) and bool not in expected_types)
-    if wrong_type:
-        raise ValueError(
-            f"malformed .alpmodel manifest: field {key!r} must be {type_desc}, got {type(v).__name__}{where}"
-        )
-    return v
+    _check_type(d[key], expected, type_desc, f"field {key!r}", context)
+    return d[key]
+
+
+def _optional_field(d: dict, key: str, expected: type | tuple[type, ...], type_desc: str,
+                     *, context: str = "") -> object | None:
+    """`_required_field`'s sibling for a field that is OPTIONAL on the wire:
+    ABSENT is fine (the dataclass default stands), PRESENT-but-wrong-typed
+    raises exactly the curated `ValueError` a required field would
+    (tan-cli#1056).
+
+    A separate helper rather than a flag on `_required_field`, because the
+    two differ ONLY in the missing-key branch and overloading that branch
+    would make each call site's intent depend on an argument instead of on
+    which function it names.
+
+    Returns `None` for an absent field. That is unambiguous rather than
+    merely convenient: no `expected` in this module admits `NoneType`, so a
+    field that is PRESENT and `None` raises above and never reaches the
+    return -- the caller can read `None` as "absent" without a sentinel."""
+    if key not in d:
+        return None
+    _check_type(d[key], expected, type_desc, f"field {key!r}", context)
+    return d[key]
 
 
 def _pick(d: dict, keys: set) -> dict:
@@ -114,9 +171,120 @@ def _check_nested_types(value: dict, inner_types: dict[str, tuple[type | tuple[t
             _required_field(value, inner_key, inner_expected, inner_desc, context=context)
 
 
+def _check_element_types(value: list, expected: type | tuple[type, ...], type_desc: str,
+                          context: str) -> None:
+    """`_check_nested_types`'s list-shaped sibling: one level of `_check_type`
+    under a field `_check_element_fields` has already confirmed is a `list`
+    (tan-cli#1063). The dict helper above takes a per-KEY map; a list has no
+    keys, so this one takes a single ELEMENT type and names the offending
+    index where the dict side names the key -- `element 1 must be an int, got
+    str in inputs[0].shape` is the exact counterpart of `field 'sram_kib'
+    must be an int, got str in targets[0].requires`.
+
+    Every element is checked, not just the first: a `shape` whose second
+    entry is the corrupted one is as wrong as one whose first is."""
+    for i, elem in enumerate(value):
+        _check_type(elem, expected, type_desc, f"element {i}", context)
+
+
+def _check_schema_version(d: dict) -> None:
+    """Both `from_json` and `from_cbor` route through `from_dict` (tan-cli#1039)
+    -- this check is therefore written ONCE and enforced on both reader
+    paths, rather than living only in the JSON-era code `from_dict` used to
+    be (`from_cbor` built a `Manifest` directly and never called `from_dict`
+    at all, so a future manifest version read by an older `tan` over CBOR --
+    the PRODUCTION reader path for `.alpmodel` packages -- was silently
+    parsed as v1 instead of refused).
+
+    `type(v) is not int`, NOT `isinstance` (tan-cli#1064): `bool` is an
+    `int` subclass and `True == 1`, so the bare comparison accepted `v=True`
+    as v1 -- and float `1.0` too. This is the one comparison in this module
+    that reads a decoded value without routing through
+    `_required_field`/`_check_type`, so it restates their `bool` rule in its
+    own terms rather than inheriting it. A future manifest version written
+    as `1.0` or `True` is a manifest this reader does not understand, and
+    must be refused as loudly as `v=2` already was."""
+    v = d.get("v", MANIFEST_SCHEMA_VERSION)
+    if type(v) is not int or v != MANIFEST_SCHEMA_VERSION:
+        raise ValueError(f"unsupported manifest version {v!r}; expected {MANIFEST_SCHEMA_VERSION}")
+
+
+def _check_blob_formats(targets: list["Target"]) -> None:
+    """`_TARGET_TYPES["blob_format"]` (used by `_check_element_fields` while
+    decoding `targets`) only confirms each target's `blob_format` is a `str`
+    -- it says nothing about WHICH string. `VALID_BLOB_FORMATS` was a real
+    constant instead of a comment for exactly the reason this function now
+    exists: an unlisted `blob_format` is now rejected ON DECODE (tan-cli#1074).
+
+    This is a READ-side guard only, not a write-side one -- `build.py`'s
+    `Blob(format=...)` construction never consults `VALID_BLOB_FORMATS` at
+    all, so a new adapter can still WRITE an unlisted format; it can no
+    longer do so silently, because the package this function's caller
+    guards is the same one every reader -- `tan model check`, flash, deploy
+    -- decodes. `python/tests/gates/test_blob_format_producers_stay_in_valid_blob_formats.py`
+    is the write-side half: it walks the adapter/fixture SOURCE for every
+    literal `blob_format` a producer emits and fails if one is missing from
+    this set, which is what actually keeps a new backend from shipping
+    silently -- this function alone only refuses to read the result back.
+
+    Called from `from_dict` once every target is already a `Target`
+    instance, rather than threaded through `_check_element_fields` as a
+    fourth kind of per-field check (type / nested / element) -- membership
+    against a closed value set is the only check in this module that is not
+    a shape check, and a purpose-built function reads more plainly than a new
+    parameter every OTHER `_decode_list_field` caller would have to pass
+    `None` for."""
+    for i, t in enumerate(targets):
+        if t.blob_format not in VALID_BLOB_FORMATS:
+            raise ValueError(
+                f"malformed .alpmodel manifest: field 'blob_format' must be "
+                f"one of {sorted(VALID_BLOB_FORMATS)}, got {t.blob_format!r} "
+                f"in targets[{i}]"
+            )
+
+
+def _check_element_fields(elem: dict, item_keys: set, required: frozenset,
+                           field_types: dict[str, tuple[type | tuple[type, ...], str]],
+                           nested_types: dict | None, element_types: dict | None,
+                           context: str) -> None:
+    """Guard ONE decoded element of a nested list field.
+
+    `required` fields first (alphabetically, so a message names the same
+    field it always has), then the OPTIONAL remainder of `item_keys` --
+    `Target.compiler_version`/`caveats` are carried through to the
+    constructor by `_pick` but sit in no `required` set, so before
+    tan-cli#1056 nothing type-checked them at all and
+    `{"compiler_version": 12345, "caveats": "not-a-list"}` constructed
+    silently.
+
+    `field_types` gives each field a REAL `expected` type, not the
+    accepts-anything `object` an earlier version passed (tan-cli#1049).
+    `nested_types` routes an already-checked-`dict` value through
+    `_check_nested_types` (see `_REQUIRES_TYPES`); `element_types` routes an
+    already-checked-`list` value through `_check_element_types` (see
+    `_TENSOR_ELEMENT_TYPES`, tan-cli#1063)."""
+    for field_name in sorted(required) + sorted(item_keys - required):
+        expected, type_desc = field_types[field_name]
+        if field_name in required:
+            value = _required_field(elem, field_name, expected, type_desc, context=context)
+        else:
+            value = _optional_field(elem, field_name, expected, type_desc, context=context)
+            if value is None:
+                continue
+        inner_types = nested_types.get(field_name) if nested_types else None
+        if inner_types:
+            _check_nested_types(value, inner_types, context=f"{context}.{field_name}")
+        elem_type = element_types.get(field_name) if element_types else None
+        if elem_type:
+            _check_element_types(value, elem_type[0], elem_type[1],
+                                  context=f"{context}.{field_name}")
+
+
 def _decode_list_field(d: dict, key: str, item_keys: set, required: frozenset, ctor,
                         field_types: dict[str, tuple[type | tuple[type, ...], str]],
                         nested_types: dict[str, dict[str, tuple[type | tuple[type, ...], str]]]
+                        | None = None,
+                        element_types: dict[str, tuple[type | tuple[type, ...], str]]
                         | None = None) -> list:
     """Decode a nested `.alpmodel` manifest list field (`inputs`/`outputs`/
     `targets`/`coverage`) into `ctor` instances, guarding both the field and
@@ -131,14 +299,9 @@ def _decode_list_field(d: dict, key: str, item_keys: set, required: frozenset, c
     arguments`; an incomplete `targets[]` entry names 7. `from_dict`'s own
     bare `Tensor(**t)` (no `_pick`) failed even earlier on the `**` unpack
     itself. One helper now closes both readers, since `from_cbor` routes
-    through `from_dict`.
-    `field_types` gives `_required_field` a REAL `expected` type per field,
-    not the accepts-anything `object` an earlier version passed (tan-cli#1049
-    -- see `_TENSOR_TYPES`/`_TARGET_TYPES`/`_COVERAGE_TYPES` below for the
-    why/what). Only `required` fields are checked; `compiler_version`/
-    `caveats` are a separate gap (tan-cli#1056). `nested_types` routes a
-    field's already-checked-`dict` value through `_check_nested_types` --
-    see `_REQUIRES_TYPES` below for the why.
+    through `from_dict`. The per-field work moved to `_check_element_fields`
+    above -- see it for what `field_types`/`nested_types`/`element_types`
+    each do.
 
     The field-level check below (is `d[key]` a list at all) is the same
     shape one step up: a `targets` value that decodes but isn't a list would
@@ -156,12 +319,8 @@ def _decode_list_field(d: dict, key: str, item_keys: set, required: frozenset, c
                 f"malformed .alpmodel manifest: {key}[{i}] must be a mapping, "
                 f"got {type(elem).__name__}"
             )
-        for field_name in sorted(required):
-            expected, type_desc = field_types[field_name]
-            value = _required_field(elem, field_name, expected, type_desc, context=f"{key}[{i}]")
-            inner_types = nested_types.get(field_name) if nested_types else None
-            if inner_types:
-                _check_nested_types(value, inner_types, context=f"{key}[{i}].{field_name}")
+        _check_element_fields(elem, item_keys, required, field_types,
+                               nested_types, element_types, context=f"{key}[{i}]")
         out.append(ctor(**_pick(elem, item_keys)))
     return out
 
@@ -196,6 +355,14 @@ _TARGET_TYPES = {
     "arena": (int, "an int"),
     "requires": (dict, "a mapping"),
     "blob": (int, "an int"),
+    # OPTIONAL on the wire (`_TARGET_REQUIRED` subtracts both), so these two
+    # reach `_check_element_fields` through `_optional_field`, not
+    # `_required_field`: absent is legal, present-but-wrong-typed is not.
+    # Before tan-cli#1056 they were in `_TARGET_KEYS` (so `_pick` handed them
+    # to the constructor) but in no type map at all, so
+    # `compiler_version=12345` / `caveats="not-a-list"` decoded silently.
+    "compiler_version": (str, "a string"),
+    "caveats": (list, "a list"),
 }
 
 # One level deeper than `_TARGET_TYPES["requires"]`, which only guards the
@@ -207,6 +374,26 @@ _TARGET_TYPES = {
 # undocumented restriction rather than closing a known gap.
 _REQUIRES_TYPES = {
     "sram_kib": (int, "an int"),
+}
+# Element types for a field whose own declared type is `list` -- the entries
+# above guard the CONTAINER only, which is the same shape tan-cli#1049 closed
+# for `Target.requires` one level down (tan-cli#1063). `shape` feeds
+# tensor-shape maths downstream the way `requires["sram_kib"]` feeds
+# `src/backends/inference/alp_model_select.c`'s fit gate, so
+# `shape=["a","b"]` / `[None,None]` / `[{"a":1}]` / `[True,False]` were all
+# silent-wrong values, not crashes. `caveats` is `list[str]` that `tan model
+# build` and `tan model check --exact` render as customer-readable text, so a
+# non-string element degrades a diagnostic surface silently (tan-cli#1056).
+#
+# `op_features` inside `requires` deliberately gets no entry here, for the
+# same reason `_REQUIRES_TYPES` omits it: nothing downstream reads it as
+# anything but an opaque list yet, so a shape requirement would be a new,
+# undocumented restriction rather than a closed gap.
+_TENSOR_ELEMENT_TYPES = {
+    "shape": (int, "an int"),
+}
+_TARGET_ELEMENT_TYPES = {
+    "caveats": (str, "a string"),
 }
 _COVERAGE_TYPES = {
     "backend": (str, "a string"),
@@ -251,7 +438,7 @@ class Tensor:
 class Target:
     backend: str            # cpu | ethos_u | drpai | deepx_dxm1
     silicon_ref: str        # e.g. "alif:ensemble:e8" or "*"
-    blob_format: str        # one of VALID_BLOB_FORMATS
+    blob_format: str        # one of VALID_BLOB_FORMATS; enforced by Manifest.from_dict
     accel_config: str       # "" when N/A
     arena: int
     requires: dict[str, object]  # {"sram_kib": int, "op_features": list[str]}
@@ -311,27 +498,41 @@ class Manifest:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Manifest":
-        # Both `from_json` and `from_cbor` route through here (tan-cli#1039)
-        # -- the version check and the guarded nested-list decode below are
-        # therefore each written ONCE and enforced on both reader paths,
-        # rather than the version check living only in the JSON-era code
-        # this method used to be (`from_cbor` built a `Manifest` directly
-        # and never called this method at all, so a future manifest version
-        # read by an older `tan` over CBOR -- the PRODUCTION reader path for
-        # `.alpmodel` packages -- was silently parsed as v1 instead of
-        # refused).
-        v = d.get("v", MANIFEST_SCHEMA_VERSION)
-        if v != MANIFEST_SCHEMA_VERSION:
-            raise ValueError(f"unsupported manifest version {v!r}; expected {MANIFEST_SCHEMA_VERSION}")
-        return cls(
-            name=d["name"],
-            src_sha=d["src_sha"],  # raw bytes pass-through; JSON/text callers must decode to bytes first
-            inputs=_decode_list_field(d, "inputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor, _TENSOR_TYPES),
-            outputs=_decode_list_field(d, "outputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor, _TENSOR_TYPES),
-            targets=_decode_list_field(d, "targets", _TARGET_KEYS, _TARGET_REQUIRED, Target, _TARGET_TYPES,
-                                        nested_types={"requires": _REQUIRES_TYPES}),
-            coverage=_decode_list_field(d, "coverage", _COV_KEYS, _COV_KEYS, Coverage, _COVERAGE_TYPES),
-        )
+        _check_schema_version(d)
+        # `name`/`src_sha` were still bare subscripts here even after
+        # `from_json`/`from_cbor`'s own document-level + field-level guards
+        # (tan-cli#1074): a `from_dict` mapping missing either key raised a
+        # raw `KeyError` naming only the key, not the curated `ValueError`
+        # every other field in this module raises -- no context, no "malformed
+        # .alpmodel manifest" framing, nothing a caller could route on
+        # alongside the rest of this module's error contract. `from_dict` is
+        # the shared POST-NORMALISATION entry point both `from_json` (hex
+        # str -> bytes) and `from_cbor` (bytearray -> bytes) route through
+        # after decoding their own wire form of `src_sha` -- its own contract
+        # is therefore `bytes`, matching what both callers, and the direct
+        # round-trip caller in `tests/model/test_manifest.py`, already hand
+        # it.
+        # Computed as locals, in the SAME left-to-right order the original
+        # `cls(...)` keyword-argument list used (name, src_sha, inputs,
+        # outputs, targets, coverage) -- `targets` needs to exist as a local
+        # before `_check_blob_formats` can run on it, but that must not
+        # change WHICH error a malformed document reports first: a manifest
+        # missing `name` AND carrying a bad target still reports the
+        # missing `name`, the document's own required field, ahead of a
+        # nested element's (PR #1098 review nit).
+        name = _required_field(d, "name", str, "a string")
+        src_sha = _required_field(d, "src_sha", bytes, "a bytes object")
+        inputs = _decode_list_field(d, "inputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor, _TENSOR_TYPES,
+                                     element_types=_TENSOR_ELEMENT_TYPES)
+        outputs = _decode_list_field(d, "outputs", _TENSOR_KEYS, _TENSOR_KEYS, Tensor, _TENSOR_TYPES,
+                                      element_types=_TENSOR_ELEMENT_TYPES)
+        targets = _decode_list_field(d, "targets", _TARGET_KEYS, _TARGET_REQUIRED, Target, _TARGET_TYPES,
+                                      nested_types={"requires": _REQUIRES_TYPES},
+                                      element_types=_TARGET_ELEMENT_TYPES)
+        _check_blob_formats(targets)      # tan-cli#1074: reject an unlisted blob_format
+        coverage = _decode_list_field(d, "coverage", _COV_KEYS, _COV_KEYS, Coverage, _COVERAGE_TYPES)
+        return cls(name=name, src_sha=src_sha, inputs=inputs, outputs=outputs,
+                   targets=targets, coverage=coverage)
 
     def to_json(self) -> str:
         return _json.dumps(_json_default(self.to_dict()), indent=2)
@@ -374,9 +575,25 @@ class Manifest:
     def to_cbor(self) -> bytes:
         return _cbor2.dumps(self.to_dict())
 
+    # tan-cli#1055: cbor2's decode exceptions (`CBORDecodeEOF` and its
+    # siblings, common base `CBORDecodeError`) are NOT `ValueError`
+    # subclasses, while `from_json`'s `json.JSONDecodeError` IS -- so a caller
+    # catching `ValueError` around a `.alpmodel` read, the contract every other
+    # guard in this module exists to honour, caught a malformed JSON manifest
+    # and missed a malformed CBOR one, on the PRODUCTION reader path.
+    # `package.read_package`/`read_manifest_file` bounds-check the manifest
+    # region's offset and length (tan-cli#1045) but never that its bytes are
+    # well-formed CBOR: a bit flip, a truncated write or plain non-CBOR bytes
+    # land in the `except` below.
     @classmethod
     def from_cbor(cls, blob: bytes) -> "Manifest":
-        d = _cbor2.loads(blob)
+        try:
+            d = _cbor2.loads(blob)
+        except _cbor2.CBORDecodeError as exc:
+            raise ValueError(
+                f"malformed .alpmodel manifest: not valid CBOR "
+                f"({type(exc).__name__}: {exc})"
+            ) from exc
         if not isinstance(d, dict):
             # See `from_json` above (tan-cli#1023): guard before the bare
             # `d["name"]` subscript below, reached from both

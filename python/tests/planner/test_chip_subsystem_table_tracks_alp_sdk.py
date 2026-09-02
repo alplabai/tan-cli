@@ -35,10 +35,9 @@ from __future__ import annotations
 import ast
 import pytest
 
-from tan.planner_root import bind_sdk_root
-from tests.conftest import sdk_root
-
-SDK = sdk_root()
+# `_bound_sdk` is a pytest fixture, imported for its side effect -- the
+# same idiom `_baremetal_support`'s consumers use for `bound_sdk_root`.
+from tests.planner._bound_sdk_fixture import SDK, _bound_sdk  # noqa: F401
 
 pytestmark = pytest.mark.skipif(
     SDK is None,
@@ -64,12 +63,6 @@ _SOM_INTRINSIC = {
     "gd32_swd": ("GPIO",),
     "gd32g553": ("SPI", "I2C"),
 }
-
-
-@pytest.fixture(autouse=True)
-def _bound_sdk():
-    bind_sdk_root(SDK)
-    yield
 
 
 def _upstream_table() -> dict[str, tuple[str, ...]]:
