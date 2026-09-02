@@ -762,6 +762,41 @@ def test_a_boolean_bound_is_accepted_because_bool_is_an_int(tmp_path):
 
 
 # ---------------------------------------------------------------------
+# tan-cli#1087 -- `minimum`/`maximum` on a non-`integer` parameter.
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("ptype", "default", "bound", "bound_value"),
+    [("string", "a", "minimum", 5),
+     ("enum", "a", "maximum", 5),
+     ("boolean", False, "minimum", 0)],
+)
+def test_a_numeric_bound_on_a_nonint_parameter_raises_a_curated_error(
+        tmp_path, ptype, default, bound, bound_value):
+    """tan-cli#1087. `$defs/parameter` does not cross-reference `type`
+    against `constraints` at all, so a `type: string` (or `enum`, or
+    `boolean`) parameter carrying `constraints.minimum`/`maximum` is
+    SCHEMA-VALID -- verified directly against
+    `template-catalog-v1.schema.json` with `jsonschema.validate` (not taken
+    on trust; see the issue). `_require_constraints` guarantees the bound
+    itself is an `int`, so before this fix the very next line reached
+    `value < constraints["minimum"]` as `"a" < 5` and raised a bare
+    `TypeError` -- past every `except TemplateError` this module's callers
+    declare, on a document nothing upstream refused. Now a curated
+    `ParameterError`, naming the template, the field, its value, its
+    declared type and the inapplicable bound -- not a crash, and not a
+    silently-dropped bound either."""
+    m = _tmpl()
+    with pytest.raises(m.ParameterError) as excinfo:
+        _render(tmp_path, _constrained({bound: bound_value}, default=default,
+                                       ptype=ptype))
+    msg = str(excinfo.value)
+    assert f"{_TEMPLATE}: knob={default!r} is type {ptype!r}" in msg
+    assert f"constraints.{bound} ({bound_value!r}) only applies to type " \
+           "'integer'" in msg
+
+
+# ---------------------------------------------------------------------
 # Sites :258-266 -- `substitute:`.
 # ---------------------------------------------------------------------
 

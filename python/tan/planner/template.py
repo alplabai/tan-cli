@@ -314,10 +314,12 @@ def _coerce(spec: dict[str, Any], raw: Any) -> Any:
     It does NOT cover what `_check_constraints` then DOES with them: a
     schema-VALID `type: string` (or `enum`) parameter carrying
     `constraints.minimum`/`maximum` is legal per `$defs/parameter`, and
-    `_require_constraints` guarantees the `int` that makes the resulting
-    `"a" < 5` raise a bare `TypeError`. Latent only because no shipped
-    catalog declares such a parameter. Tracked at tan-cli#1087 -- do not
-    read this paragraph as claiming otherwise."""
+    `_require_constraints` guarantees the `int` that would make a bare
+    `"a" < 5` raise a `TypeError`. tan-cli#1087 closed that: `_check_
+    constraints` now refuses `minimum`/`maximum` on any non-`integer`
+    `type` with a curated `ParameterError` before it ever compares, so the
+    bare `TypeError` this paragraph used to describe as latent no longer
+    happens -- do not read it as still open."""
     if not isinstance(raw, str):
         return raw
     ptype = spec["type"]
@@ -337,11 +339,38 @@ def _coerce(spec: dict[str, Any], raw: Any) -> Any:
 
 
 def _check_constraints(template_id: str, spec: dict[str, Any], value: Any) -> None:
+    """Enforce `spec["constraints"]` against the coerced @value.
+
+    tan-cli#1087: `minimum`/`maximum` are only MEANINGFUL on a `type:
+    integer` parameter -- `$defs/parameter` permits them alongside `type:
+    string` or `type: enum` too (the schema's `constraints` object does not
+    cross-reference `type` at all), and `_require_constraints` guarantees
+    the bound itself is an `int`, so a schema-VALID `type: string` parameter
+    carrying `constraints.minimum` used to reach the bare `value <
+    constraints["minimum"]` below as `"a" < 5` -- a raw `TypeError` on a
+    document nothing upstream refused. Refused here instead, curated, naming
+    the field, its declared type and the inapplicable bound: stricter than
+    the schema in EFFECT, deliberately (tan-cli#1087's option 3), never
+    silently -- the same choice `_require_constraints`'s own docstring
+    argues against making the other way (a dropped bound is worse than a
+    loud refusal). `type: boolean` is refused too, on purpose, even though
+    `bool < int` never raises (`isinstance(True, int)` is `True` in Python)
+    -- a bound that cannot crash is not a bound that means anything on a
+    boolean knob, and this function's job is to enforce `constraints`, not
+    merely to avoid raising a `TypeError` on them.
+    """
     constraints = spec.get("constraints") or {}
     if "enum" in constraints and value not in constraints["enum"]:
         raise ParameterError(
             f"{template_id}: {spec['name']}={value!r} not in "
             f"{constraints['enum']}")
+    for bound in ("minimum", "maximum"):
+        if bound in constraints and spec["type"] != "integer":
+            raise ParameterError(
+                f"{template_id}: {spec['name']}={value!r} is type "
+                f"{spec['type']!r}; constraints.{bound} "
+                f"({constraints[bound]!r}) only applies "
+                f"to type 'integer'")
     if "minimum" in constraints and value < constraints["minimum"]:
         raise ParameterError(
             f"{template_id}: {spec['name']}={value!r} < minimum "
