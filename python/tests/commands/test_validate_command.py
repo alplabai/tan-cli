@@ -284,6 +284,33 @@ def test_an_absolute_board_yaml_sarif_uri_names_the_real_file_with_no_base(
     assert resolved_local.samefile(board)
 
 
+def test_an_absolute_project_sarif_uri_also_names_the_real_file_with_no_base(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1117 review round 2 nit: the no-base branch is reachable
+    through an absolute `--project`, not just an absolute `--board-yaml` --
+    `resolve_board_path` joins `root` (verbatim, absolute here) with the
+    leaf, so `board_path` itself comes out absolute and `_sarif_document`
+    must gate the same way. Only `--board-yaml` was covered before this
+    test; both inputs reach [`is_absolute_path_reference`] through the SAME
+    `board_path` string, so this is a coverage gap closed, not a new branch
+    -- the property proven is identical to the sibling above."""
+    monkeypatch.chdir(tmp_path)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write(project_dir, "som: E1M-AEN701\n")
+    result = runner.invoke(
+        app, ["validate", "--offline", "--project", str(project_dir), "--format", "sarif"]
+    )
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    location, run = _sarif_artifact_location(result.output)
+    assert "uriBaseId" not in location
+    assert "originalUriBaseIds" not in run
+    resolved_local = Path(unquote(urlsplit(location["uri"]).path))
+    assert resolved_local.exists()
+    assert resolved_local.samefile(project_dir / "board.yaml")
+
+
 def test_absolute_board_yaml_uri_is_a_file_uri_but_boardyamlpath_stays_host_native(
     tmp_path, monkeypatch
 ):
@@ -552,7 +579,50 @@ def test_a_symlink_loop_project_yields_a_clean_document_not_a_traceback(tmp_path
     location = run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
     assert location["uri"] == "loop/board.yaml"
     assert location["uriBaseId"] == "%CWD%"
-    assert run["originalUriBaseIds"]["%CWD%"]["uri"] == tmp_path.as_uri() + "/"
+    # tan-cli#1117 review round 2 nit: asserted as the same urljoin +
+    # samefile PROPERTY the three sibling tests above use, not by restating
+    # `cwd_base_uri`'s own implementation expression (`tmp_path.as_uri() +
+    # "/"`) -- `loop` is itself the symlink loop, so the real file this
+    # resolves onto is `loop/board.yaml`'s NON-existent target; the property
+    # this loop case actually owes is that the base is a well-formed,
+    # slash-terminated `file:` URI naming the real CWD, independent of the
+    # missing-file outcome the guard above already refused on.
+    base = run["originalUriBaseIds"]["%CWD%"]["uri"]
+    assert base.startswith("file://")
+    assert base.endswith("/")
+    local_cwd = Path(unquote(urlsplit(base).path))
+    assert local_cwd.samefile(tmp_path)
+
+
+def test_a_removed_cwd_yields_a_clean_document_not_a_traceback(tmp_path, monkeypatch):
+    """tan-cli#1117 review round 2 BLOCKER, end-to-end: `cwd_base_uri()`
+    calls `Path.cwd()`, which raises `FileNotFoundError` when the process's
+    OWN working directory has been removed -- not caller-supplied data, but
+    a real filesystem call this exporter makes unconditionally on the
+    happy path. Pre-fix, that raise reached `_sarif_document` from INSIDE
+    `validate_cmd.py`'s own `except Exception as err:` handler and
+    double-faulted there (measured by review: exit 1, empty stdout, no
+    envelope at all -- `dev` gives exit 2 with a document). `validate()` now
+    computes the base via `cwd_base_uri_or_none()` ONCE, before this guard
+    or any other can fire, so a removed CWD degrades to the SAME no-base
+    document `dev` gave before tan-cli#1117 rather than crashing."""
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    try:
+        result = runner.invoke(app, ["validate", "--offline", "--format", "sarif"])
+    finally:
+        # Leave the process CWD somewhere real for whatever test runs next.
+        monkeypatch.chdir(tmp_path)
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    doc = json.loads(result.output)
+    run = doc["runs"][0]
+    assert [r["id"] for r in run["tool"]["driver"]["rules"]] == ["validate-board-yaml-missing"]
+    location = run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+    assert location["uri"] == "./board.yaml"
+    assert "uriBaseId" not in location
+    assert "originalUriBaseIds" not in run
 
 
 def test_missing_board_yaml_message_names_where_and_remedy(tmp_path, monkeypatch):

@@ -225,7 +225,9 @@ def is_absolute_path_reference(path: str) -> bool:
 def cwd_base_uri() -> str:
     """The SARIF `originalUriBaseIds` base for a RELATIVE `artifactLocation
     .uri` (tan-cli#1117): the process's own working directory, as an
-    absolute `file:` URI with a TRAILING SLASH.
+    absolute `file:` URI with a TRAILING SLASH. **Can raise** -- see the
+    last section below; [`cwd_base_uri_or_none`] is the guarded call site
+    should actually use.
 
     **Anchored on `Path.cwd()`, never on `--project`/`root`.**
     `resolve_board_path` already prepends `root` onto the relative reference
@@ -240,31 +242,65 @@ def cwd_base_uri() -> str:
     this line swaps `Path.cwd()` for a `root`-derived path and reds on the
     `--project sub` case for exactly that reason.
 
-    **The trailing slash is not decorative.** RFC 3986 SS5.3's reference-
-    resolution algorithm drops the base's own LAST PATH SEGMENT before
-    appending a relative reference: `urljoin("file:///a/b", "c")` names
-    `"file:///a/c"`, not `"file:///a/b/c"` -- a slash-less base names a
-    RESOURCE, indistinguishable from a file, one level above the directory it
-    reads as. `Path.as_uri()` never appends one (a directory's URI looks
-    exactly like a file's), so this function appends it explicitly. Dropping
-    it reproduces the same wrong-file mismatch tan-cli#1117 measured
-    (`EXISTS? False` against the real, differently-pathed file); the sibling
-    mutation for this line strips the `+ "/"` and reds the same way.
+    **The trailing slash is not decorative, and not unconditional.** RFC 3986
+    SS5.3's reference-resolution algorithm drops the base's own LAST PATH
+    SEGMENT before appending a relative reference: `urljoin("file:///a/b",
+    "c")` names `"file:///a/c"`, not `"file:///a/b/c"` -- a slash-less base
+    names a RESOURCE, indistinguishable from a file, one level above the
+    directory it reads as. Dropping the slash entirely reproduces the same
+    wrong-file mismatch tan-cli#1117 measured (`EXISTS? False` against the
+    real, differently-pathed file). But `Path.as_uri()` DOES already append
+    one at a filesystem root -- measured, `Path("/").as_uri() ==
+    "file:///"` -- so appending UNCONDITIONALLY doubles it there
+    (`"file:////"`, and `PureWindowsPath("C:/").as_uri()` -> `"file:///C://"`
+    the same way). SARIF 2.1.0 SS3.14.14 requires the value "SHALL end with a
+    single forward slash", NOTE 2 explaining that resolution works "by
+    simple concatenation" -- a doubled slash breaks exactly that
+    concatenation (`"file:////" + "./board.yaml"` is not the intended path,
+    even though `urljoin` itself tolerates it and recovers). Appending only
+    when not already slash-terminated keeps both properties -- always ends
+    in exactly one slash, never two.
 
-    **No filesystem call on caller data.** `Path.cwd()` reads the PROCESS's
-    own working directory -- never `--project`/`--board-yaml`, both caller-
-    supplied -- so nothing here can raise on a symlink loop, a missing
-    parent, or a permissions failure in a caller-given path. That is the
-    other half of what tan-cli#1117 was filed to avoid reintroducing: the
-    reverted round-1 attempt reached its (wrong) base through an unguarded
-    `Path.resolve(strict=False)` on `--project`, and `.resolve()`'s own
-    symlink-loop behaviour is not even uniform across pathlib versions --
-    measured directly (`python-build-standalone` 3.12.3/3.13.15/3.14.7): on
-    3.12, `Path("loop").resolve(strict=False)` raises `RuntimeError`
-    regardless of `strict=False`'s own promise not to; on 3.13/3.14 that
-    promise IS kept for `strict=False` (it returns the path unresolved, no
-    raise), but `strict=True` still raises `OSError [Errno 40]` on both.
-    Either way, resolving a caller-supplied path at all is the crash
-    surface -- this function avoids it entirely rather than depending on
-    which pathlib version happens to be running."""
-    return Path.cwd().as_uri() + "/"
+    **`Path.cwd()` CAN raise, even though it touches no caller-supplied
+    data.** `Path.cwd()` -> `os.getcwd()` raises `FileNotFoundError` (an
+    `OSError` subclass) when the process's OWN working directory has been
+    removed out from under it -- measured directly. This function does not
+    guard it: [`cwd_base_uri_or_none`] is the call site `validate_cmd.py`
+    actually uses, and it exists SPECIFICALLY because tan-cli#1117 review
+    round 2 measured that an unguarded call here reached `_sarif_document`
+    from INSIDE `validate_cmd.py`'s own `except Exception as err:` handler
+    and double-faulted the same way the reverted round-1 attempt's
+    `Path.resolve(strict=False)` symlink-loop crash did -- a `#1116`
+    never-raises instance reached through a filesystem call that happens not
+    to be caller-supplied, rather than through caller data itself. (For the
+    record, since it is the OTHER crash surface tan-cli#1117 was filed over:
+    `.resolve()`'s own symlink-loop behaviour is not uniform across pathlib
+    versions either -- measured directly, `python-build-standalone`
+    3.12.3/3.13.15/3.14.7: on 3.12, `Path("loop").resolve(strict=False)`
+    raises `RuntimeError` regardless of `strict=False`'s own promise not to;
+    on 3.13/3.14 that promise IS kept for `strict=False` (returns the path
+    unresolved, no raise), but `strict=True` still raises `OSError [Errno
+    40]` on both. This function calls neither `.resolve()` nor anything on a
+    caller-supplied path at all, so that particular crash class cannot recur
+    here regardless.)"""
+    base = Path.cwd().as_uri()
+    return base if base.endswith("/") else base + "/"
+
+
+def cwd_base_uri_or_none() -> str | None:
+    """[`cwd_base_uri`], guarded against the one way it can raise: the
+    process's own working directory has been removed. `validate_cmd.py`'s
+    `validate()` calls this ONCE, before any guard in its own body can fire,
+    and threads the result through `_emit`/`_sarif_document` as a plain
+    value -- so nothing downstream of this call touches the filesystem for
+    the SARIF base again, and nothing there can raise from a missing CWD no
+    matter which branch of `validate()` eventually reaches the SARIF
+    exporter (tan-cli#1117 review round 2's blocker).
+
+    `None` means exactly what `dev` emitted before tan-cli#1117: a relative
+    `uri` with no declared base -- the safe fallback, not a degraded one;
+    see `_sarif_document`'s own docstring for how it is threaded through."""
+    try:
+        return cwd_base_uri()
+    except OSError:
+        return None

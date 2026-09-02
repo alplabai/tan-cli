@@ -53,10 +53,13 @@ import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import unquote, urljoin, urlsplit
 
+import pytest
+
 from tan.core.uri_reference import (
     _WINDOWS_DRIVE_RE,
     _is_windows_spelled,
     cwd_base_uri,
+    cwd_base_uri_or_none,
     is_absolute_path_reference,
     path_to_uri_reference,
 )
@@ -319,15 +322,23 @@ def test_a_windows_absolute_path_is_judged_absolute():
 
 
 def test_a_driveless_windows_relative_path_is_judged_not_absolute():
-    """The exact edge case [`is_absolute_path_reference`]'s own docstring
-    names: `C:board.yaml` (a drive letter with NO root) renders, quoted, as
-    the same string -- syntactically a valid URI with scheme `C` -- so a
-    caller that judged absoluteness by sniffing the RENDERED string for a
-    scheme would misclassify it. `PureWindowsPath` itself settles it instead:
-    absolute needs BOTH a drive and a root. Mutating
-    [`is_absolute_path_reference`] to `path.startswith(...)` string-sniffing
-    reds this exact assertion; every other test in this section stays green
-    either way, which is why this one exists on its own."""
+    """The one input a FIRST version of [`is_absolute_path_reference`]'s own
+    docstring worried about: `C:board.yaml` (a drive letter with NO root).
+    That worry was measured FALSE and corrected in review (see this repo's
+    own history) -- `quote(..., safe="/")` percent-encodes the colon
+    (`path_to_uri_reference("C:board.yaml") == "C%3Aboard.yaml"`), so the
+    rendered form is never a spoofable `file:`-prefixed string in the first
+    place, on this input or any other. [`is_absolute_path_reference`]
+    DELEGATES to [`path_to_uri_reference`] rather than re-deriving
+    `PureWindowsPath`'s own `.is_absolute()` a second time, so THIS test has
+    no mutation power of its own over [`is_absolute_path_reference`] distinct
+    from `path_to_uri_reference`'s own existing coverage above -- both
+    assertions here restate the SAME fact (one via the real oracle, one via
+    the function under test) as a pinned regression guard for the input the
+    now-corrected worry singled out, not as a mutation-provable branch. See
+    `test_a_posix_absolute_path_is_judged_absolute` /
+    `test_a_windows_absolute_path_is_judged_absolute` just above for the
+    assertions that DO red under a mutated `"file:"` prefix."""
     assert not PureWindowsPath("C:board.yaml").is_absolute()
     assert not is_absolute_path_reference("C:board.yaml")
 
@@ -392,3 +403,48 @@ def test_cwd_base_uri_resolves_a_nested_relative_reference_to_the_real_file(
     local_path = Path(unquote(urlsplit(resolved).path))
     assert local_path.exists()
     assert local_path.samefile(sub / "board.yaml")
+
+
+def test_cwd_base_uri_does_not_double_the_slash_at_a_filesystem_root(monkeypatch):
+    """tan-cli#1117 review round 2 minor: `Path("/").as_uri()` is already
+    `"file:///"` (measured) -- APPENDING unconditionally doubles it
+    (`"file:////"`), and SARIF 2.1.0 SS3.14.14 requires the value "SHALL end
+    with a single forward slash". Mutating the conditional back to `+ "/"`
+    unconditionally reds this exact assertion; every OTHER test in this
+    section stays green either way (none of them chdir to an actual
+    filesystem root), which is why this one exists on its own."""
+    monkeypatch.chdir("/")
+    assert cwd_base_uri() == "file:///"
+
+
+def test_cwd_base_uri_or_none_agrees_with_cwd_base_uri_on_the_happy_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert cwd_base_uri_or_none() == cwd_base_uri()
+
+
+def test_cwd_base_uri_or_none_returns_none_when_the_cwd_has_been_removed(tmp_path, monkeypatch):
+    """tan-cli#1117 review round 2 BLOCKER: `cwd_base_uri()` calls
+    `Path.cwd()` -> `os.getcwd()`, which raises `FileNotFoundError` when the
+    process's own working directory has been removed out from under it --
+    a real, reproducible condition, not a caller-supplied one. Measured
+    directly: `cwd_base_uri()` itself still raises here (asserted below, so
+    a FUTURE change that swallows the exception inside `cwd_base_uri` itself
+    -- moving the guard to the wrong function -- reds this line); the
+    GUARDED wrapper this test is really about, [`cwd_base_uri_or_none`],
+    catches it and returns `None` instead. Mutating its `except OSError:
+    return None` to re-raise reds this test's own final assertion; mutating
+    it to catch `Exception` broadly instead of `OSError` specifically
+    changes nothing observable here (still red on the same input either
+    way) but is exercised as the narrower, correct type deliberately."""
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    try:
+        with pytest.raises(OSError):
+            cwd_base_uri()
+        assert cwd_base_uri_or_none() is None
+    finally:
+        # Leave the process's CWD somewhere real again, or every test that
+        # runs after this one in the same process inherits a dead directory.
+        monkeypatch.chdir(tmp_path)
