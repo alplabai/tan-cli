@@ -128,6 +128,33 @@ def _resolve_hw_rev(sku: str, metadata_root: Path, declared: str | None) -> str 
     Soft-fail on a preset that does not exist or does not parse, matching
     `resolve_ethos_u_variant`'s stance next door.
 
+    tan-cli#1116: NOT a pre-flight `preset_path.is_file()` -- that used to
+    gate the read below, and on Python <= 3.13 `Path.is_file()` RAISES for a
+    permission-denied ancestor -- `PermissionError`, `errno=13`, measured on
+    both 3.12.3 and 3.13.15 -- swallowing only `ENOENT`/`ENOTDIR`/`EBADF`/
+    `ELOOP` there. `pathlib`'s `_IGNORED_ERRNOS` CONSTANT that names those
+    four is itself gone a release earlier (3.13, `AttributeError` probing
+    for it), but the raising BEHAVIOUR it used to name outlives the constant
+    by one release and only actually changes in 3.14: there `is_file()`
+    swallows EVERY `OSError`, `EACCES` included, and returns `False`
+    instead (tan-cli#1116 review round 2 -- a pre-flight guard is dead on
+    3.14+ regardless of what it catches, and reasoning from either "the
+    constant still exists" or "I measured the raise" picks the wrong
+    boundary, since the two diverge for exactly the 3.13 release). NOT
+    `EACCES`, so a
+    preset whose CONTAINING directory the caller cannot traverse raised a raw
+    `PermissionError` right there, past this function's own "Soft-fail"
+    contract -- the exact `document_guards.read_catalog_document` trap ("not
+    a pre-flight `is_file()`"), just via `is_file()` instead of
+    `Path.exists()`. Reading straight through the `try` below answers the
+    same three cases (absent, a directory, no permission) through `OSError`
+    alone -- on EVERY supported interpreter, since it never calls `is_file()`
+    at all -- so the pre-flight added nothing a plain `FileNotFoundError`
+    from the read did not already give it. `UnicodeDecodeError` is also now
+    caught explicitly: it is a `ValueError`, not an `OSError` and not a
+    `yaml.YAMLError`, so a non-UTF-8 preset used to escape raw past this same
+    contract (measured, tan-cli#1116).
+
     `declared` reaching here as `None` is itself a FAIL-CLOSED answer from the
     caller, not a "customer said nothing" default: `tan.commands.model_cmd.
     _declared_hw_rev` refuses the whole run outright (a `model.board-yaml-
@@ -140,13 +167,11 @@ def _resolve_hw_rev(sku: str, metadata_root: Path, declared: str | None) -> str 
     if declared:
         return declared
     preset_path = Path(metadata_root) / "e1m_modules" / f"{sku}.yaml"
-    if not preset_path.is_file():
-        return None
     import yaml  # noqa: PLC0415 -- deferred (tan-cli#810); see sdk_cmd's `_releases_opener`
 
     try:
         preset = yaml.safe_load(preset_path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return None
     value = preset.get("default_hw_rev") if isinstance(preset, dict) else None
     return str(value) if value else None
@@ -226,6 +251,12 @@ def _topology_core_ids(sku: str, metadata_root: Path) -> set[str]:
     real, checkable fact -- unlike `paired_core`, which is genuinely absent
     for some accelerators by design.
 
+    `UnicodeDecodeError` is caught explicitly (tan-cli#1116, measured
+    escaping before this fix): it is a `ValueError`, not an `OSError` and
+    not a `yaml.YAMLError`, so a non-UTF-8 preset used to raise raw past
+    this function's own "refuses [to] `set()`" contract, same shape as
+    `_resolve_hw_rev`'s sibling fix next door.
+
     By the time this runs, @sku's preset is already known to exist and parse
     (`resolve_check_backends` -> `resolve_targets` succeeded before a single
     backend was screened, reading the SAME file), so this re-reads it rather
@@ -242,7 +273,7 @@ def _topology_core_ids(sku: str, metadata_root: Path) -> set[str]:
 
     try:
         preset = yaml.safe_load(preset_path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return set()
     topology = preset.get("topology") if isinstance(preset, dict) else None
     return set(topology) if isinstance(topology, dict) else set()

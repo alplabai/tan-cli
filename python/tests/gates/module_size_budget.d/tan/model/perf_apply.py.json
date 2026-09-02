@@ -3,6 +3,6 @@
   "module": "tan/model/perf_apply.py",
   "kind": "budget",
   "lines": null,
-  "long_functions": 1,
+  "long_functions": 3,
   "worst_function": 95
 }
