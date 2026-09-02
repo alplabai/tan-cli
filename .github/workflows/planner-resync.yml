@@ -701,6 +701,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # tan-cli#1109 review round 3 (nit): this step's own two LOCAL `jq`
+          # calls below (unlike the `gh pr list` lookup, which already checks
+          # `list_rc` explicitly) had no presence/failure guard of their own.
+          # Measured: with `jq` missing, each call exits 127 inside a `$(...)`
+          # assignment, `set -e` kills the step there -- which IS fail-closed
+          # (the step dies before ever reaching a `gh pr close`, so nothing
+          # gets destroyed) but SILENTLY: no `::error::` naming what happened,
+          # just a bare nonzero exit -- exactly the "red X with no
+          # explanation" shape tan-cli#793/#911/#920 all exist to close in
+          # this same file, in a step whose entire job is deciding what to
+          # destroy. One check up front, before either `jq` call, rather than
+          # wrapping each individually -- both calls need the same binary, so
+          # one loud refusal covers both.
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::error::jq is not on PATH -- this step needs it to build the occupied-branch exclusion and filter the open-PR list, and cannot safely guess which PRs to close without it. Refusing to guess (see tan-cli#1109 review round 3) rather than silently closing nothing and leaving a stale proposal open with no signal."
+            exit 1
+          fi
           # Same fail-closed shape as every other `gh ... | jq` lookup in this
           # job (tan-cli#920): a transient `gh` error must not be read as "no
           # other proposal exists" and fall through to leaving a stale one

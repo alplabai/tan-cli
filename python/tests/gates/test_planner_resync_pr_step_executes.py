@@ -852,6 +852,7 @@ def _run_close_step(
     keep_url: str,
     pr_list_fixture: str = "[]",
     occupied_branches: str = "",
+    no_jq: bool = False,
 ) -> tuple[subprocess.CompletedProcess[bytes], pathlib.Path]:
     bindir = tmp_path / "close-bin"
     bindir.mkdir()
@@ -864,7 +865,13 @@ def _run_close_step(
     fixture.write_text(pr_list_fixture, encoding="utf-8")
 
     env = dict(os.environ)
-    env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+    # tan-cli#1109 review round 3: `no_jq` replaces PATH outright (not
+    # prepends to it) with a dir holding only the fake `gh` -- `jq` lives
+    # under the real PATH this process inherited, so prepending would
+    # leave it reachable. `printf`/`command` are shell builtins, so the
+    # step's own presence check (`command -v jq`) still runs; only `jq`
+    # itself becomes genuinely absent.
+    env["PATH"] = str(bindir) if no_jq else f"{bindir}{os.pathsep}{env.get('PATH', '')}"
     env["GH_TOKEN"] = "fake-token"
     env["GITHUB_REPOSITORY"] = "example/tan-cli"
     env["KEEP_BRANCH"] = keep_branch
@@ -876,8 +883,19 @@ def _run_close_step(
     # found occupied THIS run, which the close step now excludes.
     env["OCCUPIED_BRANCHES"] = occupied_branches
 
+    # tan-cli#1109 review round 3: `no_jq`'s restricted PATH (bindir only,
+    # so `command -v jq` genuinely finds nothing) would also hide `bash`
+    # itself if bash were looked up BY NAME through that same PATH --
+    # `jq` and `bash` live in the same directory on this box
+    # (`/usr/bin`), so excluding jq's directory would exclude bash's too.
+    # Resolved to its absolute path from the UNRESTRICTED, real
+    # environment before `env` is built, so launching bash itself never
+    # needs a PATH lookup at all -- only what runs INSIDE the script (the
+    # step's own `command -v jq` check) is affected by `no_jq`.
+    bash_exe = shutil.which("bash") or "/bin/bash"
+
     proc = subprocess.run(
-        ["bash", "-x", "-c", _close_step_run()], env=env, capture_output=True
+        [bash_exe, "-x", "-c", _close_step_run()], env=env, capture_output=True
     )
     return proc, call_log
 
@@ -1059,10 +1077,45 @@ def test_close_step_warns_when_the_open_pr_page_is_full(tmp_path: pathlib.Path):
     )
 
 
+def test_close_step_errors_loudly_when_jq_is_missing_instead_of_proceeding_silently(
+    tmp_path: pathlib.Path,
+):
+    """tan-cli#1109 review round 3 (nit): without the presence check, a
+    missing `jq` dies inside the FIRST `$(... | jq ...)` assignment under
+    `set -e` -- fail-closed (the step never reaches a `gh pr close`) but
+    SILENT: no `::error::` naming what happened, just a bare nonzero exit,
+    exactly the shape this file's own `gh pr list` failure already guards
+    against with an explicit message. This test does NOT need real `jq`
+    to be meaningful (it is asserting what happens in its absence), so it
+    carries no jq skipif -- it is the one close-step test that must pass
+    on a box WITHOUT jq, not skip."""
+    proc, call_log = _run_close_step(
+        tmp_path,
+        _FAKE_GH_RAW_JSON,
+        keep_branch="auto/planner-resync-5c33ef04",
+        keep_url="https://github.com/example/tan-cli/pull/1108",
+        pr_list_fixture=_PR_LIST_FIXTURE_MIXED,
+        no_jq=True,
+    )
+    assert proc.returncode != 0, _fmt(proc)
+    assert b"::error::" in proc.stdout, _fmt(proc)
+    assert b"jq is not on PATH" in proc.stdout, _fmt(proc)
+    assert call_log.read_text(encoding="utf-8") == "", (
+        "no pr comment/close call may happen when jq itself is missing:\n"
+        + _fmt(proc)
+    )
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
 def test_close_step_refuses_to_guess_when_gh_pr_list_fails(tmp_path: pathlib.Path):
     """Same fail-closed shape as every other `gh ... | jq` lookup in this
     job (tan-cli#920): a transient `gh` error must not be read as "no other
-    proposal exists" and silently leave a stale one open."""
+    proposal exists" and silently leave a stale one open.
+
+    tan-cli#1109 review round 3 (nit): missed in round 2's sweep -- the step
+    now runs `jq` before it ever reaches `gh pr list` (the presence check),
+    so this test needs `jq` on PATH too, same as the others, or it fails
+    outright instead of skipping on a dev box without one."""
     proc, call_log = _run_close_step(
         tmp_path,
         _FAKE_GH_LIST_FAILS,
