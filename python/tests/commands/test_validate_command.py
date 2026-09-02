@@ -46,6 +46,8 @@ import os
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
+from urllib.request import url2pathname
 
 import pytest
 from typer.testing import CliRunner
@@ -173,17 +175,19 @@ def test_sarif_shape(tmp_path, monkeypatch):
     }
     artifact_location = result_entry["locations"][0]["physicalLocation"]["artifactLocation"]
     assert artifact_location["uri"] == "./board.yaml"
-    # tan-cli#1097 review round 2: a round-1 attempt at this PR declared
-    # `uriBaseId`/`originalUriBaseIds` here so the relative reference above
-    # had a base to resolve against. That declaration turned out to be
-    # authoritatively WRONG for this exact default case (an anchoring
-    # mismatch -- see `_sarif_document`'s own docstring) and reached it
-    # through code that could crash the command on a caller-supplied
-    # `--project`; it was reverted rather than patched in place. NEITHER key
-    # is present today -- the base is left implementation-defined, same as
-    # `dev` before this PR.
-    assert "uriBaseId" not in artifact_location
-    assert "originalUriBaseIds" not in run
+    # tan-cli#1117: the relative reference above now DOES resolve, against a
+    # base declared in `originalUriBaseIds`. This is a SHAPE check only --
+    # both keys are present and well-formed; the load-bearing proof that
+    # `urljoin(base, uri)` actually names the real file lives in
+    # `test_a_relative_sarif_uri_resolves_to_the_real_file` below, stated
+    # against `os.path.exists`/`os.path.samefile` rather than by re-deriving
+    # the base's own string (tan-cli#1117's own "trap" note: a round-1
+    # predecessor of this test computed its expectation by calling the base
+    # function itself and could never go red on a wrong base).
+    assert artifact_location["uriBaseId"] == "%CWD%"
+    base_entry = run["originalUriBaseIds"]["%CWD%"]["uri"]
+    assert base_entry.startswith("file://")
+    assert base_entry.endswith("/")
 
 
 def test_sarif_rules_are_deduped_by_code(tmp_path, monkeypatch):
@@ -202,6 +206,110 @@ def test_sarif_rules_are_deduped_by_code(tmp_path, monkeypatch):
     run = doc["runs"][0]
     assert len(run["results"]) == 2
     assert len(run["tool"]["driver"]["rules"]) == 1
+
+
+def _sarif_artifact_location(output: str) -> tuple[dict, dict]:
+    """`(artifactLocation, run)` out of one `--format sarif` invocation's
+    stdout -- shared by the three tan-cli#1117 urljoin-property tests below,
+    each of which builds its OWN expectation independently of this helper's
+    caller (this only parses the document; it asserts nothing)."""
+    run = json.loads(output)["runs"][0]
+    return run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"], run
+
+
+def test_a_relative_sarif_uri_resolves_to_the_real_file(tmp_path, monkeypatch):
+    """tan-cli#1117's acceptance criterion for the DEFAULT invocation
+    (`root="."`), stated as a property -- `urljoin(base, uri)` names the real
+    file -- rather than a pinned string. `base` and `uri` are read out of the
+    document's OWN `originalUriBaseIds`/`uriBaseId` pair; the real file's
+    path comes from `tmp_path`, never from any function under test. This is
+    the exact proof tan-cli#1117 was filed with a measured counterexample
+    for: a round-1 attempt's declared base resolved `./board.yaml` onto a
+    DIFFERENT, nonexistent file (`EXISTS? False`)."""
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "som: E1M-AEN701\n")
+    result = runner.invoke(app, ["validate", "--offline", "--format", "sarif"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    location, run = _sarif_artifact_location(result.output)
+    base = run["originalUriBaseIds"][location["uriBaseId"]]["uri"]
+    resolved_local = Path(url2pathname(urlsplit(urljoin(base, location["uri"])).path))
+    assert resolved_local.exists()
+    assert resolved_local.samefile(tmp_path / "board.yaml")
+
+
+def test_a_project_relative_sarif_uri_resolves_to_the_real_file(tmp_path, monkeypatch):
+    """The `--project sub` invocation tan-cli#1117's acceptance criteria name
+    explicitly: the measured pre-fix defect CANCELLED OUT here by accident (a
+    missing trailing slash and a `root`-anchored base happened to offset each
+    other for this one case, per `cwd_base_uri`'s own docstring) -- so this
+    case alone cannot tell a correct fix from the old, coincidentally-right
+    one. Proven the same independent way as the default-invocation sibling
+    above, against a DIFFERENT real file so the two cannot pass by aliasing
+    onto the same path."""
+    monkeypatch.chdir(tmp_path)
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    _write(sub, "som: E1M-AEN701\n")
+    result = runner.invoke(
+        app, ["validate", "--offline", "--project", "sub", "--format", "sarif"]
+    )
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    location, run = _sarif_artifact_location(result.output)
+    base = run["originalUriBaseIds"][location["uriBaseId"]]["uri"]
+    resolved_local = Path(url2pathname(urlsplit(urljoin(base, location["uri"])).path))
+    assert resolved_local.exists()
+    assert resolved_local.samefile(sub / "board.yaml")
+
+
+def test_an_absolute_board_yaml_sarif_uri_names_the_real_file_with_no_base(
+    tmp_path, monkeypatch
+):
+    """The third tan-cli#1117 acceptance invocation: an absolute
+    `--board-yaml` needs no declared base at all -- its `uri` is already
+    absolute, so `urljoin` on it is a no-op regardless of what a base would
+    say. Proven as the same real-file property as the two relative cases
+    above, independent of `test_absolute_board_yaml_uri_is_a_file_uri_but_
+    boardyamlpath_stays_host_native`'s own string-shape pin."""
+    monkeypatch.chdir(tmp_path)
+    board = tmp_path / "elsewhere.yaml"
+    board.write_text("som: E1M-AEN701\n", encoding="utf-8")
+    result = runner.invoke(
+        app, ["validate", "--offline", "--board-yaml", str(board), "--format", "sarif"]
+    )
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    location, run = _sarif_artifact_location(result.output)
+    assert "uriBaseId" not in location
+    assert "originalUriBaseIds" not in run
+    resolved_local = Path(url2pathname(urlsplit(location["uri"]).path))
+    assert resolved_local.exists()
+    assert resolved_local.samefile(board)
+
+
+def test_an_absolute_project_sarif_uri_also_names_the_real_file_with_no_base(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1117 review round 2 nit: the no-base branch is reachable
+    through an absolute `--project`, not just an absolute `--board-yaml` --
+    `resolve_board_path` joins `root` (verbatim, absolute here) with the
+    leaf, so `board_path` itself comes out absolute and `_sarif_document`
+    must gate the same way. Only `--board-yaml` was covered before this
+    test; both inputs reach [`is_absolute_path_reference`] through the SAME
+    `board_path` string, so this is a coverage gap closed, not a new branch
+    -- the property proven is identical to the sibling above."""
+    monkeypatch.chdir(tmp_path)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write(project_dir, "som: E1M-AEN701\n")
+    result = runner.invoke(
+        app, ["validate", "--offline", "--project", str(project_dir), "--format", "sarif"]
+    )
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    location, run = _sarif_artifact_location(result.output)
+    assert "uriBaseId" not in location
+    assert "originalUriBaseIds" not in run
+    resolved_local = Path(url2pathname(urlsplit(location["uri"]).path))
+    assert resolved_local.exists()
+    assert resolved_local.samefile(project_dir / "board.yaml")
 
 
 def test_absolute_board_yaml_uri_is_a_file_uri_but_boardyamlpath_stays_host_native(
@@ -254,8 +362,11 @@ def test_absolute_board_yaml_uri_is_a_file_uri_but_boardyamlpath_stays_host_nati
         "artifactLocation"
     ]
     assert sarif_location["uri"] == uri
-    # Neither key is emitted at all today (see `test_sarif_shape` for why);
-    # restated here for the absolute case too so both are covered.
+    # tan-cli#1117: an ABSOLUTE `--board-yaml` reference already resolves on
+    # its own, so `_sarif_document` declares neither key for it -- SARIF
+    # 2.1.0 SS3.4.4 says a location whose `uri` is absolute must not also
+    # carry `uriBaseId`. `test_sarif_shape` pins the RELATIVE case, where
+    # both are now present.
     assert "uriBaseId" not in sarif_location
     assert "originalUriBaseIds" not in sarif_run
 
@@ -427,6 +538,102 @@ def test_missing_board_yaml_is_validation_failure_on_both_paths(tmp_path, monkey
         assert envelope["exitCode"] == int(ExitCode.VALIDATION_FAILURE)
         assert envelope["data"]["outcome"] == "failed"
         assert [i["code"] for i in envelope["issues"]] == ["validate.board-yaml-missing"]
+
+
+def test_a_symlink_loop_project_yields_a_clean_document_not_a_traceback(tmp_path, monkeypatch):
+    """tan-cli#1117's hard requirement: a caller-supplied `--project`
+    containing a symlink LOOP must still answer the `board-yaml-missing`
+    envelope at exit 2, never a raw traceback.
+
+    Measured, pre-fix, on a round-1 attempt of this issue's own base-
+    declaration work: `Path.resolve(strict=False)` on a caller-supplied
+    `--project` raised on a self-referential symlink, and that raise
+    re-entered `validate_cmd.py`'s own `except Exception as err:` handler,
+    whose `_emit` -> `_sarif_document` path raised the SAME error a second
+    time -- exit 1, empty stdout, no envelope at all. `.resolve()`'s own
+    symlink-loop behaviour is not even uniform across pathlib versions
+    (measured directly against 3.12.3/3.13.15/3.14.7 via `python-build-
+    standalone`, see `cwd_base_uri`'s own docstring for the exact numbers) --
+    reason enough on its own not to depend on which exception a given
+    interpreter happens to raise. This module's fix touches no caller-
+    supplied path at all ([`cwd_base_uri`] reads only `Path.cwd()`), so this
+    test also stands as the regression guard against a FUTURE change
+    reintroducing a `.resolve()`/`.readlink()` call on
+    `--project`/`--board-yaml`.
+
+    `--format sarif`, not `--format json`: this is the exact invocation
+    tan-cli#1117 measured the crash against, and it is also the format
+    [`cwd_base_uri`] feeds -- the two are exercised together."""
+    monkeypatch.chdir(tmp_path)
+    loop = tmp_path / "loop"
+    try:
+        loop.symlink_to(loop)
+    except OSError:
+        pytest.skip("this host cannot create a self-referential symlink")
+    result = runner.invoke(
+        app, ["validate", "--offline", "--project", "loop", "--format", "sarif"]
+    )
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    doc = json.loads(result.output)
+    run = doc["runs"][0]
+    assert [r["id"] for r in run["tool"]["driver"]["rules"]] == ["validate-board-yaml-missing"]
+    location = run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+    assert location["uri"] == "loop/board.yaml"
+    assert location["uriBaseId"] == "%CWD%"
+    # tan-cli#1117 review round 2 nit: asserted as the same urljoin +
+    # samefile PROPERTY the three sibling tests above use, not by restating
+    # `cwd_base_uri`'s own implementation expression (`tmp_path.as_uri() +
+    # "/"`) -- `loop` is itself the symlink loop, so the real file this
+    # resolves onto is `loop/board.yaml`'s NON-existent target; the property
+    # this loop case actually owes is that the base is a well-formed,
+    # slash-terminated `file:` URI naming the real CWD, independent of the
+    # missing-file outcome the guard above already refused on.
+    base = run["originalUriBaseIds"]["%CWD%"]["uri"]
+    assert base.startswith("file://")
+    assert base.endswith("/")
+    local_cwd = Path(url2pathname(urlsplit(base).path))
+    assert local_cwd.samefile(tmp_path)
+
+
+def test_a_removed_cwd_yields_a_clean_document_not_a_traceback(tmp_path, monkeypatch):
+    """tan-cli#1117 review round 2 BLOCKER, end-to-end: `cwd_base_uri()`
+    calls `Path.cwd()`, which raises `FileNotFoundError` when the process's
+    OWN working directory has been removed -- not caller-supplied data, but
+    a real filesystem call this exporter makes unconditionally on the
+    happy path. Pre-fix, that raise reached `_sarif_document` from INSIDE
+    `validate_cmd.py`'s own `except Exception as err:` handler and
+    double-faulted there (measured by review: exit 1, empty stdout, no
+    envelope at all -- `dev` gives exit 2 with a document). `validate()` now
+    computes the base via `cwd_base_uri_or_none()` ONCE, before this guard
+    or any other can fire, so a removed CWD degrades to the SAME no-base
+    document `dev` gave before tan-cli#1117 rather than crashing.
+
+    tan-cli#1117 review round 4: `os.getcwd()` is made to raise via
+    `monkeypatch.setattr` rather than by `os.rmdir`-ing the real CWD --
+    POSIX allows deleting a process's own working directory, Windows does
+    not (`os.rmdir` on the process CWD raises `PermissionError [WinError
+    32]`, measured failing this exact test on `windows-latest` CI). `chdir`
+    to a REAL, still-existing `tmp_path` supplies the "no `board.yaml`
+    here" half portably (a relative `Path("./board.yaml").exists()` asks
+    the OS to resolve against the process's real CWD, not `os.getcwd()`, so
+    it is unaffected by the patch below); patching `os.getcwd` supplies the
+    "the base computation itself fails" half `cwd_base_uri_or_none` is
+    actually about, without touching a real directory at all."""
+    monkeypatch.chdir(tmp_path)
+
+    def _raise_removed_cwd() -> str:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(os, "getcwd", _raise_removed_cwd)
+    result = runner.invoke(app, ["validate", "--offline", "--format", "sarif"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    doc = json.loads(result.output)
+    run = doc["runs"][0]
+    assert [r["id"] for r in run["tool"]["driver"]["rules"]] == ["validate-board-yaml-missing"]
+    location = run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+    assert location["uri"] == "./board.yaml"
+    assert "uriBaseId" not in location
+    assert "originalUriBaseIds" not in run
 
 
 def test_missing_board_yaml_message_names_where_and_remedy(tmp_path, monkeypatch):
@@ -1213,6 +1420,19 @@ def test_the_rich_fields_reach_both_machine_documents(tmp_path, monkeypatch):
         "endLine": 2,
         "endColumn": 18,
     }
+    # tan-cli#1117 review round 3 MAJOR: the only assertions on this
+    # PRIMARY production SARIF path (a real, non-`--offline` `tan validate`)
+    # used to stop at `region` -- `artifactLocation` itself, the field this
+    # whole issue is about, was asserted only on `--offline` runs routed
+    # through `fail()`. Proven as the same urljoin + `samefile` property the
+    # `--offline` tests use, against the real spawn-path project directory.
+    location = run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+    assert location["uri"] == "./board.yaml"
+    assert location["uriBaseId"] == "%CWD%"
+    base = run["originalUriBaseIds"]["%CWD%"]["uri"]
+    resolved_local = Path(url2pathname(urlsplit(urljoin(base, location["uri"])).path))
+    assert resolved_local.exists()
+    assert resolved_local.samefile(second / "project" / "board.yaml")
 
 
 # ───────────────── #376's acceptance criterion, on a REAL SDK ─────────────────

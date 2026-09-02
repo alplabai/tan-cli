@@ -36,20 +36,35 @@ property is calling `.match()` rather than `.search()`; see
 `test_a_colon_later_in_a_relative_path_does_not_misclassify_it_as_windows`
 below, which mutates that call instead.
 
-This file no longer covers `root_to_base_uri` / SARIF's
-`originalUriBaseIds` -- that work was added in review round 1 and reverted
-in round 2 after the base it declared turned out not to resolve the
+A review round 1 attempt at SARIF's `originalUriBaseIds` was added here, then
+reverted in round 2 after the base it declared turned out not to resolve the
 reference it was attached to (see `tan.core.uri_reference`'s own module
-docstring, and `validate_cmd._sarif_document`'s, for the account).
+docstring, and `validate_cmd._sarif_document`'s, for the account). tan-cli#1117
+reintroduces it as [`cwd_base_uri`] and its `uriBaseId` gate,
+[`is_absolute_path_reference`] -- the two sections at the bottom of this file
+cover them, each mutating ONE branch at a time the same way the rest of this
+file already does.
 """
 from __future__ import annotations
 
 import ntpath
+import os
 import posixpath
 import re
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import urljoin, urlsplit
+from urllib.request import url2pathname
 
-from tan.core.uri_reference import _WINDOWS_DRIVE_RE, _is_windows_spelled, path_to_uri_reference
+import pytest
+
+from tan.core.uri_reference import (
+    _WINDOWS_DRIVE_RE,
+    _is_windows_spelled,
+    cwd_base_uri,
+    cwd_base_uri_or_none,
+    is_absolute_path_reference,
+    path_to_uri_reference,
+)
 
 # ---------------------------------------------------------------------------
 # The classifier itself, `_is_windows_spelled` -- one branch/constant at a
@@ -271,6 +286,26 @@ def test_a_relative_posix_path_with_a_hash_is_percent_encoded():
     assert path_to_uri_reference("./board#1.yaml") == "./board%231.yaml"
 
 
+def test_a_literal_colon_in_a_relative_path_is_percent_encoded():
+    """tan-cli#1117 review round 3 MINOR: the SOUNDNESS INVARIANT
+    [`is_absolute_path_reference`]'s delegation depends on, pinned directly
+    rather than left to be inferred from three docstrings that call it
+    load-bearing. `quote(path, safe="/")` treating `:` as UNSAFE is what
+    keeps a literal `"file:"` substring in a RELATIVE reference from ever
+    masquerading as [`path_to_uri_reference`]'s own absolute-only `file:`
+    scheme prefix. Widening the safe set to `"/:"`  -- `quote(path, safe=
+    "/:")` -- is GREEN across both this file and `test_validate_command.py`
+    on its own (no existing assertion pins the colon's own encoding), and
+    end-to-end it turns `--project 'file:sub'` into `uri: "file:sub/board
+    .yaml"`, misclassified ABSOLUTE by [`is_absolute_path_reference`] --
+    silently dropping `uriBaseId`/`originalUriBaseIds` on caller-supplied
+    input, reverting this issue's whole fix without any test noticing.
+    Measured directly against the real oracle: `path_to_uri_reference(
+    "file:sub/board.yaml") == "file%3Asub/board.yaml"`."""
+    assert path_to_uri_reference("file:sub/board.yaml") == "file%3Asub/board.yaml"
+    assert not is_absolute_path_reference("file:sub/board.yaml")
+
+
 def test_percent_encoding_does_not_touch_the_separator():
     """`quote(..., safe="/")` -- the separator itself must survive, or every
     relative path collapses to one percent-encoded segment."""
@@ -286,3 +321,232 @@ def test_the_separator_less_golden_is_unaffected_by_percent_encoding():
     golden this PR must not move stays byte-identical through the new
     encoding step, not merely through the old unconditional passthrough."""
     assert path_to_uri_reference("./board.yaml") == "./board.yaml"
+
+
+# ---------------------------------------------------------------------------
+# is_absolute_path_reference -- the SARIF uriBaseId gate (tan-cli#1117)
+# ---------------------------------------------------------------------------
+
+
+def test_a_posix_absolute_path_is_judged_absolute():
+    assert posixpath.isabs("/tmp/proj/board.yaml")
+    assert is_absolute_path_reference("/tmp/proj/board.yaml")
+
+
+def test_a_posix_relative_path_is_judged_not_absolute():
+    assert not posixpath.isabs("./board.yaml")
+    assert not is_absolute_path_reference("./board.yaml")
+
+
+def test_a_windows_absolute_path_is_judged_absolute():
+    assert ntpath.isabs("C:\\w\\proj\\board.yaml")
+    assert is_absolute_path_reference("C:\\w\\proj\\board.yaml")
+
+
+def test_a_driveless_windows_relative_path_is_judged_not_absolute():
+    """The one input a FIRST version of [`is_absolute_path_reference`]'s own
+    docstring worried about: `C:board.yaml` (a drive letter with NO root).
+    That worry was measured FALSE and corrected in review (see this repo's
+    own history) -- `quote(..., safe="/")` percent-encodes the colon
+    (`path_to_uri_reference("C:board.yaml") == "C%3Aboard.yaml"`), so the
+    rendered form is never a spoofable `file:`-prefixed string in the first
+    place, on this input or any other. [`is_absolute_path_reference`]
+    DELEGATES to [`path_to_uri_reference`] rather than re-deriving
+    `PureWindowsPath`'s own `.is_absolute()` a second time, so THIS test has
+    no mutation power of its own over [`is_absolute_path_reference`] distinct
+    from `path_to_uri_reference`'s own existing coverage above -- both
+    assertions here restate the SAME fact (one via the real oracle, one via
+    the function under test) as a pinned regression guard for the input the
+    now-corrected worry singled out, not as a mutation-provable branch. See
+    `test_a_posix_absolute_path_is_judged_absolute` /
+    `test_a_windows_absolute_path_is_judged_absolute` just above for the
+    assertions that DO red under a mutated `"file:"` prefix."""
+    assert not PureWindowsPath("C:board.yaml").is_absolute()
+    assert not is_absolute_path_reference("C:board.yaml")
+
+
+def test_a_windows_relative_path_with_no_drive_is_judged_not_absolute():
+    assert not is_absolute_path_reference("sub\\p\\board.yaml")
+
+
+# ---------------------------------------------------------------------------
+# cwd_base_uri -- the SARIF originalUriBaseIds base (tan-cli#1117)
+# ---------------------------------------------------------------------------
+
+
+def test_cwd_base_uri_ends_with_a_trailing_slash(tmp_path, monkeypatch):
+    """RFC 3986 SS5.3's merge algorithm drops the base's own LAST PATH
+    SEGMENT before appending a relative reference -- a slash-less base
+    silently answers one directory up. Mutating this function's `+ "/"`
+    away leaves this line red on its own; the property test directly below
+    is the one that shows WHY (`urljoin` naming a sibling file instead of
+    the real one)."""
+    monkeypatch.chdir(tmp_path)
+    assert cwd_base_uri().endswith("/")
+
+
+def test_cwd_base_uri_resolves_a_relative_reference_to_the_real_file(tmp_path, monkeypatch):
+    """The independent property tan-cli#1117's acceptance criteria state:
+    `urljoin(cwd_base_uri(), <relative reference>)` must name the REAL file.
+    Proven by actually creating one and reaching it back through
+    `os.path`/`Path.samefile`, never by re-deriving the expected string from
+    `Path.cwd().as_uri()` -- the same one-line expression [`cwd_base_uri`]
+    itself is, and exactly the tautology tan-cli#1117 names as the trap that
+    let a wrong base ship green once already.
+
+    Catches BOTH round-1 defects at once: stripping the trailing slash makes
+    `urljoin` drop `tmp_path`'s own last segment (naming a file one level up,
+    which this dir does not have -- `FileNotFoundError` on `samefile`); and
+    since [`cwd_base_uri`] takes no `root` parameter to anchor on instead of
+    `Path.cwd()`, the anchoring-mismatch defect has no equivalent input to
+    mutate here at all -- it is structurally excluded, not merely tested
+    for (see the function's own docstring)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "board.yaml").write_text("som: E1M-AEN701\n", encoding="utf-8")
+    resolved = urljoin(cwd_base_uri(), "./board.yaml")
+    local_path = Path(url2pathname(urlsplit(resolved).path))
+    assert local_path.exists()
+    assert local_path.samefile(tmp_path / "board.yaml")
+
+
+def test_cwd_base_uri_resolves_a_nested_relative_reference_to_the_real_file(
+    tmp_path, monkeypatch
+):
+    """The `--project sub` shape: `resolve_board_path` renders the reference
+    as `"sub/board.yaml"` (root folded INTO the reference, not into the
+    base), so the base must stay CWD-anchored here too, not move to `sub`
+    itself -- moving it would double the `sub/` prefix, the exact round-1
+    defect that happened to cancel out for this one case by accident."""
+    monkeypatch.chdir(tmp_path)
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "board.yaml").write_text("som: E1M-AEN701\n", encoding="utf-8")
+    resolved = urljoin(cwd_base_uri(), "sub/board.yaml")
+    local_path = Path(url2pathname(urlsplit(resolved).path))
+    assert local_path.exists()
+    assert local_path.samefile(sub / "board.yaml")
+
+
+def test_cwd_base_uri_does_not_double_the_slash_at_a_filesystem_root(monkeypatch):
+    """tan-cli#1117 review round 2 minor: `Path("/").as_uri()` is already
+    slash-terminated (measured on POSIX: `"file:///"`) -- APPENDING
+    unconditionally doubles it (`"file:////"`), and SARIF 2.1.0 SS3.14.14
+    requires the value "SHALL end with a single forward slash". Mutating the
+    conditional back to `+ "/"` unconditionally reds this exact assertion;
+    every OTHER test in this section stays green either way (none of them
+    chdir to an actual filesystem root), which is why this one exists on
+    its own.
+
+    tan-cli#1117 review round 4: asserted as a PROPERTY relative to
+    `Path.cwd().as_uri()` (an INDEPENDENT stdlib call, never `cwd_base_uri`
+    itself), not the POSIX-specific literal `"file:///"` -- `os.chdir("/")`
+    reaches "a filesystem root" on every platform, but not the same root
+    STRING: on Windows it is the root of the CURRENT drive (`ntpath`'s own
+    `/` semantics), so `cwd_base_uri()` there measured `"file:///D:/"` (the
+    CI checkout's drive), not `"file:///"` -- and a plain `not endswith(
+    "//")` check is ALSO wrong for the POSIX literal itself: `"file:///"`
+    (scheme + empty authority `//` + root `/`) legitimately contains `"//"`
+    as its own trailing substring while still carrying exactly ONE
+    semantically-trailing slash. The property that survives both platforms:
+    `Path.cwd().as_uri()` already ends in `/` on both (empty-authority
+    POSIX root and Windows drive root both do), so `cwd_base_uri()` must
+    equal it EXACTLY -- no character appended -- rather than needing a
+    slash guessed onto it."""
+    monkeypatch.chdir("/")
+    raw = Path.cwd().as_uri()
+    assert raw.endswith("/"), "test assumption: a filesystem root's own as_uri() is slash-terminated"
+    assert cwd_base_uri() == raw
+
+
+def test_cwd_base_uri_or_none_agrees_with_cwd_base_uri_on_the_happy_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert cwd_base_uri_or_none() == cwd_base_uri()
+
+
+def test_cwd_base_uri_or_none_returns_none_when_the_cwd_has_been_removed(monkeypatch):
+    """tan-cli#1117 review round 2 BLOCKER: `cwd_base_uri()` calls
+    `Path.cwd()` -> `os.getcwd()`, which raises `FileNotFoundError` when the
+    process's own working directory has been removed out from under it --
+    a real, reproducible condition, not a caller-supplied one. The GUARDED
+    wrapper this test is really about, [`cwd_base_uri_or_none`], catches it
+    and returns `None` instead. Mutating its `except OSError: return None`
+    to re-raise reds this test's own final assertion; mutating it to catch
+    `Exception` broadly instead of `OSError` specifically changes nothing
+    observable here (still red on the same input either way) but is
+    exercised as the narrower, correct type deliberately.
+
+    tan-cli#1117 review round 4: `os.getcwd()` is made to raise via
+    `monkeypatch.setattr`, NOT by `os.rmdir`-ing the real CWD -- POSIX lets
+    a process delete its own working directory (`gone.rmdir()`'s old shape
+    here), Windows does not (`os.rmdir` on the process CWD raises
+    `PermissionError [WinError 32]`, measured on `windows-latest` CI: this
+    exact test failed there under the removed-directory version). Patching
+    `os.getcwd` directly reproduces the SAME contract this function depends
+    on -- `Path.cwd()` calls `os.getcwd()` internally on every pathlib
+    version this repo tests (3.12/3.13/3.14, measured directly) -- without
+    touching a real directory or depending on platform-specific
+    CWD-deletion semantics at all. This repo's own rule (tests/core/
+    test_board_context.py's header, restated in this file's own module
+    docstring): no Windows host, so a platform difference is verified by an
+    oracle/mechanism that behaves identically everywhere, not by a real
+    filesystem operation whose semantics diverge."""
+    def _raise_removed_cwd() -> str:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(os, "getcwd", _raise_removed_cwd)
+    with pytest.raises(OSError):
+        cwd_base_uri()
+    assert cwd_base_uri_or_none() is None
+
+
+# ---------------------------------------------------------------------------
+# The urljoin-property tests' own OWN reversal helper -- pinned against the
+# real Windows oracle (tan-cli#1117 review round 4)
+# ---------------------------------------------------------------------------
+
+
+def test_a_windows_file_uri_path_component_round_trips_through_nturl2path():
+    """This module and `test_validate_command.py`'s urljoin-property tests
+    each reverse a resolved `file:` URI back to a filesystem path with
+    `Path(url2pathname(urlsplit(...).path))`, so their `os.path.exists`/
+    `Path.samefile` assertions mean something. Round 4 found the PRE-fix
+    version of that reversal (`Path(unquote(urlsplit(...).path))`, no
+    `url2pathname`) failed for real on `windows-latest` CI -- `nturl2path`
+    (the module Python's own `os.name`-dispatched `urllib.request.
+    url2pathname` delegates to on Windows) strips the leading `/` a `file:
+    ///C:/...` URI's path component carries before the drive letter;
+    plain `unquote` does not, so `Path("/C:/Users/.../board.yaml")` names a
+    ROOT-relative path whose first SEGMENT is literally `"C:"` -- not the
+    drive -- and never exists.
+
+    This is `tan`'s OWN code doing nothing wrong: `cwd_base_uri()`'s
+    `file:///C:/...` output is exactly the standard `file:` URI spelling
+    for a Windows absolute path (RFC 8089 appendix E; every browser, editor
+    and SARIF consumer parses it the same way) -- the defect was entirely
+    in these TEST files' own reversal helper, never in product code, which
+    is why no `tan/core/uri_reference.py` line changed for this fix.
+
+    `nturl2path` is importable and exercised on ANY host (pure Python, no
+    OS syscalls) -- this repo's own rule (no Windows host; Windows
+    behaviour verified via an `ntpath`/`PureWindowsPath`-shaped oracle, not
+    real filesystem operations) applies here exactly as it does to
+    [`_is_windows_spelled`] above. Reverting either test file's
+    `url2pathname` import back to `unquote` does not red anything ON THIS
+    HOST (Linux never takes the leading-slash-before-drive branch), which
+    is precisely why this assertion exists: it pins the STDLIB oracle's own
+    behaviour for the one input shape a Linux run can never otherwise
+    exercise."""
+    import nturl2path
+
+    # `dev` here stands in for the real CI account this defect was measured
+    # against (`tests/gates/test_no_leaked_host_paths.py`'s own placeholder
+    # set) -- the shape (leading `/` before the drive letter, nested nested
+    # segments) is what matters, not the literal account name.
+    assert (
+        nturl2path.url2pathname(
+            "/C:/Users/dev/AppData/Local/Temp/pytest-of-dev/"
+            "pytest-1/test_a_relative_sarif_uri_reso0/board.yaml"
+        )
+        == "C:\\Users\\dev\\AppData\\Local\\Temp\\pytest-of-dev"
+        "\\pytest-1\\test_a_relative_sarif_uri_reso0\\board.yaml"
+    )
