@@ -638,35 +638,39 @@ def test_gives_up_after_max_attempts_rather_than_looping_forever(repo: pathlib.P
 # -------------------------------------------- tan-cli#1119: --check-branch
 
 
-def test_branch_currently_occupied_is_none_when_the_branch_does_not_exist(
+def test_branch_currently_occupied_reports_existed_false_when_the_branch_does_not_exist(
     repo: pathlib.Path,
 ):
     """Mirrors what `decide_branch` treats as "safe" for a candidate it
     tries itself: a branch that has never been pushed at all is not
-    occupied -- nothing to protect."""
-    assert (
-        guard.branch_currently_occupied(
-            repo, "dev", "auto/planner-resync-neverexisted", AUTOMATION_NAME, AUTOMATION_EMAIL
-        )
-        is None
+    occupied -- nothing to protect. tan-cli#1119 review (minor):
+    `existed=False` distinctly, not collapsed into the same shape a genuinely
+    clean existing branch reports."""
+    occupancy = guard.branch_currently_occupied(
+        repo, "dev", "auto/planner-resync-neverexisted", AUTOMATION_NAME, AUTOMATION_EMAIL
     )
+    assert occupancy.existed is False
+    assert occupancy.foreign is None
+    assert occupancy.occupied is False
 
 
-def test_branch_currently_occupied_is_none_for_an_automation_only_branch(
+def test_branch_currently_occupied_reports_existed_true_for_an_automation_only_branch(
     repo: pathlib.Path,
 ):
     """A branch that exists but carries only the automation's own commits
-    (a prior run's own push) is not occupied."""
+    (a prior run's own push) is not occupied -- and, unlike the
+    never-existed case above, `existed` says so is True: this guard actually
+    looked and found it clean, not merely absent."""
     _push_branch_from_dev(repo, "auto/planner-resync")
     _commit(repo, AUTOMATION_NAME, AUTOMATION_EMAIL, "prior run's own commit", "a.txt")
     _run(repo, "push", "-q", "-f", "origin", "auto/planner-resync")
 
-    assert (
-        guard.branch_currently_occupied(
-            repo, "dev", "auto/planner-resync", AUTOMATION_NAME, AUTOMATION_EMAIL
-        )
-        is None
+    occupancy = guard.branch_currently_occupied(
+        repo, "dev", "auto/planner-resync", AUTOMATION_NAME, AUTOMATION_EMAIL
     )
+    assert occupancy.existed is True
+    assert occupancy.foreign is None
+    assert occupancy.occupied is False
 
 
 def test_branch_currently_occupied_finds_a_foreign_commit_on_a_branch_this_run_never_named(
@@ -681,9 +685,12 @@ def test_branch_currently_occupied_finds_a_foreign_commit_on_a_branch_this_run_n
     sha = _commit(repo, HUMAN_NAME, HUMAN_EMAIL, "a human adopted this old name", "a.txt")
     _run(repo, "push", "-q", "-f", "origin", "auto/planner-resync-eaa79695")
 
-    commit = guard.branch_currently_occupied(
+    occupancy = guard.branch_currently_occupied(
         repo, "dev", "auto/planner-resync-eaa79695", AUTOMATION_NAME, AUTOMATION_EMAIL
     )
+    assert occupancy.existed is True
+    assert occupancy.occupied is True
+    commit = occupancy.foreign
     assert commit is not None
     assert commit.sha == sha
     assert commit.author_name == HUMAN_NAME

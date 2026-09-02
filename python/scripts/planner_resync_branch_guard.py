@@ -123,9 +123,18 @@ write, RIGHT NOW" -- for a caller that is not choosing a force-push target
 at all (`planner-resync.yml`'s "Close superseded planner-resync proposals"
 step, deciding per open PR whether its head branch is safe to close). It
 does not force-push anything and writes no `$GITHUB_OUTPUT` keys of its own.
-Exit codes in this mode: 0 = not occupied (safe to close), 1 = occupied
-(protected; must not be closed), 2 = refused (could not determine). This is
-deliberately NOT served by `--branch`/`decide_branch`: that function only
+Exit codes in this mode: 0 = not occupied (safe to close -- whether the
+branch does not exist at all, or exists and is genuinely clean; see
+`BranchOccupancy` for why a caller that cares can still tell the two apart),
+1 = occupied (protected; must not be closed), 2 = refused -- a `git`
+failure this guard could not interpret, OR argparse's own `ap.error` for a
+bad invocation (both exit via `SystemExit`/`return` with code 2; a caller
+consuming this exit code must treat BOTH as "could not determine", not
+assume 2 always means the former). Any exit code OTHER than 0 or 1 --
+including one this module never deliberately produces, like a Python
+interpreter crash or an OOM kill (137) -- must be treated by a caller the
+same way: refused, not "assume clean". `--check-branch` is deliberately NOT
+served by `--branch`/`decide_branch`: that function only
 ever evaluates candidates ITS OWN cascade generates in THIS invocation
 (`primary_branch`, `<primary_branch>-<divert_suffix>`, `-2`, ...) -- a
 PREVIOUS run's diverted branch name is never one of those candidates, so a
@@ -434,13 +443,40 @@ def decide_branch(
         )
 
 
+@dataclass(frozen=True)
+class BranchOccupancy:
+    """What `branch_currently_occupied` observed about ONE branch.
+
+    tan-cli#1119 review (minor): `existed` and `foreign` are reported
+    separately on purpose. "The branch does not exist on `origin` at all"
+    and "the branch exists and carries no commit outside the automation
+    identity" are the SAME safe answer for `decide_branch`'s question ("is
+    this candidate name safe to force-push to") -- a name nobody has ever
+    used is exactly as safe as one that is genuinely clean. They are not the
+    same OBSERVATION for the close decision `branch_currently_occupied`
+    exists for, though: one means "I looked, and there is nothing there";
+    the other means "I looked, and it is clean". Collapsing both into a
+    single `None` (as an earlier version of this function did) left an
+    operator reading the close step's log after a PR closed with no way to
+    tell which happened. `occupied` is the one question most callers
+    actually need to branch on.
+    """
+
+    existed: bool
+    foreign: ForeignCommit | None
+
+    @property
+    def occupied(self) -> bool:
+        return self.foreign is not None
+
+
 def branch_currently_occupied(
     root: pathlib.Path,
     base_ref: str,
     branch: str,
     automation_name: str,
     automation_email: str,
-) -> ForeignCommit | None:
+) -> BranchOccupancy:
     """Ask this guard's own authorship test about an ARBITRARY existing
     branch (e.g. an open PR's head), right now, rather than trusting a list
     built earlier in the run.
@@ -461,18 +497,23 @@ def branch_currently_occupied(
     between an earlier snapshot and the destructive action is caught here,
     because there is no snapshot to go stale.
 
-    Returns the first foreign commit found on `branch`, or `None` if the
-    branch does not exist on `origin` (nothing to protect) or carries no
-    commit outside the automation's own identity -- mirroring exactly what
-    `decide_branch` treats as "safe" for a candidate it tries itself.
+    Returns a `BranchOccupancy` -- `existed=False` if `branch` does not
+    exist on `origin` at all (nothing to protect), `existed=True,
+    foreign=None` if it exists and carries no commit outside the
+    automation's own identity (genuinely clean), or `existed=True,
+    foreign=<commit>` if it carries one. `.occupied` mirrors exactly what
+    `decide_branch` treats as "safe to force-push to" for a candidate it
+    tries itself (`not occupied` in both of the first two cases) while still
+    letting a caller that cares -- like `--check-branch`'s own log line --
+    tell the two apart.
     """
     if not _remote_branch_exists(root, branch):
-        return None
+        return BranchOccupancy(existed=False, foreign=None)
     tracking_ref = _fetch_branch_tip(root, branch)
     foreign = _foreign_commits(
         root, base_ref, tracking_ref, automation_name, automation_email
     )
-    return foreign[0] if foreign else None
+    return BranchOccupancy(existed=True, foreign=foreign[0] if foreign else None)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -517,7 +558,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check_branch is not None:
         try:
-            commit = branch_currently_occupied(
+            occupancy = branch_currently_occupied(
                 root,
                 args.base_ref,
                 args.check_branch,
@@ -527,6 +568,7 @@ def main(argv: list[str] | None = None) -> int:
         except BranchGuardError as exc:
             sys.stderr.write(f"planner_resync_branch_guard: REFUSED: {exc}\n")
             return 2
+        commit = occupancy.foreign
         if commit is not None:
             identity = f"{commit.author_name} <{commit.author_email}>"
             if (commit.author_name, commit.author_email) != (
@@ -544,11 +586,23 @@ def main(argv: list[str] | None = None) -> int:
                 f"occupied.\n"
             )
             return 1
-        sys.stdout.write(
-            f"planner_resync_branch_guard: {args.check_branch!r} carries no "
-            f"commit outside the automation identity (or does not exist) "
-            f"-- not occupied.\n"
-        )
+        # tan-cli#1119 review (minor): "never existed" and "exists and is
+        # clean" are the same SAFE answer (`occupied` is False either way)
+        # but not the same OBSERVATION -- see `BranchOccupancy`'s own
+        # docstring. Reported distinctly so an operator reading this log
+        # after a close can tell which happened.
+        if occupancy.existed:
+            sys.stdout.write(
+                f"planner_resync_branch_guard: {args.check_branch!r} exists "
+                f"and carries no commit outside the automation identity -- "
+                f"clean, not occupied.\n"
+            )
+        else:
+            sys.stdout.write(
+                f"planner_resync_branch_guard: {args.check_branch!r} does "
+                f"not exist on origin -- nothing to protect, not "
+                f"occupied.\n"
+            )
         return 0
 
     if args.divert_suffix is None:

@@ -436,19 +436,24 @@ jobs:
           changed_list="$(git status --porcelain -- python/ | cut -c4-)"
           short="${SDK_SHA:0:8}"
 
-          # tan-cli#1006 review (nit): this is the ONE place the automation's
-          # commit identity is spelled out in this step -- both the guard
-          # invocation below (`--automation-name`/`--automation-email`,
-          # explicit rather than relying on the script's argparse defaults
-          # matching by coincidence) and the `git config` calls further down
-          # read it from here. Before this, the two lived as independent
-          # string literals (this step's `git config` vs. the script's own
-          # `--automation-name`/`--automation-email` defaults) with nothing
-          # tying them together -- a one-sided edit would silently put the
-          # guard into "every automation commit reads as foreign" mode
-          # (fail-safe, since that only ever over-protects, but silent).
-          AUTOMATION_NAME="alp-sdk planner re-sync"
-          AUTOMATION_EMAIL="noreply@alplab.ai"
+          # tan-cli#1006 review (nit) / tan-cli#1119 review (minor): this is
+          # the ONE place the automation's commit identity is spelled out in
+          # LOCAL shell form in this step -- both the guard invocation below
+          # (`--automation-name`/`--automation-email`, explicit rather than
+          # relying on the script's argparse defaults matching by
+          # coincidence) and the `git config` calls further down read it
+          # from here. Sourced from the job-level `AUTOMATION_NAME`/
+          # `AUTOMATION_EMAIL` env (bottom of this job) rather than a second
+          # pair of literals -- tan-cli#1119 measured what independent
+          # literals cost: the "Close superseded planner-resync proposals"
+          # step below used to carry its own copy, and a drift there made
+          # every branch this automation actually pushed read as "occupied"
+          # (fail-safe, since that only ever over-protects) but SILENTLY --
+          # sharing one source closes that the same way `RESYNC_ISSUE_TITLE`/
+          # `RESYNC_ISSUE_MARKER` already do for the other two steps that
+          # need to agree.
+          AUTOMATION_NAME="${AUTOMATION_NAME}"
+          AUTOMATION_EMAIL="${AUTOMATION_EMAIL}"
 
           # tan-cli#1002: never force-push over a commit this automation did
           # not write. `planner_resync_branch_guard.py` inspects the CURRENT
@@ -712,6 +717,15 @@ jobs:
             echo "::error::jq is not on PATH -- this step needs it to filter the open-PR list, and cannot safely guess which PRs to close without it. Refusing to guess (see tan-cli#1109 review round 3) rather than silently closing nothing and leaving a stale proposal open with no signal."
             exit 1
           fi
+          # tan-cli#1119 review: the per-branch loop below shells out to
+          # `python python/scripts/planner_resync_branch_guard.py
+          # --check-branch` -- the exact same "missing binary => silent
+          # wrong answer" risk `jq`'s own presence check exists for, just one
+          # command later. Checked up front, same reasoning, same shape.
+          if ! command -v python >/dev/null 2>&1; then
+            echo "::error::python is not on PATH -- this step needs it to ask planner_resync_branch_guard.py --check-branch whether each candidate branch is currently safe to close, and cannot safely guess without it. Refusing to guess rather than silently closing a protected branch."
+            exit 1
+          fi
           # Same fail-closed shape as every other `gh ... | jq` lookup in this
           # job (tan-cli#920): a transient `gh` error must not be read as "no
           # other proposal exists" and fall through to leaving a stale one
@@ -815,28 +829,58 @@ jobs:
             # Asked FRESH, immediately before acting -- not read back out of
             # a snapshot computed at the guard step above. See the tan-cli#1119
             # comment above for why that distinction is the whole fix.
+            # `AUTOMATION_NAME`/`AUTOMATION_EMAIL`: job-level env (bottom of
+            # this job), the same source the "Open or refresh the proposal
+            # PR" step's own commits are actually made under -- see that
+            # step's comment for why a second, independent pair of literals
+            # here silently breaks the cap on drift.
             set +e
             python python/scripts/planner_resync_branch_guard.py \
               --check-branch "${branch}" \
               --repo-root "${GITHUB_WORKSPACE}" \
               --base-ref dev \
-              --automation-name "alp-sdk planner re-sync" \
-              --automation-email "noreply@alplab.ai"
+              --automation-name "${AUTOMATION_NAME}" \
+              --automation-email "${AUTOMATION_EMAIL}" < /dev/null
             check_rc=$?
             set -e
-            if [ "${check_rc}" -eq 2 ]; then
-              echo "::error::could not determine whether ${branch} (PR #${n}) currently carries a commit this automation did not write -- refusing to guess whether it is safe to close. See the step log above for the git failure this raised."
+            # tan-cli#1119 review (blocker): this used to be an ALLOW-LIST of
+            # the two known outcomes (`-eq 2` refuse, `-eq 1` skip), so any
+            # OTHER exit code -- 127 (`python` resolved but the script itself
+            # could not be found or run), 137 (OOM-killed / SIGKILL), or
+            # anything else a subprocess can produce -- fell straight through
+            # to the `gh pr comment`/`gh pr close` below with no signal at
+            # all. Measured: a `python` stub exiting 127 or 137 closed the
+            # exact branch this exclusion exists to protect, step rc 0, no
+            # `::error::` -- a silent fail-OPEN in the one step whose entire
+            # thesis is fail-closed. Inverted to a DENY-list of the single
+            # known-safe answer instead: anything that is not exactly `0`
+            # aborts the whole step before any `gh pr close`, the same
+            # fail-closed posture `command -v jq`/`command -v python` and the
+            # `gh pr list` failure check above already take. `0` (not
+            # occupied, or does not exist) is the only exit code this check
+            # trusts.
+            if [ "${check_rc}" -ne 0 ]; then
+              if [ "${check_rc}" -eq 1 ]; then
+                # Occupied -- exactly the PR this exclusion exists to protect
+                # (#1103's shape, or a prior run's diverted branch a human
+                # has since adopted); leave it alone, and keep processing
+                # the rest of the candidates.
+                continue
+              fi
+              # Anything else (2 = the guard could not determine an answer,
+              # via a real git failure OR a bad invocation of the guard
+              # itself -- `argparse`'s own `ap.error` also exits 2; 127 =
+              # `python`/the script could not be run; 137 = OOM-killed; or
+              # any other subprocess failure) is refused outright, not
+              # skipped -- an unenumerated answer must abort the whole step
+              # rather than let the loop guess "probably fine" and continue
+              # closing other candidates.
+              echo "::error::could not determine whether ${branch} (PR #${n}) currently carries a commit this automation did not write (planner_resync_branch_guard.py --check-branch exited ${check_rc}, not the expected 0 or 1) -- refusing to guess whether it is safe to close. See the step log above for what this guard reported."
               exit 1
             fi
-            if [ "${check_rc}" -eq 1 ]; then
-              # Occupied -- exactly the PR this exclusion exists to protect
-              # (#1103's shape, or a prior run's diverted branch a human has
-              # since adopted); leave it alone.
-              continue
-            fi
             gh pr comment "${n}" --repo "${GITHUB_REPOSITORY}" \
-              --body "Superseded by ${KEEP_URL} (tan-cli#1109: at most one open \`auto/planner-resync-*\` proposal at a time). Closing."
-            gh pr close "${n}" --repo "${GITHUB_REPOSITORY}"
+              --body "Superseded by ${KEEP_URL} (tan-cli#1109: at most one open \`auto/planner-resync-*\` proposal at a time). Closing." < /dev/null
+            gh pr close "${n}" --repo "${GITHUB_REPOSITORY}" < /dev/null
           done <<< "${others}"
 
       # tan-cli#911: the step above's own gate ("is there a mirror diff to
@@ -1201,3 +1245,17 @@ jobs:
     env:
       RESYNC_ISSUE_TITLE: "planner-resync: a re-sync is owed and needs a human (no diff to propose)"
       RESYNC_ISSUE_MARKER: "<!-- tan-cli-planner-resync-tracker -->"
+      # tan-cli#1119 review (minor): the automation's own commit identity,
+      # hoisted here from the "Open or refresh the proposal PR" step's local
+      # `AUTOMATION_NAME`/`AUTOMATION_EMAIL` (still set there too, from
+      # these same job-level values -- see that step's own comment on why
+      # they must never drift independently) so the "Close superseded
+      # planner-resync proposals" step's live `--check-branch` calls read
+      # the SAME identity the branch was actually pushed under, instead of
+      # a second pair of literals that could silently drift from it.
+      # Measured with a drifted literal in the close step: every candidate
+      # answers "occupied" against its own author (a stranger-looking
+      # identity), `closed=[]`, step rc 0, no warning -- the cap dies
+      # silently. A single source closes that.
+      AUTOMATION_NAME: "alp-sdk planner re-sync"
+      AUTOMATION_EMAIL: "noreply@alplab.ai"

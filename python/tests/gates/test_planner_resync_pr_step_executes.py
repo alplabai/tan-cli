@@ -355,6 +355,14 @@ def _run_step(
     env["RC"] = rc
     env["GATE_VERDICT"] = "PASS"
     env["GH_TOKEN"] = "fake-token"
+    # tan-cli#1119 review (minor): `AUTOMATION_NAME`/`AUTOMATION_EMAIL` moved
+    # to job-level `env:` in the real workflow -- this step's `run:` text no
+    # longer sets them as local literals, it reads them from the
+    # environment. A real GHA job would supply them from the job's own
+    # `env:` block; this harness must too, or `set -u` kills the step on an
+    # unbound variable.
+    env["AUTOMATION_NAME"] = _AUTOMATION_NAME
+    env["AUTOMATION_EMAIL"] = _AUTOMATION_EMAIL
     # tan-cli#1109: the step now re-fetches `origin/dev` for itself and
     # compares to `DEV_SHA` (`steps.devtip.outputs.sha` on the real runner)
     # before doing anything else -- default to the workspace's OWN current
@@ -853,6 +861,8 @@ def _run_close_step(
     keep_url: str,
     pr_list_fixture: str = "[]",
     no_jq: bool = False,
+    no_python: bool = False,
+    check_branch_exit_code: int | None = None,
 ) -> tuple[subprocess.CompletedProcess[bytes], pathlib.Path]:
     """Run the close step's real `run:` body against a real `gh` stub AND
     (tan-cli#1119) a real `workspace` checkout -- the step now shells out to
@@ -861,7 +871,15 @@ def _run_close_step(
     `origin` + working clone the PR-step tests already build (`workspace`
     fixture), not just a `gh` stub. Runs with `workspace` as cwd and
     `GITHUB_WORKSPACE` pointed at it, matching what the real step sees
-    (`actions/checkout`'s default target directory)."""
+    (`actions/checkout`'s default target directory).
+
+    `check_branch_exit_code`, when given, replaces the `python` stub with
+    one that ignores its arguments and exits with that code unconditionally
+    -- tan-cli#1119 review (major 1): the ONLY way to drive the close step's
+    own `check_rc` handling through every code the real
+    `planner_resync_branch_guard.py --check-branch` invocation can produce
+    (0, 1, 2, or a subprocess failure like 127/137) without needing a
+    different real git shape for each one."""
     bindir = tmp_path / "close-bin"
     bindir.mkdir()
     gh_stub = bindir / "gh"
@@ -871,24 +889,59 @@ def _run_close_step(
     # --check-branch` itself -- same reasoning as `fake_bin`'s own python
     # stub above (a plain `python` on PATH might not be the interpreter this
     # test suite is running under).
-    python_stub = bindir / "python"
-    python_stub.write_text(
-        f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n', encoding="utf-8"
-    )
-    python_stub.chmod(0o755)
+    if no_python:
+        python_stub = None
+    elif check_branch_exit_code is not None:
+        python_stub = bindir / "python"
+        python_stub.write_text(
+            "#!/usr/bin/env bash\n"
+            f"echo 'stub python: forcing --check-branch to exit "
+            f"{check_branch_exit_code}' >&2\n"
+            f"exit {check_branch_exit_code}\n",
+            encoding="utf-8",
+        )
+        python_stub.chmod(0o755)
+    else:
+        python_stub = bindir / "python"
+        python_stub.write_text(
+            f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n', encoding="utf-8"
+        )
+        python_stub.chmod(0o755)
+    # tan-cli#1109 review round 3 / tan-cli#1119 review (blocker): `no_jq`
+    # restricts PATH to `bindir` alone so `command -v jq` genuinely finds
+    # nothing -- but `bindir` must still carry a REAL `jq` in that case
+    # (copied in below) whenever the test is not ALSO exercising
+    # `no_python`, or the step would die at the `jq` check before ever
+    # reaching the `python` one this test wants to isolate. Symmetric for
+    # `no_python`: PATH-restricted, but `jq` still present unless `no_jq`
+    # too.
+    if no_jq:
+        jq_stub = None
+    else:
+        real_jq = shutil.which("jq")
+        if real_jq is not None:
+            jq_stub = bindir / "jq"
+            jq_stub.write_text(f'#!/usr/bin/env bash\nexec "{real_jq}" "$@"\n', encoding="utf-8")
+            jq_stub.chmod(0o755)
+        else:
+            jq_stub = None
     call_log = tmp_path / "gh_calls.log"
     call_log.write_text("", encoding="utf-8")
     fixture = tmp_path / "pr_list_fixture.json"
     fixture.write_text(pr_list_fixture, encoding="utf-8")
 
     env = dict(os.environ)
-    # tan-cli#1109 review round 3: `no_jq` replaces PATH outright (not
-    # prepends to it) with a dir holding only the fake `gh` -- `jq` lives
-    # under the real PATH this process inherited, so prepending would
-    # leave it reachable. `printf`/`command` are shell builtins, so the
-    # step's own presence check (`command -v jq`) still runs; only `jq`
-    # itself becomes genuinely absent.
-    env["PATH"] = str(bindir) if no_jq else f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+    # `no_jq`/`no_python` both restrict PATH to `bindir` ALONE (not prepend
+    # to the real PATH) so the missing tool is genuinely missing -- `jq`/
+    # `python` live under the real PATH this process inherited, so
+    # prepending would leave them reachable regardless. `printf`/`command`
+    # are shell builtins, so the step's own presence checks (`command -v
+    # jq`, `command -v python`) still run either way.
+    env["PATH"] = (
+        str(bindir)
+        if (no_jq or no_python)
+        else f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+    )
     env["GH_TOKEN"] = "fake-token"
     env["GITHUB_REPOSITORY"] = "example/tan-cli"
     env["GITHUB_WORKSPACE"] = str(workspace)
@@ -896,16 +949,21 @@ def _run_close_step(
     env["KEEP_URL"] = keep_url
     env["GH_CALL_LOG"] = str(call_log)
     env["GH_PR_LIST_FIXTURE"] = str(fixture)
+    # tan-cli#1119 review (minor): job-level `env:` in the real workflow --
+    # see `_run_step`'s own copy of this comment.
+    env["AUTOMATION_NAME"] = _AUTOMATION_NAME
+    env["AUTOMATION_EMAIL"] = _AUTOMATION_EMAIL
 
-    # tan-cli#1109 review round 3: `no_jq`'s restricted PATH (bindir only,
-    # so `command -v jq` genuinely finds nothing) would also hide `bash`
+    # tan-cli#1109 review round 3 / tan-cli#1119 review (blocker): `no_jq`'s
+    # (and `no_python`'s) restricted PATH (bindir only, so `command -v jq`/
+    # `command -v python` genuinely find nothing) would also hide `bash`
     # itself if bash were looked up BY NAME through that same PATH --
-    # `jq` and `bash` live in the same directory on this box
-    # (`/usr/bin`), so excluding jq's directory would exclude bash's too.
-    # Resolved to its absolute path from the UNRESTRICTED, real
+    # `jq`/`python` and `bash` live in the same directory on this box
+    # (`/usr/bin`), so excluding jq's/python's directory would exclude
+    # bash's too. Resolved to its absolute path from the UNRESTRICTED, real
     # environment before `env` is built, so launching bash itself never
     # needs a PATH lookup at all -- only what runs INSIDE the script (the
-    # step's own `command -v jq` check) is affected by `no_jq`.
+    # step's own `command -v jq`/`command -v python` checks) is affected.
     bash_exe = shutil.which("bash") or "/bin/bash"
 
     proc = subprocess.run(
@@ -1061,15 +1119,23 @@ def test_close_step_closes_bot_prs_but_never_a_human_cross_repo_or_occupied_one(
 def test_close_step_leaves_an_unoccupied_bot_sibling_untouched_when_nothing_is_occupied(
     workspace: pathlib.Path, tmp_path: pathlib.Path
 ):
-    """The other half of the occupied-exclusion, isolated: with nothing
-    pushed onto any candidate branch (the everyday, non-diverted run -- none
-    of the fixture's branches exist on `workspace`'s origin at all, so every
-    live `--check-branch` call answers "not occupied"), the bot's own other
-    proposals still close exactly as before -- the exclusion clause must not
-    accidentally protect everything when there is nothing to protect. Also
-    proves `_remote_branch_exists` returning False (a branch this run's
-    fixture names but never actually pushed) degrades safely to "not
-    occupied", the same as an explicitly-empty snapshot used to."""
+    """The other half of the occupied-exclusion, isolated. Two DIFFERENT
+    "not occupied" shapes, both proven, not just one:
+
+    * #1103 and #1107's branches are never pushed at all -- proves
+      `_remote_branch_exists` returning False (a branch this run's fixture
+      names but never actually pushed) degrades safely to "not occupied".
+    * #1106's branch (tan-cli#1119 review, major 2) carries a REAL commit
+      under the automation's own identity, pushed for real -- the everyday
+      shape this cap actually closes in production (a genuine prior-run
+      proposal, not an absent name), and the only one of the three that
+      exercises `_identity_is_foreign` returning False end-to-end on the
+      close path. A prior version of this test left every sibling branch
+      absent, so the cap was only ever proven against "the branch does not
+      exist", never against "the branch exists and is genuinely clean"."""
+    bare = tmp_path / "origin.git"
+    _push_automation_commit_on(bare, "auto/planner-resync-eaa79695", tmp_path)
+
     proc, call_log = _run_close_step(
         workspace,
         tmp_path,
@@ -1086,6 +1152,8 @@ def test_close_step_leaves_an_unoccupied_bot_sibling_untouched_when_nothing_is_o
     # where the guard actually found it foreign-occupied; a run where
     # nothing is occupied has no reason to protect it.)
     assert "pr close 1103" in calls, calls
+    # #1106's branch exists and carries a genuine automation commit -- still
+    # closes, proving the "clean, not absent" shape works too.
     assert "pr close 1106" in calls, calls
     assert "pr close 1107" in calls, calls
 
@@ -1156,39 +1224,63 @@ def test_close_step_excludes_a_prior_run_diverted_branch_a_human_has_adopted(
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
 def test_close_step_catches_a_branch_adopted_in_the_toctou_window(
-    workspace: pathlib.Path, tmp_path: pathlib.Path
+    workspace: pathlib.Path, fake_bin: pathlib.Path, tmp_path: pathlib.Path
 ):
     """tan-cli#1119: the TOCTOU half of the same defect. `occupied_branches`
     (tan-cli#1109) is a SNAPSHOT computed at the guard step, consulted here,
     LATER -- a branch a human adopts in the window between those two moments
     was invisible to a snapshot-based check no matter how fresh the snapshot
-    was when it was taken. Simulated explicitly: this test's own call
-    represents "the guard step already ran and produced whatever snapshot it
-    produced" (this fix does not even have such a snapshot to hand the close
-    step any more -- there is nothing to pass here that would matter), and
-    the human's hand-port commit is pushed to origin strictly AFTER that
-    point but BEFORE this step runs -- i.e. exactly inside the TOCTOU
-    window. A close step that only trusted an earlier snapshot cannot see a
-    commit that did not exist yet when the snapshot was taken; a close step
-    that asks fresh, right before acting (the fix), does."""
-    bare = tmp_path / "origin.git"
+    was when it was taken.
 
-    # "The guard step already ran" -- at this point in the timeline nothing
-    # has landed on the branch yet; a snapshot taken here would (correctly,
-    # for its own moment) have reported it unoccupied.
-    keep_branch = "auto/planner-resync-5c33ef04"
-    keep_url = "https://github.com/example/tan-cli/pull/1108"
+    tan-cli#1119 review (minor): an earlier version of this test only
+    simulated "the guard step already ran" as a comment -- nothing actually
+    ran before the human's push, which made it mechanically identical to
+    `test_close_step_excludes_a_prior_run_diverted_branch_a_human_has_adopted`
+    with a different branch name. This version executes the REAL "Open or
+    refresh the proposal PR" step first (`_run_step`, the same helper the
+    PR-step tests above use), for real, against `workspace` -- capturing the
+    genuine `occupied_branches` snapshot it produces (empty: nothing is
+    occupied at that moment) as proof of what a pre-tan-cli#1119 close step
+    would have trusted. ONLY AFTER that real step completes does the human
+    adopt a wholly separate SIBLING branch (an earlier run's own proposal,
+    never a candidate in THIS guard-step invocation's own walk either) --
+    exactly inside the TOCTOU window between "the guard step ran" and "the
+    close step runs". The close step must still exclude it, DESPITE a
+    snapshot that says (truthfully, for the moment it was taken) nothing was
+    occupied."""
+    # "The guard step already ran" -- for real. A clean, non-diverted run:
+    # nothing occupies `auto/planner-resync` yet, so `decide_branch` picks
+    # it outright and the step pushes under the automation's own identity.
+    guard_sdk_sha = "cafef00d12345678"
+    guard_proc = _run_step(workspace, fake_bin, tmp_path, guard_sdk_sha)
+    assert guard_proc.returncode == 0, _fmt(guard_proc)
+    guard_outputs = (tmp_path / "github_output").read_text(encoding="utf-8")
+    assert "diverted=false\n" in guard_outputs, guard_outputs
+    # The snapshot a pre-tan-cli#1119 close step would have consumed: empty,
+    # because nothing was occupied at the moment the guard step looked --
+    # correct for its own moment, and exactly why a snapshot-based check
+    # cannot see what happens next.
+    assert "occupied_branches=\n" in guard_outputs, guard_outputs
+    keep_branch = "auto/planner-resync"
+    keep_url = "https://github.com/example/tan-cli/pull/1"
+
+    # THE TOCTOU WINDOW: strictly AFTER the guard step above completed, a
+    # human adopts a SEPARATE, pre-existing sibling branch -- an earlier
+    # run's own proposal, never a candidate this guard-step invocation's own
+    # cascade touched (it never diverted, so it never even looked at
+    # `auto/planner-resync-toctou01`).
+    bare = tmp_path / "origin.git"
+    _push_foreign_commit_on(bare, "auto/planner-resync-toctou01", tmp_path)
+
     pr_list_fixture = """[
       {"number": 4200, "headRefName": "auto/planner-resync-toctou01",
        "author": {"login": "app/github-actions", "is_bot": true},
        "isCrossRepository": false}
     ]"""
 
-    # THE TOCTOU WINDOW: a human adopts the branch strictly after "the guard
-    # step" would have looked, strictly before this step actually runs.
-    _push_foreign_commit_on(bare, "auto/planner-resync-toctou01", tmp_path)
-
-    # "The close step runs" -- later still, against the now-adopted branch.
+    # "The close step runs" -- later still, against the now-adopted branch,
+    # and (unlike the pre-fix mechanism) without ever consuming the
+    # `occupied_branches` snapshot captured above at all.
     proc, call_log = _run_close_step(
         workspace,
         tmp_path,
@@ -1206,6 +1298,127 @@ def test_close_step_catches_a_branch_adopted_in_the_toctou_window(
     assert "pr close 4200" not in calls, (
         "a branch adopted in the TOCTOU window between the guard step and "
         "this step must not be closed:\n" + calls
+    )
+
+
+# --------------------------- tan-cli#1119 review (blocker + major 1): check_rc
+
+_CHECK_RC_FIXTURE = """[
+  {"number": 9000, "headRefName": "auto/planner-resync-checkrc",
+   "author": {"login": "app/github-actions", "is_bot": true},
+   "isCrossRepository": false}
+]"""
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
+@pytest.mark.parametrize(
+    "check_rc,expect_closed,expect_step_ok",
+    [
+        # 0 = "not occupied" (the real guard's own answer for a genuinely
+        # clean or nonexistent branch) -- the ONLY code that may close.
+        (0, True, True),
+        # 1 = "occupied" -- a routine, expected skip; the step keeps
+        # running and stays green.
+        (1, False, True),
+        # 2 = the real guard's own "could not determine" refusal --
+        # (BranchGuardError OR argparse's ap.error, see the guard's own
+        # module docstring) must abort the whole step, not skip just this
+        # candidate.
+        (2, False, False),
+        # tan-cli#1119 review (blocker): 127 = "command not found" -- the
+        # single most likely real-world shape of "`python` resolved on
+        # PATH but the interpreter it points to could not run the script"
+        # (a broken venv, a bad shebang inside a container image). Measured
+        # PRE-fix: this fell through the old `-eq 2`/`-eq 1` allow-list
+        # straight to `gh pr close`, closing #9000 silently, step rc 0, no
+        # `::error::` -- exactly the failure this parametrization exists to
+        # pin shut.
+        (127, False, False),
+        # tan-cli#1119 review (blocker): 137 = 128+SIGKILL -- an OOM-killed
+        # subprocess, the other most likely real-world failure for a
+        # short-lived `python` invocation on a loaded runner. Same pre-fix
+        # silent-close shape as 127.
+        (137, False, False),
+    ],
+)
+def test_close_step_treats_every_check_branch_exit_code_correctly(
+    workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    check_rc: int,
+    expect_closed: bool,
+    expect_step_ok: bool,
+):
+    """tan-cli#1119 review (major 1): nothing exercised `check_rc` at all --
+    `grep -n "check_rc" python/tests/gates/test_planner_resync_pr_step_executes.py`
+    returned nothing
+    before this test existed, which is exactly why the blocker (every exit
+    code outside {1,2} fell through to `gh pr close`) survived a suite that
+    is otherwise mutation-proved. A `--check-branch` stub parametrised over
+    every code the real guard can produce (0, 1, 2) plus the two realistic
+    subprocess-failure codes the review measured directly (127, 137):
+    `gh pr close` must fire for 0 and ONLY 0; every other code must leave
+    #9000 untouched, and only 0/1 may leave the step itself green (rc 0) --
+    2/127/137 must abort the whole step with an `::error::`."""
+    proc, call_log = _run_close_step(
+        workspace,
+        tmp_path,
+        _FAKE_GH_RAW_JSON,
+        keep_branch="auto/planner-resync-5c33ef04",
+        keep_url="https://github.com/example/tan-cli/pull/1108",
+        pr_list_fixture=_CHECK_RC_FIXTURE,
+        check_branch_exit_code=check_rc,
+    )
+    calls = call_log.read_text(encoding="utf-8")
+
+    if expect_closed:
+        assert "pr comment 9000" in calls, _fmt(proc) + "\n" + calls
+        assert "pr close 9000" in calls, _fmt(proc) + "\n" + calls
+    else:
+        assert "pr comment 9000" not in calls, (
+            f"check_rc={check_rc} must not close #9000:\n"
+            + _fmt(proc)
+            + "\n"
+            + calls
+        )
+        assert "pr close 9000" not in calls, (
+            f"check_rc={check_rc} must not close #9000:\n"
+            + _fmt(proc)
+            + "\n"
+            + calls
+        )
+
+    if expect_step_ok:
+        assert proc.returncode == 0, _fmt(proc)
+    else:
+        assert proc.returncode != 0, _fmt(proc)
+        assert b"::error::" in proc.stdout, _fmt(proc)
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
+def test_close_step_errors_loudly_when_python_is_missing_instead_of_proceeding_silently(
+    workspace: pathlib.Path, tmp_path: pathlib.Path
+):
+    """tan-cli#1119 review (blocker): the same `command -v jq` presence-check
+    shape, now also for `python` -- the step's per-branch loop shells out to
+    it directly (`python python/scripts/planner_resync_branch_guard.py
+    --check-branch ...`), so a `python`-less runner must refuse loudly
+    before ever reaching a `gh pr close`, not fall through to whatever a
+    bare "command not found" happens to do inside the loop."""
+    proc, call_log = _run_close_step(
+        workspace,
+        tmp_path,
+        _FAKE_GH_RAW_JSON,
+        keep_branch="auto/planner-resync-5c33ef04",
+        keep_url="https://github.com/example/tan-cli/pull/1108",
+        pr_list_fixture=_PR_LIST_FIXTURE_MIXED,
+        no_python=True,
+    )
+    assert proc.returncode != 0, _fmt(proc)
+    assert b"::error::" in proc.stdout, _fmt(proc)
+    assert b"python is not on PATH" in proc.stdout, _fmt(proc)
+    assert call_log.read_text(encoding="utf-8") == "", (
+        "no pr comment/close call may happen when python itself is missing:\n"
+        + _fmt(proc)
     )
 
 
