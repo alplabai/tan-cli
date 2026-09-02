@@ -23,8 +23,8 @@ sibling's two, and requires the releaser RUN all three with `-v` and RECORD the
 per-node-id result before a tag. To find that row in the skill, grep for
 `test_deepx_compiles_real_yolo11n` rather than for prose: a heading can be
 reworded silently from the other repo, a node ID cannot drift without this
-file's own tests failing first. A SKIP does not block the tag
--- this test cannot pass without the licensed `dx-com` wheel (the binary it
+file's own tests failing first. A SKIP does not block the tag -- this test
+cannot pass without the licensed `dx-com` wheel (the binary it
 puts on PATH, and what the skipif probes, is `dxcom`), the private fixture, AND
 host RAM over dxcom's ~15 GiB floor. That last one is not merely "not
 guaranteed": `_host_mem_avail_gib()` below reads `/proc/meminfo` and returns
