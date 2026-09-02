@@ -205,16 +205,38 @@ def validate_document(doc: object, schema_path: Path, source: Path | str) -> lis
     tan-cli#1116 round 2: the ABSENT check is NOT `is_file()`/`exists()` --
     a first pass here used a pre-flight `is_file()` guarded by `except
     OSError: exists = True`, reasoning that `Path.is_file()` swallows only
-    `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` (`pathlib`'s pre-3.14 `_IGNORED_ERRNOS`
-    list), not `EACCES`. That reasoning stopped being true in Python 3.14:
-    `pathlib` DROPPED `_IGNORED_ERRNOS` there, so `is_file()`/`is_dir()`/
-    `exists()` swallow EVERY `OSError` -- including `EACCES` -- and return
-    `False` on every one of them, version-dependent behaviour a version-
-    independent contract cannot be built on (measured: seam1's `parity.yml`
-    job resolves `python-version: "3.x"` to CPython 3.14.7, where the old
-    guard was a silent no-op and a permission-denied schema directory took
-    the ABSENT arm -- `[]`, "everything is valid," the exact outcome this
-    docstring forbids two paragraphs up).
+    `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` (`pathlib`'s own `_IGNORED_ERRNOS`
+    list), not `EACCES`. That RAISING BEHAVIOUR stopped holding in Python
+    3.14, so `is_file()`/`is_dir()`/`exists()` swallow EVERY `OSError` --
+    including `EACCES` -- and return `False` on every one of them there,
+    version-dependent behaviour a version-independent contract cannot be
+    built on (measured: seam1's `parity.yml` job resolves
+    `python-version: "3.x"` to CPython 3.14.7, where the old guard was a
+    silent no-op and a permission-denied schema directory took the ABSENT
+    arm -- `[]`, "everything is valid," the exact outcome this docstring
+    forbids two paragraphs up).
+
+    Round 2's OWN first fix got the boundary wrong -- worth recording
+    precisely, since it explains why three independent readings (this
+    module's own first fix included) landed on the wrong version.
+    `_IGNORED_ERRNOS` the CONSTANT vanishes from `pathlib` a release
+    EARLIER, in 3.13 (`AttributeError` probing `pathlib._IGNORED_ERRNOS`
+    there) -- but the BEHAVIOUR it used to name survives past that removal:
+    `is_file()` on a permission-denied ancestor still raises
+    `PermissionError` on 3.13.15, exactly as on 3.12.3, and only starts
+    returning `False` in 3.14.7. Measured directly against all three real
+    interpreters, `errno=13` throughout:
+
+        3.12.3   is_file() -> raises PermissionError   _IGNORED_ERRNOS: (2, 20, 9, 40)
+        3.13.15  is_file() -> raises PermissionError   _IGNORED_ERRNOS: gone (AttributeError)
+        3.14.7   is_file() -> False                    _IGNORED_ERRNOS: gone (AttributeError)
+
+    So the constant and the behaviour it once named parted ways for one
+    full release: a guard that reasons from "the constant still exists" is
+    already wrong reading `pathlib` in 3.13, and a guard that reasons from
+    "I measured `is_file()` raise on the interpreters I have" is wrong the
+    moment 3.14 ships, whichever question it asked. Neither question is
+    safe to ask; the fix below asks neither.
 
     The fix is to not stat at all: call `schema_errors` directly and let
     the read itself answer, the same shape `_resolve_hw_rev`

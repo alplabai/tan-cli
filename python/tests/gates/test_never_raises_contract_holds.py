@@ -49,31 +49,58 @@ THE VERSION-INDEPENDENCE LESSON (review round 2 BLOCKER, its own section
 because it is the one mistake this file's FIRST version made and shipped
 red): a pre-flight `is_file()`/`is_dir()`/`exists()` guard wrapped in
 `except OSError` is not a fix, it is a bet on which errnos `pathlib`
-happens to swallow THIS interpreter. `pathlib` DROPPED its pre-3.14
-`_IGNORED_ERRNOS` allow-list (`ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP`) in Python
-3.14: on 3.14+ those three calls swallow EVERY `OSError`, `EACCES`
-included, and return `False` -- so a guard written to catch the ONE errno
-that used to escape (`EACCES`) catches nothing there, because nothing
-escapes the stat call for the guard to catch. `metadata_schema.
+happens to swallow THIS interpreter. The RAISING BEHAVIOUR that reasoning
+depends on -- `is_file()`/`is_dir()` swallow `ENOENT`/`ENOTDIR`/`EBADF`/
+`ELOOP` but re-raise `EACCES` -- holds on 3.12.3 AND 3.13.15 and stops
+holding only in 3.14.7: there those calls swallow EVERY `OSError`,
+`EACCES` included, and return `False` instead -- so a guard written to
+catch the ONE errno that used to escape catches nothing there, because
+nothing escapes the stat call for the guard to catch. `metadata_schema.
 validate_document` and `scaffold.read_example_tree` shipped exactly that
 guard in this gate's first version, and CI's `seam1` leg (`parity.yml`,
 `python-version: "3.x"`, resolved to CPython 3.14.7) turned it red on
 `TestValidateDocument::test_permission_denied` -- measured `assert 0 == 1`,
 the function silently answering "everything is valid" for a schema it could
-not even read. The fix used everywhere in this file now is the one
-`_resolve_hw_rev` (`perf_apply.py`) and `example_catalog.catalog_unreadable`
-already used: NO stat call at all. Read straight through and classify by
-the REAL exception the read raises -- `FileNotFoundError` for genuinely
-absent, everything else for "there but broken" -- which is correct on every
+not even read.
+
+**The boundary is not where the reasoning's own citation lives, and that
+gap is worth naming precisely -- it is why the first fix got it wrong.**
+`pathlib`'s `_IGNORED_ERRNOS` CONSTANT, the one the reasoning names, is
+gone a full release EARLIER than the behaviour it once described: absent
+from `pathlib` since 3.13 (`AttributeError` probing for it there), while
+`is_file()` on a permission-denied ancestor keeps RAISING through 3.13.15,
+identically to 3.12.3, and only starts returning `False` in 3.14.7.
+Measured directly against all three real interpreters
+(`python-build-standalone` portable builds for 3.13.15/3.14.7, this
+project's own pinned 3.12.3), `errno=13` throughout:
+
+    3.12.3   is_file() -> raises PermissionError   _IGNORED_ERRNOS: (2, 20, 9, 40)
+    3.13.15  is_file() -> raises PermissionError   _IGNORED_ERRNOS: gone (AttributeError)
+    3.14.7   is_file() -> False                    _IGNORED_ERRNOS: gone (AttributeError)
+
+So a guard reasoning "the constant still exists, so the old errno set
+still applies" is already wrong reading `pathlib` itself in 3.13; a guard
+reasoning "I measured `is_file()` raise on every interpreter I have" is
+wrong the moment 3.14 ships. Both are version-dependent facts a
+version-independent contract cannot rest on -- which is exactly why the
+fix below asks neither question.
+
+The fix used everywhere in this file now is the one `_resolve_hw_rev`
+(`perf_apply.py`) and `example_catalog.catalog_unreadable` already used:
+NO stat call at all. Read straight through and classify by the REAL
+exception the read raises -- `FileNotFoundError` for genuinely absent,
+everything else for "there but broken" -- which is correct on every
 interpreter because it never depends on what a stat-based guard happens to
 swallow this Python version. `TestReadExampleTree` additionally asserts the
 `not_found` VALUE, not just the exception type, because a type-only
 assertion could not see this class of bug at all: the old code still raised
-`ExampleReadError` on 3.14+, just with the wrong `not_found`.
+`ExampleReadError` on 3.14+, just with the wrong `not_found`. Re-driven
+directly against all three interpreters as part of THIS round's fix (not
+merely asserted): `tests/gates` is `1027 passed, 34 skipped` on 3.12.3,
+3.13.15 and 3.14.7 alike.
 
 THE SHAPE SWEEP (tan-cli#1116's own instruction: seed from the SHAPE, not
-
-THE SHAPE SWEEP (tan-cli#1116's own instruction: seed from the SHAPE, notfrom the four names the issue body already listed -- issue comment 2 found
+from the four names the issue body already listed -- issue comment 2 found
 `perf_apply.py`'s two sites exactly because a reviewer went looking in a
 NEIGHBOURING module a name-only seed would have missed -- and review round
 2 widened it again: an 18-of-79 hand-read triage was not sound either,
@@ -158,22 +185,27 @@ of those hand-driven with real broken files (the other 19 already
 confirmed safe by the script's own execution); **9** live defects found
 this way in `tan/core`/`tan/commands` plus **2** in the non-pinned half of
 `tan/planner`, **11 fixed in total** (the issue's own two named
-`perf_apply.py` sites are two of the eleven); **4** more found in
-`PINNED_HASHES`-protected planner files (`kconfig.py`, `sdk_compat.py`
-times two, `buildplan.py`, `slugs.py`, `kconfig_symbols.py` -- six files,
-named individually above and in `_SEEDED_CONTRACTS`' neighbouring
-comments), all deliberately deferred rather than fixed, all reported rather
-than silently skipped. **15** seeded into `_SEEDED_CONTRACTS` below -- the
+`perf_apply.py` sites are two of the eleven); **6 more sites across 5
+files** found in `PINNED_HASHES`-protected planner files -- `kconfig.py`
+(one site), `sdk_compat.py` (two: `read_sdk_version`, `_hw_revision_table`),
+`buildplan.py` (`_sdk_version`), `slugs.py` (`peripheral_kconfig`),
+`kconfig_symbols.py` (`_load_board_symbols`) -- named individually above and
+in `_SEEDED_CONTRACTS`' neighbouring comments, all deliberately deferred
+rather than fixed, all reported rather than silently skipped. **15** seeded
+into `_SEEDED_CONTRACTS` below -- the
 twelve from review round 1 plus `som_buildability.hw_rev_not_buildable`,
 `new_som_cmd._known_board_names` and `new_som_cmd._family_hw_revisions`.
 `template.py::_docs_ref`/`render_to_envelope` are fixed but NOT seeded here
 (deliberately, not an oversight): seeding either needs `bind_sdk_root`,
 global mutable state this gate's other 15 seeds do not touch and this file
-declines to be the first to introduce; their fixes are instead verified by
-a standalone reproduction driven directly through `render_to_envelope`
-end-to-end (reported, not committed as a second harness) and covered
-going forward by `tests/planner/test_render_to_envelope_malformed_example_
-board.py`'s existing SDK-gated suite.
+declines to be the first to introduce. Both are instead covered by a
+COMMITTED test (review round 3 minor: an earlier draft of this fix shipped
+neither fix with a test at all -- `tests/planner/test_docs_ref_and_
+render_to_envelope_encoding.py`, SDK-gated the same way `tests/planner/
+test_render_to_envelope_malformed_example_board.py` already is), mutation-
+proved the same way as this file's own seeds (byte-copy restore,
+`__pycache__` cleared before and after, each reds specifically on its own
+narrowed `except`).
 
 The gap between 65 and 15 is real and recorded here rather than implied
 clean: 19 are already-correct functions this file has not been asked to
@@ -207,12 +239,16 @@ much of the ORIGINAL caveat held.
 `ci.yml`'s `python` job pins `python-version: "3.12"`; `seam1` uses
 `python-version: "3.x"`, which resolved to CPython 3.14.7 the run this gate
 broke on. `chmod 000` worked identically on both -- the bug was never a
-skipped shape, it was `pathlib` behaving differently across the two
-interpreters underneath a shape that DID run (see THE VERSION-INDEPENDENCE
-LESSON above). Driven and confirmed on BOTH interpreters as part of fixing
-this: a portable CPython 3.14.7 build (`python-build-standalone`, the exact
-patch release `seam1` reported) and the repo's pinned 3.12.3, side by side,
-every seeded shape green on both -- not asserted here, run.
+skipped shape, it was `pathlib` behaving differently across interpreters
+underneath a shape that DID run (see THE VERSION-INDEPENDENCE LESSON above
+for exactly which release changes what -- the constant `pathlib.
+_IGNORED_ERRNOS` and the raising behaviour it once named do not vanish in
+the same release, and neither citation alone pins the real boundary).
+Driven and confirmed on all THREE real interpreters as part of fixing
+this: portable `python-build-standalone` builds of 3.13.15 and 3.14.7
+(the exact patch release `seam1` reported) alongside the repo's pinned
+3.12.3, side by side -- every seeded shape green on all three, not
+asserted here, run (`tests/gates`: `1027 passed, 34 skipped` on each).
 """
 from __future__ import annotations
 
@@ -754,16 +790,20 @@ class TestValidateDocument:
     def test_permission_denied(self, tmp_path):
         # tan-cli#1116 review round 2 BLOCKER, re-derived: the first version
         # of this fix guarded a pre-flight `is_file()` with `except OSError:
-        # exists = True`, which only helped on Python <= 3.12. `pathlib`
-        # DROPPED `_IGNORED_ERRNOS` in 3.14, so `is_file()` there swallows
-        # EVERY `OSError` including `EACCES` and returns `False` -- the guard
-        # never fired, and this test was measured RED in CI's seam1 leg
-        # (`python-version: "3.x"`, resolved to CPython 3.14.7) with `len(0)
-        # == 1`: the fix silently returned `[]`, "everything is valid," on a
-        # schema this could not even read. The rewrite removes `is_file()`
-        # entirely, so this shape is now driven correctly on every supported
-        # interpreter -- this test is what proves that, not just a single
-        # local run.
+        # exists = True`, which only helped through Python 3.13.15 --
+        # `is_file()` there still raises `PermissionError` for a
+        # permission-denied ancestor, identically to 3.12.3, even though
+        # `pathlib`'s `_IGNORED_ERRNOS` CONSTANT the reasoning cites is
+        # already gone by 3.13. Only in 3.14.7 does `is_file()` itself start
+        # swallowing EVERY `OSError` including `EACCES` and returning
+        # `False` -- the guard never fired there, and this test was measured
+        # RED in CI's seam1 leg (`python-version: "3.x"`, resolved to
+        # CPython 3.14.7) with `len(0) == 1`: the fix silently returned
+        # `[]`, "everything is valid," on a schema this could not even
+        # read. The rewrite removes `is_file()` entirely, so this shape is
+        # now driven correctly on every supported interpreter -- this test
+        # is what proves that, not just a single local run (re-run against
+        # 3.12.3, 3.13.15 and 3.14.7 alike).
         sub = tmp_path / "sub"
         schema_path = sub / "schema.json"
         sub.mkdir()
@@ -1032,7 +1072,12 @@ class TestReadExampleTree:
         # `DirEntry::file_type()`), so an inner loop cannot reach the read
         # path at all. The top-level `source_dir` itself as the loop is the
         # shape that actually exercises this function: a real anomaly, not
-        # a typo, so `not_found=False`.
+        # a typo, so `not_found=False`. UNLIKE the permission-denied shape
+        # below, this one was already wrong under the OLD `is_dir()`
+        # pre-flight on EVERY interpreter, not just 3.14+: `is_dir()` on a
+        # symlink loop returns `False` (never raises) on 3.12.3 and 3.13.15
+        # alike, so the old code answered `not_found=True` there too --
+        # ELOOP was never gated on the EACCES boundary at all.
         source_dir = tmp_path / "example"
         _symlink_loop(source_dir)
         err = _read_example_tree_error(source_dir)
@@ -1041,15 +1086,19 @@ class TestReadExampleTree:
     @_skip_as_root
     def test_permission_denied(self, tmp_path):
         # tan-cli#1116 review round 2 BLOCKER, re-derived: the first
-        # version's `is_dir()` pre-flight was dead on Python >= 3.14
-        # (`pathlib` dropped `_IGNORED_ERRNOS` there -- `is_dir()` swallows
-        # EVERY `OSError` including `EACCES` and returns `False`), so a
+        # version's `is_dir()` pre-flight was dead only on Python 3.14+ --
+        # there `is_dir()` swallows EVERY `OSError` including `EACCES` and
+        # returns `False`, where 3.12.3 AND 3.13.15 alike still raise
+        # `PermissionError` for it (the `_IGNORED_ERRNOS` constant the
+        # reasoning cites is gone from `pathlib` a release earlier, in
+        # 3.13, without changing this raise until 3.14). So a
         # permission-denied PARENT fell through to `is_source_dir is False`
         # -> `not_found=True`, the wrong arm, on the exact interpreter
         # seam1's CI leg runs (CPython 3.14.7). The rewrite calls no stat at
         # all, so this is version-independent: `not_found` MUST be `False`
         # here, on every supported interpreter -- the assertion this test
-        # makes, not merely "raises something."
+        # makes, not merely "raises something," re-driven against 3.12.3,
+        # 3.13.15 and 3.14.7 alike.
         outer = tmp_path / "outer"
         source_dir = outer / "example"
         source_dir.mkdir(parents=True)

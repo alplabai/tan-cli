@@ -129,11 +129,19 @@ def _resolve_hw_rev(sku: str, metadata_root: Path, declared: str | None) -> str 
     `resolve_ethos_u_variant`'s stance next door.
 
     tan-cli#1116: NOT a pre-flight `preset_path.is_file()` -- that used to
-    gate the read below, and on Python <= 3.12 `Path.is_file()` swallows only
-    `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` (pre-3.14 `pathlib`'s `_IGNORED_ERRNOS`
-    list, DROPPED in 3.14 -- see tan-cli#1116 review round 2: on 3.14+
-    `is_file()` swallows EVERY `OSError`, `EACCES` included, so a pre-flight
-    guard is dead there regardless of what it catches), NOT `EACCES`, so a
+    gate the read below, and on Python <= 3.13 `Path.is_file()` RAISES for a
+    permission-denied ancestor -- `PermissionError`, `errno=13`, measured on
+    both 3.12.3 and 3.13.15 -- swallowing only `ENOENT`/`ENOTDIR`/`EBADF`/
+    `ELOOP` there. `pathlib`'s `_IGNORED_ERRNOS` CONSTANT that names those
+    four is itself gone a release earlier (3.13, `AttributeError` probing
+    for it), but the raising BEHAVIOUR it used to name outlives the constant
+    by one release and only actually changes in 3.14: there `is_file()`
+    swallows EVERY `OSError`, `EACCES` included, and returns `False`
+    instead (tan-cli#1116 review round 2 -- a pre-flight guard is dead on
+    3.14+ regardless of what it catches, and reasoning from either "the
+    constant still exists" or "I measured the raise" picks the wrong
+    boundary, since the two diverge for exactly the 3.13 release). NOT
+    `EACCES`, so a
     preset whose CONTAINING directory the caller cannot traverse raised a raw
     `PermissionError` right there, past this function's own "Soft-fail"
     contract -- the exact `document_guards.read_catalog_document` trap ("not

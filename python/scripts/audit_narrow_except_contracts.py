@@ -23,23 +23,52 @@ order makes those undriveable from this script directly -- read the
 function, do not execute it, the same manual step tan-cli#1116's review
 round 2 took for `_docs_ref` and `render_to_envelope`.
 
-WHAT IT DOES BEYOND THE STATIC WALK: for each candidate whose signature
-looks like `(path_like, ...) -> T` -- a first positional parameter literally
-named `path`, or a `Path`-annotated parameter -- it imports the module,
-substitutes a real on-disk non-UTF-8 file for that parameter, and calls the
-function with best-effort defaults for the rest. This is EXACTLY the
-"actual execution against broken files rather than reading alone" tan-cli#1116
-review round 2 asked for after the 18-of-79 hand-read triage missed two
-confirmed live defects (`som_buildability._safe_load_mapping`,
-`template.py::_docs_ref`) in the 61 it left unread. A candidate this script
-cannot safely call (a multi-argument signature it cannot guess, a function
-requiring state this script has no way to construct) is reported as
-`unexecuted` rather than silently skipped -- the same "a shape that
-silently no-ops is worse than an honest gap" the review's own MINOR finding
-made about `drpai._compiler_version`'s dead `test_parent_is_a_file` shape.
+WHAT IT DOES BEYOND THE STATIC WALK, AND WHAT IT DOES NOT (review round 3
+BLOCKER, corrected here after an earlier draft of this docstring overclaimed
+it): for each candidate whose signature looks like `(path_like, ...) -> T`
+-- a first positional parameter literally named `path`, or a `Path`-
+annotated parameter -- it imports the module, substitutes a real on-disk
+NON-UTF-8 file for that parameter, and calls the function with best-effort
+defaults for the rest. That is ONE shape of the seven `tests/gates/
+test_never_raises_contract_holds.py` itself drives (no directory, no
+parent-is-a-file, no ELOOP, no `chmod 000`, no malformed document, no
+absent path) -- every verdict this script prints is labelled `(non-UTF-8
+only)` for exactly that reason, and a bare "OK" must never be read as
+"driven clean" across all seven. Measured on this tree: **19 OK / 43
+unexecuted / 3 ESCAPED**, and all three ESCAPED are curated exceptions a
+contract-HOLDING function raised on purpose (a non-UTF-8 catalogue
+correctly refused) -- this script's own execution pass finds ZERO defects
+here. `_known_board_names` is the worked example of why that matters: this
+script reports `OK (non-UTF-8 only)` for it, truthfully, and its real
+defect (an `EACCES`-through-`is_dir()` pre-flight) needed the `chmod 000`
+shape this script does not drive to surface at all.
+
+So: **this script SCOPES the search, it does not perform it.** Every live
+defect tan-cli#1116's triage found was found by a human reading the
+candidate list this script narrows to a tractable size, then hand-driving
+each one against the shapes that actually matter -- `chmod 000` chief among
+them, since it is the one shape this script cannot reach at all. The
+script's OWN role is upstream of that: it is what finds candidates worth a
+human's time, not what finds the defects among them, and no report of this
+issue's work should credit it with the latter.
+
+A candidate this script cannot safely call (a multi-argument signature it
+cannot guess, a function requiring state this script has no way to
+construct) is reported as `unexecuted` rather than silently skipped -- the
+same "a shape that silently no-ops is worse than an honest gap" reasoning
+applies to the tool as a whole, not just one candidate: a ZERO-candidate
+run (this script's own file moved somewhere its `TAN_ROOT` arithmetic no
+longer resolves, or run against a tree that lost its `tan/` package) is
+refused with a non-zero exit rather than printed as "0 candidate
+function(s) found" and returning 0 -- the exact #1105 shape (a check that
+can silently stop checking) this issue's own review exists to catch,
+previously present in the one tool built to prevent it.
 
 USAGE: `python scripts/audit_narrow_except_contracts.py [--planner]` from
-`python/`.
+`python/`. Prints a per-candidate verdict, then a tally line
+(`N OK (non-UTF-8 only) / N unexecuted / N ESCAPED (non-UTF-8 only)`) on
+every run -- read the tally before the per-line output, since most
+candidates are `unexecuted` and a listing alone hides that ratio.
 """
 from __future__ import annotations
 
@@ -172,10 +201,20 @@ def try_execute(dotted: str, qualname: str) -> str:
     broken = _non_utf8_file()
     try:
         obj(broken)  # type: ignore[misc]
-        return "OK: returned without raising"
+        # tan-cli#1116 review round 3 BLOCKER: this is NOT "driven clean" --
+        # it is one shape of the seven the gate itself covers (non-UTF-8
+        # only; no directory, no parent-is-a-file, no ELOOP, no chmod 000,
+        # no malformed document, no absent path). A bare "OK" here reads as
+        # a stronger claim than the run actually makes; label it so nobody
+        # -- including a future run of this same script -- can mistake a
+        # single-shape pass for exhaustive coverage the way `_known_board_
+        # names` did (this exact call returned "OK" for it; the function's
+        # real defect was an EACCES-through-`is_dir()` pre-flight this
+        # script's one shape cannot reach at all).
+        return "OK (non-UTF-8 only): returned without raising"
     except Exception as exc:  # noqa: BLE001 -- reporting every outcome
         tb = "".join(traceback.format_exception_only(type(exc), exc)).strip()
-        return f"ESCAPED: {type(exc).__name__}: {tb}"
+        return f"ESCAPED (non-UTF-8 only): {type(exc).__name__}: {tb}"
     finally:
         broken.unlink(missing_ok=True)
 
@@ -190,15 +229,60 @@ def main() -> int:
 
     sys.path.insert(0, str(TAN_ROOT.parent))
     candidates = find_candidates(include_planner=args.planner)
+
+    # tan-cli#1116 review round 3 BLOCKER: a zero-candidate run used to print
+    # "0 candidate function(s) found" and exit 0 -- indistinguishable from a
+    # genuinely clean tree, and silently vacuous if this script is ever
+    # invoked from anywhere its own walk root does not resolve correctly (a
+    # stale checkout, a moved `tan/` package, a future refactor of this
+    # file's own path arithmetic). This IS the #1105 shape -- a check that
+    # can silently stop checking -- inside the one tool this issue's own
+    # review built to prevent it. A tree with far fewer than this many
+    # candidates is not "clean," it is "this script broke"; fail loud.
+    _MIN_EXPECTED_CANDIDATES = 40  # measured 65 non-planner / 79 with
+    # --planner on the tree this script was written against; well under
+    # half of the smaller number is not a plausible real shrink from one
+    # PR, only a broken walk.
+    if len(candidates) < _MIN_EXPECTED_CANDIDATES:
+        print(
+            f"::error:: only {len(candidates)} candidate(s) found -- expected "
+            f"at least {_MIN_EXPECTED_CANDIDATES}. This script's own walk root "
+            f"is {TAN_ROOT}; if that path does not exist or the tree moved, "
+            f"this is a broken/vacuous run, not a clean tree. Refusing to "
+            f"report a tally that would misrepresent it.",
+            file=sys.stderr,
+        )
+        return 1
+
     print(f"{len(candidates)} candidate function(s) found "
           f"({'including' if args.planner else 'excluding'} tan/planner/**).\n")
 
+    tally: dict[str, int] = {"OK": 0, "ESCAPED": 0, "unexecuted": 0, "planner": 0}
     for dotted, qualname, lineno in candidates:
         if dotted.split(".")[1] == "planner":
+            tally["planner"] += 1
             print(f"{dotted}::{qualname}:{lineno} -- planner (not executed here)")
             continue
         verdict = try_execute(dotted, qualname)
+        bucket = verdict.split(" ", 1)[0].split(":", 1)[0]
+        tally[bucket] = tally.get(bucket, 0) + 1
         print(f"{dotted}::{qualname}:{lineno} -- {verdict}")
+
+    # tan-cli#1116 review round 3 BLOCKER: print the tally on EVERY run, not
+    # just when someone greps for it by hand -- a reader who only sees
+    # per-line verdicts has no cheap way to notice that most of them are
+    # "unexecuted" (this script drives ONE shape of the seven the gate
+    # itself covers, and only for the minority of candidates whose
+    # signature it can safely guess at all). This tally is upstream
+    # scoping, not a defect count: every "ESCAPED" verdict is a candidate
+    # worth reading by hand, not a confirmed bug, and a bare "OK" only ever
+    # means "this one shape didn't raise" -- see try_execute's own comment.
+    print(
+        f"\ntally: {tally.get('OK', 0)} OK (non-UTF-8 only) / "
+        f"{tally.get('unexecuted', 0)} unexecuted / "
+        f"{tally.get('ESCAPED', 0)} ESCAPED (non-UTF-8 only)"
+        + (f" / {tally['planner']} planner (not executed)" if tally["planner"] else "")
+    )
     return 0
 
 

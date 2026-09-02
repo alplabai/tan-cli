@@ -351,17 +351,39 @@ def _known_board_names(sdk_root: Path) -> set[str] | None:
     ``None`` when the directory is missing -- the closed set of shared
     carrier boards lives in the SDK checkout, not under ``--output-root``.
 
-    tan-cli#1116 review round 2: NOT a ``boards_dir.is_dir()`` pre-flight --
-    that used to gate the glob below, and ``Path.is_dir()`` on a
+    tan-cli#1116 review round 2/3: NOT a ``boards_dir.is_dir()`` pre-flight
+    -- that used to gate the glob below, and ``Path.is_dir()`` on a
     permission-denied PARENT directory raises a raw ``PermissionError`` on
-    every supported interpreter (measured escaping before this fix; this is
+    3.12.3 AND 3.13.15 (measured escaping before this fix on both; this is
     ``EACCES`` on the directory ``is_dir()`` itself needs to stat, not the
-    swallowed-errno family the other round-2 fixes describe). ``Path.glob``
-    on a genuinely ABSENT ``boards_dir`` already yields nothing rather than
-    raising, so wrapping the glob call itself in one ``except OSError``
-    covers "missing" (silently, via the empty iterator) and "parent denied"
-    (via the exception) alike, with no stat call of its own to be wrong
-    about on any interpreter.
+    swallowed-errno family the other round-2 fixes describe) -- NOT "every
+    supported interpreter" as an earlier draft of this note claimed: on
+    3.14.7 ``is_dir()`` itself already returns ``False`` for the same
+    shape, so the pre-flight would have been silently wrong there in the
+    OPPOSITE direction (masking a real permission failure as "no boards
+    here") even before this fix removed it.
+
+    The replacement wraps ``boards_dir.glob("*.yaml")`` itself in one
+    ``except OSError`` rather than gating it with a stat call -- but SAY
+    PLAINLY what that guard actually buys, rather than overclaiming it
+    (round 3 correction: an earlier draft of this note claimed the
+    exception fires for "parent denied" on every interpreter; measured,
+    it does not). ``Path.glob`` RAISES ``PermissionError`` for a
+    permission-denied parent OR grandparent on 3.12.3 -- the ``except
+    OSError`` here is genuinely load-bearing there. On 3.13.15 AND 3.14.7,
+    ``glob`` instead returns an EMPTY iterator for that same shape, silently
+    -- the ``except OSError`` clause never fires on either interpreter, and
+    this function still answers ``None`` only because the pre-existing
+    ``return names or None`` below already treats "found nothing" and
+    "permission denied" as the same outcome. Correctness on 3.13/3.14 is
+    ACCIDENTAL, inherited from a fallback this function needed anyway for
+    the ordinary "no boards yet" case, not delivered by this guard. Genuine
+    ``OSError``-raising coverage on those two interpreters would need
+    ``os.scandir``/``os.listdir`` in place of ``Path.glob``, which raise
+    for a denied ancestor on all three measured interpreters; left as-is
+    here because the outcome the caller sees (``None``) is already correct
+    on all three, and swapping the primitive is a larger, unrelated change
+    this fix does not make.
     """
     boards_dir = sdk_root / "metadata" / "boards"
     import yaml  # noqa: PLC0415 -- deferred, see `_yaml_scalar` (tan-cli#810)
@@ -428,13 +450,20 @@ def _family_hw_revisions(
     no SKU-prefix mapping / no hw-revisions file yet (creating one is a
     porting-checklist step).
 
-    tan-cli#1116 review round 2: NOT a ``path.is_file()`` pre-flight -- that
-    used to decide whether to try THIS root's candidate or fall through to
-    the next one, and it raised a raw ``PermissionError`` for a
-    permission-denied ancestor directory on every supported interpreter
-    (measured escaping before this fix; unlike a swallowed-errno version
-    skew, ``is_file()`` never ignored ``EACCES`` on the directory it needs
-    to stat, on any Python version here). Reading straight through instead:
+    tan-cli#1116 review round 2/3: NOT a ``path.is_file()`` pre-flight --
+    that used to decide whether to try THIS root's candidate or fall
+    through to the next one, and it raised a raw ``PermissionError`` for a
+    permission-denied ancestor directory on 3.12.3 AND 3.13.15 (measured
+    escaping before this fix on both) -- NOT "every supported interpreter"
+    as an earlier draft of this note claimed: on 3.14.7 ``is_file()``
+    itself already returns ``False`` for that same shape (the same
+    swallowed-errno version skew the other round-2 fixes in this PR
+    describe; `is_file()` is not exempt from it after all), so the OLD
+    pre-flight would have silently taken the wrong branch there too -- not
+    a crash, but a permission failure on THIS root silently treated as
+    "not here, try the next root" instead of the genuine "found it, but
+    it's broken" this function's own docstring below distinguishes.
+    Reading straight through instead:
     ``FileNotFoundError``/``IsADirectoryError``/``NotADirectoryError`` all
     mean "not usable AT THIS ROOT", so they fall through to the next
     candidate exactly as a ``False`` ``is_file()`` used to; any OTHER
