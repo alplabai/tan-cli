@@ -82,6 +82,36 @@ on:
           are the cheapest insurance in the pipeline.
         type: boolean
         default: false
+      skip_ceiling_interpreter:
+        description: >
+          Skip the `python-newest` job -- the one that floats `python-version:
+          "3.x"` and runs the whole suite on whatever CPython that resolves to
+          today. `release.yml`'s `gates` call passes `true`; nothing else does.
+          A tag is the one run where a floating interpreter cannot be allowed
+          to decide the outcome: CPython ships a minor between the last PR run
+          and the tag, this job reds, `build` (`release.yml`, `needs: [verify-
+          version, gates, python-gates]`) skips, and the tag is SPENT with no
+          Release behind it. That is not hypothetical -- it is `v0.5.0-rc3`
+          (#319), which died exactly that way against alp-sdk `dev` instead of
+          against CPython, and it is why the alp-sdk `ref:` in the `python`
+          job below is pinned rather than floating. A frozen tag against a
+          moving target passes today and fails tomorrow with nothing here
+          altered; the fix is the same fix, applied to the same shape.
+
+          The POLARITY is deliberate and is the trap worth naming: an input
+          spelled `run_ceiling_interpreter` with `default: true` would read
+          `null` on `pull_request`/`push`/`merge_group` (the `inputs` context
+          exists only for `workflow_call` -- see the `python` job's
+          `timeout-minutes` expression, which relies on exactly that), and
+          `null` is falsy, so the job would silently vanish from every PR --
+          the runs it exists for. Spelled as a SKIP defaulting false, the
+          absent-`inputs` case falls the right way by construction.
+
+          `github.event_name != 'workflow_call'` would NOT work here and is
+          not what this uses: in a called workflow the `github` context is the
+          CALLER's, so a tag run reads `push`, and the guard would never fire.
+        type: boolean
+        default: false
 
 # A newer push to a PR supersedes the run in flight. Never cancel a push-to-main
 # run: a rapid second merge would leave the first commit with no CI status.
@@ -104,9 +134,11 @@ jobs:
   # workflow, so a tag published a PyInstaller freeze of code no CI step had
   # ever imported, let alone tested. The cargo jobs that used to sit above it
   # could not see it -- they compiled a different language in a different
-  # directory -- and tan-cli#269 has since deleted them outright. THIS job and
-  # parity.yml's `python-tests` matrix are now the whole of the correctness
-  # gate; there is nothing else left to hide behind.
+  # directory -- and tan-cli#269 has since deleted them outright. THIS job,
+  # the `python-newest` job below it (the same selection on the newest
+  # CPython rather than the `requires-python` floor this job pins --
+  # tan-cli#1126) and parity.yml's `python-tests` matrix are now the whole of
+  # the correctness gate; there is nothing else left to hide behind.
   #
   # Zero failures is the gate, not a count. The suite is still growing as ports
   # land (~1149 passed / 81 skipped / 4 xfailed at the time of writing), and
@@ -119,18 +151,19 @@ jobs:
   # on a non-Linux host -- and it does not, since this job is `ubuntu-latest`
   # only. `parity.yml`'s cross-OS `python-tests` job explicitly
   # `--ignore=tests/gates` (that suite already runs, always, in `parity.yml`'s
-  # `seam1-plan-shape` job -- also `ubuntu-latest` only). Recorded as a
-  # decision, not an oversight: `tests/gates` is pure source parsing (`ast`
-  # over `python/tan/**`, text scans over the same), with no OS-dependent
-  # behaviour to lose by staying single-platform -- the path handling it does
-  # do is verified platform-clean (`_rel` in `test_frozen_issue_codes.py`
-  # normalises `\`->`/`; every cross-file assembled suffix resolves via
-  # `_ASSEMBLED_SUFFIXES` regardless of host). Adding a second or third OS here
-  # would cost real CI minutes for zero coverage this scan can lose on Windows
-  # or macOS specifically. Revisit if a future gate under `tests/gates` reads
-  # something host-dependent (a real path separator, a subprocess, PATH
-  # resolution) -- that gate would need its own cross-OS run, not a blanket
-  # widening of this job.
+  # `seam1-plan-shape` job and in `python-newest` below -- both also
+  # `ubuntu-latest` only, so the non-Linux claim above is untouched by either).
+  # Recorded as a decision, not an oversight: `tests/gates` is pure source
+  # parsing (`ast` over `python/tan/**`, text scans over the same), with no
+  # OS-dependent behaviour to lose by staying single-platform -- the path
+  # handling it does do is verified platform-clean (`_rel` in
+  # `test_frozen_issue_codes.py` normalises `\`->`/`; every cross-file assembled
+  # suffix resolves via `_ASSEMBLED_SUFFIXES` regardless of host). Adding a
+  # second or third OS here would cost real CI minutes for zero coverage this
+  # scan can lose on Windows or macOS specifically. Revisit if a future gate
+  # under `tests/gates` reads something host-dependent (a real path separator, a
+  # subprocess, PATH resolution) -- that gate would need its own cross-OS run,
+  # not a blanket widening of this job.
   python:
     runs-on: ubuntu-latest
     # Two numbers, because this job has two workloads and one flat cap has to
@@ -545,6 +578,208 @@ jobs:
           # on every other trigger (`push`, `workflow_call`), which is
           # exactly when that gate's own fallback -- no PR/merge-queue base
           # applies to this run -- is the correct answer.
+          TAN_MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+        run: python -m pytest tests -q
+
+  # THE OTHER HALF OF THE INTERPRETER POLICY (tan-cli#1126). The `python` job
+  # above pins `"3.12"`, the `requires-python` FLOOR; `parity.yml`'s
+  # `seam1-plan-shape` floats `"3.x"`, the CEILING -- see that job's own
+  # `python-version` block for why the spread is deliberate and what it has
+  # caught. This job closes the hole the spread had: seam1's selection is
+  # `tests/gates` plus two `tests/parity` seam files (`test_seam1_field_diff`,
+  # `test_seam1_tan_reconciliation`) and the SDK emit/kconfig/bootstrap parity
+  # steps -- NOT the whole suite, and in particular not `tests/core`. So for
+  # two tests the full suite was RED on 3.14.7 while every required context
+  # stayed green, and it stayed that way until somebody happened to run the
+  # whole suite on the newer interpreter by hand. A check that cannot report
+  # the thing it exists to catch is the shape this milestone has spent a week
+  # removing.
+  #
+  # So: the same floating `"3.x"`, the WHOLE suite, one ubuntu leg. Not a
+  # matrix -- the cross-OS dimension is already covered at the floor by
+  # parity.yml's 15-leg `python-tests-shard`, and this job is answering a
+  # different question ("does the newest interpreter agree with the floor?"),
+  # which one host answers as well as three for a repo whose interpreter-
+  # dependent surface is pure `pathlib`/`ntpath` string logic. Three of the
+  # FOUR known divergences to date (`_IGNORED_ERRNOS`, `Path.resolve
+  # (strict=False)` symlink loops, `ntpath.isabs`, and -- found in PR #1137's
+  # review -- `tan/core/bootstrap.py`'s `resolve_workspace_target`, where a
+  # rooted-but-driveless `--workspace` relocates a checkout on 3.12.3 and
+  # raises from 3.13.15 on) were measured identically on POSIX for exactly
+  # that reason. The fourth is a real, user-visible product divergence with no
+  # test pinning it, filed separately; this job cannot report what nothing
+  # asserts, which is the standing limit on what any interpreter leg buys.
+  #
+  # ON THE RELEASE PATH THIS JOB DOES NOT RUN -- `if:` below, and the
+  # `skip_ceiling_interpreter` input at the top of this file, which
+  # `release.yml`'s `gates` call passes `true`. The float's cost is paid on
+  # PRs and in the merge queue, where a red is re-runnable and a fix is
+  # cheap; on a tag the same red spends the tag (`v0.5.0-rc3` / #319 is the
+  # precedent, for the same shape with alp-sdk `dev` in place of CPython).
+  # A tag therefore ships tested at the FLOOR, which is the interpreter the
+  # `requires-python` promise is anchored on -- and the ceiling verdict for
+  # that same code already exists, from the PR and merge-queue runs that
+  # merged it.
+  #
+  # NOT `continue-on-error`, and deliberately so. A non-blocking divergence
+  # reporter is the same silent shape in a new costume: it would go orange in
+  # a corner of the checks list and be scrolled past. When a new CPython minor
+  # ships and reds this job on an unrelated PR, that is the policy working --
+  # fix the code, or record an explicit exception with a reason. Do not pin
+  # this to a version to make it quiet; pinning is a decision that belongs in
+  # `python/tests/gates/test_interpreter_policy.py`, where it has to be stated.
+  #
+  # Kept deliberately CLOSE to the `python` job's shape -- same zsh install,
+  # same `pip install -e ./python`, same whole-`tests` selection -- because a
+  # divergence reporter that runs a DIFFERENT selection than the job it is
+  # compared against cannot tell "3.14 disagrees" from "these two jobs do not
+  # run the same thing".
+  #
+  # WHAT IT DOES NOT COVER, stated plainly rather than implied by the word
+  # "whole". The SELECTION is the whole suite (`pytest tests`), but this job
+  # binds no fixture roots, so measured on 3.14.7: 7673 collected, 1365
+  # skipped (17.8%), which splits into THREE groups, not two:
+  #
+  #     696 (9.1%)  name `ALP_PLANNER_ORACLE_ROOT`
+  #     572 (7.5%)  name `ALP_SDK_ROOT`/`ALP_SDK_PARITY_ROOT` (or "a real
+  #                 alp-sdk checkout")
+  #      97 (1.3%)  ordinary host/toolchain gates -- Windows-only
+  #                 `install.ps1`, vela, tflite, a not-yet-built binary,
+  #                 `ALP_SDK_INTERNAL`, `ALP_DRPAI_TVM_HOME`, `ALP_E2E_ROOT`
+  #                 -- which every leg skips alike, at every interpreter
+  #
+  # (Classification rule, so the number is reproducible: `pytest -rs`, oracle
+  # first, then SDK, then everything else. An earlier draft of this comment
+  # said "1268 SDK-gated", which merged the first two groups and made
+  # `ALP_SDK_ROOT` look like it closes 16.5% when it closes 7.5%. It also
+  # called them "tests about another repository", which was wrong in a
+  # different way: they exercise `tan/planner/`'s OWN relocated code and need
+  # a bound checkout only as DATA.)
+  #
+  # So the honest claim is: the ceiling runs the fixture-free ~82%, and the
+  # planner families are measured at the FLOOR only.
+  #
+  # Not fixed here, deliberately, and NOT for the reason an earlier draft
+  # gave. That draft said binding would add "a THIRD copy of the alp-sdk pin",
+  # which is false twice over: there are already three literal SHAs
+  # (`ci.yml:535`, `parity.yml:683`, `parity.yml:779`), and binding needs NO
+  # copy at all -- `getting-started.yml:318-328` and
+  # `unsharded-python-canary.yml:170` read `PINNED_SDK_TAG` out of
+  # `parity.yml` with `sed` at runtime, and the first of those even errors
+  # with "do NOT add a second copy of the SHA here". The real reasons:
+  #
+  #   * a single `ALP_SDK_ROOT` bind buys 7.5%, not the 18% the merged number
+  #     suggested. The BIGGER half needs `ALP_PLANNER_ORACLE_ROOT`, and that
+  #     one wants a checkout at `PINNED_PLANNER_ORACLE_SDK_REF` specifically
+  #     -- a SECOND pin. (`parity.yml:697-698` names both pins and the
+  #     lockstep rule between them; `parity.yml:2377` and `:2897` are the
+  #     checkouts that consume the oracle one. NOT
+  #     `tests/fixtures/planner_oracle/PROVENANCE.txt`, which an earlier
+  #     draft cited: that file records the resolved SHA and names
+  #     `PINNED_SDK_TAG`, never `PINNED_PLANNER_ORACLE_SDK_REF`.) So closing
+  #     the gap properly is two roots and two pins, not one env var.
+  #   * a ceiling job wired to both doubles this job's coupling to alp-sdk
+  #     state, for families the floor already covers -- and a red arriving
+  #     from that coupling is, at a glance, indistinguishable from the
+  #     interpreter verdict this job exists to deliver. That is the failure
+  #     `clean-host.yml:86-87` names: "A gate that goes red for a reason
+  #     unrelated to its subject stops being read." This job's whole value is
+  #     that its red means one thing.
+  #
+  #     Stated at its real size, because an earlier draft of this bullet
+  #     overclaimed: the specific tan-cli#895 failure it leaned on -- the two
+  #     pins DISAGREEING, which cost 19 cases across 19 boards on all three
+  #     OSes after two sign-offs -- is now caught unconditionally by #895's
+  #     own fix, `tests/gates/test_planner_oracle_ref_tracks_pinned_sdk_tag
+  #     .py`, measured at `28 passed` with neither root bound. A pin
+  #     disagreement therefore reds in the plain local bar before any job
+  #     sees it, and a two-root ceiling job would never be the first or only
+  #     place it surfaced. Bullets 1 and 3 carry this decision on their own;
+  #     this one is the smaller point that the ceiling job's red should mean
+  #     one thing, not the historical incident.
+  #   * the families are also the slow ones -- `parity.yml` shards them four
+  #     ways per OS with a dedicated `parity, whole` leg beside that -- and
+  #     they already run per push at the floor, `ALP_SDK_ROOT`-bound, on
+  #     three OSes. Unmeasured on the CEILING, not unmeasured.
+  #
+  # Revisit if a planner-family divergence is ever found across interpreters;
+  # that changes the trade, and nothing here should be read as claiming it
+  # cannot happen.
+  #
+  # The size-ratchet/version checks are omitted for a different and settled
+  # reason: they are genuinely interpreter-independent (`ast` over source,
+  # JSON compare), measured `already matches the measured tree` under 3.12.3,
+  # 3.13.15 and 3.14.7 alike, and they already run in the `python` job.
+  #
+  # This job's first real signal is already in its own log and worth reading:
+  # 3.14.7 emits `DeprecationWarning: pathlib.PurePath.as_uri() is deprecated
+  # and scheduled for removal in Python 3.19` -- `as_uri()` being the exporter
+  # `tan/core/uri_reference.py` is built on -- and the same for `nturl2path`.
+  # Nothing here fails on it today; the removal lands two majors out and is
+  # tracked as its own issue rather than hidden in a `filterwarnings`.
+  python-newest:
+    name: "python · pytest on the newest CPython"
+    # PRs and the merge queue only -- see `skip_ceiling_interpreter` at the top
+    # of this file for why a floating interpreter must not be able to decide a
+    # tag's outcome, and why the polarity is a SKIP rather than a RUN.
+    # `inputs` is null off the `workflow_call` path, so this reads
+    # `!null` == true on `pull_request`/`push`/`merge_group`.
+    if: ${{ !inputs.skip_ceiling_interpreter }}
+    runs-on: ubuntu-latest
+    # The `python` job measures 6-11 min for the same selection at the floor
+    # (see its own comment). 30 is the same hang catcher it uses on the PR leg,
+    # not a budget.
+    timeout-minutes: 30
+    steps:
+      # `fetch-depth: 0` for the same reason the `python` job takes it:
+      # `tests/gates/test_module_size_budget_log_append_only.py` walks real git
+      # ancestry and SKIPS silently on a depth-1 graft.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # THE INTERPRETER POLICY, ceiling half -- see this job's header comment
+      # above, parity.yml's seam1 block, and the gate that enforces the pair,
+      # python/tests/gates/test_interpreter_policy.py.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x" # ceiling -- NOT the floor every other job pins
+      # Reported, not assumed: `"3.x"` resolves on GitHub's schedule, so the
+      # run log has to say which interpreter this verdict is about, or a red
+      # here is un-diagnosable six weeks later. Also the fail-fast on the
+      # degenerate case -- if `"3.x"` ever resolved to the floor itself, this
+      # job would be a duplicate of `python` and would report agreement it
+      # never tested.
+      - name: report (and require) an interpreter above the floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -c 'import sys; print("resolved interpreter:", sys.version)'
+          floor="$(python -c 'import re,tomllib;print(re.search(r">=\s*([0-9]+\.[0-9]+)",tomllib.load(open("python/pyproject.toml","rb"))["project"]["requires-python"]).group(1))')"
+          have="$(python -c 'import sys;print("%d.%d" % sys.version_info[:2])')"
+          echo "requires-python floor: ${floor}; this job: ${have}"
+          if [ "${have}" = "${floor}" ]; then
+            echo "::error::\"3.x\" resolved to ${have}, which IS the declared floor -- this job would duplicate the \`python\` job and report agreement it never tested. Either a newer CPython is not yet available to setup-python (wait), or the floor has been raised to meet the ceiling, in which case the spread is over and python/tests/gates/test_interpreter_policy.py is where that decision gets recorded."
+            exit 1
+          fi
+      # Same reason as the `python` job: without zsh the zsh-driven completion
+      # cases SKIP, and a skip on this leg against a run on the other is a
+      # difference in SELECTION masquerading as agreement.
+      - name: ensure zsh is on PATH (zsh-driven completion tests)
+        run: |
+          if ! command -v zsh >/dev/null 2>&1; then
+            bash scripts/ci/apt-bounded.sh update
+            bash scripts/ci/apt-bounded.sh install -y --no-install-recommends zsh
+          fi
+      - name: install the declared package
+        run: pip install -e ./python
+      - name: install the test runner
+        run: pip install pytest pytest-xdist
+      - name: pytest
+        working-directory: python
+        env:
+          # `merge_group` does not populate `GITHUB_BASE_REF` -- same binding
+          # the `python` job makes, same gate depending on it.
           TAN_MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
         run: python -m pytest tests -q
 
