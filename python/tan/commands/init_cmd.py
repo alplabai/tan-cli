@@ -126,6 +126,7 @@ from tan.core.example_catalog import (
     AmbiguousCoresTopologyError,
     CoresTopologyNotFoundError,
     MalformedCatalogError,
+    catalog_unreadable,
     find_example_by_cores,
     parse_topology_arg,
     unsupported_som,
@@ -1474,6 +1475,31 @@ def init(
                     f"SoM's topology before building, or widen som_skus in "
                     f"the catalog if the example really does support it.",
                 )
+            else:
+                # tan-cli#1101: `unsupported_som` returning `None` here means
+                # EITHER "checked, --som is fine" OR "could not check at
+                # all" -- the catalog exists but could not be read (non-UTF-8
+                # bytes, a directory, a permissions error, invalid JSON, the
+                # wrong top-level shape; PR #1096 made that curated rather
+                # than a crash, but `unsupported_som` degrades it the same
+                # as every other "nothing to report" reason, by design). A
+                # second, narrower read distinguishes the two: `ok`/
+                # `exitCode` and the scaffold itself stay exactly as they
+                # are (refusing here would be the tightening tan-cli#1084
+                # promised not to do) -- this only stops the envelope from
+                # claiming a check that never ran.
+                unreadable = catalog_unreadable(resolved_sdk.path)
+                if unreadable is not None:
+                    example_som_issue = Issue(
+                        "init.example-som-unchecked",
+                        "warning",
+                        f"{subject_label}: the SDK scaffold catalog could "
+                        f"not be read ({unreadable}), so whether --som "
+                        f"'{som}' is supported could not be checked. The "
+                        f"files were still written -- verify '{som}' "
+                        f"against {subject_label}'s supported SoMs before "
+                        f"building.",
+                    )
 
         missing_board_yaml_issue = None
         if is_example_shaped and not any(f.relative_path == "board.yaml" for f in files):

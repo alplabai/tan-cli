@@ -476,6 +476,59 @@ def test_a_malformed_record_does_not_silence_a_later_wellformed_one(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# catalog_unreadable: tan-cli#1101's "check was skipped, not passed" signal
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_unreadable_is_none_for_a_wellformed_catalog(tmp_path):
+    assert ec.catalog_unreadable(_one(tmp_path)) is None
+
+
+def test_catalog_unreadable_is_none_for_an_absent_catalog(tmp_path):
+    """`unsupported_som`'s own long-standing precedent: no catalog at all is
+    an older SDK, not a new failure to report -- must not warn."""
+    root = _tree(tmp_path, None)
+    assert ec.catalog_unreadable(root) is None
+
+
+def test_catalog_unreadable_names_a_non_utf8_catalog(tmp_path):
+    root = _tree(tmp_path, None)
+    _catalog_path(root).write_bytes(b"\xff\xfe not valid utf-8")
+    reason = ec.catalog_unreadable(root)
+    assert reason is not None
+    assert reason.startswith(f"cannot read template catalog at {_catalog_path(root)}: ")
+
+
+def test_catalog_unreadable_names_a_directory_where_the_file_should_be(tmp_path):
+    root = tmp_path / "sdk"
+    _catalog_path(root).mkdir(parents=True)
+    reason = ec.catalog_unreadable(root)
+    assert reason is not None
+    assert "cannot read template catalog at" in reason
+
+
+def test_catalog_unreadable_names_invalid_json(tmp_path):
+    root = _tree(tmp_path, "{")
+    reason = ec.catalog_unreadable(root)
+    assert reason is not None
+    assert "not valid JSON" in reason
+
+
+def test_catalog_unreadable_names_a_nonobject_document(tmp_path):
+    root = _tree(tmp_path, "[1, 2]")
+    reason = ec.catalog_unreadable(root)
+    assert reason is not None
+    assert "expected a JSON object, got list" in reason
+
+
+def test_catalog_unreadable_names_a_nonlist_templates(tmp_path):
+    root = _tree(tmp_path, {"templates": 3})
+    reason = ec.catalog_unreadable(root)
+    assert reason is not None
+    assert "templates must be a list, got int" in reason
+
+
+# ---------------------------------------------------------------------------
 # the refusal type itself
 # ---------------------------------------------------------------------------
 

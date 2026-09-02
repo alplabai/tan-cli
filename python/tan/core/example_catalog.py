@@ -255,6 +255,48 @@ def _declared_som_skus(catalog: Path, wanted: str) -> list[Any] | None:
     return None
 
 
+def catalog_unreadable(sdk_root: Path) -> str | None:
+    """Whether `metadata/templates/catalog-v1.json` EXISTS but could not be
+    read/parsed as the shape its schema declares -- the "the check was
+    skipped, not passed" signal `unsupported_som` cannot itself carry
+    (tan-cli#1101). `unsupported_som`'s own contract folds catalog-absent,
+    catalog-unreadable, catalog-malformed, no-record-for-this-example, and
+    sku-is-supported into one indistinguishable `None` -- exactly right for
+    "should `--from-example` refuse", wrong for "did the check even run".
+
+    Returns the curated `MalformedCatalogError` message for a catalog that
+    exists but whose document could not be decoded, or whose top-level shape
+    (a JSON object, a `templates:` list) does not match its schema --
+    non-UTF-8 bytes, a directory where a file was expected, a permissions
+    failure, invalid JSON, a non-object document, a non-list `templates:`.
+    Every one of those is a reason the SoM-support check for THIS example
+    could not run at all, not a reason it ran and found nothing.
+
+    Returns `None` for a catalog that is simply ABSENT -- `unsupported_som`'s
+    own long-standing "no catalog in this checkout (an older SDK;
+    --from-example worked there before this gate and must keep working)"
+    precedent. That is a deliberate, permanent degrade already relied on by
+    every pre-catalog SDK checkout, not a new failure this issue is about --
+    warning on it would add noise to every such checkout's `--from-example
+    --som`, not close a gap. Also `None` for a catalog that reads cleanly.
+
+    Deliberately does not look at any individual record: a well-formed
+    catalog that simply has no (or an unreadable) record for the example
+    being scaffolded is `unsupported_som`'s existing "COMMON case, not an
+    edge one" silence (66 example directories, 9 catalogued templates) --
+    unchanged here, and out of this function's narrower question.
+    """
+    catalog = sdk_root / CATALOG_RELATIVE
+    if not catalog.exists():
+        return None
+    try:
+        doc = _GUARDS.read_catalog_document(catalog)
+        _GUARDS.catalog_templates(doc, path=catalog)
+    except MalformedCatalogError as err:
+        return str(err)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # `--topology`: select a catalog record BY its cores: hardware topology
 # ---------------------------------------------------------------------------
