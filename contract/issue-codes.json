@@ -516,11 +516,10 @@
     {
       "code": "build.toolchain-root-unresolved",
       "status": "reserved",
-      "severity": "warning",
+      "severity": "error or warning",
       "consumer": "none",
-      "emittedBy": "crates/tan-cli/src/commands/build/plan_modes.rs",
-      "literal": "code: \"build.toolchain-root-unresolved\"",
-      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "note": "tan-cli#1112: was registered `warning`-only, which was drift, not the true shape -- `build_cmd.py` (the Python port; this record's `emittedBy` used to point at the now-deleted `crates/tan-cli/src/commands/build/plan_modes.rs`, fixed in the same change) emits this code at BOTH severities, policy-driven like its `build.unknown-backend` sibling: under `executionPolicy.missingTool: fail` a demoted slice raises `BuildError` directly, or via `build/token_substitution.py`'s `TokenSubstitutionError` forwarded through `BuildError` -- either way caught and re-emitted `error` by `build_cmd.py`'s own top-level `except BuildError` handler AND by `run_cmd.py`'s (`tan run` shares the same `_build` engine, tan-cli#1112 review); or, on the held-outcome retry path, `Issue(..., \"error\" if failed else \"warning\", ...)` (`build_cmd.py`'s demotion loop); under the default `skip` policy it is `warning` (`build_cmd.py`'s toolchain-demotion issue list). Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "build.unknown-backend",
@@ -1031,10 +1030,10 @@
     {
       "code": "clean.remove-failed",
       "status": "reserved",
-      "severity": "warning",
+      "severity": "error or warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/clean_cmd.py",
-      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "tan-cli#1112: was registered `warning`-only, which was drift, not the true shape -- `clean_cmd.py` emits this code at BOTH severities by design, mirroring the two removal paths' real failure modes: a directory removal (`_remove_dir`) is best-effort, matching `rmtree(ignore_errors=True)` -- a failure is reported but does not fail the command, so `warning` (`clean_cmd.py:852`); a state-file removal (`os.remove`) is NOT ignore_errors -- a failure propagates to exit 1, so `error` (`clean_cmd.py:864`). Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "clean.sdk-root-not-found",
