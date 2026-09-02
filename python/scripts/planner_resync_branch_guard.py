@@ -468,6 +468,22 @@ def main(argv: list[str] | None = None) -> int:
             # reads $GITHUB_OUTPUT with plain `grep`/`cut` (no `jq` in this
             # step), same convention as every other key here.
             fh.write(f"occupied_count={len(decision.occupied)}\n")
+            # tan-cli#1109 review round 2 (major): a SEPARATE consumer
+            # (`planner-resync.yml`'s "Close superseded planner-resync
+            # proposals" step) needs the full occupied set as a group -- to
+            # exclude every one of them from what it closes, not to name any
+            # one of them -- and reading N numbered keys back out means that
+            # caller has to know N ahead of time, which it does not (`gh pr
+            # list` finds it, not this guard). A single space-separated list
+            # is safe here specifically: `occupied_{i}_branch` values are git
+            # ref names, which cannot contain a space, so splitting on
+            # whitespace never misparses one. Written UNCONDITIONALLY, empty
+            # when there is nothing occupied -- same shape as `observed_tip`/
+            # `occupied_count` already use, not a key a reader has to guard
+            # for absence.
+            fh.write(
+                f"occupied_branches={' '.join(oc.branch for oc in decision.occupied)}\n"
+            )
             for i, oc in enumerate(decision.occupied, start=1):
                 fh.write(f"occupied_{i}_branch={oc.branch}\n")
                 fh.write(f"occupied_{i}_commit={oc.commit.sha}\n")

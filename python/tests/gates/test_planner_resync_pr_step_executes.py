@@ -851,6 +851,7 @@ def _run_close_step(
     keep_branch: str,
     keep_url: str,
     pr_list_fixture: str = "[]",
+    occupied_branches: str = "",
 ) -> tuple[subprocess.CompletedProcess[bytes], pathlib.Path]:
     bindir = tmp_path / "close-bin"
     bindir.mkdir()
@@ -870,6 +871,10 @@ def _run_close_step(
     env["KEEP_URL"] = keep_url
     env["GH_CALL_LOG"] = str(call_log)
     env["GH_PR_LIST_FIXTURE"] = str(fixture)
+    # tan-cli#1109 review round 2: `steps.pr.outputs.occupied_branches` --
+    # the branch-clobber guard's own space-separated list of everything it
+    # found occupied THIS run, which the close step now excludes.
+    env["OCCUPIED_BRANCHES"] = occupied_branches
 
     proc = subprocess.run(
         ["bash", "-x", "-c", _close_step_run()], env=env, capture_output=True
@@ -877,35 +882,19 @@ def _run_close_step(
     return proc, call_log
 
 
-#: tan-cli#1109 review (major): the earlier version of this fake answered
-#: `pr list` with a hardcoded number list regardless of argv, so the real
-#: `--jq` expression the step passes -- the `startswith("auto/planner-
-#: resync")` prefix match, the `!= KEEP_BRANCH` self-exclusion, and (this
-#: round) the `author.login == "app/github-actions"` + `isCrossRepository ==
-#: false` filters that stop a HUMAN's PR from being closed -- never actually
-#: ran. This fake instead extracts the real `--jq` argument out of `gh`'s own
-#: argv and applies it with the REAL `jq` binary against a JSON fixture
-#: (`GH_PR_LIST_FIXTURE`), the same shape `gh pr list --json ... --jq ...`
-#: itself returns -- so a typo or a dropped `select()` in the step's own
-#: string is caught here, not waved through by a fake that always answers
-#: "correctly" no matter what was asked.
-_FAKE_GH_ARGV_AWARE = """#!/usr/bin/env bash
+#: tan-cli#1109 review round 2: the close step's `gh pr list` call itself no
+#: longer carries a `--jq` -- the filtering (author/cross-repo/self/occupied)
+#: moved to a SEPARATE local `jq -r --argjson occupied ...` invocation over
+#: the raw `--json` output, so the exclusion can embed the occupied-branch
+#: set. This fake's "pr list" case therefore just returns the fixture
+#: VERBATIM (`cat`), matching what a real `gh pr list --json ...` (no `--jq`)
+#: returns -- the step's own subsequent `jq` calls are the REAL system `jq`
+#: binary either way, so the actual filter expression (prefix, self,
+#: author, cross-repo, occupied-exclusion) is exercised character-for-
+#: character regardless of which `gh` answered the raw listing.
+_FAKE_GH_RAW_JSON = """#!/usr/bin/env bash
 case "$1 $2" in
-  "pr list")
-    jq_expr=""
-    prev=""
-    for arg in "$@"; do
-      if [ "$prev" = "--jq" ]; then
-        jq_expr="$arg"
-      fi
-      prev="$arg"
-    done
-    if [ -z "$jq_expr" ]; then
-      echo "fake gh: pr list called with no --jq argument: $*" >&2
-      exit 1
-    fi
-    jq -r "$jq_expr" "$GH_PR_LIST_FIXTURE"
-    ;;
+  "pr list") cat "$GH_PR_LIST_FIXTURE" ;;
   "pr comment") echo "$*" >> "$GH_CALL_LOG"; exit 0 ;;
   "pr close") echo "$*" >> "$GH_CALL_LOG"; exit 0 ;;
   *) echo "fake gh: unhandled invocation: $*" >&2; exit 1 ;;
@@ -922,9 +911,18 @@ esac
 #: A realistic `gh pr list --json number,headRefName,author,isCrossRepository`
 #: page, mirroring the real shapes this repo has actually produced (`gh pr
 #: view <n> --json author` on a genuine bot PR: `{"is_bot":true,"login":
-#: "app/github-actions"}`, measured tan-cli#1109 review) plus the two shapes
-#: this round's guard exists to refuse:
-#:   * #1106/#1107 -- bot-authored, same-repo, diverted proposals: MUST close.
+#: "app/github-actions"}`, measured tan-cli#1109 review) plus every shape
+#: the close step must refuse:
+#:   * #1103 -- the literal incident the review round-2 finding names: BOT-
+#:     authored (opened by `app/github-actions`), on the PRIMARY branch
+#:     `auto/planner-resync`, but a HUMAN later pushed a hand-port commit
+#:     onto that same branch -- which is exactly what makes the guard divert
+#:     and is exactly why this PR must be EXCLUDED (via `occupied_branches`)
+#:     even though it passes the author/cross-repo checks on its own. This
+#:     is real PR #1103's own measured field values, not a fixture invented
+#:     for the test.
+#:   * #1106/#1107 -- bot-authored, same-repo, diverted proposals on
+#:     branches the guard did NOT report occupied this run: MUST close.
 #:   * #2001 -- a HUMAN'S PR on a branch that also happens to start with
 #:     `auto/planner-resync` (the literal #1002/#996 "hand-port work parked
 #:     on this branch name" shape): MUST NOT close.
@@ -934,6 +932,9 @@ esac
 #:   * #1108 -- the branch this run just opened/refreshed (`KEEP_BRANCH`
 #:     below): MUST NOT close itself.
 _PR_LIST_FIXTURE_MIXED = """[
+  {"number": 1103, "headRefName": "auto/planner-resync",
+   "author": {"login": "app/github-actions", "is_bot": true},
+   "isCrossRepository": false},
   {"number": 1106, "headRefName": "auto/planner-resync-eaa79695",
    "author": {"login": "app/github-actions", "is_bot": true},
    "isCrossRepository": false},
@@ -952,34 +953,47 @@ _PR_LIST_FIXTURE_MIXED = """[
 ]"""
 
 
-def test_close_step_closes_bot_prs_but_never_a_human_or_cross_repo_one(
+@pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
+def test_close_step_closes_bot_prs_but_never_a_human_cross_repo_or_occupied_one(
     tmp_path: pathlib.Path,
 ):
-    """tan-cli#1109 fault 3 + review (major): once one proposal is
-    open/refreshed, every OTHER open, BOT-AUTHORED, same-repo PR whose head
-    starts with `auto/planner-resync` is superseded and closed (#1106/#1107 --
-    the literal shape of tonight's #1106/#1107/#1108); a PR that merely
-    shares the branch prefix but is NOT the bot's own -- a human's hand-port
-    work (#2001, the #1002/#996 shape this whole guard exists to protect) or
-    a cross-repo PR (#2002) -- is never touched. Both directions asserted."""
+    """tan-cli#1109 fault 3 + review rounds 1 and 2: once one proposal is
+    open/refreshed, every OTHER open, BOT-AUTHORED, same-repo, NOT-OCCUPIED
+    PR whose head starts with `auto/planner-resync` is superseded and closed
+    (#1106/#1107 -- the literal shape of tonight's #1106/#1107/#1108); a PR
+    that merely shares the branch prefix but is NOT the bot's own -- a
+    human's hand-port work (#2001) or a cross-repo PR (#2002) -- is never
+    touched, and NEITHER is a bot-authored PR sitting on a branch THIS RUN's
+    own guard invocation reported occupied (#1103 -- the literal incident:
+    opened by the bot, then a human's hand-port commit landed on the same
+    branch, which is what makes the guard divert in the first place). All
+    three exclusion reasons plus the "still closes a legitimate sibling"
+    control asserted in one pass."""
     proc, call_log = _run_close_step(
         tmp_path,
-        _FAKE_GH_ARGV_AWARE,
+        _FAKE_GH_RAW_JSON,
         keep_branch="auto/planner-resync-5c33ef04",
         keep_url="https://github.com/example/tan-cli/pull/1108",
         pr_list_fixture=_PR_LIST_FIXTURE_MIXED,
+        occupied_branches="auto/planner-resync",
     )
     assert proc.returncode == 0, _fmt(proc)
     calls = call_log.read_text(encoding="utf-8")
 
-    # Direction 1: the bot's own OTHER proposals are superseded and closed.
-    assert "pr comment 1106" in calls, calls
+    # Direction 1: the bot's own OTHER, NOT-occupied proposal is superseded
+    # and closed -- the cap still works even with the occupied exclusion in
+    # place.
     assert "pr comment 1107" in calls, calls
-    assert "pr close 1106" in calls, calls
     assert "pr close 1107" in calls, calls
 
-    # Direction 2: a human's PR (same branch prefix, foreign author) must
-    # never be closed or commented on, no matter how it got that branch name.
+    # Direction 2: #1103 -- bot-authored, same-repo, on a branch THIS RUN's
+    # own guard reported occupied -- must never be closed or commented on.
+    # This is the review round-2 finding: the author/cross-repo filters
+    # alone are NOT enough, since #1103 passes both.
+    assert "pr comment 1103" not in calls, calls
+    assert "pr close 1103" not in calls, calls
+    # A human's PR (same branch prefix, foreign author) must never be
+    # touched, no matter how it got that branch name.
     assert "pr comment 2001" not in calls, calls
     assert "pr close 2001" not in calls, calls
     # ...and neither must a cross-repository PR, even one claiming the bot's
@@ -989,6 +1003,60 @@ def test_close_step_closes_bot_prs_but_never_a_human_or_cross_repo_one(
     # ...nor the branch this very run just opened/refreshed.
     assert "pr comment 1108" not in calls, calls
     assert "pr close 1108" not in calls, calls
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
+def test_close_step_leaves_an_unoccupied_bot_sibling_untouched_when_nothing_is_occupied(
+    tmp_path: pathlib.Path,
+):
+    """The other half of the occupied-exclusion, isolated: with
+    `OCCUPIED_BRANCHES` empty (the everyday, non-diverted run), the bot's own
+    other proposals still close exactly as before -- the exclusion clause
+    must not accidentally protect everything when there is nothing to
+    protect."""
+    proc, call_log = _run_close_step(
+        tmp_path,
+        _FAKE_GH_RAW_JSON,
+        keep_branch="auto/planner-resync-5c33ef04",
+        keep_url="https://github.com/example/tan-cli/pull/1108",
+        pr_list_fixture=_PR_LIST_FIXTURE_MIXED,
+        occupied_branches="",
+    )
+    assert proc.returncode == 0, _fmt(proc)
+    calls = call_log.read_text(encoding="utf-8")
+    # #1103 is bot-authored and same-repo -- with nothing occupied this run,
+    # it is NOT protected and closes like any other bot sibling. (This is
+    # the realistic shape too: #1103 would only ever be occupied on a run
+    # where the guard actually found it foreign-occupied; a run where
+    # nothing is occupied has no reason to protect it.)
+    assert "pr close 1103" in calls, calls
+    assert "pr close 1106" in calls, calls
+    assert "pr close 1107" in calls, calls
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
+def test_close_step_warns_when_the_open_pr_page_is_full(tmp_path: pathlib.Path):
+    """tan-cli#1109 review round 2 (nit): `--limit 100` is the page, not a
+    guaranteed complete list -- past 100 total open PRs (of ANY kind, not
+    just planner-resync ones) an older proposal this cap is meant to
+    supersede can age off page 1 with no signal. A full page (exactly 100
+    returned) must warn, loudly, rather than silently under-deliver."""
+    proc, call_log = _run_close_step(
+        tmp_path,
+        _FAKE_GH_RAW_JSON,
+        keep_branch="auto/planner-resync-5c33ef04",
+        keep_url="https://github.com/example/tan-cli/pull/1108",
+        pr_list_fixture='[{"number": 3000, "headRefName": "unrelated/branch-0", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3001, "headRefName": "unrelated/branch-1", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3002, "headRefName": "unrelated/branch-2", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3003, "headRefName": "unrelated/branch-3", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3004, "headRefName": "unrelated/branch-4", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3005, "headRefName": "unrelated/branch-5", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3006, "headRefName": "unrelated/branch-6", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3007, "headRefName": "unrelated/branch-7", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3008, "headRefName": "unrelated/branch-8", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3009, "headRefName": "unrelated/branch-9", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3010, "headRefName": "unrelated/branch-10", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3011, "headRefName": "unrelated/branch-11", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3012, "headRefName": "unrelated/branch-12", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3013, "headRefName": "unrelated/branch-13", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3014, "headRefName": "unrelated/branch-14", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3015, "headRefName": "unrelated/branch-15", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3016, "headRefName": "unrelated/branch-16", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3017, "headRefName": "unrelated/branch-17", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3018, "headRefName": "unrelated/branch-18", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3019, "headRefName": "unrelated/branch-19", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3020, "headRefName": "unrelated/branch-20", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3021, "headRefName": "unrelated/branch-21", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3022, "headRefName": "unrelated/branch-22", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3023, "headRefName": "unrelated/branch-23", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3024, "headRefName": "unrelated/branch-24", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3025, "headRefName": "unrelated/branch-25", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3026, "headRefName": "unrelated/branch-26", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3027, "headRefName": "unrelated/branch-27", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3028, "headRefName": "unrelated/branch-28", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3029, "headRefName": "unrelated/branch-29", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3030, "headRefName": "unrelated/branch-30", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3031, "headRefName": "unrelated/branch-31", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3032, "headRefName": "unrelated/branch-32", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3033, "headRefName": "unrelated/branch-33", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3034, "headRefName": "unrelated/branch-34", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3035, "headRefName": "unrelated/branch-35", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3036, "headRefName": "unrelated/branch-36", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3037, "headRefName": "unrelated/branch-37", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3038, "headRefName": "unrelated/branch-38", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3039, "headRefName": "unrelated/branch-39", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3040, "headRefName": "unrelated/branch-40", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3041, "headRefName": "unrelated/branch-41", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3042, "headRefName": "unrelated/branch-42", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3043, "headRefName": "unrelated/branch-43", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3044, "headRefName": "unrelated/branch-44", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3045, "headRefName": "unrelated/branch-45", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3046, "headRefName": "unrelated/branch-46", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3047, "headRefName": "unrelated/branch-47", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3048, "headRefName": "unrelated/branch-48", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3049, "headRefName": "unrelated/branch-49", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3050, "headRefName": "unrelated/branch-50", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3051, "headRefName": "unrelated/branch-51", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3052, "headRefName": "unrelated/branch-52", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3053, "headRefName": "unrelated/branch-53", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3054, "headRefName": "unrelated/branch-54", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3055, "headRefName": "unrelated/branch-55", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3056, "headRefName": "unrelated/branch-56", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3057, "headRefName": "unrelated/branch-57", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3058, "headRefName": "unrelated/branch-58", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3059, "headRefName": "unrelated/branch-59", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3060, "headRefName": "unrelated/branch-60", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3061, "headRefName": "unrelated/branch-61", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3062, "headRefName": "unrelated/branch-62", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3063, "headRefName": "unrelated/branch-63", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3064, "headRefName": "unrelated/branch-64", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3065, "headRefName": "unrelated/branch-65", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3066, "headRefName": "unrelated/branch-66", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3067, "headRefName": "unrelated/branch-67", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3068, "headRefName": "unrelated/branch-68", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3069, "headRefName": "unrelated/branch-69", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3070, "headRefName": "unrelated/branch-70", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3071, "headRefName": "unrelated/branch-71", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3072, "headRefName": "unrelated/branch-72", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3073, "headRefName": "unrelated/branch-73", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3074, "headRefName": "unrelated/branch-74", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3075, "headRefName": "unrelated/branch-75", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3076, "headRefName": "unrelated/branch-76", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3077, "headRefName": "unrelated/branch-77", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3078, "headRefName": "unrelated/branch-78", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3079, "headRefName": "unrelated/branch-79", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3080, "headRefName": "unrelated/branch-80", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3081, "headRefName": "unrelated/branch-81", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3082, "headRefName": "unrelated/branch-82", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3083, "headRefName": "unrelated/branch-83", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3084, "headRefName": "unrelated/branch-84", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3085, "headRefName": "unrelated/branch-85", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3086, "headRefName": "unrelated/branch-86", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3087, "headRefName": "unrelated/branch-87", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3088, "headRefName": "unrelated/branch-88", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3089, "headRefName": "unrelated/branch-89", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3090, "headRefName": "unrelated/branch-90", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3091, "headRefName": "unrelated/branch-91", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3092, "headRefName": "unrelated/branch-92", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3093, "headRefName": "unrelated/branch-93", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3094, "headRefName": "unrelated/branch-94", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3095, "headRefName": "unrelated/branch-95", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3096, "headRefName": "unrelated/branch-96", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3097, "headRefName": "unrelated/branch-97", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3098, "headRefName": "unrelated/branch-98", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3099, "headRefName": "unrelated/branch-99", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}]',
+        occupied_branches="",
+    )
+    assert proc.returncode == 0, _fmt(proc)
+    assert b"::warning::" in proc.stdout, _fmt(proc)
+    assert b"exactly 100 open PRs" in proc.stdout, _fmt(proc)
+    # None of the 100 unrelated PRs match the auto/planner-resync prefix, so
+    # the warning must not be accompanied by any close call.
+    assert call_log.read_text(encoding="utf-8") == "", call_log.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_close_step_refuses_to_guess_when_gh_pr_list_fails(tmp_path: pathlib.Path):

@@ -692,6 +692,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           KEEP_BRANCH: ${{ steps.pr.outputs.branch }}
           KEEP_URL: ${{ steps.pr.outputs.url }}
+          # tan-cli#1109 review round 2 (major): the full occupied set THIS
+          # RUN's own branch-clobber guard invocation found, space-separated
+          # (`planner_resync_branch_guard.py`'s `occupied_branches=` --
+          # unconditional, empty when nothing is occupied). See the `others=`
+          # filter below for why this is load-bearing, not decorative.
+          OCCUPIED_BRANCHES: ${{ steps.pr.outputs.occupied_branches }}
         shell: bash
         run: |
           set -euo pipefail
@@ -715,6 +721,24 @@ jobs:
           # `isCrossRepository == false` check is defence in depth: a fork PR
           # cannot forge that author identity, but there is no reason to rely
           # on that alone when the field is free to check.
+          #
+          # tan-cli#1109 review round 2 (major): the author filter alone
+          # STILL closes the case this repo actually had -- a BOT-authored
+          # PR whose branch a human took over (exactly #1103: opened by
+          # `app/github-actions`, then a human pushed a hand-port commit onto
+          # `auto/planner-resync` on top of it). The guard's own diversion is
+          # what protects the COMMIT; this exclusion is what stops this step
+          # closing the PR SITTING on that same protected branch. Excluding
+          # every branch THIS RUN's own guard invocation reported occupied
+          # (not a fixed name -- `auto/planner-resync` today, but whichever
+          # candidate the cascade actually protected) is precise: a prior
+          # run's own diverted SIBLING (say `auto/planner-resync-eaa79695`,
+          # not occupied by anything foreign) is not in this set and still
+          # gets closed, so the cap still works. Do NOT skip this whole step
+          # on `diverted == true` instead -- diversion is exactly the run
+          # where accumulation happens, so that would disable the cap
+          # precisely when it is needed.
+          occupied_json="$(printf '%s' "${OCCUPIED_BRANCHES}" | jq -Rsc 'split(" ") | map(select(length > 0))')"
           # tan-cli#1109 review (nit): `--limit 100`, same reasoning as the
           # "Surface the owed work..." / "Close the tracking issue..." steps'
           # own `gh issue list --limit 100` further down -- `gh pr list` with
@@ -724,18 +748,27 @@ jobs:
           # it. 100 is this repo's own established ceiling for that lookup;
           # not measured as a live problem today (5 open PRs total), same as
           # the un-`--limit`ed `gh pr list --head` a few lines above -- but
-          # cheap to fix here alongside the rest of this round.
+          # cheap to fix here alongside the rest of this round. The page is
+          # the 100 newest OPEN PRs OF ANY KIND, though, not 100
+          # planner-resync ones -- fail-open, not destructive, but a full
+          # page is worth a loud note rather than a silent under-delivery
+          # past 100 total open PRs.
           set +e
-          others="$(gh pr list --repo "${GITHUB_REPOSITORY}" --state open \
-                      --limit 100 \
-                      --json number,headRefName,author,isCrossRepository \
-                      --jq ".[] | select(.headRefName | startswith(\"auto/planner-resync\")) | select(.headRefName != \"${KEEP_BRANCH}\") | select(.author.login == \"app/github-actions\") | select(.isCrossRepository == false) | .number")"
-          lookup_rc=$?
+          raw="$(gh pr list --repo "${GITHUB_REPOSITORY}" --state open \
+                   --limit 100 \
+                   --json number,headRefName,author,isCrossRepository)"
+          list_rc=$?
           set -e
-          if [ "${lookup_rc}" -ne 0 ]; then
+          if [ "${list_rc}" -ne 0 ]; then
             echo "::error::gh pr list failed while looking for other open planner-resync proposals to supersede -- refusing to guess whether any exist. See the step log for gh's error."
             exit 1
           fi
+          raw_count="$(printf '%s' "${raw}" | jq 'length')"
+          if [ "${raw_count}" = "100" ]; then
+            echo "::warning::gh pr list returned exactly 100 open PRs (the --limit ceiling) while looking for other planner-resync proposals to supersede -- there may be MORE open PRs this page did not include, and any auto/planner-resync* PR sitting past page 1 would be silently missed by this step's cap. Investigate if this repo's open-PR count keeps climbing."
+          fi
+          others="$(printf '%s' "${raw}" | jq -r --argjson occupied "${occupied_json}" \
+                      ".[] | select(.headRefName | startswith(\"auto/planner-resync\")) | select(.headRefName != \"${KEEP_BRANCH}\") | select(.author.login == \"app/github-actions\") | select(.isCrossRepository == false) | select(.headRefName as \$h | (\$occupied | index(\$h)) == null) | .number")"
           for n in ${others}; do
             gh pr comment "${n}" --repo "${GITHUB_REPOSITORY}" \
               --body "Superseded by ${KEEP_URL} (tan-cli#1109: at most one open \`auto/planner-resync-*\` proposal at a time). Closing."

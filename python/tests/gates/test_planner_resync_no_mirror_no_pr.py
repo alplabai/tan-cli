@@ -97,7 +97,25 @@ def _ensure_commit_fetched(sdk: pathlib.Path, sha: str) -> None:
     reaches it. See the module docstring for why this is needed at all
     (`seam1`'s own checkout is `fetch-depth: 1`, exactly one commit, no
     ancestors or descendants) and why `--depth 1` per SHA is sufficient
-    (`classify()` never needs connectivity between them).
+    there (`classify()` never needs connectivity between them).
+
+    tan-cli#1109 review round 2 (nit): `--depth 1` is only safe to ADD when
+    the checkout is ALREADY shallow -- measured on a controlled pair, fetching
+    a missing SHA with `--depth 1` into a COMPLETE clone writes `.git/shallow`
+    and converts it into a shallow repo as a side effect, silently, with no
+    connection to anything this test asked for. A developer who binds
+    `ALP_SDK_ROOT` at a real, full clone (exactly the everyday local-testing
+    case) would have it quietly shallowed the first time this test happened
+    to need a SHA that checkout didn't already have -- a surprise that only
+    surfaces much later, as a confusing history error in some UNRELATED git
+    operation. Guarded via `git rev-parse --is-shallow-repository`: `--depth 1`
+    only when the checkout already answers `true` (seam1's own shape, where
+    one more shallow boundary changes nothing); a full, non-shallow checkout
+    gets a plain unbounded fetch of the one SHA instead, which cannot shallow
+    it. If shallow-ness itself cannot be determined, default to the narrower
+    `--depth 1` fetch -- CI's own checkout (the case this function exists for)
+    is always shallow, so that is the safe default when the probe itself is
+    inconclusive, not a license to shallow an unknown repo by default.
 
     Only a genuine fetch failure skips -- never a bare "not present", and
     never silently: the skip reason names the exact SHA and the git error,
@@ -109,10 +127,19 @@ def _ensure_commit_fetched(sdk: pathlib.Path, sha: str) -> None:
     )
     if present.returncode == 0:
         return
-    fetch = subprocess.run(
-        ["git", "-C", str(sdk), "fetch", "--quiet", "--depth", "1", "origin", sha],
-        capture_output=True,
+    shallow_probe = subprocess.run(
+        ["git", "-C", str(sdk), "rev-parse", "--is-shallow-repository"],
+        capture_output=True, text=True,
     )
+    already_shallow = (
+        shallow_probe.returncode != 0
+        or shallow_probe.stdout.strip() != "false"
+    )
+    fetch_argv = ["git", "-C", str(sdk), "fetch", "--quiet"]
+    if already_shallow:
+        fetch_argv += ["--depth", "1"]
+    fetch_argv += ["origin", sha]
+    fetch = subprocess.run(fetch_argv, capture_output=True)
     if fetch.returncode != 0:
         pytest.skip(
             f"{sha} is not present in the bound alp-sdk checkout at {sdk} and "
@@ -179,3 +206,119 @@ def test_the_0914da38_to_5c33ef04_range_proves_zero_mirror_changes_and_no_pr():
         "means to `planner-resync.yml`'s PR step, which is what tan-cli#1109 "
         "says must never happen when zero mirrored files changed"
     )
+
+
+# --------------------------------------------------------- shallow-guard
+
+
+def _local_git(root, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        check=True,
+        env={
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@example.invalid",
+            "PATH": __import__("os").environ.get("PATH", ""),
+            "HOME": str(root),
+        },
+    )
+    return proc.stdout.decode("utf-8", "replace")
+
+
+def _is_shallow(root) -> bool:
+    return (
+        _local_git(root, "rev-parse", "--is-shallow-repository").strip() == "true"
+    )
+
+
+def test_ensure_commit_fetched_does_not_shallow_a_complete_clone(tmp_path):
+    """tan-cli#1109 review round 2 (nit): `--depth 1` is only safe to add
+    when the checkout is ALREADY shallow. Hermetic (local repos, no
+    network) so this reproduces the same measurement the review made --
+    fetching a missing SHA with an unconditional `--depth 1` into a
+    COMPLETE clone writes `.git/shallow` and converts it into a shallow
+    repo as a side effect -- without depending on this workstation's own
+    git credential configuration (a real `github.com` fetch needs the
+    developer's `gh`-based credential helper, which the test suite's own
+    `_scrub_sdk_discovery_env` autouse fixture -- `HOME` repointed to a
+    fresh empty dir on every test -- removes; a local bare-repo remote
+    needs none of that)."""
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _local_git(seed, "init", "-q")
+    _local_git(seed, "remote", "add", "origin", str(bare))
+    _local_git(seed, "commit", "-q", "--allow-empty", "-m", "commit A")
+    _local_git(seed, "push", "-q", "origin", "HEAD:main")
+
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(bare), str(clone)], check=True, capture_output=True
+    )
+    assert _is_shallow(clone) is False, "the seed clone must start out complete"
+
+    _local_git(seed, "commit", "-q", "--allow-empty", "-m", "commit B")
+    _local_git(seed, "push", "-q", "origin", "HEAD:main")
+    sha_b = _local_git(seed, "rev-parse", "HEAD").strip()
+
+    _ensure_commit_fetched(clone, sha_b)
+
+    assert _is_shallow(clone) is False, (
+        "a complete clone must stay complete -- an unconditional `--depth 1` "
+        "would have silently converted it to a shallow repo here"
+    )
+    present = subprocess.run(
+        ["git", "-C", str(clone), "cat-file", "-e", f"{sha_b}^{{commit}}"],
+        capture_output=True,
+    )
+    assert present.returncode == 0, "the missing commit must still be fetched"
+
+
+def test_ensure_commit_fetched_still_fetches_into_an_already_shallow_clone(tmp_path):
+    """The other direction: seam1's own actual shape (`fetch-depth: 1`) must
+    keep working exactly as before -- the guard must not become so cautious
+    it stops fetching into a checkout that was ALREADY shallow."""
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _local_git(seed, "init", "-q")
+    _local_git(seed, "remote", "add", "origin", str(bare))
+    _local_git(seed, "commit", "-q", "--allow-empty", "-m", "commit A")
+    _local_git(seed, "push", "-q", "origin", "HEAD:main")
+    sha_a = _local_git(seed, "rev-parse", "HEAD").strip()
+    _local_git(seed, "commit", "-q", "--allow-empty", "-m", "commit B")
+    _local_git(seed, "push", "-q", "origin", "HEAD:main")
+    sha_b = _local_git(seed, "rev-parse", "HEAD").strip()
+
+    shallow_clone = tmp_path / "shallow-clone"
+    shallow_clone.mkdir()
+    subprocess.run(
+        ["git", "init", "-q", str(shallow_clone)], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(shallow_clone), "remote", "add", "origin", str(bare)],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(shallow_clone), "fetch", "--quiet", "--depth", "1",
+         "origin", sha_a],
+        check=True, capture_output=True,
+    )
+    assert _is_shallow(shallow_clone) is True, "the fixture itself must start shallow"
+
+    _ensure_commit_fetched(shallow_clone, sha_b)
+
+    assert _is_shallow(shallow_clone) is True
+    present = subprocess.run(
+        ["git", "-C", str(shallow_clone), "cat-file", "-e", f"{sha_b}^{{commit}}"],
+        capture_output=True,
+    )
+    assert present.returncode == 0, "the missing commit must still be fetched"
+

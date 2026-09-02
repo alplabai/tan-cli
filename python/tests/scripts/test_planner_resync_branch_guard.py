@@ -450,6 +450,14 @@ def test_cascaded_diversion_reports_every_occupied_candidate_in_github_output(
     assert "occupied_2_branch=auto/planner-resync-cafef00d" in text
     assert f"occupied_2_commit={diverted_sha}" in text
     assert "occupied_2_author=Another Human <other@example.com>" in text
+    # tan-cli#1109 review round 2 (major): the consolidated list
+    # `planner-resync.yml`'s close-superseded step actually reads --
+    # both occupied branches, space-separated, in the SAME order as the
+    # numbered keys above.
+    assert (
+        "occupied_branches=auto/planner-resync auto/planner-resync-cafef00d\n"
+        in text
+    )
 
 
 def test_cli_writes_github_output(repo: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
@@ -482,6 +490,42 @@ def test_cli_writes_github_output(repo: pathlib.Path, tmp_path: pathlib.Path, mo
     # The diverted name doesn't exist on origin yet -- empty, matching
     # `--force-with-lease=<branch>:` (empty <expect>) for "must not exist".
     assert "observed_tip=\n" in text
+    # tan-cli#1109 review round 2 (major): the single occupied branch,
+    # by itself (no trailing siblings), same reason as the cascaded case
+    # above.
+    assert "occupied_branches=auto/planner-resync\n" in text
+
+
+def test_occupied_branches_is_empty_and_unconditional_when_nothing_is_occupied(
+    repo: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
+    """tan-cli#1109 review round 2 (major): the everyday, non-diverted run --
+    `occupied_branches=` must still be WRITTEN (empty), same shape as
+    `observed_tip=`/`occupied_count=` already use, so a caller's `grep '^…='`
+    under `set -euo pipefail` never dies on a missing key (tan-cli#1006's own
+    `protected_commit=` incident, one level up)."""
+    _push_branch_from_dev(repo, "auto/planner-resync")
+    _commit(repo, AUTOMATION_NAME, AUTOMATION_EMAIL, "propose re-sync", "resync.txt")
+    _run(repo, "push", "-q", "-f", "origin", "auto/planner-resync")
+
+    out = tmp_path / "github_output"
+    out.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+
+    rc = guard.main(
+        [
+            "--repo-root",
+            str(repo),
+            "--branch",
+            "auto/planner-resync",
+            "--divert-suffix",
+            "abc12345",
+        ]
+    )
+    assert rc == 0
+    text = out.read_text(encoding="utf-8")
+    assert "occupied_count=0\n" in text
+    assert "occupied_branches=\n" in text
 
 
 def test_forged_commit_with_separator_embedded_in_author_name_is_refused(
