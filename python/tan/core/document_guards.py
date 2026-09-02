@@ -116,22 +116,44 @@ fixed crash.
 WHAT IS DELIBERATELY NOT HERE
 ------------------------------
 
-tan-cli#1085 closed the FULL extraction of this family; this module is the
-document-agnostic register both catalog readers import, plus `require_
-readable_text` (the read-half shape `render_to_envelope`'s example
-`board.yaml` read shares with `read_catalog_document`), and no more:
+tan-cli#1085 closed the CROSS-MODULE half of this family that was still
+duplicated by hand (`require_readable_text`, the read-half shape
+`render_to_envelope`'s example `board.yaml` read shared with
+`read_catalog_document`). It did not shrink `template.py` back toward its
+pre-sweep size -- the module grew net +405 lines against its 1658-line
+tan-cli#1025 starting point across the five rounds this family's own PRs
+record (#1073 +122, #1082 +376, #1084 -136, plus the smaller PRs since), and
+this module only ever absorbed the pieces two MODULES both needed. This
+module is that document-agnostic register, and no more:
 
 * `_require_constraints` stays in `template.py`. It guards `$defs/parameter`'s
   `constraints:` bounds, which only the planner's parameter resolution reads;
   `example_catalog.py` has no parameter path at all, so moving it would be
-  extraction for its own sake with no second caller to prove it shared.
+  extraction for its own sake with no second MODULE to prove it shared.
   tan-cli#1087 (PR #1123) kept `_check_constraints`'s `ParameterError` local
   for the identical reason.
-* `_load_som_doc`, `_board_route_entries` and `_docs_ref` stay in
-  `template.py` too: each still has exactly one caller, and `_docs_ref`
-  degrades to `"main"` rather than curated-raising at all, a different shape
-  from everything else in this file. A single caller with no sibling to prove
-  the sharing is not what this register is for.
+* `_load_som_doc` and `_board_route_entries` stay in `template.py` too, but
+  NOT because either has only one caller -- each has two, WITHIN
+  `template.py` (`_load_som_doc`: `_default_preset_for_sku` and
+  `_topology_for_sku`; `_board_route_entries`: `_board_alias_to_entry` and
+  `_resolve_pin_target`), which is exactly why each is its own function
+  instead of two inlined reads. The register's bar is a caller in a
+  DIFFERENT MODULE -- proof that a second, independent implementation is the
+  live alternative to sharing -- and neither has one: no other module reads
+  `metadata/e1m_modules/<sku>.yaml` or a board's `e1m_routes:` at all, let
+  alone by hand. `_docs_ref` stays for a different reason again: it has one
+  caller and degrades to `"main"` rather than curated-raising at all, a
+  different shape from everything else in this file.
+
+  Staying local is a scope claim, not a soundness one: `_load_som_doc` and
+  `_board_route_entries` still guard their OWN absence with a pre-flight
+  `is_file()` and then read+parse UNGUARDED (no `try` at all, so `audit_
+  narrow_except_contracts.py`'s too-narrow-a-`try` sweep cannot see it) --
+  a real, live gap of the SAME #1116 class `require_readable_text` closes
+  for the catalog and the example `board.yaml`, reachable through `emit_
+  scaffold`'s `except TemplateError` and nothing else. #1085 is an
+  extraction issue, not a guard sweep, so this PR does not fix that gap;
+  it is filed and tracked separately.
 * The `SkuNotSupportedError` / `CoresTopologyNotFoundError` selection
   semantics stay with their own modules. This register answers "is this
   document the shape it claims to be", never "which record did you mean".

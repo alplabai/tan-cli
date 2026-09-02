@@ -337,7 +337,14 @@ def test_both_selectors_are_bound_to_the_same_register_objects():
     assert tmpl._require_mapping_doc.__func__ is DocumentGuards.require_mapping_doc
     assert tmpl._require_field.__func__ is DocumentGuards.require_field
     assert tmpl._require_key.__func__ is DocumentGuards.require_key
-    assert tmpl._require_readable_text.__func__ is DocumentGuards.require_readable_text
+    # `getattr(..., "__func__", None)`, not a bare `.__func__` -- a
+    # private, unbound function (the M17 mutation this pins against) has
+    # no `__func__` attribute at all, so a bare access reds via a raw
+    # `AttributeError` instead of this assertion's own comparison (the
+    # same nit #1096's review raised for this file's three neighbouring
+    # lines, which predate this change and are unchanged here).
+    assert getattr(tmpl._require_readable_text, "__func__", None) is (
+        DocumentGuards.require_readable_text)
     assert tmpl._catalog_templates.__func__ is DocumentGuards.catalog_templates
 
     # One register, two exception classes -- deliberately, because
