@@ -629,6 +629,58 @@ def _sdk_root_flag_unresolved_issue(
     )
 
 
+def _example_som_catalog_issue(
+    resolved_sdk: _Sdk, example_src: str, som: str, subject_label: str
+) -> Issue | None:
+    """tan-cli#890/#1101: whether `--som som` against the SDK scaffold
+    catalog's record for `example_src` is (a) declared unsupported, (b)
+    could not be checked at all, or (c) neither -- extracted out of
+    `init()` itself (tan-cli#1101 review minor: this was inline and pushed
+    `init()` to the 6th-largest function in the tree) since the whole block
+    is exactly this seam: four already-resolved values in, one optional
+    `Issue` out, no other state.
+
+    `unsupported_som` returning `None` is ambiguous by its own documented
+    contract -- EITHER "checked, --som is fine (or there was no record to
+    check against)" OR "could not check at all" (the catalog, or the
+    matching record within it, could not be read: non-UTF-8 bytes, a
+    directory, a permissions error, invalid JSON, the wrong top-level shape,
+    a malformed `supported.som_skus` on the matching record -- PR #1096 made
+    that curated rather than a crash, but `unsupported_som` degrades it the
+    same as every other "nothing to report" reason, by design). This second,
+    narrower read (`catalog_unreadable`) distinguishes the two. `ok`/
+    `exitCode` and the scaffold itself stay exactly as they are either way
+    (refusing here would be the tightening tan-cli#1084 promised not to
+    do) -- this only stops the envelope from claiming a check that never
+    ran.
+    """
+    supported = unsupported_som(resolved_sdk.path, example_src, som)
+    if supported is not None:
+        return Issue(
+            "init.example-som-unsupported",
+            "warning",
+            f"{subject_label} declares supported.som_skus "
+            f"{list(supported)} in the SDK scaffold catalog; --som "
+            f"'{som}' is outside that set, and `alp_project.py --emit "
+            f"scaffold` refuses the same pair. The files were still "
+            f"written -- check the scaffolded board.yaml against your "
+            f"SoM's topology before building, or widen som_skus in "
+            f"the catalog if the example really does support it.",
+        )
+    unreadable = catalog_unreadable(resolved_sdk.path, example_src)
+    if unreadable is not None:
+        return Issue(
+            "init.example-som-unchecked",
+            "warning",
+            f"{subject_label}: the SDK scaffold catalog could not be "
+            f"read ({unreadable}), so whether --som '{som}' is "
+            f"supported could not be checked. The files were still "
+            f"written -- verify '{som}' against {subject_label}'s "
+            f"supported SoMs before building.",
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # The two planning paths
 # ---------------------------------------------------------------------------
@@ -1462,44 +1514,9 @@ def init(
         example_som_issue = None
         if is_example_shaped and som is not None and resolved_sdk is not None:
             example_src = template_id[len("example:") :]
-            supported = unsupported_som(resolved_sdk.path, example_src, som)
-            if supported is not None:
-                example_som_issue = Issue(
-                    "init.example-som-unsupported",
-                    "warning",
-                    f"{subject_label} declares supported.som_skus "
-                    f"{list(supported)} in the SDK scaffold catalog; --som "
-                    f"'{som}' is outside that set, and `alp_project.py --emit "
-                    f"scaffold` refuses the same pair. The files were still "
-                    f"written -- check the scaffolded board.yaml against your "
-                    f"SoM's topology before building, or widen som_skus in "
-                    f"the catalog if the example really does support it.",
-                )
-            else:
-                # tan-cli#1101: `unsupported_som` returning `None` here means
-                # EITHER "checked, --som is fine" OR "could not check at
-                # all" -- the catalog exists but could not be read (non-UTF-8
-                # bytes, a directory, a permissions error, invalid JSON, the
-                # wrong top-level shape; PR #1096 made that curated rather
-                # than a crash, but `unsupported_som` degrades it the same
-                # as every other "nothing to report" reason, by design). A
-                # second, narrower read distinguishes the two: `ok`/
-                # `exitCode` and the scaffold itself stay exactly as they
-                # are (refusing here would be the tightening tan-cli#1084
-                # promised not to do) -- this only stops the envelope from
-                # claiming a check that never ran.
-                unreadable = catalog_unreadable(resolved_sdk.path)
-                if unreadable is not None:
-                    example_som_issue = Issue(
-                        "init.example-som-unchecked",
-                        "warning",
-                        f"{subject_label}: the SDK scaffold catalog could "
-                        f"not be read ({unreadable}), so whether --som "
-                        f"'{som}' is supported could not be checked. The "
-                        f"files were still written -- verify '{som}' "
-                        f"against {subject_label}'s supported SoMs before "
-                        f"building.",
-                    )
+            example_som_issue = _example_som_catalog_issue(
+                resolved_sdk, example_src, som, subject_label
+            )
 
         missing_board_yaml_issue = None
         if is_example_shaped and not any(f.relative_path == "board.yaml" for f in files):

@@ -1436,11 +1436,16 @@ def test_from_example_stays_silent_on_a_non_utf8_catalog_with_no_som(tmp_path):
     assert env["issues"] == [], env["issues"]
 
 
-def test_from_example_stays_silent_on_a_directory_where_the_catalog_should_be(tmp_path):
+def test_from_example_warns_on_a_directory_where_the_catalog_should_be(tmp_path):
     """tan-cli#1101 acceptance: a DIRECTORY at the catalog path is the other
     named "unreadable" shape (alongside non-UTF-8 bytes and a permissions
     failure) -- must warn the same way a non-UTF-8 catalog does, not just
-    the one byte-level case."""
+    the one byte-level case.
+
+    tan-cli#1101 review MINOR: this test's name used to claim "stays_silent"
+    while its own body asserted the opposite -- copy-pasted from the
+    no-`--som` test just above it. The behaviour was always "warns"; only
+    the name was wrong."""
     sdk = _sdk_with_catalog(tmp_path, with_catalog=False)
     example_dir = sdk / "examples" / "multicore" / "mproc-mailbox"
     (example_dir / "src").mkdir(parents=True)
@@ -1460,6 +1465,55 @@ def test_from_example_stays_silent_on_a_directory_where_the_catalog_should_be(tm
     codes = [i["code"] for i in env["issues"]]
     assert codes == ["init.example-som-unchecked"], env["issues"]
     assert (tmp_path / "board.yaml").is_file()
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="POSIX-only, non-root: chmod 0o000 has no effect for root, and "
+           "Windows ACLs don't honour POSIX mode bits the same way.",
+)
+def test_from_example_survives_a_permission_denied_catalog_directory(tmp_path):
+    """tan-cli#1101 review BLOCKER, re-derived end to end. `catalog_unreadable`'s
+    first draft pre-flighted with `if not catalog.exists(): return None` --
+    but `Path.exists()` swallows only `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP`
+    (`pathlib.py`'s `_IGNORED_ERRNOS`), NOT `EACCES`. So an SDK checkout
+    whose `metadata/templates/` the caller cannot traverse escaped as a raw
+    `PermissionError`, past `init_cmd.py`'s bare call site (no try/except of
+    its own), and out as `init.internal-failure` with NOTHING scaffolded --
+    undoing the exact crash-safety #1096 landed, on the exact "a permissions
+    failure" shape this issue's own acceptance criteria and this code's
+    docstring/registry note both name. Measured on `origin/dev` before this
+    fix existed: `ok:true exitCode:0 issues:[]`, `.alp`/`board.yaml`/`src`
+    all scaffolded -- this test pins that `tan init` on this branch matches
+    that outcome on three of those four axes and additionally reports the
+    new warning, never a crash."""
+    sdk = _sdk_with_catalog(tmp_path)
+    example_dir = sdk / "examples" / "multicore" / "mproc-mailbox"
+    (example_dir / "src").mkdir(parents=True)
+    (example_dir / "src" / "main.c").write_text(
+        "int main(void) { return 0; }\n", encoding="utf-8")
+    templates_dir = sdk / "metadata" / "templates"
+
+    templates_dir.chmod(0o000)
+    try:
+        proc = run_tan(
+            "init", "--from-example", "multicore/mproc-mailbox", "--sdk-root", "./sdk",
+            "--som", "E1M-AEN301", "--format", "json", cwd=tmp_path,
+        )
+    finally:
+        templates_dir.chmod(0o755)
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert env["exitCode"] == 0, env
+    assert env["ok"] is True, env
+    codes = [i["code"] for i in env["issues"]]
+    assert codes == ["init.example-som-unchecked"], env["issues"]
+    assert "init.internal-failure" not in codes
+    assert "Permission denied" in env["issues"][0]["message"]
+    assert (tmp_path / ".alp").is_dir()
+    assert (tmp_path / "board.yaml").is_file()
+    assert (tmp_path / "src" / "main.c").is_file()
 
 
 def test_from_example_without_som_never_warns(tmp_path):

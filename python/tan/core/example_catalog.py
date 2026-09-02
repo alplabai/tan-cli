@@ -255,22 +255,46 @@ def _declared_som_skus(catalog: Path, wanted: str) -> list[Any] | None:
     return None
 
 
-def catalog_unreadable(sdk_root: Path) -> str | None:
-    """Whether `metadata/templates/catalog-v1.json` EXISTS but could not be
-    read/parsed as the shape its schema declares -- the "the check was
-    skipped, not passed" signal `unsupported_som` cannot itself carry
-    (tan-cli#1101). `unsupported_som`'s own contract folds catalog-absent,
-    catalog-unreadable, catalog-malformed, no-record-for-this-example, and
+def catalog_unreadable(sdk_root: Path, example_src: str) -> str | None:
+    """Whether the SoM-support check for `example_src` could not run at all
+    -- the "the check was skipped, not passed" signal `unsupported_som`
+    cannot itself carry (tan-cli#1101). `unsupported_som`'s own contract
+    folds catalog-absent, catalog-unreadable, catalog-malformed,
+    unreadable-matching-record, no-record-for-this-example, and
     sku-is-supported into one indistinguishable `None` -- exactly right for
     "should `--from-example` refuse", wrong for "did the check even run".
 
-    Returns the curated `MalformedCatalogError` message for a catalog that
-    exists but whose document could not be decoded, or whose top-level shape
-    (a JSON object, a `templates:` list) does not match its schema --
-    non-UTF-8 bytes, a directory where a file was expected, a permissions
-    failure, invalid JSON, a non-object document, a non-list `templates:`.
-    Every one of those is a reason the SoM-support check for THIS example
-    could not run at all, not a reason it ran and found nothing.
+    Returns the curated `MalformedCatalogError` message for two shapes,
+    both driven through `_declared_som_skus` (the SAME read `unsupported_som`
+    does, not a second one, so nothing here can disagree with it about what
+    counts as malformed):
+
+      * the catalog DOCUMENT itself could not be decoded, or its top-level
+        shape (a JSON object, a `templates:` list) does not match its
+        schema -- non-UTF-8 bytes, a directory where a file was expected,
+        a permissions failure (tan-cli#1101 review BLOCKER: a `PermissionError`
+        on a directory the caller cannot even `stat()` used to escape a
+        `catalog.exists()` pre-flight raw, undoing the #1096 crash-safety
+        this whole issue is about -- there is no pre-flight now, matching
+        `document_guards.read_catalog_document`'s own "not a pre-flight
+        `is_file()`" reasoning), invalid JSON, a non-object document, a
+        non-list `templates:`;
+      * the catalog document reads fine and a record's `example:` DOES
+        match `example_src`, but that SAME record's `supported:` /
+        `supported.som_skus:` cannot be read as the shape its schema
+        declares (tan-cli#1101 review MAJOR: `unsupported_som` folded this
+        into "nothing to report" alongside the genuinely-unremarkable "no
+        record at all" case, which is the one place this function's own
+        first draft still claimed a coverage it did not have).
+
+    In both cases the SoM-support check for THIS example could not run,
+    which is this function's whole question -- unlike a record for a
+    DIFFERENT example that cannot be read, still skipped rather than fatal
+    (`_declared_som_skus`'s own per-record-skip precedent, unchanged), and
+    unlike a well-formed catalog with simply no record for this example at
+    all, which is `unsupported_som`'s "COMMON case, not an edge one" silence
+    (66 example directories, 9 catalogued templates) -- there was nothing to
+    check there, not a check that failed.
 
     Returns `None` for a catalog that is simply ABSENT -- `unsupported_som`'s
     own long-standing "no catalog in this checkout (an older SDK;
@@ -278,21 +302,22 @@ def catalog_unreadable(sdk_root: Path) -> str | None:
     precedent. That is a deliberate, permanent degrade already relied on by
     every pre-catalog SDK checkout, not a new failure this issue is about --
     warning on it would add noise to every such checkout's `--from-example
-    --som`, not close a gap. Also `None` for a catalog that reads cleanly.
-
-    Deliberately does not look at any individual record: a well-formed
-    catalog that simply has no (or an unreadable) record for the example
-    being scaffolded is `unsupported_som`'s existing "COMMON case, not an
-    edge one" silence (66 example directories, 9 catalogued templates) --
-    unchanged here, and out of this function's narrower question.
+    --som`, not close a gap. Distinguished from every OTHER
+    `MalformedCatalogError` by `err.__cause__` rather than a pre-flight stat:
+    `read_catalog_document`'s `except (OSError, UnicodeDecodeError) as exc:
+    raise self.error(...) from exc` is the only site in the whole guarded
+    read that chains a `FileNotFoundError` as the cause, so `isinstance(
+    err.__cause__, FileNotFoundError)` names exactly "the file was never
+    there" and nothing else -- a directory, a permissions failure, and every
+    record-level shape error all chain something else (or nothing).
     """
     catalog = sdk_root / CATALOG_RELATIVE
-    if not catalog.exists():
-        return None
+    wanted = f"examples/{example_src.strip().strip('/')}"
     try:
-        doc = _GUARDS.read_catalog_document(catalog)
-        _GUARDS.catalog_templates(doc, path=catalog)
+        _declared_som_skus(catalog, wanted)
     except MalformedCatalogError as err:
+        if isinstance(err.__cause__, FileNotFoundError):
+            return None
         return str(err)
     return None
 

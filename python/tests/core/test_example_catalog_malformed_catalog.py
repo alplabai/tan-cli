@@ -66,6 +66,7 @@ before -- asserted directly below, not assumed.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -481,20 +482,20 @@ def test_a_malformed_record_does_not_silence_a_later_wellformed_one(tmp_path):
 
 
 def test_catalog_unreadable_is_none_for_a_wellformed_catalog(tmp_path):
-    assert ec.catalog_unreadable(_one(tmp_path)) is None
+    assert ec.catalog_unreadable(_one(tmp_path), _SRC) is None
 
 
 def test_catalog_unreadable_is_none_for_an_absent_catalog(tmp_path):
     """`unsupported_som`'s own long-standing precedent: no catalog at all is
     an older SDK, not a new failure to report -- must not warn."""
     root = _tree(tmp_path, None)
-    assert ec.catalog_unreadable(root) is None
+    assert ec.catalog_unreadable(root, _SRC) is None
 
 
 def test_catalog_unreadable_names_a_non_utf8_catalog(tmp_path):
     root = _tree(tmp_path, None)
     _catalog_path(root).write_bytes(b"\xff\xfe not valid utf-8")
-    reason = ec.catalog_unreadable(root)
+    reason = ec.catalog_unreadable(root, _SRC)
     assert reason is not None
     assert reason.startswith(f"cannot read template catalog at {_catalog_path(root)}: ")
 
@@ -502,30 +503,89 @@ def test_catalog_unreadable_names_a_non_utf8_catalog(tmp_path):
 def test_catalog_unreadable_names_a_directory_where_the_file_should_be(tmp_path):
     root = tmp_path / "sdk"
     _catalog_path(root).mkdir(parents=True)
-    reason = ec.catalog_unreadable(root)
+    reason = ec.catalog_unreadable(root, _SRC)
     assert reason is not None
     assert "cannot read template catalog at" in reason
 
 
 def test_catalog_unreadable_names_invalid_json(tmp_path):
     root = _tree(tmp_path, "{")
-    reason = ec.catalog_unreadable(root)
+    reason = ec.catalog_unreadable(root, _SRC)
     assert reason is not None
     assert "not valid JSON" in reason
 
 
 def test_catalog_unreadable_names_a_nonobject_document(tmp_path):
     root = _tree(tmp_path, "[1, 2]")
-    reason = ec.catalog_unreadable(root)
+    reason = ec.catalog_unreadable(root, _SRC)
     assert reason is not None
     assert "expected a JSON object, got list" in reason
 
 
 def test_catalog_unreadable_names_a_nonlist_templates(tmp_path):
     root = _tree(tmp_path, {"templates": 3})
-    reason = ec.catalog_unreadable(root)
+    reason = ec.catalog_unreadable(root, _SRC)
     assert reason is not None
     assert "templates must be a list, got int" in reason
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="POSIX-only, non-root: chmod 0o000 has no effect for root, and "
+           "Windows ACLs don't honour POSIX mode bits the same way.",
+)
+def test_catalog_unreadable_names_a_permission_denied_parent_directory(tmp_path):
+    """tan-cli#1101 review BLOCKER, re-derived. `Path.exists()` swallows only
+    `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` (`pathlib.py`'s `_IGNORED_ERRNOS`) --
+    NOT `EACCES`. A pre-flight `if not catalog.exists(): return None` (the
+    function's own first draft) therefore let a `PermissionError` on a
+    catalog whose PARENT directory the caller cannot traverse escape RAW,
+    straight past `except MalformedCatalogError` -- undoing the exact
+    crash-safety PR #1096 landed, on the exact "a permissions failure" shape
+    this function's own docstring claims to cover. There must be no
+    pre-flight stat at all: `catalog_unreadable` reads straight through
+    `_declared_som_skus` -> `read_catalog_document`, whose own
+    `except (OSError, UnicodeDecodeError)` already covers this without ever
+    calling `.exists()` first."""
+    root = _one(tmp_path)
+    templates_dir = root / "metadata" / "templates"
+    templates_dir.chmod(0o000)
+    try:
+        reason = ec.catalog_unreadable(root, _SRC)
+    finally:
+        templates_dir.chmod(0o755)
+    assert reason is not None
+    assert "cannot read template catalog at" in reason
+    assert "Permission denied" in reason
+
+
+def test_catalog_unreadable_names_a_malformed_matching_records_supported_field(tmp_path):
+    """tan-cli#1101 review MAJOR: a catalog that is well-formed at the top
+    level, whose record's `example:` DOES match, but whose `supported:` (or
+    `supported.som_skus:`) cannot be read as the shape its schema declares,
+    used to report `None` -- indistinguishable from "checked, sku is fine"
+    or "no record at all". The SoM-support check for THIS example could not
+    run either way; both must be named."""
+    root = _one(tmp_path, supported=3)
+    reason = ec.catalog_unreadable(root, _SRC)
+    assert reason is not None
+    assert f"{_catalog_path(root)} templates[0].supported must be a mapping" in reason
+
+
+def test_catalog_unreadable_names_a_malformed_matching_records_som_skus(tmp_path):
+    root = _one(tmp_path, supported={"som_skus": "not-a-list"})
+    reason = ec.catalog_unreadable(root, _SRC)
+    assert reason is not None
+    assert "supported.som_skus must be a list" in reason
+
+
+def test_catalog_unreadable_is_none_when_a_different_records_example_is_malformed(tmp_path):
+    """The per-record SKIP still holds through `catalog_unreadable`: a
+    record for a DIFFERENT example whose own `example:` cannot be read must
+    not spuriously warn about `_SRC`, which a later, well-formed record
+    still resolves cleanly."""
+    root = _tree(tmp_path, {"templates": [{"example": 7}, _record()]})
+    assert ec.catalog_unreadable(root, _SRC) is None
 
 
 # ---------------------------------------------------------------------------
