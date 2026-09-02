@@ -66,10 +66,45 @@ surfaces permitted to say it -- a real compile and a bench point -- answer the
 same question from the same kind of evidence (a real per-operator placement,
 measured, not screened). One site is what makes the guard on that word
 (`tests/model/test_check.py`) bind to the live rule for both.
+
+ONE PARSER, BOTH FORMATS. `read_perf_point` parses with `yaml.safe_load`, not
+`json.loads`: alp-sdk publishes its tier-2 perf points as YAML
+(`metadata/model_perf/<sku>/<hash>.yaml`, per `model-perf-v1.schema.json`'s
+own `$id`/title, and the `tests/fixtures/model_perf/` synthetic alongside
+it), while every document `tan`'s own test suite writes for this reader is
+JSON. Valid JSON is valid YAML, so ONE parser reads both, with no
+format-sniff or extension check of its own to drift from what either side
+actually writes -- a reader pinned to `json.loads` in one place while the
+real documents are YAML is exactly how tan-cli#1105 happened (the fixture
+discovery predicate in `tests/conftest.py` globbed for `*.json` against a
+`*.yaml` file and permanently skipped, hiding that this reader could not
+have parsed it either). `yaml` is imported inside `read_perf_point`, not at
+module scope, because `tan.model.perf` sits on `tan.cli`'s eager import
+graph (via `tan/commands/model_cmd.py`) and PyYAML is single-use here
+(tan-cli#810, enforced by `tests/gates/test_cli_import_is_lean.py`).
+
+THE ASYMMETRY THAT COMES BACK THE OTHER WAY (tan-cli#1114 review minor).
+"Valid JSON is valid YAML" only widens what parses; it says nothing about
+what a WIDER YAML document means once it parses. `yaml.safe_load` is YAML
+1.1: an unquoted scalar gets an implicit type -- `2026-08-16` becomes a
+`datetime.date`, `5.1` becomes a `float` -- and `_text()` below is
+deliberately `str`-strict, so an identity field a hand-authored point left
+unquoted does not raise, it silently drops the WHOLE point (the same `None`
+as a missing field). Deliberately not "fixed" by coercing non-`str` scalars
+back to text: this reader's entire design is to refuse rather than guess
+(the module docstring above, throughout), and a value YAML re-typed out from
+under the schema's own `"type": "string"` is exactly the ambiguity that
+design refuses on -- coercing it would be the one place this reader started
+inferring instead of matching. alp-sdk's own `validate_metadata.py` schema
+pass already rejects an unquoted date/version at the SOURCE (a JSON Schema
+`"type": "string"` check fails a parsed `datetime.date`/`float` the same
+way), so every point that actually reaches a customer's `metadata_root` --
+published or the `tests/fixtures/` synthetic -- was quoted correctly before
+it got there; the residual risk is a document nobody has validated yet,
+which is refused, not misread.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -78,13 +113,17 @@ from pathlib import Path
 #: `find_perf_point` cannot drift apart on it.
 _PERF_DIRNAME = "model_perf"
 
-#: The banner alp-sdk stamps on the synthetic points under
-#: `tests/fixtures/model_perf/`, which exist so its own perf-point checks run
-#: against a real document instead of passing vacuously over an empty
-#: `metadata/model_perf/`. alp-sdk's `validate_metadata.py` REFUSES this key on
-#: anything under `metadata/model_perf/`; this reader refuses it wherever it
-#: appears, so a fixture that ever escaped into a published tree still could
-#: not be read as bench data by a customer's `tan`.
+#: NOT alp-sdk's own fixture convention -- alp-sdk's `_fixture` marker is a
+#: PATH convention checked on the SKU directory / filename
+#: (`scripts/validate_metadata.py`'s `_MODEL_PERF_FIXTURE_MARKER`, guarding
+#: only the *published* `metadata/model_perf/` tree), never a document key,
+#: and the real `tests/fixtures/model_perf/` document this reader is proven
+#: against carries no such key (tan-cli#1114 review minor -- this comment
+#: used to claim otherwise). `_FIXTURE_KEY` is tan's OWN, additional
+#: document-level convention: kept as defence-in-depth against a key nothing
+#: upstream currently writes, so a synthetic document that ever DID carry one
+#: -- hand-authored, or a future alp-sdk convention -- is refused on sight
+#: rather than only by accident of shape.
 _FIXTURE_KEY = "_fixture"
 
 #: The only `stance` a readable point may declare. The schema's enum has
@@ -194,6 +233,21 @@ def target_dir_name(backend: str, accel_config: str) -> str:
     return accel_config or backend
 
 
+#: The production mirror of `read_perf_point`'s own accept-both stance (the
+#: module docstring's "ONE PARSER, BOTH FORMATS"): `.yaml` is what alp-sdk
+#: actually publishes, `.json` is additionally discovered because tan's own
+#: test suite writes JSON synthetic points into this exact `<sku>/<target>/`
+#: layout. `find_perf_points` globbing `*.json` alone (tan-cli#1114 review
+#: major) was the identical never-fires shape tan-cli#1105 fixed for the two
+#: test-side predicates, just on the production discovery path instead.
+_PERF_POINT_GLOBS = ("*.yaml", "*.json")
+
+
+def _perf_point_files(target_dir: Path) -> list[Path]:
+    """Every file under @target_dir this reader will attempt, in path order."""
+    return sorted({p for pattern in _PERF_POINT_GLOBS for p in target_dir.glob(pattern)})
+
+
 def _text(doc: dict, key: str) -> str | None:
     value = doc.get(key)
     return value if isinstance(value, str) else None
@@ -259,15 +313,29 @@ def read_perf_point(path: Path) -> PerfPoint | None:
     """Parse ONE perf-point file, or `None` for anything this reader will not
     treat as a measurement.
 
-    `None` covers: unreadable/unparseable bytes, a document that is not a JSON
-    object, a `_fixture`-bannered synthetic, a `stance` that is not
-    `bench-measured`, and any document missing an identity field. Never raises
-    -- see the module docstring on why a consumer stays quiet where the
-    producing repository's own gate is loud.
+    Parsed with `yaml.safe_load` -- see the module docstring's "ONE PARSER,
+    BOTH FORMATS" note for why, and why the import is deferred to here rather
+    than module scope.
+
+    `None` covers: unreadable bytes, a document this parser cannot make sense
+    of at all, a document that is not a mapping, a `_fixture`-bannered
+    synthetic, a `stance` that is not `bench-measured`, and any document
+    missing an identity field. Never raises -- see the module docstring on why
+    a consumer stays quiet where the producing repository's own gate is loud.
     """
+    import yaml  # noqa: PLC0415 (tan-cli#810: single-use, kept off `tan --version`)
+
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        # `ValueError` is required alongside `yaml.YAMLError`, not redundant
+        # with it: `path.read_text(encoding="utf-8")` raises
+        # `UnicodeDecodeError` (a `ValueError` subclass) on non-UTF-8 bytes,
+        # BEFORE the parser ever runs, and `yaml.YAMLError` does not cover it
+        # (tan-cli#1114 review blocker 1 -- the pre-tan-cli#1105 `json.loads`
+        # form relied on the same `ValueError` membership for its own decode
+        # errors, and narrowing this clause to `(OSError, yaml.YAMLError)`
+        # silently dropped the encoding case rather than replacing it).
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, yaml.YAMLError):
         return None
     if not isinstance(doc, dict) or _FIXTURE_KEY in doc:
         return None
@@ -413,7 +481,7 @@ def find_perf_points(*, sku: str, backend: str, accel_config: str,
     if not target_dir.is_dir():
         return []
     return [
-        point for point in (read_perf_point(p) for p in sorted(target_dir.glob("*.json")))
+        point for point in (read_perf_point(p) for p in _perf_point_files(target_dir))
         if point is not None
         and point.sku == sku
         and point.hw_rev == hw_rev

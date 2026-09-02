@@ -57,7 +57,7 @@ import pytest
 _MUST_NOT_LOAD = (
     ("click.testing", "tan/cli.py's `--help --format json` path"),
     ("jsonschema", "tan/commands/new_som_cmd.py's `_schema_errors`"),
-    ("yaml", "tan/commands/{new_som_cmd,kconfig_cmd}.py"),
+    ("yaml", "tan/model/perf.py, tan/commands/{new_som_cmd,kconfig_cmd}.py"),
     ("urllib.request", "tan/commands/sdk_cmd.py's release fetch"),
 )
 
