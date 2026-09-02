@@ -183,7 +183,7 @@ both call into through the same curated-raise contract, and no more:
   flatten) reimplement `_board_route_entries`'s read too, each to a FOURTH
   contract: neither raises OR returns `None` on a wrong shape -- both
   silently SKIP the one malformed entry and keep the rest
-  (`bom_netlist.py:76,78,81`'s three `if not isinstance(...): continue`
+  (`bom_netlist.py:76,79,82`'s three `if not isinstance(...): continue`
   filters; `loader.py:1078`'s `if isinstance(e1m, str) and isinstance(
   macro, str):` value-level filter) -- because both consume a project
   document already schema-validated upstream, a different situation from
