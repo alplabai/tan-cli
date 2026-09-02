@@ -536,13 +536,17 @@ def _rendered_bytes(
 #:
 #: `_require_constraints` below did NOT move -- it guards `$defs/parameter`'s
 #: bounds, which only this module's parameter resolution reads, so it has no
-#: second caller to prove it shared (tan-cli#1085 tracks the full extraction).
+#: second caller to prove it shared. `require_readable_text` (tan-cli#1085)
+#: is the file-read half `render_to_envelope`'s example `board.yaml` read
+#: used to run by hand -- now the same definition `read_catalog_document`
+#: itself calls.
 _GUARDS = DocumentGuards(TemplateError)
 
 _SHAPE_NOUN = SHAPE_NOUN
 _require_mapping_doc = _GUARDS.require_mapping_doc
 _require_field = _GUARDS.require_field
 _require_key = _GUARDS.require_key
+_require_readable_text = _GUARDS.require_readable_text
 _catalog_templates = _GUARDS.catalog_templates
 
 
@@ -1874,20 +1878,13 @@ def render_to_envelope(
     # so a hand-edited catalog pointing at a directory with no `board.yaml`
     # reached the user as a raw `FileNotFoundError`.
     #
-    # tan-cli#1116 review round 2: `UnicodeDecodeError` is caught alongside
-    # `OSError` -- it is a `ValueError`, not an `OSError`, so a non-UTF-8
-    # example board.yaml used to escape this curated-raise contract as a raw
-    # traceback instead of a `TemplateError` (measured escaping before this
-    # fix). `getattr(exc, "strerror", None)`, not a bare `exc.strerror`:
-    # `UnicodeDecodeError` has no `.strerror` attribute at all, so the old
-    # unconditional access would itself have raised `AttributeError` the
-    # moment this arm widened to catch it.
-    try:
-        board_yaml_text = board_yaml_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise TemplateError(
-            f"cannot read template example board.yaml at "
-            f"{board_yaml_path}: {getattr(exc, 'strerror', None) or exc}") from exc
+    # tan-cli#1116 fixed a narrowed `except OSError` here (a non-UTF-8
+    # board.yaml escaped raw); tan-cli#1085 folded the fixed body into
+    # `DocumentGuards.require_readable_text`, the same definition
+    # `read_catalog_document` calls for the catalog's own read. Message
+    # text unchanged, one definition instead of two.
+    board_yaml_text = _require_readable_text(
+        board_yaml_path, what="template example board.yaml")
     # tan-cli#1052: the fifth sibling of the same malformed-YAML family
     # tan-cli#1025 -> #1034 -> #1037/#1048 swept through the SoM preset
     # and the board metadata. THIS document is the catalog template's
