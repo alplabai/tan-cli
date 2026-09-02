@@ -3,7 +3,7 @@
 # Build-time-only additions to the release lock (tan-cli#437). pyproject.toml
 # deliberately does NOT declare these as runtime dependencies -- see
 # build_binary.sh's header ("PyInstaller is a BUILD-TIME tool only") -- so a
-# plain `pip install alp-tan` never pulls a build toolchain a library
+# plain `pip install tan-cli` never pulls a build toolchain a library
 # consumer doesn't want. They still have to be resolved and hash-pinned
 # alongside the runtime set, because they are exactly what
 # `pip install ".[monitor]" "pyinstaller>=6.10"` used to resolve unpinned in

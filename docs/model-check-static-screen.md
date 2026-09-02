@@ -236,7 +236,7 @@ short-circuit, so a missing or unreadable `.onnx` raises and surfaces as
 `model.check-failed`, exactly like an unreadable `.tflite`.
 
 For a `.tflite` source that extracts to `[]` because the reader itself is
-missing, the note names the fix — `pip install alp-tan[model-io]` — rather
+missing, the note names the fix — `pip install tan-cli[model-io]` — rather
 than reading as "this model genuinely has no operators".
 
 ## The JSON report
@@ -297,7 +297,7 @@ Ethos-U55 (E1M-AEN501)  partial
   96% of compute (23/25 ops) is NPU-eligible   [upper bound, static screen]
   2 ops are certain CPU fallback: NORMALIZE, TOPK
   static screen (screening): operator-name membership against <table>.json only. …
-  Exact:  pip install alp-tan[model-compile]  &&  tan model check --exact
+  Exact:  pip install tan-cli[model-compile]  &&  tan model check --exact
 ```
 
 The `N/M ops` figure counts only verdicts a real screen determined

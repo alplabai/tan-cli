@@ -109,7 +109,7 @@ def _pyserial_missing() -> MonitorError:
     return MonitorError(
         "monitor.pyserial-missing",
         "pyserial is required for `tan monitor`. Install it with "
-        '`pip install "alp-tan[monitor]"`. A frozen `tan` binary bundles it at '
+        '`pip install "tan-cli[monitor]"`. A frozen `tan` binary bundles it at '
         "build time, so a binary built without that extra cannot gain it here.",
         ExitCode.RUNTIME_FAILURE,
         {"schemaVersion": DATA_SCHEMA_VERSION},

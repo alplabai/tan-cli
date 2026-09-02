@@ -355,7 +355,7 @@ covering all four release platforms in one file (markers like `sys_platform
 == 'win32'` gate the Windows-only `pywin32-ctypes`/`pefile` entries). Both
 `release.yml`'s `build` job and `clean-host.yml`'s `freeze-and-smoke` job
 install it with `pip install --require-hashes -r
-release-requirements.lock.txt`, then the local `alp-tan` package separately
+release-requirements.lock.txt`, then the local `tan-cli` package separately
 with `--no-deps --no-build-isolation` (its deps are already satisfied by the
 lock; build isolation would otherwise re-resolve `setuptools` live). `pip`
 **refuses the entire install** on any hash mismatch or any unhashed

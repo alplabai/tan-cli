@@ -70,7 +70,7 @@ _UNAVAILABLE_REASONS: dict[str, str] = {
     # `model-compile` extra (`pyproject.toml`: `ethos-u-vela>=3.9`), which
     # carries the floor -- name it instead of a bare `pip install
     # ethos-u-vela` that could drift from that pin.
-    "ethos_u": "vela not on PATH; pip install alp-tan[model-compile]",
+    "ethos_u": "vela not on PATH; pip install tan-cli[model-compile]",
     # deepx_dxm1's row is NOT `DeepxAdapter.is_available()` (see
     # `_deepx_dxm1_status` in `tan.commands.model_cmd`): that adapter method
     # ORs in a second arm -- `ALP_DEEPX_SDK_HOME` pointing at a directory --

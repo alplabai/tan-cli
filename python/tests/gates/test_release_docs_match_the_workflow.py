@@ -76,8 +76,9 @@ _BANNER_LINES = 15
 #: check below is not "is this command mentioned" -- recording an unusable
 #: command so nobody reinvents the package name is legitimate, and the root
 #: README does exactly that for npm and crates.io. It is "is it mentioned
-#: WITHOUT saying it does not work", which is what `pip install alp-tan` was
-#: doing as python/README.md's primary install instruction (#385).
+#: WITHOUT saying it does not work", which is what `pip install alp-tan` (the
+#: distribution's name at the time) was doing as python/README.md's primary
+#: install instruction (#385).
 _UNUSABLE_MARKERS = (
     "404",
     "does not exist",
@@ -414,7 +415,7 @@ def _uncaveated(rel: str, pattern: re.Pattern[str]) -> list[str]:
 
     Inside a FENCE the command IS the instruction, so the refusal has to be in
     the copied text itself. This is #385's actual shape and the reason a window
-    cannot see it: `python3 -m pip install alp-tan` sat in python/README.md's
+    cannot see it: `python3 -m pip install tan-cli` sat in python/README.md's
     install fence, and the prose introducing that very fence is where the "not
     on PyPI" wording lives -- so a window check calls the block caveated while
     the first command a new user copies still 404s. Nothing about a paragraph
@@ -610,13 +611,17 @@ def test_no_doc_claims_a_publish_job_the_workflow_does_not_have():
 
 
 def test_an_install_command_for_an_unpublished_registry_is_never_offered():
-    """tan-cli#385. `python3 -m pip install alp-tan` was python/README.md's
-    PRIMARY instruction while `alp-tan` had never been published: no PyPI job
-    exists in release.yml and `https://pypi.org/pypi/alp-tan/json` answers 404,
-    so the first command a new user ran could only fail. The distribution name
-    is read from pyproject, and whether each registry is on the release path is
-    read from the workflow, so renaming the distribution or adding a real
-    publish job both land here automatically."""
+    """tan-cli#385. `python3 -m pip install alp-tan` -- the distribution was
+    named `alp-tan` then -- was python/README.md's PRIMARY instruction while
+    nothing had ever been published under it, so the first command a new user
+    ran could only fail. Both halves of that setup have since changed and this
+    gate followed neither by hand: the distribution was renamed to `tan-cli`
+    and a real `publish_pypi` job was added (tan-cli#1054), and the assertions
+    below still hold because the name is read from pyproject and the channel
+    state from the workflow. The name is deliberately NOT spelled in the
+    patterns -- an earlier draft of this docstring was rewritten by a global
+    rename and briefly claimed the README had said `pip install tan-cli` in
+    2026-08, which it never did."""
     pypi_name = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]["name"]
     patterns = {
         "pypi": re.compile(rf"""pip\s+install\s+["']?{re.escape(pypi_name)}\b"""),

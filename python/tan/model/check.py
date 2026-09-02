@@ -137,7 +137,7 @@ def check_model_backends(*, backends: list[str], sku: str, source: Path,
     and knows nothing about `model-io`): when the reader is the actual cause,
     the resulting `undetermined` report's note is swapped for one that names
     the fix (`_reader_missing_report`), never left as the generic "nothing to
-    score" text that gives a `pip install alp-tan` customer -- exactly the
+    score" text that gives a `pip install tan-cli` customer -- exactly the
     shape `ci.yml` itself installs, no `model-io` extra -- no hint at all
     (MAJOR 2 review).
 
@@ -192,7 +192,7 @@ def _reader_missing_report(report: BackendReport) -> BackendReport:
     leave `report.table` `None`)."""
     return replace(report, notes=[
         "no operators could be extracted: the `tflite` reader is not "
-        "installed on this host (pip install alp-tan[model-io]); this is "
+        "installed on this host (pip install tan-cli[model-io]); this is "
         "not a statement about the model itself.",
     ])
 
@@ -383,7 +383,7 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
         return replace(report, notes=[
             *report.notes,
             "--exact was requested, but vela is not on PATH (pip install "
-            "alp-tan[model-compile]).",
+            "tan-cli[model-compile]).",
             "Reporting the static screen instead.",
         ])
     target = _headline_ethos_u_target(sku, metadata_root)

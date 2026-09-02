@@ -231,14 +231,14 @@ jobs:
       # that shipped (`tan/cli.py` imports `click.testing`, typer stopped
       # depending on click, and a clean install therefore died at import while
       # every developer machine passed). Installing the package resolves exactly
-      # what a customer's `pip install alp-tan` resolves. Extras stay out: the
+      # what a customer's `pip install tan-cli` resolves. Extras stay out: the
       # `monitor` extra is optional at runtime by definition, and installing it
       # here would hide a module-scope `import serial` from the gate below.
       #
       # Deliberately ASYMMETRIC with python-binaries.yml, which installs
       # `-e ".[monitor]"`: the release artifact carries the extra because a frozen
       # binary cannot gain pyserial later, while this job must keep testing the
-      # extras-LESS shape, which is what `pip install alp-tan` gives a customer
+      # extras-LESS shape, which is what `pip install tan-cli` gives a customer
       # and the only shape in which `test_declared_dependencies.py` can catch an
       # extras-only import escaping to module scope. Do not "fix" one to match
       # the other.

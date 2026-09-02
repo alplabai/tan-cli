@@ -422,7 +422,7 @@ jobs:
       # `release-requirements.lock.txt`, hash-verified
       # (`--require-hashes` -- pip REFUSES the install outright on any
       # mismatch or any unhashed requirement in the file, it does not fall
-      # back to resolving around the problem), and the local `alp-tan`
+      # back to resolving around the problem), and the local `tan-cli`
       # package is installed separately, `--no-deps --no-build-isolation`
       # (its deps are already satisfied by the lock; build-isolation would
       # otherwise re-resolve `[build-system] requires` -- `setuptools` --

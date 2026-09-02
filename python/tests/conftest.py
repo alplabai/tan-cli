@@ -1512,7 +1512,7 @@ def tan_under_test() -> None:
         "here would describe a different tree -- including the parity gates, "
         "which have already reported a divergence that did not exist because "
         "of exactly this (tan-cli#423). Run pytest from `python/`, or "
-        "`pip uninstall alp-tan`, or set PYTHONPATH to this repo's `python/`."
+        "`pip uninstall tan-cli`, or set PYTHONPATH to this repo's `python/`."
     )
 
     # Second, independent probe (tan-cli#665): does `sys.executable` -- the

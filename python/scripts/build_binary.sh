@@ -45,7 +45,7 @@
 # venv built from the hand-written list froze a binary that died at import with
 # `ModuleNotFoundError: No module named 'click'`. Installing the PACKAGE means
 # the runtime deps come from pyproject.toml, which is also what a customer's
-# `pip install alp-tan` resolves, so a build environment can no longer be
+# `pip install tan-cli` resolves, so a build environment can no longer be
 # quietly richer than the declared one.
 #
 # `[monitor]` IS included, and this line used to say the opposite ("extras stay
