@@ -676,10 +676,33 @@ def test_a_rooted_path_is_never_joined_onto_cwd_even_if_both_oracles_go_quiet(
     invariant "a rooted path is NEVER silently joined onto `cwd`" is total
     rather than contingent on `ntpath.isabs`. This makes that branch live and
     proves it refuses rather than joins -- the failure mode being a UNC path
-    quietly becoming `<cwd>/\\\\srv\\share`."""
+    quietly becoming `<cwd>/\\\\srv\\share`.
+
+    BOTH oracles have to be silenced, not just `ntpath_isabs`, and the reason
+    is a host difference rather than a tidiness one: off Windows
+    `os.path.isabs` is `posixpath.isabs`, which already says `False` here, but
+    ON Windows it IS `ntpath.isabs`, which says `True` for this input on all
+    three interpreters -- so silencing one oracle would exercise the tail on
+    Linux/macOS and slip straight past it on the `windows-latest` shards. The
+    `os` stand-in keeps this host's real `name`, so nothing here pretends to
+    be a platform it is not; it removes only the absoluteness answer."""
+    import types
+
     from tan.core import bootstrap
 
     monkeypatch.setattr(bootstrap, "ntpath_isabs", lambda raw: False)
+    monkeypatch.setattr(
+        bootstrap,
+        "os",
+        types.SimpleNamespace(
+            name=os.name,
+            path=types.SimpleNamespace(
+                isabs=lambda raw: False,
+                normpath=os.path.normpath,
+                join=os.path.join,
+            ),
+        ),
+    )
 
     with pytest.raises(ValueError, match="has a root but no drive"):
         bootstrap.resolve_workspace_target("\\\\srv\\share", os.path.join(os.sep, "cwd"))
