@@ -194,6 +194,66 @@ def test_sarif_rules_are_deduped_by_code(tmp_path, monkeypatch):
     assert len(run["tool"]["driver"]["rules"]) == 1
 
 
+def test_absolute_board_yaml_uri_is_a_file_uri_but_boardyamlpath_stays_host_native(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1097's whole point, proven as a divergence rather than two
+    separate pins: driving the SAME absolute `--board-yaml` through
+    `--format json` and `--format diagnostic-v1` must produce documents that
+    DISAGREE on this field's spelling. `data.boardYamlPath` -- and by the
+    same contract `--input`'s spawn argv and every other `Path()` consumer
+    this module has -- stays host-native; only the two `uri` fields
+    ([`_issue_to_diagnostic`], [`_sarif_document`]) go through
+    `tan.core.uri_reference.path_to_uri_reference`. A future sweep that
+    "unifies" the two contracts would make `uri` and `boardYamlPath` agree
+    again, and this assertion is what catches that."""
+    monkeypatch.chdir(tmp_path)
+    board = tmp_path / "elsewhere.yaml"
+    board.write_text("som: E1M-AEN701\n", encoding="utf-8")
+
+    result_json = runner.invoke(
+        app, ["validate", "--offline", "--board-yaml", str(board), "--format", "json"]
+    )
+    assert result_json.exit_code == int(ExitCode.VALIDATION_FAILURE), result_json.output
+    envelope = json.loads(result_json.output)
+    assert envelope["data"]["boardYamlPath"] == str(board)
+
+    result_diag = runner.invoke(
+        app,
+        ["validate", "--offline", "--board-yaml", str(board), "--format", "diagnostic-v1"],
+    )
+    assert result_diag.exit_code == int(ExitCode.VALIDATION_FAILURE), result_diag.output
+    uri = json.loads(result_diag.output)["diagnostics"][0]["uri"]
+    assert uri == Path(str(board)).as_uri()
+    assert uri != envelope["data"]["boardYamlPath"]
+
+    result_sarif = runner.invoke(
+        app, ["validate", "--offline", "--board-yaml", str(board), "--format", "sarif"]
+    )
+    assert result_sarif.exit_code == int(ExitCode.VALIDATION_FAILURE), result_sarif.output
+    sarif_uri = json.loads(result_sarif.output)["runs"][0]["results"][0]["locations"][0][
+        "physicalLocation"
+    ]["artifactLocation"]["uri"]
+    assert sarif_uri == uri
+
+
+def test_relative_board_yaml_uri_stays_the_pinned_relative_reference(tmp_path, monkeypatch):
+    """The separator-less default case both `test_diagnostic_v1_schema_
+    violation_carries_one_diagnostic` and `test_sarif_shape` already pin at
+    `"./board.yaml"` -- restated here as its own test, next to the absolute
+    case above, because tan-cli#1097's relative-vs-absolute decision (see
+    `tan.core.uri_reference.path_to_uri_reference`'s docstring) is that a
+    relative `board_path` is returned UNCHANGED, not resolved to an absolute
+    `file:` URI. `"./board.yaml"` is already a legal relative URI reference
+    per RFC 3986 SS4.2, and this is the assertion that a future change to
+    that decision would have to update deliberately."""
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "som: E1M-AEN701\n")
+    result = runner.invoke(app, ["validate", "--offline", "--format", "diagnostic-v1"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    assert json.loads(result.output)["diagnostics"][0]["uri"] == "./board.yaml"
+
+
 def test_text_and_json_formats_are_unchanged(tmp_path, monkeypatch):
     """`text`/`json` behaviour is pinned byte-for-byte by the conformance
     fixtures; this only guards that adding two new format values didn't
