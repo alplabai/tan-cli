@@ -39,7 +39,11 @@ here instead, named `<date>-<8 hex chars>.md` (the trailing token exists only
 to make the filename unique against a concurrent branch or same-day run; it
 carries no other meaning). Its content is the same dated `- <date> --
 <reason>` bullet, with one `- <module>: <before> -> <after>` sub-bullet per
-ceiling that moved, that used to be one line appended to the old file.
+ceiling that moved, that used to be one line appended to the old file. That
+`<after>` is a point-in-time fact, not a live one: a later shrink of the same
+module writes no entry (see `../module_size_budget.d/README.md`'s `"kind":
+"budget"` bullet for why), so an entry here can go stale without anything in
+the tree saying so.
 
 Do not hand-edit an existing entry here, and do not delete one — once a file
 in this directory reaches `dev` it is exactly as immutable as a line in the

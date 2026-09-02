@@ -58,8 +58,8 @@ Two kinds of record, and the difference is load-bearing:
   absorbed by a plain regen with no `--reason` and no new entry, because
   `_append_log` (`scripts/regen_module_size_budget.py`) fires only on growth,
   so a ledger entry's logged `-> Y` can end up above the module's current
-  `lines` — the ledger is history, not state, and this record here is the one
-  and only enforced ceiling.
+  `lines` — the ledger is history, not state, and it is this record, never
+  the ledger, that the gate enforces against.
 * **`"kind": "observed"`** — a `python/tests/**` file over the cap. A
   MEASUREMENT, never a ceiling (tan-cli#817). Nothing compares it to a
   threshold, its growth needs no `--reason`, and it never writes a ledger
