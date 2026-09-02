@@ -10,8 +10,7 @@
 #   Tag scheme : v<major>.<minor>.<patch>   (SemVer, e.g. v0.1.0)
 #                The tag MUST equal `TAN_VERSION` in python/tan/version.py —
 #                the string the shipped binary prints — with pyproject.toml
-#                (PEP 440 rendering) and npm-shim/package.json reconciled
-#                against it. The verify-version job below fails the release if
+#                (PEP 440 rendering) reconciled against it. The verify-version job below fails the release if
 #                they disagree. There is no longer a workspace Cargo.toml to
 #                read at all — tan-cli#269 deleted `crates/` — but this note
 #                stays because an earlier revision of this header said the tag
@@ -156,8 +155,8 @@ permissions:
 
 jobs:
   # Fail fast, before the matrix freezes anything: the tag must equal
-  # `TAN_VERSION` in python/tan/version.py, with pyproject.toml and
-  # npm-shim/package.json reconciled against it. This line named the workspace
+  # `TAN_VERSION` in python/tan/version.py, with pyproject.toml reconciled
+  # against it. This line named the workspace
   # Cargo.toml version and a target count off the retired cargo pipeline until
   # tan-cli#383 -- neither survived the port, and it outlived the fix that
   # corrected every markdown file, because a comment is the one piece of
@@ -196,17 +195,19 @@ jobs:
       # same version differently: SemVer `0.5.0-dev` vs PEP 440 `0.5.0.dev0`. A
       # string compare across that boundary is either a false failure or, worse,
       # a false pass on a version nobody agreed to. The mapping is explicit and
-      # has its own `--selftest`. It keeps the npm-shim check the old step
-      # carried, because postinstall.js derives the asset tag as
-      # `TAG = v${pkg.version}` (npm-shim/postinstall.js:25) and the shim was six
-      # releases stale before that check existed.
+      # has its own `--selftest`. It used to reconcile a third source,
+      # `npm-shim/package.json`, whose `postinstall.js` derived the asset tag as
+      # `TAG = v${pkg.version}` -- that shim is retired with the npm channel
+      # (tan-cli#1054), and the reader set is now policed by
+      # `test_version_check_still_reads_every_source_it_is_supposed_to` so a
+      # source cannot be dropped as quietly as this one nearly was.
       #
       # No `pip install` before it: the script imports only the stdlib, so this
       # gate cannot fail for a reason unrelated to versions.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: tag == TAN_VERSION == pyproject == npm-shim
+      - name: tag == TAN_VERSION == pyproject
         shell: bash
         run: python python/scripts/version_check.py --selftest --tag "$GITHUB_REF_NAME"
 
@@ -947,199 +948,127 @@ jobs:
   # four archives above are PyInstaller freezes of `python/`. Keeping it behind
   # a false `if:` would have left a `cargo publish` in the release path shipping
   # a different program under the same name; deleting it is the only version of
-  # "must not run" that is actually true. The PyPI equivalent (`pip install
-  # alp-tan`, the name python/pyproject.toml already reserves) is a separate
-  # decision and deliberately not smuggled in here.
+  # "must not run" that is actually true. The PyPI question this paragraph
+  # parked as "a separate decision, deliberately not smuggled in here" was
+  # decided in tan-cli#1054: PyPI is the sole standalone install channel, and
+  # the npm shim is retired.
 
-  # npm shim — `npm i -g @alplabai/tan` / `npx @alplabai/tan`. One release tag
-  # scheme (v*), one workflow. Gated on NPM_TOKEN; on a FINAL tag a missing
-  # token FAILS rather than skipping, mirroring the crates.io job above (#151).
+  # PyPI — the standalone install channel (tan-cli#1054). It replaces the npm
+  # shim, which was a DOWNLOADER for four platform-specific release assets and
+  # 404'd at install time on `win32/arm64` and `linux/arm64` (tan-cli#436);
+  # this uploads the package itself, one `py3-none-any` wheel with no platform
+  # hole. The frozen binaries stay exactly as they are: they exist for the VS
+  # Code extension, which downloads a raw asset and cannot `pip install`.
   #
-  # A pre-release tag is skipped here too, and this path was the sharpest of the
-  # three: `npm publish` below passes no `--tag`, so npm defaults the release to
-  # the `latest` dist-tag. An unguarded rc would therefore become plain
-  # `npm i -g @alplabai/tan` for every consumer -- and npm unpublish is far more
-  # restricted than a crates.io yank (72-hour window, refused outright once
-  # anything depends on it).
-  #
-  # The relaxation, when we want an rc installable: publish it with
-  # `--tag next` so `npm i @alplabai/tan@next` reaches it while `latest` stays
-  # on the last real release. Skipping is the smaller change and keeps the rc
-  # fully retractable, which is the point of cutting one.
-  publish_npm:
-    name: publish · npm shim
+  # A pre-release tag is skipped, same as the shim was. PyPI has no dist-tag
+  # concept, so an rc uploaded here is resolvable by `pip install
+  # tan-cli==X.Y.ZrcN` but is NOT what a bare `pip install tan-cli` picks --
+  # pip prefers finals unless `--pre` is passed. Skipping is still the smaller
+  # change and keeps the rc fully retractable; PyPI deletion is more restricted
+  # than a crates.io yank and a filename can never be reused.
+  publish_pypi:
+    name: publish · PyPI
     needs: release
     if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
-    # tan-cli#855: no bound at all. checkout + setup-node + `npm pack
-    # --dry-run` + (armed only) `npm publish` -- no build, no compilation, one
-    # small package. Matched to the 10-minute "checkout + light tool + one
-    # command" class this file's own `verify-version` and
-    # version-identity.yml's `not-a-released-version` already use.
+    # Same 10-minute "checkout + light tool + one command" class as
+    # `verify-version`: checkout, `python -m build`, and (armed only) an
+    # upload. No compilation, one small distribution.
     timeout-minutes: 10
     permissions:
       contents: read
+      # Trusted Publishing (OIDC). This is the WHOLE credential story -- there
+      # is no `secrets.PYPI_TOKEN` anywhere in this job, deliberately. PyPI
+      # cannot scope an API token to a project that does not exist yet, so any
+      # token created before the first publish is necessarily ACCOUNT-scoped:
+      # publish and yank rights on every project under that account. The
+      # pending-publisher flow binds the identity before the project exists and
+      # skips that window entirely (tan-cli#1054).
+      #
+      # `id-token: write` is not novel here -- `release` already holds it for
+      # `actions/attest-build-provenance`.
       id-token: write
-    defaults:
-      run:
-        working-directory: npm-shim
     # What this job actually DID, for `release_gate` to compare against what was
-    # declared (#237). Deliberately OBSERVED rather than re-derived from
-    # `NPM_PUBLISH_ENABLED`: re-reading the declaration would make the gate
-    # circular — it would assert the declaration equals itself and pass even if
-    # the job had done the opposite. `published=true` is written only AFTER
-    # `npm publish` returns, and `false` only by the branch that declines.
+    # declared. Deliberately OBSERVED rather than re-derived from
+    # `PYPI_PUBLISH_ENABLED`: re-reading the declaration would make the gate
+    # circular -- it would assert the declaration equals itself and pass even if
+    # the job had done the opposite. `published=true` is written only AFTER the
+    # upload returns, and `false` only by the branch that declines.
     #
     # Two step ids because exactly one of them runs; a skipped step contributes
     # nothing, so the `||` picks whichever fired.
     outputs:
       published: ${{ steps.published.outputs.published || steps.declined.outputs.published }}
     env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       # Publishing is OPT-IN, off by default. Set the repository VARIABLE
-      # `TAN_NPM_PUBLISH` to `true` to arm it (Settings -> Secrets and variables
-      # -> Actions -> Variables). A variable, not a secret: the value is not
-      # sensitive, and a secret that gates behaviour is invisible in the UI.
+      # `TAN_PYPI_PUBLISH` to `true` to arm it (Settings -> Secrets and
+      # variables -> Actions -> Variables). A variable, not a secret: the value
+      # is not sensitive, and a secret that gates behaviour is invisible in the
+      # UI.
       #
-      # WHY off (#233): v0.4.1's publish failed with `npm error code EOTP` --
-      # `NPM_TOKEN` is a classic/publish token on a 2FA account, so `npm publish`
-      # demands an interactive one-time password no CI run can answer. Only an
-      # npm AUTOMATION (or granular) token is exempt. That is an account-side
-      # fix, so the failure recurs on every final tag until it is made.
+      # WHY off until armed: Trusted Publishing needs a publisher configured on
+      # pypi.org's side (Your projects -> Publishing -> Add a pending
+      # publisher: project `tan-cli`, owner `alplabai`, repository `tan-cli`,
+      # workflow `release.yml`, environment BLANK -- no job here uses
+      # `environment:`, and the OIDC claim must match the full tuple). That is a
+      # web-UI action no workflow can perform. Until it exists every upload
+      # would fail, and a permanently-red job on the release board is worse than
+      # no job -- it teaches everyone to stop reading the one board where
+      # ignoring red is least affordable.
       #
-      # A permanently-red job on the release workflow is worse than no job. It is
-      # the mirror of a gate that cannot fail: a job that can only fail teaches
-      # everyone to stop reading the one board where ignoring red is least
-      # affordable. So this is gated OFF rather than left red -- and the OFF path
-      # is LOUD (see `npm publishing is disabled` below), because the other
-      # failure this repo spent the week removing is a channel that quietly
-      # reports success while shipping nothing (#151).
-      NPM_PUBLISH_ENABLED: ${{ vars.TAN_NPM_PUBLISH == 'true' }}
+      # So this is gated OFF rather than left red, and the OFF path is LOUD (see
+      # `PyPI publishing is disabled` below), because the other failure this
+      # repo spent a week removing is a channel that quietly reports success
+      # while shipping nothing (tan-cli#151).
+      PYPI_PUBLISH_ENABLED: ${{ vars.TAN_PYPI_PUBLISH == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # `npm publish` authenticates via NODE_AUTH_TOKEN (npm registry
-          # token), not a persisted git remote; nothing here pushes to the
-          # repo (tan-cli#435).
           persist-credentials: false
-      # cache-poisoning is suppressed ON THIS STEP rather than by line number in
-      # .github/zizmor.yml. It used to be baselined there as `release.yml:850:9`,
-      # and that anchor rotted twice: 790 -> 850 when tan-cli#500 added a step to
-      # the `build` job, and 850 -> 864 when this branch added comments above.
-      # Neither change touched this step. A suppression that moves when unrelated
-      # lines move is a suppression that will one day sit on a different step.
-      #
-      # WHY IT IS SUPPRESSED RATHER THAN FIXED. The step passes `node-version`
-      # and `registry-url` only -- no `cache:` input, so no dependency cache is
-      # restored or saved; zizmor reports the action's CAPABILITY, at Low
-      # confidence, not an observed cache. There is also nothing to poison: the
-      # job's two steps are `npm pack --dry-run` and `npm publish`, and it
-      # installs no dependencies.
-      #
-      # WHAT WOULD CHANGE THIS. Add a `cache:` input here, or an install step
-      # ahead of `npm publish`, and this must be re-argued rather than carried:
-      # at that point a restored cache really would reach the one job in this
-      # repository that publishes to a registry. THE SAME IS TRUE IMPLICITLY:
-      # `actions/setup-node` v5+ auto-restores an npm cache with no explicit
-      # `cache:` input at all when `npm-shim/package.json` carries a
-      # `packageManager` field, so this holds only as long as that file has
-      # none -- add one and re-argue this before merging.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 # zizmor: ignore[cache-poisoning]
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          node-version: "24"
-          registry-url: https://registry.npmjs.org
+          python-version: '3.12'
 
-      # Runs whether or not publishing is armed. The shim is still a shipped
-      # artefact of this repo, and a shim that stops packing is worth catching
-      # while it is cheap rather than on the day the token is fixed.
-      - name: Pack (smoke — confirm the shim packs with its bin + postinstall)
+      # Always, armed or not: a distribution that will not BUILD is a fault
+      # this job must report even on a disarmed tag, the same way the npm shim
+      # it replaces always ran its `npm pack --dry-run` smoke.
+      - name: Build sdist + wheel
         run: |
-          npm pack --dry-run
-          node -e "const p=require('./package.json'); if(!p.bin||!p.bin.tan) throw new Error('shim missing bin.tan')"
+          set -euo pipefail
+          python -m pip install --quiet build
+          python -m build --sdist --wheel --outdir dist ./python
+          ls -l dist
 
-      # The OFF path, and it says so out loud in the run summary rather than
-      # passing silently. Exits 0: not publishing is the DECISION here, not a
-      # failure, and the release itself is unaffected.
-      - name: npm publishing is disabled
+      - name: PyPI publishing is disabled
         id: declined
-        if: ${{ env.NPM_PUBLISH_ENABLED != 'true' }}
+        if: ${{ env.PYPI_PUBLISH_ENABLED != 'true' }}
         run: |
           echo "published=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::TAN_PYPI_PUBLISH is not 'true', so nothing was uploaded to PyPI for ${GITHUB_REF_NAME}. The distribution above built cleanly; only the upload was declined. Arm it by setting the repository variable TAN_PYPI_PUBLISH=true AFTER configuring the pending publisher on pypi.org (tan-cli#1054)."
           {
-            echo "### npm: NOT PUBLISHED — deliberately disabled"
-            echo
-            echo "\`@alplabai/tan@${GITHUB_REF_NAME#v}\` was **not** published. The shim packed cleanly; publishing is gated off."
-            echo
-            echo "Reason: the configured \`NPM_TOKEN\` requires an interactive one-time password (\`npm error code EOTP\`), which no CI run can supply. It needs replacing with an npm **automation** token — see [#233](https://github.com/alplabai/tan-cli/issues/233)."
-            echo
-            echo "To arm this job once that is done, set the repository variable \`TAN_NPM_PUBLISH\` to \`true\`."
+            echo "### PyPI"
+            echo ""
+            echo "\`TAN_PYPI_PUBLISH\` is not \`true\` -- **nothing was uploaded**."
+            echo "The sdist and wheel built successfully; only the upload was declined."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "::notice::npm publish is gated off (TAN_NPM_PUBLISH is not 'true'). @alplabai/tan was NOT published for this tag; see #233."
 
-      # Same rule as the crates.io job, and for the same reason: this job only
-      # runs on a final tag, so a missing token means the release advertises
-      # `npm i -g @alplabai/tan` for a package that does not exist. v0.4.0 did
-      # (#151). The pack smoke above still runs first, so a genuinely broken
-      # shim is reported as a broken shim rather than as a missing secret.
-      # The three ARMED steps below all carry the same gate. Left individually
-      # conditional rather than split into a second job, so the token refusal,
-      # the publish and the outcome record stay next to the pack smoke they
-      # belong with.
-      - name: Refuse to "publish" with no token
-        if: ${{ env.NPM_PUBLISH_ENABLED == 'true' && env.NPM_TOKEN == '' }}
-        run: |
-          echo "### npm: NOT PUBLISHED" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`NPM_TOKEN\` is not set, so \`npm i -g @alplabai/tan\` will not resolve for this release. The shim packed cleanly." >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::NPM_TOKEN is not set, but TAN_NPM_PUBLISH is 'true'. A FINAL release must not report a successful npm publish it did not perform (#151). Add the secret, or unset TAN_NPM_PUBLISH."
-          exit 1
+      - name: Publish to PyPI
+        if: ${{ env.PYPI_PUBLISH_ENABLED == 'true' }}
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist
 
-      - name: Publish to npm
-        if: ${{ env.NPM_PUBLISH_ENABLED == 'true' }}
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      # Reached only if `npm publish` above returned 0 -- a failure fails the job
-      # before this runs, so `published=true` is an observation, not a claim.
-      - name: Record the npm outcome
+      - name: Record the PyPI outcome
         id: published
-        if: ${{ env.NPM_PUBLISH_ENABLED == 'true' }}
+        if: ${{ env.PYPI_PUBLISH_ENABLED == 'true' }}
         run: |
           echo "published=true" >> "$GITHUB_OUTPUT"
-          echo "### npm: published \`@alplabai/tan@${GITHUB_REF_NAME#v}\`" >> "$GITHUB_STEP_SUMMARY"
 
-  # ---------------------------------------------------------------------------
-  # #237: a tag must not be able to skip its own publishes silently.
-  #
-  # v0.4.1 proved it could. One flaky unit test failed `gates`, so `build`,
-  # `release` and both publish jobs were marked SKIPPED, and the tag existed --
-  # immutably -- with no Release, no assets, and `releases/latest` still pointing
-  # at the previous version. The only signal was a red check on a run nobody was
-  # necessarily watching. `skipped` is the right semantic for a conditional job
-  # and the wrong one for the publish leg of a tag, because a tag is a commitment:
-  # the version number is spent and `install.sh` resolves it the moment a Release
-  # appears.
-  #
-  # This is NOT an exemption list. An exemption list grows -- npm today, some
-  # future channel tomorrow -- and every addition is a place the invariant quietly
-  # stops covering something. The invariant is DECLARATION-RELATIVE instead, the
-  # same mechanism #219 used for issue codes: declare the intent, then assert the
-  # outcome against the declaration.
-  #
-  #   1. HARD, unconditional: a pushed `v*` tag MUST produce a Release with its
-  #      assets. Nothing legitimately skips that, rc or final.
-  #   2. PER CHANNEL: the outcome must match the channel's declared intent.
-  #      crates.io has no gate variable, so its intent is "always". npm's intent
-  #      is `TAN_NPM_PUBLISH`; unset means it must decline and exit 0, armed means
-  #      it must publish or fail.
-  #
-  # So a disarmed npm channel is not an exemption -- it SATISFIES the invariant,
-  # because declaration and outcome agree. And arming it changes the declaration,
-  # after which this gate demands a publish with no edit here. That is also why
-  # this cannot re-create the permanently-red board #239 removed.
+
   release_gate:
     name: release outcome matches intent
-    needs: [release, publish_npm]
+    needs: [release, publish_pypi]
     # `always()`, or a skipped dependency skips the gate too and the whole point
     # is lost. Tag-only: this workflow has no other trigger today, but the guard
     # makes the scope explicit rather than inherited.
@@ -1166,9 +1095,9 @@ jobs:
         shell: bash
         env:
           RELEASE_RESULT: ${{ needs.release.result }}
-          NPM_RESULT: ${{ needs.publish_npm.result }}
-          NPM_PUBLISHED: ${{ needs.publish_npm.outputs.published }}
-          NPM_DECLARED: ${{ vars.TAN_NPM_PUBLISH == 'true' }}
+          PYPI_RESULT: ${{ needs.publish_pypi.result }}
+          PYPI_PUBLISHED: ${{ needs.publish_pypi.outputs.published }}
+          PYPI_DECLARED: ${{ vars.TAN_PYPI_PUBLISH == 'true' }}
         run: |
           set -euo pipefail
           fail=0
@@ -1180,7 +1109,7 @@ jobs:
           note "| leg | declared | result | published |"
           note "|---|---|---|---|"
           note "| release | always | \`${RELEASE_RESULT}\` | - |"
-          note "| npm | \`TAN_NPM_PUBLISH=${NPM_DECLARED}\` | \`${NPM_RESULT}\` | \`${NPM_PUBLISHED:-<none>}\` |"
+          note "| PyPI | \`TAN_PYPI_PUBLISH=${PYPI_DECLARED}\` | \`${PYPI_RESULT}\` | \`${PYPI_PUBLISHED:-<none>}\` |"
           note ""
 
           # 1. Unconditional. A tag with no Release behind it is the v0.4.1 state.
@@ -1200,23 +1129,23 @@ jobs:
               ;;
           esac
 
-          # 2b. npm against its declaration. The job must not have FAILED either
+          # 2b. PyPI against its declaration. The job must not have FAILED either
           # way -- a disarmed channel still has to exit 0 having said so.
-          if [ "$NPM_RESULT" != "success" ]; then
-            bad "the npm job did not complete cleanly (job: ${NPM_RESULT}). Disarmed it must report NOT PUBLISHED and exit 0; armed it must publish."
+          if [ "$PYPI_RESULT" != "success" ]; then
+            bad "the PyPI job did not complete cleanly (job: ${PYPI_RESULT}). Disarmed it must build the distribution, report NOT PUBLISHED and exit 0; armed it must upload."
           # The job succeeded, so `published` MUST be one of the two values it
-          # writes. Anything else means the outputs wiring between `publish_npm`
+          # writes. Anything else means the outputs wiring between `publish_pypi`
           # and this gate is broken, and the comparisons below would be reading
           # nothing.
           #
           # This is the one hole `always()` + a declaration check cannot close by
-          # itself. An unresolvable `needs.publish_npm.outputs.published` --
+          # itself. An unresolvable `needs.publish_pypi.outputs.published` --
           # renamed step id, removed `outputs:` block, a context GitHub does not
           # populate -- evaluates to the EMPTY STRING; it does not error. And ''
           # satisfies `!= "true"`, which is the disarmed-expected branch, which is
           # the state tan is in today. So a broken wiring would pass GREEN on every
-          # disarmed tag and only surface at ARMING time, reported as "npm did not
-          # publish" when npm may have published fine and the gate is describing
+          # disarmed tag and only surface at ARMING time, reported as "PyPI did not
+          # publish" when PyPI may have published fine and the gate is describing
           # its own broken input. Arming is the moment this gate most needs to be
           # trustworthy; it must not be the moment it starts lying.
           #
@@ -1228,9 +1157,9 @@ jobs:
           #
           # "Empty means the wiring is broken" is only true because each channel is
           # a SEPARATE JOB with its own `needs: release`. A failed `release` or a
-          # failed `publish_crates` cannot blank npm's self-report, because npm's
+          # failed sibling job cannot blank PyPI's self-report, because PyPI's
           # job either ran and reported, or was skipped and is caught by the
-          # `NPM_RESULT` check above. So an empty `published` from a job that
+          # `PYPI_RESULT` check above. So an empty `published` from a job that
           # reports `success` really does mean the outputs wiring is broken, and
           # nothing else.
           #
@@ -1253,12 +1182,12 @@ jobs:
           # Kept in the SAME elif chain rather than a separate `case`, so a broken
           # wiring reports exactly one cause: a garbage value would otherwise also
           # trip a declaration comparison it has nothing to compare against.
-          elif [ "$NPM_PUBLISHED" != "true" ] && [ "$NPM_PUBLISHED" != "false" ]; then
-            bad "the npm job reported published='${NPM_PUBLISHED:-<empty>}', which is neither true nor false. The outputs wiring between publish_npm and this gate is broken, so the declaration checks are comparing against nothing. Check publish_npm's \`outputs:\` block and the \`declined\`/\`published\` step ids."
-          elif [ "$NPM_DECLARED" = "true" ] && [ "$NPM_PUBLISHED" != "true" ]; then
-            bad "TAN_NPM_PUBLISH is 'true' but the npm job did not publish (published=${NPM_PUBLISHED:-<none>}). An armed channel that ships nothing is the silent-success failure #151 removed."
-          elif [ "$NPM_DECLARED" != "true" ] && [ "$NPM_PUBLISHED" = "true" ]; then
-            bad "npm published while TAN_NPM_PUBLISH is not 'true'. The channel shipped something nobody declared."
+          elif [ "$PYPI_PUBLISHED" != "true" ] && [ "$PYPI_PUBLISHED" != "false" ]; then
+            bad "the PyPI job reported published='${PYPI_PUBLISHED:-<empty>}', which is neither true nor false. The outputs wiring between publish_pypi and this gate is broken, so the declaration checks are comparing against nothing. Check publish_pypi's \`outputs:\` block and the \`declined\`/\`published\` step ids."
+          elif [ "$PYPI_DECLARED" = "true" ] && [ "$PYPI_PUBLISHED" != "true" ]; then
+            bad "TAN_PYPI_PUBLISH is 'true' but the PyPI job did not upload (published=${PYPI_PUBLISHED:-<none>}). An armed channel that ships nothing is the silent-success failure #151 removed. If the upload itself failed, check that the pending publisher is configured on pypi.org for project tan-cli / alplabai / tan-cli / release.yml with a BLANK environment (tan-cli#1054)."
+          elif [ "$PYPI_DECLARED" != "true" ] && [ "$PYPI_PUBLISHED" = "true" ]; then
+            bad "PyPI published while TAN_PYPI_PUBLISH is not 'true'. The channel shipped something nobody declared."
           fi
 
           if [ "$fail" -ne 0 ]; then
@@ -1277,7 +1206,7 @@ jobs:
   # `version_check.py --not-released` exists to refuse. Every PR opened
   # against `dev` then fails `version-identity.yml`'s `not-a-released-version`
   # job on a check unrelated to its own diff, until a human notices and bumps
-  # four files by hand. That has happened twice (tan-cli#479 -> 0.5.2-rc1.dev0,
+  # three files by hand. That has happened twice (tan-cli#479 -> 0.5.2-rc1.dev0,
   # #768 -> 0.6.0-rc2.dev0), both hand-carried, both the same recurrence one
   # release apart.
   #
@@ -1364,7 +1293,7 @@ jobs:
         run: |
           set -euo pipefail
           status="${{ steps.bump.outputs.status }}"
-          changed="$(git status --porcelain -- python/tan/version.py python/pyproject.toml npm-shim/package.json CHANGELOG.md)"
+          changed="$(git status --porcelain -- python/tan/version.py python/pyproject.toml CHANGELOG.md)"
           case "${status}" in
             applied)
               if [ -z "${changed}" ]; then
@@ -1396,7 +1325,7 @@ jobs:
           git config user.name  "tan-cli dev-version bump"
           git config user.email "noreply@alplab.ai"
           git checkout -q -B "${branch}"
-          git add python/tan/version.py python/pyproject.toml npm-shim/package.json CHANGELOG.md
+          git add python/tan/version.py python/pyproject.toml CHANGELOG.md
           git commit -q -m "chore(release): move dev off the published ${GITHUB_REF_NAME}
 
           Machine-proposed by python/scripts/bump_dev_version.py, gated on

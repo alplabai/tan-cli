@@ -29,7 +29,7 @@
 #
 # At release: drop the pre-release entirely (`0.5.0`), date CHANGELOG.md's
 # `## [0.5.0]` heading, and bring python/pyproject.toml (PEP 440 spelling) and
-# npm-shim/package.json (this exact string) with it --
+# (the npm shim that also carried it is retired, tan-cli#1054) --
 # `python/scripts/version_check.py --selftest --self --not-released` checks all
 # four together.
 #

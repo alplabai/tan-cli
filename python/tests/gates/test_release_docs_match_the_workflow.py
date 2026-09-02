@@ -45,9 +45,9 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 VERSION_CHECK = REPO_ROOT / "python" / "scripts" / "version_check.py"
 PYPROJECT = REPO_ROOT / "python" / "pyproject.toml"
 
-#: The documents that make claims about the release. `npm-shim/README.md` makes
-#: them too but is owned by that package and already derives its wording from
-#: the same workflow; add it here the day it stops.
+#: The documents that make claims about the release. `npm-shim/README.md` used
+#: to be a fifth, deliberately excluded because it was owned by that package;
+#: the shim is retired (tan-cli#1054) and the exclusion is moot.
 #:
 #: `release.yml`'s own COMMENTS are a fifth source and are scanned too, from
 #: `_workflow_comments()` below rather than from here -- they are not a file a
@@ -173,6 +173,31 @@ def _runs(node: object) -> list[str]:
     return out
 
 
+def _steps_source(node: object) -> list[str]:
+    """Every `run:` body AND every `uses:` ref under a node.
+
+    A publish channel is not always a shell command. `publish_pypi` uploads
+    with `uses: pypa/gh-action-pypi-publish@<sha>` and has no `run:` that names
+    a registry at all, so a `run:`-only scan reported `pypi: absent` while the
+    job sat right there (tan-cli#1054). `_registry_channels`' own needle list
+    already anticipated the action form -- it carries `"pypi-publish"` beside
+    `"twine upload"` -- so the intent was there and only the scanner was
+    narrow. That is the same blindness this gate exists to catch, one level up:
+    a check that cannot see the thing it is checking for.
+    """
+    out = list(_runs(node))
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "uses" and isinstance(value, str):
+                out.append(value)
+            else:
+                out.extend(_steps_source(value) if key != "run" else [])
+    elif isinstance(node, list):
+        for item in node:
+            out.extend(_steps_source(item))
+    return out
+
+
 @functools.cache
 def _tag_gate_commands() -> str:
     """What the job that gates the tag on a version actually executes."""
@@ -283,7 +308,7 @@ def _registry_channels() -> dict[str, str]:
     for registry, needles in commands.items():
         state = "absent"
         for job_id, body in _publish_jobs().items():
-            for run in _runs(body):
+            for run in _steps_source(body):
                 if any(needle in run for needle in needles):
                     state = "opt-in" if _gating_variables().get(job_id) else "default"
         out[registry] = state
@@ -565,6 +590,21 @@ def test_no_doc_claims_a_publish_job_the_workflow_does_not_have():
                     f"{rel} describes `{job}` without naming the repository "
                     f"variable that arms it ({sorted(variables)}) -- a reader "
                     f"cannot tell whether the channel is live"
+                )
+        # The reverse of the two checks above, and the direction that was
+        # missing: a doc describing a publish job release.yml no longer has.
+        # Every check here reads FORWARD from the workflow (does the doc match
+        # what exists?), so a retired job left in prose was invisible -- the
+        # loop right above only iterates jobs that DO exist. tan-cli#1054
+        # retired `publish_npm` and three live docs kept describing it, on a
+        # fully green board. A reader is told to expect a channel that cannot
+        # run, which is the same "look away from the real job" harm as the
+        # `if: false` case.
+        for ghost in re.findall(r"\bpublish_[a-z0-9_]+\b", text):
+            if ghost not in _publish_jobs():
+                problems.append(
+                    f"{rel} describes `{ghost}`, which release.yml does not "
+                    f"define (publish jobs: {sorted(_publish_jobs())})"
                 )
     assert not problems, "\n  ".join(["release docs vs release.yml:", *problems])
 

@@ -44,7 +44,11 @@ v<major>.<minor>.<patch>-<pre>        e.g. v0.4.0-rc1 pre-release
   - `python/pyproject.toml`'s `version` must be the **PEP 440 rendering** of it
     (`0.5.0-dev` → `0.5.0.dev0`). The two spellings are not string-equal, which
     is exactly why the check is a script and not a `grep`.
-  - `npm-shim/package.json`'s `version` must equal `TAN_VERSION` **exactly**
+  - (retired, tan-cli#1054) `npm-shim/package.json`'s `version` used to be a
+    third source reconciled here; the shim is gone with the npm channel, and
+    `test_version_check_still_reads_every_source_it_is_supposed_to` now pins
+    the reader set so a source cannot be dropped as quietly as this one nearly
+    was
     (npm ships SemVer, so nothing is translated here): `postinstall.js` derives
     its download tag as `` v${pkg.version} ``, so a stale shim fetches a tag
     that does not exist.
@@ -74,18 +78,27 @@ they cannot disagree with each other or with the tag:
 | `v0.4.0` | `false` | `true` |
 | `v0.4.0-rc1` | `true` | `false` |
 
-`publish_crates` is deleted for every tag (the assets never came from the
+The crates.io job is deleted for every tag (the assets never came from the
 crates any more, and `crates/` itself is gone as of tan-cli#269, so publishing
-`alp-tan-cli` would ship a different program under the same name). `publish_npm` is a **real job** and runs only on a FINAL tag — its
+under that name would ship a different program). The npm shim is retired
+entirely as of tan-cli#1054 — PyPI is the sole standalone install channel now.
+`publish_pypi` is a **real job** and runs only on a FINAL tag — its
 own `if` is `startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name,
 '-')`, so a pre-release skips it entirely, the same way it skips `make_latest`.
 Even on a final tag the publish itself is **opt-in and off**: the job reads
-`NPM_PUBLISH_ENABLED: ${{ vars.TAN_NPM_PUBLISH == 'true' }}` and, unless that
+`PYPI_PUBLISH_ENABLED: ${{ vars.TAN_PYPI_PUBLISH == 'true' }}` and, unless that
 repository *variable* is `true`, records `published=false` and says so in the
 run summary — a loud no-op rather than a silent skip. Arming it needs the
-variable AND a replacement `NPM_TOKEN`: the configured one is a classic token on
-a 2FA account, so `npm publish` answers `EOTP`. See
-[`npm-shim/README.md`](../npm-shim/README.md) for the operator's half.
+variable — and, before the first upload can succeed, a pending publisher
+configured on pypi.org (project `tan-cli`, owner `alplabai`, repository
+`tan-cli`, workflow `release.yml`, environment BLANK). That is a web-UI action
+no workflow can perform, which is why the job is gated OFF rather than left
+permanently red.
+
+Historical note, kept because it is why the channel moved at all: arming npm
+needed a replacement `NPM_TOKEN`, because the configured one is a classic token
+on a 2FA account, so `npm publish` answers `EOTP`. Trusted Publishing dissolves
+that class rather than re-provisioning it.
 
 This is load-bearing rather than cosmetic. Both [`install.sh`](../install.sh)
 and [`install.ps1`](../install.ps1) resolve what `latest` means through GitHub,
@@ -503,28 +516,37 @@ today: `_aen_peripherals_dtsi()` runs first, and `d639e777` is an ancestor of
   creation.
 - **The GitHub release needs no secrets** — archives, `checksums.txt`,
   `envelope-contract.json` and the provenance attestation all run on the default
-  `GITHUB_TOKEN`. `CARGO_REGISTRY_TOKEN` is gone with its job; `NPM_TOKEN` is
-  read only by a channel that is off until someone arms it:
+  `GITHUB_TOKEN`. `CARGO_REGISTRY_TOKEN` and `NPM_TOKEN` are both gone with
+  their jobs, and the channel that replaced them **reads no secret at all**:
 
   | Job | State | Consequence |
   |---|---|---|
-  | `publish · crates.io` | **deleted** | `cargo install alp-tan-cli` resolves only to the stale Rust program under that name. Do not advertise it. |
-  | `publish · npm shim` | **live, opt-in** — final tags only, and then only when the repository variable `TAN_NPM_PUBLISH` is `true` | Unarmed, `npm i -g @alplabai/tan` does not resolve (`E404` at every version) and the job says so in the run summary. Armed, it publishes and `release_gate` fails the tag if it did not. |
+  | `publish · crates.io` | **deleted** | Do not advertise a `cargo install` path; the name on crates.io resolves only to a stale Rust program. |
+  | `publish · npm shim` | **deleted** (tan-cli#1054) | The shim was a downloader for four platform-specific assets and 404'd at install time on `win32/arm64` and `linux/arm64` (tan-cli#436). It was never published, so there is no installed base. |
+  | `publish · PyPI` | **live, opt-in** — final tags only, and then only when the repository variable `TAN_PYPI_PUBLISH` is `true` | Unarmed, the job still builds the sdist + wheel and records `published=false` in the run summary. Armed, it uploads and `release_gate` fails the tag if it did not. |
 
-  **Present is not the same as usable.** `NPM_TOKEN` was configured for v0.4.1
-  and the job still failed — `npm error code EOTP`, because a classic/publish
-  token on a 2FA account makes `npm publish` demand an interactive one-time
-  password no CI run can answer. Only an npm **automation** token (or a granular
-  token) is exempt. The missing-secret refusal above cannot catch this: the token
-  is there, so the job proceeds and fails at the registry, after signing a
-  provenance statement into the public transparency log for a version that never
-  published (#233).
+  **PyPI uses Trusted Publishing (OIDC), not a token.** This is the whole
+  reason the channel moved. `NPM_TOKEN` was configured for v0.4.1 and the job
+  still failed — `npm error code EOTP`, because a classic/publish token on a
+  2FA account makes `npm publish` demand an interactive one-time password no
+  CI run can answer. Only an npm **automation** token was exempt. A
+  missing-secret refusal cannot catch that shape: the token is present, so the
+  job proceeds and fails at the registry, after signing a provenance statement
+  into the public transparency log for a version that never published (#233).
+  Trusted Publishing removes the whole credential class rather than
+  re-provisioning it — `publish_pypi` has `id-token: write` and no
+  `secrets.*` reference anywhere.
 
-  Both previously emitted a `::warning::` and exited **0**, so the run summary
-  read `publish · crates.io  success` while crates.io answered
-  `crate 'alp-tan-cli' does not exist` — what shipped for v0.4.0 (#151). The
-  lesson survives the deletion: a publish channel that cannot work must fail or
-  be switched off, never report success. Any doc that offers `cargo install
-  alp-tan-cli` or `npm i -g @alplabai/tan` as an install path is wrong until
-  crates.io comes back and `TAN_NPM_PUBLISH` has actually put a version on the
-  registry — a job existing is not a package existing.
+  There is a second reason not to reach for a token here: PyPI cannot scope an
+  API token to a project that does not exist, so any token minted before the
+  first publish is necessarily **account-scoped** — publish and yank rights on
+  every project under that account. The pending-publisher flow binds the
+  identity before the project exists and skips that window entirely.
+
+  Both retired jobs previously emitted a `::warning::` and exited **0**, so the
+  run summary read `publish · crates.io  success` while crates.io answered
+  `crate does not exist` — what shipped for v0.4.0 (#151). The lesson survives
+  both deletions: a publish channel that cannot work must fail or be switched
+  off, never report success. And a job existing is still not a package
+  existing — `TAN_PYPI_PUBLISH` being `true` is necessary, not sufficient; the
+  pending publisher has to be configured on pypi.org first.

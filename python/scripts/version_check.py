@@ -3,7 +3,7 @@
 """One version, three files, and one explicit SemVer <-> PEP 440 mapping.
 
 THE SOURCE OF TRUTH IS ``python/tan/version.py``'s ``TAN_VERSION``. Not
-pyproject.toml, not Cargo.toml, not npm-shim/package.json: ``TAN_VERSION`` is
+pyproject.toml, not Cargo.toml: ``TAN_VERSION`` is
 the string the shipped artifact PRINTS (``tan --version``), it is what
 alp-sdk-vscode parses and compares against its ``SUPPORTED_CLI_VERSION``, and a
 release whose binary reports a version nobody else agrees with is the one
@@ -13,8 +13,6 @@ the git tag is. Everything else derives from it or is checked against it:
 * ``python/pyproject.toml``'s ``version`` must be the PEP 440 RENDERING of it
   (``0.5.0-dev`` -> ``0.5.0.dev0``). The two spellings are not interchangeable
   and cannot be string-compared, which is exactly why this file exists.
-* ``npm-shim/package.json``'s ``version`` must equal it EXACTLY: postinstall.js
-  derives the asset tag as ``TAG = `v${pkg.version}` `` (npm-shim/postinstall.js:25),
   so a stale shim downloads a tag that does not exist. npm ships SemVer, so no
   translation applies here.
 * ``Cargo.toml`` is not read, and as of tan-cli#269 does not exist: it versioned
@@ -66,7 +64,7 @@ from pathlib import Path
 
 #: `python/` -- this script lives in `python/scripts/`.
 PYTHON_ROOT = Path(__file__).resolve().parent.parent
-#: The repo root, for `npm-shim/` and `CHANGELOG.md`.
+#: The repo root, for `CHANGELOG.md`.
 REPO_ROOT = PYTHON_ROOT.parent
 
 #: SemVer, restricted to the pre-release spellings this project actually uses,
@@ -374,7 +372,7 @@ def released_version_problems(
             f"`.devN` tail on the NEXT pre-release (0.5.0-rc4 -> "
             f"0.5.0-rc5.dev0), which is the only spelling that sorts above the "
             f"published tag in SemVer and PEP 440 alike -- and bring "
-            f"pyproject.toml and npm-shim/package.json with it."
+            f"pyproject.toml with it."
         ]
     return []
 
