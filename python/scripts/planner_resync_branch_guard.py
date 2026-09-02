@@ -642,16 +642,37 @@ def main(argv: list[str] | None = None) -> int:
             # reads $GITHUB_OUTPUT with plain `grep`/`cut` (no `jq` in this
             # step), same convention as every other key here.
             fh.write(f"occupied_count={len(decision.occupied)}\n")
-            # tan-cli#1109 review round 2 (major): a SEPARATE consumer
-            # (`planner-resync.yml`'s "Close superseded planner-resync
-            # proposals" step) needs the full occupied set as a group -- to
-            # exclude every one of them from what it closes, not to name any
-            # one of them -- and reading N numbered keys back out means that
-            # caller has to know N ahead of time, which it does not (`gh pr
-            # list` finds it, not this guard). A single space-separated list
-            # is safe here specifically: `occupied_{i}_branch` values are git
-            # ref names, which cannot contain a space, so splitting on
-            # whitespace never misparses one. Written UNCONDITIONALLY, empty
+            # tan-cli#1109 review round 2 (major): originally added for a
+            # SEPARATE consumer (`planner-resync.yml`'s "Close superseded
+            # planner-resync proposals" step) that needed the full occupied
+            # set as a group -- to exclude every one of them from what it
+            # closes, not to name any one of them -- and reading N numbered
+            # keys back out would have meant that caller had to know N ahead
+            # of time, which it did not (`gh pr list` finds it, not this
+            # guard). A single space-separated list is safe here
+            # specifically: `occupied_{i}_branch` values are git ref names,
+            # which cannot contain a space, so splitting on whitespace never
+            # misparses one.
+            #
+            # tan-cli#1119 review round 3 (nit): that consumer is GONE -- the
+            # close step now asks `--check-branch` live, per candidate,
+            # instead of consuming a snapshot, so no workflow step reads
+            # this key any more (`grep -rn occupied_branches
+            # .github/workflows/` finds only the explanatory comment on the
+            # close step, not a read). Kept anyway, deliberately, for two
+            # reasons rather than dropped as dead machinery: (1) it is a
+            # slice of the SAME `decision.occupied` data `occupied_count`/
+            # `occupied_{i}_*` below still serve to the PR body's credit
+            # loop, so keeping it costs nothing beyond one `fh.write` call,
+            # not a parallel code path that could itself drift; and (2) it
+            # is deliberately exercised as EVIDENCE by
+            # `test_close_step_catches_a_branch_adopted_in_the_toctou_window`
+            # (`test_planner_resync_pr_step_executes.py`), which asserts
+            # this key comes back genuinely empty after a real, non-diverted
+            # guard-step run -- i.e. proof of exactly what a pre-tan-cli#1119
+            # close step would have (correctly, for that moment) trusted,
+            # before the close step's own live check is shown to catch what
+            # that trust would have missed. Written UNCONDITIONALLY, empty
             # when there is nothing occupied -- same shape as `observed_tip`/
             # `occupied_count` already use, not a key a reader has to guard
             # for absence.

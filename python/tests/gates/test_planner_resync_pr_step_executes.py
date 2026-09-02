@@ -251,13 +251,20 @@ def _push_foreign_commit_on(bare: pathlib.Path, branch: str, tmp_path: pathlib.P
     return sha
 
 
-#: Must match `planner-resync.yml`'s own `AUTOMATION_NAME`/`AUTOMATION_EMAIL`
-#: (the step's `git config user.name`/`user.email`, which is also what it
-#: passes `planner_resync_branch_guard.py --automation-name`/
-#: `--automation-email`) -- a prior run's own commit, for the refresh shape
-#: below.
-_AUTOMATION_NAME = "alp-sdk planner re-sync"
-_AUTOMATION_EMAIL = "noreply@alplab.ai"
+#: tan-cli#1119 review round 3 (nit): read straight out of the real
+#: `jobs.propose.env` block (`_workflow()`, already defined above) instead
+#: of a hand-copied literal -- a copy here could disagree with the workflow
+#: without the workflow ever disagreeing with ITSELF, which is exactly the
+#: kind of drift `AUTOMATION_NAME`/`AUTOMATION_EMAIL` being hoisted to
+#: job-level `env:` (this same PR) was supposed to make impossible. This is
+#: the last copy; every other reader in this module (`git config
+#: user.name`/`user.email`, `planner_resync_branch_guard.py
+#: --automation-name`/`--automation-email`) already gets it from these two
+#: constants, and this makes THEM trace back to the workflow file itself
+#: rather than to a second literal living beside it.
+_JOB_ENV = _workflow()["jobs"]["propose"]["env"]
+_AUTOMATION_NAME = _JOB_ENV["AUTOMATION_NAME"]
+_AUTOMATION_EMAIL = _JOB_ENV["AUTOMATION_EMAIL"]
 
 
 def _push_automation_commit_on(bare: pathlib.Path, branch: str, tmp_path: pathlib.Path) -> str:

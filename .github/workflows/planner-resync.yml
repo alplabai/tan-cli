@@ -436,24 +436,29 @@ jobs:
           changed_list="$(git status --porcelain -- python/ | cut -c4-)"
           short="${SDK_SHA:0:8}"
 
-          # tan-cli#1006 review (nit) / tan-cli#1119 review (minor): this is
-          # the ONE place the automation's commit identity is spelled out in
-          # LOCAL shell form in this step -- both the guard invocation below
+          # tan-cli#1006 review (nit) / tan-cli#1119 review (minor): the
+          # automation's commit identity used to be spelled out as a LOCAL
+          # literal right here, which both the guard invocation below
           # (`--automation-name`/`--automation-email`, explicit rather than
           # relying on the script's argparse defaults matching by
-          # coincidence) and the `git config` calls further down read it
-          # from here. Sourced from the job-level `AUTOMATION_NAME`/
-          # `AUTOMATION_EMAIL` env (bottom of this job) rather than a second
-          # pair of literals -- tan-cli#1119 measured what independent
-          # literals cost: the "Close superseded planner-resync proposals"
-          # step below used to carry its own copy, and a drift there made
-          # every branch this automation actually pushed read as "occupied"
-          # (fail-safe, since that only ever over-protects) but SILENTLY --
-          # sharing one source closes that the same way `RESYNC_ISSUE_TITLE`/
-          # `RESYNC_ISSUE_MARKER` already do for the other two steps that
-          # need to agree.
-          AUTOMATION_NAME="${AUTOMATION_NAME}"
-          AUTOMATION_EMAIL="${AUTOMATION_EMAIL}"
+          # coincidence) and the `git config` calls further down read.
+          # tan-cli#1119 measured what a SECOND, independent copy of that
+          # literal costs elsewhere in this file: the "Close superseded
+          # planner-resync proposals" step below used to carry its own, and
+          # a drift there made every branch this automation actually pushed
+          # read as "occupied" (fail-safe, since that only ever
+          # over-protects) but SILENTLY. Fixed by hoisting BOTH values to
+          # the job-level `AUTOMATION_NAME`/`AUTOMATION_EMAIL` env (bottom
+          # of this job, same pattern `RESYNC_ISSUE_TITLE`/
+          # `RESYNC_ISSUE_MARKER` already use for the other two steps that
+          # need to agree) -- `${AUTOMATION_NAME}`/`${AUTOMATION_EMAIL}`
+          # below read straight from that job env; tan-cli#1119 review round
+          # 3 (nit): there is deliberately NO local reassignment here any
+          # more (`AUTOMATION_NAME="${AUTOMATION_NAME}"` was a no-op
+          # self-assignment left over from the literal it replaced, not
+          # load-bearing for anything -- a step's job-level `env:` is
+          # already in scope for every `run:` block in the job, so nothing
+          # needs re-exporting).
 
           # tan-cli#1002: never force-push over a commit this automation did
           # not write. `planner_resync_branch_guard.py` inspects the CURRENT
