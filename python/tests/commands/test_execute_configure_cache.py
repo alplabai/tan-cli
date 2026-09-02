@@ -25,7 +25,7 @@ import json
 import os
 import shutil
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from tan.core.build_plan import parse_build_plan
 from tan.commands.build.configure_inputs import (
@@ -86,6 +86,24 @@ def test_discovers_nested_boards_and_socs_fragments(tmp_path):
 
 def test_missing_app_dir_is_the_empty_set_not_an_error(tmp_path):
     assert discover_configure_inputs(tmp_path / "does-not-exist") == frozenset()
+
+
+def test_the_relative_key_is_posix_spelled_under_windows_rules_too():
+    """tan-cli#1132: the `Path.glob` -> `os.scandir` swap changed WHERE the
+    relative key comes from -- `Path(entry.path).relative_to(app_dir)` off a
+    `DirEntry`, not `matched_path.relative_to(app_dir)` off a glob result --
+    and this repo has no Windows host to check that on (PR #1125 shipped a
+    MERGE verdict and then failed four `windows-latest` shards). So the
+    Windows spelling is pinned by ORACLE, `PureWindowsPath`, not by a real
+    filesystem operation: an `os.scandir` entry path on Windows is
+    backslash-separated, and the stamp file's keys must stay the SAME
+    forward-slash strings a previously-stamped build dir already holds, or
+    every first build after upgrading tan reports a spurious change.
+    """
+    app_dir = PureWindowsPath(r"C:\proj\app")
+    entries = [r"C:\proj\app\prj.conf", r"C:\proj\app\boards\deep\nested.overlay"]
+    keys = [PureWindowsPath(e).relative_to(app_dir).as_posix() for e in entries]
+    assert keys == ["prj.conf", "boards/deep/nested.overlay"]
 
 
 def test_stamp_round_trips_including_the_empty_set(tmp_path):

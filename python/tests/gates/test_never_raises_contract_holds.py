@@ -271,6 +271,43 @@ from the `_known_board_names` finding next door. `TestKnownBoardNames.
 test_permission_denied_ancestor` seeds the new shape;
 `TestFamilyHwRevisions.test_permission_denied` (unchanged) already covered
 `_family_hw_revisions`'s equivalent case correctly before this issue.
+
+TAN-CLI#1132 FOLLOW-UP -- THE OTHER HALF OF THE SAME CLASS. #1127 above is
+the SWALLOW half: the exception never exists, because `Path.glob` answers an
+empty iterator instead of raising. #1132 is the ESCAPE half: the exception
+DOES exist, and the `try` written to catch it is not around the code that
+raises. `Path.glob` is lazy -- it returns a generator and does the
+filesystem work on ITERATION -- so
+
+    try:
+        matches = app_dir.glob(pattern)   # cannot fail: builds a generator
+    except OSError:
+        continue
+    for path in matches:                  # the real work, outside the try
+
+has an `except OSError` that is dead on EVERY interpreter. `_known_board_
+names` escaped that only because it wrote `sorted(boards_dir.glob(...))`,
+and `sorted()` forced iteration inside its `try`. A sweep for one half of
+this class does not find the other, which is why
+`scripts/audit_narrow_except_contracts.py` now detects the lazy-iterator
+shape explicitly (tan-cli#1132) rather than only the too-narrow-`except`
+one.
+
+Two live sites, both seeded below. `configure_inputs.discover_configure_
+inputs` had BOTH faults in one function -- the dead lazy-glob `except` and
+an `is_dir()` pre-flight of exactly the kind THE VERSION-INDEPENDENCE
+LESSON describes -- and, measured against a `chmod 000` PARENT, raised
+`PermissionError` on 3.12.3 and 3.13.15 while returning `frozenset()` on
+3.14.7, against a docstring promising the empty set. `analyze._resolve_
+table` had the same `is_dir()` pre-flight plus a completely UNGUARDED
+`sorted(table_dir.glob("*.json"))`, and raised on the same two
+interpreters against a docstring promising `None`. Both now list through
+`os.scandir`/`os.listdir`, the primitive that raises identically on all
+three; both were re-measured, all four cells green on all three
+interpreters, and both mutation-proved by deleting their `except` clause
+one at a time -- each reds on 3.12.3, 3.13.15 AND 3.14.7, which is the
+property neither had before (deleting the old handlers changed nothing
+anywhere, because they never fired).
 """
 from __future__ import annotations
 
@@ -281,9 +318,10 @@ from pathlib import Path
 import pytest
 
 from tan.commands import new_som_cmd
+from tan.commands.build import configure_inputs
 from tan.core import document_guards, error_catalog, example_catalog, example_facets
-from tan.core import metadata_schema, scaffold, sdk_discovery, som_buildability
-from tan.model import perf, perf_apply
+from tan.core import metadata_schema, scaffold, sdk_discovery, shapes, som_buildability
+from tan.model import analyze, perf, perf_apply
 from tan.model.adapters import drpai
 
 #: Opt-in seed list -- `{"module.qualname": "why this function's contract
@@ -370,6 +408,22 @@ _SEEDED_CONTRACTS: dict[str, str] = {
         "chmod 000 escaped raw past the same missing OSError; fixed in the "
         "same change"
     ),
+    "configure_inputs.discover_configure_inputs": (
+        "tan-cli#1132's first live site: 'Returns the empty set for a "
+        "missing/unreadable app_dir' is its written contract, and it "
+        "raised PermissionError on 3.12.3/3.13.15 for a chmod-000 PARENT "
+        "-- an is_dir() pre-flight plus a lazy Path.glob iterated OUTSIDE "
+        "its own try, so the except OSError was dead on all three "
+        "interpreters; os.scandir + one live handler now"
+    ),
+    "analyze._resolve_table": (
+        "tan-cli#1132's second live site: 'None when the backend has no "
+        "table directory' is the whole contract behind the caller's "
+        "`undetermined` verdict, and it raised PermissionError on "
+        "3.12.3/3.13.15 for the same shape past an is_dir() pre-flight and "
+        "a completely unguarded sorted(table_dir.glob(...)); os.listdir + "
+        "one live handler now"
+    ),
 }
 
 _covered: set[str] = set()
@@ -429,6 +483,35 @@ _skip_as_root = pytest.mark.skipif(
     "there; it skips only for a human running as root locally or a runner "
     "that overrides the default user.",
 )
+
+
+class _OsWithName:
+    """The real `os` module with ONE attribute overridden: `name`.
+
+    tan-cli#1132: the obvious way to ask a platform-casing question --
+    `monkeypatch.setattr(shapes, "os", _OsWithName("nt"))`, what `TestIsYamlBoardFile`
+    and `TestKnownBoardNames` above do -- mutates the REAL `os` module, and
+    `pathlib` reads `os.name` at construction time to choose between
+    `PosixPath` and `WindowsPath`. Any function that builds a fresh `Path`
+    after that patch therefore dies with `NotImplementedError: cannot
+    instantiate 'WindowsPath' on your system` instead of exercising the rule
+    under test. Both tan-cli#1132 sites do build one (`analyze._resolve_
+    table`'s `Path(metadata_root)`, the walk's `Path(entry.path)`), so those
+    two test groups shadow the `os` NAME inside `tan.core.shapes` with this
+    instead -- `shapes.matches_glob_suffix` is the only reader of `os.name`
+    on either path, and `os.path` and everything else still resolve to the
+    real module through `__getattr__`.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def __getattr__(self, attr: str):
+        return getattr(os, attr)
 
 
 @contextlib.contextmanager
@@ -1397,6 +1480,290 @@ class TestFamilyHwRevisions:
 # ---------------------------------------------------------------------------
 # Anti-drift: every seed has a test, every test group is a declared seed.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1132 -- the ESCAPE half of the #1116 class: a `try` that cannot
+# catch, because `Path.glob` is lazy and the iteration happened outside it.
+# Both functions below now list through `os.scandir`/`os.listdir`, the only
+# primitive measured to raise identically on 3.12.3, 3.13.15 and 3.14.7 for
+# BOTH denied shapes (the directory itself chmod 000, and an ANCESTOR of it
+# chmod 000). `_permission_denied` below covers the second; the first needs
+# the directory under test to be the denied one, which these build inline.
+# ---------------------------------------------------------------------------
+
+
+class TestMatchesGlobSuffix:
+    """`shapes.matches_glob_suffix` is the ONE spelling of the casing rule
+    every `Path.glob("*.<ext>")` -> `os.listdir`/`os.scandir` swap in this
+    tree needs (tan-cli#1127 review round 2, generalised by tan-cli#1132 when
+    two more swaps wanted the identical predicate). Not a `_SEEDED_CONTRACTS`
+    entry -- it is a platform-casing predicate, not a quiet-return contract --
+    so no `@_covers`, exactly like `TestIsYamlBoardFile` above.
+
+    Every expectation is a literal, independently-stated boolean; nothing
+    here re-derives an answer by calling `Path.glob` a second time."""
+
+    def test_posix_is_case_sensitive(self, monkeypatch):
+        monkeypatch.setattr(shapes, "os", _OsWithName("posix"))
+        assert shapes.matches_glob_suffix("prj.conf", ".conf", ".overlay") is True
+        assert shapes.matches_glob_suffix("app.overlay", ".conf", ".overlay") is True
+        assert shapes.matches_glob_suffix("prj.CONF", ".conf", ".overlay") is False
+        assert shapes.matches_glob_suffix("App.OverLay", ".conf", ".overlay") is False
+        assert shapes.matches_glob_suffix("readme.txt", ".conf", ".overlay") is False
+        assert shapes.matches_glob_suffix("no-suffix", ".conf", ".overlay") is False
+
+    def test_windows_is_case_insensitive(self, monkeypatch):
+        monkeypatch.setattr(shapes, "os", _OsWithName("nt"))
+        assert shapes.matches_glob_suffix("prj.conf", ".conf", ".overlay") is True
+        assert shapes.matches_glob_suffix("prj.CONF", ".conf", ".overlay") is True
+        assert shapes.matches_glob_suffix("App.OverLay", ".conf", ".overlay") is True
+        assert shapes.matches_glob_suffix("readme.txt", ".conf", ".overlay") is False
+        assert shapes.matches_glob_suffix("no-suffix", ".conf", ".overlay") is False
+
+    def test_the_suffix_argument_may_be_spelled_either_case(self, monkeypatch):
+        # The caller's own spelling must not decide the answer -- only the
+        # platform does. Both call sites pass lowercase today; a future one
+        # passing ".JSON" must not silently start matching nothing on POSIX
+        # and everything on Windows.
+        monkeypatch.setattr(shapes, "os", _OsWithName("nt"))
+        assert shapes.matches_glob_suffix("table.json", ".JSON") is True
+        monkeypatch.setattr(shapes, "os", _OsWithName("posix"))
+        assert shapes.matches_glob_suffix("table.JSON", ".JSON") is True
+        assert shapes.matches_glob_suffix("table.json", ".JSON") is False
+
+    def test_no_suffixes_matches_nothing(self, monkeypatch):
+        # `str.endswith(())` is False, and the Windows arm builds its tuple
+        # separately -- pinned so the two arms cannot drift on the edge case.
+        for platform in ("posix", "nt"):
+            monkeypatch.setattr(shapes, "os", _OsWithName(platform))
+            assert shapes.matches_glob_suffix("prj.conf") is False
+
+
+@_covers("configure_inputs.discover_configure_inputs")
+class TestDiscoverConfigureInputs:
+    """Contract: `frozenset()` for a missing or unreadable `app_dir`, and for
+    an unreadable `boards/`/`socs/` subtree -- never a raise."""
+
+    def _app(self, tmp_path: Path) -> Path:
+        app = tmp_path / "outer" / "app"
+        app.mkdir(parents=True)
+        (app / "prj.conf").write_text("", encoding="utf-8")
+        return app
+
+    def test_absent(self, tmp_path):
+        assert configure_inputs.discover_configure_inputs(tmp_path / "nope") == frozenset()
+
+    def test_app_dir_is_a_file(self, tmp_path):
+        path = tmp_path / "app"
+        path.write_text("not a directory", encoding="utf-8")
+        assert configure_inputs.discover_configure_inputs(path) == frozenset()
+
+    def test_parent_is_a_file(self, tmp_path):
+        _parent_is_a_file(tmp_path / "outer" / "app")
+        assert configure_inputs.discover_configure_inputs(tmp_path / "outer" / "app") == frozenset()
+
+    @_skip_as_root
+    def test_permission_denied(self, tmp_path):
+        # `app_dir` ITSELF chmod 000. `Path.glob` never raised for this shape
+        # on ANY of the three interpreters (measured), so the old `except
+        # OSError` was dead here even on 3.12.3; `os.scandir` raises on all
+        # three, which is what this pins.
+        app = self._app(tmp_path)
+        with _permission_denied(app):
+            assert configure_inputs.discover_configure_inputs(app) == frozenset()
+
+    @_skip_as_root
+    def test_permission_denied_ancestor(self, tmp_path):
+        # THE mutation-proof shape (tan-cli#1132): deny `app_dir`'s PARENT.
+        # Before the fix this raised PermissionError on 3.12.3 and 3.13.15
+        # -- straight out of the `is_dir()` pre-flight, with the lazy-glob
+        # `except OSError` never reached -- and returned frozenset() on
+        # 3.14.7. Deleting the `except OSError` in
+        # `discover_configure_inputs` must red this on all three now.
+        app = self._app(tmp_path)
+        with _permission_denied(app.parent):
+            assert configure_inputs.discover_configure_inputs(app) == frozenset()
+
+    @_skip_as_root
+    def test_permission_denied_qualifier_subtree(self, tmp_path):
+        # A denied `boards/` is `unreadable`, not `absent`: it must NOT slip
+        # through the inner (FileNotFoundError, NotADirectoryError) handler
+        # and leave a half-answer behind. The whole set folds to frozenset().
+        app = self._app(tmp_path)
+        boards = app / "boards"
+        boards.mkdir()
+        (boards / "native_sim.conf").write_text("", encoding="utf-8")
+        with _permission_denied(boards):
+            assert configure_inputs.discover_configure_inputs(app) == frozenset()
+
+    def test_absent_qualifier_subtrees_are_not_a_failure(self, tmp_path):
+        # The inner handler's own mutation proof: `boards/` and `socs/` are
+        # OPTIONAL and usually absent. Removing `except (FileNotFoundError,
+        # NotADirectoryError)` sends their FileNotFoundError to the outer
+        # `except OSError`, which reds this by answering frozenset() instead.
+        app = self._app(tmp_path)
+        assert configure_inputs.discover_configure_inputs(app) == frozenset({"prj.conf"})
+
+    def test_a_qualifier_subtree_that_is_a_file_is_not_a_failure_either(self, tmp_path):
+        # `Path.glob("boards/**/*.conf")` matched nothing for a `boards`
+        # that is a regular file, without raising; `os.scandir` raises
+        # NotADirectoryError for it, which is why that name is in the inner
+        # handler alongside FileNotFoundError.
+        app = self._app(tmp_path)
+        (app / "boards").write_text("not a directory", encoding="utf-8")
+        assert configure_inputs.discover_configure_inputs(app) == frozenset({"prj.conf"})
+
+    def test_symlink_loop_skips_only_that_entry(self, tmp_path):
+        # Behaviour preserved across the primitive swap: `Path.is_file()`
+        # answers False for an ELOOP symlink, but `os.DirEntry.is_file()`
+        # RAISES OSError for it on all three interpreters (measured). The
+        # walk uses `shapes.is_file`, so one bad entry costs one entry, not
+        # the whole set -- exactly what the `glob` version did.
+        app = self._app(tmp_path)
+        _symlink_loop(app / "loop.conf")
+        assert configure_inputs.discover_configure_inputs(app) == frozenset({"prj.conf"})
+
+    def test_nested_qualifier_fragments_still_resolve(self, tmp_path):
+        # `boards/**/*.conf` matched zero-or-more directories, so both a file
+        # directly in `boards/` and one nested below it counted. Pinned here
+        # because the `os.scandir` walk reproduces that by hand.
+        app = self._app(tmp_path)
+        (app / "boards" / "deep").mkdir(parents=True)
+        (app / "boards" / "flat.conf").write_text("", encoding="utf-8")
+        (app / "boards" / "deep" / "nested.overlay").write_text("", encoding="utf-8")
+        (app / "socs").mkdir()
+        (app / "socs" / "posix.conf").write_text("", encoding="utf-8")
+        assert configure_inputs.discover_configure_inputs(app) == frozenset({
+            "prj.conf", "boards/flat.conf", "boards/deep/nested.overlay",
+            "socs/posix.conf",
+        })
+
+    def test_a_directory_named_like_a_fragment_is_not_a_fragment(self, tmp_path):
+        # The old code's `path.is_file()` filter, preserved.
+        app = self._app(tmp_path)
+        (app / "notafile.conf").mkdir()
+        assert configure_inputs.discover_configure_inputs(app) == frozenset({"prj.conf"})
+
+    def test_uppercase_suffix_matches_only_on_windows(self, tmp_path, monkeypatch):
+        # tan-cli#1127 review round 2's casing question, asked end-to-end of
+        # this function: `Path.glob("*.conf")` enumerated a `Prj.CONF` on
+        # Windows before the swap, and must still.
+        app = self._app(tmp_path)
+        (app / "Extra.CONF").write_text("", encoding="utf-8")
+        monkeypatch.setattr(shapes, "os", _OsWithName("posix"))
+        assert configure_inputs.discover_configure_inputs(app) == frozenset({"prj.conf"})
+        monkeypatch.setattr(shapes, "os", _OsWithName("nt"))
+        assert configure_inputs.discover_configure_inputs(app) == frozenset(
+            {"prj.conf", "Extra.CONF"})
+
+
+@_covers("analyze._resolve_table")
+class TestResolveTable:
+    """Contract: `None` when the backend's table directory is missing,
+    unreadable or not a directory, and when no table in it covers the
+    variant -- never a raise, because every one of those is the caller's
+    `undetermined`."""
+
+    _BACKEND = "ethos_u"
+    _VARIANT = "u55"
+
+    def _table_dir(self, metadata_root: Path) -> Path:
+        return metadata_root / "npu_ops" / self._BACKEND
+
+    def _seeded(self, tmp_path: Path) -> Path:
+        metadata_root = tmp_path / "metadata"
+        table_dir = self._table_dir(metadata_root)
+        table_dir.mkdir(parents=True)
+        (table_dir / "u55@vela-4.1.0.json").write_text(
+            '{"applies_to": {"variant": "u55"}, "supported_ops": ["CONV_2D"]}',
+            encoding="utf-8")
+        return metadata_root
+
+    def _resolve(self, metadata_root: Path):
+        return analyze._resolve_table(metadata_root, self._BACKEND, self._VARIANT)
+
+    def test_the_fixture_itself_resolves(self, tmp_path):
+        # Without this, every "is None" below would pass for a fixture that
+        # never had a resolvable table in the first place.
+        metadata_root = self._seeded(tmp_path)
+        resolved = self._resolve(metadata_root)
+        assert resolved is not None
+        assert resolved[0].name == "u55@vela-4.1.0.json"
+
+    def test_absent(self, tmp_path):
+        assert self._resolve(tmp_path / "metadata") is None
+
+    def test_table_dir_is_a_file(self, tmp_path):
+        metadata_root = tmp_path / "metadata"
+        table_dir = self._table_dir(metadata_root)
+        table_dir.parent.mkdir(parents=True)
+        table_dir.write_text("not a directory", encoding="utf-8")
+        assert self._resolve(metadata_root) is None
+
+    def test_parent_is_a_file(self, tmp_path):
+        _parent_is_a_file(self._table_dir(tmp_path / "metadata"))
+        assert self._resolve(tmp_path / "metadata") is None
+
+    def test_empty_directory(self, tmp_path):
+        self._table_dir(tmp_path / "metadata").mkdir(parents=True)
+        assert self._resolve(tmp_path / "metadata") is None
+
+    def test_non_utf8(self, tmp_path):
+        metadata_root = self._seeded(tmp_path)
+        _non_utf8(self._table_dir(metadata_root) / "u55@vela-4.1.0.json")
+        assert self._resolve(metadata_root) is None
+
+    def test_malformed_document(self, tmp_path):
+        metadata_root = self._seeded(tmp_path)
+        _malformed(self._table_dir(metadata_root) / "u55@vela-4.1.0.json", '{"a": [1, 2')
+        assert self._resolve(metadata_root) is None
+
+    def test_directory_where_table_expected(self, tmp_path):
+        metadata_root = tmp_path / "metadata"
+        _as_directory(self._table_dir(metadata_root) / "u55@vela-4.1.0.json")
+        assert self._resolve(metadata_root) is None
+
+    def test_symlink_loop(self, tmp_path):
+        metadata_root = tmp_path / "metadata"
+        _symlink_loop(self._table_dir(metadata_root) / "u55@vela-4.1.0.json")
+        assert self._resolve(metadata_root) is None
+
+    @_skip_as_root
+    def test_permission_denied(self, tmp_path):
+        # The table directory ITSELF chmod 000.
+        metadata_root = self._seeded(tmp_path)
+        with _permission_denied(self._table_dir(metadata_root)):
+            assert self._resolve(metadata_root) is None
+
+    @_skip_as_root
+    def test_permission_denied_ancestor(self, tmp_path):
+        # THE mutation-proof shape (tan-cli#1132): deny the table directory's
+        # ANCESTOR. Before the fix this raised PermissionError on 3.12.3 and
+        # 3.13.15 out of the `is_dir()` pre-flight -- and would have raised
+        # out of the unguarded `sorted(table_dir.glob(...))` behind it on
+        # 3.12.3 anyway -- while returning None on 3.14.7. Deleting the
+        # `except OSError` in `_resolve_table` must red this on all three.
+        metadata_root = self._seeded(tmp_path)
+        with _permission_denied(self._table_dir(metadata_root).parent):
+            assert self._resolve(metadata_root) is None
+
+    def test_uppercase_json_suffix_matches_only_on_windows(self, tmp_path, monkeypatch):
+        # `table_dir.glob("*.json")` enumerated a `U55.JSON` on Windows
+        # before the `os.listdir` swap; the swap must not have narrowed it.
+        metadata_root = tmp_path / "metadata"
+        table_dir = self._table_dir(metadata_root)
+        table_dir.mkdir(parents=True)
+        (table_dir / "U55@VELA-4.1.0.JSON").write_text(
+            '{"applies_to": {"variant": "u55"}, "supported_ops": ["CONV_2D"]}',
+            encoding="utf-8")
+        monkeypatch.setattr(shapes, "os", _OsWithName("posix"))
+        assert self._resolve(metadata_root) is None
+        monkeypatch.setattr(shapes, "os", _OsWithName("nt"))
+        resolved = self._resolve(metadata_root)
+        assert resolved is not None
+        assert resolved[0].name == "U55@VELA-4.1.0.JSON"
+
 
 
 def test_every_seed_has_a_test():
