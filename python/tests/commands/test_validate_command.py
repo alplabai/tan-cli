@@ -171,9 +171,19 @@ def test_sarif_shape(tmp_path, monkeypatch):
         "endLine": 1,
         "endColumn": 1,
     }
-    assert result_entry["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == (
-        "./board.yaml"
-    )
+    artifact_location = result_entry["locations"][0]["physicalLocation"]["artifactLocation"]
+    assert artifact_location["uri"] == "./board.yaml"
+    # tan-cli#1097 review round 2: a round-1 attempt at this PR declared
+    # `uriBaseId`/`originalUriBaseIds` here so the relative reference above
+    # had a base to resolve against. That declaration turned out to be
+    # authoritatively WRONG for this exact default case (an anchoring
+    # mismatch -- see `_sarif_document`'s own docstring) and reached it
+    # through code that could crash the command on a caller-supplied
+    # `--project`; it was reverted rather than patched in place. NEITHER key
+    # is present today -- the base is left implementation-defined, same as
+    # `dev` before this PR.
+    assert "uriBaseId" not in artifact_location
+    assert "originalUriBaseIds" not in run
 
 
 def test_sarif_rules_are_deduped_by_code(tmp_path, monkeypatch):
@@ -192,6 +202,79 @@ def test_sarif_rules_are_deduped_by_code(tmp_path, monkeypatch):
     run = doc["runs"][0]
     assert len(run["results"]) == 2
     assert len(run["tool"]["driver"]["rules"]) == 1
+
+
+def test_absolute_board_yaml_uri_is_a_file_uri_but_boardyamlpath_stays_host_native(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1097's whole point, proven as a divergence rather than two
+    separate pins: driving the SAME absolute `--board-yaml` through
+    `--format json` and `--format diagnostic-v1` must produce documents that
+    DISAGREE on this field's spelling. `data.boardYamlPath` stays
+    host-native; only the two `uri` fields ([`_issue_to_diagnostic`],
+    [`_sarif_document`]) go through
+    `tan.core.uri_reference.path_to_uri_reference`. A future sweep that
+    "unifies" the two contracts would make `uri` and `boardYamlPath` agree
+    again, and this assertion is what catches that.
+
+    This test asserts `data.boardYamlPath` only -- it does NOT exercise
+    `--input`'s spawn argv. That is the non-`--offline` SPAWN path, asserted
+    separately by `test_a_valid_board_passes_without_offline`'s own
+    `command_line.endswith("--input ./board.yaml")`, and is untouched by
+    this PR by inspection: the `command_line` string is built directly from
+    `board_path` (`f"{python_binary} {script} --input {board_path}"`),
+    nowhere near `path_to_uri_reference`."""
+    monkeypatch.chdir(tmp_path)
+    board = tmp_path / "elsewhere.yaml"
+    board.write_text("som: E1M-AEN701\n", encoding="utf-8")
+
+    result_json = runner.invoke(
+        app, ["validate", "--offline", "--board-yaml", str(board), "--format", "json"]
+    )
+    assert result_json.exit_code == int(ExitCode.VALIDATION_FAILURE), result_json.output
+    envelope = json.loads(result_json.output)
+    assert envelope["data"]["boardYamlPath"] == str(board)
+
+    result_diag = runner.invoke(
+        app,
+        ["validate", "--offline", "--board-yaml", str(board), "--format", "diagnostic-v1"],
+    )
+    assert result_diag.exit_code == int(ExitCode.VALIDATION_FAILURE), result_diag.output
+    uri = json.loads(result_diag.output)["diagnostics"][0]["uri"]
+    assert uri == Path(str(board)).as_uri()
+    assert uri != envelope["data"]["boardYamlPath"]
+
+    result_sarif = runner.invoke(
+        app, ["validate", "--offline", "--board-yaml", str(board), "--format", "sarif"]
+    )
+    assert result_sarif.exit_code == int(ExitCode.VALIDATION_FAILURE), result_sarif.output
+    sarif_doc = json.loads(result_sarif.output)
+    sarif_run = sarif_doc["runs"][0]
+    sarif_location = sarif_run["results"][0]["locations"][0]["physicalLocation"][
+        "artifactLocation"
+    ]
+    assert sarif_location["uri"] == uri
+    # Neither key is emitted at all today (see `test_sarif_shape` for why);
+    # restated here for the absolute case too so both are covered.
+    assert "uriBaseId" not in sarif_location
+    assert "originalUriBaseIds" not in sarif_run
+
+
+def test_relative_board_yaml_uri_stays_the_pinned_relative_reference(tmp_path, monkeypatch):
+    """The separator-less default case both `test_diagnostic_v1_schema_
+    violation_carries_one_diagnostic` and `test_sarif_shape` already pin at
+    `"./board.yaml"` -- restated here as its own test, next to the absolute
+    case above, because tan-cli#1097's relative-vs-absolute decision (see
+    `tan.core.uri_reference.path_to_uri_reference`'s docstring) is that a
+    relative `board_path` is returned UNCHANGED, not resolved to an absolute
+    `file:` URI. `"./board.yaml"` is already a legal relative URI reference
+    per RFC 3986 SS4.2, and this is the assertion that a future change to
+    that decision would have to update deliberately."""
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "som: E1M-AEN701\n")
+    result = runner.invoke(app, ["validate", "--offline", "--format", "diagnostic-v1"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    assert json.loads(result.output)["diagnostics"][0]["uri"] == "./board.yaml"
 
 
 def test_text_and_json_formats_are_unchanged(tmp_path, monkeypatch):

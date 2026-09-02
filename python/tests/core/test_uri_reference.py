@@ -1,0 +1,288 @@
+# SPDX-License-Identifier: Apache-2.0
+"""`tan.core.uri_reference` (tan-cli#1097).
+
+This repo has NO Windows host (PR #1089/#1090's own rule, restated in
+`test_board_context.py`'s header): a Windows-spelled path exercises the
+Windows branch on Linux/mac CI identically, because
+[`path_to_uri_reference`] picks its oracle (`PureWindowsPath` vs
+`PurePosixPath`) from the STRING itself, never from `os.name`. `ntpath.isabs`
+and `PureWindowsPath(...).as_uri()`/`.is_absolute()` are all pure string
+operations -- no filesystem touch -- so they are real oracles here, not a
+simulation.
+
+`data.boardYamlPath` staying host-native (unchanged by this module) is
+asserted in `tests/commands/test_validate_command.py`'s
+`test_absolute_board_yaml_uri_is_a_file_uri_but_boardyamlpath_stays_host_
+native`, NOT here -- this file proves [`path_to_uri_reference`] in isolation
+and has no envelope of its own to assert `boardYamlPath` against.
+
+## Review round 1 -- what each test class below closes
+
+Round 1 found the first version of this module had a real regression (an
+absolute POSIX path containing a backslash was silently renamed) and a live,
+untested branch (the whole-function mutation used for the mutation-proof
+reverted too much to exercise `_WINDOWS_DRIVE_RE` on its own). The tests
+under "the classifier itself" section below mutate ONE branch/constant at a
+time for exactly that reason -- see each test's own docstring for the exact
+`git diff`-shaped mutation it is built to catch, and this module's own
+docstring for the narrative.
+
+Round 1's *second* review pass found one more control that could not fail:
+un-anchoring `_WINDOWS_DRIVE_RE` (`^[A-Za-z]:` -> `[A-Za-z]:`) left every
+test here green. The regex uses `.match()`, which already anchors at the
+string's own start regardless of `^` -- so the `^` is genuinely redundant,
+and no input distinguishes its removal under `.match()`. The load-bearing
+property is calling `.match()` rather than `.search()`; see
+`test_a_colon_later_in_a_relative_path_does_not_misclassify_it_as_windows`
+below, which mutates that call instead.
+
+This file no longer covers `root_to_base_uri` / SARIF's
+`originalUriBaseIds` -- that work was added in review round 1 and reverted
+in round 2 after the base it declared turned out not to resolve the
+reference it was attached to (see `tan.core.uri_reference`'s own module
+docstring, and `validate_cmd._sarif_document`'s, for the account).
+"""
+from __future__ import annotations
+
+import ntpath
+import posixpath
+import re
+from pathlib import PurePosixPath, PureWindowsPath
+
+from tan.core.uri_reference import _WINDOWS_DRIVE_RE, _is_windows_spelled, path_to_uri_reference
+
+# ---------------------------------------------------------------------------
+# The classifier itself, `_is_windows_spelled` -- one branch/constant at a
+# time (round 1 MAJOR 1 and MAJOR 2)
+# ---------------------------------------------------------------------------
+
+
+def test_a_leading_slash_is_posix_even_with_a_later_backslash():
+    """Round 1 MAJOR 1, the regression, reduced to the classifier alone.
+    `we\\ird.yaml` is a legal POSIX filename (backslash is not special to a
+    POSIX filesystem); a leading `/` must settle POSIX-ness before the `"\\"
+    in path` check even runs. Mutating this test's own anchor -- deleting
+    the `if path.startswith("/"): return False` early-return in
+    `_is_windows_spelled` -- reds this exact assertion (verified as part of
+    this PR's mutation-proof; see the PR description for the exact output)."""
+    assert not _is_windows_spelled("/tmp/proj/we\\ird.yaml")
+
+
+def test_a_forward_slash_spelled_drive_path_is_still_judged_windows():
+    """Round 1 MAJOR 2. `_WINDOWS_DRIVE_RE` is the classifier's ONLY signal
+    for a drive letter with no backslash anywhere in the string
+    (`"c:/w/proj/board.yaml"`) -- deleting it (mutating `_is_windows_spelled`
+    to `return "\\" in path` alone, the exact mutation round 1 measured)
+    reds this assertion where the whole-function mutation used for the
+    module-level mutation-proof could not reach it."""
+    input_path = "c:/w/proj/board.yaml"
+    assert "\\" not in input_path, "the drive-letter regex must be the ONLY signal firing here"
+    assert _is_windows_spelled(input_path)
+
+
+def test_a_colon_later_in_a_relative_path_does_not_misclassify_it_as_windows():
+    """Round 1's SECOND review pass: the earlier version of this test used
+    an ABSOLUTE (leading-`/`) input, so it was actually exercising MAJOR 1's
+    guard rather than the drive-letter regex it claimed to pin -- and, it
+    turns out, no INPUT could have exercised the regex's own anchoring in
+    isolation anyway: `_WINDOWS_DRIVE_RE.match()` already anchors at the
+    string's own start regardless of whether the pattern itself carries `^`
+    (`.match()` is inherently start-anchored; verified directly, every input
+    tried agrees between `re.compile(r"^[A-Za-z]:")` and
+    `re.compile(r"[A-Za-z]:")` under `.match()`). This property is therefore
+    DOUBLY defended -- both by `.match()`'s own anchor and by the pattern's
+    redundant `^` -- and a genuine misclassification of a mid-string colon
+    needs BOTH the anchor removed from the pattern AND the call switched to
+    `.search()` at once (see [`test_the_unanchored_search_combination_
+    would_misclassify_it`] just below for what that combination looks
+    like, kept as documentation rather than a single-mutation claim). This
+    test states the requirement directly -- "a colon later in a relative
+    path is not Windows-spelled" -- rather than chasing a mutation that
+    does not exist as a single line."""
+    assert not _is_windows_spelled("sub/board:1.yaml")
+
+
+def test_the_unanchored_search_combination_would_misclassify_it():
+    """NOT a mutation-proof of the shipped code -- `_is_windows_spelled`
+    uses `.match()` with an (redundantly) anchored pattern, and neither
+    alone produces a false positive on this input (see the test above).
+    This documents what the FAILURE would look like if a future edit
+    weakened both at once: an unanchored copy of the same pattern, searched
+    rather than matched, finds "d:" inside "board:1.yaml" -- a letter
+    immediately followed by a colon, nowhere near the string's start."""
+    unanchored = re.compile(_WINDOWS_DRIVE_RE.pattern.removeprefix("^"))
+    assert unanchored.search("sub/board:1.yaml") is not None
+
+
+# ---------------------------------------------------------------------------
+# Absolute paths become absolute `file:` URIs
+# ---------------------------------------------------------------------------
+
+
+def test_an_absolute_posix_path_becomes_a_file_uri():
+    uri = path_to_uri_reference("/w/proj/board.yaml")
+    assert uri == "file:///w/proj/board.yaml"
+    assert uri == PurePosixPath("/w/proj/board.yaml").as_uri()
+
+
+def test_an_absolute_posix_path_containing_a_backslash_keeps_its_own_name():
+    """Round 1 MAJOR 1's own reduction, end to end through
+    [`path_to_uri_reference`] rather than the classifier alone: measured
+    through the real CLI as `--board-yaml '/tmp/.../we\\ird.yaml'` rendering
+    `uri` as `.../we/ird.yaml` -- a DIFFERENT, nonexistent file, with no
+    `file:` scheme either (it fell to the relative Windows slash-swap
+    branch). Fixed: this is an ABSOLUTE POSIX path, and stays one -- percent-
+    encoded (`%5C`), not rewritten, not scheme-less."""
+    path = "/tmp/proj/we\\ird.yaml"
+    uri = path_to_uri_reference(path)
+    assert uri == "file:///tmp/proj/we%5Cird.yaml"
+    assert uri == PurePosixPath(path).as_uri()
+    assert uri.startswith("file:///")
+    assert "we/ird" not in uri, "must not silently rename the file"
+
+
+def test_an_absolute_windows_drive_path_becomes_a_file_uri():
+    """The issue's own reduction: `C:\\w\\proj\\board.yaml` must become a
+    scheme-carrying, forward-slashed, percent-encoded `file:` URI, not a
+    bare path with the backslashes swapped."""
+    uri = path_to_uri_reference(r"C:\w\proj\board.yaml")
+    assert uri == PureWindowsPath(r"C:\w\proj\board.yaml").as_uri()
+    assert uri == "file:///C:/w/proj/board.yaml"
+    assert uri.startswith("file:///")
+    # The two things the issue calls invalid in a URI reference at that
+    # position: no bare backslash, and the drive letter is followed by `/`
+    # under the `file:///C:/...` authority-less form, not a bare `:`.
+    assert "\\" not in uri
+    assert "C:/" in uri
+
+
+def test_a_forward_slash_spelled_absolute_drive_path_also_becomes_a_file_uri():
+    """The MAJOR 2 input carried all the way to an absolute result --
+    `"c:/w/proj/board.yaml"` is Windows-spelled (drive letter, no backslash
+    anywhere) AND absolute, so it must reach the SAME `file:` URI a
+    backslash-spelled equivalent does, not the relative slash-swap branch."""
+    uri = path_to_uri_reference("c:/w/proj/board.yaml")
+    assert uri == "file:///c:/w/proj/board.yaml"
+    assert uri == PureWindowsPath("c:/w/proj/board.yaml").as_uri()
+
+
+def test_a_pre_1090_mixed_separator_windows_path_still_becomes_a_file_uri():
+    """Pre-#1090 the field could render the MIXED `C:\\w\\proj/board.yaml`
+    (backslash root, forward-slash join) -- also invalid, for the same
+    reason. `ntpath.isabs`/`PureWindowsPath` treat a mixed-separator string
+    the same as a pure one, so the fix covers this shape too without a
+    special case."""
+    mixed = "C:\\w\\proj/board.yaml"
+    uri = path_to_uri_reference(mixed)
+    assert uri == PureWindowsPath(mixed).as_uri()
+    assert uri.startswith("file:///")
+
+
+def test_a_windows_unc_path_becomes_a_file_uri():
+    uri = path_to_uri_reference(r"\\server\share\board.yaml")
+    assert uri == PureWindowsPath(r"\\server\share\board.yaml").as_uri()
+    assert ntpath.isabs(r"\\server\share\board.yaml")
+
+
+def test_a_forward_slash_only_absolute_root_is_judged_posix_not_windows():
+    """No backslash and no drive letter -- `_is_windows_spelled` must read
+    this as POSIX. This also documents WHY the gate is `.is_absolute()` and
+    not `ntpath.isabs`: `ntpath.isabs("/w/proj/board.yaml")` is `True`
+    ("absolute on the current drive"), but `PureWindowsPath(...)
+    .is_absolute()` is `False` (pathlib requires a drive too), and calling
+    `.as_uri()` after trusting `ntpath.isabs` alone raises."""
+    uri = path_to_uri_reference("/w/proj/board.yaml")
+    assert uri == PurePosixPath("/w/proj/board.yaml").as_uri()
+    assert ntpath.isabs("/w/proj/board.yaml")
+    assert not PureWindowsPath("/w/proj/board.yaml").is_absolute()
+
+
+def test_a_windows_rooted_but_driveless_path_does_not_raise_and_stays_slash_swapped():
+    """`ntpath.isabs(r"\\proj\\x")` is `True` -- "absolute on the current
+    drive" -- but there is no drive to resolve it against, and
+    `PureWindowsPath(...).as_uri()` refuses it (`is_absolute()` requires
+    drive AND root). Gating on `.is_absolute()` routes this to the
+    backslash-swap branch instead of crashing; the result is a legal
+    relative-ref (RFC 3986's `path-absolute` form: leading `/`, no scheme),
+    not a claim about which drive it is rooted on."""
+    path = "\\proj\\board.yaml"
+    assert ntpath.isabs(path)
+    assert not PureWindowsPath(path).is_absolute()
+    assert path_to_uri_reference(path) == "/proj/board.yaml"
+
+
+def test_a_relative_windows_spelled_path_gets_its_backslashes_swapped_for_slashes():
+    """`resolve_board_path("sub\\p", None)`'s exact shape
+    (`test_a_relative_windows_root_joins_with_a_backslash_too`,
+    `test_board_context.py`). A raw backslash is not a legal URI-reference
+    character at all (RFC 3986's `pchar` excludes it unencoded), so this
+    case is NOT "returned unchanged" like the POSIX relative case below --
+    it is made valid by swapping separators, which changes no Windows
+    filesystem meaning (Windows accepts `/` as an equally valid separator)."""
+    assert path_to_uri_reference("sub\\p\\board.yaml") == "sub/p/board.yaml"
+
+
+# ---------------------------------------------------------------------------
+# Relative paths stay relative -- this function's documented decision
+# ---------------------------------------------------------------------------
+
+
+def test_the_resolvers_own_relative_default_is_returned_unchanged():
+    """`resolve_board_path(None, None)` -- `tan validate`'s own default --
+    always answers `"./board.yaml"`. The pinned golden
+    (`test_validate_command.py`, `contract/envelopes/`) expects this EXACT
+    string back, not an absolute `file:` URI."""
+    assert path_to_uri_reference("./board.yaml") == "./board.yaml"
+
+
+def test_a_relative_posix_path_stays_unchanged():
+    assert not posixpath.isabs("sub/p/board.yaml")
+    assert path_to_uri_reference("sub/p/board.yaml") == "sub/p/board.yaml"
+
+
+def test_as_uri_itself_would_raise_on_a_relative_path_which_is_why_this_function_exists():
+    """Documents the constraint [`path_to_uri_reference`]'s docstring
+    states: `PurePath.as_uri()` only accepts an absolute path, so this
+    function cannot simply delegate to it unconditionally."""
+    try:
+        PurePosixPath("./board.yaml").as_uri()
+    except ValueError as err:
+        assert "relative path" in str(err)
+    else:  # pragma: no cover - documents the guard, does not exercise it
+        raise AssertionError("expected pathlib to refuse a relative as_uri()")
+
+
+# ---------------------------------------------------------------------------
+# Percent-encoding on the relative branches (round 1 minor)
+# ---------------------------------------------------------------------------
+
+
+def test_a_relative_posix_path_with_a_space_is_percent_encoded():
+    """A raw space is not a legal URI-reference character. Measured
+    pre-fix: `--board-yaml 'my board.yaml'` rendered `uri` as
+    `./my board.yaml`, unencoded."""
+    assert path_to_uri_reference("./my board.yaml") == "./my%20board.yaml"
+
+
+def test_a_relative_posix_path_with_a_hash_is_percent_encoded():
+    """`#` is the URI fragment delimiter, not cosmetic: an unencoded `#` in
+    `./board#1.yaml` parses as path `./board` plus fragment `1.yaml`, not
+    one filename. Measured pre-fix: emitted unencoded."""
+    assert path_to_uri_reference("./board#1.yaml") == "./board%231.yaml"
+
+
+def test_percent_encoding_does_not_touch_the_separator():
+    """`quote(..., safe="/")` -- the separator itself must survive, or every
+    relative path collapses to one percent-encoded segment."""
+    assert path_to_uri_reference("sub/dir/board.yaml") == "sub/dir/board.yaml"
+
+
+def test_a_relative_windows_spelled_path_with_a_space_is_percent_encoded_too():
+    assert path_to_uri_reference("sub\\my dir\\board.yaml") == "sub/my%20dir/board.yaml"
+
+
+def test_the_separator_less_golden_is_unaffected_by_percent_encoding():
+    """`"./board.yaml"` contains no character `quote` touches -- the pinned
+    golden this PR must not move stays byte-identical through the new
+    encoding step, not merely through the old unconditional passthrough."""
+    assert path_to_uri_reference("./board.yaml") == "./board.yaml"
