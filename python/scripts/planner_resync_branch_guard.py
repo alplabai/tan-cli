@@ -116,6 +116,34 @@ landing on `origin/<branch>` in that window is invisible to a bare `git push
 push --force-with-lease="${branch}":"${observed_tip}"` (the documented way to
 require "still exactly this sha", or "still does not exist" for an empty
 value) instead of `-f`.
+
+`--check-branch BRANCH` (tan-cli#1119) is a SEPARATE mode that answers a
+different question -- "does BRANCH carry a commit the automation did not
+write, RIGHT NOW" -- for a caller that is not choosing a force-push target
+at all (`planner-resync.yml`'s "Close superseded planner-resync proposals"
+step, deciding per open PR whether its head branch is safe to close). It
+does not force-push anything and writes no `$GITHUB_OUTPUT` keys of its own.
+Exit codes in this mode: 0 = not occupied (safe to close -- whether the
+branch does not exist at all, or exists and is genuinely clean; see
+`BranchOccupancy` for why a caller that cares can still tell the two apart),
+1 = occupied (protected; must not be closed), 2 = refused -- a `git`
+failure this guard could not interpret, OR argparse's own `ap.error` for a
+bad invocation (both exit via `SystemExit`/`return` with code 2; a caller
+consuming this exit code must treat BOTH as "could not determine", not
+assume 2 always means the former). Any exit code OTHER than 0 or 1 --
+including one this module never deliberately produces, like a Python
+interpreter crash or an OOM kill (137) -- must be treated by a caller the
+same way: refused, not "assume clean". `--check-branch` is deliberately NOT
+served by `--branch`/`decide_branch`: that function only
+ever evaluates candidates ITS OWN cascade generates in THIS invocation
+(`primary_branch`, `<primary_branch>-<divert_suffix>`, `-2`, ...) -- a
+PREVIOUS run's diverted branch name is never one of those candidates, so a
+caller that only consulted a `decide_branch` result (or, worse, a snapshot
+of one computed earlier in the same run) can neither see a human's takeover
+of that older name nor react to one that happens after the snapshot was
+taken. Asking `--check-branch` fresh, immediately before the destructive
+action, answers both: it is not limited to a fixed candidate set, and there
+is no snapshot to go stale.
 """
 
 from __future__ import annotations
@@ -415,6 +443,79 @@ def decide_branch(
         )
 
 
+@dataclass(frozen=True)
+class BranchOccupancy:
+    """What `branch_currently_occupied` observed about ONE branch.
+
+    tan-cli#1119 review (minor): `existed` and `foreign` are reported
+    separately on purpose. "The branch does not exist on `origin` at all"
+    and "the branch exists and carries no commit outside the automation
+    identity" are the SAME safe answer for `decide_branch`'s question ("is
+    this candidate name safe to force-push to") -- a name nobody has ever
+    used is exactly as safe as one that is genuinely clean. They are not the
+    same OBSERVATION for the close decision `branch_currently_occupied`
+    exists for, though: one means "I looked, and there is nothing there";
+    the other means "I looked, and it is clean". Collapsing both into a
+    single `None` (as an earlier version of this function did) left an
+    operator reading the close step's log after a PR closed with no way to
+    tell which happened. `occupied` is the one question most callers
+    actually need to branch on.
+    """
+
+    existed: bool
+    foreign: ForeignCommit | None
+
+    @property
+    def occupied(self) -> bool:
+        return self.foreign is not None
+
+
+def branch_currently_occupied(
+    root: pathlib.Path,
+    base_ref: str,
+    branch: str,
+    automation_name: str,
+    automation_email: str,
+) -> BranchOccupancy:
+    """Ask this guard's own authorship test about an ARBITRARY existing
+    branch (e.g. an open PR's head), right now, rather than trusting a list
+    built earlier in the run.
+
+    tan-cli#1119: `decide_branch` only ever answers for the handful of
+    candidate names IT tries THIS run (`primary_branch`, then
+    `<primary_branch>-<divert_suffix>`, then `-2`, ...) -- a PREVIOUS run's
+    diverted branch name is never one of those candidates, so a human who
+    adopts THAT branch (pushes a commit onto it between runs) is invisible
+    to a caller that only consults `decide_branch`'s own `occupied` list.
+    This function instead re-runs the identical `_foreign_commits` check
+    against `branch` directly, at the moment it is called -- the same
+    question `decide_branch` asks of each candidate it tries, just asked of
+    a caller-supplied name instead of a name this module generated itself.
+    Calling it immediately before a destructive action (rather than
+    consulting a snapshot computed earlier in the run) also closes the
+    TOCTOU window a snapshot leaves open: a branch adopted in the interval
+    between an earlier snapshot and the destructive action is caught here,
+    because there is no snapshot to go stale.
+
+    Returns a `BranchOccupancy` -- `existed=False` if `branch` does not
+    exist on `origin` at all (nothing to protect), `existed=True,
+    foreign=None` if it exists and carries no commit outside the
+    automation's own identity (genuinely clean), or `existed=True,
+    foreign=<commit>` if it carries one. `.occupied` mirrors exactly what
+    `decide_branch` treats as "safe to force-push to" for a candidate it
+    tries itself (`not occupied` in both of the first two cases) while still
+    letting a caller that cares -- like `--check-branch`'s own log line --
+    tell the two apart.
+    """
+    if not _remote_branch_exists(root, branch):
+        return BranchOccupancy(existed=False, foreign=None)
+    tracking_ref = _fetch_branch_tip(root, branch)
+    foreign = _foreign_commits(
+        root, base_ref, tracking_ref, automation_name, automation_email
+    )
+    return BranchOccupancy(existed=True, foreign=foreign[0] if foreign else None)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Refuse to force-push auto/planner-resync over a "
@@ -425,15 +526,88 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--branch", default="auto/planner-resync")
     ap.add_argument(
         "--divert-suffix",
-        required=True,
+        default=None,
         help="short alp-sdk sha used to name a diverted branch when "
-        "--branch carries non-automation commits",
+        "--branch carries non-automation commits -- required unless "
+        "--check-branch is given",
     )
     ap.add_argument("--automation-name", default="alp-sdk planner re-sync")
     ap.add_argument("--automation-email", default="noreply@alplab.ai")
+    # tan-cli#1119: a second, independent mode -- ask whether ONE existing
+    # branch (an open PR's head, say) carries a foreign commit RIGHT NOW,
+    # rather than picking a branch to force-push to. See
+    # `branch_currently_occupied`'s docstring for why this must be a live
+    # per-branch question, not a snapshot `decide_branch` built earlier in
+    # the run: `decide_branch`'s own candidate walk never tries a PREVIOUS
+    # run's diverted name, so a caller that only ever consulted that walk's
+    # `occupied` list would miss a human who adopted such a branch, and
+    # would also be reading a stale snapshot rather than the live truth by
+    # the time a caller acts on it (the TOCTOU window).
+    ap.add_argument(
+        "--check-branch",
+        default=None,
+        metavar="BRANCH",
+        help="instead of deciding where to force-push, report (via exit "
+        "code) whether BRANCH currently carries a commit the automation "
+        "did not write; does not force-push or write force-push-related "
+        "$GITHUB_OUTPUT keys",
+    )
     args = ap.parse_args(argv)
 
     root = args.repo_root.resolve()
+
+    if args.check_branch is not None:
+        try:
+            occupancy = branch_currently_occupied(
+                root,
+                args.base_ref,
+                args.check_branch,
+                args.automation_name,
+                args.automation_email,
+            )
+        except BranchGuardError as exc:
+            sys.stderr.write(f"planner_resync_branch_guard: REFUSED: {exc}\n")
+            return 2
+        commit = occupancy.foreign
+        if commit is not None:
+            identity = f"{commit.author_name} <{commit.author_email}>"
+            if (commit.author_name, commit.author_email) != (
+                commit.committer_name,
+                commit.committer_email,
+            ):
+                identity += (
+                    f", committed by {commit.committer_name} "
+                    f"<{commit.committer_email}>"
+                )
+            sys.stdout.write(
+                f"planner_resync_branch_guard: {args.check_branch!r} "
+                f"carries {commit.sha[:8]} ({commit.subject!r}, by "
+                f"{identity}), which the automation did not write -- "
+                f"occupied.\n"
+            )
+            return 1
+        # tan-cli#1119 review (minor): "never existed" and "exists and is
+        # clean" are the same SAFE answer (`occupied` is False either way)
+        # but not the same OBSERVATION -- see `BranchOccupancy`'s own
+        # docstring. Reported distinctly so an operator reading this log
+        # after a close can tell which happened.
+        if occupancy.existed:
+            sys.stdout.write(
+                f"planner_resync_branch_guard: {args.check_branch!r} exists "
+                f"and carries no commit outside the automation identity -- "
+                f"clean, not occupied.\n"
+            )
+        else:
+            sys.stdout.write(
+                f"planner_resync_branch_guard: {args.check_branch!r} does "
+                f"not exist on origin -- nothing to protect, not "
+                f"occupied.\n"
+            )
+        return 0
+
+    if args.divert_suffix is None:
+        ap.error("--divert-suffix is required unless --check-branch is given")
+
     try:
         decision = decide_branch(
             root,
@@ -468,16 +642,37 @@ def main(argv: list[str] | None = None) -> int:
             # reads $GITHUB_OUTPUT with plain `grep`/`cut` (no `jq` in this
             # step), same convention as every other key here.
             fh.write(f"occupied_count={len(decision.occupied)}\n")
-            # tan-cli#1109 review round 2 (major): a SEPARATE consumer
-            # (`planner-resync.yml`'s "Close superseded planner-resync
-            # proposals" step) needs the full occupied set as a group -- to
-            # exclude every one of them from what it closes, not to name any
-            # one of them -- and reading N numbered keys back out means that
-            # caller has to know N ahead of time, which it does not (`gh pr
-            # list` finds it, not this guard). A single space-separated list
-            # is safe here specifically: `occupied_{i}_branch` values are git
-            # ref names, which cannot contain a space, so splitting on
-            # whitespace never misparses one. Written UNCONDITIONALLY, empty
+            # tan-cli#1109 review round 2 (major): originally added for a
+            # SEPARATE consumer (`planner-resync.yml`'s "Close superseded
+            # planner-resync proposals" step) that needed the full occupied
+            # set as a group -- to exclude every one of them from what it
+            # closes, not to name any one of them -- and reading N numbered
+            # keys back out would have meant that caller had to know N ahead
+            # of time, which it did not (`gh pr list` finds it, not this
+            # guard). A single space-separated list is safe here
+            # specifically: `occupied_{i}_branch` values are git ref names,
+            # which cannot contain a space, so splitting on whitespace never
+            # misparses one.
+            #
+            # tan-cli#1119 review round 3 (nit): that consumer is GONE -- the
+            # close step now asks `--check-branch` live, per candidate,
+            # instead of consuming a snapshot, so no workflow step reads
+            # this key any more (`grep -rn occupied_branches
+            # .github/workflows/` finds only the explanatory comment on the
+            # close step, not a read). Kept anyway, deliberately, for two
+            # reasons rather than dropped as dead machinery: (1) it is a
+            # slice of the SAME `decision.occupied` data `occupied_count`/
+            # `occupied_{i}_*` below still serve to the PR body's credit
+            # loop, so keeping it costs nothing beyond one `fh.write` call,
+            # not a parallel code path that could itself drift; and (2) it
+            # is deliberately exercised as EVIDENCE by
+            # `test_close_step_catches_a_branch_adopted_in_the_toctou_window`
+            # (`test_planner_resync_pr_step_executes.py`), which asserts
+            # this key comes back genuinely empty after a real, non-diverted
+            # guard-step run -- i.e. proof of exactly what a pre-tan-cli#1119
+            # close step would have (correctly, for that moment) trusted,
+            # before the close step's own live check is shown to catch what
+            # that trust would have missed. Written UNCONDITIONALLY, empty
             # when there is nothing occupied -- same shape as `observed_tip`/
             # `occupied_count` already use, not a key a reader has to guard
             # for absence.

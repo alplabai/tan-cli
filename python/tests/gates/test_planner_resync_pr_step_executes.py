@@ -251,13 +251,20 @@ def _push_foreign_commit_on(bare: pathlib.Path, branch: str, tmp_path: pathlib.P
     return sha
 
 
-#: Must match `planner-resync.yml`'s own `AUTOMATION_NAME`/`AUTOMATION_EMAIL`
-#: (the step's `git config user.name`/`user.email`, which is also what it
-#: passes `planner_resync_branch_guard.py --automation-name`/
-#: `--automation-email`) -- a prior run's own commit, for the refresh shape
-#: below.
-_AUTOMATION_NAME = "alp-sdk planner re-sync"
-_AUTOMATION_EMAIL = "noreply@alplab.ai"
+#: tan-cli#1119 review round 3 (nit): read straight out of the real
+#: `jobs.propose.env` block (`_workflow()`, already defined above) instead
+#: of a hand-copied literal -- a copy here could disagree with the workflow
+#: without the workflow ever disagreeing with ITSELF, which is exactly the
+#: kind of drift `AUTOMATION_NAME`/`AUTOMATION_EMAIL` being hoisted to
+#: job-level `env:` (this same PR) was supposed to make impossible. This is
+#: the last copy; every other reader in this module (`git config
+#: user.name`/`user.email`, `planner_resync_branch_guard.py
+#: --automation-name`/`--automation-email`) already gets it from these two
+#: constants, and this makes THEM trace back to the workflow file itself
+#: rather than to a second literal living beside it.
+_JOB_ENV = _workflow()["jobs"]["propose"]["env"]
+_AUTOMATION_NAME = _JOB_ENV["AUTOMATION_NAME"]
+_AUTOMATION_EMAIL = _JOB_ENV["AUTOMATION_EMAIL"]
 
 
 def _push_automation_commit_on(bare: pathlib.Path, branch: str, tmp_path: pathlib.Path) -> str:
@@ -355,6 +362,14 @@ def _run_step(
     env["RC"] = rc
     env["GATE_VERDICT"] = "PASS"
     env["GH_TOKEN"] = "fake-token"
+    # tan-cli#1119 review (minor): `AUTOMATION_NAME`/`AUTOMATION_EMAIL` moved
+    # to job-level `env:` in the real workflow -- this step's `run:` text no
+    # longer sets them as local literals, it reads them from the
+    # environment. A real GHA job would supply them from the job's own
+    # `env:` block; this harness must too, or `set -u` kills the step on an
+    # unbound variable.
+    env["AUTOMATION_NAME"] = _AUTOMATION_NAME
+    env["AUTOMATION_EMAIL"] = _AUTOMATION_EMAIL
     # tan-cli#1109: the step now re-fetches `origin/dev` for itself and
     # compares to `DEV_SHA` (`steps.devtip.outputs.sha` on the real runner)
     # before doing anything else -- default to the workspace's OWN current
@@ -845,71 +860,141 @@ def _close_step_run() -> str:
 
 
 def _run_close_step(
+    workspace: pathlib.Path,
     tmp_path: pathlib.Path,
     gh_script: str,
     *,
     keep_branch: str,
     keep_url: str,
     pr_list_fixture: str = "[]",
-    occupied_branches: str = "",
     no_jq: bool = False,
+    no_python: bool = False,
+    check_branch_exit_code: int | None = None,
 ) -> tuple[subprocess.CompletedProcess[bytes], pathlib.Path]:
+    """Run the close step's real `run:` body against a real `gh` stub AND
+    (tan-cli#1119) a real `workspace` checkout -- the step now shells out to
+    `planner_resync_branch_guard.py --check-branch` per candidate, live
+    `git ls-remote`/`git log` and all, so it needs the same real bare
+    `origin` + working clone the PR-step tests already build (`workspace`
+    fixture), not just a `gh` stub. Runs with `workspace` as cwd and
+    `GITHUB_WORKSPACE` pointed at it, matching what the real step sees
+    (`actions/checkout`'s default target directory).
+
+    `check_branch_exit_code`, when given, replaces the `python` stub with
+    one that ignores its arguments and exits with that code unconditionally
+    -- tan-cli#1119 review (major 1): the ONLY way to drive the close step's
+    own `check_rc` handling through every code the real
+    `planner_resync_branch_guard.py --check-branch` invocation can produce
+    (0, 1, 2, or a subprocess failure like 127/137) without needing a
+    different real git shape for each one."""
     bindir = tmp_path / "close-bin"
     bindir.mkdir()
     gh_stub = bindir / "gh"
     gh_stub.write_text(gh_script, encoding="utf-8")
     gh_stub.chmod(0o755)
+    # tan-cli#1119: the step now runs `python python/scripts/...
+    # --check-branch` itself -- same reasoning as `fake_bin`'s own python
+    # stub above (a plain `python` on PATH might not be the interpreter this
+    # test suite is running under).
+    if no_python:
+        python_stub = None
+    elif check_branch_exit_code is not None:
+        python_stub = bindir / "python"
+        python_stub.write_text(
+            "#!/usr/bin/env bash\n"
+            f"echo 'stub python: forcing --check-branch to exit "
+            f"{check_branch_exit_code}' >&2\n"
+            f"exit {check_branch_exit_code}\n",
+            encoding="utf-8",
+        )
+        python_stub.chmod(0o755)
+    else:
+        python_stub = bindir / "python"
+        python_stub.write_text(
+            f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n', encoding="utf-8"
+        )
+        python_stub.chmod(0o755)
+    # tan-cli#1109 review round 3 / tan-cli#1119 review (blocker): `no_jq`
+    # restricts PATH to `bindir` alone so `command -v jq` genuinely finds
+    # nothing -- but `bindir` must still carry a REAL `jq` in that case
+    # (copied in below) whenever the test is not ALSO exercising
+    # `no_python`, or the step would die at the `jq` check before ever
+    # reaching the `python` one this test wants to isolate. Symmetric for
+    # `no_python`: PATH-restricted, but `jq` still present unless `no_jq`
+    # too.
+    if no_jq:
+        jq_stub = None
+    else:
+        real_jq = shutil.which("jq")
+        if real_jq is not None:
+            jq_stub = bindir / "jq"
+            jq_stub.write_text(f'#!/usr/bin/env bash\nexec "{real_jq}" "$@"\n', encoding="utf-8")
+            jq_stub.chmod(0o755)
+        else:
+            jq_stub = None
     call_log = tmp_path / "gh_calls.log"
     call_log.write_text("", encoding="utf-8")
     fixture = tmp_path / "pr_list_fixture.json"
     fixture.write_text(pr_list_fixture, encoding="utf-8")
 
     env = dict(os.environ)
-    # tan-cli#1109 review round 3: `no_jq` replaces PATH outright (not
-    # prepends to it) with a dir holding only the fake `gh` -- `jq` lives
-    # under the real PATH this process inherited, so prepending would
-    # leave it reachable. `printf`/`command` are shell builtins, so the
-    # step's own presence check (`command -v jq`) still runs; only `jq`
-    # itself becomes genuinely absent.
-    env["PATH"] = str(bindir) if no_jq else f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+    # `no_jq`/`no_python` both restrict PATH to `bindir` ALONE (not prepend
+    # to the real PATH) so the missing tool is genuinely missing -- `jq`/
+    # `python` live under the real PATH this process inherited, so
+    # prepending would leave them reachable regardless. `printf`/`command`
+    # are shell builtins, so the step's own presence checks (`command -v
+    # jq`, `command -v python`) still run either way.
+    env["PATH"] = (
+        str(bindir)
+        if (no_jq or no_python)
+        else f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+    )
     env["GH_TOKEN"] = "fake-token"
     env["GITHUB_REPOSITORY"] = "example/tan-cli"
+    env["GITHUB_WORKSPACE"] = str(workspace)
     env["KEEP_BRANCH"] = keep_branch
     env["KEEP_URL"] = keep_url
     env["GH_CALL_LOG"] = str(call_log)
     env["GH_PR_LIST_FIXTURE"] = str(fixture)
-    # tan-cli#1109 review round 2: `steps.pr.outputs.occupied_branches` --
-    # the branch-clobber guard's own space-separated list of everything it
-    # found occupied THIS run, which the close step now excludes.
-    env["OCCUPIED_BRANCHES"] = occupied_branches
+    # tan-cli#1119 review (minor): job-level `env:` in the real workflow --
+    # see `_run_step`'s own copy of this comment.
+    env["AUTOMATION_NAME"] = _AUTOMATION_NAME
+    env["AUTOMATION_EMAIL"] = _AUTOMATION_EMAIL
 
-    # tan-cli#1109 review round 3: `no_jq`'s restricted PATH (bindir only,
-    # so `command -v jq` genuinely finds nothing) would also hide `bash`
+    # tan-cli#1109 review round 3 / tan-cli#1119 review (blocker): `no_jq`'s
+    # (and `no_python`'s) restricted PATH (bindir only, so `command -v jq`/
+    # `command -v python` genuinely find nothing) would also hide `bash`
     # itself if bash were looked up BY NAME through that same PATH --
-    # `jq` and `bash` live in the same directory on this box
-    # (`/usr/bin`), so excluding jq's directory would exclude bash's too.
-    # Resolved to its absolute path from the UNRESTRICTED, real
+    # `jq`/`python` and `bash` live in the same directory on this box
+    # (`/usr/bin`), so excluding jq's/python's directory would exclude
+    # bash's too. Resolved to its absolute path from the UNRESTRICTED, real
     # environment before `env` is built, so launching bash itself never
     # needs a PATH lookup at all -- only what runs INSIDE the script (the
-    # step's own `command -v jq` check) is affected by `no_jq`.
+    # step's own `command -v jq`/`command -v python` checks) is affected.
     bash_exe = shutil.which("bash") or "/bin/bash"
 
     proc = subprocess.run(
-        [bash_exe, "-x", "-c", _close_step_run()], env=env, capture_output=True
+        [bash_exe, "-x", "-c", _close_step_run()],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
     )
     return proc, call_log
 
 
 #: tan-cli#1109 review round 2: the close step's `gh pr list` call itself no
-#: longer carries a `--jq` -- the filtering (author/cross-repo/self/occupied)
-#: moved to a SEPARATE local `jq -r --argjson occupied ...` invocation over
-#: the raw `--json` output, so the exclusion can embed the occupied-branch
-#: set. This fake's "pr list" case therefore just returns the fixture
-#: VERBATIM (`cat`), matching what a real `gh pr list --json ...` (no `--jq`)
-#: returns -- the step's own subsequent `jq` calls are the REAL system `jq`
-#: binary either way, so the actual filter expression (prefix, self,
-#: author, cross-repo, occupied-exclusion) is exercised character-for-
-#: character regardless of which `gh` answered the raw listing.
+#: longer carries a `--jq` -- the filtering (prefix/self/author/cross-repo)
+#: moved to a SEPARATE local `jq -r ... | @tsv` invocation over the raw
+#: `--json` output. This fake's "pr list" case therefore just returns the
+#: fixture VERBATIM (`cat`), matching what a real `gh pr list --json ...`
+#: (no `--jq`) returns -- the step's own subsequent `jq` call is the REAL
+#: system `jq` binary either way, so the actual filter expression (prefix,
+#: self, author, cross-repo) is exercised character-for-character regardless
+#: of which `gh` answered the raw listing. tan-cli#1119: the occupied-branch
+#: exclusion is no longer part of that `jq` filter at all -- it is now a
+#: live `planner_resync_branch_guard.py --check-branch` call per surviving
+#: candidate, asked against the REAL git state in `workspace` (not a value
+#: this fake `gh` or the fixture below can answer).
 _FAKE_GH_RAW_JSON = """#!/usr/bin/env bash
 case "$1 $2" in
   "pr list") cat "$GH_PR_LIST_FIXTURE" ;;
@@ -935,12 +1020,14 @@ esac
 #:     authored (opened by `app/github-actions`), on the PRIMARY branch
 #:     `auto/planner-resync`, but a HUMAN later pushed a hand-port commit
 #:     onto that same branch -- which is exactly what makes the guard divert
-#:     and is exactly why this PR must be EXCLUDED (via `occupied_branches`)
-#:     even though it passes the author/cross-repo checks on its own. This
-#:     is real PR #1103's own measured field values, not a fixture invented
-#:     for the test.
+#:     and is exactly why this PR must be EXCLUDED (the test that uses this
+#:     fixture pushes that hand-port commit for real, onto `workspace`'s
+#:     origin, so the live `--check-branch` call this step now makes finds
+#:     it) even though it passes the author/cross-repo checks on its own.
+#:     This is real PR #1103's own measured field values, not a fixture
+#:     invented for the test.
 #:   * #1106/#1107 -- bot-authored, same-repo, diverted proposals on
-#:     branches the guard did NOT report occupied this run: MUST close.
+#:     branches that carry no foreign commit right now: MUST close.
 #:   * #2001 -- a HUMAN'S PR on a branch that also happens to start with
 #:     `auto/planner-resync` (the literal #1002/#996 "hand-port work parked
 #:     on this branch name" shape): MUST NOT close.
@@ -973,43 +1060,55 @@ _PR_LIST_FIXTURE_MIXED = """[
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
 def test_close_step_closes_bot_prs_but_never_a_human_cross_repo_or_occupied_one(
-    tmp_path: pathlib.Path,
+    workspace: pathlib.Path, tmp_path: pathlib.Path
 ):
-    """tan-cli#1109 fault 3 + review rounds 1 and 2: once one proposal is
-    open/refreshed, every OTHER open, BOT-AUTHORED, same-repo, NOT-OCCUPIED
-    PR whose head starts with `auto/planner-resync` is superseded and closed
-    (#1106/#1107 -- the literal shape of tonight's #1106/#1107/#1108); a PR
-    that merely shares the branch prefix but is NOT the bot's own -- a
-    human's hand-port work (#2001) or a cross-repo PR (#2002) -- is never
-    touched, and NEITHER is a bot-authored PR sitting on a branch THIS RUN's
-    own guard invocation reported occupied (#1103 -- the literal incident:
-    opened by the bot, then a human's hand-port commit landed on the same
-    branch, which is what makes the guard divert in the first place). All
-    three exclusion reasons plus the "still closes a legitimate sibling"
-    control asserted in one pass."""
+    """tan-cli#1109 fault 3 + review rounds 1 and 2 + tan-cli#1119: once one
+    proposal is open/refreshed, every OTHER open, BOT-AUTHORED, same-repo,
+    NOT-OCCUPIED PR whose head starts with `auto/planner-resync` is
+    superseded and closed; a PR that merely shares the branch prefix but is
+    NOT the bot's own -- a human's hand-port work (#2001) or a cross-repo PR
+    (#2002) -- is never touched, and NEITHER is a bot-authored PR sitting on
+    a branch that CURRENTLY carries a foreign commit (#1103 -- the literal
+    incident: opened by the bot, then a human's hand-port commit landed on
+    the same branch -- AND #1106, occupied here too so this also proves the
+    exclusion holds for MORE THAN ONE occupied branch at once, not just the
+    single-occupied case). All exclusion reasons plus the "still closes a
+    legitimate sibling" control (#1107) asserted in one pass.
+
+    tan-cli#1119: unlike the pre-fix version of this test, "occupied" is not
+    a symbolic string passed alongside the fixture -- #1103's and #1106's
+    hand-port commits are pushed for REAL onto `workspace`'s origin, and the
+    close step's own live `--check-branch` call is what finds them."""
+    bare = tmp_path / "origin.git"
+    _push_foreign_commit_on(bare, "auto/planner-resync", tmp_path)
+    _push_foreign_commit_on(bare, "auto/planner-resync-eaa79695", tmp_path)
+
     proc, call_log = _run_close_step(
+        workspace,
         tmp_path,
         _FAKE_GH_RAW_JSON,
         keep_branch="auto/planner-resync-5c33ef04",
         keep_url="https://github.com/example/tan-cli/pull/1108",
         pr_list_fixture=_PR_LIST_FIXTURE_MIXED,
-        occupied_branches="auto/planner-resync",
     )
     assert proc.returncode == 0, _fmt(proc)
     calls = call_log.read_text(encoding="utf-8")
 
     # Direction 1: the bot's own OTHER, NOT-occupied proposal is superseded
-    # and closed -- the cap still works even with the occupied exclusion in
+    # and closed -- the cap still works even with two occupied exclusions in
     # place.
     assert "pr comment 1107" in calls, calls
     assert "pr close 1107" in calls, calls
 
-    # Direction 2: #1103 -- bot-authored, same-repo, on a branch THIS RUN's
-    # own guard reported occupied -- must never be closed or commented on.
-    # This is the review round-2 finding: the author/cross-repo filters
-    # alone are NOT enough, since #1103 passes both.
+    # Direction 2: #1103 AND #1106 -- both bot-authored, same-repo, on a
+    # branch that currently carries a foreign commit -- must never be closed
+    # or commented on. This is the review round-2 finding (author/cross-repo
+    # filters alone are NOT enough, since both pass them) proved for TWO
+    # simultaneously occupied branches, not just one.
     assert "pr comment 1103" not in calls, calls
     assert "pr close 1103" not in calls, calls
+    assert "pr comment 1106" not in calls, calls
+    assert "pr close 1106" not in calls, calls
     # A human's PR (same branch prefix, foreign author) must never be
     # touched, no matter how it got that branch name.
     assert "pr comment 2001" not in calls, calls
@@ -1025,20 +1124,32 @@ def test_close_step_closes_bot_prs_but_never_a_human_cross_repo_or_occupied_one(
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
 def test_close_step_leaves_an_unoccupied_bot_sibling_untouched_when_nothing_is_occupied(
-    tmp_path: pathlib.Path,
+    workspace: pathlib.Path, tmp_path: pathlib.Path
 ):
-    """The other half of the occupied-exclusion, isolated: with
-    `OCCUPIED_BRANCHES` empty (the everyday, non-diverted run), the bot's own
-    other proposals still close exactly as before -- the exclusion clause
-    must not accidentally protect everything when there is nothing to
-    protect."""
+    """The other half of the occupied-exclusion, isolated. Two DIFFERENT
+    "not occupied" shapes, both proven, not just one:
+
+    * #1103 and #1107's branches are never pushed at all -- proves
+      `_remote_branch_exists` returning False (a branch this run's fixture
+      names but never actually pushed) degrades safely to "not occupied".
+    * #1106's branch (tan-cli#1119 review, major 2) carries a REAL commit
+      under the automation's own identity, pushed for real -- the everyday
+      shape this cap actually closes in production (a genuine prior-run
+      proposal, not an absent name), and the only one of the three that
+      exercises `_identity_is_foreign` returning False end-to-end on the
+      close path. A prior version of this test left every sibling branch
+      absent, so the cap was only ever proven against "the branch does not
+      exist", never against "the branch exists and is genuinely clean"."""
+    bare = tmp_path / "origin.git"
+    _push_automation_commit_on(bare, "auto/planner-resync-eaa79695", tmp_path)
+
     proc, call_log = _run_close_step(
+        workspace,
         tmp_path,
         _FAKE_GH_RAW_JSON,
         keep_branch="auto/planner-resync-5c33ef04",
         keep_url="https://github.com/example/tan-cli/pull/1108",
         pr_list_fixture=_PR_LIST_FIXTURE_MIXED,
-        occupied_branches="",
     )
     assert proc.returncode == 0, _fmt(proc)
     calls = call_log.read_text(encoding="utf-8")
@@ -1048,24 +1159,292 @@ def test_close_step_leaves_an_unoccupied_bot_sibling_untouched_when_nothing_is_o
     # where the guard actually found it foreign-occupied; a run where
     # nothing is occupied has no reason to protect it.)
     assert "pr close 1103" in calls, calls
+    # #1106's branch exists and carries a genuine automation commit -- still
+    # closes, proving the "clean, not absent" shape works too.
     assert "pr close 1106" in calls, calls
     assert "pr close 1107" in calls, calls
 
 
+# ----------------------------------------------- tan-cli#1119: probe E + TOCTOU
+
+#: tan-cli#1119 probe E, verbatim from the issue: a PRIOR run's diverted
+#: branch (`auto/planner-resync-eaa79695` -- NOT `auto/planner-resync`
+#: itself, and NOT a candidate name THIS run's own branch-clobber guard
+#: invocation ever tries) that a human has since adopted, sitting under an
+#: OLDER bot-opened PR (#2300). #1107 is a legitimate, unoccupied sibling --
+#: the cap must still close it.
+_PR_LIST_FIXTURE_PRIOR_RUN_DIVERTED = """[
+  {"number": 2300, "headRefName": "auto/planner-resync-9f10cba2",
+   "author": {"login": "app/github-actions", "is_bot": true},
+   "isCrossRepository": false},
+  {"number": 1107, "headRefName": "auto/planner-resync-bbfc6c5a",
+   "author": {"login": "app/github-actions", "is_bot": true},
+   "isCrossRepository": false}
+]"""
+
+
 @pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
-def test_close_step_warns_when_the_open_pr_page_is_full(tmp_path: pathlib.Path):
+def test_close_step_excludes_a_prior_run_diverted_branch_a_human_has_adopted(
+    workspace: pathlib.Path, tmp_path: pathlib.Path
+):
+    """tan-cli#1119 probe E: `occupied_branches` (tan-cli#1109's fix) only
+    ever covers THIS run's own candidate walk (`decide_branch` tries
+    `auto/planner-resync`, then `<primary>-<this run's own suffix>`, then
+    `-2`, ...) -- a PREVIOUS run's diverted branch name
+    (`auto/planner-resync-9f10cba2`, say, picked by a run that targeted a
+    DIFFERENT alp-sdk sha) is never one of those candidates, so a human who
+    adopts THAT branch is invisible to a close step that only consults a
+    snapshot built from this run's own guard invocation.
+
+    Measured pre-fix (real YAML step body, real `jq`, this exact fixture):
+    `closed=['2300', '1107']` -- #2300 must not be in that list. Post-fix,
+    the close step asks the guard's own authorship test about
+    `auto/planner-resync-9f10cba2` LIVE, at close time, rather than
+    consulting any run's snapshot -- so it excludes #2300 regardless of
+    which run (this one, or some earlier one) the branch name came from.
+    #1107 (a genuinely unoccupied sibling) still closes -- the cap keeps
+    working."""
+    bare = tmp_path / "origin.git"
+    # The human's adoption of the prior run's diverted branch -- pushed for
+    # real, so the close step's live `--check-branch` call is what finds it,
+    # not a value this test hands it directly.
+    _push_foreign_commit_on(bare, "auto/planner-resync-9f10cba2", tmp_path)
+
+    proc, call_log = _run_close_step(
+        workspace,
+        tmp_path,
+        _FAKE_GH_RAW_JSON,
+        keep_branch="auto/planner-resync-5c33ef04",
+        keep_url="https://github.com/example/tan-cli/pull/1108",
+        pr_list_fixture=_PR_LIST_FIXTURE_PRIOR_RUN_DIVERTED,
+    )
+    assert proc.returncode == 0, _fmt(proc)
+    calls = call_log.read_text(encoding="utf-8")
+
+    # The prior-run diverted branch a human adopted: excluded.
+    assert "pr comment 2300" not in calls, calls
+    assert "pr close 2300" not in calls, calls
+    # The cap still works: an unrelated, unoccupied bot sibling still closes.
+    assert "pr comment 1107" in calls, calls
+    assert "pr close 1107" in calls, calls
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
+def test_close_step_catches_a_branch_adopted_in_the_toctou_window(
+    workspace: pathlib.Path, fake_bin: pathlib.Path, tmp_path: pathlib.Path
+):
+    """tan-cli#1119: the TOCTOU half of the same defect. `occupied_branches`
+    (tan-cli#1109) is a SNAPSHOT computed at the guard step, consulted here,
+    LATER -- a branch a human adopts in the window between those two moments
+    was invisible to a snapshot-based check no matter how fresh the snapshot
+    was when it was taken.
+
+    tan-cli#1119 review (minor): an earlier version of this test only
+    simulated "the guard step already ran" as a comment -- nothing actually
+    ran before the human's push, which made it mechanically identical to
+    `test_close_step_excludes_a_prior_run_diverted_branch_a_human_has_adopted`
+    with a different branch name. This version executes the REAL "Open or
+    refresh the proposal PR" step first (`_run_step`, the same helper the
+    PR-step tests above use), for real, against `workspace` -- capturing the
+    genuine `occupied_branches` snapshot it produces (empty: nothing is
+    occupied at that moment) as proof of what a pre-tan-cli#1119 close step
+    would have trusted. ONLY AFTER that real step completes does the human
+    adopt a wholly separate SIBLING branch (an earlier run's own proposal,
+    never a candidate in THIS guard-step invocation's own walk either) --
+    exactly inside the TOCTOU window between "the guard step ran" and "the
+    close step runs". The close step must still exclude it, DESPITE a
+    snapshot that says (truthfully, for the moment it was taken) nothing was
+    occupied."""
+    # "The guard step already ran" -- for real. A clean, non-diverted run:
+    # nothing occupies `auto/planner-resync` yet, so `decide_branch` picks
+    # it outright and the step pushes under the automation's own identity.
+    guard_sdk_sha = "cafef00d12345678"
+    guard_proc = _run_step(workspace, fake_bin, tmp_path, guard_sdk_sha)
+    assert guard_proc.returncode == 0, _fmt(guard_proc)
+    guard_outputs = (tmp_path / "github_output").read_text(encoding="utf-8")
+    assert "diverted=false\n" in guard_outputs, guard_outputs
+    # The snapshot a pre-tan-cli#1119 close step would have consumed: empty,
+    # because nothing was occupied at the moment the guard step looked --
+    # correct for its own moment, and exactly why a snapshot-based check
+    # cannot see what happens next.
+    assert "occupied_branches=\n" in guard_outputs, guard_outputs
+    keep_branch = "auto/planner-resync"
+    keep_url = "https://github.com/example/tan-cli/pull/1"
+
+    # THE TOCTOU WINDOW: strictly AFTER the guard step above completed, a
+    # human adopts a SEPARATE, pre-existing sibling branch -- an earlier
+    # run's own proposal, never a candidate this guard-step invocation's own
+    # cascade touched (it never diverted, so it never even looked at
+    # `auto/planner-resync-toctou01`).
+    bare = tmp_path / "origin.git"
+    _push_foreign_commit_on(bare, "auto/planner-resync-toctou01", tmp_path)
+
+    pr_list_fixture = """[
+      {"number": 4200, "headRefName": "auto/planner-resync-toctou01",
+       "author": {"login": "app/github-actions", "is_bot": true},
+       "isCrossRepository": false}
+    ]"""
+
+    # "The close step runs" -- later still, against the now-adopted branch,
+    # and (unlike the pre-fix mechanism) without ever consuming the
+    # `occupied_branches` snapshot captured above at all.
+    proc, call_log = _run_close_step(
+        workspace,
+        tmp_path,
+        _FAKE_GH_RAW_JSON,
+        keep_branch=keep_branch,
+        keep_url=keep_url,
+        pr_list_fixture=pr_list_fixture,
+    )
+    assert proc.returncode == 0, _fmt(proc)
+    calls = call_log.read_text(encoding="utf-8")
+    assert "pr comment 4200" not in calls, (
+        "a branch adopted in the TOCTOU window between the guard step and "
+        "this step must not be closed:\n" + calls
+    )
+    assert "pr close 4200" not in calls, (
+        "a branch adopted in the TOCTOU window between the guard step and "
+        "this step must not be closed:\n" + calls
+    )
+
+
+# --------------------------- tan-cli#1119 review (blocker + major 1): check_rc
+
+_CHECK_RC_FIXTURE = """[
+  {"number": 9000, "headRefName": "auto/planner-resync-checkrc",
+   "author": {"login": "app/github-actions", "is_bot": true},
+   "isCrossRepository": false}
+]"""
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
+@pytest.mark.parametrize(
+    "check_rc,expect_closed,expect_step_ok",
+    [
+        # 0 = "not occupied" (the real guard's own answer for a genuinely
+        # clean or nonexistent branch) -- the ONLY code that may close.
+        (0, True, True),
+        # 1 = "occupied" -- a routine, expected skip; the step keeps
+        # running and stays green.
+        (1, False, True),
+        # 2 = the real guard's own "could not determine" refusal --
+        # (BranchGuardError OR argparse's ap.error, see the guard's own
+        # module docstring) must abort the whole step, not skip just this
+        # candidate.
+        (2, False, False),
+        # tan-cli#1119 review (blocker): 127 = "command not found" -- the
+        # single most likely real-world shape of "`python` resolved on
+        # PATH but the interpreter it points to could not run the script"
+        # (a broken venv, a bad shebang inside a container image). Measured
+        # PRE-fix: this fell through the old `-eq 2`/`-eq 1` allow-list
+        # straight to `gh pr close`, closing #9000 silently, step rc 0, no
+        # `::error::` -- exactly the failure this parametrization exists to
+        # pin shut.
+        (127, False, False),
+        # tan-cli#1119 review (blocker): 137 = 128+SIGKILL -- an OOM-killed
+        # subprocess, the other most likely real-world failure for a
+        # short-lived `python` invocation on a loaded runner. Same pre-fix
+        # silent-close shape as 127.
+        (137, False, False),
+    ],
+)
+def test_close_step_treats_every_check_branch_exit_code_correctly(
+    workspace: pathlib.Path,
+    tmp_path: pathlib.Path,
+    check_rc: int,
+    expect_closed: bool,
+    expect_step_ok: bool,
+):
+    """tan-cli#1119 review (major 1): nothing exercised `check_rc` at all --
+    `grep -n "check_rc" python/tests/gates/test_planner_resync_pr_step_executes.py`
+    returned nothing
+    before this test existed, which is exactly why the blocker (every exit
+    code outside {1,2} fell through to `gh pr close`) survived a suite that
+    is otherwise mutation-proved. A `--check-branch` stub parametrised over
+    every code the real guard can produce (0, 1, 2) plus the two realistic
+    subprocess-failure codes the review measured directly (127, 137):
+    `gh pr close` must fire for 0 and ONLY 0; every other code must leave
+    #9000 untouched, and only 0/1 may leave the step itself green (rc 0) --
+    2/127/137 must abort the whole step with an `::error::`."""
+    proc, call_log = _run_close_step(
+        workspace,
+        tmp_path,
+        _FAKE_GH_RAW_JSON,
+        keep_branch="auto/planner-resync-5c33ef04",
+        keep_url="https://github.com/example/tan-cli/pull/1108",
+        pr_list_fixture=_CHECK_RC_FIXTURE,
+        check_branch_exit_code=check_rc,
+    )
+    calls = call_log.read_text(encoding="utf-8")
+
+    if expect_closed:
+        assert "pr comment 9000" in calls, _fmt(proc) + "\n" + calls
+        assert "pr close 9000" in calls, _fmt(proc) + "\n" + calls
+    else:
+        assert "pr comment 9000" not in calls, (
+            f"check_rc={check_rc} must not close #9000:\n"
+            + _fmt(proc)
+            + "\n"
+            + calls
+        )
+        assert "pr close 9000" not in calls, (
+            f"check_rc={check_rc} must not close #9000:\n"
+            + _fmt(proc)
+            + "\n"
+            + calls
+        )
+
+    if expect_step_ok:
+        assert proc.returncode == 0, _fmt(proc)
+    else:
+        assert proc.returncode != 0, _fmt(proc)
+        assert b"::error::" in proc.stdout, _fmt(proc)
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
+def test_close_step_errors_loudly_when_python_is_missing_instead_of_proceeding_silently(
+    workspace: pathlib.Path, tmp_path: pathlib.Path
+):
+    """tan-cli#1119 review (blocker): the same `command -v jq` presence-check
+    shape, now also for `python` -- the step's per-branch loop shells out to
+    it directly (`python python/scripts/planner_resync_branch_guard.py
+    --check-branch ...`), so a `python`-less runner must refuse loudly
+    before ever reaching a `gh pr close`, not fall through to whatever a
+    bare "command not found" happens to do inside the loop."""
+    proc, call_log = _run_close_step(
+        workspace,
+        tmp_path,
+        _FAKE_GH_RAW_JSON,
+        keep_branch="auto/planner-resync-5c33ef04",
+        keep_url="https://github.com/example/tan-cli/pull/1108",
+        pr_list_fixture=_PR_LIST_FIXTURE_MIXED,
+        no_python=True,
+    )
+    assert proc.returncode != 0, _fmt(proc)
+    assert b"::error::" in proc.stdout, _fmt(proc)
+    assert b"python is not on PATH" in proc.stdout, _fmt(proc)
+    assert call_log.read_text(encoding="utf-8") == "", (
+        "no pr comment/close call may happen when python itself is missing:\n"
+        + _fmt(proc)
+    )
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
+def test_close_step_warns_when_the_open_pr_page_is_full(
+    workspace: pathlib.Path, tmp_path: pathlib.Path
+):
     """tan-cli#1109 review round 2 (nit): `--limit 100` is the page, not a
     guaranteed complete list -- past 100 total open PRs (of ANY kind, not
     just planner-resync ones) an older proposal this cap is meant to
     supersede can age off page 1 with no signal. A full page (exactly 100
     returned) must warn, loudly, rather than silently under-deliver."""
     proc, call_log = _run_close_step(
+        workspace,
         tmp_path,
         _FAKE_GH_RAW_JSON,
         keep_branch="auto/planner-resync-5c33ef04",
         keep_url="https://github.com/example/tan-cli/pull/1108",
         pr_list_fixture='[{"number": 3000, "headRefName": "unrelated/branch-0", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3001, "headRefName": "unrelated/branch-1", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3002, "headRefName": "unrelated/branch-2", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3003, "headRefName": "unrelated/branch-3", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3004, "headRefName": "unrelated/branch-4", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3005, "headRefName": "unrelated/branch-5", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3006, "headRefName": "unrelated/branch-6", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3007, "headRefName": "unrelated/branch-7", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3008, "headRefName": "unrelated/branch-8", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3009, "headRefName": "unrelated/branch-9", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3010, "headRefName": "unrelated/branch-10", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3011, "headRefName": "unrelated/branch-11", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3012, "headRefName": "unrelated/branch-12", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3013, "headRefName": "unrelated/branch-13", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3014, "headRefName": "unrelated/branch-14", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3015, "headRefName": "unrelated/branch-15", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3016, "headRefName": "unrelated/branch-16", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3017, "headRefName": "unrelated/branch-17", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3018, "headRefName": "unrelated/branch-18", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3019, "headRefName": "unrelated/branch-19", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3020, "headRefName": "unrelated/branch-20", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3021, "headRefName": "unrelated/branch-21", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3022, "headRefName": "unrelated/branch-22", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3023, "headRefName": "unrelated/branch-23", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3024, "headRefName": "unrelated/branch-24", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3025, "headRefName": "unrelated/branch-25", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3026, "headRefName": "unrelated/branch-26", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3027, "headRefName": "unrelated/branch-27", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3028, "headRefName": "unrelated/branch-28", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3029, "headRefName": "unrelated/branch-29", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3030, "headRefName": "unrelated/branch-30", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3031, "headRefName": "unrelated/branch-31", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3032, "headRefName": "unrelated/branch-32", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3033, "headRefName": "unrelated/branch-33", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3034, "headRefName": "unrelated/branch-34", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3035, "headRefName": "unrelated/branch-35", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3036, "headRefName": "unrelated/branch-36", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3037, "headRefName": "unrelated/branch-37", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3038, "headRefName": "unrelated/branch-38", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3039, "headRefName": "unrelated/branch-39", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3040, "headRefName": "unrelated/branch-40", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3041, "headRefName": "unrelated/branch-41", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3042, "headRefName": "unrelated/branch-42", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3043, "headRefName": "unrelated/branch-43", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3044, "headRefName": "unrelated/branch-44", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3045, "headRefName": "unrelated/branch-45", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3046, "headRefName": "unrelated/branch-46", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3047, "headRefName": "unrelated/branch-47", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3048, "headRefName": "unrelated/branch-48", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3049, "headRefName": "unrelated/branch-49", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3050, "headRefName": "unrelated/branch-50", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3051, "headRefName": "unrelated/branch-51", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3052, "headRefName": "unrelated/branch-52", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3053, "headRefName": "unrelated/branch-53", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3054, "headRefName": "unrelated/branch-54", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3055, "headRefName": "unrelated/branch-55", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3056, "headRefName": "unrelated/branch-56", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3057, "headRefName": "unrelated/branch-57", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3058, "headRefName": "unrelated/branch-58", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3059, "headRefName": "unrelated/branch-59", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3060, "headRefName": "unrelated/branch-60", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3061, "headRefName": "unrelated/branch-61", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3062, "headRefName": "unrelated/branch-62", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3063, "headRefName": "unrelated/branch-63", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3064, "headRefName": "unrelated/branch-64", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3065, "headRefName": "unrelated/branch-65", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3066, "headRefName": "unrelated/branch-66", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3067, "headRefName": "unrelated/branch-67", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3068, "headRefName": "unrelated/branch-68", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3069, "headRefName": "unrelated/branch-69", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3070, "headRefName": "unrelated/branch-70", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3071, "headRefName": "unrelated/branch-71", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3072, "headRefName": "unrelated/branch-72", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3073, "headRefName": "unrelated/branch-73", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3074, "headRefName": "unrelated/branch-74", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3075, "headRefName": "unrelated/branch-75", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3076, "headRefName": "unrelated/branch-76", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3077, "headRefName": "unrelated/branch-77", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3078, "headRefName": "unrelated/branch-78", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3079, "headRefName": "unrelated/branch-79", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3080, "headRefName": "unrelated/branch-80", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3081, "headRefName": "unrelated/branch-81", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3082, "headRefName": "unrelated/branch-82", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3083, "headRefName": "unrelated/branch-83", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3084, "headRefName": "unrelated/branch-84", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3085, "headRefName": "unrelated/branch-85", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3086, "headRefName": "unrelated/branch-86", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3087, "headRefName": "unrelated/branch-87", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3088, "headRefName": "unrelated/branch-88", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3089, "headRefName": "unrelated/branch-89", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3090, "headRefName": "unrelated/branch-90", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3091, "headRefName": "unrelated/branch-91", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3092, "headRefName": "unrelated/branch-92", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3093, "headRefName": "unrelated/branch-93", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3094, "headRefName": "unrelated/branch-94", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3095, "headRefName": "unrelated/branch-95", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3096, "headRefName": "unrelated/branch-96", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3097, "headRefName": "unrelated/branch-97", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3098, "headRefName": "unrelated/branch-98", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}, {"number": 3099, "headRefName": "unrelated/branch-99", "author": {"login": "someone", "is_bot": false}, "isCrossRepository": false}]',
-        occupied_branches="",
     )
     assert proc.returncode == 0, _fmt(proc)
     assert b"::warning::" in proc.stdout, _fmt(proc)
@@ -1078,7 +1457,7 @@ def test_close_step_warns_when_the_open_pr_page_is_full(tmp_path: pathlib.Path):
 
 
 def test_close_step_errors_loudly_when_jq_is_missing_instead_of_proceeding_silently(
-    tmp_path: pathlib.Path,
+    workspace: pathlib.Path, tmp_path: pathlib.Path
 ):
     """tan-cli#1109 review round 3 (nit): without the presence check, a
     missing `jq` dies inside the FIRST `$(... | jq ...)` assignment under
@@ -1090,6 +1469,7 @@ def test_close_step_errors_loudly_when_jq_is_missing_instead_of_proceeding_silen
     carries no jq skipif -- it is the one close-step test that must pass
     on a box WITHOUT jq, not skip."""
     proc, call_log = _run_close_step(
+        workspace,
         tmp_path,
         _FAKE_GH_RAW_JSON,
         keep_branch="auto/planner-resync-5c33ef04",
@@ -1107,7 +1487,9 @@ def test_close_step_errors_loudly_when_jq_is_missing_instead_of_proceeding_silen
 
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="no jq to filter with")
-def test_close_step_refuses_to_guess_when_gh_pr_list_fails(tmp_path: pathlib.Path):
+def test_close_step_refuses_to_guess_when_gh_pr_list_fails(
+    workspace: pathlib.Path, tmp_path: pathlib.Path
+):
     """Same fail-closed shape as every other `gh ... | jq` lookup in this
     job (tan-cli#920): a transient `gh` error must not be read as "no other
     proposal exists" and silently leave a stale one open.
@@ -1117,6 +1499,7 @@ def test_close_step_refuses_to_guess_when_gh_pr_list_fails(tmp_path: pathlib.Pat
     so this test needs `jq` on PATH too, same as the others, or it fails
     outright instead of skipping on a dev box without one."""
     proc, call_log = _run_close_step(
+        workspace,
         tmp_path,
         _FAKE_GH_LIST_FAILS,
         keep_branch="auto/planner-resync",
