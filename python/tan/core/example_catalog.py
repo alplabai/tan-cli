@@ -132,6 +132,62 @@ defect" -- so it warns and still writes every file
 `E1M-AEN301` really does carry both `m55_hp` and `m55_he`, so the scaffold it
 would have produced is plausibly fine. What was wrong is that NOTHING
 CHECKED, and that is what the warning fixes.
+
+WHY `catalog_unreadable` EXISTS, AND WHAT IT COVERS (tan-cli#1101)
+--------------------------------------------------------------------
+
+`unsupported_som`'s own contract folds catalog-absent, catalog-unreadable,
+catalog-malformed, unreadable-matching-record, no-record-for-this-example,
+and sku-is-supported into one indistinguishable `None` -- exactly right for
+"should `--from-example` refuse", wrong for "did the check even run".
+`catalog_unreadable` is the second, narrower read that answers the second
+question, so `--from-example --som` can warn "this check did not run"
+instead of reporting `issues: []` on a check that never happened.
+
+It reports two DIFFERENT shapes, and (tan-cli#1101 review MINOR) says so in
+two DIFFERENT sentences rather than one that overstates the second:
+
+  * the catalog DOCUMENT itself could not be decoded, or its top-level shape
+    (a JSON object, a `templates:` list) does not match its schema --
+    non-UTF-8 bytes, a directory where a file was expected, a permissions
+    failure (tan-cli#1101 review BLOCKER: a `PermissionError` on a directory
+    the caller cannot even `stat()` used to escape a `catalog.exists()`
+    pre-flight raw, undoing the #1096 crash-safety this whole issue is
+    about -- there is no pre-flight now, matching
+    `document_guards.read_catalog_document`'s own "not a pre-flight
+    `is_file()`" reasoning), invalid JSON, a non-object document, a
+    non-list `templates:`. This is genuinely "could not be read".
+  * the document reads fine and a record's `example:` DOES match, but that
+    SAME record's `supported:` / `supported.som_skus:` is not the shape its
+    schema declares -- missing entirely, the wrong type, or (tan-cli#1101
+    review MINOR) an absent key masquerading as "no `supported.som_skus`"
+    in `unsupported_som`'s own docstring, which conflated it with the
+    genuinely-silent empty-list case. The document was readable; ONE
+    record's declared support was not. Calling that "could not be read"
+    sends a customer looking for a corrupt file that does not exist.
+
+In both cases the SoM-support check for THIS example could not run, which
+is `catalog_unreadable`'s whole question -- unlike a record for a DIFFERENT
+example that cannot be read, still skipped rather than fatal
+(`_declared_som_skus`'s own per-record-skip precedent, unchanged: a record
+whose OWN `example:` is unreadable cannot be attributed to the example being
+asked about, so it is simply not evidence either way), and unlike a
+well-formed catalog with simply no record for this example at all, which is
+`unsupported_som`'s "COMMON case, not an edge one" silence (66 example
+directories, 9 catalogued templates) -- there was nothing to check there,
+not a check that failed. A catalog that is ABSENT altogether is the same
+silence, for a different reason: `unsupported_som`'s own long-standing "no
+catalog in this checkout (an older SDK; --from-example worked there before
+this gate and must keep working)" precedent -- warning on it would add noise
+to every pre-catalog checkout's `--from-example --som`, not close a gap.
+Distinguished from every OTHER `MalformedCatalogError` by `err.__cause__`
+rather than a pre-flight stat: `read_catalog_document`'s
+`except (OSError, UnicodeDecodeError) as exc: raise self.error(...) from
+exc` is the only site in the whole guarded read that chains a
+`FileNotFoundError` as the cause, so `isinstance(err.__cause__,
+FileNotFoundError)` names exactly "the file was never there" and nothing
+else -- a directory, a permissions failure, and every record-level shape
+error all chain something else (or nothing).
 """
 
 from __future__ import annotations
@@ -197,7 +253,13 @@ def unsupported_som(sdk_root: Path, example_src: str, sku: str) -> tuple[str, ..
         catalog declares 9 templates while `examples/aen/` alone holds 66
         directories, so an undeclared example has no support set to check
         and inventing one would be this defect pointed the other way,
-      * a record with no `supported.som_skus`,
+      * a record whose `supported.som_skus` is present as an empty list
+        (`[]`) -- NOT a missing or malformed `supported`/`som_skus` key
+        (tan-cli#1101 review MINOR corrected this bullet, which used to
+        read as covering both): those raise `MalformedCatalogError` same as
+        any other malformed field, so THIS function still folds them into
+        `None`, but `catalog_unreadable` (below, see its module-docstring
+        section) reports them as a check that could not run, not silence,
       * `sku` is in the set.
 
     Never raises: a scaffold must not fail because a catalog could not be
@@ -252,6 +314,35 @@ def _declared_som_skus(catalog: Path, wanted: str) -> list[Any] | None:
             _GUARDS.require_key(record, "supported", dict,
                                 doc=catalog, field=field),
             "som_skus", list, doc=catalog, field=f"{field}.supported")
+    return None
+
+
+def catalog_unreadable(sdk_root: Path, example_src: str) -> str | None:
+    """Whether the SoM-support check for `example_src` could not run at all
+    -- see "WHY `catalog_unreadable` EXISTS, AND WHAT IT COVERS" above for
+    the full reasoning (tan-cli#1101). `None` for a catalog that is ABSENT
+    or that reads cleanly (whether or not it supports `example_src`); the
+    already-composed, correctly-led reason string otherwise -- "the SDK
+    scaffold catalog could not be read" only for a genuine document-level
+    failure, a different lead for a document that read fine but whose
+    matching record did not.
+    """
+    catalog = sdk_root / CATALOG_RELATIVE
+    try:
+        doc = _GUARDS.read_catalog_document(catalog)
+        _GUARDS.catalog_templates(doc, path=catalog)
+    except MalformedCatalogError as err:
+        if isinstance(err.__cause__, FileNotFoundError):
+            return None
+        return f"the SDK scaffold catalog could not be read ({err})"
+    wanted = f"examples/{example_src.strip().strip('/')}"
+    try:
+        _declared_som_skus(catalog, wanted)
+    except MalformedCatalogError as err:
+        return (
+            f"the SDK scaffold catalog's declared support for this "
+            f"example is not the shape its schema declares ({err})"
+        )
     return None
 
 

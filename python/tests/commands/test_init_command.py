@@ -1313,7 +1313,10 @@ def test_from_example_warns_when_som_is_outside_the_catalog_support_set(tmp_path
 
 
 def test_from_example_is_silent_when_the_som_is_in_the_support_set(tmp_path):
-    """Anti-false-alarm: the supported SKU must not warn."""
+    """Anti-false-alarm: the supported SKU must not warn -- and, tan-cli#1101,
+    a catalog that reads cleanly must not trip the "could not check"
+    warning either. A warning firing when the catalog reads fine is worse
+    than the silence it would replace."""
     _sdk_with_catalog(tmp_path)
 
     proc = run_tan(
@@ -1323,7 +1326,7 @@ def test_from_example_is_silent_when_the_som_is_in_the_support_set(tmp_path):
     env = envelope(proc)
 
     assert proc.returncode == 0, env
-    assert "init.example-som-unsupported" not in [i["code"] for i in env["issues"]]
+    assert env["issues"] == [], env["issues"]
 
 
 def test_from_example_does_not_warn_for_an_example_with_no_catalog_record(tmp_path):
@@ -1374,7 +1377,14 @@ def test_from_example_survives_a_non_utf8_catalog(tmp_path):
     `init.internal-failure` -- no files written at all. This is the exact
     case that broke; it must not be able to break silently again. Same shape
     as `test_from_example_survives_an_sdk_with_no_catalog_at_all` above, but
-    for an UNREADABLE catalog rather than an ABSENT one."""
+    for an UNREADABLE catalog rather than an ABSENT one.
+
+    tan-cli#1101: `env["issues"] == []` used to be THIS test's own
+    assertion, and was itself the remaining defect on the other axis -- the
+    catalog could not be read at all, so the SoM-support check never ran,
+    and an empty issues list told the customer it had PASSED. Assert all
+    four together (ok, exitCode, the new warning, the scaffold) -- the risk
+    here is a fix that quietly turns a success into a failure."""
     sdk = _sdk_with_catalog(tmp_path)
     example_dir = sdk / "examples" / "multicore" / "mproc-mailbox"
     (example_dir / "src").mkdir(parents=True)
@@ -1390,8 +1400,117 @@ def test_from_example_survives_a_non_utf8_catalog(tmp_path):
     env = envelope(proc)
 
     assert proc.returncode == 0, env
+    assert env["exitCode"] == 0, env
+    assert env["ok"] is True, env
+    codes = [i["code"] for i in env["issues"]]
+    assert codes == ["init.example-som-unchecked"], env["issues"]
+    warn = env["issues"][0]
+    assert warn["severity"] == "warning"
+    assert "E1M-AEN301" in warn["message"], "the unchecked --som must be named"
+    assert "init.internal-failure" not in codes
+    assert (tmp_path / ".alp").is_dir()
+    assert (tmp_path / "board.yaml").is_file()
+    assert (tmp_path / "src" / "main.c").is_file()
+
+
+def test_from_example_stays_silent_on_a_non_utf8_catalog_with_no_som(tmp_path):
+    """No `--som` means nothing for the catalog's `supported.som_skus` to be
+    checked against at all -- `init.example-som-unchecked` must not fire
+    just because the catalog happens to be unreadable when there is no SoM
+    in play to warn about."""
+    sdk = _sdk_with_catalog(tmp_path)
+    example_dir = sdk / "examples" / "multicore" / "mproc-mailbox"
+    (example_dir / "src").mkdir(parents=True)
+    (example_dir / "src" / "main.c").write_text(
+        "int main(void) { return 0; }\n", encoding="utf-8")
+    (sdk / "metadata" / "templates" / "catalog-v1.json").write_bytes(
+        b"\xff\xfe not valid utf-8")
+
+    proc = run_tan(
+        "init", "--from-example", "multicore/mproc-mailbox", "--sdk-root", "./sdk",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
     assert env["issues"] == [], env["issues"]
-    assert "init.internal-failure" not in [i["code"] for i in env["issues"]]
+
+
+def test_from_example_warns_on_a_directory_where_the_catalog_should_be(tmp_path):
+    """tan-cli#1101 acceptance: a DIRECTORY at the catalog path is the other
+    named "unreadable" shape (alongside non-UTF-8 bytes and a permissions
+    failure) -- must warn the same way a non-UTF-8 catalog does, not just
+    the one byte-level case.
+
+    tan-cli#1101 review MINOR: this test's name used to claim "stays_silent"
+    while its own body asserted the opposite -- copy-pasted from the
+    no-`--som` test just above it. The behaviour was always "warns"; only
+    the name was wrong."""
+    sdk = _sdk_with_catalog(tmp_path, with_catalog=False)
+    example_dir = sdk / "examples" / "multicore" / "mproc-mailbox"
+    (example_dir / "src").mkdir(parents=True)
+    (example_dir / "src" / "main.c").write_text(
+        "int main(void) { return 0; }\n", encoding="utf-8")
+    (sdk / "metadata" / "templates" / "catalog-v1.json").mkdir(parents=True)
+
+    proc = run_tan(
+        "init", "--from-example", "multicore/mproc-mailbox", "--sdk-root", "./sdk",
+        "--som", "E1M-AEN301", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert env["exitCode"] == 0, env
+    assert env["ok"] is True, env
+    codes = [i["code"] for i in env["issues"]]
+    assert codes == ["init.example-som-unchecked"], env["issues"]
+    assert (tmp_path / "board.yaml").is_file()
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="POSIX-only, non-root: chmod 0o000 has no effect for root, and "
+           "Windows ACLs don't honour POSIX mode bits the same way.",
+)
+def test_from_example_survives_a_permission_denied_catalog_directory(tmp_path):
+    """tan-cli#1101 review BLOCKER, re-derived end to end. `catalog_unreadable`'s
+    first draft pre-flighted with `if not catalog.exists(): return None` --
+    but `Path.exists()` swallows only `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP`
+    (`pathlib.py`'s `_IGNORED_ERRNOS`), NOT `EACCES`. So an SDK checkout
+    whose `metadata/templates/` the caller cannot traverse escaped as a raw
+    `PermissionError`, past `init_cmd.py`'s bare call site (no try/except of
+    its own), and out as `init.internal-failure` with NOTHING scaffolded --
+    undoing the exact crash-safety #1096 landed, on the exact "a permissions
+    failure" shape this issue's own acceptance criteria and this code's
+    docstring/registry note both name. Measured on `origin/dev` before this
+    fix existed: `ok:true exitCode:0 issues:[]`, `.alp`/`board.yaml`/`src`
+    all scaffolded -- this test pins that `tan init` on this branch matches
+    that outcome on three of those four axes and additionally reports the
+    new warning, never a crash."""
+    sdk = _sdk_with_catalog(tmp_path)
+    example_dir = sdk / "examples" / "multicore" / "mproc-mailbox"
+    (example_dir / "src").mkdir(parents=True)
+    (example_dir / "src" / "main.c").write_text(
+        "int main(void) { return 0; }\n", encoding="utf-8")
+    templates_dir = sdk / "metadata" / "templates"
+
+    templates_dir.chmod(0o000)
+    try:
+        proc = run_tan(
+            "init", "--from-example", "multicore/mproc-mailbox", "--sdk-root", "./sdk",
+            "--som", "E1M-AEN301", "--format", "json", cwd=tmp_path,
+        )
+    finally:
+        templates_dir.chmod(0o755)
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env
+    assert env["exitCode"] == 0, env
+    assert env["ok"] is True, env
+    codes = [i["code"] for i in env["issues"]]
+    assert codes == ["init.example-som-unchecked"], env["issues"]
+    assert "init.internal-failure" not in codes
+    assert "Permission denied" in env["issues"][0]["message"]
     assert (tmp_path / ".alp").is_dir()
     assert (tmp_path / "board.yaml").is_file()
     assert (tmp_path / "src" / "main.c").is_file()
@@ -2664,7 +2783,14 @@ def test_topology_a_non_utf8_catalog_is_the_coded_malformed_issue(tmp_path):
     `ValueError`, not an `OSError`) missed that handler too and fell through
     to `init.internal-failure`. `contract/issue-codes.json`'s
     `init.catalog-malformed` note says its condition is "absent or
-    unreadable" -- this is the "unreadable" half, now actually reached."""
+    unreadable" -- this is the "unreadable" half, now actually reached.
+
+    tan-cli#1101 pins this REFUSAL as unchanged: `--from-example` on the
+    identical unreadable catalog now WARNS instead of staying silent
+    (`test_from_example_survives_a_non_utf8_catalog`), and that new warning
+    must not drift into softening this exitCode-2 refusal too -- `warn,
+    still select` and `refuse` are deliberately different contracts for
+    `unsupported_som` and `find_example_by_cores` respectively."""
     _sdk_with_topology_catalog(tmp_path, [("gateway-demo", {"m33_sm": "zephyr"})])
     (tmp_path / "sdk" / "metadata" / "templates" / "catalog-v1.json").write_bytes(
         b"\xff\xfe not valid utf-8")
