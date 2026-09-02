@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -110,11 +111,46 @@ def test_forcing_in_the_else_clause_is_still_an_escape():
     ) == ["d.glob(...) at line 2"]
 
 
+#: The five names SHAPE 2 selects on, spelled here independently of the
+#: script so the two can be compared rather than assumed equal.
+_EXPECTED_LAZY_NAMES = {"glob", "rglob", "iterdir", "scandir", "walk"}
+
+
 @pytest.mark.parametrize("call", ["d.glob('*')", "d.rglob('*')", "d.iterdir()",
                                   "os.scandir(d)", "os.walk(d)"])
-def test_every_name_the_docstring_lists_is_recognised(call):
-    # `LAZY_ITER_CALLS` and the docstring's list must not drift apart.
+def test_every_expected_lazy_name_is_actually_detected(call):
+    """Each name is DRIVEN, not merely listed -- a name in the constant that
+    the walk cannot reach (an `ast.Name` callee spelling it never inspects,
+    say) would pass a set comparison and fail here."""
     assert _escapes(f"try:\n    m = {call}\nexcept OSError:\n    m = []\n")
+
+
+def test_the_lazy_name_set_matches_this_file_and_the_scripts_own_docstring():
+    """Pins `LAZY_ITER_CALLS` in BOTH directions, and pins the docstring too.
+
+    Review nit: the parametrized test above only catches a name being
+    REMOVED. Adding an inert `"zzz_never_used"` to `LAZY_ITER_CALLS` reds
+    nothing there, and nothing read the prose at all -- so the constant was
+    pinned against shrinking, and the "SHAPE 2 ... a call named `glob`,
+    `rglob`, `iterdir`, `scandir` or `walk`" sentence in the script's module
+    docstring was pinned not at all. That sentence is the whole contract a
+    reader acts on; an over-broad constant silently widens the walk under a
+    docstring that still promises five names.
+
+    Both halves are asserted against `_EXPECTED_LAZY_NAMES` above rather
+    than against each other, so agreeing on a wrong value is not enough --
+    growing the set means editing the constant, the prose AND this list,
+    which is the point.
+    """
+    assert audit.LAZY_ITER_CALLS == _EXPECTED_LAZY_NAMES
+    claim = "a call named `glob`, `rglob`, `iterdir`,\n`scandir` or `walk`"
+    assert claim in audit.__doc__, (
+        "the script's SHAPE 2 docstring no longer spells the five names this "
+        "test expects; if the set really changed, change the prose, this "
+        "assertion and _EXPECTED_LAZY_NAMES together"
+    )
+    quoted = set(re.findall(r"`(\w+)`", claim))
+    assert quoted == _EXPECTED_LAZY_NAMES
 
 
 # ---------------------------------------------------------------------------

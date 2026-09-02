@@ -21,12 +21,15 @@ Two layers of test here, mirroring how the sibling sdk-switch-pristine guard
   actually reach the spawn -- not just that the helper function returns the
   right thing in isolation.
 """
+import ast
+import inspect
 import json
 import os
 import shutil
 import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+import tan.commands.build.configure_inputs as configure_inputs_module
 from tan.core.build_plan import parse_build_plan
 from tan.commands.build.configure_inputs import (
     discover_configure_inputs,
@@ -117,6 +120,40 @@ def test_the_relative_key_is_posix_spelled_under_windows_rules_too():
     # only ever exercised under a spelling this host never uses.
     assert relative_key(PurePosixPath("/proj/app/boards/b.conf"),
                         PurePosixPath("/proj/app")) == "boards/b.conf"
+
+
+def test_the_walk_hands_relative_key_a_platform_dispatched_path():
+    """The other half of the seam, which the oracle above cannot reach.
+
+    `relative_key` normalises correctly for whatever `PurePath` flavour it
+    is given; what supplies the Windows flavour is `Path(entry.path)` in
+    `_candidate_files`, and `Path` dispatches on `os.name`. Swap that one
+    call to `PurePosixPath` and every test in this file still passes on this
+    POSIX host -- while on Windows `os.scandir` hands back
+    `C:\\proj\\app\\prj.conf`, which a POSIX flavour reads as a single
+    filename and `relative_to` then rejects. `windows-latest` would catch
+    it; this catches it here, which is where the change gets made (review
+    nit, tan-cli#1132).
+
+    Asserted structurally rather than by execution because the failure only
+    exists on a host this repo does not have. `ast` over the shipped source
+    is the same tool `tests/gates/test_no_unreachable_except_handler.py` and
+    `test_subprocess_env_routes_through_the_helper.py` use for exactly this
+    "the call must route through X" shape.
+    """
+    tree = ast.parse(inspect.getsource(configure_inputs_module))
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "relative_key"]
+    assert len(calls) == 1, "relative_key gained or lost a call site"
+    first_arg = calls[0].args[0]
+    assert isinstance(first_arg, ast.Call), (
+        "relative_key's path argument is no longer a constructor call; it "
+        "must be built by `Path(...)` so it carries platform semantics")
+    assert isinstance(first_arg.func, ast.Name) and first_arg.func.id == "Path", (
+        f"relative_key is handed a {ast.unparse(first_arg.func)}(...), not a "
+        "Path(...). Only `pathlib.Path` dispatches on os.name, which is the "
+        "whole reason the Windows oracle above proves anything.")
 
 
 def test_stamp_round_trips_including_the_empty_set(tmp_path):
