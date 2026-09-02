@@ -99,16 +99,24 @@ class BackendReport:
                                # (tan.model.check's `--exact` path, tan-cli#782 Task 6) OR
                                # basis == "bench" (a matched `metadata/model_perf/` point,
                                # tan.model.perf_apply). Only the "compiled" path ever
-                               # DERIVES "fits" -- from `tan.model.perf.coverage_from_
-                               # placement`, the one function in tan allowed to return it,
-                               # off a real vela compile's own placement summary. A
-                               # "bench" report never derives its own verdict (alp-sdk's
+                               # DERIVES a verdict -- from `tan.model.perf.coverage_from_
+                               # placement`, the one function in tan allowed to return
+                               # "fits", off a real vela compile's own placement summary.
+                               # A "bench" report NEVER derives its own verdict (alp-sdk's
                                # real model-perf schema carries no bench-measured
-                               # placement split, tan-cli#1115): it only ever CARRIES a
-                               # "fits" that a real "compiled" run already produced and the
-                               # bench point corroborated on arena/SRAM. analyze_backend()
-                               # itself never emits "fits" -- basis stays "static-screen"
-                               # here always.
+                               # placement split, tan-cli#1115): `tan.model.perf_apply.
+                               # _perf_point_report` CARRIES this field from the report it
+                               # is rebasing ONLY when that report's own basis is already
+                               # "compiled" (a real placement, safe to keep); otherwise --
+                               # the ordinary case, no `--exact` alongside the bench point
+                               # -- the word is WITHHELD to "undetermined" rather than
+                               # promoting the static screen's name-level estimate to
+                               # `confidence: "certain"`. `docs/model-check-static-
+                               # screen.md` documents `undetermined` @ `basis: "bench"` as
+                               # a legitimate, distinct combination from `undetermined` @
+                               # `basis: "static-screen"` for exactly this reason.
+                               # analyze_backend() itself never emits "fits" -- basis stays
+                               # "static-screen" here always.
     # MAC-weighted UPPER bound, 0-100 -- ONLY at `basis: "static-screen"`
     # (this module's own `_score_ops`/`eligible_macs / total_macs`). Always
     # `None` at `basis: "compiled"` (tan.model.check's `--exact` path):
@@ -126,15 +134,18 @@ class BackendReport:
     # The REAL NPU-vs-CPU op-count placement ratio, 0-100 -- set only where a
     # real placement was MEASURED: `basis: "compiled"` (`tan.model.check.
     # _report_from_vela_compile`, from vela's own "CPU/NPU operators = N (P%)"
-    # summary counts). NEVER set BY a `basis: "bench"` report on its own
-    # (tan-cli#1115): alp-sdk's real `metadata/model_perf/` schema carries no
-    # per-operator NPU/CPU placement split for a bench point to report --
-    # `tan.model.perf_apply.apply_perf_point` instead CARRIES this field
-    # through unchanged from whatever @report already had (the static
-    # screen's `None`, or a real `--exact` compile's measured ratio) when it
-    # rebases a report onto a matched point; see `tan.model.perf`'s module
-    # docstring, "DEAD FIELDS". `None` at `basis: "static-screen"`, where
-    # there is no real compile to report a placement for. Deliberately a
+    # summary counts), OR `basis: "bench"` in the ONE case that also counts as
+    # measured -- a bench point rebasing a report whose basis was ALREADY
+    # "compiled" (a real `--exact` compile ran alongside it and the two
+    # agreed; `tan.model.perf_apply._perf_point_report` carries this field
+    # from that pre-existing real placement, since a bench point has no
+    # per-operator placement of its own to contribute -- alp-sdk's real
+    # `metadata/model_perf/` schema carries none, tan-cli#1115, see
+    # `tan.model.perf`'s module docstring, "DEAD FIELDS"). `None` at
+    # `basis: "static-screen"` (no real compile to report a placement for)
+    # AND at `basis: "bench"` whenever it is NOT corroborating an already-
+    # "compiled" report -- the ordinary case, no `--exact` run at all -- a
+    # bench point alone never earns a non-`None` value here. Deliberately a
     # SEPARATE field from `compute_on_npu_pct_max` above, not a reuse of it
     # under a different meaning: an op-count ratio and a MAC-weighted ratio
     # answer different questions and must never share one key a consumer could
@@ -147,7 +158,15 @@ class BackendReport:
     # envelope consumer that reads compute_on_npu_pct_max but doesn't render
     # `notes` (prose). 0 whenever no such op exists, including every report
     # variant that never reached scoring (format-not-accepted, no-table,
-    # empty-ops) -- there, no cpu-certain verdict was determined at all.
+    # empty-ops) -- there, no cpu-certain verdict was determined at all -- AND
+    # a `basis: "bench"` report rebased with no corroborating real placement
+    # (tan-cli#1115 PR review nit: this field is 0 there too, not because zero
+    # such ops were found but because `npu_coverage` itself was withheld to
+    # "undetermined" and nothing about placement was determined at all). A
+    # consumer CANNOT distinguish "zero uncosted CPU ops really exist" from
+    # "withheld" by this field alone -- read `npu_coverage`/`basis` first:
+    # `uncosted_cpu_op_count` only means what it says when `npu_coverage` is
+    # not `"undetermined"`.
     uncosted_cpu_op_count: int = 0
     ops: list[OpVerdict] = field(default_factory=list)
     basis: str = "static-screen"          # the only basis this module ever emits
