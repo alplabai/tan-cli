@@ -302,7 +302,11 @@ from tan.core.sdk_discovery import (
 )
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.subprocess_env import spawn_env
-from tan.core.uri_reference import path_to_uri_reference
+from tan.core.uri_reference import (
+    cwd_base_uri,
+    is_absolute_path_reference,
+    path_to_uri_reference,
+)
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, ValidateOutputFormat
@@ -367,6 +371,12 @@ _SARIF_SCHEMA_URI = (
     "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/"
     "sarif-schema-2.1.0.json"
 )
+
+#: The SARIF `originalUriBaseIds` key `_sarif_document` declares for
+#: [`cwd_base_uri`] (tan-cli#1117). SARIF 2.1.0 SS3.14.14 recommends, but does
+#: not require, wrapping a `uriBaseId` in `%`; this repo invents no other
+#: convention to match, so the recommendation is followed.
+_SARIF_URI_BASE_ID = "%CWD%"
 
 #: Outcome strings, verbatim from `tan_core::validate::Outcome::as_str`. The
 #: issue code is `validate.<outcome>`, so these strings are wire contract.
@@ -989,26 +999,26 @@ def _sarif_document(
     .uri` bare, with no scheme; this function's `uri` handling has diverged
     from it on purpose (see [`path_to_uri_reference`]). alp-sdk owes the
     same fix -- tracked as alp-sdk#1909, not fixed here (a different repo,
-    different release cadence). A round-1 attempt at this PR also declared
-    `originalUriBaseIds`/`uriBaseId` so a RELATIVE `artifactLocation.uri`
-    would have a defined base to resolve against; round 2 review found that
-    declared base did not actually resolve the reference in the default
-    case (an anchoring mismatch, `root` vs. the CWD `board_path` is really
-    relative to) and reached it through an unguarded `Path.resolve()` that
-    could raise on a caller-supplied `--project` containing a symlink loop
-    -- crashing this exact command. That work was reverted rather than
-    patched a third time in place; see `tan.core.uri_reference`'s module
-    docstring for the fuller account. This function currently emits a
-    RELATIVE `artifactLocation.uri` with NO base declared when `board_path`
-    is relative -- valid SARIF, but the base is left implementation-defined,
-    same as `dev` before this PR (tan-cli#1097's own defect is still closed
-    for the ABSOLUTE case, which is the one the issue was filed against).
-    Closing the relative case is tracked as tan-cli#1117, filed with both
-    measurements above (the wrong-base result, the symlink-loop crash) so a
-    reader following the reference gets the full history rather than
-    rediscovering it."""
+    different release cadence).
+
+    tan-cli#1117: a RELATIVE `artifactLocation.uri` now carries a
+    `uriBaseId` naming `_SARIF_URI_BASE_ID`, and the `run` declares that id
+    in `originalUriBaseIds` pointing at [`cwd_base_uri`] -- so a spec-
+    conformant consumer resolves the reference the same way regardless of
+    its own CWD, instead of falling back to it by luck. `originalUriBaseIds`
+    is only ADDED when at least one location actually uses it: an absolute
+    `--board-yaml` reference already resolves on its own, and SARIF 2.1.0
+    SS3.4.4 says a location whose `uri` is absolute must NOT also carry a
+    `uriBaseId` -- gated by [`is_absolute_path_reference`], not by sniffing
+    the rendered string (see that function's own docstring for why sniffing
+    is unsound for a driveless Windows path). A round-1 attempt at this PR
+    tried the same shape and got the base itself wrong (anchored on `root`,
+    missing a trailing slash) through code that could crash the command on a
+    caller-supplied `--project` symlink loop; see `tan.core.uri_reference`'s
+    module docstring for that account and how this version avoids both."""
     rules: dict[str, dict[str, str]] = {}
     results = []
+    base_needed = False
     for issue, finding in reported:
         code = _diagnostic_code(issue, finding)
         if code not in rules:
@@ -1016,6 +1026,14 @@ def _sarif_document(
             if finding.doc_uri:
                 rule["helpUri"] = finding.doc_uri
             rules[code] = rule
+        # tan-cli#1097: `artifactLocation` is a URI reference (SARIF 2.1.0),
+        # never the bare filesystem path this used to emit -- see this
+        # function's own docstring for what is, and is not, resolved by
+        # this fix alone.
+        artifact_location: dict[str, str] = {"uri": path_to_uri_reference(board_path)}
+        if not is_absolute_path_reference(board_path):
+            artifact_location["uriBaseId"] = _SARIF_URI_BASE_ID
+            base_needed = True
         results.append(
             {
                 "ruleId": code,
@@ -1027,34 +1045,33 @@ def _sarif_document(
                 "locations": [
                     {
                         "physicalLocation": {
-                            # tan-cli#1097: `artifactLocation` is a URI
-                            # reference (SARIF 2.1.0), never the bare
-                            # filesystem path this used to emit -- see
-                            # this function's own docstring for what is,
-                            # and is not, resolved by this fix alone.
-                            "artifactLocation": {"uri": path_to_uri_reference(board_path)},
+                            "artifactLocation": artifact_location,
                             "region": _sarif_region(finding),
                         }
                     }
                 ],
             }
         )
+    run: dict[str, Any] = {
+        "tool": {
+            "driver": {
+                "name": "tan",
+                "informationUri": "https://github.com/alplabai/tan-cli",
+                "version": TAN_VERSION,
+                "rules": list(rules.values()),
+            }
+        },
+        "results": results,
+    }
+    if base_needed:
+        # tan-cli#1117: declared once per RUN, not per result -- every
+        # relative `board_path` in one invocation names the same file, so
+        # one base entry covers every location that references it.
+        run["originalUriBaseIds"] = {_SARIF_URI_BASE_ID: {"uri": cwd_base_uri()}}
     return {
         "$schema": _SARIF_SCHEMA_URI,
         "version": "2.1.0",
-        "runs": [
-            {
-                "tool": {
-                    "driver": {
-                        "name": "tan",
-                        "informationUri": "https://github.com/alplabai/tan-cli",
-                        "version": TAN_VERSION,
-                        "rules": list(rules.values()),
-                    }
-                },
-                "results": results,
-            }
-        ],
+        "runs": [run],
     }
 
 

@@ -36,20 +36,30 @@ property is calling `.match()` rather than `.search()`; see
 `test_a_colon_later_in_a_relative_path_does_not_misclassify_it_as_windows`
 below, which mutates that call instead.
 
-This file no longer covers `root_to_base_uri` / SARIF's
-`originalUriBaseIds` -- that work was added in review round 1 and reverted
-in round 2 after the base it declared turned out not to resolve the
+A review round 1 attempt at SARIF's `originalUriBaseIds` was added here, then
+reverted in round 2 after the base it declared turned out not to resolve the
 reference it was attached to (see `tan.core.uri_reference`'s own module
-docstring, and `validate_cmd._sarif_document`'s, for the account).
+docstring, and `validate_cmd._sarif_document`'s, for the account). tan-cli#1117
+reintroduces it as [`cwd_base_uri`] and its `uriBaseId` gate,
+[`is_absolute_path_reference`] -- the two sections at the bottom of this file
+cover them, each mutating ONE branch at a time the same way the rest of this
+file already does.
 """
 from __future__ import annotations
 
 import ntpath
 import posixpath
 import re
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import unquote, urljoin, urlsplit
 
-from tan.core.uri_reference import _WINDOWS_DRIVE_RE, _is_windows_spelled, path_to_uri_reference
+from tan.core.uri_reference import (
+    _WINDOWS_DRIVE_RE,
+    _is_windows_spelled,
+    cwd_base_uri,
+    is_absolute_path_reference,
+    path_to_uri_reference,
+)
 
 # ---------------------------------------------------------------------------
 # The classifier itself, `_is_windows_spelled` -- one branch/constant at a
@@ -286,3 +296,99 @@ def test_the_separator_less_golden_is_unaffected_by_percent_encoding():
     golden this PR must not move stays byte-identical through the new
     encoding step, not merely through the old unconditional passthrough."""
     assert path_to_uri_reference("./board.yaml") == "./board.yaml"
+
+
+# ---------------------------------------------------------------------------
+# is_absolute_path_reference -- the SARIF uriBaseId gate (tan-cli#1117)
+# ---------------------------------------------------------------------------
+
+
+def test_a_posix_absolute_path_is_judged_absolute():
+    assert posixpath.isabs("/tmp/proj/board.yaml")
+    assert is_absolute_path_reference("/tmp/proj/board.yaml")
+
+
+def test_a_posix_relative_path_is_judged_not_absolute():
+    assert not posixpath.isabs("./board.yaml")
+    assert not is_absolute_path_reference("./board.yaml")
+
+
+def test_a_windows_absolute_path_is_judged_absolute():
+    assert ntpath.isabs("C:\\w\\proj\\board.yaml")
+    assert is_absolute_path_reference("C:\\w\\proj\\board.yaml")
+
+
+def test_a_driveless_windows_relative_path_is_judged_not_absolute():
+    """The exact edge case [`is_absolute_path_reference`]'s own docstring
+    names: `C:board.yaml` (a drive letter with NO root) renders, quoted, as
+    the same string -- syntactically a valid URI with scheme `C` -- so a
+    caller that judged absoluteness by sniffing the RENDERED string for a
+    scheme would misclassify it. `PureWindowsPath` itself settles it instead:
+    absolute needs BOTH a drive and a root. Mutating
+    [`is_absolute_path_reference`] to `path.startswith(...)` string-sniffing
+    reds this exact assertion; every other test in this section stays green
+    either way, which is why this one exists on its own."""
+    assert not PureWindowsPath("C:board.yaml").is_absolute()
+    assert not is_absolute_path_reference("C:board.yaml")
+
+
+def test_a_windows_relative_path_with_no_drive_is_judged_not_absolute():
+    assert not is_absolute_path_reference("sub\\p\\board.yaml")
+
+
+# ---------------------------------------------------------------------------
+# cwd_base_uri -- the SARIF originalUriBaseIds base (tan-cli#1117)
+# ---------------------------------------------------------------------------
+
+
+def test_cwd_base_uri_ends_with_a_trailing_slash(tmp_path, monkeypatch):
+    """RFC 3986 SS5.3's merge algorithm drops the base's own LAST PATH
+    SEGMENT before appending a relative reference -- a slash-less base
+    silently answers one directory up. Mutating this function's `+ "/"`
+    away leaves this line red on its own; the property test directly below
+    is the one that shows WHY (`urljoin` naming a sibling file instead of
+    the real one)."""
+    monkeypatch.chdir(tmp_path)
+    assert cwd_base_uri().endswith("/")
+
+
+def test_cwd_base_uri_resolves_a_relative_reference_to_the_real_file(tmp_path, monkeypatch):
+    """The independent property tan-cli#1117's acceptance criteria state:
+    `urljoin(cwd_base_uri(), <relative reference>)` must name the REAL file.
+    Proven by actually creating one and reaching it back through
+    `os.path`/`Path.samefile`, never by re-deriving the expected string from
+    `Path.cwd().as_uri()` -- the same one-line expression [`cwd_base_uri`]
+    itself is, and exactly the tautology tan-cli#1117 names as the trap that
+    let a wrong base ship green once already.
+
+    Catches BOTH round-1 defects at once: stripping the trailing slash makes
+    `urljoin` drop `tmp_path`'s own last segment (naming a file one level up,
+    which this dir does not have -- `FileNotFoundError` on `samefile`); and
+    since [`cwd_base_uri`] takes no `root` parameter to anchor on instead of
+    `Path.cwd()`, the anchoring-mismatch defect has no equivalent input to
+    mutate here at all -- it is structurally excluded, not merely tested
+    for (see the function's own docstring)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "board.yaml").write_text("som: E1M-AEN701\n", encoding="utf-8")
+    resolved = urljoin(cwd_base_uri(), "./board.yaml")
+    local_path = Path(unquote(urlsplit(resolved).path))
+    assert local_path.exists()
+    assert local_path.samefile(tmp_path / "board.yaml")
+
+
+def test_cwd_base_uri_resolves_a_nested_relative_reference_to_the_real_file(
+    tmp_path, monkeypatch
+):
+    """The `--project sub` shape: `resolve_board_path` renders the reference
+    as `"sub/board.yaml"` (root folded INTO the reference, not into the
+    base), so the base must stay CWD-anchored here too, not move to `sub`
+    itself -- moving it would double the `sub/` prefix, the exact round-1
+    defect that happened to cancel out for this one case by accident."""
+    monkeypatch.chdir(tmp_path)
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "board.yaml").write_text("som: E1M-AEN701\n", encoding="utf-8")
+    resolved = urljoin(cwd_base_uri(), "sub/board.yaml")
+    local_path = Path(unquote(urlsplit(resolved).path))
+    assert local_path.exists()
+    assert local_path.samefile(sub / "board.yaml")

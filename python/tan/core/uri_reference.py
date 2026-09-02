@@ -41,28 +41,35 @@ relative. Absolutising `path` here would (a) move the pre-existing pinned
 golden (`test_validate_command.py`'s `"./board.yaml"` pins) and (b) bake the
 process's CWD into an otherwise portable document.
 
-**This module makes NO claim about how a relative reference gets resolved.**
-An earlier version of this docstring (tan-cli#1097 review round 1) tried to
-close that gap by having `validate_cmd._sarif_document` declare a SARIF
-`originalUriBaseIds`/`uriBaseId` pair -- round 2 review found that addition
-declared a base that did not actually resolve the reference in the default
-case (an anchoring mismatch between `root` and the CWD `board_path` is
-actually relative to, compounded by a missing trailing slash), and reached
-that wrong answer through an unguarded `Path.resolve()` that could raise on
-a caller-supplied `--project` containing a symlink loop, crashing the
-command it touched. Declaring an authoritatively WRONG base is worse than
-declaring none -- round 1's undefined base at least let a spec-conformant
-consumer fall back to its own CWD and succeed. That work was reverted; the
-base-declaration question (where SARIF's base should be anchored, and how to
-resolve it soundly for both `root="."` and a `--board-yaml`/`--project`
-override) is tracked as tan-cli#1117, filed with both measurements above --
-the wrong-base `urljoin` result and the `Path.resolve(strict=False)`
-symlink-loop crash -- rather than bolted onto this fix.
+**This module used to make NO claim about how a relative reference gets
+resolved -- tan-cli#1117 closes that gap.** An earlier version of this
+docstring (tan-cli#1097 review round 1) tried the same thing by having
+`validate_cmd._sarif_document` declare a SARIF `originalUriBaseIds`/
+`uriBaseId` pair -- round 2 review found that addition declared a base that
+did not actually resolve the reference in the default case (an anchoring
+mismatch between `root` and the CWD `board_path` is actually relative to,
+compounded by a missing trailing slash), and reached that wrong answer
+through an unguarded `Path.resolve()` that could raise on a caller-supplied
+`--project` containing a symlink loop, crashing the command it touched.
+Declaring an authoritatively WRONG base is worse than declaring none --
+round 1's undefined base at least let a spec-conformant consumer fall back to
+its own CWD and succeed. That work was reverted rather than patched a third
+time in place; tan-cli#1117 was filed with both measurements (the wrong-base
+`urljoin` result and the `Path.resolve(strict=False)` symlink-loop crash) so
+whoever picked it up next would not rediscover either.
+
+[`cwd_base_uri`] is that pick-up: it anchors on `Path.cwd()` -- never
+`root`, which is what produced the anchoring mismatch -- and never resolves
+a caller-supplied path, so the symlink-loop crash class cannot recur here.
+`validate_cmd._sarif_document` wires it into `originalUriBaseIds`, gated on
+[`is_absolute_path_reference`] so an absolute `--board-yaml` reference (which
+already resolves on its own) never carries a `uriBaseId` SARIF 2.1.0 SS3.4.4
+says it must not.
 """
 from __future__ import annotations
 
 import re
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import quote
 
 #: A Windows drive letter at the string's own start (`C:...`, no backslash
@@ -180,3 +187,84 @@ def path_to_uri_reference(path: str) -> str:
     if posix.is_absolute():
         return posix.as_uri()
     return quote(path, safe="/")
+
+
+def is_absolute_path_reference(path: str) -> bool:
+    """Whether [`path_to_uri_reference`] renders `path` as an ABSOLUTE
+    `file:` URI -- the gate `_sarif_document` (tan-cli#1117) uses to decide
+    whether a location may carry SARIF's `uriBaseId` at all: 2.1.0 SS3.4.4
+    -- "If the uri property is an absolute URI, the uriBaseId property SHALL
+    be absent."
+
+    Delegates to [`path_to_uri_reference`] itself rather than RE-DERIVING
+    the same `_is_windows_spelled` + `.is_absolute()` branch a second time:
+    a `file:` scheme in that function's OUTPUT is produced by exactly its
+    two `.as_uri()` calls, both already gated on the identical
+    `is_absolute()` check a second copy here would only duplicate --
+    drifting the two apart the moment [`path_to_uri_reference`] grows a
+    branch this one does not learn about is exactly the per-command-copy
+    class of defect `tan.core.board_context`'s own module docstring names
+    for a resolver retyped instead of shared.
+
+    A first version of this docstring worried the sniff was unsound for a
+    driveless Windows path (`"C:board.yaml"`) on the theory that its
+    rendered form is "quoted unchanged" and therefore a syntactically valid
+    URI with scheme `C`. Measured, that is false: `quote(..., safe="/")`
+    does not treat `:` as safe, so `path_to_uri_reference("C:board.yaml")`
+    is actually `"C%3Aboard.yaml"` -- the colon is percent-encoded, and
+    `.startswith("file:")` on it is `False`, correctly. The SAME encoding
+    rule is what makes the sniff safe in general: a `file:` PREFIX can only
+    ever appear in the output through the two absolute-only `.as_uri()`
+    branches -- any RELATIVE reference containing a literal `"file:"`
+    substring has its colon percent-encoded before this check ever sees it
+    (`path_to_uri_reference("file:sub/board.yaml") == "file%3Asub/board
+    .yaml"`, measured), so it can never masquerade as one."""
+    return path_to_uri_reference(path).startswith("file:")
+
+
+def cwd_base_uri() -> str:
+    """The SARIF `originalUriBaseIds` base for a RELATIVE `artifactLocation
+    .uri` (tan-cli#1117): the process's own working directory, as an
+    absolute `file:` URI with a TRAILING SLASH.
+
+    **Anchored on `Path.cwd()`, never on `--project`/`root`.**
+    `resolve_board_path` already prepends `root` onto the relative reference
+    itself (`--project sub` renders `"sub/board.yaml"`, not `"board.yaml"`),
+    so the reference is CWD-relative by construction. A base ALSO anchored on
+    `root` would apply that prefix a SECOND time -- `urljoin("file://.../sub/
+    ", "sub/board.yaml")` names `.../sub/sub/board.yaml`, which does not
+    exist -- reproducing the exact tan-cli#1097-round-2 defect this issue was
+    filed to fix (measured there: `root="."`'s base resolved `./board.yaml`
+    onto the WRONG file because the base and the reference were anchored to
+    two different roots). `tests/core/test_uri_reference.py`'s mutation for
+    this line swaps `Path.cwd()` for a `root`-derived path and reds on the
+    `--project sub` case for exactly that reason.
+
+    **The trailing slash is not decorative.** RFC 3986 SS5.3's reference-
+    resolution algorithm drops the base's own LAST PATH SEGMENT before
+    appending a relative reference: `urljoin("file:///a/b", "c")` names
+    `"file:///a/c"`, not `"file:///a/b/c"` -- a slash-less base names a
+    RESOURCE, indistinguishable from a file, one level above the directory it
+    reads as. `Path.as_uri()` never appends one (a directory's URI looks
+    exactly like a file's), so this function appends it explicitly. Dropping
+    it reproduces the same wrong-file mismatch tan-cli#1117 measured
+    (`EXISTS? False` against the real, differently-pathed file); the sibling
+    mutation for this line strips the `+ "/"` and reds the same way.
+
+    **No filesystem call on caller data.** `Path.cwd()` reads the PROCESS's
+    own working directory -- never `--project`/`--board-yaml`, both caller-
+    supplied -- so nothing here can raise on a symlink loop, a missing
+    parent, or a permissions failure in a caller-given path. That is the
+    other half of what tan-cli#1117 was filed to avoid reintroducing: the
+    reverted round-1 attempt reached its (wrong) base through an unguarded
+    `Path.resolve(strict=False)` on `--project`, and `.resolve()`'s own
+    symlink-loop behaviour is not even uniform across pathlib versions --
+    measured directly (`python-build-standalone` 3.12.3/3.13.15/3.14.7): on
+    3.12, `Path("loop").resolve(strict=False)` raises `RuntimeError`
+    regardless of `strict=False`'s own promise not to; on 3.13/3.14 that
+    promise IS kept for `strict=False` (it returns the path unresolved, no
+    raise), but `strict=True` still raises `OSError [Errno 40]` on both.
+    Either way, resolving a caller-supplied path at all is the crash
+    surface -- this function avoids it entirely rather than depending on
+    which pathlib version happens to be running."""
+    return Path.cwd().as_uri() + "/"
