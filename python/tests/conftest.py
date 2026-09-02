@@ -241,14 +241,19 @@ def sdk_publishes_model_perf_points(sdk: Path) -> bool:
 
 def sdk_ships_the_model_perf_fixture(sdk: Path) -> bool:
     """True when ``<sdk>/tests/fixtures/model_perf/`` holds at least one
-    synthetic perf point -- alp-sdk's own `_fixture`-bannered document.
+    synthetic perf point -- a schema-valid, illustrative document alp-sdk
+    ships for exercising its own validator (NOT `_fixture`-marked in any way
+    itself: alp-sdk's `_MODEL_PERF_FIXTURE_MARKER` guards the *published*
+    `metadata/model_perf/` tree against a stray fixture landing there by
+    accident, and this document lives under `tests/fixtures/` instead,
+    where no such marker is ever checked -- tan-cli#1115).
 
     A SEPARATE artefact from the published tree above and therefore a separate
-    predicate, not a broader one: a test that proves tan REFUSES a fixture
-    point needs a real fixture document to refuse, and that exists today
+    predicate, not a broader one: a test that proves tan can READ a real,
+    schema-shaped point needs a real document to read, and that exists today
     (alp-sdk `9b466018`, "feat(metadata): tier-2 model-perf perf-point
     contract (Refs #1520) (#1884)") while a published point does not. Folding
-    the two into one switch would skip the refusal proof for the next several
+    the two into one switch would skip that proof for the next several
     months on the strength of an unrelated absence.
 
     Globs both `*.yaml` and `*.json`: alp-sdk ships this specific fixture as
@@ -345,8 +350,9 @@ needs_sdk_model_perf_fixture = pytest.mark.skipif(
         "model-perf perf-point contract (Refs #1520) (#1884)\", already on "
         "origin/dev -- unrelated to the still-open "
         f"{_SDK_PR} the three marks above this one gate on), so there is no "
-        "real fixture document for this test to prove tan REFUSES. Already "
-        "present at ci.yml's sdk_parity `ref:` / parity.yml's "
+        "real fixture document for this test to read (tan-cli#1115: this "
+        "reader now consumes that fixture by its actual fields rather than "
+        "refusing it). Already present at ci.yml's sdk_parity `ref:` / parity.yml's "
         "PINNED_SDK_TAG (0914da38); EXPECTED only against a checkout older "
         "than `9b466018`, and a failure here against one that has it is a "
         "regression, not this skip."
