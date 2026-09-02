@@ -58,7 +58,6 @@ can fail for reasons unrelated to versions.
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import subprocess
 import sys
@@ -209,11 +208,6 @@ def read_pyproject_version() -> str:
         return data["project"]["version"]
     except KeyError as err:
         raise VersionError(f"no [project] version in {path}") from err
-
-
-def read_npm_shim_version() -> str:
-    path = REPO_ROOT / "npm-shim" / "package.json"
-    return json.loads(path.read_text(encoding="utf-8"))["version"]
 
 
 def release_target(version: str) -> tuple[str, bool]:
@@ -406,14 +400,6 @@ def check(tag: str | None, *, against_tags: bool = False) -> list[str]:
                 f"TAN_VERSION {tan_version!r} -- expected {expected_pep440!r}"
             )
 
-    shim_version = read_npm_shim_version()
-    if shim_version != tan_version:
-        problems.append(
-            f"npm-shim/package.json version {shim_version!r} != TAN_VERSION "
-            f"{tan_version!r}; postinstall.js downloads assets from tag "
-            f"v{shim_version} (see npm-shim/postinstall.js:25)"
-        )
-
     problems.extend(changelog_problems(tan_version))
 
     if tag is not None:
@@ -442,7 +428,6 @@ def check(tag: str | None, *, against_tags: bool = False) -> list[str]:
     changelog_target, _ = release_target(tan_version)
     print(f"TAN_VERSION (source of truth) : {tan_version}")
     print(f"python/pyproject.toml         : {pyproject_version} (want {expected_pep440})")
-    print(f"npm-shim/package.json         : {shim_version} (want {tan_version})")
     print(f"CHANGELOG.md section          : ## [{changelog_target}]")
     if tag is not None:
         print(f"git tag                       : {tag}")

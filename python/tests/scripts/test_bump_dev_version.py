@@ -4,7 +4,7 @@
 The workflow this script feeds -- checking out `dev`, committing, pushing a
 branch, opening a PR -- is not exercised here for the same reason
 `test_pin_move_verify.py` does not shell `git`/`gh` either: there is nothing
-to unit-test about a network call, and the arithmetic + the four-file edit is
+to unit-test about a network call, and the arithmetic + the three-file edit is
 exactly the part a CI round trip is the wrong place to discover a bug in. Two
 of the cases below are the REAL, MEASURED precedents this script's rule was
 read off of (`python/tan/version.py`'s own history / CHANGELOG.md), not
@@ -13,7 +13,6 @@ invented examples.
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 
@@ -80,7 +79,7 @@ def test_next_dev_version_refuses_a_non_release_input(released: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# build_plan / apply_plan -- the four-file edit, against a synthetic tree
+# build_plan / apply_plan -- the three-file edit, against a synthetic tree
 # ---------------------------------------------------------------------------
 
 _VERSION_PY = """\
@@ -94,14 +93,6 @@ _PYPROJECT = """\
 name = "alp-tan"
 version = "0.6.0rc1"
 description = "fixture"
-"""
-
-_NPM_SHIM = """\
-{
-  "name": "@alplabai/tan",
-  "version": "0.6.0-rc1",
-  "description": "fixture — an em dash, matching the real file's own"
-}
 """
 
 _CHANGELOG = """\
@@ -120,7 +111,7 @@ All notable changes to `tan` are documented here.
 
 def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A minimal tree shaped like the real repo (`python/tan/version.py`,
-    `python/pyproject.toml`, `npm-shim/package.json`, `CHANGELOG.md`), with
+    `python/pyproject.toml`, `CHANGELOG.md`), with
     `version_check`'s `PYTHON_ROOT`/`REPO_ROOT` rebound onto it -- the same
     technique `test_version_check_refuses_an_empty_changelog_section.py`
     uses on `version_check` itself. `bump_dev_version.vc` IS `version_check`
@@ -131,8 +122,6 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (python_root / "tan").mkdir(parents=True)
     (python_root / "tan" / "version.py").write_text(_VERSION_PY, encoding="utf-8")
     (python_root / "pyproject.toml").write_text(_PYPROJECT, encoding="utf-8")
-    (tmp_path / "npm-shim").mkdir()
-    (tmp_path / "npm-shim" / "package.json").write_text(_NPM_SHIM, encoding="utf-8")
     (tmp_path / "CHANGELOG.md").write_text(_CHANGELOG, encoding="utf-8")
 
     monkeypatch.setattr(vc, "PYTHON_ROOT", python_root)
@@ -148,7 +137,6 @@ def test_build_plan_computes_all_four_edits(tmp_path, monkeypatch) -> None:
     assert plan.target == "0.6.0"
     assert 'TAN_VERSION = "0.6.0-rc2.dev0"' in plan.version_py_text
     assert 'version = "0.6.0rc2.dev0"' in plan.pyproject_text
-    assert json.loads(plan.npm_shim_text)["version"] == "0.6.0-rc2.dev0"
     assert "## [0.6.0] — Unreleased" in plan.changelog_text
     # The new heading lands AHEAD of the existing (now-dated) one, matching
     # where a hand-written bump has put it both times before.
@@ -162,15 +150,6 @@ def test_build_plan_computes_all_four_edits(tmp_path, monkeypatch) -> None:
     assert "## [0.6.0] — Unreleased\n\n### Fixed\n\n- `TAN_VERSION`" in (
         plan.changelog_text
     )
-    # `_bump_npm_shim`'s `ensure_ascii=False` is load-bearing (tan-cli#880):
-    # the real npm-shim/package.json's `description` carries a literal em
-    # dash, and the default `ensure_ascii=True` would silently rewrite it as
-    # a `\uXXXX` escape on every bump -- a diff on a field this script has
-    # no business touching. The em dash in `_NPM_SHIM` above exists so this
-    # assertion can catch that regression; it must appear literally, not
-    # escaped.
-    assert "fixture — an em dash" in plan.npm_shim_text
-    assert "\\u2014" not in plan.npm_shim_text
 
 
 def test_build_plan_leaves_files_untouched_until_apply(tmp_path, monkeypatch) -> None:
@@ -236,7 +215,7 @@ def test_main_skips_when_dev_has_already_moved_off_the_tag(
 ) -> None:
     """The one legitimate no-op: `TAN_VERSION` on `dev` no longer equals the
     tag just published (a previous run already bumped it, or a human beat the
-    job to it). Must exit 0 AND leave the four files untouched -- and must
+    job to it). Must exit 0 AND leave the three files untouched -- and must
     say so via `status=skip` rather than `status=applied`, so a workflow step
     reading that output cannot mistake this for the bump having happened."""
     root = _synthetic_repo(tmp_path, monkeypatch)

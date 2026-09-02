@@ -417,6 +417,72 @@ def _uncaveated(rel: str, pattern: re.Pattern[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 # The gate
 # ---------------------------------------------------------------------------
+#: Every version source `version_check.py` compares, as the reader function
+#: that fetches it. Asserted as a SET rather than a count so a drop names the
+#: source it lost, and asserted at all because nothing else in the repo does:
+#: when `npm-shim/package.json` was retired (tan-cli#1054), an audit found the
+#: contract had no census of its own sources. `_version_authority()` reads
+#: only `read_tan_version`, so removing any OTHER reader -- plus its call site
+#: and its summary line -- left every gate green and the whole pytest suite
+#: passing while `check()` silently compared one fewer file. That is the
+#: over-deletion this exists to make loud.
+#:
+#: `read_changelog_headings` is reached through `changelog_problems()` rather
+#: than called from `check()` directly, which is why the two assertions below
+#: differ: DEFINED covers the reader surviving at all, CALLED covers `check()`
+#: still routing through it.
+_DECLARED_VERSION_READERS = frozenset(
+    {"read_tan_version", "read_pyproject_version", "read_changelog_headings"}
+)
+_READERS_CALLED_BY_CHECK = frozenset({"read_tan_version", "read_pyproject_version"})
+
+
+def _version_readers() -> tuple[frozenset[str], frozenset[str]]:
+    """`(defined, called-by-check)` reader names, from `version_check.py`'s AST.
+
+    Derived, not restated -- the same reason `_version_authority()` is.
+    """
+    tree = ast.parse(VERSION_CHECK.read_text(encoding="utf-8"))
+    defined = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("read_")
+    }
+    check = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "check"
+    )
+    called = {
+        node.func.id
+        for node in ast.walk(check)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id.startswith("read_")
+    }
+    return frozenset(defined), frozenset(called)
+
+
+def test_version_check_still_reads_every_source_it_is_supposed_to():
+    """A version source cannot be dropped silently.
+
+    Failing here means `version_check.py` gained or lost a reader. If that was
+    deliberate, update the two frozensets above IN THE SAME COMMIT and say why
+    -- the point is that the change is stated, not that it is forbidden.
+    """
+    defined, called = _version_readers()
+    assert defined == _DECLARED_VERSION_READERS, (
+        f"version_check.py's reader set changed: "
+        f"lost {sorted(_DECLARED_VERSION_READERS - defined)}, "
+        f"gained {sorted(defined - _DECLARED_VERSION_READERS)}"
+    )
+    assert called == _READERS_CALLED_BY_CHECK, (
+        f"check() no longer routes through the same readers: "
+        f"lost {sorted(_READERS_CALLED_BY_CHECK - called)}, "
+        f"gained {sorted(called - _READERS_CALLED_BY_CHECK)}"
+    )
+
+
 def test_the_documented_version_authority_is_the_one_the_tag_gate_reads():
     authority_file, symbol = _version_authority()
     wrong = []
