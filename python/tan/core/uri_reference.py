@@ -31,10 +31,14 @@ to assert against).
 
 A relative `path` (`resolve_board_path`'s own default, `"./board.yaml"`) is
 returned as a relative reference rather than absolutised. It is already a
-legal relative URI reference per RFC 3986 SS4.2 -- both SARIF 2.1.0's
-`artifactLocation.uri` and this repo's own `diagnostic-v1.schema.json` accept
-one -- and absolutising it here would (a) move the pre-existing pinned golden
-(`test_validate_command.py`'s `"./board.yaml"` pins) and (b) bake the
+legal relative URI reference per RFC 3986 SS4.2 -- SARIF 2.1.0's
+`artifactLocation.uri` accepts one (`format: uri-reference`). alp-sdk's
+`metadata/schemas/diagnostic-v1.schema.json` (NOT this repo's -- it lives in
+alp-sdk, `git ls-files` here has zero hits for it) types the analogous field
+as a bare `"type": "string"` and accepts a raw filesystem path too, so it
+constrains nothing either way and is not cited as support for staying
+relative. Absolutising `path` here would (a) move the pre-existing pinned
+golden (`test_validate_command.py`'s `"./board.yaml"` pins) and (b) bake the
 process's CWD into an otherwise portable document.
 
 **This module makes NO claim about how a relative reference gets resolved.**
@@ -51,8 +55,9 @@ declaring none -- round 1's undefined base at least let a spec-conformant
 consumer fall back to its own CWD and succeed. That work was reverted; the
 base-declaration question (where SARIF's base should be anchored, and how to
 resolve it soundly for both `root="."` and a `--board-yaml`/`--project`
-override) is tracked as a separate, standalone follow-up rather than bolted
-onto this fix.
+override) is tracked as tan-cli#1117, filed with both measurements above --
+the wrong-base `urljoin` result and the `Path.resolve(strict=False)`
+symlink-loop crash -- rather than bolted onto this fix.
 """
 from __future__ import annotations
 

@@ -1002,7 +1002,11 @@ def _sarif_document(
     RELATIVE `artifactLocation.uri` with NO base declared when `board_path`
     is relative -- valid SARIF, but the base is left implementation-defined,
     same as `dev` before this PR (tan-cli#1097's own defect is still closed
-    for the ABSOLUTE case, which is the one the issue was filed against)."""
+    for the ABSOLUTE case, which is the one the issue was filed against).
+    Closing the relative case is tracked as tan-cli#1117, filed with both
+    measurements above (the wrong-base result, the symlink-loop crash) so a
+    reader following the reference gets the full history rather than
+    rediscovering it."""
     rules: dict[str, dict[str, str]] = {}
     results = []
     for issue, finding in reported:
