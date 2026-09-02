@@ -314,10 +314,12 @@ def _coerce(spec: dict[str, Any], raw: Any) -> Any:
     It does NOT cover what `_check_constraints` then DOES with them: a
     schema-VALID `type: string` (or `enum`) parameter carrying
     `constraints.minimum`/`maximum` is legal per `$defs/parameter`, and
-    `_require_constraints` guarantees the `int` that makes the resulting
-    `"a" < 5` raise a bare `TypeError`. Latent only because no shipped
-    catalog declares such a parameter. Tracked at tan-cli#1087 -- do not
-    read this paragraph as claiming otherwise."""
+    `_require_constraints` guarantees the `int` that would make a bare
+    `"a" < 5` raise a `TypeError`. tan-cli#1087 closed that: `_check_
+    constraints` now refuses `minimum`/`maximum` on any non-`integer`
+    `type` with a curated `ParameterError` before it ever compares, so the
+    bare `TypeError` this paragraph used to describe as latent no longer
+    happens -- do not read it as still open."""
     if not isinstance(raw, str):
         return raw
     ptype = spec["type"]
@@ -337,11 +339,40 @@ def _coerce(spec: dict[str, Any], raw: Any) -> Any:
 
 
 def _check_constraints(template_id: str, spec: dict[str, Any], value: Any) -> None:
+    """Enforce `spec["constraints"]` against the coerced @value.
+
+    tan-cli#1087: `minimum`/`maximum` are only well-typed against `type:
+    integer` -- `$defs/parameter.type` is exactly `string`/`integer`/
+    `boolean`/`enum`, none of the other three compare against an `int`
+    bound, and the schema does not cross-reference `type` against
+    `constraints` at all. `boolean` is refused too, on purpose, even though
+    `bool < int` never raises -- a bound that cannot crash still is not one
+    that means anything on a boolean knob. A schema addition of a fifth
+    numeric `type` would need a matching line here.
+
+    DIVERGES FROM alp-sdk on this input class, deliberately: `scripts/
+    alp_template.py`'s own `_check_constraints` has no such guard and still
+    raises the bare `TypeError` this closes. alp-sdk#1916 tracks closing the
+    gap; until then tan refuses where alp-sdk still crashes.
+
+    `constraints.enum` is the SAME inapplicability class one line below --
+    an `integer` parameter can never satisfy it, since the schema forces
+    `enum` items to strings -- and is DELIBERATELY LEFT OPEN here: it fails
+    loudly with a value-blaming message rather than crashing, so it stayed
+    out of #1087's scope. alp-sdk#1916 tracks it too.
+    """
     constraints = spec.get("constraints") or {}
     if "enum" in constraints and value not in constraints["enum"]:
         raise ParameterError(
             f"{template_id}: {spec['name']}={value!r} not in "
             f"{constraints['enum']}")
+    for bound in ("minimum", "maximum"):
+        if bound in constraints and spec["type"] != "integer":
+            raise ParameterError(
+                f"{template_id}: {spec['name']}={value!r} is type "
+                f"{spec['type']!r}; constraints.{bound} "
+                f"({constraints[bound]!r}) only applies "
+                f"to type 'integer'")
     if "minimum" in constraints and value < constraints["minimum"]:
         raise ParameterError(
             f"{template_id}: {spec['name']}={value!r} < minimum "

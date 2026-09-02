@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tan.model.perf import (
     coverage_from_placement,
@@ -138,6 +139,23 @@ def test_an_exact_eight_field_match_returns_the_point(tmp_path):
     assert point.capture_reference == "alp-sdk-internal:bench/captures/x.log"
 
 
+def test_a_yaml_suffixed_point_is_discovered_not_just_a_json_one(tmp_path):
+    # tan-cli#1114 review major: `find_perf_points`'s OWN discovery glob was
+    # `*.json`-only, the same never-fires shape tan-cli#1105 fixed for the
+    # two test-side predicates -- but on the PRODUCTION lookup path, which is
+    # what actually has to find a real alp-sdk-published point
+    # (`metadata/model_perf/<sku>/<hash>.yaml`, per
+    # `scripts/validate_metadata.py::_collect_model_perf_files`). The content
+    # here is still `json.dumps` output (this reader parses that fine too --
+    # the module docstring's "ONE PARSER, BOTH FORMATS") -- only the
+    # FILENAME suffix is the thing under test.
+    path = _write_point(tmp_path, _point_doc(), filename="p.yaml")
+    assert path.name == "p.yaml"
+    point = _find(tmp_path)
+    assert point is not None
+    assert point.path == path
+
+
 @pytest.mark.parametrize("field,value", [
     ("sku", "E1M-AEN701"),
     ("hw_rev", "r1"),                        # a different module revision
@@ -257,10 +275,13 @@ def test_two_toolchain_versions_left_unstated_are_refused_not_ranked(tmp_path):
 
 
 def test_a_fixture_bannered_point_is_never_consumed(tmp_path):
-    # alp-sdk stamps `_fixture` on synthetic documents whose `measured`
-    # figures are PLACEHOLDERS. Reporting one at `confidence: "certain"` is
-    # the single worst output this tier can produce, so it is refused
-    # outright rather than consumed with a caveat.
+    # NOT alp-sdk's own convention -- alp-sdk's `_fixture` marker is a PATH
+    # check on the *published* tree (`validate_metadata.py`'s
+    # `_MODEL_PERF_FIXTURE_MARKER`), never a document key (tan-cli#1114
+    # review minor). This is tan's OWN, additional document-level refusal:
+    # defence-in-depth against a key nothing upstream writes today, so that a
+    # document carrying one anyway -- hand-authored, or a future convention
+    # -- is still refused outright rather than consumed with a caveat.
     path = _write_point(tmp_path, _point_doc(_fixture="SYNTHETIC -- not a measurement"))
     assert read_perf_point(path) is None
     assert _find(tmp_path) is None
@@ -274,12 +295,19 @@ def test_a_point_that_is_not_bench_measured_is_refused(tmp_path):
     assert _find(tmp_path) is None
 
 
-@pytest.mark.parametrize("body", ["{not json", '["a list"]', '"a string"', "null"])
+@pytest.mark.parametrize("body", [
+    b"{not json", b'["a list"]', b'"a string"', b"null",
+    # tan-cli#1114 review blocker 1: `path.read_text(encoding="utf-8")`
+    # raises `UnicodeDecodeError` on this BEFORE `yaml.safe_load` ever runs
+    # -- a `ValueError` subclass, not a `yaml.YAMLError`, so the reader's
+    # except clause must catch both, not just the latter.
+    b"schema_version: 1\nnote: caf\xe9 -- invalid utf-8 mid-value\n",
+])
 def test_a_malformed_document_is_not_a_match_and_never_raises(tmp_path, body):
     d = tmp_path / "model_perf" / "E1M-AEN801" / "ethos-u85-256"
     d.mkdir(parents=True)
     path = d / "p.json"
-    path.write_text(body, encoding="utf-8")
+    path.write_bytes(body)
     assert read_perf_point(path) is None
     assert _find(tmp_path) is None
 
@@ -290,6 +318,95 @@ def test_an_unreadable_file_is_not_a_match_and_never_raises(tmp_path):
     d = tmp_path / "model_perf" / "E1M-AEN801" / "ethos-u85-256" / "p.json"
     d.mkdir(parents=True)
     assert read_perf_point(d) is None
+    assert _find(tmp_path) is None
+
+
+def _real_yaml_point(quote_scalars: bool = True) -> str:
+    """The `_point_doc()` field model written as REAL YAML source -- block
+    mappings, a comment, no JSON braces -- not `json.dumps` output that
+    merely happens to parse as YAML too. Distinguishes a reader that actually
+    parses YAML from one that only accidentally tolerates JSON's syntax
+    overlap with it (tan-cli#1114 review blocker 2).
+
+    @quote_scalars controls `capture.date` / `toolchain.version`: quoted
+    (the default, and what alp-sdk's own fixture does) stays a `str`; left
+    unquoted, PyYAML's YAML-1.1 implicit typing turns them into a
+    `datetime.date` / `float` -- see the module docstring's "THE ASYMMETRY
+    THAT COMES BACK THE OTHER WAY" note.
+    """
+    date = '"2026-08-16"' if quote_scalars else "2026-08-16"
+    version = '"5.1.0"' if quote_scalars else "5.1"
+    return f"""\
+# A real bench-measured point, hand-authored (this is what tan's reader must
+# actually parse -- not the `json.dumps` shape every OTHER test in this file
+# writes).
+stance: bench-measured
+measured_on:
+  sku: E1M-AEN801
+  hw_rev: r2
+  core: m55_hp
+  backend: ethos_u
+  accel_config: ethos-u85-256
+model:
+  slug: person-detect-int8
+  sha256: {_SHA}
+  size_bytes: 300568
+  source: tests/fixtures/models/person_detect_int8.tflite
+toolchain:
+  name: vela
+  version: {version}
+  system_config: Ethos_U85_SRAM_Only
+  memory_mode: Sram_Only
+measured:
+  npu_ops: 44
+  cpu_ops: 0
+  arena_bytes: 74480
+  req_sram_kib: 73
+  latency_ms_mean: 12.4
+  latency_ms_p95: 12.9
+  runs: 100
+capture:
+  date: {date}
+  operator: alpCaner
+  reference: "alp-sdk-internal:bench/captures/x.log"
+"""
+
+
+def test_a_real_yaml_syntax_document_is_read_not_just_json(tmp_path):
+    # tan-cli#1114 review blocker 2: the fix this issue is FOR is "the reader
+    # can parse YAML", and no test asserted that against real YAML syntax --
+    # every OTHER document in this file is `json.dumps` output, which a
+    # reader that still only accepted JSON would pass just as well. This one
+    # is real YAML source (block mappings, a `#` comment): unparseable by
+    # `dev`'s `json.loads`-based reader (a `JSONDecodeError`, caught, `None`)
+    # and read correctly by this one.
+    d = tmp_path / "model_perf" / "E1M-AEN801" / "ethos-u85-256"
+    d.mkdir(parents=True)
+    path = d / "p.yaml"
+    path.write_text(_real_yaml_point(), encoding="utf-8")
+    point = read_perf_point(path)
+    assert point is not None, "a real YAML document must be readable"
+    assert point.sku == "E1M-AEN801"
+    assert point.model_sha256 == _SHA
+    assert point.latency_ms_mean == 12.4
+    assert _find(tmp_path) is not None
+
+
+def test_an_unquoted_scalar_silently_drops_the_whole_point(tmp_path):
+    # THE ASYMMETRY THAT COMES BACK THE OTHER WAY (module docstring): YAML
+    # 1.1 implicit-types an unquoted `date`/`version` scalar away from `str`
+    # (`datetime.date` / `float`), and `_text()` is `str`-strict, so the
+    # WHOLE point is refused -- the same `None` as a missing field, not a
+    # crash and not a coercion. Pinned deliberately, not merely "known": this
+    # reader's whole design is refuse-over-guess (module docstring,
+    # throughout), and alp-sdk's own schema validator already requires
+    # `"type": "string"` on both fields, so a document that reaches this
+    # reader unquoted was never going to be a valid published point either.
+    d = tmp_path / "model_perf" / "E1M-AEN801" / "ethos-u85-256"
+    d.mkdir(parents=True)
+    path = d / "p.yaml"
+    path.write_text(_real_yaml_point(quote_scalars=False), encoding="utf-8")
+    assert read_perf_point(path) is None
     assert _find(tmp_path) is None
 
 
@@ -440,15 +557,31 @@ pytestmark_real_sdk = pytest.mark.skipif(
 @pytestmark_real_sdk
 @needs_sdk_model_perf_fixture
 def test_alp_sdks_own_synthetic_fixture_point_is_refused_by_this_reader():
-    """Not tan's IDEA of a fixture -- the actual `_fixture`-bannered document
-    alp-sdk ships. Its identity fields are real (a real sha256 of a real
-    model) while every figure under `measured` is a placeholder, which is
-    exactly the shape that would be catastrophic to report as `bench`."""
-    fixtures = sorted((SDK / "tests" / "fixtures" / "model_perf").rglob("*.json"))
+    """The actual illustrative document alp-sdk ships under
+    `tests/fixtures/model_perf/` (alp-sdk `9b466018`, "feat(metadata):
+    tier-2 model-perf perf-point contract (Refs #1520) (#1884)") -- a
+    schema-valid, semantic-check-clean point whose figures are explicitly
+    NOT a real bench capture (its own header comment says so). Published as
+    YAML, per `model-perf-v1.schema.json`'s own `$id`/title.
+
+    alp-sdk's `_fixture` marker guards the PUBLISHED `metadata/model_perf/`
+    tree and is a PATH convention there (a `_fixture`-suffixed SKU directory
+    or filename, `scripts/validate_metadata.py`'s
+    `_MODEL_PERF_FIXTURE_MARKER`) -- never a document key, and this specific
+    document carries no such key. This reader refuses it anyway, today,
+    because its shape (no top-level `stance`, no `measured_on`/`measured`
+    blocks -- alp-sdk's real schema nests identity under `sku`/`hw_rev`/
+    `target` and figures under `perf`) does not match ANYTHING
+    `read_perf_point` currently recognises as a point, fixture or not. That
+    is a real, separate schema-drift gap this test does not close (tracked
+    for a follow-up, not tan-cli#1105's scope: fixing the glob/parse format
+    alone must not silently promise the reader also matches alp-sdk's
+    CURRENT field names, which it does not yet)."""
+    fixtures = sorted((SDK / "tests" / "fixtures" / "model_perf").rglob("*.yaml"))
     assert fixtures, "the capability mark should have skipped this"
     for path in fixtures:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-        assert "_fixture" in doc, f"{path} is not a fixture point"
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert isinstance(doc, dict), f"{path} did not parse to a mapping"
         assert read_perf_point(path) is None, (
             f"{path}: a placeholder document must never be readable as a "
             f"measurement"

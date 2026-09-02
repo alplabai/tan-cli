@@ -302,6 +302,7 @@ from tan.core.sdk_discovery import (
 )
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.subprocess_env import spawn_env
+from tan.core.uri_reference import path_to_uri_reference
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, ValidateOutputFormat
@@ -911,14 +912,19 @@ def _issue_to_diagnostic(issue: Issue, finding: _Finding, board_path: str) -> di
     `= see:` line is no longer discarded on the way past -- that URL is the
     child's, not tan's, and it exists."""
     diagnostic = {
-        # tan-cli#1097: a filesystem PATH where LSP requires a URI reference.
-        # On Windows this is `C:\w\proj\board.yaml`, which no editor matches
-        # by document URI -- the diagnostic attaches to nothing, silently.
-        # Pre-existing: tan-cli#1031 made the separator follow the root (this
-        # was the mixed `C:\w\proj/board.yaml`), which is neither more nor
-        # less valid as a URI. Fix is `Path(...).as_uri()`, here and at the
-        # SARIF `artifactLocation` below -- not in the path resolver.
-        "uri": board_path,
+        # tan-cli#1097: rendered through `path_to_uri_reference`, not
+        # `board_path` bare -- a filesystem PATH is not a URI reference (on
+        # Windows this was `C:\w\proj\board.yaml`, which no editor matches
+        # by document URI, so the diagnostic attached to nothing, silently).
+        # Fixed at the exporter, here and at the SARIF `artifactLocation`
+        # below -- not in the path resolver; see `tan.core.uri_reference`'s
+        # module docstring for the relative-vs-absolute split. This closes
+        # the defect for an ABSOLUTE board path; a RELATIVE `uri` here is
+        # left as a legal relative reference with no base declared -- this
+        # module makes no claim about how a consumer resolves it (see the
+        # module docstring's own note on why an earlier attempt at that,
+        # tied to SARIF's `originalUriBaseIds`, was reverted).
+        "uri": path_to_uri_reference(board_path),
         "range": _lsp_range(finding),
         "severity": issue.severity,
         "code": _diagnostic_code(issue, finding),
@@ -976,7 +982,31 @@ def _sarif_document(
     `helpUri` follows `documentationUri` exactly: present on a rule whose
     validator named a `= see:` page, absent otherwise. tan invents none for
     its own codes (it has no landing pages), and `helpUri` is optional in the
-    SARIF 2.1.0 schema."""
+    SARIF 2.1.0 schema.
+
+    tan-cli#1097 review measured that alp-sdk's own `to_sarif`/`_uri` --
+    what "mirroring" above still means for shape -- emits `artifactLocation
+    .uri` bare, with no scheme; this function's `uri` handling has diverged
+    from it on purpose (see [`path_to_uri_reference`]). alp-sdk owes the
+    same fix -- tracked as alp-sdk#1909, not fixed here (a different repo,
+    different release cadence). A round-1 attempt at this PR also declared
+    `originalUriBaseIds`/`uriBaseId` so a RELATIVE `artifactLocation.uri`
+    would have a defined base to resolve against; round 2 review found that
+    declared base did not actually resolve the reference in the default
+    case (an anchoring mismatch, `root` vs. the CWD `board_path` is really
+    relative to) and reached it through an unguarded `Path.resolve()` that
+    could raise on a caller-supplied `--project` containing a symlink loop
+    -- crashing this exact command. That work was reverted rather than
+    patched a third time in place; see `tan.core.uri_reference`'s module
+    docstring for the fuller account. This function currently emits a
+    RELATIVE `artifactLocation.uri` with NO base declared when `board_path`
+    is relative -- valid SARIF, but the base is left implementation-defined,
+    same as `dev` before this PR (tan-cli#1097's own defect is still closed
+    for the ABSOLUTE case, which is the one the issue was filed against).
+    Closing the relative case is tracked as tan-cli#1117, filed with both
+    measurements above (the wrong-base result, the symlink-loop crash) so a
+    reader following the reference gets the full history rather than
+    rediscovering it."""
     rules: dict[str, dict[str, str]] = {}
     results = []
     for issue, finding in reported:
@@ -997,11 +1027,12 @@ def _sarif_document(
                 "locations": [
                     {
                         "physicalLocation": {
-                            # tan-cli#1097, the same defect as the LSP `uri`
-                            # above: SARIF 2.1.0 requires a URI reference, and
-                            # a consumer resolving this path against
-                            # `originalUriBaseIds` silently resolves it wrong.
-                            "artifactLocation": {"uri": board_path},
+                            # tan-cli#1097: `artifactLocation` is a URI
+                            # reference (SARIF 2.1.0), never the bare
+                            # filesystem path this used to emit -- see
+                            # this function's own docstring for what is,
+                            # and is not, resolved by this fix alone.
+                            "artifactLocation": {"uri": path_to_uri_reference(board_path)},
                             "region": _sarif_region(finding),
                         }
                     }
