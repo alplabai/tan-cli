@@ -642,17 +642,16 @@ def _example_som_catalog_issue(
 
     `unsupported_som` returning `None` is ambiguous by its own documented
     contract -- EITHER "checked, --som is fine (or there was no record to
-    check against)" OR "could not check at all" (the catalog, or the
-    matching record within it, could not be read: non-UTF-8 bytes, a
-    directory, a permissions error, invalid JSON, the wrong top-level shape,
-    a malformed `supported.som_skus` on the matching record -- PR #1096 made
-    that curated rather than a crash, but `unsupported_som` degrades it the
-    same as every other "nothing to report" reason, by design). This second,
-    narrower read (`catalog_unreadable`) distinguishes the two. `ok`/
-    `exitCode` and the scaffold itself stay exactly as they are either way
-    (refusing here would be the tightening tan-cli#1084 promised not to
-    do) -- this only stops the envelope from claiming a check that never
-    ran.
+    check against)" OR "could not check at all". This second, narrower read
+    (`catalog_unreadable`) distinguishes the two, and returns its reason
+    ALREADY led correctly for which of its two shapes actually happened (a
+    genuinely unreadable catalog document vs. one that read fine but whose
+    matching record did not) -- see that function's own docstring, and the
+    module docstring section it points at, rather than re-deriving either
+    lead here. `ok`/`exitCode` and the scaffold itself stay exactly as they
+    are either way (refusing here would be the tightening tan-cli#1084
+    promised not to do) -- this only stops the envelope from claiming a
+    check that never ran.
     """
     supported = unsupported_som(resolved_sdk.path, example_src, som)
     if supported is not None:
@@ -667,15 +666,14 @@ def _example_som_catalog_issue(
             f"SoM's topology before building, or widen som_skus in "
             f"the catalog if the example really does support it.",
         )
-    unreadable = catalog_unreadable(resolved_sdk.path, example_src)
-    if unreadable is not None:
+    check_skipped_reason = catalog_unreadable(resolved_sdk.path, example_src)
+    if check_skipped_reason is not None:
         return Issue(
             "init.example-som-unchecked",
             "warning",
-            f"{subject_label}: the SDK scaffold catalog could not be "
-            f"read ({unreadable}), so whether --som '{som}' is "
-            f"supported could not be checked. The files were still "
-            f"written -- verify '{som}' against {subject_label}'s "
+            f"{subject_label}: {check_skipped_reason}, so whether --som "
+            f"'{som}' is supported could not be checked. The files were "
+            f"still written -- verify '{som}' against {subject_label}'s "
             f"supported SoMs before building.",
         )
     return None

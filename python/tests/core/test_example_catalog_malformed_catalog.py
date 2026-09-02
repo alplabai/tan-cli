@@ -497,7 +497,8 @@ def test_catalog_unreadable_names_a_non_utf8_catalog(tmp_path):
     _catalog_path(root).write_bytes(b"\xff\xfe not valid utf-8")
     reason = ec.catalog_unreadable(root, _SRC)
     assert reason is not None
-    assert reason.startswith(f"cannot read template catalog at {_catalog_path(root)}: ")
+    assert reason.startswith("the SDK scaffold catalog could not be read (")
+    assert f"cannot read template catalog at {_catalog_path(root)}: " in reason
 
 
 def test_catalog_unreadable_names_a_directory_where_the_file_should_be(tmp_path):
@@ -505,6 +506,7 @@ def test_catalog_unreadable_names_a_directory_where_the_file_should_be(tmp_path)
     _catalog_path(root).mkdir(parents=True)
     reason = ec.catalog_unreadable(root, _SRC)
     assert reason is not None
+    assert reason.startswith("the SDK scaffold catalog could not be read (")
     assert "cannot read template catalog at" in reason
 
 
@@ -512,6 +514,7 @@ def test_catalog_unreadable_names_invalid_json(tmp_path):
     root = _tree(tmp_path, "{")
     reason = ec.catalog_unreadable(root, _SRC)
     assert reason is not None
+    assert reason.startswith("the SDK scaffold catalog could not be read (")
     assert "not valid JSON" in reason
 
 
@@ -519,6 +522,7 @@ def test_catalog_unreadable_names_a_nonobject_document(tmp_path):
     root = _tree(tmp_path, "[1, 2]")
     reason = ec.catalog_unreadable(root, _SRC)
     assert reason is not None
+    assert reason.startswith("the SDK scaffold catalog could not be read (")
     assert "expected a JSON object, got list" in reason
 
 
@@ -526,6 +530,7 @@ def test_catalog_unreadable_names_a_nonlist_templates(tmp_path):
     root = _tree(tmp_path, {"templates": 3})
     reason = ec.catalog_unreadable(root, _SRC)
     assert reason is not None
+    assert reason.startswith("the SDK scaffold catalog could not be read (")
     assert "templates must be a list, got int" in reason
 
 
@@ -565,10 +570,19 @@ def test_catalog_unreadable_names_a_malformed_matching_records_supported_field(t
     `supported.som_skus:`) cannot be read as the shape its schema declares,
     used to report `None` -- indistinguishable from "checked, sku is fine"
     or "no record at all". The SoM-support check for THIS example could not
-    run either way; both must be named."""
+    run either way; both must be named.
+
+    tan-cli#1101 review MINOR: this is the "readable but incomplete" shape,
+    so it must NOT get the "could not be read" lead -- the document parsed
+    fine, only one record's declared support did not."""
     root = _one(tmp_path, supported=3)
     reason = ec.catalog_unreadable(root, _SRC)
     assert reason is not None
+    assert reason.startswith(
+        "the SDK scaffold catalog's declared support for this example is "
+        "not the shape its schema declares ("
+    )
+    assert "could not be read" not in reason
     assert f"{_catalog_path(root)} templates[0].supported must be a mapping" in reason
 
 
@@ -576,6 +590,11 @@ def test_catalog_unreadable_names_a_malformed_matching_records_som_skus(tmp_path
     root = _one(tmp_path, supported={"som_skus": "not-a-list"})
     reason = ec.catalog_unreadable(root, _SRC)
     assert reason is not None
+    assert reason.startswith(
+        "the SDK scaffold catalog's declared support for this example is "
+        "not the shape its schema declares ("
+    )
+    assert "could not be read" not in reason
     assert "supported.som_skus must be a list" in reason
 
 
@@ -585,6 +604,25 @@ def test_catalog_unreadable_is_none_when_a_different_records_example_is_malforme
     not spuriously warn about `_SRC`, which a later, well-formed record
     still resolves cleanly."""
     root = _tree(tmp_path, {"templates": [{"example": 7}, _record()]})
+    assert ec.catalog_unreadable(root, _SRC) is None
+
+
+def test_catalog_unreadable_is_none_when_no_record_is_ever_attributable_to_src(tmp_path):
+    """tan-cli#1101 review NIT: the previous test only pinned "bad record,
+    THEN a later good one" -- the other half, "bad record(s), and no good
+    one anywhere for `_SRC`", was silent and untested. Decision, pinned
+    here rather than left an accident: still `None`. A record whose OWN
+    `example:` cannot be read is not evidence either way about `_SRC` --
+    it is simply not attributable to it (`_declared_som_skus`'s own
+    per-record-skip precedent) -- so a catalog holding only such a record,
+    plus an unrelated well-formed one, ends the scan having found nothing
+    for `_SRC`, indistinguishable from -- and given the SAME treatment as
+    -- the ordinary "no record for this example at all" case."""
+    root = _tree(tmp_path, {"templates": [
+        {"id": "x", "example": 7},
+        {"id": "y", "example": "examples/some/other-thing",
+         "supported": {"som_skus": ["E1M-OTHER"]}},
+    ]})
     assert ec.catalog_unreadable(root, _SRC) is None
 
 
