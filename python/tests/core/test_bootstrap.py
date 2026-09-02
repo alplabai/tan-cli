@@ -604,3 +604,154 @@ def test_the_drive_relative_guard_did_not_change_is_plain_relative():
     assert ntpath_isabs("C:ws") is True
     assert is_plain_relative("C:ws") is False
     assert is_plain_relative("ws") is True
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1139: the rooted-but-driveless `--workspace \proj\ws` guard was dead
+# on CPython 3.12, alive on 3.13/3.14
+# ---------------------------------------------------------------------------
+
+#: The refusal `--workspace \proj\ws` must produce, byte for byte. A VERBATIM
+#: contract: it is what a user sees and what
+#: `test_bootstrap_command.py::test_workspace_is_validated_before_anything_
+#: touches_the_disk` matches a fragment of, so it is pinned whole here rather
+#: than by substring.
+_ROOTED_NO_DRIVE_REFUSAL = (
+    "--workspace '\\proj\\ws' has a root but no drive, which is ambiguous on this "
+    "host (it would resolve against whichever drive the process happens to be "
+    "running from); pass a full absolute path instead"
+)
+
+
+def test_a_rooted_but_driveless_workspace_is_refused_rather_than_taken_literally():
+    """**tan-cli#1139.** `--workspace \\proj\\ws` names a root with no drive,
+    which is exactly the ambiguity `resolve_workspace_target` exists to refuse
+    -- and off Windows on CPython **3.12** it was accepted verbatim, putting a
+    customer's checkout in a literal `\\proj\\ws` directory instead.
+
+    Measured on real interpreters, on a clean `dev`::
+
+        3.12.3   -> '\\\\proj\\\\ws'      (returned, guard dead)
+        3.13.15  -> ValueError          (guard alive)
+        3.14.7   -> ValueError          (guard alive)
+
+    `pyproject.toml` pins `requires-python = ">=3.12"`, so the dead arm was
+    the supported floor, not a legacy branch. This test therefore only reds on
+    3.12 if the fix is reverted -- see the next test for the one that reds on
+    all three."""
+    from tan.core.bootstrap import resolve_workspace_target
+
+    with pytest.raises(ValueError) as excinfo:
+        resolve_workspace_target("\\proj\\ws", os.path.join(os.sep, "cwd"))
+
+    assert str(excinfo.value) == _ROOTED_NO_DRIVE_REFUSAL
+
+
+def test_the_refusal_does_not_ride_on_this_interpreters_ntpath_isabs(monkeypatch):
+    """The version-invariance pin, and the one that reds on ALL THREE
+    interpreters if `_is_rooted_no_drive` is removed.
+
+    The defect was not "3.12 is wrong"; it was that the refusal was reached
+    THROUGH `ntpath_isabs`, whose answer for this shape flips at CPython 3.13
+    (`True` on 3.12.3, `False` on 3.13.15/3.14.7 -- `PureWindowsPath` says
+    `False` throughout). Forcing the helper to the 3.12 answer reproduces the
+    dead-guard condition on any interpreter, so this asserts the refusal
+    survives it. Nothing here touches the filesystem: the divergence is
+    injected, not provoked by a real host."""
+    from tan.core import bootstrap
+
+    monkeypatch.setattr(bootstrap, "ntpath_isabs", lambda raw: True)
+
+    with pytest.raises(ValueError) as excinfo:
+        bootstrap.resolve_workspace_target("\\proj\\ws", os.path.join(os.sep, "cwd"))
+
+    assert str(excinfo.value) == _ROOTED_NO_DRIVE_REFUSAL
+
+
+def test_a_rooted_path_is_never_joined_onto_cwd_even_if_both_oracles_go_quiet(
+    monkeypatch,
+):
+    """The tail branch in `resolve_workspace_target` is unreachable through
+    every input measured on 3.12.3/3.13.15/3.14.7, and is kept anyway so the
+    invariant "a rooted path is NEVER silently joined onto `cwd`" is total
+    rather than contingent on `ntpath.isabs`. This makes that branch live and
+    proves it refuses rather than joins -- the failure mode being a UNC path
+    quietly becoming `<cwd>/\\\\srv\\share`."""
+    from tan.core import bootstrap
+
+    monkeypatch.setattr(bootstrap, "ntpath_isabs", lambda raw: False)
+
+    with pytest.raises(ValueError, match="has a root but no drive"):
+        bootstrap.resolve_workspace_target("\\\\srv\\share", os.path.join(os.sep, "cwd"))
+
+
+@pytest.mark.parametrize(
+    ("raw", "refused"),
+    [
+        # Rooted, no drive -- refused on every host, both spellings on Windows.
+        ("\\proj\\ws", True),
+        ("\\", True),
+        # A UNC root or a device path carries the drive's equivalent: absolute.
+        ("\\\\srv\\share\\ws", False),
+        ("\\\\?\\C:\\ws", False),
+        # A drive-absolute path, and an ordinary relative one.
+        ("C:\\proj\\ws", False),
+        ("sub\\ws", False),
+    ],
+)
+def test_the_windows_spelled_decision_table_is_interpreter_independent(raw, refused):
+    """Pins the whole Windows-spelled table, not just the defect's own input,
+    so a future narrowing of the leading-separator regex cannot trade the fix
+    for a UNC-path regression. `\\\\srv\\share\\ws` and `\\\\?\\C:\\ws` are the
+    two shapes a naive "starts with a separator" test would break.
+
+    Measured identical on 3.12.3, 3.13.15 and 3.14.7."""
+    from tan.core.bootstrap import resolve_workspace_target
+
+    if refused:
+        with pytest.raises(ValueError, match="has a root but no drive"):
+            resolve_workspace_target(raw, os.path.join(os.sep, "cwd"))
+    else:
+        assert resolve_workspace_target(raw, os.path.join(os.sep, "cwd"))
+
+
+@pytest.mark.parametrize("raw", ["\\proj\\x", "/proj/x", "\\", "/"])
+def test_the_other_ntpath_isabs_call_site_is_indifferent_to_the_3_13_boundary(raw):
+    """`ntpath_isabs` has two callers, and #1139 was fixed at ONE of them. This
+    is the measurement that says the other one did not need touching, and that
+    leaving the shared helper version-variant moved no defect into it.
+
+    `is_plain_relative` answers `False` for every input on which the helper
+    diverges, on both sides of the boundary -- because its own component scan
+    sees the leading separator as an empty part and rejects independently of
+    the `isabs` pre-test. The second assertion pins that REASON, so the claim
+    stops being true loudly rather than silently if the scan is ever
+    reshaped."""
+    import re
+
+    from tan.core.bootstrap import is_plain_relative
+
+    assert is_plain_relative(raw) is False
+    # The reason it is False: the pre-test is not what decides it.
+    assert any(part in ("", ".", "..") for part in re.split(r"[\\/]", raw))
+
+
+def test_ntpath_isabs_is_deliberately_left_version_variant():
+    """`ntpath_isabs` was NOT narrowed to `PureWindowsPath.is_absolute()`, and
+    that is a decision rather than an oversight: its `^[A-Za-z]:` regex is the
+    only thing refusing `C:ws` at the `is_plain_relative` call site
+    (tan-cli#495 defect 8), and narrowing it buys nothing there while
+    reshaping a manifest guard.
+
+    Pins the two answers the callers actually depend on. `C:ws` is stable
+    across 3.12.3/3.13.15/3.14.7; the rooted case is not, which is why nothing
+    reads it for that shape any more."""
+    from pathlib import PureWindowsPath
+
+    from tan.core.bootstrap import ntpath_isabs
+
+    assert ntpath_isabs("C:ws") is True
+    assert ntpath_isabs("C:\\ws") is True
+    # pathlib's answer for the rooted-but-driveless shape, stable on all three
+    # -- the oracle `resolve_workspace_target` now agrees with.
+    assert PureWindowsPath("\\proj\\ws").is_absolute() is False
