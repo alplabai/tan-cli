@@ -1921,12 +1921,20 @@ def _run(
     # here worth refusing the write over.
     provenance_path = launch_provenance.sidecar_path(workspace_root)
     provenance_content: str | None = None
-    if provenance_path.is_file():
-        try:
-            with open(provenance_path, encoding="utf-8") as handle:
-                provenance_content = handle.read()
-        except OSError:
-            provenance_content = None
+    # tan-cli#1116 review round 2: no `is_file()` pre-flight -- `Path.is_file()`
+    # (pre-3.14) swallows ENOENT/ENOTDIR/EBADF/ELOOP but not EACCES, and on
+    # 3.14+ it swallows EVERY OSError including EACCES and returns `False`,
+    # which would have taken this "absent" arm for a permission-denied
+    # sidecar instead of the "read error" one two paragraphs up documents.
+    # `UnicodeDecodeError` is caught alongside `OSError` for the same reason
+    # named there: it is a `ValueError`, not an `OSError`, so a non-UTF-8
+    # sidecar used to escape this "ANY failure ... degrades to empty()"
+    # contract raw.
+    try:
+        with open(provenance_path, encoding="utf-8") as handle:
+            provenance_content = handle.read()
+    except (OSError, UnicodeDecodeError):
+        provenance_content = None
     provenance = launch_provenance.load(provenance_content)
 
     # alp-sdk#1026 review finding #1: compute this BEFORE the write, against

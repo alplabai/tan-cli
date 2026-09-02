@@ -350,21 +350,42 @@ def _known_board_names(sdk_root: Path) -> set[str] | None:
     """Board ``name:`` values from ``<sdk_root>/metadata/boards/``, or
     ``None`` when the directory is missing -- the closed set of shared
     carrier boards lives in the SDK checkout, not under ``--output-root``.
+
+    tan-cli#1116 review round 2: NOT a ``boards_dir.is_dir()`` pre-flight --
+    that used to gate the glob below, and ``Path.is_dir()`` on a
+    permission-denied PARENT directory raises a raw ``PermissionError`` on
+    every supported interpreter (measured escaping before this fix; this is
+    ``EACCES`` on the directory ``is_dir()`` itself needs to stat, not the
+    swallowed-errno family the other round-2 fixes describe). ``Path.glob``
+    on a genuinely ABSENT ``boards_dir`` already yields nothing rather than
+    raising, so wrapping the glob call itself in one ``except OSError``
+    covers "missing" (silently, via the empty iterator) and "parent denied"
+    (via the exception) alike, with no stat call of its own to be wrong
+    about on any interpreter.
     """
     boards_dir = sdk_root / "metadata" / "boards"
-    if not boards_dir.is_dir():
-        return None
     import yaml  # noqa: PLC0415 -- deferred, see `_yaml_scalar` (tan-cli#810)
 
+    try:
+        candidates = sorted(boards_dir.glob("*.yaml"))
+    except OSError:
+        return None
     names: set[str] = set()
-    for path in sorted(boards_dir.glob("*.yaml")):
+    for path in candidates:
         try:
             doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except (yaml.YAMLError, UnicodeDecodeError):
+        except (OSError, yaml.YAMLError, UnicodeDecodeError):
             # tan-cli#415: `UnicodeDecodeError` is a `ValueError`, not a
             # `yaml.YAMLError`, so a non-UTF-8 board file escaped this
             # best-effort scan as an unhandled traceback instead of being
             # skipped the same way an unparseable one already is.
+            #
+            # tan-cli#1116 review round 2: `OSError` is caught too -- a file
+            # this glob enumerated but cannot itself be READ (a per-file
+            # `chmod 000`, distinct from the containing directory this
+            # function's own `boards_dir.is_dir()` guard already covers)
+            # raised a raw `PermissionError` past this same best-effort scan
+            # (measured escaping before this fix).
             continue
         if isinstance(doc, dict) and isinstance(doc.get("name"), str):
             names.add(doc["name"])
@@ -406,6 +427,21 @@ def _family_hw_revisions(
     None means "not resolvable at scaffold time" -- a brand-new family with
     no SKU-prefix mapping / no hw-revisions file yet (creating one is a
     porting-checklist step).
+
+    tan-cli#1116 review round 2: NOT a ``path.is_file()`` pre-flight -- that
+    used to decide whether to try THIS root's candidate or fall through to
+    the next one, and it raised a raw ``PermissionError`` for a
+    permission-denied ancestor directory on every supported interpreter
+    (measured escaping before this fix; unlike a swallowed-errno version
+    skew, ``is_file()`` never ignored ``EACCES`` on the directory it needs
+    to stat, on any Python version here). Reading straight through instead:
+    ``FileNotFoundError``/``IsADirectoryError``/``NotADirectoryError`` all
+    mean "not usable AT THIS ROOT", so they fall through to the next
+    candidate exactly as a ``False`` ``is_file()`` used to; any OTHER
+    failure (permission, a non-UTF-8 file, invalid YAML) means the file IS
+    there and IS the one for this SKU, so it stops the search with ``None``
+    rather than silently trying a second root that was never going to be
+    the right answer.
     """
     family_dir = _resolve_sku_family(sku, sdk_root)
     if family_dir is None:
@@ -414,19 +450,23 @@ def _family_hw_revisions(
 
     for root in (output_root, sdk_root):
         path = root / "metadata" / "e1m_modules" / family_dir / "hw-revisions.yaml"
-        if path.is_file():
-            try:
-                doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            except (yaml.YAMLError, UnicodeDecodeError):
-                # tan-cli#415: same widening as `_known_board_names` above --
-                # `UnicodeDecodeError` is a `ValueError`, not a `yaml.YAMLError`,
-                # and previously escaped uncaught rather than resolving to
-                # "not resolvable".
-                return None
-            revs = doc.get("hw_revisions")
-            if isinstance(revs, dict):
-                return path, {str(k) for k in revs}
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+            continue
+        except (OSError, yaml.YAMLError, UnicodeDecodeError):
+            # tan-cli#415: `UnicodeDecodeError` is caught alongside
+            # `yaml.YAMLError` -- it is a `ValueError`, not a
+            # `yaml.YAMLError`, and previously escaped uncaught rather than
+            # resolving to "not resolvable". `OSError` (tan-cli#1116 review
+            # round 2) covers a per-file `chmod 000`, distinct from the
+            # ancestor-directory case the `except` above now handles by
+            # falling through instead of stopping.
             return None
+        revs = doc.get("hw_revisions")
+        if isinstance(revs, dict):
+            return path, {str(k) for k in revs}
+        return None
     return None
 
 

@@ -129,19 +129,23 @@ def _resolve_hw_rev(sku: str, metadata_root: Path, declared: str | None) -> str 
     `resolve_ethos_u_variant`'s stance next door.
 
     tan-cli#1116: NOT a pre-flight `preset_path.is_file()` -- that used to
-    gate the read below, and `Path.is_file()` swallows only
-    `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` (`pathlib`'s `_IGNORED_ERRNOS`), NOT
-    `EACCES`, so a preset whose CONTAINING directory the caller cannot
-    traverse raised a raw `PermissionError` right there, past this
-    function's own "Soft-fail" contract -- the exact `document_guards.
-    read_catalog_document` trap ("not a pre-flight `is_file()`"), just via
-    `is_file()` instead of `Path.exists()`. Reading straight through the
-    `try` below answers the same three cases (absent, a directory, no
-    permission) through `OSError` alone, so the pre-flight added nothing a
-    plain `FileNotFoundError` from the read did not already give it.
-    `UnicodeDecodeError` is also now caught explicitly: it is a
-    `ValueError`, not an `OSError` and not a `yaml.YAMLError`, so a non-UTF-8
-    preset used to escape raw past this same contract (measured, tan-cli#1116).
+    gate the read below, and on Python <= 3.12 `Path.is_file()` swallows only
+    `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` (pre-3.14 `pathlib`'s `_IGNORED_ERRNOS`
+    list, DROPPED in 3.14 -- see tan-cli#1116 review round 2: on 3.14+
+    `is_file()` swallows EVERY `OSError`, `EACCES` included, so a pre-flight
+    guard is dead there regardless of what it catches), NOT `EACCES`, so a
+    preset whose CONTAINING directory the caller cannot traverse raised a raw
+    `PermissionError` right there, past this function's own "Soft-fail"
+    contract -- the exact `document_guards.read_catalog_document` trap ("not
+    a pre-flight `is_file()`"), just via `is_file()` instead of
+    `Path.exists()`. Reading straight through the `try` below answers the
+    same three cases (absent, a directory, no permission) through `OSError`
+    alone -- on EVERY supported interpreter, since it never calls `is_file()`
+    at all -- so the pre-flight added nothing a plain `FileNotFoundError`
+    from the read did not already give it. `UnicodeDecodeError` is also now
+    caught explicitly: it is a `ValueError`, not an `OSError` and not a
+    `yaml.YAMLError`, so a non-UTF-8 preset used to escape raw past this same
+    contract (measured, tan-cli#1116).
 
     `declared` reaching here as `None` is itself a FAIL-CLOSED answer from the
     caller, not a "customer said nothing" default: `tan.commands.model_cmd.

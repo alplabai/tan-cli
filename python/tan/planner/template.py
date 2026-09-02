@@ -1569,12 +1569,18 @@ def _docs_ref(base_dir: Path) -> str:
     the reasoning that `yaml.safe_load(...) or {}` only ever produces a
     dict-or-`{}` result; a non-empty bare-list/scalar document is
     neither, and reached `doc.get(...)` bare, `AttributeError: 'list'
-    object has no attribute 'get'`)."""
+    object has no attribute 'get'`).
+
+    tan-cli#1116 review round 2: `UnicodeDecodeError` and `yaml.YAMLError`
+    are caught alongside `OSError` -- neither is an `OSError`, so a non-UTF-8
+    or syntactically-invalid `sdk_version.yaml` used to raise raw past this
+    same "cost a stale-but-safe link, not the whole scaffold" contract
+    (both measured escaping before this fix)."""
     try:
         doc = yaml.safe_load(
             (base_dir / "metadata" / "sdk_version.yaml").read_text(encoding="utf-8")
         ) or {}
-    except OSError:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return "main"
     if not isinstance(doc, dict):
         return "main"
@@ -1836,12 +1842,21 @@ def render_to_envelope(
     # `check_template_catalog.py`, but that gate runs on the SDK, not here,
     # so a hand-edited catalog pointing at a directory with no `board.yaml`
     # reached the user as a raw `FileNotFoundError`.
+    #
+    # tan-cli#1116 review round 2: `UnicodeDecodeError` is caught alongside
+    # `OSError` -- it is a `ValueError`, not an `OSError`, so a non-UTF-8
+    # example board.yaml used to escape this curated-raise contract as a raw
+    # traceback instead of a `TemplateError` (measured escaping before this
+    # fix). `getattr(exc, "strerror", None)`, not a bare `exc.strerror`:
+    # `UnicodeDecodeError` has no `.strerror` attribute at all, so the old
+    # unconditional access would itself have raised `AttributeError` the
+    # moment this arm widened to catch it.
     try:
         board_yaml_text = board_yaml_path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise TemplateError(
             f"cannot read template example board.yaml at "
-            f"{board_yaml_path}: {exc.strerror or exc}") from exc
+            f"{board_yaml_path}: {getattr(exc, 'strerror', None) or exc}") from exc
     # tan-cli#1052: the fifth sibling of the same malformed-YAML family
     # tan-cli#1025 -> #1034 -> #1037/#1048 swept through the SoM preset
     # and the board metadata. THIS document is the catalog template's

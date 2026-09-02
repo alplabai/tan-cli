@@ -108,12 +108,18 @@ def _safe_load_mapping(path: Path) -> Optional[dict]:
     pins PyYAML as loaded only by `new_som_cmd`/`kconfig_cmd`'s single-use
     paths -- a module-scope `import yaml` here would load it on `tan
     --version` too.
+
+    tan-cli#1116 review round 2: `UnicodeDecodeError` is caught alongside
+    `OSError` -- it is a `ValueError`, not an `OSError`, so a non-UTF-8
+    `hw-revisions.yaml` used to raise raw past `hw_rev_not_buildable`'s own
+    written "Never raises" contract (measured escaping through that real
+    caller before this fix).
     """
     import yaml
 
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     try:
         doc = yaml.safe_load(text)

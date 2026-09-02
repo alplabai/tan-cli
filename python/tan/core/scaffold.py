@@ -2023,28 +2023,43 @@ def read_example_tree(source_dir: Path) -> list[PlannedFile]:
     text today -- and with build output pruned, that is true of a built-in-place
     checkout too.
 
-    tan-cli#1116: the `is_dir()` pre-flight is itself guarded. `Path.is_dir()`
-    swallows only `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` (`pathlib`'s
-    `_IGNORED_ERRNOS`), NOT `EACCES` -- an example whose PARENT directory the
-    caller cannot traverse raised a raw `PermissionError` straight out of this
-    function (measured), never reaching the `except (OSError,
-    UnicodeDecodeError)` two lines below because the raise happened before
-    that `try` even opened. `not_found=False`, not `True`: a directory this
-    cannot even stat is not the user's typo, it is the same "unreadable"
-    runtime failure the class's own docstring already names for that arm.
+    tan-cli#1116 round 2: NOT an `is_dir()` pre-flight -- a first pass here
+    guarded `source_dir.is_dir()` with `except OSError`, reasoning that
+    `Path.is_dir()` swallows only `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP`
+    (pre-3.14 `pathlib`'s `_IGNORED_ERRNOS`), not `EACCES`. `pathlib` DROPPED
+    that allow-list in Python 3.14: `is_dir()` there swallows EVERY `OSError`
+    -- `EACCES` included -- and returns `False`, so the guarded pre-flight
+    was version-dependent and silently dead on >= 3.14 (measured: seam1's
+    CI leg runs CPython 3.14.7). On that interpreter a permission-denied
+    parent fell through to `is_source_dir is False`, which this function
+    itself raises as `not_found=True` -- the "user's typo" arm -- the exact
+    wrong answer this docstring's own words rule out two paragraphs up.
+
+    The fix: no stat call at all. `_example_source_files`'s `os.walk(...,
+    onerror=_raise)` already re-raises whatever `os.scandir` cannot get past
+    -- `FileNotFoundError` for a genuinely absent path, `NotADirectoryError`
+    for `source_dir` itself (or an ancestor) being a plain file,
+    `PermissionError`/other `OSError` (ELOOP included) for everything else
+    -- so calling it directly and classifying by the REAL exception is
+    version-independent by construction, the same shape `validate_document`
+    (`metadata_schema.py`) and `_resolve_hw_rev` (`perf_apply.py`) now use.
+    `FileNotFoundError`/`NotADirectoryError` keep the ORIGINAL "not a
+    directory" wording and `not_found=True` -- both are "this is not a real
+    example directory," a typo-shaped answer, exactly what the pre-existing
+    `is_dir() is False` branch covered for those two causes. Every other
+    failure (a permission-denied ancestor, an ELOOP symlink loop, a
+    non-UTF-8 file once inside a directory that DID open) is `not_found=
+    False`: a directory this cannot even read is a runtime failure, never
+    the customer's typo.
     """
-    try:
-        is_source_dir = source_dir.is_dir()
-    except OSError as err:
-        raise ExampleReadError(str(err), not_found=False) from err
-    if not is_source_dir:
-        raise ExampleReadError(f"'{source_dir}' is not a directory.", not_found=True)
     files: list[PlannedFile] = []
     try:
         for path in _example_source_files(source_dir):
             files.append(
                 PlannedFile(path.relative_to(source_dir).as_posix(), _read_verbatim(path))
             )
+    except (FileNotFoundError, NotADirectoryError) as err:
+        raise ExampleReadError(f"'{source_dir}' is not a directory.", not_found=True) from err
     except (OSError, UnicodeDecodeError) as err:
         # UnicodeDecodeError is a ValueError, not an OSError -- catching only
         # OSError would let a binary file in an example escape as a traceback.

@@ -45,69 +45,174 @@ never the shape of the clause that currently happens to hold it. A rule
 keyed on clause shape cannot tell a correct narrowing from a regression;
 this file asks the function itself, by running it.
 
-THE SHAPE SWEEP (tan-cli#1116's own instruction: seed from the SHAPE, not
-from the four names the issue body already listed -- issue comment 2 found
-`perf_apply.py`'s two sites exactly because a reviewer went looking in a
-NEIGHBOURING module a name-only seed would have missed).
+THE VERSION-INDEPENDENCE LESSON (review round 2 BLOCKER, its own section
+because it is the one mistake this file's FIRST version made and shipped
+red): a pre-flight `is_file()`/`is_dir()`/`exists()` guard wrapped in
+`except OSError` is not a fix, it is a bet on which errnos `pathlib`
+happens to swallow THIS interpreter. `pathlib` DROPPED its pre-3.14
+`_IGNORED_ERRNOS` allow-list (`ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP`) in Python
+3.14: on 3.14+ those three calls swallow EVERY `OSError`, `EACCES`
+included, and return `False` -- so a guard written to catch the ONE errno
+that used to escape (`EACCES`) catches nothing there, because nothing
+escapes the stat call for the guard to catch. `metadata_schema.
+validate_document` and `scaffold.read_example_tree` shipped exactly that
+guard in this gate's first version, and CI's `seam1` leg (`parity.yml`,
+`python-version: "3.x"`, resolved to CPython 3.14.7) turned it red on
+`TestValidateDocument::test_permission_denied` -- measured `assert 0 == 1`,
+the function silently answering "everything is valid" for a schema it could
+not even read. The fix used everywhere in this file now is the one
+`_resolve_hw_rev` (`perf_apply.py`) and `example_catalog.catalog_unreadable`
+already used: NO stat call at all. Read straight through and classify by
+the REAL exception the read raises -- `FileNotFoundError` for genuinely
+absent, everything else for "there but broken" -- which is correct on every
+interpreter because it never depends on what a stat-based guard happens to
+swallow this Python version. `TestReadExampleTree` additionally asserts the
+`not_found` VALUE, not just the exception type, because a type-only
+assertion could not see this class of bug at all: the old code still raised
+`ExampleReadError` on 3.14+, just with the wrong `not_found`.
 
-An AST walk over every `python/tan/**` function whose `try` wraps a
-`.read_text(`/`.read_bytes(`/`open(`/`yaml.safe_load(`/`json.load(`/`
-json.loads(` call, with a `broad` catch (`except Exception`/`BaseException`)
-excluded as safe-by-construction: **79** functions, reproducible by re-running
-the same walk (not committed here -- a one-off audit script, not a second
-gate). Most are false positives of the mechanical heuristic (a `try` matching
-a `.load(`-shaped attribute name on already-decoded text, not a file read; a
-name that shadows a stdlib name) or already hold a properly-widened contract
-(`OSError` PLUS the decode/parse family the call actually raises). Reading
-each of those 79 plus the four issue-named sites plus their explicitly-named
-siblings (`error_catalog.py:104`, `sdk_discovery.py:189`, `metadata_schema.
-py:209`, `scaffold.py:2034`), 18 were genuine candidates worth driving
-against real broken files rather than reasoning about from the source; doing
-that (the same seven shapes below, run against each) found:
+THE SHAPE SWEEP (tan-cli#1116's own instruction: seed from the SHAPE, not
+
+THE SHAPE SWEEP (tan-cli#1116's own instruction: seed from the SHAPE, notfrom the four names the issue body already listed -- issue comment 2 found
+`perf_apply.py`'s two sites exactly because a reviewer went looking in a
+NEIGHBOURING module a name-only seed would have missed -- and review round
+2 widened it again: an 18-of-79 hand-read triage was not sound either,
+finding two more confirmed live defects in "the first handful" of the 61 it
+had left unread).
+
+`python/scripts/audit_narrow_except_contracts.py` is the walk, committed
+(review round 2 MINOR: the first version's count was not reproducible --
+"a one-off audit script, not a second gate" is not the same as "not
+committed"). Re-running it: **65** candidates under `tan/core`/`tan/
+commands`/`tan/model` (excluding `tan/planner/**`, whose import order needs
+`bind_sdk_root` first -- the script's own `--planner` flag widens the walk
+there, reported but not executed) whose `try` wraps a `.read_text(`/`.
+read_bytes(`/`open(`/`yaml.safe_load(`/`json.load(`/`json.loads(` call with
+a non-broad `except`. **79** including `tan/planner/**`.
+
+By the end of review round 2 ALL 65 non-planner candidates have been
+individually inspected -- 19 confirmed already-correct by the script's own
+best-effort execution (a real non-UTF-8 file substituted for a path-shaped
+first parameter), the remaining 46 read by hand because the script's
+signature-guessing heuristic cannot safely call them (a multi-argument
+signature, a parameter that takes already-decoded TEXT rather than a path,
+a bound method). Driving the 46 by hand -- real broken files, not just
+reading source and guessing, review round 2's own explicit instruction --
+found, beyond the four issue-named sites:
 
   * TWO more `except (OSError, yaml.YAMLError)` sites missing
     `UnicodeDecodeError` exactly like `perf_apply.py`'s pair --
-    `tan/model/adapters/drpai.py::_compiler_version` (FIXED here) and
-    `tan/planner/kconfig.py::_emit_extra_library_profile` (found, NOT fixed
-    here -- `kconfig.py` is a hash-pinned verbatim mirror of alp-sdk's
+    `tan/model/adapters/drpai.py::_compiler_version` (round 1, FIXED) and
+    `tan/planner/kconfig.py::_emit_extra_library_profile` (round 1, found,
+    NOT fixed -- `kconfig.py` is a hash-pinned verbatim mirror of alp-sdk's
     `scripts/alp_orchestrate/kconfig.py`, `test_planner_relocation_
     freshness.py`'s `PINNED_HASHES`; editing it here without first porting
     the fix upstream and re-pinning that hash is exactly the drift that gate
-    exists to catch, and is out of this issue's scope. NOT seeded below for
-    the same reason a gate seeded on a currently-failing function is
-    disabled on day one: it does not hold today).
-  * THREE `is_file()`/`is_dir()` PRE-FLIGHT checks that raised a raw
-    `PermissionError` on a permission-denied ANCESTOR directory -- the exact
-    PR #1110 `Path.exists()` trap (`_IGNORED_ERRNOS` swallows `ENOENT`/
-    `ENOTDIR`/`EBADF`/`ELOOP`, never `EACCES`), just via a sibling stdlib
-    call instead of `Path.exists()` itself. All three measured escaping
-    raw, all three FIXED here: `perf_apply._resolve_hw_rev`, `metadata_
-    schema.validate_document`, `scaffold.read_example_tree`.
+    exists to catch, and is out of this issue's scope).
+  * THREE `is_file()`/`is_dir()` pre-flight checks that raised a raw
+    `PermissionError` on a permission-denied ANCESTOR directory (round 1) --
+    `perf_apply._resolve_hw_rev`, `metadata_schema.validate_document`,
+    `scaffold.read_example_tree`, all FIXED -- the last two rewritten AGAIN
+    in review round 2 once the fix itself turned out to be version-dependent
+    (see THE VERSION-INDEPENDENCE LESSON above).
+  * `som_buildability._safe_load_mapping` (review round 2, found by the
+    reviewer): `except OSError` alone, missing `UnicodeDecodeError`, on the
+    private helper behind `hw_rev_not_buildable`'s own "Never raises: a
+    scaffold must not fail because a metadata file could not be read."
+    FIXED.
+  * `tan/planner/template.py::_docs_ref` (review round 2, found by the
+    reviewer): `except OSError` alone around a `yaml.safe_load(read_text(...))`
+    pair, missing BOTH `UnicodeDecodeError` and `yaml.YAMLError` -- a
+    malformed OR non-UTF-8 `sdk_version.yaml` used to raise raw past this
+    "cost a stale-but-safe link, not the whole scaffold" contract. FIXED --
+    `template.py` is NOT in `PINNED_HASHES` (confirmed against the gate's
+    own list; it is a HAND-PORT the freshness gate tracks by hashing the
+    alp-sdk SOURCE it was ported from, `HAND_PORT_HASHES`, not by hashing
+    this file), so the mirror argument does not apply here.
+  * `tan/planner/template.py::render_to_envelope`'s example `board.yaml`
+    read (review round 2 MAJOR, found by the reviewer): `except OSError`
+    alone, missing `UnicodeDecodeError`, raising a curated `TemplateError`.
+    FIXED, same file, same non-pinned reasoning.
+  * `tan/commands/debug_config_cmd.py::_run`'s `.alp/debug-launch-
+    provenance.json` sidecar read (found in review round 2's re-triage, NOT
+    named by the reviewer): an `is_file()` pre-flight AND a bare
+    `except OSError`, missing `UnicodeDecodeError` -- past its own
+    documented "ANY failure ... degrades to `empty()`" contract. FIXED.
+  * `tan/commands/new_som_cmd.py::_known_board_names` and
+    `_family_hw_revisions` (found in review round 2's re-triage, NOT named
+    by the reviewer): BOTH missing `OSError` entirely in their per-file
+    except clause (a per-file `chmod 000`, distinct from the directory-level
+    guard each already had), AND both directory/file-level guards
+    (`boards_dir.is_dir()` / `path.is_file()`) had their OWN EACCES-on-
+    ancestor trap, the same class as the three round-1 sites. FOUR
+    confirmed escapes across the two functions, all FIXED.
+  * `tan/planner/slugs.py::peripheral_kconfig` and `tan/planner/
+    kconfig_symbols.py::_load_board_symbols` (found opportunistically while
+    checking the pinned planner files review round 2's MINOR finding named
+    as an incomplete deferral list): the same missing-`UnicodeDecodeError`
+    shape. NOT fixed -- both in `PINNED_HASHES`, same reasoning as
+    `kconfig.py`.
 
-So: **79** mechanically-flagged, **18** hand-read and shape-driven, **5**
-live defects found this way (3 fixed here, plus the issue's own two named
-live sites in `perf_apply.py`, also fixed here -- 6 fixes total; 1 more
-found-and-deferred as out of scope), **12** seeded into `_SEEDED_CONTRACTS`
-below. The gap between 79 and 12 is real and recorded here rather than
-implied clean: most of the 79 are either false positives of the mechanical
-walk or already-correct functions this file simply has not been asked to
-seed yet.
+So: **65** non-planner candidates, reproducible; **all 65** read; **46**
+of those hand-driven with real broken files (the other 19 already
+confirmed safe by the script's own execution); **9** live defects found
+this way in `tan/core`/`tan/commands` plus **2** in the non-pinned half of
+`tan/planner`, **11 fixed in total** (the issue's own two named
+`perf_apply.py` sites are two of the eleven); **4** more found in
+`PINNED_HASHES`-protected planner files (`kconfig.py`, `sdk_compat.py`
+times two, `buildplan.py`, `slugs.py`, `kconfig_symbols.py` -- six files,
+named individually above and in `_SEEDED_CONTRACTS`' neighbouring
+comments), all deliberately deferred rather than fixed, all reported rather
+than silently skipped. **15** seeded into `_SEEDED_CONTRACTS` below -- the
+twelve from review round 1 plus `som_buildability.hw_rev_not_buildable`,
+`new_som_cmd._known_board_names` and `new_som_cmd._family_hw_revisions`.
+`template.py::_docs_ref`/`render_to_envelope` are fixed but NOT seeded here
+(deliberately, not an oversight): seeding either needs `bind_sdk_root`,
+global mutable state this gate's other 15 seeds do not touch and this file
+declines to be the first to introduce; their fixes are instead verified by
+a standalone reproduction driven directly through `render_to_envelope`
+end-to-end (reported, not committed as a second harness) and covered
+going forward by `tests/planner/test_render_to_envelope_malformed_example_
+board.py`'s existing SDK-gated suite.
+
+The gap between 65 and 15 is real and recorded here rather than implied
+clean: 19 are already-correct functions this file has not been asked to
+seed, 6 are found-and-fixed-but-not-yet-seeded (the template.py pair) or
+found-and-deferred (the six pinned files), and the remaining are the
+already-broad-enough `except` clauses (`except Exception`/`BaseException`,
+excluded from the walk itself) plus curated-raise functions correctly
+converting to a project exception type (`model_cmd._load_board`,
+`kconfig_symbols._run_kconfig`'s `_CoreResolutionError` ladder, and
+similar) that this file has likewise not been asked to seed.
 
 THE ROOT/CI CAVEAT (tan-cli#1105's own lesson, named explicitly in this
-issue so it is not silently repeated): every permission-denied shape below
-is `@_skip_as_root`, which SKIPS -- loudly, by name, with a reason string a
-CI log shows -- under `os.geteuid() == 0` or on Windows. This is NOT a
-silent gap: `.github/workflows/ci.yml`'s `python` job that runs this
-directory (`gates` included) runs on `runs-on: ubuntu-latest` with no
-`container:` key, and a GitHub-hosted `ubuntu-latest` runner with no
-container override runs its job steps as the unprivileged `runner` account,
-not root (measured: `id -u` on this very sandbox, itself non-root, reports
-1000; GitHub's own hosted-runner documentation states the same for
-`ubuntu-latest`). So the permission shape DOES execute, for real, on the one
-CI job that runs this file. It skips only for a human running the suite as
-root locally (`sudo pytest ...`) or a self-hosted/containerized runner that
-overrides the default user -- a real, named gap, not the tan-cli#1105 shape
-of "skips everywhere it matters and nobody noticed."
+issue so it is not silently repeated -- corrected in review round 2, whose
+BLOCKER named this section wrong on BOTH the job and the axis, and the half
+it got wrong was the half that actually broke): every permission-denied
+shape below is `@_skip_as_root`, which SKIPS -- loudly, by name, with a
+reason string a CI log shows -- under `os.geteuid() == 0` or on Windows.
+
+**Two jobs run `tests/gates`, not one** -- `ci.yml`'s own comment says so
+verbatim ("this job is one of the two `tests/gates` legs in CI; the other
+is `parity.yml`'s `seam1-plan-shape`"). `ci.yml`'s `python` job is
+DELIBERATELY NOT a required context (its own header says so); `parity.yml`'s
+`seam1` IS required, and `seam1` is the leg this gate actually broke on.
+Both run on `ubuntu-latest` with no `container:` key, so both run as the
+unprivileged `runner` account, not root -- the chmod-000 shape genuinely
+executes on both, and `_skip_as_root` is not a silent gap on either. That
+much of the ORIGINAL caveat held.
+
+**What the original caveat missed is the axis that actually decided
+`seam1`'s outcome: the INTERPRETER VERSION, not root-vs-non-root.**
+`ci.yml`'s `python` job pins `python-version: "3.12"`; `seam1` uses
+`python-version: "3.x"`, which resolved to CPython 3.14.7 the run this gate
+broke on. `chmod 000` worked identically on both -- the bug was never a
+skipped shape, it was `pathlib` behaving differently across the two
+interpreters underneath a shape that DID run (see THE VERSION-INDEPENDENCE
+LESSON above). Driven and confirmed on BOTH interpreters as part of fixing
+this: a portable CPython 3.14.7 build (`python-build-standalone`, the exact
+patch release `seam1` reported) and the repo's pinned 3.12.3, side by side,
+every seeded shape green on both -- not asserted here, run.
 """
 from __future__ import annotations
 
@@ -117,8 +222,9 @@ from pathlib import Path
 
 import pytest
 
+from tan.commands import new_som_cmd
 from tan.core import document_guards, error_catalog, example_catalog, example_facets
-from tan.core import metadata_schema, scaffold, sdk_discovery
+from tan.core import metadata_schema, scaffold, sdk_discovery, som_buildability
 from tan.model import perf, perf_apply
 from tan.model.adapters import drpai
 
@@ -180,6 +286,28 @@ _SEEDED_CONTRACTS: dict[str, str] = {
         "named by PR #1096's review as a prior instance (scaffold.py:2034); "
         "a curated-raise contract (ExampleReadError); had the EACCES-"
         "through-is_dir() pre-flight trap, fixed in the same change"
+    ),
+    "som_buildability.hw_rev_not_buildable": (
+        "found in the round-2 re-triage after review round 2 (tan-cli#1116): "
+        "its own docstring says 'Never raises: a scaffold must not fail "
+        "because a metadata file could not be read', and its private "
+        "_safe_load_mapping caught OSError alone, missing UnicodeDecodeError "
+        "-- measured escaping through this real caller; fixed in the same "
+        "change"
+    ),
+    "new_som_cmd._known_board_names": (
+        "found in the round-2 re-triage: 'None when the directory is "
+        "missing' is its whole contract, but its per-file except clause "
+        "(yaml.YAMLError, UnicodeDecodeError) dropped OSError entirely, so "
+        "a per-FILE chmod 000 (distinct from the containing directory its "
+        "own is_dir() guard covers) escaped raw; fixed in the same change"
+    ),
+    "new_som_cmd._family_hw_revisions": (
+        "found in the round-2 re-triage: same shape and same fix as "
+        "_known_board_names next door -- 'None' on 'not resolvable at "
+        "scaffold time' is the whole contract, and the same per-file "
+        "chmod 000 escaped raw past the same missing OSError; fixed in the "
+        "same change"
     ),
 }
 
@@ -253,6 +381,22 @@ def _permission_denied(dir_path: Path):
         yield
     finally:
         dir_path.chmod(original_mode)
+
+
+@contextlib.contextmanager
+def _permission_denied_file(file_path: Path):
+    """chmod 0o000 on @file_path ITSELF (which must already exist), for the
+    duration of the block -- the distinct "per-file, containing directory
+    stays listable" shape `new_som_cmd._known_board_names` needed
+    (tan-cli#1116 review round 2): `stat()` only needs the CONTAINING
+    directory to be searchable, so this shape is not reachable through
+    `_permission_denied` above, which denies the directory."""
+    original_mode = file_path.stat().st_mode
+    file_path.chmod(0o000)
+    try:
+        yield
+    finally:
+        file_path.chmod(original_mode)
 
 
 # ---------------------------------------------------------------------------
@@ -555,9 +699,16 @@ class TestTopologyCoreIds:
 
 
 # ---------------------------------------------------------------------------
-# metadata_schema.validate_document -- quiet-return: [] for a schema that is
-# genuinely absent (the ABSENT half of its own two-shape docstring), a
-# one-message list for a schema that exists but cannot be read/parsed.
+# metadata_schema.validate_document -- quiet-return: [] ONLY for a
+# `FileNotFoundError` (the ABSENT half of its own two-shape docstring), a
+# one-message list for every OTHER way the read can fail -- including a
+# directory, a file parent, or an ELOOP loop, none of which are "absent"
+# (tan-cli#1116 review round 2: a first version classified those three as
+# ABSENT via a since-deleted `is_file()` pre-flight, which was wrong even on
+# the interpreter it worked on -- a directory at the schema path is not
+# "nothing to disclose", it is exactly the second bullet's "exists but
+# cannot be read"; `FileNotFoundError` is now the ONLY absent signal, on
+# every interpreter, because nothing here ever calls `is_file()`).
 # ---------------------------------------------------------------------------
 
 
@@ -576,23 +727,43 @@ class TestValidateDocument:
     def test_directory_where_file_expected(self, tmp_path):
         schema_path = tmp_path / "schema.json"
         _as_directory(schema_path)
-        # A directory is not `is_file()`: the ABSENT half, `[]`.
-        assert metadata_schema.validate_document({}, schema_path, source="src") == []
+        # NOT absent: `_cached_validator`'s `stat()` succeeds on a directory,
+        # and the read past it raises `IsADirectoryError` -- the UNREADABLE
+        # half, a one-message list, version-independently (tan-cli#1116
+        # review round 2 -- see the class comment above).
+        result = metadata_schema.validate_document({}, schema_path, source="src")
+        assert len(result) == 1
 
     def test_parent_is_a_file(self, tmp_path):
         schema_path = tmp_path / "parent" / "schema.json"
         _parent_is_a_file(schema_path)
-        # `is_file()` swallows ENOTDIR too: the ABSENT half, `[]`.
-        assert metadata_schema.validate_document({}, schema_path, source="src") == []
+        # NOT absent: `stat()` raises `NotADirectoryError`, not
+        # `FileNotFoundError` -- the UNREADABLE half.
+        result = metadata_schema.validate_document({}, schema_path, source="src")
+        assert len(result) == 1
 
     def test_symlink_loop(self, tmp_path):
         schema_path = tmp_path / "schema.json"
         _symlink_loop(schema_path)
-        # `is_file()` swallows ELOOP too: the ABSENT half, `[]`.
-        assert metadata_schema.validate_document({}, schema_path, source="src") == []
+        # NOT absent: `stat()` raises `OSError` (ELOOP) -- the UNREADABLE
+        # half.
+        result = metadata_schema.validate_document({}, schema_path, source="src")
+        assert len(result) == 1
 
     @_skip_as_root
     def test_permission_denied(self, tmp_path):
+        # tan-cli#1116 review round 2 BLOCKER, re-derived: the first version
+        # of this fix guarded a pre-flight `is_file()` with `except OSError:
+        # exists = True`, which only helped on Python <= 3.12. `pathlib`
+        # DROPPED `_IGNORED_ERRNOS` in 3.14, so `is_file()` there swallows
+        # EVERY `OSError` including `EACCES` and returns `False` -- the guard
+        # never fired, and this test was measured RED in CI's seam1 leg
+        # (`python-version: "3.x"`, resolved to CPython 3.14.7) with `len(0)
+        # == 1`: the fix silently returned `[]`, "everything is valid," on a
+        # schema this could not even read. The rewrite removes `is_file()`
+        # entirely, so this shape is now driven correctly on every supported
+        # interpreter -- this test is what proves that, not just a single
+        # local run.
         sub = tmp_path / "sub"
         schema_path = sub / "schema.json"
         sub.mkdir()
@@ -774,10 +945,18 @@ class TestDrpaiCompilerVersion:
         assert isinstance(drpai._compiler_version(tmp_path), str)
 
     def test_parent_is_a_file(self, tmp_path):
-        # `tvm_home` itself absent (its parent already exists as tmp_path,
-        # a real directory) exercises the same FileNotFoundError arm every
-        # candidate hits when tvm_home does not exist at all.
-        assert drpai._compiler_version(tmp_path / "does-not-exist") == "drp-ai_tvm"
+        # tan-cli#1116 review round 2 MINOR: a first version of this test
+        # passed a nonexistent `tvm_home`, which hits the identical
+        # `FileNotFoundError` arm `test_absent` already drives -- measured,
+        # both returned the same fallback, so this shape was a silent no-op
+        # duplicate rather than a real drive of "parent is a file," exactly
+        # the #1105 pattern this whole gate exists to catch, just inside the
+        # gate itself. `tvm_home` ITSELF is now a regular file, so every one
+        # of the three candidate paths (`tvm_home / rel`) has a FILE as its
+        # own parent -- `NotADirectoryError`, genuinely distinct from
+        # `test_absent`'s `FileNotFoundError`.
+        (tmp_path / "tvm_home").write_text("not a directory")
+        assert drpai._compiler_version(tmp_path / "tvm_home") == "drp-ai_tvm"
 
     def test_symlink_loop(self, tmp_path):
         _symlink_loop(tmp_path / "VERSION")
@@ -797,60 +976,87 @@ class TestDrpaiCompilerVersion:
 
 # ---------------------------------------------------------------------------
 # scaffold.read_example_tree -- curated-raise: ExampleReadError, never a raw
-# stdlib exception, on every failure.
+# stdlib exception, on every failure. `not_found` is asserted explicitly,
+# not just the exception TYPE (tan-cli#1116 review round 2 BLOCKER): a first
+# version of this fix's own `is_dir()` guard was dead on Python >= 3.14 and
+# silently answered `not_found=True` (the user's-typo arm) for a
+# permission-denied parent, where this class's own docstring says
+# `not_found=False` -- a type-only assertion could not see that, only a
+# value assertion can, which is what every test below now makes.
 # ---------------------------------------------------------------------------
+
+
+def _read_example_tree_error(source_dir):
+    with pytest.raises(scaffold.ExampleReadError) as excinfo:
+        scaffold.read_example_tree(source_dir)
+    return excinfo.value
 
 
 @_covers("scaffold.read_example_tree")
 class TestReadExampleTree:
     def test_absent(self, tmp_path):
-        with pytest.raises(scaffold.ExampleReadError):
-            scaffold.read_example_tree(tmp_path / "example")
+        # Genuinely missing: FileNotFoundError -> the "typo" arm.
+        err = _read_example_tree_error(tmp_path / "example")
+        assert err.not_found is True
 
     def test_non_utf8(self, tmp_path):
         source_dir = tmp_path / "example"
         source_dir.mkdir()
         _non_utf8(source_dir / "main.c")
-        with pytest.raises(scaffold.ExampleReadError):
-            scaffold.read_example_tree(source_dir)
+        err = _read_example_tree_error(source_dir)
+        assert err.not_found is False
 
     def test_directory_where_file_expected(self, tmp_path):
-        # `source_dir` itself is a plain FILE, not a directory -- the
-        # `is_dir()` half of this function's own contract.
+        # `source_dir` itself is a plain FILE, not a directory --
+        # `NotADirectoryError` from `os.scandir`, the OTHER "not a real
+        # example directory" cause, also the "typo" arm.
         source_dir = tmp_path / "example"
         source_dir.write_text("not a directory")
-        with pytest.raises(scaffold.ExampleReadError):
-            scaffold.read_example_tree(source_dir)
+        err = _read_example_tree_error(source_dir)
+        assert err.not_found is True
 
     def test_parent_is_a_file(self, tmp_path):
+        # Also `NotADirectoryError` (a non-final path component) -- same
+        # bucket as the file-itself shape above, indistinguishable by
+        # errno, and both were indistinguishable through the OLD `is_dir()`
+        # pre-flight too, so this is not a behaviour change, just a
+        # version-independent path to the same answer.
         source_dir = tmp_path / "parent" / "example"
         _parent_is_a_file(source_dir)
-        with pytest.raises(scaffold.ExampleReadError):
-            scaffold.read_example_tree(source_dir)
+        err = _read_example_tree_error(source_dir)
+        assert err.not_found is True
 
     def test_symlink_loop(self, tmp_path):
         # Not via an INNER file -- `_example_source_files` skips symlinks
         # structurally (never follows one, matching the oracle's
         # `DirEntry::file_type()`), so an inner loop cannot reach the read
         # path at all. The top-level `source_dir` itself as the loop is the
-        # shape that actually exercises this function.
+        # shape that actually exercises this function: a real anomaly, not
+        # a typo, so `not_found=False`.
         source_dir = tmp_path / "example"
         _symlink_loop(source_dir)
-        with pytest.raises(scaffold.ExampleReadError):
-            scaffold.read_example_tree(source_dir)
+        err = _read_example_tree_error(source_dir)
+        assert err.not_found is False
 
     @_skip_as_root
     def test_permission_denied(self, tmp_path):
-        # PARENT of source_dir denied, not source_dir itself (tan-cli#1116's
-        # own fix here: `source_dir.is_dir()` raised raw `PermissionError`
-        # for exactly this shape before the fix).
+        # tan-cli#1116 review round 2 BLOCKER, re-derived: the first
+        # version's `is_dir()` pre-flight was dead on Python >= 3.14
+        # (`pathlib` dropped `_IGNORED_ERRNOS` there -- `is_dir()` swallows
+        # EVERY `OSError` including `EACCES` and returns `False`), so a
+        # permission-denied PARENT fell through to `is_source_dir is False`
+        # -> `not_found=True`, the wrong arm, on the exact interpreter
+        # seam1's CI leg runs (CPython 3.14.7). The rewrite calls no stat at
+        # all, so this is version-independent: `not_found` MUST be `False`
+        # here, on every supported interpreter -- the assertion this test
+        # makes, not merely "raises something."
         outer = tmp_path / "outer"
         source_dir = outer / "example"
         source_dir.mkdir(parents=True)
         (source_dir / "main.c").write_text("int main(void) { return 0; }")
         with _permission_denied(outer):
-            with pytest.raises(scaffold.ExampleReadError):
-                scaffold.read_example_tree(source_dir)
+            err = _read_example_tree_error(source_dir)
+        assert err.not_found is False
 
     def test_malformed_document(self, tmp_path):
         # No document shape of its own -- a text file is either valid UTF-8
@@ -858,6 +1064,191 @@ class TestReadExampleTree:
         # further to malform.
         pytest.skip("read_example_tree has no parse step of its own to malform")
 
+
+# ---------------------------------------------------------------------------
+# som_buildability.hw_rev_not_buildable -- quiet-return, None on every
+# failure ("Never raises: a scaffold must not fail because a metadata file
+# could not be read", its own docstring). Found in the tan-cli#1116 review
+# round 2 re-triage, not in the original 12: the private `_safe_load_mapping`
+# it calls caught `OSError` alone, missing `UnicodeDecodeError`.
+# ---------------------------------------------------------------------------
+
+
+def _hw_rev_preset_path(sdk_root: Path, sku: str = "E1M-AEN301") -> Path:
+    return sdk_root / "metadata" / "e1m_modules" / f"{sku}.yaml"
+
+
+@_covers("som_buildability.hw_rev_not_buildable")
+class TestHwRevNotBuildable:
+    _SKU = "E1M-AEN301"
+
+    def test_absent(self, tmp_path):
+        assert som_buildability.hw_rev_not_buildable(tmp_path, self._SKU) is None
+
+    def test_non_utf8(self, tmp_path):
+        path = _hw_rev_preset_path(tmp_path, self._SKU)
+        path.parent.mkdir(parents=True)
+        _non_utf8(path)
+        assert som_buildability.hw_rev_not_buildable(tmp_path, self._SKU) is None
+
+    def test_directory_where_file_expected(self, tmp_path):
+        _as_directory(_hw_rev_preset_path(tmp_path, self._SKU))
+        assert som_buildability.hw_rev_not_buildable(tmp_path, self._SKU) is None
+
+    def test_parent_is_a_file(self, tmp_path):
+        _parent_is_a_file(_hw_rev_preset_path(tmp_path, self._SKU))
+        assert som_buildability.hw_rev_not_buildable(tmp_path, self._SKU) is None
+
+    def test_symlink_loop(self, tmp_path):
+        _symlink_loop(_hw_rev_preset_path(tmp_path, self._SKU))
+        assert som_buildability.hw_rev_not_buildable(tmp_path, self._SKU) is None
+
+    @_skip_as_root
+    def test_permission_denied(self, tmp_path):
+        path = _hw_rev_preset_path(tmp_path, self._SKU)
+        path.parent.mkdir(parents=True)
+        path.write_text("default_hw_rev: r2\n")
+        with _permission_denied(path.parent):
+            assert som_buildability.hw_rev_not_buildable(tmp_path, self._SKU) is None
+
+    def test_malformed_document(self, tmp_path):
+        path = _hw_rev_preset_path(tmp_path, self._SKU)
+        path.parent.mkdir(parents=True)
+        _malformed(path, "a: [1, 2")
+        assert som_buildability.hw_rev_not_buildable(tmp_path, self._SKU) is None
+
+
+# ---------------------------------------------------------------------------
+# new_som_cmd._known_board_names / _family_hw_revisions -- both quiet-return
+# (None on every failure), both found in the same round-2 re-triage, both
+# missing `OSError` entirely in their per-file except clause -- a per-file
+# `chmod 000` (the CONTAINING directory stays listable) escaped raw past
+# both, distinct from the directory-level `is_dir()`/`is_file()` pre-flight
+# trap the round-2 fixes elsewhere in this file describe (and which turned
+# out to ALSO be present here, on the directory side, fixed in the same
+# change).
+# ---------------------------------------------------------------------------
+
+
+@_covers("new_som_cmd._known_board_names")
+class TestKnownBoardNames:
+    def _boards_dir(self, sdk_root: Path) -> Path:
+        return sdk_root / "metadata" / "boards"
+
+    def test_absent(self, tmp_path):
+        assert new_som_cmd._known_board_names(tmp_path) is None
+
+    def test_non_utf8(self, tmp_path):
+        boards = self._boards_dir(tmp_path)
+        boards.mkdir(parents=True)
+        _non_utf8(boards / "x.yaml")
+        assert new_som_cmd._known_board_names(tmp_path) is None
+
+    def test_directory_where_file_expected(self, tmp_path):
+        boards = self._boards_dir(tmp_path)
+        boards.mkdir(parents=True)
+        _as_directory(boards / "x.yaml")
+        assert new_som_cmd._known_board_names(tmp_path) is None
+
+    def test_parent_is_a_file(self, tmp_path):
+        # `metadata` itself is a FILE, so `boards_dir`'s own parent cannot
+        # be traversed -- the directory-level shape, not the per-file one.
+        _parent_is_a_file(tmp_path / "metadata" / "boards")
+        assert new_som_cmd._known_board_names(tmp_path) is None
+
+    def test_symlink_loop(self, tmp_path):
+        boards = self._boards_dir(tmp_path)
+        boards.mkdir(parents=True)
+        _symlink_loop(boards / "x.yaml")
+        assert new_som_cmd._known_board_names(tmp_path) is None
+
+    @_skip_as_root
+    def test_permission_denied(self, tmp_path):
+        # Per-FILE chmod, containing directory stays listable -- the exact
+        # shape that escaped raw before this fix (measured).
+        boards = self._boards_dir(tmp_path)
+        boards.mkdir(parents=True)
+        path = boards / "x.yaml"
+        path.write_text("name: FOO\n")
+        with _permission_denied_file(path):
+            assert new_som_cmd._known_board_names(tmp_path) is None
+
+    def test_malformed_document(self, tmp_path):
+        boards = self._boards_dir(tmp_path)
+        boards.mkdir(parents=True)
+        _malformed(boards / "x.yaml", "a: [1, 2")
+        assert new_som_cmd._known_board_names(tmp_path) is None
+
+
+@_covers("new_som_cmd._family_hw_revisions")
+class TestFamilyHwRevisions:
+    _SKU = "E1M-AEN301"
+
+    def _patch_family(self, monkeypatch):
+        monkeypatch.setattr(
+            new_som_cmd, "_resolve_sku_family", lambda sku, sdk_root: "aen")
+
+    def _hw_rev_path(self, sdk_root: Path) -> Path:
+        return sdk_root / "metadata" / "e1m_modules" / "aen" / "hw-revisions.yaml"
+
+    def test_absent(self, tmp_path, monkeypatch):
+        self._patch_family(monkeypatch)
+        result = new_som_cmd._family_hw_revisions(
+            self._SKU, tmp_path / "out", tmp_path / "sdk")
+        assert result is None
+
+    def test_non_utf8(self, tmp_path, monkeypatch):
+        self._patch_family(monkeypatch)
+        sdk_root = tmp_path / "sdk"
+        path = self._hw_rev_path(sdk_root)
+        path.parent.mkdir(parents=True)
+        _non_utf8(path)
+        result = new_som_cmd._family_hw_revisions(self._SKU, tmp_path / "out", sdk_root)
+        assert result is None
+
+    def test_directory_where_file_expected(self, tmp_path, monkeypatch):
+        self._patch_family(monkeypatch)
+        sdk_root = tmp_path / "sdk"
+        _as_directory(self._hw_rev_path(sdk_root))
+        result = new_som_cmd._family_hw_revisions(self._SKU, tmp_path / "out", sdk_root)
+        assert result is None
+
+    def test_parent_is_a_file(self, tmp_path, monkeypatch):
+        self._patch_family(monkeypatch)
+        sdk_root = tmp_path / "sdk"
+        _parent_is_a_file(self._hw_rev_path(sdk_root))
+        result = new_som_cmd._family_hw_revisions(self._SKU, tmp_path / "out", sdk_root)
+        assert result is None
+
+    def test_symlink_loop(self, tmp_path, monkeypatch):
+        self._patch_family(monkeypatch)
+        sdk_root = tmp_path / "sdk"
+        _symlink_loop(self._hw_rev_path(sdk_root))
+        result = new_som_cmd._family_hw_revisions(self._SKU, tmp_path / "out", sdk_root)
+        assert result is None
+
+    @_skip_as_root
+    def test_permission_denied(self, tmp_path, monkeypatch):
+        # tan-cli#1116 review round 2: the CONTAINING directory denied --
+        # the `path.is_file()` pre-flight this fix removed raised raw
+        # `PermissionError` for exactly this shape (measured).
+        self._patch_family(monkeypatch)
+        sdk_root = tmp_path / "sdk"
+        path = self._hw_rev_path(sdk_root)
+        path.parent.mkdir(parents=True)
+        path.write_text("hw_revisions: {r1: {}}\n")
+        with _permission_denied(path.parent):
+            result = new_som_cmd._family_hw_revisions(self._SKU, tmp_path / "out", sdk_root)
+        assert result is None
+
+    def test_malformed_document(self, tmp_path, monkeypatch):
+        self._patch_family(monkeypatch)
+        sdk_root = tmp_path / "sdk"
+        path = self._hw_rev_path(sdk_root)
+        path.parent.mkdir(parents=True)
+        _malformed(path, "a: [1, 2")
+        result = new_som_cmd._family_hw_revisions(self._SKU, tmp_path / "out", sdk_root)
+        assert result is None
 
 # ---------------------------------------------------------------------------
 # Anti-drift: every seed has a test, every test group is a declared seed.

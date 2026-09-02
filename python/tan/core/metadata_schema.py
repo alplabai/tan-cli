@@ -202,29 +202,36 @@ def validate_document(doc: object, schema_path: Path, source: Path | str) -> lis
     that does not (`new_som_cmd`'s in-memory self-check) calls `schema_errors`
     directly instead, precisely because it has no `source` to give.
 
-    tan-cli#1116: the ABSENT check above is not a bare `is_file()` -- that
-    used to be the whole check, and `Path.is_file()` swallows only
-    `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` (`pathlib`'s `_IGNORED_ERRNOS`), NOT
-    `EACCES`. A schema file behind a permission-denied ancestor directory
-    therefore raised a raw `PermissionError` straight out of this function's
-    own "never raises" contract (measured) -- the exact `document_guards.
-    read_catalog_document` trap, on the ABSENT half's `is_file()` instead of
-    the EXISTS half's read. Such a path is exactly the second bullet's
-    "cannot be read" case, not the first bullet's "not there": treated as
-    present-but-unreadable so it earns the synthetic message, not silence.
+    tan-cli#1116 round 2: the ABSENT check is NOT `is_file()`/`exists()` --
+    a first pass here used a pre-flight `is_file()` guarded by `except
+    OSError: exists = True`, reasoning that `Path.is_file()` swallows only
+    `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` (`pathlib`'s pre-3.14 `_IGNORED_ERRNOS`
+    list), not `EACCES`. That reasoning stopped being true in Python 3.14:
+    `pathlib` DROPPED `_IGNORED_ERRNOS` there, so `is_file()`/`is_dir()`/
+    `exists()` swallow EVERY `OSError` -- including `EACCES` -- and return
+    `False` on every one of them, version-dependent behaviour a version-
+    independent contract cannot be built on (measured: seam1's `parity.yml`
+    job resolves `python-version: "3.x"` to CPython 3.14.7, where the old
+    guard was a silent no-op and a permission-denied schema directory took
+    the ABSENT arm -- `[]`, "everything is valid," the exact outcome this
+    docstring forbids two paragraphs up).
+
+    The fix is to not stat at all: call `schema_errors` directly and let
+    the read itself answer, the same shape `_resolve_hw_rev`
+    (`perf_apply.py`) and `example_catalog.catalog_unreadable` already use.
+    `_cached_validator`'s own `Path(schema_path).stat()` raises
+    `FileNotFoundError` for a genuinely absent path and ONLY for that --
+    a directory raises `IsADirectoryError` once the read past `stat()`
+    reaches it, a file parent raises `NotADirectoryError`, an ELOOP symlink
+    loop and an EACCES ancestor both raise their own `OSError` -- so
+    `except FileNotFoundError` alone is the ABSENT half, precisely, on every
+    supported interpreter, because it never depends on what `is_file()`
+    happens to swallow this Python version.
     """
     try:
-        exists = Path(schema_path).is_file()
-    except OSError:
-        # Cannot even tell whether it exists (its own directory refused a
-        # stat) -- that is "cannot be read", not "absent"; fall through to
-        # the real read below, whose broad `except OSError` produces the
-        # synthetic message this same failure deserves.
-        exists = True
-    if not exists:
-        return []
-    try:
         return schema_errors(doc, schema_path, source=source)
+    except FileNotFoundError:
+        return []
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         return [f"{_posix(source)}: could not validate against {_posix(schema_path)}: {exc}"]
 
