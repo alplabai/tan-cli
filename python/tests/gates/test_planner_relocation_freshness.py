@@ -734,7 +734,7 @@ from tests.conftest import sdk_root
 #: Verified from `gh pr diff 1001`, not from the issue titles.
 #:
 #: What the tag move cost here, measured:
-#:   - Scaffold re-vendor: 9 files across 5 of the 10 (template, sku) pairs,
+#:   - Scaffold re-vendor: 9 files across 6 of the 10 (template, sku) pairs,
 #:     one upstream cause (alp-sdk#1855). 17 of `scaffold_byte_parity.py`'s
 #:     62 `DELIBERATE_EDITS` retired -- they exist only to qualify the bare
 #:     referents the emit now rewrites itself, so upstream took over their

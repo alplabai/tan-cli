@@ -943,15 +943,23 @@ _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EDITED = (
 
 
 def un_edit_sensor_board_yaml_historical_note_boards_pointer(text: str) -> str:
-    """tan-cli#977, re-anchored tan-cli#1026: reverse the `#1269` historical
-    NOTE's bare `metadata/boards/e1m-evk.yaml`/`e1m-x-evk.yaml` mentions
-    rewrite above to recover the emit's own (dead-pointer) bytes -- the
-    board.yaml-side sibling of `src/main.c`'s `hardware_boards_pointer`
-    entry above. `EDITED`'s trailing `"each --\n"` need not match
-    `EMITTED`'s trailing `"each -- "` (no newline) byte-for-byte: this is a
-    plain independent `str.replace`, not a line-anchored patch, and the
-    adjacent `historical_note_v2n_pointer` entry's own `EMITTED` supplies
-    the `"see\n..."` that follows in the real emit either way."""
+    """tan-cli#977, re-anchored tan-cli#1026 and again tan-cli#1151:
+    reverse the `#1269` historical NOTE's bare
+    `metadata/boards/e1m-evk.yaml`/`e1m-x-evk.yaml` mentions rewrite above
+    to recover the emit's own (dead-pointer) bytes -- the board.yaml-side
+    sibling of `src/main.c`'s `hardware_boards_pointer` entry above. Both
+    constants now END mid-sentence at `BRD_I2C`, and everything after that
+    is untouched passthrough: this is a plain independent `str.replace`, not
+    a line-anchored patch, so it needs no shared boundary with a neighbour
+    at all.
+
+    The span used to end at `"each -- "` and hand the rest of the paragraph
+    to the adjacent `historical_note_v2n_pointer` entry -- which
+    alp-sdk#1855 superseded and tan-cli#1151 retired. DO NOT reason from
+    that boundary; neither the `each --` tail nor the sibling entry exists
+    any more, and leaving the old span in place across the `ff27f179`
+    re-vendor is exactly what made the vendored `board.yaml` INVALID YAML.
+    The `#:` block above records that failure and the measurement."""
     return text.replace(
         _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EDITED,
         _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EMITTED,
@@ -1403,10 +1411,20 @@ DELIBERATE_EDITS: dict[
     # `un_edit_sensor_main_c_hardware_paragraph` are kept as functions (their
     # constants document the transform for the next re-vendor that finds the
     # same class of gap) but are no longer referenced from this dict.
-    # `pattern_paragraph` below is NOT in this list: its anchor (`sensor`'s
-    # generic "Contrasts with... i2c-scanner" paragraph, which names no
-    # chip) is untouched by the TMP112 -> BMP581 swap and still matches
-    # verbatim, so it is reapplied forward, unchanged.
+    # `pattern_paragraph` was called out here, through tan-cli#1001, as
+    # deliberately ABSENT from that list: its anchor (`sensor`'s generic
+    # "Contrasts with... i2c-scanner" paragraph, which names no chip) was
+    # untouched by the TMP112 -> BMP581 swap and still matched verbatim, so
+    # it was reapplied forward unchanged. tan-cli#1151's `ff27f179`
+    # re-vendor retired the ENTRY itself, for the same reason as the other
+    # sixteen that round -- alp-sdk#1855 makes the emit rewrite the bare
+    # `examples/peripheral-io/i2c-scanner` referent the edit existed to
+    # qualify -- and deleted its `un_edit` and constants with it. So there
+    # is no longer an entry here NOR an absence to go looking for. Do not
+    # hunt for that anchor. This block comment records #996/#1001's twenty
+    # retirements only; tan-cli#1151's seventeen are listed in MANIFEST.md
+    # under "Seventeen of `DELIBERATE_EDITS`' prior sixty-two entries
+    # retired".
     ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note"): (
         "tan-cli#814, re-anchored tan-cli#1001 review (blocker): alp-sdk "
         "722320a1 did not heal this -- it reintroduced the identical defect "
@@ -1993,7 +2011,9 @@ def self_check() -> None:
     # reason as the other sixteen this re-vendor retired: alp-sdk#1855 makes
     # the emit itself rewrite the bare `examples/peripheral-io/i2c-scanner`
     # referent this edit existed to qualify, so the vendored bytes are now
-    # the emit's own. See the DELIBERATE_EDITS block comment for the list.
+    # the emit's own. See MANIFEST.md, "Seventeen of `DELIBERATE_EDITS`'
+    # prior sixty-two entries retired", for that round's list -- the
+    # DELIBERATE_EDITS block comment records #996/#1001's twenty, not these.
     #
     # THE DISCIPLINE THIS BLOCK CARRIED IS NOT LOST, and that is checked
     # rather than asserted: `pattern_paragraph` was also the fixture for the
@@ -2331,7 +2351,8 @@ def self_check() -> None:
     # exact class this round's reason-string-filter discipline exists to
     # catch). `deepx_v2m_note`'s pair and `extra_conf_order` are each the
     # only entry on their own path, so were never vacuity-exposed -- re-
-    # proven here anyway, for uniformity, so all 62 entries carry the same
+    # proven here anyway, for uniformity, so all 45 entries the table still
+    # carries after tan-cli#1151's seventeen retirements share the same
     # reason-filtered proof rather than two different proof shapes.
     for template, sku, path, edit_id, emitted in (
         ("edge-ai", "E1M-AEN801", "board.yaml", "deepx_v2m_note",

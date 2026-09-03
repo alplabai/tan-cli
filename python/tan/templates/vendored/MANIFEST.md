@@ -95,50 +95,6 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Prior vendor point (all templates):** **`722320a1`**
-  (`722320a1abe3cea675e99e97300b8a484b4e8464`, alp-sdk `dev`, 63 commits past
-  `v0.16.0`/`eb96112b`) — tan-cli#996/#1001's re-pin, the same change that
-  moves `parity.yml`'s `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF` and
-  `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT`/
-  `HAND_PORT_PINNED_SDK_COMMIT`. Not tagged (alp-sdk's newest tag is still
-  `v0.16.0`) — `- Ref:` below stays `v0.16.0` because `_docs_ref()`'s
-  `_tag_resolves()` guard still degrades to the last RESOLVING tag, not to
-  this untagged commit.
-
-  **Twenty files moved across seven (template, sku) pairs** —
-  `diagnostics`/E1M-AEN801 (`README.md`), `diagnostics`/E1M-V2N101
-  (`README.md`), `edge-ai`/E1M-AEN801 (`README.md`, `src/main.c`),
-  `edge-ai`/E1M-V2N101 (`README.md`, `src/main.c`), `iot`/E1M-AEN801
-  (`README.md`, `board.yaml`), `sensor`/E1M-AEN801 (`README.md`,
-  `board.yaml`, `boards/native_sim_native_64.conf`,
-  `boards/native_sim_native_64.overlay`, `src/main.c`, `testcase.yaml`) and
-  `sensor`/E1M-V2N101 (the same six paths as its sibling SKU). `minimal` and
-  `multicore-mailbox` are untouched at both SKUs (`scaffold_byte_parity.py`
-  reported 0 diffs for both before this re-vendor and still does after).
-
-  Unlike every prior vendor-point move recorded here, this one is NOT just a
-  doc-link ref bump — real `examples/**` content changed inside the
-  `eb96112b..722320a1` window and the vendored bytes follow it:
-  `examples/peripheral-io/i2c-master`'s underlying chip swapped TMP112 ->
-  BMP581 (alp-sdk#1269, `sensor`'s own catalog entry), which is why `sensor`
-  moved all six of its files rather than just `README.md`;
-  `examples/ai/cold-chain-monitor`'s README/`src/main.c` gained real
-  doc-link/units-test pointers on their own (superseding entry 4's
-  `DELIBERATE_EDITS`, see "Deliberate edits on top of the emit" below); and
-  `examples/connectivity/mqtt-telemetry`'s README gained a `tan init`/
-  `tan build` customer-workflow rewrite plus a TMP112 -> BMP581 sensor-link
-  swap of its own (`iot`). Twenty of `DELIBERATE_EDITS`' prior thirty-one
-  entries retired as a direct result — their declared anchors stopped
-  matching this reworded prose verbatim; see "Deliberate edits on top of the
-  emit" below for the full retirement accounting, and
-  `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS` block comment for the
-  per-entry reasoning.
-
-  Verified at `722320a1`, against a checkout with tags fetched:
-  `scaffold_byte_parity.py` **10/10 PASS** (rc 0; `multicore-mailbox` is a
-  10th (template, sku) pair not present at the `eb96112b` vendor point's own
-  9/9 count above — tan-cli#996/#1001 adds it, unrelated to this re-vendor).
-
 - **Current vendor point (all templates):** **`ff27f179`**
   (`ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2`, alp-sdk `dev`) —
   tan-cli#1151's re-pin (the #1118 planner re-sync), the same change that
@@ -149,7 +105,7 @@ from an un-revendored SDK change.
   `v0.16.0`), so `- Ref:` below stays `v0.16.0` for the same
   `_tag_resolves()` reason as the `722320a1` bullet.
 
-  **Nine files moved across five (template, sku) pairs** —
+  **Nine files moved across six (template, sku) pairs** —
   `edge-ai`/E1M-AEN801 (`src/main.c`), `edge-ai`/E1M-V2N101 (`src/main.c`),
   `iot`/E1M-AEN801 (`board.yaml`, `src/main.c`),
   `multicore-mailbox`/E1M-AEN801 (`src/main.c`), `sensor`/E1M-AEN801
@@ -197,6 +153,50 @@ from an un-revendored SDK change.
 
   Verified at `ff27f179`, against a checkout with tags fetched:
   `scaffold_byte_parity.py` **10/10 PASS** (rc 0).
+
+- **Prior vendor point (all templates):** **`722320a1`**
+  (`722320a1abe3cea675e99e97300b8a484b4e8464`, alp-sdk `dev`, 63 commits past
+  `v0.16.0`/`eb96112b`) — tan-cli#996/#1001's re-pin, the same change that
+  moves `parity.yml`'s `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF` and
+  `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT`/
+  `HAND_PORT_PINNED_SDK_COMMIT`. Not tagged (alp-sdk's newest tag is still
+  `v0.16.0`) — `- Ref:` below stays `v0.16.0` because `_docs_ref()`'s
+  `_tag_resolves()` guard still degrades to the last RESOLVING tag, not to
+  this untagged commit.
+
+  **Twenty files moved across seven (template, sku) pairs** —
+  `diagnostics`/E1M-AEN801 (`README.md`), `diagnostics`/E1M-V2N101
+  (`README.md`), `edge-ai`/E1M-AEN801 (`README.md`, `src/main.c`),
+  `edge-ai`/E1M-V2N101 (`README.md`, `src/main.c`), `iot`/E1M-AEN801
+  (`README.md`, `board.yaml`), `sensor`/E1M-AEN801 (`README.md`,
+  `board.yaml`, `boards/native_sim_native_64.conf`,
+  `boards/native_sim_native_64.overlay`, `src/main.c`, `testcase.yaml`) and
+  `sensor`/E1M-V2N101 (the same six paths as its sibling SKU). `minimal` and
+  `multicore-mailbox` are untouched at both SKUs (`scaffold_byte_parity.py`
+  reported 0 diffs for both before this re-vendor and still does after).
+
+  Unlike every prior vendor-point move recorded here, this one is NOT just a
+  doc-link ref bump — real `examples/**` content changed inside the
+  `eb96112b..722320a1` window and the vendored bytes follow it:
+  `examples/peripheral-io/i2c-master`'s underlying chip swapped TMP112 ->
+  BMP581 (alp-sdk#1269, `sensor`'s own catalog entry), which is why `sensor`
+  moved all six of its files rather than just `README.md`;
+  `examples/ai/cold-chain-monitor`'s README/`src/main.c` gained real
+  doc-link/units-test pointers on their own (superseding entry 4's
+  `DELIBERATE_EDITS`, see "Deliberate edits on top of the emit" below); and
+  `examples/connectivity/mqtt-telemetry`'s README gained a `tan init`/
+  `tan build` customer-workflow rewrite plus a TMP112 -> BMP581 sensor-link
+  swap of its own (`iot`). Twenty of `DELIBERATE_EDITS`' prior thirty-one
+  entries retired as a direct result — their declared anchors stopped
+  matching this reworded prose verbatim; see "Deliberate edits on top of the
+  emit" below for the full retirement accounting, and
+  `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS` block comment for the
+  per-entry reasoning.
+
+  Verified at `722320a1`, against a checkout with tags fetched:
+  `scaffold_byte_parity.py` **10/10 PASS** (rc 0; `multicore-mailbox` is a
+  10th (template, sku) pair not present at the `eb96112b` vendor point's own
+  9/9 count above — tan-cli#996/#1001 adds it, unrelated to this re-vendor).
 
 - **Prior vendor point:** **`eb96112b`**
   (`eb96112ba7d1cc3b4084c985962ea31772177d74`, alp-sdk — the
@@ -527,10 +527,14 @@ round-three review, see entry 17 below): `multicore-mailbox`'s
 already qualified), and two `README.md` sites (a link-label mislabel
 byte-for-byte matching entry 16's `src/main.c` fix, and a `west build`
 command that names a path that does not exist in a scaffolded project).
-That is `1 + 1 + 2 + 2 + 2 + 6 + 24 + 21 + 3 = 62`.
-`test_the_manifest_deliberate_edit_count_matches_the_table` pins the
-**sixty-two** above against `len(DELIBERATE_EDITS)` itself, the drift this
-paragraph shipped with nothing catching before tan-cli#932. tan-cli#384's
+That is `1 + 1 + 2 + 2 + 2 + 6 + 24 + 21 + 3 = 62` -- the table as it stood
+at tan-cli#1009, which is what the derivation above walks. tan-cli#1151's
+`ff27f179` re-vendor then retired **seventeen** of those (enumerated under
+"Current vendor point" above), leaving the **forty-five** this section opens
+with. `test_the_manifest_deliberate_edit_count_matches_the_table` pins that
+forty-five -- not the sixty-two derived here -- against
+`len(DELIBERATE_EDITS)` itself, the drift this paragraph shipped with nothing
+catching before tan-cli#932. tan-cli#384's
 seven `README.md` doc-link entries
 are NOT among them — they were RETIRED when alp-sdk cut the real `v0.15.0`
 tag (see "Current vendor point" above); listed here only as history, not as

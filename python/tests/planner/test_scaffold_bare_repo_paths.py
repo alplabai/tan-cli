@@ -9,8 +9,17 @@ is restructured (guarded document reads, `_require_key`/`_require_field`
 threading, `example_rel`), so `planner_resync.py` never proposes a merge for
 it and the freshness gate stays red until a person ports the delta. This
 file is the proof that the delta was PORTED rather than the pin merely
-moved: every case below reds against the unported `template.py` on its own
-assertion, not on an import error (measured -- see the three groups).
+moved, and the measurement is stated exactly rather than rounded up: against
+the unported `template.py`, **16 of the 17 cases below red -- 7 on their own
+value assertions and 9 on `AttributeError: module 'tan.planner.template' has
+no attribute '_scaffold_bare_repo_paths'`**. Nine reding on the missing
+attribute is not a weakness: the function does not exist pre-port, so there
+is no value for those cases to assert about, and the same 9/7 split is
+recorded at `tests/gates/test_planner_relocation_freshness.py:1275-1283`.
+The 17th, `test_the_examples_own_path_with_no_subpath_still_becomes_a_dot`,
+passes BOTH ways by design -- it is the no-regression control for behaviour
+part 2 did not change, so a red there would mean the port broke something
+rather than that it landed.
 
 THE DELTA, in three behavioural parts:
 
