@@ -187,6 +187,51 @@ What those commands do:
    On a minimal Linux host this phase also needs `file` on PATH
    (Debian/Ubuntu: `sudo apt-get install -y file`); without it the underlying
    `west sdk install`'s own host-tools step fails with "Host tools installation failed" and names nothing.
+   This phase lists the SDK releases through the GitHub API, whose anonymous
+   quota is counted **per source IP** -- so behind a shared office egress, a
+   corporate VPN or a runner pool it can be exhausted by traffic that is not
+   yours, and the download fails with `403 API rate limit exceeded`. Set
+   `$TAN_GITHUB_TOKEN` to authenticate it. The token needs no scopes --
+   listing public releases requires none.
+
+   `tan` also reads `$GH_TOKEN` and `$GITHUB_TOKEN`, in that order behind
+   `$TAN_GITHUB_TOKEN`, so an existing `gh auth login` session or a CI job's
+   own token authenticates the download with nothing new to set. That means
+   an **ambient** `$GH_TOKEN` you set for something else will be used here
+   too; `$TAN_GITHUB_TOKEN` overrides it for `tan` alone, and unsetting all
+   three restores the anonymous download exactly as it was. Every message
+   `tan` prints about this names the **variable**, never its value, and the
+   `bootstrap.sdk-credential-unstaged` warning tells you when a variable was
+   set but not used.
+
+   How the token is handled, since it is a secret:
+
+   - **Environment only, never a flag.** There is deliberately no
+     `--github-token`: a flag value lands in shell history, in the host
+     process table for the whole multi-minute download, and in the argv
+     people paste into bug reports.
+   - **Never an argv element.** `tan` stages it in a private `netrc` and
+     points `west sdk install` at it with `$NETRC`, so it appears in no log,
+     no `--dry-run` plan, no `data.plannedCommands` and no JSON envelope.
+   - **Offered to `api.github.com` and to nothing else.** This is *narrower*
+     than `west sdk install --personal-access-token`, which puts an
+     `Authorization` header on the session: a netrc credential is matched per
+     host, so the release CDN that serves the actual multi-hundred-megabyte
+     archive never sees your token.
+   - **It touches disk.** The staged `netrc` is a real file -- mode `0600`
+     inside a `0700` directory under the toolchain root, deleted when the
+     download returns and swept on the next `tan bootstrap` if a crash
+     skipped that. It is deliberately not under `$TMPDIR`: that sweep
+     identifies what to delete by NAME, and a name is only proof of
+     ownership inside a directory `tan` owns. The sweep also leaves alone
+     anything recent enough to belong to a concurrent `tan bootstrap` --
+     under six hours old — so two `tan` runs at once cannot silently
+     de-authenticate each other.
+   - **It replaces your own `netrc` for that one child.** `$NETRC` has no
+     `~/.netrc` fallback behind it, so an unrelated credential in your own
+     `~/.netrc` is not visible to `west sdk install` while `tan` is
+     authenticating the download. Nothing is set at all when you supply no
+     token.
 2. If you skip the toolchain phase, or need to point at a different pin, run
    `west sdk install` by hand from inside the workspace venv:
 

@@ -10,6 +10,7 @@ toolchain on every PR).
 from __future__ import annotations
 
 import json
+from fnmatch import fnmatch
 from pathlib import Path
 
 import pytest
@@ -330,3 +331,213 @@ def test_a_checksum_failure_gets_the_proxy_ca_hint(detail):
 )
 def test_an_unrelated_failure_is_never_augmented(detail):
     assert tp.augment_acquisition_failure(detail) == detail
+
+
+# ---------------------------------------------------------------------------
+# The SDK download credential (tan-cli#1143)
+# ---------------------------------------------------------------------------
+
+
+def test_the_token_precedence_defers_to_the_existing_credential_sources():
+    """`gh`'s own order, with a tan-specific override in front of it: a
+    developer who has run `gh auth login`, and a workflow that already
+    exports the job token, both get an authenticated download with nothing
+    new to set."""
+    assert tp.SDK_TOKEN_ENV_VARS == ("TAN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
+    env = {"TAN_GITHUB_TOKEN": "aaa", "GH_TOKEN": "bbb", "GITHUB_TOKEN": "ccc"}
+    assert tp.resolve_sdk_token(env) == tp.SdkToken("aaa", "TAN_GITHUB_TOKEN")
+    del env["TAN_GITHUB_TOKEN"]
+    assert tp.resolve_sdk_token(env) == tp.SdkToken("bbb", "GH_TOKEN")
+    del env["GH_TOKEN"]
+    assert tp.resolve_sdk_token(env) == tp.SdkToken("ccc", "GITHUB_TOKEN")
+
+
+def test_an_empty_variable_is_skipped_rather_than_ending_the_search():
+    """`GITHUB_TOKEN=` is what an unset workflow secret expands to. Letting
+    it shadow a usable `GH_TOKEN` behind it would be the surprise -- and
+    would reintroduce the anonymous rate limit on exactly the hosts that
+    thought they had solved it."""
+    assert tp.resolve_sdk_token({"TAN_GITHUB_TOKEN": "", "GH_TOKEN": "  ", "GITHUB_TOKEN": "x"}) == (
+        tp.SdkToken("x", "GITHUB_TOKEN")
+    )
+    assert tp.resolve_sdk_token({}) is None
+    assert tp.resolve_sdk_token({"TAN_GITHUB_TOKEN": "\n"}) is None
+
+
+def test_surrounding_whitespace_is_forgiven_and_interior_whitespace_is_not():
+    """A `GH_TOKEN` set from a file read is routinely `"...\\n"`. A value with
+    interior whitespace is not a token this module will write into a netrc:
+    `netrc`'s parser would mis-split the line, and `NetrcParseError` quotes
+    the offending token back in its message -- a secret arriving in a
+    child's stderr, which is precisely where `capture_tail` picks things
+    up."""
+    assert tp.usable_sdk_token("  ghp_abc123  \n") == "ghp_abc123"
+    assert tp.usable_sdk_token("ghp abc") is None
+    assert tp.usable_sdk_token("ghp\nabc") is None
+    assert tp.usable_sdk_token("gh#p") is None
+    assert tp.usable_sdk_token(None) is None
+    # Every real GitHub credential format is inside the allowed class, so the
+    # guard costs nothing it was not meant to cost.
+    for real in ("ghp_16C7e42F", "gho_x", "ghs_x", "github_pat_11A_bCd-e.f", "a" * 40):
+        assert tp.usable_sdk_token(real) == real
+
+
+def test_the_staged_netrc_names_only_the_github_api_host():
+    """The credential is offered to `fetch_releases`' host and to nothing
+    else -- not to the release CDN the archive itself comes from, not to
+    anything else the child happens to talk to."""
+    text = tp.netrc_text("ghp_secret")
+    assert text.splitlines() == [
+        "machine api.github.com",
+        "  login x-access-token",
+        "  password ghp_secret",
+    ]
+    assert text.endswith("\n")
+    assert tp.GITHUB_API_HOST == "api.github.com"
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "tar: Unexpected EOF",
+        "sha256 mismatched: aaa:bbb",
+        # A 403 that is NOT a quota -- the #304 CA-interference shape. Handing
+        # this one "set a token" would send the reader to a lever that cannot
+        # fix it, which is the same defect in the other direction.
+        'Failed to fetch: 403, {"message": "Resource not accessible"}',
+    ],
+)
+def test_a_failure_that_is_not_a_rate_limit_gets_no_token_note(detail):
+    assert tp.rate_limit_note(detail, authenticated_as=None) is None
+    assert tp.rate_limit_note(detail, authenticated_as="GH_TOKEN") is None
+    assert tp.rate_limit_note(detail, authenticated_as=None, credential_seen="GH_TOKEN") is None
+
+
+def test_an_unauthenticated_rate_limit_names_tans_surface_and_disowns_wests_flag():
+    note = tp.rate_limit_note(
+        "fetch_releases API rate limit exceeded. Try executing install script with "
+        "--personal-access-token argument or use a .netrc file",
+        authenticated_as=None,
+    )
+    assert note is not None
+    assert "$TAN_GITHUB_TOKEN" in note
+    assert "$GH_TOKEN/$GITHUB_TOKEN" in note
+    assert "anonymous per-IP API quota" in note
+    # The correction that is the reason this note exists at all.
+    assert "that is `west`'s own flag" in note
+    assert "does not accept it" in note
+
+
+def test_an_authenticated_rate_limit_does_not_tell_the_reader_to_set_a_token_again():
+    """The two situations are genuinely different. With a credential already
+    in play the per-IP quota was never the binding limit, so repeating "set a
+    token" would point at a lever the reader has already pulled."""
+    note = tp.rate_limit_note("API rate limit exceeded", authenticated_as="GH_TOKEN")
+    assert note is not None
+    assert "$GH_TOKEN" in note
+    assert "AUTHENTICATED quota" in note
+    assert "anonymous" in note  # named only to say it was NOT the limit hit
+    assert "$TAN_GITHUB_TOKEN" not in note
+
+
+def test_a_credential_that_was_present_but_unused_is_told_so_not_told_to_set_one():
+    """tan-cli#1148 review: the wrong-advice combination. If the environment
+    HELD a credential and this download still went out anonymous, "set
+    $TAN_GITHUB_TOKEN" points at a lever the reader can see is already
+    pulled. The note sends them to the `bootstrap.sdk-credential-unstaged`
+    warning that says WHY instead."""
+    note = tp.rate_limit_note(
+        "API rate limit exceeded", authenticated_as=None, credential_seen="GH_TOKEN"
+    )
+    assert note is not None
+    assert "went out anonymous even though $GH_TOKEN is set" in note
+    assert "the warning above" in note
+    # The three branches are genuinely distinct, not one string with a
+    # variable spliced in.
+    assert "$TAN_GITHUB_TOKEN" not in note
+    assert "AUTHENTICATED quota" not in note
+
+
+def test_the_authenticated_note_names_the_one_symptom_an_inert_transport_would_show():
+    """tan pins neither `west` nor `requests`, so a future west that sets its
+    own Authorization header on the no-token branch would make the netrc
+    transport INERT with no gate anywhere able to catch it (`requests` is not
+    a tan dependency and no zephyr checkout exists at test time, so any such
+    gate would SKIP everywhere -- a dead gate). This sentence is the
+    substitute: the live symptom, surfaced at the exact moment an inert
+    transport becomes observable."""
+    note = tp.rate_limit_note("API rate limit exceeded", authenticated_as="GH_TOKEN")
+    assert note is not None
+    assert "may not be reaching `west sdk install`" in note
+    assert "west --version" in note
+
+
+def test_a_set_but_unusable_token_variable_is_reported_rather_than_dropped():
+    """A `.env` value that kept its literal quotes is the realistic case. Left
+    silent, the symptom is a download that is anonymous for a reason nothing
+    on screen names."""
+    assert tp.rejected_sdk_token_vars({"GH_TOKEN": '"ghp_abc"'}) == ("GH_TOKEN",)
+    assert tp.rejected_sdk_token_vars({"TAN_GITHUB_TOKEN": "ghp_ok"}) == ()
+    # Unset and blank are NOT reported: `GITHUB_TOKEN=` is what an unset
+    # workflow secret expands to, and warning on every CI run is noise.
+    assert tp.rejected_sdk_token_vars({}) == ()
+    assert tp.rejected_sdk_token_vars({"GITHUB_TOKEN": "", "GH_TOKEN": "   "}) == ()
+    assert tp.rejected_sdk_token_vars(
+        {"TAN_GITHUB_TOKEN": "a b", "GITHUB_TOKEN": "c#d"}
+    ) == ("TAN_GITHUB_TOKEN", "GITHUB_TOKEN")
+
+
+def test_the_credential_scratch_name_cannot_collide_with_a_store_or_with_wreckage():
+    """The sweep's only proof of provenance is the name, so the name must be
+    unmistakable: nothing else tan writes under the toolchain root starts
+    with a dot."""
+    assert tp.NETRC_SCRATCH_PREFIX.startswith(".")
+    assert tp.netrc_scratch_glob_pattern() == ".alp-netrc-*"
+    leaf = tp.store_dir_name("1.0.1")
+    assert not leaf.startswith(tp.NETRC_SCRATCH_PREFIX)
+    assert not fnmatch(leaf, tp.netrc_scratch_glob_pattern())
+    assert not fnmatch(
+        f"{leaf}{tp.TMP_SUFFIX_PREFIX}4242", tp.netrc_scratch_glob_pattern()
+    )
+    assert not fnmatch(f"{tp.NETRC_SCRATCH_PREFIX}abcd", tp.wreckage_glob_pattern(leaf))
+
+
+def test_only_a_variable_that_would_have_won_is_reported_as_shadowed():
+    """`resolve_sdk_token` takes the first usable and stops. A broken value
+    BEHIND the winner was never going to be consulted, so naming it is noise;
+    one AHEAD of the winner lost a race it would otherwise have won."""
+    def shadowed(environ):
+        # `winner` is passed in, never re-derived (tan-cli#1148 round 3): the
+        # caller has already resolved, and two resolutions of the same three
+        # variables are two chances to disagree.
+        return tp.shadowed_sdk_token_vars(environ, tp.resolve_sdk_token(environ))
+
+    assert shadowed({"TAN_GITHUB_TOKEN": '"quoted"', "GH_TOKEN": "ghp_good"}) == (
+        "TAN_GITHUB_TOKEN",
+    )
+    assert shadowed({"TAN_GITHUB_TOKEN": "ghp_good", "GITHUB_TOKEN": '"quoted"'}) == ()
+    # Nothing resolved: every refused variable is worth naming.
+    assert shadowed({"TAN_GITHUB_TOKEN": '"a"', "GITHUB_TOKEN": "b c"}) == (
+        "TAN_GITHUB_TOKEN",
+        "GITHUB_TOKEN",
+    )
+    assert shadowed({}) == ()
+    # An explicit `winner` overrides what the environment would resolve to --
+    # the signature's whole point.
+    env = {"TAN_GITHUB_TOKEN": '"quoted"', "GH_TOKEN": "ghp_good"}
+    assert tp.shadowed_sdk_token_vars(env, None) == ("TAN_GITHUB_TOKEN",)
+
+
+def test_the_unusable_variable_message_is_rendered_from_the_outcome():
+    """tan-cli#1148 round 2: this message used to be built before the resolve
+    ran, so it could assert a download "will go out unauthenticated" that in
+    fact went out authenticated on the next variable down. Both endings are
+    statements of fact about a decision already taken."""
+    fell_back = tp.unusable_token_message("TAN_GITHUB_TOKEN", authenticated_as="GH_TOKEN")
+    assert "$TAN_GITHUB_TOKEN is set but is not a value tan can use" in fell_back
+    assert fell_back.endswith("tan authenticated the download with $GH_TOKEN instead.")
+    assert "unauthenticated" not in fell_back
+
+    anonymous = tp.unusable_token_message("GH_TOKEN", authenticated_as=None)
+    assert anonymous.endswith("the Zephyr SDK download will go out unauthenticated.")
+    assert "instead" not in anonymous

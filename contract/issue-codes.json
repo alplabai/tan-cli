@@ -368,6 +368,14 @@
       "note": "issue #474 (ADR 0021 Lane 1 P1): recorded via `Log.warn` in `toolchain_phase`/`_acquire_toolchain`/`_finish_toolchain_install`, the acquisition of the `arm-zephyr-eabi` cross toolchain via `west sdk install --install-dir`. A DELIBERATE 4th `WORKSPACE_BLOCKING` member alongside `zephyr-requirements`/`sdk-extras`/`editable-install` -- the frozen v0.4.1 Rust oracle never acquired a cross toolchain at all, so this is a Python-only addition with no oracle sibling, not a parity gap. Covers every non-fatal failure mode the phase can hit: an unreadable/malformed `metadata/toolchains.json`, missing 7-Zip on native Windows, insufficient disk (a preflight against the manifest's own measured footprint), a `west sdk install` failure, a post-install version mismatch, a compiler that will not run, a failed stamp write, and an adopted `$ALP_TOOLCHAIN_ROOT` directory tan will not delete on the caller's behalf. Never fired for an unsupported host (Intel Mac, windows-arm64) or a manifest publishing no artifact for this host -- ADR 0021's own words, \"a coded, honest skip, never a failure\" -- those are `log.line`, not `log.warn`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "bootstrap.sdk-credential-unstaged",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
+      "note": "issue #1143: recorded via `Log.warn` in `_sdk_credential`. The environment named a GitHub credential for the Zephyr SDK download (`TAN_GITHUB_TOKEN`/`GH_TOKEN`/`GITHUB_TOKEN`) and tan did not use it -- either the value is not one it will write into a netrc (letters, digits, `_`, `-`, `.` only; a quoted `.env` value keeps its quotes) or the private netrc could not be staged. Deliberately NOT a `WORKSPACE_BLOCKING` member, unlike `bootstrap.toolchain-install`: the download proceeds unauthenticated and usually still succeeds, so this reports a lost optimisation, never a workspace that cannot build. Exists because the downgrade used to be a `Log.line`, which prints NOTHING in JSON mode -- an extension user got no signal at all and was then told by the rate-limit remedy to set a token they could see was already set (tan-cli#1148 review). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Never carries the token value: every message names only the VARIABLE."
+    },
+    {
       "code": "bootstrap.failed",
       "status": "reserved",
       "severity": "error",

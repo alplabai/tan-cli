@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 #: The one cross-toolchain ADR 0021 Lane 1 acquires. `west sdk install`'s own
@@ -488,3 +489,387 @@ def augment_acquisition_failure(detail: str) -> str:
             "from a network path that does not intercept TLS."
         )
     return detail
+
+
+# ---------------------------------------------------------------------------
+# Authenticating the SDK download (tan-cli#1143)
+# ---------------------------------------------------------------------------
+
+#: The environment variables `tan bootstrap` reads a GitHub credential from,
+#: in precedence order, for the `west sdk install` download ONLY.
+#:
+#: **An environment variable, not a CLI flag, and not a manifest field.** A
+#: token is a secret, and the three candidate surfaces are not equally safe
+#: for one:
+#:
+#: - a CLI flag lands the value in shell history, in the host process table
+#:   for the whole (multi-minute) run, and in any CI log that echoes the
+#:   command -- and `tan`'s own argv is what a customer pastes into a bug
+#:   report;
+#: - a manifest field puts it in a file people commit;
+#: - an environment variable is the one surface that survives none of those,
+#:   and is already how every workflow in this repo carries `GH_TOKEN`.
+#:
+#: The precedence deliberately DEFERS to the existing credential sources
+#: rather than inventing a tan-only concept: `GH_TOKEN` then `GITHUB_TOKEN`
+#: is `gh`'s own order, so a developer who has run `gh auth login`, and a
+#: GitHub Actions job that already exports the workflow token, both get an
+#: authenticated download with nothing new to set. `TAN_GITHUB_TOKEN` leads
+#: so a host with an ambient `GH_TOKEN` bound to some other account can
+#: override it for tan alone.
+SDK_TOKEN_ENV_VARS: tuple[str, ...] = ("TAN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
+
+#: The env var `requests` reads a netrc path from -- `requests.utils.
+#: get_netrc_auth` consults `os.environ["NETRC"]` FIRST and falls back to
+#: `~/.netrc` only when it is unset. This is the whole reason the token can
+#: travel to `west` out of band: `west sdk install` reads a token from
+#: `--personal-access-token` and from NOTHING else (measured against Zephyr
+#: v4.4.1 `scripts/west_commands/sdk.py:473` -- it consults no environment
+#: variable of its own; `grep environ` across that file finds only
+#: `ZEPHYR_BASE` and `ZEPHYR_SDK_INSTALL_DIR`), but its GitHub call goes
+#: through `requests`, and `requests` applies netrc credentials whenever the
+#: request carries no `Authorization` header -- which is exactly west's
+#: `req_headers = {}` branch. West's own rate-limit message names the
+#: mechanism: "Try executing install script with --personal-access-token
+#: argument **or use a .netrc file**".
+#:
+#: **This is STRICTLY NARROWER than the flag it replaces, and that is a
+#: feature, not a consolation.** `--personal-access-token` puts an
+#: `Authorization: Bearer` header on west's `requests` session, and
+#: `requests` carries a session header across a redirect to a different host
+#: unless the caller strips it; a netrc credential is matched PER MACHINE, and
+#: [`netrc_text`] names only [`GITHUB_API_HOST`]. So the token is offered to
+#: the rate-limited `fetch_releases` call and to nothing else -- not to the
+#: release CDN the multi-hundred-megabyte archive is actually fetched from,
+#: not to anything else the child talks to.
+#:
+#: **It REPLACES rather than augments the caller's own netrc**, for the
+#: duration of that one child. `get_netrc_auth` sets
+#: `netrc_locations = (netrc_file,)` when `$NETRC` is set -- there is no
+#: `~/.netrc` fallback behind it -- so a caller whose own `~/.netrc`
+#: authenticates some other host loses it inside `west sdk install`.
+#: Accepted rather than worked around: merging their file into ours would
+#: mean copying THEIR secrets into a file tan wrote, which is a worse trade
+#: than one child process not seeing an unrelated credential, and the child
+#: in question talks to GitHub and its CDN and nothing else. Only ever set
+#: when tan actually has a token; an unauthenticated run passes no env at all.
+#:
+#: **Staging touches disk.** The token is written to a real file (see
+#: `bootstrap_cmd._stage_sdk_credential`), not held in memory -- mode 0600
+#: inside a 0700 directory under the toolchain root, deleted in a `finally`
+#: and swept on the next run if a crash skipped that.
+#:
+#: **RESIDUAL RISK, recorded because tan pins neither west nor requests.**
+#: Two external behaviours make this work and neither is under a version
+#: constraint tan controls: (1) `requests.utils.get_netrc_auth` reading
+#: `$NETRC` (measured on 2.34.2; present since 2.15), and (2) west's no-token
+#: branch leaving `req_headers` EMPTY, since `requests` skips netrc entirely
+#: for a request that already carries an `Authorization` header. If a future
+#: west sets a header there, this goes INERT -- the download silently falls
+#: back to the anonymous quota while the user believes they are
+#: authenticated. There is no gate for it here: `requests` is not a tan
+#: dependency (`pyproject.toml` -- `import requests` is a `ModuleNotFoundError`
+#: in a CI-shaped venv) and `ci.yml` checks out alp-sdk but never zephyr, so a
+#: CI-time gate would SKIP everywhere, which is a dead gate rather than a real
+#: one. A RUNTIME check is NOT ruled out, correcting an over-broad claim that
+#: stood here (tan-cli#1148 round 2): the bootstrap already resolves a
+#: `zephyr_base`, so reading `<zephyr_base>/scripts/west_commands/sdk.py` and
+#: refusing to claim authentication when its no-token branch stops leaving
+#: `req_headers` empty runs where the artifact exists and nowhere else.
+#: **Filed as tan-cli#1154.** An earlier revision of this line said "filed as
+#: a follow-up" when no issue existed yet -- a sentence that reads as a fact
+#: and was not one. The number is here so the claim resolves against
+#: something. Until #1154 lands, what exists is a live symptom
+#: -- [`rate_limit_note`]'s authenticated branch names this possibility by
+#: name when a credentialled download is rate-limited anyway, which is exactly
+#: when an inert transport becomes observable. Re-verify with
+#: `grep -n "req_headers" <zephyr>/scripts/west_commands/sdk.py` and
+#: `python -c "import inspect,requests;print(inspect.getsource(requests.utils.get_netrc_auth))"`.
+NETRC_ENV_VAR = "NETRC"
+
+#: The host `west sdk install`'s rate-limited call goes to (`fetch_releases`
+#: against the GitHub REST API). The staged netrc names ONLY this machine, so
+#: the credential is never offered to the release CDN the archive itself is
+#: fetched from, nor to anything else the child happens to talk to.
+GITHUB_API_HOST = "api.github.com"
+
+#: The prefix of the private directory the staged netrc lives in, created
+#: under the TOOLCHAIN ROOT rather than under `$TMPDIR` -- see
+#: [`netrc_scratch_glob_pattern`] for why that placement is what makes the
+#: crash-residue sweep safe. Leading dot, so it can never collide with a
+#: [`store_dir_name`] result or with a [`TMP_SUFFIX_PREFIX`] sibling.
+NETRC_SCRATCH_PREFIX = ".alp-netrc-"
+
+
+def netrc_scratch_glob_pattern() -> str:
+    """The glob that reclaims a PRIOR run's staged credential -- the
+    crash-residue half of the cleanup, since a `finally` does not run on
+    SIGKILL, an OOM kill or power loss, and a secret accumulating one copy
+    per crash with nothing sweeping it is the wrong steady state.
+
+    The reason this pattern is rooted at the toolchain root and not at
+    `$TMPDIR` is that the sweep's only proof of provenance is the NAME, and a
+    name is only proof inside a namespace tan owns. `$TMPDIR` is shared by
+    every process on the box, so a `.alp-netrc-*` found there is not
+    necessarily one tan wrote; the toolchain root (or the directory
+    `$ALP_TOOLCHAIN_ROOT` deliberately named) is the same ownership argument
+    [`wreckage_glob_pattern`] already relies on, so this sweep is exactly as
+    well-founded as the one running beside it.
+
+    **Not, as an earlier revision claimed, because sweeping `/tmp` would be
+    exploitable** -- corrected on measurement (tan-cli#1148 round 2): `/tmp`
+    is `0o1777`, but `shutil.rmtree.avoids_symlink_attacks` is `True` here,
+    so no escalation was ever demonstrated and this should not have asserted
+    one. What the move measurably DID buy is a swept namespace that is
+    NARROWER than `$TMPDIR`, not one that is unconditionally private, and the
+    difference is the caller's `umask`. Measured under `umask 022`: root
+    `0o755`, scratch `0o700`, netrc `0o600` -- no other user can create a
+    `.alp-netrc-*` here. Measured under `umask 002` (this repo's own CI and
+    developer default): root `0o775`, so the root is GROUP-WRITABLE and a
+    member of that group can. The credential itself is unreadable either way
+    (`mkdtemp` forces `0o700` and the netrc `0o600` regardless of umask); the
+    part that varies is who can put a directory into the namespace the sweep
+    globs.
+
+    Two residuals follow from that and are recorded rather than claimed away:
+    a group-writable root under `umask 002`, and an `$ALP_TOOLCHAIN_ROOT`
+    that the operator deliberately pointed at a SHARED directory. In both,
+    the sweep can be handed a `.alp-netrc-*` tan did not write. What that
+    buys an attacker is bounded by what the sweep does -- `rmtree` of a
+    directory, with `avoids_symlink_attacks` true -- so it is a nuisance
+    (deleting their own planted directory) rather than an escalation; but
+    "narrower than `$TMPDIR`, and private at `umask 022`" is the honest
+    statement, not "not creatable at all".
+    """
+    return f"{NETRC_SCRATCH_PREFIX}*"
+
+
+#: netrc's `login` for a GitHub token. GitHub ignores the username on a
+#: token-as-password Basic credential; `x-access-token` is the spelling
+#: GitHub's own docs use for it.
+NETRC_LOGIN = "x-access-token"
+
+#: A token this module is willing to write into a netrc file. Deliberately a
+#: WHITELIST, not a blacklist of separators: `netrc`'s parser is
+#: whitespace-and-quote-sensitive, so a value carrying a space, a newline or
+#: a `#` does not merely fail to authenticate -- it can make the parser
+#: mis-split the file, and `netrc.NetrcParseError` quotes the offending token
+#: back in its message, which is precisely a secret arriving in a child's
+#: stderr and from there in `capture_tail`. Every GitHub credential format
+#: (`ghp_`/`gho_`/`ghs_`/`github_pat_`, and a bare 40-hex classic token) is
+#: inside this class, so the guard costs nothing real and closes the
+#: injection path completely.
+_SDK_TOKEN_ALLOWED = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
+)
+
+
+@dataclass(frozen=True)
+class SdkToken:
+    """A usable GitHub credential and the NAME of the variable it came from.
+
+    `source` is the only half of this that is ever printed, logged or put in
+    an envelope: it is a variable name the customer chose, never the secret.
+    """
+
+    #: The secret. Never logged, never in an argv, never in an envelope.
+    value: str
+    #: The environment variable it was read from -- safe to print.
+    source: str
+
+
+def usable_sdk_token(raw: str | None) -> str | None:
+    """`raw` stripped, or `None` when it is empty or carries a character
+    [`_SDK_TOKEN_ALLOWED`] refuses. Surrounding whitespace is forgiven (a
+    `GH_TOKEN` set from a file read is routinely `"...\\n"`); interior
+    whitespace is not, because a value that cannot be written into a netrc
+    line unambiguously must not be written into one at all."""
+    if raw is None:
+        return None
+    token = raw.strip()
+    if not token:
+        return None
+    if any(ch not in _SDK_TOKEN_ALLOWED for ch in token):
+        return None
+    return token
+
+
+def resolve_sdk_token(environ: Mapping[str, str]) -> SdkToken | None:
+    """The first usable credential among [`SDK_TOKEN_ENV_VARS`], in order, or
+    `None` when the environment names none -- in which case the download
+    stays exactly as unauthenticated as it has always been. A variable that
+    is set but empty, or set to something [`usable_sdk_token`] refuses, is
+    SKIPPED rather than ending the search: `GITHUB_TOKEN=` is what an unset
+    workflow secret expands to, and letting that shadow a perfectly good
+    `GH_TOKEN` behind it would be the surprise."""
+    for name in SDK_TOKEN_ENV_VARS:
+        token = usable_sdk_token(environ.get(name))
+        if token is not None:
+            return SdkToken(token, name)
+    return None
+
+
+def rejected_sdk_token_vars(environ: Mapping[str, str]) -> tuple[str, ...]:
+    """The [`SDK_TOKEN_ENV_VARS`] that are SET to a non-blank value this
+    module will not use -- [`usable_sdk_token`] refused the characters.
+
+    Exists so the refusal is not silent. The realistic way to land here is a
+    `.env` line or a shell export that kept its literal quotes
+    (`GH_TOKEN="ghp_..."` read by something that does not strip them), and
+    the symptom without this is a download that is anonymous for a reason
+    nothing on screen names, followed by a remedy telling the reader to set
+    a variable they can see is already set.
+
+    A variable that is unset or blank is NOT reported: `GITHUB_TOKEN=` is
+    what an unset workflow secret expands to, and warning about it on every
+    CI run would be noise, not signal.
+    """
+    return tuple(
+        name
+        for name in SDK_TOKEN_ENV_VARS
+        if (environ.get(name) or "").strip() and usable_sdk_token(environ.get(name)) is None
+    )
+
+
+def shadowed_sdk_token_vars(
+    environ: Mapping[str, str], winner: SdkToken | None
+) -> tuple[str, ...]:
+    """The [`rejected_sdk_token_vars`] that would have WON precedence over
+    `winner` -- all of them when `winner` is `None`.
+
+    `winner` is a REQUIRED argument rather than something this re-derives:
+    the one caller has already called [`resolve_sdk_token`], and resolving
+    the same three variables twice invites the two answers to disagree the
+    day anything about the environment is not stable between them
+    (tan-cli#1148 round 3).
+
+    This, not the raw rejected set, is what is worth telling a customer
+    about. A variable BEHIND the one that won was never going to be consulted
+    (`resolve_sdk_token` takes the first usable and stops), so reporting it
+    is noise about a value that changed nothing; a variable AHEAD of it lost
+    a race it would otherwise have won, which is a real surprise worth
+    naming.
+    """
+    order = SDK_TOKEN_ENV_VARS
+    limit = order.index(winner.source) if winner is not None else len(order)
+    return tuple(name for name in rejected_sdk_token_vars(environ) if order.index(name) < limit)
+
+
+#: What a customer is told about a variable [`usable_sdk_token`] refused.
+#: `{name}` is the variable, never the value -- a rejected token is as much a
+#: secret as an accepted one.
+_UNUSABLE_TOKEN_PREFIX = (
+    "${name} is set but is not a value tan can use as a GitHub token (letters, "
+    "digits, `_`, `-` and `.` only -- a quoted `.env` value keeps its quotes)"
+)
+
+#: The two possible ENDINGS, chosen from what actually happened rather than
+#: from what was about to be attempted. tan-cli#1148 review round 2: this
+#: warning used to be raised before the resolve, so with
+#: `TAN_GITHUB_TOKEN='"quoted"'` AND a good `GH_TOKEN` the envelope carried a
+#: registered issue code asserting the download "will go out unauthenticated"
+#: while it went out authenticated. A wire surface stating the opposite of
+#: what happened is worse than the silence this warning replaced.
+_UNUSABLE_TOKEN_FELL_BACK = "; tan authenticated the download with ${fallback} instead."
+_UNUSABLE_TOKEN_UNAUTHENTICATED = "; the Zephyr SDK download will go out unauthenticated."
+
+
+def unusable_token_message(name: str, *, authenticated_as: str | None) -> str:
+    """The `bootstrap.sdk-credential-unstaged` message for one refused
+    variable. `authenticated_as` is the variable whose token really reached
+    the download by the time this is rendered -- `None` if none did."""
+    text = _UNUSABLE_TOKEN_PREFIX.format(name=name)
+    if authenticated_as is not None:
+        return text + _UNUSABLE_TOKEN_FELL_BACK.format(fallback=authenticated_as)
+    return text + _UNUSABLE_TOKEN_UNAUTHENTICATED
+
+
+def netrc_text(token: str) -> str:
+    """The netrc document staged for the `west sdk install` child -- one
+    machine, [`GITHUB_API_HOST`], and nothing else. Trailing newline: Python's
+    `netrc` parser is line-oriented and a file whose last line is unterminated
+    is a needless edge case."""
+    return f"machine {GITHUB_API_HOST}\n  login {NETRC_LOGIN}\n  password {token}\n"
+
+
+#: The one narrowly-matched marker that says a `west sdk install` failure was
+#: GitHub's API quota rather than anything about the pin, the network or the
+#: host. `clean-host.yml`'s own rate-limit exclusion already settled the
+#: shape of this test in this repo -- match the literal `rate limit`, not a
+#: bare `403`, so a CA/permission 403 (the #304 shape) cannot be mistaken for
+#: a quota one and handed a remedy that would not fix it.
+_RATE_LIMIT_MARKER = "rate limit"
+
+
+#: The AUTHENTICATED-quota branch of [`rate_limit_note`]. `{source}` is the
+#: variable name, never the value. The closing sentence is deliberate: it is
+#: the only live symptom an INERT netrc transport would ever produce (see
+#: [`NETRC_ENV_VAR`]'s residual-risk note), and this is exactly the moment it
+#: would show.
+_AUTHENTICATED_QUOTA_NOTE = (
+    "That is GitHub's AUTHENTICATED quota, not the anonymous per-IP one: tan "
+    "already handed this download the credential in ${source}. Check that the token "
+    "is valid, unexpired and not already exhausted by other traffic, or wait for the "
+    "quota window to reset and re-run `tan bootstrap`. If you are confident the token "
+    "is good and this persists, the credential may not be reaching `west sdk install` "
+    "at all -- tan hands it over through a netrc, and a `west` that sets its own "
+    "Authorization header would silently bypass it; please report it with your "
+    "`west --version` (tan-cli#1143)."
+)
+
+#: The branch for "the environment HELD a credential and this download went
+#: out anonymous anyway". Points at the `bootstrap.sdk-credential-unstaged`
+#: warning that says WHY, instead of repeating advice the reader has already
+#: followed.
+_UNUSED_CREDENTIAL_NOTE = (
+    "That is GitHub's anonymous per-IP API quota, and this download went out "
+    "anonymous even though ${source} is set -- tan could not use it, and said so in "
+    "the warning above rather than here. Fix that first: re-running with a usable "
+    "credential is what lifts this limit."
+)
+
+#: The plain anonymous branch -- the one a customer behind a shared egress
+#: address actually hits, and the only one that names a variable to set.
+_ANONYMOUS_QUOTA_NOTE = (
+    "That is GitHub's anonymous per-IP API quota -- shared with everyone behind the "
+    "same egress address, so it can be exhausted by traffic that is not yours. "
+    "Authenticate the download by setting ${primary} (or {alternatives}, read in that "
+    "order) to a GitHub token with no scopes -- listing public releases needs none -- "
+    "and re-run `tan bootstrap`. Ignore the `--personal-access-token` flag named "
+    "above: that is `west`'s own flag, and `tan bootstrap` does not accept it. tan "
+    "passes the token to `west sdk install` out of band, so it never appears in an "
+    "argv, a log or a `--dry-run` plan."
+)
+
+
+def rate_limit_note(
+    detail: str, *, authenticated_as: str | None, credential_seen: str | None = None
+) -> str | None:
+    """The tan-side remedy to append to a rate-limited `west sdk install`
+    failure, or `None` when `detail` says nothing about a quota.
+
+    The same shape as [`low_disk_note`] and [`augment_acquisition_failure`]:
+    the child's own message is kept verbatim and a note is appended, because
+    that message is actively MISLEADING here -- west tells the reader to
+    "try executing install script with --personal-access-token argument",
+    which is `west`'s flag on a command the customer never typed and which
+    `tan bootstrap` does not accept. Naming tan's own surface is the whole
+    point of the note.
+
+    THREE states, because there are three genuinely different situations and
+    collapsing any two of them hands somebody advice that cannot help:
+    a credential that reached the download
+    ([`_AUTHENTICATED_QUOTA_NOTE`]), one that was present but unusable
+    ([`_UNUSED_CREDENTIAL_NOTE`]), and none at all
+    ([`_ANONYMOUS_QUOTA_NOTE`]).
+    """
+    if _RATE_LIMIT_MARKER not in detail.lower():
+        return None
+    if authenticated_as is not None:
+        return _AUTHENTICATED_QUOTA_NOTE.format(source=authenticated_as)
+    if credential_seen is not None:
+        return _UNUSED_CREDENTIAL_NOTE.format(source=credential_seen)
+    primary, *fallbacks = SDK_TOKEN_ENV_VARS
+    return _ANONYMOUS_QUOTA_NOTE.format(
+        primary=primary, alternatives="/".join(f"${name}" for name in fallbacks)
+    )

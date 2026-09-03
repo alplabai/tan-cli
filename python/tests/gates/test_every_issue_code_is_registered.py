@@ -771,7 +771,18 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # mismatch, a compiler that will not run, a failed stamp write, an
         # adopted-root refusal). Registered as `bootstrap.toolchain-install`
         # in contract/issue-codes.json before bumping.
-        expected_calls=31,
+        #
+        # 33, not 31, since issue #1143 gave `tan bootstrap` a way to
+        # authenticate its own `west sdk install`: `_sdk_credential` carries
+        # TWO new `log.warn("sdk-credential-unstaged", ...)` call sites --
+        # one for a token variable whose VALUE tan will not write into a
+        # netrc, one for a netrc it could not stage -- both meaning "the
+        # environment named a credential and this download is going out
+        # unauthenticated anyway". One code, two sites, deliberately NOT a
+        # `WORKSPACE_BLOCKING` member (the download usually still succeeds).
+        # Registered as `bootstrap.sdk-credential-unstaged` in
+        # contract/issue-codes.json before bumping.
+        expected_calls=33,
         sites=1,
     ),
     ("tan/commands/bootstrap_cmd.py", "_refusal"): dict(
