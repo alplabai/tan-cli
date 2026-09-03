@@ -76,8 +76,9 @@ different vocabularies out of the same key:
 | `cpu-only` | `static-screen` | Nothing screened is `npu-eligible`. |
 | `undetermined` | `static-screen` | Nothing was screened. **Absence of data, not evidence of no support.** |
 
-Five distinct values, listed above in seven rows because `partial` (three
-ways) and `cpu-only` (two ways) mean a different thing at each basis, exactly
+Five distinct values, listed above in seven rows because `partial` and
+`cpu-only` each appear at three bases -- and `fits` and `undetermined` at two
+-- meaning a different thing at each, exactly
 as `partial`/`fits` at `basis: "bench"` never originate there -- they only
 ever arrive already-measured, riding along from a corroborating `--exact`
 compile. A bench point that is NOT corroborated

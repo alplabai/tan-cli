@@ -147,29 +147,23 @@ class BackendReport:
     backend: str              # cpu | ethos_u | drpai | deepx_dxm1
     variant: str | None       # u85 | u55 | u65 | None
     table: str | None         # the table file that answered, or None
-    npu_coverage: str          # "full-eligible" | "partial" | "cpu-only" | "undetermined" --
-                               # plus "fits", which can appear at basis == "compiled"
-                               # (tan.model.check's `--exact` path, tan-cli#782 Task 6) OR
-                               # basis == "bench" (a matched `metadata/model_perf/` point,
-                               # tan.model.perf_apply). Only the "compiled" path ever
-                               # DERIVES a verdict -- from `tan.model.perf.coverage_from_
-                               # placement`, the one function in tan allowed to return
-                               # "fits", off a real vela compile's own placement summary.
-                               # A "bench" report NEVER derives its own verdict (alp-sdk's
-                               # real model-perf schema carries no bench-measured
-                               # placement split, tan-cli#1115): `tan.model.perf_apply.
-                               # _perf_point_report` CARRIES this field from the report it
-                               # is rebasing ONLY when that report's own basis is already
-                               # "compiled" (a real placement, safe to keep); otherwise --
-                               # the ordinary case, no `--exact` alongside the bench point
-                               # -- the word is WITHHELD to "undetermined" rather than
-                               # promoting the static screen's name-level estimate to
-                               # `confidence: "certain"`. `docs/model-check-static-
-                               # screen.md` documents `undetermined` @ `basis: "bench"` as
-                               # a legitimate, distinct combination from `undetermined` @
-                               # `basis: "static-screen"` for exactly this reason.
-                               # analyze_backend() itself never emits "fits" -- basis stays
-                               # "static-screen" here always.
+    # WHICH words are legitimate here is NOT restated in this comment -- read
+    # `LEGITIMATE_COVERAGE_BY_BASIS` above, keyed by this report's own `basis`.
+    # It is the source of truth, `__post_init__` enforces it on construction,
+    # and a prose second copy of that enumeration in this exact spot is what
+    # drifted and cost tan-cli#1135. What stays here is only WHY the vocabulary
+    # is basis-dependent, which no dict can say: `tan.model.perf.coverage_from_
+    # placement` is the one function in tan allowed to return "fits", off a
+    # real vela compile's own placement summary, so only `basis: "compiled"`
+    # ever DERIVES a verdict. A `basis: "bench"` report derives nothing --
+    # alp-sdk's real model-perf schema carries no bench-measured placement
+    # split (tan-cli#1115) -- so `tan.model.perf_apply._perf_point_report`
+    # CARRIES this field from the report it is rebasing only when that
+    # report's basis is already "compiled", and otherwise WITHHOLDS it to
+    # `COVERAGE_WITHHELD` rather than promoting the static screen's name-level
+    # estimate to `confidence: "certain"`. analyze_backend() itself never
+    # emits "fits" -- `basis` stays "static-screen" in this module always.
+    npu_coverage: str
     # MAC-weighted UPPER bound, 0-100 -- ONLY at `basis: "static-screen"`
     # (this module's own `_score_ops`/`eligible_macs / total_macs`). Always
     # `None` at `basis: "compiled"` (tan.model.check's `--exact` path):
@@ -269,11 +263,30 @@ class BackendReport:
         production construction sites (`analyze.py` x4, `tan.model.check.
         _report_from_vela_compile`, `tan.model.perf_apply._perf_point_report`)
         and every `dataclasses.replace` of a report run through here, so a new
-        branch that invents a word at a basis it does not belong to fails
-        loudly at the point of the mistake instead of reaching an envelope
-        consumer that matches exhaustively on the pair (`tan.core.model_check`,
-        and the customers `docs/model-check-static-screen.md` tells to do
-        exactly that).
+        branch that invents a word at a basis it does not belong to cannot
+        reach an envelope consumer that matches exhaustively on the pair
+        (`tan.core.model_check`, and the customers
+        `docs/model-check-static-screen.md` tells to do exactly that).
+
+        THE BLAST RADIUS, stated rather than left to "fails loudly": this is
+        not a traceback at the user. `tan model check` wraps each model in
+        `tan.commands.model_cmd._model_check_block`'s `except Exception`, so a
+        raise here becomes that ONE model's coded Issue and `exitCode: 1` --
+        the other models in the same `board.yaml` still report. Measured, on a
+        two-model board.yaml with the first model forced to an illegitimate
+        pair: `"ok": false`, `"exitCode": 1`, `issues[0]` =
+        `model.check-failed` / `model 'm': ValueError: illegitimate
+        (npu_coverage, basis) pair ('fits', 'static-screen') -- ...`, and
+        `data.models` still carrying the second model's full report.
+
+        That is the right trade for a false negative in the enumeration (one
+        report dropped, loudly, with the offending pair named) against the
+        alternative (a word the documented vocabulary does not contain,
+        shipped in a `data.models[].backends[]` block a consumer is told it
+        may match exhaustively). If the
+        enumeration is ever wrong in the OTHER direction -- too narrow for a
+        pair production really produces -- it costs a report, so widen it
+        here and document the row rather than deleting the check.
 
         Deliberately validates the pair, NOT each field alone -- the whole
         point is that `"fits"` is legitimate and `"full-eligible"` is not at
