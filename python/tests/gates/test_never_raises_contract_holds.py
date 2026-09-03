@@ -29,8 +29,10 @@ instead of returning.
 WHAT THIS DOES NOT ASSERT, deliberately. Nothing about a function not named
 in `_SEEDED_CONTRACTS`. The tree has far more candidates than this seeds --
 see THE SHAPE SWEEP below for the measured count -- and this file protects
-only the seeded twelve until someone adds the next one, the same "opt-in,
-not a blanket walk" reasoning `_SHARED_HELPERS`'s own docstring gives: a
+only the seeded NINETEEN (twelve at tan-cli#1116, then three, then #1132's
+two, then #1133's two; re-count the dict rather than trusting this
+sentence) until someone adds the next one, the same "opt-in, not a blanket
+walk" reasoning `_SHARED_HELPERS`'s own docstring gives: a
 blanket version of this check is red on the day it lands (again, see THE
 SHAPE SWEEP), and a gate that is red on landing gets disabled, which
 protects nothing.
@@ -192,7 +194,9 @@ files** found in `PINNED_HASHES`-protected planner files -- `kconfig.py`
 `kconfig_symbols.py` (`_load_board_symbols`) -- named individually above and
 in `_SEEDED_CONTRACTS`' neighbouring comments, all deliberately deferred
 rather than fixed, all reported rather than silently skipped. **15** seeded
-into `_SEEDED_CONTRACTS` below -- the
+into `_SEEDED_CONTRACTS` below AT THAT ROUND (nineteen today; every count
+in this paragraph is tan-cli#1116's own measurement, kept as the record of
+what that sweep found rather than silently re-stated) -- the
 twelve from review round 1 plus `som_buildability.hw_rev_not_buildable`,
 `new_som_cmd._known_board_names` and `new_som_cmd._family_hw_revisions`.
 `template.py::_docs_ref`/`render_to_envelope` are fixed but NOT seeded here
@@ -206,6 +210,25 @@ test_render_to_envelope_malformed_example_board.py` already is), mutation-
 proved the same way as this file's own seeds (byte-copy restore,
 `__pycache__` cleared before and after, each reds specifically on its own
 narrowed `except`).
+
+**THAT DECISION WAS REVERSED at tan-cli#1133, and what reversed it is what
+it cost.** Two MORE sites in that same `template.py` -- `_load_som_doc` and
+`_board_route_entries`, one call away from the read #1116 fixed and reached
+in the SAME `emit_scaffold` invocation -- were left unseeded on the same
+reasoning, then went unfound by `scripts/audit_narrow_except_contracts.py`
+(they had no `try` at all, so the too-narrow-a-`try` sweep was structurally
+blind to them), and shipped: a non-UTF-8 byte, a malformed YAML document
+and a `chmod 000` file each escaped `emit_scaffold` raw, past a caller that
+catches `TemplateError` and nothing else, on 3.12.3, 3.13.15 and 3.14.7
+alike. A committed test next door is not the same protection as a seed
+here, because only the seed list is walked for completeness. Both are
+seeded now, at the bottom of this file, and the `bind_sdk_root` cost is
+paid in the narrowest available way: NO autouse fixture (importing
+`_bound_sdk` would bind for all nineteen seeds and error outright when
+`SDK is None`), a per-class `skipif`, and the bind inside each call. The
+older two (`_docs_ref`, `render_to_envelope`) stay where they are -- both
+already have committed tests, and #1133 does not re-open a decision it did
+not need to.
 
 The gap between 65 and 15 is real and recorded here rather than implied
 clean: 19 are already-correct functions this file has not been asked to
@@ -323,6 +346,12 @@ from tan.core import document_guards, error_catalog, example_catalog, example_fa
 from tan.core import metadata_schema, scaffold, sdk_discovery, shapes, som_buildability
 from tan.model import analyze, perf, perf_apply
 from tan.model.adapters import drpai
+# `SDK` ONLY -- deliberately NOT the `_bound_sdk` fixture next to it, which
+# is autouse and would bind for every seed in this file. See the tan-cli#1133
+# section at the bottom, which is the only part of this module that uses it.
+# The name is captured at that module's import time, before `tests/conftest.
+# py`'s autouse `_scrub_sdk_discovery_env` deletes `ALP_SDK_ROOT`.
+from tests.planner._bound_sdk_fixture import SDK
 
 #: Opt-in seed list -- `{"module.qualname": "why this function's contract
 #: matters"}`. See the module docstring for what is and is not asserted.
@@ -423,6 +452,22 @@ _SEEDED_CONTRACTS: dict[str, str] = {
         "3.12.3/3.13.15 for the same shape past an is_dir() pre-flight and "
         "a completely unguarded sorted(table_dir.glob(...)); os.listdir + "
         "one live handler now"
+    ),
+    "template._load_som_doc": (
+        "tan-cli#1133's first live site, and the first PLANNER seed here "
+        "(see the module docstring's own reversal): an is_file() pre-flight "
+        "then a wholly UNGUARDED read+parse -- no `try` at any point, which "
+        "is why the too-narrow-a-`try` sweep could not see it -- so a "
+        "non-UTF-8 byte, a malformed YAML document and a chmod-000 file "
+        "each escaped raw past its own curated-raise TemplateError contract "
+        "and out through `cli._emit_scaffold`'s `except TemplateError` and "
+        "nothing else; measured on 3.12.3, 3.13.15 and 3.14.7 alike"
+    ),
+    "template._board_route_entries": (
+        "tan-cli#1133's second live site, one document over and the same "
+        "shape line for line: same is_file() pre-flight, same bare "
+        "read+parse, same three raw exceptions measured escaping the same "
+        "curated contract on the same three interpreters"
     ),
 }
 
@@ -1771,6 +1816,181 @@ class TestResolveTable:
         assert resolved is not None
         assert resolved[0].name == "U55@VELA-4.1.0.JSON"
 
+
+# ---------------------------------------------------------------------------
+# tan-cli#1133: the two `tan/planner/template.py` reads -- curated-raise,
+# `TemplateError` and nothing else, on every failure shape either can meet.
+#
+# THE REVERSAL, stated where it happened. An earlier version of this file's
+# docstring said `template.py`'s fixed sites were "fixed but NOT seeded here
+# (deliberately, not an oversight)", because seeding one needs
+# `bind_sdk_root` -- global mutable state no other seed touches. tan-cli#1133
+# is what that decision cost: two MORE sites in the same file, one call away
+# from the read #1116 fixed and reached in the same invocation, went
+# unseeded, then unfound by the sweep (no `try` to call too narrow), and
+# shipped. The seed list is the only thing in this repo that would have held
+# them, so they are in it now.
+#
+# The price is paid in the narrowest way available. There is NO autouse
+# fixture here: importing `tests.planner._bound_sdk_fixture._bound_sdk` would
+# register it as autouse for this WHOLE module, binding for the other
+# seventeen seeds that neither need nor want it (and erroring outright when
+# `SDK is None`, which for this un-gated module is the common case). Instead
+# these two groups skip as a unit when no real checkout is bound, and each
+# binds inside its own call -- the same "import inside the call so the module
+# is not imported before `bind_sdk_root` has run" step every module under
+# `tests/planner/` already takes.
+# ---------------------------------------------------------------------------
+
+_needs_sdk = pytest.mark.skipif(
+    SDK is None,
+    reason="ALP_SDK_ROOT is not set (or does not point at a real alp-sdk "
+           "checkout) -- importing tan.planner.template requires SOME bound "
+           "root (tan/planner_root.py). A SKIP about the missing root, not a "
+           "pass. CI binds it on the sdk-parity legs.",
+)
+
+
+def _planner_template():
+    """`tan.planner.template`, bound and imported INSIDE the call.
+
+    `tan/planner/paths.py` evaluates `REPO = sdk_root()` at module scope, so
+    an import at this file's top level would freeze (or refuse) the planner's
+    root at collection time for the whole session. Every consumer under
+    `tests/planner/` defers the import the same way.
+    """
+    from tan.planner_root import bind_sdk_root
+    bind_sdk_root(SDK)
+    import tan.planner.template as m
+    return m
+
+
+class _PlannerDocumentCases:
+    """The shapes both `template.py` reads meet, driven identically.
+
+    Both functions take `(name, metadata_root)` and read exactly one file
+    under it, so one set of cases covers both -- subclasses supply only
+    `_path` (where the document lives) and `_call` (how it is reached).
+    Written as a shared base rather than a parametrised pair so each seeded
+    name keeps its own `@_covers` class, which is what
+    `test_every_seed_has_a_test` counts.
+    """
+
+    #: The `_GOOD` document is not asserted on here -- these cases are about
+    #: failure -- but each subclass writes it for the shapes that need a
+    #: file to exist before being made unreadable.
+    _GOOD = "{}\n"
+
+    def _path(self, metadata_root: Path) -> Path:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def _call(self, metadata_root: Path):  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def _raises(self, metadata_root: Path) -> str:
+        m = _planner_template()
+        with pytest.raises(m.TemplateError) as excinfo:
+            self._call(metadata_root)
+        return str(excinfo.value)
+
+    def _prepared(self, tmp_path: Path) -> Path:
+        metadata_root = tmp_path / "metadata"
+        path = self._path(metadata_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self._GOOD, encoding="utf-8")
+        return metadata_root
+
+    def test_absent(self, tmp_path):
+        # The one shape the deleted `is_file()` pre-flight DID answer. Its
+        # message is preserved byte for byte -- `require_readable_text`'s
+        # `absent=` argument exists for exactly that, and this asserts the
+        # preservation rather than trusting it.
+        msg = self._raises(tmp_path / "metadata")
+        assert msg.startswith("no metadata/")
+
+    def test_non_utf8(self, tmp_path):
+        metadata_root = self._prepared(tmp_path)
+        _non_utf8(self._path(metadata_root))
+        assert "cannot read" in self._raises(metadata_root)
+
+    def test_malformed_document(self, tmp_path):
+        # Two different failures wear this name for a YAML document, and
+        # both used to escape raw. Syntactically invalid (`yaml.
+        # ParserError`, neither an OSError nor a ValueError, so nothing in
+        # this module's ladder had ever caught it) ...
+        metadata_root = self._prepared(tmp_path)
+        _malformed(self._path(metadata_root), "a: [1, 2\nb: }{\n")
+        assert "not valid YAML" in self._raises(metadata_root)
+
+    def test_malformed_shape(self, tmp_path):
+        # ... and legal YAML that is not a mapping, the tan-cli#1025 half
+        # this file's reads have guarded since long before #1133.
+        metadata_root = self._prepared(tmp_path)
+        _malformed(self._path(metadata_root), "- one\n- two\n")
+        assert "expected a YAML mapping" in self._raises(metadata_root)
+
+    def test_directory_where_file_expected(self, tmp_path):
+        metadata_root = tmp_path / "metadata"
+        _as_directory(self._path(metadata_root))
+        assert "cannot read" in self._raises(metadata_root)
+
+    def test_parent_is_a_file(self, tmp_path):
+        metadata_root = tmp_path / "metadata"
+        _parent_is_a_file(self._path(metadata_root))
+        assert "cannot read" in self._raises(metadata_root)
+
+    def test_symlink_loop(self, tmp_path):
+        metadata_root = tmp_path / "metadata"
+        _symlink_loop(self._path(metadata_root))
+        assert "cannot read" in self._raises(metadata_root)
+
+    @_skip_as_root
+    def test_permission_denied_file(self, tmp_path):
+        metadata_root = self._prepared(tmp_path)
+        with _permission_denied_file(self._path(metadata_root)):
+            assert "cannot read" in self._raises(metadata_root)
+
+    @_skip_as_root
+    def test_permission_denied_parent(self, tmp_path):
+        # THE tan-cli#1127 CELL, and the reason the pre-flight had to go
+        # rather than be widened: `Path.is_file()` raises `PermissionError`
+        # here on 3.12.3 and 3.13.15, and returns `False` on 3.14.7 -- so
+        # before this fix the SAME unreadable file produced a raw traceback
+        # on two interpreters and, on the third, the curated but FALSE
+        # `no metadata/...` message. Both halves measured. Asserting
+        # `cannot read` (not merely "raises TemplateError") is what pins the
+        # 3.14.7 half: a curated-but-untrue "no such file" would satisfy the
+        # weaker assertion.
+        metadata_root = self._prepared(tmp_path)
+        with _permission_denied(self._path(metadata_root).parent):
+            assert "cannot read" in self._raises(metadata_root)
+
+
+@_needs_sdk
+@_covers("template._load_som_doc")
+class TestLoadSomDoc(_PlannerDocumentCases):
+    _SKU = "E1M-FAKE1133"
+    _GOOD = "default_board: TARGET-BOARD\n"
+
+    def _path(self, metadata_root: Path) -> Path:
+        return metadata_root / "e1m_modules" / f"{self._SKU}.yaml"
+
+    def _call(self, metadata_root: Path):
+        return _planner_template()._load_som_doc(self._SKU, metadata_root)
+
+
+@_needs_sdk
+@_covers("template._board_route_entries")
+class TestBoardRouteEntries(_PlannerDocumentCases):
+    _BOARD = "fake1133-board"
+    _GOOD = "e1m_routes:\n  gpio: []\n"
+
+    def _path(self, metadata_root: Path) -> Path:
+        return metadata_root / "boards" / f"{self._BOARD}.yaml"
+
+    def _call(self, metadata_root: Path):
+        return _planner_template()._board_route_entries(
+            self._BOARD, metadata_root)
 
 
 def test_every_seed_has_a_test():

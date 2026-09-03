@@ -152,7 +152,7 @@ def load_catalog(catalog_path: Path | None = None) -> dict[str, Any]:
     The ABSENT-document half is curated here too (tan-cli#1077 review). The
     first cut deferred it as "equally true of all four documents this
     module reads"; measured, it was not -- `_load_som_doc` and
-    `_board_route_entries` carry an `is_file()` check and `_docs_ref` an
+    `_board_route_entries` carried an `is_file()` check and `_docs_ref` an
     `except OSError`, so three of the module's five reads were ALREADY
     handled and only this one and `render_to_envelope`'s example
     `board.yaml` were bare. A false symmetry claim in a docstring is the
@@ -160,6 +160,16 @@ def load_catalog(catalog_path: Path | None = None) -> dict[str, Any]:
     the claim is gone. `except OSError`, not a pre-flight `is_file()`: a
     present-but-unreadable path (a directory, a permissions error) is named
     too, not only a missing one.
+
+    tan-cli#1133 finished that: "handled" turned out to be doing a lot of
+    work for the two `is_file()` sites. A pre-flight answers ABSENCE and
+    nothing else -- it left the read and the parse behind it completely
+    bare, so a non-UTF-8 byte, a malformed document or a `chmod 000` file
+    escaped raw past this module's curated contract at both of them, and
+    the pre-flight was itself the tan-cli#1127 interpreter trap. Both now
+    go through `_read_yaml_mapping` with no pre-flight at all, so all five
+    of this module's reads are curated on every failure rather than three
+    of five on one.
 
     tan-cli#1084: the read itself is `DocumentGuards.read_catalog_document`
     now -- the SAME body, moved to `tan/core/document_guards.py` so
@@ -550,6 +560,81 @@ _require_readable_text = _GUARDS.require_readable_text
 _catalog_templates = _GUARDS.catalog_templates
 
 
+def _parse_yaml_mapping(text: str, *, path: Any, what: str) -> dict[str, Any]:
+    """@text parsed as YAML and known to be a mapping, or a curated
+    `TemplateError` -- the YAML twin of `DocumentGuards.
+    read_catalog_document`'s `json.JSONDecodeError` arm (tan-cli#1133).
+
+    `yaml.safe_load` is NOT covered by `require_readable_text`: a file that
+    decodes as UTF-8 perfectly well can still be syntactically invalid YAML,
+    and `yaml.YAMLError` is neither an `OSError` nor a `ValueError`, so
+    nothing in this module's `except` ladder had ever caught it. All THREE
+    of this file's outer-document YAML reads parsed bare -- measured through
+    the real `emit_scaffold` on 3.12.3, 3.13.15 and 3.14.7, a malformed
+    `metadata/e1m_modules/<sku>.yaml`, `metadata/boards/<board>.yaml` or
+    template-example `board.yaml` each raised a raw `yaml.parser.ParserError`
+    past `tan/planner/cli._emit_scaffold`'s `except TemplateError` and
+    nothing else, i.e. as a traceback.
+
+    The message shape is `read_catalog_document`'s verbatim with the format
+    name swapped -- `malformed {what} at {path}: not valid YAML ({problem},
+    line L column C)` -- because the two answer the same question about two
+    serialisations of the same kind of document. `problem`/`problem_mark`
+    are `MarkedYAMLError`'s (a scanner/parser error); a plain `YAMLError`
+    with neither degrades to its own one-line text rather than printing a
+    multi-line dump into a single curated message.
+
+    NOT in `tan/core/document_guards.py`, on that module's own stated
+    membership bar: `tan/core/example_catalog.py`, the register's second
+    consumer, reads JSON only, so a YAML parse guard has exactly ONE consumer
+    module -- this one, where it has three call sites. That is the same test
+    `_require_constraints` is kept local by, and the register is deliberately
+    standard-library-only besides (adding `import yaml` to it would put
+    PyYAML in the import closure of `tan init`'s SDK-free path for a shape
+    that path never runs).
+    """
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        problem = getattr(exc, "problem", None) or str(exc).replace("\n", " ")
+        mark = getattr(exc, "problem_mark", None)
+        where = ("" if mark is None else
+                 f", line {mark.line + 1} column {mark.column + 1}")
+        raise TemplateError(
+            f"malformed {what} at {path}: not valid YAML "
+            f"({problem}{where})") from exc
+    return _require_mapping_doc(doc or {}, path=path, what=what)
+
+
+def _read_yaml_mapping(path: Path, *, what: str, absent: str) -> dict[str, Any]:
+    """`metadata/**` YAML at @path, read AND parsed AND known to be a
+    mapping, with a curated `TemplateError` for every failure of all three
+    (tan-cli#1133).
+
+    The two `metadata/**` documents this module reads used to spell this as
+    a pre-flight `if not path.is_file(): raise` followed by a completely
+    bare `yaml.safe_load(path.read_text(encoding="utf-8"))` -- no `try` at
+    any point, which is why `scripts/audit_narrow_except_contracts.py`'s
+    too-narrow-a-`try` sweep could not see them (there was no `try` to call
+    too narrow) and two live sites survived that sweep, a gate and three
+    reviews.
+
+    The pre-flight is gone rather than merely supplemented, per PR #1110 and
+    PR #1121: `Path.is_file()` is itself the tan-cli#1127 trap -- against a
+    `chmod 000` PARENT directory it raises `PermissionError` on 3.12.3 and
+    3.13.15 and returns `False` on 3.14.7, so the same unreadable file was a
+    raw traceback on two interpreters and, on the third, the curated but
+    FALSE `no metadata/...` message (all four cells measured on this tree
+    before this fix). Classifying on the real exception instead gives one
+    answer on all three: `FileNotFoundError` -> @absent, every other read
+    failure -> `cannot read {what} at {path}: {strerror}`, a malformed
+    document -> `malformed {what} at {path}`.
+    """
+    return _parse_yaml_mapping(
+        _require_readable_text(path, what=what, absent=absent),
+        path=path, what=what)
+
+
 def _record_parameters(record: Any, *, doc: Any, field: str) -> list[Any]:
     """The record's `parameters:` list, every spec shape-checked once.
 
@@ -637,9 +722,6 @@ def _load_som_doc(sku: str, metadata_root: Path) -> dict[str, Any]:
     (also `topology:`), so all three read the exact same doc for the
     same `(sku, metadata_root)`."""
     som_path = metadata_root / "e1m_modules" / f"{sku}.yaml"
-    if not som_path.is_file():
-        raise TemplateError(
-            f"no metadata/e1m_modules/{sku}.yaml for sku {sku!r}")
     # Mirrors `resolve_targets`'s `preset` guard (tan-cli#1010,
     # `tan/model/targets.py:312-323`): a SoM YAML that parses but is not
     # a mapping (e.g. a bare list or a bare scalar) must not reach a
@@ -649,9 +731,15 @@ def _load_som_doc(sku: str, metadata_root: Path) -> dict[str, Any]:
     # in the call stack (tan-cli#1025). Shared with the module's two
     # other outer-document reads since tan-cli#1052; the message is
     # unchanged.
-    return _require_mapping_doc(
-        yaml.safe_load(som_path.read_text(encoding="utf-8")) or {},
-        path=som_path, what="SoM preset")
+    #
+    # tan-cli#1133: the READ and the PARSE are guarded too, and the
+    # `is_file()` pre-flight this used to open with is gone -- see
+    # `_read_yaml_mapping`. The missing-file message is byte-identical to
+    # the one that pre-flight raised (pinned by `tests/planner/
+    # test_render_to_envelope_malformed_example_board.py`).
+    return _read_yaml_mapping(
+        som_path, what="SoM preset",
+        absent=f"no metadata/e1m_modules/{sku}.yaml for sku {sku!r}")
 
 
 def _default_preset_for_sku(sku: str, metadata_root: Path) -> str:
@@ -819,12 +907,11 @@ def _board_route_entries(board_name: str, metadata_root: Path) -> list[dict[str,
     level down that guarding only `e1m_routes:` itself would leave
     open."""
     board_path = metadata_root / "boards" / f"{board_name}.yaml"
-    if not board_path.is_file():
-        raise TemplateError(
-            f"no metadata/boards/{board_name}.yaml for board {board_name!r}")
-    doc = _require_mapping_doc(
-        yaml.safe_load(board_path.read_text(encoding="utf-8")) or {},
-        path=board_path, what="board metadata")
+    # tan-cli#1133, same change as `_load_som_doc`'s: no `is_file()`
+    # pre-flight, and the read and the parse are curated rather than bare.
+    doc = _read_yaml_mapping(
+        board_path, what="board metadata",
+        absent=f"no metadata/boards/{board_name}.yaml for board {board_name!r}")
     routes = _require_field(doc.get("e1m_routes") or {}, dict,
                             doc=board_path, field="e1m_routes")
     for section in _ROUTE_SECTIONS:
@@ -1970,9 +2057,16 @@ def render_to_envelope(
     # That degrades to empty rather than to garbage, but it is exactly
     # the unpinned residual sibling this PR exists to stop leaving
     # behind, so the falsy scalars are refused too.
-    example_doc = _require_mapping_doc(
-        yaml.safe_load(board_yaml_text) or {},
-        path=board_yaml_path, what="template example board.yaml")
+    #
+    # tan-cli#1133: the PARSE is guarded too. tan-cli#1116 fixed the READ
+    # here and left `yaml.safe_load` bare one line down, so a template
+    # example `board.yaml` that decoded fine but did not parse still raised
+    # a raw `yaml.parser.ParserError` through `emit_scaffold` -- measured on
+    # 3.12.3, 3.13.15 and 3.14.7 alike. Same `_parse_yaml_mapping` the two
+    # `metadata/**` documents above now use.
+    example_doc = _parse_yaml_mapping(
+        board_yaml_text, path=board_yaml_path,
+        what="template example board.yaml")
     raw_cores = example_doc.get("cores")
     original_core_ids = list(_require_field(
         {} if raw_cores is None else raw_cores, dict,

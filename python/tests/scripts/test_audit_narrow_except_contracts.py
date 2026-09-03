@@ -353,3 +353,146 @@ def test_the_real_tree_clears_the_floor_and_reports_no_lazy_escape():
     candidates = audit.find_candidates(include_planner=False)
     assert len(candidates) >= 40
     assert [c for c in candidates if "lazy-escape" in c.shapes] == []
+
+
+# ---------------------------------------------------------------------------
+# SHAPE 3, "there is no `try` at all" (tan-cli#1133). Same standard as SHAPE
+# 2 above: the positive half, the negative half, and every limit the module
+# docstring claims, asserted rather than asserted-about.
+# ---------------------------------------------------------------------------
+
+
+#: The pre-fix `tan/planner/template.py::_load_som_doc`, transcribed. This is
+#: the shape the first two detectors are structurally blind to and the reason
+#: shape 3 exists, so it is pinned as the real thing rather than a paraphrase.
+_PRE_FIX_LOAD_SOM_DOC = (
+    "def _load_som_doc(sku, metadata_root):\n"
+    "    som_path = metadata_root / 'e1m_modules' / f'{sku}.yaml'\n"
+    "    if not som_path.is_file():\n"
+    "        raise TemplateError(f'no metadata/e1m_modules/{sku}.yaml')\n"
+    "    return _require_mapping_doc(\n"
+    "        yaml.safe_load(som_path.read_text(encoding='utf-8')) or {},\n"
+    "        path=som_path, what='SoM preset')\n"
+)
+
+
+def test_the_tan_cli_1133_shape_is_reported(tmp_path, monkeypatch):
+    monkeypatch.setattr(audit, "TAN_ROOT",
+                        _tan_tree(tmp_path, mod=_PRE_FIX_LOAD_SOM_DOC))
+    [found] = audit.find_candidates(include_planner=False)
+    assert found.qualname == "_load_som_doc"
+    assert found.shapes == frozenset({"absent-try"})
+    # BOTH bare calls, not just the outer one: the read and the parse each
+    # raise a different class (`UnicodeDecodeError`/`OSError` and
+    # `yaml.YAMLError`), and reporting only one would understate the site.
+    assert found.absent_detail == (
+        "yaml.safe_load(...) at line 6 [raises TemplateError]",
+        "som_path.read_text(...) at line 6 [raises TemplateError]",
+    )
+
+
+def test_a_quiet_return_docstring_is_contract_evidence_too(tmp_path, monkeypatch):
+    # The other half of `declared_contract`: no curated raise anywhere, but
+    # the docstring promises an outcome a raw OSError would breach.
+    monkeypatch.setattr(audit, "TAN_ROOT", _tan_tree(tmp_path, mod=(
+        "def f(path):\n"
+        "    '''Never raises: None when the file cannot be read.'''\n"
+        "    return path.read_text()\n"
+    )))
+    [found] = audit.find_candidates(include_planner=False)
+    assert found.shapes == frozenset({"absent-try"})
+    assert found.absent_detail == (
+        "path.read_text(...) at line 3 [docstring says 'never raises']",)
+
+
+def test_a_bare_read_with_no_declared_contract_is_not_reported(tmp_path, monkeypatch):
+    # The selectivity that keeps shape 3 from reporting every read in the
+    # tree. This function promises nothing, so a raw OSError out of it
+    # breaches nothing it declared.
+    monkeypatch.setattr(audit, "TAN_ROOT", _tan_tree(tmp_path, mod=(
+        "def f(path):\n"
+        "    return path.read_text()\n"
+    )))
+    assert audit.find_candidates(include_planner=False) == []
+
+
+def test_a_builtin_raise_is_not_contract_evidence(tmp_path, monkeypatch):
+    # `raise ValueError(...)` is not a curated contract -- it promises
+    # nothing a raw OSError would breach -- so it must not pull every
+    # argument-validating function in the tree into the report.
+    monkeypatch.setattr(audit, "TAN_ROOT", _tan_tree(tmp_path, mod=(
+        "def f(path):\n"
+        "    if path is None:\n"
+        "        raise ValueError('path')\n"
+        "    return path.read_text()\n"
+    )))
+    assert audit.find_candidates(include_planner=False) == []
+
+
+def test_a_guarded_read_is_not_an_absent_try_however_narrow(tmp_path, monkeypatch):
+    # Judging the handler's BREADTH is SHAPE 1's job. A read inside a
+    # handled `try` is shape 1's to report or excuse, never shape 3's --
+    # otherwise every shape 1 finding would be double-counted as a shape 3
+    # one and the third tally line would mean nothing.
+    monkeypatch.setattr(audit, "TAN_ROOT", _tan_tree(tmp_path, mod=(
+        "def f(path):\n"
+        "    try:\n"
+        "        return path.read_text()\n"
+        "    except OSError:\n"
+        "        raise TemplateError('nope')\n"
+    )))
+    [found] = audit.find_candidates(include_planner=False)
+    assert found.shapes == frozenset({"narrow-except"})
+    assert found.absent_detail == ()
+
+
+def test_a_try_finally_is_not_cover_for_shape_3(tmp_path, monkeypatch):
+    # A `try`/`finally` re-raises exactly what shape 3 hunts, so it must not
+    # count as cover -- the mirror of `test_a_try_finally_carries_no_lazy_
+    # escape` above, where the same construct correctly suppresses SHAPE 2.
+    monkeypatch.setattr(audit, "TAN_ROOT", _tan_tree(tmp_path, mod=(
+        "def f(path):\n"
+        "    '''Never raises.'''\n"
+        "    try:\n"
+        "        return path.read_text()\n"
+        "    finally:\n"
+        "        pass\n"
+    )))
+    [found] = audit.find_candidates(include_planner=False)
+    assert "absent-try" in found.shapes
+
+
+def test_the_caller_side_contract_is_a_known_false_negative(tmp_path, monkeypatch):
+    """The recorded limit, pinned as a measurement rather than approved.
+
+    The issue's own definition has two halves -- "a function whose declared
+    contract, OR whose caller's only handler, cannot absorb what the read
+    raises". This detector implements the first half only: it reads the
+    contract off the function, and builds no call graph. `g` below is a real
+    instance of the second half (its only caller curates a narrow class
+    around it), and shape 3 does not report it. Asserting that is what stops
+    the docstring's claim rotting into a lie if the walk ever changes.
+    """
+    monkeypatch.setattr(audit, "TAN_ROOT", _tan_tree(tmp_path, mod=(
+        "def g(path):\n"
+        "    return path.read_text()\n"
+        "\n"
+        "def caller(path):\n"
+        "    try:\n"
+        "        return g(path)\n"
+        "    except TemplateError:\n"
+        "        return None\n"
+    )))
+    assert [c.qualname for c in audit.find_candidates(include_planner=False)] == []
+
+
+def test_the_third_tally_line_is_printed_on_every_run(tmp_path, monkeypatch, capsys):
+    """Three tally lines, never summed. A reader who sees only two would
+    have no way to notice shape 3 stopped reporting."""
+    monkeypatch.setattr(audit, "TAN_ROOT", _TAN)
+    monkeypatch.setattr(sys, "argv", ["audit_narrow_except_contracts.py"])
+    assert audit.main() == 0
+    out = capsys.readouterr().out
+    assert re.search(r"^tally: \d+ OK", out, re.M)
+    assert re.search(r"^lazy-escape \(static, shape 2\): \d+ of \d+", out, re.M)
+    assert re.search(r"^absent-try \(static, shape 3\): \d+ of \d+", out, re.M)
