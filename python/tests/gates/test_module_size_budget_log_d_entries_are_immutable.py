@@ -157,6 +157,22 @@ def _introducing_commit(cwd: Path, path: str) -> tuple[str, str] | None:
     first; the loop still checks tree membership rather than trusting the
     first line, so a history whose oldest listed commit is a delete (an
     add/drop/re-add cycle) resolves to the right commit instead of raising.
+
+    Being listed is only half of what `--full-history` buys here, and the
+    other half is the load-bearing one (tan-cli#1144). DEFAULT simplification
+    also follows only ONE parent of a merge that is TREESAME to it -- so as
+    soon as any later merge drops the path against a branch that forked
+    BEFORE the entry existed, that merge is TREESAME to the pre-entry parent,
+    only that parent is followed, and the entire side the introducing merge
+    lives on is pruned out of the walk. The introduction then resolves to
+    whatever ordinary commit re-added the path, whose blob is HEAD's own, and
+    `entry_violations`' check 4 reads clean on a rewritten entry.
+    `--full-history` follows every parent regardless, which keeps the
+    introduction reachable. Deleting it here left the whole gates suite green
+    until
+    `test_a_merge_introduced_entry_is_caught_even_when_default_simplification_would_prune_the_introducing_merge`
+    was added to pin it -- that test is this argument's only guard, so do not
+    weaken it.
     """
     result = _git_ok(
         "rev-list", "--full-history", "--reverse", "HEAD", "--", path, cwd=cwd
@@ -1424,6 +1440,147 @@ def test_a_merge_introduced_entry_dropped_by_a_merge_and_re_added_with_different
     assert "LOG.d/2026-08-27-22222222.md" in violations, (
         "an entry a merge introduced, a merge dropped and an ordinary commit "
         f"re-added with DIFFERENT content must be flagged, but got: {violations}"
+    )
+
+
+def _merge_introduced_then_dropped_against_a_pre_entry_branch(repo: Path) -> Path:
+    """`_merge_introduced_then_merge_dropped`'s sibling, differing in exactly
+    one structural detail: the branch the DROPPING merge merges forked BEFORE
+    the entry ever existed, so that parent's tree and the dropping merge's
+    own tree agree about the path (neither has it) and the merge is TREESAME
+    to it for that path.
+
+    That TREESAME-ness is the whole point. DEFAULT git history simplification
+    follows only one parent of a merge it is TREESAME to, which prunes the
+    entire side the INTRODUCING merge lives on out of a path-limited walk --
+    the half of `--full-history` that `_introducing_commit`'s docstring calls
+    load-bearing. The sibling helper's dropping merge is TREESAME to NEITHER
+    parent (both sides carry the entry), so default simplification already
+    follows both parents there and no test built on it can see this
+    difference. Returns the entry directory.
+    """
+    entry_dir = _entry_introduced_by_a_merge_commit(repo)
+
+    # `main` is a parent of the introducing merge and has never held the
+    # entry -- branching from it is what makes this side "pre-entry". A new
+    # commit on top keeps the merge below a real two-parent one rather than a
+    # fast-forward.
+    _git(repo, "checkout", "-q", "-b", "preentry", "main")
+    _write(repo, "preentry.txt", ["unrelated, on a branch that forked before the entry existed"])
+    _commit(repo, "a commit on a branch that predates the entry")
+
+    _git(repo, "checkout", "-q", "feature")
+    merge = _git(repo, "merge", "--no-edit", "preentry", check=False)
+    assert merge.returncode == 0, f"the dropping merge must succeed clean -- stderr: {merge.stderr}"
+
+    (entry_dir / "2026-08-27-22222222.md").unlink()
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--amend", "--no-edit")
+
+    assert len(_git(repo, "rev-parse", "HEAD^@").stdout.splitlines()) == 2, (
+        "the dropping merge must be a real two-parent merge commit"
+    )
+    # The structural difference from the sibling helper, asserted rather than
+    # described: the merge and its SECOND parent (the pre-entry branch) both
+    # lack the entry, i.e. the merge is TREESAME to that parent for the path.
+    assert _blob_oid(repo, "HEAD", "LOG.d/2026-08-27-22222222.md") is None, (
+        "the dropping merge must remove the entry from HEAD's tree"
+    )
+    assert _blob_oid(repo, "HEAD^2", "LOG.d/2026-08-27-22222222.md") is None, (
+        "the dropping merge's second parent must be a branch that never held "
+        "the entry -- without that the merge is TREESAME to no parent, "
+        "default simplification follows both, and nothing is pruned"
+    )
+    assert _walk_records_for(repo, "LOG.d/2026-08-27-22222222.md") == [], (
+        "neither the introducing merge nor the dropping merge may emit a "
+        "--name-status record, or this is not the shape being composed"
+    )
+    # Same documented exclusion the sibling helper pins, pinned again here
+    # because this variant reaches it by a different route: at THIS point the
+    # entry has no record and is not in HEAD's tree, so it is in neither of
+    # `entry_violations`' two inputs (module docstring, "What is deliberately
+    # excluded" item 2).
+    assert entry_violations(repo, "LOG.d") == {}, (
+        "merge-introduced + merge-dropped + never re-added is a DOCUMENTED "
+        "exclusion; if it is now caught, the docstring and this assertion "
+        "must move with it"
+    )
+    return entry_dir
+
+
+def test_a_merge_introduced_entry_is_caught_even_when_default_simplification_would_prune_the_introducing_merge(tmp_path):
+    """tan-cli#1144: the guard `_introducing_commit`'s `--full-history` never
+    had. Same composed shape as
+    `test_a_merge_introduced_entry_dropped_by_a_merge_and_re_added_with_different_content_is_caught`
+    -- a merge INTRODUCES the entry, a merge DROPS it, an ordinary commit
+    RE-ADDS it with different content -- but with the dropping merge TREESAME
+    to its pre-entry parent, so DEFAULT history simplification prunes the
+    introducing merge's whole side out of the path-limited walk instead of
+    following both parents. The sibling test passes with `--full-history`
+    deleted from the `rev-list` call; this one cannot, because without it the
+    walk resolves the "introduction" to the re-add itself, whose blob IS
+    HEAD's, and the rewritten entry reads clean.
+
+    Deleting `--full-history` from the `git rev-list` call in
+    `_introducing_commit` was measured green across the entire gates suite
+    (`1078 passed, 34 skipped`) before this test existed. It is the only
+    thing standing between that call and a silent reopening of PR #1070's
+    blind spot on an append-only ledger.
+    """
+    repo = tmp_path / "repo"
+    entry_dir = _merge_introduced_then_dropped_against_a_pre_entry_branch(repo)
+    path = "LOG.d/2026-08-27-22222222.md"
+
+    _write(entry_dir, "2026-08-27-22222222.md", ["- 2026-08-27 -- RE-ADDED by an ordinary commit, different content"])
+    _commit(repo, "an ordinary commit re-adds the entry the merge dropped")
+    re_add = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    # Checks 1-3 are clean here BY CONSTRUCTION, so nothing but check 4's
+    # introduction anchor can catch this: the re-add is the path's only
+    # name-status record (check 1), the path is back in HEAD's tree
+    # (check 2), and the record check 3 anchors on is that same re-add, whose
+    # blob is therefore HEAD's own.
+    assert _walk_records_for(repo, path) == [f"A\t{path}"], (
+        "the re-add must be the path's ONLY --name-status record, or checks "
+        "1-3 could be doing the catching and this test would not isolate the "
+        "introduction walk"
+    )
+    tree = _git(repo, "ls-tree", "-r", "--name-only", "HEAD", "--", "LOG.d").stdout.splitlines()
+    assert path in tree, "the re-added entry must be back in HEAD's tree"
+    head_oid = _blob_oid(repo, "HEAD", path)
+    assert _blob_oid(repo, re_add, path) == head_oid, (
+        "the add-commit anchor must AGREE with HEAD here, or check 3 is doing "
+        "the catching rather than check 4"
+    )
+
+    # The pruning itself, measured on raw git rather than argued: the same
+    # walk WITHOUT `--full-history` lists nothing but the re-add -- both
+    # merges, and with them the introduction, are simplified away.
+    default_walk = _git(repo, "rev-list", "--reverse", "HEAD", "--", path).stdout.split()
+    assert default_walk == [re_add], (
+        "default history simplification must prune both merges out of this "
+        f"path's walk, or the scenario is not the blind spot: {default_walk}"
+    )
+
+    intro = _introducing_commit(repo, path)
+    assert intro is not None, "a path read out of HEAD's own tree must resolve an introducing commit"
+    assert intro[0] != re_add, (
+        "`_introducing_commit`'s `git rev-list --full-history` walk must "
+        "reach the MERGE that introduced the entry; resolving to the re-add "
+        f"({re_add}) means the walk was simplified down to the surviving "
+        "parent -- i.e. `--full-history` is no longer pinned on that walk "
+        "and PR #1070's merge-introduction blind spot is reopened"
+    )
+    assert intro[1] != head_oid, (
+        "the introducing merge's blob must differ from HEAD's, or this test "
+        "asserts nothing about content"
+    )
+
+    violations = entry_violations(repo, "LOG.d")
+    assert path in violations, (
+        "an entry a merge introduced, a merge dropped against a pre-entry "
+        "branch, and an ordinary commit re-added with DIFFERENT content must "
+        f"be flagged, but got: {violations}"
     )
 
 
