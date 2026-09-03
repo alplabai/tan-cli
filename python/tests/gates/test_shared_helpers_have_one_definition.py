@@ -156,6 +156,16 @@ _SHARED_HELPERS: dict[str, tuple[str, str]] = {
         "tan/core/shapes.py",
         "the short YAML-ish type name for an error message",
     ),
+    "matches_glob_suffix": (
+        "tan/core/shapes.py",
+        "`Path.glob`'s own platform casing rule (case-sensitive on POSIX, "
+        "case-INSENSITIVE on Windows), the one thing every `glob(\"*.<ext>\")` "
+        "-> `os.listdir`/`os.scandir` swap needs to avoid silently narrowing "
+        "the match on Windows; three call sites since tan-cli#1132 "
+        "(`new_som_cmd._is_yaml_board_file`, `build/configure_inputs`, "
+        "`model/analyze._is_table_file`), each of which had re-derived it as "
+        "a private one-liner otherwise",
+    ),
     "resolve_board_path": (
         "tan/core/board_context.py",
         "turns `--project`/`--board-yaml` into the `board.yaml` path "

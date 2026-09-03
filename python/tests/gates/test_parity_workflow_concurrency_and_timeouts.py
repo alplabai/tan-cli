@@ -507,10 +507,13 @@ def test_this_repos_own_workflows_produce_no_timeout_problems() -> None:
 #: actual current counts; a future PR that drops a job updates this dict on
 #: purpose, the same anti-shrink shape `_PARITY_JOBS` gives `parity.yml`.
 _MIN_BOUNDED_JOBS = {
-    # 3 since tan-cli#1054 retired the `shim` job with `npm-shim/` itself.
-    # Still equal to the real count, which is the property that matters here:
-    # a floor below it cannot catch the shrink it exists for.
-    "ci.yml": 3,
+    # 4: `shim` retired with `npm-shim/` (tan-cli#1054), `python-newest`
+    # added (tan-cli#1126) -- net unchanged from the 4 this said before, but
+    # NOT for the same reason, and it was briefly stale in between: dev carried
+    # `4` against a real 5 once #1137 landed, because that PR added a bounded
+    # job and did not bump the floor. Re-measured here rather than assumed
+    # equal. A floor below the real count is not a floor.
+    "ci.yml": 4,
     "clean-host.yml": 2,
     "e2e-container.yml": 2,
     "getting-started.yml": 1,

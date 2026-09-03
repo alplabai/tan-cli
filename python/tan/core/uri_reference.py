@@ -130,15 +130,30 @@ def path_to_uri_reference(path: str) -> str:
     """`path` rendered as a valid URI reference (RFC 3986).
 
     `PurePath.as_uri()` is the exporter for the absolute case, and it is the
-    gate too: `.is_absolute()`, NOT `ntpath.isabs`/`posixpath.isabs`. Those
-    two disagree with `PureWindowsPath.is_absolute()` for a rooted-but-
-    driveless Windows path (`ntpath.isabs(r"\\proj\\x")` is `True` --
-    "absolute on the current drive" -- but `PureWindowsPath(r"\\proj\\x")
-    .is_absolute()` is `False`, since pathlib requires BOTH a drive and a
-    root); gating on the wrong one would call `.as_uri()` on a path it then
-    raises `ValueError` on. Using `.is_absolute()` as both the gate and the
-    thing `.as_uri()` itself checks keeps the two in lockstep by
-    construction.
+    gate too: `.is_absolute()`, NOT `ntpath.isabs`/`posixpath.isabs`. The
+    load-bearing reason is that `.is_absolute()` IS the predicate
+    `.as_uri()` itself enforces, so the gate and the exporter cannot
+    disagree -- on any interpreter, now or later. Gating on a DIFFERENT
+    notion of "absolute" would call `.as_uri()` on a path it then raises
+    `ValueError` on.
+
+    A weaker reason used to stand here, and it has since expired
+    (tan-cli#1126). It said the two oracles simply disagree for a
+    rooted-but-driveless Windows path -- `ntpath.isabs(r"\\proj\\x")` is
+    `True` ("absolute on the current drive") against
+    `PureWindowsPath(r"\\proj\\x").is_absolute()`'s `False` (pathlib
+    requires BOTH a drive and a root) -- stated as a fixed stdlib fact.
+    It is not one. Measured on 3.12.3 / 3.13.15 / 3.14.7: `ntpath.isabs`
+    answers that shape `True` on 3.12 and `False` from **3.13** on, where
+    CPython made it agree with pathlib; `.is_absolute()` is `False` on all
+    three, unchanged. So on every supported interpreter but the `>=3.12`
+    floor itself the two now AGREE -- which changes nothing about this
+    gate, precisely because the choice never rested on them differing.
+    Two tests in `tests/core/test_uri_reference.py` had encoded the 3.12
+    answer as universal and failed the full suite on 3.14.7 for it; the
+    version-dependent fact now lives in one measured constant there
+    (`_NTPATH_ISABS_ACCEPTS_A_DRIVELESS_ROOT`), asserted on both sides of
+    the boundary rather than restated in prose here.
 
     * An ABSOLUTE `path` becomes an absolute `file:` URI --
       `file:///C:/w/proj/board.yaml` for the Windows-spelled root the issue

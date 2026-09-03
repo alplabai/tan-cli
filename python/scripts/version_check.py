@@ -13,8 +13,6 @@ the git tag is. Everything else derives from it or is checked against it:
 * ``python/pyproject.toml``'s ``version`` must be the PEP 440 RENDERING of it
   (``0.5.0-dev`` -> ``0.5.0.dev0``). The two spellings are not interchangeable
   and cannot be string-compared, which is exactly why this file exists.
-  so a stale shim downloads a tag that does not exist. npm ships SemVer, so no
-  translation applies here.
 * ``Cargo.toml`` is not read, and as of tan-cli#269 does not exist: it versioned
   the Rust crates, which stopped producing the release assets at the port.
   release.yml used to gate the tag on it (`grep -m1 '^version = ' Cargo.toml`),
