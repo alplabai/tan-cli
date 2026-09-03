@@ -171,8 +171,13 @@ tan run --flash --confirm
 What those commands do:
 
 1. `bootstrap` prepares west, Zephyr, the Python environment and SDK
-   dependencies into a workspace venv at `alp-workspace/.venv` (next to the
-   SDK checkout by default) -- and, as its final phase (ADR 0021 Lane 1 P1),
+   dependencies into a workspace venv **next to the SDK checkout** -- which
+   for the Quickstart's own invocation means `./.venv`, not
+   `alp-workspace/.venv`: `west init -l ./alp-sdk` forces the west topdir to
+   be the checkout's PARENT, and starting in an empty directory makes that
+   parent the current directory. `alp-workspace/` appears only in the two
+   cases further down: you pass `--workspace`, or the directory held
+   something besides the checkout and `bootstrap` relocated it there for you -- and, as its final phase (ADR 0021 Lane 1 P1),
    acquires the Zephyr SDK cross-toolchain (`arm-zephyr-eabi`) that
    `tan build` needs for real silicon, into the artifact-keyed store
    `~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/` (or
@@ -236,10 +241,21 @@ What those commands do:
    `west sdk install` by hand from inside the workspace venv:
 
    ```sh
-   source alp-workspace/.venv/bin/activate    # Windows: alp-workspace\.venv\Scripts\Activate.ps1
-   export ZEPHYR_BASE="$PWD/alp-workspace/zephyr"
+   source .venv/bin/activate    # Windows: .venv\Scripts\Activate.ps1
+   export ZEPHYR_BASE="$PWD/zephyr"
    west sdk install --version 1.0.1 -t arm-zephyr-eabi
    ```
+
+   Those two paths are the Quickstart's own layout -- an empty starting
+   directory and no `--workspace`, so the west topdir is the current
+   directory. **Do not hand-adjust them for a different layout: ask `tan`.**
+   `tan bootstrap` prints the exact activate and `ZEPHYR_BASE` lines for the
+   workspace it actually created, and `tan bootstrap --print-env` reprints
+   them at any time (it writes to stdout precisely so it can be redirected or
+   sourced). Use those if you passed `--workspace <path>`, or if `bootstrap`
+   relocated the checkout into `alp-workspace/` because the starting
+   directory held anything besides the checkout -- in both of those layouts
+   the venv is `alp-workspace/.venv` and Zephyr is `alp-workspace/zephyr`.
 
    the exact command `tan doctor`'s `zephyrSdk` check also names, so it
    stays correct if that pin ever moves. On a minimal Linux host this also
