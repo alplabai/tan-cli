@@ -346,13 +346,22 @@ jobs:
       # function's: the relocation target already exists AND already holds
       # content of its own.
       #
-      # For this job the post-#302 behaviour is the more dangerous of the two,
-      # which is why the dedicated parent still matters. A refusal would have
-      # failed loudly at the guard. A silent relocation instead MOVES the
-      # checkout out from under `path: alp-workspace/alp-sdk`, so every later
-      # step's `--sdk-root ./alp-sdk` and `working-directory:` would name a
-      # path that no longer holds what it says. A dedicated parent is also what
-      # the guard's own remedy tells a customer to create.
+      # Both behaviours fail this job loudly, and neither is silent -- an
+      # earlier draft of this comment claimed the relocation was silent and
+      # the more dangerous of the two, and both halves were wrong.
+      # `bootstrap_cmd.py:3510` raises it through `log.warn`, `take_issues`
+      # (`:2953`) puts `bootstrap.workspace-relocated` on the envelope at
+      # `severity: "warning"`, and the very same step below
+      # (`EXPECTED_WARNINGS` at :435-439) fails on any warning that is not
+      # `bootstrap.python-floor-skew`. So a relocation dies right here, not
+      # somewhere downstream. `bootstrap_cmd.py:3609` says as much in its own
+      # words: "HONESTLY, not silently".
+      #
+      # The dedicated parent still matters, for the plainer reason: tripping
+      # the guard would fail this job at `bootstrap.workspace-relocated`, a
+      # code that reads as unrelated to what the job is testing, and a
+      # dedicated parent is also what the guard's own remedy tells a customer
+      # to create.
       - name: clone alp-sdk into a dedicated workspace parent
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -569,10 +578,17 @@ jobs:
           version="$(python3 -c 'import json; print(json.load(open("alp-sdk/metadata/toolchains.json"))["zephyrSdk"]["version"])')"
           python3 "${GITHUB_WORKSPACE}/python/scripts/sdk_release_list_probe.py" --version "${version}"
 
-      # tan does not run this itself -- `west sdk install` needs an initialised
-      # west workspace, and build_readiness.rs prints it as the `fix` string
-      # instead (`west sdk install --version <v> -t arm-zephyr-eabi`). Running
-      # exactly that command here is the only way the printed remedy gets tested.
+      # tan-cli#1163: "tan does not run this itself" was true when written and
+      # is not now -- `tan bootstrap` HAS run `west sdk install` since ADR 0021
+      # Lane 1 P1 / tan-cli#474 (`bootstrap_cmd.py:3788` -> `toolchain_phase`
+      # -> `_acquire_toolchain`), unless `--no-toolchain`/`--no-west`. The
+      # bootstrap step above depends on that phase running, so the two comments
+      # contradicted each other 200 lines apart. (`build_readiness.rs` is the
+      # frozen Rust oracle, not a live code path.)
+      #
+      # This step still earns its keep for the reason the rest of the sentence
+      # gives: `tan doctor` prints this exact command as its `fix` string, and
+      # running it verbatim here is the only way the printed remedy is tested.
       #
       # The version comes from the SDK's own metadata/toolchains.json, the same
       # read parity.yml's seam2 does and the same file
