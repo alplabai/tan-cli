@@ -19,7 +19,17 @@ from pathlib import Path
 
 import pytest
 
-from tan.model.analyze import BackendReport, OpVerdict, analyze_backend, resolve_ethos_u_variant
+from tan.model.analyze import (
+    COVERAGE_WITHHELD,
+    LEGITIMATE_COVERAGE_BY_BASIS,
+    BackendReport,
+    OpVerdict,
+    analyze_backend,
+    resolve_ethos_u_variant,
+)
+from tan.model import analyze as analyze_mod
+from tan.model.perf import PerfPoint
+from tan.model.perf_apply import _perf_point_report
 from tan.model.tensorio import OpDesc
 from tests.conftest import needs_sdk_npu_op_tables, sdk_root
 
@@ -630,3 +640,141 @@ def test_resolve_ethos_u_variant_tolerates_a_non_string_ethos_u_variant_field(tm
     (modules_dir / "E1M-FAKE999.yaml").write_text(
         "inference:\n  ethos_u_variant: 7\nsom: {}\n", encoding="utf-8")
     assert resolve_ethos_u_variant("E1M-FAKE999", metadata_root=tmp_path) is None
+
+
+# --------------------------------------------------------------------------
+# tan-cli#1135 -- LEGITIMATE_COVERAGE_BY_BASIS and the construction-time guard
+# --------------------------------------------------------------------------
+
+
+def _report(coverage: str, basis: str) -> BackendReport:
+    return BackendReport(backend="ethos_u", variant="u85", table=None,
+                         npu_coverage=coverage, compute_on_npu_pct_max=None,
+                         basis=basis)
+
+
+@pytest.mark.parametrize("basis,coverage", sorted(
+    (b, c) for b, cs in LEGITIMATE_COVERAGE_BY_BASIS.items() for c in cs))
+def test_every_declared_legitimate_pair_constructs(basis, coverage):
+    assert _report(coverage, basis).npu_coverage == coverage
+
+
+def test_the_static_screen_may_not_claim_fits():
+    # The word is reserved for a REAL placement -- `tan.model.perf.
+    # coverage_from_placement` is the only function in tan that returns it,
+    # and this module's module docstring says so in its last paragraph.
+    with pytest.raises(ValueError, match=r"\('fits', 'static-screen'\)"):
+        _report("fits", "static-screen")
+
+
+def test_a_compiled_report_may_not_claim_the_static_screens_capped_positive():
+    # `full-eligible` is a NAME-level estimate; a compile measured a real
+    # placement and reports `fits`/`partial`/`cpu-only` instead. Promoting the
+    # estimate under `confidence: "certain"` is the exact failure tan-cli#1115
+    # closed on the bench path.
+    with pytest.raises(ValueError, match=r"\('full-eligible', 'compiled'\)"):
+        _report("full-eligible", "compiled")
+
+
+def test_an_unknown_basis_is_refused_by_name():
+    with pytest.raises(ValueError, match=r"unknown basis 'measured'"):
+        _report("partial", "measured")
+
+
+def test_the_bench_vocabulary_is_the_compiled_one_plus_the_withheld_word():
+    # Not an independently maintained list: `_perf_point_report` CARRIES a
+    # compiled report's own verdict or withholds, so a word newly reachable at
+    # `"compiled"` is reachable at `"bench"` by construction.
+    assert (LEGITIMATE_COVERAGE_BY_BASIS["bench"]
+            == LEGITIMATE_COVERAGE_BY_BASIS["compiled"] | {COVERAGE_WITHHELD})
+
+
+def test_the_bench_entry_is_still_DERIVED_from_the_compiled_one_in_the_source():
+    """The value check above cannot see the property this design rests on.
+
+    Re-typing `"bench"` as a literal `frozenset({...})` with today's four words
+    leaves every value assertion in this file green (measured on the tree
+    before this test existed: `51 passed, 11 skipped`, rc=0) -- it only goes
+    red once the two lists have ALREADY drifted,
+    which is precisely the second-hand-written-list failure tan-cli#1135 exists
+    to prevent. So read the SOURCE: the `"bench"` value must still be an
+    expression built from `_COVERAGE_AT_COMPILED`, not a set literal.
+
+    Structural (`ast`) rather than a substring match, so reformatting the dict
+    cannot red this and cannot green a literal either."""
+    import ast  # noqa: PLC0415 -- test-local, one call site
+
+    tree = ast.parse(Path(analyze_mod.__file__).read_text(encoding="utf-8"))
+    value = next(
+        node.value for node in ast.walk(tree)
+        if isinstance(node, ast.AnnAssign | ast.Assign)
+        and any(t.id == "LEGITIMATE_COVERAGE_BY_BASIS"
+                for t in ([node.target] if isinstance(node, ast.AnnAssign) else node.targets)
+                if isinstance(t, ast.Name)))
+    assert isinstance(value, ast.Dict)
+    bench = next(v for k, v in zip(value.keys, value.values, strict=True)
+                 if isinstance(k, ast.Constant) and k.value == "bench")
+    names = {n.id for n in ast.walk(bench) if isinstance(n, ast.Name)}
+    assert "_COVERAGE_AT_COMPILED" in names, (
+        f"LEGITIMATE_COVERAGE_BY_BASIS['bench'] is spelled "
+        f"{ast.unparse(bench)!r} -- a self-contained list. It must be DERIVED "
+        f"from `_COVERAGE_AT_COMPILED`, because `_perf_point_report` carries a "
+        f"compiled report's own verdict or withholds: a word reachable at "
+        f"`compiled` is reachable at `bench` for free, and writing the bench "
+        f"words out again re-creates the duplication tan-cli#1135 removed.")
+
+
+def test_the_no_verdict_reports_all_state_the_withheld_word_at_static_screen():
+    # All THREE `analyze_backend` short-circuits that never reach `_score_ops`.
+    # The first two need no table on disk; `_empty_ops_report` is only reached
+    # once a table RESOLVES, so it gets one written for it.
+    reports = [
+        analyze_backend(backend="drpai", src_format="tflite", ops=[_op("Conv")],
+                        metadata_root=Path("/nonexistent")),          # format-not-accepted
+        analyze_backend(backend="ethos_u", src_format="tflite", ops=[_op("CONV_2D")],
+                        metadata_root=Path("/nonexistent")),          # no-table-for-backend
+    ]
+    assert [r.ops[0].reason for r in reports] == ["format-not-accepted", "no-table-for-backend"]
+    for report in reports:
+        assert (report.npu_coverage, report.basis) == (COVERAGE_WITHHELD, "static-screen")
+
+
+def test_the_empty_ops_report_also_states_the_withheld_word_at_static_screen(tmp_path):
+    # The third short-circuit -- a table that RESOLVED, with nothing to score.
+    _write_table(tmp_path, "drpai", "onnx-i8@translator-1.12.json", variant="onnx-i8",
+                 op_namespace="onnx", supported=["Conv"])
+    report = analyze_backend(backend="drpai", src_format="onnx", ops=[], metadata_root=tmp_path)
+    assert report.table is not None and report.ops == []
+    assert (report.npu_coverage, report.basis) == (COVERAGE_WITHHELD, "static-screen")
+
+
+def test_partial_at_bench_is_really_reachable_through_production_code():
+    """The one declared pair no other test reaches through a real code path.
+
+    `_perf_point_report`'s carry branch is coverage-AGNOSTIC (`report.
+    npu_coverage if real_placement else COVERAGE_WITHHELD`), so this adds no
+    new branch -- but without it the gate protects a documented row nothing in
+    CI ever produces, and "reachable" would rest on the reviewer's word rather
+    than on a run."""
+    point = PerfPoint(
+        path=Path("/x/p.yaml"), sku="E1M-AEN801", hw_rev="A", core="m55",
+        backend="ethos_u", accel_config="ethos-u85-256",
+        compiler_version="vela 5.1.0", model_name="m", model_src_sha="ab" * 32,
+        model_format="tflite", capture_date="2026-01-01", capture_operator="x",
+        capture_bench_id="e1m-aen-evk-01", vela_system_config=None,
+        vela_memory_mode=None, req_sram_kib=73, arena_bytes=74480,
+        latency_ms_mean=1.0, latency_ms_p50=None, latency_ms_p95=1.2,
+        latency_ms_stdev=None, latency_runs=100, capture_notes=None)
+    compiled = BackendReport(
+        backend="ethos_u", variant="u85", table=None, npu_coverage="partial",
+        compute_on_npu_pct_max=None, npu_placement_pct_real=66.67,
+        basis="compiled", confidence="certain")
+
+    rebased = _perf_point_report(compiled, point)
+
+    assert (rebased.npu_coverage, rebased.basis) == ("partial", "bench")
+    assert rebased.confidence == "certain"
+    # And the withholding half of the same branch, off a static screen.
+    static = BackendReport(backend="ethos_u", variant="u85", table=None,
+                           npu_coverage="partial", compute_on_npu_pct_max=66.67)
+    assert _perf_point_report(static, point).npu_coverage == COVERAGE_WITHHELD

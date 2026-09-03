@@ -85,7 +85,7 @@ import hashlib
 from dataclasses import replace
 from pathlib import Path
 
-from .analyze import BackendReport, OpVerdict
+from .analyze import COVERAGE_WITHHELD, BackendReport, OpVerdict
 from .perf import PerfPoint, coverage_from_placement, find_perf_points
 from .targets import TargetSpec
 
@@ -549,7 +549,7 @@ def _perf_point_report(report: BackendReport, point: PerfPoint) -> BackendReport
     real_placement = report.basis == "compiled"
     return BackendReport(
         backend=report.backend, variant=report.variant, table=report.table,
-        npu_coverage=report.npu_coverage if real_placement else "undetermined",
+        npu_coverage=report.npu_coverage if real_placement else COVERAGE_WITHHELD,
         compute_on_npu_pct_max=None,
         npu_placement_pct_real=report.npu_placement_pct_real if real_placement else None,
         uncosted_cpu_op_count=report.uncosted_cpu_op_count if real_placement else 0,

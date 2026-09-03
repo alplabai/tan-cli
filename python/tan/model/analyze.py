@@ -90,6 +90,56 @@ class OpVerdict:
     macs: int = 0             # 0 when not computable
 
 
+#: The `npu_coverage` word a report states when it has no placement verdict of
+#: its own to state. It means TWO different things depending on `basis` -- at
+#: `"static-screen"`, "nothing was screened at all" (`_format_not_accepted_
+#: report`/`_no_table_report`/`_empty_ops_report` below); at `"bench"`,
+#: "a real measurement rebased this report but carried no placement, so the
+#: coverage word is WITHHELD rather than borrowed from the static screen
+#: underneath" (`tan.model.perf_apply._perf_point_report`). Named rather than
+#: spelled inline at those four sites so the withholding rule and the
+#: `"bench"` entry of `LEGITIMATE_COVERAGE_BY_BASIS` below cannot drift apart:
+#: they are the same decision written once.
+COVERAGE_WITHHELD = "undetermined"
+
+#: `npu_coverage` at `basis: "compiled"` -- exactly what `tan.model.perf.
+#: coverage_from_placement` can return off a REAL per-operator placement, the
+#: one function in tan allowed to return `"fits"`. `None` from that function
+#: (an unreadable placement summary) is not a fourth word: it degrades to the
+#: static screen with its basis unchanged (`tan.model.check.
+#: _vela_placement_unreadable`), so it contributes no `"compiled"` pair.
+_COVERAGE_AT_COMPILED = frozenset({"fits", "partial", "cpu-only"})
+
+#: THE ENUMERATION: `basis` -> every `npu_coverage` that is legitimate at it.
+#:
+#: `BackendReport.__post_init__` enforces this on EVERY construction, so an
+#: illegitimate pair cannot reach an envelope, and
+#: `tests/gates/test_model_check_doc_coverage_table.py` holds
+#: `docs/model-check-static-screen.md`'s own `(npuCoverage, basis)` table to
+#: it in both directions (tan-cli#1135 -- that page went false at five lines
+#: on tan-cli#1115 with nothing to catch it).
+#:
+#: Each entry is derived from the code path that produces it, not restated
+#: from prose:
+#:
+#:   `"static-screen"`  `_coverage_label` over a non-empty verdict list --
+#:                      `"full-eligible"` / `"partial"` / `"cpu-only"` -- plus
+#:                      `COVERAGE_WITHHELD` from the three no-verdict reports.
+#:                      This module never emits any other basis.
+#:   `"compiled"`       `_COVERAGE_AT_COMPILED`, above.
+#:   `"bench"`          `_perf_point_report` CARRIES a `"compiled"` report's
+#:                      own already-measured verdict, or withholds. So it is
+#:                      the compiled set plus `COVERAGE_WITHHELD` BY
+#:                      CONSTRUCTION here, not by a second hand-written list:
+#:                      a new word reachable at `"compiled"` is reachable at
+#:                      `"bench"` for free, exactly as the carry branch says.
+LEGITIMATE_COVERAGE_BY_BASIS: dict[str, frozenset[str]] = {
+    "static-screen": frozenset({"full-eligible", "partial", "cpu-only", COVERAGE_WITHHELD}),
+    "compiled": _COVERAGE_AT_COMPILED,
+    "bench": _COVERAGE_AT_COMPILED | {COVERAGE_WITHHELD},
+}
+
+
 @dataclass(frozen=True)
 class BackendReport:
     """One backend's static-screen partition report for a model."""
@@ -97,29 +147,23 @@ class BackendReport:
     backend: str              # cpu | ethos_u | drpai | deepx_dxm1
     variant: str | None       # u85 | u55 | u65 | None
     table: str | None         # the table file that answered, or None
-    npu_coverage: str          # "full-eligible" | "partial" | "cpu-only" | "undetermined" --
-                               # plus "fits", which can appear at basis == "compiled"
-                               # (tan.model.check's `--exact` path, tan-cli#782 Task 6) OR
-                               # basis == "bench" (a matched `metadata/model_perf/` point,
-                               # tan.model.perf_apply). Only the "compiled" path ever
-                               # DERIVES a verdict -- from `tan.model.perf.coverage_from_
-                               # placement`, the one function in tan allowed to return
-                               # "fits", off a real vela compile's own placement summary.
-                               # A "bench" report NEVER derives its own verdict (alp-sdk's
-                               # real model-perf schema carries no bench-measured
-                               # placement split, tan-cli#1115): `tan.model.perf_apply.
-                               # _perf_point_report` CARRIES this field from the report it
-                               # is rebasing ONLY when that report's own basis is already
-                               # "compiled" (a real placement, safe to keep); otherwise --
-                               # the ordinary case, no `--exact` alongside the bench point
-                               # -- the word is WITHHELD to "undetermined" rather than
-                               # promoting the static screen's name-level estimate to
-                               # `confidence: "certain"`. `docs/model-check-static-
-                               # screen.md` documents `undetermined` @ `basis: "bench"` as
-                               # a legitimate, distinct combination from `undetermined` @
-                               # `basis: "static-screen"` for exactly this reason.
-                               # analyze_backend() itself never emits "fits" -- basis stays
-                               # "static-screen" here always.
+    # WHICH words are legitimate here is NOT restated in this comment -- read
+    # `LEGITIMATE_COVERAGE_BY_BASIS` above, keyed by this report's own `basis`.
+    # It is the source of truth, `__post_init__` enforces it on construction,
+    # and a prose second copy of that enumeration in this exact spot is what
+    # drifted and cost tan-cli#1135. What stays here is only WHY the vocabulary
+    # is basis-dependent, which no dict can say: `tan.model.perf.coverage_from_
+    # placement` is the one function in tan allowed to return "fits", off a
+    # real vela compile's own placement summary, so only `basis: "compiled"`
+    # ever DERIVES a verdict. A `basis: "bench"` report derives nothing --
+    # alp-sdk's real model-perf schema carries no bench-measured placement
+    # split (tan-cli#1115) -- so `tan.model.perf_apply._perf_point_report`
+    # CARRIES this field from the report it is rebasing only when that
+    # report's basis is already "compiled", and otherwise WITHHOLDS it to
+    # `COVERAGE_WITHHELD` rather than promoting the static screen's name-level
+    # estimate to `confidence: "certain"`. analyze_backend() itself never
+    # emits "fits" -- `basis` stays "static-screen" in this module always.
+    npu_coverage: str
     # MAC-weighted UPPER bound, 0-100 -- ONLY at `basis: "static-screen"`
     # (this module's own `_score_ops`/`eligible_macs / total_macs`). Always
     # `None` at `basis: "compiled"` (tan.model.check's `--exact` path):
@@ -210,6 +254,55 @@ class BackendReport:
     latency_runs: int | None = None
     perf_ref: str | None = None
     notes: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Refuse an illegitimate `(npu_coverage, basis)` pair at construction.
+
+        This is what makes `LEGITIMATE_COVERAGE_BY_BASIS` a constant
+        PRODUCTION reads rather than a list a test mirrors: all six
+        production construction sites (`analyze.py` x4, `tan.model.check.
+        _report_from_vela_compile`, `tan.model.perf_apply._perf_point_report`)
+        and every `dataclasses.replace` of a report run through here, so a new
+        branch that invents a word at a basis it does not belong to cannot
+        reach an envelope consumer that matches exhaustively on the pair
+        (`tan.core.model_check`, and the customers
+        `docs/model-check-static-screen.md` tells to do exactly that).
+
+        THE BLAST RADIUS, stated rather than left to "fails loudly": this is
+        not a traceback at the user. `tan model check` wraps each model in
+        `tan.commands.model_cmd._model_check_block`'s `except Exception`, so a
+        raise here becomes that ONE model's coded Issue and `exitCode: 1` --
+        the other models in the same `board.yaml` still report. Measured, on a
+        two-model board.yaml with the first model forced to an illegitimate
+        pair: `"ok": false`, `"exitCode": 1`, `issues[0]` =
+        `model.check-failed` / `model 'm': ValueError: illegitimate
+        (npu_coverage, basis) pair ('fits', 'static-screen') -- ...`, and
+        `data.models` still carrying the second model's full report.
+
+        That is the right trade for a false negative in the enumeration (one
+        report dropped, loudly, with the offending pair named) against the
+        alternative (a word the documented vocabulary does not contain,
+        shipped in a `data.models[].backends[]` block a consumer is told it
+        may match exhaustively). If the
+        enumeration is ever wrong in the OTHER direction -- too narrow for a
+        pair production really produces -- it costs a report, so widen it
+        here and document the row rather than deleting the check.
+
+        Deliberately validates the pair, NOT each field alone -- the whole
+        point is that `"fits"` is legitimate and `"full-eligible"` is not at
+        `basis: "compiled"`, while the reverse holds at `"static-screen"`.
+        Says nothing about MEANING -- that `undetermined` reads differently at
+        `"bench"` than at `"static-screen"` is prose, and stays prose."""
+        legitimate = LEGITIMATE_COVERAGE_BY_BASIS.get(self.basis)
+        if legitimate is None:
+            raise ValueError(
+                f"unknown basis {self.basis!r} -- BackendReport bases are "
+                f"{sorted(LEGITIMATE_COVERAGE_BY_BASIS)}")
+        if self.npu_coverage not in legitimate:
+            raise ValueError(
+                f"illegitimate (npu_coverage, basis) pair "
+                f"({self.npu_coverage!r}, {self.basis!r}) -- legitimate "
+                f"npu_coverage at basis {self.basis!r}: {sorted(legitimate)}")
 
 
 def resolve_ethos_u_variant(sku: str, *, metadata_root: Path) -> str | None:
@@ -404,7 +497,7 @@ def _format_not_accepted_report(backend: str, src_format: str, ops: Sequence[OpD
                 for o in ops]
     return BackendReport(
         backend=backend, variant=variant, table=None,
-        npu_coverage="undetermined", compute_on_npu_pct_max=None, ops=verdicts,
+        npu_coverage=COVERAGE_WITHHELD, compute_on_npu_pct_max=None, ops=verdicts,
         notes=[f"{backend} does not ingest {src_format!r} source models; "
                f"no score computed. This is not a verdict on the model, only "
                f"on the format/backend pairing."],
@@ -416,7 +509,7 @@ def _no_table_report(backend: str, ops: Sequence[OpDesc], variant: str | None) -
                            macs=o.macs) for o in ops]
     return BackendReport(
         backend=backend, variant=variant, table=None,
-        npu_coverage="undetermined", compute_on_npu_pct_max=None, ops=verdicts,
+        npu_coverage=COVERAGE_WITHHELD, compute_on_npu_pct_max=None, ops=verdicts,
         notes=["no NPU-ops support table for this backend/variant -- absence "
                "of data, not evidence of no support."],
     )
@@ -425,7 +518,7 @@ def _no_table_report(backend: str, ops: Sequence[OpDesc], variant: str | None) -
 def _empty_ops_report(backend: str, table_path: Path, variant: str | None) -> BackendReport:
     return BackendReport(
         backend=backend, variant=variant, table=str(table_path),
-        npu_coverage="undetermined", compute_on_npu_pct_max=None, ops=[],
+        npu_coverage=COVERAGE_WITHHELD, compute_on_npu_pct_max=None, ops=[],
         notes=["no operators were extracted for this source; nothing to "
                "score, so no coverage verdict is reported."],
     )

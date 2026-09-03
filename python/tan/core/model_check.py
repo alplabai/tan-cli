@@ -16,7 +16,7 @@ the format.
 """
 from __future__ import annotations
 
-from tan.model.analyze import BackendReport, OpVerdict
+from tan.model.analyze import COVERAGE_WITHHELD, BackendReport, OpVerdict
 
 #: Cosmetic backend -> text-mode label. `ethos_u` is special-cased in
 #: `backend_label` below to fold in the resolved variant ("Ethos-U55") --
@@ -91,7 +91,7 @@ def _coverage_line(report: dict) -> str | None:
     read alongside the REAL placement percentage as self-contradictory. The
     real split is already `notes`' whole point for that report
     (`"N/Total operators placed on the NPU (P%)"`)."""
-    if report["npuCoverage"] == "undetermined" or report["basis"] != "static-screen":
+    if report["npuCoverage"] == COVERAGE_WITHHELD or report["basis"] != "static-screen":
         return None
     determined = [o for o in report["ops"] if o["status"] in ("npu-eligible", "cpu-certain")]
     if not determined:
