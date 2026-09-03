@@ -150,29 +150,47 @@ def _introducing_commit(cwd: Path, path: str) -> tuple[str, str] | None:
     HEAD's own tree and which the caller therefore treats as a hard git
     failure rather than a pass.
 
-    `--full-history` is what makes this work for the merge case: it keeps a
-    merge commit in a path-limited walk instead of simplifying it away, and
-    a merge that introduces a path present in NEITHER parent is TREESAME to
-    neither, so it is listed. `--reverse` puts the oldest listed commit
-    first; the loop still checks tree membership rather than trusting the
-    first line, so a history whose oldest listed commit is a delete (an
-    add/drop/re-add cycle) resolves to the right commit instead of raising.
+    `--reverse` puts the oldest listed commit first; the loop still checks
+    tree membership rather than trusting the first line, so a history whose
+    oldest listed commit is a delete (an add/drop/re-add cycle) resolves to
+    the right commit instead of raising.
 
-    Being listed is only half of what `--full-history` buys here, and the
-    other half is the load-bearing one (tan-cli#1144). DEFAULT simplification
-    also follows only ONE parent of a merge that is TREESAME to it -- so as
-    soon as any later merge drops the path against a branch that forked
-    BEFORE the entry existed, that merge is TREESAME to the pre-entry parent,
-    only that parent is followed, and the entire side the introducing merge
-    lives on is pruned out of the walk. The introduction then resolves to
-    whatever ordinary commit re-added the path, whose blob is HEAD's own, and
-    `entry_violations`' check 4 reads clean on a rewritten entry.
-    `--full-history` follows every parent regardless, which keeps the
-    introduction reachable. Deleting it here left the whole gates suite green
-    until
+    `--full-history` buys exactly one thing here, and it is NOT keeping the
+    introducing merge in the listing (tan-cli#1144). Measured on raw git
+    2.43.0, against the shape `_entry_introduced_by_a_merge_commit` builds
+    and again against tan-cli#1070's own introduce-then-rewrite shape, both
+    walks list the same commits:
+
+        introducing merge alone   --full-history: 823bf29a
+                                  default       : 823bf29a
+        + rewritten by a 2nd merge --full-history: 823bf29a cfd155ae
+                                  default       : 823bf29a cfd155ae
+
+    DEFAULT simplification already keeps a merge that is TREESAME to NO
+    parent, which a merge introducing a path present in neither parent
+    always is. So the listing half is free -- in every shape this file
+    constructs, including the one tan-cli#1070 was filed for. An earlier
+    version of this docstring claimed the flag was what got that merge
+    listed; it is not, and a reader who believes it will delete the flag and
+    measure no difference on the shapes nearest to hand.
+
+    What is NOT free is REACHABILITY, and it is the whole of what the flag
+    does here. Default simplification follows only ONE parent of a merge it
+    IS TREESAME to. A later merge that drops the path is TREESAME to any
+    parent whose tree also lacks it, so that one parent alone is followed and
+    the entire side the introducing merge lives on is pruned out of the walk
+    before it can be listed at all. `_introducing_commit` then resolves the
+    "introduction" to whatever ordinary commit re-added the path, whose blob
+    IS HEAD's own, and `entry_violations`' check 4 reads a rewritten entry
+    clean. `--full-history` follows every parent regardless.
+
+    Deleting it here left the ENTIRE gates suite green -- `1142 passed, 34
+    skipped` on tan-cli `1fc18bb1`, Python 3.12.3, git 2.43.0 -- until
     `test_a_merge_introduced_entry_is_caught_even_when_default_simplification_would_prune_the_introducing_merge`
-    was added to pin it -- that test is this argument's only guard, so do not
-    weaken it.
+    was added to pin it. That test is this argument's only guard, so do not
+    weaken it; its helper reaches the pruning condition by forking the
+    dropping merge's other side BEFORE the entry existed, which is one
+    sufficient way for that parent's tree to lack the path, not the only one.
     """
     result = _git_ok(
         "rev-list", "--full-history", "--reverse", "HEAD", "--", path, cwd=cwd
@@ -1522,10 +1540,11 @@ def test_a_merge_introduced_entry_is_caught_even_when_default_simplification_wou
     HEAD's, and the rewritten entry reads clean.
 
     Deleting `--full-history` from the `git rev-list` call in
-    `_introducing_commit` was measured green across the entire gates suite
-    (`1078 passed, 34 skipped`) before this test existed. It is the only
-    thing standing between that call and a silent reopening of PR #1070's
-    blind spot on an append-only ledger.
+    `_introducing_commit` was measured green across the entire gates suite --
+    `1142 passed, 34 skipped` on tan-cli `1fc18bb1`, Python 3.12.3, git
+    2.43.0 -- before this test existed. It is the only thing standing between
+    that call and a silent reopening of PR #1070's blind spot on an
+    append-only ledger.
     """
     repo = tmp_path / "repo"
     entry_dir = _merge_introduced_then_dropped_against_a_pre_entry_branch(repo)
