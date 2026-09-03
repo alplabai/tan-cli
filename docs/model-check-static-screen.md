@@ -90,6 +90,16 @@ the FIGURES are certain, and treat `npuCoverage: "undetermined"` at
 `basis: "bench"` as "SRAM/latency are measured; placement is not" rather than
 as the static-screen meaning of the same word.
 
+**The pair set in that table is gated, the `Means` column is not.**
+`tan.model.analyze.LEGITIMATE_COVERAGE_BY_BASIS` enumerates the legitimate
+`basis -> {npuCoverage}` combinations, `BackendReport.__post_init__` refuses to
+construct a report outside it, and
+`tests/gates/test_model_check_doc_coverage_table.py` fails the build in both
+directions -- a pair reachable in code but missing from the table, and a row
+here for a combination code can no longer produce (tan-cli#1135, after this
+page went false at five lines on tan-cli#1115). What each word MEANS at each
+basis is prose and stays a review problem; only the pairs are mechanical.
+
 `undetermined` is deliberate and load-bearing. A backend that ingests a
 different source format than the one you handed it, or one that ships no
 support table at all (`deepx_dxm1` ships none, by decision), reports

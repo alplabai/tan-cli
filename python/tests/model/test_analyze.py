@@ -19,7 +19,14 @@ from pathlib import Path
 
 import pytest
 
-from tan.model.analyze import BackendReport, OpVerdict, analyze_backend, resolve_ethos_u_variant
+from tan.model.analyze import (
+    COVERAGE_WITHHELD,
+    LEGITIMATE_COVERAGE_BY_BASIS,
+    BackendReport,
+    OpVerdict,
+    analyze_backend,
+    resolve_ethos_u_variant,
+)
 from tan.model.tensorio import OpDesc
 from tests.conftest import needs_sdk_npu_op_tables, sdk_root
 
@@ -630,3 +637,60 @@ def test_resolve_ethos_u_variant_tolerates_a_non_string_ethos_u_variant_field(tm
     (modules_dir / "E1M-FAKE999.yaml").write_text(
         "inference:\n  ethos_u_variant: 7\nsom: {}\n", encoding="utf-8")
     assert resolve_ethos_u_variant("E1M-FAKE999", metadata_root=tmp_path) is None
+
+
+# --------------------------------------------------------------------------
+# tan-cli#1135 -- LEGITIMATE_COVERAGE_BY_BASIS and the construction-time guard
+# --------------------------------------------------------------------------
+
+
+def _report(coverage: str, basis: str) -> BackendReport:
+    return BackendReport(backend="ethos_u", variant="u85", table=None,
+                         npu_coverage=coverage, compute_on_npu_pct_max=None,
+                         basis=basis)
+
+
+@pytest.mark.parametrize("basis,coverage", sorted(
+    (b, c) for b, cs in LEGITIMATE_COVERAGE_BY_BASIS.items() for c in cs))
+def test_every_declared_legitimate_pair_constructs(basis, coverage):
+    assert _report(coverage, basis).npu_coverage == coverage
+
+
+def test_the_static_screen_may_not_claim_fits():
+    # The word is reserved for a REAL placement -- `tan.model.perf.
+    # coverage_from_placement` is the only function in tan that returns it,
+    # and this module's module docstring says so in its last paragraph.
+    with pytest.raises(ValueError, match=r"\('fits', 'static-screen'\)"):
+        _report("fits", "static-screen")
+
+
+def test_a_compiled_report_may_not_claim_the_static_screens_capped_positive():
+    # `full-eligible` is a NAME-level estimate; a compile measured a real
+    # placement and reports `fits`/`partial`/`cpu-only` instead. Promoting the
+    # estimate under `confidence: "certain"` is the exact failure tan-cli#1115
+    # closed on the bench path.
+    with pytest.raises(ValueError, match=r"\('full-eligible', 'compiled'\)"):
+        _report("full-eligible", "compiled")
+
+
+def test_an_unknown_basis_is_refused_by_name():
+    with pytest.raises(ValueError, match=r"unknown basis 'measured'"):
+        _report("partial", "measured")
+
+
+def test_the_bench_vocabulary_is_the_compiled_one_plus_the_withheld_word():
+    # Not an independently maintained list: `_perf_point_report` CARRIES a
+    # compiled report's own verdict or withholds, so a word newly reachable at
+    # `"compiled"` is reachable at `"bench"` by construction. Pinned here so a
+    # future edit that re-types the bench entry as a literal set is caught.
+    assert (LEGITIMATE_COVERAGE_BY_BASIS["bench"]
+            == LEGITIMATE_COVERAGE_BY_BASIS["compiled"] | {COVERAGE_WITHHELD})
+
+
+def test_the_no_verdict_reports_all_state_the_withheld_word_at_static_screen():
+    # The three `analyze_backend` short-circuits that never reach `_score_ops`.
+    for report in (analyze_backend(backend="drpai", src_format="tflite", ops=[_op("Conv")],
+                                   metadata_root=Path("/nonexistent")),
+                   analyze_backend(backend="ethos_u", src_format="tflite", ops=[_op("CONV_2D")],
+                                   metadata_root=Path("/nonexistent"))):
+        assert (report.npu_coverage, report.basis) == (COVERAGE_WITHHELD, "static-screen")
