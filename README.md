@@ -223,8 +223,10 @@ What those commands do:
      download returns and swept on the next `tan bootstrap` if a crash
      skipped that. It is deliberately not under `$TMPDIR`: that sweep
      identifies what to delete by NAME, and a name is only proof of
-     ownership inside a directory `tan` owns. The sweep also leaves anything
-     recent enough to belong to a concurrent `tan bootstrap` alone.
+     ownership inside a directory `tan` owns. The sweep also leaves alone
+     anything recent enough to belong to a concurrent `tan bootstrap` --
+     under six hours old — so two `tan` runs at once cannot silently
+     de-authenticate each other.
    - **It replaces your own `netrc` for that one child.** `$NETRC` has no
      `~/.netrc` fallback behind it, so an unrelated credential in your own
      `~/.netrc` is not visible to `west sdk install` while `tan` is

@@ -506,17 +506,26 @@ def test_only_a_variable_that_would_have_won_is_reported_as_shadowed():
     """`resolve_sdk_token` takes the first usable and stops. A broken value
     BEHIND the winner was never going to be consulted, so naming it is noise;
     one AHEAD of the winner lost a race it would otherwise have won."""
-    assert tp.shadowed_sdk_token_vars(
-        {"TAN_GITHUB_TOKEN": '"quoted"', "GH_TOKEN": "ghp_good"}
-    ) == ("TAN_GITHUB_TOKEN",)
-    assert tp.shadowed_sdk_token_vars(
-        {"TAN_GITHUB_TOKEN": "ghp_good", "GITHUB_TOKEN": '"quoted"'}
-    ) == ()
+    def shadowed(environ):
+        # `winner` is passed in, never re-derived (tan-cli#1148 round 3): the
+        # caller has already resolved, and two resolutions of the same three
+        # variables are two chances to disagree.
+        return tp.shadowed_sdk_token_vars(environ, tp.resolve_sdk_token(environ))
+
+    assert shadowed({"TAN_GITHUB_TOKEN": '"quoted"', "GH_TOKEN": "ghp_good"}) == (
+        "TAN_GITHUB_TOKEN",
+    )
+    assert shadowed({"TAN_GITHUB_TOKEN": "ghp_good", "GITHUB_TOKEN": '"quoted"'}) == ()
     # Nothing resolved: every refused variable is worth naming.
-    assert tp.shadowed_sdk_token_vars(
-        {"TAN_GITHUB_TOKEN": '"a"', "GITHUB_TOKEN": "b c"}
-    ) == ("TAN_GITHUB_TOKEN", "GITHUB_TOKEN")
-    assert tp.shadowed_sdk_token_vars({}) == ()
+    assert shadowed({"TAN_GITHUB_TOKEN": '"a"', "GITHUB_TOKEN": "b c"}) == (
+        "TAN_GITHUB_TOKEN",
+        "GITHUB_TOKEN",
+    )
+    assert shadowed({}) == ()
+    # An explicit `winner` overrides what the environment would resolve to --
+    # the signature's whole point.
+    env = {"TAN_GITHUB_TOKEN": '"quoted"', "GH_TOKEN": "ghp_good"}
+    assert tp.shadowed_sdk_token_vars(env, None) == ("TAN_GITHUB_TOKEN",)
 
 
 def test_the_unusable_variable_message_is_rendered_from_the_outcome():

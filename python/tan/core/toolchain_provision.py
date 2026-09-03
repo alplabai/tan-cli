@@ -576,7 +576,10 @@ SDK_TOKEN_ENV_VARS: tuple[str, ...] = ("TAN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_T
 #: `zephyr_base`, so reading `<zephyr_base>/scripts/west_commands/sdk.py` and
 #: refusing to claim authentication when its no-token branch stops leaving
 #: `req_headers` empty runs where the artifact exists and nowhere else.
-#: Filed as a follow-up. Until then what exists is a live symptom
+#: **Filed as tan-cli#1154.** An earlier revision of this line said "filed as
+#: a follow-up" when no issue existed yet -- a sentence that reads as a fact
+#: and was not one. The number is here so the claim resolves against
+#: something. Until #1154 lands, what exists is a live symptom
 #: -- [`rate_limit_note`]'s authenticated branch names this possibility by
 #: name when a credentialled download is rate-limited anyway, which is exactly
 #: when an inert transport becomes observable. Re-verify with
@@ -617,9 +620,26 @@ def netrc_scratch_glob_pattern() -> str:
     exploitable** -- corrected on measurement (tan-cli#1148 round 2): `/tmp`
     is `0o1777`, but `shutil.rmtree.avoids_symlink_attacks` is `True` here,
     so no escalation was ever demonstrated and this should not have asserted
-    one. What the move measurably DID buy is that the exposure is closed
-    rather than relocated -- root `0o755`, scratch `0o700`, netrc `0o600`, so
-    no foreign `.alp-netrc-*` is creatable in the swept namespace at all.
+    one. What the move measurably DID buy is a swept namespace that is
+    NARROWER than `$TMPDIR`, not one that is unconditionally private, and the
+    difference is the caller's `umask`. Measured under `umask 022`: root
+    `0o755`, scratch `0o700`, netrc `0o600` -- no other user can create a
+    `.alp-netrc-*` here. Measured under `umask 002` (this repo's own CI and
+    developer default): root `0o775`, so the root is GROUP-WRITABLE and a
+    member of that group can. The credential itself is unreadable either way
+    (`mkdtemp` forces `0o700` and the netrc `0o600` regardless of umask); the
+    part that varies is who can put a directory into the namespace the sweep
+    globs.
+
+    Two residuals follow from that and are recorded rather than claimed away:
+    a group-writable root under `umask 002`, and an `$ALP_TOOLCHAIN_ROOT`
+    that the operator deliberately pointed at a SHARED directory. In both,
+    the sweep can be handed a `.alp-netrc-*` tan did not write. What that
+    buys an attacker is bounded by what the sweep does -- `rmtree` of a
+    directory, with `avoids_symlink_attacks` true -- so it is a nuisance
+    (deleting their own planted directory) rather than an escalation; but
+    "narrower than `$TMPDIR`, and private at `umask 022`" is the honest
+    statement, not "not creatable at all".
     """
     return f"{NETRC_SCRATCH_PREFIX}*"
 
@@ -711,10 +731,17 @@ def rejected_sdk_token_vars(environ: Mapping[str, str]) -> tuple[str, ...]:
     )
 
 
-def shadowed_sdk_token_vars(environ: Mapping[str, str]) -> tuple[str, ...]:
+def shadowed_sdk_token_vars(
+    environ: Mapping[str, str], winner: SdkToken | None
+) -> tuple[str, ...]:
     """The [`rejected_sdk_token_vars`] that would have WON precedence over
-    whatever [`resolve_sdk_token`] actually returned -- all of them when
-    nothing resolved.
+    `winner` -- all of them when `winner` is `None`.
+
+    `winner` is a REQUIRED argument rather than something this re-derives:
+    the one caller has already called [`resolve_sdk_token`], and resolving
+    the same three variables twice invites the two answers to disagree the
+    day anything about the environment is not stable between them
+    (tan-cli#1148 round 3).
 
     This, not the raw rejected set, is what is worth telling a customer
     about. A variable BEHIND the one that won was never going to be consulted
@@ -724,7 +751,6 @@ def shadowed_sdk_token_vars(environ: Mapping[str, str]) -> tuple[str, ...]:
     naming.
     """
     order = SDK_TOKEN_ENV_VARS
-    winner = resolve_sdk_token(environ)
     limit = order.index(winner.source) if winner is not None else len(order)
     return tuple(name for name in rejected_sdk_token_vars(environ) if order.index(name) < limit)
 

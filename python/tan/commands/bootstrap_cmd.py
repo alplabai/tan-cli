@@ -1394,7 +1394,15 @@ def _sdk_credential_is_possibly_live(candidate: Path, now: float) -> bool:
     here, because it is a fact about how long the retry loop can run.
 
     Anything unreadable counts as LIVE: refusing to delete what cannot be
-    measured is the safe answer for a credential."""
+    measured is the safe answer for a credential.
+
+    The subtraction is deliberately NOT `abs()`-wrapped: a backwards clock
+    skew (or a file dated into the future) yields a negative age, which
+    compares as "too young to touch". Both fail-safes are pinned --
+    `test_an_unreadable_credential_directory_is_left_alone` and
+    `test_a_credential_with_a_future_mtime_is_kept_not_swept` -- because a
+    fail-safe documented as deliberate and left undriven is indistinguishable
+    from one nobody meant (tan-cli#1148 round 3)."""
     try:
         return now - candidate.stat().st_mtime < SDK_CREDENTIAL_LIVE_WINDOW_S
     except OSError:
@@ -1473,7 +1481,7 @@ def _sdk_credential(log: Log, runner: Runner, root: Path) -> _SdkCredential | No
         return None
     token = toolchain_provision.resolve_sdk_token(os.environ)
     credential = _stage_sdk_credential(token, root) if token is not None else None
-    for name in toolchain_provision.shadowed_sdk_token_vars(os.environ):
+    for name in toolchain_provision.shadowed_sdk_token_vars(os.environ, token):
         log.warn(
             "sdk-credential-unstaged",
             toolchain_provision.unusable_token_message(
@@ -1676,13 +1684,32 @@ TOOLCHAIN_INSTALL_TAIL_LINES = 40
 #: and discarded when `_run_west_sdk_install_with_retries` returns, and that
 #: cannot exceed `TOOLCHAIN_INSTALL_ATTEMPTS` timeouts plus the backoff
 #: between them, because `Runner.run` kills the child at `INSTALL_TIMEOUT_S`.
-#: Doubled for margin. A clock that skews backwards makes `age` negative,
-#: which reads as "too young to touch" -- the safe direction.
+#: That worst case is `3 * 3600 + (15 + 30)` = 10,845s; `SAFETY_FACTOR`
+#: doubles it, so the window is **21,690s = 6.03 hours**.
+#:
+#: The doubling is a RULE, not a taste: a bound computed from three constants
+#: that a later PR may retune must not become exact, and mtime granularity, a
+#: laptop suspended mid-download and a slow network filesystem all push the
+#: observed age of a live credential above the arithmetic worst case. Pinned
+#: by `test_the_live_window_keeps_a_real_margin_over_the_worst_case_lifetime`,
+#: which recomputes the worst case independently and requires the factor --
+#: without it the window would equal the worst case exactly and a credential
+#: alive for one second longer than the arithmetic allows would be swept.
+#:
+#: A clock that skews backwards makes `age` negative, which reads as "too
+#: young to touch" -- the safe direction, and pinned by
+#: `test_a_credential_with_a_future_mtime_is_kept_not_swept` (an `abs()`
+#: around the subtraction would sweep it, which is why that test exists).
 #:
 #: Cost of the window: residue from a crash within it survives until the NEXT
-#: `tan bootstrap` after it ages out. The sweep runs on every invocation of
-#: the phase, so that is a delay, not a leak.
-SDK_CREDENTIAL_LIVE_WINDOW_S = 2 * (
+#: `tan bootstrap` after it ages out -- at most 6.03 hours of extra dwell for
+#: a file that is already `0o600`. The sweep runs on every invocation of the
+#: phase, so that is a delay, not a leak.
+#: The margin multiplier above. Named rather than inlined so the rule and the
+#: test that pins it refer to the same number.
+SDK_CREDENTIAL_LIVE_SAFETY_FACTOR = 2
+
+SDK_CREDENTIAL_LIVE_WINDOW_S = SDK_CREDENTIAL_LIVE_SAFETY_FACTOR * (
     TOOLCHAIN_INSTALL_ATTEMPTS * INSTALL_TIMEOUT_S
     + TOOLCHAIN_RETRY_BACKOFF_S * TOOLCHAIN_INSTALL_ATTEMPTS * (TOOLCHAIN_INSTALL_ATTEMPTS - 1) // 2
 )

@@ -922,6 +922,51 @@ def test_a_concurrent_runs_live_credential_is_never_swept(tmp_path, monkeypatch)
     assert not stale.exists()
 
 
+def test_a_credential_with_a_future_mtime_is_kept_not_swept(tmp_path):
+    """The backwards-clock-skew fail-safe, which round 3 of the tan-cli#1148
+    review found DOCUMENTED but UNPINNED: wrapping the subtraction in `abs()`
+    left the whole suite at 95 passed.
+
+    A negative age must read as "too young to touch". Under `abs()` a
+    directory dated a day into the future measures as a day OLD and is
+    swept -- which is exactly the live credential of a concurrent run on a
+    box whose clock just stepped backwards, the case the window exists for.
+    """
+    future = tmp_path / f"{tp.NETRC_SCRATCH_PREFIX}skewed"
+    future.mkdir()
+    ahead = time.time() + 86400
+    os.utime(future, (ahead, ahead))
+
+    assert bootstrap_cmd._sdk_credential_is_possibly_live(future, time.time())
+    # ...and end to end, through the sweep itself.
+    bootstrap_cmd._reclaim_sdk_credential_wreckage(tmp_path)
+    assert future.exists()
+
+
+def test_the_live_window_keeps_a_real_margin_over_the_worst_case_lifetime():
+    """The other undriven mutant round 3 found: `2 * (` -> `1 * (` also left
+    95 passed. The doubling is a rule, not a taste -- a bound computed from
+    three constants a later PR may retune must not become exact, and mtime
+    granularity, a suspended laptop and a slow network filesystem all push a
+    live credential's observed age above the arithmetic worst case.
+
+    The worst case is recomputed here from the constants rather than read
+    back from the module, so this cannot pass by agreeing with itself.
+    """
+    attempts = bootstrap_cmd.TOOLCHAIN_INSTALL_ATTEMPTS
+    backoff = sum(
+        bootstrap_cmd.TOOLCHAIN_RETRY_BACKOFF_S * (attempt - 1)
+        for attempt in range(1, attempts + 1)
+    )
+    worst_case = attempts * bootstrap_cmd.INSTALL_TIMEOUT_S + backoff
+    assert worst_case == 10845  # 3 x 3600 + (15 + 30), stated in the constant's comment
+
+    assert bootstrap_cmd.SDK_CREDENTIAL_LIVE_SAFETY_FACTOR >= 2
+    assert bootstrap_cmd.SDK_CREDENTIAL_LIVE_WINDOW_S >= 2 * worst_case
+    # And the dwell cost the docstring quotes to the customer is real.
+    assert round(bootstrap_cmd.SDK_CREDENTIAL_LIVE_WINDOW_S / 3600, 2) == 6.03
+
+
 def test_an_unreadable_credential_directory_is_left_alone(tmp_path):
     """Anything the sweep cannot measure counts as LIVE. Deleting a
     credential on a failed `stat` would be guessing, in the one direction
