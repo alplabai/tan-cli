@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from netrc import netrc
 from pathlib import Path
 
@@ -615,6 +616,11 @@ def test_dry_run_plans_the_argv_and_writes_nothing(tmp_path, monkeypatch):
 #: for the wrong reason.
 SENTINEL_TOKEN = "ghp_TANCLI1143SENTINELdoNotLeakThisValue"
 
+#: A SECOND sentinel, for the cases where one variable holds an unusable
+#: value and another holds a usable one -- the two must be told apart, and
+#: neither may reach an envelope.
+GOOD_TOKEN = "ghp_TANCLI1143SECONDsentinelAlsoDoNotLeak"
+
 #: What `west sdk install` really prints when GitHub's API quota is
 #: exhausted -- the `self.inf(...)` line from Zephyr v4.4.1
 #: `scripts/west_commands/sdk.py:270` followed by the exception
@@ -865,6 +871,65 @@ def test_a_dry_run_stages_no_credential_even_with_a_token_in_the_environment(
     assert any("sdk" in argv and "install" in argv for argv in runner.planned)
 
 
+def _age_out(directory: Path) -> None:
+    """Backdate `directory` past `SDK_CREDENTIAL_LIVE_WINDOW_S`, so the sweep
+    treats it as a crashed run's residue rather than a concurrent run's live
+    credential. Real residue is minutes-to-days old by the time anything
+    sweeps it; a fixture created microseconds ago is not."""
+    old = time.time() - bootstrap_cmd.SDK_CREDENTIAL_LIVE_WINDOW_S - 60
+    os.utime(directory, (old, old))
+
+
+def test_a_concurrent_runs_live_credential_is_never_swept(tmp_path, monkeypatch):
+    """tan-cli#1148 round 2, FIX 3. The extension shells `tan`, so two
+    concurrent `tan bootstrap` runs are ordinary. Without a liveness bound
+    the second run's sweep deletes the first run's IN-USE netrc, and the
+    first run silently continues anonymous after having already printed that
+    it was authenticating -- the exact silent-downgrade shape the rest of
+    this work exists to remove.
+
+    An age window, not a PID probe: the lifetime of a live staged credential
+    is bounded by construction (`TOOLCHAIN_INSTALL_ATTEMPTS` timeouts plus
+    backoff, since `Runner.run` kills the child at `INSTALL_TIMEOUT_S`),
+    whereas a PID check is racy under reuse and differs across platforms.
+    """
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
+    monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
+    monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(bootstrap_cmd.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(bootstrap_cmd.Runner, "run", _echoing_rate_limit_failure({}))
+
+    root = tmp_path / "home" / ".alp" / "toolchains"
+    root.mkdir(parents=True)
+    # Another `tan bootstrap`, mid-download, right now.
+    live = root / f"{tp.NETRC_SCRATCH_PREFIX}concurrent"
+    live.mkdir()
+    (live / "netrc").write_text(tp.netrc_text(SENTINEL_TOKEN), encoding="utf-8")
+    # And a genuine crash residue beside it, so this proves DISCRIMINATION
+    # rather than a sweep that simply stopped working.
+    stale = root / f"{tp.NETRC_SCRATCH_PREFIX}crashed"
+    stale.mkdir()
+    _age_out(stale)
+
+    ws = _workspace(tmp_path)
+    log = bootstrap_cmd.Log(json_mode=True)
+    bootstrap_cmd.toolchain_phase(
+        ws, log, bootstrap_cmd.Runner(json=True), sdk_root, None, is_windows=False
+    )
+
+    assert live.exists() and (live / "netrc").exists()
+    assert not stale.exists()
+
+
+def test_an_unreadable_credential_directory_is_left_alone(tmp_path):
+    """Anything the sweep cannot measure counts as LIVE. Deleting a
+    credential on a failed `stat` would be guessing, in the one direction
+    that cannot be undone."""
+    missing = tmp_path / "gone"
+    assert bootstrap_cmd._sdk_credential_is_possibly_live(missing, time.time())
+
+
 def test_a_crashed_runs_leftover_credential_is_reclaimed_by_the_next_run(tmp_path, monkeypatch):
     """tan-cli#1148 review FIX 1. `_discard_sdk_credential` runs in a
     `finally`, which cannot run on SIGKILL, an OOM kill or power loss -- and
@@ -887,6 +952,7 @@ def test_a_crashed_runs_leftover_credential_is_reclaimed_by_the_next_run(tmp_pat
     residue = root / f"{tp.NETRC_SCRATCH_PREFIX}crashed"
     residue.mkdir(parents=True)
     (residue / "netrc").write_text(tp.netrc_text(SENTINEL_TOKEN), encoding="utf-8")
+    _age_out(residue)
     # A neighbour that must survive: the sweep's only proof of provenance is
     # the name, so it has to be narrow enough to leave everything else alone.
     survivor = root / "some-other-thing"
@@ -941,16 +1007,36 @@ def test_the_staged_credential_lives_under_the_toolchain_root_not_the_shared_tmp
     Asserting the PARENT is what stops a future refactor quietly moving the
     secret back to `$TMPDIR` and leaving the sweep pointed at nothing."""
     seen: dict = {}
+    decoy = tmp_path / "decoy-tmpdir"
+    decoy.mkdir()
     monkeypatch.setenv("TAN_GITHUB_TOKEN", SENTINEL_TOKEN)
-    monkeypatch.setenv("TMPDIR", str(tmp_path / "decoy-tmpdir"))
-    (tmp_path / "decoy-tmpdir").mkdir()
+    # `monkeypatch.setenv("TMPDIR", ...)` is INERT here and the round-2 review
+    # caught it being used that way: `tempfile.tempdir` is already cached from
+    # the first `gettempdir()` of the process, so the env var is read by
+    # nobody and the decoy assertion below stayed green under a mutation that
+    # really did stage into `/tmp`. Patch the resolved value instead.
+    monkeypatch.setattr(bootstrap_cmd.tempfile, "tempdir", str(decoy))
+    # ...and prove the redirect took, so this half cannot go quietly inert
+    # again: without `dir=root`, `mkdtemp` resolves here.
+    assert bootstrap_cmd.tempfile.gettempdir() == str(decoy)
     _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
 
+    # `assert list(decoy.iterdir()) == []` stood here and is REMOVED, not
+    # repaired (tan-cli#1148 round 2). Two things were wrong with it and only
+    # one was the `TMPDIR` env var: even with the redirect made real above,
+    # that assertion cannot fail BY CONSTRUCTION, because the staged
+    # directory is deleted by `_discard_sdk_credential` before this test ever
+    # looks -- so the decoy is empty at assertion time whichever directory
+    # `mkdtemp` chose. Measured: with `dir=root` dropped, the netrc really
+    # landed in the decoy and that line stayed green.
+    #
+    # The path CAPTURED DURING the run is what carries the property, and it
+    # is a real discriminator precisely because the redirect above is live:
+    # without `dir=root` this resolves under `decoy`.
     staged = Path(seen["netrc_path"])
     assert staged.parent.parent == tmp_path / "home" / ".alp" / "toolchains"
     assert staged.name == "netrc"
     assert staged.parent.name.startswith(tp.NETRC_SCRATCH_PREFIX)
-    assert list((tmp_path / "decoy-tmpdir").iterdir()) == []
 
 
 def test_a_downgrade_to_unauthenticated_reaches_the_json_envelope(tmp_path, monkeypatch):
@@ -1001,3 +1087,54 @@ def test_a_token_variable_tan_will_not_use_says_so_instead_of_vanishing(tmp_path
     # token is still a token.
     assert SENTINEL_TOKEN not in downgrade
     assert SENTINEL_TOKEN not in _rendered_envelope(log, runner, sdk_root)
+
+
+def test_a_shadowed_unusable_variable_never_claims_a_download_went_out_anonymous(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1148 round 2, FIX 1. `TAN_GITHUB_TOKEN` holding a quoted
+    `.env` value, `GH_TOKEN` holding a good one: the refused-variable warning
+    used to be raised BEFORE the resolve, so a registered issue code went out
+    on the envelope asserting the download "will go out unauthenticated"
+    while it went out authenticated on `GH_TOKEN`.
+
+    A wire surface stating the opposite of what happened is worse than the
+    silence the warning replaced, so it is now rendered from the outcome:
+    the variable is still named -- it lost a race it would otherwise have
+    won, which is the surprise worth reporting -- but the sentence ends with
+    what actually happened.
+    """
+    seen: dict = {}
+    monkeypatch.setenv("TAN_GITHUB_TOKEN", f'"{SENTINEL_TOKEN}"')
+    monkeypatch.setenv("GH_TOKEN", GOOD_TOKEN)
+    log, runner = _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
+    sdk_root = str(tmp_path / "ws" / "alp-sdk")
+
+    # It really did go out authenticated, on the variable behind the bad one.
+    assert tp.NETRC_ENV_VAR in seen["extra_env"][0]
+    assert GOOD_TOKEN in seen["netrc_text"]
+
+    downgrade = next(msg for code, msg in log.warnings if code == "sdk-credential-unstaged")
+    assert "$TAN_GITHUB_TOKEN is set but is not a value tan can use" in downgrade
+    assert "tan authenticated the download with $GH_TOKEN instead." in downgrade
+    assert "unauthenticated" not in downgrade
+    # And the rate-limit remedy agrees with it rather than contradicting it.
+    failure = next(msg for code, msg in log.warnings if code == "toolchain-install")
+    assert "AUTHENTICATED quota" in failure
+    assert "anonymous per-IP API quota" not in failure
+    for secret in (SENTINEL_TOKEN, GOOD_TOKEN):
+        assert secret not in _rendered_envelope(log, runner, sdk_root)
+
+
+def test_a_variable_behind_the_one_that_won_is_not_reported_at_all(tmp_path, monkeypatch):
+    """`resolve_sdk_token` takes the first usable and stops, so a broken
+    value BEHIND the winner was never going to be consulted. Reporting it
+    would be noise about a variable that changed nothing -- and noise on a
+    registered issue code is how a code stops being read."""
+    seen: dict = {}
+    monkeypatch.setenv("TAN_GITHUB_TOKEN", GOOD_TOKEN)
+    monkeypatch.setenv("GITHUB_TOKEN", f'"{SENTINEL_TOKEN}"')
+    log, _runner = _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
+
+    assert [code for code, _ in log.warnings] == ["toolchain-install"]
+    assert GOOD_TOKEN in seen["netrc_text"]

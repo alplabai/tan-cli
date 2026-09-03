@@ -221,8 +221,10 @@ What those commands do:
    - **It touches disk.** The staged `netrc` is a real file -- mode `0600`
      inside a `0700` directory under the toolchain root, deleted when the
      download returns and swept on the next `tan bootstrap` if a crash
-     skipped that. It is deliberately not under `$TMPDIR`, which is
-     world-writable and therefore unsafe to sweep.
+     skipped that. It is deliberately not under `$TMPDIR`: that sweep
+     identifies what to delete by NAME, and a name is only proof of
+     ownership inside a directory `tan` owns. The sweep also leaves anything
+     recent enough to belong to a concurrent `tan bootstrap` alone.
    - **It replaces your own `netrc` for that one child.** `$NETRC` has no
      `~/.netrc` fallback behind it, so an unrelated credential in your own
      `~/.netrc` is not visible to `west sdk install` while `tan` is

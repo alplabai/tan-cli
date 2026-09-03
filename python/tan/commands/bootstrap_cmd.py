@@ -48,9 +48,10 @@ timeout.
 **Text mode writes to stderr only.** stdout is the envelope channel; a single
 stray byte there breaks the extension silently.
 
-**This module is 5.3x the size guideline and needs its own split, which is
-not any one PR's to do.** `tests/gates/_module_size_budget_core.py` sets
-`MODULE_CAP = 800`; this file is over 4,250 lines, and the ratchet in
+**This module is over 5.5x the size guideline and needs its own split, which
+is not any one PR's to do.** `tests/gates/_module_size_budget_core.py` sets
+`MODULE_CAP = 800`; this file is over 4,400 lines (and its worst function is
+819, itself over sixteen times `FUNCTION_CAP = 50`), and the ratchet in
 `module_size_budget.d/` records that as a baseline rather than a target. For
 scale, tan-cli#1142 was filed for `planner/template.py` at 2.58x. Every
 increment lands here for a locally correct reason -- a phase's IO belongs
@@ -1386,6 +1387,20 @@ def _sdk_credential_seen() -> str | None:
     return rejected[0] if rejected else None
 
 
+def _sdk_credential_is_possibly_live(candidate: Path, now: float) -> bool:
+    """`True` when `candidate` is young enough that another `tan bootstrap`
+    could still be using it -- see `SDK_CREDENTIAL_LIVE_WINDOW_S`, defined
+    below beside the three retry constants it is derived from rather than
+    here, because it is a fact about how long the retry loop can run.
+
+    Anything unreadable counts as LIVE: refusing to delete what cannot be
+    measured is the safe answer for a credential."""
+    try:
+        return now - candidate.stat().st_mtime < SDK_CREDENTIAL_LIVE_WINDOW_S
+    except OSError:
+        return True
+
+
 def _reclaim_sdk_credential_wreckage(root: Path) -> None:
     """Delete any staged credential a PRIOR run left behind, before a new one
     is written -- the crash-residue half of `_discard_sdk_credential`
@@ -1398,15 +1413,25 @@ def _reclaim_sdk_credential_wreckage(root: Path) -> None:
     unreadable to other users, but "unreadable secrets pile up forever" is
     still the wrong steady state for a credential.
 
-    Structured exactly like `_reclaim_toolchain_wreckage` beside it, for the
-    same reason: the naming pattern is the proof of provenance, so this can
-    only ever delete a directory tan created for exactly this purpose, and it
+    Structured like `_reclaim_toolchain_wreckage` beside it, for the same
+    reason: the naming pattern is the proof of provenance, so this can only
+    ever delete a directory tan created for exactly this purpose, and it
     never raises.
+
+    ONE deliberate difference from that sibling: this one discriminates on
+    LIVENESS (`SDK_CREDENTIAL_LIVE_WINDOW_S`) and that one does not. The
+    sibling can afford not to -- a concurrent run whose `.tmp-*` install
+    directory is deleted underneath it FAILS LOUDLY, with a `west sdk
+    install` error and a `toolchain-install` warning. Deleting a live netrc
+    produces no error at all: the download simply proceeds anonymous, after
+    the run has already said it was authenticating. Silent is the difference,
+    and it is why the extra check is here and not there.
     """
+    now = time.time()
     try:
         for candidate in root.glob(toolchain_provision.netrc_scratch_glob_pattern()):
             try:
-                if candidate.is_dir():
+                if candidate.is_dir() and not _sdk_credential_is_possibly_live(candidate, now):
                     shutil.rmtree(candidate)
             except OSError:
                 pass
@@ -1432,29 +1457,37 @@ def _sdk_credential(log: Log, runner: Runner, root: Path) -> _SdkCredential | No
     download usually still succeeds, and failing a whole workspace over a
     missed optimisation would be its own defect.
 
+    **Every warning is raised AFTER the staging it describes, never before**
+    (tan-cli#1148 round 2). The refused-variable loop used to run first, so
+    with `TAN_GITHUB_TOKEN` holding a quoted `.env` value and a perfectly
+    good `GH_TOKEN` behind it, a registered issue code went out on the
+    envelope saying the download "will go out unauthenticated" while it went
+    out authenticated on `GH_TOKEN`. A wire surface asserting the opposite of
+    what happened is worse than the silence this warning replaced, so the
+    order here is resolve -> stage -> report, and every message is rendered
+    from the outcome rather than from the intent.
+
     Every line here names the VARIABLE, never the value.
     """
     if runner.dry_run:
         return None
-    for name in toolchain_provision.rejected_sdk_token_vars(os.environ):
+    token = toolchain_provision.resolve_sdk_token(os.environ)
+    credential = _stage_sdk_credential(token, root) if token is not None else None
+    for name in toolchain_provision.shadowed_sdk_token_vars(os.environ):
         log.warn(
             "sdk-credential-unstaged",
-            f"${name} is set but is not a value tan can use as a GitHub token "
-            "(letters, digits, `_`, `-` and `.` only -- a quoted `.env` value keeps "
-            "its quotes); the Zephyr SDK download will go out unauthenticated.",
+            toolchain_provision.unusable_token_message(
+                name, authenticated_as=credential.source if credential is not None else None
+            ),
         )
-    token = toolchain_provision.resolve_sdk_token(os.environ)
-    if token is None:
-        return None
-    credential = _stage_sdk_credential(token, root)
-    if credential is None:
+    if token is not None and credential is None:
         log.warn(
             "sdk-credential-unstaged",
             f"the ${token.source} credential could not be staged for `west sdk "
             "install`; the Zephyr SDK download will go out unauthenticated.",
         )
-        return None
-    log.line(f"Authenticating the Zephyr SDK download with the token in ${token.source}")
+    if credential is not None:
+        log.line(f"Authenticating the Zephyr SDK download with the token in ${token.source}")
     return credential
 
 
@@ -1627,6 +1660,32 @@ TOOLCHAIN_RETRY_BACKOFF_S = 15
 #: multi-hundred-line traceback but wide enough to keep the real subprocess
 #: stderr line the traceback's closing frames sit on top of.
 TOOLCHAIN_INSTALL_TAIL_LINES = 40
+
+#: A staged credential younger than this is treated as possibly LIVE and is
+#: never reclaimed (tan-cli#1148 round 2). The extension shells `tan`, so two
+#: concurrent `tan bootstrap` runs are not exotic, and without this the
+#: second run's sweep deletes the first run's in-use netrc -- silently
+#: downgrading it to anonymous AFTER it printed "Authenticating the Zephyr
+#: SDK download...". A silent downgrade is the exact shape the rest of this
+#: work exists to remove, so the sweep must not be able to cause one.
+#:
+#: An AGE window rather than a PID liveness probe, deliberately: a PID check
+#: is racy (reuse), is not portable in the same shape across POSIX and
+#: Windows, and answers a harder question than this needs. The lifetime of a
+#: live staged credential is BOUNDED BY CONSTRUCTION -- it is written once
+#: and discarded when `_run_west_sdk_install_with_retries` returns, and that
+#: cannot exceed `TOOLCHAIN_INSTALL_ATTEMPTS` timeouts plus the backoff
+#: between them, because `Runner.run` kills the child at `INSTALL_TIMEOUT_S`.
+#: Doubled for margin. A clock that skews backwards makes `age` negative,
+#: which reads as "too young to touch" -- the safe direction.
+#:
+#: Cost of the window: residue from a crash within it survives until the NEXT
+#: `tan bootstrap` after it ages out. The sweep runs on every invocation of
+#: the phase, so that is a delay, not a leak.
+SDK_CREDENTIAL_LIVE_WINDOW_S = 2 * (
+    TOOLCHAIN_INSTALL_ATTEMPTS * INSTALL_TIMEOUT_S
+    + TOOLCHAIN_RETRY_BACKOFF_S * TOOLCHAIN_INSTALL_ATTEMPTS * (TOOLCHAIN_INSTALL_ATTEMPTS - 1) // 2
+)
 
 
 def _run_west_sdk_install_with_retries(

@@ -500,3 +500,35 @@ def test_the_credential_scratch_name_cannot_collide_with_a_store_or_with_wreckag
         f"{leaf}{tp.TMP_SUFFIX_PREFIX}4242", tp.netrc_scratch_glob_pattern()
     )
     assert not fnmatch(f"{tp.NETRC_SCRATCH_PREFIX}abcd", tp.wreckage_glob_pattern(leaf))
+
+
+def test_only_a_variable_that_would_have_won_is_reported_as_shadowed():
+    """`resolve_sdk_token` takes the first usable and stops. A broken value
+    BEHIND the winner was never going to be consulted, so naming it is noise;
+    one AHEAD of the winner lost a race it would otherwise have won."""
+    assert tp.shadowed_sdk_token_vars(
+        {"TAN_GITHUB_TOKEN": '"quoted"', "GH_TOKEN": "ghp_good"}
+    ) == ("TAN_GITHUB_TOKEN",)
+    assert tp.shadowed_sdk_token_vars(
+        {"TAN_GITHUB_TOKEN": "ghp_good", "GITHUB_TOKEN": '"quoted"'}
+    ) == ()
+    # Nothing resolved: every refused variable is worth naming.
+    assert tp.shadowed_sdk_token_vars(
+        {"TAN_GITHUB_TOKEN": '"a"', "GITHUB_TOKEN": "b c"}
+    ) == ("TAN_GITHUB_TOKEN", "GITHUB_TOKEN")
+    assert tp.shadowed_sdk_token_vars({}) == ()
+
+
+def test_the_unusable_variable_message_is_rendered_from_the_outcome():
+    """tan-cli#1148 round 2: this message used to be built before the resolve
+    ran, so it could assert a download "will go out unauthenticated" that in
+    fact went out authenticated on the next variable down. Both endings are
+    statements of fact about a decision already taken."""
+    fell_back = tp.unusable_token_message("TAN_GITHUB_TOKEN", authenticated_as="GH_TOKEN")
+    assert "$TAN_GITHUB_TOKEN is set but is not a value tan can use" in fell_back
+    assert fell_back.endswith("tan authenticated the download with $GH_TOKEN instead.")
+    assert "unauthenticated" not in fell_back
+
+    anonymous = tp.unusable_token_message("GH_TOKEN", authenticated_as=None)
+    assert anonymous.endswith("the Zephyr SDK download will go out unauthenticated.")
+    assert "instead" not in anonymous

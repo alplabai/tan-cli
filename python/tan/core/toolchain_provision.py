@@ -568,11 +568,17 @@ SDK_TOKEN_ENV_VARS: tuple[str, ...] = ("TAN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_T
 #: west sets a header there, this goes INERT -- the download silently falls
 #: back to the anonymous quota while the user believes they are
 #: authenticated. There is no gate for it here: `requests` is not a tan
-#: dependency (`pyproject.toml`) and no zephyr checkout exists at test time,
-#: so any check would SKIP in CI and on every developer box, which is a dead
-#: gate rather than a real one. What exists instead is a live symptom --
-#: [`rate_limit_note`]'s authenticated branch names this possibility by name
-#: when a credentialled download is rate-limited anyway, which is exactly
+#: dependency (`pyproject.toml` -- `import requests` is a `ModuleNotFoundError`
+#: in a CI-shaped venv) and `ci.yml` checks out alp-sdk but never zephyr, so a
+#: CI-time gate would SKIP everywhere, which is a dead gate rather than a real
+#: one. A RUNTIME check is NOT ruled out, correcting an over-broad claim that
+#: stood here (tan-cli#1148 round 2): the bootstrap already resolves a
+#: `zephyr_base`, so reading `<zephyr_base>/scripts/west_commands/sdk.py` and
+#: refusing to claim authentication when its no-token branch stops leaving
+#: `req_headers` empty runs where the artifact exists and nowhere else.
+#: Filed as a follow-up. Until then what exists is a live symptom
+#: -- [`rate_limit_note`]'s authenticated branch names this possibility by
+#: name when a credentialled download is rate-limited anyway, which is exactly
 #: when an inert transport becomes observable. Re-verify with
 #: `grep -n "req_headers" <zephyr>/scripts/west_commands/sdk.py` and
 #: `python -c "import inspect,requests;print(inspect.getsource(requests.utils.get_netrc_auth))"`.
@@ -599,13 +605,21 @@ def netrc_scratch_glob_pattern() -> str:
     per crash with nothing sweeping it is the wrong steady state.
 
     The reason this pattern is rooted at the toolchain root and not at
-    `$TMPDIR` is the sweep itself. `/tmp` is world-writable (`drwxrwxrwt`),
-    so `rmtree`-ing `"$TMPDIR"/tan-sdk-netrc-*` would be tan deleting paths
-    any local user can create and rename under it -- trading a residue
-    problem for a considerably worse one. The toolchain root is tan's own
-    directory (or the one `$ALP_TOOLCHAIN_ROOT` deliberately named), which is
-    the same provenance argument [`wreckage_glob_pattern`] already relies on,
-    so the sweep there is as safe as the one already running beside it.
+    `$TMPDIR` is that the sweep's only proof of provenance is the NAME, and a
+    name is only proof inside a namespace tan owns. `$TMPDIR` is shared by
+    every process on the box, so a `.alp-netrc-*` found there is not
+    necessarily one tan wrote; the toolchain root (or the directory
+    `$ALP_TOOLCHAIN_ROOT` deliberately named) is the same ownership argument
+    [`wreckage_glob_pattern`] already relies on, so this sweep is exactly as
+    well-founded as the one running beside it.
+
+    **Not, as an earlier revision claimed, because sweeping `/tmp` would be
+    exploitable** -- corrected on measurement (tan-cli#1148 round 2): `/tmp`
+    is `0o1777`, but `shutil.rmtree.avoids_symlink_attacks` is `True` here,
+    so no escalation was ever demonstrated and this should not have asserted
+    one. What the move measurably DID buy is that the exposure is closed
+    rather than relocated -- root `0o755`, scratch `0o700`, netrc `0o600`, so
+    no foreign `.alp-netrc-*` is creatable in the swept namespace at all.
     """
     return f"{NETRC_SCRATCH_PREFIX}*"
 
@@ -695,6 +709,53 @@ def rejected_sdk_token_vars(environ: Mapping[str, str]) -> tuple[str, ...]:
         for name in SDK_TOKEN_ENV_VARS
         if (environ.get(name) or "").strip() and usable_sdk_token(environ.get(name)) is None
     )
+
+
+def shadowed_sdk_token_vars(environ: Mapping[str, str]) -> tuple[str, ...]:
+    """The [`rejected_sdk_token_vars`] that would have WON precedence over
+    whatever [`resolve_sdk_token`] actually returned -- all of them when
+    nothing resolved.
+
+    This, not the raw rejected set, is what is worth telling a customer
+    about. A variable BEHIND the one that won was never going to be consulted
+    (`resolve_sdk_token` takes the first usable and stops), so reporting it
+    is noise about a value that changed nothing; a variable AHEAD of it lost
+    a race it would otherwise have won, which is a real surprise worth
+    naming.
+    """
+    order = SDK_TOKEN_ENV_VARS
+    winner = resolve_sdk_token(environ)
+    limit = order.index(winner.source) if winner is not None else len(order)
+    return tuple(name for name in rejected_sdk_token_vars(environ) if order.index(name) < limit)
+
+
+#: What a customer is told about a variable [`usable_sdk_token`] refused.
+#: `{name}` is the variable, never the value -- a rejected token is as much a
+#: secret as an accepted one.
+_UNUSABLE_TOKEN_PREFIX = (
+    "${name} is set but is not a value tan can use as a GitHub token (letters, "
+    "digits, `_`, `-` and `.` only -- a quoted `.env` value keeps its quotes)"
+)
+
+#: The two possible ENDINGS, chosen from what actually happened rather than
+#: from what was about to be attempted. tan-cli#1148 review round 2: this
+#: warning used to be raised before the resolve, so with
+#: `TAN_GITHUB_TOKEN='"quoted"'` AND a good `GH_TOKEN` the envelope carried a
+#: registered issue code asserting the download "will go out unauthenticated"
+#: while it went out authenticated. A wire surface stating the opposite of
+#: what happened is worse than the silence this warning replaced.
+_UNUSABLE_TOKEN_FELL_BACK = "; tan authenticated the download with ${fallback} instead."
+_UNUSABLE_TOKEN_UNAUTHENTICATED = "; the Zephyr SDK download will go out unauthenticated."
+
+
+def unusable_token_message(name: str, *, authenticated_as: str | None) -> str:
+    """The `bootstrap.sdk-credential-unstaged` message for one refused
+    variable. `authenticated_as` is the variable whose token really reached
+    the download by the time this is rendered -- `None` if none did."""
+    text = _UNUSABLE_TOKEN_PREFIX.format(name=name)
+    if authenticated_as is not None:
+        return text + _UNUSABLE_TOKEN_FELL_BACK.format(fallback=authenticated_as)
+    return text + _UNUSABLE_TOKEN_UNAUTHENTICATED
 
 
 def netrc_text(token: str) -> str:
