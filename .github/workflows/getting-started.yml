@@ -349,13 +349,23 @@ jobs:
       # Both behaviours fail this job loudly, and neither is silent -- an
       # earlier draft of this comment claimed the relocation was silent and
       # the more dangerous of the two, and both halves were wrong.
-      # `bootstrap_cmd.py:3510` raises it through `log.warn`, `take_issues`
-      # (`:2953`) puts `bootstrap.workspace-relocated` on the envelope at
-      # `severity: "warning"`, and the very same step below
-      # (`EXPECTED_WARNINGS` at :435-439) fails on any warning that is not
-      # `bootstrap.python-floor-skew`. So a relocation dies right here, not
-      # somewhere downstream. `bootstrap_cmd.py:3609` says as much in its own
-      # words: "HONESTLY, not silently".
+      # `bootstrap_cmd.py`'s `relocate_checkout` caller raises it through
+      # `log.warn("workspace-relocated", ...)`, and `Log.take_issues` puts it
+      # on the envelope at `severity: "warning"` (the `escalate_blocking and
+      # code in WORKSPACE_BLOCKING` ternary; relocation is not blocking). The
+      # very same step below then fails on any warning outside its
+      # `EXPECTED_WARNINGS` set, which holds only `bootstrap.python-floor-skew`.
+      # So a relocation dies right here, not somewhere downstream.
+      # `rollback_relocation_after`'s docstring puts it plainly: the
+      # `workspace-relocated` warning "already drained into this run's issues".
+      #
+      # Cited by SYMBOL rather than line, deliberately. An earlier draft of
+      # this same comment cited `:435-439` for `EXPECTED_WARNINGS` and its own
+      # nine added lines pushed that block to `:444` in the very commit that
+      # wrote the citation. It also pointed at the `bootstrap.workspace-
+      # relocated` emitter inside `print_env_issues`, which is the `--print-env`
+      # PROJECTION ("a real run WOULD move ...") and can never fire in this
+      # step, since this step passes `--format json` and no `--print-env`.
       #
       # The dedicated parent still matters, for the plainer reason: tripping
       # the guard would fail this job at `bootstrap.workspace-relocated`, a
