@@ -15,11 +15,31 @@ is what finds candidates to seed).
 WHAT IT WALKS: every `python/tan/**` function (excluding `tan/planner/**`,
 whose reads are import-order-gated behind `bind_sdk_root` and cannot be
 driven by a bare `python3` invocation the way every other module here can)
-carrying either of TWO shapes. `--planner` widens the walk to include
+carrying any of THREE shapes. `--planner` widens the walk to include
 `tan/planner/**` too, reported separately, since import order makes those
 undriveable from this script directly -- read the function, do not execute
 it, the same manual step tan-cli#1116's review round 2 took for `_docs_ref`
 and `render_to_envelope`.
+
+THE THREE SHAPES IN ONE LINE EACH, since "which shapes does this detect"
+is the question this tool is most often asked and most easily wrong about:
+
+  1. narrow-except -- there IS a `try`, and its `except` is narrower than
+     the I/O it wraps.
+  2. lazy-escape   -- there IS a `try`, and the filesystem work happens on
+     ITERATION, outside it, so no handler can fire.
+  3. absent-try    -- there is NO `try`, and the function declares a
+     contract the read can breach.
+
+And the shapes it does NOT detect, stated with the same weight (each is
+expanded in its own section below): a read whose only handler is in a
+CALLER too narrow to absorb it, when the reading function itself declares
+nothing (shape 3 does not walk callers); a swallow, where the primitive
+returns a benign value instead of raising at all, so no exception ever
+exists to catch (the tan-cli#1127 shape -- `Path.glob` on a denied
+ancestor, `Path.is_file()` on 3.14.7); and a handler that is correctly
+broad but WRONG about what it then does. None of the three shapes below is
+a substitute for reading the function.
 
 SHAPE 1, "the `except` is narrower than the I/O" (the original walk): a
 `try` wrapping a `.read_text(`/`.read_bytes(`/`open(`/`yaml.safe_load(`/
@@ -82,6 +102,84 @@ here is the same defect class the tool reports:
     finding either way, which is why each is printed as its own indented
     `lazy-escape:` line under whatever execution verdict the candidate got.
 
+SHAPE 3, "there is no `try` at all" (tan-cli#1133): a function that
+DECLARES a contract and performs a risky read that no handled `try` in that
+same function covers. This is the shape the first two are structurally
+blind to -- a site with no `try` is not a narrow `try` and has no dead
+handler -- and it is why two live sites in `tan/planner/template.py`
+(`_load_som_doc`, `_board_route_entries`) survived a sweep, a gate and
+three reviews: each ran `is_file()` pre-flight -> bare `read_text` -> bare
+`yaml.safe_load`, so a non-UTF-8 byte, a malformed document or a `chmod
+000` file escaped raw out of `emit_scaffold`, whose caller catches
+`TemplateError` and nothing else.
+
+    som_path = metadata_root / "e1m_modules" / f"{sku}.yaml"
+    if not som_path.is_file():
+        raise TemplateError(...)          # a curated contract, declared
+    return _require_mapping_doc(
+        yaml.safe_load(som_path.read_text(encoding="utf-8")) or {},  # bare
+        path=som_path, what="SoM preset")
+
+"Declares a contract" is `declared_contract` below, and it is read off the
+FUNCTION, never inferred: either the function raises a NON-BUILTIN
+exception class somewhere in its own body (a curated contract by
+construction -- it chose to speak in a project exception type, and a raw
+`OSError` beside that choice breaches it), or its docstring carries one of
+`CONTRACT_PHRASES` (a quiet-return contract). "No `try` covers it" means
+not lexically inside the BODY of a `try` that has at least one handler --
+a `try`/`finally` is not cover, since it re-raises exactly what SHAPE 3 is
+hunting.
+
+WHAT SHAPE 3 DOES NOT CLAIM, spelled out to the same standard as SHAPE 2:
+
+  * It is NAME-based like the other two: `x.read_text(...)`/`x.safe_load
+    (...)`/`open(...)` count whatever `x` is, and a read reached through a
+    helper this walk does not model is invisible.
+  * It uses the function's OWN declared contract as the evidence and does
+    NOT walk callers, so the OTHER half of the issue's definition -- "or
+    whose caller's only handler cannot absorb what the read raises" -- is
+    a deliberate FALSE NEGATIVE here. `analyze._resolve_table`
+    (tan-cli#1132's second site) is the worked example: it declared its
+    contract only in prose this walk's phrase list does not match and
+    raised nothing curated, so shape 3 would not have reported it either.
+    Caller-side contract inference needs a call graph this script does not
+    build; that gap is recorded, not closed.
+  * A read that is genuinely SAFE where it stands -- because the caller
+    two frames up wraps the whole call in a broad handler on purpose -- is
+    a FALSE POSITIVE, for the same reason. A SHAPE 3 line is a candidate
+    to read, never a confirmed defect, exactly like SHAPE 1's `ESCAPED`
+    and SHAPE 2's `lazy-escape`.
+  * The docstring-phrase half is a literal substring match over
+    `CONTRACT_PHRASES`, not English parsing. A function that promises
+    quiet-return in words this list does not contain is missed.
+  * It says nothing about whether the read can actually FAIL. A
+    `read_text` on a path this same function just wrote is reported like
+    any other. `commands/build_cmd::_build` is the live example on this
+    tree: PR #1160's review checked it and it is a FALSE POSITIVE --
+    `_acquire_plan` returns `text, parse_build_plan(text)`
+    (`build_cmd.py:546`), so the later `json.loads(text)` on that same
+    already-parsed string cannot fail.
+  * It is FUNCTION-SUBTREE based, not function-body based:
+    `declared_contract` and `unguarded_risky_reads` both `ast.walk` the
+    whole subtree, so a nested `def`'s curated raise counts as the
+    ENCLOSING function's contract evidence, and a nested `def`'s bare read
+    is attributed to the enclosing function too -- and DOUBLE-counted,
+    since `find_candidates` visits nested defs separately and may report
+    the same read twice under two qualnames. Shape 1 has always had the
+    same imprecision (its `try` scan walks subtrees too); it is recorded
+    here rather than fixed because no function in this tree currently
+    carries the shape, so a fix would be untested by construction.
+
+What IS pinned in `tests/scripts/test_audit_narrow_except_contracts.py`:
+the positive half (the pre-#1133 `_load_som_doc` body, transcribed, reports
+both of its bare calls), the selectivity half (a bare read with no declared
+contract, a `raise ValueError`, and a read already inside a handled `try`
+are each NOT reported), that a `try`/`finally` is not cover, and the
+caller-side FALSE NEGATIVE above, as a measurement rather than an approval.
+The false-POSITIVE direction is argued, not pinned: it needs a real site in
+this tree where a broad caller genuinely makes a bare read safe, and there
+is none to point at today. Stated here rather than left implied.
+
 WHAT IT DOES BEYOND THE STATIC WALK, AND WHAT IT DOES NOT (review round 3
 BLOCKER, corrected here after an earlier draft of this docstring overclaimed
 it): for each candidate whose signature looks like `(path_like, ...) -> T`
@@ -108,6 +206,62 @@ script reports `OK (non-UTF-8 only)` for it, truthfully, and its real
 defect (an `EACCES`-through-`is_dir()` pre-flight) needed the `chmod 000`
 shape this script does not drive to surface at all.
 
+RE-MEASURED at the tan-cli#1133 fix, and the tally MOVED. Every number here
+was produced by running this script; the DECOMPOSITION matters as much as
+the totals, because "the count went up" has two unrelated causes and an
+earlier draft of this paragraph collapsed them into one and got it wrong:
+
+    tree        script      candidates            absent-try
+    ---------------------------------------------------------------
+    #1132       #1132       65  /  79 --planner   (shape did not exist)
+    dev         dev         66  /  --             (shape did not exist)
+    dev         this        67  /  87 --planner   1  /  9
+    #1133 fix   this        69  /  85 --planner   1  /  5
+
+Read down the `candidates` column: **65 -> 66 is tree growth** since #1132,
+nothing to do with this change. **66 -> 67 is this script's new SHAPE 3**,
+which selects exactly one function the other two shapes never saw
+(`commands/build_cmd::_build`). **67 -> 69 is the #1133 fix's own new
+code**: `document_guards.require_readable_bytes` and
+`require_yaml_mapping_doc` are themselves narrow-`except` reads, so they
+join as SHAPE 1 candidates -- which is correct, and the honest cost of
+guarding anything.
+
+The `--planner` column moves the other way, 87 -> 85, and that is the fix
+landing: `template::_load_som_doc`, `_board_route_entries`,
+`_rendered_bytes` and `render_to_envelope` all DROP OUT of the walk
+entirely, because their bare reads are gone. Shape 3 falls 9 -> 5 for the
+same reason.
+
+Shape 3's detector is not vacuous at that 5, and this is the measurement
+that proves it: run over the pre-fix tree it reports **9 absent-try** and
+names every site the fix touched -- `_load_som_doc` (`som_path.read_text`
+and `yaml.safe_load`, both line 653), `_board_route_entries` (both line
+826), `render_to_envelope` (`yaml.safe_load`, line 1974) and
+`_rendered_bytes` (`read_bytes`, line 509).
+
+THE FIVE THAT REMAIN, and what is known about each -- a list, not a
+number, because "five candidates" invites exactly the deferral that let
+`_rendered_bytes` sit unread through a whole PR:
+
+  * `commands/build_cmd::_build:1234` -- a confirmed FALSE POSITIVE.
+    `_acquire_plan` returns `text, parse_build_plan(text)`
+    (`build_cmd.py:546`), so the later `json.loads(text)` on that same
+    string cannot fail. Checked, not assumed.
+  * `planner/libraries::load_manifest:232` and `planner/zephyr_board::
+    _load_soc_spec:144` -- the same defect shape as the fixed four, but on
+    the `tan build` path, where `build_cmd.py:505`'s broad `except
+    Exception` absorbs them into a coded `build.plan-unavailable`
+    envelope. A poor message rather than a traceback: real, filed, not
+    urgent.
+  * `planner/kconfig_symbols::_load_board_symbols:389` and `planner/
+    topology::_core_os_choices:62` -- not yet driven.
+
+All four open ones are tracked individually in tan-cli#1162, deliberately
+as a LIST rather than as the count "five candidates": #1133's own PR filed
+`template::_rendered_bytes` inside an undifferentiated six-candidate list
+and it turned out to be the busiest live defect of the set.
+
 So: **this script SCOPES the search, it does not perform it.** Every live
 defect tan-cli#1116's triage found was found by a human reading the
 candidate list this script narrows to a tractable size, then hand-driving
@@ -131,18 +285,20 @@ previously present in the one tool built to prevent it.
 
 USAGE: `python scripts/audit_narrow_except_contracts.py [--planner]` from
 `python/`. Prints a per-candidate verdict tagged with the shape(s) that
-selected it, then TWO tally lines -- the execution one (`N OK (non-UTF-8
-only) / N unexecuted / N ESCAPED (non-UTF-8 only)`) and the static
-`lazy-escape (static, shape 2)` one -- on every run. Read the tallies
-before the per-line output, since most candidates are `unexecuted` and a
-listing alone hides that ratio. The two are deliberately NOT summed: they
-count different things over different populations, and one number covering
-both would mean neither.
+selected it, then THREE tally lines -- the execution one (`N OK (non-UTF-8
+only) / N unexecuted / N ESCAPED (non-UTF-8 only)`), the static
+`lazy-escape (static, shape 2)` one, and the static `absent-try (static,
+shape 3)` one -- on every run. Read the tallies before the per-line output,
+since most candidates are `unexecuted` and a listing alone hides that
+ratio. The three are deliberately NOT summed: they count different things
+over different populations (one function can appear in more than one), and
+one number covering them would mean none of the three.
 """
 from __future__ import annotations
 
 import argparse
 import ast
+import builtins
 import importlib
 import inspect
 import sys
@@ -171,6 +327,21 @@ FORCING_CALLS = {
     "list", "sorted", "set", "frozenset", "tuple", "dict",
     "next", "any", "all", "min", "max", "sum", "len",
 }
+
+#: SHAPE 3's docstring evidence for a QUIET-RETURN contract. Lower-cased
+#: substring match against the function's own docstring. Deliberately short
+#: and literal: these are the phrases this tree's quiet-return functions
+#: actually use (`example_catalog.unsupported_som`, `perf.read_perf_point`,
+#: `som_buildability.hw_rev_not_buildable`, `analyze._resolve_table`), not a
+#: general attempt to parse English. See SHAPE 3's limits in the module
+#: docstring.
+CONTRACT_PHRASES = (
+    "never raises",
+    "does not raise",
+    "returns none on",
+    "none on every failure",
+    "returns the empty",
+)
 
 
 def _name(n: ast.expr) -> str:
@@ -284,24 +455,108 @@ def escaping_lazy_calls(try_node: ast.Try) -> list[str]:
     return escaping
 
 
+def _risky_call_label(node: ast.Call) -> str | None:
+    """`"som_path.read_text"` for a call SHAPE 1 would call risky I/O, else
+    `None` -- the same `RISKY_ATTRS`/`open` test `_calls_risky_io` makes,
+    reported per-call instead of per-`try`."""
+    f = node.func
+    if isinstance(f, ast.Attribute) and f.attr in RISKY_ATTRS:
+        return ast.unparse(f)
+    if isinstance(f, ast.Name) and f.id == "open":
+        return "open"
+    return None
+
+
+def _covered_call_ids(func: ast.AST) -> set[int]:
+    """Ids of every call lexically inside the BODY of a `try` that has at
+    least one handler, anywhere in @func.
+
+    `try`/`finally` with no `except` does not count as cover: it re-raises
+    whatever the body raised, which is exactly the escape SHAPE 3 is looking
+    for. The `else:` clause does not count either -- it runs outside the
+    handlers, the same reasoning `escaping_lazy_calls` gives for SHAPE 2.
+    """
+    covered: set[int] = set()
+    for sub in ast.walk(func):
+        if isinstance(sub, ast.Try) and sub.handlers:
+            for stmt in sub.body:
+                for inner in ast.walk(stmt):
+                    if isinstance(inner, ast.Call):
+                        covered.add(id(inner))
+    return covered
+
+
+def declared_contract(func: ast.AST) -> str | None:
+    """WHY this function's own outcome on failure is a promise -- the
+    evidence SHAPE 3 needs before an unguarded read is worth reporting, or
+    `None` when the function makes no such promise.
+
+    Two kinds, both read off the function itself and neither inferred from
+    its callers (see SHAPE 3's limits in the module docstring):
+
+    * a CURATED RAISE -- the function raises a non-builtin exception class
+      somewhere in its own body. That is a declared contract by
+      construction: the function has chosen to speak in a project exception
+      type, and a bare read beside that choice escapes as a raw stdlib class
+      instead. Builtin classes are excluded deliberately -- a function
+      raising `ValueError` promises nothing a raw `OSError` would breach.
+    * a QUIET-RETURN DOCSTRING -- one of `CONTRACT_PHRASES` above.
+    """
+    for sub in ast.walk(func):
+        if isinstance(sub, ast.Raise) and sub.exc is not None:
+            exc = sub.exc
+            name = _name(exc.func) if isinstance(exc, ast.Call) else _name(exc)
+            if name.endswith("Error") and not hasattr(builtins, name):
+                return f"raises {name}"
+    doc = ast.get_docstring(func) if isinstance(
+        func, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
+    for phrase in CONTRACT_PHRASES:
+        if phrase in (doc or "").lower():
+            return f"docstring says {phrase!r}"
+    return None
+
+
+def unguarded_risky_reads(func: ast.AST) -> list[str]:
+    """Labels of the risky-I/O calls in @func that NO `try` in @func covers
+    -- the tan-cli#1133 shape, a read with no handler at all rather than one
+    whose handler is too narrow.
+
+    Returns `[]` for a function whose reads are all inside a handled `try`,
+    whatever that handler catches: judging the handler's BREADTH is SHAPE
+    1's job, and a call cannot be both shapes at once.
+    """
+    covered = _covered_call_ids(func)
+    out: list[str] = []
+    for sub in ast.walk(func):
+        if isinstance(sub, ast.Call) and id(sub) not in covered:
+            label = _risky_call_label(sub)
+            if label is not None:
+                out.append(f"{label}(...) at line {sub.lineno}")
+    return out
+
+
 class Candidate(NamedTuple):
     """One function the walk selected, and WHY. `shapes` carries
-    `"narrow-except"`, `"lazy-escape"`, or both -- a function can be picked
-    for either reason, and reporting which matters because the two need
-    different follow-up (SHAPE 1 wants the handler widened; SHAPE 2 wants
-    the iteration moved inside the `try`, or the primitive swapped)."""
+    `"narrow-except"`, `"lazy-escape"`, `"absent-try"`, or any combination
+    -- a function can be picked for more than one reason, and reporting
+    which matters because each needs different follow-up (SHAPE 1 wants the
+    handler widened; SHAPE 2 wants the iteration moved inside the `try`, or
+    the primitive swapped; SHAPE 3 wants a handler that does not exist yet,
+    or the read routed through a primitive that already has one)."""
 
     dotted: str
     qualname: str
     lineno: int
     shapes: frozenset[str]
     lazy_detail: tuple[str, ...]
+    absent_detail: tuple[str, ...]
 
 
 def find_candidates(include_planner: bool) -> list[Candidate]:
     """Every function carrying SHAPE 1 (a `try` wrapping risky I/O with a
-    non-broad `except`) or SHAPE 2 (a `try` whose lazy-iterator call is
-    iterated outside it) -- see the module docstring for both."""
+    non-broad `except`), SHAPE 2 (a `try` whose lazy-iterator call is
+    iterated outside it) or SHAPE 3 (a declared contract plus a risky read
+    no `try` covers) -- see the module docstring for all three."""
     found: list[Candidate] = []
     for path in sorted(TAN_ROOT.rglob("*.py")):
         rel = path.relative_to(TAN_ROOT.parent)
@@ -319,6 +574,16 @@ def find_candidates(include_planner: bool) -> list[Candidate]:
                     qual = f"{qual_prefix}{child.name}"
                     shapes: set[str] = set()
                     lazy_detail: list[str] = []
+                    absent_detail: list[str] = []
+                    # SHAPE 3 is per-FUNCTION, not per-`try`: the whole
+                    # point is that there may be no `try` to iterate over.
+                    contract = declared_contract(child)
+                    if contract is not None:
+                        unguarded = unguarded_risky_reads(child)
+                        if unguarded:
+                            shapes.add("absent-try")
+                            absent_detail.extend(
+                                f"{detail} [{contract}]" for detail in unguarded)
                     for sub in ast.walk(child):
                         if not isinstance(sub, ast.Try):
                             continue
@@ -342,7 +607,8 @@ def find_candidates(include_planner: bool) -> list[Candidate]:
                     if shapes:
                         found.append(Candidate(
                             dotted, qual, child.lineno,
-                            frozenset(shapes), tuple(lazy_detail)))
+                            frozenset(shapes), tuple(lazy_detail),
+                            tuple(absent_detail)))
                     walk_func(child, qual_prefix=f"{qual}.")
                 elif isinstance(child, ast.ClassDef):
                     walk_func(child, qual_prefix=f"{qual_prefix}{child.name}.")
@@ -442,9 +708,13 @@ def main() -> int:
     # review built to prevent it. A tree with far fewer than this many
     # candidates is not "clean," it is "this script broke"; fail loud.
     _MIN_EXPECTED_CANDIDATES = 40  # measured 65 non-planner / 79 with
-    # --planner on the tree this script was written against; well under
-    # half of the smaller number is not a plausible real shrink from one
-    # PR, only a broken walk.
+    # --planner on the tree this script was written against, and 69 / 85 at
+    # the tan-cli#1133 fix; well under half of the smaller number is not a
+    # plausible real shrink from one PR, only a broken walk. The floor
+    # deliberately does NOT track the measurement upward: it is a
+    # vacuous-run tripwire, not a ratchet, and raising it every time the
+    # tree grows would turn an honest refactor that deletes candidates into
+    # a red run.
     if len(candidates) < _MIN_EXPECTED_CANDIDATES:
         print(
             f"::error:: only {len(candidates)} candidate(s) found -- expected "
@@ -461,11 +731,14 @@ def main() -> int:
 
     tally: dict[str, int] = {"OK": 0, "ESCAPED": 0, "unexecuted": 0, "planner": 0}
     lazy_escapes = 0
+    absent_tries = 0
     for candidate in candidates:
         dotted, qualname, lineno = candidate.dotted, candidate.qualname, candidate.lineno
         shape = "+".join(sorted(candidate.shapes))
         if "lazy-escape" in candidate.shapes:
             lazy_escapes += 1
+        if "absent-try" in candidate.shapes:
+            absent_tries += 1
         if dotted.split(".")[1] == "planner":
             tally["planner"] += 1
             print(f"{dotted}::{qualname}:{lineno} [{shape}] -- planner (not executed here)")
@@ -480,6 +753,12 @@ def main() -> int:
             # the function; `try_execute`'s one non-UTF-8 shape says nothing
             # about it either way.
             print(f"    lazy-escape: {detail}")
+        for detail in candidate.absent_detail:
+            # Also a STATIC finding: this function declares a contract (the
+            # bracketed evidence) and performs this read with no handler
+            # anywhere in its own body. Whether the CALLER absorbs what the
+            # read raises is not decided here -- read the function.
+            print(f"    absent-try: {detail}")
 
     # tan-cli#1116 review round 3 BLOCKER: print the tally on EVERY run, not
     # just when someone greps for it by hand -- a reader who only sees
@@ -504,6 +783,14 @@ def main() -> int:
     print(f"lazy-escape (static, shape 2): {lazy_escapes} of {len(candidates)} "
           f"candidate(s) build a lazy iterator inside a `try` and force it "
           f"outside")
+    # tan-cli#1133: a THIRD tally line, not folded into either above for the
+    # same reason those two are not folded into each other -- it counts a
+    # purely STATIC finding over a population selected by a DIFFERENT rule
+    # (a declared contract, not a `try`). A candidate can appear in more than
+    # one of the three lines; that is why none of them sums with another.
+    print(f"absent-try (static, shape 3): {absent_tries} of {len(candidates)} "
+          f"candidate(s) declare a contract and perform a risky read no "
+          f"`try` in the same function covers")
     return 0
 
 

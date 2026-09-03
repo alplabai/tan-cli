@@ -152,7 +152,7 @@ def load_catalog(catalog_path: Path | None = None) -> dict[str, Any]:
     The ABSENT-document half is curated here too (tan-cli#1077 review). The
     first cut deferred it as "equally true of all four documents this
     module reads"; measured, it was not -- `_load_som_doc` and
-    `_board_route_entries` carry an `is_file()` check and `_docs_ref` an
+    `_board_route_entries` carried an `is_file()` check and `_docs_ref` an
     `except OSError`, so three of the module's five reads were ALREADY
     handled and only this one and `render_to_envelope`'s example
     `board.yaml` were bare. A false symmetry claim in a docstring is the
@@ -160,6 +160,17 @@ def load_catalog(catalog_path: Path | None = None) -> dict[str, Any]:
     the claim is gone. `except OSError`, not a pre-flight `is_file()`: a
     present-but-unreadable path (a directory, a permissions error) is named
     too, not only a missing one.
+
+    tan-cli#1133 finished that and corrected the COUNT: this module makes
+    SIX filesystem reads, not five -- the four documents (this catalog, the
+    SoM preset, the board metadata, the example `board.yaml`), `_docs_ref`'s
+    `sdk_version.yaml`, and `_rendered_bytes`' per-file `read_bytes()`,
+    which no round of this family had looked at and which was raw on three
+    separate errnos (PR #1160 review, MAJOR 1). All six are curated now and
+    no `is_file()` pre-flight is left. Re-derive by grepping
+    `read_text|read_bytes|safe_load|json.loads` here rather than inheriting:
+    the version of this claim one revision ago was off by one, in the
+    direction that hid a live defect.
 
     tan-cli#1084: the read itself is `DocumentGuards.read_catalog_document`
     now -- the SAME body, moved to `tan/core/document_guards.py` so
@@ -460,9 +471,41 @@ def _safe_join(root: Path, rel: str, *, what: str) -> Path:
     Path("/etc/passwd")`), and a lexical `..` scan misses a `rel` that
     walks back out through a symlink placed inside `root`. Resolving
     both sides and checking containment catches all three forms
-    (traversal, absolute paths, symlink escape) with one check."""
-    root = root.resolve()
-    candidate = (root / rel).resolve()
+    (traversal, absolute paths, symlink escape) with one check.
+
+    tan-cli#1133 (PR #1160 review, found while driving `_rendered_bytes`'s
+    symlink-loop shape): `resolve()` itself can fail, and it fails
+    DIFFERENTLY per interpreter -- the same family as the tan-cli#1127
+    `is_file()` trap, one method over. Against a self-referential symlink,
+    measured non-root:
+
+        3.12.3   RuntimeError("Symlink loop from '<path>'")  <- raised
+        3.13.15  returns the path unchanged
+        3.14.7   returns the path unchanged
+
+    So on 3.12.3 a looped template source file escaped `emit_scaffold` as a
+    raw `RuntimeError` -- not even an `OSError`, so no read guard downstream
+    could ever have caught it -- while on 3.13/3.14 the same tree fell
+    through to the read and was curated there. Both arms are curated now.
+    The two messages still DIFFER by interpreter, because the failure
+    genuinely happens at different points, and inventing one message for
+    both would mean lying about where it broke on one of them; what is
+    identical across all three is the CLASS the caller contracts for."""
+    try:
+        root = root.resolve()
+        candidate = (root / rel).resolve()
+    except RecursionError:
+        # `RecursionError` SUBCLASSES `RuntimeError`, so the clause below
+        # would otherwise report a runaway recursion inside `resolve()` as
+        # `cannot resolve <what> ...` -- a curated message about the wrong
+        # thing, which is its own defect class (PR #1160 review round 2).
+        # The measured shape is the plain `RuntimeError("Symlink loop from
+        # ...")`; nothing here is a claim about recursion depth.
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise TemplateError(
+            f"cannot resolve {what} {rel!r} under {root}: "
+            f"{getattr(exc, 'strerror', None) or exc}") from exc
     if not candidate.is_relative_to(root):
         raise PathEscapeError(f"{what} {rel!r} escapes root {root}")
     return candidate
@@ -489,17 +532,30 @@ def _rendered_bytes(
     `render_to_envelope`. `example` is `required` in the schema (and
     pattern-constrained to `^examples/<dir>/<dir>$`), so a record without
     it raised `KeyError: 'example'`; a non-string one raised a raw
-    `TypeError` from `_safe_join`'s `root / rel`."""
+    `TypeError` from `_safe_join`'s `root / rel`.
+
+    tan-cli#1133 review (PR #1160 MAJOR 1): the read below was the FOURTH
+    absent-`try` site and the busiest of the six (4-7 files per scaffold);
+    the substitution branch's `.decode` was a FIFTH, LATENT one (no shipped
+    catalog can declare a `substitute:`). Per-cell measurement, and the
+    schema evidence for that, in `tests/planner/test_emit_scaffold_
+    unreadable_metadata.py`."""
     example = _safe_join(
         base_dir, _require_key(record, "example", str, doc=doc, field=field),
         what="template example directory")
     file_subs = _substitutions_for(record, resolved, doc=doc, field=field)
     out: list[tuple[str, bytes]] = []
     for rel in files:
-        data = _safe_join(example, rel, what="template source file").read_bytes()
+        path = _safe_join(example, rel, what="template source file")
+        data = _require_readable_bytes(path, what="template source file")
         subs = file_subs.get(rel)
         if subs:
-            text = data.decode("utf-8")
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise TemplateError(
+                    f"{template_id}: {rel} is not valid UTF-8 text, cannot "
+                    f"have substitutions applied ({exc})") from exc
             for literal, value in subs:
                 if literal not in text:
                     raise ParameterError(
@@ -548,6 +604,22 @@ _require_field = _GUARDS.require_field
 _require_key = _GUARDS.require_key
 _require_readable_text = _GUARDS.require_readable_text
 _catalog_templates = _GUARDS.catalog_templates
+#: tan-cli#1133's four. The first cut of that fix defined the two YAML ones
+#: as module-level functions HERE, on the register's stated membership bar
+#: ("a shape RUN BY more than one consumer module"): `example_catalog.py`,
+#: the register's second consumer, reads JSON only. PR #1160's review asked
+#: the question the other way round and it is the better question --
+#: `read_catalog_document` is already read + parse + mapping-check for JSON,
+#: so keeping the identical composite for YAML in a CONSUMER split one
+#: question across two homes for no reason a reader could reconstruct. The
+#: import-closure half of the original argument was also simply wrong: seven
+#: `tan/core/**` modules defer `import yaml` into a function body for exactly
+#: this purpose. Moved, and `template.py` is 71 lines lighter for it -- which
+#: matters here specifically, because this module is under
+#: `MIRRORED_PREFIX` and so cannot be split in this repo at all.
+_require_readable_bytes = _GUARDS.require_readable_bytes
+_parse_yaml_mapping = _GUARDS.require_yaml_mapping_doc
+_read_yaml_mapping = _GUARDS.read_yaml_mapping
 
 
 def _record_parameters(record: Any, *, doc: Any, field: str) -> list[Any]:
@@ -637,9 +709,6 @@ def _load_som_doc(sku: str, metadata_root: Path) -> dict[str, Any]:
     (also `topology:`), so all three read the exact same doc for the
     same `(sku, metadata_root)`."""
     som_path = metadata_root / "e1m_modules" / f"{sku}.yaml"
-    if not som_path.is_file():
-        raise TemplateError(
-            f"no metadata/e1m_modules/{sku}.yaml for sku {sku!r}")
     # Mirrors `resolve_targets`'s `preset` guard (tan-cli#1010,
     # `tan/model/targets.py:312-323`): a SoM YAML that parses but is not
     # a mapping (e.g. a bare list or a bare scalar) must not reach a
@@ -649,9 +718,15 @@ def _load_som_doc(sku: str, metadata_root: Path) -> dict[str, Any]:
     # in the call stack (tan-cli#1025). Shared with the module's two
     # other outer-document reads since tan-cli#1052; the message is
     # unchanged.
-    return _require_mapping_doc(
-        yaml.safe_load(som_path.read_text(encoding="utf-8")) or {},
-        path=som_path, what="SoM preset")
+    #
+    # tan-cli#1133: the READ and the PARSE are guarded too, and the
+    # `is_file()` pre-flight this used to open with is gone -- see
+    # `_read_yaml_mapping`. The missing-file message is byte-identical to
+    # the one that pre-flight raised (pinned by `tests/planner/
+    # test_render_to_envelope_malformed_example_board.py`).
+    return _read_yaml_mapping(
+        som_path, what="SoM preset",
+        absent=f"no metadata/e1m_modules/{sku}.yaml for sku {sku!r}")
 
 
 def _default_preset_for_sku(sku: str, metadata_root: Path) -> str:
@@ -819,12 +894,11 @@ def _board_route_entries(board_name: str, metadata_root: Path) -> list[dict[str,
     level down that guarding only `e1m_routes:` itself would leave
     open."""
     board_path = metadata_root / "boards" / f"{board_name}.yaml"
-    if not board_path.is_file():
-        raise TemplateError(
-            f"no metadata/boards/{board_name}.yaml for board {board_name!r}")
-    doc = _require_mapping_doc(
-        yaml.safe_load(board_path.read_text(encoding="utf-8")) or {},
-        path=board_path, what="board metadata")
+    # tan-cli#1133, same change as `_load_som_doc`'s: no `is_file()`
+    # pre-flight, and the read and the parse are curated rather than bare.
+    doc = _read_yaml_mapping(
+        board_path, what="board metadata",
+        absent=f"no metadata/boards/{board_name}.yaml for board {board_name!r}")
     routes = _require_field(doc.get("e1m_routes") or {}, dict,
                             doc=board_path, field="e1m_routes")
     for section in _ROUTE_SECTIONS:
@@ -1970,9 +2044,16 @@ def render_to_envelope(
     # That degrades to empty rather than to garbage, but it is exactly
     # the unpinned residual sibling this PR exists to stop leaving
     # behind, so the falsy scalars are refused too.
-    example_doc = _require_mapping_doc(
-        yaml.safe_load(board_yaml_text) or {},
-        path=board_yaml_path, what="template example board.yaml")
+    #
+    # tan-cli#1133: the PARSE is guarded too. tan-cli#1116 fixed the READ
+    # here and left `yaml.safe_load` bare one line down, so a template
+    # example `board.yaml` that decoded fine but did not parse still raised
+    # a raw `yaml.parser.ParserError` through `emit_scaffold` -- measured on
+    # 3.12.3, 3.13.15 and 3.14.7 alike. Same `_parse_yaml_mapping` the two
+    # `metadata/**` documents above now use.
+    example_doc = _parse_yaml_mapping(
+        board_yaml_text, path=board_yaml_path,
+        what="template example board.yaml")
     raw_cores = example_doc.get("cores")
     original_core_ids = list(_require_field(
         {} if raw_cores is None else raw_cores, dict,

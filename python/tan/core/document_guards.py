@@ -113,6 +113,55 @@ NOT STRICTER THAN THE SCHEMAS. Every key `require_key` is used on is
 an empty list still renders -- rejecting it would be a new refusal, not a
 fixed crash.
 
+THE MEMBERSHIP BAR, AMENDED (tan-cli#1133, PR #1160 review)
+-----------------------------------------------------------
+
+The bar stated below -- "a shape RUN BY more than one consumer module that
+can be unified without changing any consumer's pinned contract" -- is a
+SUFFICIENT condition, not a necessary one, and #1133 is where that
+distinction had to be made explicit. `require_yaml_mapping_doc`,
+`read_yaml_mapping` and `require_readable_bytes` each have exactly ONE
+consumer module today (`tan/planner/template.py`; `example_catalog.py` reads
+JSON only and decodes nothing). Read literally, the bar excludes all three,
+and the first cut of #1133 duly defined the two YAML ones as module-level
+functions inside `template.py`.
+
+They are here instead, on a SECOND sufficient condition this module already
+embodied without ever writing down -- FORMAT SYMMETRY: **when this register
+already answers a question for one serialisation, the same question for
+another serialisation belongs beside it, not in a consumer.**
+`read_catalog_document` is read + parse + shape-check for JSON.
+`read_yaml_mapping` is read + parse + shape-check for YAML. Splitting those
+across two modules would have meant a reader asking "where does this repo
+decide whether a document is the shape it claims to be?" getting two
+different answers depending on the file extension -- which is a smaller,
+quieter version of exactly the two-implementations-of-one-read problem
+tan-cli#1084 created this module to end.
+
+Two arguments that were made for keeping them in `template.py`, recorded
+because one of them was simply WRONG and a future round should not re-derive
+it as if it were new:
+
+* "The register is standard-library-only, so `import yaml` would put PyYAML
+  in the import closure of `tan init`'s SDK-free path." FALSE as stated: it
+  is true only of a MODULE-SCOPE import, and this package has an established
+  idiom that defeats it. Seven `tan/core/**` modules already defer `import
+  yaml` into a function body -- `board_context.py`, `bootstrap.py`,
+  `doctor_libraries.py`, `som_buildability.py`, `scaffold.py`,
+  `system_manifest.py`, `flash_plan.py` -- and `som_buildability.py:109`
+  documents that exact reasoning. `require_yaml_mapping_doc` does the same,
+  so the property this module claims stays true and is now enforced by a
+  test rather than by the absence of the import.
+* "One consumer, so extraction would be for its own sake." Answered by the
+  format-symmetry condition above, and by SIZE, which is not a tiebreaker
+  here but a real cost: `template.py` is this repo's most oversized module
+  and sits under `_module_size_budget_core.MIRRORED_PREFIX`, so it cannot be
+  split in this repo at all -- every line added to it is permanent. This
+  module is 400-odd lines, well under the cap, and splittable. Keeping 71
+  lines of shared-shape code in the one file that can never shed them, to
+  satisfy a bar written to prevent gratuitous extraction, would have been
+  the letter of the rule against its purpose.
+
 WHAT IS DELIBERATELY NOT HERE
 ------------------------------
 
@@ -123,11 +172,15 @@ duplicated by hand (`require_readable_text`, the read-half shape
 pre-family size: **1548** lines at tan-cli#1001 (`156582e`, before #1025
 opened this family at all) -> **1658** at the end of #1025/#1034/#1037/
 #1048 -> `1780` (#1073, +122) -> `2156` (#1082, +376) -> `2020` (#1084,
--136) -> `2051 -> 2066` (smaller rounds since) -> `2063` (this PR, -3).
-**Net +515 over the true 1548-line baseline; #1084 is still the only round
-before this one that ever removed anything.** This module is the piece of
-that growth two CONSUMER modules (`template.py` and `example_catalog.py`)
-both call into through the same curated-raise contract, and no more:
+-136) -> `2051 -> 2066` (smaller rounds since) -> `2063` (#1085, -3) ->
+`2125` (rounds since) -> **`2219` (tan-cli#1133, +94)**. Net **+671** over
+the true 1548-line baseline, re-measured rather than carried forward: the
+`+515` this paragraph recorded at #1085 was true then and is not now, and a
+count nobody re-measures is the same defect as a caller count nobody
+re-measures (below). #1084 remains the only round that ever removed
+anything. This module is the piece of that growth two CONSUMER modules
+(`template.py` and `example_catalog.py`) both call into through the same
+curated-raise contract, and no more:
 
 * `_require_constraints` stays in `template.py`. It guards `$defs/parameter`'s
   `constraints:` bounds, which only the planner's parameter resolution reads;
@@ -152,7 +205,15 @@ both call into through the same curated-raise contract, and no more:
   the clearest case: the day before this change it was two INLINE copies,
   one in this module and one in `template.py`, both already on the exact
   same `self.error`-injected contract -- nothing to change to unify them,
-  which is why they did.
+  which is why they did. tan-cli#1133 gave it a THIRD and FOURTH caller
+  (`template.py`'s two `metadata/**` reads, through `_read_yaml_mapping`)
+  and one optional argument, `absent`, which only `template.py` passes.
+  That asymmetry is deliberate and is NOT a second definition creeping
+  back in: the read itself, the `except` tuple and the `cannot read {what}
+  at {path}` message stay single-definition, and `absent` only chooses
+  which of two messages the ONE `FileNotFoundError` case gets -- those two
+  callers have a better one, naming the SKU or the board being resolved,
+  and `read_catalog_document` does not.
 * `_load_som_doc` and `_board_route_entries` do NOT clear that bar, but not
   because they lack a second caller -- they have two each, WITHIN
   `template.py` (`_load_som_doc`: `_default_preset_for_sku` and
@@ -164,9 +225,14 @@ both call into through the same curated-raise contract, and no more:
   each is its own, separately-evolved implementation with its own
   contract, so the membership bar excludes all of them even before the
   "unify without changing a pinned contract" half is reached:
-  `tan/model/targets.py::resolve_targets` (`template.py:643-644`'s own
-  comment already names it) reimplements `_load_som_doc`'s exact
-  `is_file()`-then-`yaml.safe_load`-then-mapping-check shape, but raises a
+  `tan/model/targets.py::resolve_targets` (`template.py`'s `_load_som_doc`
+  comment already names it) reimplements the `is_file()`-then-
+  `yaml.safe_load`-then-mapping-check shape `_load_som_doc` HAD until
+  tan-cli#1133 replaced it -- `targets.py:307-313` still carries it (pre-flight at :307, the raise at
+  :308, `yaml.safe_load` at :311, the mapping check at :312-313), and
+  the audit script's shape 3 does not report it, because its raises are
+  builtins (`FileNotFoundError`/`ValueError`) rather than a curated class;
+  a separate contract, not covered by this change -- and it raises a
   bare `FileNotFoundError` for the missing-file case and a bare `ValueError`
   for the malformed case. Only the `ValueError` half is pinned by a test
   (`tests/model/test_targets_malformed_preset.py`, `match="expected a YAML
@@ -202,15 +268,21 @@ both call into through the same curated-raise contract, and no more:
   curated-raising at all, a different shape from everything else in this
   file.
 
-  Staying local is a scope claim, not a soundness one: `_load_som_doc` and
-  `_board_route_entries` still guard their OWN absence with a pre-flight
-  `is_file()` and then read+parse UNGUARDED (no `try` at all, so `audit_
-  narrow_except_contracts.py`'s too-narrow-a-`try` sweep cannot see it) --
-  a real, live gap of the SAME #1116 class `require_readable_text` closes
-  for the catalog and the example `board.yaml`, reachable through `emit_
-  scaffold`'s `except TemplateError` and nothing else. tan-cli#1085 is an
-  extraction issue, not a guard sweep, so this PR does not fix that gap;
-  tan-cli#1133 tracks it.
+  Staying local is a scope claim, not a soundness one -- and tan-cli#1085
+  left that distinction load-bearing rather than theoretical. At #1085 both
+  functions still guarded their OWN absence with a pre-flight `is_file()`
+  and then read+parsed UNGUARDED (no `try` at all, so `audit_narrow_except_
+  contracts.py`'s too-narrow-a-`try` sweep could not see them) -- a real,
+  live gap of the SAME #1116 class `require_readable_text` closes for the
+  catalog and the example `board.yaml`, reachable through `emit_scaffold`'s
+  `except TemplateError` and nothing else. tan-cli#1133 CLOSED it: both now
+  read through `template.py::_read_yaml_mapping`, which calls
+  `require_readable_text` here (with `absent=`) and then a local YAML parse
+  guard, and neither carries a pre-flight any more. They are still local,
+  for the membership reason above and no other; what is gone is the
+  soundness debt that used to sit behind that scope claim. The audit script
+  grew a third shape, `absent-try`, in the same change, so a fourth
+  instance of this is findable rather than invisible.
 * The `SkuNotSupportedError` / `CoresTopologyNotFoundError` selection
   semantics stay with their own modules. This register answers "is this
   document the shape it claims to be", never "which record did you mean".
@@ -301,7 +373,9 @@ class DocumentGuards:
             return value
         return self.require_field(value, kind, doc=doc, field=f"{field}.{key}")
 
-    def require_readable_text(self, path: Any, *, what: str) -> str:
+    def require_readable_text(
+        self, path: Any, *, what: str, absent: str | None = None,
+    ) -> str:
         """@path, decoded as UTF-8 text, or the injected curated error --
         the read-half tan-cli#1085 pulled out of `read_catalog_document`
         below once `render_to_envelope`'s example `board.yaml` read
@@ -315,13 +389,162 @@ class DocumentGuards:
         review, and tan-cli#1116's own repeat of the same trap in
         `render_to_envelope`) let a non-UTF-8 document escape past a curated
         `except` clause that thought it already covered every failure.
+
+        @absent (tan-cli#1133) is the caller's OWN message for the one
+        failure a pre-flight `is_file()` used to answer for itself: the file
+        is not there. `_load_som_doc`'s `no metadata/e1m_modules/<sku>.yaml
+        for sku <sku>` and `_board_route_entries`' `no metadata/boards/
+        <board>.yaml for board <board>` are both pinned by live tests
+        (`tests/planner/test_render_to_envelope_malformed_example_board.py`),
+        and both are more useful than a generic `cannot read`, because they
+        name the SKU or board the caller was resolving rather than only the
+        path it derived. Passing @absent is therefore what lets a caller DROP
+        its pre-flight -- the tan-cli#1127 trap, where `Path.is_file()`
+        itself raises `PermissionError` on 3.12.3/3.13.15 and returns `False`
+        on 3.14.7, so the same unreadable file was a raw traceback on two
+        interpreters and a curated-but-UNTRUE "no such file" on the third
+        (both measured on this tree before the fix).
+
+        ONLY `FileNotFoundError` takes @absent, deliberately. Every other
+        `OSError` means the path is there in some form and could not be read
+        as text -- a directory (`IsADirectoryError`), a parent that is a
+        regular file (`NotADirectoryError`), a denied mode
+        (`PermissionError`), a symlink loop (`ELOOP`) -- and for all of them
+        `cannot read {what} at {path}: {strerror}` is true where "no such
+        file" would not be. An `is_file()` pre-flight could not draw that
+        line at all: it answered `False` to every one of them.
         """
         try:
             return path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
+            raise self._unreadable(exc, path, what, absent) from exc
+
+    def require_readable_bytes(
+        self, path: Any, *, what: str, absent: str | None = None,
+    ) -> bytes:
+        """@path's RAW BYTES, or the injected curated error -- the same
+        contract as `require_readable_text` above for a caller that must not
+        decode (tan-cli#1133).
+
+        Its one real caller is `tan/planner/template.py::_rendered_bytes`,
+        which copies a template's `files.user_owned` entries verbatim so that
+        `alp_template.py render` and `--emit scaffold` hand back the same
+        bytes -- a template asset is not required to be text at all, and
+        `render()` writes whatever it read. Measured before this fix, on
+        3.12.3, 3.13.15 and 3.14.7 alike: a `chmod 000` source escaped
+        `emit_scaffold` as a raw `PermissionError`, a deleted one as a raw
+        `FileNotFoundError`, and a directory in its place as a raw
+        `IsADirectoryError`.
+
+        NOT expressible as `require_readable_bytes` -> `.decode()` for the
+        text case, which is why these are two methods rather than one:
+        `Path.read_text` opens in TEXT mode and applies universal-newline
+        translation, so a CRLF document reaches the caller with `\\n`, while
+        `read_bytes().decode("utf-8")` preserves `\\r\\n`. Folding one into
+        the other would silently change what every existing caller of the
+        text half sees on a CRLF checkout -- exactly the kind of quiet
+        behaviour change this family exists to prevent.
+
+        `UnicodeDecodeError` cannot arise here (nothing is decoded), so the
+        `except` is `OSError` alone -- narrower than the text half's on
+        purpose, and narrow BECAUSE the failure surface is smaller, not
+        because the shape was copied without thinking.
+        """
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            raise self._unreadable(exc, path, what, absent) from exc
+
+    def _unreadable(
+        self, exc: BaseException, path: Any, what: str, absent: str | None,
+    ) -> Exception:
+        """The curated error for a failed read -- ONE definition of the
+        message, shared by both read halves above.
+
+        @absent, when the caller passed one, is used for `FileNotFoundError`
+        and nothing else: every other failure means the path is there in some
+        form and could not be read, so `cannot read ...` is true where "no
+        such file" would not be.
+        """
+        if absent is not None and isinstance(exc, FileNotFoundError):
+            return self.error(absent)
+        return self.error(
+            f"cannot read {what} at {path}: "
+            f"{getattr(exc, 'strerror', None) or exc}")
+
+    def require_yaml_mapping_doc(
+        self, text: str, *, path: Any, what: str,
+    ) -> dict[str, Any]:
+        """@text parsed as YAML and known to be a mapping, or the injected
+        curated error -- the YAML twin of `read_catalog_document`'s
+        `json.JSONDecodeError` arm (tan-cli#1133).
+
+        `yaml.YAMLError` is neither an `OSError` nor a `ValueError`, so no
+        `except` clause on any of `tan/planner/template.py`'s three
+        outer-document YAML reads had ever covered it: measured through the
+        real `emit_scaffold` on 3.12.3, 3.13.15 and 3.14.7, a malformed
+        `metadata/e1m_modules/<sku>.yaml`, `metadata/boards/<board>.yaml` or
+        template-example `board.yaml` each raised a raw
+        `yaml.parser.ParserError` past a caller catching `TemplateError` and
+        nothing else.
+
+        The message is `read_catalog_document`'s verbatim with the format
+        name swapped -- `malformed {what} at {path}: not valid YAML
+        ({problem}, line L column C)` -- because the two answer the same
+        question about two serialisations of the same kind of document.
+        `problem`/`problem_mark` belong to `MarkedYAMLError` (a scanner or
+        parser error); a plain `YAMLError` with neither degrades to its own
+        one-line text rather than folding a multi-line dump into a curated
+        message.
+
+        `import yaml` is FUNCTION-LOCAL, not module-scope, and that is the
+        whole of what keeps this module's stated property true: nothing in
+        `tan init`'s SDK-free path calls this method, so PyYAML stays out of
+        that path's import closure. The idiom is this package's own, not an
+        invention here -- `som_buildability.py`, `board_context.py`,
+        `bootstrap.py`, `doctor_libraries.py`, `scaffold.py`,
+        `system_manifest.py` and `flash_plan.py` all defer it the same way,
+        and `som_buildability.py:109` documents the reasoning verbatim.
+        """
+        import yaml
+        try:
+            doc = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            problem = getattr(exc, "problem", None) or str(exc).replace("\n", " ")
+            mark = getattr(exc, "problem_mark", None)
+            where = ("" if mark is None else
+                     f", line {mark.line + 1} column {mark.column + 1}")
             raise self.error(
-                f"cannot read {what} at {path}: "
-                f"{getattr(exc, 'strerror', None) or exc}") from exc
+                f"malformed {what} at {path}: not valid YAML "
+                f"({problem}{where})") from exc
+        return self.require_mapping_doc(doc or {}, path=path, what=what)
+
+    def read_yaml_mapping(
+        self, path: Any, *, what: str, absent: str | None = None,
+    ) -> dict[str, Any]:
+        """A YAML document at @path, read AND parsed AND known to be a
+        mapping -- the exact composite `read_catalog_document` below already
+        is for JSON (tan-cli#1133).
+
+        `tan/planner/template.py`'s two `metadata/**` reads used to spell
+        this as a pre-flight `if not path.is_file(): raise` followed by a
+        completely bare `yaml.safe_load(path.read_text(encoding="utf-8"))` --
+        no `try` at any point, which is why the too-narrow-a-`try` sweep
+        could not see them.
+
+        The pre-flight is gone rather than supplemented: `Path.is_file()` is
+        itself the tan-cli#1127 trap -- against a `chmod 000` PARENT
+        directory it raises `PermissionError` on 3.12.3 and 3.13.15 and
+        returns `False` on 3.14.7, so one unreadable file was a raw traceback
+        on two interpreters and, on the third, a curated but FALSE "no such
+        file" (all four cells measured). Classifying on the real exception
+        gives one answer on all three: `FileNotFoundError` -> @absent,
+        every other read failure -> `cannot read ...`, an unparseable
+        document -> `malformed ...`.
+        """
+        return self.require_yaml_mapping_doc(
+            self.require_readable_text(path, what=what, absent=absent),
+            path=path, what=what)
 
     def read_catalog_document(self, path: Any) -> dict[str, Any]:
         """`metadata/templates/catalog-v1.json`, decoded and known to be a
