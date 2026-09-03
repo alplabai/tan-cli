@@ -1235,6 +1235,46 @@ SDK_PY_READS_A_TOKEN_FROM_THE_ENVIRONMENT = SDK_PY_ASSUMPTIONS_HOLD.replace(
     '        token = os.environ.get("WEST_SDK_GITHUB_TOKEN")',
 )
 
+#: The same drift as `SDK_PY_HEADER_ON_THE_NO_TOKEN_BRANCH` with the
+#: environment read taken OUT -- a header built from a compiled-in constant.
+#: Added in tan-cli#1170 because that fixture trips the empty-dict fact and the
+#: environment-allowlist fact simultaneously, so neither was ever exercised
+#: alone. See `test_each_fact_can_trip_on_its_own_rather_than_only_in_a_bundle`.
+SDK_PY_STATIC_HEADER_ON_THE_NO_TOKEN_BRANCH = SDK_PY_ASSUMPTIONS_HOLD.replace(
+    "            req_headers = {}",
+    '            req_headers = {"Authorization": f"Bearer {_BUILTIN_FALLBACK}"}',
+)
+
+#: The drift the netrc route actually cannot survive, and the one a
+#: `req_headers`-only check was blind to (tan-cli#1170): an `auth=` argument on
+#: the `requests` call. `Session.prepare_request` gates its netrc lookup on
+#: `self.trust_env and not auth and not self.auth`, so tan's credential is not
+#: skipped-over -- it is never looked up. West's own goes out instead.
+SDK_PY_PASSES_ITS_OWN_AUTH_ARGUMENT = SDK_PY_ASSUMPTIONS_HOLD.replace(
+    "        releases = self.fetch_releases(args.api_url, req_headers)",
+    "        releases = self.fetch_releases(args.api_url, req_headers, auth=self._creds())",
+)
+
+#: The other suppressing shape: a session with the environment switched off.
+#: Measured on `requests` 2.34.2 to send `Authorization: None` -- nothing of
+#: tan's and nothing of west's, so the download simply goes out anonymous.
+SDK_PY_BUILDS_A_SESSION_WITH_TRUST_ENV_OFF = SDK_PY_ASSUMPTIONS_HOLD.replace(
+    "        releases = self.fetch_releases(args.api_url, req_headers)",
+    "        self._session = requests.Session(trust_env=False)\n"
+    "        releases = self.fetch_releases(args.api_url, req_headers)",
+)
+
+#: West moving its own credential off `--personal-access-token` and onto a
+#: config file. Nothing here is inert on its own, but the branch tan reasoned
+#: about is gone: the `req_headers = {}` below is no longer that flag's `else:`
+#: arm, so it no longer says anything about a no-token request.
+SDK_PY_TAKES_ITS_TOKEN_FROM_A_CONFIG_FILE = SDK_PY_ASSUMPTIONS_HOLD.replace(
+    "        if args.personal_access_token:", "        if self._config_token():"
+).replace(
+    '                "Authorization": f"Bearer {args.personal_access_token}",',
+    '                "Authorization": f"Bearer {self._config_token()}",',
+)
+
 
 def _write_sdk_py(tmp_path: Path, source: str) -> Path:
     """Plant a `scripts/west_commands/sdk.py` at the `$ZEPHYR_BASE`
@@ -1333,11 +1373,16 @@ def test_the_west_sdk_tripwire_says_nothing_when_there_is_no_sdk_py_to_read(
     tmp_path, monkeypatch, capsys
 ):
     """"Could not look" is not evidence the assumption broke. A workspace with
-    no zephyr checked out yet -- `--no-west`, a first run, a `$ZEPHYR_BASE`
-    whose `west_commands` moved -- keeps the pre-#1154 behaviour exactly.
+    no readable `sdk.py` keeps the pre-#1154 behaviour exactly.
 
-    Warning here instead would fire on runs where nothing is wrong and train
-    the reader to skip the code on the one run where something is.
+    NOT `--no-west`, which was the reason given here until tan-cli#1170 and is
+    measurably not a case at all: `toolchain_phase` has one caller and it is
+    the `else:` of `elif no_west:`, so a `--no-west` run never reaches this
+    code. The real cases are an adopted topdir whose zephyr is not at the
+    declared `$ZEPHYR_BASE`, a `west update` that part-failed, and a Zephyr
+    that moved `scripts/west_commands`. Warning on those would fire on runs
+    where nothing is wrong and train the reader to skip the code on the one run
+    where something is.
     """
     assert not (tmp_path / "ws" / "zephyr").exists()
     _credential, warnings, err = _stage_credential(tmp_path, monkeypatch, capsys)
@@ -1346,15 +1391,160 @@ def test_the_west_sdk_tripwire_says_nothing_when_there_is_no_sdk_py_to_read(
     assert "Authenticating the Zephyr SDK download with the token in $TAN_GITHUB_TOKEN" in err
 
 
-def test_the_two_fixtures_disagree_with_each_other_under_the_real_predicate():
+#: Every drift fixture above. Each one must both DIFFER from the base and be
+#: rejected by the predicate -- see the non-vacuity test below.
+DRIFTED_SDK_PY_FIXTURES = {
+    "header on the no-token branch": SDK_PY_HEADER_ON_THE_NO_TOKEN_BRANCH,
+    "static header on the no-token branch": SDK_PY_STATIC_HEADER_ON_THE_NO_TOKEN_BRANCH,
+    "reads a token from the environment": SDK_PY_READS_A_TOKEN_FROM_THE_ENVIRONMENT,
+    "passes its own auth argument": SDK_PY_PASSES_ITS_OWN_AUTH_ARGUMENT,
+    "builds a session with trust_env off": SDK_PY_BUILDS_A_SESSION_WITH_TRUST_ENV_OFF,
+    "takes its token from a config file": SDK_PY_TAKES_ITS_TOKEN_FROM_A_CONFIG_FILE,
+}
+
+
+def test_an_unverified_credential_and_the_rate_limit_remedy_agree_with_each_other(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1170 MAJOR, on the two surfaces one customer reads in one run.
+
+    `sdk-credential-unverified` says "treat this run as unauthenticated"; the
+    rate-limit remedy printed minutes later used to open with "tan already
+    handed this download the credential in $TAN_GITHUB_TOKEN", because
+    `authenticated_as` was passed unconditionally whenever a credential was
+    staged. Both go out on the same envelope, so a reader got two verdicts on
+    one download and no way to tell which held.
+    """
+    seen: dict = {}
+    monkeypatch.setenv("TAN_GITHUB_TOKEN", GOOD_TOKEN)
+    _write_sdk_py(tmp_path, SDK_PY_PASSES_ITS_OWN_AUTH_ARGUMENT)
+    log, _runner = _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
+
+    codes = [code for code, _ in log.warnings]
+    assert codes == ["sdk-credential-unverified", "toolchain-install"]
+    # The credential is still staged and still passed -- withholding it would
+    # GUARANTEE the anonymous quota. Only the assurance is withdrawn.
+    assert GOOD_TOKEN in seen["netrc_text"]
+
+    failure = next(msg for code, msg in log.warnings if code == "toolchain-install")
+    assert "cannot tell you which of GitHub's two quotas" in failure
+    assert "sdk-credential-unverified" in failure
+    assert "already handed this download the credential" not in failure
+
+
+def test_a_verified_credential_still_gets_the_authenticated_rate_limit_remedy(
+    tmp_path, monkeypatch
+):
+    """The other side of the branch above, so `verified` cannot rot into a
+    constant. Same run, same token, a `sdk.py` in the shape the netrc route was
+    reasoned about: no warning, and the remedy is the authenticated one."""
+    seen: dict = {}
+    monkeypatch.setenv("TAN_GITHUB_TOKEN", GOOD_TOKEN)
+    _write_sdk_py(tmp_path, SDK_PY_ASSUMPTIONS_HOLD)
+    log, _runner = _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
+
+    assert [code for code, _ in log.warnings] == ["toolchain-install"]
+    failure = next(msg for code, msg in log.warnings if code == "toolchain-install")
+    assert "already handed this download the credential" in failure
+    assert "cannot tell you which of GitHub's two quotas" not in failure
+
+
+def test_the_fixtures_disagree_with_each_other_under_the_real_predicate():
     """Non-vacuity. Every case above would still pass if `_write_sdk_py` wrote
-    to a path nothing reads and the tripwire never ran at all -- three of them
+    to a path nothing reads and the tripwire never ran at all -- some of them
     assert silence. This one drives `west_sdk_netrc_assumptions_hold` on the
-    same three fixtures directly, so a fixture that stopped DIFFERING (a
-    `.replace()` whose anchor drifted and silently no-opped) fails here rather
-    than turning the cases above into a test of nothing."""
+    fixtures directly, so a fixture that stopped DIFFERING (a `.replace()`
+    whose anchor drifted and silently no-opped) fails here rather than turning
+    the cases above into a test of nothing."""
     assert tp.west_sdk_netrc_assumptions_hold(SDK_PY_ASSUMPTIONS_HOLD)
-    assert not tp.west_sdk_netrc_assumptions_hold(SDK_PY_HEADER_ON_THE_NO_TOKEN_BRANCH)
-    assert not tp.west_sdk_netrc_assumptions_hold(SDK_PY_READS_A_TOKEN_FROM_THE_ENVIRONMENT)
-    assert SDK_PY_HEADER_ON_THE_NO_TOKEN_BRANCH != SDK_PY_ASSUMPTIONS_HOLD
-    assert SDK_PY_READS_A_TOKEN_FROM_THE_ENVIRONMENT != SDK_PY_ASSUMPTIONS_HOLD
+    for name, fixture in DRIFTED_SDK_PY_FIXTURES.items():
+        assert fixture != SDK_PY_ASSUMPTIONS_HOLD, name
+        assert not tp.west_sdk_netrc_assumptions_hold(fixture), name
+
+
+def test_each_fact_can_trip_on_its_own_rather_than_only_in_a_bundle():
+    """tan-cli#1170 review MINOR. `SDK_PY_HEADER_ON_THE_NO_TOKEN_BRANCH` reads
+    `os.environ` to build its header, so it breaks the empty-dict fact AND the
+    environment-allowlist fact at once. With only that fixture and the
+    token-variable one, a predicate that had dropped either check outright
+    would still have passed every case above -- the two facts were never
+    exercised independently.
+
+    Each assertion here isolates ONE fact by showing the other three still hold
+    of the fixture that trips it. `os.environ` is counted rather than parsed:
+    the base fixture contains exactly the two allowlisted reads, so a count of
+    two IS "no environment read was added".
+    """
+    # Fact 1 alone -- the flag the token arrives on is gone, everything else
+    # is untouched.
+    fixture = SDK_PY_TAKES_ITS_TOKEN_FROM_A_CONFIG_FILE
+    assert tp.WEST_SDK_TOKEN_FLAG_ATTR not in fixture
+    assert tp.WEST_SDK_NO_TOKEN_HEADERS in fixture
+    assert tp.WEST_SDK_TRUST_ENV not in fixture and fixture.count("os.environ") == 2
+
+    # Fact 2 alone -- a header from a compiled-in constant, no `os.environ`.
+    fixture = SDK_PY_STATIC_HEADER_ON_THE_NO_TOKEN_BRANCH
+    assert tp.WEST_SDK_TOKEN_FLAG_ATTR in fixture
+    assert tp.WEST_SDK_NO_TOKEN_HEADERS not in fixture
+    assert tp.WEST_SDK_TRUST_ENV not in fixture and fixture.count("os.environ") == 2
+
+    # Fact 3 alone, twice -- the two shapes measured to suppress the netrc.
+    for fixture in (
+        SDK_PY_PASSES_ITS_OWN_AUTH_ARGUMENT,
+        SDK_PY_BUILDS_A_SESSION_WITH_TRUST_ENV_OFF,
+    ):
+        assert tp.WEST_SDK_TOKEN_FLAG_ATTR in fixture
+        assert tp.WEST_SDK_NO_TOKEN_HEADERS in fixture
+        assert fixture.count("os.environ") == 2
+
+    # Fact 4 alone -- an added environment read, nothing else moved.
+    fixture = SDK_PY_READS_A_TOKEN_FROM_THE_ENVIRONMENT
+    assert tp.WEST_SDK_TOKEN_FLAG_ATTR in fixture
+    assert tp.WEST_SDK_NO_TOKEN_HEADERS in fixture
+    assert tp.WEST_SDK_TRUST_ENV not in fixture and fixture.count("os.environ") == 3
+
+
+def test_a_header_on_the_no_token_branch_is_not_by_itself_a_suppressed_netrc():
+    """The measurement tan-cli#1154 corrected, kept as an executable statement
+    of what fact 3 is FOR. A `requests` netrc match overwrites an
+    `Authorization` passed through `headers=`, so the header fixtures are
+    tan-inert vectors only by association -- the two shapes that really stop
+    tan's credential reaching the wire are `auth=` and `trust_env`, and those
+    are checked by name rather than inferred from a header.
+    """
+    for fixture in (
+        SDK_PY_PASSES_ITS_OWN_AUTH_ARGUMENT,
+        SDK_PY_BUILDS_A_SESSION_WITH_TRUST_ENV_OFF,
+    ):
+        # Both would sail through a check that only watched `req_headers`.
+        assert tp.WEST_SDK_NO_TOKEN_HEADERS in fixture
+        assert not tp.west_sdk_netrc_assumptions_hold(fixture)
+
+
+def test_the_tripwire_records_what_it_cannot_see_rather_than_implying_full_cover():
+    """The bound on the assurance, asserted so it cannot rot into a claim the
+    predicate does not support (tan-cli#1170). A west that keeps this shape but
+    stops using `requests` is invisible to a single-file substring check, and a
+    PARTIAL move off `--personal-access-token` -- one that leaves the attribute
+    mentioned anywhere -- passes fact 1."""
+    half_moved = SDK_PY_ASSUMPTIONS_HOLD.replace(
+        "        if args.personal_access_token:", "        if self._config_token():"
+    )
+    assert "args.personal_access_token" in half_moved  # still on the header line
+    assert tp.west_sdk_netrc_assumptions_hold(half_moved)
+
+    urllib_client = SDK_PY_ASSUMPTIONS_HOLD.replace(
+        "        releases = self.fetch_releases(args.api_url, req_headers)",
+        "        releases = urllib.request.urlopen(args.api_url).read()",
+    )
+    assert urllib_client != SDK_PY_ASSUMPTIONS_HOLD
+    assert tp.west_sdk_netrc_assumptions_hold(urllib_client)
+
+    # Pin the PARAGRAPH, not just its heading: deleting the two drifts while
+    # keeping the words "STILL UNCOVERED" would leave the reader a heading over
+    # nothing, which is the failure this assertion exists to catch.
+    doc = tp.west_sdk_netrc_assumptions_hold.__doc__ or ""
+    _, _, uncovered = doc.partition("STILL UNCOVERED")
+    assert uncovered.strip(), "the heading is there with no paragraph under it"
+    for named in ("urllib", "PARTIAL", "not evidence"):
+        assert named in uncovered, named

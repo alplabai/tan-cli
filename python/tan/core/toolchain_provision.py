@@ -574,15 +574,26 @@ SDK_TOKEN_ENV_VARS: tuple[str, ...] = ("TAN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_T
 #: "skips netrc entirely for a request that already carries an
 #: `Authorization` header". Measured against 2.34.2 -- a real `http.server`, a
 #: real netrc, the header read back off the wire -- it does not.
-#: `Session.prepare_request` gates netrc on `not auth and not self.auth`, the
-#: `auth=` ARGUMENT, not on the headers; `PreparedRequest.prepare` runs
-#: `prepare_auth` AFTER `prepare_headers`; so a netrc match OVERWRITES an
-#: `Authorization` header passed through `headers=`, which is exactly how west
-#: passes `req_headers`. A future west that sets a header on that branch
-#: therefore does not make TAN's credential inert -- it makes WEST'S inert,
-#: under tan's, silently. Either way the user is authenticated as something
-#: other than what they were told, and either way the answer is the same: stop
-#: claiming authentication and say so.
+#: `Session.prepare_request` gates netrc on `self.trust_env and not auth and
+#: not self.auth` -- the `auth=` ARGUMENT and the session's `trust_env`, never
+#: the headers; `PreparedRequest.prepare` runs `prepare_auth` AFTER
+#: `prepare_headers`; so a netrc match OVERWRITES an `Authorization` header
+#: passed through `headers=`, which is exactly how west passes `req_headers`.
+#: A future west that sets a header on that branch therefore does not make
+#: TAN's credential inert -- it makes WEST'S inert, under tan's, silently.
+#: Either way the user is authenticated as something other than what they were
+#: told, and either way the answer is the same: stop claiming authentication
+#: and say so.
+#:
+#: The corollary matters more than the correction, because it says what a
+#: SUPPRESSED netrc actually looks like: the only two shapes that stop tan's
+#: credential reaching the wire are the `auth=` argument (netrc skipped,
+#: west's own credential goes out instead) and `trust_env=False` (measured:
+#: `Authorization: None`, nothing goes out at all). Headers are not one of
+#: them. Anything downstream that tells a reader otherwise is wrong -- see
+#: [`_AUTHENTICATED_QUOTA_NOTE`], which said exactly that until tan-cli#1170,
+#: two rounds after this note was corrected: a docstring fix that leaves the
+#: customer-facing copy of the same claim standing has fixed nothing.
 #:
 #: There is no CI gate for this: `requests` is not a tan dependency
 #: (`pyproject.toml` -- `import requests` is a `ModuleNotFoundError` in a
@@ -592,12 +603,17 @@ SDK_TOKEN_ENV_VARS: tuple[str, ...] = ("TAN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_T
 #: `bootstrap_cmd._west_sdk_netrc_drift` against the `zephyr_base` the
 #: bootstrap has already resolved: it runs where the artifact exists and
 #: nowhere else, and downgrades the "Authenticating ..." line to a
-#: `bootstrap.sdk-credential-unverified` warning when it trips.
+#: `bootstrap.sdk-credential-unverified` warning when it trips. It watches for
+#: BOTH suppressing shapes named above and for the flag the token arrives on
+#: -- read its own docstring for the bound on that, which is real: a west that
+#: stops using `requests` at all satisfies every fact it checks.
 #: [`rate_limit_note`]'s authenticated branch remains the second half of this
-#: -- it names an inert transport by name when a credentialled download is
-#: rate-limited anyway, which is when one becomes observable. Re-verify with
+#: -- it is the moment a suppressed transport becomes observable, when a
+#: credentialled download is rate-limited anyway. Re-verify with
 #: `grep -n "req_headers" <zephyr>/scripts/west_commands/sdk.py` and
-#: `python -c "import inspect,requests;print(inspect.getsource(requests.utils.get_netrc_auth))"`.
+#: `python -c "import inspect,requests as r; print(inspect.getsource(
+#: r.sessions.Session.prepare_request))"` -- the gate itself, not just
+#: `get_netrc_auth`, since the gate is where `auth=` and `trust_env` bite.
 NETRC_ENV_VAR = "NETRC"
 
 #: The source line `west sdk install`'s NO-TOKEN branch leaves behind -- the
@@ -605,15 +621,63 @@ NETRC_ENV_VAR = "NETRC"
 #: [`west_sdk_netrc_assumptions_hold`].
 WEST_SDK_NO_TOKEN_HEADERS = "req_headers = {}"
 
+#: The attribute that `else:` is the arm of. Measured present in the real file
+#: at Zephyr v4.4.1 `sdk.py:473`. Two jobs: it is what makes
+#: [`WEST_SDK_NO_TOKEN_HEADERS`] mean anything (a `req_headers = {}` that is no
+#: longer that branch proves nothing about the no-token path), and its
+#: DISAPPEARANCE is the "west grew a credential of its own" drift -- a west
+#: that reads a token from a config file rather than this flag can leave every
+#: other fact below satisfied while tan's netrc is no longer what authenticates
+#: the download.
+WEST_SDK_TOKEN_FLAG_ATTR = "args.personal_access_token"
+
 #: Every environment variable `scripts/west_commands/sdk.py` is known to read
 #: (`sdk.py:231` and `:573` at Zephyr v4.4.1). No credential among them, which
 #: is the entire reason tan's token has to travel by netrc rather than by an
 #: environment variable west would read directly.
 WEST_SDK_KNOWN_ENV_READS = frozenset({"ZEPHYR_BASE", "ZEPHYR_SDK_INSTALL_DIR"})
 
+#: What [`west_sdk_netrc_assumptions_hold`]'s environment-allowlist fact
+#: actually sees, and what it does not. It matches TEXT, not reads: measured
+#: against a copy of the real v4.4.1 file it TRIPS on a bare COMMENT
+#: mentioning `os.environ.get("ZEPHYR_TOOLCHAIN_VARIANT")`, and it stays
+#: SILENT on `from os import environ; environ.get("WEST_GITHUB_TOKEN")` and on
+#: `os.environ.get(_TOKEN_VAR)` -- an indirect name it cannot resolve. The
+#: substring facts have the same two-sided character: `req_headers = dict()`
+#: and `req_headers: dict = {}` both TRIP [`WEST_SDK_NO_TOKEN_HEADERS`]
+#: despite changing nothing that matters. Widening the regex to close the
+#: silences would cost more false trips, which is the trade this file has
+#: already made in the other direction -- but a reader must not take silence
+#: for proof.
 _WEST_SDK_ENV_READ = re.compile(
     r"""os\.(?:environ(?:\.get)?|getenv)\s*[(\[]\s*["']([A-Za-z_][A-Za-z0-9_]*)"""
 )
+
+#: An `auth=` keyword argument anywhere in the file. THE shape that makes
+#: `requests` skip netrc outright -- `Session.prepare_request` gates the netrc
+#: lookup on `self.trust_env and not auth and not self.auth`, re-measured on
+#: 2.34.2 -- so a west that grows one takes tan's credential out of the request
+#: entirely and puts its own in. Word-bounded, so `oauth=` is not a match;
+#: measured ABSENT from the real v4.4.1 file, whose three `requests.get` calls
+#: pass only `url`, `headers=`, `params=` and `stream=` (`sdk.py:266`, `:332`,
+#: `:340`).
+#:
+#: Two-sided in the same way [`_WEST_SDK_ENV_READ`] is, and recorded here for
+#: the same reason: it matches TEXT, so a comment, a help string or an
+#: unrelated helper's `auth=None` default TRIPS it, while a call that reaches
+#: the same place indirectly (`**kwargs`, a wrapper that adds the argument
+#: itself) is SILENT. Fail-toward-telling is the chosen direction, but the
+#: silence is real.
+_WEST_SDK_REQUESTS_AUTH_ARG = re.compile(r"\bauth\s*=")
+
+#: The other half of that gate. A `Session(trust_env=False)` was measured to
+#: send `Authorization: None` -- no netrc read at all, and unlike the `auth=`
+#: case nothing of west's replacing it, so the download simply goes out on the
+#: anonymous quota. Matched as a bare substring rather than a call shape, so
+#: `s.trust_env = False` on a session built elsewhere trips it too. Measured
+#: absent from the real v4.4.1 file, which constructs no `Session` and calls
+#: the module-level `requests.get`.
+WEST_SDK_TRUST_ENV = "trust_env"
 
 
 def west_sdk_netrc_assumptions_hold(source: str) -> bool:
@@ -623,26 +687,49 @@ def west_sdk_netrc_assumptions_hold(source: str) -> bool:
 
     **A TRIPWIRE, not a parser** (tan-cli#1154). It answers one question --
     "is this the shape the netrc route was reasoned about?" -- and deliberately
-    does not model west's control flow. Two substring-level facts, both of
-    which a rewrite of that branch moves:
+    does not model west's control flow. Four substring-level facts:
 
-    1. [`WEST_SDK_NO_TOKEN_HEADERS`] is still present, i.e. the no-token branch
-       still sends an empty header dict.
-    2. Every environment variable the file reads is in
-       [`WEST_SDK_KNOWN_ENV_READS`], i.e. west still takes a credential from
-       `--personal-access-token` and from nothing tan could have set instead.
+    1. [`WEST_SDK_TOKEN_FLAG_ATTR`] is still present -- west's own token still
+       arrives on `--personal-access-token`, not from a config file.
+    2. [`WEST_SDK_NO_TOKEN_HEADERS`] is still present -- that flag's `else:`
+       arm still sends an empty header dict.
+    3. Nothing passes `requests` an [`_WEST_SDK_REQUESTS_AUTH_ARG`] and nothing
+       mentions [`WEST_SDK_TRUST_ENV`] -- the only two shapes MEASURED to stop
+       tan's netrc reaching the wire.
+    4. Every environment variable the file reads is in
+       [`WEST_SDK_KNOWN_ENV_READS`]. (Nothing here checks that the flag still
+       feeds a header; fact 1 is the whole of what stands behind it.)
 
-    **It fails toward telling the user.** Anything the regex finds that is not
-    on the allowlist trips it, including a perfectly innocent new
-    `os.environ.get("ZEPHYR_TOOLCHAIN_VARIANT")`. That is the deliberate
-    direction: a false trip costs one warning and an issue report, while a
-    missed one costs a user who is told they are authenticated and is not, and
-    an inert credential is worse than an absent one precisely because it
-    removes the symptom that would send them to find a token.
+    **Fact 3 is why 1, 2 and 4 are not enough.** An `Authorization` header on
+    the no-token branch does NOT make tan's credential inert -- the netrc match
+    OVERWRITES it (see [`NETRC_ENV_VAR`]) -- so a check watching only for that
+    would guard none of the vectors this predicate exists for.
+
+    **It fails toward telling the user, but only for shapes its substrings and
+    its regex see, and both directions are real** -- the measured trips and the
+    measured silences are recorded on [`_WEST_SDK_ENV_READ`]. The false trip is
+    the direction to prefer: it costs one warning and an issue report, while a
+    missed one costs a user who is told they are authenticated and is not.
+
+    **STILL UNCOVERED, said plainly rather than left to be inferred.** Two
+    drifts satisfy all four facts: a west that stops using `requests`
+    altogether (`urllib`, `httpx`), or moves the GitHub call into a module this
+    file merely imports -- `$NETRC` then means nothing and no single-file
+    substring check can see it -- and a PARTIAL move off
+    `--personal-access-token`, since fact 1 is a substring and a rewrite
+    leaving `args.personal_access_token` in a deprecation shim or a help string
+    still passes it (measured: replacing BOTH of `sdk.py:473`/`:475` trips it,
+    replacing only `:473` does not). The absence of a
+    `bootstrap.sdk-credential-unverified` warning is not evidence that neither
+    happened.
     """
-    return WEST_SDK_NO_TOKEN_HEADERS in source and not (
-        set(_WEST_SDK_ENV_READ.findall(source)) - WEST_SDK_KNOWN_ENV_READS
-    )
+    if WEST_SDK_TOKEN_FLAG_ATTR not in source:
+        return False
+    if WEST_SDK_NO_TOKEN_HEADERS not in source:
+        return False
+    if WEST_SDK_TRUST_ENV in source or _WEST_SDK_REQUESTS_AUTH_ARG.search(source):
+        return False
+    return not (set(_WEST_SDK_ENV_READ.findall(source)) - WEST_SDK_KNOWN_ENV_READS)
 
 
 def west_sdk_netrc_drift_message(var: str, version: str) -> str:
@@ -882,19 +969,55 @@ _RATE_LIMIT_MARKER = "rate limit"
 
 
 #: The AUTHENTICATED-quota branch of [`rate_limit_note`]. `{source}` is the
-#: variable name, never the value. The closing sentence is deliberate: it is
-#: the only live symptom an INERT netrc transport would ever produce (see
-#: [`NETRC_ENV_VAR`]'s residual-risk note), and this is exactly the moment it
-#: would show.
+#: variable name, never the value. The closing sentence is deliberate: an
+#: authenticated download that is rate-limited anyway is the only live symptom
+#: a SUPPRESSED netrc would ever produce (see [`NETRC_ENV_VAR`]), and this is
+#: exactly the moment it would show.
+#:
+#: **It named the wrong shape until tan-cli#1170, and this is the only
+#: USER-FACING string that carried the claim.** It used to close with "a
+#: `west` that sets its own Authorization header would silently bypass it".
+#: Measured on `requests` 2.34.2, a header does not bypass anything -- the
+#: netrc match OVERWRITES it, so tan's credential is the one that goes out. A
+#: customer following that sentence would have filed a west bug about a header
+#: that demonstrably suppresses nothing, and gone on believing the netrc route
+#: was the suspect. The two shapes that really do leave it unread are the
+#: `auth=` argument and `trust_env=False`, so those are what it names now, and
+#: what [`west_sdk_netrc_assumptions_hold`] watches the file for.
 _AUTHENTICATED_QUOTA_NOTE = (
     "That is GitHub's AUTHENTICATED quota, not the anonymous per-IP one: tan "
     "already handed this download the credential in ${source}. Check that the token "
     "is valid, unexpired and not already exhausted by other traffic, or wait for the "
     "quota window to reset and re-run `tan bootstrap`. If you are confident the token "
     "is good and this persists, the credential may not be reaching `west sdk install` "
-    "at all -- tan hands it over through a netrc, and a `west` that sets its own "
-    "Authorization header would silently bypass it; please report it with your "
+    "at all -- tan hands it over through a netrc, which a `west` that passes its HTTP "
+    "client its own credential argument, or that builds a session with the "
+    "environment switched off, would leave unread; please report it with your "
     "`west --version` (tan-cli#1143)."
+)
+
+#: The branch for "tan staged and passed a credential, but this run had
+#: already withdrawn the claim that it reaches the download" -- the state
+#: `bootstrap.sdk-credential-unverified` puts the run into. `{source}` is the
+#: variable name, never the value.
+#:
+#: It exists so the two surfaces cannot contradict each other inside one run
+#: (tan-cli#1170). The thing it must NOT do is what
+#: [`_AUTHENTICATED_QUOTA_NOTE`] does -- open with "that is GitHub's
+#: AUTHENTICATED quota". That sentence is an INFERENCE from "tan handed over a
+#: credential", and the `sdk-credential-unverified` warning is precisely tan
+#: saying it can no longer draw it. So this branch names both possibilities and
+#: hands the reader back to the remedies already printed above, rather than
+#: repeating them or picking a quota it cannot see.
+_UNVERIFIED_QUOTA_NOTE = (
+    "tan cannot tell you which of GitHub's two quotas that is. It staged the "
+    "credential in ${source} and passed it to `west sdk install`, but it also warned "
+    "above (`sdk-credential-unverified`) that this workspace's `west` no longer "
+    "matches the shape that route was measured against. So this is either the "
+    "AUTHENTICATED quota -- check the token is valid, unexpired and not already "
+    "exhausted by other traffic, then wait for the window to reset and re-run "
+    "`tan bootstrap` -- or the anonymous per-IP one, shared with everyone behind the "
+    "same egress address. The two remedies in that warning cover both cases."
 )
 
 #: The branch for "the environment HELD a credential and this download went
@@ -923,7 +1046,11 @@ _ANONYMOUS_QUOTA_NOTE = (
 
 
 def rate_limit_note(
-    detail: str, *, authenticated_as: str | None, credential_seen: str | None = None
+    detail: str,
+    *,
+    authenticated_as: str | None,
+    credential_seen: str | None = None,
+    verified: bool = True,
 ) -> str | None:
     """The tan-side remedy to append to a rate-limited `west sdk install`
     failure, or `None` when `detail` says nothing about a quota.
@@ -936,16 +1063,28 @@ def rate_limit_note(
     `tan bootstrap` does not accept. Naming tan's own surface is the whole
     point of the note.
 
-    THREE states, because there are three genuinely different situations and
+    FOUR states, because there are four genuinely different situations and
     collapsing any two of them hands somebody advice that cannot help:
     a credential that reached the download
-    ([`_AUTHENTICATED_QUOTA_NOTE`]), one that was present but unusable
-    ([`_UNUSED_CREDENTIAL_NOTE`]), and none at all
+    ([`_AUTHENTICATED_QUOTA_NOTE`]), one that was staged and passed but whose
+    transport tan could not vouch for ([`_UNVERIFIED_QUOTA_NOTE`]), one that
+    was present but unusable ([`_UNUSED_CREDENTIAL_NOTE`]), and none at all
     ([`_ANONYMOUS_QUOTA_NOTE`]).
+
+    `verified` is the fourth, added in tan-cli#1170 because without it this
+    function contradicted a warning printed minutes earlier in the same run:
+    `bootstrap.sdk-credential-unverified` says "treat this run as
+    unauthenticated", and the authenticated branch then said "tan already
+    handed this download the credential in ${source}". Two wire surfaces
+    asserting opposite facts about one download is the shape
+    `bootstrap_cmd._sdk_credential`'s own docstring calls worse than the
+    silence the warning replaced.
     """
     if _RATE_LIMIT_MARKER not in detail.lower():
         return None
     if authenticated_as is not None:
+        if not verified:
+            return _UNVERIFIED_QUOTA_NOTE.format(source=authenticated_as)
         return _AUTHENTICATED_QUOTA_NOTE.format(source=authenticated_as)
     if credential_seen is not None:
         return _UNUSED_CREDENTIAL_NOTE.format(source=credential_seen)
