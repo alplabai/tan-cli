@@ -1183,3 +1183,178 @@ def test_a_variable_behind_the_one_that_won_is_not_reported_at_all(tmp_path, mon
 
     assert [code for code, _ in log.warnings] == ["toolchain-install"]
     assert GOOD_TOKEN in seen["netrc_text"]
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1154: the runtime tripwire under the netrc route
+# ---------------------------------------------------------------------------
+
+#: `scripts/west_commands/sdk.py` reduced to the two facts tan's netrc route
+#: depends on, in the shape they have upstream. Written by these tests rather
+#: than read out of a real checkout ON PURPOSE: `ci.yml` checks out alp-sdk and
+#: never zephyr, so a test that needed one would SKIP in CI and on every
+#: developer box -- a test that cannot fail, which is the whole reason
+#: tan-cli#1154 built a runtime check instead of a CI gate. Kept faithful to
+#: Zephyr v4.4.1 `sdk.py:231`/`:473-478`/`:573` (unchanged at v4.4.2 and on
+#: `zephyrproject/main` @8a4e180b93e) so the fixture and the artifact drift
+#: together or not at all.
+SDK_PY_ASSUMPTIONS_HOLD = '''\
+import os
+
+
+class Sdk(WestCommand):
+    def install_sdk(self, args, user_args):
+        zephyr_base_env = os.environ.get("ZEPHYR_BASE")
+        if args.personal_access_token:
+            req_headers = {
+                "Authorization": f"Bearer {args.personal_access_token}",
+            }
+        else:
+            req_headers = {}
+
+        releases = self.fetch_releases(args.api_url, req_headers)
+        zephyr_sdk_install_dir = os.environ.get("ZEPHYR_SDK_INSTALL_DIR", None)
+'''
+
+#: The first drift: the no-token branch stops going out bare. Whether that
+#: makes TAN's credential inert or west's own (measured on `requests` 2.34.2 --
+#: a netrc match OVERWRITES a header passed through `headers=`, so it is
+#: west's), the user ends up authenticated as something other than what they
+#: were told, which is the same defect from where they stand.
+SDK_PY_HEADER_ON_THE_NO_TOKEN_BRANCH = SDK_PY_ASSUMPTIONS_HOLD.replace(
+    "            req_headers = {}",
+    '            req_headers = {"Authorization": f"Bearer {os.environ[\'WEST_SDK_TOKEN\']}"}',
+)
+
+#: The second drift: west grows a credential environment variable of its own.
+#: Nothing is inert here -- but tan is now staging a netrc to solve a problem
+#: west solves better, and the run should say so rather than carry on.
+SDK_PY_READS_A_TOKEN_FROM_THE_ENVIRONMENT = SDK_PY_ASSUMPTIONS_HOLD.replace(
+    '        zephyr_base_env = os.environ.get("ZEPHYR_BASE")',
+    '        zephyr_base_env = os.environ.get("ZEPHYR_BASE")\n'
+    '        token = os.environ.get("WEST_SDK_GITHUB_TOKEN")',
+)
+
+
+def _write_sdk_py(tmp_path: Path, source: str) -> Path:
+    """Plant a `scripts/west_commands/sdk.py` at the `$ZEPHYR_BASE`
+    `fallback_facts` declares -- `${WORKSPACE_DIR}/zephyr`, the same value
+    `_data` renders into the envelope's `zephyrBase`."""
+    west_commands = tmp_path / "ws" / "zephyr" / "scripts" / "west_commands"
+    west_commands.mkdir(parents=True, exist_ok=True)
+    path = west_commands / "sdk.py"
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
+def _stage_credential(tmp_path, monkeypatch, capsys):
+    """`_sdk_credential` driven directly, in TEXT mode so the
+    `Authenticating ...` progress line is observable -- `Log.line` prints
+    nothing at all under `json_mode`, which is exactly the property that made
+    the pre-#1148 downgrade invisible.
+
+    Returns `(credential, warnings, stderr)`. The staged netrc is discarded
+    before returning: these tests never spawn `west`, so nothing else would.
+    """
+    monkeypatch.setenv("TAN_GITHUB_TOKEN", GOOD_TOKEN)
+    for var in ("GH_TOKEN", "GITHUB_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    root = tmp_path / "toolchains"
+    root.mkdir(parents=True, exist_ok=True)
+    log = bootstrap_cmd.Log(json_mode=False)
+    credential = bootstrap_cmd._sdk_credential(
+        _workspace(tmp_path), log, bootstrap_cmd.Runner(json=False), root, "1.0.1"
+    )
+    if credential is not None:
+        bootstrap_cmd._discard_sdk_credential(credential.scratch_dir)
+    return credential, log.warnings, capsys.readouterr().err
+
+
+def test_the_west_sdk_tripwire_is_silent_when_the_assumptions_still_hold(
+    tmp_path, monkeypatch, capsys
+):
+    """Direction one. A `sdk.py` in the shape the netrc route was reasoned
+    about costs the run NOTHING: no warning, and the authenticated claim is
+    printed exactly as it was before tan-cli#1154."""
+    _write_sdk_py(tmp_path, SDK_PY_ASSUMPTIONS_HOLD)
+    credential, warnings, err = _stage_credential(tmp_path, monkeypatch, capsys)
+
+    assert warnings == []
+    assert "Authenticating the Zephyr SDK download with the token in $TAN_GITHUB_TOKEN" in err
+    assert credential is not None and tp.NETRC_ENV_VAR in credential.extra_env
+
+
+def test_a_west_that_sets_a_header_on_its_no_token_branch_stops_tan_claiming_authentication(
+    tmp_path, monkeypatch, capsys
+):
+    """Direction two, drift one. The claim is withdrawn and replaced by
+    `bootstrap.sdk-credential-unverified`.
+
+    The credential is still staged and still passed -- it may well still
+    work, and dropping it would GUARANTEE the anonymous quota. What stops is
+    the assurance: an inert credential is worse than an absent one precisely
+    because the user is told they are authenticated and so never goes looking
+    for a token.
+    """
+    _write_sdk_py(tmp_path, SDK_PY_HEADER_ON_THE_NO_TOKEN_BRANCH)
+    credential, warnings, err = _stage_credential(tmp_path, monkeypatch, capsys)
+
+    assert [code for code, _ in warnings] == ["sdk-credential-unverified"]
+    assert "Authenticating the Zephyr SDK download" not in err
+    assert credential is not None and tp.NETRC_ENV_VAR in credential.extra_env
+
+    message = warnings[0][1]
+    # It names what the reader should DO ...
+    assert "$TAN_GITHUB_TOKEN" in message
+    assert "treat this run as unauthenticated" in message
+    assert "west sdk install --version 1.0.1 -t arm-zephyr-eabi" in message
+    assert "https://github.com/alplabai/tan-cli/issues" in message
+    # ... and never what west does internally.
+    for internals in ("req_headers", "os.environ", "personal_access_token", "Authorization"):
+        assert internals not in message
+    # And never the token itself, on any surface.
+    assert GOOD_TOKEN not in message and GOOD_TOKEN not in err
+
+
+def test_a_west_that_reads_a_token_from_the_environment_trips_the_same_tripwire(
+    tmp_path, monkeypatch, capsys
+):
+    """Direction two, drift two -- the half a `req_headers` check alone would
+    miss. West growing its own credential variable is not an inert netrc, but
+    it does mean tan is solving a solved problem behind the user's back."""
+    _write_sdk_py(tmp_path, SDK_PY_READS_A_TOKEN_FROM_THE_ENVIRONMENT)
+    _credential, warnings, err = _stage_credential(tmp_path, monkeypatch, capsys)
+
+    assert [code for code, _ in warnings] == ["sdk-credential-unverified"]
+    assert "Authenticating the Zephyr SDK download" not in err
+
+
+def test_the_west_sdk_tripwire_says_nothing_when_there_is_no_sdk_py_to_read(
+    tmp_path, monkeypatch, capsys
+):
+    """"Could not look" is not evidence the assumption broke. A workspace with
+    no zephyr checked out yet -- `--no-west`, a first run, a `$ZEPHYR_BASE`
+    whose `west_commands` moved -- keeps the pre-#1154 behaviour exactly.
+
+    Warning here instead would fire on runs where nothing is wrong and train
+    the reader to skip the code on the one run where something is.
+    """
+    assert not (tmp_path / "ws" / "zephyr").exists()
+    _credential, warnings, err = _stage_credential(tmp_path, monkeypatch, capsys)
+
+    assert warnings == []
+    assert "Authenticating the Zephyr SDK download with the token in $TAN_GITHUB_TOKEN" in err
+
+
+def test_the_two_fixtures_disagree_with_each_other_under_the_real_predicate():
+    """Non-vacuity. Every case above would still pass if `_write_sdk_py` wrote
+    to a path nothing reads and the tripwire never ran at all -- three of them
+    assert silence. This one drives `west_sdk_netrc_assumptions_hold` on the
+    same three fixtures directly, so a fixture that stopped DIFFERING (a
+    `.replace()` whose anchor drifted and silently no-opped) fails here rather
+    than turning the cases above into a test of nothing."""
+    assert tp.west_sdk_netrc_assumptions_hold(SDK_PY_ASSUMPTIONS_HOLD)
+    assert not tp.west_sdk_netrc_assumptions_hold(SDK_PY_HEADER_ON_THE_NO_TOKEN_BRANCH)
+    assert not tp.west_sdk_netrc_assumptions_hold(SDK_PY_READS_A_TOKEN_FROM_THE_ENVIRONMENT)
+    assert SDK_PY_HEADER_ON_THE_NO_TOKEN_BRANCH != SDK_PY_ASSUMPTIONS_HOLD
+    assert SDK_PY_READS_A_TOKEN_FROM_THE_ENVIRONMENT != SDK_PY_ASSUMPTIONS_HOLD

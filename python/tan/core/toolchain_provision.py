@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -559,33 +560,112 @@ SDK_TOKEN_ENV_VARS: tuple[str, ...] = ("TAN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_T
 #: inside a 0700 directory under the toolchain root, deleted in a `finally`
 #: and swept on the next run if a crash skipped that.
 #:
-#: **RESIDUAL RISK, recorded because tan pins neither west nor requests.**
-#: Two external behaviours make this work and neither is under a version
-#: constraint tan controls: (1) `requests.utils.get_netrc_auth` reading
-#: `$NETRC` (measured on 2.34.2; present since 2.15), and (2) west's no-token
-#: branch leaving `req_headers` EMPTY, since `requests` skips netrc entirely
-#: for a request that already carries an `Authorization` header. If a future
-#: west sets a header there, this goes INERT -- the download silently falls
-#: back to the anonymous quota while the user believes they are
-#: authenticated. There is no gate for it here: `requests` is not a tan
-#: dependency (`pyproject.toml` -- `import requests` is a `ModuleNotFoundError`
-#: in a CI-shaped venv) and `ci.yml` checks out alp-sdk but never zephyr, so a
+#: **RESIDUAL RISK, recorded because tan pins neither west nor requests --
+#: and CHECKED AT RUNTIME since tan-cli#1154.** Two external behaviours make
+#: this work and neither is under a version constraint tan controls: (1)
+#: `requests.utils.get_netrc_auth` reading `$NETRC` (measured on 2.34.2, which
+#: is also the current release on PyPI; present since 2.15), and (2) west's
+#: no-token branch leaving `req_headers` EMPTY (measured on Zephyr v4.4.1
+#: `sdk.py:478`, unchanged at v4.4.2 `:478` and on `zephyrproject/main`
+#: @8a4e180b93e `:479`).
+#:
+#: **(2)'s MECHANISM was stated wrongly here and the correction is recorded
+#: rather than quietly swapped in.** An earlier revision said `requests`
+#: "skips netrc entirely for a request that already carries an
+#: `Authorization` header". Measured against 2.34.2 -- a real `http.server`, a
+#: real netrc, the header read back off the wire -- it does not.
+#: `Session.prepare_request` gates netrc on `not auth and not self.auth`, the
+#: `auth=` ARGUMENT, not on the headers; `PreparedRequest.prepare` runs
+#: `prepare_auth` AFTER `prepare_headers`; so a netrc match OVERWRITES an
+#: `Authorization` header passed through `headers=`, which is exactly how west
+#: passes `req_headers`. A future west that sets a header on that branch
+#: therefore does not make TAN's credential inert -- it makes WEST'S inert,
+#: under tan's, silently. Either way the user is authenticated as something
+#: other than what they were told, and either way the answer is the same: stop
+#: claiming authentication and say so.
+#:
+#: There is no CI gate for this: `requests` is not a tan dependency
+#: (`pyproject.toml` -- `import requests` is a `ModuleNotFoundError` in a
+#: CI-shaped venv) and `ci.yml` checks out alp-sdk but never zephyr, so a
 #: CI-time gate would SKIP everywhere, which is a dead gate rather than a real
-#: one. A RUNTIME check is NOT ruled out, correcting an over-broad claim that
-#: stood here (tan-cli#1148 round 2): the bootstrap already resolves a
-#: `zephyr_base`, so reading `<zephyr_base>/scripts/west_commands/sdk.py` and
-#: refusing to claim authentication when its no-token branch stops leaving
-#: `req_headers` empty runs where the artifact exists and nowhere else.
-#: **Filed as tan-cli#1154.** An earlier revision of this line said "filed as
-#: a follow-up" when no issue existed yet -- a sentence that reads as a fact
-#: and was not one. The number is here so the claim resolves against
-#: something. Until #1154 lands, what exists is a live symptom
-#: -- [`rate_limit_note`]'s authenticated branch names this possibility by
-#: name when a credentialled download is rate-limited anyway, which is exactly
-#: when an inert transport becomes observable. Re-verify with
+#: one. The RUNTIME check is [`west_sdk_netrc_assumptions_hold`], driven by
+#: `bootstrap_cmd._west_sdk_netrc_drift` against the `zephyr_base` the
+#: bootstrap has already resolved: it runs where the artifact exists and
+#: nowhere else, and downgrades the "Authenticating ..." line to a
+#: `bootstrap.sdk-credential-unverified` warning when it trips.
+#: [`rate_limit_note`]'s authenticated branch remains the second half of this
+#: -- it names an inert transport by name when a credentialled download is
+#: rate-limited anyway, which is when one becomes observable. Re-verify with
 #: `grep -n "req_headers" <zephyr>/scripts/west_commands/sdk.py` and
 #: `python -c "import inspect,requests;print(inspect.getsource(requests.utils.get_netrc_auth))"`.
 NETRC_ENV_VAR = "NETRC"
+
+#: The source line `west sdk install`'s NO-TOKEN branch leaves behind -- the
+#: `else:` arm of `if args.personal_access_token:`. See
+#: [`west_sdk_netrc_assumptions_hold`].
+WEST_SDK_NO_TOKEN_HEADERS = "req_headers = {}"
+
+#: Every environment variable `scripts/west_commands/sdk.py` is known to read
+#: (`sdk.py:231` and `:573` at Zephyr v4.4.1). No credential among them, which
+#: is the entire reason tan's token has to travel by netrc rather than by an
+#: environment variable west would read directly.
+WEST_SDK_KNOWN_ENV_READS = frozenset({"ZEPHYR_BASE", "ZEPHYR_SDK_INSTALL_DIR"})
+
+_WEST_SDK_ENV_READ = re.compile(
+    r"""os\.(?:environ(?:\.get)?|getenv)\s*[(\[]\s*["']([A-Za-z_][A-Za-z0-9_]*)"""
+)
+
+
+def west_sdk_netrc_assumptions_hold(source: str) -> bool:
+    """Whether `source` -- the text of `<zephyr_base>/scripts/west_commands/
+    sdk.py` -- still matches what [`NETRC_ENV_VAR`]'s residual-risk note was
+    measured against.
+
+    **A TRIPWIRE, not a parser** (tan-cli#1154). It answers one question --
+    "is this the shape the netrc route was reasoned about?" -- and deliberately
+    does not model west's control flow. Two substring-level facts, both of
+    which a rewrite of that branch moves:
+
+    1. [`WEST_SDK_NO_TOKEN_HEADERS`] is still present, i.e. the no-token branch
+       still sends an empty header dict.
+    2. Every environment variable the file reads is in
+       [`WEST_SDK_KNOWN_ENV_READS`], i.e. west still takes a credential from
+       `--personal-access-token` and from nothing tan could have set instead.
+
+    **It fails toward telling the user.** Anything the regex finds that is not
+    on the allowlist trips it, including a perfectly innocent new
+    `os.environ.get("ZEPHYR_TOOLCHAIN_VARIANT")`. That is the deliberate
+    direction: a false trip costs one warning and an issue report, while a
+    missed one costs a user who is told they are authenticated and is not, and
+    an inert credential is worse than an absent one precisely because it
+    removes the symptom that would send them to find a token.
+    """
+    return WEST_SDK_NO_TOKEN_HEADERS in source and not (
+        set(_WEST_SDK_ENV_READ.findall(source)) - WEST_SDK_KNOWN_ENV_READS
+    )
+
+
+def west_sdk_netrc_drift_message(var: str, version: str) -> str:
+    """The `bootstrap.sdk-credential-unverified` message.
+
+    **Names what the reader should DO, never what west does internally**
+    (tan-cli#1154 acceptance). `req_headers`, `os.environ` and
+    `prepare_request` are facts about somebody else's file; a customer whose
+    SDK download is about to go out on the anonymous quota needs the two
+    commands that get them unstuck and the URL that gets tan fixed.
+    """
+    return (
+        "this workspace's Zephyr handles `west sdk install` credentials "
+        "differently from the version tan was measured against, so tan cannot "
+        f"confirm the token in ${var} reaches the download -- treat this run as "
+        "unauthenticated. If it fails on a GitHub rate limit, retry from a "
+        "network with its own egress address, or run `west sdk install "
+        f"--version {version} -t {TOOLCHAIN_COMPONENT}` by hand from your west "
+        "workspace's top-level directory with a `~/.netrc` entry for "
+        f"{GITHUB_API_HOST}. Please report this at "
+        "https://github.com/alplabai/tan-cli/issues so tan can be updated."
+    )
+
 
 #: The host `west sdk install`'s rate-limited call goes to (`fetch_releases`
 #: against the GitHub REST API). The staged netrc names ONLY this machine, so
