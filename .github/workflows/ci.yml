@@ -711,12 +711,26 @@ jobs:
   # JSON compare), measured `already matches the measured tree` under 3.12.3,
   # 3.13.15 and 3.14.7 alike, and they already run in the `python` job.
   #
-  # This job's first real signal is already in its own log and worth reading:
-  # 3.14.7 emits `DeprecationWarning: pathlib.PurePath.as_uri() is deprecated
-  # and scheduled for removal in Python 3.19` -- `as_uri()` being the exporter
-  # `tan/core/uri_reference.py` is built on -- and the same for `nturl2path`.
-  # Nothing here fails on it today; the removal lands two majors out and is
-  # tracked as its own issue rather than hidden in a `filterwarnings`.
+  # This job's first real signal was worth reading, and it has since been
+  # acted on. 3.14.7 emits `DeprecationWarning: pathlib.PurePath.as_uri() is
+  # deprecated and scheduled for removal in Python 3.19`, and the same for
+  # `nturl2path`. Both were filed rather than hidden in a `filterwarnings`
+  # (tan-cli#1140), and the halves resolved differently:
+  #
+  #   * `PurePath.as_uri()` WAS the exporter `tan/core/uri_reference.py` is
+  #     built on -- its output is the SARIF `artifactLocation.uri` -- so the
+  #     removal would have broken the envelope surface. That module now
+  #     carries the body itself (`_absolute_path_to_file_uri`); the emitted
+  #     bytes are pinned identical per input, on whichever interpreter runs.
+  #   * `nturl2path` STAYS, in one test, deliberately. It is the only
+  #     spelling that performs the Windows conversion from a POSIX host, and
+  #     this repo has no Windows host; `urllib.request` -- the replacement the
+  #     message names -- does the POSIX conversion here and would leave a test
+  #     that passes and covers nothing.
+  #
+  # So both warnings are still REPORTED in this log, now from two documented
+  # test-side oracles rather than from product code, and no `filterwarnings`
+  # hides either. See `tests/core/test_uri_reference.py`'s header.
   python-newest:
     name: "python · pytest on the newest CPython"
     # PRs and the merge queue only -- see `skip_ceiling_interpreter` at the top

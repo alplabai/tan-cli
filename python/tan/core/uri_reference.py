@@ -68,9 +68,10 @@ says it must not.
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from urllib.parse import quote
+from urllib.parse import quote, quote_from_bytes
 
 #: A Windows drive letter at the string's own start (`C:...`, no backslash
 #: required yet) -- `resolve_board_path` never emits this bare, but
@@ -126,16 +127,88 @@ def _is_windows_spelled(path: str) -> bool:
     return "\\" in path or bool(_WINDOWS_DRIVE_RE.match(path))
 
 
+def _absolute_path_to_file_uri(path: PurePosixPath | PureWindowsPath) -> str:
+    """`path` -- which MUST be absolute by its own oracle's rules -- rendered
+    as an absolute `file:` URI, host-independently.
+
+    This is `pathlib.PurePath.as_uri()`'s own body, verbatim, minus the
+    `DeprecationWarning` 3.14 added to it. `PurePath.as_uri()` is deprecated
+    and scheduled for REMOVAL in Python 3.19 (tan-cli#1140), and it was this
+    module's exporter -- so the warning fired from the product module, not
+    only from tests, and the removal would break `tan validate --format
+    sarif`'s `artifactLocation.uri` outright. Carrying the body here retires
+    the deprecated call while keeping the emitted bytes identical;
+    `tests/core/test_uri_reference.py` pins that byte-identity against the
+    stdlib itself, per input, on every supported interpreter.
+
+    **The deprecation's own named replacement, `pathlib.Path.as_uri()`,
+    cannot be used here**, and that is measured, not assumed: from 3.14 it
+    delegates to `urllib.request.pathname2url(str(self), add_scheme=True)`,
+    which dispatches on `os.name`, so on this repo's POSIX CI it renders a
+    Windows-spelled path as `"file:C%3A%5Cw%5Cproj%5Cboard.yaml"` instead of
+    `"file:///C:/w/proj/board.yaml"` -- and takes the mirror-image damage on
+    the `windows-latest` pytest shard for the POSIX branch. Below 3.14 the
+    swap is invisible, which is what would have made it dangerous; the full
+    per-version table lives on the test file's
+    `_PATH_AS_URI_STILL_MATCHES_PUREPATH_CROSS_SPELLING`, which asserts it on
+    both sides of the boundary. The deeper reason is structural: `Path` is
+    CONCRETE and host-bound -- a `PureWindowsPath` cannot become a
+    `WindowsPath` on a POSIX host at all -- while [`_is_windows_spelled`]
+    deliberately picks its oracle from the path STRING so the Windows branch
+    is exercised with no Windows runner. Routing the export through `Path`
+    hands that choice back to `os.name`, the defect class tan-cli#1105 and
+    PR #1125 were bitten by.
+
+    `os.fsencode` below is the one host-sensitive call, and it is inherited
+    verbatim from the stdlib body rather than introduced: it resolves to
+    utf-8/`surrogateescape` on POSIX and utf-8/`surrogatepass` on Windows,
+    which differ only for a `str` carrying lone surrogates. Keeping it is
+    what makes this byte-identical to the call it replaces; it is not a
+    branch on `os.name`, and [`_is_windows_spelled`]'s "never the host's
+    rules" premise is untouched -- nothing below consults the host to decide
+    which SPELLING to emit.
+
+    The `.is_absolute()` guard is kept, and kept raising, for the reason
+    [`path_to_uri_reference`]'s docstring gives: the exporter must enforce
+    the very predicate its caller gates on, so gate and exporter cannot
+    drift apart. Dropping it would let a relative path through as a
+    malformed `file:` URI instead of the `ValueError` the caller's own
+    branch is written against."""
+    if not path.is_absolute():
+        raise ValueError("relative path can't be expressed as a file URI")
+
+    drive = path.drive
+    if len(drive) == 2 and drive[1] == ":":
+        # A path on a local drive => `file:///c:/a/b`.
+        prefix = "file:///" + drive
+        rest = path.as_posix()[2:]
+    elif drive:
+        # A path on a network drive => `file://host/share/a/b`.
+        prefix = "file:"
+        rest = path.as_posix()
+    else:
+        # A POSIX path => `file:///etc/hosts`.
+        prefix = "file://"
+        rest = str(path)
+    return prefix + quote_from_bytes(os.fsencode(rest))
+
+
 def path_to_uri_reference(path: str) -> str:
     """`path` rendered as a valid URI reference (RFC 3986).
 
-    `PurePath.as_uri()` is the exporter for the absolute case, and it is the
-    gate too: `.is_absolute()`, NOT `ntpath.isabs`/`posixpath.isabs`. The
-    load-bearing reason is that `.is_absolute()` IS the predicate
-    `.as_uri()` itself enforces, so the gate and the exporter cannot
-    disagree -- on any interpreter, now or later. Gating on a DIFFERENT
-    notion of "absolute" would call `.as_uri()` on a path it then raises
-    `ValueError` on.
+    [`_absolute_path_to_file_uri`] is the exporter for the absolute case,
+    and it carries the gate too: `.is_absolute()`, NOT `ntpath.isabs`/
+    `posixpath.isabs`. The load-bearing reason is that `.is_absolute()` IS
+    the predicate the exporter itself enforces, so the gate and the exporter
+    cannot disagree -- on any interpreter, now or later. Gating on a
+    DIFFERENT notion of "absolute" would call the exporter on a path it then
+    raises `ValueError` on. (That exporter used to be `PurePath.as_uri()`
+    called directly here; 3.14 deprecates it for removal in 3.19, so
+    tan-cli#1140 carried its body into this module byte-for-byte, guard
+    included, rather than let a removal take out `tan validate --format
+    sarif`'s `artifactLocation.uri`. See that function's own docstring for
+    why the deprecation's named replacement, `Path.as_uri()`, is not usable
+    here.)
 
     A weaker reason used to stand here, and it has since expired
     (tan-cli#1126). It said the two oracles simply disagree for a
@@ -163,9 +236,10 @@ def path_to_uri_reference(path: str) -> str:
       for a Windows-spelled path, `PurePosixPath` otherwise. (Plain `Path`
       would use the CI HOST's rules and misjudge a Windows-spelled string on
       this repo's Linux CI -- the same trap PR #1089/#1090 already named.)
-      `as_uri()` itself percent-encodes non-ASCII and reserved bytes (a
-      space, a literal backslash inside a POSIX filename, `#`, non-ASCII --
-      all measured), so nothing further is needed on this branch.
+      [`_absolute_path_to_file_uri`] itself percent-encodes non-ASCII and
+      reserved bytes (a space, a literal backslash inside a POSIX filename,
+      `#`, non-ASCII -- all measured), so nothing further is needed on this
+      branch.
     * A RELATIVE, POSIX-spelled `path` (`resolve_board_path`'s own default,
       `"./board.yaml"`) is returned percent-encoded but otherwise UNCHANGED
       -- see this module's docstring's "relative case" section for why it
@@ -186,9 +260,9 @@ def path_to_uri_reference(path: str) -> str:
     Known, deliberately undefended edge cases (round 1 nits, low
     reachability from this repo's own resolver): a `\\\\?\\`-prefixed
     Windows extended-length path renders its `\\\\?\\` host segment through
-    `PureWindowsPath.as_uri()` unexamined (`file://%3F/C%3A/...`, the drive
-    demoted into the path) rather than being rejected or normalised; and
-    drive-letter casing is preserved verbatim from the input rather than
+    [`_absolute_path_to_file_uri`] unexamined (`file://%3F/C%3A/...`, the
+    drive demoted into the path) rather than being rejected or normalised;
+    and drive-letter casing is preserved verbatim from the input rather than
     canonicalised, so `"c:/w/x"` and `"C:\\w\\x"` for the same file produce
     differently-cased URIs. Neither is exercised by anything
     `resolve_board_path` itself produces.
@@ -196,11 +270,11 @@ def path_to_uri_reference(path: str) -> str:
     if _is_windows_spelled(path):
         win = PureWindowsPath(path)
         if win.is_absolute():
-            return win.as_uri()
+            return _absolute_path_to_file_uri(win)
         return quote(path.replace("\\", "/"), safe="/")
     posix = PurePosixPath(path)
     if posix.is_absolute():
-        return posix.as_uri()
+        return _absolute_path_to_file_uri(posix)
     return quote(path, safe="/")
 
 
@@ -214,9 +288,9 @@ def is_absolute_path_reference(path: str) -> bool:
     Delegates to [`path_to_uri_reference`] itself rather than RE-DERIVING
     the same `_is_windows_spelled` + `.is_absolute()` branch a second time:
     a `file:` scheme in that function's OUTPUT is produced by exactly its
-    two `.as_uri()` calls, both already gated on the identical
-    `is_absolute()` check a second copy here would only duplicate --
-    drifting the two apart the moment [`path_to_uri_reference`] grows a
+    two [`_absolute_path_to_file_uri`] calls, both already gated on the
+    identical `is_absolute()` check a second copy here would only
+    duplicate -- drifting the two apart the moment [`path_to_uri_reference`] grows a
     branch this one does not learn about is exactly the per-command-copy
     class of defect `tan.core.board_context`'s own module docstring names
     for a resolver retyped instead of shared.
@@ -229,9 +303,10 @@ def is_absolute_path_reference(path: str) -> bool:
     is actually `"C%3Aboard.yaml"` -- the colon is percent-encoded, and
     `.startswith("file:")` on it is `False`, correctly. The SAME encoding
     rule is what makes the sniff safe in general: a `file:` PREFIX can only
-    ever appear in the output through the two absolute-only `.as_uri()`
-    branches -- any RELATIVE reference containing a literal `"file:"`
-    substring has its colon percent-encoded before this check ever sees it
+    ever appear in the output through the two absolute-only
+    [`_absolute_path_to_file_uri`] branches -- any RELATIVE reference
+    containing a literal `"file:"` substring has its colon percent-encoded
+    before this check ever sees it
     (`path_to_uri_reference("file:sub/board.yaml") == "file%3Asub/board
     .yaml"`, measured), so it can never masquerade as one."""
     return path_to_uri_reference(path).startswith("file:")

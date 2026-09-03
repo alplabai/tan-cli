@@ -10,6 +10,25 @@ and `PureWindowsPath(...).as_uri()`/`.is_absolute()` are all pure string
 operations -- no filesystem touch -- so they are real oracles here, not a
 simulation.
 
+## Two DELIBERATE uses of removal-scheduled stdlib APIs live in this file
+
+Both are here because this repo has no Windows host, and both are documented
+where they are used rather than silenced (tan-cli#1140): `PurePath.as_uri()`
+as the byte-identity ORACLE in
+[`test_the_exporter_still_emits_exactly_what_purepath_as_uri_emitted`] and
+[`test_the_exporter_refuses_a_relative_path_the_way_purepath_as_uri_did`],
+and `nturl2path` in
+[`test_a_windows_file_uri_path_component_round_trips_through_nturl2path`].
+CPython 3.14 deprecates both for removal in 3.19 and the
+`python · pytest on the newest CPython` job REPORTS both, by design --
+that job exists to surface exactly this class, so no `filterwarnings` hides
+either one. The product module carries neither any more: tan-cli#1140 moved
+`tan/core/uri_reference.py`'s exporter off `PurePath.as_uri()` into
+[`_absolute_path_to_file_uri`], because that call sits on the envelope
+surface (`tan validate --format sarif`'s `artifactLocation.uri`) and its
+removal would break it. What is left here is test-side oracles, each with
+its own docstring saying what a replacement would have to do.
+
 `data.boardYamlPath` staying host-native (unchanged by this module) is
 asserted in `tests/commands/test_validate_command.py`'s
 `test_absolute_board_yaml_uri_is_a_file_uri_but_boardyamlpath_stays_host_
@@ -60,6 +79,7 @@ import pytest
 
 from tan.core.uri_reference import (
     _WINDOWS_DRIVE_RE,
+    _absolute_path_to_file_uri,
     _is_windows_spelled,
     cwd_base_uri,
     cwd_base_uri_or_none,
@@ -102,6 +122,35 @@ from tan.core.uri_reference import (
 #: answer BACK still reds here rather than quietly skipping. Only the version
 #: test may vary; the assertion never stops running.
 _NTPATH_ISABS_ACCEPTS_A_DRIVELESS_ROOT = sys.version_info < (3, 13)
+
+#: Whether THIS interpreter's `pathlib.Path.as_uri()` still renders a
+#: Windows-spelled path the way `PurePath.as_uri()` does when it is handed a
+#: `PureWindowsPath` from a POSIX host -- i.e. whether the deprecation's own
+#: named replacement would have been a drop-in for the exporter tan-cli#1140
+#: moved into [`_absolute_path_to_file_uri`].
+#:
+#: Measured directly on real python-build-standalone builds of each, on this
+#: POSIX box, for `PureWindowsPath(r"C:\w\proj\board.yaml")`:
+#:
+#:     3.12.3     Path has NO `as_uri` of its own; it INHERITS the deprecated
+#:                `PurePath.as_uri`      -> "file:///C:/w/proj/board.yaml"
+#:     3.13.15    `Path.as_uri` is a verbatim COPY of `PurePath.as_uri`
+#:                                       -> "file:///C:/w/proj/board.yaml"
+#:     3.14.7     `Path.as_uri` delegates to `urllib.request.pathname2url(
+#:                str(self), add_scheme=True)`, which dispatches on `os.name`
+#:                                       -> "file:C%3A%5Cw%5Cproj%5Cboard.yaml"
+#:
+#: The boundary is **3.14**. Below it the swap is invisible; at and above it
+#: the swap silently destroys every Windows-spelled URI this module emits, on
+#: a POSIX host, and takes the mirror-image damage on the `windows-latest`
+#: pytest shard for the POSIX-spelled branch. That is why #1140 carried
+#: `PurePath.as_uri()`'s BODY across instead of taking the replacement the
+#: deprecation message names.
+#:
+#: Deliberately NOT a `skipif`: the site below asserts `is` this value, so an
+#: interpreter that changes the answer in EITHER direction reds here rather
+#: than quietly skipping.
+_PATH_AS_URI_STILL_MATCHES_PUREPATH_CROSS_SPELLING = sys.version_info < (3, 14)
 
 # ---------------------------------------------------------------------------
 # The classifier itself, `_is_windows_spelled` -- one branch/constant at a
@@ -174,7 +223,6 @@ def test_the_unanchored_search_combination_would_misclassify_it():
 def test_an_absolute_posix_path_becomes_a_file_uri():
     uri = path_to_uri_reference("/w/proj/board.yaml")
     assert uri == "file:///w/proj/board.yaml"
-    assert uri == PurePosixPath("/w/proj/board.yaml").as_uri()
 
 
 def test_an_absolute_posix_path_containing_a_backslash_keeps_its_own_name():
@@ -188,7 +236,6 @@ def test_an_absolute_posix_path_containing_a_backslash_keeps_its_own_name():
     path = "/tmp/proj/we\\ird.yaml"
     uri = path_to_uri_reference(path)
     assert uri == "file:///tmp/proj/we%5Cird.yaml"
-    assert uri == PurePosixPath(path).as_uri()
     assert uri.startswith("file:///")
     assert "we/ird" not in uri, "must not silently rename the file"
 
@@ -198,7 +245,6 @@ def test_an_absolute_windows_drive_path_becomes_a_file_uri():
     scheme-carrying, forward-slashed, percent-encoded `file:` URI, not a
     bare path with the backslashes swapped."""
     uri = path_to_uri_reference(r"C:\w\proj\board.yaml")
-    assert uri == PureWindowsPath(r"C:\w\proj\board.yaml").as_uri()
     assert uri == "file:///C:/w/proj/board.yaml"
     assert uri.startswith("file:///")
     # The two things the issue calls invalid in a URI reference at that
@@ -215,7 +261,6 @@ def test_a_forward_slash_spelled_absolute_drive_path_also_becomes_a_file_uri():
     backslash-spelled equivalent does, not the relative slash-swap branch."""
     uri = path_to_uri_reference("c:/w/proj/board.yaml")
     assert uri == "file:///c:/w/proj/board.yaml"
-    assert uri == PureWindowsPath("c:/w/proj/board.yaml").as_uri()
 
 
 def test_a_pre_1090_mixed_separator_windows_path_still_becomes_a_file_uri():
@@ -226,13 +271,13 @@ def test_a_pre_1090_mixed_separator_windows_path_still_becomes_a_file_uri():
     special case."""
     mixed = "C:\\w\\proj/board.yaml"
     uri = path_to_uri_reference(mixed)
-    assert uri == PureWindowsPath(mixed).as_uri()
+    assert uri == "file:///C:/w/proj/board.yaml"
     assert uri.startswith("file:///")
 
 
 def test_a_windows_unc_path_becomes_a_file_uri():
     uri = path_to_uri_reference(r"\\server\share\board.yaml")
-    assert uri == PureWindowsPath(r"\\server\share\board.yaml").as_uri()
+    assert uri == "file://server/share/board.yaml"
     assert ntpath.isabs(r"\\server\share\board.yaml")
 
 
@@ -241,8 +286,8 @@ def test_a_forward_slash_only_absolute_root_is_judged_posix_not_windows():
     this as POSIX. This also documents WHY the gate is `.is_absolute()` and
     not `ntpath.isabs`: `PureWindowsPath("/w/proj/board.yaml")
     .is_absolute()` is `False` on every supported interpreter (pathlib
-    requires a drive too), and calling `.as_uri()` after trusting a
-    predicate that says otherwise raises.
+    requires a drive too), and calling [`_absolute_path_to_file_uri`] after
+    trusting a predicate that says otherwise raises.
 
     tan-cli#1126 corrected the `ntpath.isabs` half of that sentence, which
     used to read "is `True`" flat: it is `True` only below 3.13 (see
@@ -251,15 +296,16 @@ def test_a_forward_slash_only_absolute_root_is_judged_posix_not_windows():
     3.14.7. The `.is_absolute()` line below is the one that has never
     moved, which is the actual argument for gating on it."""
     uri = path_to_uri_reference("/w/proj/board.yaml")
-    assert uri == PurePosixPath("/w/proj/board.yaml").as_uri()
+    assert uri == "file:///w/proj/board.yaml"
     assert ntpath.isabs("/w/proj/board.yaml") is _NTPATH_ISABS_ACCEPTS_A_DRIVELESS_ROOT
     assert not PureWindowsPath("/w/proj/board.yaml").is_absolute()
 
 
 def test_a_windows_rooted_but_driveless_path_does_not_raise_and_stays_slash_swapped():
     """`r"\\proj\\x"` is rooted with no drive to resolve that root against,
-    and `PureWindowsPath(...).as_uri()` refuses it (`is_absolute()` requires
-    drive AND root). Gating on `.is_absolute()` routes this to the
+    and the exporter refuses it (`is_absolute()` requires drive AND root --
+    `PurePath.as_uri()` did, and [`_absolute_path_to_file_uri`] kept the
+    guard when it took that body over). Gating on `.is_absolute()` routes this to the
     backslash-swap branch instead of crashing; the result is a legal
     relative-ref (RFC 3986's `path-absolute` form: leading `/`, no scheme),
     not a claim about which drive it is rooted on.
@@ -295,9 +341,10 @@ def test_the_absolute_gate_survives_every_supported_interpreter_ntpath_does_not(
     `True` on 3.12 and `False` from 3.13.
     `PureWindowsPath(...).is_absolute()` answers `False` on all three
     measured interpreters and -- the load-bearing half -- IS the predicate
-    `.as_uri()` itself enforces, so gate and exporter cannot drift apart on
-    any interpreter, present or future. "The two happen to disagree today"
-    was only ever the symptom that made the choice visible."""
+    the exporter ([`_absolute_path_to_file_uri`]) itself enforces, so gate
+    and exporter cannot drift apart on any interpreter, present or future.
+    "The two happen to disagree today" was only ever the symptom that made
+    the choice visible."""
     for path in ("\\proj\\board.yaml", "/w/proj/board.yaml"):
         assert not PureWindowsPath(path).is_absolute()
         assert ntpath.isabs(path) is _NTPATH_ISABS_ACCEPTS_A_DRIVELESS_ROOT
@@ -318,6 +365,124 @@ def test_a_relative_windows_spelled_path_gets_its_backslashes_swapped_for_slashe
 
 
 # ---------------------------------------------------------------------------
+# The exporter is byte-identical to the `PurePath.as_uri()` it replaced
+# (tan-cli#1140)
+# ---------------------------------------------------------------------------
+
+#: Every absolute shape [`path_to_uri_reference`] can render, in BOTH
+#: spellings, paired with the PURE oracle class that spelling routes to.
+#: Includes the two edge cases `tan/core/uri_reference.py`'s own docstring
+#: lists as deliberately undefended (a `\\?\`-prefixed extended-length path,
+#: and drive-letter casing) precisely so that "undefended" keeps meaning
+#: "renders the same as it always did" rather than drifting unnoticed.
+_ABSOLUTE_EXPORT_CORPUS = (
+    ("/w/proj/board.yaml", PurePosixPath),
+    ("/tmp/proj/we\\ird.yaml", PurePosixPath),
+    ("/w/a b/board.yaml", PurePosixPath),
+    ("/w/a#b/board.yaml", PurePosixPath),
+    ("/w/\u00e9\u4e2d/board.yaml", PurePosixPath),
+    ("/", PurePosixPath),
+    ("//srv/x", PurePosixPath),
+    (r"C:\w\proj\board.yaml", PureWindowsPath),
+    ("c:/w/proj/board.yaml", PureWindowsPath),
+    ("C:\\w\\proj/board.yaml", PureWindowsPath),
+    (r"C:\w\a b\board.yaml", PureWindowsPath),
+    (r"C:\w\a#b\board.yaml", PureWindowsPath),
+    ("C:/w/\u00e9\u4e2d/board.yaml", PureWindowsPath),
+    (r"\\server\share\board.yaml", PureWindowsPath),
+    (r"\\?\C:\x\board.yaml", PureWindowsPath),
+    ("C:/", PureWindowsPath),
+)
+
+
+def test_the_exporter_still_emits_exactly_what_purepath_as_uri_emitted():
+    """tan-cli#1140's whole acceptance, as a test rather than a transcript.
+
+    `tan/core/uri_reference.py`'s absolute-case exporter WAS
+    `PurePath.as_uri()`, called directly on the `PureWindowsPath`/
+    `PurePosixPath` [`_is_windows_spelled`] picks. CPython 3.14 deprecates
+    that method for REMOVAL in 3.19, and it is not an internal detail: its
+    output is the SARIF `artifactLocation.uri` `tan validate --format sarif`
+    emits, so the removal would break the envelope surface outright. #1140
+    moved the exporter to [`_absolute_path_to_file_uri`], which carries
+    `PurePath.as_uri()`'s own body verbatim minus the warning. This test is
+    the proof that "verbatim" is exactly true, per input, on whichever
+    interpreter is running -- not a claim made once in a PR description.
+
+    **`PurePath.as_uri()` on the right-hand side below is deliberate, and it
+    is why this file's header names it.** It is the ORACLE: the retired call
+    is the only thing that can prove the replacement emits the same bytes,
+    so this one site keeps calling it and the `python \u00b7 pytest on the
+    newest CPython` job REPORTS its `DeprecationWarning` -- unsuppressed, as
+    that job intends. When 3.19 removes it this test stops being runnable;
+    the correct response then is to DELETE it, not to reach for the nearest
+    non-deprecated name, because by then the pinned literal goldens the
+    absolute-`file:`-URI tests above assert (`"file:///C:/w/proj/board.yaml"`
+    and friends) carry the same property with no stdlib call at all. That is
+    the whole reason those tests were moved onto literals in #1140.
+
+    The one thing a future replacement must NOT be is
+    `pathlib.Path.as_uri()`, the replacement the deprecation message itself
+    names -- see [`_PATH_AS_URI_STILL_MATCHES_PUREPATH_CROSS_SPELLING`] and
+    the test below it for the measurement that rules it out."""
+    for spelling, oracle_cls in _ABSOLUTE_EXPORT_CORPUS:
+        pure = oracle_cls(spelling)
+        assert pure.is_absolute(), spelling
+        assert path_to_uri_reference(spelling) == pure.as_uri(), spelling
+
+
+def test_pathlib_path_as_uri_is_not_a_usable_replacement_for_the_windows_branch():
+    """The measurement that decided #1140 against the deprecation's own
+    named replacement, pinned so nobody "finishes the migration" later by
+    swapping [`_absolute_path_to_file_uri`] for `Path.as_uri()`.
+
+    A `PureWindowsPath` cannot BECOME a `WindowsPath` on a POSIX host --
+    `Path` is concrete and host-bound -- so the only spelling of that swap
+    available here is the unbound call below, and from 3.14 it is wrong:
+    `Path.as_uri` delegates to `urllib.request.pathname2url(str(self),
+    add_scheme=True)`, which dispatches on `os.name` and therefore performs
+    the POSIX conversion on this repo's POSIX CI, percent-encoding the drive
+    colon and every separator instead of emitting an authority-less
+    `file:///C:/...`. The POSIX branch takes the mirror-image damage on the
+    `windows-latest` pytest shard.
+
+    This is the same defect shape as tan-cli#1105 and the one PR #1125
+    shipped a MERGE verdict on before failing four `windows-latest` shards:
+    a substitution that looks like the platform-neutral one, passes on the
+    host that runs it, and covers nothing. Below 3.14 the swap is invisible
+    (`Path` has no `as_uri` of its own on 3.12; 3.13's is a verbatim copy),
+    which is precisely what makes it dangerous -- a green local 3.12 run
+    would have said nothing."""
+    win = PureWindowsPath(r"C:\w\proj\board.yaml")
+    correct = "file:///C:/w/proj/board.yaml"
+    assert path_to_uri_reference(r"C:\w\proj\board.yaml") == correct
+    assert _absolute_path_to_file_uri(win) == correct
+    # The swap, spelled the only way it can be spelled from a POSIX host.
+    naive = Path.as_uri(win)
+    assert (naive == correct) is _PATH_AS_URI_STILL_MATCHES_PUREPATH_CROSS_SPELLING
+    if not _PATH_AS_URI_STILL_MATCHES_PUREPATH_CROSS_SPELLING:
+        assert naive == "file:C%3A%5Cw%5Cproj%5Cboard.yaml"
+
+
+def test_the_exporter_refuses_a_relative_path_the_way_purepath_as_uri_did():
+    """Documents the constraint [`path_to_uri_reference`]'s docstring
+    states, and the reason [`_absolute_path_to_file_uri`] kept the guard
+    when it took over the body: the exporter enforces the very predicate its
+    caller gates on (`.is_absolute()`), so gate and exporter cannot drift
+    apart, and a relative path reaches a `ValueError` rather than a
+    malformed `file:` URI. Both halves are asserted -- the stdlib's refusal
+    (the behaviour being preserved) and this module's (the behaviour that
+    now has to hold on its own), down to the message text."""
+    with pytest.raises(ValueError) as stdlib_refusal:
+        PurePosixPath("./board.yaml").as_uri()
+    assert "relative path" in str(stdlib_refusal.value)
+
+    with pytest.raises(ValueError) as ours:
+        _absolute_path_to_file_uri(PurePosixPath("./board.yaml"))
+    assert str(ours.value) == "relative path can't be expressed as a file URI"
+
+
+# ---------------------------------------------------------------------------
 # Relative paths stay relative -- this function's documented decision
 # ---------------------------------------------------------------------------
 
@@ -333,18 +498,6 @@ def test_the_resolvers_own_relative_default_is_returned_unchanged():
 def test_a_relative_posix_path_stays_unchanged():
     assert not posixpath.isabs("sub/p/board.yaml")
     assert path_to_uri_reference("sub/p/board.yaml") == "sub/p/board.yaml"
-
-
-def test_as_uri_itself_would_raise_on_a_relative_path_which_is_why_this_function_exists():
-    """Documents the constraint [`path_to_uri_reference`]'s docstring
-    states: `PurePath.as_uri()` only accepts an absolute path, so this
-    function cannot simply delegate to it unconditionally."""
-    try:
-        PurePosixPath("./board.yaml").as_uri()
-    except ValueError as err:
-        assert "relative path" in str(err)
-    else:  # pragma: no cover - documents the guard, does not exercise it
-        raise AssertionError("expected pathlib to refuse a relative as_uri()")
 
 
 # ---------------------------------------------------------------------------
@@ -615,7 +768,50 @@ def test_a_windows_file_uri_path_component_round_trips_through_nturl2path():
     HOST (Linux never takes the leading-slash-before-drive branch), which
     is precisely why this assertion exists: it pins the STDLIB oracle's own
     behaviour for the one input shape a Linux run can never otherwise
-    exercise."""
+    exercise.
+
+    ## `nturl2path` is REMOVAL-SCHEDULED, and stays anyway (tan-cli#1140)
+
+    CPython 3.14 emits, on the `import` below, `DeprecationWarning:
+    'nturl2path' is deprecated and slated for removal in Python 3.19; use
+    'urllib.request' instead`. The import stays, unsuppressed -- the
+    `python · pytest on the newest CPython` job exists to REPORT exactly
+    this class, so a `filterwarnings` here would recreate the defect that
+    job was added to catch.
+
+    **The `urllib.request` the message names is not a replacement for what
+    this test needs.** Measured on this POSIX box, 3.12.3 / 3.13.15 /
+    3.14.7 alike, for the very input asserted below:
+
+        urllib.request.url2pathname("/C:/Users/dev/.../board.yaml")
+            -> "/C:/Users/dev/.../board.yaml"     (unchanged -- POSIX)
+        nturl2path.url2pathname("/C:/Users/dev/.../board.yaml")
+            -> "C:\\Users\\dev\\...\\board.yaml"      (Windows)
+
+    The mechanism differs by version and the answer does not. On 3.12/3.13
+    the platform choice is made at IMPORT time -- `urllib/request.py` runs
+    `if os.name == 'nt': from nturl2path import url2pathname, pathname2url`
+    at module level, so the POSIX name is bound to a body that is just
+    `unquote(pathname)`. From 3.14 that branch moved INSIDE the function
+    (`if os.name == 'nt':` around the drive/separator handling). Either
+    way, called from a POSIX host you get the POSIX conversion, and the
+    swap would leave this test still passing, still looking like it covers
+    Windows, and covering nothing -- the shape of tan-cli#1105, and the
+    shape PR #1125 shipped a MERGE verdict on before failing four
+    `windows-latest` shards. `nturl2path` is imported precisely because it
+    is the one spelling that performs the WINDOWS conversion regardless of
+    the running platform, and this repo has no Windows host.
+
+    **What a genuine replacement has to do when 3.19 lands.** Not "the
+    nearest non-deprecated name": it has to perform the Windows `file:`
+    URI-path -> Windows path conversion FROM A POSIX HOST -- strip the
+    extra `/` before a drive letter, swap `/` for `\\`, percent-decode --
+    without consulting `os.name`. As of 3.14.7 `urllib.request` offers no
+    such platform-explicit spelling (its nt branch is reachable only by
+    running on nt). If none has appeared by then, the two honest options
+    are to write the conversion out here, pinned by this same assertion, or
+    to delete this test and move the coverage onto a real `windows-latest`
+    job. Silently rebinding this import to `urllib.request` is neither."""
     import nturl2path
 
     # `dev` here stands in for the real CI account this defect was measured
