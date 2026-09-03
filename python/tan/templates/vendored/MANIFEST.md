@@ -490,7 +490,7 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **sixty-two** live entries
+The `DELIBERATE_EDITS` table below currently carries **forty-five** live entries
 (counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS`
 dict, not by hand): one `multicore-mailbox`/`E1M-AEN801` entry for the
 leading "blocked ahead" caveat (tan-cli#864 Q5, see entry 9 below), the
@@ -537,6 +537,49 @@ tag (see "Current vendor point" above); listed here only as history, not as
 a current exception. tan-cli#501's four `sensor`/`diagnostics` CMakeLists
 edits were REVERTED (see entry 3 below) — the theory behind them measured
 false, so those four files carry no deliberate edit at all now.
+
+**tan-cli#1151 (the `ff27f179` re-vendor) retired seventeen entries in one
+change**, sixty-two down to forty-five, taking 11 `un_edit_*` functions and
+22 constants with them. Unlike the `722320a1` round below, these did not go
+stale from alp-sdk rewording the surrounding prose: alp-sdk#1855 makes the
+EMIT ITSELF do what each of these entries was doing by hand — rewrite a bare
+`docs/*.md` / `examples/<category>/<name>[/<subpath>]` referent in a
+`board.yaml` or `src/*.c` comment into an absolute GitHub URL. Upstream took
+over their job. `multicore-mailbox`'s `peer_build_path` (tan-cli#1009) is
+the clearest case: tan's hand-fix and alp-sdk's produce **byte-identical**
+output (`./peer`), so that file needed no re-vendor at all — only the
+now-redundant entry dropped.
+
+Retired: `edge-ai` `model_readme_pointer_1`/`_2` (both SKUs), `iot`
+`cc3501e_bridge_pointer` (`board.yaml` + `src/main.c`) and
+`sensor_template_pointer`, `multicore-mailbox` `peer_build_path` and
+`peer_main_pointer`, `sensor` `historical_note_v2n_pointer` (`board.yaml` +
+`src/main.c`, both SKUs), `init_fail_scanner_pointer` (both SKUs) and
+`pattern_paragraph` (both SKUs) — that last being tan-cli#924's final live
+entry, so tan-cli#924 now has none.
+
+**Two entries were flagged by the same self-check and deliberately NOT
+retired**, which is why this round was walked per entry instead of
+batch-dropped. `sensor`'s `historical_note_boards_pointer` (both SKUs) lives
+in the same re-flowed `NOTE (#1269):` paragraph as the retired
+`historical_note_v2n_pointer`, so taking upstream's whole hunk dropped it
+silently — but what it qualifies is a bare `metadata/boards/e1m-evk.yaml` /
+`e1m-x-evk.yaml` mention, and alp-sdk#1855 leaves `metadata/` and `scripts/`
+alone on purpose (its own `_BARE_REPO_PATH_RE` comment says why). Upstream
+did not take over that job, so the edit was RE-ANCHORED and re-applied on top
+of the new emit. Nineteen flagged, seventeen retired, two re-anchored.
+
+Re-anchoring was not optional, and the first attempt at it shipped a real
+defect worth recording: the entry's old span ran to `# ... (0x47) on each --`
+and handed the rest of the paragraph to `historical_note_v2n_pointer`, the
+sibling this round retires. Re-applied unchanged, its `--\n` tail landed in
+front of the emit's own ` see\n# https://...` continuation and orphaned a
+bare `see` line with no `# ` prefix — making the vendored `board.yaml`
+**invalid YAML** (`yaml.safe_load` → `ScannerError: could not find expected
+':'`, line 52). `tests/commands/test_validate_command.py::
+test_offline_accepts_every_board_yaml_the_templates_ship` caught it. The
+entry is now narrowed to just the two `metadata/boards/*.yaml` mentions it
+exists to qualify, ending mid-sentence so the tail stays passthrough.
 
 **tan-cli#996/#1001 (the `722320a1` re-vendor) retired nineteen entries in
 one change** — entries 4, 7, 10, 11 and 12 below (`## Model`/`## Tests`

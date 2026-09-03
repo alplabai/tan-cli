@@ -913,27 +913,32 @@ def un_edit_sensor_board_yaml_portability_script_pointer(text: str) -> str:
 #: `historical_note_v2n_pointer` entry below) so it no longer overlaps
 #: upstream's changed text; the middle sentence itself passes through
 #: unedited (it needs no qualifier -- it names no path).
+#: RE-ANCHORED tan-cli#1151 (the `ff27f179` re-vendor). The old span ran to
+#: `# boards, at the same address (0x47) on each -- ` and handed the rest of
+#: the paragraph to the sibling `historical_note_v2n_pointer` entry, which
+#: alp-sdk#1855 superseded and this same change retired. Left as it was, the
+#: replacement's `--\n` tail landed in front of the emit's own ` see\n#
+#: https://...` continuation and orphaned a bare `see` line with no `# `
+#: prefix -- which made the vendored `board.yaml` INVALID YAML (measured:
+#: `yaml.safe_load` -> `ScannerError: could not find expected ':'` at line
+#: 52, caught by `tests/commands/test_validate_command.py::
+#: test_offline_accepts_every_board_yaml_the_templates_ship`). Narrowed to
+#: the two `metadata/boards/*.yaml` mentions this entry actually exists to
+#: qualify, ending mid-sentence at `BRD_I2C` so the tail is untouched
+#: passthrough. alp-sdk#1855 does NOT rewrite `metadata/` referents (its own
+#: `_BARE_REPO_PATH_RE` comment says so), which is why this entry survives
+#: the re-vendor at all while its paragraph-mate did not.
 _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EMITTED = (
     "BRD_I2C, not on BOARD_I2C_SENSORS -- see metadata/boards/e1m-evk.yaml\n"
     "# i2c_devices: and metadata/boards/e1m-x-evk.yaml i2c_devices:, neither\n"
-    "# of which lists a TMP112 on the sensor bus this example opens. BRD_I2C\n"
-    "# is a SEPARATE controller instance from BOARD_I2C_SENSORS regardless\n"
-    "# (on the E1M-AEN family, BRD_I2C is SoC I2C0, function C -- #1848), so\n"
-    "# repointing the bus_id would still not reach a TMP112 there. BMP581 is\n"
-    "# the part that is actually on BOARD_I2C_SENSORS on both supported\n"
-    "# boards, at the same address (0x47) on each -- "
+    "# of which lists a TMP112 on the sensor bus this example opens. BRD_I2C"
 )
 _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EDITED = (
     "BRD_I2C, not on BOARD_I2C_SENSORS -- see alp-sdk's\n"
     "# metadata/boards/e1m-evk.yaml i2c_devices: and\n"
     "# metadata/boards/e1m-x-evk.yaml i2c_devices: (not part of this\n"
     "# scaffolded project), neither of which lists a TMP112 on the sensor\n"
-    "# bus this example opens. BRD_I2C is a SEPARATE controller instance\n"
-    "# from BOARD_I2C_SENSORS regardless (on the E1M-AEN family, BRD_I2C is\n"
-    "# SoC I2C0, function C -- #1848), so repointing the bus_id would still\n"
-    "# not reach a TMP112 there. BMP581 is the part that is actually on\n"
-    "# BOARD_I2C_SENSORS on both supported boards, at the same address\n"
-    "# (0x47) on each --\n"
+    "# bus this example opens. BRD_I2C"
 )
 
 

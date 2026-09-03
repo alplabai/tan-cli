@@ -526,11 +526,6 @@ jobs:
       # `topology.py`, already present on tan's side via `tan.core.os_class`,
       # tan-cli#870/#914/#957/#962), so the recapture is a zero-file diff --
       # only `PROVENANCE.txt`'s own `alp-sdk ref` line moved.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ inputs.sdk_parity }}
-        with:
-          persist-credentials: false
-          repository: alplabai/alp-sdk
       # `0914da38` -> `ff27f179` (tan-cli#1151, the #1118 re-sync), moved in
       # the SAME change as `parity.yml`'s `PINNED_SDK_TAG` /
       # `PINNED_PLANNER_ORACLE_SDK_REF` and
@@ -543,6 +538,20 @@ jobs:
       # `DELIBERATE_EDITS` retired in the same change. The planner oracle
       # recapture is still a zero-file diff -- that fixture does not capture
       # the scaffold emit.
+      #
+      # KEEP THE `ref:` LINE DIRECTLY UNDER `repository:` -- no comment
+      # between them. `python/scripts/pin_move_verify.py`'s
+      # `_CI_SDK_PARITY_REF` matches the two lines as an adjacent pair and
+      # refuses ("found 0 readable") rather than guessing if anything is
+      # inserted; putting this note between them is exactly how that broke
+      # in tan-cli#1151's first cut, caught by
+      # `tests/scripts/test_pin_move_verify.py::
+      # test_extract_ci_sdk_parity_ref_against_the_real_file`.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ inputs.sdk_parity }}
+        with:
+          persist-credentials: false
+          repository: alplabai/alp-sdk
           ref: ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2
           fetch-tags: true
           path: alp-sdk
