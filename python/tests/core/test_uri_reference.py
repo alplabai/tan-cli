@@ -12,7 +12,10 @@ simulation.
 
 ## Two DELIBERATE uses of removal-scheduled stdlib APIs live in this file
 
-Both are here because this repo has no Windows host, and both are documented
+Both are here because no Windows host is available for LOCAL development, so
+Windows behaviour has to be established against `ntpath`/`PureWindowsPath`
+string oracles rather than by running it (see the correction under "the
+Windows-host premise" below -- CI is a different matter). Both are documented
 where they are used rather than silenced (tan-cli#1140): `PurePath.as_uri()`
 as the byte-identity ORACLE in
 [`test_the_exporter_still_emits_exactly_what_purepath_as_uri_emitted`] and
@@ -28,6 +31,43 @@ either one. The product module carries neither any more: tan-cli#1140 moved
 surface (`tan validate --format sarif`'s `artifactLocation.uri`) and its
 removal would break it. What is left here is test-side oracles, each with
 its own docstring saying what a replacement would have to do.
+
+## The Windows-host premise, corrected (tan-cli#1140 review round 1)
+
+"This repo has no Windows host" is shorthand. It appears three times in this
+file -- the opening paragraph above, and inside
+[`test_cwd_base_uri_or_none_returns_none_when_the_cwd_has_been_removed`] and
+[`test_a_windows_file_uri_path_component_round_trips_through_nturl2path`],
+both of which attribute it to `test_board_context.py`'s header -- and in
+sibling test modules. Taken literally it is FALSE, and it is left standing at
+those inherited sites only because correcting the phrase repo-wide is a sweep
+of its own, not because any of them is right. Measured on `origin/dev`,
+`.github/workflows/parity.yml`'s `python-tests-shard` job (`:2279`) carries
+`os: [ubuntu-latest, windows-latest, macos-latest]` (`:2284`) with
+`runs-on: ${{ matrix.os }}` (`:2302`) and runs
+`python -m pytest -q --ignore=tests/gates --ignore=tests/parity` (`:2555`) on
+every `pull_request`. THIS FILE runs on a real Windows host on every PR, and
+its result rolls up into the required contexts `python -- pytest across
+python/ (<os>)` through the `python-tests` aggregation job -- which is itself
+`runs-on: ubuntu-latest` and runs no pytest, so cite `:2284`, not it.
+
+What is true, and what every oracle in this file actually rests on, is that no
+Windows host is available LOCALLY: a change is developed and measured against
+`ntpath`/`PureWindowsPath` string oracles, and the real Windows runner only
+gets to speak after a push. That is exactly the PR #1125 story this file cites
+twice -- it shipped a MERGE verdict from local measurement and then failed
+four `windows-latest` shards, which is only possible BECAUSE CI has Windows.
+
+Two consequences worth keeping straight:
+
+* The `nturl2path` conclusion below is unchanged. The ubuntu and macos legs
+  still have to perform the Windows conversion from a POSIX host, so the
+  deprecated import is still the only spelling that does it.
+* The Windows shard pins `python-version: "3.12"` (`parity.yml:2382`), where
+  `Path.as_uri()` is not host-dispatched at all. So the Windows leg cannot
+  catch the `Path.as_uri()` class today no matter what it asserts, and
+  `python · pytest on the newest CPython` -- advisory, ubuntu, ceiling -- is
+  the only job that can.
 
 `data.boardYamlPath` staying host-native (unchanged by this module) is
 asserted in `tests/commands/test_validate_command.py`'s
@@ -123,34 +163,41 @@ from tan.core.uri_reference import (
 #: test may vary; the assertion never stops running.
 _NTPATH_ISABS_ACCEPTS_A_DRIVELESS_ROOT = sys.version_info < (3, 13)
 
-#: Whether THIS interpreter's `pathlib.Path.as_uri()` still renders a
-#: Windows-spelled path the way `PurePath.as_uri()` does when it is handed a
-#: `PureWindowsPath` from a POSIX host -- i.e. whether the deprecation's own
-#: named replacement would have been a drop-in for the exporter tan-cli#1140
-#: moved into [`_absolute_path_to_file_uri`].
+#: Whether THIS interpreter's `pathlib.Path.as_uri()` is HOST-DISPATCHED --
+#: i.e. whether the conversion it performs is chosen by the running machine's
+#: `os.name` rather than by the path's own spelling.
 #:
-#: Measured directly on real python-build-standalone builds of each, on this
-#: POSIX box, for `PureWindowsPath(r"C:\w\proj\board.yaml")`:
+#: A pure VERSION fact, with no `os.name` term in it, which is the point:
+#: 3.14 is where `Path.as_uri()` stopped sharing `PurePath.as_uri()`'s body
+#: and became `return pathname2url(str(self), add_scheme=True)`, and
+#: `urllib.request.pathname2url` opens with a literal `if os.name == 'nt':`.
+#: Read on real python-build-standalone builds of each:
 #:
-#:     3.12.3     Path has NO `as_uri` of its own; it INHERITS the deprecated
-#:                `PurePath.as_uri`      -> "file:///C:/w/proj/board.yaml"
+#:     3.12.3     `Path` has NO `as_uri` in its own `__dict__`; it INHERITS
+#:                the deprecated `PurePath.as_uri`      -- not dispatched
 #:     3.13.15    `Path.as_uri` is a verbatim COPY of `PurePath.as_uri`
-#:                                       -> "file:///C:/w/proj/board.yaml"
-#:     3.14.7     `Path.as_uri` delegates to `urllib.request.pathname2url(
-#:                str(self), add_scheme=True)`, which dispatches on `os.name`
-#:                                       -> "file:C%3A%5Cw%5Cproj%5Cboard.yaml"
+#:                                                      -- not dispatched
+#:     3.14.7     `Path.as_uri` -> `pathname2url(..., add_scheme=True)`
+#:                                                      -- DISPATCHED
 #:
-#: The boundary is **3.14**. Below it the swap is invisible; at and above it
-#: the swap silently destroys every Windows-spelled URI this module emits, on
-#: a POSIX host, and takes the mirror-image damage on the `windows-latest`
-#: pytest shard for the POSIX-spelled branch. That is why #1140 carried
-#: `PurePath.as_uri()`'s BODY across instead of taking the replacement the
-#: deprecation message names.
+#: Review round 1 MAJOR 1 killed the previous shape of this constant, and the
+#: kill is worth keeping written down. It read
+#: `_PATH_AS_URI_STILL_MATCHES_PUREPATH_CROSS_SPELLING = sys.version_info <
+#: (3, 14)` and the test asserted `(naive == correct) is` that value -- a
+#: version-ONLY constant keyed to an outcome that depends on version AND
+#: `os.name`. On 3.14.7 with `os.name = 'nt'` the Windows-spelled input
+#: MATCHES, so the constant said `False` where the outcome was `True` and the
+#: assertion failed. It passed only because the Windows shard pins 3.12
+#: (`parity.yml:2382`); the pin whose whole job was to survive a future
+#: migration was itself keyed on half the condition. Hence the split below:
+#: this constant states the mechanism, which is version-only and therefore
+#: safe to predict, and the test MEASURES the outcome over a corpus instead
+#: of predicting it per input.
 #:
-#: Deliberately NOT a `skipif`: the site below asserts `is` this value, so an
-#: interpreter that changes the answer in EITHER direction reds here rather
-#: than quietly skipping.
-_PATH_AS_URI_STILL_MATCHES_PUREPATH_CROSS_SPELLING = sys.version_info < (3, 14)
+#: Deliberately NOT a `skipif`: the test asserts a property on BOTH sides of
+#: this boundary, so an interpreter that changes the answer in either
+#: direction reds rather than quietly skipping.
+_PATH_AS_URI_IS_HOST_DISPATCHED = sys.version_info >= (3, 14)
 
 # ---------------------------------------------------------------------------
 # The classifier itself, `_is_windows_spelled` -- one branch/constant at a
@@ -305,8 +352,8 @@ def test_a_windows_rooted_but_driveless_path_does_not_raise_and_stays_slash_swap
     """`r"\\proj\\x"` is rooted with no drive to resolve that root against,
     and the exporter refuses it (`is_absolute()` requires drive AND root --
     `PurePath.as_uri()` did, and [`_absolute_path_to_file_uri`] kept the
-    guard when it took that body over). Gating on `.is_absolute()` routes this to the
-    backslash-swap branch instead of crashing; the result is a legal
+    guard when it took that body over). Gating on `.is_absolute()` routes this
+    to the backslash-swap branch instead of crashing; the result is a legal
     relative-ref (RFC 3986's `path-absolute` form: leading `/`, no scheme),
     not a claim about which drive it is rooted on.
 
@@ -375,8 +422,21 @@ def test_a_relative_windows_spelled_path_gets_its_backslashes_swapped_for_slashe
 #: lists as deliberately undefended (a `\\?\`-prefixed extended-length path,
 #: and drive-letter casing) precisely so that "undefended" keeps meaning
 #: "renders the same as it always did" rather than drifting unnoticed.
+#:
+#: `"/w/\udcff.yaml"` carries a LONE SURROGATE, and it is the one input that
+#: exercises the single host-sensitive call
+#: [`_absolute_path_to_file_uri`]'s docstring admits to: `os.fsencode` is
+#: utf-8/`surrogateescape` on POSIX and utf-8/`surrogatepass` on Windows.
+#: Measured old-vs-new identical on 3.12.3/3.13.15/3.14.7 (`file:///w/%FF
+#: .yaml`), and it stays in the corpus so the Windows shard re-checks the
+#: claim rather than leaving it as prose. (`"/w/\ud800.yaml"` -- an UNPAIRED
+#: HIGH surrogate -- raises `UnicodeEncodeError` on POSIX, old and new alike;
+#: it is deliberately not in the corpus, since this table asserts rendered
+#: strings, and the raise is behaviour inherited verbatim from the stdlib
+#: body rather than a property #1140 chose.)
 _ABSOLUTE_EXPORT_CORPUS = (
     ("/w/proj/board.yaml", PurePosixPath),
+    ("/w/\udcff.yaml", PurePosixPath),
     ("/tmp/proj/we\\ird.yaml", PurePosixPath),
     ("/w/a b/board.yaml", PurePosixPath),
     ("/w/a#b/board.yaml", PurePosixPath),
@@ -423,45 +483,112 @@ def test_the_exporter_still_emits_exactly_what_purepath_as_uri_emitted():
 
     The one thing a future replacement must NOT be is
     `pathlib.Path.as_uri()`, the replacement the deprecation message itself
-    names -- see [`_PATH_AS_URI_STILL_MATCHES_PUREPATH_CROSS_SPELLING`] and
-    the test below it for the measurement that rules it out."""
+    names -- see [`_PATH_AS_URI_IS_HOST_DISPATCHED`] and the test below for
+    the measurement that rules it out."""
     for spelling, oracle_cls in _ABSOLUTE_EXPORT_CORPUS:
         pure = oracle_cls(spelling)
         assert pure.is_absolute(), spelling
         assert path_to_uri_reference(spelling) == pure.as_uri(), spelling
 
 
-def test_pathlib_path_as_uri_is_not_a_usable_replacement_for_the_windows_branch():
-    """The measurement that decided #1140 against the deprecation's own
-    named replacement, pinned so nobody "finishes the migration" later by
-    swapping [`_absolute_path_to_file_uri`] for `Path.as_uri()`.
+def _path_as_uri_or_none(pure: PurePosixPath | PureWindowsPath) -> str | None:
+    """`Path.as_uri()` applied to a PURE path -- the only spelling the "just
+    take the replacement the deprecation names" swap can have here, since
+    `Path` is concrete and a `PureWindowsPath` cannot become a `WindowsPath`
+    on a POSIX host (nor a `PurePosixPath` a `PosixPath` on Windows).
 
-    A `PureWindowsPath` cannot BECOME a `WindowsPath` on a POSIX host --
-    `Path` is concrete and host-bound -- so the only spelling of that swap
-    available here is the unbound call below, and from 3.14 it is wrong:
-    `Path.as_uri` delegates to `urllib.request.pathname2url(str(self),
-    add_scheme=True)`, which dispatches on `os.name` and therefore performs
-    the POSIX conversion on this repo's POSIX CI, percent-encoding the drive
-    colon and every separator instead of emitting an authority-less
-    `file:///C:/...`. The POSIX branch takes the mirror-image damage on the
-    `windows-latest` pytest shard.
+    Returns `None` if it raises, so a caller can treat "raised" and "returned
+    the wrong string" alike: both mean not-a-drop-in, and which one a given
+    host produces is not something this repo can enumerate from one box."""
+    try:
+        return Path.as_uri(pure)
+    # BLE001 is suppressed rather than narrowed on purpose: the question this
+    # helper answers is "is `Path.as_uri()` a drop-in for the exporter", and
+    # ANY failure is a `no`. Enumerating what it can raise per host and per
+    # interpreter (`ValueError`, `urllib.error.URLError` from 3.14's
+    # `pathname2url`, `UnicodeEncodeError` on a lone surrogate) would make the
+    # answer depend on a list this box cannot finish measuring -- exactly the
+    # host-dependence the caller exists to expose.
+    except Exception:  # noqa: BLE001
+        return None
 
-    This is the same defect shape as tan-cli#1105 and the one PR #1125
-    shipped a MERGE verdict on before failing four `windows-latest` shards:
-    a substitution that looks like the platform-neutral one, passes on the
-    host that runs it, and covers nothing. Below 3.14 the swap is invisible
-    (`Path` has no `as_uri` of its own on 3.12; 3.13's is a verbatim copy),
-    which is precisely what makes it dangerous -- a green local 3.12 run
-    would have said nothing."""
-    win = PureWindowsPath(r"C:\w\proj\board.yaml")
-    correct = "file:///C:/w/proj/board.yaml"
-    assert path_to_uri_reference(r"C:\w\proj\board.yaml") == correct
-    assert _absolute_path_to_file_uri(win) == correct
-    # The swap, spelled the only way it can be spelled from a POSIX host.
-    naive = Path.as_uri(win)
-    assert (naive == correct) is _PATH_AS_URI_STILL_MATCHES_PUREPATH_CROSS_SPELLING
-    if not _PATH_AS_URI_STILL_MATCHES_PUREPATH_CROSS_SPELLING:
-        assert naive == "file:C%3A%5Cw%5Cproj%5Cboard.yaml"
+
+def test_pathlib_path_as_uri_is_not_a_usable_replacement_for_this_exporter():
+    r"""The measurement that decided #1140 against the deprecation's own named
+    replacement, pinned so nobody "finishes the migration" later by swapping
+    [`_absolute_path_to_file_uri`] for `Path.as_uri()`.
+
+    From 3.14 `Path.as_uri` is `return pathname2url(str(self),
+    add_scheme=True)`, and `urllib.request.pathname2url` opens with a literal
+    `if os.name == 'nt':`. So the conversion it performs is the RUNNING
+    HOST's, while [`path_to_uri_reference`] picks its oracle from the path's
+    own SPELLING. Those two agree only where host and spelling happen to
+    coincide, which is why this test asserts the OUTCOME over a corpus rather
+    than predicting it per input from an interpreter version -- review round
+    1 MAJOR 1, recorded on [`_PATH_AS_URI_IS_HOST_DISPATCHED`], killed the
+    version-only prediction that came before it.
+
+    All four cells, measured -- the two POSIX ones on real
+    python-build-standalone builds on this box, the two `nt` ones by
+    SIMULATION (`os.name = "nt"; os.path = ntpath`, which is what
+    `pathname2url` branches on), because no Windows host is available
+    locally:
+
+        3.12/3.13, either host   0 of 17 corpus inputs disagree
+        3.14.7, os.name=posix    9 of 9 WINDOWS-spelled inputs disagree,
+                                 0 of 8 POSIX-spelled
+        3.14.7, os.name='nt'     1 of 9 Windows-spelled disagrees (the
+                                 `\\?\` extended-length path, which
+                                 `Path.as_uri()` normalises and
+                                 `PurePath.as_uri()` did not), and 2 of 8
+                                 POSIX-spelled do (`/tmp/proj/we\ird.yaml`
+                                 and `//srv/x`)
+
+    The damage does not vanish on a Windows runner, it MOVES -- and the
+    POSIX-spelled shape it breaks there is `/tmp/proj/we\ird.yaml` ->
+    `"file:///tmp/proj/we/ird.yaml"`, silently naming a DIFFERENT file, which
+    is round 1 MAJOR 1 verbatim. That is the whole argument in one input.
+
+    So the assertion below is: **`Path.as_uri()` agrees with this module's
+    exporter on every corpus input if and only if it is not host-dispatched.**
+    Both directions are asserted, so the test cannot go vacuous. Mutating both
+    exporter call sites to `Path.as_uri()` reds it (and five other tests) on
+    3.14.7; on 3.12.3 and 3.13.15 that mutation is invisible, which is
+    precisely what would have made the swap dangerous and why nobody should
+    read a green local floor run as this pin holding. Below 3.14 this test is
+    still asserting something real -- that the swap was genuinely equivalent
+    then -- rather than skipping.
+
+    This is the defect shape of tan-cli#1105, and of PR #1125, which shipped a
+    MERGE verdict from local measurement and then failed four `windows-latest`
+    shards: a substitution that looks platform-neutral, passes on the host
+    that runs it, and covers nothing."""
+    disagreements = [
+        spelling
+        for spelling, oracle_cls in _ABSOLUTE_EXPORT_CORPUS
+        if _path_as_uri_or_none(oracle_cls(spelling)) != path_to_uri_reference(spelling)
+    ]
+    if _PATH_AS_URI_IS_HOST_DISPATCHED:
+        assert disagreements, (
+            "Path.as_uri() dispatches on os.name from 3.14, so some corpus "
+            "spelling foreign to this host must disagree with the exporter. "
+            "None did -- either the exporter has been swapped for it, or "
+            "CPython changed the dispatch."
+        )
+    else:
+        assert not disagreements, (
+            "below 3.14 Path.as_uri() IS PurePath.as_uri(), so nothing may "
+            f"disagree; these did: {disagreements}"
+        )
+
+    # The exact damage, pinned only on the host it was actually measured on.
+    # The `nt` strings above are documented, not asserted: they come from a
+    # simulation, and a wrong prediction would red the Windows shard for a
+    # false reason the day it moves off its 3.12 pin (`parity.yml:2382`).
+    if _PATH_AS_URI_IS_HOST_DISPATCHED and os.name != "nt":
+        win = PureWindowsPath(r"C:\w\proj\board.yaml")
+        assert _absolute_path_to_file_uri(win) == "file:///C:/w/proj/board.yaml"
+        assert _path_as_uri_or_none(win) == "file:C%3A%5Cw%5Cproj%5Cboard.yaml"
 
 
 def test_the_exporter_refuses_a_relative_path_the_way_purepath_as_uri_did():
@@ -800,7 +927,15 @@ def test_a_windows_file_uri_path_component_round_trips_through_nturl2path():
     shape PR #1125 shipped a MERGE verdict on before failing four
     `windows-latest` shards. `nturl2path` is imported precisely because it
     is the one spelling that performs the WINDOWS conversion regardless of
-    the running platform, and this repo has no Windows host.
+    the running platform.
+
+    That reason survives CI having a Windows runner, which it does -- see
+    "the Windows-host premise, corrected" in this file's header. Two of the
+    three platforms this suite runs on (`parity.yml:2284`) are POSIX, and on
+    those legs `urllib.request` would do the POSIX conversion and this
+    assertion would stop meaning anything. A test that is real on one of
+    three runners and vacuous on the other two is not coverage; the
+    deprecated import is what makes it real on all three.
 
     **What a genuine replacement has to do when 3.19 lands.** Not "the
     nearest non-deprecated name": it has to perform the Windows `file:`
@@ -808,10 +943,16 @@ def test_a_windows_file_uri_path_component_round_trips_through_nturl2path():
     extra `/` before a drive letter, swap `/` for `\\`, percent-decode --
     without consulting `os.name`. As of 3.14.7 `urllib.request` offers no
     such platform-explicit spelling (its nt branch is reachable only by
-    running on nt). If none has appeared by then, the two honest options
-    are to write the conversion out here, pinned by this same assertion, or
-    to delete this test and move the coverage onto a real `windows-latest`
-    job. Silently rebinding this import to `urllib.request` is neither."""
+    running on nt). If none has appeared by then, the honest option is to
+    write the conversion out here, pinned by this same assertion.
+
+    An earlier draft offered "or delete this test and move the coverage onto
+    a real `windows-latest` job" as the alternative. That is not an
+    alternative, and the reason is the correction in this file's header: the
+    `windows-latest` job already exists and this test already runs on it. It
+    is the two POSIX legs that would lose their coverage, which is the thing
+    the deprecated import buys. Silently rebinding this import to
+    `urllib.request` is not an option either way."""
     import nturl2path
 
     # `dev` here stands in for the real CI account this defect was measured

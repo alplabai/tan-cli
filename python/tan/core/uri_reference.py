@@ -144,20 +144,28 @@ def _absolute_path_to_file_uri(path: PurePosixPath | PureWindowsPath) -> str:
     **The deprecation's own named replacement, `pathlib.Path.as_uri()`,
     cannot be used here**, and that is measured, not assumed: from 3.14 it
     delegates to `urllib.request.pathname2url(str(self), add_scheme=True)`,
-    which dispatches on `os.name`, so on this repo's POSIX CI it renders a
-    Windows-spelled path as `"file:C%3A%5Cw%5Cproj%5Cboard.yaml"` instead of
-    `"file:///C:/w/proj/board.yaml"` -- and takes the mirror-image damage on
-    the `windows-latest` pytest shard for the POSIX branch. Below 3.14 the
-    swap is invisible, which is what would have made it dangerous; the full
-    per-version table lives on the test file's
-    `_PATH_AS_URI_STILL_MATCHES_PUREPATH_CROSS_SPELLING`, which asserts it on
-    both sides of the boundary. The deeper reason is structural: `Path` is
-    CONCRETE and host-bound -- a `PureWindowsPath` cannot become a
-    `WindowsPath` on a POSIX host at all -- while [`_is_windows_spelled`]
-    deliberately picks its oracle from the path STRING so the Windows branch
-    is exercised with no Windows runner. Routing the export through `Path`
-    hands that choice back to `os.name`, the defect class tan-cli#1105 and
-    PR #1125 were bitten by.
+    which dispatches on `os.name`, so the conversion it performs is the
+    RUNNING HOST's, not the one the path is spelled in. The damage does not
+    disappear on a Windows runner, it MOVES. Measured on 3.14.7 from a POSIX
+    host, all nine Windows-spelled shapes in the test corpus come out wrong
+    (`C:\\w\\proj\\board.yaml` -> `"file:C%3A%5Cw%5Cproj%5Cboard.yaml"`
+    rather than `"file:///C:/w/proj/board.yaml"`) while every POSIX-spelled
+    one survives; under a simulated `os.name = "nt"` that inverts, and one of
+    the POSIX shapes it then breaks is `/tmp/proj/we\\ird.yaml` ->
+    `"file:///tmp/proj/we/ird.yaml"` -- silently naming a DIFFERENT file,
+    which is round 1 MAJOR 1, the regression [`_is_windows_spelled`] exists
+    to prevent. Below 3.14 there is no divergence on either host, and that is
+    what would have made the swap dangerous. The full four-cell account, and
+    the assertion that keeps it honest, are on the test file's
+    `test_pathlib_path_as_uri_is_not_a_usable_replacement_for_this_exporter`.
+
+    The deeper reason is structural: `Path` is CONCRETE and host-bound -- a
+    `PureWindowsPath` cannot become a `WindowsPath` on a POSIX host at all --
+    while [`_is_windows_spelled`] deliberately picks its oracle from the path
+    STRING, so BOTH branches are exercised on every runner rather than only
+    the one matching that runner's `os.name`. Routing the export through
+    `Path` hands that choice back to the host, which is the defect class
+    tan-cli#1105 and PR #1125 were bitten by.
 
     `os.fsencode` below is the one host-sensitive call, and it is inherited
     verbatim from the stdlib body rather than introduced: it resolves to
@@ -290,10 +298,10 @@ def is_absolute_path_reference(path: str) -> bool:
     a `file:` scheme in that function's OUTPUT is produced by exactly its
     two [`_absolute_path_to_file_uri`] calls, both already gated on the
     identical `is_absolute()` check a second copy here would only
-    duplicate -- drifting the two apart the moment [`path_to_uri_reference`] grows a
-    branch this one does not learn about is exactly the per-command-copy
-    class of defect `tan.core.board_context`'s own module docstring names
-    for a resolver retyped instead of shared.
+    duplicate -- drifting the two apart the moment [`path_to_uri_reference`]
+    grows a branch this one does not learn about is exactly the
+    per-command-copy class of defect `tan.core.board_context`'s own module
+    docstring names for a resolver retyped instead of shared.
 
     A first version of this docstring worried the sniff was unsound for a
     driveless Windows path (`"C:board.yaml"`) on the theory that its
