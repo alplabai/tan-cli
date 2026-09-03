@@ -29,8 +29,8 @@ instead of returning.
 WHAT THIS DOES NOT ASSERT, deliberately. Nothing about a function not named
 in `_SEEDED_CONTRACTS`. The tree has far more candidates than this seeds --
 see THE SHAPE SWEEP below for the measured count -- and this file protects
-only the seeded NINETEEN (twelve at tan-cli#1116, then three, then #1132's
-two, then #1133's two; re-count the dict rather than trusting this
+only the seeded TWENTY (twelve at tan-cli#1116, then three, then #1132's
+two, then #1133's three; re-count the dict rather than trusting this
 sentence) until someone adds the next one, the same "opt-in, not a blanket
 walk" reasoning `_SHARED_HELPERS`'s own docstring gives: a
 blanket version of this check is red on the day it lands (again, see THE
@@ -224,11 +224,20 @@ alike. A committed test next door is not the same protection as a seed
 here, because only the seed list is walked for completeness. Both are
 seeded now, at the bottom of this file, and the `bind_sdk_root` cost is
 paid in the narrowest available way: NO autouse fixture (importing
-`_bound_sdk` would bind for all nineteen seeds and error outright when
+`_bound_sdk` would bind for all twenty seeds and error outright when
 `SDK is None`), a per-class `skipif`, and the bind inside each call. The
 older two (`_docs_ref`, `render_to_envelope`) stay where they are -- both
 already have committed tests, and #1133 does not re-open a decision it did
 not need to.
+
+PR #1160's review then found a THIRD planner site the same way, and it is
+the one that settles the question: `template._rendered_bytes`, whose bare
+per-file `read_bytes()` is on the hottest read path in the module (4-7
+files per scaffold). The first cut of #1133 had it in hand -- its own new
+shape-3 detector printed it -- and filed it as "a candidate to read"
+rather than driving it. Seeded here, driven, and the lesson is the same one
+the reversal above records: a candidate this list does not hold is a
+candidate that ships.
 
 The gap between 65 and 15 is real and recorded here rather than implied
 clean: 19 are already-correct functions this file has not been asked to
@@ -468,6 +477,15 @@ _SEEDED_CONTRACTS: dict[str, str] = {
         "shape line for line: same is_file() pre-flight, same bare "
         "read+parse, same three raw exceptions measured escaping the same "
         "curated contract on the same three interpreters"
+    ),
+    "template._rendered_bytes": (
+        "the FOURTH site, found by PR #1160's review after the first cut of "
+        "the fix filed it as 'a candidate to read' instead of driving it -- "
+        "and the highest-traffic one, since every catalog template lists "
+        "5-8 files.user_owned entries and 4-7 of them are read here per "
+        "scaffold. Its per-file read_bytes() was bare: chmod 000 escaped as "
+        "raw PermissionError, a deleted file as raw FileNotFoundError, a "
+        "directory as raw IsADirectoryError, on 3.12.3/3.13.15/3.14.7 alike"
     ),
 }
 
@@ -1991,6 +2009,109 @@ class TestBoardRouteEntries(_PlannerDocumentCases):
     def _call(self, metadata_root: Path):
         return _planner_template()._board_route_entries(
             self._BOARD, metadata_root)
+
+
+@_needs_sdk
+@_covers("template._rendered_bytes")
+class TestRenderedBytes:
+    """The fourth site (PR #1160 review, MAJOR 1). Not a subclass of
+    `_PlannerDocumentCases`: this read takes no `(name, metadata_root)` pair,
+    and -- the reason it is worth its own class rather than a parametrised
+    case -- its contract on a non-UTF-8 file is the OPPOSITE. A template
+    asset is not required to be text; `render()` copies whatever it read, so
+    the bytes half must HAND BACK arbitrary bytes where the three document
+    reads must refuse them."""
+
+    _RECORD = {"id": "seed1133", "example": "examples/peripheral-io/seed1133",
+               "supported": {"som_skus": ["E1M-SEED1133"]},
+               "files": {"user_owned": ["src/main.c"]}, "cores": []}
+
+    def _tree(self, tmp_path: Path) -> Path:
+        source = tmp_path / self._RECORD["example"] / "src"
+        source.mkdir(parents=True)
+        (source / "main.c").write_text("int main(void){return 0;}\n",
+                                       encoding="utf-8")
+        return tmp_path
+
+    def _path(self, base: Path) -> Path:
+        return base / self._RECORD["example"] / "src" / "main.c"
+
+    def _call(self, base: Path):
+        m = _planner_template()
+        return m._rendered_bytes(
+            "seed1133", self._RECORD, ("src/main.c",), {}, base,
+            doc="catalog", field="templates[0]")
+
+    def _raises(self, base: Path) -> str:
+        m = _planner_template()
+        with pytest.raises(m.TemplateError) as excinfo:
+            self._call(base)
+        return str(excinfo.value)
+
+    def test_absent(self, tmp_path):
+        base = self._tree(tmp_path)
+        self._path(base).unlink()
+        assert "cannot read template source file at" in self._raises(base)
+
+    def test_directory_where_file_expected(self, tmp_path):
+        base = self._tree(tmp_path)
+        self._path(base).unlink()
+        self._path(base).mkdir()
+        assert "cannot read template source file at" in self._raises(base)
+
+    def test_parent_is_a_file(self, tmp_path):
+        base = self._tree(tmp_path)
+        source = self._path(base).parent
+        (source / "main.c").unlink()
+        source.rmdir()
+        source.write_text("not a directory", encoding="utf-8")
+        assert "cannot read template source file at" in self._raises(base)
+
+    def test_symlink_loop(self, tmp_path):
+        # The one shape whose curated MESSAGE is interpreter-dependent, and
+        # deliberately so (`_safe_join`'s own docstring carries the
+        # measurement): `Path.resolve()` raises `RuntimeError("Symlink loop
+        # ...")` on 3.12.3 and returns the path unchanged on 3.13.15/3.14.7,
+        # so the failure is caught at the resolve on one and at the read on
+        # the other two. Asserting the CLASS plus the path is what holds on
+        # all three; asserting one message would pass on two interpreters
+        # and be a lie on the third.
+        base = self._tree(tmp_path)
+        self._path(base).unlink()
+        _symlink_loop(self._path(base))
+        message = self._raises(base)
+        assert "template source file" in message
+        assert "cannot read" in message or "cannot resolve" in message
+
+    @_skip_as_root
+    def test_permission_denied_file(self, tmp_path):
+        base = self._tree(tmp_path)
+        with _permission_denied_file(self._path(base)):
+            assert "cannot read template source file at" in self._raises(base)
+
+    @_skip_as_root
+    def test_permission_denied_parent(self, tmp_path):
+        base = self._tree(tmp_path)
+        with _permission_denied(self._path(base).parent):
+            assert "cannot read template source file at" in self._raises(base)
+
+    def test_non_utf8(self, tmp_path):
+        # NOT a failure here, and this asserting so is the point: the guard
+        # must not have quietly narrowed what a template may ship. `render()`
+        # writes these bytes back out verbatim; only `--emit scaffold`'s
+        # JSON envelope needs text, and it has its own curated refusal one
+        # frame up (`render_to_envelope`).
+        base = self._tree(tmp_path)
+        self._path(base).write_bytes(b"\xff\xfe\x00binary-asset")
+        assert self._call(base) == [("src/main.c", b"\xff\xfe\x00binary-asset")]
+
+    # No `test_malformed_document` here, and deliberately not an
+    # unconditional `pytest.skip` standing in for one: `_rendered_bytes`
+    # parses nothing, this class is not a `_PlannerDocumentCases` subclass,
+    # and no shared shape list requires the name -- so a skip that can never
+    # fail would be one more permanent skip in a suite where a skip is
+    # already indistinguishable from a pass at a glance (PR #1160 review
+    # round 2). The class docstring above says the contract differs.
 
 
 def test_every_seed_has_a_test():

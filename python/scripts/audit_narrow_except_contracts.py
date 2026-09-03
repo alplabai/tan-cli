@@ -154,7 +154,21 @@ WHAT SHAPE 3 DOES NOT CLAIM, spelled out to the same standard as SHAPE 2:
     quiet-return in words this list does not contain is missed.
   * It says nothing about whether the read can actually FAIL. A
     `read_text` on a path this same function just wrote is reported like
-    any other.
+    any other. `commands/build_cmd::_build` is the live example on this
+    tree: PR #1160's review checked it and it is a FALSE POSITIVE --
+    `_acquire_plan` returns `text, parse_build_plan(text)`
+    (`build_cmd.py:546`), so the later `json.loads(text)` on that same
+    already-parsed string cannot fail.
+  * It is FUNCTION-SUBTREE based, not function-body based:
+    `declared_contract` and `unguarded_risky_reads` both `ast.walk` the
+    whole subtree, so a nested `def`'s curated raise counts as the
+    ENCLOSING function's contract evidence, and a nested `def`'s bare read
+    is attributed to the enclosing function too -- and DOUBLE-counted,
+    since `find_candidates` visits nested defs separately and may report
+    the same read twice under two qualnames. Shape 1 has always had the
+    same imprecision (its `try` scan walks subtrees too); it is recorded
+    here rather than fixed because no function in this tree currently
+    carries the shape, so a fix would be untested by construction.
 
 What IS pinned in `tests/scripts/test_audit_narrow_except_contracts.py`:
 the positive half (the pre-#1133 `_load_som_doc` body, transcribed, reports
@@ -192,35 +206,61 @@ script reports `OK (non-UTF-8 only)` for it, truthfully, and its real
 defect (an `EACCES`-through-`is_dir()` pre-flight) needed the `chmod 000`
 shape this script does not drive to surface at all.
 
-RE-MEASURED at the tan-cli#1133 fix, and the tally MOVED -- that new number
-is the honest coverage statement, not the old one:
+RE-MEASURED at the tan-cli#1133 fix, and the tally MOVED. Every number here
+was produced by running this script; the DECOMPOSITION matters as much as
+the totals, because "the count went up" has two unrelated causes and an
+earlier draft of this paragraph collapsed them into one and got it wrong:
 
-    without --planner   **67 candidates**, 19 OK / 45 unexecuted /
-                        3 ESCAPED, 0 lazy-escape, **1 absent-try**
-    with --planner      **85 candidates** (18 planner), 0 lazy-escape,
-                        **6 absent-try**
+    tree        script      candidates            absent-try
+    ---------------------------------------------------------------
+    #1132       #1132       65  /  79 --planner   (shape did not exist)
+    dev         dev         66  /  --             (shape did not exist)
+    dev         this        67  /  87 --planner   1  /  9
+    #1133 fix   this        69  /  85 --planner   1  /  5
 
-The execution tally is unchanged in kind (19/45/3, all three ESCAPED still
-curated-on-purpose); 65 -> 67 is tree growth since #1132, not this change,
-which adds no non-planner candidate at all. What moved is the THIRD line,
-which did not exist before: shape 3 finds SIX candidates the first two
-shapes cannot see by construction, one outside the planner
-(`commands/build_cmd::_build`) and five inside it (`kconfig_symbols::
-_load_board_symbols`, `libraries::load_manifest`, `template::
-_rendered_bytes`, `topology::_core_os_choices`, `zephyr_board::
-_load_soc_spec`). None is fixed here -- tan-cli#1133 fixed the two sites it
-names plus one sibling in the same function-family, and every one of these
-six is a candidate to READ, on the same terms as any other line this script
-prints.
+Read down the `candidates` column: **65 -> 66 is tree growth** since #1132,
+nothing to do with this change. **66 -> 67 is this script's new SHAPE 3**,
+which selects exactly one function the other two shapes never saw
+(`commands/build_cmd::_build`). **67 -> 69 is the #1133 fix's own new
+code**: `document_guards.require_readable_bytes` and
+`require_yaml_mapping_doc` are themselves narrow-`except` reads, so they
+join as SHAPE 1 candidates -- which is correct, and the honest cost of
+guarding anything.
 
-Shape 3's detector is not vacuous at that six, and this is the measurement
-that proves it: re-run over the same tree with `tan/planner/template.py`
-reverted to its pre-#1133 form it reports **87 candidates / 9 absent-try**,
-naming all three fixed sites exactly -- `_load_som_doc` (`som_path.
-read_text` and `yaml.safe_load`, both at line 653), `_board_route_entries`
-(both at line 826) and `render_to_envelope` (`yaml.safe_load` at line
-1974). Two of those three are the sites tan-cli#1133 was filed for; the
-third is the one the sweep found because this shape now exists.
+The `--planner` column moves the other way, 87 -> 85, and that is the fix
+landing: `template::_load_som_doc`, `_board_route_entries`,
+`_rendered_bytes` and `render_to_envelope` all DROP OUT of the walk
+entirely, because their bare reads are gone. Shape 3 falls 9 -> 5 for the
+same reason.
+
+Shape 3's detector is not vacuous at that 5, and this is the measurement
+that proves it: run over the pre-fix tree it reports **9 absent-try** and
+names every site the fix touched -- `_load_som_doc` (`som_path.read_text`
+and `yaml.safe_load`, both line 653), `_board_route_entries` (both line
+826), `render_to_envelope` (`yaml.safe_load`, line 1974) and
+`_rendered_bytes` (`read_bytes`, line 509).
+
+THE FIVE THAT REMAIN, and what is known about each -- a list, not a
+number, because "five candidates" invites exactly the deferral that let
+`_rendered_bytes` sit unread through a whole PR:
+
+  * `commands/build_cmd::_build:1234` -- a confirmed FALSE POSITIVE.
+    `_acquire_plan` returns `text, parse_build_plan(text)`
+    (`build_cmd.py:546`), so the later `json.loads(text)` on that same
+    string cannot fail. Checked, not assumed.
+  * `planner/libraries::load_manifest:232` and `planner/zephyr_board::
+    _load_soc_spec:144` -- the same defect shape as the fixed four, but on
+    the `tan build` path, where `build_cmd.py:505`'s broad `except
+    Exception` absorbs them into a coded `build.plan-unavailable`
+    envelope. A poor message rather than a traceback: real, filed, not
+    urgent.
+  * `planner/kconfig_symbols::_load_board_symbols:389` and `planner/
+    topology::_core_os_choices:62` -- not yet driven.
+
+All four open ones are tracked individually in tan-cli#1162, deliberately
+as a LIST rather than as the count "five candidates": #1133's own PR filed
+`template::_rendered_bytes` inside an undifferentiated six-candidate list
+and it turned out to be the busiest live defect of the set.
 
 So: **this script SCOPES the search, it does not perform it.** Every live
 defect tan-cli#1116's triage found was found by a human reading the
@@ -668,7 +708,7 @@ def main() -> int:
     # review built to prevent it. A tree with far fewer than this many
     # candidates is not "clean," it is "this script broke"; fail loud.
     _MIN_EXPECTED_CANDIDATES = 40  # measured 65 non-planner / 79 with
-    # --planner on the tree this script was written against, and 67 / 85 at
+    # --planner on the tree this script was written against, and 69 / 85 at
     # the tan-cli#1133 fix; well under half of the smaller number is not a
     # plausible real shrink from one PR, only a broken walk. The floor
     # deliberately does NOT track the measurement upward: it is a
