@@ -2063,6 +2063,26 @@ jobs:
       # the silent failure this job is for, so the artefacts are asserted.
       - name: tan bootstrap (the customer's first command)
         working-directory: ws/alp-sdk
+        env:
+          # tan-cli#1163. `tan bootstrap`'s final phase lists the Zephyr SDK
+          # releases through the GitHub API, whose anonymous quota is counted
+          # PER SOURCE IP and shared across every hosted runner in the region --
+          # so it is exhausted by traffic that is not ours, and the job dies
+          # with `403 API rate limit exceeded` for a reason unrelated to the
+          # change under test. Measured three times in one day on PRs touching
+          # neither bootstrap nor the SDK.
+          #
+          # `TAN_GITHUB_TOKEN` rather than the `GH_TOKEN` its neighbours use
+          # (tan-cli#840's probe, and the manual `west sdk install` retry):
+          # those steps invoke `gh` and `west --personal-access-token`
+          # directly, so they need the name those tools read. This step invokes
+          # `tan`, which reads TAN_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN in
+          # that order (`SDK_TOKEN_ENV_VARS`, tan/core/toolchain_provision.py),
+          # and the tan-specific name cannot change `gh`'s ambient behaviour
+          # inside this step. tan passes it to `west sdk install` out of band,
+          # so it reaches no argv, log, `--dry-run` plan or envelope
+          # (tan-cli#1143). Listing public releases needs no scopes.
+          TAN_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tan bootstrap --non-interactive \
