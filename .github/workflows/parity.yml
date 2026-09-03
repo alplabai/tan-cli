@@ -680,7 +680,40 @@ env:
   # new refusal has nothing to fire on in this corpus, and the isinstance
   # guards change no valid-input output. Only `PROVENANCE.txt`'s own `alp-sdk
   # ref` line moves.
-  PINNED_SDK_TAG: 0914da38ebbecac3c1546064dd506f7fafe0bfa7
+  # `0914da38` -> `ff27f179` (tan-cli#1151, the #1118 re-sync): moved
+  # together with `test_planner_relocation_freshness.py`'s
+  # `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`, `ci.yml`'s
+  # `sdk_parity` `ref:`, and `PINNED_PLANNER_ORACLE_SDK_REF` below. The
+  # range's one relevant change is alp-sdk#1855 (`5c33ef04`), which teaches
+  # `scripts/alp_template.py`'s scaffold emit to rewrite a bare
+  # `docs/*.md`/`examples/<...>` prose mention into an absolute GitHub URL,
+  # and to keep a trailing `/<subpath>` when collapsing a template's own
+  # example path to `.`.
+  #
+  # THIS PIN HAD TO MOVE IN THE SAME CHANGE AS THE PORT, and that is
+  # measured, not assumed: `tests/parity/test_planner_emit_parity.py::
+  # test_the_scaffold_mode_agrees_on_stdout_through_argv` byte-compares
+  # tan's `--emit scaffold` stdout against the BOUND SDK's own, and
+  # `python-tests-shard` binds `ALP_SDK_ROOT` to THIS tag on every leg. With
+  # the port in place and the tag left at `0914da38`, that node was
+  # `3 failed, 1 passed` (`peripheral`, `sensor`, `edge-ai` -- tan correctly
+  # ahead of the tag); at `ff27f179` it is `4 passed`. Leaving the two pins
+  # split would have reddened all three `python -- pytest across python/`
+  # required contexts, so "port now, bump the tag later" was never
+  # available: any behavioural planner port must move this pin with it.
+  #
+  # Re-measured against `ff27f179` before the bump, same discipline as the
+  # `f1b1c9df` and `0914da38` moves above:
+  #   - scaffold byte-parity: 10/10 (template, sku) pairs PASS -- but only
+  #     after re-vendoring `python/tan/templates/vendored/` (9 files) and
+  #     retiring 17 of `scaffold_byte_parity.py`'s 62 `DELIBERATE_EDITS`,
+  #     which alp-sdk#1855 supersedes: they exist to qualify exactly the
+  #     bare referents the emit now rewrites itself. See MANIFEST.md.
+  #   - planner oracle: ZERO-file diff (see `PINNED_PLANNER_ORACLE_SDK_REF`).
+  #   - kconfig-fixture + toolchain-lock: unchanged in range
+  #     (`metadata/toolchains.json` and the kconfig golden do not appear in
+  #     `gh api .../compare/0914da38...ff27f179`'s 79-path file list).
+  PINNED_SDK_TAG: ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -776,7 +809,17 @@ env:
   # `PROVENANCE.txt`'s own `alp-sdk ref` line moved. See `PINNED_SDK_TAG`'s
   # own comment above for why: no board in the corpus exercises either
   # upstream change.
-  PINNED_PLANNER_ORACLE_SDK_REF: 0914da38ebbecac3c1546064dd506f7fafe0bfa7
+  # `0914da38` -> `ff27f179` (tan-cli#1151): moved in lockstep with
+  # `PINNED_SDK_TAG` above per this pin's own rule -- #270 has not landed.
+  # `python scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+  # ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2` regenerated
+  # `tests/fixtures/planner_oracle/` as a ZERO-file diff (693 emits over 99
+  # boards, 7 error-contract, 1,129,537 B -- byte-for-byte the `0914da38`
+  # numbers). Expected, and checked rather than assumed: alp-sdk#1855 only
+  # touches `scripts/alp_template.py`, whose `--emit scaffold` output this
+  # fixture does not capture (it freezes the per-board planner emits), so
+  # only `PROVENANCE.txt`'s own `alp-sdk ref` line moved.
+  PINNED_PLANNER_ORACLE_SDK_REF: ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

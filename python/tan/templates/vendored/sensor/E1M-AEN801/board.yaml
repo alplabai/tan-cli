@@ -3,7 +3,7 @@
 #
 # Reads the BMP581 barometer on BOARD_I2C_SENSORS via the chip-
 # driver header.  Discrete master that talks to a known device at
-# a known address -- contrasts with examples/peripheral-io/i2c-scanner which
+# a known address -- contrasts with https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/peripheral-io/i2c-scanner which
 # probes every 7-bit address for ACKs.
 #
 # Customer workflow: `tan init --from-example peripheral-io/i2c-master`, change `som.sku` to
@@ -49,8 +49,9 @@ cores:
 # not reach a TMP112 there. BMP581 is the part that is actually on
 # BOARD_I2C_SENSORS on both supported boards, at the same address
 # (0x47) on each --
-# see alp-sdk's examples/v2n/v2n-temp-sensor (not part of this
-# scaffolded project) for the V2N-only BRD_I2C/TMP112 pattern instead.
+see
+# https://github.com/alplabai/alp-sdk/tree/v0.16.0/examples/v2n/v2n-temp-sensor for the V2N-only BRD_I2C/TMP112 pattern
+# instead.
 chips:
   - bmp581
 

@@ -38,9 +38,11 @@ THE DELTA, in three behavioural parts:
 NOT THE ONLY PROOF, and deliberately not the strongest one.
 `tests/parity/test_planner_emit_parity.py::test_the_scaffold_mode_agrees_on_
 stdout_through_argv` byte-compares tan's whole `--emit scaffold` stdout
-against the bound SDK's own, on the real catalog: with `ALP_SDK_ROOT` at a
-real `ff27f179` checkout it is 5/5 PASS with this port and 3/5 FAIL without
-it (`peripheral`, `sensor`, `edge-ai`). That settles byte-equivalence. THIS
+against the bound SDK's own, on the real catalog. That node collects FOUR
+cases (`minimal`, `peripheral`, `sensor`, `edge-ai`): with `ALP_SDK_ROOT` at
+a real `ff27f179` checkout it is `4 passed` with this port and `3 failed, 1
+passed` without it (`peripheral`, `sensor`, `edge-ai`). That settles
+byte-equivalence. THIS
 file exists for what byte-parity cannot give: it runs against a synthetic
 catalog rather than whichever checkout happens to be bound, it names each of
 the three behavioural parts separately so a future regression says WHICH one
@@ -229,9 +231,26 @@ def _tree(tmp_path):
     base = tmp_path / "sdk"
     example = base / _EXAMPLE
     (example / "src").mkdir(parents=True)
-    (example / "board.yaml").write_text(_BOARD_YAML, encoding="utf-8")
-    (example / "src" / "main.c").write_text(_MAIN_C, encoding="utf-8")
-    (example / "src" / "app.h").write_text(_HEADER_H, encoding="utf-8")
+    # `newline="\n"` on EVERY write here, not just the ones an assertion
+    # currently reads across a line break (tan-cli#1151 review, blockers 1
+    # and 2). Without it Python's text-mode translation stores `\r\n` on
+    # Windows, `_rendered_bytes` reads the file with `read_bytes()` + a
+    # plain `.decode("utf-8")` (no translation on the way back), and the
+    # CRLF reaches the assertion. That is not hypothetical: it redded
+    # `python -- pytest shard (windows-latest 2/4)` on this change's first
+    # push, and it reds in BOTH directions -- a positive needle stops
+    # matching, and an LF-only NEGATIVE needle stops being able to match,
+    # which passes against ported and unported code alike. The two
+    # assertions that read across a line break are ALSO written
+    # CRLF-robustly below, so this line is the fix and not the only
+    # defence; a future fixture added here without `newline` cannot
+    # silently re-open it.
+    (example / "board.yaml").write_text(
+        _BOARD_YAML, encoding="utf-8", newline="\n")
+    (example / "src" / "main.c").write_text(
+        _MAIN_C, encoding="utf-8", newline="\n")
+    (example / "src" / "app.h").write_text(
+        _HEADER_H, encoding="utf-8", newline="\n")
 
     catalog = tmp_path / "catalog-v1.json"
     catalog.write_text(json.dumps({"templates": [{
@@ -240,7 +259,7 @@ def _tree(tmp_path):
         "supported": {"som_skus": [_SKU, _OTHER_SKU]},
         "files": {"user_owned": ["board.yaml", "src/main.c", "src/app.h"]},
         "cores": [],
-    }]}), encoding="utf-8")
+    }]}), encoding="utf-8", newline="\n")
 
     metadata = tmp_path / "metadata"
     (metadata / "e1m_modules").mkdir(parents=True)
@@ -250,7 +269,7 @@ def _tree(tmp_path):
             "topology:\n"
             "  m33_sm:\n"
             "    board: fake/soc/m33\n",
-            encoding="utf-8")
+            encoding="utf-8", newline="\n")
     return catalog, base, metadata
 
 
@@ -279,7 +298,16 @@ def test_a_c_or_h_sources_bare_tree_paths_are_rewritten(tmp_path, rel):
     `src/main.c` comment shipped verbatim in the scaffold."""
     out = _render(tmp_path)[rel]
     assert f"{_BLOB}/docs/e1m-pinout.md" in out
-    assert "in\n * docs/e1m-pinout.md" not in out
+    # "no BARE mention survives" stated as a count identity rather than as
+    # `"in\n * docs/e1m-pinout.md" not in out` (tan-cli#1151 review, blocker
+    # 2). The old spelling embedded a newline, so on a CRLF fixture the
+    # needle could never be present and the `not in` passed against the
+    # UNPORTED code too -- a negative half that cannot fail. This form has
+    # no newline in it at all, and it is the stronger claim anyway: EVERY
+    # occurrence of the path is part of a rewritten URL. Pre-port it reds
+    # 1 != 0; the un-rewritten fixture has one bare mention and no URL.
+    assert out.count("docs/e1m-pinout.md") == out.count(
+        f"{_BLOB}/docs/e1m-pinout.md")
 
 
 def test_the_c_source_keeps_its_deeper_example_subpath(tmp_path):
@@ -304,7 +332,15 @@ def test_the_rewrite_runs_even_when_the_sku_is_the_examples_own(tmp_path):
     this one pins the CLAIM, so a future refactor that re-scopes the pass
     under the cross-sku conditional reds here."""
     out = _render(tmp_path, sku=_SKU)
-    assert "som:\n  sku: E1M-FAKE1118\n" in out["board.yaml"]
+    # Normalised before matching: this needle spans a line break, and it is
+    # the exact assertion that redded `python -- pytest shard
+    # (windows-latest 2/4)` on this change's first push (tan-cli#1151
+    # review, blocker 1). `_tree` now pins the fixture to LF, which is the
+    # real fix; normalising here as well means the case states what it
+    # cares about -- the sku passthrough -- rather than also, silently,
+    # asserting a line-ending convention.
+    board_yaml = out["board.yaml"].replace("\r\n", "\n")
+    assert "som:\n  sku: E1M-FAKE1118\n" in board_yaml
     assert f"{_TREE}/examples/v2n/v2n-temp-sensor" in out["board.yaml"]
     assert f"{_BLOB}/docs/e1m-pinout.md" in out["src/main.c"]
 

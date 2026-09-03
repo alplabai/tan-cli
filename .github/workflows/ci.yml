@@ -531,7 +531,19 @@ jobs:
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: 0914da38ebbecac3c1546064dd506f7fafe0bfa7
+      # `0914da38` -> `ff27f179` (tan-cli#1151, the #1118 re-sync), moved in
+      # the SAME change as `parity.yml`'s `PINNED_SDK_TAG` /
+      # `PINNED_PLANNER_ORACLE_SDK_REF` and
+      # `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT` /
+      # `HAND_PORT_PINNED_SDK_COMMIT` -- see `parity.yml`'s `PINNED_SDK_TAG`
+      # comment for the full per-fixture re-measurement. Unlike the two
+      # moves above, this one IS a byte-emission change: alp-sdk#1855
+      # rewrites bare alp-sdk-tree paths in `--emit scaffold` output, so
+      # `python/tan/templates/vendored/` was re-vendored (9 files) and 17
+      # `DELIBERATE_EDITS` retired in the same change. The planner oracle
+      # recapture is still a zero-file diff -- that fixture does not capture
+      # the scaffold emit.
+          ref: ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2
           fetch-tags: true
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`

@@ -445,40 +445,6 @@ def un_edit_sensor_readme_i2c_scanner_bullet(text: str) -> str:
     )
 
 
-#: tan-cli#924 (the `src/main.c` follow-up tan-cli#912/#918 deliberately left
-#: out of scope): `sensor`'s `src/main.c` names FOUR more bare
-#: `i2c-scanner`/`examples/peripheral-io/i2c-scanner` mentions, lines 10, 18,
-#: 103 and 114 of the emitted file. A C comment, not markdown, so no link
-#: syntax applies -- named the alp-sdk path in prose instead, same shape as
-#: tan-cli#821(a)'s `edge-ai`/`src/main.c` fix above. Byte-identical between
-#: the two SKUs (confirmed: `sensor`'s `src/main.c` carries no SKU
-#: substitution at all), so each entry below shares one `un_edit` across both
-#: SKUs. Four separate entries, one per substitution, per tan-cli#908's
-#: discipline -- healing one without the others must still red.
-_SENSOR_MAIN_C_PATTERN_PARAGRAPH_EDITED = (
-    " * Pattern: open the bus, init the chip driver, loop reading the\n"
-    " * register every second, close cleanly.  Contrasts with alp-sdk's\n"
-    " * examples/peripheral-io/i2c-scanner (not part of this scaffolded\n"
-    " * project), which probes every 7-bit address for ACKs without\n"
-    " * knowing what's behind them.\n"
-)
-_SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED = (
-    " * Pattern: open the bus, init the chip driver, loop reading the\n"
-    " * register every second, close cleanly.  Contrasts with\n"
-    " * examples/peripheral-io/i2c-scanner which probes every 7-bit address for ACKs\n"
-    " * without knowing what's behind them.\n"
-)
-
-
-def un_edit_sensor_main_c_pattern_paragraph(text: str) -> str:
-    """tan-cli#924: reverse the header-comment `Contrasts with` paragraph
-    rewrite above to recover the emit's own (dead-pointer) bytes."""
-    return text.replace(
-        _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EDITED,
-        _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED,
-    )
-
-
 _SENSOR_MAIN_C_BRINGUP_INSTRUCTION_EDITED = (
     " * On a brand-new bring-up you may want to run alp-sdk's\n"
     " * examples/peripheral-io/i2c-scanner (not part of this scaffolded\n"
@@ -804,45 +770,6 @@ def un_edit_sensor_main_c_hardware_boards_pointer(text: str) -> str:
     )
 
 
-#: RE-ANCHORED tan-cli#1026 (finishing the f1b1c9df re-sync): anchor moved,
-#: problem intact -- alp-sdk#1866 (`f1b1c9df`) reworded the surrounding
-#: sentence (the old, WRONG "On the E1M-AEN family BRD_I2C is additionally
-#: the slave-only Alif LPI2C0 -- ADR 0017 -- so the SoC can't master it at
-#: all" claim, itself corrected by that same commit's own PR title: BRD_I2C
-#: is master-capable I2C0 on P7_0/P7_1, not the slave-only LPI2C0), which
-#: shifted this entry's old `"at all; see ..."` anchor text out of
-#: existence -- but did not touch the bare `examples/v2n/v2n-temp-sensor`
-#: mention this entry qualifies, which upstream still emits bare. Span
-#: starts at `simply repointing...` -- a whole fresh source line, not a
-#: mid-line word -- so `EDITED` is free to wrap the qualifier onto its
-#: own line instead of gluing `see alp-sdk's...` onto the passthrough
-#: sentence above it. The `so\n` line one step earlier is untouched
-#: passthrough: it names no path, so it needs no qualifier and simply
-#: matches upstream's own bytes.
-_SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EMITTED = (
-    "simply repointing the bus_id would still not reach a TMP112 there; see\n"
-    " * examples/v2n/v2n-temp-sensor for the V2N-only BRD_I2C/TMP112\n"
-    " * pattern.)\n"
-)
-_SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EDITED = (
-    "simply repointing the bus_id would still not reach a TMP112 there;\n"
-    " * see alp-sdk's examples/v2n/v2n-temp-sensor (not part of this\n"
-    " * scaffolded project) for the V2N-only BRD_I2C/TMP112 pattern.)\n"
-)
-
-
-def un_edit_sensor_main_c_historical_note_v2n_pointer(text: str) -> str:
-    """tan-cli#977, re-anchored tan-cli#1026: reverse the `#1269` historical
-    note's bare `examples/v2n/v2n-temp-sensor` mention rewrite above to
-    recover the emit's own (dead-pointer) bytes. Own entry from the
-    `Hardware:` paragraph fix above -- a different comment block, per the
-    one-substitution-per-entry discipline."""
-    return text.replace(
-        _SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EDITED,
-        _SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EMITTED,
-    )
-
-
 _SENSOR_MAIN_C_ADDR_METADATA_POINTER_EMITTED = (
     "E1M-X EVK (see\n * metadata/boards/e1m-evk.yaml / e1m-x-evk.yaml `i2c_devices:`).\n"
 )
@@ -883,28 +810,6 @@ def un_edit_sensor_main_c_addr_header_pointer(text: str) -> str:
     return text.replace(
         _SENSOR_MAIN_C_ADDR_HEADER_POINTER_EDITED,
         _SENSOR_MAIN_C_ADDR_HEADER_POINTER_EMITTED,
-    )
-
-
-_SENSOR_MAIN_C_INIT_FAIL_SCANNER_POINTER_EMITTED = (
-    "     * is wrong, maybe the bus is held low by another device.\n"
-    "     * examples/peripheral-io/i2c-scanner can confirm which devices ACK. */\n"
-)
-_SENSOR_MAIN_C_INIT_FAIL_SCANNER_POINTER_EDITED = (
-    "     * is wrong, maybe the bus is held low by another device.\n"
-    "     * alp-sdk's examples/peripheral-io/i2c-scanner (not part of\n"
-    "     * this scaffolded project) can confirm which devices ACK. */\n"
-)
-
-
-def un_edit_sensor_main_c_init_fail_scanner_pointer(text: str) -> str:
-    """tan-cli#977: reverse the `bmp581_init` failure doc-comment's bare
-    `examples/peripheral-io/i2c-scanner` mention rewrite above to recover
-    the emit's own (dead-pointer) bytes -- the BMP581-era recurrence of
-    entry 11's retired `init_fail_comment` anchor."""
-    return text.replace(
-        _SENSOR_MAIN_C_INIT_FAIL_SCANNER_POINTER_EDITED,
-        _SENSOR_MAIN_C_INIT_FAIL_SCANNER_POINTER_EMITTED,
     )
 
 
@@ -1045,35 +950,6 @@ def un_edit_sensor_board_yaml_historical_note_boards_pointer(text: str) -> str:
     return text.replace(
         _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EDITED,
         _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EMITTED,
-    )
-
-
-#: RE-ANCHORED tan-cli#1026, same alp-sdk#1866 rewording as the sibling
-#: entry above -- the boundary the two entries share (`"...on each -- "`)
-#: moved with it. Span starts at `see` (the word immediately after the
-#: shared boundary) so the two entries partition the whole reworded NOTE
-#: between them with no gap and no overlap.
-_SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EMITTED = (
-    "see\n"
-    "# examples/v2n/v2n-temp-sensor for the V2N-only BRD_I2C/TMP112 pattern\n"
-    "# instead.\n"
-)
-_SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EDITED = (
-    "# see alp-sdk's examples/v2n/v2n-temp-sensor (not part of this\n"
-    "# scaffolded project) for the V2N-only BRD_I2C/TMP112 pattern instead.\n"
-)
-
-
-def un_edit_sensor_board_yaml_historical_note_v2n_pointer(text: str) -> str:
-    """tan-cli#977, re-anchored tan-cli#1026: reverse the `#1269` historical
-    NOTE's bare `examples/v2n/v2n-temp-sensor` mention rewrite above to
-    recover the emit's own (dead-pointer) bytes -- the board.yaml-side
-    sibling of `src/main.c`'s `historical_note_v2n_pointer` entry above.
-    Own entry from the `metadata/boards/*.yaml` fix above, per the
-    one-substitution-per-entry discipline."""
-    return text.replace(
-        _SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EDITED,
-        _SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EMITTED,
     )
 
 
@@ -1237,33 +1113,6 @@ def un_edit_diagnostics_prj_conf_workflow_pointer(text: str) -> str:
     )
 
 
-#: tan-cli#1009 (PR #1009 review, beyond finding 1's ten blocking sites --
-#: same defect class, review-vetted, swept in the same pass rather than left
-#: for yet another follow-up): `iot`'s `board.yaml` names alp-sdk's
-#: `docs/cc3501e-bridge.md` bare, one SKU only (`iot` ships E1M-AEN801 only).
-_IOT_BOARD_YAML_CC3501E_BRIDGE_POINTER_EMITTED = (
-    "# underneath is the CC3501E Wi-Fi6+BLE coprocessor bridge on the\n"
-    "# E1M-AEN801 (see docs/cc3501e-bridge.md), selected automatically\n"
-    "# by the AEN board emit; no app change is needed to target it.\n"
-)
-_IOT_BOARD_YAML_CC3501E_BRIDGE_POINTER_EDITED = (
-    "# underneath is the CC3501E Wi-Fi6+BLE coprocessor bridge on the\n"
-    "# E1M-AEN801 (see alp-sdk's docs/cc3501e-bridge.md, not part of\n"
-    "# this scaffolded project), selected automatically\n"
-    "# by the AEN board emit; no app change is needed to target it.\n"
-)
-
-
-def un_edit_iot_board_yaml_cc3501e_bridge_pointer(text: str) -> str:
-    """tan-cli#1009: reverse `iot`'s `board.yaml` bare
-    `docs/cc3501e-bridge.md` mention rewrite above to recover the emit's own
-    (dead-pointer) bytes."""
-    return text.replace(
-        _IOT_BOARD_YAML_CC3501E_BRIDGE_POINTER_EDITED,
-        _IOT_BOARD_YAML_CC3501E_BRIDGE_POINTER_EMITTED,
-    )
-
-
 #: tan-cli#1009: `iot`'s `prj.conf` names bare `scripts/alp_project.py` in
 #: its own opening paragraph -- own constant, different wording than
 #: `sensor`/`minimal`/`diagnostics`'s prj.conf (finding 1 named this exact
@@ -1317,134 +1166,6 @@ def un_edit_iot_prj_conf_fleet_ota_pointer(text: str) -> str:
     return text.replace(
         _IOT_PRJ_CONF_FLEET_OTA_POINTER_EDITED,
         _IOT_PRJ_CONF_FLEET_OTA_POINTER_EMITTED,
-    )
-
-
-#: tan-cli#1009: `iot`'s `src/main.c` names alp-sdk's `docs/cc3501e-bridge.md`
-#: bare in its Transport doc-comment -- the src/main.c-side sibling of
-#: `board.yaml`'s cc3501e_bridge_pointer above, a different file.
-_IOT_MAIN_C_CC3501E_BRIDGE_POINTER_EMITTED = (
-    " * Transport (E1M-AEN801): the CC3501E Wi-Fi6+BLE coprocessor bridge\n"
-    " * (docs/cc3501e-bridge.md), selected automatically by the AEN board\n"
-    " * emit from `iot.wifi: true` -- the app never names it, it just\n"
-)
-_IOT_MAIN_C_CC3501E_BRIDGE_POINTER_EDITED = (
-    " * Transport (E1M-AEN801): the CC3501E Wi-Fi6+BLE coprocessor bridge\n"
-    " * (alp-sdk's docs/cc3501e-bridge.md, not part of this scaffolded\n"
-    " * project), selected automatically by the AEN board\n"
-    " * emit from `iot.wifi: true` -- the app never names it, it just\n"
-)
-
-
-def un_edit_iot_main_c_cc3501e_bridge_pointer(text: str) -> str:
-    """tan-cli#1009: reverse `iot`'s `src/main.c` Transport doc-comment's
-    bare `docs/cc3501e-bridge.md` mention rewrite above to recover the
-    emit's own (dead-pointer) bytes."""
-    return text.replace(
-        _IOT_MAIN_C_CC3501E_BRIDGE_POINTER_EDITED,
-        _IOT_MAIN_C_CC3501E_BRIDGE_POINTER_EMITTED,
-    )
-
-
-#: tan-cli#1009: `iot`'s `src/main.c` also names alp-sdk's
-#: `examples/peripheral-io/i2c-master` bare (the reviewer's own
-#: `iot/E1M-AEN801/src/main.c:26` finding) -- own entry, a different comment
-#: block than the Transport one above. Widened in the PR #1009 round-three
-#: review to also correct the same paragraph's stale "TMP112 over
-#: <alp/chips/tmp112.h>" -- alp-sdk#1269 swapped `sensor`'s underlying chip
-#: to BMP581, and this template's own `README.md:52` already says BMP581,
-#: but this `src/main.c` copy was never updated to match; both fixes sit in
-#: the same matched paragraph, so kept as one entry rather than two
-#: overlapping ones.
-_IOT_MAIN_C_SENSOR_TEMPLATE_POINTER_EMITTED = (
-    ' * The "sensor reading": to keep the focus on the transport, this\n'
-    " * template publishes a synthetic metric (device uptime).  Swap\n"
-    " * read_telemetry_value() for a real sensor read -- e.g. compose it\n"
-    " * with the `sensor` template (examples/peripheral-io/i2c-master,\n"
-    " * TMP112 over <alp/chips/tmp112.h>) -- and the publish path here is\n"
-    " * unchanged.\n"
-)
-_IOT_MAIN_C_SENSOR_TEMPLATE_POINTER_EDITED = (
-    ' * The "sensor reading": to keep the focus on the transport, this\n'
-    " * template publishes a synthetic metric (device uptime).  Swap\n"
-    " * read_telemetry_value() for a real sensor read -- e.g. compose it\n"
-    " * with the `sensor` template (alp-sdk's\n"
-    " * examples/peripheral-io/i2c-master, not part of this scaffolded\n"
-    " * project; BMP581 over <alp/chips/bmp581.h>) -- and the publish\n"
-    " * path here is unchanged.\n"
-)
-
-
-def un_edit_iot_main_c_sensor_template_pointer(text: str) -> str:
-    """tan-cli#1009: reverse `iot`'s `src/main.c` "sensor reading"
-    doc-comment's bare `examples/peripheral-io/i2c-master` mention AND its
-    stale TMP112/tmp112.h -> BMP581/bmp581.h correction (both above) to
-    recover the emit's own (dead-pointer, stale-chip) bytes."""
-    return text.replace(
-        _IOT_MAIN_C_SENSOR_TEMPLATE_POINTER_EDITED,
-        _IOT_MAIN_C_SENSOR_TEMPLATE_POINTER_EMITTED,
-    )
-
-
-#: tan-cli#1009: `edge-ai`'s `src/main.c` names alp-sdk's
-#: `examples/ai/cold-chain-monitor/models/README.md` bare, twice (the
-#: reviewer's own `edge-ai/{E1M-AEN801,E1M-V2N101}/src/main.c:20,155`
-#: finding) -- two independent doc-comments, two entries. Byte-identical
-#: between the two SKUs (confirmed: `edge-ai`'s `src/main.c` carries no SKU
-#: substitution at all), so each `un_edit` is shared across both.
-_EDGE_AI_MAIN_C_MODEL_README_POINTER_1_EMITTED = (
-    " * NOT a certified GxP / 21-CFR-Part-11 data logger (no validated audit trail,\n"
-    " * no calibration traceability, no tamper-proof storage).  The model is a stub\n"
-    " * (see examples/ai/cold-chain-monitor/models/README.md); with no model the\n"
-    " * deterministic classifier + anomaly fallback run.\n"
-)
-_EDGE_AI_MAIN_C_MODEL_README_POINTER_1_EDITED = (
-    " * NOT a certified GxP / 21-CFR-Part-11 data logger (no validated audit trail,\n"
-    " * no calibration traceability, no tamper-proof storage).  The model is a stub\n"
-    " * (see alp-sdk's examples/ai/cold-chain-monitor/models/README.md,\n"
-    " * not part of this scaffolded project); with no model the\n"
-    " * deterministic classifier + anomaly fallback run.\n"
-)
-
-
-def un_edit_edge_ai_main_c_model_readme_pointer_1(text: str) -> str:
-    """tan-cli#1009: reverse `edge-ai`'s `src/main.c` "Honest scope"
-    doc-comment's bare `examples/ai/cold-chain-monitor/models/README.md`
-    mention rewrite above to recover the emit's own (dead-pointer) bytes."""
-    return text.replace(
-        _EDGE_AI_MAIN_C_MODEL_README_POINTER_1_EDITED,
-        _EDGE_AI_MAIN_C_MODEL_README_POINTER_1_EMITTED,
-    )
-
-
-_EDGE_AI_MAIN_C_MODEL_README_POINTER_2_EMITTED = (
-    "/* 1-byte stub so alp_inference_open's non-NULL model-data contract is met.\n"
-    " * An unusable tensor (wrong shape from the stub backend) causes every\n"
-    " * alp_inference_invoke() to return no usable output, which anomaly_score()\n"
-    " * detects and routes to cc_anomaly_fallback().  See\n"
-    " * examples/ai/cold-chain-monitor/models/README.md for the autoencoder\n"
-    " * training recipe to replace this stub. */\n"
-)
-_EDGE_AI_MAIN_C_MODEL_README_POINTER_2_EDITED = (
-    "/* 1-byte stub so alp_inference_open's non-NULL model-data contract is met.\n"
-    " * An unusable tensor (wrong shape from the stub backend) causes every\n"
-    " * alp_inference_invoke() to return no usable output, which anomaly_score()\n"
-    " * detects and routes to cc_anomaly_fallback().  See alp-sdk's\n"
-    " * examples/ai/cold-chain-monitor/models/README.md (not part of\n"
-    " * this scaffolded project) for the autoencoder training recipe to\n"
-    " * replace this stub. */\n"
-)
-
-
-def un_edit_edge_ai_main_c_model_readme_pointer_2(text: str) -> str:
-    """tan-cli#1009: reverse `edge-ai`'s `src/main.c` model-stub
-    doc-comment's bare `examples/ai/cold-chain-monitor/models/README.md`
-    mention rewrite above to recover the emit's own (dead-pointer) bytes --
-    own entry from the "Honest scope" fix above, a different comment
-    block."""
-    return text.replace(
-        _EDGE_AI_MAIN_C_MODEL_README_POINTER_2_EDITED,
-        _EDGE_AI_MAIN_C_MODEL_README_POINTER_2_EMITTED,
     )
 
 
@@ -1532,37 +1253,6 @@ def un_edit_multicore_mailbox_prj_conf_workflow_pointer(text: str) -> str:
     )
 
 
-#: tan-cli#1009: `multicore-mailbox`'s `src/main.c` labels its OWN local
-#: `./peer/main.c` (a real file this template scaffolds) with alp-sdk's
-#: upstream example path instead -- a different shape than the other
-#: entries above (a local file mislabeled with an upstream path, not a bare
-#: upstream-only referent), but the reviewer's own
-#: `multicore-mailbox/E1M-AEN801/src/main.c:43` finding names it as the same
-#: defect class. Corrected to name the real local path, with the upstream
-#: path kept as a parenthetical for anyone comparing against alp-sdk's own
-#: copy of this example.
-_MULTICORE_MAILBOX_MAIN_C_PEER_MAIN_POINTER_EMITTED = (
-    " * The HE-side application lives at\n"
-    " * `examples/multicore/mproc-mailbox/peer/main.c`.  Both halves build\n"
-)
-_MULTICORE_MAILBOX_MAIN_C_PEER_MAIN_POINTER_EDITED = (
-    " * The HE-side application lives at `./peer/main.c` in this\n"
-    " * scaffolded project (alp-sdk's own upstream copy of this example\n"
-    " * lives at examples/multicore/mproc-mailbox/peer/main.c, not part\n"
-    " * of this scaffolded project).  Both halves build\n"
-)
-
-
-def un_edit_multicore_mailbox_main_c_peer_main_pointer(text: str) -> str:
-    """tan-cli#1009: reverse `multicore-mailbox`'s `src/main.c` "Peer
-    firmware" doc-comment's local-path-mislabeled-as-upstream rewrite above
-    to recover the emit's own (mislabeled) bytes."""
-    return text.replace(
-        _MULTICORE_MAILBOX_MAIN_C_PEER_MAIN_POINTER_EDITED,
-        _MULTICORE_MAILBOX_MAIN_C_PEER_MAIN_POINTER_EMITTED,
-    )
-
-
 #: tan-cli#1009 (PR #1009 round-three review, the eleventh sibling site):
 #: `multicore-mailbox`'s `board.yaml` names alp-sdk's own
 #: `src/backends/mproc/zephyr_drv.c` bare, three lines above the
@@ -1624,37 +1314,6 @@ def un_edit_multicore_mailbox_readme_peer_main_link_pointer(text: str) -> str:
     return text.replace(
         _MULTICORE_MAILBOX_README_PEER_MAIN_LINK_POINTER_EDITED,
         _MULTICORE_MAILBOX_README_PEER_MAIN_LINK_POINTER_EMITTED,
-    )
-
-
-#: tan-cli#1009 (PR #1009 round-three review, major -- a run-this
-#: instruction that FAILS): alp-sdk's emit rewrites the project root
-#: `examples/multicore/mproc-mailbox` -> `.` in three places but misses
-#: this fourth, the `/peer` sub-path in the HE-side standalone `west build`
-#: command, four lines below a correctly-rewritten `... rtss_hp .`. A
-#: customer running the shipped command gets "source directory does not
-#: exist" -- `m55_he: app: ./peer` is this scaffold's own relative path,
-#: not `examples/multicore/mproc-mailbox/peer`, which does not exist in a
-#: `tan init` project at all.
-_MULTICORE_MAILBOX_README_PEER_BUILD_PATH_EMITTED = (
-    "# HE side.\n"
-    "west build -b ensemble_e8_dk/ae822fa0e5597ls0/rtss_he examples/multicore/mproc-mailbox/peer\n"
-    "west flash\n"
-)
-_MULTICORE_MAILBOX_README_PEER_BUILD_PATH_EDITED = (
-    "# HE side.\n"
-    "west build -b ensemble_e8_dk/ae822fa0e5597ls0/rtss_he ./peer\n"
-    "west flash\n"
-)
-
-
-def un_edit_multicore_mailbox_readme_peer_build_path(text: str) -> str:
-    """tan-cli#1009: reverse `multicore-mailbox`'s `README.md` HE-side
-    standalone `west build` command's path-rewrite-miss fix above to
-    recover the emit's own (broken) bytes."""
-    return text.replace(
-        _MULTICORE_MAILBOX_README_PEER_BUILD_PATH_EDITED,
-        _MULTICORE_MAILBOX_README_PEER_BUILD_PATH_EMITTED,
     )
 
 
@@ -1760,17 +1419,6 @@ DELIBERATE_EDITS: dict[
         "affected.",
         un_edit_edge_ai_aen801_board_yaml_deepx_note,
     ),
-    ("sensor", "E1M-AEN801", "src/main.c", "pattern_paragraph"): (
-        "tan-cli#924: the header-comment 'Contrasts with' paragraph named a "
-        "bare examples/peripheral-io/i2c-scanner, not emitted into any "
-        "scaffolded project -- named the real alp-sdk path in prose (a C "
-        "comment, no markdown link syntax applies)",
-        un_edit_sensor_main_c_pattern_paragraph,
-    ),
-    ("sensor", "E1M-V2N101", "src/main.c", "pattern_paragraph"): (
-        "tan-cli#924: same as sensor/E1M-AEN801/src/main.c above",
-        un_edit_sensor_main_c_pattern_paragraph,
-    ),
     ("diagnostics", "E1M-V2N101", "src/main.c", "som_sku_header"): (
         "tan-cli#932: src/main.c was never SKU-substituted at all -- the "
         "'what success looks like' heading still names E1M-AEN801",
@@ -1837,22 +1485,6 @@ DELIBERATE_EDITS: dict[
         "#1009 review finding 2)",
         un_edit_sensor_main_c_hardware_boards_pointer,
     ),
-    ("sensor", "E1M-AEN801", "src/main.c", "historical_note_v2n_pointer"): (
-        "tan-cli#977, re-anchored tan-cli#1026 (alp-sdk#1866 corrected the "
-        "surrounding BRD_I2C/LPI2C0 sentence, moving this entry's old "
-        "anchor -- the underlying problem, a bare examples/v2n/"
-        "v2n-temp-sensor mention, was untouched by that fix): the #1269 "
-        "historical note's bare examples/v2n/v2n-temp-sensor mention, own "
-        "entry from the hardware_boards_pointer fix above",
-        un_edit_sensor_main_c_historical_note_v2n_pointer,
-    ),
-    ("sensor", "E1M-V2N101", "src/main.c", "historical_note_v2n_pointer"): (
-        "tan-cli#977, re-anchored tan-cli#1026: the #1269 historical note's "
-        "bare examples/v2n/v2n-temp-sensor mention, same substitution as "
-        "sensor/E1M-AEN801/src/main.c's historical_note_v2n_pointer entry "
-        "above (own reason string per PR #1009 review finding 2)",
-        un_edit_sensor_main_c_historical_note_v2n_pointer,
-    ),
     ("sensor", "E1M-AEN801", "src/main.c", "addr_metadata_pointer"): (
         "tan-cli#977: the BMP581_ADDR_7BIT doc-comment's bare "
         "metadata/boards/e1m-evk.yaml/e1m-x-evk.yaml mention, a different "
@@ -1882,19 +1514,6 @@ DELIBERATE_EDITS: dict[
         "src/main.c's addr_header_pointer entry above (own reason string "
         "per PR #1009 review finding 2)",
         un_edit_sensor_main_c_addr_header_pointer,
-    ),
-    ("sensor", "E1M-AEN801", "src/main.c", "init_fail_scanner_pointer"): (
-        "tan-cli#977: the bmp581_init failure doc-comment's bare "
-        "examples/peripheral-io/i2c-scanner mention -- the BMP581-era "
-        "recurrence of retired entry 11's init_fail_comment anchor",
-        un_edit_sensor_main_c_init_fail_scanner_pointer,
-    ),
-    ("sensor", "E1M-V2N101", "src/main.c", "init_fail_scanner_pointer"): (
-        "tan-cli#977: the bmp581_init failure doc-comment's bare "
-        "examples/peripheral-io/i2c-scanner mention, same substitution as "
-        "sensor/E1M-AEN801/src/main.c's init_fail_scanner_pointer entry "
-        "above (own reason string per PR #1009 review finding 2)",
-        un_edit_sensor_main_c_init_fail_scanner_pointer,
     ),
     ("sensor", "E1M-AEN801", "board.yaml", "workflow_pointer"): (
         "tan-cli#977: the Customer workflow paragraph's bare "
@@ -1955,24 +1574,6 @@ DELIBERATE_EDITS: dict[
         "historical_note_boards_pointer entry above (own reason string per "
         "PR #1009 review finding 2)",
         un_edit_sensor_board_yaml_historical_note_boards_pointer,
-    ),
-    ("sensor", "E1M-AEN801", "board.yaml", "historical_note_v2n_pointer"): (
-        "tan-cli#977, re-anchored tan-cli#1026 (alp-sdk#1866 corrected the "
-        "surrounding BRD_I2C/LPI2C0 sentence, moving this entry's old "
-        "anchor -- the underlying problem, a bare examples/v2n/"
-        "v2n-temp-sensor mention, was untouched by that fix): the same "
-        "NOTE's bare examples/v2n/v2n-temp-sensor mention -- the "
-        "board.yaml-side sibling of src/main.c's historical_note_v2n_"
-        "pointer entry, own entry from the metadata/boards/*.yaml fix "
-        "above",
-        un_edit_sensor_board_yaml_historical_note_v2n_pointer,
-    ),
-    ("sensor", "E1M-V2N101", "board.yaml", "historical_note_v2n_pointer"): (
-        "tan-cli#977, re-anchored tan-cli#1026: the same NOTE's bare "
-        "examples/v2n/v2n-temp-sensor mention, same substitution as "
-        "sensor/E1M-AEN801/board.yaml's historical_note_v2n_pointer entry "
-        "above (own reason string per PR #1009 review finding 2)",
-        un_edit_sensor_board_yaml_historical_note_v2n_pointer,
     ),
     ("sensor", "E1M-AEN801", "prj.conf", "workflow_pointer"): (
         "tan-cli#977: the same bare scripts/alp_project.py mention as "
@@ -2068,14 +1669,6 @@ DELIBERATE_EDITS: dict[
         "discipline)",
         un_edit_diagnostics_prj_conf_workflow_pointer,
     ),
-    ("iot", "E1M-AEN801", "board.yaml", "cc3501e_bridge_pointer"): (
-        "tan-cli#1009: iot's board.yaml names alp-sdk's own "
-        "docs/cc3501e-bridge.md bare, not emitted into any scaffolded "
-        "project -- found sweeping the same class through every vendored "
-        "template per the PR #1009 review's mandate, one SKU only (iot "
-        "ships E1M-AEN801 only)",
-        un_edit_iot_board_yaml_cc3501e_bridge_pointer,
-    ),
     ("iot", "E1M-AEN801", "prj.conf", "workflow_pointer"): (
         "tan-cli#1009: iot's own bare scripts/alp_project.py mention, one "
         "of finding 1's two named 'different wording' sites "
@@ -2088,53 +1681,6 @@ DELIBERATE_EDITS: dict[
         "reviewer's own iot/E1M-AEN801/prj.conf:18 finding, own entry from "
         "the workflow_pointer fix above, a different paragraph",
         un_edit_iot_prj_conf_fleet_ota_pointer,
-    ),
-    ("iot", "E1M-AEN801", "src/main.c", "cc3501e_bridge_pointer"): (
-        "tan-cli#1009: iot's src/main.c Transport doc-comment's bare "
-        "docs/cc3501e-bridge.md mention, the src/main.c-side sibling of "
-        "board.yaml's cc3501e_bridge_pointer entry above, a different file",
-        un_edit_iot_main_c_cc3501e_bridge_pointer,
-    ),
-    ("iot", "E1M-AEN801", "src/main.c", "sensor_template_pointer"): (
-        "tan-cli#1009: iot's src/main.c 'sensor reading' doc-comment's bare "
-        "examples/peripheral-io/i2c-master mention -- the reviewer's own "
-        "iot/E1M-AEN801/src/main.c:26 finding, own entry from the "
-        "cc3501e_bridge_pointer fix above, a different comment block -- "
-        "widened in the PR #1009 round-three review to also correct the "
-        "same paragraph's stale TMP112/tmp112.h mention (alp-sdk#1269 "
-        "swapped sensor's underlying chip to BMP581; this template's own "
-        "README.md:52 already said BMP581, this src/main.c copy did not)",
-        un_edit_iot_main_c_sensor_template_pointer,
-    ),
-    ("edge-ai", "E1M-AEN801", "src/main.c", "model_readme_pointer_1"): (
-        "tan-cli#1009: edge-ai's 'Honest scope' doc-comment's bare "
-        "examples/ai/cold-chain-monitor/models/README.md mention -- the "
-        "reviewer's own edge-ai/E1M-AEN801/src/main.c:20 finding",
-        un_edit_edge_ai_main_c_model_readme_pointer_1,
-    ),
-    ("edge-ai", "E1M-V2N101", "src/main.c", "model_readme_pointer_1"): (
-        "tan-cli#1009: same substitution as "
-        "edge-ai/E1M-AEN801/src/main.c's model_readme_pointer_1 entry "
-        "above (own reason string per the tan-cli#977 review's finding 2 "
-        "discipline; edge-ai's src/main.c is byte-identical between the "
-        "two SKUs at this line)",
-        un_edit_edge_ai_main_c_model_readme_pointer_1,
-    ),
-    ("edge-ai", "E1M-AEN801", "src/main.c", "model_readme_pointer_2"): (
-        "tan-cli#1009: edge-ai's model-stub doc-comment's bare "
-        "examples/ai/cold-chain-monitor/models/README.md mention -- the "
-        "reviewer's own edge-ai/E1M-AEN801/src/main.c:155 finding, own "
-        "entry from model_readme_pointer_1 above, a different comment "
-        "block",
-        un_edit_edge_ai_main_c_model_readme_pointer_2,
-    ),
-    ("edge-ai", "E1M-V2N101", "src/main.c", "model_readme_pointer_2"): (
-        "tan-cli#1009: same substitution as "
-        "edge-ai/E1M-AEN801/src/main.c's model_readme_pointer_2 entry "
-        "above (own reason string per the tan-cli#977 review's finding 2 "
-        "discipline; edge-ai's src/main.c is byte-identical between the "
-        "two SKUs at this line)",
-        un_edit_edge_ai_main_c_model_readme_pointer_2,
     ),
     ("multicore-mailbox", "E1M-AEN801", "board.yaml", "e1m_modules_pointer"): (
         "tan-cli#1009: multicore-mailbox's board.yaml bare "
@@ -2161,15 +1707,6 @@ DELIBERATE_EDITS: dict[
         "line numbering)",
         un_edit_multicore_mailbox_prj_conf_workflow_pointer,
     ),
-    ("multicore-mailbox", "E1M-AEN801", "src/main.c", "peer_main_pointer"): (
-        "tan-cli#1009: multicore-mailbox's src/main.c 'Peer firmware' "
-        "doc-comment labelled its own local ./peer/main.c with alp-sdk's "
-        "upstream example path instead of the real local one -- the "
-        "reviewer's own multicore-mailbox/E1M-AEN801/src/main.c:43 finding, "
-        "a local-path-mislabelling shape rather than a bare upstream-only "
-        "referent, but the same defect class per the review",
-        un_edit_multicore_mailbox_main_c_peer_main_pointer,
-    ),
     # tan-cli#1009 round-three review: the eleventh sibling site the
     # round-two sweep missed, plus two scope-outs from round two that did
     # not hold on closer inspection. Three entries.
@@ -2188,14 +1725,6 @@ DELIBERATE_EDITS: dict[
         "src/main.c's peer_main_pointer entry above, one file over, missed "
         "by the round-two sweep (PR #1009 round-three review)",
         un_edit_multicore_mailbox_readme_peer_main_link_pointer,
-    ),
-    ("multicore-mailbox", "E1M-AEN801", "README.md", "peer_build_path"): (
-        "tan-cli#1009: multicore-mailbox's README.md HE-side standalone "
-        "west build command names examples/multicore/mproc-mailbox/peer, "
-        "which does not exist in a tan init project (this scaffold's own "
-        "path is ./peer) -- a run-this instruction that fails, missed by "
-        "the round-two sweep (PR #1009 round-three review, major)",
-        un_edit_multicore_mailbox_readme_peer_build_path,
     ),
 }
 
@@ -2451,35 +1980,27 @@ def self_check() -> None:
         == _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED
     )
 
-    # tan-cli#924's one still-live entry (`pattern_paragraph` -- the other
-    # four sibling substitutions, `hardware_paragraph`/`bringup_instruction`/
-    # `init_fail_comment`/`failure_modes_instruction`, retired at
-    # tan-cli#996/#1001, see the DELIBERATE_EDITS block comment): the
-    # un_edit must round-trip the corrected comment back onto the emit's own
-    # (still-bare) bytes, and be registered under the exact
-    # (template, sku, path, edit_id) key.
-    for sku in ("E1M-AEN801", "E1M-V2N101"):
-        assert ("sensor", sku, "src/main.c", "pattern_paragraph") in DELIBERATE_EDITS
-        assert (
-            un_edit_sensor_main_c_pattern_paragraph(
-                _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EDITED
-            )
-            == _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED
-        )
-
-    # ...and the strict half too: feeding the un_edit its OWN emitted
-    # (still-bare) bytes finds nothing to undo -- `undo_declared_edits` must
-    # surface that as a hard failure, not a quiet pass.
-    for sku in ("E1M-AEN801", "E1M-V2N101"):
-        _, mut_failures = undo_declared_edits(
-            "sensor", sku, {"src/main.c": _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED}
-        )
-        assert [
-            f for f in mut_failures
-            if f.startswith(
-                "src/main.c: DELIBERATE_EDITS declares an edit that is no longer"
-            )
-        ], (sku, mut_failures)
+    # tan-cli#924's LAST entry (`pattern_paragraph`) retired at tan-cli#1151
+    # (the ff27f179 re-vendor) -- its four siblings
+    # (`hardware_paragraph`/`bringup_instruction`/`init_fail_comment`/
+    # `failure_modes_instruction`) had already gone at tan-cli#996/#1001, so
+    # tan-cli#924 now has no live entry and no round-trip block here. Same
+    # reason as the other sixteen this re-vendor retired: alp-sdk#1855 makes
+    # the emit itself rewrite the bare `examples/peripheral-io/i2c-scanner`
+    # referent this edit existed to qualify, so the vendored bytes are now
+    # the emit's own. See the DELIBERATE_EDITS block comment for the list.
+    #
+    # THE DISCIPLINE THIS BLOCK CARRIED IS NOT LOST, and that is checked
+    # rather than asserted: `pattern_paragraph` was also the fixture for the
+    # STRICT half -- feeding an un_edit its own already-emitted bytes must
+    # make `undo_declared_edits` report a hard failure, not pass quietly.
+    # That half is still exercised below by `diagnostics`/E1M-V2N101's
+    # six-entry set, which is reason-string-filtered (so a partial heal is
+    # still caught) and is the same place the discipline moved to when
+    # `edge-ai`'s `model_comment_1`/`_2` pair was retired at
+    # tan-cli#996/#1001 -- see the note at the top of this function. Deleting
+    # the diagnostics set without providing another strict-half fixture
+    # would leave `undo_declared_edits`' failure path uncovered.
 
     # tan-cli#932's six entries (diagnostics/E1M-V2N101 only): each un_edit
     # must round-trip the corrected src/main.c or README.md bytes back onto
@@ -2574,11 +2095,6 @@ def self_check() -> None:
             _DIAGNOSTICS_PRJ_CONF_WORKFLOW_POINTER_EMITTED,
         ),
         (
-            un_edit_iot_board_yaml_cc3501e_bridge_pointer,
-            _IOT_BOARD_YAML_CC3501E_BRIDGE_POINTER_EDITED,
-            _IOT_BOARD_YAML_CC3501E_BRIDGE_POINTER_EMITTED,
-        ),
-        (
             un_edit_iot_prj_conf_workflow_pointer,
             _IOT_PRJ_CONF_WORKFLOW_POINTER_EDITED,
             _IOT_PRJ_CONF_WORKFLOW_POINTER_EMITTED,
@@ -2587,26 +2103,6 @@ def self_check() -> None:
             un_edit_iot_prj_conf_fleet_ota_pointer,
             _IOT_PRJ_CONF_FLEET_OTA_POINTER_EDITED,
             _IOT_PRJ_CONF_FLEET_OTA_POINTER_EMITTED,
-        ),
-        (
-            un_edit_iot_main_c_cc3501e_bridge_pointer,
-            _IOT_MAIN_C_CC3501E_BRIDGE_POINTER_EDITED,
-            _IOT_MAIN_C_CC3501E_BRIDGE_POINTER_EMITTED,
-        ),
-        (
-            un_edit_iot_main_c_sensor_template_pointer,
-            _IOT_MAIN_C_SENSOR_TEMPLATE_POINTER_EDITED,
-            _IOT_MAIN_C_SENSOR_TEMPLATE_POINTER_EMITTED,
-        ),
-        (
-            un_edit_edge_ai_main_c_model_readme_pointer_1,
-            _EDGE_AI_MAIN_C_MODEL_README_POINTER_1_EDITED,
-            _EDGE_AI_MAIN_C_MODEL_README_POINTER_1_EMITTED,
-        ),
-        (
-            un_edit_edge_ai_main_c_model_readme_pointer_2,
-            _EDGE_AI_MAIN_C_MODEL_README_POINTER_2_EDITED,
-            _EDGE_AI_MAIN_C_MODEL_README_POINTER_2_EMITTED,
         ),
         (
             un_edit_multicore_mailbox_board_yaml_e1m_modules_pointer,
@@ -2622,11 +2118,6 @@ def self_check() -> None:
             un_edit_multicore_mailbox_prj_conf_workflow_pointer,
             _MULTICORE_MAILBOX_PRJ_CONF_WORKFLOW_POINTER_EDITED,
             _MULTICORE_MAILBOX_PRJ_CONF_WORKFLOW_POINTER_EMITTED,
-        ),
-        (
-            un_edit_multicore_mailbox_main_c_peer_main_pointer,
-            _MULTICORE_MAILBOX_MAIN_C_PEER_MAIN_POINTER_EDITED,
-            _MULTICORE_MAILBOX_MAIN_C_PEER_MAIN_POINTER_EMITTED,
         ),
     ):
         assert un_edit(edited) == emitted, un_edit
@@ -2653,24 +2144,10 @@ def self_check() -> None:
          _DIAGNOSTICS_PRJ_CONF_WORKFLOW_POINTER_EMITTED),
         ("diagnostics", "E1M-V2N101", "prj.conf", "workflow_pointer",
          _DIAGNOSTICS_PRJ_CONF_WORKFLOW_POINTER_EMITTED),
-        ("iot", "E1M-AEN801", "board.yaml", "cc3501e_bridge_pointer",
-         _IOT_BOARD_YAML_CC3501E_BRIDGE_POINTER_EMITTED),
         ("iot", "E1M-AEN801", "prj.conf", "workflow_pointer",
          _IOT_PRJ_CONF_WORKFLOW_POINTER_EMITTED),
         ("iot", "E1M-AEN801", "prj.conf", "fleet_ota_pointer",
          _IOT_PRJ_CONF_FLEET_OTA_POINTER_EMITTED),
-        ("iot", "E1M-AEN801", "src/main.c", "cc3501e_bridge_pointer",
-         _IOT_MAIN_C_CC3501E_BRIDGE_POINTER_EMITTED),
-        ("iot", "E1M-AEN801", "src/main.c", "sensor_template_pointer",
-         _IOT_MAIN_C_SENSOR_TEMPLATE_POINTER_EMITTED),
-        ("edge-ai", "E1M-AEN801", "src/main.c", "model_readme_pointer_1",
-         _EDGE_AI_MAIN_C_MODEL_README_POINTER_1_EMITTED),
-        ("edge-ai", "E1M-V2N101", "src/main.c", "model_readme_pointer_1",
-         _EDGE_AI_MAIN_C_MODEL_README_POINTER_1_EMITTED),
-        ("edge-ai", "E1M-AEN801", "src/main.c", "model_readme_pointer_2",
-         _EDGE_AI_MAIN_C_MODEL_README_POINTER_2_EMITTED),
-        ("edge-ai", "E1M-V2N101", "src/main.c", "model_readme_pointer_2",
-         _EDGE_AI_MAIN_C_MODEL_README_POINTER_2_EMITTED),
         ("multicore-mailbox", "E1M-AEN801", "board.yaml",
          "e1m_modules_pointer",
          _MULTICORE_MAILBOX_BOARD_YAML_E1M_MODULES_POINTER_EMITTED),
@@ -2679,9 +2156,6 @@ def self_check() -> None:
          _MULTICORE_MAILBOX_OVERLAY_ORCHESTRATOR_POINTER_EMITTED),
         ("multicore-mailbox", "E1M-AEN801", "prj.conf", "workflow_pointer",
          _MULTICORE_MAILBOX_PRJ_CONF_WORKFLOW_POINTER_EMITTED),
-        ("multicore-mailbox", "E1M-AEN801", "src/main.c",
-         "peer_main_pointer",
-         _MULTICORE_MAILBOX_MAIN_C_PEER_MAIN_POINTER_EMITTED),
     ):
         _, mut_failures = undo_declared_edits(template, sku, {path: emitted})
         reason, _ = DELIBERATE_EDITS[(template, sku, path, edit_id)]
@@ -2724,11 +2198,6 @@ def self_check() -> None:
             _SENSOR_MAIN_C_HARDWARE_BOARDS_POINTER_EMITTED,
         ),
         (
-            un_edit_sensor_main_c_historical_note_v2n_pointer,
-            _SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EDITED,
-            _SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EMITTED,
-        ),
-        (
             un_edit_sensor_main_c_addr_metadata_pointer,
             _SENSOR_MAIN_C_ADDR_METADATA_POINTER_EDITED,
             _SENSOR_MAIN_C_ADDR_METADATA_POINTER_EMITTED,
@@ -2737,11 +2206,6 @@ def self_check() -> None:
             un_edit_sensor_main_c_addr_header_pointer,
             _SENSOR_MAIN_C_ADDR_HEADER_POINTER_EDITED,
             _SENSOR_MAIN_C_ADDR_HEADER_POINTER_EMITTED,
-        ),
-        (
-            un_edit_sensor_main_c_init_fail_scanner_pointer,
-            _SENSOR_MAIN_C_INIT_FAIL_SCANNER_POINTER_EDITED,
-            _SENSOR_MAIN_C_INIT_FAIL_SCANNER_POINTER_EMITTED,
         ),
         (
             un_edit_sensor_board_yaml_workflow_pointer,
@@ -2762,11 +2226,6 @@ def self_check() -> None:
             un_edit_sensor_board_yaml_historical_note_boards_pointer,
             _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EDITED,
             _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EMITTED,
-        ),
-        (
-            un_edit_sensor_board_yaml_historical_note_v2n_pointer,
-            _SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EDITED,
-            _SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EMITTED,
         ),
         (
             un_edit_sensor_prj_conf_workflow_pointer,
@@ -2798,11 +2257,6 @@ def self_check() -> None:
             _MULTICORE_MAILBOX_README_PEER_MAIN_LINK_POINTER_EDITED,
             _MULTICORE_MAILBOX_README_PEER_MAIN_LINK_POINTER_EMITTED,
         ),
-        (
-            un_edit_multicore_mailbox_readme_peer_build_path,
-            _MULTICORE_MAILBOX_README_PEER_BUILD_PATH_EDITED,
-            _MULTICORE_MAILBOX_README_PEER_BUILD_PATH_EMITTED,
-        ),
     ):
         assert un_edit(edited) == emitted, un_edit
 
@@ -2813,10 +2267,6 @@ def self_check() -> None:
          _SENSOR_MAIN_C_HARDWARE_BOARDS_POINTER_EMITTED),
         ("sensor", "E1M-V2N101", "src/main.c", "hardware_boards_pointer",
          _SENSOR_MAIN_C_HARDWARE_BOARDS_POINTER_EMITTED),
-        ("sensor", "E1M-AEN801", "src/main.c", "historical_note_v2n_pointer",
-         _SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EMITTED),
-        ("sensor", "E1M-V2N101", "src/main.c", "historical_note_v2n_pointer",
-         _SENSOR_MAIN_C_HISTORICAL_NOTE_V2N_POINTER_EMITTED),
         ("sensor", "E1M-AEN801", "src/main.c", "addr_metadata_pointer",
          _SENSOR_MAIN_C_ADDR_METADATA_POINTER_EMITTED),
         ("sensor", "E1M-V2N101", "src/main.c", "addr_metadata_pointer",
@@ -2825,10 +2275,6 @@ def self_check() -> None:
          _SENSOR_MAIN_C_ADDR_HEADER_POINTER_EMITTED),
         ("sensor", "E1M-V2N101", "src/main.c", "addr_header_pointer",
          _SENSOR_MAIN_C_ADDR_HEADER_POINTER_EMITTED),
-        ("sensor", "E1M-AEN801", "src/main.c", "init_fail_scanner_pointer",
-         _SENSOR_MAIN_C_INIT_FAIL_SCANNER_POINTER_EMITTED),
-        ("sensor", "E1M-V2N101", "src/main.c", "init_fail_scanner_pointer",
-         _SENSOR_MAIN_C_INIT_FAIL_SCANNER_POINTER_EMITTED),
         ("sensor", "E1M-AEN801", "board.yaml", "workflow_pointer",
          _SENSOR_BOARD_YAML_WORKFLOW_POINTER_EMITTED),
         ("sensor", "E1M-V2N101", "board.yaml", "workflow_pointer",
@@ -2845,10 +2291,6 @@ def self_check() -> None:
          _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EMITTED),
         ("sensor", "E1M-V2N101", "board.yaml", "historical_note_boards_pointer",
          _SENSOR_BOARD_YAML_HISTORICAL_NOTE_BOARDS_POINTER_EMITTED),
-        ("sensor", "E1M-AEN801", "board.yaml", "historical_note_v2n_pointer",
-         _SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EMITTED),
-        ("sensor", "E1M-V2N101", "board.yaml", "historical_note_v2n_pointer",
-         _SENSOR_BOARD_YAML_HISTORICAL_NOTE_V2N_POINTER_EMITTED),
         ("sensor", "E1M-AEN801", "prj.conf", "workflow_pointer",
          _SENSOR_PRJ_CONF_WORKFLOW_POINTER_EMITTED),
         ("sensor", "E1M-V2N101", "prj.conf", "workflow_pointer",
@@ -2865,8 +2307,6 @@ def self_check() -> None:
          _MULTICORE_MAILBOX_BOARD_YAML_ZEPHYR_DRV_POINTER_EMITTED),
         ("multicore-mailbox", "E1M-AEN801", "README.md", "peer_main_link_pointer",
          _MULTICORE_MAILBOX_README_PEER_MAIN_LINK_POINTER_EMITTED),
-        ("multicore-mailbox", "E1M-AEN801", "README.md", "peer_build_path",
-         _MULTICORE_MAILBOX_README_PEER_BUILD_PATH_EMITTED),
     ):
         _, mut_failures = undo_declared_edits(template, sku, {path: emitted})
         reason, _ = DELIBERATE_EDITS[(template, sku, path, edit_id)]
@@ -2893,10 +2333,6 @@ def self_check() -> None:
          _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE_EMITTED),
         ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note",
          _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED),
-        ("sensor", "E1M-AEN801", "src/main.c", "pattern_paragraph",
-         _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED),
-        ("sensor", "E1M-V2N101", "src/main.c", "pattern_paragraph",
-         _SENSOR_MAIN_C_PATTERN_PARAGRAPH_EMITTED),
         ("iot", "E1M-AEN801", "CMakeLists.txt", "extra_conf_order",
          "list(APPEND EXTRA_CONF_FILE ${_alp_generated})\n"),
     ):

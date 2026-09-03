@@ -703,64 +703,64 @@ from tests.conftest import sdk_root
 #: ONE thing that did move in this range is a hand-port source
 #: (`scripts/alp_template.py`) -- audited at that pin, not this one.
 #:
-#: THE PIN SPLIT THIS LEAVES BEHIND IS KNOWN, MEASURED, AND NOT FREE --
-#: read this before assuming the re-sync is finished. `parity.yml`'s
-#: `PINNED_SDK_TAG` / `PINNED_PLANNER_ORACLE_SDK_REF` and `ci.yml`'s
-#: `sdk_parity` checkout `ref:` stay at `0914da38` in this change, so
-#: `tests/gates/test_sdk_pin_disagreement_warning.py`'s warn-only alarm
-#: fires. That gate calls a split "sometimes deliberate", and `ci.yml`'s own
-#: comment history says the five refs have moved in ONE change every time.
-#: They should here too; this change does not, and the cost is measured, not
-#: guessed:
+#: ALL FIVE REFS MOVE IN THIS ONE CHANGE, which is what the repo's only
+#: worked precedent for this situation does. `parity.yml`'s
+#: `PINNED_SDK_TAG` and `PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s
+#: `sdk_parity` checkout `ref:`, and this file's two pins all land at
+#: `ff27f179` together, alongside the re-vendored
+#: `python/tan/templates/vendored/` tree.
 #:
-#:   - BLOCKING, not cosmetic: `tests/parity/test_planner_emit_parity.py::
-#:     test_the_scaffold_mode_agrees_on_stdout_through_argv` byte-compares
-#:     tan's `--emit scaffold` against the BOUND SDK's own. Measured with the
-#:     port in place: 5/5 pass against an `ff27f179` checkout, 3/5 FAIL
-#:     (`peripheral`, `sensor`, `edge-ai`) against `0914da38`. That is not a
-#:     defect in the port -- it is the parity test working: tan is now ahead
-#:     of the tag. `parity.yml`'s `python-tests-shard` binds `ALP_SDK_ROOT`
-#:     to the `PINNED_SDK_TAG` checkout and runs `tests/parity` on three
-#:     OSes, so those three cases are RED there until the tag moves.
-#:   - Moving the tag is not a one-line bump, which is why it is not folded
-#:     in here. `tests/parity/scaffold_byte_parity.py` diffs
-#:     `python/tan/templates/vendored/` -- a frozen copy of alp-sdk's OWN
-#:     scaffold emit -- against the live one, and alp-sdk#1855 changes that
-#:     emit. Measured against `ff27f179`: 6 of 11 (template, sku) pairs
-#:     differ across 10 files (`edge-ai`/`iot`/`sensor`/`multicore-mailbox`
-#:     `src/main.c`, `iot`/`sensor` `board.yaml`, `multicore-mailbox`
-#:     `README.md`). Every diff is one shape -- a bare path becoming an
-#:     absolute GitHub URL, plus `mproc-mailbox`'s `/peer` becoming `./peer`
-#:     -- so the re-vendor is mechanical, but the DECISION around it is not:
-#:     14 of `scaffold_byte_parity.py`'s 58 `DELIBERATE_EDITS` entries have
-#:     an `_EMITTED` anchor that no longer appears in the new emit, and each
-#:     needs the same per-entry call tan-cli#996/#1001 made for its 20
-#:     ("upstream now does what this edit did, retire it" vs "this anchor was
-#:     already stale for an unrelated reason"). Those entries are the
-#:     customer-facing prose of 10 vendored files. That is its own reviewable
-#:     change, and folding it in here would bury the one upstream patch this
-#:     one has to stay readable against.
-#:   - The frozen planner oracle costs NOTHING, measured so the follow-up
-#:     knows: `python scripts/capture_planner_oracle.py --sdk <checkout>
-#:     --sdk-ref ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2` is a ZERO-file
-#:     diff against the committed `tests/fixtures/planner_oracle/` (693
-#:     emits, 99 boards, 7 error-contract, 1,129,537 B -- byte-for-byte the
-#:     `0914da38` numbers). Only `PROVENANCE.txt`'s own `alp-sdk ref` line
-#:     moves. So the scaffold re-vendor is the ONLY real cost of the bump.
-#:   - One warn-only step also goes yellow meanwhile: `parity.yml`'s live
-#:     hand-port alarm binds `ALP_SDK_HAND_PORT_ROOT` to the PINNED_SDK_TAG
-#:     checkout, so it reports `scripts/alp_template.py` as drifted. Its own
-#:     `::warning::` text already names this exact reading ("tan's copy may
-#:     be AHEAD of the pin rather than behind"). AHEAD is what it is here.
+#: A first cut of this change moved only the two pins here and filed the
+#: other three as a follow-up. That was wrong, and MEASURED wrong rather
+#: than argued wrong: `tests/parity/test_planner_emit_parity.py::
+#: test_the_scaffold_mode_agrees_on_stdout_through_argv` byte-compares
+#: tan's `--emit scaffold` stdout against the BOUND SDK's own, and
+#: `parity.yml`'s `python-tests-shard` binds `ALP_SDK_ROOT` to
+#: `PINNED_SDK_TAG` on every leg. With the port landed and the tag left at
+#: `0914da38` that node was `3 failed, 1 passed` (`peripheral`, `sensor`,
+#: `edge-ai` -- tan correctly AHEAD of the tag), which reddened all three
+#: `python -- pytest across python/` required contexts. The follow-up PR
+#: would have been equally red on its own (`dev`'s `template.py` against an
+#: `ff27f179` root fails the same three), and `dev`'s merge-queue ruleset is
+#: `max_entries_to_build: 1`, so the two could never have been evaluated
+#: together. Split here means deadlock; the rule is simply that a
+#: BEHAVIOURAL planner port moves the parity tag with it.
 #:
-#: Tracked at tan-cli#1149. Nothing BLOCKING that THIS change's two pins
-#: govern is measured against the tag: `parity.yml`'s gates job resolves
-#: `ALP_SDK_ROOT` and `ALP_SDK_HAND_PORT_ROOT` by grepping this file's own
-#: two pins and cloning each separately (`alp-sdk-planner-audit` /
-#: `alp-sdk-hand-port-audit`, the tan-cli#296 fix), and both are
-#: self-consistent at `ff27f179` -- measured locally with both roots bound
-#: to a real `ff27f179` checkout: 4 passed, 1 skipped (the skip is
-#: `strict_loaders`, which has its own third root and its own pin).
+#: The precedent, corrected: an earlier revision of this comment cited
+#: "#996/#1001" as a comparable two-PR split. It is not. tan-cli#996 was
+#: CLOSED UNMERGED ("Superseded by #1001") and tan-cli#1001 landed the port,
+#: BOTH audit pins, `PINNED_SDK_TAG`, `PINNED_PLANNER_ORACLE_SDK_REF`,
+#: `ci.yml`'s `ref:`, `PROVENANCE.txt` and 21 vendored files in ONE PR.
+#: Verified from `gh pr diff 1001`, not from the issue titles.
+#:
+#: What the tag move cost here, measured:
+#:   - Scaffold re-vendor: 9 files across 5 of the 10 (template, sku) pairs,
+#:     one upstream cause (alp-sdk#1855). 17 of `scaffold_byte_parity.py`'s
+#:     62 `DELIBERATE_EDITS` retired -- they exist only to qualify the bare
+#:     referents the emit now rewrites itself, so upstream took over their
+#:     job rather than merely rewording around them.
+#:     `multicore-mailbox`'s `peer_build_path` is the proof: tan's own
+#:     hand-fix (tan-cli#1009) and alp-sdk#1855 produce BYTE-IDENTICAL
+#:     output (`./peer`), so that file needed no re-vendor, only the
+#:     redundant entry dropped. `scaffold_byte_parity.py --sdk <ff27f179>`
+#:     is now 10/10 PASS.
+#:   - TWO entries were NOT retired despite being flagged, and that
+#:     distinction had to be read per entry rather than batched:
+#:     `sensor`'s `historical_note_boards_pointer` (both SKUs) sits in the
+#:     same re-flowed paragraph as a retired sibling, so a `--theirs` merge
+#:     dropped it silently -- but it qualifies bare
+#:     `metadata/boards/*.yaml` mentions, and alp-sdk#1855 deliberately
+#:     leaves `metadata/` and `scripts/` alone. Re-applied, not retired.
+#:   - Frozen planner oracle: ZERO-file diff, as predicted. `python
+#:     scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+#:     ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2` reproduced 693 emits over
+#:     99 boards (7 error-contract), 1,129,537 B -- byte-for-byte the
+#:     `0914da38` numbers. Only `PROVENANCE.txt`'s `alp-sdk ref` line moved.
+#:     That fixture freezes the per-board planner emits, which alp-sdk#1855
+#:     does not touch.
+#:   - kconfig-fixture and toolchain-lock: unchanged in range; neither
+#:     `metadata/toolchains.json` nor the kconfig golden appears in the
+#:     compare's 79-path file list.
 #:
 #:   no mirrored module moved in this range; hashes unchanged
 #:
@@ -1267,8 +1267,10 @@ PINNED_HASHES: dict[str, str] = {
 #:
 #:     PROVEN, not asserted: `python/tests/planner/test_scaffold_bare_repo_
 #:     paths.py` (new, 17 cases) reds 16/17 against the UNPORTED
-#:     `template.py` -- 8 of those on their own value assertions through
-#:     `_scaffold_readme` / `render_to_envelope`, which both exist pre-port.
+#:     `template.py` -- 7 of those on their own value assertions through
+#:     `_scaffold_readme` / `render_to_envelope`, which both exist pre-port,
+#:     and 9 on `AttributeError` (the new helper does not exist yet).
+#:     Counted from the run, not estimated.
 #:     Mutation-measured by byte-restoring `dev`'s `template.py` under the
 #:     new test file and back. The 17th (`test_the_examples_own_path_with_
 #:     no_subpath_still_becomes_a_dot`) passes both ways ON PURPOSE: it is
@@ -1277,13 +1279,19 @@ PINNED_HASHES: dict[str, str] = {
 #:     STRONGER THAN THAT, and the measurement that actually settles the
 #:     port: `tests/parity/test_planner_emit_parity.py::test_the_scaffold_
 #:     mode_agrees_on_stdout_through_argv` BYTE-compares tan's whole
-#:     `--emit scaffold` stdout against the bound SDK's own. With
-#:     `ALP_SDK_ROOT` bound to a real `ff27f179` checkout it is 5/5 PASS
-#:     with this port and 3/5 FAIL without it (`peripheral`, `sensor`,
-#:     `edge-ai`, byte-restoring `dev`'s `template.py` under the same
-#:     bound root). So the port is not merely plausible -- it reproduces
-#:     upstream's emit byte for byte on the real catalog, which is the only
-#:     bar a hand-port of an emitter can be held to.
+#:     `--emit scaffold` stdout against the bound SDK's own. That node
+#:     collects FOUR cases (`minimal`, `peripheral`, `sensor`, `edge-ai` --
+#:     `test_planner_emit_parity.py`'s own comment says so); the `5` an
+#:     earlier revision of this paragraph quoted was the `-k scaffold`
+#:     SELECTION, which also picks up
+#:     `test_a_scaffold_without_its_flags_refuses_like_alp_project_does`.
+#:     Stated per node, with `ALP_SDK_ROOT` bound to a real `ff27f179`
+#:     checkout: `4 passed` with this port, `3 failed, 1 passed` without it
+#:     (`peripheral`, `sensor`, `edge-ai`, byte-restoring `dev`'s
+#:     `template.py` under the same bound root). By selection: `5 passed`
+#:     vs `3 failed, 2 passed`. So the port is not merely plausible -- it
+#:     reproduces upstream's emit byte for byte on the real catalog, which
+#:     is the only bar a hand-port of an emitter can be held to.
 #:
 #:     Upstream's own new coverage for this commit is
 #:     `tests/scripts/test_alp_template.py` (+89/-2) plus four
