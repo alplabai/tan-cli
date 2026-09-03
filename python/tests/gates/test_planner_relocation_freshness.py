@@ -679,7 +679,94 @@ from tests.conftest import sdk_root
 #: Upstream commits in range touching this table's files:
 #:   - 1d695037 fix(orchestrate): refuse an app-less baremetal core at validate, not at build (#1897)
 #:   - f5c7ff5b fix(orchestrate): an unresolved cores[].type yields unresolved, not a crash and not a guess (#1852) (#1888)
-PINNED_SDK_COMMIT = "0914da38ebbecac3c1546064dd506f7fafe0bfa7"  # alp-sdk, past f1b1c9df -- see above
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `0914da38` -> `ff27f179`
+#: (tan-cli#1118, auditing `auto/planner-resync`'s machine proposal, which
+#: opened as an ISSUE rather than a PR because its computed diff against
+#: `python/` was EMPTY and its verdict was still `partial`).
+#:
+#: NOTHING IN THIS TABLE'S SURFACE MOVED, and that is verified rather than
+#: taken from the tracker's summary line. Two independent measurements:
+#:
+#:   - `gh api repos/alplabai/alp-sdk/compare/0914da38...ff27f179`'s FULL
+#:     changed-file list (79 paths across 12 commits) contains no path under
+#:     `scripts/alp_orchestrate/` at all.
+#:   - `test_relocated_planner_modules_match_the_pinned_sdk_audit` PASSES
+#:     with `ALP_SDK_ROOT` bound to a real `ff27f179` checkout, against the
+#:     UNCHANGED `PINNED_HASHES` literals below -- so all 21 entries re-hash
+#:     identically at the new ref, and the module SET is unchanged too (that
+#:     test pins the set as well as the contents). No literal in
+#:     `PINNED_HASHES` is touched by this change.
+#:
+#: This pin therefore moves on the same "in lockstep, so a later diff shows
+#: it staying current rather than falling behind for no stated reason" rule
+#: `HAND_PORT_PINNED_SDK_COMMIT` records for its own no-op ranges below. The
+#: ONE thing that did move in this range is a hand-port source
+#: (`scripts/alp_template.py`) -- audited at that pin, not this one.
+#:
+#: THE PIN SPLIT THIS LEAVES BEHIND IS KNOWN, MEASURED, AND NOT FREE --
+#: read this before assuming the re-sync is finished. `parity.yml`'s
+#: `PINNED_SDK_TAG` / `PINNED_PLANNER_ORACLE_SDK_REF` and `ci.yml`'s
+#: `sdk_parity` checkout `ref:` stay at `0914da38` in this change, so
+#: `tests/gates/test_sdk_pin_disagreement_warning.py`'s warn-only alarm
+#: fires. That gate calls a split "sometimes deliberate", and `ci.yml`'s own
+#: comment history says the five refs have moved in ONE change every time.
+#: They should here too; this change does not, and the cost is measured, not
+#: guessed:
+#:
+#:   - BLOCKING, not cosmetic: `tests/parity/test_planner_emit_parity.py::
+#:     test_the_scaffold_mode_agrees_on_stdout_through_argv` byte-compares
+#:     tan's `--emit scaffold` against the BOUND SDK's own. Measured with the
+#:     port in place: 5/5 pass against an `ff27f179` checkout, 3/5 FAIL
+#:     (`peripheral`, `sensor`, `edge-ai`) against `0914da38`. That is not a
+#:     defect in the port -- it is the parity test working: tan is now ahead
+#:     of the tag. `parity.yml`'s `python-tests-shard` binds `ALP_SDK_ROOT`
+#:     to the `PINNED_SDK_TAG` checkout and runs `tests/parity` on three
+#:     OSes, so those three cases are RED there until the tag moves.
+#:   - Moving the tag is not a one-line bump, which is why it is not folded
+#:     in here. `tests/parity/scaffold_byte_parity.py` diffs
+#:     `python/tan/templates/vendored/` -- a frozen copy of alp-sdk's OWN
+#:     scaffold emit -- against the live one, and alp-sdk#1855 changes that
+#:     emit. Measured against `ff27f179`: 6 of 11 (template, sku) pairs
+#:     differ across 10 files (`edge-ai`/`iot`/`sensor`/`multicore-mailbox`
+#:     `src/main.c`, `iot`/`sensor` `board.yaml`, `multicore-mailbox`
+#:     `README.md`). Every diff is one shape -- a bare path becoming an
+#:     absolute GitHub URL, plus `mproc-mailbox`'s `/peer` becoming `./peer`
+#:     -- so the re-vendor is mechanical, but the DECISION around it is not:
+#:     14 of `scaffold_byte_parity.py`'s 58 `DELIBERATE_EDITS` entries have
+#:     an `_EMITTED` anchor that no longer appears in the new emit, and each
+#:     needs the same per-entry call tan-cli#996/#1001 made for its 20
+#:     ("upstream now does what this edit did, retire it" vs "this anchor was
+#:     already stale for an unrelated reason"). Those entries are the
+#:     customer-facing prose of 10 vendored files. That is its own reviewable
+#:     change, and folding it in here would bury the one upstream patch this
+#:     one has to stay readable against.
+#:   - The frozen planner oracle costs NOTHING, measured so the follow-up
+#:     knows: `python scripts/capture_planner_oracle.py --sdk <checkout>
+#:     --sdk-ref ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2` is a ZERO-file
+#:     diff against the committed `tests/fixtures/planner_oracle/` (693
+#:     emits, 99 boards, 7 error-contract, 1,129,537 B -- byte-for-byte the
+#:     `0914da38` numbers). Only `PROVENANCE.txt`'s own `alp-sdk ref` line
+#:     moves. So the scaffold re-vendor is the ONLY real cost of the bump.
+#:   - One warn-only step also goes yellow meanwhile: `parity.yml`'s live
+#:     hand-port alarm binds `ALP_SDK_HAND_PORT_ROOT` to the PINNED_SDK_TAG
+#:     checkout, so it reports `scripts/alp_template.py` as drifted. Its own
+#:     `::warning::` text already names this exact reading ("tan's copy may
+#:     be AHEAD of the pin rather than behind"). AHEAD is what it is here.
+#:
+#: Tracked at tan-cli#1149. Nothing BLOCKING that THIS change's two pins
+#: govern is measured against the tag: `parity.yml`'s gates job resolves
+#: `ALP_SDK_ROOT` and `ALP_SDK_HAND_PORT_ROOT` by grepping this file's own
+#: two pins and cloning each separately (`alp-sdk-planner-audit` /
+#: `alp-sdk-hand-port-audit`, the tan-cli#296 fix), and both are
+#: self-consistent at `ff27f179` -- measured locally with both roots bound
+#: to a real `ff27f179` checkout: 4 passed, 1 skipped (the skip is
+#: `strict_loaders`, which has its own third root and its own pin).
+#:
+#:   no mirrored module moved in this range; hashes unchanged
+#:
+#: Upstream commits in range touching this table's files:
+#:   (none)
+PINNED_SDK_COMMIT = "ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2"  # alp-sdk, past 0914da38 -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1147,7 +1234,94 @@ PINNED_HASHES: dict[str, str] = {
 #:
 #: Upstream commits in range touching this table's files:
 #:   (none)
-HAND_PORT_PINNED_SDK_COMMIT = "0914da38ebbecac3c1546064dd506f7fafe0bfa7"  # alp-sdk, past f1b1c9df -- see above (tan-cli#996 closes tan-cli#913)
+#: AUDITED RE-SYNC (hand-port / HAND_PORT_HASHES): `0914da38` -> `ff27f179`
+#: (tan-cli#1118). ONE of the 12 pinned paths moved in this range, and it is
+#: BEHAVIOURAL for tan -- this is not a lockstep no-op like the two ranges
+#: above it.
+#:
+#:   - `scripts/alp_template.py` (+70/-8), from alp-sdk `5c33ef04`
+#:     "fix(scaffold): emit a buildable multicore-rpmsg tree, and rewrite
+#:     bare alp-sdk-tree paths in scaffolded comments" (alp-sdk#1906,
+#:     closing alp-sdk#1855). PORTED BY HAND into `tan/planner/template.py`
+#:     in this same change -- +70/-8 on the tan side too, the same three
+#:     behavioural parts, expressed in tan's restructured shape:
+#:
+#:       1. `_BARE_REPO_PATH_RE` + `_scaffold_bare_repo_paths` -- new, and
+#:          copied through verbatim (diffed byte-for-byte against the
+#:          `ff27f179` blob; the only edit is the repo-local issue-ref
+#:          spelling, `issue #1855` -> `alp-sdk#1855`, which this file's own
+#:          more recent comments already use for an upstream number).
+#:       2. `_scaffold_readme`'s bare-own-path substitution gains the
+#:          `(/\S+)?` capture, so `examples/multicore/mproc-mailbox/peer`
+#:          becomes `./peer` instead of surviving verbatim. The line it
+#:          replaces was byte-identical to upstream's on the tan side, so
+#:          this half applied 1:1.
+#:       3. `render_to_envelope` wiring -- the `board.yaml` arm gains the
+#:          call at its tail, and a NEW `.c`/`.h` arm gains it too, both
+#:          OUTSIDE the sku-conditional. tan's loop is structurally the same
+#:          `if board.yaml / elif CMakeLists.txt / elif README.md` dispatch
+#:          upstream has (tan's divergence in this function is in the guarded
+#:          document READS above the loop, not in the loop), so the two
+#:          insertions landed at the same two points. The function's
+#:          docstring paragraph is re-worded to match upstream's.
+#:
+#:     PROVEN, not asserted: `python/tests/planner/test_scaffold_bare_repo_
+#:     paths.py` (new, 17 cases) reds 16/17 against the UNPORTED
+#:     `template.py` -- 8 of those on their own value assertions through
+#:     `_scaffold_readme` / `render_to_envelope`, which both exist pre-port.
+#:     Mutation-measured by byte-restoring `dev`'s `template.py` under the
+#:     new test file and back. The 17th (`test_the_examples_own_path_with_
+#:     no_subpath_still_becomes_a_dot`) passes both ways ON PURPOSE: it is
+#:     the no-regression control for part 2's optional capture group.
+#:
+#:     STRONGER THAN THAT, and the measurement that actually settles the
+#:     port: `tests/parity/test_planner_emit_parity.py::test_the_scaffold_
+#:     mode_agrees_on_stdout_through_argv` BYTE-compares tan's whole
+#:     `--emit scaffold` stdout against the bound SDK's own. With
+#:     `ALP_SDK_ROOT` bound to a real `ff27f179` checkout it is 5/5 PASS
+#:     with this port and 3/5 FAIL without it (`peripheral`, `sensor`,
+#:     `edge-ai`, byte-restoring `dev`'s `template.py` under the same
+#:     bound root). So the port is not merely plausible -- it reproduces
+#:     upstream's emit byte for byte on the real catalog, which is the only
+#:     bar a hand-port of an emitter can be held to.
+#:
+#:     Upstream's own new coverage for this commit is
+#:     `tests/scripts/test_alp_template.py` (+89/-2) plus four
+#:     `tests/fixtures/emit-snapshots/scaffold.*.snap` updates; the tan-side
+#:     file above is the equivalent, not a copy (tan has no emit-snapshot
+#:     fixture for scaffold).
+#:
+#:     MEASURED UPSTREAM PROPERTY, ported rather than improved on: the new
+#:     pass is NOT idempotent -- the URL it emits contains the path it
+#:     matched, so a second application produces `.../blob/main/https://
+#:     github.com/...`. That is upstream's behaviour at `ff27f179` and the
+#:     port matches it; a tan-side "already a URL" guard would be exactly
+#:     the divergence this whole hash audit exists to catch. Pinned both
+#:     ways in the new test file (the property itself, and that each arm
+#:     applies the pass exactly once).
+#:
+#: The other ELEVEN pinned paths are untouched in this range -- verified
+#: against the compare API's full changed-file list, which carries no path
+#: under `scripts/gen_zephyr_board.py`, `scripts/sentinels.py`,
+#: `scripts/alp_project_loader.py`, `scripts/alp_project_emit/*` or
+#: `scripts/alp_cli/{diagnostic_format,validator}.py` -- and each was
+#: re-hashed at `ff27f179` one by one rather than assumed: all eleven
+#: literals below are UNCHANGED by this move. Only
+#: `scripts/alp_template.py`'s value changes.
+#:
+#: NOT IN SCOPE, recorded so it is not rediscovered as a gap: the same
+#: upstream commit also edits `metadata/templates/catalog-v1.json` (+2) and
+#: `examples/multicore/rpmsg-aen/linux/CMakeLists.txt` (+6/-1) -- its
+#: "buildable multicore-rpmsg tree" half. Both are alp-sdk DATA that tan
+#: reads out of the customer's own bound checkout at run time (ADR-0017;
+#: `metadata/**` did not relocate), so they arrive automatically and there
+#: is nothing to port for either.
+#:
+#:   scripts/alp_template.py: hand-ported (behavioural -- see above)
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 5c33ef04 fix(scaffold): emit a buildable multicore-rpmsg tree, and rewrite bare alp-sdk-tree paths in scaffolded comments (#1906)
+HAND_PORT_PINNED_SDK_COMMIT = "ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2"  # alp-sdk, past 0914da38 -- see above (tan-cli#996 closes tan-cli#913)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -1214,7 +1388,7 @@ HAND_PORT_HASHES: dict[str, str] = {
     "scripts/gen_zephyr_board.py": "c7a44b285e5f8d944544ac8ca6d3a060470befdfe5401772707bec6820621b0c",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/alp_project_loader.py": "4e355a59fb37457ce0479c59d06863dacfd20144f59dd0eb6dc197ac5ba19f66",
-    "scripts/alp_template.py": "24fe62eeeb00414522d109c177edaac23567f8fb7c668e1213bd2e1f4ef68a8e",
+    "scripts/alp_template.py": "f8469b99d24b58450793bcd2e00e9fd30a7a70c1e66e4a39303b785407abc7ee",
     "scripts/alp_project_emit/__init__.py": "9213c745751e23a36b3f582846a147fb9060386992ff7b8244a0c1d44d5987cf",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
     "scripts/alp_project_emit/dts.py": "cb6d4278e2fc886a23c28f2ef30b4ae9714738071219f7c29cbccbbeb1bc1782",
