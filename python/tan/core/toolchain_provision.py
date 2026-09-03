@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 #: The one cross-toolchain ADR 0021 Lane 1 acquires. `west sdk install`'s own
@@ -488,3 +489,179 @@ def augment_acquisition_failure(detail: str) -> str:
             "from a network path that does not intercept TLS."
         )
     return detail
+
+
+# ---------------------------------------------------------------------------
+# Authenticating the SDK download (tan-cli#1143)
+# ---------------------------------------------------------------------------
+
+#: The environment variables `tan bootstrap` reads a GitHub credential from,
+#: in precedence order, for the `west sdk install` download ONLY.
+#:
+#: **An environment variable, not a CLI flag, and not a manifest field.** A
+#: token is a secret, and the three candidate surfaces are not equally safe
+#: for one:
+#:
+#: - a CLI flag lands the value in shell history, in the host process table
+#:   for the whole (multi-minute) run, and in any CI log that echoes the
+#:   command -- and `tan`'s own argv is what a customer pastes into a bug
+#:   report;
+#: - a manifest field puts it in a file people commit;
+#: - an environment variable is the one surface that survives none of those,
+#:   and is already how every workflow in this repo carries `GH_TOKEN`.
+#:
+#: The precedence deliberately DEFERS to the existing credential sources
+#: rather than inventing a tan-only concept: `GH_TOKEN` then `GITHUB_TOKEN`
+#: is `gh`'s own order, so a developer who has run `gh auth login`, and a
+#: GitHub Actions job that already exports the workflow token, both get an
+#: authenticated download with nothing new to set. `TAN_GITHUB_TOKEN` leads
+#: so a host with an ambient `GH_TOKEN` bound to some other account can
+#: override it for tan alone.
+SDK_TOKEN_ENV_VARS: tuple[str, ...] = ("TAN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
+
+#: The env var `requests` reads a netrc path from -- `requests.utils.
+#: get_netrc_auth` consults `os.environ["NETRC"]` FIRST and falls back to
+#: `~/.netrc` only when it is unset. This is the whole reason the token can
+#: travel to `west` out of band: `west sdk install` reads a token from
+#: `--personal-access-token` and from NOTHING else (measured against Zephyr
+#: v4.4.1 `scripts/west_commands/sdk.py:473` -- it consults no environment
+#: variable of its own), but its GitHub call goes through `requests`, and
+#: `requests` applies netrc credentials whenever the request carries no
+#: `Authorization` header -- which is exactly west's `req_headers = {}`
+#: branch. West's own rate-limit message names the mechanism: "Try executing
+#: install script with --personal-access-token argument **or use a .netrc
+#: file**".
+NETRC_ENV_VAR = "NETRC"
+
+#: The host `west sdk install`'s rate-limited call goes to (`fetch_releases`
+#: against the GitHub REST API). The staged netrc names ONLY this machine, so
+#: the credential is never offered to the release CDN the archive itself is
+#: fetched from, nor to anything else the child happens to talk to.
+GITHUB_API_HOST = "api.github.com"
+
+#: netrc's `login` for a GitHub token. GitHub ignores the username on a
+#: token-as-password Basic credential; `x-access-token` is the spelling
+#: GitHub's own docs use for it.
+NETRC_LOGIN = "x-access-token"
+
+#: A token this module is willing to write into a netrc file. Deliberately a
+#: WHITELIST, not a blacklist of separators: `netrc`'s parser is
+#: whitespace-and-quote-sensitive, so a value carrying a space, a newline or
+#: a `#` does not merely fail to authenticate -- it can make the parser
+#: mis-split the file, and `netrc.NetrcParseError` quotes the offending token
+#: back in its message, which is precisely a secret arriving in a child's
+#: stderr and from there in `capture_tail`. Every GitHub credential format
+#: (`ghp_`/`gho_`/`ghs_`/`github_pat_`, and a bare 40-hex classic token) is
+#: inside this class, so the guard costs nothing real and closes the
+#: injection path completely.
+_SDK_TOKEN_ALLOWED = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
+)
+
+
+@dataclass(frozen=True)
+class SdkToken:
+    """A usable GitHub credential and the NAME of the variable it came from.
+
+    `source` is the only half of this that is ever printed, logged or put in
+    an envelope: it is a variable name the customer chose, never the secret.
+    """
+
+    #: The secret. Never logged, never in an argv, never in an envelope.
+    value: str
+    #: The environment variable it was read from -- safe to print.
+    source: str
+
+
+def usable_sdk_token(raw: str | None) -> str | None:
+    """`raw` stripped, or `None` when it is empty or carries a character
+    [`_SDK_TOKEN_ALLOWED`] refuses. Surrounding whitespace is forgiven (a
+    `GH_TOKEN` set from a file read is routinely `"...\\n"`); interior
+    whitespace is not, because a value that cannot be written into a netrc
+    line unambiguously must not be written into one at all."""
+    if raw is None:
+        return None
+    token = raw.strip()
+    if not token:
+        return None
+    if any(ch not in _SDK_TOKEN_ALLOWED for ch in token):
+        return None
+    return token
+
+
+def resolve_sdk_token(environ: Mapping[str, str]) -> SdkToken | None:
+    """The first usable credential among [`SDK_TOKEN_ENV_VARS`], in order, or
+    `None` when the environment names none -- in which case the download
+    stays exactly as unauthenticated as it has always been. A variable that
+    is set but empty, or set to something [`usable_sdk_token`] refuses, is
+    SKIPPED rather than ending the search: `GITHUB_TOKEN=` is what an unset
+    workflow secret expands to, and letting that shadow a perfectly good
+    `GH_TOKEN` behind it would be the surprise."""
+    for name in SDK_TOKEN_ENV_VARS:
+        token = usable_sdk_token(environ.get(name))
+        if token is not None:
+            return SdkToken(token, name)
+    return None
+
+
+def netrc_text(token: str) -> str:
+    """The netrc document staged for the `west sdk install` child -- one
+    machine, [`GITHUB_API_HOST`], and nothing else. Trailing newline: Python's
+    `netrc` parser is line-oriented and a file whose last line is unterminated
+    is a needless edge case."""
+    return f"machine {GITHUB_API_HOST}\n  login {NETRC_LOGIN}\n  password {token}\n"
+
+
+#: The one narrowly-matched marker that says a `west sdk install` failure was
+#: GitHub's API quota rather than anything about the pin, the network or the
+#: host. `clean-host.yml`'s own rate-limit exclusion already settled the
+#: shape of this test in this repo -- match the literal `rate limit`, not a
+#: bare `403`, so a CA/permission 403 (the #304 shape) cannot be mistaken for
+#: a quota one and handed a remedy that would not fix it.
+_RATE_LIMIT_MARKER = "rate limit"
+
+
+def rate_limit_note(detail: str, *, token_source: str | None) -> str | None:
+    """The tan-side remedy to append to a rate-limited `west sdk install`
+    failure, or `None` when `detail` says nothing about a quota.
+
+    The same shape as [`low_disk_note`] and [`augment_acquisition_failure`]:
+    the child's own message is kept verbatim and a note is appended, because
+    that message is actively MISLEADING here -- west tells the reader to
+    "try executing install script with --personal-access-token argument",
+    which is `west`'s flag on a command the customer never typed and which
+    `tan bootstrap` does not accept. Naming tan's own surface is the whole
+    point of the note.
+
+    `token_source` splits the two genuinely different situations. With no
+    token in play the limit hit is GitHub's anonymous PER-IP quota -- shared
+    with everyone behind the same NAT (an office egress, a corporate VPN, a
+    hosted runner pool), which is why this reaches a customer long before it
+    reaches a lone developer -- and the fix is to set one. With a token
+    already supplied the per-IP quota was never the binding limit, so
+    repeating "set a token" would send the reader to a lever they have
+    already pulled.
+    """
+    if _RATE_LIMIT_MARKER not in detail.lower():
+        return None
+    if token_source is not None:
+        return (
+            f"That is GitHub's AUTHENTICATED quota, not the anonymous per-IP one: "
+            f"tan already handed this download the credential in ${token_source}. "
+            "Check that the token is valid, unexpired and not already exhausted by "
+            "other traffic, or wait for the quota window to reset and re-run "
+            "`tan bootstrap`."
+        )
+    primary, *fallbacks = SDK_TOKEN_ENV_VARS
+    alternatives = "/".join(f"${name}" for name in fallbacks)
+    return (
+        "That is GitHub's anonymous per-IP API quota -- shared with everyone behind "
+        "the same egress address, so it can be exhausted by traffic that is not "
+        f"yours. Authenticate the download by setting ${primary} (or {alternatives}, "
+        "read in that order) to a GitHub token with no scopes -- listing public "
+        "releases needs none -- and re-run `tan bootstrap`. Ignore the "
+        "`--personal-access-token` flag named above: that is `west`'s own flag, and "
+        "`tan bootstrap` does not accept it. tan passes the token to `west sdk "
+        "install` out of band, so it never appears in an argv, a log or a "
+        "`--dry-run` plan."
+    )

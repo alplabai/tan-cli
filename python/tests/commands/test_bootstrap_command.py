@@ -2295,6 +2295,61 @@ def test_a_dry_run_with_a_toolchain_manifest_plans_the_west_sdk_install_call(tmp
     assert "--version 1.0.1" in install_cmds[0]
 
 
+def test_a_dry_run_never_puts_the_github_token_in_the_envelope(tmp_path):
+    """tan-cli#1143, end to end through a REAL `tan bootstrap` subprocess:
+    with a GitHub credential bound in the environment, the sentinel value
+    must appear nowhere in the process's whole output -- not in
+    `data.plannedCommands`, not in an issue message, not on stderr.
+
+    `--dry-run` is the sharp end of this. It is the ONE mode whose entire
+    product is the argv list tan would have spawned, published verbatim in
+    the envelope, so an implementation that reached for west's
+    `--personal-access-token` flag leaks here with no child process, no
+    network and no failure needed. The grep is over `stdout + stderr`
+    together rather than the parsed envelope, so a leak into a progress line
+    fails this too.
+    """
+    sentinel = "ghp_TANCLI1143SENTINELdoNotLeakThisValue"
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    import platform as _platform
+
+    from tan.core import toolchain_provision as _tp
+
+    host_key = _tp.toolchain_host_key(sys.platform, _platform.machine())
+    assert isinstance(host_key, str), host_key
+    (sdk / "metadata" / "toolchains.json").write_text(
+        json.dumps(
+            {
+                "zephyrSdk": {
+                    "version": "1.0.1",
+                    "baseUrl": "https://example.invalid/",
+                    "artifacts": [
+                        {
+                            "host": host_key, "component": "minimal-sdk",
+                            "filename": "x.tar.xz", "sizeBytes": 1, "sha256": "a" * 64,
+                        },
+                    ],
+                },
+                "measuredFootprint": {"extractedBytes": {"wholeSdk": 4096}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    proc = run_tan(
+        "bootstrap", "--dry-run", "--format", "json",
+        "--sdk-root", str(sdk), cwd=sdk.parent,
+        env_extra={name: sentinel for name in _tp.SDK_TOKEN_ENV_VARS},
+    )
+    env = envelope(proc)
+    assert env["exitCode"] == 0
+    # The plan really did reach the SDK-install step -- otherwise "no leak"
+    # would be a statement about a command that was never planned.
+    planned = env["data"]["plannedCommands"]
+    assert any("sdk" in p.split() and "install" in p.split() for p in planned), planned
+    assert sentinel not in proc.stdout + proc.stderr
+
+
 def test_plannedcommands_appears_only_under_dry_run(tmp_path):
     """A normal run keeps the oracle's exact `data` key set; the key appears only
     with the flag that produces it."""

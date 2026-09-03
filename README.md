@@ -187,6 +187,17 @@ What those commands do:
    On a minimal Linux host this phase also needs `file` on PATH
    (Debian/Ubuntu: `sudo apt-get install -y file`); without it the underlying
    `west sdk install`'s own host-tools step fails with "Host tools installation failed" and names nothing.
+   This phase lists the SDK releases through the GitHub API, whose anonymous
+   quota is counted **per source IP** -- so behind a shared office egress, a
+   corporate VPN or a runner pool it can be exhausted by traffic that is not
+   yours, and the download fails with `403 API rate limit exceeded`. Set
+   `$TAN_GITHUB_TOKEN` (or `$GH_TOKEN` / `$GITHUB_TOKEN`, read in that order,
+   so an existing `gh auth login` or a workflow token is picked up with
+   nothing new to set) to authenticate it. The token needs no scopes --
+   listing public releases requires none. It is passed to `west sdk install`
+   out of band, never as an argv element, so it appears in no log, no
+   `--dry-run` plan and no JSON envelope; `tan` accepts it **only** from the
+   environment, never as a command-line flag.
 2. If you skip the toolchain phase, or need to point at a different pin, run
    `west sdk install` by hand from inside the workspace venv:
 

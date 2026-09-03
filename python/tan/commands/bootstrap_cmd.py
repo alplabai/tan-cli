@@ -59,6 +59,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -1280,6 +1281,101 @@ def _augment_with_low_disk_note(root: Path, detail: str) -> str:
     return f"{detail} {note}" if note else detail
 
 
+@dataclass(frozen=True)
+class _SdkCredential:
+    """A GitHub credential staged on disk for ONE `west sdk install` run.
+
+    `source` is the NAME of the environment variable the token came from --
+    the only half of the credential that is ever printed or reported. The
+    secret itself lives in the file `extra_env` points at and in nothing
+    else tan holds.
+    """
+
+    #: The environment variable the token was read from. Safe to print.
+    source: str
+    #: What `Runner.run(extra_env=...)` receives: `NETRC=<path>`, nothing more.
+    extra_env: dict[str, str]
+    #: The private directory `_discard_sdk_credential` must delete afterwards.
+    scratch_dir: Path
+
+
+def _stage_sdk_credential(token: toolchain_provision.SdkToken) -> _SdkCredential | None:
+    """Write `token` into a private netrc and return the env that points the
+    child's HTTP client at it -- or `None` when the file cannot be written,
+    in which case the download proceeds unauthenticated exactly as it did
+    before tan-cli#1143.
+
+    **Why a file and an env var rather than `--personal-access-token`.**
+    `Runner.run` appends every argv it is given to `self.planned`, which IS
+    `data.plannedCommands` in the JSON envelope and the `--dry-run` output,
+    and a failed child's output is kept by `capture_tail` -- so an argv
+    element is the one shape a secret must never take here. `west sdk
+    install` reads a token from that flag and from no environment variable
+    of its own (Zephyr v4.4.1 `scripts/west_commands/sdk.py:473`), but its
+    GitHub call goes through `requests`, which reads a netrc path from
+    `$NETRC` and applies it whenever the request carries no `Authorization`
+    header -- west's own no-token branch. West's rate-limit message names
+    that route itself ("or use a .netrc file"). See
+    `toolchain_provision.NETRC_ENV_VAR`.
+
+    The file is created `O_EXCL` at mode 0600 inside a fresh `mkdtemp`
+    directory (0700), so it can never be read by another user and can never
+    land on a path another process pre-created. Windows honours neither
+    mode, but `mkdtemp` there is already inside the calling user's own
+    profile.
+    """
+    try:
+        scratch_dir = Path(tempfile.mkdtemp(prefix="tan-sdk-netrc-"))
+    except OSError:
+        return None
+    path = scratch_dir / "netrc"
+    try:
+        with os.fdopen(
+            os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8"
+        ) as handle:
+            handle.write(toolchain_provision.netrc_text(token.value))
+    except OSError:
+        _discard_sdk_credential(scratch_dir)
+        return None
+    return _SdkCredential(
+        token.source, {toolchain_provision.NETRC_ENV_VAR: _native(path)}, scratch_dir
+    )
+
+
+def _discard_sdk_credential(scratch_dir: Path) -> None:
+    """Delete the staged netrc, best-effort and never raising. Called from a
+    `finally`, so no exit path out of the install -- success, failure, retry
+    exhaustion, an exception from `west` itself -- leaves the token on
+    disk."""
+    shutil.rmtree(scratch_dir, ignore_errors=True)
+
+
+def _sdk_credential(log: Log, runner: Runner) -> _SdkCredential | None:
+    """The staged credential for this `west sdk install`, or `None` when the
+    environment names none -- in which case the download is exactly as
+    unauthenticated as it has always been (tan-cli#1143 acceptance: the
+    no-token path is unchanged).
+
+    Never staged under `--dry-run`: nothing is spawned, so writing a secret
+    to disk would buy nothing, and `data.plannedCommands` must be
+    byte-identical with and without a token in the environment.
+
+    The progress line names the VARIABLE, never the value.
+    """
+    token = toolchain_provision.resolve_sdk_token(os.environ)
+    if token is None or runner.dry_run:
+        return None
+    credential = _stage_sdk_credential(token)
+    if credential is None:
+        log.line(
+            f"could not stage the ${token.source} credential for `west sdk install`; "
+            "continuing unauthenticated"
+        )
+        return None
+    log.line(f"Authenticating the Zephyr SDK download with the token in ${token.source}")
+    return credential
+
+
 def _reclaim_toolchain_wreckage(root: Path, leaf: str) -> None:
     """Best-effort cleanup of a PRIOR interrupted attempt's `.tmp-*` sibling,
     before a new one starts. Never raises, and only ever touches a name
@@ -1452,7 +1548,8 @@ TOOLCHAIN_INSTALL_TAIL_LINES = 40
 
 
 def _run_west_sdk_install_with_retries(
-    ws: Workspace, log: Log, runner: Runner, argv: list[str], tmp_dir: Path
+    ws: Workspace, log: Log, runner: Runner, argv: list[str], tmp_dir: Path,
+    *, extra_env: dict[str, str] | None = None,
 ) -> str | None:
     """`runner.run(argv, ...)`, retried up to `TOOLCHAIN_INSTALL_ATTEMPTS`
     times on ANY failure -- the same blind, unconditional retry policy
@@ -1466,6 +1563,11 @@ def _run_west_sdk_install_with_retries(
     A single call under `--dry-run`: `Runner.run` returns `None` immediately
     without spawning, so the loop breaks after attempt 1 -- one planned
     command, not `TOOLCHAIN_INSTALL_ATTEMPTS` copies of it.
+
+    `extra_env` carries the staged GitHub credential (tan-cli#1143), on
+    EVERY attempt: a rate limit is exactly what this loop retries, and an
+    authenticated first attempt falling back to anonymous retries would
+    defeat it.
     """
     detail: str | None = None
     for attempt in range(1, TOOLCHAIN_INSTALL_ATTEMPTS + 1):
@@ -1484,7 +1586,9 @@ def _run_west_sdk_install_with_retries(
                 except OSError:
                     pass
             time.sleep(TOOLCHAIN_RETRY_BACKOFF_S * (attempt - 1))
-        detail = runner.run(argv, cwd=ws.workspace_dir, tail_lines=TOOLCHAIN_INSTALL_TAIL_LINES)
+        detail = runner.run(
+            argv, cwd=ws.workspace_dir, extra_env=extra_env, tail_lines=TOOLCHAIN_INSTALL_TAIL_LINES
+        )
         if detail is None or runner.dry_run:
             return detail
         if attempt < TOOLCHAIN_INSTALL_ATTEMPTS:
@@ -1533,10 +1637,37 @@ def _acquire_toolchain(
         f"Installing the Zephyr SDK {manifest.version} + arm-zephyr-eabi toolchain "
         f"(this can take several minutes on a slow link)"
     )
-    detail = _run_west_sdk_install_with_retries(ws, log, runner, argv, tmp_dir)
+    credential = _sdk_credential(log, runner)
+    try:
+        detail = _run_west_sdk_install_with_retries(
+            ws,
+            log,
+            runner,
+            argv,
+            tmp_dir,
+            extra_env=credential.extra_env if credential is not None else None,
+        )
+    finally:
+        if credential is not None:
+            _discard_sdk_credential(credential.scratch_dir)
     if detail is not None:
         augmented = toolchain_provision.augment_acquisition_failure(detail)
         augmented = _augment_with_low_disk_note(root, augmented)
+        # tan-cli#1143, the same shape `_augment_with_low_disk_note` above
+        # already establishes: keep the child's message verbatim and append
+        # the remedy in TAN's vocabulary. West's own rate-limit line names
+        # `--personal-access-token`, a flag on a command the customer never
+        # typed and which `tan bootstrap` does not accept, so the message
+        # they see today points at a lever that does not exist for them.
+        # `credential`, not the resolved token: the question the note has to
+        # answer is whether THIS download was authenticated, and a staging
+        # failure (logged above) means it was not, however many token
+        # variables the environment carries.
+        rate_limited = toolchain_provision.rate_limit_note(
+            augmented, token_source=credential.source if credential is not None else None
+        )
+        if rate_limited is not None:
+            augmented = f"{augmented} {rate_limited}"
         # tan-cli#990 review MAJOR: this is the phase's MOST LIKELY failure
         # (a flaky download/extraction survives the retry) and, until this
         # fix, the ONLY refusal in this function that named no remedy --

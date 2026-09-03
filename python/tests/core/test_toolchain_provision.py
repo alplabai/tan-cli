@@ -330,3 +330,109 @@ def test_a_checksum_failure_gets_the_proxy_ca_hint(detail):
 )
 def test_an_unrelated_failure_is_never_augmented(detail):
     assert tp.augment_acquisition_failure(detail) == detail
+
+
+# ---------------------------------------------------------------------------
+# The SDK download credential (tan-cli#1143)
+# ---------------------------------------------------------------------------
+
+
+def test_the_token_precedence_defers_to_the_existing_credential_sources():
+    """`gh`'s own order, with a tan-specific override in front of it: a
+    developer who has run `gh auth login`, and a workflow that already
+    exports the job token, both get an authenticated download with nothing
+    new to set."""
+    assert tp.SDK_TOKEN_ENV_VARS == ("TAN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
+    env = {"TAN_GITHUB_TOKEN": "aaa", "GH_TOKEN": "bbb", "GITHUB_TOKEN": "ccc"}
+    assert tp.resolve_sdk_token(env) == tp.SdkToken("aaa", "TAN_GITHUB_TOKEN")
+    del env["TAN_GITHUB_TOKEN"]
+    assert tp.resolve_sdk_token(env) == tp.SdkToken("bbb", "GH_TOKEN")
+    del env["GH_TOKEN"]
+    assert tp.resolve_sdk_token(env) == tp.SdkToken("ccc", "GITHUB_TOKEN")
+
+
+def test_an_empty_variable_is_skipped_rather_than_ending_the_search():
+    """`GITHUB_TOKEN=` is what an unset workflow secret expands to. Letting
+    it shadow a usable `GH_TOKEN` behind it would be the surprise -- and
+    would reintroduce the anonymous rate limit on exactly the hosts that
+    thought they had solved it."""
+    assert tp.resolve_sdk_token({"TAN_GITHUB_TOKEN": "", "GH_TOKEN": "  ", "GITHUB_TOKEN": "x"}) == (
+        tp.SdkToken("x", "GITHUB_TOKEN")
+    )
+    assert tp.resolve_sdk_token({}) is None
+    assert tp.resolve_sdk_token({"TAN_GITHUB_TOKEN": "\n"}) is None
+
+
+def test_surrounding_whitespace_is_forgiven_and_interior_whitespace_is_not():
+    """A `GH_TOKEN` set from a file read is routinely `"...\\n"`. A value with
+    interior whitespace is not a token this module will write into a netrc:
+    `netrc`'s parser would mis-split the line, and `NetrcParseError` quotes
+    the offending token back in its message -- a secret arriving in a
+    child's stderr, which is precisely where `capture_tail` picks things
+    up."""
+    assert tp.usable_sdk_token("  ghp_abc123  \n") == "ghp_abc123"
+    assert tp.usable_sdk_token("ghp abc") is None
+    assert tp.usable_sdk_token("ghp\nabc") is None
+    assert tp.usable_sdk_token("gh#p") is None
+    assert tp.usable_sdk_token(None) is None
+    # Every real GitHub credential format is inside the allowed class, so the
+    # guard costs nothing it was not meant to cost.
+    for real in ("ghp_16C7e42F", "gho_x", "ghs_x", "github_pat_11A_bCd-e.f", "a" * 40):
+        assert tp.usable_sdk_token(real) == real
+
+
+def test_the_staged_netrc_names_only_the_github_api_host():
+    """The credential is offered to `fetch_releases`' host and to nothing
+    else -- not to the release CDN the archive itself comes from, not to
+    anything else the child happens to talk to."""
+    text = tp.netrc_text("ghp_secret")
+    assert text.splitlines() == [
+        "machine api.github.com",
+        "  login x-access-token",
+        "  password ghp_secret",
+    ]
+    assert text.endswith("\n")
+    assert tp.GITHUB_API_HOST == "api.github.com"
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "tar: Unexpected EOF",
+        "sha256 mismatched: aaa:bbb",
+        # A 403 that is NOT a quota -- the #304 CA-interference shape. Handing
+        # this one "set a token" would send the reader to a lever that cannot
+        # fix it, which is the same defect in the other direction.
+        'Failed to fetch: 403, {"message": "Resource not accessible"}',
+    ],
+)
+def test_a_failure_that_is_not_a_rate_limit_gets_no_token_note(detail):
+    assert tp.rate_limit_note(detail, token_source=None) is None
+    assert tp.rate_limit_note(detail, token_source="GH_TOKEN") is None
+
+
+def test_an_unauthenticated_rate_limit_names_tans_surface_and_disowns_wests_flag():
+    note = tp.rate_limit_note(
+        "fetch_releases API rate limit exceeded. Try executing install script with "
+        "--personal-access-token argument or use a .netrc file",
+        token_source=None,
+    )
+    assert note is not None
+    assert "$TAN_GITHUB_TOKEN" in note
+    assert "$GH_TOKEN/$GITHUB_TOKEN" in note
+    assert "anonymous per-IP API quota" in note
+    # The correction that is the reason this note exists at all.
+    assert "that is `west`'s own flag" in note
+    assert "does not accept it" in note
+
+
+def test_an_authenticated_rate_limit_does_not_tell_the_reader_to_set_a_token_again():
+    """The two situations are genuinely different. With a credential already
+    in play the per-IP quota was never the binding limit, so repeating "set a
+    token" would point at a lever the reader has already pulled."""
+    note = tp.rate_limit_note("API rate limit exceeded", token_source="GH_TOKEN")
+    assert note is not None
+    assert "$GH_TOKEN" in note
+    assert "AUTHENTICATED quota" in note
+    assert "anonymous" in note  # named only to say it was NOT the limit hit
+    assert "$TAN_GITHUB_TOKEN" not in note

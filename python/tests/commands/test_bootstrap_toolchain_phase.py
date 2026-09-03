@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+from netrc import netrc
 from pathlib import Path
 
 import pytest
@@ -601,3 +602,237 @@ def test_dry_run_plans_the_argv_and_writes_nothing(tmp_path, monkeypatch):
     assert any("sdk" in argv and "install" in argv for argv in runner.planned)
     root = tmp_path / "home" / ".alp" / "toolchains"
     assert not root.exists()  # nothing created on disk under --dry-run
+
+
+# ---------------------------------------------------------------------------
+# Authenticating the SDK download (tan-cli#1143)
+# ---------------------------------------------------------------------------
+
+#: A value no real credential could ever be, chosen so a single `in` test
+#: over a whole rendered envelope is conclusive. Inside
+#: `toolchain_provision._SDK_TOKEN_ALLOWED` on purpose -- a sentinel the
+#: character guard would REJECT would make every leak assertion below pass
+#: for the wrong reason.
+SENTINEL_TOKEN = "ghp_TANCLI1143SENTINELdoNotLeakThisValue"
+
+#: What `west sdk install` really prints when GitHub's API quota is
+#: exhausted -- the `self.inf(...)` line from Zephyr v4.4.1
+#: `scripts/west_commands/sdk.py:270` followed by the exception
+#: `fetch_releases` raises on the same response. Verbatim, including the
+#: `--personal-access-token` advice this issue exists because `tan` cannot
+#: honour.
+WEST_RATE_LIMIT_TAIL = (
+    "fetch_releases API rate limit exceeded. Try executing install script with "
+    "--personal-access-token argument or use a .netrc file\n"
+    "Exception: Failed to fetch: 403, {\"message\": \"API rate limit exceeded for "
+    "40.65.56.224.\"}"
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_github_token(monkeypatch):
+    """No test in this file may inherit the developer's (or the runner's) own
+    `GH_TOKEN`. Without this, whether the phase stages a credential at all
+    depends on who is running the suite -- and the cases that assert the
+    UNauthenticated path would silently stop testing it on any machine where
+    `gh auth login` has been run."""
+    for name in tp.SDK_TOKEN_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def _echoing_rate_limit_failure(seen: dict):
+    """A `Runner.run` stand-in that fails the way a rate-limited `west sdk
+    install` fails, and -- the load-bearing part -- builds its captured tail
+    OUT OF THE ARGV IT WAS GIVEN.
+
+    That is not decoration. `capture_tail` keeps the last non-empty lines of
+    a failed child's output, and a child that dies printing its own command
+    line is exactly how a secret passed as an argv element reaches an
+    envelope. Echoing the argv here is what makes the "not in the tail"
+    assertions below able to FAIL: with a plain constant tail they would
+    pass against an implementation that appended
+    `--personal-access-token <token>` to the argv.
+    """
+
+    def fake_run(self, argv, cwd=None, extra_env=None, tail_lines=4):  # noqa: ARG001
+        seen.setdefault("argv", []).append(list(argv))
+        seen.setdefault("extra_env", []).append(dict(extra_env or {}))
+        netrc_path = (extra_env or {}).get(tp.NETRC_ENV_VAR)
+        if netrc_path is not None:
+            seen["netrc_path"] = netrc_path
+            seen["netrc_text"] = Path(netrc_path).read_text(encoding="utf-8")
+            seen["netrc_mode"] = oct(Path(netrc_path).stat().st_mode & 0o777)
+        return f"$ {' '.join(argv)}\n{WEST_RATE_LIMIT_TAIL}"
+
+    return fake_run
+
+
+def _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen):
+    """`toolchain_phase` driven to its rate-limited-failure exit, with the
+    retry sleep neutered. Returns the `(log, runner)` pair the assertions
+    read."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
+    monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
+    monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(bootstrap_cmd.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(bootstrap_cmd.Runner, "run", _echoing_rate_limit_failure(seen))
+    ws = _workspace(tmp_path)
+    log = bootstrap_cmd.Log(json_mode=True)
+    runner = bootstrap_cmd.Runner(json=True)
+    bootstrap_cmd.toolchain_phase(ws, log, runner, sdk_root, None, is_windows=False)
+    return log, runner
+
+
+def _rendered_envelope(log, runner, sdk_root: str) -> str:
+    """The REAL `bootstrap` JSON envelope this run would have emitted --
+    `bootstrap_cmd._data(..., planned=...)` and `log.take_issues(...)` fed to
+    the same `Envelope` the command builds, then `to_json()`.
+
+    Greping a hand-rolled dict of the pieces would prove less: this is the
+    literal text a customer pastes into a bug report and the extension logs.
+    """
+    data = bootstrap_cmd._data(
+        args={
+            "no_pip": False, "no_west": False, "no_toolchain": False, "print_env": False,
+        },
+        sdk_root=sdk_root,
+        paths=None,
+        facts=fallback_facts((3, 12)),
+        pin="",
+        planned=runner.planned,
+    )
+    issues = log.take_issues(escalate_blocking=True)
+    return bootstrap_cmd.Envelope(
+        "bootstrap",
+        bootstrap_cmd.Project(root=None, board_yaml=None),
+        data,
+        issues,
+        bootstrap_cmd.ExitCode.RUNTIME_FAILURE,
+    ).to_json()
+
+
+def test_a_github_token_in_the_environment_reaches_west_without_touching_any_argv(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1143, the whole point: the token MUST reach the child (or the
+    feature does nothing), and MUST NOT reach `planned` argv, the JSON
+    envelope, the failure tail, or any logged line (or the feature is worse
+    than nothing).
+
+    Both halves are asserted here deliberately. A "the token did not leak"
+    test that never proves the token was in play at all passes trivially
+    against an implementation that drops the credential on the floor -- and
+    then licenses exactly the belief this issue says must be earned.
+    """
+    seen: dict = {}
+    monkeypatch.setenv("TAN_GITHUB_TOKEN", SENTINEL_TOKEN)
+    log, runner = _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
+    sdk_root = str(tmp_path / "ws" / "alp-sdk")
+
+    # --- half one: the credential really reached the child ---------------
+    assert seen["extra_env"], "west sdk install was never spawned"
+    for env in seen["extra_env"]:
+        assert tp.NETRC_ENV_VAR in env, "every attempt must carry the credential"
+    assert SENTINEL_TOKEN in seen["netrc_text"]
+    # Parsed by the SAME stdlib parser `requests.utils.get_netrc_auth` uses,
+    # not by a substring match: a file the token is merely *inside* is not a
+    # file the token is *readable* from. Re-materialised from the bytes the
+    # child saw, because the original is already deleted by the time the
+    # phase returns (the case below asserts exactly that).
+    replayed = tmp_path / "captured-netrc"
+    replayed.write_text(seen["netrc_text"], encoding="utf-8")
+    parsed = netrc(str(replayed)).authenticators(tp.GITHUB_API_HOST)
+    assert parsed is not None and parsed[2] == SENTINEL_TOKEN
+    if os.name != "nt":  # Windows has no POSIX mode bits to assert on
+        assert seen["netrc_mode"] == "0o600"
+
+    # --- half two: none of the four named surfaces carries it ------------
+    assert log.blocking() == ["toolchain-install"]
+    logged = " ".join(msg for _code, msg in log.warnings)
+    assert SENTINEL_TOKEN not in logged
+    # The variable NAME is safe to print and is what makes the run
+    # explicable; the value is not.
+    for argv in runner.planned:
+        assert SENTINEL_TOKEN not in " ".join(argv)
+    tails = " ".join(f"$ {' '.join(argv)}" for argv in seen["argv"])
+    assert SENTINEL_TOKEN not in tails
+    assert SENTINEL_TOKEN not in _rendered_envelope(log, runner, sdk_root)
+
+
+def test_the_staged_credential_file_is_deleted_once_the_install_returns(tmp_path, monkeypatch):
+    """A secret written to disk that outlives the command is a leak with a
+    longer half-life than any of the four surfaces above. The cleanup is in a
+    `finally`, so this holds on the FAILURE path -- the one that skips
+    straight past the success-side code."""
+    seen: dict = {}
+    monkeypatch.setenv("GH_TOKEN", SENTINEL_TOKEN)
+    _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
+
+    staged = Path(seen["netrc_path"])
+    assert not staged.exists()
+    assert not staged.parent.exists()
+
+
+def test_a_rate_limited_failure_names_tans_own_surface_not_wests_flag(tmp_path, monkeypatch):
+    """The message a customer sees today ends with west's advice to pass
+    `--personal-access-token`, a flag on a command they never typed and which
+    `tan bootstrap` rejects. The augmented message must name the lever that
+    actually exists for them."""
+    seen: dict = {}
+    log, _runner = _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
+
+    assert log.blocking() == ["toolchain-install"]
+    msg = log.warnings[0][1]
+    # West's own text is kept verbatim -- the note is APPENDED, never a
+    # replacement (`_augment_with_low_disk_note`'s established shape).
+    assert "--personal-access-token argument or use a .netrc file" in msg
+    assert "$TAN_GITHUB_TOKEN" in msg
+    assert "anonymous per-IP API quota" in msg
+    assert "that is `west`'s own flag" in msg
+
+
+def test_an_unauthenticated_run_stages_nothing_and_spawns_the_same_argv(tmp_path, monkeypatch):
+    """tan-cli#1143 acceptance: with no token in the environment the download
+    path is byte-for-byte what it was -- no netrc, no `$NETRC`, no extra env
+    of any kind on the `west sdk install` spawn."""
+    seen: dict = {}
+    _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
+
+    assert "netrc_path" not in seen
+    assert seen["extra_env"] == [{}, {}, {}]
+    expected = tp.west_sdk_install_argv(
+        "west", version="1.0.1", install_dir=seen["argv"][0][_install_dir_index()]
+    )
+    assert seen["argv"][0][1:] == expected[1:]
+
+
+def test_a_dry_run_stages_no_credential_even_with_a_token_in_the_environment(
+    tmp_path, monkeypatch
+):
+    """`--dry-run` spawns nothing, so there is nothing to authenticate -- and
+    writing a secret to disk to plan a command that will not run is a cost
+    with no benefit. It also keeps `data.plannedCommands` identical with and
+    without a token bound, which is what
+    `test_bootstrap_command.py::test_a_dry_run_never_puts_the_github_token_in_the_envelope`
+    then greps end to end."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
+    monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
+    monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setenv("TAN_GITHUB_TOKEN", SENTINEL_TOKEN)
+    staged: list[Path] = []
+    monkeypatch.setattr(
+        bootstrap_cmd,
+        "_stage_sdk_credential",
+        lambda token: staged.append(token) or pytest.fail("staged under --dry-run"),
+    )
+
+    ws = _workspace(tmp_path)
+    log = bootstrap_cmd.Log(json_mode=True)
+    runner = bootstrap_cmd.Runner(json=True, dry_run=True)
+    bootstrap_cmd.toolchain_phase(ws, log, runner, sdk_root, None, is_windows=False)
+
+    assert staged == []
+    assert log.blocking() == []
+    assert any("sdk" in argv and "install" in argv for argv in runner.planned)
