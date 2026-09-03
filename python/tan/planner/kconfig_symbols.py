@@ -391,7 +391,7 @@ def _load_board_symbols(zephyr_base: Path, board_triple: str) -> list[dict[str, 
         # a directory in its place, a non-UTF-8 dump or an unreadable mode
         # are things a third-party build step really leaves -- each escaped
         # raw before, into `kconfig_cmd.py:541`'s `kconfig.emit-failed`
-        # envelope (or `generate_cmd.py:889`'s) naming the exception TYPE.
+        # envelope (or `generate_cmd.py:890`'s) naming the exception TYPE.
         # `never wrote` is preserved byte for byte through `absent=`; what
         # the pre-flight silently folded into it now says `cannot read`.
         raw = _GUARDS.require_readable_text(

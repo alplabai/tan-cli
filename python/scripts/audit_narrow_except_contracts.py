@@ -158,16 +158,17 @@ WHAT SHAPE 3 DOES NOT CLAIM, spelled out to the same standard as SHAPE 2:
     tree, and as of tan-cli#1162 the ONLY remaining SHAPE 3 finding
     anywhere in it: PR #1160's review checked it, tan-cli#1162 re-checked
     it independently, and it is a FALSE POSITIVE. The chain, spelled out
-    once here so a third round does not re-derive it -- `_build:1223`
-    opens with `text, plan = _acquire_plan(...)`; `_acquire_plan` ends
-    `return text, parse_build_plan(text)` (`build_cmd.py:546`); and
+    once here so a third round does not re-derive it -- `_build` opens
+    with `text, plan = _acquire_plan(...)` (`build_cmd.py:1225`);
+    `_acquire_plan` ends `return text, parse_build_plan(text)`
+    (`build_cmd.py:546`); and
     `parse_build_plan` (`tan/core/build_plan.py:543-547`) runs
     `json.loads(text)` inside a `try` whose `except ValueError` raises
     `PlanParseError("build.plan-invalid", ...)`. So by the time
-    `_build:1234` reaches `json.loads(text)`, THAT EXACT STRING has already
-    been parsed successfully by `json.loads` in the same call -- the only
-    way to arrive at line 1234 at all. It cannot fail there. This is a
-    limit of the detector, not a defect to fix, and it stays reported
+    `build_cmd.py:1234` reaches `json.loads(text)`, THAT EXACT STRING has
+    already been parsed successfully by `json.loads` in the same call --
+    the only way to arrive at line 1234 at all. It cannot fail there. This
+    is a limit of the detector, not a defect to fix, and it stays reported
     rather than suppressed: a name-based rule that grew a special case for
     one call site would be a rule nobody could reason about, and the honest
     cost is one line of output a reader has this paragraph to resolve.
@@ -288,7 +289,7 @@ turned out to be is recorded here rather than only in the issue, because
 the severity was NOT uniform and #1162's own body got one of the four
 wrong:
 
-  * `planner/libraries::load_manifest:232` -- WAS on the `tan build`
+  * `planner/libraries::load_manifest` -- WAS on the `tan build`
     path, as filed. `kconfig.py:1002` calls `libraries.resolve_selection`,
     which calls `load_manifest` per selected library, inside the
     build-plan emit -- so `build_cmd.py:505`'s broad `except Exception`
@@ -296,25 +297,25 @@ wrong:
     envelope naming the exception TYPE rather than the file. Also reached
     by `tan doctor` (`core/doctor_libraries.py:152`), whose per-name
     `except Exception` degraded it to the label `<name> (unknown)`.
-  * `planner/topology::_core_os_choices:62` -- also on the `tan build`
+  * `planner/topology::_core_os_choices` -- also on the `tan build`
     path, and on more besides: `validate._enforce_loader_rules:343` is
     reached from `loader.py:1009`, i.e. from every `load_board_yaml`, so
     `tan build`, `tan validate`, `tan generate` and `tan kconfig` all pass
     through it. Same `build_cmd.py:505` absorption on the build leg.
-  * `planner/zephyr_board::_load_soc_spec:144` -- NOT on the `tan build`
+  * `planner/zephyr_board::_load_soc_spec` -- NOT on the `tan build`
     path, and #1162's body was wrong to group it with `load_manifest`.
     Established by walking its callers rather than assumed: its only
-    caller is `emit_zephyr_board` (`zephyr_board.py:1433`), reached only
+    caller is `zephyr_board::emit_zephyr_board`, reached only
     from `planner_emit.py:287`, i.e. only from `tan generate --emit
     zephyr-board`. The two build-path modules that import from
     `zephyr_board` (`loader.py:385`, `secure.py:102`) take
     `_aen_role_slot0_map` and two constants, never `_load_soc_spec`. Its
-    real handler is `generate_cmd.py:889`'s `except BaseException`.
-  * `planner/kconfig_symbols::_load_board_symbols:389` -- reached from
-    `emit_kconfig` (`kconfig_symbols.py:454`) and so from `tan kconfig`,
+    real handler is `generate_cmd.py:890`'s `except BaseException`.
+  * `planner/kconfig_symbols::_load_board_symbols` -- reached from
+    `emit_kconfig` (same module) and so from `tan kconfig`,
     whose handler is `kconfig_cmd.py:541`'s broad `except Exception`
     (coded `kconfig.emit-failed`), or from `tan generate --emit kconfig`
-    and `generate_cmd.py:889`. Distinctive for a reason worth keeping:
+    and `generate_cmd.py:890`. Distinctive for a reason worth keeping:
     the file it reads is written by an EXTERNAL `west build -t`
     subprocess, so unlike the other three its failure shapes are not
     hypothetical metadata corruption but whatever a third-party build

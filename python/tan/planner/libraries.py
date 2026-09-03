@@ -221,11 +221,40 @@ def _emit_library_hw_backends(
 
 
 def available_libraries(metadata_root: Path) -> list[str]:
-    """Sorted list of every curated library token (manifest filename stem)."""
-    d = _libraries_dir(metadata_root)
-    if not d.is_dir():
+    """Sorted list of every curated library token (manifest filename stem).
+
+    RELOCATED divergence from alp-sdk's own `scripts/alp_orchestrate/
+    libraries.py` (tan-cli#1171 review of #1162): upstream still spells this
+    as an `if not d.is_dir(): return []` pre-flight in front of the `glob`.
+    That pre-flight was the SAME tan-cli#1127 shape the four sites in #1162
+    removed, one directory further out, and it survived that pass because
+    nothing drove it: `_PlannerDocumentCases.test_permission_denied_parent`
+    denies `metadata/libraries/`, and the shape that breaks is a denied
+    `metadata/` -- the manifest's GRANDPARENT. Measured there, before this
+    change: raw `PermissionError` out of `Path.is_dir()` on 3.12.3 and
+    3.13.15, curated on 3.14.7.
+
+    Both halves had to go, not just the pre-flight: `Path.glob` is not
+    interpreter-uniform on this shape either. Measured on the same denied
+    `metadata/`, `sorted(d.glob("*.yaml"))` raises `PermissionError` on
+    3.12.3 and returns `[]` on 3.13.15 and 3.14.7 -- so the `except OSError`
+    is what makes the three interpreters agree, and the pre-flight is
+    redundant once it is there (`glob` on a directory that is simply not
+    present yields nothing on all three).
+
+    An unreadable library directory answers `[]` rather than raising because
+    this function is not a document read: its whole output is the
+    typo-correcting `Available: ...` HINT inside another function's error
+    message, and it is reached only once that function's own guarded read has
+    already raised. There is no caller for whom an exception here would be
+    more useful than an empty option list, and one -- `load_manifest`'s
+    `absent=` -- for whom it would replace a true, curated message with a raw
+    traceback.
+    """
+    try:
+        return sorted(p.stem for p in _libraries_dir(metadata_root).glob("*.yaml"))
+    except OSError:
         return []
-    return sorted(p.stem for p in d.glob("*.yaml"))
 
 
 def load_manifest(name: str, metadata_root: Path) -> dict[str, Any]:
@@ -251,19 +280,23 @@ def load_manifest(name: str, metadata_root: Path) -> dict[str, Any]:
     TYPE rather than the file, which is the poor-message half of this
     family rather than its bare-traceback half.
 
-    `available_libraries` is now evaluated on every call rather than only on
-    the miss, because `absent=` takes a string. That is one extra directory
-    listing per selected library, on a path that already stat-ed the same
-    directory for the pre-flight this replaces; the typo-correcting
-    `Available: ...` message is preserved byte for byte in exchange.
+    `available_libraries` is passed LAZILY, as the zero-argument callable
+    `absent=` also accepts (tan-cli#1171 review), so the directory listing
+    stays on the miss path exactly as the pre-flight-era code kept it. Built
+    eagerly it ran ahead of the guarded read on every call, which put its own
+    unguarded `is_dir()` first in line and reinstated the tan-cli#1127 split
+    the rest of this change removes -- raw `PermissionError` on 3.12.3 and
+    3.13.15, curated on 3.14.7, with `metadata/` denied. The typo-correcting
+    `Available: ...` message is preserved byte for byte either way.
     """
     path = _libraries_dir(metadata_root) / f"{name}.yaml"
-    options = ", ".join(available_libraries(metadata_root)) or "<none>"
     return _GUARDS.read_yaml_mapping(
         path,
         what=f"library manifest metadata/libraries/{name}.yaml",
-        absent=(f"unknown library `{name}` in `libraries:` -- no manifest at "
-                f"metadata/libraries/{name}.yaml.  Available: {options}"))
+        absent=lambda: (
+            f"unknown library `{name}` in `libraries:` -- no manifest at "
+            f"metadata/libraries/{name}.yaml.  Available: "
+            f"{', '.join(available_libraries(metadata_root)) or '<none>'}"))
 
 
 # ---------------------------------------------------------------------------

@@ -134,11 +134,19 @@ found, beyond the four issue-named sites:
     `UnicodeDecodeError` exactly like `perf_apply.py`'s pair --
     `tan/model/adapters/drpai.py::_compiler_version` (round 1, FIXED) and
     `tan/planner/kconfig.py::_emit_extra_library_profile` (round 1, found,
-    NOT fixed -- `kconfig.py` is a hash-pinned verbatim mirror of alp-sdk's
-    `scripts/alp_orchestrate/kconfig.py`, `test_planner_relocation_
-    freshness.py`'s `PINNED_HASHES`; editing it here without first porting
-    the fix upstream and re-pinning that hash is exactly the drift that gate
-    exists to catch, and is out of this issue's scope).
+    still NOT fixed -- but READ THE NEXT PARAGRAPH BEFORE REUSING THIS
+    REASON. As written at tan-cli#1116 it says `kconfig.py` is a hash-pinned
+    verbatim mirror of alp-sdk's `scripts/alp_orchestrate/kconfig.py` and
+    that editing tan's copy would break `test_planner_relocation_freshness.
+    py`'s `PINNED_HASHES`. That mechanical claim is FALSE, measured at
+    tan-cli#1122: `PINNED_HASHES`' VALUES are sha256 of
+    `<ALP_SDK_ROOT>/scripts/alp_orchestrate/*.py` and its KEYS are SDK-side
+    paths (`test_planner_relocation_freshness.py:43`, `:84`, `:771`), and
+    nothing in that gate hashes any `tan/planner/**` file at all -- so no
+    edit here can move a pin. Whatever keeps this site deferred is a
+    MAINTENANCE-COST decision -- keeping tan's diff against upstream small,
+    and not handing `planner_resync.py`'s three-way merge another divergence
+    to carry forward -- not a gate constraint.).
   * THREE `is_file()`/`is_dir()` pre-flight checks that raised a raw
     `PermissionError` on a permission-denied ANCESTOR directory (round 1) --
     `perf_apply._resolve_hw_rev`, `metadata_schema.validate_document`,
@@ -180,18 +188,36 @@ found, beyond the four issue-named sites:
     kconfig_symbols.py::_load_board_symbols` (found opportunistically while
     checking the pinned planner files review round 2's MINOR finding named
     as an incomplete deferral list): the same missing-`UnicodeDecodeError`
-    shape. NOT fixed -- both in `PINNED_HASHES`, same reasoning as
-    `kconfig.py`. **The `_load_board_symbols` half of that deferral was
-    reversed at tan-cli#1162 and is now seeded**, because the reasoning
-    behind it does not survive `test_planner_relocation_freshness.py`'s own
-    later correction: `PINNED_HASHES` pins only the UPSTREAM side of the
-    comparison, `tan/planner/` "is not the verbatim mirror it is sometimes
-    called" (that gate's own words -- measured at `7d58ef32`, 16 of 20
-    relocated modules already differ from upstream, `kconfig_symbols.py` by
-    329 lines), and this very file already carries a documented tan-only
-    divergence (`env=spawn_env()`, tan-cli#992). The freshness gate was run
-    with `ALP_SDK_ROOT` bound after the #1162 change and is green.
-    `slugs.py::peripheral_kconfig` stays deferred; nothing here changes it.
+    shape. NOT fixed at tan-cli#1116 -- "both in `PINNED_HASHES`, same
+    reasoning as `kconfig.py`". **The `_load_board_symbols` half of that
+    deferral was reversed at tan-cli#1162 and is now seeded**, because the
+    reasoning behind it does not survive `test_planner_relocation_
+    freshness.py`'s own later correction: `PINNED_HASHES` pins only the
+    UPSTREAM side of the comparison, `tan/planner/` "is not the verbatim
+    mirror it is sometimes called" (that gate's own words -- measured at
+    `7d58ef32`, 16 of 20 relocated modules already differ from upstream,
+    `kconfig_symbols.py` by 329 lines), and this very file already carries a
+    documented tan-only divergence (`env=spawn_env()`, tan-cli#992). The
+    freshness gate was run with `ALP_SDK_ROOT` bound after the #1162 change
+    and is green.
+
+    **AND THAT REFUTATION IS NOT SPECIFIC TO `kconfig_symbols.py`.**
+    tan-cli#1122 measured the mechanism directly rather than by analogy:
+    `PINNED_HASHES`' values are sha256 of `<ALP_SDK_ROOT>/scripts/
+    alp_orchestrate/*.py`, its keys are SDK-side paths, and nothing in
+    `test_planner_relocation_freshness.py` hashes any `tan/planner/**` file
+    -- so editing tan's copy of ANY relocated module cannot break a pin.
+    That kills the stated reason for all five deferrals recorded above and
+    below, not one of them: `slugs.py::peripheral_kconfig`,
+    `kconfig.py::_emit_extra_library_profile`,
+    `sdk_compat.py::read_sdk_version`, `sdk_compat.py::_hw_revision_table`
+    and `buildplan.py::_sdk_version`. They stay deferred here -- fixing five
+    more sites is not tan-cli#1162's job -- but they stay deferred on a
+    MAINTENANCE-COST judgement (keep the diff against upstream small; do not
+    hand `planner_resync.py`'s three-way merge more divergence to carry),
+    which is a decision someone may reverse, and NOT on a gate constraint,
+    which would be a fact nobody could. See tan-cli#1122 for the
+    measurement; it is not restated here.
 
 So: **65** non-planner candidates, reproducible; **all 65** read; **46**
 of those hand-driven with real broken files (the other 19 already
@@ -203,8 +229,10 @@ files** found in `PINNED_HASHES`-protected planner files -- `kconfig.py`
 (one site), `sdk_compat.py` (two: `read_sdk_version`, `_hw_revision_table`),
 `buildplan.py` (`_sdk_version`), `slugs.py` (`peripheral_kconfig`),
 `kconfig_symbols.py` (`_load_board_symbols`) -- named individually above and
-in `_SEEDED_CONTRACTS`' neighbouring comments, all deliberately deferred
-rather than fixed, all reported rather than silently skipped. **15** seeded
+in `_SEEDED_CONTRACTS`' neighbouring comments, all deferred at that round on
+the `PINNED_HASHES` reasoning tan-cli#1122 has since refuted (see the
+`slugs.py` bullet above; five of the six deferrals stand, but on maintenance
+cost, not on the gate), all reported rather than silently skipped. **15** seeded
 into `_SEEDED_CONTRACTS` below AT THAT ROUND (twenty-five today; every
 count in this paragraph is tan-cli#1116's own measurement, kept as the
 record of what that sweep found rather than silently re-stated) -- the
@@ -522,7 +550,7 @@ _SEEDED_CONTRACTS: dict[str, str] = {
         "(...))` past a curated ZephyrBoardEmitError contract. NOT on the "
         "`tan build` path (the issue body said it was; its only caller is "
         "emit_zephyr_board, so `tan generate --emit zephyr-board` and "
-        "`generate_cmd.py:889`'s except BaseException) -- the severity "
+        "`generate_cmd.py:890`'s except BaseException) -- the severity "
         "differs from load_manifest's and the seed says so"
     ),
     "kconfig_symbols._load_board_symbols": (
@@ -2054,6 +2082,26 @@ class _PlannerDocumentCases:
         with _permission_denied(self._path(metadata_root).parent):
             assert "cannot read" in self._raises(metadata_root)
 
+    @_skip_as_root
+    def test_permission_denied_metadata_root(self, tmp_path):
+        # ONE DIRECTORY FURTHER OUT than the cell above, and a distinct
+        # shape rather than a weaker restatement of it (tan-cli#1171
+        # review). Denying the document's own parent puts the guarded read
+        # first in line; denying `metadata/` ALSO denies anything the
+        # caller does with the root BEFORE that read -- and a caller can
+        # have such a step without owning a pre-flight, because building
+        # an `absent=` message is allowed to touch the filesystem too.
+        # `libraries.load_manifest` did: its `Available: ...` list is a
+        # `glob` of `metadata/libraries/`, and while it was built eagerly
+        # the whole guarded read was unreachable behind an unguarded
+        # `is_dir()`. That put a raw `PermissionError` on 3.12.3 and
+        # 3.13.15 against a curated message on 3.14.7 -- the tan-cli#1127
+        # split, alive inside the change that removes it, and invisible to
+        # the cell above. All three measured, before and after.
+        metadata_root = self._prepared(tmp_path)
+        with _permission_denied(metadata_root):
+            assert "cannot read" in self._raises(metadata_root)
+
 
 @_needs_sdk
 @_covers("template._load_som_doc")
@@ -2330,6 +2378,62 @@ class TestLoadManifest(_PlannerDocumentCases):
         assert "cannot read" in msg
         assert "unknown library" not in msg
 
+    @_skip_as_root
+    def test_the_option_list_is_only_built_on_a_real_miss(self, tmp_path):
+        # The tan-cli#1171 review cell. What each assertion pins, stated
+        # exactly, because review round 2 caught an earlier version of this
+        # comment claiming more than the code can enforce:
+        #
+        #   * `"cannot read" in msg` is the whole load-bearing half. It
+        #     needs `self._raises` to have caught an `OrchestratorError` at
+        #     all, and with the listing built EAGERLY there is no
+        #     `OrchestratorError` to catch on 3.12.3 and 3.13.15 -- the
+        #     `is_dir()` in `available_libraries` raises a raw
+        #     `PermissionError` before the register is ever reached
+        #     (`pytest.raises` fails on the wrong type). Measured: that is
+        #     what reds the eager mutant, and it reds only on those two.
+        #   * `"Available:" not in msg` does NOT pin the ordering, and an
+        #     earlier draft of this comment wrongly said it did.
+        #     `Available:` lives only inside the `absent` message, and
+        #     `_unreadable` resolves `absent` on `FileNotFoundError` and
+        #     nothing else, so it cannot appear on a `PermissionError` path
+        #     whether the listing is built eagerly or lazily. What it pins
+        #     is that `absent=` STAYS `FileNotFoundError`-only -- widen
+        #     that branch to any other `OSError` and this reds.
+        #
+        # The tail of the test then pins that the listing is not merely
+        # gone: on a genuine miss it is built, with the sibling in it.
+        metadata_root = self._prepared(tmp_path)
+        (metadata_root / "libraries" / "sibling.yaml").write_text(
+            "tier: 1\n", encoding="utf-8")
+        with _permission_denied(metadata_root):
+            msg = self._raises(metadata_root)
+        assert "cannot read" in msg
+        assert "Available:" not in msg
+        # ... and it IS built, with the sibling in it, once the file really
+        # is missing -- so neither assertion above can pass by the listing
+        # having been dropped altogether.
+        self._path(metadata_root).unlink()
+        assert "Available: sibling" in self._raises(metadata_root)
+
+    @_skip_as_root
+    def test_available_libraries_answers_rather_than_raising(self, tmp_path):
+        # Driven DIRECTLY, not through `load_manifest`: dropping the
+        # `is_dir()` pre-flight is not on its own enough, because
+        # `Path.glob` is not interpreter-uniform on this shape either.
+        # Measured with `metadata/` denied: `glob("*.yaml")` raises
+        # `PermissionError` on 3.12.3 and returns `[]` on 3.13.15 and
+        # 3.14.7 -- so the `except OSError` is what makes the three agree,
+        # and only 3.12.3 actually executes it. Answering `[]` is the right
+        # contract here and only here: this is a HINT list inside another
+        # function's message, not a document read, and its one caller is
+        # reached only once a guarded read has already raised.
+        metadata_root = self._prepared(tmp_path)
+        module = _planner_module("libraries")
+        assert module.available_libraries(metadata_root) == [self._NAME]
+        with _permission_denied(metadata_root):
+            assert module.available_libraries(metadata_root) == []
+
 
 @_needs_sdk
 @_covers("zephyr_board._load_soc_spec")
@@ -2415,6 +2519,16 @@ class TestLoadSocSpec:
         # Asserting `cannot read` is what pins the 3.14.7 half.
         metadata_root = self._prepared(tmp_path)
         with _permission_denied(self._path(metadata_root).parent):
+            assert "cannot read SoC spec at" in self._raises(metadata_root)
+
+    @_skip_as_root
+    def test_permission_denied_metadata_root(self, tmp_path):
+        # The grandparent cell `_PlannerDocumentCases` documents, driven
+        # here too so the isolation claim is a measurement rather than an
+        # assumption: this site was already curated on all three
+        # interpreters with `metadata/` denied, and stays so.
+        metadata_root = self._prepared(tmp_path)
+        with _permission_denied(metadata_root):
             assert "cannot read SoC spec at" in self._raises(metadata_root)
 
 
@@ -2692,6 +2806,15 @@ class TestCoreOsChoices:
         # before the fix, and a SILENT wrong-document fallback on 3.14.7.
         metadata_root = self._prepared(tmp_path)
         with _permission_denied(self._path(metadata_root).parent):
+            assert "cannot read board schema at" in self._raises(metadata_root)
+
+    @_skip_as_root
+    def test_permission_denied_metadata_root(self, tmp_path):
+        # The grandparent cell, driven here for the same reason as on
+        # `TestLoadSocSpec`: already curated on all three with `metadata/`
+        # denied, and pinned so it stays that way.
+        metadata_root = self._prepared(tmp_path)
+        with _permission_denied(metadata_root):
             assert "cannot read board schema at" in self._raises(metadata_root)
 
 

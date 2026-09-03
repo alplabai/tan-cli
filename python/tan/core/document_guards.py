@@ -291,6 +291,7 @@ curated-raise contract, and no more:
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 __all__ = ["SHAPE_NOUN", "DocumentGuards"]
@@ -374,7 +375,8 @@ class DocumentGuards:
         return self.require_field(value, kind, doc=doc, field=f"{field}.{key}")
 
     def require_readable_text(
-        self, path: Any, *, what: str, absent: str | None = None,
+        self, path: Any, *, what: str,
+        absent: str | Callable[[], str] | None = None,
     ) -> str:
         """@path, decoded as UTF-8 text, or the injected curated error --
         the read-half tan-cli#1085 pulled out of `read_catalog_document`
@@ -405,6 +407,9 @@ class DocumentGuards:
         interpreters and a curated-but-UNTRUE "no such file" on the third
         (both measured on this tree before the fix).
 
+        @absent may also be a zero-argument CALLABLE, resolved only if the
+        `FileNotFoundError` branch is taken -- see `_unreadable` below.
+
         ONLY `FileNotFoundError` takes @absent, deliberately. Every other
         `OSError` means the path is there in some form and could not be read
         as text -- a directory (`IsADirectoryError`), a parent that is a
@@ -420,7 +425,8 @@ class DocumentGuards:
             raise self._unreadable(exc, path, what, absent) from exc
 
     def require_readable_bytes(
-        self, path: Any, *, what: str, absent: str | None = None,
+        self, path: Any, *, what: str,
+        absent: str | Callable[[], str] | None = None,
     ) -> bytes:
         """@path's RAW BYTES, or the injected curated error -- the same
         contract as `require_readable_text` above for a caller that must not
@@ -456,7 +462,8 @@ class DocumentGuards:
             raise self._unreadable(exc, path, what, absent) from exc
 
     def _unreadable(
-        self, exc: BaseException, path: Any, what: str, absent: str | None,
+        self, exc: BaseException, path: Any, what: str,
+        absent: str | Callable[[], str] | None,
     ) -> Exception:
         """The curated error for a failed read -- ONE definition of the
         message, shared by both read halves above.
@@ -465,9 +472,31 @@ class DocumentGuards:
         and nothing else: every other failure means the path is there in some
         form and could not be read, so `cannot read ...` is true where "no
         such file" would not be.
+
+        @absent may be a zero-argument CALLABLE as well as a string. The
+        rationale lives HERE, in the one function that resolves it and the
+        one both read halves and all four widened signatures funnel into,
+        rather than on `require_readable_text` above: on the signature it
+        would be four copies of one paragraph, and each copy would be a
+        place for the next edit to fall out of step with the resolution
+        rule it describes.
+
+        It is resolved HERE too -- inside the `FileNotFoundError` branch -- so a
+        caller whose absent-message is expensive or itself fallible does not
+        pay for it, or trip over it, on the paths that never use it
+        (tan-cli#1171 review). `libraries.load_manifest` is the caller that
+        needs it: its message ends `Available: <every manifest stem>`, and
+        building that list means LISTING `metadata/libraries/`. Eagerly, that
+        directory walk ran ahead of the guarded read on every call -- so with
+        `metadata/` itself denied it raised a raw `PermissionError` out of
+        `Path.is_dir()` on 3.12.3 and 3.13.15 while the guarded read gave the
+        curated message on 3.14.7, reinstating the exact tan-cli#1127 split
+        this family exists to remove (all three measured). Passed lazily, the
+        listing happens only after the read has already answered "not there",
+        which is the one branch it describes.
         """
         if absent is not None and isinstance(exc, FileNotFoundError):
-            return self.error(absent)
+            return self.error(absent() if callable(absent) else absent)
         return self.error(
             f"cannot read {what} at {path}: "
             f"{getattr(exc, 'strerror', None) or exc}")
@@ -520,7 +549,8 @@ class DocumentGuards:
         return self.require_mapping_doc(doc or {}, path=path, what=what)
 
     def read_yaml_mapping(
-        self, path: Any, *, what: str, absent: str | None = None,
+        self, path: Any, *, what: str,
+        absent: str | Callable[[], str] | None = None,
     ) -> dict[str, Any]:
         """A YAML document at @path, read AND parsed AND known to be a
         mapping -- the exact composite `read_catalog_document` below already
@@ -623,7 +653,8 @@ class DocumentGuards:
         return self.require_mapping_doc(doc, path=path, what=what, noun=noun)
 
     def read_json_mapping(
-        self, path: Any, *, what: str, absent: str | None = None,
+        self, path: Any, *, what: str,
+        absent: str | Callable[[], str] | None = None,
         noun: str = "a JSON object",
     ) -> dict[str, Any]:
         """A JSON document at @path, read AND parsed AND known to be a

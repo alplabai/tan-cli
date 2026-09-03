@@ -151,11 +151,11 @@ def _load_soc_spec(sku_preset: dict[str, Any], metadata_root: Path) -> dict[str,
 
     NOT on the `tan build` path, contrary to tan-cli#1162's own body, and
     established by walking callers rather than assumed: the only caller is
-    `emit_zephyr_board` (`zephyr_board.py:1433`), reached only through
+    `emit_zephyr_board` (this module), reached only through
     `planner_emit.py:287`, so only from `tan generate --emit zephyr-board`.
     `loader.py:385` and `secure.py:102` take `_aen_role_slot0_map` and two
     constants from this module, never this function. The handler that
-    actually catches what this raises is `generate_cmd.py:889`'s
+    actually catches what this raises is `generate_cmd.py:890`'s
     `except BaseException` -- coded, not a bare traceback, but naming the
     exception class instead of the file.
 
