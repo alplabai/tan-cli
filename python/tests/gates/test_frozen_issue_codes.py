@@ -114,6 +114,10 @@ FROZEN_LOCATIONS: dict[str, list[str]] = {
     "bootstrap.yocto-host": ["commands/bootstrap_cmd.py"],
     "bootstrap.prerequisites-missing": ["core/bootstrap.py", "commands/doctor_cmd.py"],
     "presets.sdk-root-unresolved": ["commands/presets_cmd.py"],
+    # tan-cli#1092: alp-sdk-vscode#649 bound a consumer to this spelling, so it
+    # left `reserved`. The whole dotted code is the string constant at the
+    # `MonitorError` call site (monitor_cmd.py:247), not an assembled suffix.
+    "monitor.no-port": ["commands/monitor_cmd.py"],
     "bootstrap.python-not-runnable": ["core/bootstrap.py", "commands/doctor_cmd.py"],
     "bootstrap.python-too-old": ["core/bootstrap.py", "commands/doctor_cmd.py"],
     # tan-cli#885: alp-sdk-vscode#575 bound a consumer to this spelling, so it
