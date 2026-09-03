@@ -177,7 +177,10 @@ What those commands do:
    be the checkout's PARENT, and starting in an empty directory makes that
    parent the current directory. `alp-workspace/` appears only in the two
    cases further down: you pass `--workspace`, or the directory held
-   something besides the checkout and `bootstrap` relocated it there for you -- and, as its final phase (ADR 0021 Lane 1 P1),
+   something besides the checkout and `bootstrap` relocated it there for
+   you.
+
+   `bootstrap` then, as its final phase (ADR 0021 Lane 1 P1),
    acquires the Zephyr SDK cross-toolchain (`arm-zephyr-eabi`) that
    `tan build` needs for real silicon, into the artifact-keyed store
    `~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/` (or
@@ -246,17 +249,6 @@ What those commands do:
    west sdk install --version 1.0.1 -t arm-zephyr-eabi
    ```
 
-   Those two paths are the Quickstart's own layout -- an empty starting
-   directory and no `--workspace`, so the west topdir is the current
-   directory. **Do not hand-adjust them for a different layout: ask `tan`.**
-   `tan bootstrap` prints the exact activate and `ZEPHYR_BASE` lines for the
-   workspace it actually created, and `tan bootstrap --print-env` reprints
-   them at any time (it writes to stdout precisely so it can be redirected or
-   sourced). Use those if you passed `--workspace <path>`, or if `bootstrap`
-   relocated the checkout into `alp-workspace/` because the starting
-   directory held anything besides the checkout -- in both of those layouts
-   the venv is `alp-workspace/.venv` and Zephyr is `alp-workspace/zephyr`.
-
    the exact command `tan doctor`'s `zephyrSdk` check also names, so it
    stays correct if that pin ever moves. On a minimal Linux host this also
    needs `file` on PATH (Debian/Ubuntu: `sudo apt-get install -y file`);
@@ -266,6 +258,20 @@ What those commands do:
    written for the `--no-hosttools` invocation in its own `note[0]`, which
    never runs the host-tools step. The command above installs host tools, so
    it needs `file`. Add `--no-hosttools` and it does not.
+
+   Those two paths are the Quickstart's own layout -- an empty starting
+   directory and no `--workspace`, so the west topdir is the current
+   directory. **Do not hand-adjust them for a different layout: ask `tan`.**
+   `tan bootstrap` prints the activate and `ZEPHYR_BASE` lines for the
+   workspace it actually created, and `tan bootstrap --print-env` reprints
+   them at any time, on stdout so the block can be redirected into a file.
+   Note that the venv-activation line it emits is a **comment**: sourcing
+   that output sets `ZEPHYR_BASE` and `ZEPHYR_TOOLCHAIN_VARIANT` but does
+   NOT activate the venv, so run the `source ...` line yourself as well.
+   Reach for it if you passed `--workspace <path>`, whose venv is
+   `<path>/.venv` and Zephyr `<path>/zephyr`, or if `bootstrap` relocated
+   the checkout into `alp-workspace/` because the starting directory held
+   something besides the checkout, whose venv is then `alp-workspace/.venv`.
 3. `init` creates a Zephyr application and pins the SDK checkout in
    `.alp/sdk-path`.
 4. `validate` checks `board.yaml` and related metadata.
