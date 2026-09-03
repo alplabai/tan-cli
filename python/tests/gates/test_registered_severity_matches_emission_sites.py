@@ -671,7 +671,8 @@ def test_dual_severity_codes_stay_dual():
     decides whether a registry string means one severity or two -- cannot be
     fooled into reading `"error or warning"` as single-severity, which is
     exactly the shape a later "normalise the registry" sweep could introduce
-    (this repo's own recurring defect class: #1059, #1062, PR #1070's :1350,
+    (this repo's own recurring defect class: #1059, #1062's round-3 review,
+    PR #1070's :1350,
     and four tests on PR #1111 -- a protection that cannot fail is not a
     protection).
     """
