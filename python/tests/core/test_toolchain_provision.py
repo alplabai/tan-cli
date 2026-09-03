@@ -10,6 +10,7 @@ toolchain on every PR).
 from __future__ import annotations
 
 import json
+from fnmatch import fnmatch
 from pathlib import Path
 
 import pytest
@@ -407,15 +408,16 @@ def test_the_staged_netrc_names_only_the_github_api_host():
     ],
 )
 def test_a_failure_that_is_not_a_rate_limit_gets_no_token_note(detail):
-    assert tp.rate_limit_note(detail, token_source=None) is None
-    assert tp.rate_limit_note(detail, token_source="GH_TOKEN") is None
+    assert tp.rate_limit_note(detail, authenticated_as=None) is None
+    assert tp.rate_limit_note(detail, authenticated_as="GH_TOKEN") is None
+    assert tp.rate_limit_note(detail, authenticated_as=None, credential_seen="GH_TOKEN") is None
 
 
 def test_an_unauthenticated_rate_limit_names_tans_surface_and_disowns_wests_flag():
     note = tp.rate_limit_note(
         "fetch_releases API rate limit exceeded. Try executing install script with "
         "--personal-access-token argument or use a .netrc file",
-        token_source=None,
+        authenticated_as=None,
     )
     assert note is not None
     assert "$TAN_GITHUB_TOKEN" in note
@@ -430,9 +432,71 @@ def test_an_authenticated_rate_limit_does_not_tell_the_reader_to_set_a_token_aga
     """The two situations are genuinely different. With a credential already
     in play the per-IP quota was never the binding limit, so repeating "set a
     token" would point at a lever the reader has already pulled."""
-    note = tp.rate_limit_note("API rate limit exceeded", token_source="GH_TOKEN")
+    note = tp.rate_limit_note("API rate limit exceeded", authenticated_as="GH_TOKEN")
     assert note is not None
     assert "$GH_TOKEN" in note
     assert "AUTHENTICATED quota" in note
     assert "anonymous" in note  # named only to say it was NOT the limit hit
     assert "$TAN_GITHUB_TOKEN" not in note
+
+
+def test_a_credential_that_was_present_but_unused_is_told_so_not_told_to_set_one():
+    """tan-cli#1148 review: the wrong-advice combination. If the environment
+    HELD a credential and this download still went out anonymous, "set
+    $TAN_GITHUB_TOKEN" points at a lever the reader can see is already
+    pulled. The note sends them to the `bootstrap.sdk-credential-unstaged`
+    warning that says WHY instead."""
+    note = tp.rate_limit_note(
+        "API rate limit exceeded", authenticated_as=None, credential_seen="GH_TOKEN"
+    )
+    assert note is not None
+    assert "went out anonymous even though $GH_TOKEN is set" in note
+    assert "the warning above" in note
+    # The three branches are genuinely distinct, not one string with a
+    # variable spliced in.
+    assert "$TAN_GITHUB_TOKEN" not in note
+    assert "AUTHENTICATED quota" not in note
+
+
+def test_the_authenticated_note_names_the_one_symptom_an_inert_transport_would_show():
+    """tan pins neither `west` nor `requests`, so a future west that sets its
+    own Authorization header on the no-token branch would make the netrc
+    transport INERT with no gate anywhere able to catch it (`requests` is not
+    a tan dependency and no zephyr checkout exists at test time, so any such
+    gate would SKIP everywhere -- a dead gate). This sentence is the
+    substitute: the live symptom, surfaced at the exact moment an inert
+    transport becomes observable."""
+    note = tp.rate_limit_note("API rate limit exceeded", authenticated_as="GH_TOKEN")
+    assert note is not None
+    assert "may not be reaching `west sdk install`" in note
+    assert "west --version" in note
+
+
+def test_a_set_but_unusable_token_variable_is_reported_rather_than_dropped():
+    """A `.env` value that kept its literal quotes is the realistic case. Left
+    silent, the symptom is a download that is anonymous for a reason nothing
+    on screen names."""
+    assert tp.rejected_sdk_token_vars({"GH_TOKEN": '"ghp_abc"'}) == ("GH_TOKEN",)
+    assert tp.rejected_sdk_token_vars({"TAN_GITHUB_TOKEN": "ghp_ok"}) == ()
+    # Unset and blank are NOT reported: `GITHUB_TOKEN=` is what an unset
+    # workflow secret expands to, and warning on every CI run is noise.
+    assert tp.rejected_sdk_token_vars({}) == ()
+    assert tp.rejected_sdk_token_vars({"GITHUB_TOKEN": "", "GH_TOKEN": "   "}) == ()
+    assert tp.rejected_sdk_token_vars(
+        {"TAN_GITHUB_TOKEN": "a b", "GITHUB_TOKEN": "c#d"}
+    ) == ("TAN_GITHUB_TOKEN", "GITHUB_TOKEN")
+
+
+def test_the_credential_scratch_name_cannot_collide_with_a_store_or_with_wreckage():
+    """The sweep's only proof of provenance is the name, so the name must be
+    unmistakable: nothing else tan writes under the toolchain root starts
+    with a dot."""
+    assert tp.NETRC_SCRATCH_PREFIX.startswith(".")
+    assert tp.netrc_scratch_glob_pattern() == ".alp-netrc-*"
+    leaf = tp.store_dir_name("1.0.1")
+    assert not leaf.startswith(tp.NETRC_SCRATCH_PREFIX)
+    assert not fnmatch(leaf, tp.netrc_scratch_glob_pattern())
+    assert not fnmatch(
+        f"{leaf}{tp.TMP_SUFFIX_PREFIX}4242", tp.netrc_scratch_glob_pattern()
+    )
+    assert not fnmatch(f"{tp.NETRC_SCRATCH_PREFIX}abcd", tp.wreckage_glob_pattern(leaf))

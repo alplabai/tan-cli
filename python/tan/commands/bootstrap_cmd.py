@@ -47,6 +47,16 @@ timeout.
 
 **Text mode writes to stderr only.** stdout is the envelope channel; a single
 stray byte there breaks the extension silently.
+
+**This module is 5.3x the size guideline and needs its own split, which is
+not any one PR's to do.** `tests/gates/_module_size_budget_core.py` sets
+`MODULE_CAP = 800`; this file is over 4,250 lines, and the ratchet in
+`module_size_budget.d/` records that as a baseline rather than a target. For
+scale, tan-cli#1142 was filed for `planner/template.py` at 2.58x. Every
+increment lands here for a locally correct reason -- a phase's IO belongs
+beside the other phases' IO -- and the sum of locally correct reasons is
+this. A successor issue tracks the split; do not treat a passing ratchet as
+this module being the right size.
 """
 from __future__ import annotations
 
@@ -1299,7 +1309,9 @@ class _SdkCredential:
     scratch_dir: Path
 
 
-def _stage_sdk_credential(token: toolchain_provision.SdkToken) -> _SdkCredential | None:
+def _stage_sdk_credential(
+    token: toolchain_provision.SdkToken, root: Path
+) -> _SdkCredential | None:
     """Write `token` into a private netrc and return the env that points the
     child's HTTP client at it -- or `None` when the file cannot be written,
     in which case the download proceeds unauthenticated exactly as it did
@@ -1320,12 +1332,19 @@ def _stage_sdk_credential(token: toolchain_provision.SdkToken) -> _SdkCredential
 
     The file is created `O_EXCL` at mode 0600 inside a fresh `mkdtemp`
     directory (0700), so it can never be read by another user and can never
-    land on a path another process pre-created. Windows honours neither
-    mode, but `mkdtemp` there is already inside the calling user's own
-    profile.
+    land on a path another process pre-created. Windows honours neither mode,
+    but the toolchain root is inside the calling user's own profile.
+
+    **Under `root`, not `$TMPDIR`** (tan-cli#1148 review): the `finally`
+    that deletes this cannot run on SIGKILL, so the residue needs a sweep,
+    and a sweep is only safe over a directory tan owns -- see
+    `toolchain_provision.netrc_scratch_glob_pattern` for that argument in
+    full, and `_reclaim_sdk_credential_wreckage` for the sweep.
     """
     try:
-        scratch_dir = Path(tempfile.mkdtemp(prefix="tan-sdk-netrc-"))
+        scratch_dir = Path(
+            tempfile.mkdtemp(prefix=toolchain_provision.NETRC_SCRATCH_PREFIX, dir=root)
+        )
     except OSError:
         return None
     path = scratch_dir / "netrc"
@@ -1350,7 +1369,52 @@ def _discard_sdk_credential(scratch_dir: Path) -> None:
     shutil.rmtree(scratch_dir, ignore_errors=True)
 
 
-def _sdk_credential(log: Log, runner: Runner) -> _SdkCredential | None:
+def _sdk_credential_seen() -> str | None:
+    """The name of a `SDK_TOKEN_ENV_VARS` variable that HELD something this
+    run did not end up authenticating with -- usable-but-unstageable, or set
+    but unusable. `None` when the environment named no credential at all.
+
+    Read fresh from `os.environ` rather than threaded down from
+    `_sdk_credential`: this is only ever consulted on the failure path, and a
+    second lookup of the same three variables is cheaper than another field
+    on `_SdkCredential` that exists solely to describe its own absence.
+    """
+    token = toolchain_provision.resolve_sdk_token(os.environ)
+    if token is not None:
+        return token.source
+    rejected = toolchain_provision.rejected_sdk_token_vars(os.environ)
+    return rejected[0] if rejected else None
+
+
+def _reclaim_sdk_credential_wreckage(root: Path) -> None:
+    """Delete any staged credential a PRIOR run left behind, before a new one
+    is written -- the crash-residue half of `_discard_sdk_credential`
+    (tan-cli#1148 review).
+
+    `_discard_sdk_credential` runs in a `finally`, which covers every exit
+    path the interpreter reaches; it does not cover the ones it does not --
+    SIGKILL, the OOM killer, power loss. Without this, one netrc per crash
+    accumulates with nothing ever reclaiming it. Modes make each copy
+    unreadable to other users, but "unreadable secrets pile up forever" is
+    still the wrong steady state for a credential.
+
+    Structured exactly like `_reclaim_toolchain_wreckage` beside it, for the
+    same reason: the naming pattern is the proof of provenance, so this can
+    only ever delete a directory tan created for exactly this purpose, and it
+    never raises.
+    """
+    try:
+        for candidate in root.glob(toolchain_provision.netrc_scratch_glob_pattern()):
+            try:
+                if candidate.is_dir():
+                    shutil.rmtree(candidate)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _sdk_credential(log: Log, runner: Runner, root: Path) -> _SdkCredential | None:
     """The staged credential for this `west sdk install`, or `None` when the
     environment names none -- in which case the download is exactly as
     unauthenticated as it has always been (tan-cli#1143 acceptance: the
@@ -1360,16 +1424,34 @@ def _sdk_credential(log: Log, runner: Runner) -> _SdkCredential | None:
     to disk would buy nothing, and `data.plannedCommands` must be
     byte-identical with and without a token in the environment.
 
-    The progress line names the VARIABLE, never the value.
+    A downgrade to unauthenticated is a `log.warn`, never a `log.line`
+    (tan-cli#1148 review): `Log.line` prints nothing at all in JSON mode, so
+    an extension user got zero signal and was then told by the failure note
+    to set a token they could see was already set. `sdk-credential-unstaged`
+    is deliberately NOT in `WORKSPACE_BLOCKING` -- an unauthenticated
+    download usually still succeeds, and failing a whole workspace over a
+    missed optimisation would be its own defect.
+
+    Every line here names the VARIABLE, never the value.
     """
-    token = toolchain_provision.resolve_sdk_token(os.environ)
-    if token is None or runner.dry_run:
+    if runner.dry_run:
         return None
-    credential = _stage_sdk_credential(token)
+    for name in toolchain_provision.rejected_sdk_token_vars(os.environ):
+        log.warn(
+            "sdk-credential-unstaged",
+            f"${name} is set but is not a value tan can use as a GitHub token "
+            "(letters, digits, `_`, `-` and `.` only -- a quoted `.env` value keeps "
+            "its quotes); the Zephyr SDK download will go out unauthenticated.",
+        )
+    token = toolchain_provision.resolve_sdk_token(os.environ)
+    if token is None:
+        return None
+    credential = _stage_sdk_credential(token, root)
     if credential is None:
-        log.line(
-            f"could not stage the ${token.source} credential for `west sdk install`; "
-            "continuing unauthenticated"
+        log.warn(
+            "sdk-credential-unstaged",
+            f"the ${token.source} credential could not be staged for `west sdk "
+            "install`; the Zephyr SDK download will go out unauthenticated.",
         )
         return None
     log.line(f"Authenticating the Zephyr SDK download with the token in ${token.source}")
@@ -1637,7 +1719,7 @@ def _acquire_toolchain(
         f"Installing the Zephyr SDK {manifest.version} + arm-zephyr-eabi toolchain "
         f"(this can take several minutes on a slow link)"
     )
-    credential = _sdk_credential(log, runner)
+    credential = _sdk_credential(log, runner, root)
     try:
         detail = _run_west_sdk_install_with_retries(
             ws,
@@ -1661,10 +1743,14 @@ def _acquire_toolchain(
         # they see today points at a lever that does not exist for them.
         # `credential`, not the resolved token: the question the note has to
         # answer is whether THIS download was authenticated, and a staging
-        # failure (logged above) means it was not, however many token
-        # variables the environment carries.
+        # failure means it was not, however many token variables the
+        # environment carries. `credential_seen` is the second half of that
+        # (tan-cli#1148 review): an environment that HELD a credential tan
+        # could not use must not be told to go and set one.
         rate_limited = toolchain_provision.rate_limit_note(
-            augmented, token_source=credential.source if credential is not None else None
+            augmented,
+            authenticated_as=credential.source if credential is not None else None,
+            credential_seen=_sdk_credential_seen() if credential is None else None,
         )
         if rate_limited is not None:
             augmented = f"{augmented} {rate_limited}"
@@ -1749,6 +1835,14 @@ def toolchain_phase(
 
     root, leaf, root_adopted = _toolchain_root_and_leaf(manifest)
     store_dir = root / leaf
+    if not runner.dry_run:
+        # Here, not in `_acquire_toolchain` beside the `.tmp-*` sweep it
+        # mirrors: this is ABOVE the already-installed early return below,
+        # which is the branch a bootstrapped machine takes every time. A
+        # crash-residue sweep that only ran on the runs that install
+        # something would leave a stale credential on disk for as long as the
+        # pin held (tan-cli#1148 review).
+        _reclaim_sdk_credential_wreckage(root)
     if toolchain_provision.stamp_matches_pin(_read_toolchain_stamp(store_dir), manifest):
         log.line(f"Cross toolchain already installed and verified: {_native(store_dir)}")
         return

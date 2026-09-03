@@ -655,6 +655,15 @@ def _echoing_rate_limit_failure(seen: dict):
     """
 
     def fake_run(self, argv, cwd=None, extra_env=None, tail_lines=4):  # noqa: ARG001
+        # `self.planned.append(list(argv))` is the FIRST thing the real
+        # `Runner.run` does, and `planned` is `data.plannedCommands`. Without
+        # it here, monkeypatching `run` wholesale leaves `runner.planned`
+        # EMPTY -- and the `for argv in runner.planned` leak assertion below
+        # iterates zero times and cannot fail (tan-cli#1148 review: a
+        # zero-iteration loop asserting a security property reads as
+        # coverage and is worse than no test). The stand-in reproduces the
+        # side effect, not just the return value.
+        self.planned.append(list(argv))
         seen.setdefault("argv", []).append(list(argv))
         seen.setdefault("extra_env", []).append(dict(extra_env or {}))
         netrc_path = (extra_env or {}).get(tp.NETRC_ENV_VAR)
@@ -748,16 +757,34 @@ def test_a_github_token_in_the_environment_reaches_west_without_touching_any_arg
         assert seen["netrc_mode"] == "0o600"
 
     # --- half two: none of the four named surfaces carries it ------------
-    assert log.blocking() == ["toolchain-install"]
+    # ORDER MATTERS. Each surface is asserted before the one whose failure
+    # would mask it, so a single mutation reds the assertion that actually
+    # guards it: planned argv first (the `--dry-run` surface, which no child
+    # output can reach), then the rendered envelope, then the logged
+    # messages, then the captured tail.
+    #
+    # The count is the anti-vacuity guard: `planned` is populated by the
+    # stand-in's own `self.planned.append`, so if that ever stops happening
+    # the loop below would silently iterate zero times and prove nothing.
+    #
+    # Snapshotted first because `_rendered_envelope` calls `take_issues`,
+    # which DRAINS the log -- reading `log.warnings` after it would be the
+    # same vacuity in a new place (an empty string contains no sentinel).
+    blocking = log.blocking()
     logged = " ".join(msg for _code, msg in log.warnings)
-    assert SENTINEL_TOKEN not in logged
-    # The variable NAME is safe to print and is what makes the run
-    # explicable; the value is not.
+    assert logged, "the failure must have been recorded at all"
+
+    assert len(runner.planned) == bootstrap_cmd.TOOLCHAIN_INSTALL_ATTEMPTS
     for argv in runner.planned:
         assert SENTINEL_TOKEN not in " ".join(argv)
+    assert SENTINEL_TOKEN not in _rendered_envelope(log, runner, sdk_root)
+    assert blocking == ["toolchain-install"]
+    # The variable NAME is safe to print and is what makes the run
+    # explicable; the value is not.
+    assert SENTINEL_TOKEN not in logged
+    assert "$TAN_GITHUB_TOKEN" in logged
     tails = " ".join(f"$ {' '.join(argv)}" for argv in seen["argv"])
     assert SENTINEL_TOKEN not in tails
-    assert SENTINEL_TOKEN not in _rendered_envelope(log, runner, sdk_root)
 
 
 def test_the_staged_credential_file_is_deleted_once_the_install_returns(tmp_path, monkeypatch):
@@ -836,3 +863,141 @@ def test_a_dry_run_stages_no_credential_even_with_a_token_in_the_environment(
     assert staged == []
     assert log.blocking() == []
     assert any("sdk" in argv and "install" in argv for argv in runner.planned)
+
+
+def test_a_crashed_runs_leftover_credential_is_reclaimed_by_the_next_run(tmp_path, monkeypatch):
+    """tan-cli#1148 review FIX 1. `_discard_sdk_credential` runs in a
+    `finally`, which cannot run on SIGKILL, an OOM kill or power loss -- and
+    a SIGKILLed `pytest -n 8` run left two of these behind during that
+    review. Without a sweep a credential accumulates one copy per crash,
+    forever.
+
+    The sweep sits ABOVE the already-installed early return, which is the
+    branch a bootstrapped machine takes every time: this case proves it by
+    stamping the store so the phase returns without installing anything, and
+    still expecting the residue gone.
+    """
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
+    monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
+    monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
+
+    root = tmp_path / "home" / ".alp" / "toolchains"
+    leaf = tp.store_dir_name("1.0.1")
+    residue = root / f"{tp.NETRC_SCRATCH_PREFIX}crashed"
+    residue.mkdir(parents=True)
+    (residue / "netrc").write_text(tp.netrc_text(SENTINEL_TOKEN), encoding="utf-8")
+    # A neighbour that must survive: the sweep's only proof of provenance is
+    # the name, so it has to be narrow enough to leave everything else alone.
+    survivor = root / "some-other-thing"
+    survivor.mkdir()
+    manifest = tp.parse_toolchain_manifest(_small_manifest())
+    (root / leaf).mkdir()
+    (root / leaf / tp.STAMP_FILENAME).write_text(
+        tp.render_stamp(tp.ToolchainStamp("1.0.1", manifest.digest(), tp.TOOLCHAIN_COMPONENT)),
+        encoding="utf-8",
+    )
+
+    ws = _workspace(tmp_path)
+    log = bootstrap_cmd.Log(json_mode=True)
+    runner = bootstrap_cmd.Runner(json=True)
+    bootstrap_cmd.toolchain_phase(ws, log, runner, sdk_root, None, is_windows=False)
+
+    assert runner.planned == []  # the already-installed fast path, as intended
+    # NARROW first, then EFFECTIVE. A sweep that deletes the residue by
+    # deleting everything would pass the second assertion and fail the
+    # customer, so the bound is asserted before the effect.
+    assert survivor.exists()
+    assert (root / leaf).exists()
+    assert not residue.exists()
+
+
+def test_a_dry_run_reclaims_nothing(tmp_path, monkeypatch):
+    """`--dry-run` writes nothing and deletes nothing -- the sweep is a
+    mutation like any other, and the flag's whole contract is that a preview
+    run leaves the machine as it found it."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _make_sdk_with_toolchains(tmp_path, _small_manifest())
+    monkeypatch.setattr(bootstrap_cmd.sys, "platform", "linux")
+    monkeypatch.setattr(bootstrap_cmd.platform, "machine", lambda: "x86_64")
+    root = tmp_path / "home" / ".alp" / "toolchains"
+    residue = root / f"{tp.NETRC_SCRATCH_PREFIX}crashed"
+    residue.mkdir(parents=True)
+
+    ws = _workspace(tmp_path)
+    log = bootstrap_cmd.Log(json_mode=True)
+    runner = bootstrap_cmd.Runner(json=True, dry_run=True)
+    bootstrap_cmd.toolchain_phase(ws, log, runner, sdk_root, None, is_windows=False)
+
+    assert residue.exists()
+
+
+def test_the_staged_credential_lives_under_the_toolchain_root_not_the_shared_tmpdir(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1148 review FIX 1, the placement half. A sweep is only safe
+    over a directory tan owns: `/tmp` is world-writable, so globbing and
+    `rmtree`-ing `$TMPDIR/...` would delete paths any local user can create.
+    Asserting the PARENT is what stops a future refactor quietly moving the
+    secret back to `$TMPDIR` and leaving the sweep pointed at nothing."""
+    seen: dict = {}
+    monkeypatch.setenv("TAN_GITHUB_TOKEN", SENTINEL_TOKEN)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "decoy-tmpdir"))
+    (tmp_path / "decoy-tmpdir").mkdir()
+    _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
+
+    staged = Path(seen["netrc_path"])
+    assert staged.parent.parent == tmp_path / "home" / ".alp" / "toolchains"
+    assert staged.name == "netrc"
+    assert staged.parent.name.startswith(tp.NETRC_SCRATCH_PREFIX)
+    assert list((tmp_path / "decoy-tmpdir").iterdir()) == []
+
+
+def test_a_downgrade_to_unauthenticated_reaches_the_json_envelope(tmp_path, monkeypatch):
+    """tan-cli#1148 review, minor 1: the downgrade used to be a `log.line`,
+    which prints NOTHING in JSON mode (`Log.line`: `if not self.json`). An
+    extension user got no signal at all, and was then told by the rate-limit
+    remedy to set a token they could see was already set.
+
+    Not `WORKSPACE_BLOCKING`, deliberately: an unauthenticated download
+    usually still succeeds, and failing a whole workspace over a missed
+    optimisation would be its own defect.
+    """
+    seen: dict = {}
+    monkeypatch.setenv("GH_TOKEN", SENTINEL_TOKEN)
+    monkeypatch.setattr(bootstrap_cmd, "_stage_sdk_credential", lambda token, root: None)
+    log, runner = _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
+    sdk_root = str(tmp_path / "ws" / "alp-sdk")
+
+    codes = [code for code, _msg in log.warnings]
+    assert "sdk-credential-unstaged" in codes
+    assert "sdk-credential-unstaged" not in log.blocking()
+    downgrade = next(msg for code, msg in log.warnings if code == "sdk-credential-unstaged")
+    assert "$GH_TOKEN" in downgrade
+    assert "unauthenticated" in downgrade
+    assert SENTINEL_TOKEN not in downgrade
+
+    # And the remedy must NOT then tell them to set the token they set.
+    failure = next(msg for code, msg in log.warnings if code == "toolchain-install")
+    assert "went out anonymous even though $GH_TOKEN is set" in failure
+    assert "Authenticate the download by setting $TAN_GITHUB_TOKEN" not in failure
+    # The whole envelope still carries no secret.
+    assert SENTINEL_TOKEN not in _rendered_envelope(log, runner, sdk_root)
+
+
+def test_a_token_variable_tan_will_not_use_says_so_instead_of_vanishing(tmp_path, monkeypatch):
+    """tan-cli#1148 review, minor 3. A `.env` value that kept its literal
+    quotes is the realistic case; silently skipping it leaves a download
+    anonymous for a reason nothing on screen names."""
+    seen: dict = {}
+    monkeypatch.setenv("GH_TOKEN", f'"{SENTINEL_TOKEN}"')
+    log, runner = _run_toolchain_phase_to_failure(tmp_path, monkeypatch, seen)
+    sdk_root = str(tmp_path / "ws" / "alp-sdk")
+
+    downgrade = next(msg for code, msg in log.warnings if code == "sdk-credential-unstaged")
+    assert "$GH_TOKEN is set but is not a value tan can use" in downgrade
+    assert "netrc_path" not in seen  # nothing staged from an unusable value
+    # The rejected VALUE is as much a secret as an accepted one -- a quoted
+    # token is still a token.
+    assert SENTINEL_TOKEN not in downgrade
+    assert SENTINEL_TOKEN not in _rendered_envelope(log, runner, sdk_root)
