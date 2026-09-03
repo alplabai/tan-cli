@@ -36,12 +36,32 @@ is not attempted, so nobody reads a clean run as a broader claim than it is:
     genuinely IS the property. Only the `if:`-key surface is decidable, and
     that is PR #1168's.
 
-## The four line-attribution blind spots, named because they are silent
+## The blind spots, named because they are silent
 
-This module does NO name resolution and follows no values -- its only
-reachability assumption is that `coverage` attributes an executed line to the
-line the source occupies. Four shapes defeat that, and every one of them is
-skipped rather than guessed at:
+This module rests on exactly two assumptions, and neither is about what any
+NAME holds -- it does no name resolution and follows no values, so there is no
+`for`-target, comprehension-target, `with ... as`, attribute or walrus binding
+for it to lose track of. The two are:
+
+  A. `coverage` attributes an executed line to the line the source occupies.
+  B. `header covered and body uncovered` means THE COLLECTION WAS EMPTY.
+
+Assumption B is the weaker of the two and is stated here because it was
+unnamed for a while. A `for` whose ITERABLE RAISES has the identical coverage
+signature to one whose collection is empty -- measured with real `coverage`
+over a real module, `for r in rows():  # iterable RAISES` and
+`for e in empty():  # collection EMPTY` both report
+`header_covered=True, body_covered=False` and both are reported. So does a
+loop whose body only ever runs in a SPAWNED interpreter the parent's coverage
+never saw, and this repo spawns at roughly 150 call sites. There is no live
+instance today -- all eight reported loops are genuine empty-collection cases
+-- but the first one to appear would be MISCLASSIFIED rather than declared,
+because neither "healthy-empty" nor "forward-looking" is true of it. That is
+what [`ALLOWED_EMPTY_LOOPS`]' third class, `unmeasurable`, exists to say; see
+its comment for the shape of such a row.
+
+Five shapes defeat assumption A, and every one of them is skipped rather than
+guessed at:
 
   * **Comprehensions.** A comprehension's header and body usually share a
     physical line, so the coverage signal cannot separate them.
@@ -56,6 +76,11 @@ skipped rather than guessed at:
     skipped test. That is a different defect with a different remedy, and
     folding it in would bury the eight real findings under every
     `ALP_SDK_ROOT`-gated skip in the directory.
+  * **A body measured by somebody else's interpreter.** A loop whose body runs
+    only inside a spawned `python -c ...` child is uncovered in the parent's
+    data no matter how many times it ran. Nothing here can see the child, so
+    such a loop is reported and must be declared `unmeasurable` -- the second
+    half of assumption B above.
 
 ## Two implementation notes, both of them bugs that were made first
 
@@ -182,11 +207,22 @@ def never_iterating(
 
 
 def iter_tautologies(tree: ast.AST, rel: str, text: str) -> list[Finding]:
-    """`assert <literal-true>` and `assert x == x` -- an assertion that holds
-    for every input.
+    """An assertion that holds for every input. Four decidable spellings:
 
-    The tan-cli#1145 sweep found ZERO of these. It is carried anyway, as
-    regression insurance at essentially no cost: the shape is trivially
+      * `assert <truthy literal>` -- `assert True`, `assert "TODO"`, `assert 1`.
+      * `assert x == x` / `assert x is x`.
+      * `assert f"..."` -- an f-string is always a non-empty `str` here, so
+        the assertion is a no-op no matter what it interpolates.
+      * `assert (x, "message")` -- the classic mistyped `assert x, "message"`.
+        A non-empty tuple is truthy, so the real condition is discarded and
+        the assertion can never fail. Python's own `SyntaxWarning` catches the
+        two-element literal case; this catches it whatever the arity and
+        wherever the file is parsed rather than imported.
+
+    The tan-cli#1145 sweep found ZERO of the first two, and re-measuring the
+    tree for the second two found ZERO of those as well (`python/{tan,tests,
+    scripts}`, 1335 asserts under `tests/gates` alone). All four are carried
+    as regression insurance at essentially no cost: every shape is trivially
     AST-decidable, and a future `assert True  # TODO` is exactly the kind of
     placeholder that survives review because it reads as deliberate.
     """
@@ -202,6 +238,10 @@ def iter_tautologies(tree: ast.AST, rel: str, text: str) -> list[Finding]:
 def _is_tautology(test: ast.expr) -> bool:
     if isinstance(test, ast.Constant):
         return bool(test.value)
+    if isinstance(test, ast.JoinedStr):
+        return True  # an f-string is a non-empty str: always truthy
+    if isinstance(test, ast.Tuple):
+        return bool(test.elts)  # `assert (x, "msg")` -- the missing comma
     if not isinstance(test, ast.Compare) or len(test.ops) != 1:
         return False
     if not isinstance(test.ops[0], (ast.Eq, ast.Is)):
@@ -286,10 +326,10 @@ def iter_assert_lines(tree: ast.AST) -> frozenset[int]:
 # collapse does. Raise one deliberately, never to make a red go away.
 # --------------------------------------------------------------------------
 
-#: `for`/`async for` statements under `tests/gates/`. Measured: 282.
+#: `for`/`async for` statements under `tests/gates/`. Measured: 283.
 MIN_FOR_SITES = 240
 
-#: `assert` statements under `tests/gates/`. Measured: 1329.
+#: `assert` statements under `tests/gates/`. Measured: 1335.
 MIN_ASSERT_SITES = 1100
 
 #: How many `.py` files under `tests/gates/` the coverage run is allowed NOT
@@ -320,12 +360,25 @@ MAX_UNMEASURED_GATE_FILES = 0
 #: a REVIEWED DECISION, not a suppression: each says why zero iterations is
 #: the correct measurement for that loop today. A loop not listed here reds.
 #:
-#: Two rows carry genuinely different meanings and the difference is the point
-#: of writing them down: "healthy-empty" (the loop populates a violation list
-#: and its being empty IS the gate passing -- it iterating would be the
-#: failure) versus "forward-looking" (the loop measures a population that is
-#: empty today, so the gate around it is currently vacuous and everyone can
-#: see that it is).
+#: Rows carry three genuinely different meanings and the difference is the
+#: point of writing them down:
+#:
+#:   * "healthy-empty" -- the loop populates a violation list and its being
+#:     empty IS the gate passing; it iterating would be the failure.
+#:   * "forward-looking" -- the loop measures a population that is empty
+#:     today, so the gate around it is currently vacuous and everyone can see
+#:     that it is.
+#:   * "unmeasurable" -- the collection was NOT empty, or cannot be shown to
+#:     have been. The two live shapes are an iterable that RAISES (identical
+#:     coverage signature to an empty one -- see the module docstring's
+#:     assumption B) and a body that only ever runs in a spawned interpreter
+#:     this run never measured. There are ZERO such rows today, and the class
+#:     exists so the first one is declared honestly instead of being squeezed
+#:     into one of the two labels that would be false of it. Such a row must
+#:     say WHICH shape it is and what does exercise the body -- a
+#:     `pytest.raises` around the loop, or the name of the child command --
+#:     because "unmeasurable" is a statement about this run, not about the
+#:     code, and the next person needs to know where the real coverage lives.
 #:
 #: No row may cite a `<file>.py:<line>`, and
 #: `test_no_allow_list_reason_cites_a_line_number` enforces it. The KEY is

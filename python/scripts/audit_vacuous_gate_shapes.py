@@ -39,8 +39,9 @@ defences, and neither is optional:
     silence by both checks below.
   * **Fabricated-input negative controls**, in
     `tests/gates/test_vacuous_gate_shapes.py`. They drive `never_iterating`
-    and the `if:`-key walk with synthesised input that MUST be flagged, so a
-    neutered detector reds in the suite rather than going quietly green here.
+    with a synthesised coverage map whose one never-iterating loop MUST be
+    flagged, so a neutered detector reds in the suite rather than going
+    quietly green here.
     `scripts/audit_narrow_except_contracts.py` shipped 290 lines of `ast`
     logic with no test coverage at all; this is that lesson applied.
 
@@ -152,12 +153,11 @@ def check_floors(
     # slack in it would let that many modules stop being measured -- every
     # loop and assertion in them exempted -- and still read green.
     measured_floor = len(gate_modules()) - core.MAX_UNMEASURED_GATE_FILES
-    checks = (
+    # Two floors about the WALK, whose remedy is "fix the walk"...
+    for label, found, floor in (
         ("`for` sites walked", len(sites), core.MIN_FOR_SITES),
         ("`assert` sites walked", total_asserts, core.MIN_ASSERT_SITES),
-        ("gate files measured", measured, measured_floor),
-    )
-    for label, found, floor in checks:
+    ):
         if found < floor:
             problems.append(
                 f"{label}: {found}, below the floor of {floor}. A clean report "
@@ -165,6 +165,23 @@ def check_floors(
                 "this gate exists to prevent -- fix the scan, or move the "
                 "floor deliberately in the same change that shrank the tree."
             )
+    # ...and one about the RUN, whose remedy is entirely different and was
+    # wrong when it shared the message above. At zero slack the common way to
+    # trip this is adding a `.py` under `tests/gates/` that nothing imports --
+    # nothing is broken about the walk in that case, and "fix the scan" sends
+    # the reader looking for a bug that is not there.
+    if measured < measured_floor:
+        problems.append(
+            f"gate files measured: {measured} of {len(gate_modules())} on "
+            f"disk, below the floor of {measured_floor}. A module absent from "
+            "the coverage mapping is skipped IN SILENCE by both checks below, "
+            "so every loop and assertion in it is exempted while this report "
+            "still reads clean. If it is a new helper nothing imports, import "
+            "it from the test that needs it or move it out of `tests/gates/`; "
+            "if the run genuinely stopped importing a gate module, that is "
+            "the bug. Raising `MAX_UNMEASURED_GATE_FILES` is a deliberate "
+            "change with a reason, never a way to make this go away."
+        )
     return problems
 
 

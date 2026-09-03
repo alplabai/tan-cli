@@ -79,12 +79,16 @@ AUDIT_SCRIPT = "scripts/audit_vacuous_gate_shapes.py"
 #: job-wide `GITHUB_EVENT_NAME=merge_group` but NOT a step-scoped `env:`.
 MERGE_GROUP_VAR = "TAN_MERGE_GROUP_BASE_REF"
 
-#: The two meanings an `ALLOWED_EMPTY_LOOPS` row may carry. See
-#: `test_every_allowed_empty_loop_row_carries_a_classified_reason`.
-CLASSES = ("healthy-empty", "forward-looking")
+#: The three meanings an `ALLOWED_EMPTY_LOOPS` row may carry. See
+#: `test_every_allowed_empty_loop_row_carries_a_classified_reason`, and
+#: `_vacuous_gate_shapes_core.py`'s comment on the table for what each means.
+CLASSES = ("healthy-empty", "forward-looking", "unmeasurable")
 
-#: A `<file>.py:<line>` citation, which no allow-list reason may carry.
-LINE_CITATION = re.compile(r"\.py:\d+")
+#: A `<file>:<line>` citation, which no allow-list reason may carry. Workflow
+#: files too, not only `.py`: a reason naming `ci.yml:640` rots exactly the way
+#: the `test_interpreter_policy.py:230` one did, and this repo's `parity.yml`
+#: line numbers moved by roughly 43 lines in a single day.
+LINE_CITATION = re.compile(r"\.(?:py|ya?ml):\d+")
 
 
 def _sources() -> list[tuple[str, str, ast.Module]]:
@@ -153,9 +157,15 @@ def test_the_tautology_and_swallow_walks_flag_fabricated_input():
     """Both walks report zero on this tree, which is exactly what a walk that
     stopped matching also reports. These are the only things that tell the two
     apart."""
-    taut = "def f(x):\n    assert True\n    assert x == x\n"
+    taut = (
+        "def f(x):\n"
+        "    assert True\n"
+        "    assert x == x\n"
+        '    assert f"{x} must be set"\n'
+        '    assert (x, "x must be set")\n'
+    )
     got = core.iter_tautologies(ast.parse(taut), "fab.py", taut)
-    assert [f.lineno for f in got] == [2, 3], f"tautology walk: {got!r}"
+    assert [f.lineno for f in got] == [2, 3, 4, 5], f"tautology walk: {got!r}"
 
     swallowed = (
         "def f(x):\n"
@@ -173,14 +183,21 @@ def test_the_tautology_and_swallow_walks_flag_fabricated_input():
 
 
 def test_the_walks_leave_the_benign_spellings_alone():
-    """The false-positive controls. `assert x == y` is an ordinary comparison
-    and a `try` that catches something else does not swallow the assertion --
-    flagging either would make these rules wrong on their first run, which is
-    how a gate gets deleted rather than fixed."""
+    """The false-positive controls, one per rule that could over-reach.
+
+    `assert x == y` is an ordinary comparison; `assert x, f"..."` is the
+    CORRECT two-argument form and must not be confused with the tuple typo it
+    is one comma away from; `assert ()` is an empty tuple, which always FAILS
+    rather than always passing; and a `try` that catches something else does
+    not swallow the assertion. Flagging any of these would make the rules
+    wrong on their first run, which is how a gate gets deleted rather than
+    fixed."""
     benign = (
         "def f(x, y):\n"
         "    assert x == y\n"
         "    assert False or x\n"
+        '    assert x, f"{x} must be set"\n'   # the CORRECT two-argument form
+        "    assert ()\n"                      # empty tuple: always FAILS
         "    try:\n"
         "        assert x\n"
         "    except OSError:\n"
@@ -255,6 +272,50 @@ def test_never_iterating_flags_a_fabricated_loop():
         "the never-iterating detector did not report exactly the one loop "
         f"whose header ran and whose body did not: {found!r}"
     )
+
+
+def test_an_async_for_is_walked_exactly_like_a_for():
+    """`iter_for_sites` claims `For`/`AsyncFor`, and `tests/gates` contains 283
+    of the first and ZERO of the second -- so deleting the `AsyncFor` half
+    leaves the count at 283, `MIN_FOR_SITES` green, and every other test in
+    this file passing. A forward-looking branch that measures nothing, inside a
+    gate about forward-looking branches that measure nothing, and unlike the
+    allow-list rows it carried no declaration. This is the declaration: the
+    branch driven on fabricated input in BOTH states, so it cannot be deleted
+    or broken silently."""
+    src = (
+        "async def f(a, b):\n"
+        "    async for x in a:\n"
+        "        touched(x)\n"
+        "    async for y in b:\n"
+        "        never(y)\n"
+    )
+    sites = core.iter_for_sites(ast.parse(src), "fab.py", src)
+    assert [s.header_line for s in sites] == [2, 4], sites
+    assert [sorted(s.body_lines) for s in sites] == [[3], [5]], sites
+    found = core.never_iterating(sites, {"fab.py": frozenset({2, 3, 4})})
+    assert [s.header_line for s in found] == [4], found
+
+
+def test_the_third_allow_list_class_is_accepted_before_it_has_a_row():
+    """`unmeasurable` has ZERO rows, so the parametrized classification test
+    never exercises it -- precisely the shape this whole gate objects to.
+    Driven on fabricated reasons instead: each declared class is accepted, an
+    invented fourth is not.
+
+    The class is not decoration. `header covered and body uncovered` does NOT
+    mean "the collection was empty": a `for` whose ITERABLE RAISES has the
+    identical coverage signature (measured), as does one whose body only runs
+    in a spawned interpreter -- and this repo spawns at roughly 150 call
+    sites. There is no live instance today. Without a truthful label the first
+    one gets filed as `healthy-empty` or `forward-looking`, both of which
+    would be FALSE of it, and the allow-list stops being a record of
+    decisions, which is the only thing it is for.
+    """
+    assert CLASSES == ("healthy-empty", "forward-looking", "unmeasurable")
+    for name in CLASSES:
+        assert f"{name}. Fabricated.".startswith(CLASSES), name
+    assert not "genuinely-fine. Fabricated.".startswith(CLASSES)
 
 
 def test_body_line_span_is_the_whole_subtree_not_the_first_statement():
@@ -351,18 +412,22 @@ def test_every_allowed_empty_loop_row_carries_a_classified_reason(
     """A row without a reason is a suppression; a row with one is a reviewed
     decision. That difference is the whole point of the allow-list.
 
-    The reason must also pick one of the two CLASSES, because they mean
-    opposite things and conflating them is how a vacuous gate gets waved
+    The reason must also pick one of the three CLASSES, because they mean
+    different things and conflating them is how a vacuous gate gets waved
     through as a healthy one: `healthy-empty` says the loop collects
     violations and its being empty IS the gate passing, so an iteration would
     be the failure; `forward-looking` says the population it measures is empty
     today, which means the assertions inside it are currently checking nothing
-    and everyone can see that.
+    and everyone can see that; `unmeasurable` says the collection was NOT
+    empty and this run could not see the body -- an iterable that raised, or a
+    body that only runs in a spawned interpreter. There are zero rows of the
+    third kind today; it exists so the first one is declared honestly rather
+    than squeezed into one of the two labels that would be false of it.
     """
     reason = core.ALLOWED_EMPTY_LOOPS[key]
     assert reason.startswith(CLASSES), (
         f"{key!r}'s reason starts with none of {CLASSES} -- say which of the "
-        f"two this is before saying why: {reason!r}"
+        f"three this is before saying why: {reason!r}"
     )
     assert len(reason) >= 80, (
         f"{key!r} carries a classification but no argument: {reason!r}"
@@ -382,6 +447,10 @@ def test_no_allow_list_reason_cites_a_line_number(reason: str):
     unrelated edit two hundred lines higher in the same file moved it to 232.
     Nothing caught it, because the classification check reads only the prefix
     and the length. This is the check that would have.
+
+    Workflow files are in scope too, not only `.py`: a reason naming
+    `ci.yml:640` rots the same way, and this repo's `parity.yml` line numbers
+    moved by roughly 43 lines in a single day.
     """
     hit = LINE_CITATION.search(reason)
     assert hit is None, (
