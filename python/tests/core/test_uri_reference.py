@@ -42,14 +42,22 @@ both of which attribute it to `test_board_context.py`'s header -- and in
 sibling test modules. Taken literally it is FALSE, and it is left standing at
 those inherited sites only because correcting the phrase repo-wide is a sweep
 of its own, not because any of them is right. Measured on `origin/dev`,
-`.github/workflows/parity.yml`'s `python-tests-shard` job (`:2279`) carries
-`os: [ubuntu-latest, windows-latest, macos-latest]` (`:2284`) with
-`runs-on: ${{ matrix.os }}` (`:2302`) and runs
-`python -m pytest -q --ignore=tests/gates --ignore=tests/parity` (`:2555`) on
+`.github/workflows/parity.yml`'s `python-tests-shard` job (`:2322`) carries
+`os: [ubuntu-latest, windows-latest, macos-latest]` (`:2327`) with
+`runs-on: ${{ matrix.os }}` (`:2345`) and runs
+`python -m pytest -q --ignore=tests/gates --ignore=tests/parity` (`:2598`) on
 every `pull_request`. THIS FILE runs on a real Windows host on every PR, and
 its result rolls up into the required contexts `python -- pytest across
 python/ (<os>)` through the `python-tests` aggregation job -- which is itself
-`runs-on: ubuntu-latest` and runs no pytest, so cite `:2284`, not it.
+`runs-on: ubuntu-latest` and runs no pytest, so cite `:2327`, not it.
+
+(Line numbers RE-MEASURED at tan-cli#1162, which is why they are not the
+`:2279`/`:2284`/`:2302`/`:2382`/`:2555` this paragraph carried when
+tan-cli#1140 wrote it -- `parity.yml` grew ~43 lines above this job in
+between. The JOB is what the claim rests on, not the offset; each number
+above was re-read out of `parity.yml` on this branch rather than carried
+forward, and a future round that finds them stale should do the same
+instead of deleting the citation.)
 
 What is true, and what every oracle in this file actually rests on, is that no
 Windows host is available LOCALLY: a change is developed and measured against
@@ -63,7 +71,7 @@ Two consequences worth keeping straight:
 * The `nturl2path` conclusion below is unchanged. The ubuntu and macos legs
   still have to perform the Windows conversion from a POSIX host, so the
   deprecated import is still the only spelling that does it.
-* The Windows shard pins `python-version: "3.12"` (`parity.yml:2382`), where
+* The Windows shard pins `python-version: "3.12"` (`parity.yml:2425`), where
   `Path.as_uri()` is not host-dispatched at all. So the Windows leg cannot
   catch the `Path.as_uri()` class today no matter what it asserts, and
   `python · pytest on the newest CPython` -- advisory, ubuntu, ceiling -- is
@@ -188,7 +196,7 @@ _NTPATH_ISABS_ACCEPTS_A_DRIVELESS_ROOT = sys.version_info < (3, 13)
 #: `os.name`. On 3.14.7 with `os.name = 'nt'` the Windows-spelled input
 #: MATCHES, so the constant said `False` where the outcome was `True` and the
 #: assertion failed. It passed only because the Windows shard pins 3.12
-#: (`parity.yml:2382`); the pin whose whole job was to survive a future
+#: (`parity.yml:2425`); the pin whose whole job was to survive a future
 #: migration was itself keyed on half the condition. Hence the split below:
 #: this constant states the mechanism, which is version-only and therefore
 #: safe to predict, and the test MEASURES the outcome over a corpus instead
@@ -584,7 +592,7 @@ def test_pathlib_path_as_uri_is_not_a_usable_replacement_for_this_exporter():
     # The exact damage, pinned only on the host it was actually measured on.
     # The `nt` strings above are documented, not asserted: they come from a
     # simulation, and a wrong prediction would red the Windows shard for a
-    # false reason the day it moves off its 3.12 pin (`parity.yml:2382`).
+    # false reason the day it moves off its 3.12 pin (`parity.yml:2425`).
     if _PATH_AS_URI_IS_HOST_DISPATCHED and os.name != "nt":
         win = PureWindowsPath(r"C:\w\proj\board.yaml")
         assert _absolute_path_to_file_uri(win) == "file:///C:/w/proj/board.yaml"
@@ -931,7 +939,7 @@ def test_a_windows_file_uri_path_component_round_trips_through_nturl2path():
 
     That reason survives CI having a Windows runner, which it does -- see
     "the Windows-host premise, corrected" in this file's header. Two of the
-    three platforms this suite runs on (`parity.yml:2284`) are POSIX, and on
+    three platforms this suite runs on (`parity.yml:2327`) are POSIX, and on
     those legs `urllib.request` would do the POSIX conversion and this
     assertion would stop meaning anything. A test that is real on one of
     three runners and vacuous on the other two is not coverage; the

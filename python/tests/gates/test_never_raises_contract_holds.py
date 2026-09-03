@@ -29,9 +29,10 @@ instead of returning.
 WHAT THIS DOES NOT ASSERT, deliberately. Nothing about a function not named
 in `_SEEDED_CONTRACTS`. The tree has far more candidates than this seeds --
 see THE SHAPE SWEEP below for the measured count -- and this file protects
-only the seeded TWENTY (twelve at tan-cli#1116, then three, then #1132's
-two, then #1133's three; re-count the dict rather than trusting this
-sentence) until someone adds the next one, the same "opt-in, not a blanket
+only the seeded TWENTY-FIVE (twelve at tan-cli#1116, then three, then
+#1132's two, then #1133's three, then #1134's one and #1162's four;
+re-count the dict rather than trusting this sentence) until someone adds
+the next one, the same "opt-in, not a blanket
 walk" reasoning `_SHARED_HELPERS`'s own docstring gives: a
 blanket version of this check is red on the day it lands (again, see THE
 SHAPE SWEEP), and a gate that is red on landing gets disabled, which
@@ -180,7 +181,17 @@ found, beyond the four issue-named sites:
     checking the pinned planner files review round 2's MINOR finding named
     as an incomplete deferral list): the same missing-`UnicodeDecodeError`
     shape. NOT fixed -- both in `PINNED_HASHES`, same reasoning as
-    `kconfig.py`.
+    `kconfig.py`. **The `_load_board_symbols` half of that deferral was
+    reversed at tan-cli#1162 and is now seeded**, because the reasoning
+    behind it does not survive `test_planner_relocation_freshness.py`'s own
+    later correction: `PINNED_HASHES` pins only the UPSTREAM side of the
+    comparison, `tan/planner/` "is not the verbatim mirror it is sometimes
+    called" (that gate's own words -- measured at `7d58ef32`, 16 of 20
+    relocated modules already differ from upstream, `kconfig_symbols.py` by
+    329 lines), and this very file already carries a documented tan-only
+    divergence (`env=spawn_env()`, tan-cli#992). The freshness gate was run
+    with `ALP_SDK_ROOT` bound after the #1162 change and is green.
+    `slugs.py::peripheral_kconfig` stays deferred; nothing here changes it.
 
 So: **65** non-planner candidates, reproducible; **all 65** read; **46**
 of those hand-driven with real broken files (the other 19 already
@@ -194,9 +205,9 @@ files** found in `PINNED_HASHES`-protected planner files -- `kconfig.py`
 `kconfig_symbols.py` (`_load_board_symbols`) -- named individually above and
 in `_SEEDED_CONTRACTS`' neighbouring comments, all deliberately deferred
 rather than fixed, all reported rather than silently skipped. **15** seeded
-into `_SEEDED_CONTRACTS` below AT THAT ROUND (nineteen today; every count
-in this paragraph is tan-cli#1116's own measurement, kept as the record of
-what that sweep found rather than silently re-stated) -- the
+into `_SEEDED_CONTRACTS` below AT THAT ROUND (twenty-five today; every
+count in this paragraph is tan-cli#1116's own measurement, kept as the
+record of what that sweep found rather than silently re-stated) -- the
 twelve from review round 1 plus `som_buildability.hw_rev_not_buildable`,
 `new_som_cmd._known_board_names` and `new_som_cmd._family_hw_revisions`.
 `template.py::_docs_ref`/`render_to_envelope` are fixed but NOT seeded here
@@ -345,6 +356,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -477,6 +489,65 @@ _SEEDED_CONTRACTS: dict[str, str] = {
         "shape line for line: same is_file() pre-flight, same bare "
         "read+parse, same three raw exceptions measured escaping the same "
         "curated contract on the same three interpreters"
+    ),
+    "uri_reference.cwd_base_uri_or_none": (
+        "tan-cli#1134 part 1, and the archetype the gate had somehow never "
+        "seeded: its ENTIRE reason for existing is 'returns None instead of "
+        "raising'. PR #1125 added it because `cwd_base_uri()`'s `Path.cwd()` "
+        "raises FileNotFoundError when the process CWD has been removed, and "
+        "that raise DOUBLE-FAULTED inside `validate_cmd.py`'s own `except "
+        "Exception as err:  # never a bare traceback; the envelope is the "
+        "contract` handler -- the handler calls `_emit` -> `_sarif_document`, "
+        "which raised again. A textbook member of this class, added in the "
+        "same week the gate landed, unguarded until now. Not a fix: the "
+        "function is correct, and this is the pin that keeps it correct"
+    ),
+    "libraries.load_manifest": (
+        "tan-cli#1162's first site: an is_file() pre-flight then a wholly "
+        "unguarded `yaml.safe_load(path.read_text(...))`, past its own "
+        "curated OrchestratorError contract. Measured escaping raw on "
+        "3.12.3/3.13.15/3.14.7 alike -- UnicodeDecodeError for a non-UTF-8 "
+        "manifest, yaml.parser.ParserError for a malformed one, "
+        "PermissionError for a chmod-000 one -- and on the chmod-000 PARENT "
+        "shape the pre-flight ALSO produced a curated message that was FALSE "
+        "on 3.14.7 (`unknown library ... Available: <none>`, for a manifest "
+        "that is there). Reached from `tan build` through "
+        "`kconfig.py:1002`'s resolve_selection, where `build_cmd.py:505` "
+        "absorbed it into a build.plan-unavailable envelope naming the "
+        "exception TYPE rather than the file"
+    ),
+    "zephyr_board._load_soc_spec": (
+        "tan-cli#1162's second site, same shape one serialisation over: "
+        "is_file() pre-flight then a bare `json.loads(soc_path.read_text"
+        "(...))` past a curated ZephyrBoardEmitError contract. NOT on the "
+        "`tan build` path (the issue body said it was; its only caller is "
+        "emit_zephyr_board, so `tan generate --emit zephyr-board` and "
+        "`generate_cmd.py:889`'s except BaseException) -- the severity "
+        "differs from load_manifest's and the seed says so"
+    ),
+    "kconfig_symbols._load_board_symbols": (
+        "tan-cli#1162's third site, and the one whose broken input is not "
+        "hypothetical: `alp_kconfig.json` is written by an EXTERNAL `west "
+        "build -t` subprocess, so a directory in its place, a non-UTF-8 dump "
+        "or an unreadable mode are all things a third-party build step can "
+        "really leave. Its parse and shape halves were already guarded; the "
+        "READ was bare behind an is_file() pre-flight. Deferred at "
+        "tan-cli#1116 as PINNED_HASHES-protected -- superseded, see this "
+        "module's own note: only the UPSTREAM side of that comparison is "
+        "pinned and this file already carries a documented tan-only "
+        "divergence (tan-cli#992)"
+    ),
+    "topology._core_os_choices": (
+        "tan-cli#1162's fourth site, and the only one whose pre-flight was a "
+        "SELECTOR rather than a guard: `is_file()` chose between the "
+        "project's own board schema and the in-tree BOARD_SCHEMA, and "
+        "answered False to `denied` and `is a directory` exactly as it did "
+        "to `not there` -- so an unreadable project schema silently fell "
+        "back onto a DIFFERENT document and the caller was told an OS set "
+        "the project never declared (measured: NO RAISE, wrong answer, on "
+        "3.14.7; raw PermissionError on 3.12.3/3.13.15). On the `tan build`, "
+        "`tan validate`, `tan generate` and `tan kconfig` paths alike, "
+        "through loader.py:1009 -> validate.py:343"
     ),
     "template._rendered_bytes": (
         "the FOURTH site, found by PR #1160's review after the first cut of "
@@ -2112,6 +2183,516 @@ class TestRenderedBytes:
     # fail would be one more permanent skip in a suite where a skip is
     # already indistinguishable from a pass at a glance (PR #1160 review
     # round 2). The class docstring above says the contract differs.
+
+
+# ---------------------------------------------------------------------------
+# uri_reference.cwd_base_uri_or_none -- quiet-return (tan-cli#1134 part 1).
+# ---------------------------------------------------------------------------
+
+
+@_covers("uri_reference.cwd_base_uri_or_none")
+class TestCwdBaseUriOrNone:
+    """The one seeded function that is NOT reached through a path argument,
+    and the reason it needed seeding at all.
+
+    Every other member of this dict fails because of a document SOMEONE
+    ELSE handed it. This one fails because of the process's own working
+    directory -- `cwd_base_uri()` calls `Path.cwd()`, `Path.cwd()` calls
+    `os.getcwd()`, and `os.getcwd()` raises when the CWD has been removed
+    out from under the process. So the seven on-disk shape builders above
+    have nothing to offer here; the fixture is `os.getcwd` itself.
+
+    `os.getcwd` is patched rather than the real CWD removed, and that is
+    tan-cli#1117 review round 4's own measurement, not a shortcut: POSIX
+    lets a process `rmdir` its own working directory and Windows does not
+    (`PermissionError [WinError 32]`, measured on `windows-latest` CI,
+    where the removed-directory spelling of this test failed for real).
+    Patching the call `Path.cwd()` actually makes reproduces the same
+    contract identically on all three platforms this suite runs on.
+
+    WHY IT IS SEEDED (tan-cli#1134). This function is not a fix and was
+    never broken -- it is the GUARD PR #1125 added, and its whole reason
+    for existing is the sentence "returns `None` instead of raising".
+    `cwd_base_uri()`'s raise reached `_sarif_document` from INSIDE
+    `validate_cmd.py`'s own `except Exception as err:  # never a bare
+    traceback; the envelope is the contract` handler, and double-faulted
+    there: the handler that exists to guarantee an envelope was itself the
+    frame that could not produce one. A guard on that path is exactly what
+    this gate is for, and it sat unseeded from the week the gate landed
+    until #1134.
+
+    THE ERRNOS ARE DRIVEN, not reasoned. `os.getcwd()` raises more than
+    `ENOENT`: `EACCES` when a parent of the CWD loses execute permission,
+    and `ENOTDIR`/`ENAMETOOLONG` in the shapes glibc can return. Each is
+    driven below as its own case rather than trusting that "they are all
+    `OSError` subclasses" -- which is true, and is precisely the kind of
+    true-by-inspection claim tan-cli#1116 exists because nobody tested."""
+
+    def _guarded(self, monkeypatch, exc: BaseException):
+        def _raise() -> str:
+            raise exc
+        monkeypatch.setattr(os, "getcwd", _raise)
+        from tan.core.uri_reference import cwd_base_uri_or_none
+        return cwd_base_uri_or_none()
+
+    @pytest.mark.parametrize("exc", [
+        FileNotFoundError(2, "No such file or directory"),
+        PermissionError(13, "Permission denied"),
+        NotADirectoryError(20, "Not a directory"),
+        OSError(36, "File name too long"),
+    ], ids=["ENOENT", "EACCES", "ENOTDIR", "ENAMETOOLONG"])
+    def test_every_getcwd_failure_returns_none(self, monkeypatch, exc):
+        assert self._guarded(monkeypatch, exc) is None
+
+    def test_the_unguarded_call_really_does_raise(self, monkeypatch):
+        # The other half of the pin: without this, a mutation that made
+        # `cwd_base_uri()` itself stop raising would leave the cases above
+        # green while asserting nothing.
+        from tan.core.uri_reference import cwd_base_uri
+
+        def _raise() -> str:
+            raise FileNotFoundError(2, "No such file or directory")
+        monkeypatch.setattr(os, "getcwd", _raise)
+        with pytest.raises(OSError):
+            cwd_base_uri()
+
+    def test_the_happy_path_is_not_swallowed(self, tmp_path, monkeypatch):
+        # A guard that returned None unconditionally would satisfy every
+        # case above. This is what stops it.
+        from tan.core.uri_reference import cwd_base_uri, cwd_base_uri_or_none
+        monkeypatch.chdir(tmp_path)
+        value = cwd_base_uri_or_none()
+        assert value is not None
+        assert value == cwd_base_uri()
+        assert value.startswith("file:") and value.endswith("/")
+
+
+# ---------------------------------------------------------------------------
+# The tan-cli#1162 planner sites. Four functions, three documents and one
+# subprocess artefact, all now read through `tan/core/document_guards.py`.
+# ---------------------------------------------------------------------------
+
+
+def _planner_module(name: str):
+    """`tan.planner.<name>`, bound and imported INSIDE the call -- the same
+    deferral `_planner_template` above documents, for the same
+    module-scope `REPO = sdk_root()` reason."""
+    import importlib
+    from tan.planner_root import bind_sdk_root
+    bind_sdk_root(SDK)
+    return importlib.import_module(f"tan.planner.{name}")
+
+
+@_needs_sdk
+@_covers("libraries.load_manifest")
+class TestLoadManifest(_PlannerDocumentCases):
+    """tan-cli#1162 site 1. A `_PlannerDocumentCases` subclass because the
+    shapes and the curated vocabulary are identical to `template.py`'s two
+    YAML document reads -- the only differences are the curated class
+    (`OrchestratorError`, not `TemplateError`) and the `absent` message,
+    which is this function's typo-correcting `unknown library ...
+    Available: ...` rather than a `no metadata/...` line."""
+
+    _GOOD = "tier: 1\nlicense: Apache-2.0\n"
+    _NAME = "seed1162"
+
+    def _path(self, metadata_root: Path) -> Path:
+        return metadata_root / "libraries" / f"{self._NAME}.yaml"
+
+    def _call(self, metadata_root: Path):
+        return _planner_module("libraries").load_manifest(
+            self._NAME, metadata_root)
+
+    def _raises(self, metadata_root: Path) -> str:
+        m = _planner_module("models")
+        with pytest.raises(m.OrchestratorError) as excinfo:
+            self._call(metadata_root)
+        return str(excinfo.value)
+
+    def test_absent(self, tmp_path):
+        # This function's `absent=` message is not the base class's `no
+        # metadata/...`: the typo-correcting option list is the whole point
+        # of the message and is preserved byte for byte across the fix.
+        msg = self._raises(tmp_path / "metadata")
+        assert msg.startswith(f"unknown library `{self._NAME}`")
+        assert "Available: <none>" in msg
+
+    def test_a_directory_is_no_longer_reported_as_an_unknown_library(self, tmp_path):
+        # THE MEASURED LIE, and the reason the pre-flight had to go rather
+        # than be widened. Before the fix, on 3.12.3, 3.13.15 AND 3.14.7
+        # alike, a DIRECTORY named `<lib>.yaml` made `is_file()` answer
+        # False, so the user was told the library was unknown -- and the
+        # option list, built from the same `glob("*.yaml")`, listed that
+        # very directory as an available library in the same sentence.
+        metadata_root = tmp_path / "metadata"
+        _as_directory(self._path(metadata_root))
+        msg = self._raises(metadata_root)
+        assert "cannot read" in msg
+        assert "unknown library" not in msg
+
+
+@_needs_sdk
+@_covers("zephyr_board._load_soc_spec")
+class TestLoadSocSpec:
+    """tan-cli#1162 site 2. NOT a `_PlannerDocumentCases` subclass: the
+    document is JSON, so "malformed" and "not a mapping" are two different
+    fixtures (`{` and `[]`) where YAML's are `a: [1, 2` and `- one`, and the
+    curated noun is `a JSON object`, not `a YAML mapping`."""
+
+    _PRESET = {"sku": "E1M-SEED1162", "silicon": "alif:ensemble:e8"}
+    _GOOD = '{"variants": [], "cores": []}'
+
+    def _path(self, metadata_root: Path) -> Path:
+        from tan.soc_ref import resolve_soc_path
+        path = resolve_soc_path(self._PRESET["silicon"], metadata_root)
+        assert path is not None, "test assumption: a triple-colon silicon ref resolves"
+        return path
+
+    def _call(self, metadata_root: Path):
+        m = _planner_module("zephyr_board")
+        return m._load_soc_spec(self._PRESET, metadata_root)
+
+    def _raises(self, metadata_root: Path) -> str:
+        m = _planner_module("zephyr_board")
+        with pytest.raises(m.ZephyrBoardEmitError) as excinfo:
+            self._call(metadata_root)
+        return str(excinfo.value)
+
+    def _prepared(self, tmp_path: Path) -> Path:
+        metadata_root = tmp_path / "metadata"
+        path = self._path(metadata_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self._GOOD, encoding="utf-8")
+        return metadata_root
+
+    def test_the_good_document_still_loads(self, tmp_path):
+        assert self._call(self._prepared(tmp_path)) == {"variants": [], "cores": []}
+
+    def test_absent(self, tmp_path):
+        assert self._raises(tmp_path / "metadata").startswith("no SoC spec at ")
+
+    def test_non_utf8(self, tmp_path):
+        metadata_root = self._prepared(tmp_path)
+        _non_utf8(self._path(metadata_root))
+        assert "cannot read SoC spec at" in self._raises(metadata_root)
+
+    def test_malformed_document(self, tmp_path):
+        metadata_root = self._prepared(tmp_path)
+        _malformed(self._path(metadata_root), '{"variants": [')
+        assert "not valid JSON" in self._raises(metadata_root)
+
+    def test_malformed_shape(self, tmp_path):
+        metadata_root = self._prepared(tmp_path)
+        _malformed(self._path(metadata_root), "[]")
+        assert "expected a JSON object, got list" in self._raises(metadata_root)
+
+    def test_directory_where_file_expected(self, tmp_path):
+        metadata_root = tmp_path / "metadata"
+        _as_directory(self._path(metadata_root))
+        assert "cannot read SoC spec at" in self._raises(metadata_root)
+
+    def test_parent_is_a_file(self, tmp_path):
+        metadata_root = tmp_path / "metadata"
+        _parent_is_a_file(self._path(metadata_root))
+        assert "cannot read SoC spec at" in self._raises(metadata_root)
+
+    def test_symlink_loop(self, tmp_path):
+        metadata_root = tmp_path / "metadata"
+        _symlink_loop(self._path(metadata_root))
+        assert "cannot read SoC spec at" in self._raises(metadata_root)
+
+    @_skip_as_root
+    def test_permission_denied_file(self, tmp_path):
+        metadata_root = self._prepared(tmp_path)
+        with _permission_denied_file(self._path(metadata_root)):
+            assert "cannot read SoC spec at" in self._raises(metadata_root)
+
+    @_skip_as_root
+    def test_permission_denied_parent(self, tmp_path):
+        # The tan-cli#1127 cell for this site. Before the fix: raw
+        # `PermissionError` on 3.12.3 and 3.13.15, and on 3.14.7 the curated
+        # but FALSE `no SoC spec at <path>` for a spec that is there.
+        # Asserting `cannot read` is what pins the 3.14.7 half.
+        metadata_root = self._prepared(tmp_path)
+        with _permission_denied(self._path(metadata_root).parent):
+            assert "cannot read SoC spec at" in self._raises(metadata_root)
+
+
+@_needs_sdk
+@_covers("kconfig_symbols._load_board_symbols")
+class TestLoadBoardSymbols:
+    """tan-cli#1162 site 3, and the only seeded site whose broken input
+    comes from a SUBPROCESS rather than from the SDK checkout.
+
+    `_load_board_symbols` runs `west build --cmake-only` and then `west
+    build -t alpkconfigjson` in a scratch tree of its own making, and reads
+    the `alp_kconfig.json` the second one is supposed to leave behind. So
+    the fixture cannot be a file placed beforehand -- the directory does not
+    exist yet when the test starts. `subprocess.run` is substituted with a
+    stub that reports success and leaves whichever broken shape the case
+    wants at exactly the path the real dumper would have written, which is
+    the real body of the function running against a real broken file, not a
+    unit test of the guard expression.
+
+    `west_program` is stubbed too, and only because resolving it needs a
+    real west workspace on disk; nothing about which program name comes
+    back is under test here."""
+
+    def _run(self, tmp_path, shape, *, good=b'[{"name": "CONFIG_X"}]'):
+        m = _planner_module("kconfig_symbols")
+        state: dict[str, Path] = {}
+
+        def _fake_run(cmd, **kwargs):
+            # `-d <build_dir>` is how both invocations name the tree; the
+            # SECOND (the `-t` one) is where the artefact appears.
+            build_dir = Path(cmd[cmd.index("-d") + 1])
+            state["output"] = build_dir / "alp_kconfig.json"
+            if "-t" in cmd:
+                build_dir.mkdir(parents=True, exist_ok=True)
+                shape(state["output"], good)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch = pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(m.subprocess, "run", _fake_run)
+            monkeypatch.setattr(m, "west_program", lambda *a, **k: "west")
+            with pytest.raises(m.OrchestratorError) as excinfo:
+                m._load_board_symbols(tmp_path / "zephyr", "alp_seed1162")
+            return str(excinfo.value)
+        finally:
+            monkeypatch.undo()
+
+    def _ok(self, tmp_path, shape, *, good=b'[{"name": "CONFIG_X"}]'):
+        m = _planner_module("kconfig_symbols")
+
+        def _fake_run(cmd, **kwargs):
+            build_dir = Path(cmd[cmd.index("-d") + 1])
+            if "-t" in cmd:
+                build_dir.mkdir(parents=True, exist_ok=True)
+                shape(build_dir / "alp_kconfig.json", good)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch = pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(m.subprocess, "run", _fake_run)
+            monkeypatch.setattr(m, "west_program", lambda *a, **k: "west")
+            return m._load_board_symbols(tmp_path / "zephyr", "alp_seed1162")
+        finally:
+            monkeypatch.undo()
+
+    @staticmethod
+    def _write(path, data):
+        path.write_bytes(data)
+
+    def test_the_good_artefact_still_loads(self, tmp_path):
+        assert self._ok(tmp_path, self._write) == [{"name": "CONFIG_X"}]
+
+    def test_absent(self, tmp_path):
+        # `never wrote` is preserved byte for byte through `absent=`: it is
+        # a better message than `cannot read` for the one shape it is true
+        # of, and it is what tells the reader the DUMPER misbehaved.
+        msg = self._run(tmp_path, lambda p, d: None)
+        assert "completed but never wrote" in msg
+        assert "never emit a partial/empty menu" in msg
+
+    def test_non_utf8(self, tmp_path):
+        msg = self._run(tmp_path, lambda p, d: p.write_bytes(b"\xff\xfe\x00x"))
+        assert "cannot read the `alpkconfigjson` dumper's output at" in msg
+
+    def test_directory_where_file_expected(self, tmp_path):
+        msg = self._run(tmp_path, lambda p, d: p.mkdir())
+        assert "cannot read the `alpkconfigjson` dumper's output at" in msg
+
+    def test_empty_artefact_is_still_refused_by_its_own_guard(self, tmp_path):
+        # Pre-existing and untouched by tan-cli#1162, asserted here so the
+        # read guard cannot be widened later in a way that swallows it.
+        msg = self._run(tmp_path, self._write, good=b"   \n")
+        assert "reported success but wrote an empty" in msg
+
+    def test_malformed_json_is_still_refused_by_its_own_guard(self, tmp_path):
+        msg = self._run(tmp_path, self._write, good=b"[{")
+        assert "is not valid JSON" in msg
+
+    def test_a_non_list_artefact_is_still_refused_by_its_own_guard(self, tmp_path):
+        msg = self._run(tmp_path, self._write, good=b'{"a": 1}')
+        # The product message wraps across a source line, so compare on
+        # whitespace-collapsed text rather than reproducing the wrap here.
+        assert "is not a list of symbols (got dict)" in " ".join(msg.split())
+
+    @_skip_as_root
+    def test_permission_denied_file(self, tmp_path):
+        def _shape(path, data):
+            path.write_bytes(data)
+            path.chmod(0o000)
+        msg = self._run(tmp_path, _shape)
+        assert "cannot read the `alpkconfigjson` dumper's output at" in msg
+
+    @_skip_as_root
+    def test_permission_denied_parent(self, tmp_path):
+        # The tan-cli#1127 cell: raw `PermissionError` on 3.12.3/3.13.15
+        # before the fix, and the curated but FALSE `never wrote` on 3.14.7
+        # for an artefact the dumper DID write.
+        modes: list = []
+
+        def _shape(path, data):
+            path.write_bytes(data)
+            modes.append((path.parent, path.parent.stat().st_mode))
+            path.parent.chmod(0o000)
+        try:
+            msg = self._run(tmp_path, _shape)
+        finally:
+            for d, mode in modes:
+                d.chmod(mode)
+        assert "cannot read the `alpkconfigjson` dumper's output at" in msg
+        assert "never wrote" not in msg
+
+
+@_needs_sdk
+@_covers("topology._core_os_choices")
+class TestCoreOsChoices:
+    """tan-cli#1162 site 4. The odd one out twice over: its `absent` shape
+    is NOT a failure (an absent project schema is the documented fallback
+    onto the in-tree `BOARD_SCHEMA`), and its pre-flight was a SELECTOR
+    between two documents rather than a guard on one -- so the shape that
+    matters most here is the one where the project's OWN schema is present
+    and unreadable, which used to fall back SILENTLY and answer with the
+    wrong document's OS set."""
+
+    _GOOD = ('{"$defs": {"core_entry": {"properties": {"os": '
+             '{"enum": ["zephyr", "yocto", "baremetal", "off"]}}}}}')
+
+    def _path(self, metadata_root: Path) -> Path:
+        return metadata_root / "schemas" / "board.schema.json"
+
+    def _module(self):
+        m = _planner_module("topology")
+        m._core_os_choices.cache_clear()
+        return m
+
+    def _call(self, metadata_root: Path):
+        return self._module()._core_os_choices(metadata_root)
+
+    def _raises(self, metadata_root: Path) -> str:
+        m = self._module()
+        models = _planner_module("models")
+        with pytest.raises(models.OrchestratorError) as excinfo:
+            m._core_os_choices(metadata_root)
+        return str(excinfo.value)
+
+    def _prepared(self, tmp_path: Path) -> Path:
+        metadata_root = tmp_path / "metadata"
+        path = self._path(metadata_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self._GOOD, encoding="utf-8")
+        return metadata_root
+
+    def test_the_projects_own_schema_wins_when_it_is_readable(self, tmp_path):
+        metadata_root = self._prepared(tmp_path)
+        _malformed(self._path(metadata_root),
+                   '{"$defs": {"core_entry": {"properties": {"os": '
+                   '{"enum": ["only-this"]}}}}}')
+        assert self._call(metadata_root) == ("only-this",)
+
+    def test_absent_falls_back_to_the_in_tree_schema(self, tmp_path):
+        # NOT a failure: the fallback is the function's own contract. It is
+        # asserted positively (a non-empty tuple carrying the real enum)
+        # rather than as "does not raise", so a guard that started refusing
+        # a synthetic metadata root would red here.
+        choices = self._call(tmp_path / "metadata")
+        assert "zephyr" in choices and "off" in choices
+
+    def test_a_missing_fallback_schema_is_a_curated_refusal(self, tmp_path):
+        # The other arm, driven rather than assumed: with BOTH the project
+        # schema and the in-tree one gone there is nothing to read, and the
+        # `board schema not found` message is the one that must appear.
+        m = self._module()
+        monkeypatch = pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(m, "BOARD_SCHEMA", tmp_path / "nowhere.json")
+            models = _planner_module("models")
+            with pytest.raises(models.OrchestratorError) as excinfo:
+                m._core_os_choices(tmp_path / "metadata")
+            assert str(excinfo.value).startswith("board schema not found: ")
+        finally:
+            monkeypatch.undo()
+            m._core_os_choices.cache_clear()
+
+    def test_non_utf8(self, tmp_path):
+        metadata_root = self._prepared(tmp_path)
+        _non_utf8(self._path(metadata_root))
+        assert "cannot read board schema at" in self._raises(metadata_root)
+
+    def test_malformed_document(self, tmp_path):
+        metadata_root = self._prepared(tmp_path)
+        _malformed(self._path(metadata_root), '{"$defs": ')
+        assert "not valid JSON" in self._raises(metadata_root)
+
+    def test_malformed_shape(self, tmp_path):
+        metadata_root = self._prepared(tmp_path)
+        _malformed(self._path(metadata_root), "[]")
+        assert "expected a JSON object, got list" in self._raises(metadata_root)
+
+    @pytest.mark.parametrize("doc,missing", [
+        ("{}", "'$defs'"),
+        ('{"$defs": {}}', "'core_entry'"),
+        ('{"$defs": {"core_entry": {}}}', "'properties'"),
+        ('{"$defs": {"core_entry": {"properties": {}}}}', "'os'"),
+        ('{"$defs": {"core_entry": {"properties": {"os": {}}}}}', "'enum'"),
+    ], ids=["defs", "core_entry", "properties", "os", "enum"])
+    def test_each_missing_link_in_the_defs_chain_is_named(self, tmp_path, doc, missing):
+        # The sibling one level in from the read this issue named: before
+        # the fix these five were a raw `KeyError` out of a bare subscript
+        # chain, on every interpreter.
+        metadata_root = self._prepared(tmp_path)
+        _malformed(self._path(metadata_root), doc)
+        assert f"is missing required key {missing}" in self._raises(metadata_root)
+
+    def test_a_non_list_enum_is_named_rather_than_iterated(self, tmp_path):
+        metadata_root = self._prepared(tmp_path)
+        _malformed(self._path(metadata_root),
+                   '{"$defs": {"core_entry": {"properties": {"os": '
+                   '{"enum": "zephyr"}}}}}')
+        assert "must be a list, got str" in self._raises(metadata_root)
+
+    def test_directory_where_file_expected(self, tmp_path):
+        # THE SILENT-FALLBACK CELL. Before the fix this returned the
+        # in-tree schema's enum with no diagnostic at all, on all three
+        # interpreters -- `is_file()` answered False for a directory
+        # exactly as it did for an absent file, so an unreadable project
+        # schema was indistinguishable from no project schema.
+        metadata_root = tmp_path / "metadata"
+        _as_directory(self._path(metadata_root))
+        assert "cannot read board schema at" in self._raises(metadata_root)
+
+    def test_parent_is_a_file(self, tmp_path):
+        # ENOTDIR, and the one shape that is DELIBERATELY still a fallback:
+        # a parent that is a regular file means this root has no `schemas/`
+        # directory at all, which is the same "carries no schema of its
+        # own" fact ENOENT reports. `read_optional_text`'s docstring says
+        # so; this drives it.
+        metadata_root = tmp_path / "metadata"
+        _parent_is_a_file(self._path(metadata_root))
+        choices = self._call(metadata_root)
+        assert "zephyr" in choices and "off" in choices
+
+    def test_symlink_loop(self, tmp_path):
+        metadata_root = tmp_path / "metadata"
+        _symlink_loop(self._path(metadata_root))
+        assert "cannot read board schema at" in self._raises(metadata_root)
+
+    @_skip_as_root
+    def test_permission_denied_file(self, tmp_path):
+        metadata_root = self._prepared(tmp_path)
+        with _permission_denied_file(self._path(metadata_root)):
+            assert "cannot read board schema at" in self._raises(metadata_root)
+
+    @_skip_as_root
+    def test_permission_denied_parent(self, tmp_path):
+        # The tan-cli#1127 cell: raw `PermissionError` on 3.12.3/3.13.15
+        # before the fix, and a SILENT wrong-document fallback on 3.14.7.
+        metadata_root = self._prepared(tmp_path)
+        with _permission_denied(self._path(metadata_root).parent):
+            assert "cannot read board schema at" in self._raises(metadata_root)
 
 
 def test_every_seed_has_a_test():

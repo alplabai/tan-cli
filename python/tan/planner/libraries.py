@@ -38,10 +38,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
-import yaml
+from tan.core.document_guards import DocumentGuards
 
 from .models import BoardProject, OrchestratorError, Slice
 from .som_metadata import _sku_family, resolve_capabilities
+
+#: The malformed-document register (`tan/core/document_guards.py`), bound to
+#: THIS module's own curated class. See that module's docstring for why the
+#: exception type is injected rather than fixed.
+#:
+#: There is NO module-scope `import yaml` here any more (tan-cli#1162):
+#: `load_manifest` was its only user and now reads through
+#: `read_yaml_mapping`, which defers the import into the function body --
+#: the idiom `som_buildability.py:109` documents and seven `tan/core/**`
+#: modules share.
+_GUARDS = DocumentGuards(OrchestratorError)
 
 
 def _libraries_dir(metadata_root: Path) -> Path:
@@ -222,18 +233,37 @@ def load_manifest(name: str, metadata_root: Path) -> dict[str, Any]:
 
     The error lists every available library so a typo in ``libraries: [...]``
     is self-correcting.
+
+    RELOCATED divergence from alp-sdk's own `scripts/alp_orchestrate/
+    libraries.py` (tan-cli#1162): upstream still spells this as an
+    `is_file()` pre-flight followed by a wholly unguarded
+    `yaml.safe_load(path.read_text(...))`. Read + parse + shape-check now go
+    through `tan/core/document_guards.py`'s register, for the reasons
+    `read_yaml_mapping` documents: the pre-flight answered `False` to a
+    directory, a denied mode and an `ELOOP` alike, and on a `chmod 000`
+    PARENT it did not answer at all on 3.12.3/3.13.15 (`PermissionError`
+    straight out of `Path.is_file()`, tan-cli#1127). Measured before this
+    change, through the real `tan build` path: a non-UTF-8 manifest escaped
+    as a raw `UnicodeDecodeError`, a malformed one as a raw
+    `yaml.parser.ParserError`, a `chmod 000` one as a raw `PermissionError`
+    -- each absorbed two frames up by `build_cmd.py:505`'s broad `except
+    Exception` into a `build.plan-unavailable` envelope naming the EXCEPTION
+    TYPE rather than the file, which is the poor-message half of this
+    family rather than its bare-traceback half.
+
+    `available_libraries` is now evaluated on every call rather than only on
+    the miss, because `absent=` takes a string. That is one extra directory
+    listing per selected library, on a path that already stat-ed the same
+    directory for the pre-flight this replaces; the typo-correcting
+    `Available: ...` message is preserved byte for byte in exchange.
     """
     path = _libraries_dir(metadata_root) / f"{name}.yaml"
-    if not path.is_file():
-        options = ", ".join(available_libraries(metadata_root)) or "<none>"
-        raise OrchestratorError(
-            f"unknown library `{name}` in `libraries:` -- no manifest at "
-            f"metadata/libraries/{name}.yaml.  Available: {options}")
-    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(doc, dict):
-        raise OrchestratorError(
-            f"library manifest metadata/libraries/{name}.yaml is not a mapping")
-    return doc
+    options = ", ".join(available_libraries(metadata_root)) or "<none>"
+    return _GUARDS.read_yaml_mapping(
+        path,
+        what=f"library manifest metadata/libraries/{name}.yaml",
+        absent=(f"unknown library `{name}` in `libraries:` -- no manifest at "
+                f"metadata/libraries/{name}.yaml.  Available: {options}"))
 
 
 # ---------------------------------------------------------------------------

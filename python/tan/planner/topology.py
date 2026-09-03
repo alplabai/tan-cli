@@ -26,6 +26,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from tan.core.document_guards import DocumentGuards
 from tan.core.os_class import CLASS_RUNTIMES  # noqa: F401  (re-export: unchanged public name)
 from tan.core.os_class import allowed_os_for_core as _allowed_os_for_core_shared
 from tan.core.os_class import cross_class_os as _cross_class_os  # noqa: F401  (re-export: validate.py's `from .topology import ... _cross_class_os`)
@@ -33,6 +34,9 @@ from tan.core.os_class import default_os_from_core_type as _default_os_from_core
 
 from .models import OrchestratorError
 from .paths import BOARD_SCHEMA
+
+#: The malformed-document register, bound to THIS module's curated class.
+_GUARDS = DocumentGuards(OrchestratorError)
 
 if TYPE_CHECKING:
     from .models import BoardProject
@@ -53,14 +57,55 @@ def _core_os_choices(metadata_root: Path) -> tuple[str, ...]:
     `schemas/` of its own (e.g. a synthetic test root) -- the same fallback
     `loader._validate_board` applies, so a scratch root without a schema copy
     still resolves instead of raising a raw `FileNotFoundError`.
+
+    RELOCATED divergence from alp-sdk's own `scripts/alp_orchestrate/
+    topology.py` (tan-cli#1162), which still spells the lines below as two
+    `is_file()` pre-flights and a bare `json.loads(read_text(...))`. Two
+    defects lived in that, and only one is the bare read the issue names:
+
+    * The fallback pre-flight is not a guard but a SELECTOR, and
+      `is_file()` answered `False` to "denied" and "is a directory"
+      exactly as to "not there" -- so an unreadable project schema fell
+      back silently onto a DIFFERENT document and the caller was told an
+      `os:` set the project never declared. `read_optional_text`
+      classifies on the real exception: `ENOENT`/`ENOTDIR` is the legal
+      no-schema-of-its-own branch, everything else is a refusal.
+    * On a `chmod 000` PARENT that pre-flight does not answer at all on
+      3.12.3/3.13.15 (`Path.is_file()` raises `PermissionError`; 3.14.7
+      returns `False` -- tan-cli#1127), so one unreadable schema was a raw
+      traceback on two interpreters and a silent wrong answer on the third.
+
+    CALLERS: `validate._enforce_loader_rules:343` via `loader.py:1009`, so
+    every `load_board_yaml` -- `tan build`, `tan validate`, `tan generate`,
+    `tan kconfig` -- plus `_allowed_os_for_core` below. On `tan build` the
+    raw exception was absorbed by `build_cmd.py:505` into a
+    `build.plan-unavailable` envelope naming the type, not the file.
+
+    The `$defs` chain uses `require_key` rather than bare subscript for the
+    same reason: a legal-JSON schema missing `core_entry`, or with a
+    non-list `enum`, reached `tuple()` as a raw `KeyError`/`TypeError`.
     """
     schema_path = Path(metadata_root) / "schemas" / "board.schema.json"
-    if not schema_path.is_file():
+    text = _GUARDS.read_optional_text(schema_path, what="board schema")
+    if text is None:
         schema_path = BOARD_SCHEMA
-    if not schema_path.is_file():
-        raise OrchestratorError(f"board schema not found: {schema_path}")
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    return tuple(schema["$defs"]["core_entry"]["properties"]["os"]["enum"])
+        text = _GUARDS.require_readable_text(
+            schema_path, what="board schema",
+            absent=f"board schema not found: {schema_path}")
+    schema = _GUARDS.require_json_mapping_doc(
+        text, path=schema_path, what="board schema")
+    defs = _GUARDS.require_key(
+        schema, "$defs", dict, doc=schema_path, field="board schema")
+    entry = _GUARDS.require_key(
+        defs, "core_entry", dict, doc=schema_path, field="$defs")
+    props = _GUARDS.require_key(
+        entry, "properties", dict, doc=schema_path, field="$defs.core_entry")
+    os_prop = _GUARDS.require_key(
+        props, "os", dict, doc=schema_path,
+        field="$defs.core_entry.properties")
+    return tuple(_GUARDS.require_key(
+        os_prop, "enum", list, doc=schema_path,
+        field="$defs.core_entry.properties.os"))
 
 
 def _runtime_class(core_type: str) -> str:
