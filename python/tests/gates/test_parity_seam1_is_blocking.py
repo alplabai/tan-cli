@@ -53,12 +53,14 @@ oracle)` and, separately, at job level:
 | `"true "` | `'true '` | rc=1 | passes |
 | `${{ env.SOFT }}` | `str` | rc=1 | passes |
 | `${{ matrix.experimental }}` | `str` | rc=1 | passes |
-| anchor/alias to `"true"` | `'true'` | rc=1 | passes |
+| anchor/alias to `"true"` | `'true'` | rc=1 (`expected bool value but found alias node`) | passes |
 | `yes` | `True` | rc=1 | catches |
 | `on` | `True` | rc=1 | catches |
 
-Three of them are lint-clean AND silent, which is the landable attack. The rest
-are "merely" silent -- and actionlint is not what the merge queue requires
+Three spellings are lint-clean, and TWO of those three (`${{ true }}` and
+`${{ github.event_name == 'pull_request' }}`) are also silent under
+`is not True` -- landable and silent at once, which is the real attack. The
+rest are "merely" silent, and actionlint is not what the merge queue requires
 (`dev`'s required contexts are seam1, the three pytest legs and zizmor), so
 "actionlint would have caught it" is not a defence this gate may lean on. All
 eleven are covered by [`test_a_neutering_spelling_reds_this_gate`].
@@ -69,7 +71,7 @@ A job whose `if:` is false renders **"skipped", not "failed"**, so a guard on
 the job silences a required context with no red anywhere. Checked by VALUE, not
 by absence-of-key search: PR #1193's naive `assert "if" not in job` failed on a
 pristine `ci.yml` because `python-newest` legitimately carries a release
-opt-out. Measured on `parity.yml` at `dev` `647480a5`, `seam1-plan-shape`
+opt-out. Measured on `parity.yml` at `dev` `b432409`, `seam1-plan-shape`
 carries NO job-level `if:` -- unlike its four siblings `seam2`, `first-blink`,
 `python-tests` and `release-sdk-parity`, which all do -- so the pinned value
 here is `None`. If this job ever earns one, pin it in [`SEAM1_JOB_IF`] with the
@@ -166,7 +168,7 @@ SOFT_STEP_SHARED_REASON = (
 )
 
 #: The job-level `if:` [`SEAM1_JOB`] is permitted to carry. `None` means NONE,
-#: and that is a MEASURED value, not an assumption: on `dev` `647480a5` this job
+#: and that is a MEASURED value, not an assumption: on `dev` `b432409` this job
 #: has no `if:` while `seam2`, `first-blink`, `python-tests` and
 #: `release-sdk-parity` all do. Checked by value rather than by
 #: `assert "if" not in job` so that, the day this job earns a legitimate guard,
@@ -174,7 +176,7 @@ SOFT_STEP_SHARED_REASON = (
 SEAM1_JOB_IF: str | None = None
 
 #: A floor on the walk, so a green bar cannot mean "the job has no steps".
-#: 24 on `dev` `647480a5`; the floor is deliberately well below that, because
+#: 24 on `dev` `b432409`; the floor is deliberately well below that, because
 #: this is an anti-vacuity check and not a second size ratchet.
 MIN_STEPS = 15
 
