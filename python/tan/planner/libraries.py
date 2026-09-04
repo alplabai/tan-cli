@@ -38,10 +38,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
-import yaml
+from tan.core.document_guards import DocumentGuards
 
 from .models import BoardProject, OrchestratorError, Slice
 from .som_metadata import _sku_family, resolve_capabilities
+
+#: The malformed-document register (`tan/core/document_guards.py`), bound to
+#: THIS module's own curated class. See that module's docstring for why the
+#: exception type is injected rather than fixed.
+#:
+#: There is NO module-scope `import yaml` here any more (tan-cli#1162):
+#: `load_manifest` was its only user and now reads through
+#: `read_yaml_mapping`, which defers the import into the function body --
+#: the idiom `som_buildability.py:109` documents and seven `tan/core/**`
+#: modules share.
+_GUARDS = DocumentGuards(OrchestratorError)
 
 
 def _libraries_dir(metadata_root: Path) -> Path:
@@ -210,11 +221,40 @@ def _emit_library_hw_backends(
 
 
 def available_libraries(metadata_root: Path) -> list[str]:
-    """Sorted list of every curated library token (manifest filename stem)."""
-    d = _libraries_dir(metadata_root)
-    if not d.is_dir():
+    """Sorted list of every curated library token (manifest filename stem).
+
+    RELOCATED divergence from alp-sdk's own `scripts/alp_orchestrate/
+    libraries.py` (tan-cli#1171 review of #1162): upstream still spells this
+    as an `if not d.is_dir(): return []` pre-flight in front of the `glob`.
+    That pre-flight was the SAME tan-cli#1127 shape the four sites in #1162
+    removed, one directory further out, and it survived that pass because
+    nothing drove it: `_PlannerDocumentCases.test_permission_denied_parent`
+    denies `metadata/libraries/`, and the shape that breaks is a denied
+    `metadata/` -- the manifest's GRANDPARENT. Measured there, before this
+    change: raw `PermissionError` out of `Path.is_dir()` on 3.12.3 and
+    3.13.15, curated on 3.14.7.
+
+    Both halves had to go, not just the pre-flight: `Path.glob` is not
+    interpreter-uniform on this shape either. Measured on the same denied
+    `metadata/`, `sorted(d.glob("*.yaml"))` raises `PermissionError` on
+    3.12.3 and returns `[]` on 3.13.15 and 3.14.7 -- so the `except OSError`
+    is what makes the three interpreters agree, and the pre-flight is
+    redundant once it is there (`glob` on a directory that is simply not
+    present yields nothing on all three).
+
+    An unreadable library directory answers `[]` rather than raising because
+    this function is not a document read: its whole output is the
+    typo-correcting `Available: ...` HINT inside another function's error
+    message, and it is reached only once that function's own guarded read has
+    already raised. There is no caller for whom an exception here would be
+    more useful than an empty option list, and one -- `load_manifest`'s
+    `absent=` -- for whom it would replace a true, curated message with a raw
+    traceback.
+    """
+    try:
+        return sorted(p.stem for p in _libraries_dir(metadata_root).glob("*.yaml"))
+    except OSError:
         return []
-    return sorted(p.stem for p in d.glob("*.yaml"))
 
 
 def load_manifest(name: str, metadata_root: Path) -> dict[str, Any]:
@@ -222,18 +262,41 @@ def load_manifest(name: str, metadata_root: Path) -> dict[str, Any]:
 
     The error lists every available library so a typo in ``libraries: [...]``
     is self-correcting.
+
+    RELOCATED divergence from alp-sdk's own `scripts/alp_orchestrate/
+    libraries.py` (tan-cli#1162): upstream still spells this as an
+    `is_file()` pre-flight followed by a wholly unguarded
+    `yaml.safe_load(path.read_text(...))`. Read + parse + shape-check now go
+    through `tan/core/document_guards.py`'s register, for the reasons
+    `read_yaml_mapping` documents: the pre-flight answered `False` to a
+    directory, a denied mode and an `ELOOP` alike, and on a `chmod 000`
+    PARENT it did not answer at all on 3.12.3/3.13.15 (`PermissionError`
+    straight out of `Path.is_file()`, tan-cli#1127). Measured before this
+    change, through the real `tan build` path: a non-UTF-8 manifest escaped
+    as a raw `UnicodeDecodeError`, a malformed one as a raw
+    `yaml.parser.ParserError`, a `chmod 000` one as a raw `PermissionError`
+    -- each absorbed two frames up by `build_cmd.py:505`'s broad `except
+    Exception` into a `build.plan-unavailable` envelope naming the EXCEPTION
+    TYPE rather than the file, which is the poor-message half of this
+    family rather than its bare-traceback half.
+
+    `available_libraries` is passed LAZILY, as the zero-argument callable
+    `absent=` also accepts (tan-cli#1171 review), so the directory listing
+    stays on the miss path exactly as the pre-flight-era code kept it. Built
+    eagerly it ran ahead of the guarded read on every call, which put its own
+    unguarded `is_dir()` first in line and reinstated the tan-cli#1127 split
+    the rest of this change removes -- raw `PermissionError` on 3.12.3 and
+    3.13.15, curated on 3.14.7, with `metadata/` denied. The typo-correcting
+    `Available: ...` message is preserved byte for byte either way.
     """
     path = _libraries_dir(metadata_root) / f"{name}.yaml"
-    if not path.is_file():
-        options = ", ".join(available_libraries(metadata_root)) or "<none>"
-        raise OrchestratorError(
+    return _GUARDS.read_yaml_mapping(
+        path,
+        what=f"library manifest metadata/libraries/{name}.yaml",
+        absent=lambda: (
             f"unknown library `{name}` in `libraries:` -- no manifest at "
-            f"metadata/libraries/{name}.yaml.  Available: {options}")
-    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(doc, dict):
-        raise OrchestratorError(
-            f"library manifest metadata/libraries/{name}.yaml is not a mapping")
-    return doc
+            f"metadata/libraries/{name}.yaml.  Available: "
+            f"{', '.join(available_libraries(metadata_root)) or '<none>'}"))
 
 
 # ---------------------------------------------------------------------------
