@@ -262,3 +262,102 @@ jobs:
       # output IS the artefact. An upload step here would either publish an
       # empty archive or need the harness changed to bind-mount its workdir
       # out, which is a bigger change than wiring up the job.
+
+  # =========================================================================
+  # tan-cli#1187 scope item 3: six days is the finding, not the failure
+  # =========================================================================
+  #
+  # Every scheduled run of this workflow failed on `dev` from 2026-08-30 to
+  # 2026-09-04 with an identical signature, and nothing said so. This job is
+  # the "or should page on a red `dev`" half of that issue's own decision.
+  #
+  # NOT made a required merge-queue context, deliberately, and that is the
+  # other half of the decision rather than an omission. This file's own header
+  # already records why: `e2e-full.sh` clones alp-sdk `--branch dev` fresh per
+  # run, so "a REPEATABLE `dev` x `dev` result" is exactly what a green run
+  # does NOT prove -- in one multi-hour round alp-sdk `dev` moved three times
+  # (`33374319` -> `b5fe22aa` -> `e9aea71b`). A job whose subject moves
+  # underneath it between runs is the wrong thing to block merges on: it trades
+  # six days of unread red for an unpredictable merge queue, and the failure it
+  # would block on may belong to someone else's push to another repo. What was
+  # actually missing is somewhere a human looks.
+  #
+  # Same shape as `parity.yml`'s `notify-planner-drift`, for the same reasons,
+  # and it inherits that job's hard-won de-dup rule: NOT
+  # `gh issue list --search "<marker> in:body"`, because GitHub's search
+  # tokenizes on hyphens and ANDs the tokens rather than matching the phrase --
+  # measured there returning five issues for a marker only one of them
+  # contains, which silently comments on whichever sorts first, forever.
+  # Filter server-side on the LABEL set this job creates the issue with (exact
+  # match, no tokenizing), then client-side on the literal marker.
+  #
+  # Deliberately narrow, again matching that precedent: ONE tracking issue,
+  # refreshed -- never one per failing night, because six consecutive failures
+  # are one incident and filing six issues would reproduce the original problem
+  # in a new form. Scheduled runs only: a `pull_request` failure already has a
+  # PR to notice it on. It does not label, close or otherwise manage the
+  # issue's lifecycle; a green run does not self-close it. That stays human.
+  notify-schedule-red:
+    name: "file/refresh a tracking issue when the nightly run is red"
+    needs: container
+    if: always() && github.event_name == 'schedule' && needs.container.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # One `gh issue list` plus one create-or-comment. Scoped to this job
+      # alone so the workflow-level `contents: read` stays least-privilege for
+      # every other job here.
+      issues: write
+    steps:
+      - name: file or refresh the e2e-container red-schedule issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          IMAGE: ${{ github.event.inputs.image || 'ubuntu:24.04' }}
+        run: |
+          set -euo pipefail
+          title="e2e-container: the nightly clean-container run is red on dev"
+          # A fixed, grep-able marker rather than the free-text title, so a
+          # maintainer can reword the title without breaking de-dup.
+          marker="<!-- tan-cli-e2e-container-red-tracker -->"
+          body=$(cat <<EOF
+          $marker
+
+          The \`container\` job (\`clean container: ${IMAGE}\`) failed on the nightly
+          schedule. This workflow is the only \`dev\` x \`dev\` clean-machine coverage
+          in the repo -- \`getting-started.yml\` and \`clean-host.yml\` both start from
+          a stock \`ubuntu-latest\` that already ships \`git\`, \`cmake\`, \`python3\` and
+          \`curl\`, which is the exact condition tan-cli#687 reported.
+
+          Run: ${RUN_URL}
+
+          Read the run's own log first, not this issue: since tan-cli#1187 the
+          harness prints every \`issues[]\` entry of a failing envelope -- code,
+          severity and the whole message -- instead of a \`head -c 400\` excerpt that
+          stopped before \`issues[]\` began. The failing assertion names which of its
+          invariants broke (exit code, envelope \`ok\`, stderr size), so the cause
+          should be one line away.
+
+          Note what a red run here does and does not mean: \`e2e-full.sh\` clones
+          alp-sdk \`--branch dev\` fresh per run, so a failure may belong to an
+          alp-sdk push rather than to anything in this repo. The resolved SHA is
+          printed as \`alp-sdk ref=dev sha=<40 hex>\` -- read it before comparing two
+          runs.
+
+          This issue is filed/refreshed automatically by \`e2e-container.yml\`'s
+          \`notify-schedule-red\` job. It does not self-close on a green run; close it
+          by hand once the run is green again.
+          EOF
+          )
+          existing=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open \
+              --label bug,ci --json number,body \
+              --jq '[.[] | select(.body | contains("tan-cli-e2e-container-red-tracker"))][0].number' \
+              || true)
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+            echo "::notice::updated existing e2e-container red-schedule issue #${existing}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" \
+                --body "${body}" --label bug,ci
+            echo "::notice::filed a new e2e-container red-schedule issue"
+          fi
