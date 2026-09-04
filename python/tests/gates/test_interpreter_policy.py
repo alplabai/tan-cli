@@ -91,12 +91,13 @@ So four invariants, each guarding a way that could quietly come undone:
    is why "just bind `ALP_SDK_ROOT`" closes 7.5% rather than the 18% a merged
    count suggests. That gap is stated in the job's own comment and is not this
    gate's to close;
-5. the ceiling job is still BLOCKING -- no `continue-on-error` on the job or
-   any of its steps, and no step-level `if:` on the pytest step. This is the
-   ring outside invariant 4, and it is the more likely edit: invariant 4 stops
-   the job being narrowed, invariant 5 stops it being NEUTERED. All three of
-   those one-line edits leave the job present, floating, named and green while
-   it either ignores its own failure or never runs pytest at all -- and the
+5. the ceiling job is still BLOCKING -- no truthy `continue-on-error` on the
+   job or any of its steps in ANY of its spellings, no step-level `if:` on the
+   pytest step, and no job-level `if:` other than the release opt-out. This is
+   the ring outside invariant 4, and it is the more likely edit: invariant 4
+   stops the job being narrowed, invariant 5 stops it being NEUTERED. Every one
+   of those one-line edits leaves the job present, floating, named and green
+   while it either ignores its own failure or never runs pytest at all -- and the
    first time `"3.x"` moves and reds a PR at an awkward moment,
    `continue-on-error: true` is the standard reach. This repo's own record
    says so: `getting-started.yml:133-138` is a job that floated `"3.x"`, red
@@ -136,8 +137,10 @@ runner happens to notice months later.
 
 from __future__ import annotations
 
+import copy
 import functools
 import re
+import sys
 import tomllib
 from pathlib import Path
 
@@ -212,6 +215,52 @@ FULL_SUITE_COMMAND = "python -m pytest tests -q"
 #: [`FULL_SUITE_COMMAND`] compares, so the selection assertion would still
 #: pass while the divergence went unrun.
 CEILING_PYTEST_ENV = frozenset({"TAN_MERGE_GROUP_BASE_REF"})
+
+#: Every `continue-on-error` spelling that NEUTERS the job or step it is
+#: written on, spelled as it would appear in the YAML. The controls below
+#: drive each one through `yaml.safe_load` rather than hand-typing the loaded
+#: Python value, because the spelling IS the defect: tan-cli#1182 was this
+#: file comparing the loaded value with `is not True`, which is `True` for
+#: every entry here that loads as a `str`, so each of those passed the check
+#: while doing exactly what the check forbids.
+#:
+#: The expression forms are not exotic. GitHub documents `continue-on-error`
+#: as taking an expression and its own example is
+#: `continue-on-error: ${{ matrix.experimental }}`, so the runner honours them
+#: all. Two of them are also clean workflow syntax -- measured with
+#: `actionlint` 1.7.7 on the real `ci.yml`, `${{ true }}` and
+#: `${{ github.event_name == 'pull_request' }}` both lint OK at job and step
+#: level, and `${{ matrix.experimental }}` is rejected here only because this
+#: job declares no matrix. So the landable, lint-clean silencing edit was real
+#: and this list is not a theory about YAML.
+NEUTERING_SPELLINGS = (
+    "true",
+    "True",
+    "TRUE",
+    "yes",
+    "on",
+    '"true"',
+    "'true'",
+    '"true "',
+    "!!str true",
+    "!!bool 'yes'",
+    "${{ true }}",
+    "${{ github.event_name == 'pull_request' }}",
+    "${{ matrix.experimental }}",
+    "${{ env.SOFT }}",
+)
+
+#: The spellings that leave the job or step BLOCKING and must therefore keep
+#: this gate GREEN. `false` is the explicit opt-out someone may legitimately
+#: write, so it is allowed rather than merely tolerated; the rest are the
+#: PyYAML-falsy neighbours, asserted so a future tightening to
+#: `is None or is False` cannot red a workflow that means "blocking".
+#:
+#: Only the three `false` spellings are landable: measured with `actionlint`
+#: 1.7.7, `no`, `off`, `null`, `~` and an empty value are each rejected as a
+#: workflow-syntax error, and `0` as an `!!int` node. They are unlandable
+#: rather than silent, which is the opposite of the defect above.
+BLOCKING_SPELLINGS = ("false", "False", "FALSE", "no", "off", "null", "~", "", "0")
 
 #: `python-version` values allowed BETWEEN the floor and the ceiling, each one
 #: a deliberate decision recorded here rather than a pin that appeared in a
@@ -518,11 +567,27 @@ def test_the_ceiling_job_cannot_be_neutered_without_being_removed():
 
     Scoped to the ceiling job only. `continue-on-error` is a legitimate tool
     elsewhere in this repo, and this test says nothing about those uses.
+
+    Compared with `in (None, False)`, NOT `is not True` -- tan-cli#1182. The
+    original spelling was vacuous for every form GitHub actually accepts:
+    `continue-on-error` takes an EXPRESSION, and `yaml.safe_load` returns a
+    `str` for an expression or any quoted or `!!str`-tagged spelling, so
+    `"..." is not True` waved it straight through. Measured against the real
+    `ci.yml` before the fix, at a FULLY GREEN suite: `${{ true }}` (job and
+    step), `"true"`, `${{ github.event_name == 'pull_request' }}`,
+    `!!str true`, `"true "`, an anchor/alias to a quoted `true`,
+    `${{ matrix.experimental }}` and `${{ env.SOFT }}` -- versus one failure
+    for the plain `true` the old spelling did catch. `False` stays allowed
+    because it is the explicit opt-out someone may legitimately write.
+    [`NEUTERING_SPELLINGS`] and [`BLOCKING_SPELLINGS`] hold both sides and
+    [`test_a_neutering_spelling_reds_this_gate`] drives THIS function against
+    each, so reverting the comparison reds rather than silently reopening it.
     """
     job = _load(WORKFLOWS / "ci.yml")["jobs"][FULL_SUITE_JOB]
 
-    assert job.get("continue-on-error") is not True, (
-        f"ci.yml:{FULL_SUITE_JOB} carries `continue-on-error: true` at JOB level "
+    assert job.get("continue-on-error") in (None, False), (
+        f"ci.yml:{FULL_SUITE_JOB} carries "
+        f"`continue-on-error: {job.get('continue-on-error')!r}` at JOB level "
         "-- it now reports success whatever the suite does, which is the "
         "silent-check shape tan-cli#1126 exists to remove, wearing the job's own "
         "name. If the newest interpreter has become too noisy to block on, that "
@@ -532,13 +597,27 @@ def test_the_ceiling_job_cannot_be_neutered_without_being_removed():
 
     for index, step in enumerate(job["steps"]):
         label = step.get("name") or step.get("uses") or f"step {index}"
-        assert step.get("continue-on-error") is not True, (
+        assert step.get("continue-on-error") in (None, False), (
             f"ci.yml:{FULL_SUITE_JOB}'s step {label!r} carries "
-            "`continue-on-error: true`. A failure there is swallowed and the job "
+            f"`continue-on-error: {step.get('continue-on-error')!r}`. A failure "
+            "there is swallowed and the job "
             "still reports green -- on the pytest step that is the whole gate; "
             "on a setup step it means the suite runs against a half-built "
             "environment and says nothing about the interpreter."
         )
+
+    guard = str(job.get("if", "")).strip()
+    assert guard == RELEASE_GUARD_EXPRESSION, (
+        f"ci.yml:{FULL_SUITE_JOB}'s JOB-level `if:` is {guard!r}, and the only "
+        f"condition this job may carry is {RELEASE_GUARD_EXPRESSION!r}. Checked "
+        "by VALUE rather than by absence because this job legitimately has one "
+        "-- but any OTHER expression is the widest neutering available here: a "
+        "job whose `if:` is false renders SKIPPED, not failed, so the whole "
+        "suite runs zero times and nothing in the checks list objects. "
+        "[`test_the_ceiling_job_is_kept_off_the_release_path`] asserts the same "
+        "value for the release-path reason; the duplication is deliberate, so "
+        "this test stays complete if that one is ever narrowed."
+    )
 
     pytest_step = _ceiling_pytest_step(job)
     assert "if" not in pytest_step, (
@@ -612,6 +691,102 @@ def test_the_ceiling_job_is_kept_off_the_release_path():
         f"release.yml's `gates` call must pass {RELEASE_OPT_OUT_INPUT}: true. "
         "Without it the guard above is inert and the tag path floats again."
     )
+
+
+def _loaded(spelling: str):
+    """The Python value `yaml.safe_load` produces for `continue-on-error:
+    <spelling>` -- the real loader, so a control cannot encode a belief about
+    YAML that YAML does not share (`yes` is `True`, `!!str true` is a `str`,
+    an empty value is `None`)."""
+    return yaml.safe_load(f"continue-on-error: {spelling}")["continue-on-error"]
+
+
+def _patched_ci(monkeypatch, mutate) -> None:
+    """Run [`test_the_ceiling_job_cannot_be_neutered_without_being_removed`]
+    against a doctored `ci.yml`.
+
+    A deep copy behind a patched `_load`, rather than writing the workflow to
+    a temporary tree: the test under control reads `ci.yml` through that one
+    function, and editing the real file to measure a gate is how a measurement
+    gets left behind in a commit.
+    """
+    ci = copy.deepcopy(_load(WORKFLOWS / "ci.yml"))
+    mutate(ci["jobs"][FULL_SUITE_JOB])
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_load",
+        lambda path: ci if path.name == "ci.yml" else _load.__wrapped__(path),
+    )
+
+
+def _set_on_job(value):
+    def mutate(job):
+        job["continue-on-error"] = value
+
+    return mutate
+
+
+def _set_on_pytest_step(value):
+    def mutate(job):
+        _ceiling_pytest_step(job)["continue-on-error"] = value
+
+    return mutate
+
+
+@pytest.mark.parametrize("spelling", NEUTERING_SPELLINGS)
+@pytest.mark.parametrize("level", ("job", "step"))
+def test_a_neutering_spelling_reds_this_gate(monkeypatch, level: str, spelling: str):
+    """The negative control tan-cli#1182 asks for, one case per spelling.
+
+    Without it the fix is a one-line edit nothing stands behind: reverting
+    `in (None, False)` to `is not True` would leave every other test in this
+    file green, which is precisely how the hole survived from the day the
+    assertion was written. These reds instead, and name the spelling that got
+    through.
+    """
+    value = _loaded(spelling)
+    mutate = _set_on_job(value) if level == "job" else _set_on_pytest_step(value)
+    _patched_ci(monkeypatch, mutate)
+    with pytest.raises(AssertionError, match="continue-on-error"):
+        test_the_ceiling_job_cannot_be_neutered_without_being_removed()
+
+
+@pytest.mark.parametrize("spelling", BLOCKING_SPELLINGS)
+@pytest.mark.parametrize("level", ("job", "step"))
+def test_a_blocking_spelling_keeps_this_gate_green(monkeypatch, level: str, spelling: str):
+    """The other half of the control. A gate that reds on `false` would push
+    the next person to delete the key rather than write the opt-out, and an
+    absent key and an explicit `false` mean the same thing to the runner."""
+    value = _loaded(spelling)
+    mutate = _set_on_job(value) if level == "job" else _set_on_pytest_step(value)
+    _patched_ci(monkeypatch, mutate)
+    test_the_ceiling_job_cannot_be_neutered_without_being_removed()
+
+
+@pytest.mark.parametrize(
+    "guard",
+    (
+        "github.event_name == 'schedule'",
+        "${{ false }}",
+        "${{ !inputs.skip_ceiling_interpreter && github.event_name != 'pull_request' }}",
+        "${{ inputs.skip_ceiling_interpreter }}",
+    ),
+)
+def test_a_job_level_if_other_than_the_release_guard_reds_this_gate(monkeypatch, guard: str):
+    """The job-level `if:` control, and the reason it is a VALUE check.
+
+    A skipped job renders as "skipped", never "failed", so every expression
+    here leaves `python-newest` present, floating, named -- and running the
+    suite zero times. Blast radius wider than any `continue-on-error`, which
+    at least still runs pytest.
+    """
+
+    def mutate(job):
+        job["if"] = guard
+
+    _patched_ci(monkeypatch, mutate)
+    with pytest.raises(AssertionError, match="`if:`"):
+        test_the_ceiling_job_cannot_be_neutered_without_being_removed()
 
 
 @pytest.mark.parametrize("workflow", sorted({workflow for workflow, _ in FLOATING_JOBS}))
