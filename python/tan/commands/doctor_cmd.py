@@ -111,6 +111,21 @@ removed: both `alp-sdk-vscode` call sites (`["doctor", "--build"]`,
 relies on does not need to keep doing something to still be worth accepting
 without error.
 
+**One name out of that unported `--build` vocabulary came BACK, deliberately
+and partially (tan-cli#1192): `dtc`, and only as `devicetreeLint`.** The
+sentence above still holds for `git`/`cmake`/`ninja`/`gperf`/`vendorToolchain`
+-- none of those is ported and none is planned -- but `dtc`'s premise changed
+underneath it. When this paragraph was written the Zephyr SDK put a `dtc` in
+CMake's reach on every install, so probing for one could only restate what
+`zephyrSdk` already said. Since tan-cli#1176/#1178 `tan bootstrap` acquires
+the SDK with `--no-hosttools`, the SDK ships no `dtc`, and Zephyr's
+devicetree LINT pass (`dts.cmake`'s `if(DTC)` block) silently stopped running
+with nothing on either side saying so. `devicetreeLint` is not the oracle's
+`dtc` check re-ported -- that one was a bare is-it-on-PATH presence probe,
+which after #1178 would warn on every correct install -- it is the narrower
+question that probe cannot answer; see `devicetree_lint_check` for the
+predicate and the severity argument.
+
 `--fix` is a separate, NOT-yet-ported flag gap (it is not part of this one):
 the oracle's `--build --fix` auto-repairs a missing Zephyr workspace by
 running `tan bootstrap`, and nothing here does that yet.
@@ -151,6 +166,7 @@ from tan.core.bootstrap import (
     select_linux_install,
 )
 from tan.core.consent import can_prompt
+from tan.core import devicetree_lint
 from tan.core.doctor_git import (
     _git_behind_upstream,
     _git_core_longpaths,
@@ -1386,6 +1402,108 @@ def toolchain_check(sdk_root: str | None) -> Check:
         f"run `tan bootstrap` to acquire it (ADR 0021 Lane 1 P1).",
         "tan bootstrap",
         scope="project",
+    )
+
+
+def devicetree_lint_check(resolution: devicetree_lint.DtcResolution) -> Check:
+    """`devicetreeLint` -- will Zephyr's diagnostics-only `dtc` pass actually
+    run for a build on this host (tan-cli#1192)?
+
+    See `tan.core.devicetree_lint` for the two CMake mechanisms this mirrors
+    (`find_program(DTC dtc)` over the SDK's `hosttools` prefix then `PATH`,
+    then `find_package(Dtc 1.4.6)`'s silent `DTC-NOTFOUND` reset) and for the
+    tan-cli#1176/#1178 premise change that made the question worth asking.
+
+    **This partially reverses this module's own recorded decision that
+    `dtc`/`gperf` were deliberately NOT ported from the frozen Rust oracle's
+    `--build` vocabulary** (see the module docstring). That decision was right
+    when it was made and its premise is gone: `dtc` used to arrive with the
+    Zephyr SDK on every install, so a `dtc` probe could only restate what
+    `zephyrSdk` already reported. Since tan-cli#1178 `tan bootstrap` passes
+    `--no-hosttools`, the SDK ships no `dtc`, and the lint pass stopped
+    running with nothing anywhere saying so. `gperf` stays unported; only
+    `dtc` is reopened, and only as this question.
+
+    **The severity, which is the whole difficulty.** A naive "is `dtc` on
+    PATH" `warn` would fire on EVERY correctly-bootstrapped host, which is the
+    anti-pattern `west_check`'s own docstring records ("a warning that fires
+    on every correct install trains users to ignore warnings", tan-cli#299).
+    So the no-`dtc` arm is a `pass`: it is the ordinary, supported, documented
+    state, the build genuinely succeeds, and `tan bootstrap` is not a remedy
+    for it -- bootstrap is what caused it, on purpose. The row still SAYS the
+    lint is not running, which is the visibility tan-cli#1192 asks for, but it
+    raises no `issues[]` entry, contributes no `nextSteps` line, lands in
+    `summary.pass`, and cannot move the exit code.
+
+    The one `warn` arm is the host where somebody INSTALLED a `dtc` and does
+    not get the lint anyway, because `FindDtc.cmake` judged it unusable and
+    reset it to `DTC-NOTFOUND` without printing anything. That is a real,
+    actionable divergence between what an operator did and what they got, it
+    is unreachable on a host provisioned per this repo's own onramp, and its
+    fix is concrete. `warn`, never `fail`: `exit_code_for` reserves exit 4 for
+    a host that cannot build, and this one builds fine -- it just builds
+    without a class of diagnostics.
+
+    NOT harvested by `tan support-bundle`: that command reports only the five
+    HOST checks `support_bundle_cmd._HOST_CHECK_ORDER` names, built by
+    `host_environment_checks` (which this is deliberately not added to), so
+    this check reaches neither that command's report nor its verdict. That is
+    the right call for the same reason `_demote_long_paths_fail` exists --
+    support-bundle's acceptance bar is matching the frozen oracle's axes, and
+    the oracle has no devicetree-lint axis at all.
+
+    `scope="host"` on every arm: the subject is this machine's tooling (an SDK
+    install and `PATH`), identical for every project built on it, which is
+    `tan.core.doctor_scope`'s own test.
+    """
+    floor = devicetree_lint.format_version(devicetree_lint.DTC_MIN_VERSION)
+    lint_flags = "`-E unit_address_vs_reg` / `-Wunique_unit_address_if_enabled`"
+    if devicetree_lint.lint_will_run(resolution) and resolution.version is not None:
+        where = (
+            "the Zephyr SDK's own hosttools bundle, which `host-tools.cmake` puts on "
+            "`CMAKE_PREFIX_PATH`"
+            if resolution.origin == devicetree_lint.ORIGIN_HOSTTOOLS
+            else "this host's PATH"
+        )
+        return Check(
+            "devicetreeLint",
+            "pass",
+            f"dtc {devicetree_lint.format_version(resolution.version)} at "
+            f"{resolution.path} ({where}) -- Zephyr's devicetree lint pass "
+            f"({lint_flags}, `dts.cmake`'s `if(DTC)` block) runs for builds here.",
+            scope="host",
+        )
+    if resolution.path is not None:
+        answered = (
+            f"reports {devicetree_lint.format_version(resolution.version)}, below the "
+            f"{floor} floor"
+            if resolution.version is not None
+            else "did not answer `dtc --version` in a form `FindDtc.cmake` can parse"
+        )
+        return Check(
+            "devicetreeLint",
+            "warn",
+            f"`dtc` is installed at {resolution.path} but {answered}, so Zephyr's "
+            f"`find_package(Dtc {floor})` rejects it and `FindDtc.cmake` resets DTC to "
+            f"`DTC-NOTFOUND` -- silently. The devicetree lint pass ({lint_flags}) does "
+            f"not run, exactly as if no dtc were installed, and nothing in the build "
+            f"output says so.",
+            f"Install dtc {floor} or newer (Debian/Ubuntu `device-tree-compiler`, "
+            f"Homebrew `dtc`) ahead of {resolution.path} on PATH, or drop this one so "
+            f"the report stops claiming a lint that is not happening.",
+            scope="host",
+        )
+    return Check(
+        "devicetreeLint",
+        "pass",
+        f"no `dtc` in CMake's reach (neither a Zephyr SDK `hosttools/` copy nor one on "
+        f"PATH), so Zephyr's devicetree lint pass ({lint_flags}) is SKIPPED -- "
+        f"`dts.cmake` guards it with `if(DTC)` and treats dtc as optional. Builds "
+        f"succeed and produce a real `zephyr.elf`; only those diagnostics are absent. "
+        f"This is the expected state after `tan bootstrap`, which acquires the Zephyr "
+        f"SDK with `--no-hosttools` (tan-cli#1178) and so installs no dtc. Install a "
+        f"system dtc {floor} or newer if you want the lint back.",
+        scope="host",
     )
 
 
@@ -2719,6 +2837,58 @@ def _zephyr_sdk_detected() -> bool:
     return _zephyr_sdk_detected_root() is not None
 
 
+def _resolve_dtc() -> devicetree_lint.DtcResolution:
+    """Resolve `dtc` the way `zephyr/cmake/modules/FindDtc.cmake` would, and
+    ask it its version -- the IO half of `devicetree_lint_check`.
+
+    Order matters and is CMake's, not this file's: `find_program` searches
+    `CMAKE_PREFIX_PATH` BEFORE the ambient `PATH`, and the SDK's own
+    `cmake/zephyr/host-tools.cmake` is the only thing that puts a
+    `dtc`-bearing prefix on that list. A PATH-first probe would attribute the
+    reported version to the wrong binary on a host that has both -- the same
+    "which binary answered" defect tan-cli#123/#488 closed for `west`.
+
+    The SDK root comes from `_zephyr_sdk_detected_root()` -- the SAME
+    `ZEPHYR_SDK_INSTALL_DIR`-then-scan precedence `zephyrSdk` and `toolchain`
+    already trust, reused rather than re-rolled. One narrowing, stated rather
+    than glossed: an SDK reachable ONLY through CMake's user package registry
+    (`~/.cmake/packages/Zephyr-sdk/*`, which `west sdk install` writes and
+    `FindZephyr-sdk.cmake`'s CONFIG-mode lookup consults) and living outside
+    `$HOME` and `/opt` is not consulted here. That can only ever move a hosttools
+    `dtc` from the first arm to the third -- `pass` either way -- and never
+    manufacture the `warn`, which is the arm that would cost a customer
+    attention.
+
+    Never raises: `_zephyr_sdk_detected_root`, `on_path` and `probe` are all
+    non-raising by contract (see the module docstring), and the one direct
+    filesystem touch here catches `OSError` itself.
+    """
+    host_os, host_arch = _host_os_arch_tags()
+    found: str | None = None
+    origin = devicetree_lint.ORIGIN_ABSENT
+    sdk_dir = _zephyr_sdk_detected_root()
+    if sdk_dir is not None:
+        bin_dir = devicetree_lint.hosttools_bin_dir(sdk_dir, host_os, host_arch)
+        if bin_dir is not None:
+            candidate = bin_dir / ("dtc.exe" if os.name == "nt" else "dtc")
+            try:
+                present = candidate.is_file()
+            except OSError:
+                present = False
+            if present:
+                found, origin = str(candidate), devicetree_lint.ORIGIN_HOSTTOOLS
+    if found is None:
+        on_path_dtc = on_path("dtc")
+        if on_path_dtc is not None:
+            found, origin = on_path_dtc, devicetree_lint.ORIGIN_PATH
+    version = (
+        devicetree_lint.parse_dtc_version(probe([found, "--version"]))
+        if found is not None
+        else None
+    )
+    return devicetree_lint.DtcResolution(found, origin, version)
+
+
 def _probe_host_python(
     floor: tuple[int, int],
 ) -> tuple[str, tuple[int, int], str] | None:
@@ -3993,6 +4163,15 @@ def _collect(
     # issue #474 (ADR 0021 Lane 1 P1): stamp-vs-pin, narrower than `zephyrSdk`
     # above -- see `toolchain_check`'s own docstring for the distinction.
     _add(toolchain_check(sdk_root))
+    # tan-cli#1192: beside the two toolchain checks because it reads the SAME
+    # resolved SDK install (`_zephyr_sdk_detected_root`) they do -- but it
+    # answers a question neither does: whether Zephyr's diagnostics-only `dtc`
+    # pass will run at all now that `tan bootstrap` acquires the SDK with
+    # `--no-hosttools` (tan-cli#1178) and so ships no `dtc`. NOT added to
+    # `host_environment_checks` below: `tan support-bundle` reports only the
+    # five checks `_HOST_CHECK_ORDER` names, and this is not one of them --
+    # see `devicetree_lint_check`'s docstring for why that is deliberate.
+    _add(devicetree_lint_check(_resolve_dtc()))
     # tan-cli#736: unconditional on Windows. This used to ride the
     # `zephyrSdk` Fail (`and not zephyr_sdk_ok`), which silently excused the
     # host that has an SDK and no 7-Zip -- exactly the host whose next

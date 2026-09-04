@@ -999,13 +999,23 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # so it emits the SAME already-registered `doctor.bootstrap-manifest`
         # and no registry entry is added: one more call site, no new code --
         # exactly the shape the `63 as of tan-cli#727` bump above describes.
+        #
+        # 74 as of tan-cli#1192: `devicetree_lint_check` is THREE `Check(...)`
+        # sites (lint runs; a `dtc` Zephyr's own `find_package(Dtc 1.4.6)`
+        # rejects; no `dtc` in CMake's reach at all), all literally named
+        # `"devicetreeLint"`, so they contribute ONE new code,
+        # `doctor.devicetree-lint`, newly registered in
+        # `contract/issue-codes.json` -- the same shape as the
+        # `libraries_check` and `toolchain_check` bumps above. Only the middle
+        # site can ever emit it: the other two are `pass`, and
+        # `checks_to_issues` raises an issue for `warn`/`fail` only.
         prefix="doctor.",
         expr="kebab_check_name(check.name)",
         name="Check",
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=71,
+        expected_calls=74,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(
