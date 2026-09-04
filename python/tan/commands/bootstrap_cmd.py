@@ -95,7 +95,11 @@ from tan.commands.doctor_cmd import (
 )
 from tan.core import toolchain_provision
 from tan.core.probe import probe_status
-from tan.core.subprocess_env import restore_ld_library_path, spawn_env
+from tan.core.subprocess_env import (
+    ld_library_path_needs_restore,
+    restore_ld_library_path,
+    spawn_env,
+)
 from tan.commands.presets_cmd import parse_som_preset, resolve_project_paths
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, global_default_pointer_fix_hint
 from tan.core.atomic_write import atomic_write_bytes, atomic_write_text
@@ -632,8 +636,9 @@ class Runner:
         # that function's own docstring for why -- so this never touches a
         # host that never had the problem, and never guesses at a value to
         # fall back to.
-        ld_library_path_orig = os.environ.get("LD_LIBRARY_PATH_ORIG")
-        if not self.clear_zephyr_base and not extra_env and ld_library_path_orig is None:
+        # tan-cli#1189: keyed off `LD_LIBRARY_PATH_ORIG is None` until that
+        # proxy was measured wrong. See `ld_library_path_needs_restore`.
+        if not self.clear_zephyr_base and not extra_env and not ld_library_path_needs_restore():
             return None
         env = dict(os.environ)
         restore_ld_library_path(env)
