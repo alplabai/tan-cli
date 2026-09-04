@@ -1292,6 +1292,73 @@ def _augment_with_low_disk_note(root: Path, detail: str) -> str:
     return f"{detail} {note}" if note else detail
 
 
+def _zephyr_base_path(facts: BootstrapFacts, tokens: Tokens) -> str | None:
+    """`$ZEPHYR_BASE` AS THE MANIFEST DECLARES IT, token-substituted -- or
+    `None` when the manifest declares no such key, or declares it blank.
+
+    Never re-derived as `<workspaceDir>/zephyr`: if alp-sdk repoints that key,
+    the envelope's `zephyrBase`, the printed export line and the tripwire below
+    all have to follow it together. One derivation, two callers, so a repoint
+    cannot leave `_data` and `_west_sdk_netrc_drift` reading different trees.
+
+    **TEXT, not a `Path`** (tan-cli#1170 review). `Path()` normalises, and
+    neither caller wants that: `_data` puts this on the wire, where a declared
+    trailing slash is the manifest's to keep and not tan's to drop, and a blank
+    declaration would become `"."` -- which would send `_west_sdk_netrc_drift`
+    to read `./scripts/west_commands/sdk.py` relative to the process CWD and
+    judge the workspace by whatever unrelated tree it found. Blank is `None`
+    on both counts, so `_data` renders `""` exactly as it does for an absent
+    key and that read cannot happen. No manifest declares it blank today; this
+    is a guard, not a fix.
+    """
+    for key, raw in facts.env:
+        if key == "ZEPHYR_BASE":
+            resolved = tokens.apply(raw)
+            return resolved if resolved else None
+    return None
+
+
+def _west_sdk_netrc_drift(ws: Workspace, var: str, version: str) -> str | None:
+    """The `bootstrap.sdk-credential-unverified` message when this workspace's
+    `west sdk install` no longer matches the shape tan's netrc route was
+    reasoned about -- `None` when it does, or when there is nothing to read.
+
+    **The RUNTIME half of `toolchain_provision.NETRC_ENV_VAR`'s residual-risk
+    note** (tan-cli#1154). Deliberately not a CI gate: `requests` is not a tan
+    dependency and `ci.yml` checks out alp-sdk but never zephyr, so a gate
+    would skip in CI and on every developer box -- a gate that cannot fail.
+    This runs only where the artifact exists, which on the path that matters
+    (a `tan bootstrap` about to spend several minutes on an authenticated
+    download) is always.
+
+    Silent on `OSError`. Refusing to claim authentication needs evidence that
+    the assumption BROKE, and "could not look" is not that -- warning on it
+    would train the reader to ignore the code on the one run where it means
+    something. **Not, as an earlier revision of this docstring claimed,
+    because it "would fire on every `--no-west` workspace"** (tan-cli#1170
+    review): a `--no-west` run never reaches here at all. `toolchain_phase` has
+    exactly one caller and it sits in the `else:` of `elif no_west:`, which
+    logs "Skipping cross-toolchain acquisition (--no-west: ...)" and calls
+    nothing. The cases that DO reach an unreadable `sdk.py` are ordinary and
+    all of them mean "not yet", never "broken": an adopted topdir whose zephyr
+    is not at the `$ZEPHYR_BASE` the manifest declares, a `west update` that
+    part-failed or was interrupted before the zephyr repo landed, and a Zephyr
+    that moved `scripts/west_commands` out from under the path this reads.
+    """
+    base = _zephyr_base_path(ws.facts, Tokens(str(ws.repo_root), str(ws.workspace_dir)))
+    if base is None:
+        return None
+    try:
+        source = (Path(base) / "scripts" / "west_commands" / "sdk.py").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return None
+    if toolchain_provision.west_sdk_netrc_assumptions_hold(source):
+        return None
+    return toolchain_provision.west_sdk_netrc_drift_message(var, version)
+
+
 @dataclass(frozen=True)
 class _SdkCredential:
     """A GitHub credential staged on disk for ONE `west sdk install` run.
@@ -1308,6 +1375,14 @@ class _SdkCredential:
     extra_env: dict[str, str]
     #: The private directory `_discard_sdk_credential` must delete afterwards.
     scratch_dir: Path
+    #: Whether tan could still see the shape the netrc route depends on when
+    #: this was staged -- `False` exactly when this run raised
+    #: `bootstrap.sdk-credential-unverified` (tan-cli#1170). It travels ON the
+    #: credential rather than being recomputed downstream so that no later
+    #: surface can reach a different verdict about the same download than the
+    #: warning the user already read; `toolchain_provision.rate_limit_note`
+    #: is the one consumer.
+    verified: bool = True
 
 
 def _stage_sdk_credential(
@@ -1326,10 +1401,10 @@ def _stage_sdk_credential(
     install` reads a token from that flag and from no environment variable
     of its own (Zephyr v4.4.1 `scripts/west_commands/sdk.py:473`), but its
     GitHub call goes through `requests`, which reads a netrc path from
-    `$NETRC` and applies it whenever the request carries no `Authorization`
-    header -- west's own no-token branch. West's rate-limit message names
-    that route itself ("or use a .netrc file"). See
-    `toolchain_provision.NETRC_ENV_VAR`.
+    `$NETRC` and applies it unless the call passes `auth=` or the session sets
+    `trust_env=False` -- NOT "whenever the request carries no `Authorization`
+    header", as an earlier revision said; a header does not suppress it, the
+    netrc match overwrites one (`toolchain_provision.NETRC_ENV_VAR`).
 
     The file is created `O_EXCL` at mode 0600 inside a fresh `mkdtemp`
     directory (0700), so it can never be read by another user and can never
@@ -1447,7 +1522,9 @@ def _reclaim_sdk_credential_wreckage(root: Path) -> None:
         pass
 
 
-def _sdk_credential(log: Log, runner: Runner, root: Path) -> _SdkCredential | None:
+def _sdk_credential(
+    ws: Workspace, log: Log, runner: Runner, root: Path, version: str
+) -> _SdkCredential | None:
     """The staged credential for this `west sdk install`, or `None` when the
     environment names none -- in which case the download is exactly as
     unauthenticated as it has always been (tan-cli#1143 acceptance: the
@@ -1495,7 +1572,24 @@ def _sdk_credential(log: Log, runner: Runner, root: Path) -> _SdkCredential | No
             "install`; the Zephyr SDK download will go out unauthenticated.",
         )
     if credential is not None:
-        log.line(f"Authenticating the Zephyr SDK download with the token in ${token.source}")
+        # tan-cli#1154: the claim is made ONLY when tan can still see the shape
+        # the netrc route depends on. An inert credential is worse than an
+        # absent one -- it removes the symptom that would send the reader to
+        # find a token -- so a drifted west downgrades this line to a warning
+        # rather than printing an assurance tan can no longer stand behind.
+        drift = _west_sdk_netrc_drift(ws, token.source, version)
+        if drift is not None:
+            log.warn("sdk-credential-unverified", drift)
+            # tan-cli#1170: recorded ON the credential, not left to be
+            # recomputed later. `rate_limit_note`'s authenticated branch
+            # otherwise tells the same reader, minutes later in the same run,
+            # that "tan already handed this download the credential in
+            # $<var>" -- the assurance this branch just withdrew.
+            credential = replace(credential, verified=False)
+        else:
+            log.line(
+                f"Authenticating the Zephyr SDK download with the token in ${token.source}"
+            )
     return credential
 
 
@@ -1805,7 +1899,7 @@ def _acquire_toolchain(
         f"Installing the Zephyr SDK {manifest.version} + arm-zephyr-eabi toolchain "
         f"(this can take several minutes on a slow link)"
     )
-    credential = _sdk_credential(log, runner, root)
+    credential = _sdk_credential(ws, log, runner, root, manifest.version)
     try:
         detail = _run_west_sdk_install_with_retries(
             ws,
@@ -1833,10 +1927,17 @@ def _acquire_toolchain(
         # environment carries. `credential_seen` is the second half of that
         # (tan-cli#1148 review): an environment that HELD a credential tan
         # could not use must not be told to go and set one.
+        # `verified` (tan-cli#1170) is the third axis: a credential that was
+        # staged and passed but whose transport this run already declined to
+        # vouch for. Without it the authenticated branch renders an assurance
+        # the `sdk-credential-unverified` warning printed above this one has
+        # already withdrawn, and the customer reads two wire surfaces
+        # disagreeing about one download.
         rate_limited = toolchain_provision.rate_limit_note(
             augmented,
             authenticated_as=credential.source if credential is not None else None,
             credential_seen=_sdk_credential_seen() if credential is None else None,
+            verified=credential.verified if credential is not None else True,
         )
         if rate_limited is not None:
             augmented = f"{augmented} {rate_limited}"
@@ -2579,20 +2680,17 @@ def _data(
     `zephyrBase` is RENDERED FROM THE MANIFEST (`env.ZEPHYR_BASE`), never
     re-derived as `<workspaceDir>/zephyr`: if alp-sdk repoints that key the
     printed export line follows it, and a second derivation here would hand a
-    consumer a path nothing else in the run agrees with. Absent key -> `""`,
-    like every other unresolved path field.
+    consumer a path nothing else in the run agrees with. Absent -- or declared
+    blank -- key -> `""`, like every other unresolved path field, and the
+    declared text is put on the wire unnormalised (see `_zephyr_base_path`).
 
     `missingPrerequisites` is an explicit `null` on every run with no missing
     tool to name -- NEVER `[]`, which would be a second spelling of the fact a
     successful run already reports as `null`.
     """
     tokens = paths.tokens() if paths else Tokens("", "")
-    zephyr_base = ""
-    if paths is not None:
-        for key, raw in facts.env:
-            if key == "ZEPHYR_BASE":
-                zephyr_base = _native(tokens.apply(raw))
-                break
+    resolved = _zephyr_base_path(facts, tokens) if paths is not None else None
+    zephyr_base = _native(resolved) if resolved is not None else ""
     data: dict[str, object] = {
         "schemaVersion": DATA_SCHEMA_VERSION,
         # `_native` like the other three: a consumer comparing `sdkRoot` against

@@ -36,7 +36,7 @@ _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "models" / "tiny_i
 # just "tflite not installed" (importorskip's own bare default message), but
 # which extra actually puts it on PATH. `pip install -e ./python` alone (the
 # bare shape `ci.yml`'s `gates` job installs, no extras) never gets this.
-_MODEL_IO_SKIP_REASON = "tflite reader missing -- pip install alp-tan[model-io] for real .tflite parsing"
+_MODEL_IO_SKIP_REASON = "tflite reader missing -- pip install tan-cli[model-io] for real .tflite parsing"
 
 
 def envelope(result):
@@ -383,7 +383,7 @@ def test_text_mode_carries_the_silent_cpu_fallback_sentence_and_the_upgrade_hint
     assert "96% of compute" in text
     assert "NORMALIZE" in text and "TOPK" in text
     assert "falls back to the CPU silently rather than failing" in text
-    assert "Exact:  pip install alp-tan[model-compile]  &&  tan model check --exact" in text
+    assert "Exact:  pip install tan-cli[model-compile]  &&  tan model check --exact" in text
 
 
 # --------------------------------------------------------------------------

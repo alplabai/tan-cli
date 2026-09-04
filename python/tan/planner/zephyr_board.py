@@ -83,10 +83,13 @@ Scope (issue #523, first slice):
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any, NoReturn
+
+# NO module-scope `import json` any more (tan-cli#1162): `_load_soc_spec` was
+# its only user and now reads through `document_guards.read_json_mapping`.
+from tan.core.document_guards import DocumentGuards
 
 from .loader import _load_yaml
 from .project_loader import _resolve_sku
@@ -127,21 +130,47 @@ class ZephyrBoardEmitError(ValueError):
     """Raised when metadata needed for a requested board is missing."""
 
 
+#: The malformed-document register, bound to THIS module's curated class.
+_GUARDS = DocumentGuards(ZephyrBoardEmitError)
+
+
 # ---------------------------------------------------------------------
 # Family-agnostic naming + resolution
 # ---------------------------------------------------------------------
 
 
 def _load_soc_spec(sku_preset: dict[str, Any], metadata_root: Path) -> dict[str, Any]:
+    """The SoC JSON this SoM's `silicon:` ref names, as a mapping.
+
+    RELOCATED divergence from alp-sdk's own `scripts/alp_orchestrate/
+    zephyr_board.py` (tan-cli#1162): upstream still spells the last two
+    lines as an `is_file()` pre-flight plus a bare `json.loads(soc_path.
+    read_text(...))`. Read, parse and shape-check now go through
+    `tan/core/document_guards.py`'s register, for the reasons
+    `read_json_mapping` documents.
+
+    NOT on the `tan build` path, contrary to tan-cli#1162's own body, and
+    established by walking callers rather than assumed: the only caller is
+    `emit_zephyr_board` (this module), reached only through
+    `planner_emit.py:287`, so only from `tan generate --emit zephyr-board`.
+    `loader.py:385` and `secure.py:102` take `_aen_role_slot0_map` and two
+    constants from this module, never this function. The handler that
+    actually catches what this raises is `generate_cmd.py:890`'s
+    `except BaseException` -- coded, not a bare traceback, but naming the
+    exception class instead of the file.
+
+    `no SoC spec at <path>` is preserved byte for byte through `absent=`;
+    the shapes the pre-flight folded into it (a directory, a denied mode, a
+    symlink loop) now say `cannot read`, which is true where it was not.
+    """
     silicon = sku_preset.get("silicon")
     if not silicon:
         raise ZephyrBoardEmitError(f"SoM {sku_preset.get('sku')!r} declares no silicon:")
     soc_path = resolve_soc_path(silicon, metadata_root)
     if soc_path is None:
         raise ZephyrBoardEmitError(f"silicon ref {silicon!r} is not a triple-colon string")
-    if not soc_path.is_file():
-        raise ZephyrBoardEmitError(f"no SoC spec at {soc_path}")
-    return json.loads(soc_path.read_text(encoding="utf-8"))
+    return _GUARDS.read_json_mapping(
+        soc_path, what="SoC spec", absent=f"no SoC spec at {soc_path}")
 
 
 def _resolve_variant(sku_preset: dict[str, Any], soc_spec: dict[str, Any]) -> dict[str, Any]:

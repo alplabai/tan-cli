@@ -45,7 +45,7 @@ _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "models" / "tiny_i
 # which extra actually puts it on PATH. `pip install -e ./python` alone (the
 # bare shape `ci.yml`'s `gates` job installs, no extras) never gets this;
 # only the real read-a-real-.tflite tests need it.
-_MODEL_IO_SKIP_REASON = "tflite reader missing -- pip install alp-tan[model-io] for real .tflite parsing"
+_MODEL_IO_SKIP_REASON = "tflite reader missing -- pip install tan-cli[model-io] for real .tflite parsing"
 
 
 #: Every core name a perf-point test in this file writes onto a point's

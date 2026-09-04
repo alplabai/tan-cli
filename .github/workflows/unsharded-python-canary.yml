@@ -188,7 +188,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: install alp-tan[monitor] + pytest
+      - name: install tan-cli[monitor] + pytest
         shell: bash
         working-directory: python
         run: |

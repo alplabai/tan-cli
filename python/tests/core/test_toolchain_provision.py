@@ -458,18 +458,70 @@ def test_a_credential_that_was_present_but_unused_is_told_so_not_told_to_set_one
     assert "AUTHENTICATED quota" not in note
 
 
-def test_the_authenticated_note_names_the_one_symptom_an_inert_transport_would_show():
-    """tan pins neither `west` nor `requests`, so a future west that sets its
-    own Authorization header on the no-token branch would make the netrc
-    transport INERT with no gate anywhere able to catch it (`requests` is not
-    a tan dependency and no zephyr checkout exists at test time, so any such
-    gate would SKIP everywhere -- a dead gate). This sentence is the
-    substitute: the live symptom, surfaced at the exact moment an inert
-    transport becomes observable."""
+def test_the_authenticated_note_names_the_one_symptom_a_suppressed_netrc_would_show():
+    """tan pins neither `west` nor `requests`, so a future west could stop
+    tan's netrc reaching the wire with no gate anywhere able to catch it
+    (`requests` is not a tan dependency and no zephyr checkout exists at test
+    time, so any such gate would SKIP everywhere -- a dead gate). This sentence
+    is the substitute: the live symptom, surfaced at the exact moment a
+    suppressed transport becomes observable.
+
+    It must not name the shape that does NOT suppress anything (tan-cli#1170).
+    Until then it closed with "a `west` that sets its own Authorization header
+    would silently bypass it", which `requests` 2.34.2 falsifies -- the netrc
+    match overwrites such a header -- and which would have sent a customer to
+    file a west bug about a header that bypasses nothing. The two shapes that
+    do suppress it are `auth=` and `trust_env=False`, and those are what it
+    describes now.
+    """
     note = tp.rate_limit_note("API rate limit exceeded", authenticated_as="GH_TOKEN")
     assert note is not None
     assert "may not be reaching `west sdk install`" in note
     assert "west --version" in note
+    assert "its own credential argument" in note
+    assert "environment switched off" in note
+    assert "Authorization header" not in note
+
+
+def test_a_staged_but_unverified_credential_does_not_get_told_it_was_authenticated():
+    """tan-cli#1170 MAJOR. `bootstrap.sdk-credential-unverified` tells the
+    reader to "treat this run as unauthenticated"; minutes later, on the same
+    run, the rate-limit remedy used to open with "tan already handed this
+    download the credential in $GH_TOKEN". Two wire surfaces contradicting each
+    other about one download is the shape `_sdk_credential`'s own docstring
+    calls worse than the silence the warning replaced.
+
+    The fourth branch does not pick a quota either: "that is the AUTHENTICATED
+    quota" is an INFERENCE from "tan handed over a credential", and the warning
+    is tan saying it can no longer draw it.
+    """
+    note = tp.rate_limit_note(
+        "API rate limit exceeded", authenticated_as="GH_TOKEN", verified=False
+    )
+    assert note is not None
+    assert "cannot tell you which of GitHub's two quotas" in note
+    assert "$GH_TOKEN" in note
+    assert "sdk-credential-unverified" in note
+    # It contradicts neither the warning above it nor the anonymous branch.
+    assert not note.startswith("That is GitHub's AUTHENTICATED quota")
+    assert "$TAN_GITHUB_TOKEN" not in note  # never "go and set a token"
+
+
+def test_the_four_rate_limit_branches_are_four_distinct_strings():
+    """Non-vacuity for the branch added in tan-cli#1170: a `verified` argument
+    that was accepted and ignored would leave two of these identical."""
+    detail = "API rate limit exceeded"
+    notes = [
+        tp.rate_limit_note(detail, authenticated_as="GH_TOKEN"),
+        tp.rate_limit_note(detail, authenticated_as="GH_TOKEN", verified=False),
+        tp.rate_limit_note(detail, authenticated_as=None, credential_seen="GH_TOKEN"),
+        tp.rate_limit_note(detail, authenticated_as=None),
+    ]
+    assert all(note is not None for note in notes)
+    assert len(set(notes)) == 4
+    # `verified=False` with no credential at all is not a fifth state -- there
+    # is nothing staged to be unverified about.
+    assert tp.rate_limit_note(detail, authenticated_as=None, verified=False) == notes[3]
 
 
 def test_a_set_but_unusable_token_variable_is_reported_rather_than_dropped():

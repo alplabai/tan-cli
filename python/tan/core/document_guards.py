@@ -291,6 +291,7 @@ curated-raise contract, and no more:
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 __all__ = ["SHAPE_NOUN", "DocumentGuards"]
@@ -374,7 +375,8 @@ class DocumentGuards:
         return self.require_field(value, kind, doc=doc, field=f"{field}.{key}")
 
     def require_readable_text(
-        self, path: Any, *, what: str, absent: str | None = None,
+        self, path: Any, *, what: str,
+        absent: str | Callable[[], str] | None = None,
     ) -> str:
         """@path, decoded as UTF-8 text, or the injected curated error --
         the read-half tan-cli#1085 pulled out of `read_catalog_document`
@@ -405,6 +407,9 @@ class DocumentGuards:
         interpreters and a curated-but-UNTRUE "no such file" on the third
         (both measured on this tree before the fix).
 
+        @absent may also be a zero-argument CALLABLE, resolved only if the
+        `FileNotFoundError` branch is taken -- see `_unreadable` below.
+
         ONLY `FileNotFoundError` takes @absent, deliberately. Every other
         `OSError` means the path is there in some form and could not be read
         as text -- a directory (`IsADirectoryError`), a parent that is a
@@ -420,7 +425,8 @@ class DocumentGuards:
             raise self._unreadable(exc, path, what, absent) from exc
 
     def require_readable_bytes(
-        self, path: Any, *, what: str, absent: str | None = None,
+        self, path: Any, *, what: str,
+        absent: str | Callable[[], str] | None = None,
     ) -> bytes:
         """@path's RAW BYTES, or the injected curated error -- the same
         contract as `require_readable_text` above for a caller that must not
@@ -456,7 +462,8 @@ class DocumentGuards:
             raise self._unreadable(exc, path, what, absent) from exc
 
     def _unreadable(
-        self, exc: BaseException, path: Any, what: str, absent: str | None,
+        self, exc: BaseException, path: Any, what: str,
+        absent: str | Callable[[], str] | None,
     ) -> Exception:
         """The curated error for a failed read -- ONE definition of the
         message, shared by both read halves above.
@@ -465,9 +472,31 @@ class DocumentGuards:
         and nothing else: every other failure means the path is there in some
         form and could not be read, so `cannot read ...` is true where "no
         such file" would not be.
+
+        @absent may be a zero-argument CALLABLE as well as a string. The
+        rationale lives HERE, in the one function that resolves it and the
+        one both read halves and all four widened signatures funnel into,
+        rather than on `require_readable_text` above: on the signature it
+        would be four copies of one paragraph, and each copy would be a
+        place for the next edit to fall out of step with the resolution
+        rule it describes.
+
+        It is resolved HERE too -- inside the `FileNotFoundError` branch -- so a
+        caller whose absent-message is expensive or itself fallible does not
+        pay for it, or trip over it, on the paths that never use it
+        (tan-cli#1171 review). `libraries.load_manifest` is the caller that
+        needs it: its message ends `Available: <every manifest stem>`, and
+        building that list means LISTING `metadata/libraries/`. Eagerly, that
+        directory walk ran ahead of the guarded read on every call -- so with
+        `metadata/` itself denied it raised a raw `PermissionError` out of
+        `Path.is_dir()` on 3.12.3 and 3.13.15 while the guarded read gave the
+        curated message on 3.14.7, reinstating the exact tan-cli#1127 split
+        this family exists to remove (all three measured). Passed lazily, the
+        listing happens only after the read has already answered "not there",
+        which is the one branch it describes.
         """
         if absent is not None and isinstance(exc, FileNotFoundError):
-            return self.error(absent)
+            return self.error(absent() if callable(absent) else absent)
         return self.error(
             f"cannot read {what} at {path}: "
             f"{getattr(exc, 'strerror', None) or exc}")
@@ -520,7 +549,8 @@ class DocumentGuards:
         return self.require_mapping_doc(doc or {}, path=path, what=what)
 
     def read_yaml_mapping(
-        self, path: Any, *, what: str, absent: str | None = None,
+        self, path: Any, *, what: str,
+        absent: str | Callable[[], str] | None = None,
     ) -> dict[str, Any]:
         """A YAML document at @path, read AND parsed AND known to be a
         mapping -- the exact composite `read_catalog_document` below already
@@ -546,6 +576,102 @@ class DocumentGuards:
             self.require_readable_text(path, what=what, absent=absent),
             path=path, what=what)
 
+    def read_optional_text(self, path: Any, *, what: str) -> str | None:
+        """@path's text, or `None` when the document is NOT THERE AT ALL --
+        every other read failure still raises the injected curated error
+        (tan-cli#1162).
+
+        The one shape `require_readable_text` cannot express: a caller for
+        whom an absent document is a legal branch rather than a failure.
+        `tan/planner/topology.py::_core_os_choices` is its consumer -- a
+        `metadata_root` that carries no `schemas/` of its own (a synthetic
+        test root) falls back to the in-tree `BOARD_SCHEMA`, and that
+        fallback is the function's own documented contract, not an error
+        path.
+
+        Absent is `FileNotFoundError` OR `NotADirectoryError`, and the
+        second is not a widening for its own sake: `ENOTDIR` means an
+        ancestor of @path is a regular file, so the directory the caller
+        was looking in does not exist as a directory -- the same "this root
+        carries no such document" fact `ENOENT` reports, arrived at one
+        level up. Every OTHER `OSError` (`PermissionError`,
+        `IsADirectoryError`, `ELOOP`) and `UnicodeDecodeError` means the
+        document IS there and could not be read, which is a failure and
+        must not degrade to a silent fallback onto a DIFFERENT document.
+
+        That distinction is the whole reason this is a `try` rather than
+        the `is_file()` pre-flight it replaces. `Path.is_file()` answers
+        `False` to all of those alike where it answers at all, and on a
+        `chmod 000` parent it does not answer at all on two of the three
+        interpreters this repo supports (tan-cli#1127) -- so the pre-flight
+        version of this branch raised a raw `PermissionError` on 3.12.3 and
+        3.13.15 and silently read the wrong schema on 3.14.7.
+        """
+        try:
+            return path.read_text(encoding="utf-8")
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except (OSError, UnicodeDecodeError) as exc:
+            raise self._unreadable(exc, path, what, None) from exc
+
+    def require_json_mapping_doc(
+        self, text: str, *, path: Any, what: str, noun: str = "a JSON object",
+    ) -> dict[str, Any]:
+        """@text parsed as JSON and known to be a mapping, or the injected
+        curated error -- `read_catalog_document`'s own parse+shape arm,
+        pulled out so it is not the catalog's private property
+        (tan-cli#1162).
+
+        Extracted for the same FORMAT-SYMMETRY reason the module docstring
+        gives for `require_yaml_mapping_doc`, and in the same direction:
+        that method already answers "is this text the document it claims to
+        be" for YAML, and the JSON half was sitting inline in one
+        catalog-specific composite where a second JSON reader could not
+        reach it. `tan/planner/zephyr_board.py::_load_soc_spec` and
+        `tan/planner/topology.py::_core_os_choices` are that second and
+        third reader.
+
+        A MOVE, not a copy: `read_catalog_document` below now calls this,
+        so the `not valid JSON` message has one definition rather than two
+        that happen to agree. Its own messages are unchanged byte for byte
+        -- `what="template catalog"` and the default @noun reproduce
+        exactly what tan-cli#1084 landed.
+
+        No `doc or {}` here, deliberately, where `require_yaml_mapping_doc`
+        has one: an empty YAML document parses to `None` and legitimately
+        means "an empty mapping", while empty JSON text is a
+        `json.JSONDecodeError` and a literal `null` is a document that says
+        `null` -- refused as `got NoneType`, which is what the catalog has
+        always done.
+        """
+        try:
+            doc = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise self.error(
+                f"malformed {what} at {path}: not valid JSON "
+                f"({exc.msg}, line {exc.lineno} column {exc.colno})") from exc
+        return self.require_mapping_doc(doc, path=path, what=what, noun=noun)
+
+    def read_json_mapping(
+        self, path: Any, *, what: str,
+        absent: str | Callable[[], str] | None = None,
+        noun: str = "a JSON object",
+    ) -> dict[str, Any]:
+        """A JSON document at @path, read AND parsed AND known to be a
+        mapping -- exactly what `read_yaml_mapping` above is for YAML, and
+        what `read_catalog_document` below now IS (tan-cli#1162).
+
+        @absent behaves as it does on `require_readable_text`: it is the
+        caller's own message for `FileNotFoundError` and nothing else, and
+        passing one is what lets a caller drop an `is_file()` pre-flight
+        without losing the message that pre-flight used to produce.
+        `_load_soc_spec`'s `no SoC spec at <path>` is preserved that way,
+        byte for byte.
+        """
+        return self.require_json_mapping_doc(
+            self.require_readable_text(path, what=what, absent=absent),
+            path=path, what=what, noun=noun)
+
     def read_catalog_document(self, path: Any) -> dict[str, Any]:
         """`metadata/templates/catalog-v1.json`, decoded and known to be a
         JSON object -- the read BOTH catalog readers do.
@@ -554,16 +680,16 @@ class DocumentGuards:
         JSONDecodeError` is a `ValueError` too, so an `except TemplateError`
         never caught it and a half-written catalog reached the user as a
         traceback.
+
+        A one-line call into `read_json_mapping` since tan-cli#1162, which
+        pulled the read+parse+shape composite this function WAS out to
+        where a second and third JSON reader could use it. Its messages are
+        unchanged byte for byte; what changed is that they now have one
+        definition. Kept as a named method rather than inlined at its two
+        call sites because `what="template catalog"` is the fact those
+        callers must not have to spell twice.
         """
-        text = self.require_readable_text(path, what="template catalog")
-        try:
-            doc = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise self.error(
-                f"malformed template catalog at {path}: not valid JSON "
-                f"({exc.msg}, line {exc.lineno} column {exc.colno})") from exc
-        return self.require_mapping_doc(
-            doc, path=path, what="template catalog", noun="a JSON object")
+        return self.read_json_mapping(path, what="template catalog")
 
     def catalog_templates(self, doc: Any, *, path: Any) -> list[Any]:
         """`templates:` as a real list, on a catalog that is really a mapping.

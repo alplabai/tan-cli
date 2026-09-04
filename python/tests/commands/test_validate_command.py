@@ -1465,7 +1465,7 @@ def test_a_real_sdk_backed_board_passes_without_offline(tmp_path, monkeypatch):
     `_planner_python` is pinned to `sys.executable` for determinism, NOT to
     dodge a failure: it otherwise falls back to bare PATH `python`/`python3`
     (see its docstring), whose third-party imports are whatever the host
-    happens to have. The interpreter running pytest has alp-tan's own
+    happens to have. The interpreter running pytest has tan-cli's own
     `jsonschema`/`PyYAML` installed, which is what the real validator needs.
     """
     monkeypatch.chdir(tmp_path)

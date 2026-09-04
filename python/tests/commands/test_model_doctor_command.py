@@ -98,7 +98,7 @@ def test_ethos_u_unavailable_reason_is_exact(tmp_path, monkeypatch):
     assert row["tool"] == "vela"
     assert row["available"] is False
     assert row["version"] is None
-    assert row["reason"] == "vela not on PATH; pip install alp-tan[model-compile]"
+    assert row["reason"] == "vela not on PATH; pip install tan-cli[model-compile]"
 
 
 def test_ethos_u_available_when_vela_is_on_path(tmp_path, monkeypatch):
@@ -585,7 +585,7 @@ def test_text_mode_reports_one_readable_line_per_backend(tmp_path, monkeypatch):
     lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
     assert any(ln.startswith("cpu: available") for ln in lines)
     assert any(
-        ln.startswith("ethos_u: unavailable") and "pip install alp-tan[model-compile]" in ln
+        ln.startswith("ethos_u: unavailable") and "pip install tan-cli[model-compile]" in ln
         for ln in lines
     )
     assert any(

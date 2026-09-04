@@ -782,7 +782,20 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # `WORKSPACE_BLOCKING` member (the download usually still succeeds).
         # Registered as `bootstrap.sdk-credential-unstaged` in
         # contract/issue-codes.json before bumping.
-        expected_calls=33,
+        #
+        # 34, not 33, since tan-cli#1154 gave the SAME `_sdk_credential` a
+        # runtime tripwire under that netrc route: ONE new
+        # `log.warn("sdk-credential-unverified", ...)` call site, taken
+        # instead of the `Authenticating the Zephyr SDK download ...` line
+        # when the resolved `<zephyr_base>/scripts/west_commands/sdk.py` no
+        # longer matches the shape the route was measured against. A NEW code,
+        # not a second site on the old one -- "the credential is staged but
+        # tan cannot vouch for it" is a different fact from
+        # `sdk-credential-unstaged`'s "tan did not use it at all", and
+        # collapsing them would put two verdicts behind one wire string.
+        # Registered as `bootstrap.sdk-credential-unverified` in
+        # contract/issue-codes.json before bumping.
+        expected_calls=34,
         sites=1,
     ),
     ("tan/commands/bootstrap_cmd.py", "_refusal"): dict(

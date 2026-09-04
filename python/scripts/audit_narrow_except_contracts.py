@@ -155,10 +155,23 @@ WHAT SHAPE 3 DOES NOT CLAIM, spelled out to the same standard as SHAPE 2:
   * It says nothing about whether the read can actually FAIL. A
     `read_text` on a path this same function just wrote is reported like
     any other. `commands/build_cmd::_build` is the live example on this
-    tree: PR #1160's review checked it and it is a FALSE POSITIVE --
-    `_acquire_plan` returns `text, parse_build_plan(text)`
-    (`build_cmd.py:546`), so the later `json.loads(text)` on that same
-    already-parsed string cannot fail.
+    tree, and as of tan-cli#1162 the ONLY remaining SHAPE 3 finding
+    anywhere in it: PR #1160's review checked it, tan-cli#1162 re-checked
+    it independently, and it is a FALSE POSITIVE. The chain, spelled out
+    once here so a third round does not re-derive it -- `_build` opens
+    with `text, plan = _acquire_plan(...)` (`build_cmd.py:1225`);
+    `_acquire_plan` ends `return text, parse_build_plan(text)`
+    (`build_cmd.py:546`); and
+    `parse_build_plan` (`tan/core/build_plan.py:543-547`) runs
+    `json.loads(text)` inside a `try` whose `except ValueError` raises
+    `PlanParseError("build.plan-invalid", ...)`. So by the time
+    `build_cmd.py:1234` reaches `json.loads(text)`, THAT EXACT STRING has
+    already been parsed successfully by `json.loads` in the same call --
+    the only way to arrive at line 1234 at all. It cannot fail there. This
+    is a limit of the detector, not a defect to fix, and it stays reported
+    rather than suppressed: a name-based rule that grew a special case for
+    one call site would be a rule nobody could reason about, and the honest
+    cost is one line of output a reader has this paragraph to resolve.
   * It is FUNCTION-SUBTREE based, not function-body based:
     `declared_contract` and `unguarded_risky_reads` both `ast.walk` the
     whole subtree, so a nested `def`'s curated raise counts as the
@@ -217,6 +230,7 @@ earlier draft of this paragraph collapsed them into one and got it wrong:
     dev         dev         66  /  --             (shape did not exist)
     dev         this        67  /  87 --planner   1  /  9
     #1133 fix   this        69  /  85 --planner   1  /  5
+    #1162 fix   this        70  /  83 --planner   1  /  1
 
 Read down the `candidates` column: **65 -> 66 is tree growth** since #1132,
 nothing to do with this change. **66 -> 67 is this script's new SHAPE 3**,
@@ -233,6 +247,35 @@ landing: `template::_load_som_doc`, `_board_route_entries`,
 entirely, because their bare reads are gone. Shape 3 falls 9 -> 5 for the
 same reason.
 
+RE-MEASURED AGAIN at the tan-cli#1162 fix, the last row above, and the
+same decomposition applies -- 85 -> 83 with `--planner`, 69 -> 70 without,
+because the two columns move for two different reasons and one number
+would hide both. Measured by running this script over each tree, and the
+membership delta taken by diffing the two candidate listings rather than
+by subtracting the totals:
+
+    DROP OUT (4)  planner/libraries::load_manifest
+                  planner/topology::_core_os_choices
+                  planner/zephyr_board::_load_soc_spec
+                  core/document_guards::read_catalog_document
+    JOIN (2)      core/document_guards::read_optional_text
+                  core/document_guards::require_json_mapping_doc
+
+The three planner functions drop for the #1133 reason: their bare reads
+are gone. `read_catalog_document` drops for a different one -- it is now
+a one-line delegation to `read_json_mapping` and contains no `try` of its
+own to be a SHAPE 1 candidate over. The two that join are the new
+narrow-`except` reads the register grew to absorb them, which is the same
+honest cost #1133 recorded for `require_readable_bytes` and
+`require_yaml_mapping_doc`: guarding a site MOVES it into this walk's
+shape-1 population, it does not remove it from the tree.
+
+`planner/kconfig_symbols::_load_board_symbols` is the one site this fix
+touched that STAYS a candidate, and correctly: it carried SHAPE 1 as well
+as SHAPE 3 (its `except json.JSONDecodeError` arm), and only the SHAPE 3
+half was the defect. Its `absent-try` LINE is gone; its shape-1 candidacy
+is not, and nothing in this fix claims it should be.
+
 Shape 3's detector is not vacuous at that 5, and this is the measurement
 that proves it: run over the pre-fix tree it reports **9 absent-try** and
 names every site the fix touched -- `_load_som_doc` (`som_path.read_text`
@@ -240,27 +283,55 @@ and `yaml.safe_load`, both line 653), `_board_route_entries` (both line
 826), `render_to_envelope` (`yaml.safe_load`, line 1974) and
 `_rendered_bytes` (`read_bytes`, line 509).
 
-THE FIVE THAT REMAIN, and what is known about each -- a list, not a
-number, because "five candidates" invites exactly the deferral that let
-`_rendered_bytes` sit unread through a whole PR:
+THE ONE THAT REMAINS (tan-cli#1162), and it is the false positive above.
+The four that were open at #1133 have been driven and fixed; what each
+turned out to be is recorded here rather than only in the issue, because
+the severity was NOT uniform and #1162's own body got one of the four
+wrong:
 
-  * `commands/build_cmd::_build:1234` -- a confirmed FALSE POSITIVE.
-    `_acquire_plan` returns `text, parse_build_plan(text)`
-    (`build_cmd.py:546`), so the later `json.loads(text)` on that same
-    string cannot fail. Checked, not assumed.
-  * `planner/libraries::load_manifest:232` and `planner/zephyr_board::
-    _load_soc_spec:144` -- the same defect shape as the fixed four, but on
-    the `tan build` path, where `build_cmd.py:505`'s broad `except
-    Exception` absorbs them into a coded `build.plan-unavailable`
-    envelope. A poor message rather than a traceback: real, filed, not
-    urgent.
-  * `planner/kconfig_symbols::_load_board_symbols:389` and `planner/
-    topology::_core_os_choices:62` -- not yet driven.
+  * `planner/libraries::load_manifest` -- WAS on the `tan build`
+    path, as filed. `kconfig.py:1002` calls `libraries.resolve_selection`,
+    which calls `load_manifest` per selected library, inside the
+    build-plan emit -- so `build_cmd.py:505`'s broad `except Exception`
+    absorbed the raw exception into a coded `build.plan-unavailable`
+    envelope naming the exception TYPE rather than the file. Also reached
+    by `tan doctor` (`core/doctor_libraries.py:152`), whose per-name
+    `except Exception` degraded it to the label `<name> (unknown)`.
+  * `planner/topology::_core_os_choices` -- also on the `tan build`
+    path, and on more besides: `validate._enforce_loader_rules:343` is
+    reached from `loader.py:1009`, i.e. from every `load_board_yaml`, so
+    `tan build`, `tan validate`, `tan generate` and `tan kconfig` all pass
+    through it. Same `build_cmd.py:505` absorption on the build leg.
+  * `planner/zephyr_board::_load_soc_spec` -- NOT on the `tan build`
+    path, and #1162's body was wrong to group it with `load_manifest`.
+    Established by walking its callers rather than assumed: its only
+    caller is `zephyr_board::emit_zephyr_board`, reached only
+    from `planner_emit.py:287`, i.e. only from `tan generate --emit
+    zephyr-board`. The two build-path modules that import from
+    `zephyr_board` (`loader.py:385`, `secure.py:102`) take
+    `_aen_role_slot0_map` and two constants, never `_load_soc_spec`. Its
+    real handler is `generate_cmd.py:890`'s `except BaseException`.
+  * `planner/kconfig_symbols::_load_board_symbols` -- reached from
+    `emit_kconfig` (same module) and so from `tan kconfig`,
+    whose handler is `kconfig_cmd.py:541`'s broad `except Exception`
+    (coded `kconfig.emit-failed`), or from `tan generate --emit kconfig`
+    and `generate_cmd.py:890`. Distinctive for a reason worth keeping:
+    the file it reads is written by an EXTERNAL `west build -t`
+    subprocess, so unlike the other three its failure shapes are not
+    hypothetical metadata corruption but whatever a third-party build
+    step leaves on disk.
 
-All four open ones are tracked individually in tan-cli#1162, deliberately
-as a LIST rather than as the count "five candidates": #1133's own PR filed
-`template::_rendered_bytes` inside an undifferentiated six-candidate list
-and it turned out to be the busiest live defect of the set.
+So all four were absorbed by a broad handler somewhere and none was a
+bare traceback -- materially less severe than #1133's sites, which
+escaped `emit_scaffold` past an `except TemplateError` and nothing else.
+What they produced instead was a coded envelope naming an exception CLASS
+where the user needed the FILE, plus -- on the `chmod 000` PARENT shape --
+a curated message that was actively FALSE on 3.14.7 (`unknown library
+... Available: <none>`, `no SoC spec at <path>`, `never wrote <path>`,
+and for `_core_os_choices` no message at all: it silently fell back onto
+a DIFFERENT schema document and answered with the OS set the project
+never declared). All four cells measured on 3.12.3, 3.13.15 and 3.14.7
+before and after.
 
 So: **this script SCOPES the search, it does not perform it.** Every live
 defect tan-cli#1116's triage found was found by a human reading the

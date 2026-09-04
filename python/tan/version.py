@@ -28,10 +28,9 @@
 # have sorted EQUAL to the published tag.
 #
 # At release: drop the pre-release entirely (`0.5.0`), date CHANGELOG.md's
-# `## [0.5.0]` heading, and bring python/pyproject.toml (PEP 440 spelling) and
-# npm-shim/package.json (this exact string) with it --
-# `python/scripts/version_check.py --selftest --self --not-released` checks all
-# four together.
+# `## [0.5.0]` heading, and bring python/pyproject.toml (PEP 440 spelling)
+# with it -- `python/scripts/version_check.py --selftest --self
+# --not-released` checks all three together.
 #
 # 0.5.1: patch fix for the 27 camelCase issue codes v0.5.0 shipped in
 # `contract/issue-codes.json` (`doctor.boardYaml`, `support-

@@ -107,10 +107,13 @@ For serial monitoring, install the optional dependency from the checkout:
 python3 -m pip install "./python[monitor]"
 ```
 
-`tan` is not published on PyPI, and `@alplabai/tan` is not currently published
-on npm. The `alp-tan-cli` crate on crates.io is a stale v0.4-era Rust CLI, no
-longer built from this repository and not the current program. Use a GitHub
-release or a source checkout.
+`tan` is not on PyPI **yet**: `release.yml`'s `publish_pypi` job exists and is
+opt-in, off until the repository variable `TAN_PYPI_PUBLISH` is `true` and a
+pending publisher is configured on pypi.org (tan-cli#1054). PyPI is the
+intended standalone channel; the npm shim that used to be advertised here is
+retired, and the `alp-tan-cli` crate on crates.io is a stale v0.4-era Rust CLI,
+no longer built from this repository and not the current program. Until the
+first upload lands, use a GitHub release or a source checkout.
 
 ### What a build needs
 
@@ -240,6 +243,13 @@ What those commands do:
      `~/.netrc` is not visible to `west sdk install` while `tan` is
      authenticating the download. Nothing is set at all when you supply no
      token.
+   - **`tan` stops claiming it if it cannot verify the route.** The netrc
+     hand-off depends on how the Zephyr in your workspace handles credentials,
+     which `tan` neither owns nor pins. Before printing that it authenticated
+     the download, `tan` checks the `west sdk install` in that workspace still
+     matches what the hand-off was measured against; if it does not, you get a
+     `bootstrap.sdk-credential-unverified` warning naming what to do instead,
+     rather than an assurance that quietly stopped being true.
 2. If you skip the toolchain phase, or need to point at a different pin, run
    `west sdk install` by hand from inside the workspace venv:
 
