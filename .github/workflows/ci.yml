@@ -817,24 +817,36 @@ jobs:
   #   * `nturl2path` STAYS, in one test, deliberately. It is the only
   #     spelling that performs the Windows conversion from a POSIX host, and
   #     two of the three platforms that suite runs on are POSIX
-  #     (`parity.yml:2284`); `urllib.request` -- the replacement the message
-  #     names -- would do the POSIX conversion on those two legs and leave a
-  #     test that passes and covers nothing.
+  #     (`parity.yml`'s `python-tests-shard` matrix `os:`); `urllib.request`
+  #     -- the replacement the message names -- would do the POSIX conversion
+  #     on those two legs and leave a test that passes and covers nothing.
   #
   # NOT "this repo has no Windows host". An earlier draft of this comment said
-  # that and it is false: `parity.yml`'s `python-tests-shard` (`:2279`) runs
-  # `python/tests` on `[ubuntu-latest, windows-latest, macos-latest]`
-  # (`:2284`, `runs-on: ${{ matrix.os }}` at `:2302`) on every
-  # `pull_request`, and that is what the three required `python -- pytest
-  # across python/ (<os>)` contexts roll up. The true premise, and the one the
-  # reasoning above actually rests on, is that no Windows host is available
-  # for LOCAL development -- Windows behaviour is established against
-  # `ntpath`/`PureWindowsPath` oracles and CI only speaks after a push.
+  # that and it is false: `parity.yml`'s `python-tests-shard` job runs
+  # `python/tests` on a matrix `os:` of
+  # `[ubuntu-latest, windows-latest, macos-latest]` with
+  # `runs-on: ${{ matrix.os }}`, on every `pull_request`, and that is what the
+  # three required `python -- pytest across python/ (<os>)` contexts roll up.
+  # The true premise, and the one the reasoning above actually rests on, is
+  # that an `ntpath`/`PureWindowsPath` string oracle asks the Windows question
+  # on all three legs and while the change is being written, whereas a real
+  # Windows filesystem operation asks it on one leg only and only after a push
+  # (tan-cli#1153, which retired the claim from every site that carried it;
+  # that issue's canonical statement, including the two coverage holes the
+  # Windows shards do have, lives in
+  # `python/tests/core/test_uri_reference.py`'s header).
   #
-  # One consequence lands on THIS job specifically. The Windows shard pins
-  # `python-version: "3.12"` (`parity.yml:2382`), where `Path.as_uri()` is not
-  # host-dispatched at all, so no required context can catch a future PR that
-  # "finishes the migration" by taking the replacement the deprecation names:
+  # Cited by job and key, not by offset, deliberately: this comment carried
+  # `:2279`/`:2284`/`:2302`/`:2382` and every one of them rotted inside a week
+  # -- `parity.yml` is a file several PRs a week touch. `grep -n
+  # "python-tests-shard" .github/workflows/parity.yml` re-derives an offset
+  # whenever one is genuinely wanted.
+  #
+  # One consequence lands on THIS job specifically. The Windows shard's
+  # `actions/setup-python` step pins `python-version: "3.12"`, where
+  # `Path.as_uri()` is not host-dispatched at all, so no required context can
+  # catch a future PR that "finishes the migration" by taking the replacement
+  # the deprecation names:
   # that mutation is `37 passed` on 3.12.3 and 3.13.15 and reds only at the
   # ceiling. This advisory job is the only one that can see it -- which is an
   # argument for reading its log, not for trusting the required five alone.

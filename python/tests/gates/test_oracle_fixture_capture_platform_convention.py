@@ -18,7 +18,12 @@ so on Linux/macOS CI the doctored `/` was silently flattened right back to
 `/` (a no-op) and compared equal to itself. The PR's Windows job caught it
 downstream, the hard way: `3 failed` against live win32 `\\` output. This
 module is the guard against a third instance landing the same way, checkable
-with no live oracle and no Windows runner.
+on ANY host with no live oracle -- and, unlike the win32 job that caught
+`aaf452e`, before a push rather than after one. (CI does have a Windows
+runner: `parity.yml`'s `python-tests-shard` matrix `os:` carries
+`windows-latest`. It just never runs THIS suite -- those shards pass
+`--ignore=tests/gates`, so `tests/gates` is ubuntu-only by the recorded
+decision in `ci.yml`'s comment above its `python` job. tan-cli#1153.)
 
 ## After tan-cli#269 this gate matters MORE, not less
 

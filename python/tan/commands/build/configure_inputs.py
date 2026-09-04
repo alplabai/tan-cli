@@ -140,11 +140,15 @@ def relative_key(path: PurePath, base: PurePath) -> str:
     file's key, and the one expression `_candidate_files` uses to build one.
 
     A separate function so the Windows spelling can be DRIVEN rather than
-    restated (tan-cli#1132 review): this repo has no Windows host, and
-    `os.scandir` hands back a backslash-separated `entry.path` there, so the
-    key must be proven to normalise. Taking `PurePath` (not `Path`) is what
-    makes that possible without touching a filesystem -- a test passes real
-    `PureWindowsPath` values through THIS function, so a future edit here
+    restated (tan-cli#1132 review): `os.scandir` hands back a
+    backslash-separated `entry.path` on Windows, so the key must be proven to
+    normalise. Taking `PurePath` (not `Path`) is what makes that provable on
+    ANY host without touching a filesystem, which is the point -- CI does run
+    this suite on `windows-latest` (`parity.yml`'s `python-tests-shard`, whose
+    matrix `os:` carries all three platforms; tan-cli#1153 corrects the "no
+    Windows host" claim that stood here), but only after a push, whereas a
+    pure-string oracle answers while the code is being written. A test passes
+    real `PureWindowsPath` values through THIS function, so a future edit here
     (say, to `os.path.relpath`, which would leave backslashes in) reds the
     oracle instead of sailing past a restatement of the old expression. The
     keys are compared across runs, so a changed spelling would report every

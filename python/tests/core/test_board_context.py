@@ -181,7 +181,11 @@ def test_the_end_to_end_assertion_holds_under_windows_path_semantics():
     `ntpath.join(root, leaf)`, which is exactly what this resolver answers for
     a natively spelled root. Before the fix the resolver answered
     `C:\\w\\proj/board.yaml` and that equality failed -- which is the CI
-    failure, reproduced here without a Windows runner."""
+    failure, reproduced from a POSIX host. `PureWindowsPath` and
+    `ntpath.join` are pure string operations, so this test asks the Windows
+    question on all three of `parity.yml`'s `python-tests-shard` legs and
+    answers it before a push -- NOT because the repo lacks a Windows runner
+    (it has one, on every `pull_request`; tan-cli#1153)."""
     root = "C:\\Users\\runner\\AppData\\Local\\Temp\\pytest-0\\proj"
     expected = str(PureWindowsPath(root) / "board.yaml")
     assert expected == ntpath.join(root, "board.yaml")
