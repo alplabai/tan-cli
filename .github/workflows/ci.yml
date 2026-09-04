@@ -287,8 +287,14 @@ jobs:
       # review, Major 2). Installing it here does not turn `-n`/parallelism
       # on for the rest of this job's `pytest` step below -- xdist only
       # activates under `-n`/`--dist`, neither of which this job passes.
+      #
+      # `coverage` alongside them, for the `audit_vacuous_gate_shapes.py`
+      # step at the end of this job: that audit is the only thing in any
+      # workflow that measures which `tests/gates` loops NEVER ITERATE, and
+      # it cannot do that from a static walk. Installed here rather than in
+      # the step so an install failure reads as an install failure.
       - name: install the test runner
-        run: pip install pytest pytest-xdist
+        run: pip install pytest pytest-xdist coverage
       # Public repo, so the default token is enough. Only on the release path:
       # see the `sdk_parity` input for why PRs skip it.
       #
@@ -602,6 +608,70 @@ jobs:
           # applies to this run -- is the correct answer.
           TAN_MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
         run: python -m pytest tests -q
+      # tan-cli#1145. A gate whose loop never iterates cannot fail, and no
+      # static walk can tell: the loop looks fine, its assertions look
+      # thorough, and the collection it iterates is empty every time. This
+      # step re-runs `tests/gates` under `coverage` and reports any `for`
+      # whose header line executed while no line of its body ever did, plus
+      # any gate FILE that executed no `assert` at all. Reviewed instances
+      # are declared, with a reason each, in `python/tests/gates/
+      # _vacuous_gate_shapes_core.py`; anything undeclared fails here.
+      #
+      # AFTER the pytest step, not before: the audit's own child run is what
+      # produces the coverage data, so a suite that is already red produces a
+      # meaningless measurement -- and the step above is the better place to
+      # learn that. It refuses to report on a red child run for the same
+      # reason.
+      #
+      # THIS JOB ONLY, and the reason is COST, nothing subtler. Three legs
+      # run `tests/gates`: this one, `parity.yml`'s `seam1-plan-shape`, and
+      # `python-newest` below (see the `--ignore=tests/gates` note at the top
+      # of this file, which names all three). Adding a second full execution
+      # of the directory to each -- measured at `1235 passed, 112 skipped in
+      # 32.29s` plain against `61.27s` under `coverage` -- buys nothing this
+      # job does not already give. It is NOT that a bound `ALP_SDK_ROOT`
+      # would measure something wrong: binding one only unskips tests, which
+      # can only SHRINK the never-iterated set, so seam1 could produce fewer
+      # findings but never a false one. (An earlier draft of this comment
+      # argued the opposite and was refuted by its own monotonicity claim.)
+      #
+      # The pass/skip counts are ENVIRONMENT-BOUND and are stated with their
+      # environment rather than as bare truths: CPython 3.12.3 on Linux, no
+      # `ALP_SDK_ROOT` / `ALP_SDK_HAND_PORT_ROOT` / `ALP_SDK_STRICT_LOADERS_
+      # ROOT` bound, with `pytest-xdist` and `pyserial` both INSTALLED, on
+      # this branch merged with `dev` at `2915b209`. 109 of the 112 skips are
+      # SDK-root-gated; the other three are
+      # `test_never_raises_contract_holds.py`'s "has no parse step of its own
+      # to malform". A round-5 figure of `1197 passed, 59 skipped` did not
+      # reproduce for the reviewer and is replaced rather than defended --
+      # the wall-clock ratio is the load-bearing part of this comment, and it
+      # held (32.29s against 61.27s, 1.90x).
+      #
+      # The consequence is disclosed rather than implied: `python` is not a
+      # required context (see the BRANCH PROTECTION block at the top of this
+      # file), so a new never-iterating loop reds VISIBLY on the PR without
+      # blocking the merge. The structural half -- every allow-list row still
+      # naming a real loop and carrying a classified, line-free reason, the
+      # tautology and swallowed-assert walks, and every negative control --
+      # lives in `python/tests/gates/test_vacuous_gate_shapes.py` and
+      # therefore DOES block, through seam1.
+      #
+      # `TAN_MERGE_GROUP_BASE_REF` is bound HERE and not only on the pytest
+      # step above: this step spawns its OWN `pytest tests/gates` child, which
+      # inherits the job-wide environment (including
+      # `GITHUB_EVENT_NAME=merge_group`) but NOT a step-scoped `env:` set on a
+      # different step. Without it, `test_module_size_budget_log_append_only.
+      # py::test_the_ledger_only_ever_appends_since_the_prs_base` hits
+      # `BaseRefUnresolved` and fails by design on every merge-queue run --
+      # measured `1 failed, 1234 passed, 112 skipped`, and rc=0 in 63.39s
+      # with the binding in place -- and the audit, which refuses to report
+      # on a red child run, exits 1 having measured nothing.
+      # `test_the_audit_step_binds_the_merge_group_base_ref` pins this.
+      - name: no undeclared vacuous gate shapes (tests/gates under coverage)
+        working-directory: python
+        env:
+          TAN_MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+        run: python scripts/audit_vacuous_gate_shapes.py
 
   # THE OTHER HALF OF THE INTERPRETER POLICY (tan-cli#1126). The `python` job
   # above pins `"3.12"`, the `requires-python` FLOOR; `parity.yml`'s
