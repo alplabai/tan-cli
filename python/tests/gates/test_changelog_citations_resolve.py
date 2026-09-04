@@ -76,9 +76,10 @@ than a coordinate a rung merely tolerated. The other two are real rot in
 coordinate set has drifted (`_acquire_plan` cited at `build_cmd.py:839` is now
 `:516`, `_emit_plan` at `:734` is now `:411`, the seven
 `build.plan-unavailable` sites cited as `:734-833` now run `:447`-`:510`, and
-a dozen bare `:NNN` continuations follow), so it is filed rather than bundled
-into a change about building the gate. Adding the rung today would leave `dev`
-red on a fragment this change is not rewriting.
+a dozen bare `:NNN` continuations follow), so it is filed as tan-cli#1198
+rather than bundled into a change about building the gate. Adding the rung
+today would leave `dev` red on a fragment this change is not rewriting; it is
+worth revisiting once tan-cli#1198 is closed.
 
 **Anything outside `changelog.d/`.** Not PR bodies (instances 3 and 4 above
 were PR bodies -- no gate can reach those), not `CHANGELOG.md` (its folded
