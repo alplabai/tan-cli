@@ -6,6 +6,7 @@ for `Runner._env` (tan-cli#990), now proved once against the lifted primitive
 so every OTHER caller inherits the same guarantee."""
 from __future__ import annotations
 
+import os
 import sys
 
 from tan.core.subprocess_env import (
@@ -64,6 +65,19 @@ def test_restore_ld_library_path_is_a_noop_without_orig_when_not_frozen(monkeypa
 _BUNDLE = "/work/proj/tan-cli-lib/_internal"
 
 
+def _sep(*entries: str) -> str:
+    """Join search-path entries with `os.pathsep`, NOT a hardcoded `":"`.
+
+    The first cut of these tests hardcoded `:` and went green on macOS while
+    every one of them failed on `windows-latest` (`python -- pytest shard
+    (windows-latest 2/4)`), because `os.pathsep` is `";"` there: the whole
+    string parsed as ONE entry, the bundle never matched, and the assertions
+    that the bundle gets stripped could not hold. The module under test was
+    right all along -- it has always split on `os.pathsep` -- so the fixture,
+    not the code, is what had to become platform-correct."""
+    return os.pathsep.join(entries)
+
+
 def _frozen_onedir(monkeypatch, ld_library_path):
     """A frozen ONEDIR process on a host that had NO `LD_LIBRARY_PATH` of its
     own, so the bootloader recorded no `LD_LIBRARY_PATH_ORIG` to undo."""
@@ -93,20 +107,20 @@ def test_restore_drops_the_bundle_when_frozen_with_no_orig(monkeypatch):
 def test_restore_keeps_the_host_entries_around_the_bundle(monkeypatch):
     """The bundle is removed; everything the host legitimately had is kept,
     in order. Removal must not become "wipe the search path"."""
-    _frozen_onedir(monkeypatch, f"{_BUNDLE}:/usr/lib/x86_64-linux-gnu:/opt/vendor/lib")
+    _frozen_onedir(monkeypatch, _sep(_BUNDLE, "/usr/lib/x86_64-linux-gnu", "/opt/vendor/lib"))
 
-    env = {"LD_LIBRARY_PATH": f"{_BUNDLE}:/usr/lib/x86_64-linux-gnu:/opt/vendor/lib"}
+    env = {"LD_LIBRARY_PATH": _sep(_BUNDLE, "/usr/lib/x86_64-linux-gnu", "/opt/vendor/lib")}
     restore_ld_library_path(env)
 
-    assert env["LD_LIBRARY_PATH"] == "/usr/lib/x86_64-linux-gnu:/opt/vendor/lib"
+    assert env["LD_LIBRARY_PATH"] == _sep("/usr/lib/x86_64-linux-gnu", "/opt/vendor/lib")
 
 
 def test_restore_matches_the_bundle_through_a_trailing_slash(monkeypatch):
     """A trailing slash is the same directory. Matching the raw string would
     let the exact leak this fixes walk straight past the check."""
-    _frozen_onedir(monkeypatch, f"{_BUNDLE}/:/usr/lib/x86_64-linux-gnu")
+    _frozen_onedir(monkeypatch, _sep(f"{_BUNDLE}/", "/usr/lib/x86_64-linux-gnu"))
 
-    env = {"LD_LIBRARY_PATH": f"{_BUNDLE}/:/usr/lib/x86_64-linux-gnu"}
+    env = {"LD_LIBRARY_PATH": _sep(f"{_BUNDLE}/", "/usr/lib/x86_64-linux-gnu")}
     restore_ld_library_path(env)
 
     assert env["LD_LIBRARY_PATH"] == "/usr/lib/x86_64-linux-gnu"
@@ -116,12 +130,12 @@ def test_restore_leaves_a_frozen_run_whose_path_lacks_the_bundle_alone(monkeypat
     """Anti-overreach: frozen, no `ORIG`, but the bundle is NOT on the path,
     so nothing was overridden and nothing may be stripped. Without this the
     fallback would start editing a search path the bootloader never touched."""
-    _frozen_onedir(monkeypatch, "/usr/lib/x86_64-linux-gnu:/opt/vendor/lib")
+    _frozen_onedir(monkeypatch, _sep("/usr/lib/x86_64-linux-gnu", "/opt/vendor/lib"))
 
-    env = {"LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu:/opt/vendor/lib"}
+    env = {"LD_LIBRARY_PATH": _sep("/usr/lib/x86_64-linux-gnu", "/opt/vendor/lib")}
     restore_ld_library_path(env)
 
-    assert env["LD_LIBRARY_PATH"] == "/usr/lib/x86_64-linux-gnu:/opt/vendor/lib"
+    assert env["LD_LIBRARY_PATH"] == _sep("/usr/lib/x86_64-linux-gnu", "/opt/vendor/lib")
 
 
 def test_orig_still_wins_over_the_bundle_fallback(monkeypatch):
@@ -129,10 +143,10 @@ def test_orig_still_wins_over_the_bundle_fallback(monkeypatch):
     -- the fallback must not preempt it or second-guess it."""
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", _BUNDLE, raising=False)
-    monkeypatch.setenv("LD_LIBRARY_PATH", f"{_BUNDLE}:/usr/lib/x86_64-linux-gnu")
+    monkeypatch.setenv("LD_LIBRARY_PATH", _sep(_BUNDLE, "/usr/lib/x86_64-linux-gnu"))
     monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/usr/lib/x86_64-linux-gnu")
 
-    env = {"LD_LIBRARY_PATH": f"{_BUNDLE}:/usr/lib/x86_64-linux-gnu"}
+    env = {"LD_LIBRARY_PATH": _sep(_BUNDLE, "/usr/lib/x86_64-linux-gnu")}
     restore_ld_library_path(env)
 
     assert env["LD_LIBRARY_PATH"] == "/usr/lib/x86_64-linux-gnu"
