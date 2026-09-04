@@ -471,9 +471,15 @@ def low_disk_note(free_bytes: int) -> str | None:
 #: `doctor_cmd`'s own note -- that `file` stays out of the prerequisites
 #: manifest because "`tan bootstrap` genuinely does not need it" -- TRUE;
 #: between #990 and #1176 that sentence was false. It is also the same flag
-#: the README's manual command, alp-sdk's `metadata/bootstrap.json`
-#: (`manualInstallHints.posix.note[0]`) and
-#: `.github/workflows/onramp-clean-container.yml` have always used.
+#: alp-sdk's `metadata/bootstrap.json` (`manualInstallHints.posix.note[0]`,
+#: vendored at `contract/fixtures/bootstrap/manifest.json` and mirrored in
+#: `tan.core.bootstrap`'s own hint text) and
+#: `.github/workflows/onramp-clean-container.yml` have always used. NOT the
+#: README's manual command, which is `west sdk install --version 1.0.1 -t
+#: arm-zephyr-eabi` and carries no `--no-hosttools` on purpose: it mirrors
+#: `doctor_cmd.zephyr_sdk_install_command()` / the frozen Rust oracle
+#: verbatim, so it DOES run the host-tools step and DOES need `file` -- which
+#: is exactly what the README says beside it.
 #:
 #: UNCONDITIONAL, and that is deliberate. Passing it only when `file(1)` is
 #: absent would produce two differently-shaped installs -- one with
