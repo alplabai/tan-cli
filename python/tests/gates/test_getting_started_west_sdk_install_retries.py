@@ -241,3 +241,10 @@ def test_the_credential_still_reaches_west_through_a_netrc():
     assert re.search(r"chmod 0600 .*netrc", run), (
         "the staged netrc is no longer chmod 0600 (tan-cli#1185 acceptance)"
     )
+    assert "api.github.com/rate_limit" in run, (
+        "the step no longer checks that the staged netrc actually "
+        "AUTHENTICATES. Without it a green run stops distinguishing 'the token "
+        "reached api.github.com' from 'the shared anonymous quota happened to "
+        "be free', which is the wrong-reason pass every other assertion here "
+        "exists to prevent (tan-cli#1185)"
+    )

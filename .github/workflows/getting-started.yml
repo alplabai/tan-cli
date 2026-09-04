@@ -678,7 +678,33 @@ jobs:
                    "${GH_TOKEN}" > "${netrc_dir}/netrc" )
           chmod 0600 "${netrc_dir}/netrc"
           export NETRC="${netrc_dir}/netrc"
-
+          # Prove the staged credential AUTHENTICATES, before spending minutes on
+          # a download whose success would not distinguish "the token reached
+          # api.github.com" from "the shared anonymous quota happened to be
+          # free". A green step is not evidence of the first, and a check that
+          # cannot tell them apart is how tan-cli#1185 sat here for four rounds
+          # of hardening beside it.
+          #
+          # `curl --netrc-file` reads the same document `requests` reads from
+          # $NETRC, so this measures the FILE and the token rather than this
+          # step's intent. GitHub's anonymous core quota is 60/hour and any
+          # authenticated identity is far above it, so `<= 60` is unambiguous.
+          #
+          # Hard-fails ONLY on that unambiguous negative, which is a real defect
+          # in the staging above. An unreachable or unparseable endpoint warns
+          # and continues: that is the network, not this step's subject, and a
+          # check that reds for a reason unrelated to its subject stops being
+          # read (this repo's own `sdk list --online` precedent in
+          # clean-host.yml). So it CAN fail, and only for the right reason.
+          core_limit="$(curl -sS --max-time 30 --netrc-file "${NETRC}" https://api.github.com/rate_limit 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["resources"]["core"]["limit"])' 2>/dev/null || echo unknown)"
+          if [ "${core_limit}" = "unknown" ]; then
+            echo "::warning::could not read api.github.com/rate_limit to confirm the staged netrc authenticates; continuing (that is the network, not the credential)" >&2
+          elif [ "${core_limit}" -le 60 ]; then
+            echo "::error::the staged netrc did not authenticate: GitHub reports a core rate limit of ${core_limit}/hour, which is the ANONYMOUS per-IP quota. The token is not reaching api.github.com, so this download runs on a quota shared with every hosted runner in the region (tan-cli#1143 / tan-cli#1185)." >&2
+            exit 1
+          else
+            echo "staged netrc authenticates: GitHub core rate limit ${core_limit}/hour (anonymous is 60)"
+          fi
           # Retry the whole install (tan-cli#689). The credential staged above
           # lifts the API rate limit on `fetch_releases`, but that is only the
           # FIRST network call this makes. `setup.sh -t arm-zephyr-eabi` then fetches
