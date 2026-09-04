@@ -27,6 +27,7 @@ technical strings -- register names, error codes, flags, paths -- where a
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -271,10 +272,53 @@ def main(argv: list[str] | None = None) -> int:
                     help="PERFORM THE FOLD: rewrite CHANGELOG.md and DELETE "
                          "every file in changelog.d/. Irreversible for any "
                          "fragment that is untracked or staged-but-uncommitted "
-                         "(tan-cli#1172). Without it, this script only reports.")
+                         "(tan-cli#1172). Without it, this script only reports. "
+                         "Refused (exit 2) alongside --check, --dry-run, or "
+                         "--require-empty, which all promise to change nothing "
+                         "(tan-cli#1181).")
     ap.add_argument("--root", type=Path, default=None,
                     help="repo root (default: discovered from this script's location)")
     args = ap.parse_args(argv)
+
+    # tan-cli#1181: `--write` is the irreversible half; the other three flags
+    # all promise, in their own help text, to change nothing. Combined, the
+    # destructive one used to win silently -- `--dry-run --write` folded 162
+    # fragments and deleted them, exit 0, from an invocation whose documented
+    # meaning is "print the resulting CHANGELOG.md to stdout, write nothing",
+    # and which `changelog.d/README.md` advertises as the safe look-first
+    # form. Worse, the precedence was INCONSISTENT in exactly the direction
+    # that loses data: `--check --write` was safe only because `--check` is
+    # handled first, so the same operator learned two opposite lessons about
+    # what a safe flag does when paired with `--write`.
+    #
+    # There is no reading of such a command line that is safe to guess: the
+    # operator asked for both halves, so honouring either one silently does
+    # something they also asked not to do -- and one of the two answers is
+    # unrecoverable. Refuse, name the flags, and name what to run instead.
+    # Exit 2 (not 1) marks it as a USAGE error, distinct from the exit 1 a
+    # malformed fragment or a failed fold returns.
+    conflicting = [
+        name
+        for name, requested in (
+            ("--check", args.check),
+            ("--require-empty", args.require_empty),
+            ("--dry-run", args.dry_run),
+        )
+        if requested
+    ]
+    if args.write and conflicting:
+        joined = ", ".join(conflicting)
+        print(
+            f"error: --write cannot be combined with {joined}. --write "
+            "DELETES every file in changelog.d/, and "
+            + ("those flags promise" if len(conflicting) > 1 else "that flag promises")
+            + " to change nothing -- refusing rather than guessing which "
+            "half you meant (tan-cli#1181).\n"
+            f"       To look first:  assemble_changelog.py {conflicting[0]}\n"
+            "       To fold:         assemble_changelog.py --write",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         root = args.root or repo_root(Path(__file__).resolve().parent)
@@ -332,10 +376,61 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return 0
 
-        changelog.write_text(text, encoding="utf-8")
+        # tan-cli#1181: temp file + os.replace, not truncate-then-write. The
+        # fragments are unlinked immediately below, so a crash or ENOSPC
+        # partway THROUGH the write would leave CHANGELOG.md truncated with
+        # the text that was supposed to replace it already deleted. os.replace
+        # is atomic within a filesystem: CHANGELOG.md is either wholly the old
+        # file or wholly the new one, never a prefix of either. The fsync is
+        # what makes that survive a power cut rather than only a crash --
+        # without it the rename can be durable while the bytes are not.
+        tmp = changelog.with_name(changelog.name + ".tmp")
+        try:
+            # newline=None deliberately, matching the Path.write_text this
+            # replaced: on Windows that translates "\n" to CRLF, and changing
+            # it here would rewrite every line ending in CHANGELOG.md.
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, changelog)
+        except OSError as exc:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise AssembleError(
+                f"failed to write {changelog.relative_to(root)}: {exc}. "
+                f"Nothing was deleted -- {frag_dir.relative_to(root)}/ is "
+                "untouched and the fold can simply be re-run."
+            ) from exc
+
+        # Unlink AFTER the replace, so there is no state where the fragments
+        # are gone and CHANGELOG.md is unwritten. The reverse window does
+        # survive -- CHANGELOG.md folded with fragments still on disk -- and
+        # re-running --write on that tree DOUBLE-folds, splicing every
+        # surviving entry into the section a second time. So a failed unlink
+        # is reported and exits nonzero, naming the survivors, instead of
+        # printing a success line over a tree that is in neither state.
+        survivors: list[str] = []
         for category in CATEGORIES:
             for name, _ in buckets[category]:
-                (frag_dir / name).unlink()
+                try:
+                    (frag_dir / name).unlink()
+                except OSError as exc:
+                    survivors.append(f"{name}: {exc}")
+        if survivors:
+            print(
+                f"error: {changelog.relative_to(root)} was folded, but "
+                f"{len(survivors)} of {total} fragment(s) could not be "
+                "deleted:\n  " + "\n  ".join(sorted(survivors)) + "\n"
+                "Delete them by hand -- their text is ALREADY in "
+                f"{changelog.relative_to(root)}, so re-running --write would "
+                "fold each of them a second time.",
+                file=sys.stderr,
+            )
+            return 1
+
         print(f"folded {total} fragment(s) into {changelog.relative_to(root)}")
         return 0
 

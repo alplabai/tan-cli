@@ -808,7 +808,7 @@ jobs:
       # `e2f5021`, and its fragment was still sitting in `changelog.d/` at tag
       # `ad6470c`. The fix was in the tree and in nobody's notes.
       #
-      # `--require-empty` already existed (`assemble_changelog.py:173`) and was
+      # `--require-empty` already existed (`assemble_changelog.py:266`) and was
       # wired into zero workflows. `--check` is NOT a substitute -- it never
       # fails merely because fragments are pending, which is the one thing
       # this gate exists to catch (tan-cli#930 made `--check` also refuse a

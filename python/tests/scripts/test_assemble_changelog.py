@@ -396,7 +396,7 @@ def test_no_fragments_is_a_clean_no_op(tmp_path: Path) -> None:
 # reached by typing the script's name.
 # ---------------------------------------------------------------------------
 def test_a_bare_invocation_folds_nothing_and_deletes_nothing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
 ) -> None:
     """The defect this closes: the fold used to be the DEFAULT.
 
@@ -469,3 +469,166 @@ def test_the_require_empty_error_names_the_flag_that_actually_folds(
     root = _repo(tmp_path, {"1.added.md": "- Added a thing.\n"})
     assert ac.main(["--root", str(root), "--require-empty"]) == 1
     assert "--write" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1181 -- no FLAG COMBINATION can reach the irreversible half either.
+#
+# The controls above pin that the bare NAME cannot fold. Nothing pinned the
+# combinations, and one of them was live: `--dry-run --write` performed the
+# fold, exit 0, silently -- measured on the real tree at PR #1181's head, 163
+# fragments down to 1 (README.md) with no warning -- from an invocation whose
+# `--dry-run` half is documented as "write nothing" and is advertised by
+# `changelog.d/README.md` as the safe look-first form. `--check --write` was
+# safe, but only by accident of `--check` being handled first, so the
+# precedence was inconsistent in exactly the direction that loses data.
+#
+# One test per refused pairing, deliberately not parametrised into one: each
+# pairing is a separate way to lose 163 uncommitted files, and a parametrised
+# id is easier to silently narrow than a named test is to delete.
+# ---------------------------------------------------------------------------
+def _assert_nothing_happened(root: Path, before: str) -> None:
+    assert (root / "changelog.d" / "1.added.md").exists(), (
+        "a refused invocation deleted a fragment anyway"
+    )
+    assert (root / "CHANGELOG.md").read_text(encoding="utf-8") == before, (
+        "a refused invocation rewrote CHANGELOG.md anyway"
+    )
+
+
+def test_dry_run_plus_write_is_refused_not_folded(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The measured defect: `--dry-run --write` folded and deleted, exit 0."""
+    root = _repo(tmp_path, {"1.added.md": "- Added a thing.\n"})
+    before = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert ac.main(["--root", str(root), "--dry-run", "--write"]) == 2
+    _assert_nothing_happened(root, before)
+    err = capsys.readouterr().err
+    assert "--dry-run" in err and "--write" in err
+
+
+def test_check_plus_write_is_refused_not_silently_reduced_to_check(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--check --write` never folded, but it reported and exited 0 as if the
+    `--write` had not been typed. That is the same inconsistency from the
+    harmless side: an operator who learns `--check --write` is fine has learned
+    the wrong lesson about `--dry-run --write`."""
+    root = _repo(tmp_path, {"1.added.md": "- Added a thing.\n"})
+    before = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert ac.main(["--root", str(root), "--check", "--write"]) == 2
+    _assert_nothing_happened(root, before)
+    assert "--check" in capsys.readouterr().err
+
+
+def test_require_empty_plus_write_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--require-empty` is the release GATE. Pairing it with the fold would
+    make the gate step itself destructive if a `--write` ever leaked into
+    `release.yml`'s invocation."""
+    root = _repo(tmp_path, {"1.added.md": "- Added a thing.\n"})
+    before = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert ac.main(["--root", str(root), "--require-empty", "--write"]) == 2
+    _assert_nothing_happened(root, before)
+    assert "--require-empty" in capsys.readouterr().err
+
+
+def test_all_three_at_once_is_refused_and_every_flag_is_named(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The refusal must name each conflicting flag it saw, not just the first
+    one -- an operator who removes only the flag in the message and re-runs
+    must not land on a second silently-destructive combination."""
+    root = _repo(tmp_path, {"1.added.md": "- Added a thing.\n"})
+    before = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert ac.main(
+        ["--root", str(root), "--check", "--require-empty", "--dry-run", "--write"]
+    ) == 2
+    _assert_nothing_happened(root, before)
+    err = capsys.readouterr().err
+    for flag in ("--check", "--require-empty", "--dry-run"):
+        assert flag in err, f"{flag} was not named in the refusal"
+
+
+def test_the_refusal_names_a_command_that_actually_works(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Same bar as `--require-empty`'s error (tan-cli#1172): a refusal that
+    does not say what to run instead just gets the flag deleted at random."""
+    root = _repo(tmp_path, {"1.added.md": "- Added a thing.\n"})
+    assert ac.main(["--root", str(root), "--dry-run", "--write"]) == 2
+    err = capsys.readouterr().err
+    assert "assemble_changelog.py --dry-run" in err
+    assert "assemble_changelog.py --write" in err
+
+
+def test_the_safe_flags_still_combine_with_each_other(tmp_path: Path) -> None:
+    """The refusal must be about `--write` specifically, not about "more than
+    one flag". `--check --dry-run` and `--check --require-empty` change
+    nothing whichever wins, so refusing them would be a gratuitous break."""
+    root = _repo(tmp_path, {"1.added.md": "- Added a thing.\n"})
+    assert ac.main(["--root", str(root), "--check", "--dry-run"]) == 0
+    assert ac.main(["--root", str(root), "--check", "--require-empty"]) == 1
+    assert (root / "changelog.d" / "1.added.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1181 -- the fold's two failure windows.
+# ---------------------------------------------------------------------------
+def test_a_failed_changelog_write_leaves_both_sides_intact(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CHANGELOG.md is written via a temp file + `os.replace`, so a failure
+    mid-write cannot leave it truncated with the fragments already gone. The
+    old truncate-then-write could: `write_text` opens with "w", which empties
+    the file before a single byte of the new text lands."""
+    root = _repo(tmp_path, {"1.added.md": "- Added a thing.\n"})
+    before = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    def boom(src: object, dst: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(ac.os, "replace", boom)
+    assert ac.main(["--root", str(root), "--write"]) == 1
+
+    assert (root / "CHANGELOG.md").read_text(encoding="utf-8") == before, (
+        "a failed write truncated CHANGELOG.md"
+    )
+    assert (root / "changelog.d" / "1.added.md").exists(), (
+        "a fragment was deleted despite the write never landing"
+    )
+    assert not (root / "CHANGELOG.md.tmp").exists(), "temp file left behind"
+    assert "No space left on device" in capsys.readouterr().err
+
+
+def test_an_unlink_failure_reports_the_survivors_instead_of_success(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The window that DOES survive: CHANGELOG.md folded, fragments still on
+    disk. Re-running `--write` there splices every survivor a second time --
+    forced by monkeypatching `Path.unlink` to raise, the measured result was
+    the same entry appearing twice in CHANGELOG.md. The fold cannot undo the
+    write, so the contract is that it must not report success: exit nonzero
+    and name the survivors, so the operator deletes them by hand rather than
+    re-running into a double fold."""
+    root = _repo(tmp_path, {"1.added.md": "- Added a thing.\n"})
+    real_unlink = Path.unlink
+
+    def refuse(self: Path, *args: object, **kwargs: object) -> None:
+        if self.parent.name == "changelog.d":
+            raise PermissionError(13, "Permission denied")
+        real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    assert ac.main(["--root", str(root), "--write"]) == 1, (
+        "a fold that could not delete its fragments reported success"
+    )
+
+    text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "Added a thing." in text, "the write itself should have landed"
+    assert (root / "changelog.d" / "1.added.md").exists()
+    err = capsys.readouterr().err
+    assert "1.added.md" in err, "the survivor was not named"
+    assert "second time" in err, "the double-fold hazard was not stated"

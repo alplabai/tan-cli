@@ -79,6 +79,13 @@ python3 python/scripts/assemble_changelog.py --dry-run  # same render as a bare 
 python3 python/scripts/assemble_changelog.py --require-empty  # exit 1 if any fragment is still unfolded
 ```
 
+One flag at a time: `--write` is REFUSED (exit 2) alongside `--check`,
+`--dry-run`, or `--require-empty` (tan-cli#1181). `--dry-run --write` used to
+perform the whole fold silently, exit 0 — the destructive half won over the
+flag documented as "write nothing", from a command line that asked for both.
+There is no safe way to guess which half was meant, so it names the flags it
+saw and what to run instead.
+
 `--check` never fails merely because fragments are pending — that is why it is
 not the gate. Like every mode it refuses (exit 1) an unusable fragment: a
 category outside the six, an empty or whitespace-only body, or — since
@@ -95,7 +102,7 @@ bullet-list heading. It still does not, and never will, judge whether a
 fragment's sentences are *true* — a wrong count or a false claim reads clean;
 that stays a review problem.
 `--require-empty` is the gate, and since tan-cli#813 it is a live one:
-`.github/workflows/release.yml:724` runs it, so a tag cut with fragments still
+`.github/workflows/release.yml:828` runs it, so a tag cut with fragments still
 sitting here fails the release rather than shipping a CHANGELOG missing them.
 
 This runs **before** the version bump and tag, so `release.yml`'s existing
