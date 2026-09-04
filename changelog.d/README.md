@@ -58,6 +58,49 @@ Multi-paragraph entries and sub-bullets are fine — keep the existing house
 style, which runs long deliberately (the CHANGELOG is the exhaustive record;
 the release page is the summary — see `alp-lab:writing-release-notes`).
 
+## `file:line` citations
+
+**Prefer the symbol to the coordinate.** `SDK_TOKEN_ENV_VARS` in
+`tan/core/toolchain_provision.py` cannot rot; the same constant's line number
+did, by 79 lines, before that fragment was ever folded (tan-cli#1191's title
+case). A fragment sits in this directory for weeks while the tree moves
+underneath it, and `splice()` copies it byte-for-byte, so a stale coordinate
+ships permanently. Five rotted citations were measured in one day; `parity.yml`
+line numbers have moved by 43 lines in a single day, then another 19.
+
+When the line itself is the point, write the coordinate — but know that
+`python/tests/gates/test_changelog_citations_resolve.py` now resolves every one
+of them against the worktree and fails on a line number that does not exist.
+Read that file's docstring before relying on it: it catches an out-of-range
+coordinate and NOT an in-range one that points at the wrong line, which is the
+larger half of the problem and still a review job.
+
+**Citing a coordinate at an earlier commit** — "before this change, X was at
+`foo.py:647`" — is legitimate and must not be guessed at from the prose. Say
+which commit, in the coordinate, where a machine can read it:
+
+```
+`tan/core/scaffold.py@8ca9a40adb9c4ee48345e10df58ae5e3516a9316:647`
+```
+
+That form is range-checked against `git show <ref>:<path>` instead of the
+worktree, so it is a real check rather than an exemption. A ref the local clone
+cannot resolve is skipped, not failed.
+
+Two shapes are deliberately never checked, because they are transcripts of some
+other tree rather than claims about this one: anything inside a fence, and an
+inline span of the grep/compiler shape `<path>:<line>: <the line's own text>`.
+A path the gate cannot find is never a failure either — a fragment may cite a
+file its own PR deletes, or one in alp-sdk or alp-sdk-vscode entirely.
+
+**Keep every inline code span on ONE line.** CommonMark folds the newline
+inside a span to a space and keeps the continuation line's own indentation, so
+a span broken after `windows-latest,` and continued on the next (two-space
+indented) line ships as `os: [ubuntu-latest, windows-latest,   macos-latest]` —
+three spaces where one was meant. `splice()` will not fix it for you
+(tan-cli#1180). Overrun the wrap column instead; there is no line-length gate
+on this directory.
+
 ## Release time
 
 `python/scripts/assemble_changelog.py --write` folds every fragment into
