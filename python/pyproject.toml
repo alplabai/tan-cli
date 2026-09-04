@@ -1,15 +1,20 @@
 [project]
-# DISTRIBUTION name is `alp-tan`, not `tan`: the name `tan` is already taken on
+# DISTRIBUTION name is `tan-cli`, not `tan`: the name `tan` is already taken on
 # PyPI ("The compromising code formatter", v23.7.0), so `pip install tan` would
 # fetch an unrelated package. The IMPORT package stays `tan` and the console
 # script stays `tan`, so a customer still types `tan build` -- only the install
 # line differs:
 #
-#     pip install alp-tan   ->   tan --version
+#     pip install tan-cli   ->   tan --version
 #
-# `tan-cli` was also free; `alp-tan` is preferred because the other Alp Lab
-# artefacts are `alp-`prefixed.
-name = "alp-tan"
+# `alp-tan` was the first choice and was also free, preferred at the time
+# because the other Alp Lab artefacts are `alp-`prefixed. Reversed in
+# tan-cli#1054, before anything was ever uploaded under either name: this
+# distribution is published from `github.com/alplabai/tan-cli` and
+# authenticated by Trusted Publishing, which binds the PyPI project to that
+# exact repository. `pypi.org/project/tan-cli` <-> `github.com/alplabai/tan-cli`
+# is one name a reader can follow; `alp-tan` <-> `tan-cli` is two.
+name = "tan-cli"
 # The PEP 440 RENDERING of `python/tan/version.py`'s TAN_VERSION, which is the
 # source of truth -- never edited alone. `0.5.0-rc5.dev0` -> `0.5.0rc5.dev0`
 # (the two spellings are not interchangeable and cannot be string-compared);
@@ -63,7 +68,7 @@ requires-python = ">=3.12"
 # 0.26.0** it does not (measured: PyPI `requires_dist` for 0.25.1 still lists
 # `click>=8.2.1`; 0.26.0's does not, and its wheel gained a vendored
 # `typer/_click/` package -- typer's OWN click-alike, not a re-export of the
-# public one). So a clean `pip install alp-tan` produced `ModuleNotFoundError:
+# public one). So a clean `pip install tan-cli` produced `ModuleNotFoundError:
 # No module named 'click'` on first run, and every local test suite passed
 # regardless because click was present for other reasons. A package that
 # imports a module must declare it; leaning on someone else's dependency graph
@@ -176,7 +181,7 @@ monitor = ["pyserial>=3.5"]
 # by name anywhere under `tan/` (so `test_declared_dependencies.py` does not
 # require it), but it is `tflite`'s own declared runtime dependency (measured:
 # `pip show tflite` -> `Requires: flatbuffers, numpy`) -- pinned explicitly here,
-# not left to a transitive resolve, so `pip install alp-tan[model-io]` is a
+# not left to a transitive resolve, so `pip install tan-cli[model-io]` is a
 # working reader and not just a gate-satisfying stub. Pins mirror alp-sdk's own
 # `model-io` extra exactly (its `pyproject.toml`'s entry, due to be dropped once
 # `scripts/alp_model/` is deleted -- ADR-0028 Task 6) rather than inventing new
@@ -187,7 +192,7 @@ model-io = ["tflite>=2.10", "flatbuffers>=23.1.21"]
 # for `tan.model.adapters.ethos_u.VelaAdapter.compile()` (`shutil.which("vela")`
 # is the runtime gate; this extra is what puts it on PATH). NOT required for
 # `tan model build` to run -- every vendor adapter shells its compiler as an
-# external binary, never a Python import, so a bare `pip install alp-tan`
+# external binary, never a Python import, so a bare `pip install tan-cli`
 # still works and only that one NPU backend's compile step is unavailable
 # (`is_available()` reports False; `doctor`/`check` explain why). Pins mirror
 # alp-sdk's own `model-compile` extra exactly (due to be dropped from

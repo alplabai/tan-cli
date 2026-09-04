@@ -490,8 +490,9 @@ def test_this_repos_own_workflows_produce_no_timeout_problems() -> None:
 
 #: EVERY workflow file's bounded-job count, mapped to the MINIMUM it must
 #: still contribute -- not just presence. Presence alone let a shrink from
-#: `release.yml`'s real 5 bounded jobs (`verify-version`, `build`, `release`,
-#: `publish_npm`, `release_gate` -- `gates`/`python-gates` stay excluded as
+#: `release.yml`'s real 6 bounded jobs (`verify-version`, `build`, `release`,
+#: `publish_pypi`, `release_gate`, `propose-dev-version-bump` --
+#: `gates`/`python-gates` stay excluded as
 #: LOCAL `uses:` callers) down to 1 pass silently, since the old check only
 #: asked "is release.yml in the set at all". Floored for all TWELVE non-parity
 #: files (release-lock-update.yml added tan-cli#437), not just the four
@@ -506,6 +507,12 @@ def test_this_repos_own_workflows_produce_no_timeout_problems() -> None:
 #: actual current counts; a future PR that drops a job updates this dict on
 #: purpose, the same anti-shrink shape `_PARITY_JOBS` gives `parity.yml`.
 _MIN_BOUNDED_JOBS = {
+    # 4: `shim` retired with `npm-shim/` (tan-cli#1054), `python-newest`
+    # added (tan-cli#1126) -- net unchanged from the 4 this said before, but
+    # NOT for the same reason, and it was briefly stale in between: dev carried
+    # `4` against a real 5 once #1137 landed, because that PR added a bounded
+    # job and did not bump the floor. Re-measured here rather than assumed
+    # equal. A floor below the real count is not a floor.
     "ci.yml": 4,
     "clean-host.yml": 2,
     "e2e-container.yml": 2,
@@ -515,7 +522,11 @@ _MIN_BOUNDED_JOBS = {
     "python-binaries.yml": 4,
     "release-combination.yml": 4,
     "release-lock-update.yml": 1,
-    "release.yml": 5,
+    # 6, not 5: the real count was already 6 when this said 5 (the comment
+    # above omitted `propose-dev-version-bump`), so dropping a job landed
+    # exactly ON the floor and passed. tan-cli#1054 measured that while
+    # retiring `publish_npm`. A floor below the real count is not a floor.
+    "release.yml": 6,
     "unsharded-python-canary.yml": 1,
     "version-identity.yml": 1,
 }

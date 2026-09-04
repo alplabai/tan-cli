@@ -562,7 +562,7 @@ just the one that captured it:
   variables. A golden recorded on a toolchain-less box would therefore go RED
   on a box that has them — and the repo's own unavailable-reason string tells
   the reader to install one (`"vela not on PATH; pip install
-  alp-tan[model-compile]"`). Measured on a host carrying a `vela`, a `dxcom`
+  tan-cli[model-compile]"`). Measured on a host carrying a `vela`, a `dxcom`
   and `ALP_VELA_CONFIG`/`ALP_DEEPX_SDK_HOME`, three of the five reported rows
   flip. `model-doctor-no-sdk` therefore ships an `env.json` pinning `PATH` to
   its own (empty) scratch directory and unsetting the three variables, so the

@@ -146,7 +146,7 @@ def _exact_hint_line(report: dict) -> str | None:
         return None
     if any(n.startswith("--exact") for n in report["notes"]):
         return None
-    return "  Exact:  pip install alp-tan[model-compile]  &&  tan model check --exact"
+    return "  Exact:  pip install tan-cli[model-compile]  &&  tan model check --exact"
 
 
 def render_backend_report(report: dict, *, sku: str | None, prefix: str = "") -> list[str]:

@@ -52,7 +52,7 @@ env:
   # list is what broke: `python/tan/cli.py` imports `click.testing`, typer
   # stopped depending on click, and a venv built from the list froze a binary
   # that died at import with `ModuleNotFoundError: No module named 'click'`.
-  # `-e ./python` resolves exactly what a customer's `pip install alp-tan`
+  # `-e ./python` resolves exactly what a customer's `pip install tan-cli`
   # resolves, so the build environment can no longer be quietly richer than the
   # declared one. PyInstaller stays out of pyproject.toml on purpose: it is a
   # build-time tool, not a runtime dependency.
@@ -85,7 +85,7 @@ env:
   # clean-host.yml's `freeze-and-smoke` job, which now install that lock
   # `--require-hashes`. The two goals conflict: this workflow's whole point,
   # per the paragraph above, is proving the freeze matches what `pip install
-  # alp-tan` resolves TODAY (the click regression this comment already
+  # tan-cli` resolves TODAY (the click regression this comment already
   # describes is exactly the class of drift a stale lock would hide again).
   # Locking it would trade that live signal for reproducing a pin that could
   # already be stale. `release.yml`/`clean-host.yml` remain the only

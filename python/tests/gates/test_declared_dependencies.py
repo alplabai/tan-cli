@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Every third-party module `tan/` imports must be declared in pyproject.
 
-Written because a real `pip install alp-tan` failed on first run with
+Written because a real `pip install tan-cli` failed on first run with
 `ModuleNotFoundError: No module named 'click'` while every local test suite
 passed. `tan/cli.py` does `from click.testing import CliRunner` (that is how
 `--help` under `--format json` is captured into one envelope instead of Click
@@ -156,7 +156,7 @@ def test_every_third_party_import_is_a_declared_dependency():
     )
     assert not undeclared, (
         "`tan/` imports a distribution pyproject declares nowhere, so a clean\n"
-        "`pip install alp-tan` will crash on first run even though every test\n"
+        "`pip install tan-cli` will crash on first run even though every test\n"
         "here passes (the module is present locally for unrelated reasons).\n"
         "Declare it in `dependencies`, or as an extra if it is optional, or\n"
         "stop importing it:\n  " + "\n  ".join(undeclared)

@@ -15,7 +15,7 @@ identical version string. This script is how the lock that fixes that gets
 REGENERATED; `python/release-requirements.lock.txt` is the artefact both
 release workflows now install from with `pip install --require-hashes`.
 
-Only third-party distributions go in the lock -- never `alp-tan` itself. The
+Only third-party distributions go in the lock -- never `tan-cli` itself. The
 local package is always installed from the checked-out commit
 (`pip install --no-deps -e .` in the workflows), which is already exactly
 reproducible (it's the git tree at the tag); locking it too would mean

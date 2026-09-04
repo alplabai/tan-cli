@@ -5,12 +5,14 @@ MCU and MPU alike — and `tan` turns it into firmware.
 
 ## Install
 
-Install from a checkout. `tan` is **not on PyPI** — the `alp-tan` distribution
-name is reserved in `pyproject.toml` and has never been published, so
-`pip install alp-tan` answers `ERROR: No matching distribution found`
-(`https://pypi.org/pypi/alp-tan/json` → `404`). The release workflow has no
-PyPI job: publishing there is a separate decision nobody has taken
-(`.github/workflows/release.yml`).
+Install from a checkout. `tan` is **not on PyPI yet** — the distribution has
+never been published, so a `pip install` of it answers `ERROR: No matching
+distribution found`. The decision to publish there HAS now been taken
+(tan-cli#1054: PyPI is the sole standalone install channel, and the npm shim is
+retired), and `.github/workflows/release.yml` carries a `publish_pypi` job — but
+it is opt-in and off, waiting on the repository variable `TAN_PYPI_PUBLISH` and
+a pending publisher configured on pypi.org. Until the first final tag uploads
+under that arrangement, a checkout install is the only path.
 
 On a PEP 668 host (Debian/Ubuntu, including stock `ubuntu:24.04`), installing
 straight into the system interpreter refuses with
@@ -57,10 +59,10 @@ someone who just wants the command.
 Most planning/build commands do need a checkout for metadata, schemas, examples,
 and tooling; pass it with `--sdk-root` or place it beside the project.
 
-The distribution is named `alp-tan` rather than `tan` because `tan` is already
-taken on PyPI (an unrelated code formatter); the command you run is still `tan`.
-Reserving the name is not the same as occupying it — nothing is uploaded under
-either.
+The distribution is not named `tan` because that name is already taken on PyPI
+(an unrelated code formatter); the command you run is still `tan`. Reserving a
+name is not the same as occupying it — nothing is uploaded yet under any of
+them.
 
 ## What it does
 

@@ -45,9 +45,9 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 VERSION_CHECK = REPO_ROOT / "python" / "scripts" / "version_check.py"
 PYPROJECT = REPO_ROOT / "python" / "pyproject.toml"
 
-#: The documents that make claims about the release. `npm-shim/README.md` makes
-#: them too but is owned by that package and already derives its wording from
-#: the same workflow; add it here the day it stops.
+#: The documents that make claims about the release. `npm-shim/README.md` used
+#: to be a fifth, deliberately excluded because it was owned by that package;
+#: the shim is retired (tan-cli#1054) and the exclusion is moot.
 #:
 #: `release.yml`'s own COMMENTS are a fifth source and are scanned too, from
 #: `_workflow_comments()` below rather than from here -- they are not a file a
@@ -76,8 +76,9 @@ _BANNER_LINES = 15
 #: check below is not "is this command mentioned" -- recording an unusable
 #: command so nobody reinvents the package name is legitimate, and the root
 #: README does exactly that for npm and crates.io. It is "is it mentioned
-#: WITHOUT saying it does not work", which is what `pip install alp-tan` was
-#: doing as python/README.md's primary install instruction (#385).
+#: WITHOUT saying it does not work", which is what `pip install alp-tan` (the
+#: distribution's name at the time) was doing as python/README.md's primary
+#: install instruction (#385).
 _UNUSABLE_MARKERS = (
     "404",
     "does not exist",
@@ -170,6 +171,31 @@ def _runs(node: object) -> list[str]:
     elif isinstance(node, list):
         for item in node:
             out.extend(_runs(item))
+    return out
+
+
+def _steps_source(node: object) -> list[str]:
+    """Every `run:` body AND every `uses:` ref under a node.
+
+    A publish channel is not always a shell command. `publish_pypi` uploads
+    with `uses: pypa/gh-action-pypi-publish@<sha>` and has no `run:` that names
+    a registry at all, so a `run:`-only scan reported `pypi: absent` while the
+    job sat right there (tan-cli#1054). `_registry_channels`' own needle list
+    already anticipated the action form -- it carries `"pypi-publish"` beside
+    `"twine upload"` -- so the intent was there and only the scanner was
+    narrow. That is the same blindness this gate exists to catch, one level up:
+    a check that cannot see the thing it is checking for.
+    """
+    out = list(_runs(node))
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "uses" and isinstance(value, str):
+                out.append(value)
+            else:
+                out.extend(_steps_source(value) if key != "run" else [])
+    elif isinstance(node, list):
+        for item in node:
+            out.extend(_steps_source(item))
     return out
 
 
@@ -283,7 +309,7 @@ def _registry_channels() -> dict[str, str]:
     for registry, needles in commands.items():
         state = "absent"
         for job_id, body in _publish_jobs().items():
-            for run in _runs(body):
+            for run in _steps_source(body):
                 if any(needle in run for needle in needles):
                     state = "opt-in" if _gating_variables().get(job_id) else "default"
         out[registry] = state
@@ -389,7 +415,7 @@ def _uncaveated(rel: str, pattern: re.Pattern[str]) -> list[str]:
 
     Inside a FENCE the command IS the instruction, so the refusal has to be in
     the copied text itself. This is #385's actual shape and the reason a window
-    cannot see it: `python3 -m pip install alp-tan` sat in python/README.md's
+    cannot see it: `python3 -m pip install tan-cli` sat in python/README.md's
     install fence, and the prose introducing that very fence is where the "not
     on PyPI" wording lives -- so a window check calls the block caveated while
     the first command a new user copies still 404s. Nothing about a paragraph
@@ -417,6 +443,72 @@ def _uncaveated(rel: str, pattern: re.Pattern[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 # The gate
 # ---------------------------------------------------------------------------
+#: Every version source `version_check.py` compares, as the reader function
+#: that fetches it. Asserted as a SET rather than a count so a drop names the
+#: source it lost, and asserted at all because nothing else in the repo does:
+#: when `npm-shim/package.json` was retired (tan-cli#1054), an audit found the
+#: contract had no census of its own sources. `_version_authority()` reads
+#: only `read_tan_version`, so removing any OTHER reader -- plus its call site
+#: and its summary line -- left every gate green and the whole pytest suite
+#: passing while `check()` silently compared one fewer file. That is the
+#: over-deletion this exists to make loud.
+#:
+#: `read_changelog_headings` is reached through `changelog_problems()` rather
+#: than called from `check()` directly, which is why the two assertions below
+#: differ: DEFINED covers the reader surviving at all, CALLED covers `check()`
+#: still routing through it.
+_DECLARED_VERSION_READERS = frozenset(
+    {"read_tan_version", "read_pyproject_version", "read_changelog_headings"}
+)
+_READERS_CALLED_BY_CHECK = frozenset({"read_tan_version", "read_pyproject_version"})
+
+
+def _version_readers() -> tuple[frozenset[str], frozenset[str]]:
+    """`(defined, called-by-check)` reader names, from `version_check.py`'s AST.
+
+    Derived, not restated -- the same reason `_version_authority()` is.
+    """
+    tree = ast.parse(VERSION_CHECK.read_text(encoding="utf-8"))
+    defined = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("read_")
+    }
+    check = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "check"
+    )
+    called = {
+        node.func.id
+        for node in ast.walk(check)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id.startswith("read_")
+    }
+    return frozenset(defined), frozenset(called)
+
+
+def test_version_check_still_reads_every_source_it_is_supposed_to():
+    """A version source cannot be dropped silently.
+
+    Failing here means `version_check.py` gained or lost a reader. If that was
+    deliberate, update the two frozensets above IN THE SAME COMMIT and say why
+    -- the point is that the change is stated, not that it is forbidden.
+    """
+    defined, called = _version_readers()
+    assert defined == _DECLARED_VERSION_READERS, (
+        f"version_check.py's reader set changed: "
+        f"lost {sorted(_DECLARED_VERSION_READERS - defined)}, "
+        f"gained {sorted(defined - _DECLARED_VERSION_READERS)}"
+    )
+    assert called == _READERS_CALLED_BY_CHECK, (
+        f"check() no longer routes through the same readers: "
+        f"lost {sorted(_READERS_CALLED_BY_CHECK - called)}, "
+        f"gained {sorted(called - _READERS_CALLED_BY_CHECK)}"
+    )
+
+
 def test_the_documented_version_authority_is_the_one_the_tag_gate_reads():
     authority_file, symbol = _version_authority()
     wrong = []
@@ -500,17 +592,36 @@ def test_no_doc_claims_a_publish_job_the_workflow_does_not_have():
                     f"variable that arms it ({sorted(variables)}) -- a reader "
                     f"cannot tell whether the channel is live"
                 )
+        # The reverse of the two checks above, and the direction that was
+        # missing: a doc describing a publish job release.yml no longer has.
+        # Every check here reads FORWARD from the workflow (does the doc match
+        # what exists?), so a retired job left in prose was invisible -- the
+        # loop right above only iterates jobs that DO exist. tan-cli#1054
+        # retired `publish_npm` and three live docs kept describing it, on a
+        # fully green board. A reader is told to expect a channel that cannot
+        # run, which is the same "look away from the real job" harm as the
+        # `if: false` case.
+        for ghost in re.findall(r"\bpublish_[a-z0-9_]+\b", text):
+            if ghost not in _publish_jobs():
+                problems.append(
+                    f"{rel} describes `{ghost}`, which release.yml does not "
+                    f"define (publish jobs: {sorted(_publish_jobs())})"
+                )
     assert not problems, "\n  ".join(["release docs vs release.yml:", *problems])
 
 
 def test_an_install_command_for_an_unpublished_registry_is_never_offered():
-    """tan-cli#385. `python3 -m pip install alp-tan` was python/README.md's
-    PRIMARY instruction while `alp-tan` had never been published: no PyPI job
-    exists in release.yml and `https://pypi.org/pypi/alp-tan/json` answers 404,
-    so the first command a new user ran could only fail. The distribution name
-    is read from pyproject, and whether each registry is on the release path is
-    read from the workflow, so renaming the distribution or adding a real
-    publish job both land here automatically."""
+    """tan-cli#385. `python3 -m pip install alp-tan` -- the distribution was
+    named `alp-tan` then -- was python/README.md's PRIMARY instruction while
+    nothing had ever been published under it, so the first command a new user
+    ran could only fail. Both halves of that setup have since changed and this
+    gate followed neither by hand: the distribution was renamed to `tan-cli`
+    and a real `publish_pypi` job was added (tan-cli#1054), and the assertions
+    below still hold because the name is read from pyproject and the channel
+    state from the workflow. The name is deliberately NOT spelled in the
+    patterns -- an earlier draft of this docstring was rewritten by a global
+    rename and briefly claimed the README had said `pip install tan-cli` in
+    2026-08, which it never did."""
     pypi_name = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]["name"]
     patterns = {
         "pypi": re.compile(rf"""pip\s+install\s+["']?{re.escape(pypi_name)}\b"""),

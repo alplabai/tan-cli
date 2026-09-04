@@ -107,10 +107,13 @@ For serial monitoring, install the optional dependency from the checkout:
 python3 -m pip install "./python[monitor]"
 ```
 
-`tan` is not published on PyPI, and `@alplabai/tan` is not currently published
-on npm. The `alp-tan-cli` crate on crates.io is a stale v0.4-era Rust CLI, no
-longer built from this repository and not the current program. Use a GitHub
-release or a source checkout.
+`tan` is not on PyPI **yet**: `release.yml`'s `publish_pypi` job exists and is
+opt-in, off until the repository variable `TAN_PYPI_PUBLISH` is `true` and a
+pending publisher is configured on pypi.org (tan-cli#1054). PyPI is the
+intended standalone channel; the npm shim that used to be advertised here is
+retired, and the `alp-tan-cli` crate on crates.io is a stale v0.4-era Rust CLI,
+no longer built from this repository and not the current program. Until the
+first upload lands, use a GitHub release or a source checkout.
 
 ### What a build needs
 

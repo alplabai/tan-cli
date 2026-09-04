@@ -54,7 +54,7 @@ Three of the four backend rows read the HOST, not this case's inputs:
 so a golden recorded on a toolchain-less box would go RED the moment anyone ran
 it on a box that HAS them -- and the repo's own unavailable-reason string tells
 a customer to install one (`"vela not on PATH; pip install
-alp-tan[model-compile]"`). That is a latent CI failure, not coverage.
+tan-cli[model-compile]"`). That is a latent CI failure, not coverage.
 
 MEASURED, on this box, with a `vela` and a `dxcom` on PATH and
 `ALP_VELA_CONFIG`/`ALP_DEEPX_SDK_HOME` set, running the harness's env WITHOUT

@@ -54,7 +54,7 @@ def _declared_runtime_distributions() -> dict[str, str]:
     `monitor` specifically: a frozen binary bundles it at build time (see
     `build_binary.sh`'s header -- `tan monitor` is a command the binary
     advertises and a customer can never add an extra after the fact), so the
-    release lock has to cover it even though a plain `pip install alp-tan`
+    release lock has to cover it even though a plain `pip install tan-cli`
     does not.
     """
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))

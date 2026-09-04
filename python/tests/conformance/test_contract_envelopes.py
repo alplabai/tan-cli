@@ -37,7 +37,7 @@ as "differs somehow".
   ``shutil.which('dxcom')`` and the ``ALP_DRPAI_TVM_HOME`` / ``ALP_DEEPX_SDK_HOME``
   / ``ALP_VELA_CONFIG`` environment variables, so a golden recorded on a
   toolchain-less box would go RED on a developer who ran the repo's own
-  documented ``pip install alp-tan[model-compile]`` -- which installs ``vela``.
+  documented ``pip install tan-cli[model-compile]`` -- which installs ``vela``.
   Pinning the environment is what makes that golden mean the same thing on every
   box; normalising the rows instead would erase the only fields the case exists
   to gate.

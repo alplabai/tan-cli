@@ -20,7 +20,7 @@ needs a bench with a device on it.
 
 **pyserial may or may not be genuinely installed, and this file does not need
 to know which (tan-cli#255).** `ci.yml` installs `-e ./python` with NO extras
-on purpose -- that is the shape a customer's `pip install alp-tan` gives, and
+on purpose -- that is the shape a customer's `pip install tan-cli` gives, and
 the only one in which `tests/gates/test_declared_dependencies.py` can catch an
 extras-only import escaping to a top-level-module import -- while `python-binaries.yml` and
 `parity.yml` install `[monitor]`. The six cases below that exercise
@@ -38,7 +38,7 @@ that assert the pyserial-ABSENT behaviour still force the real `ImportError`
 themselves (`_block_pyserial`), since producing that failure honestly is the
 whole point of them. Installing the extra in `ci.yml` instead was considered
 and rejected: it would blind `test_declared_dependencies.py` to the shape a
-bare `pip install alp-tan` actually produces.
+bare `pip install tan-cli` actually produces.
 """
 from __future__ import annotations
 
@@ -346,7 +346,7 @@ def test_frozen_build_without_the_extra_reports_pyserial_missing_not_a_tan_bug(m
     assert codes == ["monitor.pyserial-missing"], envelope
     assert "monitor.internal-failure" not in codes
     assert result.exit_code == 1, f"expected RUNTIME_FAILURE, got {result.exit_code}"
-    assert 'alp-tan[monitor]' in envelope["issues"][0]["message"]
+    assert 'tan-cli[monitor]' in envelope["issues"][0]["message"]
 
 
 def test_unfrozen_build_without_pyserial_reports_the_same_code(monkeypatch):

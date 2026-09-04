@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # tan CI — the Python package job (installs the declared package + runs
-# `python/tests`, `ALP_SDK_ROOT`-gated via `sdk_parity`), the npm-shim
-# platform-mapping check, and the sdist/wheel build-floor proof.
+# `python/tests`, `ALP_SDK_ROOT`-gated via `sdk_parity`), the workflow-security
+# audit, and the sdist/wheel build-floor proof. The npm-shim platform-mapping
+# check went with the shim itself (tan-cli#1054).
 #
 # BRANCH PROTECTION (tan-cli#392, tan-cli#269 -- DONE; tan-cli#439)
 # =================================================================
@@ -263,14 +264,14 @@ jobs:
       # that shipped (`tan/cli.py` imports `click.testing`, typer stopped
       # depending on click, and a clean install therefore died at import while
       # every developer machine passed). Installing the package resolves exactly
-      # what a customer's `pip install alp-tan` resolves. Extras stay out: the
+      # what a customer's `pip install tan-cli` resolves. Extras stay out: the
       # `monitor` extra is optional at runtime by definition, and installing it
       # here would hide a module-scope `import serial` from the gate below.
       #
       # Deliberately ASYMMETRIC with python-binaries.yml, which installs
       # `-e ".[monitor]"`: the release artifact carries the extra because a frozen
       # binary cannot gain pyserial later, while this job must keep testing the
-      # extras-LESS shape, which is what `pip install alp-tan` gives a customer
+      # extras-LESS shape, which is what `pip install tan-cli` gives a customer
       # and the only shape in which `test_declared_dependencies.py` can catch an
       # extras-only import escaping to module scope. Do not "fix" one to match
       # the other.
@@ -836,34 +837,6 @@ jobs:
           # the `python` job makes, same gate depending on it.
           TAN_MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
         run: python -m pytest tests -q
-
-  # The npm shim's platform -> asset table is DATA in a postinstall script, so
-  # nothing compiled it, tested it, or noticed when it drifted. It has drifted
-  # in BOTH directions: it once served `-gnu` while install.sh and the VS Code
-  # extension served `-musl` (a musl host downloaded a binary that could not
-  # execute), and from v0.5.0 the correct answer reversed -- PyInstaller cannot
-  # produce the static `-musl` artefact the retired Rust target did, so Linux is
-  # `-gnu` again. This job is what keeps the shim, install.sh and the contract
-  # doc from separating, whichever direction is currently correct.
-  # Node's own test runner, so there is nothing to install.
-  shim:
-    runs-on: ubuntu-latest
-    # Under a minute on every run sampled, PR and release tag alike. 10 is a
-    # hang catcher for the pip install, not a budget.
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24" # same major release.yml's publish_npm job packs with
-      # The FILE, not the directory: `--test <dir>` resolves its argument as a
-      # module on node 26 and dies with MODULE_NOT_FOUND, so the directory form
-      # would make this job's result depend on the runner image's node.
-      - name: pin the platform -> asset mapping
-        run: node --test npm-shim/test/libc-mapping.test.js
-
   # `build-system.requires` is a promise to anyone building the sdist/wheel
   # themselves -- a downstream packager, a distro, an offline mirror -- and
   # until this job existed NOTHING in CI stood behind it. Every other Python
@@ -879,7 +852,10 @@ jobs:
   # measures.
   wheel-floor:
     runs-on: ubuntu-latest
-    # Under a minute on every run sampled. Same reasoning as `shim` above.
+    # Under a minute on every run sampled: a pip install and one build, no
+    # test suite. 10 is a hang catcher, not a budget. (This used to defer to
+    # the `shim` job's identical reasoning; that job retired with the npm
+    # shim in tan-cli#1054.)
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

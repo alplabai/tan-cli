@@ -2444,7 +2444,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: install alp-tan[monitor,model-compile] + pytest
+      - name: install tan-cli[monitor,model-compile] + pytest
         shell: bash
         working-directory: python
         run: |
@@ -2972,7 +2972,7 @@ jobs:
       # `--emit scaffold` subprocess and `kconfig_fixture_parity.py` /
       # `toolchain_lock_parity.py` below, none of which need anything beyond
       # PyYAML/jsonschema, already in `python/pyproject.toml`'s dependencies.
-      - name: install alp-tan + test deps
+      - name: install tan-cli + test deps
         run: |
           python3 -m pip install --upgrade pip pytest
           python3 -m pip install ./python

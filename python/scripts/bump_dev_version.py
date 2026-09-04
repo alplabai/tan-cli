@@ -11,11 +11,11 @@ the moment a tag is pushed, `dev`'s `TAN_VERSION` equals a published release
 -- the precise state `version_check.py --not-released` exists to refuse.
 Every PR opened against `dev` then fails `version-identity.yml`'s
 `not-a-released-version` job on a check unrelated to its own diff, until a
-human notices and bumps four files by hand. That has happened twice
+human notices and bumps three files by hand. That has happened twice
 (tan-cli#479 -> `0.5.2-rc1.dev0`, tan-cli#768 -> `0.6.0-rc2.dev0`), both by
 hand, both the same recurrence one release apart.
 
-This script is the arithmetic + the four-file edit those two fixes each did
+This script is the arithmetic + the three-file edit those two fixes each did
 by hand, computed from ONE input: the tag `release.yml` just published. It
 calls into `version_check` for the SemVer<->PEP 440 rendering and the
 CHANGELOG target (`release_target()`) rather than re-deriving either -- that
@@ -49,7 +49,6 @@ resolved is a gate that can fail for a reason unrelated to versions.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import sys
@@ -115,7 +114,7 @@ def next_dev_version(released: str) -> str:
 
 @dataclass(frozen=True)
 class BumpPlan:
-    """The computed edit to the four files `version_check.py` cross-checks,
+    """The computed edit to the three files `version_check.py` cross-checks,
     not yet written. Kept apart from `apply_plan()` so a caller can inspect
     or diff the plan before committing to it (and so tests can assert on the
     computed text without touching a filesystem twice)."""
@@ -125,11 +124,9 @@ class BumpPlan:
     target: str
     version_py: Path
     pyproject: Path
-    npm_shim: Path
     changelog: Path
     version_py_text: str
     pyproject_text: str
-    npm_shim_text: str
     changelog_text: str
 
 
@@ -175,20 +172,6 @@ def _bump_pyproject(text: str, *, next_version: str) -> str:
         )
     pep440 = vc.semver_to_pep440(next_version)
     return _PYPROJECT_VERSION_LINE.sub(f'version = "{pep440}"', text, count=1)
-
-
-def _bump_npm_shim(text: str, *, next_version: str) -> str:
-    data = json.loads(text)
-    if "version" not in data:
-        raise vc.VersionError(
-            'npm-shim/package.json has no top-level "version" key'
-        )
-    data["version"] = next_version
-    # `ensure_ascii=False`: the file's own `description` carries a literal
-    # em dash (the only non-ASCII character in the file), and the default
-    # `ensure_ascii=True` would silently turn it into a `\uXXXX` escape on
-    # every bump -- a diff on a field this script has no business touching.
-    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
 
 def _insert_changelog_section(
@@ -253,9 +236,9 @@ def _insert_changelog_section(
 
 
 def build_plan(released: str, *, today: str | None = None) -> BumpPlan:
-    """The four-file edit `next_dev_version(released)` implies, read from and
-    validated against `python/tan/version.py`, `python/pyproject.toml`,
-    `npm-shim/package.json` and `CHANGELOG.md` under `version_check`'s
+    """The three-file edit `next_dev_version(released)` implies, read from and
+    validated against `python/tan/version.py`, `python/pyproject.toml` and
+    `CHANGELOG.md` under `version_check`'s
     CURRENT `PYTHON_ROOT`/`REPO_ROOT` -- rebind those to point this whole
     function at a synthetic tree, the same technique
     `test_version_check_refuses_an_empty_changelog_section.py` already uses
@@ -268,7 +251,6 @@ def build_plan(released: str, *, today: str | None = None) -> BumpPlan:
 
     version_py = vc.PYTHON_ROOT / "tan" / "version.py"
     pyproject = vc.PYTHON_ROOT / "pyproject.toml"
-    npm_shim = vc.REPO_ROOT / "npm-shim" / "package.json"
     changelog = vc.REPO_ROOT / "CHANGELOG.md"
 
     version_py_text = _bump_version_py(
@@ -280,9 +262,6 @@ def build_plan(released: str, *, today: str | None = None) -> BumpPlan:
     )
     pyproject_text = _bump_pyproject(
         pyproject.read_text(encoding="utf-8"), next_version=next_version
-    )
-    npm_shim_text = _bump_npm_shim(
-        npm_shim.read_text(encoding="utf-8"), next_version=next_version
     )
     changelog_text = _insert_changelog_section(
         changelog.read_text(encoding="utf-8"),
@@ -297,21 +276,18 @@ def build_plan(released: str, *, today: str | None = None) -> BumpPlan:
         target=target,
         version_py=version_py,
         pyproject=pyproject,
-        npm_shim=npm_shim,
         changelog=changelog,
         version_py_text=version_py_text,
         pyproject_text=pyproject_text,
-        npm_shim_text=npm_shim_text,
         changelog_text=changelog_text,
     )
 
 
 def apply_plan(plan: BumpPlan) -> None:
-    """Write the four files. Separate from `build_plan()` so a caller (or a
+    """Write the three files. Separate from `build_plan()` so a caller (or a
     test) can inspect the computed text before anything touches disk."""
     plan.version_py.write_text(plan.version_py_text, encoding="utf-8")
     plan.pyproject.write_text(plan.pyproject_text, encoding="utf-8")
-    plan.npm_shim.write_text(plan.npm_shim_text, encoding="utf-8")
     plan.changelog.write_text(plan.changelog_text, encoding="utf-8")
 
 
@@ -334,7 +310,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--apply", action="store_true",
-        help="write the four files (default: report the computed plan only)",
+        help="write the three files (default: report the computed plan only)",
     )
     args = parser.parse_args(argv)
 
@@ -371,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
         print("applied.")
         _emit_status("applied")
     else:
-        print("(dry run -- pass --apply to write the four files)")
+        print("(dry run -- pass --apply to write the three files)")
         _emit_status("would-apply")
     return 0
 
