@@ -941,6 +941,28 @@ else
       cmake ninja-build xz-utils wget python3-venv file >"$WORK/apt-b.log" 2>&1
   fi
 
+  # tan-cli#1189: the pair that decides whether tan's tan-cli#992
+  # `LD_LIBRARY_PATH` restore can fire at all on this host. `tan` is a
+  # PyInstaller ONEDIR freeze here, and its bootloader points
+  # `LD_LIBRARY_PATH` at the bundled `_internal/` before running -- stashing
+  # the caller's value in `LD_LIBRARY_PATH_ORIG` so children can be given it
+  # back. `subprocess_env.restore_ld_library_path` is a documented NO-OP when
+  # `LD_LIBRARY_PATH_ORIG` is absent, on the reading that an absent marker
+  # means "this host never had the problem".
+  #
+  # That reading holds only if the bootloader records the marker
+  # unconditionally. If it records it ONLY when the caller already had an
+  # `LD_LIBRARY_PATH`, a bare container -- which has none -- gets the bundled
+  # path with nothing to undo it, and every hosted runner is immune. So this is
+  # the PRE-LAUNCH value, deliberately: what the bootloader had to work with.
+  # An `<unset>` on the first line is the whole finding.
+  #
+  # Not an assertion. The harness must not fail on a fact it is here to
+  # MEASURE (tan-cli#1186's own "measure it before you fix it"), and the
+  # failure this informs is already scored by the bootstrap check below.
+  note "host LD_LIBRARY_PATH before tan (pre-launch): ${LD_LIBRARY_PATH:-<unset>}"
+  note "host LD_LIBRARY_PATH_ORIG before tan (pre-launch): ${LD_LIBRARY_PATH_ORIG:-<unset>}"
+
   hdr "B: bootstrap succeeds on a provisioned host"
   T0=$(date +%s)
   "$TAN" bootstrap --sdk-root ./alp-sdk --non-interactive --format json \
