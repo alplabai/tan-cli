@@ -169,3 +169,93 @@ measured.
 `contract/README.md`'s row for the five `debug-config-preview-*` cases said
 they "probe no PATH". That was true when written and is corrected in the same
 change.
+
+Re-recorded on : 2026-09-04
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#1179, review of PR tan-cli#1194
+Branch         : fix/1179-openocd-hosttools-note (off dev @ a92a0011)
+
+What changed in the golden (fourth re-record)
+---------------------------------------------
+`data.notes[3]` REPLACED, nothing else moved. `expected.exit` is still 0,
+`issues` is still `[]`, and `data.configuration` is byte-identical to the third
+re-record. Diffed against the previous recording, exactly one line differs:
+
+  - "No OpenOCD executable could be resolved for this build, so this profile
+     carries no 'serverpath' (and no 'searchDir'): this project's runners.yaml
+     has no 'config.openocd' key, ..."
+  + "No OpenOCD executable could be resolved for this draft, so it carries no
+     'serverpath' (and no 'searchDir'), and no 'openocd' is on PATH here
+     either. This is a baremetal target, built by tan's plain-CMake backend
+     rather than by Zephyr, ..."
+
+Why the THIRD recording was wrong
+---------------------------------
+Two separate defects, both in the WORDING (the predicate that decides whether
+to emit at all is unchanged and still correct):
+
+1. It asserted a fact about a file that does not exist here. This case runs
+   from a fresh EMPTY scratch directory -- no `build/`, no
+   `system-manifest.yaml`, no `runners.yaml` anywhere -- so
+   `_resolve_from_build` returns `(LaunchResolution(), [], None)` at its
+   missing-manifest branch and never opens a `runners.yaml` at all. The note
+   nevertheless read "this project's runners.yaml has no 'config.openocd'
+   key". Measured on this branch's parent (57a2244), in an empty directory,
+   with a bare `PATH`:
+
+       tan --format json debug-config --target-kind zephyr-mcu \
+           --server openocd --preview
+       -> data.notes[3] = "... this project's runners.yaml has no
+          'config.openocd' key, and no 'openocd' is on PATH here either. ..."
+
+   That is `tan debug-config`'s PRIMARY documented use, in
+   `_resolve_from_build`'s own docstring: "`debug-config` must still emit its
+   draft before the first build". alp-sdk-vscode surfaces `data.notes`
+   verbatim, so this shipped a false statement to the user.
+
+2. `--target-kind baremetal-mcu` -- which is what this case's `args.txt`
+   passes -- was handed a paragraph about the Zephyr SDK's `--no-hosttools`
+   install and Zephyr's `find_program(OPENOCD openocd)`. A baremetal target is
+   NOT a Zephyr build: `os: baremetal` routes to the plain-CMake backend
+   (`baremetal_cmake_flash`, `BAREMETAL_PROJECT_INCLUDE`), and
+   `_resolve_from_build` only ever reads `<build_dir>/zephyr/runners.yaml`,
+   which that backend does not write. No Zephyr SDK is in this target kind's
+   story, so the paragraph sent the reader to fix something that was never
+   their problem.
+
+None of tan-cli#1179's six unit cases covered either: all six use `ZEPHYR_MCU`
+against a really-built slice with a real `runners.yaml`, so the only wording
+they exercised was the one state where the old sentence WAS true -- and the
+state this golden actually ships was covered by nothing. This re-record adds
+three cases (`test_debug_config_openocd_hosttools_note.py`): the pre-build
+state, the `baremetal-mcu` state, and a `baremetal-mcu`-with-`openocd`-on-PATH
+control.
+
+The wording is now split three ways, one per state:
+`OPENOCD_NO_HOSTTOOLS_NOTE` (a build was read; its `runners.yaml` has no
+`config.openocd` -- unchanged, and still what the third recording said),
+`OPENOCD_NO_HOSTTOOLS_NOTE_PRE_BUILD` (no build was read), and
+`OPENOCD_NO_SERVERPATH_NOTE_BAREMETAL` (this case). The signal is
+`registered_runners`, which `_resolve_from_build` returns empty from every
+branch that opened no readable `runners.yaml`.
+
+How it was captured
+-------------------
+Through the conformance harness's own `fresh_dir` / `copy_fixture_inputs` /
+`case_env` / `normalise`, imported from
+`python/tests/conformance/test_contract_envelopes.py`, exactly as
+`contract/README.md`'s "Regenerating a golden" step 1 requires. No hand-editing
+of `expected.json`; it was rewritten from the child's own stdout.
+
+The `env.json` PATH pin was NOT touched and is still load-bearing -- proven on
+this recording box, which carries `/usr/bin/openocd` (`which openocd` ->
+`/usr/bin/openocd`). Recording the same case through `case_env` twice, once
+with this case's `env.json` and once with none:
+
+    WITH env.json pin    : exit=0, data.notes has 4 entries (the note fires)
+    WITHOUT env.json pin : exit=0, data.notes has 3 entries (no note at all)
+
+So an unpinned re-record here would have blessed a three-note golden that then
+fails on every box without an `openocd` -- the hole tan-cli#253 closed for
+`model doctor`'s `vela`, reproduced live.

@@ -31,6 +31,17 @@ is silent too. That last one is measured benign upstream (`openocd -s
 /nonexistent/does/not/exist -f interface/jlink.cfg` still loads off OpenOCD's
 built-in scripts directory, reaching "session transport was not selected"), and
 warning on it would be a false alarm on a host that debugs fine today.
+
+**tan-cli#1194 review -- three spellings, one per state.** The first version of the note
+asserted "this project's runners.yaml has no 'config.openocd' key" in every
+state it fired in -- including the state it fires in most often, before the
+first build, where `_resolve_from_build` returns at its missing-manifest branch
+and never opens a `runners.yaml` at all. The six cases above all use
+`ZEPHYR_MCU` against a really-built slice, so none of them covered the wording
+the `debug-config-preview-baremetal-mcu` golden actually ships. The three cases
+at the bottom of this file cover the two spellings they miss: the pre-build one
+and the `baremetal-mcu` one (a plain-CMake, no-OS backend that no Zephyr SDK
+paragraph applies to).
 """
 import os
 import sys
@@ -40,10 +51,18 @@ import pytest
 
 from tan.commands.debug_config_cmd import (
     OPENOCD_NO_HOSTTOOLS_NOTE,
+    OPENOCD_NO_HOSTTOOLS_NOTE_PRE_BUILD,
+    OPENOCD_NO_SERVERPATH_NOTE_BAREMETAL,
     _preview_notes_for,
     _resolve_from_build,
 )
-from tan.core.debug_launch import OPENOCD, ZEPHYR_MCU, apply_launch_resolution, create_launch_draft
+from tan.core.debug_launch import (
+    BAREMETAL_MCU,
+    OPENOCD,
+    ZEPHYR_MCU,
+    apply_launch_resolution,
+    create_launch_draft,
+)
 from tests.conftest import empty_tool_inventory
 
 #: The `runners.yaml` `config:` block CMake writes when `find_program(OPENOCD
@@ -136,7 +155,7 @@ def _notes(root: str) -> list[str]:
     )
     draft = create_launch_draft(ZEPHYR_MCU, OPENOCD, None)
     apply_launch_resolution(draft, resolution)
-    return _preview_notes_for(draft, registered_runners, OPENOCD)
+    return _preview_notes_for(draft, registered_runners, OPENOCD, ZEPHYR_MCU)
 
 
 def test_no_serverpath_and_no_openocd_on_path_says_so(tmp_path, monkeypatch):
@@ -151,6 +170,11 @@ def test_no_serverpath_and_no_openocd_on_path_says_so(tmp_path, monkeypatch):
     assert OPENOCD_NO_HOSTTOOLS_NOTE in notes
     assert "--no-hosttools" in OPENOCD_NO_HOSTTOOLS_NOTE
     assert "serverpath" in OPENOCD_NO_HOSTTOOLS_NOTE
+    # tan-cli#1194 review: and it is the BUILD-READ spelling, not the pre-build one.
+    # A build really was read here (`runners.yaml` registers both runners), so
+    # asserting something about that file is legitimate in this state and only
+    # in this state.
+    assert OPENOCD_NO_HOSTTOOLS_NOTE_PRE_BUILD not in notes
 
 
 def test_no_serverpath_but_openocd_on_path_is_silent(tmp_path, monkeypatch):
@@ -198,7 +222,7 @@ def test_the_mixed_host_is_silent(tmp_path, monkeypatch):
     ]
     assert draft["serverpath"] == "/usr/bin/openocd"
     assert OPENOCD_NO_HOSTTOOLS_NOTE not in _preview_notes_for(
-        draft, registered_runners, OPENOCD
+        draft, registered_runners, OPENOCD, ZEPHYR_MCU
     )
 
 
@@ -214,7 +238,7 @@ def test_a_non_openocd_server_never_sees_the_note(tmp_path, monkeypatch):
     apply_launch_resolution(draft, resolution)
 
     assert OPENOCD_NO_HOSTTOOLS_NOTE not in _preview_notes_for(
-        draft, registered_runners, JLINK
+        draft, registered_runners, JLINK, ZEPHYR_MCU
     )
 
 
@@ -266,3 +290,90 @@ def test_the_note_rides_in_the_envelope_and_does_not_move_the_exit_code(tmp_path
     configuration = envelope["data"]["configuration"]
     assert "serverpath" not in configuration and "searchDir" not in configuration
     assert OPENOCD_NO_HOSTTOOLS_NOTE in envelope["data"]["notes"]
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1194 review: the wording is split three ways, and these cover the two
+# spellings the six cases above never reach. The pre-build one matters most:
+# it is `tan debug-config`'s own primary documented use ("`debug-config` must
+# still emit its draft before the first build", `_resolve_from_build`'s
+# docstring) AND the state the `debug-config-preview-baremetal-mcu` contract
+# golden records, and alp-sdk-vscode surfaces `data.notes` to the user
+# VERBATIM.
+# ---------------------------------------------------------------------------
+
+
+def _unbuilt_notes(root: str, target: str) -> list[str]:
+    """The notes for a project with no `build/` at all, via the same calls the
+    command makes. `_resolve_from_build` returns at its missing-manifest branch
+    here and never opens a `runners.yaml`."""
+    resolution, registered_runners, _core_id = _resolve_from_build(root, target, OPENOCD, None)
+    assert registered_runners == []
+    draft = create_launch_draft(target, OPENOCD, None)
+    apply_launch_resolution(draft, resolution)
+    assert "serverpath" not in draft and "searchDir" not in draft
+    return _preview_notes_for(draft, registered_runners, OPENOCD, target)
+
+
+def test_the_pre_build_state_does_not_claim_a_runners_yaml_it_never_read(
+    tmp_path, monkeypatch
+):
+    """THE tan-cli#1194-review CASE. An empty project directory -- no `build/`, no
+    `system-manifest.yaml`, no `runners.yaml` anywhere -- must not be told that
+    "this project's runners.yaml has no 'config.openocd' key". There is no
+    runners.yaml. It gets the pre-build spelling instead, which says so."""
+    root = str(tmp_path / "project")
+    Path(root).mkdir()
+    monkeypatch.setenv("PATH", _path_without_openocd(tmp_path / "inventory"))
+
+    notes = _unbuilt_notes(root, ZEPHYR_MCU)
+
+    assert OPENOCD_NO_HOSTTOOLS_NOTE_PRE_BUILD in notes
+    assert OPENOCD_NO_HOSTTOOLS_NOTE not in notes
+    # The specific false claim this case exists to keep out of the envelope.
+    assert not any("runners.yaml has no 'config.openocd' key" in n for n in notes)
+    # The actionable half survives the reword -- the note is still about the
+    # `--no-hosttools` SDK and still names the field that is missing.
+    assert "--no-hosttools" in OPENOCD_NO_HOSTTOOLS_NOTE_PRE_BUILD
+    assert "serverpath" in OPENOCD_NO_HOSTTOOLS_NOTE_PRE_BUILD
+
+
+def test_a_baremetal_target_is_not_handed_the_zephyr_sdk_paragraph(
+    tmp_path, monkeypatch
+):
+    """`baremetal-mcu` is a plain-CMake, no-OS backend (`os: baremetal` ->
+    `baremetal_cmake_flash`), so no Zephyr SDK and no `find_program(OPENOCD
+    openocd)` is in its story, and `_resolve_from_build` only ever reads
+    `<build_dir>/zephyr/runners.yaml` -- which that backend never writes. This
+    is the shape the `debug-config-preview-baremetal-mcu` golden records."""
+    root = str(tmp_path / "project")
+    Path(root).mkdir()
+    monkeypatch.setenv("PATH", _path_without_openocd(tmp_path / "inventory"))
+
+    notes = _unbuilt_notes(root, BAREMETAL_MCU)
+
+    assert OPENOCD_NO_SERVERPATH_NOTE_BAREMETAL in notes
+    assert OPENOCD_NO_HOSTTOOLS_NOTE not in notes
+    assert OPENOCD_NO_HOSTTOOLS_NOTE_PRE_BUILD not in notes
+    # No Zephyr-SDK prose at all: not the flag, not the CMake probe, not the
+    # SDK's host tools.
+    assert "--no-hosttools" not in OPENOCD_NO_SERVERPATH_NOTE_BAREMETAL
+    assert "find_program" not in OPENOCD_NO_SERVERPATH_NOTE_BAREMETAL
+    assert "tan bootstrap" not in OPENOCD_NO_SERVERPATH_NOTE_BAREMETAL
+    # But the actionable half is still there.
+    assert "put it on PATH" in OPENOCD_NO_SERVERPATH_NOTE_BAREMETAL
+
+
+def test_a_baremetal_target_with_openocd_on_path_is_silent(tmp_path, monkeypatch):
+    """CONTROL for the new arm: the target kind never suppresses the PATH
+    probe. A host that has `openocd` is correctly provisioned for this session
+    and hears nothing, baremetal or not."""
+    root = str(tmp_path / "project")
+    Path(root).mkdir()
+    monkeypatch.setenv("PATH", _path_with_openocd(tmp_path / "inventory"))
+
+    notes = _unbuilt_notes(root, BAREMETAL_MCU)
+
+    assert OPENOCD_NO_SERVERPATH_NOTE_BAREMETAL not in notes
+    assert OPENOCD_NO_HOSTTOOLS_NOTE not in notes
+    assert OPENOCD_NO_HOSTTOOLS_NOTE_PRE_BUILD not in notes

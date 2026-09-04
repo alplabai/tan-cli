@@ -579,17 +579,23 @@ just the one that captured it:
   `--no-hosttools`, so the SDK ships no `openocd`; `tan debug-config --server
   openocd` on a host with no system one either used to emit a profile with no
   `serverpath`, no `searchDir` and no warning. It now emits a `data.notes`
-  entry, and that note fires only when no `openocd` resolves on `PATH` -- so
-  this case reads the host in exactly the way the paragraph above describes,
-  and a re-record on a box carrying `/usr/bin/openocd` would bless a note-less
-  golden that then fails on every box without one. Its `env.json` pins `PATH`
-  alone (`{"PATH": "__WORKDIR__"}`) and unsets nothing. Left unpinned, the
-  golden's answer would instead ride on `python/tests/conftest.py`'s
-  session-scoped PROBE_TOOLS scrub -- a fixture in a different tree, which the
-  "Regenerating a golden" procedure above (it calls `case_env`; it runs no
-  session fixture) never applies. The other twenty-four cases answer from their
-  own copied inputs and carry no `env.json`; pinning host state they never read
-  would only hide a real regression in how they read it.
+  entry -- and, since tan-cli#1194's review round, the spelling of that entry
+  that fits the state this case is actually in: an empty scratch directory
+  with no build, asking for `baremetal-mcu`, which is a plain-CMake backend
+  no Zephyr-SDK paragraph applies to (the first wording asserted "this
+  project's runners.yaml has no 'config.openocd' key" about a file that has
+  never existed here). The note fires only when no `openocd` resolves on
+  `PATH` -- so this case reads the host in exactly the way the paragraph
+  above describes, and a re-record on a box carrying `/usr/bin/openocd` would
+  bless a note-less golden that then fails on every box without one. Its
+  `env.json` pins `PATH` alone (`{"PATH": "__WORKDIR__"}`) and unsets nothing.
+  Left unpinned, the golden's answer would instead ride on
+  `python/tests/conftest.py`'s session-scoped PROBE_TOOLS scrub -- a fixture
+  in a different tree, which the "Regenerating a golden" procedure above (it
+  calls `case_env`; it runs no session fixture) never applies. The other
+  twenty-four cases answer from their own copied inputs and carry no
+  `env.json`; pinning host state they never read would only hide a real
+  regression in how they read it.
 
 ## Cases pinned today
 
@@ -614,7 +620,7 @@ just the one that captured it:
 | `debug-config-preview-zephyr-mcu-sdk-identity` | `debug-config --target-kind zephyr-mcu --server jlink --core m55_hp --sdk-root ./sdk --preview` (fixture SDK) | 0 | |
 | `debug-config-preview-baremetal-mcu` | `debug-config --target-kind baremetal-mcu --server openocd --preview` | 0 | |
 | `debug-config-preview-yocto-userspace` | `debug-config --target-kind yocto-userspace --server gdbserver --preview` | 0 | |
-| `debug-config-preview-native-host` | `debug-config --target-kind native-host --server none --preview` | 0 | One profile per `--target-kind`. Unlike the other cases these pin a `data` value that is itself a consumer ARTEFACT, not a report: alp-sdk-vscode#342 writes `data.configuration` into `launch.json` verbatim, so the golden pins the emitted key SET — an added key or a changed `program`/`executable` fails here instead of shipping. **All five were re-recorded against the shipping Python CLI under tan-cli#502 and carry a `PROVENANCE.txt`; none is `xfail`'d any more — see "Why the five `debug-config-preview-*` goldens were re-recorded" right below this table.** `--preview` reads no `board.yaml` and spawns no Python. It used to probe no PATH either; since tan-cli#1179 the OpenOCD profile does — `baremetal-mcu` is the one case here that passes `--server openocd`, its `data.notes` now carries the OpenOCD-without-host-tools note, and it therefore ships an `env.json` pinning `PATH` (see "Pinning host state a case reads" and its own `PROVENANCE.txt`). For the other four the only host-dependent output is still the absolute working directory, tokenized as `__WORKDIR__` above. |
+| `debug-config-preview-native-host` | `debug-config --target-kind native-host --server none --preview` | 0 | One profile per `--target-kind`. Unlike the other cases these pin a `data` value that is itself a consumer ARTEFACT, not a report: alp-sdk-vscode#342 writes `data.configuration` into `launch.json` verbatim, so the golden pins the emitted key SET — an added key or a changed `program`/`executable` fails here instead of shipping. **All five were re-recorded against the shipping Python CLI under tan-cli#502 and carry a `PROVENANCE.txt`; none is `xfail`'d any more — see "Why the five `debug-config-preview-*` goldens were re-recorded" right below this table.** `--preview` reads no `board.yaml` and spawns no Python. It used to probe no PATH either; since tan-cli#1179 the OpenOCD profile does — `baremetal-mcu` is the one case here that passes `--server openocd`, its `data.notes` now carries the no-`serverpath` note (tan-cli#1194 review: the `baremetal-mcu` spelling of it, which drops the Zephyr-SDK `--no-hosttools` paragraph — that target kind is built by the plain-CMake backend, so no Zephyr SDK and no `find_program(OPENOCD openocd)` is in its story), and it therefore ships an `env.json` pinning `PATH` (see "Pinning host state a case reads" and its own `PROVENANCE.txt`). For the other four the only host-dependent output is still the absolute working directory, tokenized as `__WORKDIR__` above. |
 | `presets-no-sdk` | `presets --format json` (no SDK resolvable) | 0 | Pins the `presets.sdk-root-unresolved` warning ON THE WIRE — the one frozen issue code reachable hermetically — plus the full `PresetsData` key set with `soms: []`. |
 | `presets-heterogeneous-som` | `presets --sdk-root ./sdk --format json` (fixture SDK) | 0 | Issue #106's worked example made executable. The fixture SoM has an `a55` (`machine:` → yocto) and an `m33` (`board:` → zephyr), so `data.soms[].cores[].{id,os}` carries two different values — rename `soms` or `cores` and this fails instead of quietly scaffolding a multi-core part single-core with no IPC. Also pins `boardLibraries` discovery. |
 | `explain-overview` | `explain --format json` | 0 | `data.available.projectTemplates`, the New Project wizard's starter list. Fully hermetic — the catalogues are static, no SDK involved. |
