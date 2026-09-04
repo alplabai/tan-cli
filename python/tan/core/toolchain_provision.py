@@ -516,10 +516,24 @@ def low_disk_note(free_bytes: int) -> str | None:
 #: "Placeholder fields" warning does not fire. The emitted configuration stays
 #: valid and `configFiles` still resolves (it comes from `board.cmake`, not
 #: from `hosttools/`); cortex-debug then falls back to its own
-#: `openocd`-on-`PATH` lookup, and a host with none learns that from the debug
-#: adapter at session start rather than from `tan`. That degradation is
-#: SILENT, which is worth knowing; `tan support-bundle` does probe `openocd`
-#: on `PATH` and reports it.
+#: `openocd`-on-`PATH` lookup. NO LONGER SILENT (tan-cli#1179): a host with no
+#: `openocd` on `PATH` either used to learn this from the debug adapter at
+#: session start, with `tan` nowhere in the loop -- `debug_config_cmd`'s
+#: `_openocd_hosttools_note` now says it in `data.notes` instead, naming this
+#: flag and that OpenOCD has to come from the system. It stays a NOTE, not a
+#: failure: one advisory field is missing, nothing else is, and a host that
+#: does have `openocd` on `PATH` (or a `serverpath` that resolved) hears
+#: nothing. `tan support-bundle` probes `openocd` on `PATH` too -- through the
+#: very table and lookup that note borrows.
+#:
+#: The `dtc` half of the same shape is STILL silent and is tracked as
+#: tan-cli#1192: `cmake/modules/dts.cmake` runs the devicetree lint only
+#: `if(DTC)`, so with no `hosttools/` and no system `dtc` the
+#: `-Wunique_unit_address_if_enabled` / `-E unit_address_vs_reg` pass stops
+#: running and nothing says so. It is a `tan doctor` CHECK rather than a note,
+#: which is why tan-cli#1179 did not carry it: it moves that command's verdict,
+#: and after this flag a CORRECT install has no `dtc` at all, so the naive
+#: on-PATH predicate would warn on every correctly-provisioned host.
 NO_HOSTTOOLS_FLAG = "--no-hosttools"
 
 

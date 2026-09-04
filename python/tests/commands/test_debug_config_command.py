@@ -798,7 +798,7 @@ def test_the_placeholder_note_survives_an_unresolved_host_port():
     apply_launch_resolution(draft, LaunchResolution(gdb_path="/opt/gdb/bin/aarch64-poky-linux-gdb"))
 
     assert draft["miDebuggerServerAddress"] == "<host>:<port>"
-    notes = _preview_notes_for(draft, [], GDBSERVER)
+    notes = _preview_notes_for(draft, [], GDBSERVER, YOCTO_USERSPACE)
     assert any(n.startswith("Placeholder fields") for n in notes)
 
 
@@ -930,7 +930,7 @@ def test_runners_yaml_fills_the_device_and_gdb_a_build_can_answer(tmp_path):
     draft = create_launch_draft(ZEPHYR_MCU, "pyocd", None)
     apply_launch_resolution(draft, pyocd_resolution)
     assert draft["targetId"] == "<resolved-target-id>"
-    notes = _preview_notes_for(draft, pyocd_runners, "pyocd")
+    notes = _preview_notes_for(draft, pyocd_runners, "pyocd", ZEPHYR_MCU)
     assert any('runners.yaml: ["jlink", "openocd"]' in n for n in notes)
 
 
