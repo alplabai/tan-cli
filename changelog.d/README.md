@@ -60,16 +60,31 @@ the release page is the summary — see `alp-lab:writing-release-notes`).
 
 ## Release time
 
-`python/scripts/assemble_changelog.py` folds every fragment into
+`python/scripts/assemble_changelog.py --write` folds every fragment into
 `CHANGELOG.md` under the current `Unreleased` header, in canonical section
-order, then deletes the fragments:
+order, then deletes the fragments.
+
+**`--write` is required, and that is deliberate (tan-cli#1172).** The fold used
+to be the default, so typing the script's name rewrote `CHANGELOG.md` and
+deleted every fragment — no prompt, exit 0, and a summary that reads like
+success. It cost 157 fragments once. A fragment you have written but not yet
+`git add`ed is unrecoverable that way, and drafting is exactly when you would
+run this to see how it renders.
 
 ```sh
-python3 python/scripts/assemble_changelog.py          # fold + delete fragments
-python3 python/scripts/assemble_changelog.py --check   # report only, change nothing
-python3 python/scripts/assemble_changelog.py --dry-run # print the result to stdout
+python3 python/scripts/assemble_changelog.py           # render to stdout, change NOTHING
+python3 python/scripts/assemble_changelog.py --write    # fold + delete fragments (release only)
+python3 python/scripts/assemble_changelog.py --check    # report what is pending, change nothing
+python3 python/scripts/assemble_changelog.py --dry-run  # same render as a bare run, without the reminder
 python3 python/scripts/assemble_changelog.py --require-empty  # exit 1 if any fragment is still unfolded
 ```
+
+One flag at a time: `--write` is REFUSED (exit 2) alongside `--check`,
+`--dry-run`, or `--require-empty` (tan-cli#1181). `--dry-run --write` used to
+perform the whole fold silently, exit 0 — the destructive half won over the
+flag documented as "write nothing", from a command line that asked for both.
+There is no safe way to guess which half was meant, so it names the flags it
+saw and what to run instead.
 
 `--check` never fails merely because fragments are pending — that is why it is
 not the gate. Like every mode it refuses (exit 1) an unusable fragment: a
@@ -87,7 +102,7 @@ bullet-list heading. It still does not, and never will, judge whether a
 fragment's sentences are *true* — a wrong count or a false claim reads clean;
 that stays a review problem.
 `--require-empty` is the gate, and since tan-cli#813 it is a live one:
-`.github/workflows/release.yml:724` runs it, so a tag cut with fragments still
+`.github/workflows/release.yml:828` runs it, so a tag cut with fragments still
 sitting here fails the release rather than shipping a CHANGELOG missing them.
 
 This runs **before** the version bump and tag, so `release.yml`'s existing
