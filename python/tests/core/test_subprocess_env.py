@@ -27,11 +27,28 @@ def test_restore_ld_library_path_sets_the_preserved_value(monkeypatch):
 
 
 def test_restore_ld_library_path_drops_the_key_when_orig_was_empty(monkeypatch):
-    """PyInstaller sets `LD_LIBRARY_PATH_ORIG` to the EMPTY string, not
-    unset, when the host had no `LD_LIBRARY_PATH` before the bootloader
-    touched it -- the restore must drop the var entirely, not set it to `""`
-    (some loaders treat an explicit empty value as "search the current
-    directory")."""
+    """A `LD_LIBRARY_PATH_ORIG` of `""` must drop the var entirely rather
+    than set it to `""` -- some loaders treat an explicit empty value as
+    "search the current directory".
+
+    **This docstring used to assert that PyInstaller ALWAYS spells the
+    no-original case this way** ("sets it to the EMPTY string, not unset,
+    when the host had no `LD_LIBRARY_PATH`"). That claim is false, and it is
+    a large part of why tan-cli#1189 survived: it is what made
+    `if orig is None: return` look like a safe fast path, since on that
+    reading a frozen host would always carry SOME marker.
+
+    Confirmed by intervention rather than by reading PyInstaller: had `ORIG`
+    been `""` on the tan-cli#1189 container, the pre-fix `Runner._env` would
+    not have taken its `return None` shortcut (`"" is not None`), so it would
+    have built an env, called the restore, landed in THIS branch and popped
+    the key -- no leak. A leak was measured anyway; the fix adds behaviour on
+    exactly one condition (`orig is None`), and it took that host from
+    30 passed/1 failed to 33 passed/0 failed. So `ORIG` was absent there.
+
+    The case below is still real and still worth holding -- `""` is a shape
+    PyInstaller does produce -- it just is not the ONLY shape, which is why
+    `restore_ld_library_path` no longer keys off the marker alone."""
     monkeypatch.setenv("LD_LIBRARY_PATH", "/home/runner/.local/bin/tan-cli-lib/_internal")
     monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "")
 
