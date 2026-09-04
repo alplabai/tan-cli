@@ -53,15 +53,15 @@ over a real module, `for r in rows():  # iterable RAISES` and
 `for e in empty():  # collection EMPTY` both report
 `header_covered=True, body_covered=False` and both are reported. So does a
 loop whose body only ever runs in a SPAWNED interpreter the parent's coverage
-never saw, and this repo spawns at 336 call sites -- measured, not estimated
+never saw, and this repo spawns at 337 call sites -- measured, not estimated
 (the dot is bracketed rather than backslash-escaped only so this docstring
-carries no escape sequence; it counts the same 336):
+carries no escape sequence; it counts the same 337):
 
     grep -rnE "subprocess[.](run|Popen|check_output|check_call)" \
-        python/{tan,tests,scripts} --include=*.py | wc -l   # -> 336
+        python/{tan,tests,scripts} --include=*.py | wc -l   # -> 337
 
-`tan` 51, `tests` 273, `scripts` 12; `tests/gates` alone, the directory this
-audit measures, 48. There is no live instance today -- all eight reported
+`tan` 51, `tests` 274, `scripts` 12; `tests/gates` alone, the directory this
+audit measures, 49. There is no live instance today -- all eight reported
 loops are genuine empty-collection cases
 -- but the first one to appear would be MISCLASSIFIED rather than declared,
 because neither "healthy-empty" nor "forward-looking" is true of it. That is
@@ -522,8 +522,9 @@ def literal_dict_keys(tree: ast.AST, name: str) -> list[list[object]]:
 #: on `dev` at `658f2e37`).
 MIN_FOR_SITES = 240
 
-#: `assert` statements under `tests/gates/`. Measured: 1416 (was 1354 on
-#: `dev` at `658f2e37`).
+#: `assert` statements under `tests/gates/`. Measured: 1417 (1416 before the
+#: seventh round added the job-level `if:` check to
+#: `_assert_the_audit_step_can_still_fail`; was 1354 on `dev` at `658f2e37`).
 MIN_ASSERT_SITES = 1100
 
 #: How many `.py` files under `tests/gates/` the coverage run is allowed NOT

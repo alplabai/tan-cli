@@ -961,7 +961,7 @@ def _assert_the_audit_step_can_still_fail(job: dict) -> None:
     exercised in BOTH directions rather than only in the direction that says
     "fine".
 
-    SIX checks, and the count is the finding. The first version of this one
+    SEVEN checks, and the count is the finding. The first version of this one
     had two: step-level `continue-on-error is not True`, and
     `"--report" not in step["run"]`. PR #1166's fourth review round measured
     three standard neuterings surviving that, each still `44 passed` --
@@ -993,16 +993,43 @@ def _assert_the_audit_step_can_still_fail(job: dict) -> None:
     other, including a quoted `"false"`, is a demand to spell it plainly.
     (`test_interpreter_policy.py:524` and `:535` carry the identical hole and
     are filed separately -- not fixed here.)
+
+    The SEVENTH check is a JOB-level `if:`, and it is the sixth round's
+    finding. A skipped job renders as "skipped", not "failed": no red
+    appears anywhere in the checks list, the audit runs zero times, and
+    nothing objects. Measured on `b1f7bce8` -- `if: github.event_name ==
+    'schedule'` inserted immediately after `  python:` in `ci.yml` left this
+    file at `82 passed`, no red at all. It is the `continue-on-error` motive
+    verbatim ("only enforce it in the merge queue"), one level up and with a
+    LARGER blast radius: the whole job disappears rather than one step, and
+    `if: github.event_name != 'pull_request'` achieves it invisibly.
+    `ci.yml`'s `python` job carries no `if:` today -- its parsed keys are
+    exactly `runs-on`, `steps` and `timeout-minutes` -- and this helper is
+    only ever handed that job or a fabricated stand-in, so the check reaches
+    no other job: `python-newest`'s legitimate
+    `${{ !inputs.skip_ceiling_interpreter }}` is out of its scope by
+    construction, not by exemption. (`test_interpreter_policy.py:544`
+    carries the identical job-`if` hole beside its `continue-on-error` twin,
+    and is filed with them -- not fixed here.)
     """
     assert job.get("continue-on-error") in (None, False), (
         f"ci.yml's `python` job carries "
         f"`continue-on-error: {job.get('continue-on-error')!r}` at JOB "
         "level. Every step in it, the audit included, then reports green "
-        "whatever it did -- and this is the likeliest of the six, because "
+        "whatever it did -- and this is the likeliest of the seven, because "
         "the audit reds on somebody ELSE's undeclared loop and softening the "
         "job is the standard response to a job that reds for a reason you "
         "did not cause. Absent, or a literal `false`; an expression or a "
         "quoted string is the same softening one level less visible."
+    )
+    assert "if" not in job, (
+        f"ci.yml's `python` job carries a JOB-level `if:` ({job.get('if')!r}). "
+        "A skipped job renders as `skipped`, not `failed`, so the audit "
+        "runs zero times and NOTHING reds -- the same motive as the "
+        "`continue-on-error` above, one level up and with a larger blast "
+        "radius, because the whole job disappears rather than one step. The "
+        "job's schedule is set by the workflow's own triggers; a guard here "
+        "is a way to stop enforcing it on the events that matter."
     )
     for index, step in enumerate(job["steps"]):
         label = step.get("name") or step.get("uses") or f"step {index}"
@@ -1018,10 +1045,11 @@ def _assert_the_audit_step_can_still_fail(job: dict) -> None:
     step = _audit_step(job)
     assert "if" not in step, (
         f"ci.yml's audit step carries a step-level `if:` ({step.get('if')!r}). "
-        "The job's own guard is the only condition allowed here: a "
-        "step-level one lets the job run, install everything, skip the audit "
-        "and report success -- indistinguishable from a real green in the "
-        "checks list, which is worse than the step being deleted."
+        "No condition is allowed at either level -- the job-level check "
+        "above bans the other half: a step-level one lets the job run, "
+        "install everything, skip the audit and report success -- "
+        "indistinguishable from a real green in the checks list, which is "
+        "worse than the step being deleted."
     )
     command = str(step["run"]).strip()
     for token in command.split():
@@ -1127,7 +1155,9 @@ SOFTENING_CONTINUE_ON_ERROR: list[tuple[str, object]] = [
 #: `44 passed` except `step-continue-on-error` and `run---report`, which were
 #: the only two it checked. The six non-literal `continue-on-error` rows are
 #: the fifth review round's finding and survived the SECOND version too, at
-#: `65 passed` each.
+#: `65 passed` each. `job-if-expression` is the SIXTH round's and survived
+#: the third version as well: measured on `b1f7bce8` with that `if:` written
+#: into `ci.yml`'s real `python` job, `82 passed`.
 NEUTERINGS: list[tuple[str, dict, dict]] = [
     (f"job-continue-on-error-{label}", {"continue-on-error": value}, {})
     for label, value in SOFTENING_CONTINUE_ON_ERROR
@@ -1135,6 +1165,7 @@ NEUTERINGS: list[tuple[str, dict, dict]] = [
     (f"step-continue-on-error-{label}", {}, {"continue-on-error": value})
     for label, value in SOFTENING_CONTINUE_ON_ERROR
 ] + [
+    ("job-if-expression", {"if": "github.event_name == 'schedule'"}, {}),
     ("step-if-false", {}, {"if": False}),
     ("step-if-expression", {}, {"if": "github.event_name == 'schedule'"}),
 ] + [
