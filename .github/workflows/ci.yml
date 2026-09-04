@@ -639,8 +639,10 @@ jobs:
       # environment rather than as bare truths: CPython 3.12.3 on Linux, no
       # `ALP_SDK_ROOT` / `ALP_SDK_HAND_PORT_ROOT` / `ALP_SDK_STRICT_LOADERS_
       # ROOT` bound, with `pytest-xdist` and `pyserial` both INSTALLED, on
-      # this branch merged with `dev` at `2915b209`. All 112 skips are
-      # SDK-root-gated. A round-5 figure of `1197 passed, 59 skipped` did not
+      # this branch merged with `dev` at `2915b209`. 109 of the 112 skips are
+      # SDK-root-gated; the other three are
+      # `test_never_raises_contract_holds.py`'s "has no parse step of its own
+      # to malform". A round-5 figure of `1197 passed, 59 skipped` did not
       # reproduce for the reviewer and is replaced rather than defended --
       # the wall-clock ratio is the load-bearing part of this comment, and it
       # held (32.29s against 61.27s, 1.90x).

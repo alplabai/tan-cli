@@ -57,7 +57,9 @@ rather than an implication:
   reproduce -- which is this file's own thesis turned on its own prose.
   CPython 3.12.3 on Linux; `pytest-xdist` and `pyserial` both INSTALLED; none
   of `ALP_SDK_ROOT`, `ALP_SDK_HAND_PORT_ROOT` or `ALP_SDK_STRICT_LOADERS_ROOT`
-  bound, which is what all 112 skips are. A round-5 figure of
+  bound, which is what 109 of the 112 skips are (the other three are
+  `test_never_raises_contract_holds.py`'s "has no parse step of its own to
+  malform"). A round-5 figure of
   `1197 passed, 59 skipped` did not reproduce for the reviewer (who measured
   `1210 passed, 60 skipped`) and is replaced rather than defended; the
   wall-clock ratio, which is what the cost argument rests on, held either way.
