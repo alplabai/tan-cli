@@ -2322,10 +2322,29 @@ jobs:
   # 26m/22m/17m job on windows/ubuntu/macos respectively -- ~97% of the wall
   # clock is this one step, and everything else in the job (checkout, SDK
   # clone, pip install) is 12-41s, i.e. negligible per-shard overhead. Root
-  # cause (not fixed here, sharding is parallelisation only): ~4300 tests
-  # spawn a fresh interpreter via subprocess.run/Popen at ~150 call sites to
-  # re-exercise `tan` as a customer would invoke it, and process creation is
-  # far more expensive on windows-latest than on the other two runners.
+  # cause (not fixed here, sharding is parallelisation only): this suite
+  # re-exercises `tan` as a customer would invoke it, by spawning a fresh
+  # interpreter, and process creation is far more expensive on
+  # windows-latest than on the other two runners.
+  #
+  # The two figures that size that claim are written WITH the command that
+  # produced each, because the pair this comment used to carry ("~4300
+  # tests ... ~150 call sites") rotted unnoticed until tan-cli#1183 measured
+  # it -- 150 was 336, off by 2.2x. Re-derive, do not re-estimate. Measured
+  # on `a92a0011`:
+  #
+  #   336 interpreter-spawn call sites (tan 51, tests 274, scripts 11):
+  #     grep -rnE "subprocess[.](run|Popen|check_output|check_call)" python/{tan,tests,scripts} --include=*.py | wc -l
+  #   `check_output` and `check_call` are both 0 in this tree, so the
+  #   narrower `run|Popen` reading of that sentence gives the same 336.
+  #
+  #   5919 tests in the scope the 0..3 legs shard (the `parity` leg's own
+  #   scope is a further 780, unsharded):
+  #     (cd python && python -m pytest -q --collect-only --ignore=tests/gates --ignore=tests/parity tests | tail -1)
+  #
+  # Neither figure is read by any job, gate or test, so nothing reds when
+  # they drift again -- which is exactly why the command has to travel with
+  # the number.
   #
   # This job is renamed to `python-tests-shard` and carries `shard` in its
   # matrix -- deliberately NOT the job branch protection requires. GitHub
