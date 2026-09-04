@@ -140,9 +140,9 @@ reason, because `_tainted_names` promises exactly one of the two:
         re.search(NEEDLE, guard)   not refused
         guard.find(NEEDLE) >= 0    refused -- it IS a `Compare`
 
-    `assert guard.startswith("${{ !inputs.skip_ceiling_interpreter")` is
-    tan-cli#1137's defect verbatim with the `!` deleted, and this gate is
-    silent on it. 0 live sites. Closing it means an allow/deny list of `str`
+    `assert guard.startswith("${{ inputs.skip_ceiling_interpreter")` is
+    tan-cli#1137's defect verbatim with the `!` deleted, which is the string
+    `_FABRICATED_NON_COMPARE_SEARCH` uses, and this gate is silent on it. 0 live sites. Closing it means an allow/deny list of `str`
     methods and of the `re` surface, which is a different rule from "read the
     whole value" and is not attempted here.
   * the OVER-approximating half of `_items_guard_side`. Which element of
