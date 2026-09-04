@@ -44,13 +44,23 @@ rather than an implication:
 * The coverage run is not duplicated into the other two legs that run
   `tests/gates` (`parity.yml`'s `seam1-plan-shape` and `ci.yml`'s
   `python-newest`). The reason is COST and only cost: a second full execution
-  of the directory, re-measured on this branch's head at
-  `1197 passed, 59 skipped in 32.05s` plain against `63.14s` under
-  `coverage`, with the audit end to end at 63.84s. It is deliberately NOT
-  that a bound `ALP_SDK_ROOT` would measure something
+  of the directory, re-measured on this branch merged with `dev` at
+  `2915b209` at `1235 passed, 112 skipped in 32.29s` plain against `61.27s`
+  under `coverage`, with the audit end to end at 64.09s. It is deliberately
+  NOT that a bound `ALP_SDK_ROOT` would measure something
   wrong -- binding one only unskips tests, which can only SHRINK the
   never-iterated set, so seam1 could produce fewer findings but never a false
   one.
+
+  Those pass/skip counts are ENVIRONMENT-BOUND and are recorded with their
+  environment, because a number stated as a bare truth is one nobody else can
+  reproduce -- which is this file's own thesis turned on its own prose.
+  CPython 3.12.3 on Linux; `pytest-xdist` and `pyserial` both INSTALLED; none
+  of `ALP_SDK_ROOT`, `ALP_SDK_HAND_PORT_ROOT` or `ALP_SDK_STRICT_LOADERS_ROOT`
+  bound, which is what all 112 skips are. A round-5 figure of
+  `1197 passed, 59 skipped` did not reproduce for the reviewer (who measured
+  `1210 passed, 60 skipped`) and is replaced rather than defended; the
+  wall-clock ratio, which is what the cost argument rests on, held either way.
 
 Nothing here claims to catch the class in general. Unreachability that needs a
 dataflow invariant (tan-cli#1062's round-3 review) is a refinement-typing
@@ -118,6 +128,20 @@ REPORT_FLAG = "--report"
 #: `test_interpreter_policy.py` names; `; true`, `|| :` and `|| exit 0` are
 #: the same move spelled differently, and a check that knew only the first
 #: would be an instruction to spell it one of the other three.
+#:
+#: `|| :` is carried for completeness and NOT because it is reachable
+#: unquoted. A bare `run: python scripts/... || :` is invalid YAML -- the
+#: trailing `: ` is read as a mapping indicator -- and PyYAML refuses the
+#: whole file with `yaml.scanner.ScannerError: mapping values are not
+#: allowed here`, so all three `_python_job()` callers error on the load
+#: rather than one check reporting the neutering (measured on this branch:
+#: `3 failed, 79 passed`, all three from the load and none from a check).
+#: GitHub Actions' own parser would reject it for the same
+#: reason, so unquoted it is not a neutering anybody can land. Quoted
+#: (`run: "python scripts/... || :"`) or block-scalar it is ordinary YAML and
+#: this regex is what catches it. (An earlier round of this review recorded
+#: the mechanism as "`yaml.safe_load` turns `run:` into a mapping"; it does
+#: not -- it raises.)
 DISCARDS_EXIT_STATUS = re.compile(r"(?:\|\||;)\s*(?::|true\b|exit\s+0\b)")
 
 #: A `<file>:<line>` citation, which no allow-list reason may carry. Workflow
@@ -274,6 +298,47 @@ def test_the_walks_leave_the_benign_spellings_alone():
     assert core.iter_swallowed_asserts(tree, "benign.py", benign) == []
 
 
+def test_the_eq_arm_flags_the_nan_case_too():
+    """The one place the walk knowingly over-claims, pinned so it stays a
+    recorded judgement rather than an undiscovered bug.
+
+    `assert x is x` is unconditionally true. `assert x == x` is NOT: `__eq__`
+    is as overridable as the `__repr__`/`__format__` the f-string rule
+    declines two spellings for, and unlike those it has a BUILT-IN
+    counterexample. Measured on CPython 3.12.3 in this venv:
+    `float("nan") == float("nan")` is `False`, and `x == x` with
+    `x = float("nan")` is `False` -- yet `iter_tautologies` reports
+    `Finding(rel='fab.py', lineno=3, source='assert x == x')` for exactly
+    that source.
+
+    The assertion below is that it IS reported. That is the deliberate
+    choice, not a bug to be narrowed away later without noticing: flagging
+    `assert x == x` is right in every non-NaN case, and an `assert x == x`
+    written to test for NaN wants `math.isnan` and a comment. Narrowing the
+    arm to `ast.Is` would red HERE, which is the point -- the alternative was
+    a docstring claiming "unconditionally true" of a rule for which a
+    two-token counterexample exists.
+    """
+    nan_case = 'x = float("nan")\nx = float("nan")\nassert x == x\n'
+    findings = core.iter_tautologies(ast.parse(nan_case), "fab.py", nan_case)
+    assert findings == [core.Finding("fab.py", 3, "assert x == x")], findings
+
+    # The counterexample itself, on the live interpreter, so the docstring
+    # above cannot rot into a claim about some other Python. `same is nan`,
+    # which is exactly the `x == x` shape the walk flags: one name, one
+    # object, both sides -- and still not equal. Spelled `!=` over two names
+    # rather than `not (nan == nan)` because the latter is itself a
+    # self-comparison and reads as the defect instead of the evidence.
+    nan = float("nan")
+    same = nan
+    assert same is nan and same != nan, (
+        "float('nan') == float('nan') is True on this interpreter, which "
+        "would make the `Eq` arm sound after all. The docstring above and "
+        "`iter_tautologies`' own record the opposite -- re-measure both "
+        "before trusting either."
+    )
+
+
 # --------------------------------------------------------------------------
 # 2. The coverage gate's negative controls and floors
 # --------------------------------------------------------------------------
@@ -341,9 +406,9 @@ def test_never_iterating_flags_a_fabricated_loop():
 
 
 def test_an_async_for_is_walked_exactly_like_a_for():
-    """`iter_for_sites` claims `For`/`AsyncFor`, and `tests/gates` contains 295
+    """`iter_for_sites` claims `For`/`AsyncFor`, and `tests/gates` contains 299
     of the first and ZERO of the second -- so deleting the `AsyncFor` half
-    leaves the count at 295, `MIN_FOR_SITES` green, and every other test in
+    leaves the count at 299, `MIN_FOR_SITES` green, and every other test in
     this file passing. A forward-looking branch that measures nothing, inside a
     gate about forward-looking branches that measure nothing, and unlike the
     allow-list rows it carried no declaration. This is the declaration: the
@@ -372,10 +437,10 @@ def test_the_third_allow_list_class_is_accepted_before_it_has_a_row():
     The class is not decoration. `header covered and body uncovered` does NOT
     mean "the collection was empty": a `for` whose ITERABLE RAISES has the
     identical coverage signature (measured), as does one whose body only runs
-    in a spawned interpreter -- and this repo spawns at 336 measured call
+    in a spawned interpreter -- and this repo spawns at 337 measured call
     sites (`grep -rnE "subprocess[.](run|Popen|check_output|check_call)"
     python/{tan,tests,scripts} --include=*.py | wc -l`; `tests/gates` alone,
-    48). There is no live instance today. Without a truthful label the first
+    49). There is no live instance today. Without a truthful label the first
     one gets filed as `healthy-empty` or `forward-looking`, both of which
     would be FALSE of it, and the allow-list stops being a record of
     decisions, which is the only thing it is for.
@@ -503,8 +568,8 @@ def _assert_key_names_exactly_one_loop(
 
     `any(site.key == key ...)` was the first version and it checked only the
     staleness half. `ForSite.key` is `(file, header source)` and is NOT unique
-    within a file: measured over this branch's 295 sites under `tests/gates/`,
-    263 distinct keys and 26 shared by 2-4 sites --
+    within a file: re-measured over this branch's 299 sites under
+    `tests/gates/`, 265 distinct keys and 28 shared by 2-4 sites --
     `for node in ast.walk(tree):` occurs 4x in
     `test_subprocess_env_routes_through_the_helper.py` and 4x in
     `_vacuous_gate_shapes_core.py` itself. None of the eight rows collides
@@ -737,38 +802,108 @@ def test_the_duplicate_key_walk_flags_fabricated_input():
     assert core.duplicate_literal_dict_keys(tree, "CLEAN") == []
     assert core.duplicate_literal_dict_keys(tree, "ABSENT") == []
 
-    # And the real tables ARE reached -- the check above is worthless if the
-    # walk cannot see them. Both are `AnnAssign`, and both are non-empty.
+
+@pytest.mark.parametrize(
+    "name", ["ALLOWED_EMPTY_LOOPS", "ALLOWED_ZERO_ASSERT_FILES"]
+)
+def test_the_duplicate_key_walk_reaches_the_real_tables(name: str):
+    """The fabricated-input check above is worthless if the walk cannot see
+    the tables it is supposed to guard. Both are `AnnAssign`, and both are
+    non-empty.
+
+    Its OWN test rather than a tail on the fabricated-input one, and that is
+    the fifth round's finding a second time: with both in one body the
+    fabricated `ANNOTATED` assertion fails first on any narrowing and this
+    one never executes, so the reachability claim was never measured red.
+    Measured after the split, with the shared walk re-narrowed to
+    `ast.Assign`: `5 failed, 77 passed`, and both parameters of this test are
+    among the five by name.
+    """
+    table = getattr(core, name)
     real = ast.parse(Path(core.__file__).read_text(encoding="utf-8"))
-    for name, table in (
-        ("ALLOWED_EMPTY_LOOPS", core.ALLOWED_EMPTY_LOOPS),
-        ("ALLOWED_ZERO_ASSERT_FILES", core.ALLOWED_ZERO_ASSERT_FILES),
-    ):
-        assert _literal_dict_key_count(real, name) == len(table), (
-            f"the duplicate-key walk reaches {_literal_dict_key_count(real, name)} "
-            f"literal keys for {name}, but the imported table has {len(table)}. "
-            "The walk is not looking at the table it is supposed to guard, so "
-            "`test_no_allow_list_key_is_spelled_twice` is reporting a clean "
-            "zero from having found nothing to check."
-        )
+    reached = _literal_dict_key_count(real, name)
+    assert reached == len(table), (
+        f"the duplicate-key walk reaches {reached} "
+        f"literal keys for {name}, but the imported table has {len(table)}. "
+        "The walk is not looking at the table it is supposed to guard, so "
+        "`test_no_allow_list_key_is_spelled_twice` is reporting a clean "
+        "zero from having found nothing to check."
+    )
 
 
 def _literal_dict_key_count(tree: ast.AST, name: str) -> int:
     """How many literal keys the `name = {...}` dict literal spells, counting
-    a duplicate twice -- the reachability half of the check above."""
-    total = 0
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            targets: list[ast.expr] = list(node.targets)
-        elif isinstance(node, ast.AnnAssign):
-            targets = [node.target]
-        else:
-            continue
-        if not isinstance(node.value, ast.Dict):
-            continue
-        if any(isinstance(x, ast.Name) and x.id == name for x in targets):
-            total += sum(1 for key in node.value.keys if key is not None)
-    return total
+    a duplicate twice -- the reachability half of the check above.
+
+    Counted THROUGH [`core.literal_dict_keys`], which is the walk
+    `core.duplicate_literal_dict_keys` itself runs. An earlier version of
+    this helper re-implemented the same `Assign`/`AnnAssign` walk here, so
+    the reachability assertion guarded a COPY: re-narrowing the real walk to
+    `ast.Assign` (the exact regression this test's docstring names) left it
+    reporting `8` and `2` and PASSING, while `core.duplicate_literal_dict_keys`
+    saw `[]` for both tables. PR #1166, round 5 -- the same self-referential
+    shape the fabricated-duplicate control below closes from the other side.
+    """
+    return sum(len(keys) for keys in core.literal_dict_keys(tree, name))
+
+
+@pytest.mark.parametrize(
+    "name", ["ALLOWED_EMPTY_LOOPS", "ALLOWED_ZERO_ASSERT_FILES"]
+)
+def test_a_duplicated_real_key_is_reported_by_the_walk_itself(name: str):
+    """`core.duplicate_literal_dict_keys` reports a duplicate in the REAL
+    table's own source, driven end to end rather than through a count.
+
+    The count above proves the walk REACHES the table; this proves the
+    reporting branch fires on it. Both allow-lists are clean, so on the
+    shipped source that branch never runs against a real table at all -- the
+    vacuity this file is about, one level up -- and a fabricated `TABLE = {}`
+    literal in a string is not the shape being guarded: it is spelled
+    `NAME = {...}` where both real tables are spelled `NAME: dict[...] =
+    {...}`, which is exactly the distinction the first draft of the walk got
+    wrong.
+
+    Two rows carrying a SENTINEL key are inserted TEXTUALLY, immediately
+    after the table's own `NAME: dict` opening line. A sentinel rather than
+    one of the table's real keys, so the test says nothing about how many
+    rows the table happens to carry: if either allow-list is ever emptied --
+    a good outcome, not a defect -- this still proves the walk reaches the
+    binding, where a real-key version would have died on an empty table and
+    the count check one test up would have passed vacuously at `0 == 0`.
+
+    No AST walk is used to find the insertion point, because a walk here
+    would reintroduce the parallel-reimplementation defect this test exists
+    to close.
+    """
+    sentinel = "a fabricated key that no allow-list spells"
+    lines = Path(core.__file__).read_text(encoding="utf-8").splitlines()
+    opener = f"{name}: dict"
+    matched = [i for i, line in enumerate(lines) if line.startswith(opener)]
+    assert len(matched) == 1, (
+        f"expected exactly one line in {Path(core.__file__).name} starting "
+        f"{opener!r}, found {len(matched)}. The insertion point below is "
+        "matched textually on purpose; re-point it rather than widening it."
+    )
+    clean = ast.parse("\n".join(lines))
+    assert sentinel not in [
+        key for keys in core.literal_dict_keys(clean, name) for key in keys
+    ], f"{name} already spells the sentinel key -- pick another."
+
+    row = f"    {sentinel!r}: 'a duplicate',"
+    lines.insert(matched[0] + 1, row)
+    lines.insert(matched[0] + 1, row)
+    mutated = ast.parse("\n".join(lines))
+
+    assert core.duplicate_literal_dict_keys(mutated, name) == [sentinel], (
+        f"{name} was given two rows both keyed {sentinel!r} and "
+        "`core.duplicate_literal_dict_keys` did not report it. The walk "
+        "cannot see the real table -- so on the SHIPPED source it reports a "
+        "clean zero from having found nothing, and every reviewed reason in "
+        "the table can be silently replaced by another row."
+    )
+    # ...and the unmutated source is clean, so the line above is reporting
+    # the insertion and not a pre-existing duplicate.
+    assert core.duplicate_literal_dict_keys(clean, name) == []
 
 
 # --------------------------------------------------------------------------
@@ -836,22 +971,47 @@ def _assert_the_audit_step_can_still_fail(job: dict) -> None:
     job-level, step-level and `if`, and this reimplementation had dropped two
     of them. Mirrored rather than reinvented, then extended with the two
     command shapes that precedent does not cover.
+
+    The two `continue-on-error` checks compare against `(None, False)` and
+    NOT with `is not True`, and that is the whole finding of the fifth round.
+    GitHub Actions documents the key as accepting an EXPRESSION
+    (`continue-on-error: ${{ matrix.experimental }}` is the documented
+    example), `yaml.safe_load` hands an expression -- and a quoted `"true"`
+    -- back as a `str`, and `"..." is not True` is `True`, so every such
+    spelling sailed through all six checks. Measured on `c2a083a2` against a
+    real `ci.yml` edit, `65 passed` for each of `${{ true }}`, `"true"` and
+    `${{ github.event_name == 'pull_request' }}` at BOTH job and step level,
+    against `1 failed, 64 passed` for the plain `true` the old comparison did
+    catch. The scenario is the one this helper's first check already names:
+    the audit reds on somebody else's undeclared loop and the author writes
+    `continue-on-error: ${{ github.event_name == 'pull_request' }}` to "only
+    enforce it in the merge queue" -- the audit then goes silent on every PR
+    and the test stays green. Absent or a literal `false` are the only two
+    spellings that are not a softening, so those are the two allowed; any
+    other, including a quoted `"false"`, is a demand to spell it plainly.
+    (`test_interpreter_policy.py:524` and `:535` carry the identical hole and
+    are filed separately -- not fixed here.)
     """
-    assert job.get("continue-on-error") is not True, (
-        "ci.yml's `python` job carries `continue-on-error: true` at JOB "
+    assert job.get("continue-on-error") in (None, False), (
+        f"ci.yml's `python` job carries "
+        f"`continue-on-error: {job.get('continue-on-error')!r}` at JOB "
         "level. Every step in it, the audit included, then reports green "
         "whatever it did -- and this is the likeliest of the six, because "
         "the audit reds on somebody ELSE's undeclared loop and softening the "
         "job is the standard response to a job that reds for a reason you "
-        "did not cause."
+        "did not cause. Absent, or a literal `false`; an expression or a "
+        "quoted string is the same softening one level less visible."
     )
     for index, step in enumerate(job["steps"]):
         label = step.get("name") or step.get("uses") or f"step {index}"
-        assert step.get("continue-on-error") is not True, (
+        assert step.get("continue-on-error") in (None, False), (
             f"ci.yml's `python` job step {label!r} carries "
-            "`continue-on-error: true`. On the audit step that is the whole "
-            "gate; on the `pip install coverage` step above it the audit "
-            "then dies at import inside a step that reports success."
+            f"`continue-on-error: {step.get('continue-on-error')!r}`. On the "
+            "audit step that is the whole gate; on the `pip install "
+            "coverage` step above it the audit then dies at import inside a "
+            "step that reports success. Absent, or a literal `false`; an "
+            "expression or a quoted string is the same softening one level "
+            "less visible."
         )
     step = _audit_step(job)
     assert "if" not in step, (
@@ -945,14 +1105,34 @@ def test_the_audit_step_can_still_fail():
     _assert_the_audit_step_can_still_fail(_python_job())
 
 
+#: Every `continue-on-error` spelling that is NOT absent-or-literal-`false`,
+#: as `yaml.safe_load` hands it back. The bool is what the old `is not True`
+#: comparison caught; the three `str` rows are what it did not, and each was
+#: measured on `c2a083a2` at `65 passed` -- green -- against a real `ci.yml`
+#: edit at both job and step level. GitHub Actions documents the key as
+#: taking an expression, so none of these is hypothetical.
+SOFTENING_CONTINUE_ON_ERROR: list[tuple[str, object]] = [
+    ("literal", True),
+    ("expression", "${{ true }}"),
+    ("quoted", "true"),
+    ("event-expression", "${{ github.event_name == 'pull_request' }}"),
+]
+
 #: One fabricated `python` job per way to silence the audit step, as
-#: `(id, job overlay, audit-step overlay)`. Each was MEASURED on this branch
-#: against the FIRST version of `test_the_audit_step_can_still_fail`: all of
-#: them survived it at `44 passed` except `step-continue-on-error` and
-#: `run---report`, which were the only two it checked.
+#: `(id, job overlay, audit-step overlay)`. Each of the ORIGINAL four was
+#: MEASURED on this branch against the FIRST version of
+#: `test_the_audit_step_can_still_fail`: all of them survived it at
+#: `44 passed` except `step-continue-on-error` and `run---report`, which were
+#: the only two it checked. The six non-literal `continue-on-error` rows are
+#: the fifth review round's finding and survived the SECOND version too, at
+#: `65 passed` each.
 NEUTERINGS: list[tuple[str, dict, dict]] = [
-    ("job-continue-on-error", {"continue-on-error": True}, {}),
-    ("step-continue-on-error", {}, {"continue-on-error": True}),
+    (f"job-continue-on-error-{label}", {"continue-on-error": value}, {})
+    for label, value in SOFTENING_CONTINUE_ON_ERROR
+] + [
+    (f"step-continue-on-error-{label}", {}, {"continue-on-error": value})
+    for label, value in SOFTENING_CONTINUE_ON_ERROR
+] + [
     ("step-if-false", {}, {"if": False}),
     ("step-if-expression", {}, {"if": "github.event_name == 'schedule'"}),
 ] + [
@@ -994,15 +1174,40 @@ def test_a_neutered_audit_step_is_caught(job: dict, step: dict):
         )
 
 
-def test_continue_on_error_on_a_step_beside_the_audit_is_caught():
+@pytest.mark.parametrize(
+    "value",
+    [case[1] for case in SOFTENING_CONTINUE_ON_ERROR],
+    ids=[case[0] for case in SOFTENING_CONTINUE_ON_ERROR],
+)
+def test_continue_on_error_on_a_step_beside_the_audit_is_caught(value: object):
     """The reach `test_interpreter_policy.py` covers by walking EVERY step
     rather than only the one it names: `continue-on-error: true` on the
     `pip install ... coverage` step above the audit leaves the audit dying at
-    import inside a job that reports green."""
+    import inside a job that reports green. Driven on every spelling in
+    [`SOFTENING_CONTINUE_ON_ERROR`], because the walk and the audit step's
+    own check share one comparison and a narrowing of it has to red in both
+    places."""
     fabricated = _fabricated_python_job()
-    fabricated["steps"][0]["continue-on-error"] = True
+    fabricated["steps"][0]["continue-on-error"] = value
     with pytest.raises(AssertionError):
         _assert_the_audit_step_can_still_fail(fabricated)
+
+
+@pytest.mark.parametrize("value", [None, False], ids=["absent", "literal-false"])
+def test_the_two_non_softening_continue_on_error_spellings_pass(value: object):
+    """The positive half of the comparison the fifth round widened.
+
+    `in (None, False)` would be a check nobody could satisfy if it also
+    rejected the two spellings that are NOT a softening. Absent is the shape
+    `ci.yml` actually ships; a literal `false` is the explicit restatement of
+    it, and a reviewer who writes one must not be told to delete it.
+    """
+    job = _fabricated_python_job()
+    if value is not None:
+        job["continue-on-error"] = value
+        job["steps"][0]["continue-on-error"] = value
+        job["steps"][1]["continue-on-error"] = value
+    _assert_the_audit_step_can_still_fail(job)
 
 
 def test_the_coverage_check_is_not_satisfied_by_the_audit_step_itself():
@@ -1054,6 +1259,37 @@ def test_the_exit_status_regex_covers_the_four_spellings():
         assert DISCARDS_EXIT_STATUS.search(command) is None, command
 
 
+def test_an_unquoted_trailing_colon_suffix_is_not_valid_yaml_at_all():
+    """The `|| :` row in [`NEUTERINGS`] is driven on a fabricated dict, never
+    through a real YAML load, and the difference matters enough to pin.
+
+    Appended UNQUOTED to a `run:` line, `|| :` is not a neutering that
+    survives -- it is not a neutering that PARSES. The trailing `: ` is a
+    mapping indicator, PyYAML raises `ScannerError: mapping values are not
+    allowed here`, and every `_python_job()` caller errors on the load rather
+    than one check reporting the softening. GitHub Actions' own parser
+    rejects it for the same reason, so the conclusion is STRONGER than "the
+    check catches it": unquoted, nobody can land it.
+
+    Quoted or block-scalared it is ordinary YAML, [`DISCARDS_EXIT_STATUS`] is
+    what catches it then, and that half is driven by
+    `test_the_exit_status_regex_covers_the_four_spellings` above. This is
+    here because the round-5 review recorded the mechanism as
+    "`yaml.safe_load` turns `run:` into a mapping", which is not what happens
+    -- a wrong mechanism behind a right conclusion is the shape this whole
+    file exists to refuse.
+    """
+    fragment = "steps:\n  - run: python scripts/x.py || :\n"
+    with pytest.raises(yaml.scanner.ScannerError) as caught:
+        yaml.safe_load(fragment)
+    assert "mapping values are not allowed here" in str(caught.value)
+
+    quoted = 'steps:\n  - run: "python scripts/x.py || :"\n'
+    loaded = yaml.safe_load(quoted)
+    assert loaded["steps"][0]["run"] == "python scripts/x.py || :"
+    assert DISCARDS_EXIT_STATUS.search(loaded["steps"][0]["run"]) is not None
+
+
 def test_the_audit_step_binds_the_merge_group_base_ref():
     """The audit spawns its OWN `pytest tests/gates` child.
 
@@ -1064,12 +1300,15 @@ def test_the_audit_step_binds_the_merge_group_base_ref():
     that event -- so without this binding
     `test_module_size_budget_log_append_only.py::test_the_ledger_only_ever_
     appends_since_the_prs_base` hits `BaseRefUnresolved` and fails by design.
-    Re-measured on this branch's head with `GITHUB_EVENT_NAME=merge_group`
-    and the variable unset: `1 failed, 1196 passed, 59 skipped`, then the
-    audit refusing to measure a red run. With it bound, the same audit exits
-    0 in 64.29s. The result is a `python` job red on every queued PR, blaming the
-    suite rather than the missing variable, with the never-iterating
-    measurement running zero times in the merge queue.
+    Re-measured on this branch merged with `dev` at `2915b209`, with
+    `GITHUB_EVENT_NAME=merge_group` and the variable unset:
+    `1 failed, 1234 passed, 112 skipped`, then the audit refusing to measure
+    a red run. With it bound, the same audit exits 0 in 63.39s. (Same
+    environment as the module docstring names -- CPython 3.12.3, `xdist` and
+    `pyserial` installed, no SDK root bound.) The result is a `python` job
+    red on every queued PR, blaming the suite rather than the missing
+    variable, with the never-iterating measurement running zero times in the
+    merge queue.
     """
     step = _audit_step()
     env = step.get("env") or {}

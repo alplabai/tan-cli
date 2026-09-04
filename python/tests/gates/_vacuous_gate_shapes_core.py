@@ -127,8 +127,9 @@ class ForSite:
         the next person deletes the gate rather than the rows.
 
         It is NOT unique within a file, and that is checked rather than
-        assumed. Measured over this branch's 295 sites under `tests/gates/`:
-        263 distinct keys, 26 of them shared by 2-4 sites --
+        assumed. Re-measured for PR #1166's sixth round over this
+        branch's 299 sites under `tests/gates/`: 265 distinct keys, 28 of
+        them shared by 2-4 sites --
         `for node in ast.walk(tree):` occurs 4x in
         `test_subprocess_env_routes_through_the_helper.py` and 4x in THIS
         module. None of the eight rows in [`ALLOWED_EMPTY_LOOPS`] collides
@@ -232,7 +233,9 @@ def iter_tautologies(tree: ast.AST, rel: str, text: str) -> list[Finding]:
     """An assertion that holds for every input. Four decidable spellings:
 
       * `assert <truthy literal>` -- `assert True`, `assert "TODO"`, `assert 1`.
-      * `assert x == x` / `assert x is x`.
+      * `assert x == x` / `assert x is x`. The `is` arm is unconditional; the
+        `==` arm is NOT, and the exception is recorded below rather than
+        argued away.
       * `assert f"...lit..."` -- an f-string carrying LITERAL text. It is a
         non-empty `str` whatever it interpolates, so the assertion is a no-op.
       * `assert (x, "message")` -- the classic mistyped `assert x, "message"`.
@@ -266,12 +269,33 @@ def iter_tautologies(tree: ast.AST, rel: str, text: str) -> list[Finding]:
         whose every element is a `*`-unpacking is declined too. One non-`*`
         element is what makes the arity at least 1 regardless.
 
+    `assert x == x` IS flagged, and the claim "unconditionally true" is
+    FALSE OF IT -- recorded here because the f-string rule above declines two
+    spellings for exactly this reason and the `==` arm does not, so the
+    asymmetry is deliberate and has to be visible. `__eq__` is as overridable
+    as `__repr__`/`__format__`, and unlike those there is a BUILT-IN
+    counterexample: measured on CPython 3.12.3, `float("nan") == float("nan")`
+    is `False`, and so is `x == x` for `x = float("nan")`. The `is` arm has no
+    such hole and is sound.
+
+    It stays flagged anyway, and that is a different judgement from the
+    f-string one rather than an inconsistent one. Declining `f"{x!r}"` costs
+    nothing -- the tree carries zero `assert <f-string>` statements of any
+    kind, so the narrower rule loses no real finding. Flagging `assert x == x`
+    is useful in every non-NaN case, which is every case this tree has and
+    very nearly every case any tree has; an `assert x == x` written to prove a
+    value is not NaN is a shape that wants `math.isnan` and a comment, not a
+    silent pass from a lint. `test_the_eq_arm_flags_the_nan_case_too` is the
+    control, and it asserts the flagging rather than a narrowing, so a future
+    narrowing to `ast.Is` reds visibly here instead of quietly changing what
+    the docstring means.
+
     `test_the_walks_leave_the_benign_spellings_alone` drives all four
     exclusions, because a branch that only ever says "yes" is not a branch.
 
     ZERO of all four, measured across the whole walked tree rather than only
     the directory the coverage half looks at: `python/{tan,tests,scripts}`,
-    13389 `assert` statements, 0 truthy-literal, 0 `x == x`, 0 literal-bearing
+    13508 `assert` statements, 0 truthy-literal, 0 `x == x`, 0 literal-bearing
     f-string, 0 non-`*` tuple. The f-string figure is a measurement of THIS
     rule and not of the wider claim: the tree carries 0 `assert <f-string>`
     statements of ANY kind, so the two spellings the rule deliberately
@@ -313,6 +337,11 @@ def _is_tautology(test: ast.expr) -> bool:
         return False
     if not isinstance(test.ops[0], (ast.Eq, ast.Is)):
         return False
+    # `Is` is unconditional. `Eq` is not: `float("nan") == float("nan")` is
+    # `False` on CPython 3.12.3, so `assert x == x` is reported here while
+    # genuinely failing for a NaN. Kept deliberately -- see the docstring for
+    # why this arm is judged differently from the f-string conversions, and
+    # `test_the_eq_arm_flags_the_nan_case_too` for the control that pins it.
     left, right = test.left, test.comparators[0]
     return (
         isinstance(left, ast.Name)
@@ -415,8 +444,40 @@ def duplicate_literal_dict_keys(tree: ast.AST, name: str) -> list[object]:
     A `**expansion` entry has no literal key and is skipped; so is a key that
     is not a literal at all. Neither is a shape either allow-list uses, and
     guessing at one would be this module's own over-claim.
+
+    The walk itself is [`literal_dict_keys`], and it is shared rather than
+    inlined here on purpose: the reachability guard in
+    `test_vacuous_gate_shapes.py` used to re-implement the same `Assign`/
+    `AnnAssign` walk in the test file and compare ITS count against the
+    imported table, so re-narrowing the walk in THIS module left the guard
+    green -- a guard for a copy, not for the function. One implementation,
+    one place to narrow, both callers red together (PR #1166, round 5).
     """
     duplicates: list[object] = []
+    for keys in literal_dict_keys(tree, name):
+        seen: list[object] = []
+        for value in keys:
+            if value in seen and value not in duplicates:
+                duplicates.append(value)
+            seen.append(value)
+    return duplicates
+
+
+def literal_dict_keys(tree: ast.AST, name: str) -> list[list[object]]:
+    """Every literal key of every `name = {...}` dict literal in `tree`, one
+    list per binding, in source order and with duplicates kept.
+
+    Both the plain (`NAME = {...}`) and the ANNOTATED (`NAME: dict[...] =
+    {...}`) binding are matched -- see [`duplicate_literal_dict_keys`], which
+    is the only reason this walk exists and whose docstring records what
+    happened the first time it matched only `ast.Assign`.
+
+    One list PER BINDING rather than one flat list, because a duplicate is a
+    property of a single dict literal: two separate bindings of the same name
+    do not collapse a key into another, the second binding simply replaces
+    the first wholesale.
+    """
+    found: list[list[object]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             targets: list[ast.expr] = list(node.targets)
@@ -431,18 +492,16 @@ def duplicate_literal_dict_keys(tree: ast.AST, name: str) -> list[object]:
             for target in targets
         ):
             continue
-        seen: list[object] = []
+        keys: list[object] = []
         for key in node.value.keys:
             if key is None:
                 continue
             try:
-                value = ast.literal_eval(key)
+                keys.append(ast.literal_eval(key))
             except ValueError:
                 continue
-            if value in seen and value not in duplicates:
-                duplicates.append(value)
-            seen.append(value)
-    return duplicates
+        found.append(keys)
+    return found
 
 
 # --------------------------------------------------------------------------
@@ -452,12 +511,19 @@ def duplicate_literal_dict_keys(tree: ast.AST, name: str) -> list[object]:
 # change applied and no `ALP_SDK_ROOT` bound; each is set below the
 # measurement with headroom, so ordinary churn does not move them but a
 # collapse does. Raise one deliberately, never to make a red go away.
+#
+# Re-measured for PR #1166's sixth round on this branch merged with `dev` at
+# `2915b209`, still with no `ALP_SDK_ROOT` bound. The floors themselves are
+# UNCHANGED -- both measurements moved up, which is the direction that needs
+# no edit; only the recorded measurement moves.
 # --------------------------------------------------------------------------
 
-#: `for`/`async for` statements under `tests/gates/`. Measured: 295.
+#: `for`/`async for` statements under `tests/gates/`. Measured: 299 (was 295
+#: on `dev` at `658f2e37`).
 MIN_FOR_SITES = 240
 
-#: `assert` statements under `tests/gates/`. Measured: 1354.
+#: `assert` statements under `tests/gates/`. Measured: 1416 (was 1354 on
+#: `dev` at `658f2e37`).
 MIN_ASSERT_SITES = 1100
 
 #: How many `.py` files under `tests/gates/` the coverage run is allowed NOT
