@@ -12,10 +12,14 @@ before and after the mutation. That one character would have deleted the
 ceiling job from every PR *and* run it on the release path, and the gate
 written to prevent exactly that was blind to it.
 
-The rule is deliberately small: **a value read out of a workflow `if:` key may
-only be compared with `==`, `!=`, `is` or `is not`** (`_ALLOWED_OPS`, which is
-enforced, not decorative), and never against a string it is only PART of.
-Refused, therefore:
+The rule is deliberately small: **a value read out of a workflow `if:` key must
+be read WHOLE -- compared with `==` or `!=` against a full expected expression,
+or tested for membership of a literal collection -- and never searched for, or
+against, a substring.** `_ALLOWED_OPS` is enforced, not decorative, so every
+ordering operator is refused outright; `is` / `is not` survive it only when
+neither operand is a `str` constant, and `in` / `not in` only when the guard is
+the ELEMENT and the container is not a `str` or an f-string. Refused,
+therefore:
 
   * `<needle> in guard` / `not in` -- the guard as the CONTAINER, a substring
     search. Polarity, negation and whitespace all live inside the expression,
@@ -78,9 +82,12 @@ essentially all assert on driven subprocess stdout/stderr, where presence
 genuinely IS the property. Only the `if:`-key surface is decidable, so only it
 is gated.
 
-It also does not follow a guard out of the module's own local names. Every
-form below is MEASURED as missed, not guessed at, and each one needs a rule
-this walk does not have:
+It also does not follow a guard out of the module's own local names, does not
+decide a `str` container that was BUILT rather than written, and does not look
+past a comparison node at all. Every form below is MEASURED, not guessed at,
+and each needs a rule this walk does not have. The first SIX are misses; the
+last TWO are the over-approximating direction and are named for the same
+reason, because `_tainted_names` promises exactly one of the two:
 
   * a guard passed as a function PARAMETER, or RETURNED / YIELDED out of one
     (`def f(): return step.get("if")` then `g = f()`) -- both need
@@ -99,10 +106,54 @@ this walk does not have:
     resolution this per-file walk does not do, and refusing the shape outright
     would red the named-collection form -- `guard in ALLOWED_GUARDS` where
     `ALLOWED_GUARDS` is a `frozenset` is the whole-value test this gate asks
-    for, and telling an author to inline it would be noise. A `str` or f-string
-    container written INLINE is decidable and IS refused. Measured across the
-    267 files this scan reads: 0 live sites put a guard on the element side of
-    a `Name` container, so this is a disclosed gap, not a live miss.
+    for, and telling an author to inline it would be noise. What IS decidable,
+    and IS refused, is exactly three spellings of an inline container: a bare
+    `ast.Constant` holding a `str`, an `ast.JoinedStr` (an f-string), and
+    implicit adjacent-literal concatenation, which the parser folds into a
+    `Constant` before this walk ever sees it. Nothing else -- the next entry
+    lists the six built containers that are NOT. Measured across the 267 files
+    this scan reads: 0 live sites put a guard on the element side of a `Name`
+    container, so this is a disclosed gap, not a live miss.
+  * a `str` CONTAINER that is BUILT rather than written as one literal.
+    `_string_container` decides the three spellings above and no others.
+    Measured, with `guard` tainted:
+
+        guard in "a != b"                refused
+        guard in f"{A} or {B}"           refused
+        guard in "aaa" "bbb"             refused (the parser folds it)
+        guard in "aaa" + "bbb"           MISSED
+        guard in "a %s b" % X            MISSED
+        guard in "a {} b".format(X)      MISSED
+        guard in "".join([A, B])         MISSED
+        guard in str(ALLOWED)            MISSED
+        guard in "abc"[0:2]              MISSED
+
+    Every missed row is a substring search that `"" in <container>` satisfies,
+    so each is this gate's headline class. Deciding them means deciding the
+    TYPE of an arbitrary expression, which is the same name resolution the
+    `Name` container is disclosed for above. 0 live sites of any of the six.
+  * any read of a guard that is not a COMPARISON. `_membership_violations`
+    visits `ast.Compare` nodes and only those, so a method call or a regex
+    performs the same substring search unwatched. Measured:
+
+        guard.startswith(NEEDLE)   not refused
+        re.search(NEEDLE, guard)   not refused
+        guard.find(NEEDLE) >= 0    refused -- it IS a `Compare`
+
+    `assert guard.startswith("${{ !inputs.skip_ceiling_interpreter")` is
+    tan-cli#1137's defect verbatim with the `!` deleted, and this gate is
+    silent on it. 0 live sites. Closing it means an allow/deny list of `str`
+    methods and of the `re` surface, which is a different rule from "read the
+    whole value" and is not attempted here.
+  * the OVER-approximating half of `_items_guard_side`. Which element of
+    `for <k>, <v> in <d>.items()` carries the guard is DECIDED only when `<d>`
+    resolves, in this same module, to a `Dict` literal or a `DictComp` with an
+    `if:` read on exactly one of its two sides. Otherwise BOTH names stay
+    tainted -- including when the guard reached the dict through a name rather
+    than through a read of its own (`g = step.get("if")` then
+    `{n: g for n in STEPS}`). That is the false-positive direction, chosen on
+    purpose; `_items_guard_side` records the measured miss that made the
+    alternative unacceptable.
   * a name bound to a COMPREHENSION whose guard read sits in the condition
     rather than the element. Measured:
     `off = {job for job, body in _publish_jobs().items() if
@@ -114,10 +165,14 @@ this walk does not have:
 
 Within a module's local names the walk is a fixpoint (see `_tainted_names`),
 so a chain of rebinds does not lose it. What is open is the module boundary,
-the attribute/subscript boundary and the `Name` container; closing any of the
-three costs more false positives, or more name resolution, than tan-cli#1145's
-rule is worth. Every one of them has a control, so the answer is pinned and a
-later narrowing reds a test rather than passing quietly.
+the attribute/subscript boundary, the `Name` container, the built `str`
+container and everything that is not an `ast.Compare` at all; closing any of
+them costs more false positives, or more name resolution, or a list of `str`
+methods, than tan-cli#1145's rule is worth. Every one of them has a control,
+so the answer is pinned and a later narrowing reds a test rather than passing
+quietly. #1145's criterion is that whatever these docstrings claim is enforced
+is exactly true, and an honest list of what is NOT satisfies it; completeness
+is not what it asks for.
 """
 import ast
 import pathlib
@@ -225,19 +280,83 @@ def _bound_names(target: ast.AST) -> list[str]:
     return []
 
 
-def _items_value_target(
-    targets: list[ast.AST], source: ast.AST
-) -> list[ast.AST] | None:
-    """`[<value>]` for `for <key>, <value> in <expr>.items()`, else `None`.
+def _assigned_sources(tree: ast.AST) -> dict[str, list[ast.AST]]:
+    """Every module-local name, and the expressions ASSIGNED to it.
 
-    A mapping unpack puts the KEY first, and a key is a step name, not a
-    guard. Tainting the whole tuple spilled the guard onto identifiers as
-    generic as `name`: measured before this narrowing,
+    Read only by `_items_guard_side`, and only to answer one question about a
+    `.items()` receiver: was it built by a `Dict` literal or a `DictComp`
+    whose two sides this walk can tell apart? Anything else is undecidable and
+    the caller fails closed -- so this records EVERY assignment rather than
+    only the dict-shaped ones, and a name bound by a `for` target, or never
+    bound in this module at all, is simply absent, which reads the same way.
+    """
+    out: dict[str, list[ast.AST]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                for name in _bound_names(target):
+                    out.setdefault(name, []).append(node.value)
+    return out
+
+
+def _key_value_pairs(
+    receiver: ast.AST, assigned: dict[str, list[ast.AST]]
+) -> list[tuple[ast.AST, ast.AST]] | None:
+    """The `key: value` pairs of every dict a `.items()` receiver is bound to.
+
+    `None` means UNDECIDABLE and the caller must fail closed: the receiver is
+    not a bare `Name`, or nothing in this module assigns it, or one of its
+    bindings is something other than a `Dict` literal or a `DictComp`. A
+    `Dict` carrying a `**` expansion has a `None` key and is undecidable for
+    the same reason -- the pairs it contributes are written somewhere else.
+    """
+    if not isinstance(receiver, ast.Name):
+        return None
+    sources = assigned.get(receiver.id)
+    if not sources:
+        return None
+    pairs: list[tuple[ast.AST, ast.AST]] = []
+    for source in sources:
+        if isinstance(source, ast.DictComp):
+            pairs.append((source.key, source.value))
+        elif isinstance(source, ast.Dict) and all(
+            key is not None for key in source.keys
+        ):
+            pairs.extend(zip(source.keys, source.values))
+        else:
+            return None
+    return pairs
+
+
+def _items_guard_side(
+    targets: list[ast.AST], source: ast.AST, assigned: dict[str, list[ast.AST]]
+) -> list[ast.AST] | None:
+    """The ONE element of `for <k>, <v> in <d>.items()` that holds the guard.
+
+    `None` means NO narrowing -- the caller keeps the whole tuple and taints
+    both names. Both directions of that default are measured, not argued.
+
+    Narrowing at all is needed because tainting the tuple spills the guard
+    onto identifiers as generic as `name`: before any narrowing,
     `test_getting_started_sdk_outage_probe.py`'s taint set was
     `['found', 'name', 'wrong']`, so an unrelated `assert "..." in name`
-    written anywhere later in that 230-line module would have red with a
-    paragraph about workflow `if:` keys. `found` stays tainted on its own
-    merits -- it is also bound directly from `_step(...).get("if")`.
+    written later in that 232-line module would have red with a paragraph
+    about workflow `if:` keys.
+
+    Narrowing to the VALUE unconditionally, on the reasoning that a mapping
+    key is a step name, is what the round before this one did, and it was a
+    MISS: measured on `wrong = {_step(n).get("if"): n for n in STEPS}` then
+    `for guard, name in wrong.items()`, the taint set was `['name', 'wrong']`
+    and the only reported line was the unrelated `<needle> in name`. The
+    substring test against the actual guard went unreported.
+
+    So the side is DECIDED. It is decidable whenever the receiver resolves, in
+    this same module, to a `Dict` literal or a `DictComp`: the guard sits on
+    whichever side reads an `if:` key, and when exactly one side does that side
+    is kept. When the receiver does not resolve, or BOTH sides read one, or
+    NEITHER does, both elements stay tainted: over-approximating costs the
+    module-wide NAME taint `_tainted_names` measures, but only the MISS costs
+    the defect, so the tie goes to tainting both.
     """
     if not (
         isinstance(source, ast.Call)
@@ -251,7 +370,14 @@ def _items_value_target(
         return None
     if len(targets[0].elts) != 2:
         return None
-    return [targets[0].elts[1]]
+    pairs = _key_value_pairs(source.func.value, assigned)
+    if pairs is None:
+        return None
+    on_key = any(_contains_if_key_read(key) for key, _ in pairs)
+    on_value = any(_contains_if_key_read(value) for _, value in pairs)
+    if on_key == on_value:
+        return None
+    return [targets[0].elts[0 if on_key else 1]]
 
 
 def _bindings(tree: ast.AST) -> list[tuple[list[str], ast.AST]]:
@@ -263,6 +389,7 @@ def _bindings(tree: ast.AST) -> list[tuple[list[str], ast.AST]]:
     readily, and the shape measured to slip past an assignment-only walk is a
     dict comprehension followed by `for name, guard in wrong.items()`.
     """
+    assigned = _assigned_sources(tree)
     pairs: list[tuple[list[str], ast.AST]] = []
     for node in ast.walk(tree):
         targets: list[ast.AST]
@@ -285,7 +412,7 @@ def _bindings(tree: ast.AST) -> list[tuple[list[str], ast.AST]]:
             continue
         if source is None:
             continue
-        targets = _items_value_target(targets, source) or targets
+        targets = _items_guard_side(targets, source, assigned) or targets
         names: list[str] = []
         for target in targets:
             names.extend(_bound_names(target))
@@ -314,7 +441,7 @@ def _tainted_names(tree: ast.AST) -> set[str]:
     that module reds on a paragraph about workflow guards. That is the shape of
     the cost: not one line of review, but an unrelated author in an unrelated
     module getting a red about `if:` keys. `name` used to be in the first set
-    too, which is why `_items_value_target` exists.
+    too, which is why `_items_guard_side` exists.
 
     Iterated to a FIXPOINT, because one rebind is enough to lose the trail: a
     single pass sees `a = step.get("if")` but not the `b = a` behind it, and
@@ -349,6 +476,12 @@ def _string_container(node: ast.AST) -> bool:
     resolution. `x in "<str>"` is a substring test however whole-valued `x`
     looks, and `"" in "<str>"` is True -- so a guard read from a step that
     carries no `if:` key at all satisfies it.
+
+    Two node types, and no third. Implicit adjacent-literal concatenation
+    (`"aaa" "bbb"`) arrives already folded into one `Constant` by the parser,
+    so it is covered for free; a container BUILT at runtime is not. Those six
+    forms are tabulated in the module docstring's does-NOT-do list and pinned
+    by `test_a_built_str_container_is_a_measured_gap`.
     """
     return _str_constant(node) or isinstance(node, ast.JoinedStr)
 
@@ -583,10 +716,10 @@ def test_x():
     assert step.get("if") is "${{ github.event_name == 'push' }}"
 """
 
-#: The KEY of a `.items()` unpack is a step name, not a guard. Before
-#: `_items_value_target` the whole tuple was tainted and this reported
-#: `fab:4` -- an unrelated substring assertion on `name`, red with a paragraph
-#: about workflow `if:` keys. The guard half must stay tainted, which the
+#: Orientation A, `{name: guard}`: the KEY is a step name. Before any
+#: narrowing the whole tuple was tainted and this reported `fab:4` -- an
+#: unrelated substring assertion on `name`, red with a paragraph about
+#: workflow `if:` keys. The guard half must stay tainted, which the
 #: `== GATE_EXPRESSION` line does not prove; `_FABRICATED_ITEMS_UNPACK` does.
 _FABRICATED_ITEMS_KEY = '''
 def test_x():
@@ -594,6 +727,63 @@ def test_x():
     for name, guard in wrong.items():
         assert "tan-cli#840" in name
         assert guard == GATE_EXPRESSION
+'''
+
+#: Orientation B, `{guard: name}` -- the same dict keyed the other way round,
+#: and the shape a narrowing to the VALUE element gets exactly backwards.
+#: Measured on that narrowing: taint `['name', 'wrong']`, and the ONLY line
+#: reported was `fab:6`, the unrelated assertion on `name`. The substring test
+#: against the actual guard on `fab:5` -- tan-cli#1137's defect verbatim --
+#: went unreported, which is strictly worse than tainting both.
+_FABRICATED_ITEMS_KEY_IS_THE_GUARD = '''
+def test_x():
+    wrong = {_step(n).get("if"): n for n in SDK_DEPENDENT_STEPS}
+    for guard, name in wrong.items():
+        assert GATE_EXPRESSION in guard
+        assert "tan-cli#840" in name
+'''
+
+#: The FAIL-CLOSED case. `wrong` is tainted -- the call that builds it reads an
+#: `if:` key -- but a call is not a `Dict` literal or a `DictComp`, so which
+#: side of the pair carries the guard is undecidable and BOTH names stay
+#: tainted. Two reported lines, one of which is a false positive on `name`.
+#: That is the deliberate direction -- it is the same over-approximation cost
+#: `_tainted_names` records, and the miss `_FABRICATED_ITEMS_KEY_IS_THE_GUARD`
+#: measures is the one that costs the defect.
+_FABRICATED_ITEMS_UNRESOLVED_RECEIVER = '''
+def test_x():
+    wrong = _guards_by_name(_step(NAME).get("if"))
+    for name, guard in wrong.items():
+        assert GATE_EXPRESSION in guard
+        assert "tan-cli#840" in name
+'''
+
+#: NOT a blessing -- the six built `str` containers the module docstring
+#: enumerates, kept as a control so the gap stays measured. Each is a
+#: substring search that `"" in <container>` satisfies; none is decidable
+#: without deciding the TYPE of an arbitrary expression.
+_FABRICATED_BUILT_STR_CONTAINER = '''
+def test_x():
+    guard = step.get("if")
+    assert guard in "aaa" + "bbb"
+    assert guard in "a %s b" % X
+    assert guard in "a {} b".format(X)
+    assert guard in "".join([A, B])
+    assert guard in str(ALLOWED)
+    assert guard in "abc"[0:2]
+'''
+
+#: NOT a blessing either -- the walk visits `ast.Compare` nodes and only
+#: those. The first two lines are substring searches on the guard that no
+#: `Compare` node covers; the third does the identical search and IS reported,
+#: purely because `>= 0` makes it a comparison. `startswith` here is
+#: tan-cli#1137's defect verbatim with the `!` deleted.
+_FABRICATED_NON_COMPARE_SEARCH = '''
+def test_x():
+    guard = step.get("if")
+    assert guard.startswith("${{ inputs.skip_ceiling_interpreter")
+    assert re.search(NEEDLE, guard)
+    assert guard.find(NEEDLE) >= 0
 '''
 
 #: The binding whose SOURCE is tainted only later in the walk. `ast.walk` is
@@ -718,9 +908,53 @@ def test_the_detector_fires_on_an_identity_test_against_a_str_literal():
 
 
 def test_the_key_of_an_items_unpack_is_not_tainted():
-    """Taint must not escape onto `name`. Before `_items_value_target` this
-    reported `fab:4`."""
+    """Orientation A. Taint must not escape onto `name`. Before any narrowing
+    this reported `fab:4`."""
     assert _membership_violations(_FABRICATED_ITEMS_KEY, "fab") == []
+
+
+def test_the_guard_is_found_when_the_items_key_is_the_one_holding_it():
+    """Orientation B, and the reason the side is decided rather than assumed.
+
+    `fab:5` is the substring test against the guard; `fab:6` is unrelated and
+    must stay silent. A narrowing to the VALUE element reported `['fab:6']`
+    only -- it named the unrelated line and missed the defect, which is worse
+    than tainting both. `_items_guard_side` reads the `DictComp` and keeps the
+    KEY here because that is the side with the `if:` read.
+    """
+    assert _membership_violations(
+        _FABRICATED_ITEMS_KEY_IS_THE_GUARD, "fab"
+    ) == ["fab:5"]
+
+
+def test_an_unresolvable_items_receiver_taints_both_elements():
+    """The fail-closed default: a receiver that is not a `Dict` literal or a
+    `DictComp` in this module makes the pair undecidable, so both names stay
+    tainted and `fab:6` is a disclosed false positive."""
+    assert _membership_violations(
+        _FABRICATED_ITEMS_UNRESOLVED_RECEIVER, "fab"
+    ) == ["fab:5", "fab:6"]
+
+
+def test_a_built_str_container_is_a_measured_gap():
+    """Six substring searches, all silent. `_string_container` decides an
+    `ast.Constant` str and an `ast.JoinedStr`; a container assembled by `+`,
+    `%`, `.format()`, `join`, `str()` or a slice needs the TYPE of an
+    arbitrary expression. Enumerated in the module docstring and pinned here,
+    so closing the gap reds this rather than passing quietly."""
+    assert _membership_violations(_FABRICATED_BUILT_STR_CONTAINER, "fab") == []
+
+
+def test_the_rule_stops_at_comparison_nodes():
+    """The walk visits `ast.Compare` and nothing else, which no other
+    does-NOT-do entry covers -- every one of those is a DATAFLOW limit.
+
+    `fab:4` is tan-cli#1137's defect with the `!` deleted and is silent;
+    `fab:5` is the same search through `re`; `fab:6` does the identical thing
+    and IS reported, only because `>= 0` makes it a comparison."""
+    assert _membership_violations(_FABRICATED_NON_COMPARE_SEARCH, "fab") == [
+        "fab:6"
+    ]
 
 
 def test_the_detector_does_not_taint_an_attribute_or_subscript_receiver():
