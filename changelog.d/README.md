@@ -60,14 +60,22 @@ the release page is the summary — see `alp-lab:writing-release-notes`).
 
 ## Release time
 
-`python/scripts/assemble_changelog.py` folds every fragment into
+`python/scripts/assemble_changelog.py --write` folds every fragment into
 `CHANGELOG.md` under the current `Unreleased` header, in canonical section
-order, then deletes the fragments:
+order, then deletes the fragments.
+
+**`--write` is required, and that is deliberate (tan-cli#1172).** The fold used
+to be the default, so typing the script's name rewrote `CHANGELOG.md` and
+deleted every fragment — no prompt, exit 0, and a summary that reads like
+success. It cost 157 fragments once. A fragment you have written but not yet
+`git add`ed is unrecoverable that way, and drafting is exactly when you would
+run this to see how it renders.
 
 ```sh
-python3 python/scripts/assemble_changelog.py          # fold + delete fragments
-python3 python/scripts/assemble_changelog.py --check   # report only, change nothing
-python3 python/scripts/assemble_changelog.py --dry-run # print the result to stdout
+python3 python/scripts/assemble_changelog.py           # render to stdout, change NOTHING
+python3 python/scripts/assemble_changelog.py --write    # fold + delete fragments (release only)
+python3 python/scripts/assemble_changelog.py --check    # report what is pending, change nothing
+python3 python/scripts/assemble_changelog.py --dry-run  # same render as a bare run, without the reminder
 python3 python/scripts/assemble_changelog.py --require-empty  # exit 1 if any fragment is still unfolded
 ```
 

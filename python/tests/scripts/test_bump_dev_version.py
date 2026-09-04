@@ -320,7 +320,9 @@ def test_the_created_fixed_heading_lets_a_later_fragment_append_not_duplicate(
         encoding="utf-8",
     )
 
-    assert ac.main(["--root", str(root)]) == 0
+    # `--write` since tan-cli#1172: the fold is opt-in now, and this test
+    # asserts on the FOLDED file, so it wants the real thing.
+    assert ac.main(["--root", str(root), "--write"]) == 0
     text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
 
     unreleased_start = text.index("## [0.6.0] — Unreleased")

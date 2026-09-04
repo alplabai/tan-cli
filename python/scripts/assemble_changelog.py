@@ -265,7 +265,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--require-empty", action="store_true",
                     help="exit 1 if any fragment remains unfolded (for a release gate)")
     ap.add_argument("--dry-run", action="store_true",
-                    help="print the resulting CHANGELOG.md to stdout, write nothing")
+                    help="print the resulting CHANGELOG.md to stdout, write "
+                         "nothing (this is also what a bare invocation does)")
+    ap.add_argument("--write", action="store_true",
+                    help="PERFORM THE FOLD: rewrite CHANGELOG.md and DELETE "
+                         "every file in changelog.d/. Irreversible for any "
+                         "fragment that is untracked or staged-but-uncommitted "
+                         "(tan-cli#1172). Without it, this script only reports.")
     ap.add_argument("--root", type=Path, default=None,
                     help="repo root (default: discovered from this script's location)")
     args = ap.parse_args(argv)
@@ -286,8 +292,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.require_empty and total:
                 print(
                     "::error::unfolded changelog fragments remain -- run "
-                    "`python3 python/scripts/assemble_changelog.py` and commit "
-                    "the result before tagging",
+                    "`python3 python/scripts/assemble_changelog.py --write` and "
+                    "commit the result before tagging",
                     file=sys.stderr,
                 )
                 return 1
@@ -302,8 +308,28 @@ def main(argv: list[str] | None = None) -> int:
         merged = lines[:start + 1] + splice(lines[start + 1:end], buckets) + lines[end:]
         text = "\n".join(merged).rstrip("\n") + "\n"
 
-        if args.dry_run:
+        if not args.write:
+            # tan-cli#1172: the fold used to be the DEFAULT. A bare invocation
+            # rewrote CHANGELOG.md and deleted every fragment, with no prompt,
+            # exit 0, and a summary that reads like success -- and the next
+            # `--check` then reported `0 fragment(s) pending`, which reads as
+            # "nothing to do" rather than "everything is gone". It cost 157
+            # fragments once, recovered only because they happened to be
+            # tracked with a clean index at that moment.
+            #
+            # The safe intent is the common one: almost every interactive
+            # reason to run this script is to SEE the rendered result. So that
+            # is the default now, and the irreversible half has to be asked
+            # for by name. The release flow says the name once, in one place.
             sys.stdout.write(text)
+            if not args.dry_run:
+                print(
+                    f"\n-- {total} fragment(s) rendered above, NOTHING written. "
+                    f"Pass --write to fold them into "
+                    f"{changelog.relative_to(root)} and delete "
+                    f"{frag_dir.relative_to(root)}/*.md.",
+                    file=sys.stderr,
+                )
             return 0
 
         changelog.write_text(text, encoding="utf-8")

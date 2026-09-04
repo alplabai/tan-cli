@@ -65,7 +65,7 @@ def test_every_fragment_reaches_the_changelog_and_is_deleted(tmp_path: Path) -> 
         "103.fixed.md": "- **Fixed two.**",
         "104.security.md": "- **Security one.**",
     })
-    assert ac.main(["--root", str(root)]) == 0
+    assert ac.main(["--root", str(root), "--write"]) == 0
 
     text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     for expected in ("Added one.", "Fixed one.", "Fixed two.", "Security one."):
@@ -78,7 +78,7 @@ def test_every_fragment_reaches_the_changelog_and_is_deleted(tmp_path: Path) -> 
 def test_existing_entries_survive(tmp_path: Path) -> None:
     """A fragment must never overwrite hand-written text already in the section."""
     root = _repo(tmp_path, {"201.fixed.md": "- **New fixed.**"})
-    assert ac.main(["--root", str(root)]) == 0
+    assert ac.main(["--root", str(root), "--write"]) == 0
     text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     assert "Pre-existing fixed entry." in text
     assert "Pre-existing added entry." in text
@@ -88,7 +88,7 @@ def test_existing_entries_survive(tmp_path: Path) -> None:
 def test_released_sections_are_untouched(tmp_path: Path) -> None:
     """Only the Unreleased section may be edited; shipped history is immutable."""
     root = _repo(tmp_path, {"301.fixed.md": "- **New fixed.**"})
-    assert ac.main(["--root", str(root)]) == 0
+    assert ac.main(["--root", str(root), "--write"]) == 0
     text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     released = text.split("## [0.9.8]", 1)[1]
     assert "New fixed." not in released, "an entry leaked into a released section"
@@ -102,7 +102,7 @@ def test_verbatim_technical_strings_are_not_reformatted(tmp_path: Path) -> None:
         "`AE822FA0E5597LS0_M55_HE`, I2C `0x1E`, code `flash.serial-unsupported`."
     )
     root = _repo(tmp_path, {"401.fixed.md": body})
-    assert ac.main(["--root", str(root)]) == 0
+    assert ac.main(["--root", str(root), "--write"]) == 0
     text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     assert body in text, "fragment body was altered in transit"
 
@@ -110,7 +110,7 @@ def test_verbatim_technical_strings_are_not_reformatted(tmp_path: Path) -> None:
 def test_a_bad_category_is_refused_not_dropped(tmp_path: Path) -> None:
     """The whole point: an unusable fragment must STOP the run, not vanish."""
     root = _repo(tmp_path, {"501.nonsense.md": "- **Would be lost.**"})
-    assert ac.main(["--root", str(root)]) == 1
+    assert ac.main(["--root", str(root), "--write"]) == 1
     # And nothing was consumed on the way to failing.
     assert (root / "changelog.d" / "501.nonsense.md").is_file()
     assert "Would be lost." not in (root / "CHANGELOG.md").read_text(encoding="utf-8")
@@ -118,13 +118,13 @@ def test_a_bad_category_is_refused_not_dropped(tmp_path: Path) -> None:
 
 def test_an_empty_fragment_is_refused(tmp_path: Path) -> None:
     root = _repo(tmp_path, {"601.fixed.md": ""})
-    assert ac.main(["--root", str(root)]) == 1
+    assert ac.main(["--root", str(root), "--write"]) == 1
     assert (root / "changelog.d" / "601.fixed.md").is_file()
 
 
 def test_a_whitespace_only_fragment_is_refused(tmp_path: Path) -> None:
     root = _repo(tmp_path, {"602.fixed.md": "   \n\t\n   "})
-    assert ac.main(["--root", str(root)]) == 1
+    assert ac.main(["--root", str(root), "--write"]) == 1
     assert (root / "changelog.d" / "602.fixed.md").is_file()
 
 
@@ -159,7 +159,7 @@ def test_the_930_defect_is_also_refused_by_the_real_fold_and_require_empty(
     not bolted onto `--check` alone, or it would drift the moment another
     entry point is added."""
     root = _repo(tmp_path, {"778.changed.md": "not a bullet at all"})
-    assert ac.main(["--root", str(root)]) == 1
+    assert ac.main(["--root", str(root), "--write"]) == 1
     assert ac.main(["--root", str(root), "--require-empty"]) == 1
 
 
@@ -348,7 +348,7 @@ def test_missing_unreleased_header_refuses_rather_than_guessing(tmp_path: Path) 
         {"701.fixed.md": "- **Entry.**"},
         changelog="# Changelog\n\n## [0.9.8] — 2026-01-01\n\n### Fixed\n\n- Old.\n",
     )
-    assert ac.main(["--root", str(root)]) == 1
+    assert ac.main(["--root", str(root), "--write"]) == 1
     assert (root / "changelog.d" / "701.fixed.md").is_file()
 
 
@@ -358,7 +358,7 @@ def test_require_empty_is_a_real_gate(tmp_path: Path) -> None:
     assert ac.main(["--root", str(root), "--require-empty"]) == 1
     # Fold them, then the same gate must pass -- proving it tracks real state
     # rather than always failing.
-    assert ac.main(["--root", str(root)]) == 0
+    assert ac.main(["--root", str(root), "--write"]) == 0
     assert ac.main(["--root", str(root), "--require-empty"]) == 0
 
 
@@ -386,5 +386,86 @@ def test_dry_run_writes_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[st
 def test_no_fragments_is_a_clean_no_op(tmp_path: Path) -> None:
     root = _repo(tmp_path, {})
     before = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert ac.main(["--root", str(root)]) == 0
+    assert ac.main(["--root", str(root), "--write"]) == 0
     assert (root / "CHANGELOG.md").read_text(encoding="utf-8") == before
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1172 -- the fold is opt-in. These are data-loss controls, not
+# behaviour tests: what they pin is that the IRREVERSIBLE half cannot be
+# reached by typing the script's name.
+# ---------------------------------------------------------------------------
+def test_a_bare_invocation_folds_nothing_and_deletes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The defect this closes: the fold used to be the DEFAULT.
+
+    A bare run rewrote CHANGELOG.md and deleted every fragment, with no
+    prompt, exit 0, and a summary that reads like success -- and the next
+    `--check` then reported `0 fragment(s) pending`, which reads as "nothing
+    to do" rather than "everything is gone". It cost 157 fragments once,
+    recovered only because they happened to be tracked with a clean index at
+    that moment. An untracked or staged-but-uncommitted fragment -- exactly
+    the state you are in while DRAFTING one, which is exactly when you would
+    reach for this script to see how it renders -- would have been gone.
+    """
+    root = _repo(tmp_path, {"1.added.md": "- Added a thing.\n"})
+    before = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert ac.main(["--root", str(root)]) == 0
+
+    assert (root / "changelog.d" / "1.added.md").exists(), (
+        "a bare invocation deleted a fragment"
+    )
+    assert (root / "CHANGELOG.md").read_text(encoding="utf-8") == before, (
+        "a bare invocation rewrote CHANGELOG.md"
+    )
+
+
+def test_a_bare_invocation_still_renders_so_the_safe_intent_is_the_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Making the fold opt-in must not make INSPECTION harder: rendering is
+    the common interactive reason to run this at all."""
+    root = _repo(tmp_path, {"1.added.md": "- A distinctive fragment body.\n"})
+    assert ac.main(["--root", str(root)]) == 0
+    captured = capsys.readouterr()
+    assert "A distinctive fragment body." in captured.out
+    assert "--write" in captured.err, (
+        "a bare run must name the flag that would have folded, or the reader "
+        "cannot tell inspection from a no-op"
+    )
+
+
+def test_write_still_folds_and_deletes(tmp_path: Path) -> None:
+    """The other direction: `--write` must still do the whole job, or this
+    change has traded a data-loss bug for a release-blocking one."""
+    root = _repo(tmp_path, {"1.added.md": "- Added a thing.\n"})
+    assert ac.main(["--root", str(root), "--write"]) == 0
+    assert not (root / "changelog.d" / "1.added.md").exists()
+    assert "Added a thing." in (root / "CHANGELOG.md").read_text(encoding="utf-8")
+
+
+def test_dry_run_is_silent_where_a_bare_run_nudges(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--dry-run` is an EXPLICIT request to render, so it gets no nudge. The
+    nudge exists for the person who typed the bare name expecting a fold."""
+    root = _repo(tmp_path, {"1.added.md": "- Added a thing.\n"})
+    assert ac.main(["--root", str(root), "--dry-run"]) == 0
+    captured = capsys.readouterr()
+    assert "Added a thing." in captured.out
+    assert captured.err == ""
+    assert (root / "changelog.d" / "1.added.md").exists()
+
+
+def test_the_require_empty_error_names_the_flag_that_actually_folds(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The message a release engineer sees on a red tag has to name a command
+    that works. It used to say `assemble_changelog.py` with no flag, which
+    after this change reports and exits 0 without folding -- leaving them to
+    run it, see success, and find the fragments still pending."""
+    root = _repo(tmp_path, {"1.added.md": "- Added a thing.\n"})
+    assert ac.main(["--root", str(root), "--require-empty"]) == 1
+    assert "--write" in capsys.readouterr().err
