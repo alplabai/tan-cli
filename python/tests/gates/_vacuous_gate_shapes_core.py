@@ -53,8 +53,16 @@ over a real module, `for r in rows():  # iterable RAISES` and
 `for e in empty():  # collection EMPTY` both report
 `header_covered=True, body_covered=False` and both are reported. So does a
 loop whose body only ever runs in a SPAWNED interpreter the parent's coverage
-never saw, and this repo spawns at roughly 150 call sites. There is no live
-instance today -- all eight reported loops are genuine empty-collection cases
+never saw, and this repo spawns at 336 call sites -- measured, not estimated
+(the dot is bracketed rather than backslash-escaped only so this docstring
+carries no escape sequence; it counts the same 336):
+
+    grep -rnE "subprocess[.](run|Popen|check_output|check_call)" \
+        python/{tan,tests,scripts} --include=*.py | wc -l   # -> 336
+
+`tan` 51, `tests` 273, `scripts` 12; `tests/gates` alone, the directory this
+audit measures, 48. There is no live instance today -- all eight reported
+loops are genuine empty-collection cases
 -- but the first one to appear would be MISCLASSIFIED rather than declared,
 because neither "healthy-empty" nor "forward-looking" is true of it. That is
 what [`ALLOWED_EMPTY_LOOPS`]' third class, `unmeasurable`, exists to say; see
@@ -117,6 +125,20 @@ class ForSite:
         Deliberately NOT `(rel, lineno)`. A line number churns on every edit
         above it, so a line-keyed allow-list rots into noise within a week and
         the next person deletes the gate rather than the rows.
+
+        It is NOT unique within a file, and that is checked rather than
+        assumed. Measured over this branch's 295 sites under `tests/gates/`:
+        263 distinct keys, 26 of them shared by 2-4 sites --
+        `for node in ast.walk(tree):` occurs 4x in
+        `test_subprocess_env_routes_through_the_helper.py` and 4x in THIS
+        module. None of the eight rows in [`ALLOWED_EMPTY_LOOPS`] collides
+        today, so nothing is wrong now; a row keyed on a duplicated header
+        later would exempt every sibling that shares it, one reviewed
+        decision silently covering loops nobody read.
+        `test_every_allowed_empty_loop_row_still_names_a_real_loop` refuses
+        that by requiring EXACTLY one match, not at least one -- fail closed,
+        so the first such row is a deliberate decision (re-key it, or reword
+        one of the headers) rather than a silent widening.
         """
         return (self.rel, self.source)
 
@@ -225,9 +247,21 @@ def iter_tautologies(tree: ast.AST, rel: str, text: str) -> list[Finding]:
     flagging it would be this walk making the over-claim it exists to catch:
 
       * `f""` (`JoinedStr(values=[])`) and `f"{x}"` (only a `FormattedValue`)
-        are `""` when the interpolation is empty. Measured on 3.12:
+        are `""` when the interpolation is empty. Measured on CPython 3.12.3:
         `bool(f"")` and `bool(f"{x}")` with `x = ""` are both `False`.
-        Only literal text makes an f-string unconditionally truthy.
+
+        The rule is exactly "the `JoinedStr` carries a non-empty literal
+        `Constant` segment", and it is narrower than "unconditionally truthy"
+        in the SAFE direction -- it declines two spellings that are truthy for
+        every BUILT-IN operand. Measured on the same interpreter with
+        `x = ""`, `bool(f"{x!r}")` is `True` (`"''"`) and `bool(f"{x:>10}")`
+        is `True` (ten spaces), and both are declined here. That is
+        deliberate, not an oversight: a conversion runs `__repr__`/`__str__`
+        and a format spec runs `__format__`, and a class defining either to
+        return `""` makes both genuinely falsy, so flagging them would be
+        this walk committing the over-claim it exists to catch. `f"{x=}"` IS
+        flagged, and correctly -- the `=` spec emits a real
+        `Constant("x=")`.
       * `()` is falsy, and `(*xs,)` is `()` when `xs` is empty -- so a tuple
         whose every element is a `*`-unpacking is declined too. One non-`*`
         element is what makes the arity at least 1 regardless.
@@ -237,11 +271,15 @@ def iter_tautologies(tree: ast.AST, rel: str, text: str) -> list[Finding]:
 
     ZERO of all four, measured across the whole walked tree rather than only
     the directory the coverage half looks at: `python/{tan,tests,scripts}`,
-    13372 `assert` statements, 0 truthy-literal, 0 `x == x`, 0 literal-bearing
-    f-string, 0 non-`*` tuple. All four are carried
-    as regression insurance at essentially no cost: every shape is trivially
-    AST-decidable, and a future `assert True  # TODO` is exactly the kind of
-    placeholder that survives review because it reads as deliberate.
+    13389 `assert` statements, 0 truthy-literal, 0 `x == x`, 0 literal-bearing
+    f-string, 0 non-`*` tuple. The f-string figure is a measurement of THIS
+    rule and not of the wider claim: the tree carries 0 `assert <f-string>`
+    statements of ANY kind, so the two spellings the rule deliberately
+    declines (a conversion, a format spec -- see above) account for none of
+    the gap either. All four are carried as regression insurance at
+    essentially no cost: every shape is trivially AST-decidable, and a future
+    `assert True  # TODO` is exactly the kind of placeholder that survives
+    review because it reads as deliberate.
     """
     findings: list[Finding] = []
     for node in ast.walk(tree):
@@ -256,9 +294,13 @@ def _is_tautology(test: ast.expr) -> bool:
     if isinstance(test, ast.Constant):
         return bool(test.value)
     if isinstance(test, ast.JoinedStr):
-        # Literal text makes it unconditionally non-empty. `f""` and `f"{x}"`
-        # do not -- both are `""` for an empty interpolation, so both can
-        # genuinely fail and neither is flagged.
+        # A non-empty literal `Constant` segment makes it non-empty whatever
+        # it interpolates. `f""` and `f"{x}"` carry none -- both are `""` for
+        # an empty interpolation, so both can genuinely fail and neither is
+        # flagged. A conversion (`f"{x!r}"`) and a format spec (`f"{x:>10}"`)
+        # are truthy for every BUILT-IN operand and are still declined,
+        # because `__repr__`/`__format__` are overridable and may return
+        # `""`; see the docstring.
         return any(
             isinstance(v, ast.Constant) and bool(v.value) for v in test.values
         )
@@ -342,6 +384,67 @@ def iter_assert_lines(tree: ast.AST) -> frozenset[int]:
     )
 
 
+def duplicate_literal_dict_keys(tree: ast.AST, name: str) -> list[object]:
+    """The keys spelled more than once in the `name = {...}` dict LITERAL.
+
+    Both allow-lists below are dict literals, and Python collapses a
+    duplicate key silently: the later spelling wins, the earlier one never
+    existed, and no error is raised at import, at parse, or anywhere else.
+    Measured on this branch: inserting a full `unmeasurable`-class row for the
+    already-present key
+    `("tests/gates/test_core_does_not_import_commands.py", "for module in
+    _command_imports(path):")` left the suite at `44 passed` -- the later
+    ORIGINAL entry won, the inserted row never existed, and its reviewed prose
+    was replaced by nothing at all.
+
+    That is not a widening (the exemption already covered that key), but it is
+    the same silent-drop shape `_module_size_budget_core.py`'s `_load_json`
+    already refuses for its records, citing tan-cli#586: "the last spelling
+    silently wins and any other is dead weight". A REVIEWED REASON that can be
+    quietly replaced is worth less than one that cannot, so this reads the
+    SOURCE rather than the collapsed dict -- by the time the object exists the
+    evidence is gone.
+
+    Both the plain (`NAME = {...}`) and the ANNOTATED (`NAME: dict[...] =
+    {...}`) binding are matched. Both allow-lists below use the annotated
+    form, and a first draft of this walk handled only `ast.Assign` -- so it
+    reached neither of them and reported a clean zero, which is the defect
+    this whole module is named after, committed inside the fix for it. The
+    fabricated-input control drives both spellings for that reason.
+
+    A `**expansion` entry has no literal key and is skipped; so is a key that
+    is not a literal at all. Neither is a shape either allow-list uses, and
+    guessing at one would be this module's own over-claim.
+    """
+    duplicates: list[object] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if not isinstance(node.value, ast.Dict):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in targets
+        ):
+            continue
+        seen: list[object] = []
+        for key in node.value.keys:
+            if key is None:
+                continue
+            try:
+                value = ast.literal_eval(key)
+            except ValueError:
+                continue
+            if value in seen and value not in duplicates:
+                duplicates.append(value)
+            seen.append(value)
+    return duplicates
+
+
 # --------------------------------------------------------------------------
 # Floors. Every check above reports zero on a healthy tree, which is exactly
 # what a scan that stopped matching also reports -- these numbers are the only
@@ -351,10 +454,10 @@ def iter_assert_lines(tree: ast.AST) -> frozenset[int]:
 # collapse does. Raise one deliberately, never to make a red go away.
 # --------------------------------------------------------------------------
 
-#: `for`/`async for` statements under `tests/gates/`. Measured: 285.
+#: `for`/`async for` statements under `tests/gates/`. Measured: 295.
 MIN_FOR_SITES = 240
 
-#: `assert` statements under `tests/gates/`. Measured: 1337.
+#: `assert` statements under `tests/gates/`. Measured: 1354.
 MIN_ASSERT_SITES = 1100
 
 #: How many `.py` files under `tests/gates/` the coverage run is allowed NOT

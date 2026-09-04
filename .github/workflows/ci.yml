@@ -626,8 +626,8 @@ jobs:
       # run `tests/gates`: this one, `parity.yml`'s `seam1-plan-shape`, and
       # `python-newest` below (see the `--ignore=tests/gates` note at the top
       # of this file, which names all three). Adding a second full execution
-      # of the directory to each -- measured locally at `1187 passed, 60
-      # skipped in 39.45s` plain against `80.01s` under `coverage` -- buys
+      # of the directory to each -- measured locally at `1197 passed, 59
+      # skipped in 32.05s` plain against `63.14s` under `coverage` -- buys
       # nothing this job does not already give. It is NOT that a bound `ALP_SDK_ROOT` would measure something
       # wrong: binding one only unskips tests, which can only SHRINK the
       # never-iterated set, so seam1 could produce fewer findings but never a
@@ -650,9 +650,9 @@ jobs:
       # different step. Without it, `test_module_size_budget_log_append_only.
       # py::test_the_ledger_only_ever_appends_since_the_prs_base` hits
       # `BaseRefUnresolved` and fails by design on every merge-queue run --
-      # measured `1 failed, 1179 passed, 60 skipped`, and rc=0 with the
-      # binding in place -- and the audit, which refuses to report on a red
-      # child run, exits 1 having measured nothing.
+      # measured `1 failed, 1196 passed, 59 skipped`, and rc=0 in 64.29s with
+      # the binding in place -- and the audit, which refuses to report on a
+      # red child run, exits 1 having measured nothing.
       # `test_the_audit_step_binds_the_merge_group_base_ref` pins this.
       - name: no undeclared vacuous gate shapes (tests/gates under coverage)
         working-directory: python
