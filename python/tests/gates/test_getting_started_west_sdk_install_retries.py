@@ -49,18 +49,31 @@ _INVOCATION = re.compile(r"west\s+sdk\s+install\b.*-t\s+arm-zephyr-eabi", re.S)
 #: precedent (`clean_host_smoke.py`'s 3-attempt retry).
 _RETRY_LOOP = re.compile(r"for\s+attempt\s+in\s+((?:\d+\s*){3,});\s*do")
 
-#: The exact two-line invocation this step must contain, anchored end to
-#: end (`--version <x> -t arm-zephyr-eabi \` then a continuation line
-#: `--personal-access-token <y>`) so that:
-#:   * a DROPPED flag or invocation has nothing to match (0 hits);
+#: The exact invocation this step must contain, anchored end to end
+#: (`--version <x> -t arm-zephyr-eabi` terminated by the retry loop's own
+#: `; then`) so that:
+#:   * a DROPPED invocation has nothing to match (0 hits);
 #:   * a DUPLICATED invocation cannot be swallowed into one greedy match --
-#:     each hit stops at its own `--personal-access-token` line, so two
-#:     copies produce two non-overlapping hits, not one;
-#:   * a MANGLED invocation (renamed flag, missing continuation, extra
-#:     text on the flag line) breaks the anchored shape and matches nothing.
+#:     each hit stops at its own `; then`, so two copies produce two
+#:     non-overlapping hits, not one;
+#:   * a MANGLED invocation (an extra flag, a missing target, a stray
+#:     continuation) breaks the anchored shape and matches nothing.
+#:
+#: **tan-cli#1185 removed the `--personal-access-token <y>` continuation line
+#: this used to anchor on**, so the shape is one line now. That flag put the
+#: token in `west`'s argv -- and so in the host process table -- for the whole
+#: multi-minute download; the credential reaches the same `west` through a
+#: netrc the step stages instead (`NETRC`), which is what `tan bootstrap`
+#: already did (tan-cli#1143). A side effect worth keeping: the command under
+#: test is now LITERALLY the remedy `tan doctor` prints, with no
+#: runner-specific authentication detail bolted onto it.
+#:
+#: Dropping the flag alone would satisfy this regex while leaving the download
+#: anonymous, which is the tan-cli#689/#1163 rate-limit flake coming back. So
+#: the two tests at the bottom of this file hold both halves: the flag must
+#: not return, AND the netrc that replaced it must not be dropped.
 _EXACT_INVOCATION = re.compile(
-    r"west\s+sdk\s+install\s+--version\s+\S+\s+-t\s+arm-zephyr-eabi\s*\\\s*\n"
-    r"\s*--personal-access-token\s+\S+"
+    r"west\s+sdk\s+install\s+--version\s+\S+\s+-t\s+arm-zephyr-eabi\s*;\s*then"
 )
 
 
@@ -160,8 +173,71 @@ def test_the_invocation_still_carries_the_flag_under_test():
     run = _step()["run"]
     hits = list(_EXACT_INVOCATION.finditer(run))
     assert len(hits) == 1, (
-        f"expected exactly one west sdk install --version ... "
-        f"-t arm-zephyr-eabi \\ / --personal-access-token ... invocation "
-        f"(not dropped, not duplicated, not mangled), found {len(hits)}:\n"
-        f"{run}"
+        f"expected exactly one `west sdk install --version ... "
+        f"-t arm-zephyr-eabi; then` invocation (not dropped, not duplicated, "
+        f"not mangled), found {len(hits)}. If a credential flag was added "
+        f"back onto this line, that is tan-cli#1185 returning -- see "
+        f"test_the_credential_is_not_passed_in_argv below:\n{run}"
+    )
+
+
+def test_the_credential_is_not_passed_in_argv():
+    """tan-cli#1185. A credential on a CLI flag lands in the host process
+    table for the whole multi-minute download, readable by anything else
+    executing in the job -- the invariant
+    `toolchain_provision.SDK_TOKEN_ENV_VARS` states in its own words and
+    tan-cli#1143 designed `tan bootstrap` around. This step was the last site
+    in the repo contradicting it.
+
+    Scoped to THIS step; `test_no_credential_in_workflow_argv.py` is the
+    repo-wide gate. Comment lines are exempt for the same reason they are
+    there: the block right above the invocation explains why the netrc
+    exists, and it has to be able to name the flag it replaced."""
+    offenders = [
+        line.strip()
+        for line in _step()["run"].splitlines()
+        if "--personal-access-token" in line and not line.lstrip().startswith("#")
+    ]
+    assert not offenders, (
+        "the SDK-install step passes a credential on a CLI flag again "
+        "(tan-cli#1185/#1143). Stage it into a netrc instead -- `mktemp -d`, "
+        "`trap ... EXIT`, `chmod 0600`, `export NETRC`:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_credential_still_reaches_west_through_a_netrc():
+    """The other half, and the reason the test above cannot stand alone:
+    deleting the flag AND the netrc satisfies it perfectly while leaving the
+    download anonymous. That is not a neutral state -- it is tan-cli#689 /
+    tan-cli#1163 returning, a `403 API rate limit exceeded` on a quota counted
+    per source IP and shared across every hosted runner in the region, reddening
+    this job for traffic that is not ours.
+
+    Each fact below is checked separately so a partial regression names itself
+    rather than reporting as one opaque failure."""
+    run = _step()["run"]
+    assert re.search(r"^\s*export NETRC=", run, re.M), (
+        "the step no longer exports NETRC, so `requests` -- the client `west "
+        "sdk install`'s GitHub call goes through -- has no netrc path to read "
+        "and the download is anonymous (tan-cli#1143 "
+        "`toolchain_provision.NETRC_ENV_VAR`)"
+    )
+    assert "machine api.github.com" in run and "login x-access-token" in run, (
+        "the staged netrc is no longer the one-machine document tan writes "
+        "(`toolchain_provision.netrc_text`: api.github.com / x-access-token) "
+        "-- a mismatched machine line means `requests` finds no entry and "
+        "authenticates nothing"
+    )
+    trap_lines = [
+        line for line in run.splitlines()
+        if line.lstrip().startswith("trap ") and "EXIT" in line and "netrc" in line
+    ]
+    assert trap_lines, (
+        "no `trap ... EXIT` discarding the netrc: a credential file must not "
+        "survive the step on ANY exit path, including the `exit 1` the "
+        "exhausted retry takes (tan-cli#1185 acceptance)"
+    )
+    assert re.search(r"chmod 0600 .*netrc", run), (
+        "the staged netrc is no longer chmod 0600 (tan-cli#1185 acceptance)"
     )

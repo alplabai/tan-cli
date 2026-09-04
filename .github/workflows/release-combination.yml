@@ -730,13 +730,38 @@ jobs:
         if: ${{ !matrix.expect_refuse }}
         working-directory: release-workspace
         env:
+          # Read by the `run:` block below, which stages it into a private
+          # netrc. NOT passed on `--personal-access-token`: see the tan-cli#1185
+          # block there for why no site in this repo does that any more.
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version="$(python3 -c 'import json; print(json.load(open("alp-sdk/metadata/toolchains.json"))["zephyrSdk"]["version"])')"
           echo "Zephyr SDK pin (alp-sdk metadata/toolchains.json): ${version}"
-          west sdk install --version "${version}" -t arm-zephyr-eabi \
-              --personal-access-token "${GH_TOKEN}"
+          # tan-cli#1185: the credential travels in a netrc, not in argv. A flag
+          # lands the value in the host process table for the whole
+          # multi-minute download, readable by anything else executing in this
+          # job -- the reason `tan bootstrap` hands the same token to the same
+          # `west` out of band (tan-cli#1143,
+          # `bootstrap_cmd._stage_sdk_credential`) rather than on a flag.
+          # `west sdk install` reads no credential env var of its own (Zephyr
+          # v4.4.1 `scripts/west_commands/sdk.py`), but its GitHub call goes
+          # through `requests`, which reads a netrc path from $NETRC. Same
+          # one-machine document tan writes (`toolchain_provision.netrc_text`).
+          netrc_dir="$(mktemp -d)"
+          # Removed on EVERY exit path, including a failing `west` under
+          # `set -e`. Under $TMPDIR, never inside the repo working tree.
+          trap 'rm -rf "${netrc_dir}"' EXIT
+          chmod 0700 "${netrc_dir}"
+          # `printf` is a shell builtin, so the token is in no child's argv
+          # here either; the `umask` closes the window in which the file could
+          # be readable by anyone else before the `chmod`.
+          ( umask 0077
+            printf 'machine api.github.com\n  login x-access-token\n  password %s\n' \
+                   "${GH_TOKEN}" > "${netrc_dir}/netrc" )
+          chmod 0600 "${netrc_dir}/netrc"
+          export NETRC="${netrc_dir}/netrc"
+          west sdk install --version "${version}" -t arm-zephyr-eabi
 
       # ---- init -> generate -> build ---------------------------------------
 
