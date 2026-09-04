@@ -1,21 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 """`tan.core.uri_reference` (tan-cli#1097).
 
-This repo has NO Windows host (PR #1089/#1090's own rule, restated in
-`test_board_context.py`'s header): a Windows-spelled path exercises the
-Windows branch on Linux/mac CI identically, because
-[`path_to_uri_reference`] picks its oracle (`PureWindowsPath` vs
-`PurePosixPath`) from the STRING itself, never from `os.name`. `ntpath.isabs`
-and `PureWindowsPath(...).as_uri()`/`.is_absolute()` are all pure string
+A Windows-spelled path exercises the Windows branch on Linux/mac CI
+identically, because [`path_to_uri_reference`] picks its oracle
+(`PureWindowsPath` vs `PurePosixPath`) from the STRING itself, never from
+`os.name` (PR #1089/#1090's own rule). `ntpath.isabs` and
+`PureWindowsPath(...).as_uri()`/`.is_absolute()` are all pure string
 operations -- no filesystem touch -- so they are real oracles here, not a
-simulation.
+simulation, and they answer identically on whichever host runs them. That
+property, and NOT "this repo has no Windows host" (false -- see "## The
+Windows-host premise, corrected" below, which is where this repo's canonical
+statement lives), is why this file is written the way it is.
 
 ## Two DELIBERATE uses of removal-scheduled stdlib APIs live in this file
 
-Both are here because no Windows host is available for LOCAL development, so
-Windows behaviour has to be established against `ntpath`/`PureWindowsPath`
-string oracles rather than by running it (see the correction under "the
-Windows-host premise" below -- CI is a different matter). Both are documented
+Both are here because Windows behaviour is established against
+`ntpath`/`PureWindowsPath` string oracles, which answer on all three legs and
+while the change is being written, rather than by running the real thing on
+the one leg that could (see "## The Windows-host premise, corrected" below --
+CI having Windows is a different matter, and it does). Both are documented
 where they are used rather than silenced (tan-cli#1140): `PurePath.as_uri()`
 as the byte-identity ORACLE in
 [`test_the_exporter_still_emits_exactly_what_purepath_as_uri_emitted`] and
@@ -32,39 +35,76 @@ surface (`tan validate --format sarif`'s `artifactLocation.uri`) and its
 removal would break it. What is left here is test-side oracles, each with
 its own docstring saying what a replacement would have to do.
 
-## The Windows-host premise, corrected (tan-cli#1140 review round 1)
+## The Windows-host premise, corrected (tan-cli#1140, finished at #1153)
 
-"This repo has no Windows host" is shorthand. It appears three times in this
-file -- the opening paragraph above, and inside
-[`test_cwd_base_uri_or_none_returns_none_when_the_cwd_has_been_removed`] and
-[`test_a_windows_file_uri_path_component_round_trips_through_nturl2path`],
-both of which attribute it to `test_board_context.py`'s header -- and in
-sibling test modules. Taken literally it is FALSE, and it is left standing at
-those inherited sites only because correcting the phrase repo-wide is a sweep
-of its own, not because any of them is right. Measured on `origin/dev`,
-`.github/workflows/parity.yml`'s `python-tests-shard` job (`:2322`) carries
-`os: [ubuntu-latest, windows-latest, macos-latest]` (`:2327`) with
-`runs-on: ${{ matrix.os }}` (`:2345`) and runs
-`python -m pytest -q --ignore=tests/gates --ignore=tests/parity` (`:2598`) on
-every `pull_request`. THIS FILE runs on a real Windows host on every PR, and
-its result rolls up into the required contexts `python -- pytest across
-python/ (<os>)` through the `python-tests` aggregation job -- which is itself
-`runs-on: ubuntu-latest` and runs no pytest, so cite `:2327`, not it.
+**"This repo has no Windows host" is false, and no site in this repo says it
+any more.** It stood in nine places across five files, and tan-cli#1153
+removed the last of them; this section is the canonical statement the
+siblings now cite instead of restating it.
 
-(Line numbers RE-MEASURED at tan-cli#1162, which is why they are not the
-`:2279`/`:2284`/`:2302`/`:2382`/`:2555` this paragraph carried when
-tan-cli#1140 wrote it -- `parity.yml` grew ~43 lines above this job in
-between. The JOB is what the claim rests on, not the offset; each number
-above was re-read out of `parity.yml` on this branch rather than carried
-forward, and a future round that finds them stale should do the same
-instead of deleting the citation.)
+The measurement, cited by JOB AND KEY rather than by offset -- see "why no
+line numbers" below. `.github/workflows/parity.yml` defines a
+`python-tests-shard` job whose `strategy.matrix` carries
+`os: [ubuntu-latest, windows-latest, macos-latest]` and whose `runs-on:` is
+`${{ matrix.os }}`; its pytest step runs
+`python -m pytest -q --ignore=tests/gates --ignore=tests/parity` with
+`--shard-id`/`--num-shards=4` on every `pull_request`. THIS FILE therefore
+runs on a real Windows host on every PR, and its result rolls up into the
+required contexts `python -- pytest across python/ (<os>)` through the
+`python-tests` job -- which is a different job, `runs-on: ubuntu-latest`,
+with no checkout and no pytest, whose own `matrix.os` exists only to
+reproduce those three context strings. Cite the SHARD job, never the
+aggregate: the aggregate is not a Windows run.
 
-What is true, and what every oracle in this file actually rests on, is that no
-Windows host is available LOCALLY: a change is developed and measured against
-`ntpath`/`PureWindowsPath` string oracles, and the real Windows runner only
-gets to speak after a push. That is exactly the PR #1125 story this file cites
-twice -- it shipped a MERGE verdict from local measurement and then failed
-four `windows-latest` shards, which is only possible BECAUSE CI has Windows.
+Three facts had been compressed into that one false sentence, and they come
+apart like this:
+
+1. **A pure string oracle is what makes Windows behaviour checkable at all
+   three legs and before a push.** `ntpath.isabs`, `PureWindowsPath` and
+   `nturl2path` touch no filesystem and read no `os.name`, so they ask the
+   WINDOWS question on the ubuntu and macos legs too, and on whatever box the
+   change is being written on. A real filesystem operation asks it on exactly
+   one leg. That, not any absence, is why every oracle in this file is
+   string-shaped -- and it is the part of the old sentence's advice that was
+   always right.
+2. **CI's Windows shards are real and will red you after a push.** PR #1125
+   shipped a MERGE verdict from local measurement and then failed four
+   `windows-latest` shards; PR #1151 was caught by `python -- pytest shard
+   (windows-latest 2/4)` for a CRLF fixture bug while its review was still
+   running. Both stories require CI to have Windows.
+3. **Their coverage has two holes**, which is the part nobody had written
+   down:
+   * the shards run `--ignore=tests/gates`, and `tests/gates` is
+     ubuntu-only by a recorded decision (see `ci.yml`'s comment above its
+     `python` job, tan-cli#372/#1152). Nothing under `tests/gates` is ever
+     executed on Windows or macOS.
+   * the shard's `actions/setup-python` step pins `python-version: "3.12"`,
+     so a divergence that only appears on 3.13+ CANNOT be caught by a
+     required context there. PR #1150 found a live instance: `Path.as_uri`
+     is host-dispatched only from 3.14, so "finishing the migration" to it
+     would pass every required context and red only in the advisory
+     `python -- pytest on the newest CPython` job, which is ubuntu.
+
+Note what is NOT claimed here. "No Windows host is available locally" is a
+tempting replacement and it is ALSO an overstatement: `parity.yml`'s own
+pin-bump comments record byte-parity re-measurements taken "(Windows host,
+`py -3.14`)" before landing, `tests/fixtures/oracle_captures/PROVENANCE.txt`
+records a real win32 oracle capture, and
+`tests/commands/test_monitor_command.py`'s UNC-port case is measured against
+a real `serial.Serial` on a Windows box. A Windows host is sometimes
+available and sometimes not; the oracles above hold either way, which is
+precisely why the justification is stated as fact 1 and not as an inventory
+of anybody's desk.
+
+**Why no line numbers.** This paragraph has carried three different sets --
+`:2279`/`:2284`/`:2302`/`:2382`/`:2555` when tan-cli#1140 wrote it,
+`:2322`/`:2327`/`:2345`/`:2425`/`:2598` after tan-cli#1162 re-measured them,
+and both sets were stale within days because `parity.yml` is a file several
+PRs a week touch. Job names and YAML keys are what the claim actually rests
+on and they do not rot, and one command re-derives an offset whenever one is
+genuinely needed:
+
+    grep -n "python-tests-shard" .github/workflows/parity.yml
 
 Two consequences worth keeping straight:
 
@@ -539,8 +579,8 @@ def test_pathlib_path_as_uri_is_not_a_usable_replacement_for_this_exporter():
     All four cells, measured -- the two POSIX ones on real
     python-build-standalone builds on this box, the two `nt` ones by
     SIMULATION (`os.name = "nt"; os.path = ntpath`, which is what
-    `pathname2url` branches on), because no Windows host is available
-    locally:
+    `pathname2url` branches on) -- which is what puts all four cells in one
+    place, measurable from one host, rather than two of them behind a push:
 
         3.12/3.13, either host   0 of 17 corpus inputs disagree
         3.14.7, os.name=posix    9 of 9 WINDOWS-spelled inputs disagree,
@@ -853,11 +893,12 @@ def test_cwd_base_uri_or_none_returns_none_when_the_cwd_has_been_removed(monkeyp
     on -- `Path.cwd()` calls `os.getcwd()` internally on every pathlib
     version this repo tests (3.12/3.13/3.14, measured directly) -- without
     touching a real directory or depending on platform-specific
-    CWD-deletion semantics at all. This repo's own rule (tests/core/
-    test_board_context.py's header, restated in this file's own module
-    docstring): no Windows host, so a platform difference is verified by an
-    oracle/mechanism that behaves identically everywhere, not by a real
-    filesystem operation whose semantics diverge."""
+    CWD-deletion semantics at all. This repo's own rule (this file's module
+    docstring, "## The Windows-host premise, corrected", is where it is
+    stated): a platform difference is verified by an oracle/mechanism that
+    behaves identically everywhere, not by a real filesystem operation whose
+    semantics diverge -- so it is checked on all three shard legs and before
+    a push, rather than only on `windows-latest` and only afterwards."""
     def _raise_removed_cwd() -> str:
         raise FileNotFoundError(2, "No such file or directory")
 
@@ -895,10 +936,11 @@ def test_a_windows_file_uri_path_component_round_trips_through_nturl2path():
     is why no `tan/core/uri_reference.py` line changed for this fix.
 
     `nturl2path` is importable and exercised on ANY host (pure Python, no
-    OS syscalls) -- this repo's own rule (no Windows host; Windows
-    behaviour verified via an `ntpath`/`PureWindowsPath`-shaped oracle, not
-    real filesystem operations) applies here exactly as it does to
-    [`_is_windows_spelled`] above. Reverting either test file's
+    OS syscalls) -- this repo's own rule (Windows behaviour verified via an
+    `ntpath`/`PureWindowsPath`-shaped oracle that answers on every runner,
+    not via real filesystem operations that answer on one) applies here
+    exactly as it does to [`_is_windows_spelled`] above. Reverting either
+    test file's
     `url2pathname` import back to `unquote` does not red anything ON THIS
     HOST (Linux never takes the leading-slash-before-drive branch), which
     is precisely why this assertion exists: it pins the STDLIB oracle's own
@@ -938,9 +980,10 @@ def test_a_windows_file_uri_path_component_round_trips_through_nturl2path():
     the running platform.
 
     That reason survives CI having a Windows runner, which it does -- see
-    "the Windows-host premise, corrected" in this file's header. Two of the
-    three platforms this suite runs on (`parity.yml:2327`) are POSIX, and on
-    those legs `urllib.request` would do the POSIX conversion and this
+    "## The Windows-host premise, corrected" in this file's header. Two of
+    the three platforms this suite runs on (`parity.yml`'s
+    `python-tests-shard` matrix `os:`) are POSIX, and on those legs
+    `urllib.request` would do the POSIX conversion and this
     assertion would stop meaning anything. A test that is real on one of
     three runners and vacuous on the other two is not coverage; the
     deprecated import is what makes it real on all three.

@@ -1597,6 +1597,13 @@ PROBE_TOOLS: frozenset[str] = frozenset(
         # Zephyr-SDK-only; `faultdecode_cmd` tries it ahead of the ordinary
         # `llvm-addr2line`/`addr2line` pair, which are NOT listed here.
         "arm-zephyr-eabi-addr2line",
+        # Devicetree compiler, probed by `doctor_cmd._resolve_dtc`
+        # (tan-cli#1192). A distro `dtc` is common on a firmware developer's
+        # own machine and absent from every runner, which is exactly the
+        # tan-cli#603 split this list exists to close: without it,
+        # `devicetreeLint` answers `pass`-because-absent on CI and
+        # `pass`-because-found locally, from the same test.
+        "dtc",
     }
 )
 

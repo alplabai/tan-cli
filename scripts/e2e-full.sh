@@ -295,7 +295,7 @@ jrun() {
     why="${why:+$why; }expected exit $expect, got $RC"
   if [ -n "$why" ]; then
     bad "$label: $why"
-    note "$(head -c 300 "$o")"
+    envelope_issues "$o"
     [ "$esz" -eq 0 ] || note "$(head -c 200 "$e")"
     return 1
   else
@@ -328,6 +328,80 @@ excerpt() {
   else
     tail -c 400 "$f" 2>/dev/null
   fi
+}
+
+# Every `issues[]` entry of a JSON envelope -- code, severity and the WHOLE
+# message -- for a `note`-style report of why a `tan` command failed.
+#
+# tan-cli#1187: `e2e-container` was red on every `dev` run for six consecutive
+# days and the log never once said why. The failure paths printed a
+# `head -c 400` excerpt of the raw envelope, and an envelope's scalar/`data`
+# prefix alone is already longer than that, so what reached the reader was
+#
+#   {"command":"bootstrap","ok":false,"exitCode":1,...,"factsFromManifest":tr
+#
+# cut mid-token, with `issues[]` -- the only field that names a cause -- never
+# appearing at all (measured on run 33855586144, `dev`, 2026-09-04). A
+# byte-count excerpt is the wrong tool for an envelope specifically: it
+# truncates by POSITION, and the causal field is last, so the excerpt is
+# guaranteed to spend its whole budget on fields nobody is reading.
+#
+# Prints the issues and nothing else, so it stays short on the envelopes that
+# carry one or two. The raw head survives only where there is no parseable
+# envelope to read -- there the bytes themselves are the evidence, and a
+# `tan` that printed something other than an envelope is its own finding.
+envelope_issues() {
+  # `${1:-}`, not a bare `$1`, for the same reason `excerpt` above uses it:
+  # under `set -u` a no-arg call must return a report, not abort the run.
+  local f="${1:-}"
+  # stderr deliberately NOT suppressed: a python3 that cannot run here must
+  # say so rather than leave a failure path printing nothing at all, which is
+  # the exact shape (a diagnostic that silently explains nothing) this
+  # function exists to remove.
+  python3 - "$f" <<'PY' | sed 's/^/        /'
+import json, sys
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as handle:
+        envelope = json.load(handle)
+except Exception as exc:
+    print(f"NOT a parseable envelope ({type(exc).__name__}: {exc}).")
+    print(f"First 400 bytes of {path} verbatim:")
+    try:
+        with open(path, "rb") as handle:
+            print(handle.read(400).decode("utf-8", "replace"))
+    except OSError as read_exc:
+        print(f"  ...and the capture could not be read either: {read_exc}")
+    raise SystemExit
+
+if not isinstance(envelope, dict):
+    print(f"envelope is a {type(envelope).__name__}, not an object: {envelope!r}")
+    raise SystemExit
+
+issues = envelope.get("issues")
+if not issues:
+    # Not an error here: `ok:false` with an empty `issues[]` is itself a
+    # reportable defect (a command that failed and named no reason), and
+    # saying so is more use than printing 400 bytes of `data`.
+    print(f"envelope carries NO issues[] (ok={envelope.get('ok')!r}, "
+          f"exitCode={envelope.get('exitCode')!r}) -- nothing on it names a cause")
+    raise SystemExit
+
+print(f"envelope issues[] ({len(issues)}):")
+for index, issue in enumerate(issues):
+    if not isinstance(issue, dict):
+        print(f"  issues[{index}] is not an object: {issue!r}")
+        continue
+    print(f"  issues[{index}] {issue.get('severity', '?')} "
+          f"{issue.get('code', '?')}: {issue.get('message', '')}")
+    # Anything else the issue carries (`remediation`, `context`, ...) printed
+    # rather than dropped: this runs on failure paths only, where an unread
+    # field is exactly what cost six days.
+    for key, value in issue.items():
+        if key not in ("severity", "code", "message"):
+            print(f"    {key}: {value}")
+PY
 }
 
 ########################  FRESH HOST  ########################
@@ -672,7 +746,7 @@ check_bootstrap_refusal() {
   note "$label: exit=$rc stderr=${esz}B"
   if [ "$rc" -eq 0 ]; then
     bada "$label: bootstrap unexpectedly exited 0"
-    note "$(head -c 300 "$out")"
+    envelope_issues "$out"
     [ "$esz" -eq 0 ] || note "$(excerpt "$err")"
     return
   fi
@@ -716,7 +790,7 @@ PY
       NOTOOLS)        bada "$label: check_bootstrap_refusal called with an empty tool list -- cannot verify anything" ;;
       *)              bada "$label: unrecognised verdict '$verdict'" ;;
     esac
-    note "$(head -c 300 "$out")"
+    envelope_issues "$out"
     # A frozen tan spilling a stack trace on this path (never expected, since
     # this leg only exercises envelope-shape defects) would otherwise report
     # as a bare byte count -- tan-cli#758 review. `esz` is already known from
@@ -759,7 +833,7 @@ check_bootstrap_python_gate() {
   note "$label: exit=$rc stderr=${esz}B"
   if [ "$rc" -eq 0 ]; then
     bada "$label: bootstrap unexpectedly exited 0"
-    note "$(head -c 300 "$out")"
+    envelope_issues "$out"
     [ "$esz" -eq 0 ] || note "$(excerpt "$err")"
     return
   fi
@@ -801,7 +875,7 @@ PY
     MISSING:*)      bada "$label: $verdict" ;;
     *)              bada "$label: unrecognised verdict '$verdict'" ;;
   esac
-  note "$(head -c 300 "$out")"
+  envelope_issues "$out"
   # A frozen tan spilling a stack trace on this path would otherwise report
   # as a bare byte count -- tan-cli#758 review.
   [ "$esz" -eq 0 ] || note "$(excerpt "$err")"
@@ -867,6 +941,28 @@ else
       cmake ninja-build xz-utils wget python3-venv file >"$WORK/apt-b.log" 2>&1
   fi
 
+  # tan-cli#1189: the pair that decides whether tan's tan-cli#992
+  # `LD_LIBRARY_PATH` restore can fire at all on this host. `tan` is a
+  # PyInstaller ONEDIR freeze here, and its bootloader points
+  # `LD_LIBRARY_PATH` at the bundled `_internal/` before running -- stashing
+  # the caller's value in `LD_LIBRARY_PATH_ORIG` so children can be given it
+  # back. `subprocess_env.restore_ld_library_path` is a documented NO-OP when
+  # `LD_LIBRARY_PATH_ORIG` is absent, on the reading that an absent marker
+  # means "this host never had the problem".
+  #
+  # That reading holds only if the bootloader records the marker
+  # unconditionally. If it records it ONLY when the caller already had an
+  # `LD_LIBRARY_PATH`, a bare container -- which has none -- gets the bundled
+  # path with nothing to undo it, and every hosted runner is immune. So this is
+  # the PRE-LAUNCH value, deliberately: what the bootloader had to work with.
+  # An `<unset>` on the first line is the whole finding.
+  #
+  # Not an assertion. The harness must not fail on a fact it is here to
+  # MEASURE (tan-cli#1186's own "measure it before you fix it"), and the
+  # failure this informs is already scored by the bootstrap check below.
+  note "host LD_LIBRARY_PATH before tan (pre-launch): ${LD_LIBRARY_PATH:-<unset>}"
+  note "host LD_LIBRARY_PATH_ORIG before tan (pre-launch): ${LD_LIBRARY_PATH_ORIG:-<unset>}"
+
   hdr "B: bootstrap succeeds on a provisioned host"
   T0=$(date +%s)
   "$TAN" bootstrap --sdk-root ./alp-sdk --non-interactive --format json \
@@ -875,6 +971,67 @@ else
   ESZ=$(wc -c <"$WORK/bsB.err" | tr -d ' ')
   OKVAL=$(jget "$WORK/bsB.out" ok)
   note "bootstrap: exit=$RC ok=$OKVAL stderr=${ESZ}B took $((T1-T0))s"
+  # tan-cli#1169: WHICH quota the toolchain phase just spent, printed as a
+  # fact rather than left to be inferred. A 403 on the anonymous per-IP quota
+  # breaks all three assertions below at once -- exit, `ok`, and 0-byte
+  # stderr -- so without this line the rate limit presents as three
+  # unrelated-looking failures rather than one cause, which is a large part of
+  # why it went unfixed.
+  #
+  # tan itself gives the reader NOTHING here. Its `Authenticating the Zephyr
+  # SDK download with the token in $<var>` line is a `Log.line`, and
+  # `Log.line` prints nothing at all under `--format json`
+  # (`bootstrap_cmd.py:265-268`), while the envelope is deliberately
+  # byte-identical with and without a token. So the harness has to say it.
+  #
+  # The NAME of the variable, never the value -- the rule tan's own messages
+  # follow. The verdict is sound because a token that is present and does NOT
+  # end up authenticating the download always leaves a
+  # `bootstrap.sdk-credential-*` issue on the envelope: `-unstaged` when it
+  # was refused or could not be written into the private netrc, `-unverified`
+  # when `west sdk install` no longer matches the shape that netrc route
+  # depends on (tan-cli#1148, tan-cli#1154). Absence of both, with the
+  # variable set AND the envelope actually read, is the staged-and-passed
+  # path and nothing else -- the `PARSEFAIL:` branch below separates out the
+  # case where it was not read, which is not evidence of anything. `${!v}` is
+  # bash indirect expansion, which this harness already requires elsewhere.
+  SDK_CRED_VAR=NONE
+  for v in TAN_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN; do
+    [ -n "${!v:-}" ] || continue
+    SDK_CRED_VAR="$v"; break
+  done
+  #
+  # `PARSEFAIL:` rather than a swallowed `d = {}` (tan-cli#1184 review). An
+  # absent or unparseable `$WORK/bsB.out` -- `tan bootstrap` dying with a
+  # traceback before it writes one, which is exactly what the `ok=NONE` on
+  # the `note` line above is the symptom of -- would otherwise be
+  # INDISTINGUISHABLE from an envelope carrying no credential issue, and the
+  # branch below would print the positive "staged for west sdk install"
+  # assurance from an absence of evidence. The sentinel shape is this file's
+  # own, from `check_bootstrap_refusal` above. The `|| echo` fallback covers
+  # a host with no `python3` at all: an empty capture is neither the codes
+  # nor `NONE`, so it would reach the alarming branch below as a false alarm
+  # with an empty code list.
+  SDK_CRED_ISSUES=$(python3 - "$WORK/bsB.out" <<'PY' || echo "PARSEFAIL:python3 unavailable"
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception as e:
+    print("PARSEFAIL:" + str(e)); raise SystemExit
+codes = [str(i.get("code")) for i in (d.get("issues") or [])
+         if str(i.get("code") or "").startswith("bootstrap.sdk-credential-")]
+print(",".join(codes) if codes else "NONE")
+PY
+)
+  if [ "$SDK_CRED_VAR" = NONE ]; then
+    note "SDK download credential: none of TAN_GITHUB_TOKEN/GH_TOKEN/GITHUB_TOKEN is set -- the release listing went out on the anonymous per-IP quota"
+  elif [ "${SDK_CRED_ISSUES#PARSEFAIL:}" != "$SDK_CRED_ISSUES" ]; then
+    note "SDK download credential: \$$SDK_CRED_VAR was set, but the bootstrap envelope could not be read -- whether it was staged is UNKNOWN (${SDK_CRED_ISSUES})"
+  elif [ "$SDK_CRED_ISSUES" = NONE ]; then
+    note "SDK download credential: \$$SDK_CRED_VAR, staged for west sdk install (no bootstrap.sdk-credential-* issue on the envelope)"
+  else
+    note "SDK download credential: \$$SDK_CRED_VAR did NOT authenticate the download -- $SDK_CRED_ISSUES"
+  fi
   # A host below the EFFECTIVE Python floor is refused CORRECTLY right here
   # (bootstrap.python-too-old) -- tan-cli#757. That is not a defect: measured
   # identical on ubuntu:22.04, debian:12 and debian:11 (all below the 3.12
@@ -898,6 +1055,22 @@ else
   # hand-copied-tuple drift the HOST_PREREQS block above already had to fix
   # once; verifying the arithmetic in a message tan already printed is not
   # that.
+  # WHICH of the three invariants below actually broke, and ONLY those
+  # (tan-cli#1187, second defect). The failure line used to print all three
+  # values unconditionally -- `exit 1 ok=False stderr=0B` -- in which
+  # `stderr=0B` is the assertion PASSING. Three facts at equal weight, one of
+  # them good news, reads as three unrelated problems rather than the one that
+  # happened, and it is what made six days of an identical failure look like a
+  # three-part mystery. Naming only the violations leaves the reader the real
+  # count.
+  B_WHY=""
+  [ "$RC" -eq 0 ]       || B_WHY="exit $RC (wanted 0)"
+  [ "$OKVAL" = "True" ] || B_WHY="${B_WHY:+$B_WHY; }envelope ok=$OKVAL (wanted True)"
+  [ "$ESZ" -eq 0 ]      || B_WHY="${B_WHY:+$B_WHY; }stderr ${ESZ}B (wanted 0)"
+  # Anti-vacuity: the `else` arm below is reached only when at least one of the
+  # three failed, so an empty $B_WHY there means this block and that condition
+  # have drifted apart -- say so rather than print `failed -- `.
+  B_WHY="${B_WHY:-NO invariant violated; this failure branch and the condition guarding it have drifted apart}"
   B_FLOOR_REFUSAL=0
   if [ "$RC" -eq 0 ] && [ "$OKVAL" = "True" ] && [ "$ESZ" -eq 0 ]; then
     okb "B: bootstrap ok:true, exit 0, 0-byte stderr"
@@ -931,18 +1104,18 @@ PY
         ;;
       UNEARNED)
         badb "B: bootstrap refused bootstrap.python-too-old naming Python $FOUND_VER against floor $EFFECTIVE_FLOOR, but $FOUND_VER is NOT below $EFFECTIVE_FLOOR -- an unearned refusal"
-        note "$(head -c 400 "$WORK/bsB.out")"
+        envelope_issues "$WORK/bsB.out"
         [ "$ESZ" -eq 0 ] || note "$(excerpt "$WORK/bsB.err")"
         ;;
       NOPARSE)
         badb "B: bootstrap carries bootstrap.python-too-old but its message could not be parsed for found/floor -- cannot verify the refusal was earned"
-        note "$(head -c 400 "$WORK/bsB.out")"
+        envelope_issues "$WORK/bsB.out"
         [ "$ESZ" -eq 0 ] || note "$(excerpt "$WORK/bsB.err")"
         ;;
       *)
         # Not a floor refusal at all -- a bare crash trace lands here.
-        badb "B: bootstrap failed (exit $RC ok=$OKVAL stderr=${ESZ}B)"
-        note "$(head -c 400 "$WORK/bsB.out")"
+        badb "B: bootstrap failed -- $B_WHY"
+        envelope_issues "$WORK/bsB.out"
         [ "$ESZ" -eq 0 ] || note "$(excerpt "$WORK/bsB.err")"
         ;;
     esac
@@ -1002,7 +1175,7 @@ PY
     okb "B: init exit 0, 0-byte stderr"; HAVE_PROJECT=1
   else
     badb "B: init failed (exit $RC, stderr ${ESZ}B)"
-    note "$(head -c 300 "$WORK/initB.out")"
+    envelope_issues "$WORK/initB.out"
     [ "$ESZ" -eq 0 ] || note "$(excerpt "$WORK/initB.err")"
   fi
 
@@ -1021,6 +1194,49 @@ PY
       SDK_OK=1
       note "B: Zephyr SDK already present -- no download needed"
     else
+      # tan-cli#1169: this one stays ANONYMOUS, deliberately, and the token
+      # forwarded into the container for `tan bootstrap` above does not reach
+      # it. `west sdk install` takes a credential from
+      # `--personal-access-token` and from NOTHING else -- it reads no
+      # environment variable of its own (measured at Zephyr v4.4.1,
+      # `scripts/west_commands/sdk.py:473`; `grep environ` over that file
+      # finds only ZEPHYR_BASE and ZEPHYR_SDK_INSTALL_DIR, recorded as
+      # `toolchain_provision.WEST_SDK_KNOWN_ENV_READS`). So "the environment
+      # now carries a token" covers `tan bootstrap` and covers nothing here.
+      #
+      # Three reasons not to close that gap in this change:
+      #
+      #  1. The flag is the one shape tan-cli#1143 exists to forbid. It would
+      #     put the secret in this process's argv -- readable in the process
+      #     table of whatever box this runs on, and this harness runs on
+      #     developer machines (Windows Git Bash and WSL) as well as in an
+      #     ephemeral `--rm` container.
+      #  2. The netrc route tan uses instead is not a one-liner: a 0600 file
+      #     in a 0700 scratch directory, discarded in a `finally` on every
+      #     exit path, plus a sweep for a previous crash's leftovers. Hand-
+      #     rolling that in bash is a second place a secret touches disk, with
+      #     none of those guarantees.
+      #  3. This step exists to run the command `tan doctor` PRINTS, verbatim,
+      #     the way a customer would (`zephyr_sdk_install_command`,
+      #     `doctor_cmd.py:1158`). A customer on a home IP has their own
+      #     unauthenticated quota; authenticating it here would stop measuring
+      #     the shape under test. `getting-started.yml`'s own manual
+      #     `west sdk install` makes the opposite trade and says so beside the
+      #     flag -- that step is a retry loop whose subject is the toolchain
+      #     arriving, not the customer's command.
+      #
+      # What that leaves standing, named rather than glossed: this download
+      # can still 403 on the shared per-IP quota. It is reached more often
+      # than the `PRE = pass` guard above suggests, because that guard reads
+      # `tan doctor`'s `zephyrSdk` check, which takes ZEPHYR_SDK_INSTALL_DIR
+      # first when that names a valid root and otherwise scans the top level
+      # -- never recursing -- of `/opt`, $HOME, %USERPROFILE% and
+      # `Path.home()` for a `zephyr-sdk*` entry (`doctor_cmd.py:2640-2694`).
+      # Neither route can see the store `tan bootstrap` just filled at
+      # `~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`: it is two
+      # levels below $HOME rather than at its top level, and it is not what
+      # ZEPHYR_SDK_INSTALL_DIR points at. Derived from source, not measured
+      # in a container run.
       SDK_TIMEOUT="${ZEPHYR_SDK_INSTALL_TIMEOUT:-1200}"
       T0=$(date +%s)
       if ( cd "$WS" && timeout "$SDK_TIMEOUT" "$WEST_BIN" sdk install \
@@ -1114,7 +1330,7 @@ PY
     if [ "$SDK_OK" -eq 1 ]; then
       [ "$RC" -eq 0 ] && okb "B: build exit 0" || {
         badb "B: build exit $RC"
-        note "$(head -c 500 "$WORK/buildB.out")"
+        envelope_issues "$WORK/buildB.out"
         [ "$BESZ" -eq 0 ] || note "$(excerpt "$WORK/buildB.err")"
       }
     else
@@ -1340,7 +1556,7 @@ PY
   if [ "$SDK_OK" -eq 1 ]; then
     if [ "$RC" -ne 0 ]; then
       bad "dirty build: exit $RC"
-      note "$(head -c 400 "$WORK/dbuild.out")"
+      envelope_issues "$WORK/dbuild.out"
       [ "$DESZ" -eq 0 ] || note "$(excerpt "$WORK/dbuild.err")"
     elif [ "$DIRTY_SLICES" = "UNREADABLE" ] || [ "$CLEAN_SLICES" = "UNREADABLE" ]; then
       # Already scored above (#336) -- an unreadable slice list means nothing

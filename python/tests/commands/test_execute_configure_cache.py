@@ -95,14 +95,17 @@ def test_missing_app_dir_is_the_empty_set_not_an_error(tmp_path):
 def test_the_relative_key_is_posix_spelled_under_windows_rules_too():
     """tan-cli#1132: the `Path.glob` -> `os.scandir` swap changed WHERE the
     relative key comes from -- an `entry.path` off a `DirEntry`, not a
-    matched path off a glob result -- and this repo has no Windows host to
-    check that on (PR #1125 shipped a MERGE verdict and then failed four
-    `windows-latest` shards). So the Windows spelling is pinned by ORACLE,
-    `PureWindowsPath`, not by a real filesystem operation: `os.scandir`
-    hands back a backslash-separated `entry.path` there, and the stamp
-    file's keys must stay the SAME forward-slash strings a previously-
-    stamped build dir already holds, or every first build after upgrading
-    tan reports every tracked file as new.
+    matched path off a glob result -- and the only place a REAL Windows
+    filesystem answers that is `parity.yml`'s `python-tests-shard`
+    `windows-latest` leg, which speaks only after a push (PR #1125 shipped a
+    MERGE verdict from local measurement and then failed four of those
+    shards; the "this repo has no Windows host" this sentence used to open
+    with was false, tan-cli#1153). So the Windows spelling is pinned by
+    ORACLE, `PureWindowsPath`, not by a real filesystem operation:
+    `os.scandir` hands back a backslash-separated `entry.path` there, and the
+    stamp file's keys must stay the SAME forward-slash strings a previously-
+    stamped build dir already holds, or every first build after upgrading tan
+    reports every tracked file as new.
 
     It DRIVES `configure_inputs.relative_key` rather than restating its
     expression (review nit): a test that recomputed

@@ -62,6 +62,10 @@ _PACKAGE = Path(__file__).resolve().parents[2] / "tan"
 #: `test_every_check_call_site_declares_a_literal_scope`, which keys on nothing.
 _PINNED_SCOPES = {
     # doctor_cmd -- host: the verdict is about this machine.
+    # `devicetreeLint` (tan-cli#1192) is host: its subject is this machine's
+    # tooling -- a Zephyr SDK `hosttools/` copy of `dtc` or one on PATH -- and
+    # the answer is identical for every project built here.
+    "devicetreeLint": "host",
     "homePath": "host",
     "hostPrerequisites": "host",
     "hostPython": "host",

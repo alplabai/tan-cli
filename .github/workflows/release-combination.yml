@@ -730,13 +730,65 @@ jobs:
         if: ${{ !matrix.expect_refuse }}
         working-directory: release-workspace
         env:
+          # Read by the `run:` block below, which stages it into a private
+          # netrc. NOT passed on `--personal-access-token`: see the tan-cli#1185
+          # block there for why no site in this repo does that any more.
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version="$(python3 -c 'import json; print(json.load(open("alp-sdk/metadata/toolchains.json"))["zephyrSdk"]["version"])')"
           echo "Zephyr SDK pin (alp-sdk metadata/toolchains.json): ${version}"
-          west sdk install --version "${version}" -t arm-zephyr-eabi \
-              --personal-access-token "${GH_TOKEN}"
+          # tan-cli#1185: the credential travels in a netrc, not in argv. A flag
+          # lands the value in the host process table for the whole
+          # multi-minute download, readable by anything else executing in this
+          # job -- the reason `tan bootstrap` hands the same token to the same
+          # `west` out of band (tan-cli#1143,
+          # `bootstrap_cmd._stage_sdk_credential`) rather than on a flag.
+          # `west sdk install` reads no credential env var of its own (Zephyr
+          # v4.4.1 `scripts/west_commands/sdk.py`), but its GitHub call goes
+          # through `requests`, which reads a netrc path from $NETRC. Same
+          # one-machine document tan writes (`toolchain_provision.netrc_text`).
+          netrc_dir="$(mktemp -d)"
+          # Removed on EVERY exit path, including a failing `west` under
+          # `set -e`. Under $TMPDIR, never inside the repo working tree.
+          trap 'rm -rf "${netrc_dir}"' EXIT
+          chmod 0700 "${netrc_dir}"
+          # `printf` is a shell builtin, so the token is in no child's argv
+          # here either; the `umask` closes the window in which the file could
+          # be readable by anyone else before the `chmod`.
+          ( umask 0077
+            printf 'machine api.github.com\n  login x-access-token\n  password %s\n' \
+                   "${GH_TOKEN}" > "${netrc_dir}/netrc" )
+          chmod 0600 "${netrc_dir}/netrc"
+          export NETRC="${netrc_dir}/netrc"
+          # Prove the staged credential AUTHENTICATES, before spending minutes on
+          # a download whose success would not distinguish "the token reached
+          # api.github.com" from "the shared anonymous quota happened to be
+          # free". A green step is not evidence of the first, and a check that
+          # cannot tell them apart is how tan-cli#1185 sat here for four rounds
+          # of hardening beside it.
+          #
+          # `curl --netrc-file` reads the same document `requests` reads from
+          # $NETRC, so this measures the FILE and the token rather than this
+          # step's intent. GitHub's anonymous core quota is 60/hour and any
+          # authenticated identity is far above it, so `<= 60` is unambiguous.
+          #
+          # Hard-fails ONLY on that unambiguous negative, which is a real defect
+          # in the staging above. An unreachable or unparseable endpoint warns
+          # and continues: that is the network, not this step's subject, and a
+          # check that reds for a reason unrelated to its subject stops being
+          # read (this repo's own `sdk list --online` precedent in
+          # clean-host.yml). So it CAN fail, and only for the right reason.
+          core_limit="$(curl -sS --max-time 30 --netrc-file "${NETRC}" https://api.github.com/rate_limit 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["resources"]["core"]["limit"])' 2>/dev/null || echo unknown)"
+          if [ "${core_limit}" = "unknown" ]; then
+            echo "::warning::could not read api.github.com/rate_limit to confirm the staged netrc authenticates; continuing (that is the network, not the credential)" >&2
+          elif [ "${core_limit}" -le 60 ]; then
+            echo "::error::the staged netrc did not authenticate: GitHub reports a core rate limit of ${core_limit}/hour, which is the ANONYMOUS per-IP quota. The token is not reaching api.github.com, so this download runs on a quota shared with every hosted runner in the region (tan-cli#1143 / tan-cli#1185)." >&2
+            exit 1
+          else
+            echo "staged netrc authenticates: GitHub core rate limit ${core_limit}/hour (anonymous is 60)"
+          fi
+          west sdk install --version "${version}" -t arm-zephyr-eabi
 
       # ---- init -> generate -> build ---------------------------------------
 

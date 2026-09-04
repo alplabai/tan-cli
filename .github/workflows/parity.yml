@@ -2073,9 +2073,8 @@ jobs:
           # neither bootstrap nor the SDK.
           #
           # `TAN_GITHUB_TOKEN` rather than the `GH_TOKEN` its neighbours use
-          # (tan-cli#840's probe, and the manual `west sdk install` retry):
-          # those steps invoke `gh` and `west --personal-access-token`
-          # directly, so they need the name those tools read. This step invokes
+          # (tan-cli#840's probe among them): those steps invoke `gh` directly,
+          # so they need the name that tool reads. This step invokes
           # `tan`, which reads TAN_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN in
           # that order (`SDK_TOKEN_ENV_VARS`, tan/core/toolchain_provision.py),
           # and the tan-specific name cannot change `gh`'s ambient behaviour
@@ -2322,10 +2321,29 @@ jobs:
   # 26m/22m/17m job on windows/ubuntu/macos respectively -- ~97% of the wall
   # clock is this one step, and everything else in the job (checkout, SDK
   # clone, pip install) is 12-41s, i.e. negligible per-shard overhead. Root
-  # cause (not fixed here, sharding is parallelisation only): ~4300 tests
-  # spawn a fresh interpreter via subprocess.run/Popen at ~150 call sites to
-  # re-exercise `tan` as a customer would invoke it, and process creation is
-  # far more expensive on windows-latest than on the other two runners.
+  # cause (not fixed here, sharding is parallelisation only): this suite
+  # re-exercises `tan` as a customer would invoke it, by spawning a fresh
+  # interpreter, and process creation is far more expensive on
+  # windows-latest than on the other two runners.
+  #
+  # The two figures that size that claim are written WITH the command that
+  # produced each, because the pair this comment used to carry ("~4300
+  # tests ... ~150 call sites") rotted unnoticed until tan-cli#1183 measured
+  # it -- 150 was 336, off by 2.2x. Re-derive, do not re-estimate. Measured
+  # on `a92a0011`:
+  #
+  #   336 interpreter-spawn call sites (tan 51, tests 274, scripts 11):
+  #     grep -rnE "subprocess[.](run|Popen|check_output|check_call)" python/{tan,tests,scripts} --include=*.py | wc -l
+  #   `check_output` and `check_call` are both 0 in this tree, so the
+  #   narrower `run|Popen` reading of that sentence gives the same 336.
+  #
+  #   5919 tests in the scope the 0..3 legs shard (the `parity` leg's own
+  #   scope is a further 780, unsharded):
+  #     (cd python && python -m pytest -q --collect-only --ignore=tests/gates --ignore=tests/parity tests | tail -1)
+  #
+  # Neither figure is read by any job, gate or test, so nothing reds when
+  # they drift again -- which is exactly why the command has to travel with
+  # the number.
   #
   # This job is renamed to `python-tests-shard` and carries `shard` in its
   # matrix -- deliberately NOT the job branch protection requires. GitHub
@@ -2457,13 +2475,23 @@ jobs:
           # job binds ALP_SDK_ROOT, so it is where tests/model/test_tensorio.py's
           # tflite parse path AND tests/model/test_vela_yolo_internal.py's real
           # Ethos-U/Vela compile of the public person_detect_int8.tflite fixture
-          # (alp-sdk#1471) actually get exercised instead of perpetually skipping
-          # in every tan CI run. `ethos-u-vela` ships cp312 wheels for exactly
-          # this job's OS matrix (manylinux x86_64, win_amd64, macosx arm64) at
-          # ~2 MB and is Apache-2.0 -- verified before adding it here, not
+          # (alp-sdk#1470) WILL get exercised instead of perpetually skipping --
+          # once that PR merges. It has not: measured 2026-09-01, #1470 is OPEN
+          # and CONFLICTING, and `tests/fixtures/models/` both on alp-sdk `dev`
+          # and at this workflow's own PINNED_SDK_TAG carries only
+          # gen_tiny_model.py, gen_tiny_onnx.py, tiny_cnn.onnx and
+          # tiny_int8.tflite -- the 712-byte toy test_vela_yolo_internal.py
+          # deliberately refuses. So the vela leg installed here still SKIPS in
+          # every tan CI run today; installing the toolchain is necessary, not
+          # sufficient. (tan-cli#785. The earlier `alp-sdk#1471` here was the
+          # wrong PR -- that one is the bootstrap prerequisites.install.linux
+          # re-key, merged 2026-08-15.) `ethos-u-vela` ships cp312 wheels for
+          # exactly this job's OS matrix (manylinux x86_64, win_amd64, macosx
+          # arm64) at ~2 MB and is Apache-2.0 -- verified before adding it, not
           # assumed. DEEPX's `dxcom` and DRP-AI's TVM stay license-gated vendor
-          # toolchains with no PyPI wheel to pin, so `test_deepx_yolo_internal.py`
-          # keeps skipping in CI (see this job's own model-compile comment in
+          # toolchains with no PyPI wheel to pin, so
+          # `test_deepx_yolo_internal.py` keeps skipping in CI (see this job's
+          # own model-compile comment in
           # pyproject.toml).
           python -m pip install --quiet -e ".[monitor,model-compile]" pytest pytest-shard
 

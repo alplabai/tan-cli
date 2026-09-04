@@ -102,10 +102,21 @@ _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
 def _is_windows_spelled(path: str) -> bool:
     """Whether `path` is WINDOWS-spelled, judged from the string itself
-    rather than `os.name` -- this repo has no Windows host (tan-cli#1089/
-    #1090's own rule), so [`path_to_uri_reference`] must pick its oracle
-    (`PureWindowsPath` vs `PurePosixPath`) from the path's own spelling,
-    never the CI host's.
+    rather than `os.name` (tan-cli#1089/#1090's own rule): a Windows-spelled
+    path reaches [`path_to_uri_reference`] on EVERY host, not only on the
+    `windows-latest` leg, so the oracle (`PureWindowsPath` vs
+    `PurePosixPath`) must come from the path's own spelling and never from
+    the running host's. Reading `os.name` would make the ubuntu and macos
+    legs answer the POSIX question about a Windows path -- which is the same
+    failure [`_absolute_path_to_file_uri`] below records for `Path.as_uri()`,
+    and it does not disappear on a Windows runner, it MOVES.
+
+    An earlier version of this docstring justified the rule with "this repo
+    has no Windows host". That is false and is corrected repo-wide in
+    tan-cli#1153: `parity.yml`'s `python-tests-shard` job runs this suite on
+    `windows-latest` (its matrix `os:` carries all three platforms, with
+    `runs-on: ${{ matrix.os }}`) on every `pull_request`. The rule above is
+    right for its own reason, not for that one.
 
     A LEADING `/` is decided POSIX before any later backslash is even
     consulted (review round 1 MAJOR 1, a real regression this fixed): a

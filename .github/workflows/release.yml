@@ -809,7 +809,7 @@ jobs:
       # `e2f5021`, and its fragment was still sitting in `changelog.d/` at tag
       # `ad6470c`. The fix was in the tree and in nobody's notes.
       #
-      # `--require-empty` already existed (`assemble_changelog.py:173`) and was
+      # `--require-empty` already existed (`assemble_changelog.py:266`) and was
       # wired into zero workflows. `--check` is NOT a substitute -- it never
       # fails merely because fragments are pending, which is the one thing
       # this gate exists to catch (tan-cli#930 made `--check` also refuse a
@@ -817,7 +817,10 @@ jobs:
       # an orthogonal improvement -- it still exits 0 on a clean fragment
       # that is simply unfolded).
       #
-      # A red X here means: run `python3 python/scripts/assemble_changelog.py`,
+      # A red X here means: run `python3 python/scripts/assemble_changelog.py --write`
+      # (the `--write` is required since tan-cli#1172 -- without it the script
+      # renders and changes nothing, so a bare run here looks like it worked
+      # and leaves the fragments pending),
       # commit the folded CHANGELOG, and re-tag. Loud at tag time is the point;
       # the alternative is discovering it in a published release body that
       # cannot be re-sliced.

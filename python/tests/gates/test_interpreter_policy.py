@@ -196,7 +196,11 @@ RELEASE_OPT_OUT_INPUT = "skip_ceiling_interpreter"
 #: written to prevent, at once. A gate that pins the presence of a mechanism
 #: while its POLARITY is free is not a gate; it is a comment with an assert
 #: around it, and this repo has now shipped that shape four times
-#: (tan-cli#1059, #1062, #1070).
+#: (tan-cli#1059, #1062's round-3 review, #1070). The middle one is worded
+#: that way on purpose: PR #1062 retired `tan build --no-auto-bootstrap` and
+#: has nothing to do with this defect class -- the instance was an incidental
+#: finding in its third review round, and a bare `#1062` sends a reader to the
+#: wrong subject (tan-cli#1145).
 #:
 #: Exact, therefore. A semantically-equivalent rewrite (`${{ ! inputs.x }}`,
 #: `${{ inputs.x != true }}`) reds here deliberately: rewriting a guard whose

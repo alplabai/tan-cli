@@ -58,18 +58,76 @@ Multi-paragraph entries and sub-bullets are fine — keep the existing house
 style, which runs long deliberately (the CHANGELOG is the exhaustive record;
 the release page is the summary — see `alp-lab:writing-release-notes`).
 
+## `file:line` citations
+
+**Prefer the symbol to the coordinate.** `SDK_TOKEN_ENV_VARS` in
+`tan/core/toolchain_provision.py` cannot rot; the same constant's line number
+did, by 79 lines, before that fragment was ever folded (tan-cli#1191's title
+case). A fragment sits in this directory for weeks while the tree moves
+underneath it, and `splice()` copies it byte-for-byte, so a stale coordinate
+ships permanently. Five rotted citations were measured in one day; `parity.yml`
+line numbers have moved by 43 lines in a single day, then another 19.
+
+When the line itself is the point, write the coordinate — but know that
+`python/tests/gates/test_changelog_citations_resolve.py` now resolves every one
+of them against the worktree and fails on a line number that does not exist.
+Read that file's docstring before relying on it: it catches an out-of-range
+coordinate and NOT an in-range one that points at the wrong line, which is the
+larger half of the problem and still a review job.
+
+**Citing a coordinate at an earlier commit** — "before this change, X was at
+`foo.py:647`" — is legitimate and must not be guessed at from the prose. Say
+which commit, in the coordinate, where a machine can read it:
+
+```
+`tan/core/scaffold.py@8ca9a40adb9c4ee48345e10df58ae5e3516a9316:647`
+```
+
+That form is range-checked against `git show <ref>:<path>` instead of the
+worktree, so it is a real check rather than an exemption. A ref the local clone
+cannot resolve is skipped, not failed.
+
+Two shapes are deliberately never checked, because they are transcripts of some
+other tree rather than claims about this one: anything inside a fence, and an
+inline span of the grep/compiler shape `<path>:<line>: <the line's own text>`.
+A path the gate cannot find is never a failure either — a fragment may cite a
+file its own PR deletes, or one in alp-sdk or alp-sdk-vscode entirely.
+
+**Keep every inline code span on ONE line.** CommonMark folds the newline
+inside a span to a space and keeps the continuation line's own indentation, so
+a span broken after `windows-latest,` and continued on the next (two-space
+indented) line ships as `os: [ubuntu-latest, windows-latest,   macos-latest]` —
+three spaces where one was meant. `splice()` will not fix it for you
+(tan-cli#1180). Overrun the wrap column instead; there is no line-length gate
+on this directory.
+
 ## Release time
 
-`python/scripts/assemble_changelog.py` folds every fragment into
+`python/scripts/assemble_changelog.py --write` folds every fragment into
 `CHANGELOG.md` under the current `Unreleased` header, in canonical section
-order, then deletes the fragments:
+order, then deletes the fragments.
+
+**`--write` is required, and that is deliberate (tan-cli#1172).** The fold used
+to be the default, so typing the script's name rewrote `CHANGELOG.md` and
+deleted every fragment — no prompt, exit 0, and a summary that reads like
+success. It cost 157 fragments once. A fragment you have written but not yet
+`git add`ed is unrecoverable that way, and drafting is exactly when you would
+run this to see how it renders.
 
 ```sh
-python3 python/scripts/assemble_changelog.py          # fold + delete fragments
-python3 python/scripts/assemble_changelog.py --check   # report only, change nothing
-python3 python/scripts/assemble_changelog.py --dry-run # print the result to stdout
+python3 python/scripts/assemble_changelog.py           # render to stdout, change NOTHING
+python3 python/scripts/assemble_changelog.py --write    # fold + delete fragments (release only)
+python3 python/scripts/assemble_changelog.py --check    # report what is pending, change nothing
+python3 python/scripts/assemble_changelog.py --dry-run  # same render as a bare run, without the reminder
 python3 python/scripts/assemble_changelog.py --require-empty  # exit 1 if any fragment is still unfolded
 ```
+
+One flag at a time: `--write` is REFUSED (exit 2) alongside `--check`,
+`--dry-run`, or `--require-empty` (tan-cli#1181). `--dry-run --write` used to
+perform the whole fold silently, exit 0 — the destructive half won over the
+flag documented as "write nothing", from a command line that asked for both.
+There is no safe way to guess which half was meant, so it names the flags it
+saw and what to run instead.
 
 `--check` never fails merely because fragments are pending — that is why it is
 not the gate. Like every mode it refuses (exit 1) an unusable fragment: a
@@ -87,7 +145,7 @@ bullet-list heading. It still does not, and never will, judge whether a
 fragment's sentences are *true* — a wrong count or a false claim reads clean;
 that stays a review problem.
 `--require-empty` is the gate, and since tan-cli#813 it is a live one:
-`.github/workflows/release.yml:724` runs it, so a tag cut with fragments still
+`.github/workflows/release.yml:828` runs it, so a tag cut with fragments still
 sitting here fails the release rather than shipping a CHANGELOG missing them.
 
 This runs **before** the version bump and tag, so `release.yml`'s existing
