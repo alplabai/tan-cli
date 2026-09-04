@@ -875,6 +875,51 @@ else
   ESZ=$(wc -c <"$WORK/bsB.err" | tr -d ' ')
   OKVAL=$(jget "$WORK/bsB.out" ok)
   note "bootstrap: exit=$RC ok=$OKVAL stderr=${ESZ}B took $((T1-T0))s"
+  # tan-cli#1169: WHICH quota the toolchain phase just spent, printed as a
+  # fact rather than left to be inferred. A 403 on the anonymous per-IP quota
+  # breaks all three assertions below at once -- exit, `ok`, and 0-byte
+  # stderr -- so without this line the rate limit presents as three
+  # unrelated-looking failures rather than one cause, which is a large part of
+  # why it went unfixed.
+  #
+  # tan itself gives the reader NOTHING here. Its `Authenticating the Zephyr
+  # SDK download with the token in $<var>` line is a `Log.line`, and
+  # `Log.line` prints nothing at all under `--format json`
+  # (`bootstrap_cmd.py:265-268`), while the envelope is deliberately
+  # byte-identical with and without a token. So the harness has to say it.
+  #
+  # The NAME of the variable, never the value -- the rule tan's own messages
+  # follow. The verdict is sound because a token that is present and does NOT
+  # end up authenticating the download always leaves a
+  # `bootstrap.sdk-credential-*` issue on the envelope: `-unstaged` when it
+  # was refused or could not be written into the private netrc, `-unverified`
+  # when `west sdk install` no longer matches the shape that netrc route
+  # depends on (tan-cli#1148, tan-cli#1154). Absence of both, with the
+  # variable set, is the staged-and-passed path and nothing else. `${!v}` is
+  # bash indirect expansion, which this harness already requires elsewhere.
+  SDK_CRED_VAR=NONE
+  for v in TAN_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN; do
+    [ -n "${!v:-}" ] || continue
+    SDK_CRED_VAR="$v"; break
+  done
+  SDK_CRED_ISSUES=$(python3 - "$WORK/bsB.out" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    d = {}
+codes = [str(i.get("code")) for i in (d.get("issues") or [])
+         if str(i.get("code") or "").startswith("bootstrap.sdk-credential-")]
+print(",".join(codes) if codes else "NONE")
+PY
+)
+  if [ "$SDK_CRED_VAR" = NONE ]; then
+    note "SDK download credential: none of TAN_GITHUB_TOKEN/GH_TOKEN/GITHUB_TOKEN is set -- the release listing went out on the anonymous per-IP quota"
+  elif [ "$SDK_CRED_ISSUES" = NONE ]; then
+    note "SDK download credential: \$$SDK_CRED_VAR, staged for west sdk install (no bootstrap.sdk-credential-* issue on the envelope)"
+  else
+    note "SDK download credential: \$$SDK_CRED_VAR did NOT authenticate the download -- $SDK_CRED_ISSUES"
+  fi
   # A host below the EFFECTIVE Python floor is refused CORRECTLY right here
   # (bootstrap.python-too-old) -- tan-cli#757. That is not a defect: measured
   # identical on ubuntu:22.04, debian:12 and debian:11 (all below the 3.12
@@ -1021,6 +1066,45 @@ PY
       SDK_OK=1
       note "B: Zephyr SDK already present -- no download needed"
     else
+      # tan-cli#1169: this one stays ANONYMOUS, deliberately, and the token
+      # forwarded into the container for `tan bootstrap` above does not reach
+      # it. `west sdk install` takes a credential from
+      # `--personal-access-token` and from NOTHING else -- it reads no
+      # environment variable of its own (measured at Zephyr v4.4.1,
+      # `scripts/west_commands/sdk.py:473`; `grep environ` over that file
+      # finds only ZEPHYR_BASE and ZEPHYR_SDK_INSTALL_DIR, recorded as
+      # `toolchain_provision.WEST_SDK_KNOWN_ENV_READS`). So "the environment
+      # now carries a token" covers `tan bootstrap` and covers nothing here.
+      #
+      # Three reasons not to close that gap in this change:
+      #
+      #  1. The flag is the one shape tan-cli#1143 exists to forbid. It would
+      #     put the secret in this process's argv -- readable in the process
+      #     table of whatever box this runs on, and this harness runs on
+      #     developer machines (Windows Git Bash and WSL) as well as in an
+      #     ephemeral `--rm` container.
+      #  2. The netrc route tan uses instead is not a one-liner: a 0600 file
+      #     in a 0700 scratch directory, discarded in a `finally` on every
+      #     exit path, plus a sweep for a previous crash's leftovers. Hand-
+      #     rolling that in bash is a second place a secret touches disk, with
+      #     none of those guarantees.
+      #  3. This step exists to run the command `tan doctor` PRINTS, verbatim,
+      #     the way a customer would (`zephyr_sdk_install_command`,
+      #     `doctor_cmd.py:1158`). A customer on a home IP has their own
+      #     unauthenticated quota; authenticating it here would stop measuring
+      #     the shape under test. `getting-started.yml`'s own manual
+      #     `west sdk install` makes the opposite trade and says so beside the
+      #     flag -- that step is a retry loop whose subject is the toolchain
+      #     arriving, not the customer's command.
+      #
+      # What that leaves standing, named rather than glossed: this download
+      # can still 403 on the shared per-IP quota. It is reached more often
+      # than the `PRE = pass` guard above suggests, because that guard reads
+      # `tan doctor`'s `zephyrSdk` check, which scans only `/opt` and the top
+      # level of $HOME for a `zephyr-sdk*` directory (`doctor_cmd.py:2640-2696`)
+      # and therefore cannot see the store `tan bootstrap` just filled at
+      # `~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`. Derived
+      # from source, not measured in a container run.
       SDK_TIMEOUT="${ZEPHYR_SDK_INSTALL_TIMEOUT:-1200}"
       T0=$(date +%s)
       if ( cd "$WS" && timeout "$SDK_TIMEOUT" "$WEST_BIN" sdk install \
