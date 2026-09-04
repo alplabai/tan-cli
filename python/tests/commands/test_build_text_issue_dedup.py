@@ -22,7 +22,7 @@ from __future__ import annotations
 from tan.commands.build_cmd import _text_issues
 from tan.envelope import Issue
 
-_PATH = "E:\venv\Scripts;C:\Windows\system32;C:\Program Files\Git\cmd"
+_PATH = r"E:\venv\Scripts;C:\Windows\system32;C:\Program Files\Git\cmd"
 _REASON = f"tool `bitbake` not found -- searched PATH: {_PATH}"
 
 _DATA = {
