@@ -668,6 +668,21 @@ jobs:
       - name: tan bootstrap (venv + west workspace + SDK python deps)
         if: ${{ !matrix.expect_refuse }}
         working-directory: release-workspace
+        env:
+          # tan-cli#1163, the third site. Same asymmetry the other two had, and
+          # the sharpest instance of it: the printed-remedy step immediately
+          # below already carries `GH_TOKEN` -- it runs unconditionally on
+          # every full leg, under the same `if:` as this one, because it is
+          # what a customer who followed `tan doctor`'s printed remedy does --
+          # while this step, the real download, ran anonymous. A 403 on
+          # someone else's traffic raises `bootstrap.toolchain-install`, which
+          # is WORKSPACE_BLOCKING (`bootstrap_cmd.py:245-247`), so `take_issues`
+          # escalates it to `severity: "error"` and `ok:false` and this step's
+          # own `if not e.get("ok")` exits 1 -- reddening the pre-release
+          # combination gate for a reason that has nothing to do with the
+          # release. `github.token` rather than `secrets.GITHUB_TOKEN` to match
+          # the sibling step below; identical value.
+          TAN_GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # stderr is captured AND echoed (getting-started.yml's own bootstrap

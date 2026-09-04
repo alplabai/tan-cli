@@ -330,12 +330,48 @@ jobs:
 
       # `alp-workspace/` holds the checkout and NOTHING else, on purpose.
       # `west init -l` builds the workspace in the checkout's PARENT, so
-      # bootstrap guards a parent that holds any other entry -- and under a CI
-      # runner's non-terminal stdio that guard REFUSES outright rather than
-      # offering to relocate. Cloning into $GITHUB_WORKSPACE (which already holds
-      # this repo) would hit that refusal and the job would never reach
-      # bootstrap's real work. A dedicated parent is also what the guard's own
-      # remedy tells a customer to create.
+      # bootstrap guards a parent that holds any other entry
+      # (`parent_needs_workspace_guard`, tan/core/bootstrap.py). Cloning into
+      # $GITHUB_WORKSPACE -- which already holds this repo -- would trip it.
+      #
+      # What tripping it COSTS changed at tan-cli#302, and this comment used to
+      # state the pre-#302 behaviour: it said the guard "REFUSES outright rather
+      # than offering to relocate" under a CI runner's non-terminal stdio. It no
+      # longer refuses. A dirty parent with no `--workspace` now RELOCATES the
+      # checkout into `<parent>/alp-workspace` automatically, on every run, TTY
+      # or not -- `workspace_guard_target_occupied_refusal`'s own docstring says
+      # the port "takes NO input on this decision on ANY run", and
+      # tests/commands/test_bootstrap_command.py:965-1022 drives exactly that
+      # under `--format json`. The single surviving refusal is that same
+      # function's: the relocation target already exists AND already holds
+      # content of its own.
+      #
+      # Both behaviours fail this job loudly, and neither is silent -- an
+      # earlier draft of this comment claimed the relocation was silent and
+      # the more dangerous of the two, and both halves were wrong.
+      # `bootstrap_cmd.py`'s `relocate_checkout` caller raises it through
+      # `log.warn("workspace-relocated", ...)`, and `Log.take_issues` puts it
+      # on the envelope at `severity: "warning"` (the `escalate_blocking and
+      # code in WORKSPACE_BLOCKING` ternary; relocation is not blocking). The
+      # very same step below then fails on any warning outside its
+      # `EXPECTED_WARNINGS` set, which holds only `bootstrap.python-floor-skew`.
+      # So a relocation dies right here, not somewhere downstream.
+      # `rollback_relocation_after`'s docstring puts it plainly: the
+      # `workspace-relocated` warning "already drained into this run's issues".
+      #
+      # Cited by SYMBOL rather than line, deliberately. An earlier draft of
+      # this same comment cited `:435-439` for `EXPECTED_WARNINGS` and its own
+      # nine added lines pushed that block to `:444` in the very commit that
+      # wrote the citation. It also pointed at the `bootstrap.workspace-
+      # relocated` emitter inside `print_env_issues`, which is the `--print-env`
+      # PROJECTION ("a real run WOULD move ...") and can never fire in this
+      # step, since this step passes `--format json` and no `--print-env`.
+      #
+      # The dedicated parent still matters, for the plainer reason: tripping
+      # the guard would fail this job at `bootstrap.workspace-relocated`, a
+      # code that reads as unrelated to what the job is testing, and a
+      # dedicated parent is also what the guard's own remedy tells a customer
+      # to create.
       - name: clone alp-sdk into a dedicated workspace parent
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -353,6 +389,26 @@ jobs:
       # anyway.
       - name: tan bootstrap (venv + west workspace + SDK python deps)
         working-directory: alp-workspace
+        env:
+          # tan-cli#1163. `tan bootstrap`'s final phase lists the Zephyr SDK
+          # releases through the GitHub API, whose anonymous quota is counted
+          # PER SOURCE IP and shared across every hosted runner in the region --
+          # so it is exhausted by traffic that is not ours, and the job dies
+          # with `403 API rate limit exceeded` for a reason unrelated to the
+          # change under test. Measured three times in one day on PRs touching
+          # neither bootstrap nor the SDK.
+          #
+          # `TAN_GITHUB_TOKEN` rather than the `GH_TOKEN` its neighbours use
+          # (tan-cli#840's probe, and the manual `west sdk install` retry):
+          # those steps invoke `gh` and `west --personal-access-token`
+          # directly, so they need the name those tools read. This step invokes
+          # `tan`, which reads TAN_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN in
+          # that order (`SDK_TOKEN_ENV_VARS`, tan/core/toolchain_provision.py),
+          # and the tan-specific name cannot change `gh`'s ambient behaviour
+          # inside this step. tan passes it to `west sdk install` out of band,
+          # so it reaches no argv, log, `--dry-run` plan or envelope
+          # (tan-cli#1143). Listing public releases needs no scopes.
+          TAN_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # stderr is captured AND echoed: in `--format json` the envelope is the
@@ -532,10 +588,17 @@ jobs:
           version="$(python3 -c 'import json; print(json.load(open("alp-sdk/metadata/toolchains.json"))["zephyrSdk"]["version"])')"
           python3 "${GITHUB_WORKSPACE}/python/scripts/sdk_release_list_probe.py" --version "${version}"
 
-      # tan does not run this itself -- `west sdk install` needs an initialised
-      # west workspace, and build_readiness.rs prints it as the `fix` string
-      # instead (`west sdk install --version <v> -t arm-zephyr-eabi`). Running
-      # exactly that command here is the only way the printed remedy gets tested.
+      # tan-cli#1163: "tan does not run this itself" was true when written and
+      # is not now -- `tan bootstrap` HAS run `west sdk install` since ADR 0021
+      # Lane 1 P1 / tan-cli#474 (`bootstrap_cmd.py:3788` -> `toolchain_phase`
+      # -> `_acquire_toolchain`), unless `--no-toolchain`/`--no-west`. The
+      # bootstrap step above depends on that phase running, so the two comments
+      # contradicted each other 200 lines apart. (`build_readiness.rs` is the
+      # frozen Rust oracle, not a live code path.)
+      #
+      # This step still earns its keep for the reason the rest of the sentence
+      # gives: `tan doctor` prints this exact command as its `fix` string, and
+      # running it verbatim here is the only way the printed remedy is tested.
       #
       # The version comes from the SDK's own metadata/toolchains.json, the same
       # read parity.yml's seam2 does and the same file
