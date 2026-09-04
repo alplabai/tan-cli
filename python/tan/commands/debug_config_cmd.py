@@ -95,6 +95,16 @@ from typing import Any
 import typer
 
 from tan.commands.build_output import read_sdk_som_and_soc, resolve_project_context
+# The openocd-on-PATH probe is BORROWED, not rebuilt (tan-cli#1179). Both
+# names are private to `support_bundle_cmd`, and importing them is still the
+# right call: `_RUNTIME_EXECUTABLES[OPENOCD]` is the candidate-name table and
+# `_first_on_path` resolves it through `doctor_cmd.on_path` -- the same single
+# lookup `tan support-bundle` reports. A second, independently written probe
+# here would be free to disagree with the bundle a customer attaches to the
+# bug report about this very note, and to miss a second openocd spelling the
+# table later learns. No cycle: nothing under `tan/commands/` imports this
+# module, and `cli.py` already pulls `support_bundle_cmd` into every graph.
+from tan.commands.support_bundle_cmd import _RUNTIME_EXECUTABLES, _first_on_path
 from tan.core.atomic_write import atomic_write_text
 from tan.core.debug_launch import (
     BAREMETAL_MCU,
@@ -811,6 +821,88 @@ def _has_placeholder(value: Any) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#1179: the OpenOCD-without-host-tools note.
+#
+# THE SILENT SHAPE THIS CLOSES. Zephyr writes `config.openocd` /
+# `config.openocd_search` into `runners.yaml` only inside `if(OPENOCD)`
+# (`cmake/flash/CMakeLists.txt`), and `OPENOCD` is a bare, optional
+# `find_program(OPENOCD openocd)` (`cmake/modules/FindHostTools.cmake`, whose
+# own comment reads "openocd is an optional dependency") that normally finds
+# the SDK's copy through `list(APPEND CMAKE_PREFIX_PATH ${HOST_TOOLS_HOME}/usr)`
+# in the SDK's own `cmake/zephyr/host-tools.cmake`. Since tan-cli#1176/#1178
+# `tan bootstrap` passes `--no-hosttools`, so there is no `hosttools/` to find.
+# CMake's `if()` reads `OPENOCD-NOTFOUND` as false, so both keys are ABSENT
+# rather than present-and-empty; both `serverpath` and `searchDir` are ADDITIVE
+# keys in `apply_launch_resolution`, and neither appears as a `<resolved-...>`
+# placeholder in the OpenOCD draft, so `_has_placeholder` never sees them and
+# the "Placeholder fields" note never fires. Contrast `svdFile`/`svdPath`,
+# which ARE placeholders and ARE deleted -- that is the path that would have
+# warned. `NO_HOSTTOOLS_FLAG` in `tan.core.toolchain_provision` is where the
+# flag itself is decided, and records the same degradation from that side.
+#
+# A NOTE, NOT A FAILURE. The emitted configuration is valid and `configFiles`
+# still resolves (from `board.cmake`, not from `hosttools/`). What is missing
+# is one advisory field, so this rides in `data.notes` and `tan debug-config`
+# still exits 0 with `ok: true`.
+#
+# THREE CONDITIONS, ALL LOAD-BEARING -- see `doctor_cmd.west_check`'s own
+# account of the lesson ("a warning that fires on every correct install trains
+# users to ignore warnings"):
+#
+# * `server` AND the draft's `servertype` are both OpenOCD. `server` is what
+#   the caller asked for; `servertype` is what the FINAL draft emits, and a
+#   yocto-userspace (cppdbg) draft has no `serverpath` field to be missing in
+#   the first place -- warning there would be noise about a key that target
+#   kind never carries.
+# * `serverpath` is absent from the draft. That is the resolution's own
+#   answer, read the same way the rest of `_preview_notes_for` reads the final
+#   draft: `apply_launch_resolution` inserts the key if and only if
+#   `runners.yaml` gave it one.
+# * No `openocd` on PATH. This is what keeps a correctly-provisioned host
+#   quiet, including the MIXED host measured in tan-cli#1179 (system OpenOCD
+#   on PATH, no `hosttools/`), which is silenced twice over: with
+#   `find_program` succeeding, `runners.yaml` DOES carry `config.openocd` --
+#   alongside an `openocd_search` pointing at the SDK's nonexistent
+#   `share/openocd/scripts`, from `set_ifndef(OPENOCD_DEFAULT_PATH ...)`,
+#   measured benign because OpenOCD still loads off its built-in scripts
+#   directory -- so `serverpath` is present AND the probe finds one. A host
+#   that has OpenOCD but built before installing it stays quiet too:
+#   cortex-debug's own PATH lookup will find it, so there is nothing to tell
+#   that developer.
+# ---------------------------------------------------------------------------
+#: The note's wording, kept whole and at module scope so it has exactly one
+#: spelling for both the emitter and the tests that pin it.
+OPENOCD_NO_HOSTTOOLS_NOTE = (
+    "No OpenOCD executable could be resolved for this build, so this profile "
+    "carries no 'serverpath' (and no 'searchDir'): this project's runners.yaml "
+    "has no 'config.openocd' key, and no 'openocd' is on PATH here either. "
+    "tan bootstrap installs the Zephyr SDK with --no-hosttools, so the SDK "
+    "ships no OpenOCD of its own and Zephyr's optional find_program(OPENOCD "
+    "openocd) had nothing to record at build time -- OpenOCD has to come from "
+    "the system on this host. Install it (your package manager's 'openocd', "
+    "or a vendor build), put it on PATH, and rebuild so tan can fill "
+    "'serverpath' in; PATH alone is already enough for a session, because "
+    "cortex-debug falls back to its own PATH lookup when 'serverpath' is "
+    "absent. Nothing else about this configuration is missing -- "
+    "'configFiles' resolves from board.cmake, not from the SDK's host tools."
+)
+
+
+def _openocd_hosttools_note(draft: dict[str, Any], server: str) -> str | None:
+    """[`OPENOCD_NO_HOSTTOOLS_NOTE`] when OpenOCD was asked for, the resolution
+    produced no `serverpath`, and no `openocd` is on PATH either; `None`
+    otherwise. All three conditions and why each is load-bearing are in the
+    block comment above."""
+    if server != OPENOCD or draft.get("servertype") != OPENOCD:
+        return None
+    if "serverpath" in draft:
+        return None
+    if _first_on_path(_RUNTIME_EXECUTABLES[OPENOCD]) is not None:
+        return None
+    return OPENOCD_NO_HOSTTOOLS_NOTE
+
+
 def _preview_notes_for(
     draft: dict[str, Any], registered_runners: list[str], server: str
 ) -> list[str]:
@@ -839,6 +931,9 @@ def _preview_notes_for(
             f"This build registers no '{runner}' runner (runners.yaml: {rendered}), "
             "so its fields could not be resolved."
         )
+    hosttools_note = _openocd_hosttools_note(draft, server)
+    if hosttools_note is not None:
+        notes.append(hosttools_note)
     return notes
 
 

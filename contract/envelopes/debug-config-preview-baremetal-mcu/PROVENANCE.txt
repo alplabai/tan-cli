@@ -112,3 +112,60 @@ re-record (see that fixture's `PROVENANCE.txt` for the full rationale).
 
 `data` is otherwise byte-identical to the first re-record; `issues` is
 unchanged (`[]`).
+
+Re-recorded on : 2026-09-04
+Recorded from  : the SHIPPING Python CLI, at this branch's
+                 `python/tan/version.py::TAN_VERSION`.
+Issue          : tan-cli#1179
+Branch         : fix/1179-openocd-hosttools-note (off dev @ a92a0011)
+
+What changed in the golden (third re-record)
+--------------------------------------------
+One `data.notes` entry appended, nothing else moved, `expected.exit` still 0
+and `issues` still `[]`:
+
+    + "data"."notes"[3] = the OpenOCD-without-host-tools note
+      ("No OpenOCD executable could be resolved for this build, ...")
+
+Captured exactly as the harness invokes it, by importing
+`python/tests/conformance/test_contract_envelopes.py`'s own `fresh_dir` /
+`copy_fixture_inputs` / `case_env` / `normalise` -- including `case_env`, which
+is what applies the new `env.json` below.
+
+Why the note is now in this envelope
+------------------------------------
+tan-cli#1179. Since tan-cli#1176/#1178 `tan bootstrap` installs the Zephyr SDK
+with `--no-hosttools`, so the SDK ships no `openocd`. Zephyr writes
+`config.openocd` / `config.openocd_search` into `runners.yaml` only inside
+`if(OPENOCD)`, and `serverpath`/`searchDir` are ADDITIVE keys that are no
+`<resolved-...>` placeholder, so on a host with no system OpenOCD either the
+profile lost both fields with no warning and `ok: true`. The first thing that
+told the developer anything was the debug adapter failing to launch a GDB
+server, with tan nowhere in the loop. This case is the only golden in the set
+that asks for `--server openocd`, so it is the only one the note reaches.
+
+A NOTE, not a failure: `ok` stays `true`, `exitCode` stays 0, `issues` stays
+empty, and `data.configuration` is byte-identical to the second re-record.
+`configFiles` still resolves (from `board.cmake`, not from `hosttools/`).
+
+Why this case now ships an `env.json` (the second in the set)
+-------------------------------------------------------------
+    {"PATH": "__WORKDIR__"}
+
+The note fires only when no `openocd` resolves on `PATH`, so this case now
+reads the HOST -- the same class of fact `model-doctor-no-sdk` pins for
+`vela`/`dxcom` under tan-cli#253, and the same failure mode: a re-record on a
+box carrying `/usr/bin/openocd` would bless a note-less golden that then fails
+on every box without one. Unpinned, the golden's answer would instead depend on
+`python/tests/conftest.py`'s session-scoped PROBE_TOOLS scrub -- a fixture in a
+different tree, which `contract/README.md`'s documented recording procedure
+(it calls `case_env`, it runs no session fixture) never applies.
+
+`__WORKDIR__` rather than `""` for the same reason `model-doctor-no-sdk` gives:
+an empty `PATH` also strips a Windows runner's launcher search path, and a
+harness that cannot spawn the child reports a contract failure it never
+measured.
+
+`contract/README.md`'s row for the five `debug-config-preview-*` cases said
+they "probe no PATH". That was true when written and is corrected in the same
+change.

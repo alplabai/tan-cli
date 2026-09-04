@@ -437,10 +437,21 @@ def test_case_env_refuses_a_non_string_value(tmp_path):
 def test_no_case_ships_an_env_json_it_does_not_need():
     """`env.json` is a LAST RESORT, the same way `DELIBERATE_DIVERGENCE` is: a
     case that pins host state it never reads has quietly narrowed what it gates.
-    Exactly one case needs one today, and a second must be argued for in its own
-    PROVENANCE.txt rather than added silently."""
+    Two cases need one today, and a third must be argued for in its own
+    PROVENANCE.txt rather than added silently.
+
+    `debug-config-preview-baremetal-mcu` is the second (tan-cli#1179). Its
+    `data.notes` now carries the OpenOCD-without-host-tools note, whose whole
+    point is that it fires only when no `openocd` resolves on `PATH` -- so this
+    case reads the host exactly the way `model-doctor-no-sdk` does, and a
+    re-record on a box with `/usr/bin/openocd` would bless a note-less golden
+    that then fails everywhere else. Leaving it unpinned would have made the
+    golden depend on `tests/conftest.py`'s session-scoped PROBE_TOOLS scrub, a
+    fixture in a different tree that the documented recording procedure
+    (`contract/README.md`, which calls `case_env` but runs no session fixture)
+    never applies."""
     carrying = sorted(f.name for f in FIXTURES if (f / CASE_ENV).is_file())
-    assert carrying == ["model-doctor-no-sdk"], (
+    assert carrying == ["debug-config-preview-baremetal-mcu", "model-doctor-no-sdk"], (
         "a new env.json appeared -- justify it in that case's PROVENANCE.txt and "
         "under 'Pinning host state a case reads' in contract/README.md, then add "
         "it here; pinning host state a case does not read only hides regressions"
