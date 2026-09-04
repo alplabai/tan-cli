@@ -13,13 +13,17 @@ ceiling job from every PR *and* run it on the release path, and the gate
 written to prevent exactly that was blind to it.
 
 The rule is deliberately small: **a value read out of a workflow `if:` key must
-be read WHOLE -- compared with `==` or `!=` against a full expected expression,
-or tested for membership of a literal collection -- and never searched for, or
-against, a substring.** `_ALLOWED_OPS` is enforced, not decorative, so every
-ordering operator is refused outright; `is` / `is not` survive it only when
-neither operand is a `str` constant, and `in` / `not in` only when the guard is
-the ELEMENT and the container is not a `str` or an f-string. Refused,
-therefore:
+be read WHOLE -- compared with `==`, `!=`, `is` or `is not` against one full
+expected value, or tested for membership of a literal collection -- and never
+searched for, or against, a substring.** `is` / `is not` are in that list
+because `step.get("if") is None` is the whole-value test for an absent key and
+is live at `test_getting_started_sdk_outage_probe.py:224`; what they may NOT be
+written against is a `str` constant, for the reason below.
+
+`_ALLOWED_OPS` is enforced, not decorative, so every ordering operator is
+refused outright; `is` / `is not` survive it only when neither operand is a
+`str` constant, and `in` / `not in` only when the guard is the ELEMENT and the
+container is not a `str` or an f-string. Refused, therefore:
 
   * `<needle> in guard` / `not in` -- the guard as the CONTAINER, a substring
     search. Polarity, negation and whitespace all live inside the expression,
@@ -85,7 +89,7 @@ is gated.
 It also does not follow a guard out of the module's own local names, does not
 decide a `str` container that was BUILT rather than written, and does not look
 past a comparison node at all. Every form below is MEASURED, not guessed at,
-and each needs a rule this walk does not have. The first SIX are misses; the
+and each needs a rule this walk does not have. The first SEVEN are misses; the
 last TWO are the over-approximating direction and are named for the same
 reason, because `_tainted_names` promises exactly one of the two:
 
@@ -98,6 +102,18 @@ reason, because `_tainted_names` promises exactly one of the two:
     `C.guard`. Binding those would mean tainting the RECEIVER, which taints
     `self` and reds every unrelated `NEEDLE in self.stdout` in the module.
   * a guard IMPORTED from another module -- the scan is per-file.
+  * a name in this module rebound from ANOTHER module
+    (`import thisfile; thisfile.wrong = {...}`), or by an `exec` run elsewhere
+    against this module's namespace. `_binds_names_dynamically` closes the
+    in-file half -- one mention of `exec`, `eval`, `globals`, `locals`, `vars`
+    or `from x import *` makes every name in the file unresolvable -- but a
+    write performed from OUTSIDE the file is invisible to a per-file walk by
+    construction, and no version of this scan sees it. It is the one
+    fail-closed row this module cannot reach, so it is written down rather
+    than papered over. 0 live sites: no file under `python/tests/` writes an
+    attribute onto another file under `python/tests/`; the five `setattr`
+    sites there all target a `tan` module or a dataclass instance, neither of
+    which this scan reads.
   * a guard on the ELEMENT side of a bare `Name` CONTAINER
     (`guard in ALLOWED_GUARDS`). If that name holds a collection this is the
     whole-value test the gate asks for; if it holds a `str` it is a substring
@@ -111,9 +127,11 @@ reason, because `_tainted_names` promises exactly one of the two:
     `ast.Constant` holding a `str`, an `ast.JoinedStr` (an f-string), and
     implicit adjacent-literal concatenation, which the parser folds into a
     `Constant` before this walk ever sees it. Nothing else -- the next entry
-    lists the six built containers that are NOT. Measured across the 267 files
-    this scan reads: 0 live sites put a guard on the element side of a `Name`
-    container, so this is a disclosed gap, not a live miss.
+    lists the six built containers that are NOT. Measured across every file
+    this scan reads -- 267 on this branch, 270 on the merge with `dev`, so
+    read it as "all of them" rather than as a number: 0 live sites put a guard
+    on the element side of a `Name` container, so this is a disclosed gap, not
+    a live miss.
   * a `str` CONTAINER that is BUILT rather than written as one literal.
     `_string_container` decides the three spellings above and no others.
     Measured, with `guard` tainted:
@@ -142,18 +160,28 @@ reason, because `_tainted_names` promises exactly one of the two:
 
     `assert guard.startswith("${{ inputs.skip_ceiling_interpreter")` is
     tan-cli#1137's defect verbatim with the `!` deleted, which is the string
-    `_FABRICATED_NON_COMPARE_SEARCH` uses, and this gate is silent on it. 0 live sites. Closing it means an allow/deny list of `str`
-    methods and of the `re` surface, which is a different rule from "read the
-    whole value" and is not attempted here.
+    `_FABRICATED_NON_COMPARE_SEARCH` uses, and this gate is silent on it.
+    0 live sites. Closing it means an allow/deny list of `str` methods and of
+    the `re` surface, which is a different rule from "read the whole value"
+    and is not attempted here.
   * the OVER-approximating half of `_items_guard_side`. Which element of
     `for <k>, <v> in <d>.items()` carries the guard is DECIDED only when `<d>`
-    resolves, in this same module, to a `Dict` literal or a `DictComp` with an
-    `if:` read on exactly one of its two sides. Otherwise BOTH names stay
-    tainted -- including when the guard reached the dict through a name rather
-    than through a read of its own (`g = step.get("if")` then
-    `{n: g for n in STEPS}`). That is the false-positive direction, chosen on
-    purpose; `_items_guard_side` records the measured miss that made the
-    alternative unacceptable.
+    is a bare `Name` whose EVERY binding in this module is visible and is a
+    `Dict` literal or a `DictComp`, with an `if:` read on exactly one of its
+    two sides. ONE binding by any other form refuses it: a `for` or
+    comprehension target, a `with ... as`, an `AugAssign`, a tuple or
+    `Starred` unpack, a function or lambda parameter, an `import ... as`, an
+    `except ... as`, a `match` capture, a `global` / `nonlocal`, a `def` /
+    `class` / `type` name, a PEP 695 type parameter. So does a `Dict` carrying
+    a `**`, a `.items(...)` call that takes arguments, an unpack that is not
+    exactly two elements, and a module that binds names dynamically. In every
+    one of those BOTH names stay tainted -- including when the guard reached
+    the dict through a name rather than through a read of its own
+    (`g = step.get("if")` then `{n: g for n in STEPS}`). That is the
+    false-positive direction, chosen on purpose; `_items_guard_side` records
+    the measured miss that made the alternative unacceptable, and
+    `_REBINDING_FORMS` pins one control per form, so a form dropped from the
+    walk reds a test instead of quietly re-opening the miss.
   * a name bound to a COMPREHENSION whose guard read sits in the condition
     rather than the element. Measured:
     `off = {job for job, body in _publish_jobs().items() if
@@ -280,39 +308,174 @@ def _bound_names(target: ast.AST) -> list[str]:
     return []
 
 
-def _assigned_sources(tree: ast.AST) -> dict[str, list[ast.AST]]:
-    """Every module-local name, and the expressions ASSIGNED to it.
+#: A binding whose VALUE this walk cannot name. Recorded rather than skipped,
+#: so a name carrying one can never be mistaken for resolvable. Three
+#: unrelated things produce it, and all three must fail closed:
+#:
+#:   * the form binds an ELEMENT of its source rather than the source itself
+#:     -- a `for` or comprehension target, a `with ... as`, a tuple / list /
+#:     `Starred` unpack -- so the source expression says nothing about what
+#:     the name holds;
+#:   * the form has no source expression in this tree at all -- a function or
+#:     lambda PARAMETER, an `import ... as`, an `except ... as`, a `match`
+#:     capture, a `global` / `nonlocal`, a bare `AnnAssign` annotation, a
+#:     `def` / `class` / `type` name, a PEP 695 type parameter;
+#:   * the form rebinds through an operator this walk does not model --
+#:     `AugAssign`, where `d |= other` yields a value written somewhere else.
+_OPAQUE = object()
 
-    Read only by `_items_guard_side`, and only to answer one question about a
-    `.items()` receiver: was it built by a `Dict` literal or a `DictComp`
-    whose two sides this walk can tell apart? Anything else is undecidable and
-    the caller fails closed -- so this records EVERY assignment rather than
-    only the dict-shaped ones, and a name bound by a `for` target, or never
-    bound in this module at all, is simply absent, which reads the same way.
+#: Callables that can bind ANY name in this module from outside the syntax
+#: tree. One mention is enough to make every name in the file unresolvable;
+#: see `_binds_names_dynamically`.
+_DYNAMIC_BINDERS = frozenset({"eval", "exec", "globals", "locals", "vars"})
+
+
+def _binds_names_dynamically(tree: ast.AST) -> bool:
+    """True if this module can bind a name outside the reach of a syntax walk.
+
+    `exec("wrong = {}")`, `globals()["wrong"] = {}` and `from x import *` bind
+    names that no enumeration of binding FORMS can see, so in a module using
+    any of them no name has a provably complete binding set. `_name_sources`
+    returns nothing at all for such a module and every receiver in it fails
+    closed -- which is the only honest answer, since the alternative is to
+    treat a binding set that is knowably incomplete as complete.
+
+    This is the one entry on the fail-closed list that is not a form: it is
+    the residue AFTER the forms, and it is here so that "any binding form this
+    walk does not model" is true of the ones nobody can enumerate too.
     """
-    out: dict[str, list[ast.AST]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and any(
+            alias.name == "*" for alias in node.names
+        ):
+            return True
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in _DYNAMIC_BINDERS
+        ):
+            return True
+    return False
+
+
+def _name_sources(tree: ast.AST) -> dict[str, list[object]]:
+    """Every module-local name, and EVERY binding of it -- a value or `_OPAQUE`.
+
+    Read only by `_key_value_pairs`, and only to answer one question about a
+    `.items()` receiver: is this name's binding set COMPLETE, and is every
+    binding in it a dict whose two sides this walk can tell apart?
+
+    The contract is therefore COMPLETENESS, not coverage of the forms someone
+    thought to enumerate. A name resolves to an expression under exactly three
+    forms -- an `Assign`, an `AnnAssign` carrying a value, and a walrus, each
+    to a bare `Name` target -- because those are the three that bind the name
+    to the source expression ITSELF. Every other binder in the language
+    records `_OPAQUE` against the name instead, which makes the caller fail
+    closed; a name this module never binds is absent, which fails closed too;
+    and a module that binds names dynamically resolves nothing at all.
+
+    Recording only `Assign` was a MISS, and the round that shipped it was
+    strictly worse than the two before it. Measured on
+    `wrong = {_step(n).get("if"): n for n in STEPS}`, rebound later by
+    `for wrong in _maps_keyed_by_name():` and read by
+    `for name, guard in wrong.items(): assert GATE_EXPRESSION in guard`: the
+    `for`-target rebind was invisible, the lone `Assign` was treated as the
+    whole binding set, the KEY element was kept as the guard side -- and the
+    substring test against the actual guard went unreported, where both
+    earlier rounds reported it. `_REBINDING_FORMS` carries a control for every
+    form below, so dropping one from this walk reds a test.
+    """
+    if _binds_names_dynamically(tree):
+        return {}
+    out: dict[str, list[object]] = {}
+
+    def record(name: str, source: object) -> None:
+        out.setdefault(name, []).append(source)
+
+    def record_target(target: ast.AST, source: object) -> None:
+        """`source` for a bare `Name` target; `_OPAQUE` for every other."""
+        if isinstance(target, ast.Name):
+            record(target.id, source)
+            return
+        for name in _bound_names(target):
+            record(name, _OPAQUE)
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                for name in _bound_names(target):
-                    out.setdefault(name, []).append(node.value)
+                record_target(target, node.value)
+        elif isinstance(node, ast.NamedExpr):
+            record_target(node.target, node.value)
+        elif isinstance(node, ast.AnnAssign):
+            record_target(node.target, node.value or _OPAQUE)
+        elif isinstance(node, ast.AugAssign):
+            record_target(node.target, _OPAQUE)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            record_target(node.target, _OPAQUE)
+        elif isinstance(node, ast.withitem):
+            if node.optional_vars is not None:
+                record_target(node.optional_vars, _OPAQUE)
+        elif isinstance(node, ast.arg):
+            record(node.arg, _OPAQUE)
+        elif isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            record(node.name, _OPAQUE)
+        elif isinstance(node, ast.TypeAlias):
+            record_target(node.name, _OPAQUE)
+        elif isinstance(node, (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
+            record(node.name, _OPAQUE)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                record(alias.asname or alias.name.split(".")[0], _OPAQUE)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            for name in node.names:
+                record(name, _OPAQUE)
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name is not None:
+                record(node.name, _OPAQUE)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
+            if node.name is not None:
+                record(node.name, _OPAQUE)
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest is not None:
+                record(node.rest, _OPAQUE)
     return out
 
 
 def _key_value_pairs(
-    receiver: ast.AST, assigned: dict[str, list[ast.AST]]
+    receiver: ast.AST, bound: dict[str, list[object]]
 ) -> list[tuple[ast.AST, ast.AST]] | None:
     """The `key: value` pairs of every dict a `.items()` receiver is bound to.
 
-    `None` means UNDECIDABLE and the caller must fail closed: the receiver is
-    not a bare `Name`, or nothing in this module assigns it, or one of its
-    bindings is something other than a `Dict` literal or a `DictComp`. A
-    `Dict` carrying a `**` expansion has a `None` key and is undecidable for
-    the same reason -- the pairs it contributes are written somewhere else.
+    `None` means UNDECIDABLE and the caller must fail closed. It is the answer
+    whenever the receiver's binding set cannot be PROVEN complete AND
+    dict-shaped, which is every case but one:
+
+      * the receiver is not a bare `Name`;
+      * nothing in this module binds that name -- it is imported, a built-in,
+        or arrives through a star import;
+      * the module binds names dynamically, so nothing in it resolves;
+      * ANY of its bindings is `_OPAQUE` -- any binding form other than an
+        `Assign` / `AnnAssign` / walrus to a bare `Name`: a `for` target, a
+        comprehension target, a `with ... as`, an `AugAssign`, a tuple or
+        `Starred` unpack, a function or lambda parameter, an `import ... as`,
+        an `except ... as`, a `match` capture, a `global` / `nonlocal`, a
+        `def` / `class` / `type` name, a PEP 695 type parameter;
+      * any of its bindings is an expression that is neither a `Dict` literal
+        nor a `DictComp`;
+      * a `Dict` binding carries a `**` expansion, whose key is `None` and
+        whose pairs are written somewhere else.
+
+    Only when EVERY binding is a visible, `None`-key-free `Dict` literal or a
+    `DictComp` are the pairs returned and `_items_guard_side` allowed to
+    narrow. Fail-closed on any form this walk does not model -- not on the
+    subset of forms someone thought to enumerate, which is the narrowing that
+    shipped as a MISS in the round before this one (see `_name_sources`).
     """
     if not isinstance(receiver, ast.Name):
         return None
-    sources = assigned.get(receiver.id)
+    sources = bound.get(receiver.id)
     if not sources:
         return None
     pairs: list[tuple[ast.AST, ast.AST]] = []
@@ -329,7 +492,7 @@ def _key_value_pairs(
 
 
 def _items_guard_side(
-    targets: list[ast.AST], source: ast.AST, assigned: dict[str, list[ast.AST]]
+    targets: list[ast.AST], source: ast.AST, bound: dict[str, list[object]]
 ) -> list[ast.AST] | None:
     """The ONE element of `for <k>, <v> in <d>.items()` that holds the guard.
 
@@ -350,13 +513,19 @@ def _items_guard_side(
     and the only reported line was the unrelated `<needle> in name`. The
     substring test against the actual guard went unreported.
 
-    So the side is DECIDED. It is decidable whenever the receiver resolves, in
-    this same module, to a `Dict` literal or a `DictComp`: the guard sits on
-    whichever side reads an `if:` key, and when exactly one side does that side
-    is kept. When the receiver does not resolve, or BOTH sides read one, or
-    NEITHER does, both elements stay tainted: over-approximating costs the
-    module-wide NAME taint `_tainted_names` measures, but only the MISS costs
-    the defect, so the tie goes to tainting both.
+    So the side is DECIDED -- but only where `_key_value_pairs` can PROVE the
+    receiver's binding set complete and dict-shaped: every binding of that
+    name, by every binding form in the language, a visible `Dict` literal or
+    `DictComp`. Then the guard sits on whichever side reads an `if:` key, and
+    when exactly one side does, that side is kept. When the receiver does not
+    resolve, when the `.items(...)` call takes arguments, when the unpack is
+    not exactly two elements, or when BOTH sides read an `if:` key or NEITHER
+    does, both elements stay tainted: over-approximating costs the module-wide
+    NAME taint `_tainted_names` measures, but only the MISS costs the defect,
+    so the tie goes to tainting both. Failing closed on any form the walk
+    cannot name a value for -- rather than on a list of forms someone
+    enumerated -- is the round-5 correction: enumerating only `Assign` MISSED
+    the guard through a `for`-target rebind of the very same name.
     """
     if not (
         isinstance(source, ast.Call)
@@ -370,7 +539,7 @@ def _items_guard_side(
         return None
     if len(targets[0].elts) != 2:
         return None
-    pairs = _key_value_pairs(source.func.value, assigned)
+    pairs = _key_value_pairs(source.func.value, bound)
     if pairs is None:
         return None
     on_key = any(_contains_if_key_read(key) for key, _ in pairs)
@@ -389,7 +558,7 @@ def _bindings(tree: ast.AST) -> list[tuple[list[str], ast.AST]]:
     readily, and the shape measured to slip past an assignment-only walk is a
     dict comprehension followed by `for name, guard in wrong.items()`.
     """
-    assigned = _assigned_sources(tree)
+    bound = _name_sources(tree)
     pairs: list[tuple[list[str], ast.AST]] = []
     for node in ast.walk(tree):
         targets: list[ast.AST]
@@ -412,7 +581,7 @@ def _bindings(tree: ast.AST) -> list[tuple[list[str], ast.AST]]:
             continue
         if source is None:
             continue
-        targets = _items_guard_side(targets, source, assigned) or targets
+        targets = _items_guard_side(targets, source, bound) or targets
         names: list[str] = []
         for target in targets:
             names.extend(_bound_names(target))
@@ -960,3 +1129,326 @@ def test_the_rule_stops_at_comparison_nodes():
 def test_the_detector_does_not_taint_an_attribute_or_subscript_receiver():
     """`self.guard = step.get("if")` must not taint `self`."""
     assert _membership_violations(_FABRICATED_RECEIVER_COLLATERAL, "fab") == []
+
+
+# ---------------------------------------------------------------------------
+# The fail-closed controls -- one per binding form `_name_sources` does NOT
+# resolve to a value, plus one per predicate `_key_value_pairs` and
+# `_items_guard_side` rely on. Round 4 shipped four of the predicates below
+# with NO control at all: each of the four mutations named in
+# `test_every_resolution_predicate_has_a_control`'s docstring measured a fully
+# green `22 passed`.
+# ---------------------------------------------------------------------------
+#: `wrong` bound ONCE, by a `DictComp` whose VALUE side reads the `if:` key.
+#: The side is decidable, so only the guard line is reported and the unrelated
+#: assertion on `name` stays silent. Every fail-closed control below is this
+#: same source with ONE rebinding form spliced in, so the difference between
+#: `['fab:5']` here and two reported lines there is the fail-closed branch and
+#: nothing else.
+_RESOLVED_ITEMS_RECEIVER = '''
+def test_x():
+    wrong = {n: _step(n).get("if") for n in STEPS}
+    for name, guard in wrong.items():
+        assert GATE_EXPRESSION in guard
+        assert "tan-cli#840" in name
+'''
+
+#: EVERY binding form in the language that binds a name to something other
+#: than a source expression this walk can name -- the completeness obligation
+#: `_name_sources` carries, written out rather than left to whoever next
+#: enumerates a subset. Each value is spliced into `_RESOLVED_ITEMS_RECEIVER`
+#: between the `DictComp` and the `.items()` unpack, so `wrong` is bound twice:
+#: once decidably, once by the form under test. The answer must be the
+#: FAIL-CLOSED one -- BOTH names tainted, BOTH assertion lines reported --
+#: because a binding set with one unresolvable member is not a binding set.
+#:
+#: `del wrong` is absent on purpose: it UNBINDS a name rather than binding it,
+#: so it cannot make a resolved receiver hold something else.
+_REBINDING_FORMS = {
+    "for target": "for wrong in _maps():\n    pass",
+    "async for target": (
+        "async def _inner():\n    async for wrong in _amaps():\n        pass"
+    ),
+    "comprehension target": "_ = [wrong for wrong in _maps()]",
+    "with ... as": "with _open() as wrong:\n    pass",
+    "async with ... as": (
+        "async def _inner():\n    async with _open() as wrong:\n        pass"
+    ),
+    "augmented assignment": "wrong |= _more()",
+    "annotation with no value": "wrong: dict",
+    "tuple unpack from a call": "wrong, other = _pair()",
+    "starred unpack": "wrong, *rest = _pair()",
+    "function parameter": "def _inner(wrong):\n    return wrong",
+    "keyword-only parameter": "def _inner(*, wrong=None):\n    return wrong",
+    "lambda parameter": "_ = lambda wrong: wrong",
+    "import ... as": "import json as wrong",
+    "from ... import ... as": "from json import loads as wrong",
+    "except ... as": "try:\n    pass\nexcept Exception as wrong:\n    pass",
+    "match capture": "match _thing():\n    case wrong:\n        pass",
+    "match mapping rest": (
+        "match _thing():\n    case {'k': _, **wrong}:\n        pass"
+    ),
+    "global declaration": "global wrong",
+    "nonlocal declaration": "nonlocal wrong",
+    "def name": "def wrong():\n    return None",
+    "class name": "class wrong:\n    pass",
+    "type alias": "type wrong = dict",
+    "PEP 695 type parameter": "def _inner[wrong](x):\n    return x",
+    "exec": 'exec("wrong = {}")',
+    "globals() subscript": 'globals()["wrong"] = {}',
+    "eval": '_ = eval("wrong")',
+    "locals()": "_ = locals()",
+    "vars()": "_ = vars()",
+}
+
+
+def _with_rebinding(rebind: str) -> tuple[str, list[str]]:
+    """`_RESOLVED_ITEMS_RECEIVER` with `rebind` spliced in, and its answer.
+
+    Returns the fabricated source and the two `fab:<line>` labels that a
+    fail-closed walk must report: the substring test against the guard, and
+    the unrelated assertion on `name` that a DECIDED side would have kept
+    silent. Reporting both is the point -- the false positive on `name` is the
+    disclosed price of never missing the guard.
+    """
+    body = "\n".join(f"    {line}" if line else "" for line in rebind.splitlines())
+    source = _RESOLVED_ITEMS_RECEIVER.replace(
+        "    for name, guard in wrong.items():",
+        f"{body}\n    for name, guard in wrong.items():",
+        1,
+    )
+    offset = len(rebind.splitlines())
+    return source, [f"fab:{5 + offset}", f"fab:{6 + offset}"]
+
+
+#: A star import cannot sit inside a function, so it is the one dynamic binder
+#: that needs its own module. `from x import *` can bind ANY name, `wrong`
+#: included, from a file this per-file walk never opens.
+_FABRICATED_STAR_IMPORT = '''
+from _elsewhere import *
+
+
+def test_x():
+    wrong = {n: _step(n).get("if") for n in STEPS}
+    for name, guard in wrong.items():
+        assert GATE_EXPRESSION in guard
+        assert "tan-cli#840" in name
+'''
+
+#: The `Dict` LITERAL resolution path, which round 4 documented in two
+#: docstrings and exercised in no control: both `.items()` controls it shipped
+#: build their receiver from a `DictComp`, so deleting the `ast.Dict` branch of
+#: `_key_value_pairs` measured a fully green 22.
+_FABRICATED_DICT_LITERAL_RECEIVER = '''
+def test_x():
+    wrong = {"install": _step("install").get("if"), "build": _step("b").get("if")}
+    for name, guard in wrong.items():
+        assert GATE_EXPRESSION in guard
+        assert "tan-cli#840" in name
+'''
+
+#: A `**` expansion gives the `Dict` a `None` key, and the pairs it
+#: contributes are written somewhere else entirely -- so the dict is NOT
+#: complete and the side is undecidable. Round 4 guarded this and had no
+#: control for it: dropping the `None`-key guard measured a green 22, because
+#: nothing in the file ever built a `Dict` with a `**` in it.
+_FABRICATED_DICT_STAR_EXPANSION = '''
+def test_x():
+    wrong = {"install": _step("install").get("if"), **_more_guards()}
+    for name, guard in wrong.items():
+        assert GATE_EXPRESSION in guard
+        assert "tan-cli#840" in name
+'''
+
+#: `dict.items()` takes no arguments, so a `.items(...)` that does is not the
+#: method this narrowing models and the receiver's shape says nothing about
+#: the unpack. Round 4 refused both spellings and had a control for neither.
+_FABRICATED_ITEMS_WITH_ARGUMENTS = '''
+def test_x():
+    wrong = {n: _step(n).get("if") for n in STEPS}
+    for name, guard in wrong.items(SENTINEL):
+        assert GATE_EXPRESSION in guard
+        assert "tan-cli#840" in name
+    for name, guard in wrong.items(strict=True):
+        assert GATE_EXPRESSION in guard
+        assert "tan-cli#840" in name
+'''
+
+#: `dict.items()` yields 2-tuples, so a 3-element unpack is not unpacking the
+#: pair this narrowing resolved and neither element can be ruled out. Round 4
+#: refused it and had no control: dropping the length check measured a green
+#: 22, and kept element `[1]` out of a tuple whose shape it had not checked.
+_FABRICATED_THREE_ELEMENT_UNPACK = '''
+def test_x():
+    wrong = {n: _step(n).get("if") for n in STEPS}
+    for name, guard, extra in wrong.items():
+        assert GATE_EXPRESSION in guard
+        assert "tan-cli#840" in name
+        assert "tan-cli#840" in extra
+'''
+
+#: The BLOCKER round 4 shipped, in both orientations. `wrong` is bound once by
+#: an `Assign` to a decidable `DictComp` and once by a `for` target that
+#: `_assigned_sources` did not read -- so the `Assign` alone was treated as the
+#: complete binding set, a side was picked from a dict that is not the one at
+#: the `.items()` call, and the guard went untainted. Measured on the two
+#: earlier revisions of this file and on round 4's:
+#:
+#:     8344c8f (round 2)  A ['fab:9']  B ['fab:9']
+#:     6cd93a7 (round 3)  A ['fab:9']  B []
+#:     58eee85 (round 4)  A []         B []          <- worse than both
+#:
+#: It reproduces on the live tree too: appending
+#: `for wrong in _guard_maps_by_guard(): / for guard, name in wrong.items(): /
+#: assert GATE_EXPRESSION in guard` to
+#: `test_getting_started_sdk_outage_probe.py` measured `[]` on round 4, with
+#: `guard` absent from a taint set of `['found', 'name', 'wrong']`.
+_FABRICATED_REBOUND_KEYED_BY_GUARD = '''
+def test_x():
+    wrong = {_step(n).get("if"): n for n in STEPS}
+    assert wrong
+
+
+    for wrong in _maps_keyed_by_name():
+        for name, guard in wrong.items():
+            assert GATE_EXPRESSION in guard
+'''
+
+_FABRICATED_REBOUND_KEYED_BY_NAME = '''
+def test_x():
+    wrong = {n: _step(n).get("if") for n in STEPS}
+    assert wrong
+
+
+    for wrong in _maps_keyed_by_guard():
+        for guard, name in wrong.items():
+            assert GATE_EXPRESSION in guard
+'''
+
+
+def test_a_resolved_items_receiver_still_decides_the_guard_side():
+    """The baseline the fail-closed controls below are measured against.
+
+    One binding, a `DictComp`, `if:` read on the VALUE side: the side is
+    decided, `guard` is tainted and `name` is not, so only `fab:5` is
+    reported. Every row of `_REBINDING_FORMS` is this same source with one
+    extra binding of `wrong` spliced in, and every one of them must report
+    BOTH lines instead."""
+    assert _membership_violations(_RESOLVED_ITEMS_RECEIVER, "fab") == ["fab:5"]
+
+
+def test_every_binding_form_that_is_not_resolved_fails_closed():
+    """The round-5 rule: fail closed on ANY binding form the walk does not
+    model, not on the ones someone thought to enumerate.
+
+    Round 4's `_assigned_sources` read `ast.Assign` and nothing else while
+    `_bindings` enumerated seven forms, so a `for`-target rebind, a walrus, a
+    `with ... as`, an `AnnAssign`, an `AugAssign` or a plain function
+    parameter shadowing the name was invisible -- and `_key_value_pairs`
+    treated a non-empty `Assign` list as a COMPLETE binding set. It then
+    picked a side out of a dict that is not the one at the `.items()` call.
+
+    Twenty-eight forms, every one of them a second binding of an otherwise
+    decidable receiver, and every one must report both lines."""
+    for label, rebind in _REBINDING_FORMS.items():
+        source, expected = _with_rebinding(rebind)
+        assert _membership_violations(source, "fab") == expected, label
+
+
+def test_a_star_import_makes_every_name_in_the_module_unresolvable():
+    """`from x import *` binds names from a file this walk never opens, so no
+    name in the module has a provably complete binding set. It cannot live
+    inside a function, which is why it is not a `_REBINDING_FORMS` row."""
+    assert _membership_violations(_FABRICATED_STAR_IMPORT, "fab") == [
+        "fab:8",
+        "fab:9",
+    ]
+
+
+def test_the_blocker_is_caught_in_both_orientations():
+    """A decidable `Assign`, then a `for`-target rebind of the same name.
+
+    Round 4 reported `[]` on both -- strictly worse than round 2 (`['fab:9']`
+    on both) and round 3 (`['fab:9']` on the first). The guard must be
+    reported however the `Assign`-bound dict happens to be keyed, because the
+    dict at the `.items()` call is not that dict at all."""
+    assert _membership_violations(
+        _FABRICATED_REBOUND_KEYED_BY_GUARD, "fab"
+    ) == ["fab:9"]
+    assert _membership_violations(
+        _FABRICATED_REBOUND_KEYED_BY_NAME, "fab"
+    ) == ["fab:9"]
+
+
+def test_a_dict_literal_receiver_resolves_like_a_dict_comprehension():
+    """`_key_value_pairs`' `ast.Dict` branch, which had no control at all.
+
+    Both `.items()` controls round 4 shipped build the receiver from a
+    `DictComp`, so deleting the `Dict` branch outright measured `22 passed`
+    while two docstrings went on documenting it as a supported resolution
+    path. Deleted, this reports `['fab:4', 'fab:5']` instead."""
+    assert _membership_violations(
+        _FABRICATED_DICT_LITERAL_RECEIVER, "fab"
+    ) == ["fab:5"]
+
+
+def test_a_dict_with_a_star_expansion_is_undecidable():
+    """The `None`-key guard, which had no control either.
+
+    `{**other}` gives `ast.Dict` a `None` key and the pairs come from
+    somewhere this walk cannot read, so the dict is incomplete and both names
+    stay tainted."""
+    assert _membership_violations(
+        _FABRICATED_DICT_STAR_EXPANSION, "fab"
+    ) == ["fab:5", "fab:6"]
+
+
+def test_an_items_call_that_takes_arguments_is_not_the_items_being_modelled():
+    """`not source.args and not source.keywords`, which had no control.
+
+    `dict.items()` takes none of either, so a `.items(...)` that does is some
+    other method on some other object and the receiver's dict shape proves
+    nothing about the unpack."""
+    assert _membership_violations(
+        _FABRICATED_ITEMS_WITH_ARGUMENTS, "fab"
+    ) == ["fab:5", "fab:6", "fab:8", "fab:9"]
+
+
+def test_an_unpack_that_is_not_a_pair_is_undecidable():
+    """`len(targets[0].elts) != 2`, which had no control.
+
+    `dict.items()` yields 2-tuples. A 3-element unpack is not unpacking the
+    pair that was resolved, so no element can be ruled out; dropping the check
+    kept element `[1]` out of a tuple whose shape had never been checked."""
+    assert _membership_violations(
+        _FABRICATED_THREE_ELEMENT_UNPACK, "fab"
+    ) == ["fab:5", "fab:6", "fab:7"]
+
+
+#: The one place a non-`Name` binding target differs from an `_OPAQUE` one.
+#: Unpacking a dict yields its KEYS, so `wrong` here holds a guard STRING, not
+#: the mapping -- but the source expression IS a `DictComp`, so a
+#: `record_target` that handed every unpacked name the source it was unpacked
+#: FROM would resolve `wrong` to that comprehension, keep the KEY side, leave
+#: `guard` untainted and miss `fab:5`. Every other unpack fails closed by
+#: accident (a `Call`, a `Tuple` and a `List` are none of them dicts); this one
+#: fails closed only because the walk refuses to name a value for a target it
+#: did not bind whole.
+_FABRICATED_UNPACK_FROM_A_DICT = '''
+def test_x():
+    wrong, other = {_step(n).get("if"): n for n in STEPS}
+    for name, guard in wrong.items():
+        assert GATE_EXPRESSION in guard
+        assert "tan-cli#840" in name
+'''
+
+
+def test_unpacking_a_dict_does_not_resolve_the_names_to_that_dict():
+    """A tuple target binds an ELEMENT of its source, never the source.
+
+    Measured: handing the unpacked names the `DictComp` they came out of
+    reports `['fab:5', 'fab:6']` here today and `['fab:6']` with that change
+    -- the unrelated line kept, the guard lost."""
+    assert _membership_violations(
+        _FABRICATED_UNPACK_FROM_A_DICT, "fab"
+    ) == ["fab:5", "fab:6"]
