@@ -225,6 +225,33 @@ jobs:
           # small, but the safe form costs nothing and is what the sibling
           # ALP_SDK_REF line above already does.
           IMAGE: ${{ github.event.inputs.image || 'ubuntu:24.04' }}
+          # tan-cli#1169, the fourth site tan-cli#1163 named and deliberately
+          # left open. The harness runs `tan bootstrap` inside the container
+          # (`scripts/e2e-full.sh:872`), whose toolchain phase lists the Zephyr
+          # SDK releases through the GitHub API -- an anonymous quota counted
+          # PER SOURCE IP and shared across every hosted runner in the region,
+          # so it is exhausted by traffic that is not ours and the job dies
+          # with `403 API rate limit exceeded` for a reason unrelated to the
+          # change under test. Measured three times in one week.
+          #
+          # tan-cli#1163's fix could not reach here: an `env:` block sets the
+          # variable on the RUNNER, and `scripts/e2e-container.sh` forwarded
+          # only ALP_SDK_REF / ZEPHYR_SDK_VERSION / ZEPHYR_SDK_INSTALL_TIMEOUT
+          # into the container. That script now forwards this name too, by
+          # NAME (`docker run -e TAN_GITHUB_TOKEN`, no `=value`), so the token
+          # is not an element of the `docker run` argv on the runner either.
+          #
+          # `TAN_GITHUB_TOKEN` rather than `GH_TOKEN`, matching the three sites
+          # tan-cli#1163 fixed: the process this reaches is `tan`, which reads
+          # TAN_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN in that order
+          # (`SDK_TOKEN_ENV_VARS`, `python/tan/core/toolchain_provision.py:599`)
+          # and passes it to `west sdk install` out of band through a private
+          # netrc, so it reaches no argv, log, `--dry-run` plan or envelope
+          # (tan-cli#1143). Being FIRST in that order, it also cannot be
+          # shadowed by anything the container image happens to carry. Listing
+          # public releases needs no scopes, so the job's least-privilege
+          # `contents: read` (above) is already enough.
+          TAN_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           bash scripts/e2e-container.sh python/dist/tan "$IMAGE"
