@@ -240,6 +240,13 @@ What those commands do:
      `~/.netrc` is not visible to `west sdk install` while `tan` is
      authenticating the download. Nothing is set at all when you supply no
      token.
+   - **`tan` stops claiming it if it cannot verify the route.** The netrc
+     hand-off depends on how the Zephyr in your workspace handles credentials,
+     which `tan` neither owns nor pins. Before printing that it authenticated
+     the download, `tan` checks the `west sdk install` in that workspace still
+     matches what the hand-off was measured against; if it does not, you get a
+     `bootstrap.sdk-credential-unverified` warning naming what to do instead,
+     rather than an assurance that quietly stopped being true.
 2. If you skip the toolchain phase, or need to point at a different pin, run
    `west sdk install` by hand from inside the workspace venv:
 
