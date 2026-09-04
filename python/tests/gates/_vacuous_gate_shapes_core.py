@@ -211,17 +211,34 @@ def iter_tautologies(tree: ast.AST, rel: str, text: str) -> list[Finding]:
 
       * `assert <truthy literal>` -- `assert True`, `assert "TODO"`, `assert 1`.
       * `assert x == x` / `assert x is x`.
-      * `assert f"..."` -- an f-string is always a non-empty `str` here, so
-        the assertion is a no-op no matter what it interpolates.
+      * `assert f"...lit..."` -- an f-string carrying LITERAL text. It is a
+        non-empty `str` whatever it interpolates, so the assertion is a no-op.
       * `assert (x, "message")` -- the classic mistyped `assert x, "message"`.
-        A non-empty tuple is truthy, so the real condition is discarded and
-        the assertion can never fail. Python's own `SyntaxWarning` catches the
-        two-element literal case; this catches it whatever the arity and
-        wherever the file is parsed rather than imported.
+        A tuple with at least one non-`*` element has at least one item, so it
+        is truthy, the real condition is discarded, and the assertion can
+        never fail. Python's own `SyntaxWarning` catches the two-element
+        literal case; this catches it whatever the arity and wherever the file
+        is parsed rather than imported.
 
-    The tan-cli#1145 sweep found ZERO of the first two, and re-measuring the
-    tree for the second two found ZERO of those as well (`python/{tan,tests,
-    scripts}`, 1335 asserts under `tests/gates` alone). All four are carried
+    The last two are narrower than the shapes they are named after, and the
+    narrowing is the point -- each excluded spelling can genuinely FAIL, so
+    flagging it would be this walk making the over-claim it exists to catch:
+
+      * `f""` (`JoinedStr(values=[])`) and `f"{x}"` (only a `FormattedValue`)
+        are `""` when the interpolation is empty. Measured on 3.12:
+        `bool(f"")` and `bool(f"{x}")` with `x = ""` are both `False`.
+        Only literal text makes an f-string unconditionally truthy.
+      * `()` is falsy, and `(*xs,)` is `()` when `xs` is empty -- so a tuple
+        whose every element is a `*`-unpacking is declined too. One non-`*`
+        element is what makes the arity at least 1 regardless.
+
+    `test_the_walks_leave_the_benign_spellings_alone` drives all four
+    exclusions, because a branch that only ever says "yes" is not a branch.
+
+    ZERO of all four, measured across the whole walked tree rather than only
+    the directory the coverage half looks at: `python/{tan,tests,scripts}`,
+    13372 `assert` statements, 0 truthy-literal, 0 `x == x`, 0 literal-bearing
+    f-string, 0 non-`*` tuple. All four are carried
     as regression insurance at essentially no cost: every shape is trivially
     AST-decidable, and a future `assert True  # TODO` is exactly the kind of
     placeholder that survives review because it reads as deliberate.
@@ -239,9 +256,17 @@ def _is_tautology(test: ast.expr) -> bool:
     if isinstance(test, ast.Constant):
         return bool(test.value)
     if isinstance(test, ast.JoinedStr):
-        return True  # an f-string is a non-empty str: always truthy
+        # Literal text makes it unconditionally non-empty. `f""` and `f"{x}"`
+        # do not -- both are `""` for an empty interpolation, so both can
+        # genuinely fail and neither is flagged.
+        return any(
+            isinstance(v, ast.Constant) and bool(v.value) for v in test.values
+        )
     if isinstance(test, ast.Tuple):
-        return bool(test.elts)  # `assert (x, "msg")` -- the missing comma
+        # `assert (x, "msg")` -- the missing comma. One non-`*` element makes
+        # the arity at least 1, hence truthy. `()` is falsy and `(*xs,)` is
+        # `()` for an empty `xs`, so neither is flagged.
+        return any(not isinstance(e, ast.Starred) for e in test.elts)
     if not isinstance(test, ast.Compare) or len(test.ops) != 1:
         return False
     if not isinstance(test.ops[0], (ast.Eq, ast.Is)):
@@ -326,10 +351,10 @@ def iter_assert_lines(tree: ast.AST) -> frozenset[int]:
 # collapse does. Raise one deliberately, never to make a red go away.
 # --------------------------------------------------------------------------
 
-#: `for`/`async for` statements under `tests/gates/`. Measured: 283.
+#: `for`/`async for` statements under `tests/gates/`. Measured: 285.
 MIN_FOR_SITES = 240
 
-#: `assert` statements under `tests/gates/`. Measured: 1335.
+#: `assert` statements under `tests/gates/`. Measured: 1337.
 MIN_ASSERT_SITES = 1100
 
 #: How many `.py` files under `tests/gates/` the coverage run is allowed NOT
@@ -374,11 +399,19 @@ MAX_UNMEASURED_GATE_FILES = 0
 #:     assumption B) and a body that only ever runs in a spawned interpreter
 #:     this run never measured. There are ZERO such rows today, and the class
 #:     exists so the first one is declared honestly instead of being squeezed
-#:     into one of the two labels that would be false of it. Such a row must
-#:     say WHICH shape it is and what does exercise the body -- a
-#:     `pytest.raises` around the loop, or the name of the child command --
-#:     because "unmeasurable" is a statement about this run, not about the
-#:     code, and the next person needs to know where the real coverage lives.
+#:     into one of the two labels that would be false of it.
+#:
+#:     Such a row carries a HIGHER bar than the other two, and it is CHECKED,
+#:     not merely asked for (`test_every_allowed_empty_loop_row_carries_a_
+#:     classified_reason` routes every row through the same helper the
+#:     fabricated-input test drives). It must contain one of `"raises"` /
+#:     `"spawned"`, naming which shape defeated the measurement, AND the
+#:     phrase `"exercised by"` followed by where the body really runs -- the
+#:     `pytest.raises` around the loop, the child command, or plainly that
+#:     nothing exercises it. Both are required because "unmeasurable" is a
+#:     statement about THIS RUN, not about the code: without the shape it is
+#:     a shrug, and without the location the next person cannot tell whether
+#:     real coverage exists elsewhere or nowhere at all.
 #:
 #: No row may cite a `<file>.py:<line>`, and
 #: `test_no_allow_list_reason_cites_a_line_number` enforces it. The KEY is

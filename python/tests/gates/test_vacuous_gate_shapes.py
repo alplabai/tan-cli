@@ -84,6 +84,16 @@ MERGE_GROUP_VAR = "TAN_MERGE_GROUP_BASE_REF"
 #: `_vacuous_gate_shapes_core.py`'s comment on the table for what each means.
 CLASSES = ("healthy-empty", "forward-looking", "unmeasurable")
 
+#: The two shapes that defeat assumption B (see `_vacuous_gate_shapes_core.py`)
+#: and are therefore the only things an `unmeasurable` row may be. A row must
+#: name one -- "unmeasurable" with no shape is a shrug, not a decision.
+UNMEASURABLE_SHAPES = ("raises", "spawned")
+
+#: And it must say where the body IS exercised, since "unmeasurable" is a claim
+#: about THIS run rather than about the code. The next person needs to know
+#: whether real coverage exists elsewhere or nowhere.
+UNMEASURABLE_EVIDENCE = "exercised by"
+
 #: A `<file>:<line>` citation, which no allow-list reason may carry. Workflow
 #: files too, not only `.py`: a reason naming `ci.yml:640` rots exactly the way
 #: the `test_interpreter_policy.py:230` one did, and this repo's `parity.yml`
@@ -158,14 +168,15 @@ def test_the_tautology_and_swallow_walks_flag_fabricated_input():
     stopped matching also reports. These are the only things that tell the two
     apart."""
     taut = (
-        "def f(x):\n"
+        "def f(x, xs):\n"
         "    assert True\n"
         "    assert x == x\n"
-        '    assert f"{x} must be set"\n'
-        '    assert (x, "x must be set")\n'
+        '    assert f"{x} must be set"\n'      # literal text: always truthy
+        '    assert (x, "x must be set")\n'    # the dropped comma
+        "    assert (*xs, x)\n"                # one non-* element: arity >= 1
     )
     got = core.iter_tautologies(ast.parse(taut), "fab.py", taut)
-    assert [f.lineno for f in got] == [2, 3, 4, 5], f"tautology walk: {got!r}"
+    assert [f.lineno for f in got] == [2, 3, 4, 5, 6], f"tautology walk: {got!r}"
 
     swallowed = (
         "def f(x):\n"
@@ -185,19 +196,30 @@ def test_the_tautology_and_swallow_walks_flag_fabricated_input():
 def test_the_walks_leave_the_benign_spellings_alone():
     """The false-positive controls, one per rule that could over-reach.
 
-    `assert x == y` is an ordinary comparison; `assert x, f"..."` is the
+    `assert x == y` is an ordinary comparison. `assert x, f"..."` is the
     CORRECT two-argument form and must not be confused with the tuple typo it
-    is one comma away from; `assert ()` is an empty tuple, which always FAILS
-    rather than always passing; and a `try` that catches something else does
-    not swallow the assertion. Flagging any of these would make the rules
-    wrong on their first run, which is how a gate gets deleted rather than
-    fixed."""
+    is one comma away from. And four spellings that LOOK like the two new
+    rules but can genuinely fail, so flagging them would be this walk
+    committing the over-claim it exists to catch:
+
+      * `assert f""` -- `JoinedStr(values=[])`, falsy, always fails.
+      * `assert f"{x}"` -- `""` when `x` is `""`; measured `bool(f"{x}")` with
+        `x = ""` is `False`. Only LITERAL text makes an f-string truthy.
+      * `assert ()` -- empty tuple, always fails.
+      * `assert (*xs,)` -- `()` when `xs` is empty, so it can fail. One non-`*`
+        element is what makes a tuple's arity at least 1.
+
+    Flagging any of these would make the rules wrong on their first run, which
+    is how a gate gets deleted rather than fixed."""
     benign = (
-        "def f(x, y):\n"
+        "def f(x, y, xs):\n"
         "    assert x == y\n"
         "    assert False or x\n"
         '    assert x, f"{x} must be set"\n'   # the CORRECT two-argument form
+        '    assert f""\n'                     # JoinedStr(values=[]): FALSY
+        '    assert f"{x}"\n'                  # "" for an empty x: can FAIL
         "    assert ()\n"                      # empty tuple: always FAILS
+        "    assert (*xs,)\n"                  # () for an empty xs: can FAIL
         "    try:\n"
         "        assert x\n"
         "    except OSError:\n"
@@ -275,9 +297,9 @@ def test_never_iterating_flags_a_fabricated_loop():
 
 
 def test_an_async_for_is_walked_exactly_like_a_for():
-    """`iter_for_sites` claims `For`/`AsyncFor`, and `tests/gates` contains 283
+    """`iter_for_sites` claims `For`/`AsyncFor`, and `tests/gates` contains 285
     of the first and ZERO of the second -- so deleting the `AsyncFor` half
-    leaves the count at 283, `MIN_FOR_SITES` green, and every other test in
+    leaves the count at 285, `MIN_FOR_SITES` green, and every other test in
     this file passing. A forward-looking branch that measures nothing, inside a
     gate about forward-looking branches that measure nothing, and unlike the
     allow-list rows it carried no declaration. This is the declaration: the
@@ -311,11 +333,40 @@ def test_the_third_allow_list_class_is_accepted_before_it_has_a_row():
     one gets filed as `healthy-empty` or `forward-looking`, both of which
     would be FALSE of it, and the allow-list stops being a record of
     decisions, which is the only thing it is for.
+
+    The third class also carries a HIGHER bar than the other two -- it must
+    name the shape and where the body really runs -- and that branch is
+    likewise unreachable from the parametrized row test while no row exists,
+    so it is driven here too, in both directions.
     """
     assert CLASSES == ("healthy-empty", "forward-looking", "unmeasurable")
     for name in CLASSES:
         assert f"{name}. Fabricated.".startswith(CLASSES), name
     assert not "genuinely-fine. Fabricated.".startswith(CLASSES)
+
+    # And the extra bar the third class carries, which the parametrized test
+    # above cannot reach either. A row that names the shape AND where the
+    # body really runs is accepted; the two half-answers are not.
+    good = (
+        "unmeasurable. The iterable raises StopSomething on the first "
+        "`next`, so the body is unreachable in THIS run; it is exercised by "
+        "the `pytest.raises(...)` case two functions down."
+    )
+    _assert_row_reason_is_sound("fabricated", good)
+    for bad in (
+        "unmeasurable. It is fine. Nothing here says which of the two shapes "
+        "it is, nor what does exercise the body, and nothing checks it.",
+        "unmeasurable. The body only runs in a spawned interpreter, and this "
+        "sentence stops there without saying where the real coverage lives.",
+        "unmeasurable. It is exercised by something, somewhere, but this "
+        "reason never says which of the two shapes defeated the measurement.",
+    ):
+        with pytest.raises(AssertionError):
+            _assert_row_reason_is_sound("fabricated", bad)
+    # ...and the two lower bars still apply to it, through the same helper.
+    for bad in ("unmeasurable. Too short.", "invented-class. " + "x" * 90):
+        with pytest.raises(AssertionError):
+            _assert_row_reason_is_sound("fabricated", bad)
 
 
 def test_body_line_span_is_the_whole_subtree_not_the_first_statement():
@@ -424,13 +475,54 @@ def test_every_allowed_empty_loop_row_carries_a_classified_reason(
     third kind today; it exists so the first one is declared honestly rather
     than squeezed into one of the two labels that would be false of it.
     """
-    reason = core.ALLOWED_EMPTY_LOOPS[key]
+    _assert_row_reason_is_sound(repr(key), core.ALLOWED_EMPTY_LOOPS[key])
+
+
+def _assert_row_reason_is_sound(label: str, reason: str) -> None:
+    """The whole per-row bar, in ONE place.
+
+    A helper rather than a test body because the `unmeasurable` branch below
+    is unreachable from the parametrized caller while that class has zero
+    rows -- so `test_the_third_allow_list_class_is_accepted_before_it_has_a_row`
+    drives this same function with fabricated reasons, and the DISPATCH is
+    exercised too, not only the thing it dispatches to. A branch reachable
+    from exactly one caller that never takes it is the defect this file is
+    about.
+    """
     assert reason.startswith(CLASSES), (
-        f"{key!r}'s reason starts with none of {CLASSES} -- say which of the "
+        f"{label}'s reason starts with none of {CLASSES} -- say which of the "
         f"three this is before saying why: {reason!r}"
     )
     assert len(reason) >= 80, (
-        f"{key!r} carries a classification but no argument: {reason!r}"
+        f"{label} carries a classification but no argument: {reason!r}"
+    )
+    if reason.startswith("unmeasurable"):
+        _assert_unmeasurable_reason_is_specific(label, reason)
+
+
+def _assert_unmeasurable_reason_is_specific(label: str, reason: str) -> None:
+    """The extra bar an `unmeasurable` row carries, and the other two do not.
+
+    `healthy-empty` and `forward-looking` are both claims about the CODE, and
+    the class name carries most of the meaning. `unmeasurable` is a claim
+    about THIS RUN -- the collection was not empty, the run simply could not
+    see the body -- so the class name alone says almost nothing. The table
+    comment in `_vacuous_gate_shapes_core.py` already demands the shape and
+    the real coverage location; before this, nothing checked, and a row
+    reading "unmeasurable. It is fine." plus filler to 80 characters passed.
+    """
+    assert any(shape in reason for shape in UNMEASURABLE_SHAPES), (
+        f"{label}'s `unmeasurable` reason names neither shape that defeats "
+        f"assumption B -- say which it is (one of {UNMEASURABLE_SHAPES}: an "
+        "iterable that RAISES, or a body that only runs in a SPAWNED "
+        f"interpreter):\n    {reason}"
+    )
+    assert UNMEASURABLE_EVIDENCE in reason, (
+        f"{label}'s `unmeasurable` reason does not say where the body IS "
+        f"{UNMEASURABLE_EVIDENCE!r} -- name the `pytest.raises` around it, or "
+        "the child command, or say plainly that nothing exercises it. "
+        "'Unmeasurable' is a statement about this run, not about the code, "
+        f"and without that the row is a shrug:\n    {reason}"
     )
 
 
