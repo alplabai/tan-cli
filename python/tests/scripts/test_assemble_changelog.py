@@ -11,7 +11,10 @@ that, not at pretty formatting.
 
 from __future__ import annotations
 
+import fnmatch
 import importlib.util
+import os
+import stat
 import sys
 from pathlib import Path
 
@@ -599,7 +602,10 @@ def test_a_failed_changelog_write_leaves_both_sides_intact(
     assert (root / "changelog.d" / "1.added.md").exists(), (
         "a fragment was deleted despite the write never landing"
     )
-    assert not (root / "CHANGELOG.md.tmp").exists(), "temp file left behind"
+    assert not list(root.glob("*.tan-tmp")), "temp file left behind"
+    assert not (root / "CHANGELOG.md.tmp").exists(), (
+        "the old, un-gitignored temp name is back"
+    )
     assert "No space left on device" in capsys.readouterr().err
 
 
@@ -632,3 +638,193 @@ def test_an_unlink_failure_reports_the_survivors_instead_of_success(
     err = capsys.readouterr().err
     assert "1.added.md" in err, "the survivor was not named"
     assert "second time" in err, "the double-fold hazard was not stated"
+
+
+def test_a_partial_unlink_failure_names_exactly_the_survivors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The test above refuses EVERY unlink, so it pins only all-or-nothing. A
+    PARTIAL failure is the branch a re-run double-folds from, and its contract
+    is stricter: the named set must equal the on-disk set exactly, each with
+    its own errno, or the operator cleans up the wrong files. Measured on the
+    real 162-fragment corpus via `LD_PRELOAD` (no monkeypatching), 1-of-162
+    and 45-of-162 both behaved this way."""
+    root = _repo(
+        tmp_path,
+        {
+            "1.added.md": "- **First.**",
+            "2.added.md": "- **Second.**",
+            "3.fixed.md": "- **Third.**",
+        },
+    )
+    real_unlink = Path.unlink
+    refused = {"1.added.md", "3.fixed.md"}
+
+    def partial(self: Path, *args: object, **kwargs: object) -> None:
+        if self.parent.name == "changelog.d" and self.name in refused:
+            raise PermissionError(1, "Operation not permitted")
+        real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "unlink", partial)
+    assert ac.main(["--root", str(root), "--write"]) == 1
+    assert {q.name for q in (root / "changelog.d").glob("*.md")} == refused
+    err = capsys.readouterr().err
+    assert "2 of 3 fragment(s) could not be deleted" in err
+    for name in sorted(refused):
+        assert f"{name}: [Errno 1] Operation not permitted" in err, name
+    assert "2.added.md" not in err, "a deleted fragment was named a survivor"
+
+
+def test_a_re_run_on_a_folded_plus_survivors_tree_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-running `--write` on the state the test above leaves behind used to
+    splice each survivor a SECOND time and exit 0 -- measured on the real
+    corpus, `folded 1 fragment(s) into CHANGELOG.md` while that entry's lead
+    sentence went 1 -> 2. It must refuse, and change nothing while refusing."""
+    root = _repo(tmp_path, {"1.added.md": "- **First.**", "2.added.md": "- **Second.**"})
+    real_unlink = Path.unlink
+
+    def partial(self: Path, *args: object, **kwargs: object) -> None:
+        if self.name == "1.added.md":
+            raise PermissionError(1, "Operation not permitted")
+        real_unlink(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "unlink", partial)
+    assert ac.main(["--root", str(root), "--write"]) == 1
+    capsys.readouterr()
+    monkeypatch.undo()
+
+    folded = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert folded.count("**First.**") == 1
+    assert ac.main(["--root", str(root), "--write"]) == 1, "the re-run double-folded"
+    err = capsys.readouterr().err
+    assert "1 fragment(s) are ALREADY present" in err
+    assert "1.added.md" in err
+    assert (root / "CHANGELOG.md").read_text(encoding="utf-8") == folded, (
+        "the refused re-run still rewrote CHANGELOG.md"
+    )
+    assert (root / "changelog.d" / "1.added.md").is_file(), (
+        "the refused re-run deleted the survivor it declined to fold"
+    )
+
+
+def test_the_guard_also_refuses_the_render_not_only_the_fold(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A bare run and `--dry-run` on that tree would otherwise print a
+    CHANGELOG with the entry twice and call it the result."""
+    root = _repo(tmp_path, {"1.added.md": "- **Pre-existing added entry.**"})
+    assert ac.main(["--root", str(root)]) == 1
+    assert ac.main(["--root", str(root), "--dry-run"]) == 1
+    assert "ALREADY present" in capsys.readouterr().err
+
+
+def test_the_guard_does_not_fire_on_this_repos_real_pending_fragments() -> None:
+    """The false-positive control, over the real corpus, not a fixture.
+    `splice()` copies bodies byte-for-byte, so `body in <section>` is an exact
+    already-folded test, not a similarity heuristic -- 0 hits across all 162
+    fragments pending here. A guard that fired would block every fold."""
+    buckets = ac.load_fragments(REPO_ROOT / "changelog.d")
+    lines = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+    start, end = ac.find_unreleased(lines)
+    assert ac.already_folded(lines[start + 1:end], buckets) == []
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1181 -- the fold lands on the right inode, durably, in a temp file
+# `.gitignore` covers.
+# ---------------------------------------------------------------------------
+def test_a_symlinked_changelog_is_written_through_not_clobbered(tmp_path: Path) -> None:
+    """`os.replace` targeting the LINK replaces it with a regular file: the
+    fold lands on the wrong inode, the real file keeps its old bytes, the
+    fragments are deleted anyway, and the run exits 0 reporting success.
+    Measured on a copy of this repo before the fix -- `real/CHANGELOG.md`
+    unchanged at md5 4cc00bd3446d5718b8eabb27b50d1744, the repo-root path a
+    new 1261455-byte regular file, 162 fragments gone. `Path.write_text`, the
+    call the temp replaced, followed the link; so must this."""
+    root = _repo(tmp_path, {"1.added.md": "- **Entry that must reach the real file.**"})
+    real_dir = root / "real"
+    real_dir.mkdir()
+    real = real_dir / "CHANGELOG.md"
+    (root / "CHANGELOG.md").rename(real)
+    (root / "CHANGELOG.md").symlink_to(Path("real") / "CHANGELOG.md")
+
+    assert ac.main(["--root", str(root), "--write"]) == 0
+    assert (root / "CHANGELOG.md").is_symlink(), "the symlink was replaced by a file"
+    assert "Entry that must reach the real file." in real.read_text(encoding="utf-8"), (
+        "the fold landed on the wrong inode; the real file was never updated"
+    )
+    assert not list(root.glob("*.tan-tmp")), "a temp was left beside the LINK"
+    assert not list(real_dir.glob("*.tan-tmp")), "a temp was left beside the real file"
+
+
+def test_the_rename_is_fsynced_too_not_only_the_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`os.fsync` on the temp makes the BYTES durable, not the RENAME. A power
+    cut in between leaves exactly the state the survivor report calls
+    impossible: CHANGELOG.md at its old content with the fragments gone. So
+    the parent directory is fsynced after the replace too, in that order."""
+    if os.name == "nt":  # pragma: no cover - no directory handle to fsync
+        pytest.skip("Windows journals the rename itself; there is no dir fd")
+    root = _repo(tmp_path, {"1.added.md": "- **Entry.**"})
+    events: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def rec_fsync(fd: int) -> None:
+        events.append("fsync-dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "fsync-file")
+        real_fsync(fd)
+
+    def rec_replace(src: object, dst: object) -> None:
+        events.append("replace")
+        real_replace(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ac.os, "fsync", rec_fsync)
+    monkeypatch.setattr(ac.os, "replace", rec_replace)
+    assert ac.main(["--root", str(root), "--write"]) == 0
+    assert events == ["fsync-file", "replace", "fsync-dir"], events
+
+
+def test_the_temp_file_is_one_gitignore_already_covers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`CHANGELOG.md.tmp` matched no `.gitignore` rule: a SIGKILL mid-fsync
+    left a 1261455-byte untracked, committable file in the repo ROOT
+    (`?? CHANGELOG.md.tmp`), which a later run then truncated without a word.
+    `.gitignore:53-69` pins `*.tan-tmp` for the two other producers."""
+    root = _repo(tmp_path, {"1.added.md": "- **Entry.**"})
+    seen: list[str] = []
+    real_replace = os.replace
+
+    def rec(src: object, dst: object) -> None:
+        seen.append(Path(str(src)).name)
+        real_replace(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ac.os, "replace", rec)
+    assert ac.main(["--root", str(root), "--write"]) == 0
+    assert len(seen) == 1, seen
+    patterns = [
+        line.strip()
+        for line in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert any(fnmatch.fnmatch(seen[0], pat) for pat in patterns), (
+        f"the fold's temp {seen[0]!r} is matched by no .gitignore rule"
+    )
+
+
+def test_a_root_missing_its_changelog_gets_the_scripts_own_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`repo_root` settles only on a directory holding BOTH CHANGELOG.md and
+    changelog.d/; `--root` bypassed that, so this died with a raw
+    FileNotFoundError traceback, not the script's `error: ...` contract."""
+    root = tmp_path / "half"
+    (root / "changelog.d").mkdir(parents=True)
+    (root / "changelog.d" / "1.added.md").write_text("- **Entry.**", encoding="utf-8")
+    assert ac.main(["--root", str(root), "--write"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: "), err
+    assert "does not contain both CHANGELOG.md and changelog.d/" in err
+    assert (root / "changelog.d" / "1.added.md").is_file()
