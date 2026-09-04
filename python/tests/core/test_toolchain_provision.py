@@ -300,9 +300,46 @@ def test_west_sdk_install_argv_uses_the_non_deprecated_gnu_toolchains_flag():
         "/venv/bin/west", "sdk", "install",
         "--version", "1.0.1",
         "--gnu-toolchains", "arm-zephyr-eabi",
+        "--no-hosttools",
         "--install-dir", "/tmp/x",
     ]
     assert "--toolchains" not in argv  # the deprecated alias, never emitted
+
+
+def test_west_sdk_install_argv_always_passes_no_hosttools():
+    """tan-cli#1176 regression guard. Without `--no-hosttools`, `west sdk
+    install` runs the pinned SDK's own `setup.sh -t arm-zephyr-eabi -h`, whose
+    bundled host-tools install needs `file(1)` on PATH. `file` is NOT one of
+    the documented prerequisites (`cmake ninja-build python3 python3-pip
+    python3-venv git curl xz-utils wget`), so on a host carrying only those --
+    a bare `ubuntu:24.04` is the measured case -- the step dies with
+
+        ERROR: Host tools installation failed
+        FATAL ERROR: command "<sdk>/setup.sh -t arm-zephyr-eabi -h" failed
+
+    `bootstrap_cmd._acquire_toolchain` then retries three times and `tan
+    bootstrap` exits 1 with "bootstrap: INCOMPLETE -- toolchain-install did
+    not install, so this workspace cannot build yet." That is #1176: the whole
+    automatic acquisition path (tan-cli#990 / ADR 0021 Lane 1 P1) unusable on
+    the exact host class the quickstart documents.
+
+    Asserted across several argument shapes, and UNCONDITIONALLY -- a future
+    edit that made the flag conditional on probing for `file(1)` would produce
+    two differently-shaped installs the store cannot tell apart (it is keyed
+    by artifact and version alone, and the stamp records the pinned version
+    plus the manifest digest; neither encodes the flag).
+    """
+    for version, install_dir in (
+        ("1.0.1", "/tmp/x"),
+        ("0.17.4", "/home/u/.alp/toolchains/zephyr-sdk-0.17.4-arm-zephyr-eabi"),
+    ):
+        argv = tp.west_sdk_install_argv("west", version=version, install_dir=install_dir)
+        assert "--no-hosttools" in argv, (
+            f"west_sdk_install_argv dropped `--no-hosttools` ({argv!r}) -- that "
+            "reintroduces tan-cli#1176: the SDK's host-tools step then runs and "
+            'needs `file(1)`, failing with "Host tools installation failed" on '
+            "any host with only the documented prerequisites."
+        )
 
 
 # ---------------------------------------------------------------------------
