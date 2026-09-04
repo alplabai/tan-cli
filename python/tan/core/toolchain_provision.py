@@ -451,12 +451,89 @@ def low_disk_note(free_bytes: int) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+#: Passed on EVERY `west sdk install` tan spawns (tan-cli#1176), never
+#: probed for. Without it `west` runs the pinned SDK's own `setup.sh -t
+#: arm-zephyr-eabi -h`, whose bundled host-tools install needs `file(1)` on
+#: `PATH`. `file` is NOT among the prerequisites the quickstart documents
+#: (`cmake ninja-build python3 python3-pip python3-venv git curl xz-utils
+#: wget`), so on a host carrying only those -- a bare `ubuntu:24.04` is the
+#: measured case -- the step dies with:
+#:
+#:     Installing host tools ...
+#:     ERROR: Host tools installation failed
+#:     FATAL ERROR: command "<sdk>/setup.sh -t arm-zephyr-eabi -h" failed
+#:
+#: `bootstrap_cmd._acquire_toolchain` then retries three times and `tan
+#: bootstrap` exits 1 with "bootstrap: INCOMPLETE -- toolchain-install did not
+#: install, so this workspace cannot build yet." The flag is what makes the
+#: automatic acquisition path (tan-cli#990 / ADR 0021 Lane 1 P1) work on the
+#: exact host class the quickstart documents, and it is what makes
+#: `doctor_cmd`'s own note -- that `file` stays out of the prerequisites
+#: manifest because "`tan bootstrap` genuinely does not need it" -- TRUE;
+#: between #990 and #1176 that sentence was false. It is also the same flag
+#: alp-sdk's `metadata/bootstrap.json` (`manualInstallHints.posix.note[0]`,
+#: vendored at `contract/fixtures/bootstrap/manifest.json` and mirrored in
+#: `tan.core.bootstrap`'s own hint text) and
+#: `.github/workflows/onramp-clean-container.yml` have always used. NOT the
+#: README's manual command, which is `west sdk install --version 1.0.1 -t
+#: arm-zephyr-eabi` and carries no `--no-hosttools` on purpose: it mirrors
+#: `doctor_cmd.zephyr_sdk_install_command()` / the frozen Rust oracle
+#: verbatim, so it DOES run the host-tools step and DOES need `file` -- which
+#: is exactly what the README says beside it.
+#:
+#: UNCONDITIONAL, and that is deliberate. Passing it only when `file(1)` is
+#: absent would produce two differently-shaped installs -- one with
+#: `hosttools/`, one without -- that are INDISTINGUISHABLE in the store: the
+#: store is keyed by artifact and version alone
+#: (`~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`) and the
+#: verification stamp records the pinned version plus the manifest digest,
+#: neither of which encodes the flag. A host that installed one shape and
+#: later wanted the other would read a matching stamp and skip. One shape,
+#: always.
+#:
+#: WHAT IT GIVES UP, stated rather than glossed: the whole `hosttools/`
+#: bundle. Measured on a real `zephyr-sdk-1.0.1` install,
+#: `hosttools/sysroots/x86_64-pokysdk-linux/usr/bin/` holds 39 binaries, among
+#: them `dtc` (plus `fdtdump`/`fdtget`/`fdtoverlay`/`fdtput`), `openocd`,
+#: `bossac` and the `qemu-system-*` family;
+#: `contract/fixtures/toolchains/toolchains.json` measures the same bundle at
+#: 1242632545 bytes, 61% of the 2026739200-byte SDK. Zephyr treats both `dtc`
+#: and `openocd` as optional -- `cmake/modules/FindHostTools.cmake` says so in
+#: as many words for openocd ("openocd is an optional dependency", a bare
+#: `find_program(OPENOCD openocd)`) -- and the container job above builds a
+#: real `zephyr.elf` with this flag and no `dtc`, `gperf` or `file` anywhere
+#: on the host.
+#:
+#: The consequence worth naming beyond `dtc` is OPENOCD. `tan debug-config
+#: --server openocd` fills `serverpath`/`searchDir` from `runners.yaml`'s
+#: `config.openocd` / `config.openocd_search`, and Zephyr writes those keys
+#: only inside `if(OPENOCD)` (`cmake/flash/CMakeLists.txt`), resolved from the
+#: SDK's own `list(APPEND CMAKE_PREFIX_PATH ${HOST_TOOLS_HOME}/usr)`
+#: (`<sdk>/cmake/zephyr/host-tools.cmake`). With no `hosttools/` and no system
+#: OpenOCD both keys are simply ABSENT -- never `OPENOCD-NOTFOUND` -- so
+#: `debug_launch.apply_launch_resolution` inserts neither (both are additive,
+#: neither is a `<resolved-...>` placeholder) and `_preview_notes_for`'s
+#: "Placeholder fields" warning does not fire. The emitted configuration stays
+#: valid and `configFiles` still resolves (it comes from `board.cmake`, not
+#: from `hosttools/`); cortex-debug then falls back to its own
+#: `openocd`-on-`PATH` lookup, and a host with none learns that from the debug
+#: adapter at session start rather than from `tan`. That degradation is
+#: SILENT, which is worth knowing; `tan support-bundle` does probe `openocd`
+#: on `PATH` and reports it.
+NO_HOSTTOOLS_FLAG = "--no-hosttools"
+
+
 def west_sdk_install_argv(west: str, *, version: str, install_dir: str) -> list[str]:
     """The one place this argv is assembled -- `--gnu-toolchains`, not the
     deprecated `--toolchains` alias (`scripts/west_commands/sdk.py`: the
     deprecated spelling only warns-and-aliases today, but a customer reading
     `data.plannedCommands` under `--dry-run` should see the command tan will
-    actually run, not one the ADR's own text used loosely)."""
+    actually run, not one the ADR's own text used loosely).
+
+    [`NO_HOSTTOOLS_FLAG`] rides on every one of these, unconditionally --
+    see its own comment for the `file(1)` failure it prevents (tan-cli#1176),
+    why it is not probed for, and what it gives up (`dtc`, OpenOCD).
+    """
     return [
         west,
         "sdk",
@@ -465,6 +542,7 @@ def west_sdk_install_argv(west: str, *, version: str, install_dir: str) -> list[
         version,
         "--gnu-toolchains",
         TOOLCHAIN_COMPONENT,
+        NO_HOSTTOOLS_FLAG,
         "--install-dir",
         install_dir,
     ]

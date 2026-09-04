@@ -2293,6 +2293,10 @@ def test_a_dry_run_with_a_toolchain_manifest_plans_the_west_sdk_install_call(tmp
     assert len(install_cmds) == 1, planned
     assert "--gnu-toolchains arm-zephyr-eabi" in install_cmds[0]
     assert "--version 1.0.1" in install_cmds[0]
+    # tan-cli#1176: the published plan is what a customer copies and runs by
+    # hand, so the flag that makes the command work on a host without
+    # `file(1)` has to be visible here too, not only in the spawned argv.
+    assert "--no-hosttools" in install_cmds[0]
 
 
 def test_a_dry_run_never_puts_the_github_token_in_the_envelope(tmp_path):

@@ -195,9 +195,16 @@ What those commands do:
    compiler and re-verifies its stamp rather than reinstalling. Pass
    `--no-toolchain` to skip this phase (the rest of `bootstrap` is
    unaffected, and `native_sim` builds never need a cross toolchain at all).
-   On a minimal Linux host this phase also needs `file` on PATH
-   (Debian/Ubuntu: `sudo apt-get install -y file`); without it the underlying
-   `west sdk install`'s own host-tools step fails with "Host tools installation failed" and names nothing.
+   This phase does **not** need `file` on PATH, on any host: it passes
+   `--no-hosttools` to the underlying `west sdk install` (tan-cli#1176), so
+   the SDK's own host-tools step -- the part that needs `file`, and that dies
+   with "Host tools installation failed" naming nothing without it -- never
+   runs at all. That is deliberate: it is what lets this phase complete on a
+   host carrying only the prerequisites above. What it skips is the SDK's
+   `hosttools/` bundle, so this phase installs no `dtc`, `openocd`, `bossac`
+   or `qemu-system-*`; Zephyr treats `dtc` and `openocd` as optional and a
+   real-silicon build needs neither, but if you want them, run the manual
+   command below WITHOUT `--no-hosttools` (and then you do need `file`).
    This phase lists the SDK releases through the GitHub API, whose anonymous
    quota is counted **per source IP** -- so behind a shared office egress, a
    corporate VPN or a runner pool it can be exhausted by traffic that is not

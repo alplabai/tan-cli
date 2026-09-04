@@ -1217,7 +1217,19 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
     # Named HERE rather than added to the manifest's `prerequisites`, because
     # `tan bootstrap` genuinely does not need it and succeeds without it --
     # promoting it there would refuse hosts over a tool the bootstrap never
-    # uses. This is the message immediately preceding the failure, which is
+    # uses. What MAKES that claim true is that `tan bootstrap`'s automatic
+    # acquisition path passes `--no-hosttools`
+    # (`tan.core.toolchain_provision.west_sdk_install_argv`), so it never runs
+    # the SDK's host-tools step and never reaches `file` at all; between
+    # tan-cli#990 (which added that path) and tan-cli#1176 (which added the
+    # flag) the sentence above was FALSE -- `tan bootstrap` ran the very
+    # command this note is about and failed on exactly these two lines. Do not
+    # delete the flag without moving `file` into the prerequisites manifest.
+    # The command in `zephyr_sdk_install_command()` above carries no
+    # `--no-hosttools` on purpose (it mirrors the Rust oracle verbatim), which
+    # is why the note below still applies to it.
+    #
+    # This is the message immediately preceding the failure, which is
     # where it is actionable. Same shape as `seven_zip_check` above: a
     # host-tool prerequisite of `west sdk install` itself, surfaced beside the
     # command that needs it rather than folded into the bootstrap gate.
