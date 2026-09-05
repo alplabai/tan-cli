@@ -121,7 +121,7 @@ CASE_METADATA = frozenset(
 #: harness that cannot spawn the child reports a contract failure it never
 #: measured.
 #:
-#: Opt-in and absent for 25 of the 26 cases: every one of those answers from its
+#: Opt-in and absent for 24 of the 27 cases: every one of those answers from its
 #: OWN copied inputs, and pinning host state they never read would only hide a
 #: real regression in how they read it.
 CASE_ENV = "env.json"

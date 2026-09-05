@@ -127,9 +127,13 @@ def _pyserial_missing() -> MonitorError:
 #: plugged in, `data.availablePorts` would record as `[]` forever, pinning
 #: nothing the issue asked for. Set to a JSON-encoded `[[device, description],
 #: ...]` array, this REPLACES the pyserial enumeration outright, in the exact
-#: `[(device, description)]` shape every caller (`_refuse_listing_ports`,
-#: `_port_is_usable`) already expects -- so nothing downstream of this function
-#: needs to know the seam exists. See
+#: `[(device, description)]` shape every regular CALLER (`_refuse_listing_ports`,
+#: `_port_is_usable`) already expects, so none of THOSE need to know the seam
+#: exists. `_run_monitor` is the one exception: it also checks this variable
+#: directly, to skip its own "pyserial is importable" precheck (see that
+#: function's comment) -- without that second check this golden would depend
+#: on whether pyserial happens to be installed in whatever environment replays
+#: it, the exact host-dependence this seam exists to remove. See
 #: `contract/envelopes/monitor-no-port/PROVENANCE.txt` for how a golden arms
 #: it via `env.json`.
 _TEST_PORTS_ENV = "TAN_MONITOR_TEST_PORTS_JSON"
@@ -149,11 +153,18 @@ def _available_ports() -> list[tuple[str, str]]:
     for what is simply an optional dependency the customer never installed.
 
     `_TEST_PORTS_ENV`, when set, short-circuits all of the above -- see its own
-    comment.
+    comment. A malformed value (bad JSON, the wrong shape) is a harness/fixture
+    bug, not a customer-facing one -- the same "do not let this become
+    `monitor.internal-failure`" reasoning the ImportError guard above states
+    for itself -- so it is swallowed and falls through to the real enumeration
+    below rather than escaping as an unexpected exception.
     """
     fake = os.environ.get(_TEST_PORTS_ENV)
     if fake is not None:
-        return [(str(device), str(description)) for device, description in json.loads(fake)]
+        try:
+            return [(str(device), str(description)) for device, description in json.loads(fake)]
+        except (ValueError, TypeError):
+            pass
 
     try:
         from serial.tools import list_ports  # noqa: PLC0415 (optional at runtime)

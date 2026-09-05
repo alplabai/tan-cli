@@ -39,11 +39,17 @@ project), the `monitor.no-port` issue (`monitor_cmd.py::_refuse_listing_ports`)
 with its "no --port given -- available serial ports: ..." message, and --
 the field this case exists to freeze -- `data.availablePorts`, a two-entry
 array pinning BOTH shapes the issue named: one port with a real `description`
-("COM7"/"USB Serial") and one with none ("COM8"/`""`, the empty string
-`_ports_data` emits when pyserial reports no description -- the value the
-alp-sdk-vscode consumer falls back from to the literal "n/a" it renders,
-which is therefore a fact about the CONSUMER's own fallback, not something
-this envelope carries). A rename of `device`, `description` or
+("COM7"/"USB Serial") and one with none ("COM8"/`"n/a"`). `"n/a"`, not `""`,
+because pyserial's own `ListPortInfo.__init__`
+(`serial/tools/list_ports_common.py`) sets `self.description = "n/a"` as its
+default and only ever overwrites it with a real string -- a description-less
+port's `description` is `"n/a"`, truthy, so `monitor_cmd.py`'s own
+`p.description or ""` guard (`_available_ports`) never fires for anything
+`comports()` actually returns; `""` is reachable only by feeding this seam a
+literal empty string, which is not what tan sends. `"n/a"` is therefore tan's
+own word for "no description", verbatim what alp-sdk-vscode's
+`packages/alp-core/src/monitor/ports.ts` says it treats it as -- not a
+consumer-side fallback rendering. A rename of `device`, `description` or
 `availablePorts` itself now fails here instead of shipping silently.
 
 Why this case carries an `env.json` -- the "reads a live serial port" problem
@@ -89,3 +95,18 @@ whether pyserial is installed in the box that replays it.
 
 `PATH` is left untouched (unlike `model-doctor-no-sdk`'s `env.json`): nothing
 on this path calls `shutil.which`, so there is nothing to pin.
+
+This case's `env.json`, like the other two, is bundled verbatim into the
+PUBLISHED `envelope-contract.json` release asset (`release.yml`'s "Bundle the
+envelope contract" step). That means `TAN_MONITOR_TEST_PORTS_JSON`'s name and
+shape ship to every consumer, in tension with `monitor_cmd.py`'s own comment
+that the seam is "never a documented, `--help`-visible flag" -- a reader of
+the published contract CAN discover and set it. Decided deliberately, not
+overlooked: the other two `env.json`-carrying cases (`PATH`) already publish a
+variable that steers the command's answer, and this one is no different in
+kind -- setting it only changes what `tan monitor` reports back to the caller
+that set it, in that caller's own process, so there is no privilege or
+cross-user exposure to guard against. The fix, if this is ever judged worth
+one, is to keep the seam out of `envelope-contract.json` rather than out of
+the golden -- e.g. a bundler-side name filter -- not to drop this case's
+`env.json`, which the deterministic recording still requires.
