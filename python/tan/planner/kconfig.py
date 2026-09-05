@@ -89,12 +89,12 @@ def _emit_extra_library_profile(
 
     Failures (malformed YAML, missing keys) emit a single `#`-prefixed
     diagnostic comment so the customer sees the failure in the slice's
-    alp.conf rather than getting silent drop-out.
+    alp.conf rather than silent drop-out (tan-cli#1122: except widened).
     """
-    profile_path = (REPO / profile_rel).resolve()
     try:
+        profile_path = REPO / profile_rel
         doc = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as e:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
         return [f"# extra_libraries[{name}] profile parse failed: {e}"]
     if not isinstance(doc, dict):
         return [f"# extra_libraries[{name}] profile is not a mapping"]
