@@ -143,6 +143,7 @@ from pathlib import Path
 
 import typer
 
+from tan.commands.build.toolchain import _is_toolchain_wreckage, _toolchain_store_scan_root
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
     global_default_pointer_fix_hint,
@@ -1294,10 +1295,49 @@ def _host_toolchain_matching_pin(
     name guess. A missing or unreadable `sdk_version` -- an unusual layout
     `_zephyr_sdk_root_valid` still validated on compiler-binary presence
     alone -- is honestly "does not match", not a guessed pass.
+
+    **Never returns an entry inside tan's OWN ADR 0021 store for THIS pin
+    (`_toolchain_store_dir(manifest)`) -- this adoption path is for a
+    toolchain tan did NOT install (tan-cli#990's `~/zephyr-sdk-1.0.1` case),
+    where a version-string match is the only signal available. Since
+    tan-cli#1186 widened `_zephyr_sdk_scan_roots` to also cover that store
+    (for `zephyrSdk`'s sake), `_zephyr_sdk_detected_root` can now return an
+    entry living INSIDE it too -- and that entry is already governed by the
+    stricter, digest-precise `stamp_matches_pin` check `toolchain_check` runs
+    first. A store directory can carry a real compiler and a `sdk_version`
+    matching the pin's nominal version while its stamp names a DIFFERENT
+    digest (the pin moved without the version string changing, ADR 0021's
+    own "stamped 1.0.1 against a moved pin" case) -- measured: without this
+    guard that combination made this function return the store entry as a
+    version-string match, turning the correct stamp-based `fail` a few lines
+    below in `toolchain_check` into a `pass` it never reaches. Trusting the
+    stamp alone for anything inside tan's own store, and never re-deriving a
+    looser verdict for it here, keeps the two checks from disagreeing on the
+    same directory.
+
+    Deliberately keyed on `_toolchain_store_dir(manifest)` -- the one
+    per-version LEAF tan's own installs use -- rather than the broader
+    `_toolchain_store_scan_root()` (the whole configured root, `~/.alp/
+    toolchains` or `$ALP_TOOLCHAIN_ROOT` verbatim). `resolve_toolchain_root`
+    takes an env override VERBATIM as the root, with no `/toolchains`
+    suffix (`toolchain_provision.resolve_toolchain_root`), so ADR 0021's own
+    documented bench/CI escape hatch -- `$ALP_TOOLCHAIN_ROOT` pointed at an
+    ancestor like `$HOME` or `/opt` -- makes the store root coincide with a
+    directory a hand-installed host toolchain also legitimately lives under.
+    Excluding the whole root there would misread that adopted toolchain as
+    "inside tan's own store" and refuse to adopt it, turning a
+    previously-passing configuration into a `toolchain` FAIL; excluding only
+    the specific `<root>/<store leaf for this manifest version>` directory
+    keeps the guard narrow enough to still hold under that escape hatch.
     """
     root = _zephyr_sdk_detected_root()
     if root is None:
         return None
+    try:
+        if root.resolve().is_relative_to(_toolchain_store_dir(manifest).resolve()):
+            return None
+    except OSError:
+        pass
     version_text = _read_text(root / toolchain_provision.SDK_VERSION_FILE_RELPATH)
     if version_text is None or version_text.strip() != manifest.version:
         return None
@@ -2758,7 +2798,23 @@ def _zephyr_sdk_root_valid(root: Path) -> bool:
 def _zephyr_sdk_scan_roots() -> list[Path]:
     """Every directory `_zephyr_sdk_detected` scans for a `zephyr-sdk-*`
     install, besides `/opt` -- `$HOME`, `%USERPROFILE%` AND `Path.home()`,
-    ALL of them, never `HOME or USERPROFILE`.
+    ALL of them, never `HOME or USERPROFILE` -- PLUS the ADR 0021
+    artifact-keyed store (`~/.alp/toolchains`, or `$ALP_TOOLCHAIN_ROOT`)
+    `tan bootstrap`'s own toolchain phase installs into, two directory
+    levels below `$HOME` and invisible to the first four roots (tan-cli#1186:
+    a real compiler planted at that exact bootstrap-filled path was measured
+    returning `False` here before this root was added).
+    `_toolchain_store_scan_root`/`_is_toolchain_wreckage` are reused from
+    `build.toolchain` rather than re-derived -- the SAME store root
+    `${TOOLCHAIN_ROOT}` substitution (tan-cli#547) already scans, so this
+    check and that one cannot independently drift on where tan's own
+    installs live, and the SAME `.tmp-<pid>` wreckage exclusion applies (an
+    interrupted acquisition's leftover also starts with `zephyr-sdk`). Routed
+    through the same string-level `seen` dedup as the other four roots (an
+    `ALP_TOOLCHAIN_ROOT` pointed at `$HOME` or `/opt` -- both legitimate,
+    e.g. a bench-machine escape hatch -- would otherwise list that directory
+    twice; harmless for this yes/no scan but not for the invariant the other
+    roots already hold).
 
     Under Git Bash/MSYS on Windows, `HOME` is a POSIX-translated path
     (`/c/Users/dev`) while the real Zephyr SDK sits under the native
@@ -2772,7 +2828,7 @@ def _zephyr_sdk_scan_roots() -> list[Path]:
     not assumed redundant.
     """
     roots = [Path("/opt")]
-    seen: set[str] = set()
+    seen: set[str] = {str(roots[0])}
     for raw in (os.environ.get("HOME"), os.environ.get("USERPROFILE")):
         if raw and raw not in seen:
             seen.add(raw)
@@ -2783,6 +2839,10 @@ def _zephyr_sdk_scan_roots() -> list[Path]:
         home = None
     if home is not None and str(home) not in seen:
         roots.append(home)
+        seen.add(str(home))
+    store_root = _toolchain_store_scan_root()
+    if str(store_root) not in seen:
+        roots.append(store_root)
     return roots
 
 
@@ -2807,17 +2867,29 @@ def _zephyr_sdk_detected_root() -> Path | None:
         except OSError:
             continue
         for entry in entries:
-            if entry.name.startswith("zephyr-sdk") and _zephyr_sdk_root_valid(entry):
+            if (
+                entry.name.startswith("zephyr-sdk")
+                and not _is_toolchain_wreckage(entry.name)
+                and _zephyr_sdk_root_valid(entry)
+            ):
                 return entry
     return None
 
 
 def _zephyr_sdk_detected() -> bool:
     """`True` when a Zephyr SDK toolchain is installed anywhere this host
-    would resolve one from. Mirrors `crate::toolchain::resolve_toolchain_root`
-    /`zephyr_sdk_detected` (not yet ported for build-plan `${TOOLCHAIN_ROOT}`
-    substitution -- see `build_cmd.py`'s `toolchain_root=None` -- but doctor
-    only needs the yes/no, same split the Rust module docstring draws):
+    would resolve one from. Descends from `crate::toolchain::
+    resolve_toolchain_root`/`zephyr_sdk_detected` in the now-deleted Rust
+    oracle (`crates/` retired in tan-cli#601) -- doctor only ever needed that
+    pair's yes/no half. Build-plan `${TOOLCHAIN_ROOT}` substitution is its own
+    resolver now, not `None` as it was when this docstring was last true:
+    `build.toolchain.resolve_toolchain_root` (tan-cli#547), which
+    `build_cmd.py` calls and passes on as `toolchain_root=toolchain.root`.
+    That resolver is stricter on purpose -- a host with SEVERAL candidate
+    installs and no `ZEPHYR_SDK_INSTALL_DIR` to choose between them must FAIL
+    a substitution (the wrong one silently baked into a slice is worse than
+    refusing), but should not fail doctor's plain yes/no here, which only
+    needs to know that AT LEAST one usable toolchain exists somewhere:
     `ZEPHYR_SDK_INSTALL_DIR`, honored ONLY when the directory it names
     actually CONTAINS the toolchain (`_zephyr_sdk_root_valid` -- the variable
     is exported from a shell profile and routinely outlives the SDK it once
@@ -2826,9 +2898,10 @@ def _zephyr_sdk_detected() -> bool:
     -- trusting presence alone would report a false Pass here and the real
     failure would surface later as a raw CMake toolchain error); else any
     `zephyr-sdk*`-named directory, similarly validated, directly under
-    `_zephyr_sdk_scan_roots()`. Several installs still count as detected --
-    this is only doctor's yes/no, not the ambiguous-root pick the build-plan
-    substitution path will need.
+    `_zephyr_sdk_scan_roots()` -- which now also covers the ADR 0021
+    artifact-keyed store `tan bootstrap` fills (tan-cli#1186). Several
+    installs still count as detected here -- this is only doctor's yes/no,
+    not the ambiguous-root pick `${TOOLCHAIN_ROOT}` substitution needs.
 
     Never raises: an unreadable or missing scan root is "nothing found
     there", not a doctor crash. Delegates to `_zephyr_sdk_detected_root` so
