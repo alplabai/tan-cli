@@ -10,11 +10,13 @@ Issue          : tan-cli#1165
 Branch         : feat/1165-monitor-no-port-envelope (off dev @ 4d4190a2)
 
 This is a NEW golden, not a re-recording: there was no previous recording to
-be wrong. `monitor` was the only command surface with a `data` field the
-extension reads (`data.availablePorts[].{device,description}`,
-alp-sdk-vscode `src/monitor.ts::listSerialPorts`) that no golden pinned at
-all -- a rename of either key would make the extension silently report "No
-serial ports were found" while `tan monitor` itself reported a full list.
+be wrong. `monitor` was the only command surface with a `data` field a
+consumer reads (`data.availablePorts[].{device,description}`, alp-sdk-vscode
+`src/monitor.ts::listSerialPorts` -- alp-sdk-vscode#649, OPEN, not merged, as
+of this recording; verified directly against that PR's head commit, not
+assumed from `dev`) that no golden pinned at all -- a rename of either key
+would make that extension silently report "No serial ports were found" while
+`tan monitor` itself reported a full list.
 
 How it was captured
 --------------------
@@ -47,9 +49,11 @@ port's `description` is `"n/a"`, truthy, so `monitor_cmd.py`'s own
 `p.description or ""` guard (`_available_ports`) never fires for anything
 `comports()` actually returns; `""` is reachable only by feeding this seam a
 literal empty string, which is not what tan sends. `"n/a"` is therefore tan's
-own word for "no description", verbatim what alp-sdk-vscode's
-`packages/alp-core/src/monitor/ports.ts` says it treats it as -- not a
-consumer-side fallback rendering. A rename of `device`, `description` or
+own word for "no description" -- confirmed against alp-sdk-vscode#649's
+`packages/alp-core/src/monitor/ports.ts` (fetched via `gh api` at that PR's
+current head): "tan sends the literal string `"n/a"` when it has nothing, and
+that is tan's word, not ours to invent when the field is absent entirely" --
+not a consumer-side fallback rendering. A rename of `device`, `description` or
 `availablePorts` itself now fails here instead of shipping silently.
 
 Why this case carries an `env.json` -- the "reads a live serial port" problem
@@ -57,19 +61,12 @@ Why this case carries an `env.json` -- the "reads a live serial port" problem
 `_available_ports()`'s real source, pyserial's own
 `serial.tools.list_ports.comports()`, enumerates whatever serial hardware is
 physically attached to the host running it. Measured live on the recording
-box:
-
-    COM31  Standard Serial over Bluetooth link (COM31)
-    COM27  Standard Serial over Bluetooth link (COM27)
-    COM26  Standard Serial over Bluetooth link (COM26)
-    COM29  Standard Serial over Bluetooth link (COM29)
-    COM28  Standard Serial over Bluetooth link (COM28)
-    COM30  Standard Serial over Bluetooth link (COM30)
-    COM38  USB Serial Port (COM38)
-    COM24  USB Serial Port (COM24)
+box: eight ports, in two families -- six Bluetooth virtual serial pairs and
+two USB serial adapters (each described only as "Standard Serial over
+Bluetooth link" or "USB Serial Port", never a vendor/product string).
 
 A golden recorded straight off that list would pin this specific machine's
-Bluetooth pairings and a USB adapter's enumeration order -- not the CONTRACT --
+Bluetooth pairing count and a USB adapter's enumeration order -- not the CONTRACT --
 and would go RED on a CI runner with nothing plugged in (an empty
 `availablePorts: []`, which pins nothing the issue asked for) and on every
 other developer's desk (a different list entirely). There was no existing
