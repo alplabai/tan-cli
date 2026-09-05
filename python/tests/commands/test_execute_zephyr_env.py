@@ -402,6 +402,46 @@ def test_fills_zephyr_sdk_install_dir_from_tans_verified_store(tmp_path, monkeyp
     assert Path(seen["ZEPHYR_SDK_INSTALL_DIR"]).samefile(store_dir)
 
 
+def test_a_scan_visible_host_sdk_beats_tans_own_arm_only_store(tmp_path, monkeypatch):
+    """tan-cli#1209 review MINOR: tan's store is installed `-t
+    arm-zephyr-eabi` ONLY. Before this fix a verified store outranked
+    CMake's own prefix scan for EVERY slice, so a host that ALSO carries a
+    full, independent SDK (found by `_scan_roots()`, exactly where CMake's
+    own `FindZephyr-sdk.cmake` looks) got `ZEPHYR_SDK_INSTALL_DIR` forced to
+    the arm-only store regardless -- able to fail a non-ARM slice that
+    configured fine unaided, and diverging from `doctor_cmd.
+    _zephyr_sdk_scan_roots`, which ranks that same store LAST. Fails before
+    the fix (`ZEPHYR_SDK_INSTALL_DIR` in `seen`, naming the arm-only
+    store); passes once the host scan takes precedence and the key is left
+    unfilled for CMake's own scan to resolve."""
+    real_ws, sdk_root, build_root = _make_workspace(tmp_path)
+    manifest_text = _small_toolchain_manifest()
+    _write_toolchain_manifest(sdk_root, manifest_text)
+    manifest = tp.parse_toolchain_manifest(manifest_text)
+    home = tmp_path / "home"
+    _point_home_at(monkeypatch, home)
+    store_dir = home / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
+    _write_verified_stamp(store_dir, manifest)
+    # A full, independent host SDK -- top-level under HOME, exactly where
+    # `_scan_roots()`/CMake's own prefix scan looks, and where tan's own
+    # store (two levels deeper, under `.alp/toolchains/`) is invisible.
+    (home / "zephyr-sdk-9.9.9").mkdir()
+    out_file = tmp_path / "env.json"
+
+    out = execute_slices(
+        parse_build_plan(_plan(_probe_cmd(out_file))),
+        build_root=build_root,
+        env_lookup=lambda k: None,
+        gap_fillers=[],
+        on_output=lambda s: None,
+        sdk_root=str(sdk_root),
+    )
+
+    assert out[0].status == "succeeded", out[0].message
+    seen = json.loads(out_file.read_text(encoding="utf-8"))
+    assert "ZEPHYR_SDK_INSTALL_DIR" not in seen
+
+
 def test_an_inherited_zephyr_sdk_install_dir_survives_verbatim_despite_a_valid_stamp(
     tmp_path, monkeypatch
 ):

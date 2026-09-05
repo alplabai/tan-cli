@@ -28,6 +28,7 @@ from tan.commands.build.toolchain import (
     NO_TOOLCHAIN_ADVICE,
     ToolchainResolution,
     _scan_roots,
+    host_scan_has_toolchain,
     resolve_toolchain_root,
     verified_store_dir,
 )
@@ -491,3 +492,49 @@ def test_verified_store_dir_returns_the_store_when_the_stamp_matches_the_pin(tmp
     result = verified_store_dir(str(sdk_root))
     assert result is not None
     assert result.resolve() == store_dir.resolve()
+
+
+# ---------------------------------------------------------------------------
+# `host_scan_has_toolchain` (tan-cli#1209 review MINOR) -- the precedence
+# narrowing: tan's own arm-only store must not outrank a fuller, independent
+# host SDK that CMake's own prefix scan would already find.
+# ---------------------------------------------------------------------------
+
+
+def test_host_scan_has_toolchain_is_false_with_nothing_on_the_host(monkeypatch, tmp_path):
+    monkeypatch.setattr("tan.commands.build.toolchain._scan_roots", lambda: [tmp_path])
+    assert host_scan_has_toolchain() is False
+
+
+def test_host_scan_has_toolchain_is_true_for_an_independent_host_install(monkeypatch, tmp_path):
+    _install(tmp_path, "zephyr-sdk-9.9.9")
+    monkeypatch.setattr("tan.commands.build.toolchain._scan_roots", lambda: [tmp_path])
+    assert host_scan_has_toolchain() is True
+
+
+def test_host_scan_has_toolchain_ignores_tans_own_store_leaf(monkeypatch, tmp_path):
+    """The `$ALP_TOOLCHAIN_ROOT`-pointed-at-an-ancestor coincidence
+    (`test_alp_toolchain_root_ancestor_with_stamped_leaf_exports_the_leaf_
+    never_home`, `test_execute_zephyr_env.py`): tan's own stamped leaf can
+    sit directly under a directory `_scan_roots()` also names. It must
+    never be double-counted as an INDEPENDENT host toolchain."""
+    from tan.commands.build import toolchain as bt
+
+    store_leaf = _install(tmp_path, "zephyr-sdk-1.0.1-arm-zephyr-eabi")
+    monkeypatch.setattr(bt, "_scan_roots", lambda: [tmp_path])
+    monkeypatch.setattr(bt, "_toolchain_store_scan_root", lambda: tmp_path)
+    assert store_leaf.exists()
+    assert host_scan_has_toolchain() is False
+
+
+def test_host_scan_has_toolchain_still_sees_a_sibling_outside_the_store(monkeypatch, tmp_path):
+    """The ancestor-coincidence exclusion is scoped to the store's own
+    subtree -- a genuinely separate install living OUTSIDE it (a normal
+    scan root with no `$ALP_TOOLCHAIN_ROOT` override at all) still counts,
+    proving the exclusion above is not simply "always False"."""
+    from tan.commands.build import toolchain as bt
+
+    _install(tmp_path / "scan", "zephyr-sdk-9.9.9")
+    monkeypatch.setattr(bt, "_scan_roots", lambda: [tmp_path / "scan"])
+    monkeypatch.setattr(bt, "_toolchain_store_scan_root", lambda: tmp_path / "store")
+    assert host_scan_has_toolchain() is True

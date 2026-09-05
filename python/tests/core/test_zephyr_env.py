@@ -118,16 +118,39 @@ def test_a_plan_pinned_zephyr_sdk_install_dir_is_not_overwritten():
     assert not any(key == "ZEPHYR_SDK_INSTALL_DIR" for key, _ in got)
 
 
-def test_an_inherited_zephyr_sdk_install_dir_survives_verbatim_over_the_store():
-    """An inherited, non-blank `ZEPHYR_SDK_INSTALL_DIR` is the user's
-    deliberate choice -- it beats tan's own verified store, and is not
-    probed for existence."""
+def test_an_inherited_zephyr_sdk_install_dir_survives_verbatim_over_the_store(tmp_path):
+    """An inherited `ZEPHYR_SDK_INSTALL_DIR` naming a path that EXISTS is the
+    user's deliberate choice -- it beats tan's own verified store, verbatim
+    (not normalised)."""
+    real = tmp_path / "zephyr-sdk-9.9.9"
+    real.mkdir()
     got = zephyr_env_overrides(
         None, None, slice_env={}, env_append_path={},
-        inherited=lambda k: "/user/zephyr-sdk-9.9.9" if k == "ZEPHYR_SDK_INSTALL_DIR" else None,
+        inherited=lambda k: str(real) if k == "ZEPHYR_SDK_INSTALL_DIR" else None,
         toolchain_store=Path("/store/zephyr-sdk-1.0.1-arm-zephyr-eabi"),
     )
     assert not any(key == "ZEPHYR_SDK_INSTALL_DIR" for key, _ in got)
+
+
+def test_an_inherited_zephyr_sdk_install_dir_naming_a_dead_path_falls_through_to_the_store(
+    tmp_path,
+):
+    """tan-cli#1209 review MINOR: an inherited `ZEPHYR_SDK_INSTALL_DIR`
+    pointing at a path that does NOT exist (a stale pointer to a deleted
+    SDK) must not shadow a verified store -- `build.toolchain.
+    resolve_toolchain_root`'s own rule for the SAME variable, and
+    `doctor_cmd._zephyr_sdk_detected_root`'s. Before this fix the dead
+    pointer survived verbatim, so a spawned `west build`/CMake child got a
+    `ZEPHYR_SDK_INSTALL_DIR` naming nothing -- a cmake configure failure --
+    while `tan doctor` reported the store present, the same
+    three-commands-disagree symptom #1209 exists to close."""
+    dead = tmp_path / "zephyr-sdk-9.9.9"  # never created
+    got = zephyr_env_overrides(
+        None, None, slice_env={}, env_append_path={},
+        inherited=lambda k: str(dead) if k == "ZEPHYR_SDK_INSTALL_DIR" else None,
+        toolchain_store=Path("/store/zephyr-sdk-1.0.1-arm-zephyr-eabi"),
+    )
+    assert ("ZEPHYR_SDK_INSTALL_DIR", str(Path("/store/zephyr-sdk-1.0.1-arm-zephyr-eabi"))) in got
 
 
 def test_a_blank_inherited_zephyr_sdk_install_dir_does_not_block_the_store():

@@ -1200,19 +1200,39 @@ PY
     # toolchain=pass`; the (now-removed) guard skipped this step's install on
     # that verdict; the very next `tan build` then failed cmake's configure
     # at a `find_package` call ("Configuring incomplete, errors occurred!").
-    # `tan build` never exports `ZEPHYR_SDK_INSTALL_DIR` for a toolchain
-    # living only in that store -- the same gap `build.toolchain`'s own
-    # docstring already names for `${TOOLCHAIN_ROOT}` substitution ("a
-    # customer who ran nothing but tan bootstrap still could not get it to
-    # resolve ... without ALSO hand-exporting ZEPHYR_SDK_INSTALL_DIR") -- so a
-    # toolchain doctor correctly sees present is not, on its own, proof this
-    # step can skip its own verification install. Closing that gap is a `tan
-    # build` / `bootstrap_cmd` change, out of this fix's scope; until it
-    # lands, this step always attempts its own install (the pre-#1186 shape)
-    # rather than gambling the real ARM-ELF leg on a verdict that answers a
-    # different question. `doctorPre.out` stays captured, and its verdict
-    # printed, purely so a reader of this log can see what doctor reported at
-    # this point in the run.
+    # UPDATE (tan-cli#1209): at the time of the #1206 measurement above,
+    # `tan build` never exported `ZEPHYR_SDK_INSTALL_DIR` for a toolchain
+    # living only in that store -- the exact gap `build.toolchain`'s own
+    # docstring named for `${TOOLCHAIN_ROOT}` substitution ("a customer who
+    # ran nothing but tan bootstrap still could not get it to resolve ...
+    # without ALSO hand-exporting ZEPHYR_SDK_INSTALL_DIR"). #1209 closes
+    # that gap: `execute_slices` now resolves `build.toolchain.
+    # verified_store_dir(sdk_root)` once per run and fills
+    # `ZEPHYR_SDK_INSTALL_DIR` into every spawned west/CMake child from it
+    # (tan-cli#1209 review MINOR: only when no OTHER scan-visible SDK
+    # already lives on the host, and only when no inherited
+    # `ZEPHYR_SDK_INSTALL_DIR` names a path that still exists -- see
+    # `zephyr_env.py`/`build/toolchain.py`'s own docstrings). So the
+    # PREMISE that made this step's own install unconditional -- "a
+    # toolchain doctor correctly sees present is not, on its own, proof
+    # this step can skip its own verification install" -- no longer holds
+    # for the specific failure #1206 measured.
+    #
+    # This step still does NOT skip its own install, on purpose, for a
+    # narrower reason than the one above: this harness's OWN "B: build"
+    # scoring below (`SDK_OK`/`RUN_SDK`/`HOST_ZSDK`) is built around this
+    # step genuinely attempting (or refusing) its own `west sdk install`,
+    # and flipping the guard here would also have to thread a "doctor
+    # already verified it" outcome through that bash bookkeeping -- a
+    # harness-only change with no pytest coverage in this repo, and #1206
+    # is the recorded lesson for shipping exactly that shape unverified
+    # against a real clean container. Left as a named follow-up on #1209
+    # rather than repeated here: flip this guard, retire the now-redundant
+    # PRE_DETAIL commentary below it, and re-thread SDK_OK/RUN_SDK/HOST_ZSDK
+    # accordingly -- proven the same way #1206 was, against a real
+    # clean-container run, not by reading this diff. `doctorPre.out` stays
+    # captured, and its verdict printed, purely so a reader of this log can
+    # see what doctor reported at this point in the run.
     PRE_DETAIL=$(python3 - "$WORK/doctorPre.out" <<'PY'
 import json,sys
 try: d=json.load(open(sys.argv[1]))

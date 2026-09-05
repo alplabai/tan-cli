@@ -113,7 +113,7 @@ from tan.commands.build.manifest import (
     zephyr_boilerplate_loaded,
 )
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
-from tan.commands.build.toolchain import verified_store_dir
+from tan.commands.build.toolchain import host_scan_has_toolchain, verified_store_dir
 from tan.core.plan_exec import (
     CROSS_DRIVE_MSG,
     ExecutionPolicy,
@@ -1179,7 +1179,20 @@ def execute_slices(
     # the manifest is missing/malformed, or the stamped store does not
     # match this checkout's pin -- [`zephyr_env_overrides`] then fills
     # nothing, matching today's behaviour exactly.
-    verified_store = verified_store_dir(sdk_root)
+    #
+    # tan-cli#1209 review MINOR: also `None` when `host_scan_has_toolchain()`
+    # -- a `zephyr-sdk*` install CMake's own prefix scan (or the user package
+    # registry) can already find on this host, independent of tan's store.
+    # tan's own store is `-t arm-zephyr-eabi` ONLY; forcing it ahead of a
+    # fuller, scan-visible host SDK could fail a non-ARM slice that
+    # configured fine unaided, and would make `tan build` trust a different
+    # toolchain than `tan doctor` reports (`doctor_cmd._zephyr_sdk_scan_roots`
+    # ranks that same store LAST, never first). Checked here, not inside
+    # `verified_store_dir` itself: that function answers "is the pin
+    # satisfied", a fact independent of what else is on the host.
+    verified_store = (
+        verified_store_dir(sdk_root) if not host_scan_has_toolchain() else None
+    )
 
     for sl in plan.slices:
         if sl.backend not in KNOWN_BACKENDS:

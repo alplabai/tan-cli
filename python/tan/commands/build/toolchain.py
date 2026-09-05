@@ -202,6 +202,29 @@ def _toolchain_store_scan_root() -> Path:
     return Path(root.path_str)
 
 
+def _read_text_or_none(path: Path) -> str | None:
+    """`None` on ANY read failure -- `OSError` (missing/unreadable/a
+    directory) AND `UnicodeDecodeError` (a subclass of `ValueError`) alike.
+
+    tan-cli#1209 review MAJOR: `verified_store_dir`'s two callers of this
+    used to write `path.read_text(encoding="utf-8")` under a bare
+    `except OSError`, so one non-UTF-8 byte in either
+    `<sdk_root>/metadata/toolchains.json` or the store's own
+    `.alp-toolchain-stamp.json` raised `UnicodeDecodeError` straight past
+    this function's own "never raises" contract and out of `execute_slices`
+    before any slice dispatched -- with no envelope at all under
+    `--format json`. `errors="replace"` plus `except (OSError, ValueError)`
+    mirrors `doctor_cmd._read_text` exactly (same two files, read from the
+    same two call sites in that module), so `tan build` and `tan doctor`
+    can no longer disagree on a corrupt manifest or stamp: neither raises,
+    and a mangled byte fails the JSON/shape parse that follows rather than
+    the read itself."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+
+
 def verified_store_dir(sdk_root: str | None) -> Path | None:
     """tan's own ADR 0021 store for the checkout's PINNED cross-toolchain
     version, iff `.alp-toolchain-stamp.json` there matches that pin -- the
@@ -226,18 +249,16 @@ def verified_store_dir(sdk_root: str | None) -> Path | None:
     if sdk_root is None:
         return None
     manifest_path = Path(sdk_root) / "metadata" / "toolchains.json"
-    try:
-        manifest_text = manifest_path.read_text(encoding="utf-8")
-    except OSError:
+    manifest_text = _read_text_or_none(manifest_path)
+    if manifest_text is None:
         return None
     try:
         manifest = _tp.parse_toolchain_manifest(manifest_text)
     except _tp.ToolchainManifestError:
         return None
     store_dir = _toolchain_store_scan_root() / _tp.store_dir_name(manifest.version)
-    try:
-        stamp_text = (store_dir / _tp.STAMP_FILENAME).read_text(encoding="utf-8")
-    except OSError:
+    stamp_text = _read_text_or_none(store_dir / _tp.STAMP_FILENAME)
+    if stamp_text is None:
         return None
     stamp = _tp.parse_stamp(stamp_text)
     if not _tp.stamp_matches_pin(stamp, manifest):
@@ -257,10 +278,13 @@ def _is_toolchain_wreckage(name: str) -> bool:
     return _tp.TMP_SUFFIX_PREFIX in name
 
 
-def _candidates() -> list[str]:
-    """Every distinct `zephyr-sdk*` install directory found under
-    `_scan_roots()` PLUS `_toolchain_store_scan_root()`, as POSIX-separator
-    strings, SORTED.
+def _candidates(roots: list[Path] | None = None) -> list[str]:
+    """Every distinct `zephyr-sdk*` install directory found under @roots, as
+    POSIX-separator strings, SORTED. @roots defaults to `_scan_roots()` PLUS
+    `_toolchain_store_scan_root()` -- the full set `resolve_toolchain_root`
+    needs. [`host_scan_has_toolchain`] passes `_scan_roots()` alone, to ask
+    the narrower "does the HOST carry one, never mind tan's own store"
+    question.
 
     Deduplicated on `Path.resolve()`, keeping the FIRST literal spelling
     seen. This is the guard that stops `_scan_roots()`'s deliberate overlap
@@ -279,8 +303,10 @@ def _candidates() -> list[str]:
     Never raises: an unreadable or missing scan root is "nothing found
     there", not a failed build.
     """
+    if roots is None:
+        roots = [*_scan_roots(), _toolchain_store_scan_root()]
     found: dict[str, str] = {}
-    for root in [*_scan_roots(), _toolchain_store_scan_root()]:
+    for root in roots:
         try:
             entries = sorted(root.iterdir())
         except OSError:
@@ -298,6 +324,57 @@ def _candidates() -> list[str]:
                 continue
             found.setdefault(key, entry.as_posix())
     return sorted(found.values())
+
+
+def host_scan_has_toolchain() -> bool:
+    """`True` when a `zephyr-sdk*` directory is visible under `_scan_roots()`
+    -- CMake's own `FindZephyr-sdk.cmake` prefix-scan territory -- that is
+    NOT itself inside tan's own ADR 0021 store.
+
+    tan-cli#1209 review MINOR: `verified_store_dir`'s caller
+    (`zephyr_env_overrides`, wired from `execute.py`) used to fill
+    `ZEPHYR_SDK_INSTALL_DIR` from tan's own store whenever it verified,
+    full stop -- outranking CMake's own prefix scan and the CMake user
+    package registry for EVERY slice, on EVERY host. `doctor_cmd.
+    _zephyr_sdk_scan_roots` never does that: it lists `_toolchain_store_
+    scan_root()` LAST among its scan roots, so a full, pre-existing host
+    SDK always wins there. tan's own store is installed `-t
+    arm-zephyr-eabi` ONLY, so forcing it into a spawned child's env ahead
+    of a fuller host SDK can fail a non-ARM slice (e.g.
+    `aarch64-zephyr-elf`) that configured fine without any
+    `ZEPHYR_SDK_INSTALL_DIR` override at all, and makes `tan build` use a
+    different toolchain than `tan doctor` reports. `execute_slices` calls
+    this before deciding whether to pass `verified_store_dir`'s result
+    through at all, so tan's own store fills the gap only when the host
+    scan finds nothing else -- the same "last resort" precedence doctor
+    already gives it.
+
+    The store exclusion is by PATH CONTAINMENT (`Path.is_relative_to`), not
+    by name: `$ALP_TOOLCHAIN_ROOT` pointed at an ancestor like `$HOME`
+    (ADR 0021's own documented bench/CI escape hatch) makes tan's own
+    store root COINCIDE with a `_scan_roots()` root, so a `zephyr-sdk*`
+    entry that is genuinely tan's own stamped leaf (or an unstamped
+    sibling `test_alp_toolchain_root_ancestor_with_unstamped_hand_install_
+    exports_nothing` already covers) would otherwise be double-counted as
+    an independent "host toolchain" purely because of where the escape
+    hatch happened to point -- exactly the shape
+    `test_alp_toolchain_root_ancestor_with_stamped_leaf_exports_the_leaf_
+    never_home` (`tests/commands/test_execute_zephyr_env.py`) pins.
+
+    Never raises: an unresolvable path reads as itself, matching
+    `_candidates`'s own `except OSError` fallbacks."""
+    try:
+        store_root = _toolchain_store_scan_root().resolve()
+    except OSError:
+        store_root = _toolchain_store_scan_root()
+    for candidate in _candidates(_scan_roots()):
+        try:
+            resolved = Path(candidate).resolve()
+        except OSError:
+            resolved = Path(candidate)
+        if not resolved.is_relative_to(store_root):
+            return True
+    return False
 
 
 def resolve_toolchain_root() -> ToolchainResolution:
