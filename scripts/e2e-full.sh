@@ -1182,123 +1182,120 @@ PY
   hdr "B: Zephyr SDK (west sdk install --version $ZEPHYR_SDK_VERSION -t arm-zephyr-eabi)"
   if [ "$HAVE_PROJECT" -eq 1 ] && [ -x "$WEST_BIN" ]; then
     "$TAN" doctor --build --format json >"$WORK/doctorPre.out" 2>/dev/null
-    # tan-cli#1186: `zephyrSdk` alone USED TO BE the wrong guard. It is a
-    # HOST-only fact -- ZEPHYR_SDK_INSTALL_DIR, else a scan of /opt, $HOME,
-    # %USERPROFILE% and Path.home() -- and that scan used to stop at the TOP
-    # LEVEL of those roots, so it could not see the artifact-keyed store
-    # `tan bootstrap` fills two levels below $HOME (or under
-    # $ALP_TOOLCHAIN_ROOT): measured, `doctor_cmd._zephyr_sdk_detected()`
-    # returned False against a real compiler planted at
-    # `<home>/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`. That
-    # scan itself is fixed now -- `_zephyr_sdk_scan_roots`
-    # (`python/tan/commands/doctor_cmd.py`) also scans that store, so
-    # `zephyrSdk` alone is correct again for the common case. `toolchain`
-    # (issue #474, project-scoped, stamp-vs-pin) is still read here too, as
-    # an OR and never a replacement: it reads the same store through
-    # `_toolchain_store_dir` (which also resolves $ALP_TOOLCHAIN_ROOT) by
-    # STAMP rather than by probing the compiler binary again -- unlike
-    # `_sdk_has_toolchain` above, which never trusts a bare `sdk_version`
-    # file, so a hand-crafted or corrupted store (a stamp written with no
-    # compiler beside it) still reports `toolchain: pass` here and this
-    # guard still skips the download. Accepted, not closed, in this change
-    # (tan-cli#1186 review minor 6): `bootstrap_cmd` writes that stamp LAST,
-    # only after its own compiler probe already succeeded, so this shape
-    # cannot come from a real `tan bootstrap` run -- only from deliberate
-    # tampering or a hand-edited store, which this guard was never trying to
-    # defend against. A hand-installed SDK outside tan's store still short-
-    # circuits the download exactly as before either way, and a run with no
-    # project/pin to check `toolchain` against falls back to `zephyrSdk`
-    # alone, unchanged.
-    PRE=$(python3 - "$WORK/doctorPre.out" <<'PY'
+    # tan-cli#1186 widened `tan doctor`'s zephyrSdk/toolchain checks
+    # (`python/tan/commands/doctor_cmd.py`) to also see the ADR 0021
+    # artifact-keyed store (`~/.alp/toolchains/...`, or `$ALP_TOOLCHAIN_ROOT`)
+    # `tan bootstrap`'s own toolchain phase fills -- correctly: a real,
+    # verified `arm-zephyr-eabi` compiler genuinely does live there once
+    # bootstrap has run. That doctor-side fix stays.
+    #
+    # tan-cli#1206 review: trusting that verdict HERE, to skip this step's
+    # OWN `west sdk install`, does not follow from it. `tan doctor` answers
+    # "does a verified toolchain exist on this host"; this step needs "will
+    # the `west build`/CMake configure the next step runs actually locate
+    # it" -- and for a toolchain that lives only in tan's own store those are
+    # different questions. Measured on a pristine `ubuntu:24.04` (PR #1206,
+    # job run 33969119991): right after `tan bootstrap` acquired one into
+    # that store, `tan doctor --build` reported `zephyrSdk=pass
+    # toolchain=pass`; the (now-removed) guard skipped this step's install on
+    # that verdict; the very next `tan build` then failed cmake's configure
+    # at a `find_package` call ("Configuring incomplete, errors occurred!").
+    # `tan build` never exports `ZEPHYR_SDK_INSTALL_DIR` for a toolchain
+    # living only in that store -- the same gap `build.toolchain`'s own
+    # docstring already names for `${TOOLCHAIN_ROOT}` substitution ("a
+    # customer who ran nothing but tan bootstrap still could not get it to
+    # resolve ... without ALSO hand-exporting ZEPHYR_SDK_INSTALL_DIR") -- so a
+    # toolchain doctor correctly sees present is not, on its own, proof this
+    # step can skip its own verification install. Closing that gap is a `tan
+    # build` / `bootstrap_cmd` change, out of this fix's scope; until it
+    # lands, this step always attempts its own install (the pre-#1186 shape)
+    # rather than gambling the real ARM-ELF leg on a verdict that answers a
+    # different question. `doctorPre.out` stays captured, and its verdict
+    # printed, purely so a reader of this log can see what doctor reported at
+    # this point in the run.
+    PRE_DETAIL=$(python3 - "$WORK/doctorPre.out" <<'PY'
 import json,sys
 try: d=json.load(open(sys.argv[1]))
-except Exception: print("fail zephyrSdk=? toolchain=?"); raise SystemExit
+except Exception: print("zephyrSdk=? toolchain=?"); raise SystemExit
 checks = (d.get("data") or {}).get("checks") or []
 statuses = {c.get("name"): c.get("status") for c in checks}
-z, t = statuses.get("zephyrSdk"), statuses.get("toolchain")
-ok = "pass" in (z, t)
-print(f"{'pass' if ok else 'fail'} zephyrSdk={z} toolchain={t}")
+print(f"zephyrSdk={statuses.get('zephyrSdk')} toolchain={statuses.get('toolchain')}")
 PY
 )
-    PRE_STATUS=${PRE%% *}
-    PRE_DETAIL=${PRE#* }
-    if [ "$PRE_STATUS" = "pass" ]; then
+    note "B: doctor reports $PRE_DETAIL -- re-verifying with this step's own install regardless"
+    # tan-cli#1169: this one stays ANONYMOUS, deliberately, and the token
+    # forwarded into the container for `tan bootstrap` above does not reach
+    # it. `west sdk install` takes a credential from
+    # `--personal-access-token` and from NOTHING else -- it reads no
+    # environment variable of its own (measured at Zephyr v4.4.1,
+    # `scripts/west_commands/sdk.py:473`; `grep environ` over that file
+    # finds only ZEPHYR_BASE and ZEPHYR_SDK_INSTALL_DIR, recorded as
+    # `toolchain_provision.WEST_SDK_KNOWN_ENV_READS`). So "the environment
+    # now carries a token" covers `tan bootstrap` and covers nothing here.
+    #
+    # Three reasons not to close that gap in this change:
+    #
+    #  1. The flag is the one shape tan-cli#1143 exists to forbid. It would
+    #     put the secret in this process's argv -- readable in the process
+    #     table of whatever box this runs on, and this harness runs on
+    #     developer machines (Windows Git Bash and WSL) as well as in an
+    #     ephemeral `--rm` container.
+    #  2. The netrc route tan uses instead is not a one-liner: a 0600 file
+    #     in a 0700 scratch directory, discarded in a `finally` on every
+    #     exit path, plus a sweep for a previous crash's leftovers. Hand-
+    #     rolling that in bash is a second place a secret touches disk, with
+    #     none of those guarantees.
+    #  3. This step exists to run the command `tan doctor` PRINTS, verbatim,
+    #     the way a customer would (`zephyr_sdk_install_command`,
+    #     `doctor_cmd.py:1158`). A customer on a home IP has their own
+    #     unauthenticated quota; authenticating it here would stop measuring
+    #     the shape under test. `getting-started.yml`'s own manual
+    #     `west sdk install` makes the opposite trade and says so beside the
+    #     flag -- that step is a retry loop whose subject is the toolchain
+    #     arriving, not the customer's command.
+    #
+    # What that leaves standing, named rather than glossed: this download can
+    # still 403 on the shared per-IP quota, and -- now that this step is
+    # unconditional again -- it runs on EVERY host, including one where
+    # `tan bootstrap` already left a verified toolchain in its own store,
+    # which is the ~1.9 GiB redundant-download cost tan-cli#1186 set out to
+    # remove. Reintroduced here on purpose (tan-cli#1206 review): the guard
+    # that removed it could not tell "doctor sees a toolchain" apart from
+    # "this step's own build can use one", and shipping a green harness that
+    # asserts the wrong thing is worse than a known, named inefficiency.
+    SDK_TIMEOUT="${ZEPHYR_SDK_INSTALL_TIMEOUT:-1200}"
+    T0=$(date +%s)
+    if ( cd "$WS" && timeout "$SDK_TIMEOUT" "$WEST_BIN" sdk install \
+           --version "$ZEPHYR_SDK_VERSION" -t arm-zephyr-eabi \
+           >"$WORK/sdkinstall.out" 2>"$WORK/sdkinstall.err" ); then
       SDK_OK=1
-      note "B: Zephyr SDK already present ($PRE_DETAIL) -- no download needed"
-    else
-      # tan-cli#1169: this one stays ANONYMOUS, deliberately, and the token
-      # forwarded into the container for `tan bootstrap` above does not reach
-      # it. `west sdk install` takes a credential from
-      # `--personal-access-token` and from NOTHING else -- it reads no
-      # environment variable of its own (measured at Zephyr v4.4.1,
-      # `scripts/west_commands/sdk.py:473`; `grep environ` over that file
-      # finds only ZEPHYR_BASE and ZEPHYR_SDK_INSTALL_DIR, recorded as
-      # `toolchain_provision.WEST_SDK_KNOWN_ENV_READS`). So "the environment
-      # now carries a token" covers `tan bootstrap` and covers nothing here.
-      #
-      # Three reasons not to close that gap in this change:
-      #
-      #  1. The flag is the one shape tan-cli#1143 exists to forbid. It would
-      #     put the secret in this process's argv -- readable in the process
-      #     table of whatever box this runs on, and this harness runs on
-      #     developer machines (Windows Git Bash and WSL) as well as in an
-      #     ephemeral `--rm` container.
-      #  2. The netrc route tan uses instead is not a one-liner: a 0600 file
-      #     in a 0700 scratch directory, discarded in a `finally` on every
-      #     exit path, plus a sweep for a previous crash's leftovers. Hand-
-      #     rolling that in bash is a second place a secret touches disk, with
-      #     none of those guarantees.
-      #  3. This step exists to run the command `tan doctor` PRINTS, verbatim,
-      #     the way a customer would (`zephyr_sdk_install_command`,
-      #     `doctor_cmd.py:1158`). A customer on a home IP has their own
-      #     unauthenticated quota; authenticating it here would stop measuring
-      #     the shape under test. `getting-started.yml`'s own manual
-      #     `west sdk install` makes the opposite trade and says so beside the
-      #     flag -- that step is a retry loop whose subject is the toolchain
-      #     arriving, not the customer's command.
-      #
-      # What that leaves standing, named rather than glossed: this download
-      # can still 403 on the shared per-IP quota. tan-cli#1186 closed the
-      # false-guard case (the `PRE = pass` check above now also reads
-      # `toolchain`, which DOES see the store bootstrap just filled), so what
-      # remains is the honest one: this branch runs when bootstrap's own
-      # toolchain phase genuinely did not leave a verified toolchain behind
-      # (skipped, failed, or `--no-toolchain`), not an artifact of the guard
-      # looking in the wrong place.
-      SDK_TIMEOUT="${ZEPHYR_SDK_INSTALL_TIMEOUT:-1200}"
-      T0=$(date +%s)
-      if ( cd "$WS" && timeout "$SDK_TIMEOUT" "$WEST_BIN" sdk install \
-             --version "$ZEPHYR_SDK_VERSION" -t arm-zephyr-eabi \
-             >"$WORK/sdkinstall.out" 2>"$WORK/sdkinstall.err" ); then
-        SDK_OK=1
-      fi
-      T1=$(date +%s)
-      note "west sdk install: $((T1-T0))s (timeout ${SDK_TIMEOUT}s), exit-ok=$SDK_OK"
-      [ "$SDK_OK" -eq 1 ] || note "$(excerpt "$WORK/sdkinstall.err")"
-      # `west sdk install` can extract a full, usable SDK into the sandbox
-      # $HOME and THEN fail at a later step -- missing file(1) (the host-tools
-      # gap documented above) or the `timeout "$SDK_TIMEOUT"` mid-extract --
-      # leaving SDK_OK=0 even though a real, buildable SDK is sitting right
-      # there. Recorded as ITS OWN fact: distinct from "a pre-existing host
-      # SDK" (HOST_ZSDK, scanned from $REAL_HOME below, outside the sandbox)
-      # and from "genuinely no SDK" (neither is true). The SANDBOXED $HOME is
-      # the right place to look HERE -- this asks "did THIS run's own install
-      # leave something usable", the opposite of what HOST_ZSDK asks.
-      #
-      # `_sdk_has_toolchain` (defined near the top of this script), not a bare
-      # `sdk_version` check: a `timeout` mid-install is exactly the shape that
-      # leaves `sdk_version` at the root with no toolchain under it.
-      #
-      # Pinned to $ZEPHYR_SDK_VERSION, not a `zephyr-sdk-*` glob: THIS run's
-      # own install just above always requested exactly that version, so the
-      # sandboxed $HOME can never legitimately hold any other -- pinning says
-      # so directly instead of matching-then-hoping. Contrast with HOST_ZSDK
-      # below, which stays deliberately version-agnostic for a different
-      # reason (see its own comment): RUN_SDK only ever asks "did the install
-      # THIS RUN JUST RAN leave something usable", never "does any SDK exist".
-      if _sdk_has_toolchain "$HOME/zephyr-sdk-$ZEPHYR_SDK_VERSION"; then
-        RUN_SDK=yes
-      fi
+    fi
+    T1=$(date +%s)
+    note "west sdk install: $((T1-T0))s (timeout ${SDK_TIMEOUT}s), exit-ok=$SDK_OK"
+    [ "$SDK_OK" -eq 1 ] || note "$(excerpt "$WORK/sdkinstall.err")"
+    # `west sdk install` can extract a full, usable SDK into the sandbox
+    # $HOME and THEN fail at a later step -- missing file(1) (the host-tools
+    # gap documented above) or the `timeout "$SDK_TIMEOUT"` mid-extract --
+    # leaving SDK_OK=0 even though a real, buildable SDK is sitting right
+    # there. Recorded as ITS OWN fact: distinct from "a pre-existing host
+    # SDK" (HOST_ZSDK, scanned from $REAL_HOME below, outside the sandbox)
+    # and from "genuinely no SDK" (neither is true). The SANDBOXED $HOME is
+    # the right place to look HERE -- this asks "did THIS run's own install
+    # leave something usable", the opposite of what HOST_ZSDK asks.
+    #
+    # `_sdk_has_toolchain` (defined near the top of this script), not a bare
+    # `sdk_version` check: a `timeout` mid-install is exactly the shape that
+    # leaves `sdk_version` at the root with no toolchain under it.
+    #
+    # Pinned to $ZEPHYR_SDK_VERSION, not a `zephyr-sdk-*` glob: THIS run's
+    # own install just above always requested exactly that version, so the
+    # sandboxed $HOME can never legitimately hold any other -- pinning says
+    # so directly instead of matching-then-hoping. Contrast with HOST_ZSDK
+    # below, which stays deliberately version-agnostic for a different
+    # reason (see its own comment): RUN_SDK only ever asks "did the install
+    # THIS RUN JUST RAN leave something usable", never "does any SDK exist".
+    if _sdk_has_toolchain "$HOME/zephyr-sdk-$ZEPHYR_SDK_VERSION"; then
+      RUN_SDK=yes
     fi
   else
     note "B: no west / no project -- cannot attempt the SDK install"

@@ -1573,9 +1573,13 @@ def test_collect_shows_toolchain_pass_while_zephyr_sdk_fails_on_a_stamp_with_no_
     (stamp-vs-pin, via ``_toolchain_store_dir`` -- which DOES resolve
     ``$ALP_TOOLCHAIN_ROOT`` via ``toolchain_provision.resolve_toolchain_root``).
     Shown in the exact shape ``scripts/e2e-full.sh`` parses (``tan doctor
-    --build --format json``'s ``data.checks``): this is why tan-cli#1186's
-    harness fix reads `toolchain` as well as `zephyrSdk`, not merely why
-    ``zephyrSdk``'s own scan needed widening.
+    --build --format json``'s ``data.checks``): ``zephyrSdk`` and
+    ``toolchain`` can disagree about the SAME store directory, which is why
+    a caller reading only one of them for "is a toolchain here" can be wrong
+    in either direction (tan-cli#1186's own reason for reading both;
+    tan-cli#1206 is why the harness stopped trusting either as proof its
+    OWN build step can skip a fresh install -- see the changelog entry for
+    that finding, not this doctor-side test).
     """
     monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
     monkeypatch.delenv("ALP_TOOLCHAIN_ROOT", raising=False)
@@ -1613,54 +1617,79 @@ def test_collect_shows_toolchain_pass_while_zephyr_sdk_fails_on_a_stamp_with_no_
     assert checks["toolchain"].status == "pass"
 
 
-#: The literal Python heredoc `scripts/e2e-full.sh`'s Scenario-B PRE guard
-#: execs (`PRE=$(python3 - "$WORK/doctorPre.out" <<'PY' ... PY`), pulled out
+#: The literal Python heredoc `scripts/e2e-full.sh`'s Scenario-B step execs
+#: (`PRE_DETAIL=$(python3 - "$WORK/doctorPre.out" <<'PY' ... PY`), pulled out
 #: of the shell script's own text rather than re-typed here, so a reword of
 #: the harness cannot silently drift from what this test drives.
-_E2E_PRE_GUARD_RE = re.compile(
-    r'PRE=\$\(python3 - "\$WORK/doctorPre\.out" <<\'PY\'\n(.*?)\nPY\n', re.S
+#:
+#: tan-cli#1206 review of #1186: this heredoc USED TO decide, from
+#: `zephyrSdk`/`toolchain`, whether the step's own `west sdk install` could
+#: be skipped -- and that decision was wrong. `tan doctor` answers "does a
+#: verified toolchain exist on this host"; the step needs "can the `west
+#: build`/CMake configure the next step runs actually locate it", and for a
+#: toolchain living only in tan's own ADR 0021 store those are different
+#: questions. Measured on a pristine `ubuntu:24.04` (PR #1206, run
+#: 33969119991): right after `tan bootstrap` acquired one into that store,
+#: `tan doctor --build` reported `zephyrSdk=pass toolchain=pass`, the guard
+#: skipped the install on that verdict, and the very next `tan build` failed
+#: cmake's configure at a `find_package` call. The step now always attempts
+#: its own install and this heredoc only PRINTS what doctor found, for the
+#: log -- it decides nothing any more, and the tests below hold it to that.
+_E2E_PRE_DETAIL_RE = re.compile(
+    r'PRE_DETAIL=\$\(python3 - "\$WORK/doctorPre\.out" <<\'PY\'\n(.*?)\nPY\n', re.S
 )
 
 
-def _extract_e2e_pre_guard_source() -> str:
+def _extract_e2e_pre_detail_source() -> str:
     text = (REPO_ROOT / "scripts" / "e2e-full.sh").read_text(encoding="utf-8")
-    match = _E2E_PRE_GUARD_RE.search(text)
+    match = _E2E_PRE_DETAIL_RE.search(text)
     assert match is not None, (
-        "scripts/e2e-full.sh's Scenario-B PRE guard heredoc no longer matches "
-        f"{_E2E_PRE_GUARD_RE.pattern!r} -- update this regex in the same change "
-        "that reshapes the guard."
+        "scripts/e2e-full.sh's Scenario-B PRE_DETAIL heredoc no longer matches "
+        f"{_E2E_PRE_DETAIL_RE.pattern!r} -- update this regex in the same change "
+        "that reshapes the heredoc."
     )
     return match.group(1)
 
 
-def _run_e2e_pre_guard(monkeypatch, envelope: Path) -> str:
-    source = _extract_e2e_pre_guard_source()
+def _run_e2e_pre_detail(monkeypatch, envelope: Path) -> str:
+    source = _extract_e2e_pre_detail_source()
     monkeypatch.setattr(sys, "argv", ["-", str(envelope)])
     buf = io.StringIO()
     with redirect_stdout(buf):
-        exec(compile(source, "scripts/e2e-full.sh:PRE-guard", "exec"), {"__name__": "__main__"})
+        # A real `python3 - ... <<'PY'` child treats `raise SystemExit` as a
+        # bare, successful exit -- the whole point of the heredoc's own
+        # except-and-bail shape (print the fallback line, stop). `exec()`
+        # does not offer that same courtesy: a bare `SystemExit` propagates
+        # out of it as a real exception, so a caller that reaches the
+        # malformed-envelope branch (this file's own
+        # `test_e2e_full_sh_pre_detail_survives_an_unparseable_envelope`)
+        # must catch it here, the same way a real subprocess boundary would
+        # swallow it, or this helper fails on the exact input it exists to
+        # exercise.
+        try:
+            exec(compile(source, "scripts/e2e-full.sh:PRE-detail", "exec"), {"__name__": "__main__"})
+        except SystemExit:
+            pass
     return buf.getvalue().strip()
 
 
-def test_e2e_full_sh_pre_guard_passes_on_toolchain_alone(tmp_path, monkeypatch):
-    """tan-cli#1186 review finding 1: neither doctor-side test above executes
-    a single line of ``scripts/e2e-full.sh`` -- reverting that file alone
-    (keeping the doctor_cmd.py scan fix) leaves both green, proving nothing
-    about the HARNESS's own guard. This execs the guard's actual source,
-    extracted verbatim (`_extract_e2e_pre_guard_source`), against a
-    synthetic ``tan doctor --format json`` envelope where ``zephyrSdk`` is
-    the only check still failing -- exactly the stamp-with-no-compiler case
-    above. Reverting ``scripts/e2e-full.sh`` to its pre-#1186 shape turns
-    this red: the old heredoc consulted only ``zephyrSdk`` and printed a
-    bare ``fail``.
-    """
+def test_e2e_full_sh_pre_detail_reports_both_checks_without_deciding_anything(
+    tmp_path, monkeypatch
+):
+    """Execs the heredoc's actual source, extracted verbatim
+    (`_extract_e2e_pre_detail_source`), against a synthetic ``tan doctor
+    --build --format json`` envelope where BOTH checks pass -- the exact
+    shape that used to make the (now-removed) guard skip the step's own
+    install and let a `find_package` failure through uncaught (tan-cli#1206).
+    The heredoc must still print what doctor found, verbatim, and must not
+    reintroduce a `pass`/`fail` verdict of its own."""
     envelope = tmp_path / "doctorPre.out"
     envelope.write_text(
         json.dumps(
             {
                 "data": {
                     "checks": [
-                        {"name": "zephyrSdk", "status": "fail"},
+                        {"name": "zephyrSdk", "status": "pass"},
                         {"name": "toolchain", "status": "pass"},
                     ]
                 }
@@ -1668,27 +1697,17 @@ def test_e2e_full_sh_pre_guard_passes_on_toolchain_alone(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    assert _run_e2e_pre_guard(monkeypatch, envelope) == "pass zephyrSdk=fail toolchain=pass"
+    assert _run_e2e_pre_detail(monkeypatch, envelope) == "zephyrSdk=pass toolchain=pass"
 
 
-def test_e2e_full_sh_pre_guard_fails_when_both_checks_fail(tmp_path, monkeypatch):
-    """Companion to the pass case above -- a plain double failure must still
-    download, both before and after tan-cli#1186."""
+def test_e2e_full_sh_pre_detail_survives_an_unparseable_envelope(tmp_path, monkeypatch):
+    """A `tan doctor` crash (or anything else that leaves no parseable JSON
+    behind) must not take the whole heredoc down with it -- the harness
+    still has to print something and move on to its own, now-unconditional,
+    install."""
     envelope = tmp_path / "doctorPre.out"
-    envelope.write_text(
-        json.dumps(
-            {
-                "data": {
-                    "checks": [
-                        {"name": "zephyrSdk", "status": "fail"},
-                        {"name": "toolchain", "status": "fail"},
-                    ]
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert _run_e2e_pre_guard(monkeypatch, envelope) == "fail zephyrSdk=fail toolchain=fail"
+    envelope.write_text("not json", encoding="utf-8")
+    assert _run_e2e_pre_detail(monkeypatch, envelope) == "zephyrSdk=? toolchain=?"
 
 
 def test_zephyr_sdk_root_valid_rejects_a_directory_with_no_compiler_in_it(tmp_path):
