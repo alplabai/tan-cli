@@ -23,12 +23,15 @@ tan's own POSIX bootstrap branch "cannot fail on version". Ubuntu 22.04 ships
 ``python3`` = 3.10, so bootstrap succeeds, doctor said Pass, and the customer's
 first build died inside Zephyr's CMake configure pointing at Zephyr.
 """
+import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
@@ -1532,18 +1535,22 @@ def test_zephyr_sdk_detected_via_msys_home_split_from_windows_userprofile(tmp_pa
     assert doctor_cmd._zephyr_sdk_detected() is True
 
 
-def test_zephyr_sdk_scan_cannot_see_the_bootstrap_artifact_store(tmp_path, monkeypatch):
-    """tan-cli#1186 measurement (NOT a fix -- see the module docstring's own
-    mirror note on ``_zephyr_sdk_detected``). ``tan bootstrap``'s automatic
-    toolchain acquisition fills the artifact-keyed store
+def test_zephyr_sdk_scan_now_sees_a_real_compiler_in_the_bootstrap_artifact_store(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1186 regression guard. ``tan bootstrap``'s automatic toolchain
+    acquisition fills the ADR 0021 artifact-keyed store
     ``<home>/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/``
     (``toolchain_provision.store_dir_name``) -- two directory levels below
-    ``$HOME``/``$USERPROFILE``. ``_zephyr_sdk_scan_roots`` globs only the TOP
-    LEVEL of ``/opt``, ``$HOME``, ``$USERPROFILE`` and ``Path.home()``, so a
-    REAL, fully-installed compiler sitting in that exact store is invisible
-    to it -- this plants the genuine compiler binary
-    (``_plant_zephyr_sdk``), not merely a directory, so the negative below
-    is the scan's blindness and not an incomplete fixture.
+    ``$HOME``/``$USERPROFILE``. Before this issue's fix,
+    ``_zephyr_sdk_scan_roots`` globbed only the TOP LEVEL of ``/opt``,
+    ``$HOME``, ``$USERPROFILE`` and ``Path.home()``, so a REAL,
+    fully-installed compiler sitting in that exact store was invisible to
+    it. This plants the genuine compiler binary (``_plant_zephyr_sdk``), not
+    merely a directory, so the assertion below is proof the store is now
+    scanned, not an incomplete fixture -- reverting
+    ``_zephyr_sdk_scan_roots``'s `_toolchain_store_scan_root()` addition
+    (``python/tan/commands/doctor_cmd.py``) turns this red.
     """
     monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
     monkeypatch.delenv("ALP_TOOLCHAIN_ROOT", raising=False)
@@ -1551,22 +1558,24 @@ def test_zephyr_sdk_scan_cannot_see_the_bootstrap_artifact_store(tmp_path, monke
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     store = tmp_path / ".alp" / "toolchains" / tp.store_dir_name("1.0.1")
     _plant_zephyr_sdk(store)
-    assert doctor_cmd._zephyr_sdk_detected() is False
+    assert doctor_cmd._zephyr_sdk_detected() is True
 
 
-def test_collect_shows_toolchain_pass_while_zephyr_sdk_still_fails_after_a_bootstrap_style_install(
+def test_collect_shows_toolchain_pass_while_zephyr_sdk_fails_on_a_stamp_with_no_compiler(
     tmp_path, monkeypatch
 ):
-    """tan-cli#1186's whole point, shown side by side in the exact shape
-    ``scripts/e2e-full.sh`` parses (``tan doctor --build --format json``'s
-    ``data.checks``): after a ``tan bootstrap``-style toolchain acquisition,
-    ``zephyrSdk`` (host-only, scans only the top level of ``$HOME`` -- see
-    the measurement above) still reports ``fail``, while ``toolchain``
-    (project-scoped, stamp-vs-pin, reads the SAME artifact-keyed store
-    through ``_toolchain_store_dir`` -- which DOES resolve
-    ``$ALP_TOOLCHAIN_ROOT`` via ``toolchain_provision.resolve_toolchain_root``)
-    reports ``pass``. The e2e harness's guard read only the first of these;
-    tan-cli#1186's fix reads both.
+    """A narrower case than the regression above: a store directory that
+    carries a verification STAMP but no actual compiler binary (an unusual
+    fixture, not what a real ``tan bootstrap`` leaves -- ``bootstrap_cmd``
+    probes the compiler and writes the stamp last) still correctly reports
+    ``zephyrSdk`` ``fail`` (``_zephyr_sdk_root_valid`` requires the compiler
+    binary, not just the directory) alongside ``toolchain`` ``pass``
+    (stamp-vs-pin, via ``_toolchain_store_dir`` -- which DOES resolve
+    ``$ALP_TOOLCHAIN_ROOT`` via ``toolchain_provision.resolve_toolchain_root``).
+    Shown in the exact shape ``scripts/e2e-full.sh`` parses (``tan doctor
+    --build --format json``'s ``data.checks``): this is why tan-cli#1186's
+    harness fix reads `toolchain` as well as `zephyrSdk`, not merely why
+    ``zephyrSdk``'s own scan needed widening.
     """
     monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
     monkeypatch.delenv("ALP_TOOLCHAIN_ROOT", raising=False)
@@ -1602,6 +1611,84 @@ def test_collect_shows_toolchain_pass_while_zephyr_sdk_still_fails_after_a_boots
     checks = {c.name: c for c in doctor_cmd._collect(str(sdk_root))}
     assert checks["zephyrSdk"].status == "fail"
     assert checks["toolchain"].status == "pass"
+
+
+#: The literal Python heredoc `scripts/e2e-full.sh`'s Scenario-B PRE guard
+#: execs (`PRE=$(python3 - "$WORK/doctorPre.out" <<'PY' ... PY`), pulled out
+#: of the shell script's own text rather than re-typed here, so a reword of
+#: the harness cannot silently drift from what this test drives.
+_E2E_PRE_GUARD_RE = re.compile(
+    r'PRE=\$\(python3 - "\$WORK/doctorPre\.out" <<\'PY\'\n(.*?)\nPY\n', re.S
+)
+
+
+def _extract_e2e_pre_guard_source() -> str:
+    text = (REPO_ROOT / "scripts" / "e2e-full.sh").read_text(encoding="utf-8")
+    match = _E2E_PRE_GUARD_RE.search(text)
+    assert match is not None, (
+        "scripts/e2e-full.sh's Scenario-B PRE guard heredoc no longer matches "
+        f"{_E2E_PRE_GUARD_RE.pattern!r} -- update this regex in the same change "
+        "that reshapes the guard."
+    )
+    return match.group(1)
+
+
+def _run_e2e_pre_guard(monkeypatch, envelope: Path) -> str:
+    source = _extract_e2e_pre_guard_source()
+    monkeypatch.setattr(sys, "argv", ["-", str(envelope)])
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        exec(compile(source, "scripts/e2e-full.sh:PRE-guard", "exec"), {"__name__": "__main__"})
+    return buf.getvalue().strip()
+
+
+def test_e2e_full_sh_pre_guard_passes_on_toolchain_alone(tmp_path, monkeypatch):
+    """tan-cli#1186 review finding 1: neither doctor-side test above executes
+    a single line of ``scripts/e2e-full.sh`` -- reverting that file alone
+    (keeping the doctor_cmd.py scan fix) leaves both green, proving nothing
+    about the HARNESS's own guard. This execs the guard's actual source,
+    extracted verbatim (`_extract_e2e_pre_guard_source`), against a
+    synthetic ``tan doctor --format json`` envelope where ``zephyrSdk`` is
+    the only check still failing -- exactly the stamp-with-no-compiler case
+    above. Reverting ``scripts/e2e-full.sh`` to its pre-#1186 shape turns
+    this red: the old heredoc consulted only ``zephyrSdk`` and printed a
+    bare ``fail``.
+    """
+    envelope = tmp_path / "doctorPre.out"
+    envelope.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "checks": [
+                        {"name": "zephyrSdk", "status": "fail"},
+                        {"name": "toolchain", "status": "pass"},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _run_e2e_pre_guard(monkeypatch, envelope) == "pass zephyrSdk=fail toolchain=pass"
+
+
+def test_e2e_full_sh_pre_guard_fails_when_both_checks_fail(tmp_path, monkeypatch):
+    """Companion to the pass case above -- a plain double failure must still
+    download, both before and after tan-cli#1186."""
+    envelope = tmp_path / "doctorPre.out"
+    envelope.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "checks": [
+                        {"name": "zephyrSdk", "status": "fail"},
+                        {"name": "toolchain", "status": "fail"},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _run_e2e_pre_guard(monkeypatch, envelope) == "fail zephyrSdk=fail toolchain=fail"
 
 
 def test_zephyr_sdk_root_valid_rejects_a_directory_with_no_compiler_in_it(tmp_path):

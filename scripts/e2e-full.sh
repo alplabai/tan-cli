@@ -1182,34 +1182,49 @@ PY
   hdr "B: Zephyr SDK (west sdk install --version $ZEPHYR_SDK_VERSION -t arm-zephyr-eabi)"
   if [ "$HAVE_PROJECT" -eq 1 ] && [ -x "$WEST_BIN" ]; then
     "$TAN" doctor --build --format json >"$WORK/doctorPre.out" 2>/dev/null
-    # tan-cli#1186: `zephyrSdk` alone is the wrong guard. It is a HOST-only
-    # fact -- ZEPHYR_SDK_INSTALL_DIR, else a scan of the TOP LEVEL ONLY of
-    # /opt, $HOME, %USERPROFILE% and Path.home() -- and cannot see the
-    # artifact-keyed store `tan bootstrap` just filled two levels below $HOME
-    # (or under $ALP_TOOLCHAIN_ROOT): measured, `doctor_cmd._zephyr_sdk_
-    # detected()` returns False against a real compiler planted at
-    # `<home>/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`
-    # (`test_zephyr_sdk_scan_cannot_see_the_bootstrap_artifact_store`).
-    # `toolchain` (issue #474, project-scoped, stamp-vs-pin) reads that exact
-    # store through `_toolchain_store_dir`, which DOES resolve
-    # $ALP_TOOLCHAIN_ROOT, so it is the check that actually reflects what
-    # bootstrap just did. Checked as an OR, never a replacement for
-    # `zephyrSdk`: a hand-installed SDK outside tan's store, or a run with no
-    # project/pin to check `toolchain` against, must keep skipping the
-    # download exactly as before.
+    # tan-cli#1186: `zephyrSdk` alone USED TO BE the wrong guard. It is a
+    # HOST-only fact -- ZEPHYR_SDK_INSTALL_DIR, else a scan of /opt, $HOME,
+    # %USERPROFILE% and Path.home() -- and that scan used to stop at the TOP
+    # LEVEL of those roots, so it could not see the artifact-keyed store
+    # `tan bootstrap` fills two levels below $HOME (or under
+    # $ALP_TOOLCHAIN_ROOT): measured, `doctor_cmd._zephyr_sdk_detected()`
+    # returned False against a real compiler planted at
+    # `<home>/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`. That
+    # scan itself is fixed now -- `_zephyr_sdk_scan_roots`
+    # (`python/tan/commands/doctor_cmd.py`) also scans that store, so
+    # `zephyrSdk` alone is correct again for the common case. `toolchain`
+    # (issue #474, project-scoped, stamp-vs-pin) is still read here too, as
+    # an OR and never a replacement: it reads the same store through
+    # `_toolchain_store_dir` (which also resolves $ALP_TOOLCHAIN_ROOT) by
+    # STAMP rather than by probing the compiler binary again -- unlike
+    # `_sdk_has_toolchain` above, which never trusts a bare `sdk_version`
+    # file, so a hand-crafted or corrupted store (a stamp written with no
+    # compiler beside it) still reports `toolchain: pass` here and this
+    # guard still skips the download. Accepted, not closed, in this change
+    # (tan-cli#1186 review minor 6): `bootstrap_cmd` writes that stamp LAST,
+    # only after its own compiler probe already succeeded, so this shape
+    # cannot come from a real `tan bootstrap` run -- only from deliberate
+    # tampering or a hand-edited store, which this guard was never trying to
+    # defend against. A hand-installed SDK outside tan's store still short-
+    # circuits the download exactly as before either way, and a run with no
+    # project/pin to check `toolchain` against falls back to `zephyrSdk`
+    # alone, unchanged.
     PRE=$(python3 - "$WORK/doctorPre.out" <<'PY'
 import json,sys
 try: d=json.load(open(sys.argv[1]))
-except Exception: print("fail"); raise SystemExit
+except Exception: print("fail zephyrSdk=? toolchain=?"); raise SystemExit
 checks = (d.get("data") or {}).get("checks") or []
 statuses = {c.get("name"): c.get("status") for c in checks}
-ok = "pass" in (statuses.get("zephyrSdk"), statuses.get("toolchain"))
-print("pass" if ok else "fail")
+z, t = statuses.get("zephyrSdk"), statuses.get("toolchain")
+ok = "pass" in (z, t)
+print(f"{'pass' if ok else 'fail'} zephyrSdk={z} toolchain={t}")
 PY
 )
-    if [ "$PRE" = "pass" ]; then
+    PRE_STATUS=${PRE%% *}
+    PRE_DETAIL=${PRE#* }
+    if [ "$PRE_STATUS" = "pass" ]; then
       SDK_OK=1
-      note "B: Zephyr SDK already present -- no download needed"
+      note "B: Zephyr SDK already present ($PRE_DETAIL) -- no download needed"
     else
       # tan-cli#1169: this one stays ANONYMOUS, deliberately, and the token
       # forwarded into the container for `tan bootstrap` above does not reach
@@ -1427,8 +1442,11 @@ PY
         # Neither scan above found an SDK, but the hoisted block already
         # confirmed a real ARM ELF -- that IS positive evidence a toolchain
         # was found (e.g. an inherited ZEPHYR_TOOLCHAIN_VARIANT=gnuarmemb +
-        # GNUARMEMB_TOOLCHAIN_PATH, which neither scan above knows how to
-        # detect), not a contradiction of it. Deferring to the artefact is
+        # GNUARMEMB_TOOLCHAIN_PATH, or a toolchain living only in the ADR
+        # 0021 artifact-keyed store under $HOME/.alp/toolchains -- unlike the
+        # Scenario-B `PRE` guard above, tan-cli#1186, neither scan in THIS
+        # section (the top-of-script discovery or HOST_ZSDK) knows about
+        # that store), not a contradiction of it. Deferring to the artefact is
         # what keeps this from scoring BOTH "produced a real ARM ELF" AND
         # "unexpectedly succeeded with no Zephyr SDK" for the same build.
         note "B: build succeeded and produced a real ARM ELF (already scored above)"
