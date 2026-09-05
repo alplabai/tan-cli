@@ -136,6 +136,29 @@ branches editing different modules now edit different files) but does not
 retire the step: the same silent-staleness is still reachable whenever a
 merge brings in a tree change without the matching record, which is every
 merge where one side edited a module the other side's records describe.
+
+## Growth is judged per FUNCTION, not per whole-tree scalar (tan-cli#1173)
+
+The paragraph above ("they still mean exactly what they meant") stopped being
+true the moment the whole-tree scalars were the only thing `--reason` was
+judged against: a module could have one function cross `FUNCTION_CAP` while a
+different function in the SAME module dropped below it, and the sum and the
+max would both read unchanged, so this script would see no growth at all. PR
+#1170 is the real instance, not a hypothetical one: `_sdk_credential` grew
+`50 -> 63 -> 69` while `_data` fell `51 -> 47` in the same diff, and
+`bootstrap_cmd.py.json`'s `long_functions` read `19` before and after.
+
+`ModuleFunctions.entries` (`_module_size_budget_core.py`) now stores the
+actual sorted `(span, name)` list per module instead of a count and a max, and
+`_function_deltas` below compares it per `module:name` -- a function newly
+over the cap, or an already-over one growing further, is growth in its own
+right and forces `--reason` even when nothing else in the tree moved. A
+function dropping below the cap is reported as SHRUNK, the same as a module
+shrinking: it never forces a flag, but (unlike a module-line shrink) it IS
+included in the `--reason`/`--merge-resync` ledger entry, because the shape
+this issue closes is exactly a shrink sitting right next to the growth that
+forced the entry to exist -- leaving it out of the entry would still tell only
+half of what moved.
 """
 from __future__ import annotations
 
@@ -143,6 +166,7 @@ import argparse
 import datetime
 import secrets
 import sys
+from itertools import zip_longest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "gates"))
@@ -169,41 +193,69 @@ def _deltas(old: dict[str, int], new: dict[str, int]) -> tuple[list[str], list[s
     return grown, shrunk
 
 
-def _scalar_delta(name: str, before: int, after: int) -> tuple[list[str], list[str]]:
-    if after > before:
-        return [f"{name}: {before} -> {after}"], []
-    if after < before:
-        return [], [f"{name}: {before} -> {after}"]
-    return [], []
-
-
-def _function_record_deltas(
-    old: dict[str, core.ModuleFunctions], new: dict[str, core.ModuleFunctions]
-) -> list[str]:
-    """Per-module function-fact drift, reported but deliberately NOT folded
-    into `grown`.
-
-    tan-cli#1057's meaning-preservation hinges on exactly this. The ratchet
-    has always been WHOLE-TREE: a module gaining a long function while
-    another loses one moved neither `function_count_budget` nor
-    `function_worst_budget`, and needed no `--reason`. Now that the same
-    facts are stored per module, judging growth per RECORD would silently
-    convert the whole-tree ratchet into a per-module one -- so growth is
-    still judged on the two DERIVED scalars (see `main`), and these lines are
-    the storage detail that says WHICH module moved, which the old single
-    file's `function_count_budget: 300 -> 301` never could."""
-    out: list[str] = []
-    empty = core.ModuleFunctions(count=0, worst=0)
-    for name in sorted(set(old) | set(new)):
-        before = old.get(name, empty)
-        after = new.get(name, empty)
-        if before == after:
-            continue
-        out.append(
-            f"{name}: long_functions {before.count} -> {after.count}, "
-            f"worst_function {before.worst} -> {after.worst}"
-        )
+def _spans_by_name(facts: core.ModuleFunctions) -> dict[str, list[int]]:
+    """One module's over-cap functions grouped by name, spans sorted
+    ascending. A GROUP, not a plain dict, on purpose: two functions can share
+    a name in the same module (every class's own `__init__`, a redefinition
+    under a conditional, ...), and collapsing that to one dict entry would
+    silently drop one of them from comparison below -- the same silent-drop
+    shape `_load_json` elsewhere in `core` refuses for a duplicate JSON key."""
+    out: dict[str, list[int]] = {}
+    for span, name in facts.entries:
+        out.setdefault(name, []).append(span)
+    for spans in out.values():
+        spans.sort()
     return out
+
+
+def _function_deltas(
+    old: dict[str, core.ModuleFunctions], new: dict[str, core.ModuleFunctions]
+) -> tuple[list[str], list[str]]:
+    """(grown, shrunk) description lines for INDIVIDUAL functions crossing
+    `FUNCTION_CAP` (tan-cli#1173) -- judged per `module:name`, never per
+    module and never on the two whole-tree derived scalars alone.
+
+    Before this, growth was judged only on `function_count`/`function_worst`
+    -- a sum and a max over the tree -- so one function crossing the cap
+    while a different one in the SAME module dropped below it left both
+    numbers unchanged and needed no `--reason`. That is not a hypothetical:
+    PR #1170 grew `_sdk_credential` `50 -> 63 -> 69` while `_data` fell
+    `51 -> 47` in the same diff, and `bootstrap_cmd.py.json`'s
+    `long_functions` read `19` before and after. Comparing the actual
+    per-function list closes that -- a function newly over the cap, or an
+    already-over one growing further, is its own growth event regardless of
+    what any other function in the tree did.
+
+    A function that drops below the cap (or shrinks while staying over it)
+    is reported as SHRUNK, not folded into `grown` -- deliberately, and for
+    the same reason a module shrinking never needs `--reason` (see `_deltas`
+    above): getting smaller is never the thing this ratchet exists to catch.
+    `main` still surfaces these lines in a `--reason`/`--merge-resync`
+    ledger entry (unlike a module-line shrink) so the entry names the
+    function that dropped, not only the one that grew -- otherwise an
+    offsetting pair's ledger line would tell only half of what moved."""
+    grown: list[str] = []
+    shrunk: list[str] = []
+    empty = core.ModuleFunctions(entries=())
+    for module in sorted(set(old) | set(new)):
+        old_by_name = _spans_by_name(old.get(module, empty))
+        new_by_name = _spans_by_name(new.get(module, empty))
+        for name in sorted(set(old_by_name) | set(new_by_name)):
+            before_spans = old_by_name.get(name, [])
+            after_spans = new_by_name.get(name, [])
+            label = f"{module}:{name}"
+            for before, after in zip_longest(before_spans, after_spans):
+                if before == after:
+                    continue
+                if before is None:
+                    grown.append(f"{label}: new entry at {after}")
+                elif after is None:
+                    shrunk.append(f"{label}: {before} -> dropped (now under the cap)")
+                elif after > before:
+                    grown.append(f"{label}: {before} -> {after}")
+                else:
+                    shrunk.append(f"{label}: {before} -> {after}")
+    return grown, shrunk
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -232,18 +284,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     module_grown, module_shrunk = _deltas(committed.modules, current.modules)
-    # Judged on the DERIVED whole-tree numbers on both sides, which is what
-    # keeps the ratchet's meaning identical to the pre-split one -- see
-    # `_function_record_deltas` above for why not per record.
-    count_grown, count_shrunk = _scalar_delta(
-        "function_count_budget", committed.function_count, current.function_count
-    )
-    worst_grown, worst_shrunk = _scalar_delta(
-        "function_worst_budget", committed.function_worst, current.function_worst
-    )
-    grown = module_grown + count_grown + worst_grown
-    shrunk = module_shrunk + count_shrunk + worst_shrunk
-    function_records = _function_record_deltas(committed.functions, current.functions)
+    # Judged per FUNCTION, not on the derived whole-tree numbers (tan-cli#1173)
+    # -- see `_function_deltas`'s own docstring for why the derived pair alone
+    # let an offsetting pair of per-function moves hide a cap crossing.
+    function_grown, function_shrunk = _function_deltas(committed.functions, current.functions)
+    grown = module_grown + function_grown
+    shrunk = module_shrunk + function_shrunk
 
     # tan-cli#817: the observed `tests/**` deltas are computed and REPORTED,
     # and deliberately kept out of `grown`/`shrunk` above. Those two lists are
@@ -256,14 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8"
     ) != core.dump_caps()
 
-    if not (
-        grown
-        or shrunk
-        or function_records
-        or observed_moved
-        or observed_settled
-        or stale_caps
-    ):
+    if not (grown or shrunk or observed_moved or observed_settled or stale_caps):
         print("module_size_budget.d/ already matches the measured tree.")
         return 0
 
@@ -271,8 +310,6 @@ def main(argv: list[str] | None = None) -> int:
         print("module_size_budget.d/ is stale:")
         for line in grown + shrunk:
             print(f"  {line}")
-        for line in function_records:
-            print(f"  record: {line}")
         for line in observed_moved + observed_settled:
             print(f"  observed: {line}")
         if stale_caps:
@@ -299,20 +336,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  shrunk: {line}")
     for line in grown:
         print(f"  grown:  {line}")
-    for line in function_records:
-        print(f"  record: {line}")
     for line in observed_settled + observed_moved:
         print(f"  observed (tests/, not gated): {line}")
 
     if grown and args.reason:
-        _append_log(args.reason, grown)
+        _append_log(args.reason, grown, function_shrunk)
     elif grown and args.merge_resync:
-        _append_log("merge-resync (growth already reasoned on the merged branches)", grown)
+        _append_log(
+            "merge-resync (growth already reasoned on the merged branches)",
+            grown,
+            function_shrunk,
+        )
 
     return 0
 
 
-def _append_log(reason: str, grown: list[str]) -> None:
+def _append_log(reason: str, grown: list[str], function_shrunk: list[str] = ()) -> None:
     """tan-cli#907: writes one NEW file per entry under `core.LOG_DIR`,
     never an append to `core.LOG_PATH` (frozen -- see this script's module
     docstring). The filename carries the date for a human scanning the
@@ -323,11 +362,21 @@ def _append_log(reason: str, grown: list[str]) -> None:
     number. `"x"` (exclusive create) mode both proves that and refuses to
     silently clobber an existing file on the astronomically unlikely token
     collision -- it raises `FileExistsError`, which is retried with a fresh
-    token rather than swallowed."""
+    token rather than swallowed.
+
+    `function_shrunk` (tan-cli#1173) is logged alongside `grown`, not
+    dropped: for the exact shape this issue reports -- one function crosses
+    `FUNCTION_CAP` while a different one in the SAME module drops below it --
+    the growth line alone names only half of what moved. A module-line
+    shrink is still never logged here (unchanged from before #1173); only the
+    per-function half gets this treatment, because it is the half that can
+    sit right next to the growth line that forced this entry to exist."""
     date = datetime.date.today().isoformat()
     entry = f"- {date} -- {reason}\n"
     for line in grown:
         entry += f"    - {line}\n"
+    for line in function_shrunk:
+        entry += f"    - shrunk: {line}\n"
     core.LOG_DIR.mkdir(parents=True, exist_ok=True)
     while True:
         path = core.LOG_DIR / f"{date}-{secrets.token_hex(4)}.md"

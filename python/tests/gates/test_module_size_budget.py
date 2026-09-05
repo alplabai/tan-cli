@@ -40,11 +40,13 @@ scalars DERIVED instead. The residual 12.9% is two branches editing the SAME
 module, which is a genuine same-file conflict no split removes.
 
 `function_count_budget` and `function_worst_budget` are therefore no longer
-stored anywhere: each record carries its own module's `long_functions` /
-`worst_function`, and `core.MeasuredState` exposes the two whole-tree numbers
-as a SUM and a MAX over those -- exactly how `measure_current` always
-computed them. The ratchet below still compares whole-tree totals and means
-what it always meant.
+stored anywhere: each record carries its own module's `long_functions` --
+since tan-cli#1173 the actual sorted `[span, name]` list, not a count -- and
+`core.MeasuredState` exposes the two whole-tree numbers as a SUM and a MAX
+over those lists. The ratchet below still compares whole-tree totals, but
+`scripts/regen_module_size_budget.py` no longer decides `--reason` on those
+two numbers alone: see `test_an_offsetting_pair_in_one_module_needs_a_reason_naming_both`
+below for why a whole-tree-neutral pair still needs one.
 
 A merge conflict on a record file is still resolved the same way: throw
 either side away and re-run the script against the merged tree -- it
@@ -213,7 +215,7 @@ def test_the_recorded_function_facts_match_the_measurement():
     is the whole point of keeping this gate local-first (tan-cli#895)."""
     measured = core.measure_current().functions
     recorded = core.load_generated().functions
-    empty = core.ModuleFunctions(count=0, worst=0)
+    empty = core.ModuleFunctions(entries=())
 
     wrong = []
     for rel in sorted(set(measured) | set(recorded)):
@@ -467,16 +469,23 @@ def test_the_observed_test_tree_is_recorded_not_gated(tmp_path, monkeypatch):
     assert not ledger.exists(), "the frozen single-file ledger must never be written to again"
 
 
-def test_a_whole_tree_neutral_function_move_needs_no_reason(tmp_path, monkeypatch):
-    """tan-cli#1057's meaning-preservation, pinned rather than asserted in
-    prose. The ratchet has always been WHOLE-TREE: one module gaining a long
-    function while another loses one moved neither `function_count_budget`
-    nor `function_worst_budget`, so it needed no `--reason`. Storing those
-    facts per module makes it trivially easy to start judging growth per
-    RECORD instead, which would quietly convert a whole-tree ratchet into a
-    per-module one -- the exact design change tan-cli#1057's issue text said
-    deserves its own review. This is what says no.
-    """
+def test_a_whole_tree_neutral_function_move_now_needs_a_reason(tmp_path, monkeypatch):
+    """tan-cli#1057 pinned the OPPOSITE of this outcome: one module gaining a
+    long function while another loses one moved neither `function_count_budget`
+    nor `function_worst_budget`, so it needed no `--reason`, and this test used
+    to assert exactly that (`test_a_whole_tree_neutral_function_move_needs_no_reason`).
+    tan-cli#1173 overturns it, deliberately and for a measured reason: the two
+    whole-tree scalars staying flat is precisely how a function crossing
+    `FUNCTION_CAP` can hide behind another one dropping below it, whether the
+    two are in the same module (the exact PR #1170 shape) or, as here, two
+    different ones. A function newly over the cap is now growth in its own
+    right regardless of what any other function anywhere in the tree did --
+    see `_function_deltas` in `scripts/regen_module_size_budget.py`.
+
+    The whole-tree DERIVED numbers themselves are unaffected by this move (that
+    half of tan-cli#1057 still holds -- `function_count`/`function_worst` read
+    identically before and after), which is exactly why they were never enough
+    on their own."""
     regen = _load_regen("_regen_under_test_neutral")
     target = regen.core
 
@@ -505,22 +514,134 @@ def test_a_whole_tree_neutral_function_move_needs_no_reason(tmp_path, monkeypatc
     assert before.function_count == 1
 
     # The move: `a.py` loses its long function, `b.py` gains one of the same
-    # span. Per record that is a rise in `b.py`; whole-tree it is a no-op.
+    # span. Whole-tree this nets to zero; per FUNCTION, `b.py:g` is a brand
+    # new over-cap function tan-cli#1173 says must be its own growth event.
     (package / "a.py").write_text("x = 1\n", encoding="utf-8")
     (package / "b.py").write_text(long_fn("g", 80), encoding="utf-8")
     rc = regen.main([])
-    assert rc == 0, (
-        "a whole-tree-neutral function move was refused without --reason -- "
-        "the ratchet has been narrowed to per-module, which is a change to "
-        "what its numbers MEAN, not a storage change (tan-cli#1057)"
+    assert rc == 1, (
+        "a function newly over FUNCTION_CAP was accepted without --reason just "
+        "because a different function elsewhere dropped below it -- tan-cli#1173 "
+        "exists to refuse exactly this"
     )
     assert sorted(ledger_dir.glob("*.md")) == seeded_entries, (
-        "a whole-tree-neutral move must not write a ledger entry either"
+        "a refused regen must not write anything, committed or logged"
     )
+
+    assert regen.main(["--reason", "move f to g"]) == 0
+    new_entries = sorted(set(ledger_dir.glob("*.md")) - set(seeded_entries))
+    assert len(new_entries) == 1
+    text = new_entries[0].read_text(encoding="utf-8")
+    assert "b.py:g" in text and "new entry" in text
+    assert "a.py:f" in text and "dropped" in text, (
+        "the move's OTHER half -- f dropping below the cap -- must be named in "
+        "the same entry, or the entry tells only half of what moved"
+    )
+
     after = target.load_generated()
-    assert after.function_count == before.function_count
+    assert after.function_count == before.function_count, (
+        "the whole-tree DERIVED count is still unaffected by this move -- "
+        "tan-cli#1057's half of the design is intact, tan-cli#1173 only adds "
+        "the per-function check on top of it"
+    )
     assert after.function_worst == before.function_worst
     assert set(after.functions) == {"tan/b.py"}
+
+
+def test_an_offsetting_pair_in_one_module_needs_a_reason_naming_both(tmp_path, monkeypatch):
+    """The literal tan-cli#1173 shape, constructed directly rather than
+    inferred: PR #1170 grew `_sdk_credential` `50 -> 63 -> 69` past
+    `FUNCTION_CAP` while `_data` fell `51 -> 47` below it, IN THE SAME MODULE,
+    in the same diff -- and `bootstrap_cmd.py.json`'s `long_functions` read
+    `19` before and after, because a count and a max cannot tell that apart
+    from no movement at all.
+
+    Mutation-proven in both directions, per the issue's acceptance text:
+    the offsetting pair is refused without `--reason` (below), and an
+    unrelated, non-crossing edit made afterwards is still silent (phase 3)."""
+    regen = _load_regen("_regen_under_test_offsetting_pair")
+    target = regen.core
+
+    def long_fn(name: str, body_lines: int) -> str:
+        return f"def {name}():\n" + "    pass\n" * body_lines + "\n"
+
+    package = tmp_path / "tan"
+    package.mkdir()
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    ledger_dir = tmp_path / "LOG.d"
+    monkeypatch.setattr(target, "PACKAGE", package)
+    monkeypatch.setattr(target, "TEST_ROOT", tests_root)
+    monkeypatch.setattr(target, "LOG_PATH", tmp_path / "LOG.md")
+    monkeypatch.setattr(target, "LOG_DIR", ledger_dir)
+    _redirect(target, monkeypatch, tmp_path)
+
+    module = package / "creds.py"
+
+    # A dominant third function, unchanged throughout -- `bootstrap_cmd.py`'s
+    # real `_run` at 819 lines plays exactly this role. Without it, this
+    # module's own worst span WOULD move when `_sdk_credential` overtakes
+    # `_data` (69 > 51), which the pre-#1173 whole-tree `worst` scalar could
+    # still have caught -- so it would be a weaker reproduction than PR #1170,
+    # where a bigger function elsewhere absorbs the max and both derived
+    # scalars read flat. `_giant` pins that: worst stays 819 on both sides.
+    giant = long_fn("_giant", 818)
+
+    # Seed: `_data` already over the cap (51 lines); `_sdk_credential` sits
+    # right AT the cap (50 lines: `span > FUNCTION_CAP` is strict, so 50 is
+    # not yet tracked) -- the pre-PR #1170 state.
+    module.write_text(
+        giant + long_fn("_sdk_credential", 49) + long_fn("_data", 50), encoding="utf-8"
+    )
+    assert regen.main(["--reason", "seed the fixture"]) == 0
+    seeded_entries = sorted(ledger_dir.glob("*.md"))
+    before = target.load_generated().functions["tan/creds.py"]
+    assert dict((name, span) for span, name in before.entries) == {"_giant": 819, "_data": 51}
+    assert before.count == 2 and before.worst == 819
+
+    # 1. The offsetting pair, same module, same diff: `_sdk_credential` grows
+    #    past the cap, `_data` shrinks below it. Both DERIVED whole-tree
+    #    numbers stay exactly flat (count 2 -> 2, worst 819 -> 819, `_giant`
+    #    dwarfing both movers) -- the exact silence PR #1170 hit.
+    module.write_text(
+        giant + long_fn("_sdk_credential", 68) + long_fn("_data", 46), encoding="utf-8"
+    )
+    current = target.measure_current().functions["tan/creds.py"]
+    assert current.count == before.count and current.worst == before.worst, (
+        "the fixture must reproduce a whole-tree-neutral move, or this is not "
+        "actually testing what PR #1170 hit"
+    )
+    rc = regen.main([])
+    assert rc == 1, (
+        "an offsetting per-function pair in one module was accepted without "
+        "--reason -- this is the exact shape tan-cli#1173 exists to refuse"
+    )
+    assert sorted(ledger_dir.glob("*.md")) == seeded_entries, "a refusal must write nothing"
+
+    # 2. With --reason, the regen succeeds and the ledger line names BOTH
+    #    functions -- the one that crossed the cap AND the one that dropped.
+    assert regen.main(["--reason", "PR #1170 shape"]) == 0
+    new_entries = sorted(set(ledger_dir.glob("*.md")) - set(seeded_entries))
+    assert len(new_entries) == 1
+    text = new_entries[0].read_text(encoding="utf-8")
+    assert "creds.py:_sdk_credential" in text and "new entry at 69" in text
+    assert "creds.py:_data" in text and "dropped" in text, (
+        "the ledger entry must name the function that dropped below the cap "
+        "too, or it tells only half of what moved in this diff"
+    )
+    after = target.load_generated().functions["tan/creds.py"]
+    assert dict((name, span) for span, name in after.entries) == {
+        "_giant": 819,
+        "_sdk_credential": 69,
+    }
+
+    # 3. Mutation-proof, the other direction: an unrelated edit that does not
+    #    cross FUNCTION_CAP anywhere stays silent, no flag needed.
+    (package / "unrelated.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
+    assert regen.main([]) == 0, "an edit that crosses no cap must not demand --reason"
+    assert sorted(ledger_dir.glob("*.md")) == sorted(seeded_entries + new_entries), (
+        "an unrelated, non-crossing change must not write a ledger entry either"
+    )
 
 
 def test_check_mode_reds_on_a_stale_record_and_passes_once_resynced(tmp_path, monkeypatch):
@@ -578,12 +699,12 @@ def test_check_mode_reds_on_a_stale_record_and_passes_once_resynced(tmp_path, mo
 def test_a_padded_record_reds_check_and_names_its_module(tmp_path, monkeypatch):
     """The defect tan-cli#668 exists to make structurally impossible, at the
     new storage's granularity: a hand-edited value that no real measurement
-    produced. Padding one record's `long_functions` inflates the DERIVED
-    `function_count_budget` -- which the `<=` ratchet alone cannot see,
-    because a too-generous budget still bounds the tree -- so this pins that
-    both `--check` and `test_the_recorded_function_facts_match_the_measurement`
-    catch it, and that the message names the module rather than a whole-tree
-    scalar."""
+    produced. Appending a fake entry to one record's `long_functions` list
+    inflates the DERIVED `function_count_budget` -- which the `<=` ratchet
+    alone cannot see, because a too-generous budget still bounds the tree --
+    so this pins that both `--check` and
+    `test_the_recorded_function_facts_match_the_measurement` catch it, and
+    that the message names the module rather than a whole-tree scalar."""
     import json
 
     regen = _load_regen("_regen_under_test_padded")
@@ -605,11 +726,12 @@ def test_a_padded_record_reds_check_and_names_its_module(tmp_path, monkeypatch):
 
     record = record_dir / "tan" / "a.py.json"
     data = json.loads(record.read_text(encoding="utf-8"))
-    data["long_functions"] = 99
+    assert data["long_functions"] == [[81, "f"]]
+    data["long_functions"].append([55, "fake_padded_function"])
     record.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
     assert regen.main(["--check"]) == 1, "a padded record must RED --check"
-    assert target.load_generated().function_count == 99
+    assert target.load_generated().function_count == 2
     measured = target.measure_current()
     assert measured.function_count == 1, (
         "the measurement is unaffected by the padded record -- measure_current "
@@ -665,6 +787,41 @@ def test_a_record_that_disagrees_with_its_own_path_or_kind_is_refused(tmp_path, 
     # non-record files must not be silently skipped.
     (record_dir / "stray.txt").write_text("hello\n", encoding="utf-8")
     with pytest.raises(ValueError, match="neither records nor"):
+        target.load_generated()
+
+
+def test_a_long_functions_entry_at_or_under_the_cap_is_refused(tmp_path, monkeypatch):
+    """`long_functions` (tan-cli#1173) holds only over-cap functions by
+    construction -- `measure_current` never puts a `span <= FUNCTION_CAP`
+    entry in the list it builds. An entry at or under the cap could therefore
+    only get into a record by a hand-edit, which is exactly the tan-cli#668
+    class this whole file exists to make impossible; `load_generated` raises
+    rather than silently accepting it (and, unlike a padded-upward entry,
+    doing so would otherwise UNDER-count -- a hand-edit could hide a real
+    over-cap function behind a bogus at-cap one with the same list length)."""
+    import json
+
+    regen = _load_regen("_regen_under_test_at_cap")
+    target = regen.core
+
+    package = tmp_path / "tan"
+    package.mkdir()
+    (package / "a.py").write_text("def f():\n" + "    pass\n" * 80, encoding="utf-8")
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    monkeypatch.setattr(target, "PACKAGE", package)
+    monkeypatch.setattr(target, "TEST_ROOT", tests_root)
+    monkeypatch.setattr(target, "LOG_PATH", tmp_path / "LOG.md")
+    monkeypatch.setattr(target, "LOG_DIR", tmp_path / "LOG.d")
+    record_dir = _redirect(target, monkeypatch, tmp_path)
+    assert regen.main(["--reason", "seed the fixture"]) == 0
+
+    record = record_dir / "tan" / "a.py.json"
+    data = json.loads(record.read_text(encoding="utf-8"))
+    data["long_functions"][0][0] = target.FUNCTION_CAP  # exactly at the cap, not over it
+    record.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="at or under FUNCTION_CAP"):
         target.load_generated()
 
 
