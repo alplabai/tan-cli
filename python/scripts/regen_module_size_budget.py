@@ -351,6 +351,18 @@ def main(argv: list[str] | None = None) -> int:
     grown = module_grown + function_grown
     shrunk = module_shrunk + function_shrunk
 
+    # A pure same-span rename is deliberately paired out of BOTH lists above
+    # (see `_function_deltas`'s docstring) -- it must not force --reason,
+    # since no ceiling moved. But "no --reason needed" is not the same
+    # statement as "nothing to write": the record still names the OLD
+    # function (`long_functions` stores the name), so it is stale against the
+    # tree even though the paired delta is silent about it. Compare the raw
+    # measurement, not the human-facing delta lists, to catch that -- this is
+    # the only way `committed.functions` can differ from `current.functions`
+    # while `grown`/`shrunk` are both empty for that module (a real growth or
+    # shrink always shows up in one of them; see `_deltas`/`_function_deltas`).
+    functions_stale = committed.functions != current.functions
+
     # tan-cli#817: the observed `tests/**` deltas are computed and REPORTED,
     # and deliberately kept out of `grown`/`shrunk` above. Those two lists are
     # what the `--reason` refusal below reads, so folding the observed side
@@ -363,7 +375,9 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8"
     ) != core.dump_caps()
 
-    if not (grown or shrunk or observed_moved or observed_settled or stale_caps):
+    if not (
+        grown or shrunk or observed_moved or observed_settled or stale_caps or functions_stale
+    ):
         print("module_size_budget.d/ already matches the measured tree.")
         return 0
 
@@ -375,6 +389,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  observed: {line}")
         if stale_caps:
             print("  _caps.json does not match MODULE_CAP/FUNCTION_CAP")
+        if functions_stale and not (grown or shrunk):
+            print(
+                "  a function record no longer matches its module (a pure rename -- "
+                "no ceiling moved, so nothing above named it)"
+            )
         print("Run `python scripts/regen_module_size_budget.py` to refresh it.")
         return 1
 

@@ -829,6 +829,73 @@ def test_a_pure_rename_within_one_module_is_not_growth(tmp_path, monkeypatch):
     assert shrunk == ["a.py:f: 63 -> gone (renamed, moved, or deleted -- not a shrink)"]
 
 
+def test_a_pure_rename_still_forces_the_committed_record_to_regenerate(tmp_path, monkeypatch):
+    """The same-span pairing above is correct about `--reason` -- a pure
+    rename is not a ceiling raise -- but a review of the fix found it went
+    one step further than it should have: `main()`'s staleness gate is
+    `if not (grown or shrunk or observed_moved or observed_settled or
+    stale_caps)`, and a pure rename empties BOTH `grown` and `shrunk` for its
+    module, so that gate reads "nothing changed" and never calls
+    `write_records` at all. The committed record still names the OLD
+    function (`long_functions` stores the name, not just the span), so it is
+    now stale against the tree with `--check` reporting clean -- exactly the
+    silent-staleness class this whole record tree exists to refuse.
+
+    "No --reason required" and "nothing to write" are different statements;
+    this end-to-end run (through `main()`, not `_function_deltas` directly)
+    is what tells them apart -- a plain `regen` with no flag must still
+    rewrite the record to the new name, and `--check` must catch the gap if
+    it doesn't."""
+    regen = _load_regen("_regen_under_test_rename_regen")
+    target = regen.core
+
+    package = tmp_path / "tan"
+    package.mkdir()
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    ledger_dir = tmp_path / "LOG.d"
+    monkeypatch.setattr(target, "PACKAGE", package)
+    monkeypatch.setattr(target, "TEST_ROOT", tests_root)
+    monkeypatch.setattr(target, "LOG_PATH", tmp_path / "LOG.md")
+    monkeypatch.setattr(target, "LOG_DIR", ledger_dir)
+    _redirect(target, monkeypatch, tmp_path)
+
+    def long_fn(name: str, body_lines: int) -> str:
+        return f"def {name}():\n" + "    pass\n" * body_lines + "\n"
+
+    (package / "a.py").write_text(long_fn("f", 61), encoding="utf-8")
+    assert regen.main(["--reason", "seed the fixture"]) == 0
+    seeded = target.load_generated()
+    assert dict((name, span) for span, name in seeded.functions["tan/a.py"].entries) == {"f": 62}
+
+    # The rename: same module, same span, different name.
+    (package / "a.py").write_text(long_fn("g", 61), encoding="utf-8")
+
+    # `--check` must red -- the committed record still says `f`, the tree
+    # says `g`. This is the reproduction: it read clean before this fix.
+    assert regen.main(["--check"]) == 1, (
+        "a pure rename left the committed record naming the old function, "
+        "and --check reported the tree clean anyway -- this is the bug"
+    )
+
+    # A plain regen, no flag, must succeed (no ceiling moved) AND must
+    # actually rewrite the record to the new name.
+    seeded_entries = sorted(ledger_dir.glob("*.md"))
+    assert regen.main([]) == 0, "a pure rename must not demand --reason"
+    assert sorted(ledger_dir.glob("*.md")) == seeded_entries, (
+        "a pure rename must not write a ledger entry either -- nothing about "
+        "the ceiling moved"
+    )
+    after = target.load_generated()
+    assert dict((name, span) for span, name in after.functions["tan/a.py"].entries) == {"g": 62}, (
+        "the record was not rewritten -- it still names the function that no "
+        "longer exists under that name"
+    )
+
+    # And now --check is satisfied.
+    assert regen.main(["--check"]) == 0
+
+
 def test_a_deleted_module_is_reported_as_gone_not_dropped():
     """`_deltas` (the module-line-ceiling half) had the same false wording
     `_function_deltas` was fixed for above: a module deleted outright -- not
