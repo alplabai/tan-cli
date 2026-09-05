@@ -288,7 +288,7 @@ def test_the_recorded_function_facts_match_the_measurement():
     tan-cli#1057 scheme this paragraph describes, before tan-cli#1173 existed),
     39 needed a regen under both the old single-file scheme and this one, 15
     under the old scheme only, 11 under neither, and **3** are newly taxed
-    here (`8866d7fb5`, `dcf37ae45`, `3ff889093`) -- a whole-tree-neutral
+    here -- a whole-tree-neutral
     per-module function growth, which the old file structurally could not
     see. Under tan-cli#1057, the regen those 3 forced needed no `--reason` and
     wrote no ledger entry. That consequence does NOT survive tan-cli#1173
