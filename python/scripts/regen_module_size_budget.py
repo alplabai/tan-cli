@@ -333,7 +333,11 @@ def main(argv: list[str] | None = None) -> int:
     current = core.measure_current()
     observed = core.measure_observed_tests()
     try:
-        committed = core.load_generated()
+        # --merge-resync is the one path that must survive a pre-tan-cli#1173
+        # record: merging a branch older than that schema is precisely when it
+        # is used, and refusing to LOAD such a record made the flag unreachable
+        # (the error named --merge-resync, and --merge-resync hit the error).
+        committed = core.load_generated(tolerate_legacy_records=args.merge_resync)
         committed_observed = core.load_observed_tests()
     except ValueError as err:
         print(f"error: {err}", file=sys.stderr)
@@ -461,7 +465,15 @@ def _append_log(reason: str, grown: list[str], function_shrunk: list[str]) -> No
     while True:
         path = core.LOG_DIR / f"{date}-{secrets.token_hex(4)}.md"
         try:
-            with path.open("x", encoding="utf-8") as fh:
+            # newline="\n": this is the writer that produces the entries
+            # actually committed to MODULE_SIZE_BUDGET_LOG.d/ (tan-cli#1152
+            # review) -- default newline=None would translate "\n" to "\r\n"
+            # on Windows, a real CRLF-vs-LF difference in a written entry.
+            # .gitattributes' `* text=auto eol=lf` normalises it back to LF in
+            # the committed blob regardless, but writing LF here means the
+            # on-disk file (before it is ever staged) already matches what
+            # gets committed, on every host.
+            with path.open("x", encoding="utf-8", newline="\n") as fh:
                 fh.write(entry)
         except FileExistsError:
             continue

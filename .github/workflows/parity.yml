@@ -2297,6 +2297,16 @@ jobs:
   # false-positive d9a22c0/ecab9da exists to prevent (PINNED_SDK_TAG can sit on
   # either side of the audit commit with no guarantee the two agree).
   #
+  # ONE exception, tan-cli#1152: `test_module_size_budget_log_d_entries_are_
+  # immutable.py` needs no alp-sdk ref at all (its own module docstring says
+  # so -- it walks THIS repo's own git history, not a bound checkout), so the
+  # "THIRD, uncoordinated ref" problem above does not apply to it. This
+  # `--ignore=tests/gates` still excludes it from the run below; it gets its
+  # own, narrowly-targeted invocation further down this job instead, because
+  # it is the one file in `tests/gates` ci.yml's decision comment flags as
+  # needing a cross-OS run of its own (it shells real `git`), and this job is
+  # the only place in the repo that runs on `windows-latest`/`macos-latest`.
+  #
   # No Zephyr SDK / west workspace here -- that stays seam2/
   # first-blink's job. `native_sim` e2e and the west-real-build parity cases
   # already self-skip, loudly, with a named reason when the toolchain is
@@ -2398,6 +2408,34 @@ jobs:
           persist-credentials: false
           # Same rule as every other job in this file -- see seam1's comment.
           ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
+          # tan-cli#1152: full history ONLY on the two (os, shard) legs that
+          # run the ledger-immutability gate below (matrix.os !=
+          # 'ubuntu-latest' && matrix.shard == 0 -- windows-latest+0 and
+          # macos-latest+0) -- the other 13 legs keep actions/checkout's
+          # default fetch-depth: 1, which is all they need.
+          # This is the tan-cli#970 convention every other job in this repo
+          # that needs history uses (ci.yml, this file's seam1-plan-shape job,
+          # pin-move-verify.yml, planner-resync.yml, version-identity.yml --
+          # all plain `fetch-depth: 0` on the checkout, not a runtime `git
+          # fetch --unshallow`). A runtime unshallow was tried first and
+          # reverted: this checkout sets persist-credentials: false, so an
+          # unauthenticated `git fetch --unshallow` only works because this
+          # repo is public today -- `fetch-depth: 0` here needs no fetch, no
+          # credentials, and no assumption about repo visibility.
+          #
+          # '0' is quoted, not bare 0: GitHub Actions' `&&`/`||` return an
+          # OPERAND, not a coerced boolean, and its truthiness table treats
+          # the number 0 as falsy -- so `cond && 0 || 1` collapses to `1` on
+          # EVERY leg (0 is deemed falsy, so `0 || 1` always yields 1), a
+          # documented ternary-with-falsy-true-branch footgun. Verified with
+          # the official `@actions/expressions` evaluator: the bare-`0` form
+          # returns `"1"` for all four (os, shard) combinations tried,
+          # including windows-latest+0; quoting the true branch as the
+          # non-empty string `'0'` (which IS truthy, same trick `release.yml`
+          # already uses for its `make_latest` ternary's `'false'` branch)
+          # makes it evaluate to `"0"` on exactly the two intended legs and
+          # `"1"` everywhere else.
+          fetch-depth: ${{ (matrix.os != 'ubuntu-latest' && matrix.shard == 0) && '0' || 1 }}
 
       # Env var + allow-list, not interpolation -- see seam1's comment above.
       - name: resolve alp-sdk ref
@@ -2494,6 +2532,41 @@ jobs:
           # own model-compile comment in
           # pyproject.toml).
           python -m pip install --quiet -e ".[monitor,model-compile]" pytest pytest-shard
+
+      # tan-cli#1152: the one file `tests/gates` excludes from THIS job for a
+      # reason that has nothing to do with alp-sdk refs (see the
+      # `--ignore=tests/gates` note above) gets its own targeted, cross-OS
+      # run here instead of a blanket widening of ci.yml's ubuntu-only
+      # `python` job -- exactly what that job's own decision comment asks
+      # for. `test_module_size_budget_log_d_entries_are_immutable.py` has
+      # shelled real `git` subprocesses since tan-cli#907
+      # (`rev-list --full-history`, `log --name-status`, merge construction,
+      # blob compares), which is genuinely host-dependent in a way the rest
+      # of `tests/gates` (pure `ast`/text-scan parsing) is not -- see that
+      # file's own module docstring for the CRLF and git-version hazards this
+      # run exists to catch, and why neither currently breaks anything here.
+      #
+      # `matrix.os != 'ubuntu-latest'`: ubuntu-latest already runs this file,
+      # with full history, in ci.yml's `python` job and in this workflow's
+      # own `seam1-plan-shape` job (both `fetch-depth: 0`) -- a third ubuntu
+      # run here would be the "blanket widening" the decision comment argues
+      # against, not the "gate's own cross-OS run" it asks for.
+      #
+      # `matrix.shard == 0`: this job's matrix has 5 legs per OS (4 numbered
+      # shards + the unsharded `parity` leg); picking exactly one numbered
+      # shard runs this step once per platform, not once per (os, shard) leg.
+      #
+      # Full history for this one leg comes from the "checkout tan-cli" step's
+      # own `fetch-depth:` expression above (the same `matrix.os !=
+      # 'ubuntu-latest' && matrix.shard == 0` condition) -- measured locally
+      # on a real shallow Windows checkout before that expression existed:
+      # `test_the_checkout_has_full_history` correctly hard-failed, and
+      # nothing else did.
+      - name: run the ledger-immutability gate cross-OS (tan-cli#1152)
+        if: matrix.os != 'ubuntu-latest' && matrix.shard == 0
+        shell: bash
+        working-directory: python
+        run: python -m pytest -q tests/gates/test_module_size_budget_log_d_entries_are_immutable.py
 
       # The `python-tests` job below (the one wired into branch protection --
       # see .github/workflows/ci.yml's header for the full tan-cli#392 note and

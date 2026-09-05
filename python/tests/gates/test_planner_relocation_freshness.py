@@ -1416,6 +1416,12 @@ HAND_PORT_SOURCES: dict[str, str] = {
     "project_loader.py": "scripts/alp_project_loader.py",
     "som_metadata.py": "scripts/alp_project_loader.py",
     "template.py": "scripts/alp_template.py",
+    # tan-cli#1142: template.py was 2206 lines against MODULE_CAP=800 and was
+    # split into two sibling modules -- both are this SAME hand-port, not a
+    # second one, the same many-to-one shape alp_project_loader.py already
+    # has two rows below.
+    "template_pins.py": "scripts/alp_template.py",
+    "template_rewrite.py": "scripts/alp_template.py",
     "project_emit/__init__.py": "scripts/alp_project_emit/__init__.py",
     "project_emit/bom_netlist.py": "scripts/alp_project_emit/bom_netlist.py",
     "project_emit/dts.py": "scripts/alp_project_emit/dts.py",

@@ -89,12 +89,26 @@ def _emit_extra_library_profile(
 
     Failures (malformed YAML, missing keys) emit a single `#`-prefixed
     diagnostic comment so the customer sees the failure in the slice's
-    alp.conf rather than getting silent drop-out.
+    alp.conf rather than silent drop-out.
     """
-    profile_path = (REPO / profile_rel).resolve()
+    # RELOCATED divergence from alp-sdk's own scripts/alp_orchestrate/
+    # kconfig.py: BOTH hunks below are tan-only (tan-cli#1122). alp-sdk's
+    # copy still spells this as `profile_path = (REPO / profile_rel)
+    # .resolve()` on its own line followed by `except (OSError,
+    # yaml.YAMLError)`, which raises out of a function contracted never to
+    # in two ways -- `UnicodeDecodeError` is a `ValueError`, not an
+    # `OSError`, so `read_text(encoding="utf-8")` escapes the clause before
+    # any parser runs; and `.resolve()` raises `RuntimeError("Symlink loop
+    # from %r")` on ELOOP from OUTSIDE the `try` entirely. Here the
+    # `.resolve()` is dropped (nothing downstream needs a real path -- only
+    # the read does) and the clause carries `UnicodeDecodeError`.
+    # The upstream fix is tracked as alp-sdk#1961; until it lands and a
+    # re-sync converges the two, `planner_resync.py` will surface this as a
+    # merge conflict rather than silently revert it.
     try:
+        profile_path = REPO / profile_rel
         doc = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as e:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
         return [f"# extra_libraries[{name}] profile parse failed: {e}"]
     if not isinstance(doc, dict):
         return [f"# extra_libraries[{name}] profile is not a mapping"]

@@ -144,9 +144,20 @@ MODULE_CAP = 800
 #: The guideline for a function body, same role for the function ratchet.
 FUNCTION_CAP = 50
 
-#: `tan/planner/**` is a hash-audited relocation of alp-sdk's
-#: `scripts/alp_orchestrate/**` (see `test_planner_relocation_freshness.py`).
-#: An oversized module under it is upstream's to split, not this repo's.
+#: `tan/planner/**` is a MIX (see `test_planner_relocation_freshness.py`):
+#: `PINNED_HASHES` modules are a hash-audited, 3-WAY-MERGED relocation of
+#: alp-sdk's `scripts/alp_orchestrate/**` -- an oversized one of THOSE is
+#: upstream's to split, not this repo's, because a shape change here would
+#: turn every future upstream hunk into a merge conflict against a moving
+#: file. `HAND_PORT_SOURCES` modules (e.g. `template.py`) live under this
+#: same prefix but are FLAGGED, never merged, against their upstream source
+#: (`test_planner_relocation_freshness.py`'s own module docstring) -- there is
+#: no base/theirs/ours triple for a split to break, so this repo may split one
+#: like any other oversized module (tan-cli#1142 did, for `template.py`).
+#: `test_module_size_budget.py::
+#: test_the_mirrored_planner_is_named_as_out_of_scope` checks only the
+#: `PINNED_HASHES` subset of this prefix, not the whole thing -- read that
+#: test before assuming every path under here is out of scope.
 MIRRORED_PREFIX = "tan/planner/"
 
 #: The two record kinds. `budget` is the ratcheted `tan/**` side; `observed`
@@ -434,8 +445,25 @@ def _load_records() -> dict[str, dict]:
     return out
 
 
-def load_generated() -> MeasuredState:
-    """The GATED half of the record tree (`kind: budget`)."""
+def load_generated(*, tolerate_legacy_records: bool = False) -> MeasuredState:
+    """The GATED half of the record tree (`kind: budget`).
+
+    `tolerate_legacy_records` exists for ONE caller:
+    `regen_module_size_budget.py --merge-resync`. Merging a branch that
+    predates tan-cli#1173 brings in records whose `long_functions` is still a
+    bare count, and the whole job of `--merge-resync` is to rewrite exactly
+    those. Raising on them made the flag unreachable -- the error told you to
+    run `--merge-resync`, and `--merge-resync` hit the same error, because
+    `main()` loads the records before it can act on any flag. Under the flag a
+    legacy record reads as "no recorded entries", which forces a rewrite from
+    the measured tree; that is the correct outcome, since the script never
+    derives new records from committed ones (see `measure_current`).
+
+    It stays strict everywhere else. The gate itself must keep refusing a
+    record it cannot interpret, or a stale count would be silently coerced
+    into "nothing to report" -- which is the blindness tan-cli#1173 exists to
+    remove.
+    """
     module_map: dict[str, int] = {}
     functions: dict[str, ModuleFunctions] = {}
     for key, data in _load_records().items():
@@ -445,6 +473,8 @@ def load_generated() -> MeasuredState:
         if lines is not None:
             module_map[key] = int(lines)
         raw = data.get("long_functions") or []
+        if not isinstance(raw, list) and tolerate_legacy_records:
+            raw = []
         if not isinstance(raw, list):
             raise ValueError(
                 f"module_size_budget.d/{key}{RECORD_SUFFIX}'s long_functions "
