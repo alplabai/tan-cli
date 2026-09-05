@@ -2408,6 +2408,21 @@ jobs:
           persist-credentials: false
           # Same rule as every other job in this file -- see seam1's comment.
           ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
+          # tan-cli#1152: full history ONLY on the two (os, shard) legs that
+          # run the ledger-immutability gate below (matrix.os !=
+          # 'ubuntu-latest' && matrix.shard == 0 -- windows-latest+0 and
+          # macos-latest+0) -- the other 13 legs keep actions/checkout's
+          # default fetch-depth: 1, which is all they need.
+          # This is the tan-cli#970 convention every other job in this repo
+          # that needs history uses (ci.yml, this file's seam1-plan-shape job,
+          # pin-move-verify.yml, planner-resync.yml, version-identity.yml --
+          # all plain `fetch-depth: 0` on the checkout, not a runtime `git
+          # fetch --unshallow`). A runtime unshallow was tried first and
+          # reverted: this checkout sets persist-credentials: false, so an
+          # unauthenticated `git fetch --unshallow` only works because this
+          # repo is public today -- `fetch-depth: 0` here needs no fetch, no
+          # credentials, and no assumption about repo visibility.
+          fetch-depth: ${{ (matrix.os != 'ubuntu-latest' && matrix.shard == 0) && 0 || 1 }}
 
       # Env var + allow-list, not interpolation -- see seam1's comment above.
       - name: resolve alp-sdk ref
@@ -2528,28 +2543,17 @@ jobs:
       # shards + the unsharded `parity` leg); picking exactly one numbered
       # shard runs this step once per platform, not once per (os, shard) leg.
       #
-      # Unshallowed HERE, narrowly, rather than by adding `fetch-depth: 0` to
-      # the "checkout tan-cli" step above for all 15 (os, shard) legs: that
-      # step takes actions/checkout's default (`fetch-depth: 1`), and this
-      # gate's own `test_the_checkout_has_full_history` correctly hard-fails
-      # a shallow clone instead of silently skipping it (the same tan-cli#970
-      # shape as the sibling append-only gate) -- measured locally on a real
-      # shallow Windows checkout before this step existed: exactly that one
-      # test failed, and nothing else did. `git fetch --unshallow` is only
-      # run when the checkout actually IS shallow; calling it unconditionally
-      # fails outright ("does not make sense") on a checkout that already has
-      # full history, which this job's own checkout may or may not be
-      # depending on the runner and trigger.
-      - name: unshallow + run the ledger-immutability gate cross-OS (tan-cli#1152)
+      # Full history for this one leg comes from the "checkout tan-cli" step's
+      # own `fetch-depth:` expression above (the same `matrix.os !=
+      # 'ubuntu-latest' && matrix.shard == 0` condition) -- measured locally
+      # on a real shallow Windows checkout before that expression existed:
+      # `test_the_checkout_has_full_history` correctly hard-failed, and
+      # nothing else did.
+      - name: run the ledger-immutability gate cross-OS (tan-cli#1152)
         if: matrix.os != 'ubuntu-latest' && matrix.shard == 0
         shell: bash
         working-directory: python
-        run: |
-          set -euo pipefail
-          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
-            git fetch --unshallow
-          fi
-          python -m pytest -q tests/gates/test_module_size_budget_log_d_entries_are_immutable.py
+        run: python -m pytest -q tests/gates/test_module_size_budget_log_d_entries_are_immutable.py
 
       # The `python-tests` job below (the one wired into branch protection --
       # see .github/workflows/ci.yml's header for the full tan-cli#392 note and

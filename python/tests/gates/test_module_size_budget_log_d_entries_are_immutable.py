@@ -107,14 +107,14 @@ shells real `git` (`rev-list --full-history`, `log --name-status`, merge
 construction, blob compares) -- so `parity.yml`'s `python-tests-shard` job now
 also runs THIS FILE ALONE (not the rest of `tests/gates`, which stays the pure
 parsing the premise describes) on `windows-latest` and `macos-latest`; see
-that job's own step for the two things doing so required: an explicit
-unshallow (a shallow clone reds `test_the_checkout_has_full_history` by
-design, measured locally on a shallow Windows checkout before this run
-existed) and the `PYTHONPATH`/import-root shape `working-directory: python`
-already gives every other step in that job.
+that job's own step for the two things doing so required: a `fetch-depth: 0`
+on that leg's own checkout (a shallow clone reds
+`test_the_checkout_has_full_history` by design, measured locally on a shallow
+Windows checkout before this run existed) and the `PYTHONPATH`/import-root
+shape `working-directory: python` already gives every other step in that job.
 
 Measured, not assumed: run on Windows (git 2.38.1.windows.1, `core.autocrlf
-false`) BEFORE the unshallow fix, exactly one test failed --
+false`) against a shallow checkout, exactly one test failed --
 `test_the_checkout_has_full_history`, correctly, on a real shallow clone --
 and every other test in this file already PASSED. That is despite a second
 platform hazard that looks like it should have broken something: `_write`
@@ -126,11 +126,14 @@ built by this file's helpers on Windows contains genuinely different blob
 bytes than the same scenario built on Linux. It does not currently fail
 anything HERE because every assertion in this file that re-reads an entry's
 content does so through `Path.read_text()` with no `newline=` either (see the
-two `read_text()` calls below) -- Python's universal-newline translation on
-the READ side cancels the CRLF the WRITE side introduced, on the SAME host,
-symmetrically, for exactly the string-equality checks this file makes.
-Nothing here compares raw bytes or a blob's OID against a value captured on a
-different host, so the cancellation is complete, not a near-miss.
+two entry-content `read_text()` calls below -- a third `read_text()` in this
+file reads `parity.yml`'s own YAML in the cross-OS regression test further
+down and is unrelated to this cancellation argument) -- Python's
+universal-newline translation on the READ side cancels the CRLF the WRITE
+side introduced, on the SAME host, symmetrically, for exactly the
+string-equality checks this file makes. Nothing here compares raw bytes or a
+blob's OID against a value captured on a different host, so the cancellation
+is complete, not a near-miss.
 
 Deliberately NOT "fixed" by adding `newline="\n"` to `_write` as part of this
 change: that helper lives in the sibling append-only gate file, shared by
@@ -142,6 +145,19 @@ future assertion in either file compares raw bytes (`read_bytes()`, a fixed
 hash, a byte-length) instead of `read_text()`'s normalised string. That is a
 real, narrow follow-up for `_write` itself, not a reason to hold this file's
 own cross-OS run.
+
+The PRODUCTION writer is a separate question from either test helper, and is
+not left open: `regen_module_size_budget.py`'s `_append_log` (the function
+that actually writes an entry under `MODULE_SIZE_BUDGET_LOG.d/` -- the exact
+artifact this whole gate protects) had the identical `open(..., newline=None)`
+shape and now opens with `newline="\n"` explicitly. `.gitattributes`' `*
+text=auto eol=lf` was already normalising its output to LF in the committed
+blob regardless (that pre-existing rule is the real reason this has never
+bitten the ledger), so the fix changes only the on-disk bytes before they are
+ever staged, not the committed history -- but "the normalising rule happens to
+cover it" and "the writer itself is correct" are different guarantees, and
+only a test file's helper is out of scope here, not the writer this whole
+gate exists to protect.
 
 `_introducing_commit` and the test below it already record the git version
 their own history-simplification assertions were measured against (2.43.0);
@@ -1770,6 +1786,21 @@ def test_this_file_gets_its_own_cross_os_run_in_parity_yml():
         "python-tests-shard's own os matrix must still carry windows-latest "
         "and macos-latest, or there is no non-ubuntu leg left for this "
         f"file's cross-OS step to run on: {matrix_os!r}"
+    )
+
+    # The step's own `if:` (checked below) fires on `matrix.shard == 0`, which
+    # is only ever true if `0` survives as a literal member of this matrix --
+    # renumbering it (e.g. to `[1, 2, 3, 4, parity]`, the exact off-by-one this
+    # same matrix's own comment above warns is "easy to introduce and easy to
+    # miss") makes that condition true on NO leg. The step would still exist,
+    # its `if:` string would still match the assertion below byte-for-byte,
+    # and this test would still pass green while the cross-OS run it exists to
+    # guarantee silently stopped happening on every platform.
+    matrix_shard = job["strategy"]["matrix"]["shard"]
+    assert 0 in matrix_shard, (
+        "python-tests-shard's own shard matrix must still carry a literal 0, "
+        "or matrix.shard == 0 in this file's cross-OS step is true on no leg "
+        f"and the step never runs: {matrix_shard!r}"
     )
 
     this_file_name = Path(__file__).name
