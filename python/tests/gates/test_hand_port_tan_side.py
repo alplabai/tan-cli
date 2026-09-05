@@ -83,7 +83,15 @@ HAND_PORT_TAN_SIDE: dict[str, tuple[str, ...]] = {
         "tan/planner/project_loader.py",
         "tan/planner/som_metadata.py",
     ),
-    "scripts/alp_template.py": ("tan/planner/template.py",),
+    # tan-cli#1142 split template.py (2206 lines against MODULE_CAP=800) into
+    # three sibling modules under the ONE HAND_PORT_SOURCES entry -- see that
+    # table's own comment for why a split is allowed here (MIRRORED_PREFIX
+    # bars a PINNED_HASHES module's shape from diverging, not a hand-port's).
+    "scripts/alp_template.py": (
+        "tan/planner/template.py",
+        "tan/planner/template_pins.py",
+        "tan/planner/template_rewrite.py",
+    ),
     # BOTH halves, because the mapped file disclaims the second one:
     # `project_emit/__init__.py:15` says `_CHIP_SUBSYSTEMS` is "already in
     # `slugs.py`", and `slugs.py:188` claims the relocation in the same words
