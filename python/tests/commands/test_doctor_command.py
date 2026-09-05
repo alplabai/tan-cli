@@ -37,6 +37,7 @@ from typer.testing import CliRunner
 from tan.cli import app
 from tan.commands import doctor_cmd
 from tan.core import artifact_provenance
+from tan.core import toolchain_provision as tp
 from tan.core.bootstrap import venv_layout, workspace_sdk_record_json
 from tan.core.tool_lookup import ToolResolution
 
@@ -1529,6 +1530,78 @@ def test_zephyr_sdk_detected_via_msys_home_split_from_windows_userprofile(tmp_pa
     monkeypatch.setenv("HOME", str(posix_home))
     monkeypatch.setenv("USERPROFILE", str(windows_profile))
     assert doctor_cmd._zephyr_sdk_detected() is True
+
+
+def test_zephyr_sdk_scan_cannot_see_the_bootstrap_artifact_store(tmp_path, monkeypatch):
+    """tan-cli#1186 measurement (NOT a fix -- see the module docstring's own
+    mirror note on ``_zephyr_sdk_detected``). ``tan bootstrap``'s automatic
+    toolchain acquisition fills the artifact-keyed store
+    ``<home>/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/``
+    (``toolchain_provision.store_dir_name``) -- two directory levels below
+    ``$HOME``/``$USERPROFILE``. ``_zephyr_sdk_scan_roots`` globs only the TOP
+    LEVEL of ``/opt``, ``$HOME``, ``$USERPROFILE`` and ``Path.home()``, so a
+    REAL, fully-installed compiler sitting in that exact store is invisible
+    to it -- this plants the genuine compiler binary
+    (``_plant_zephyr_sdk``), not merely a directory, so the negative below
+    is the scan's blindness and not an incomplete fixture.
+    """
+    monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
+    monkeypatch.delenv("ALP_TOOLCHAIN_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    store = tmp_path / ".alp" / "toolchains" / tp.store_dir_name("1.0.1")
+    _plant_zephyr_sdk(store)
+    assert doctor_cmd._zephyr_sdk_detected() is False
+
+
+def test_collect_shows_toolchain_pass_while_zephyr_sdk_still_fails_after_a_bootstrap_style_install(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1186's whole point, shown side by side in the exact shape
+    ``scripts/e2e-full.sh`` parses (``tan doctor --build --format json``'s
+    ``data.checks``): after a ``tan bootstrap``-style toolchain acquisition,
+    ``zephyrSdk`` (host-only, scans only the top level of ``$HOME`` -- see
+    the measurement above) still reports ``fail``, while ``toolchain``
+    (project-scoped, stamp-vs-pin, reads the SAME artifact-keyed store
+    through ``_toolchain_store_dir`` -- which DOES resolve
+    ``$ALP_TOOLCHAIN_ROOT`` via ``toolchain_provision.resolve_toolchain_root``)
+    reports ``pass``. The e2e harness's guard read only the first of these;
+    tan-cli#1186's fix reads both.
+    """
+    monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
+    monkeypatch.delenv("ALP_TOOLCHAIN_ROOT", raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    sdk_root = tmp_path / "alp-sdk"
+    (sdk_root / "metadata").mkdir(parents=True)
+    manifest_text = json.dumps(
+        {
+            "zephyrSdk": {
+                "version": "1.0.1",
+                "baseUrl": "https://example.invalid/",
+                "artifacts": [
+                    {
+                        "host": "linux-x86_64", "component": "minimal-sdk",
+                        "filename": "x.tar.xz", "sizeBytes": 1, "sha256": "a" * 64,
+                    }
+                ],
+            }
+        }
+    )
+    (sdk_root / "metadata" / "toolchains.json").write_text(manifest_text, encoding="utf-8")
+    manifest = tp.parse_toolchain_manifest(manifest_text)
+
+    store_dir = home / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
+    store_dir.mkdir(parents=True)
+    stamp = tp.ToolchainStamp(manifest.version, manifest.digest(), "arm-zephyr-eabi-gcc 14.3.0")
+    (store_dir / tp.STAMP_FILENAME).write_text(tp.render_stamp(stamp), encoding="utf-8")
+
+    checks = {c.name: c for c in doctor_cmd._collect(str(sdk_root))}
+    assert checks["zephyrSdk"].status == "fail"
+    assert checks["toolchain"].status == "pass"
 
 
 def test_zephyr_sdk_root_valid_rejects_a_directory_with_no_compiler_in_it(tmp_path):

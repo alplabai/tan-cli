@@ -1182,12 +1182,29 @@ PY
   hdr "B: Zephyr SDK (west sdk install --version $ZEPHYR_SDK_VERSION -t arm-zephyr-eabi)"
   if [ "$HAVE_PROJECT" -eq 1 ] && [ -x "$WEST_BIN" ]; then
     "$TAN" doctor --build --format json >"$WORK/doctorPre.out" 2>/dev/null
+    # tan-cli#1186: `zephyrSdk` alone is the wrong guard. It is a HOST-only
+    # fact -- ZEPHYR_SDK_INSTALL_DIR, else a scan of the TOP LEVEL ONLY of
+    # /opt, $HOME, %USERPROFILE% and Path.home() -- and cannot see the
+    # artifact-keyed store `tan bootstrap` just filled two levels below $HOME
+    # (or under $ALP_TOOLCHAIN_ROOT): measured, `doctor_cmd._zephyr_sdk_
+    # detected()` returns False against a real compiler planted at
+    # `<home>/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`
+    # (`test_zephyr_sdk_scan_cannot_see_the_bootstrap_artifact_store`).
+    # `toolchain` (issue #474, project-scoped, stamp-vs-pin) reads that exact
+    # store through `_toolchain_store_dir`, which DOES resolve
+    # $ALP_TOOLCHAIN_ROOT, so it is the check that actually reflects what
+    # bootstrap just did. Checked as an OR, never a replacement for
+    # `zephyrSdk`: a hand-installed SDK outside tan's store, or a run with no
+    # project/pin to check `toolchain` against, must keep skipping the
+    # download exactly as before.
     PRE=$(python3 - "$WORK/doctorPre.out" <<'PY'
 import json,sys
 try: d=json.load(open(sys.argv[1]))
 except Exception: print("fail"); raise SystemExit
-z=[c for c in (d.get("data") or {}).get("checks") or [] if c.get("name")=="zephyrSdk"]
-print(z[0]["status"] if z else "fail")
+checks = (d.get("data") or {}).get("checks") or []
+statuses = {c.get("name"): c.get("status") for c in checks}
+ok = "pass" in (statuses.get("zephyrSdk"), statuses.get("toolchain"))
+print("pass" if ok else "fail")
 PY
 )
     if [ "$PRE" = "pass" ]; then
@@ -1226,17 +1243,13 @@ PY
       #     arriving, not the customer's command.
       #
       # What that leaves standing, named rather than glossed: this download
-      # can still 403 on the shared per-IP quota. It is reached more often
-      # than the `PRE = pass` guard above suggests, because that guard reads
-      # `tan doctor`'s `zephyrSdk` check, which takes ZEPHYR_SDK_INSTALL_DIR
-      # first when that names a valid root and otherwise scans the top level
-      # -- never recursing -- of `/opt`, $HOME, %USERPROFILE% and
-      # `Path.home()` for a `zephyr-sdk*` entry (`doctor_cmd.py:2640-2694`).
-      # Neither route can see the store `tan bootstrap` just filled at
-      # `~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`: it is two
-      # levels below $HOME rather than at its top level, and it is not what
-      # ZEPHYR_SDK_INSTALL_DIR points at. Derived from source, not measured
-      # in a container run.
+      # can still 403 on the shared per-IP quota. tan-cli#1186 closed the
+      # false-guard case (the `PRE = pass` check above now also reads
+      # `toolchain`, which DOES see the store bootstrap just filled), so what
+      # remains is the honest one: this branch runs when bootstrap's own
+      # toolchain phase genuinely did not leave a verified toolchain behind
+      # (skipped, failed, or `--no-toolchain`), not an artifact of the guard
+      # looking in the wrong place.
       SDK_TIMEOUT="${ZEPHYR_SDK_INSTALL_TIMEOUT:-1200}"
       T0=$(date +%s)
       if ( cd "$WS" && timeout "$SDK_TIMEOUT" "$WEST_BIN" sdk install \
