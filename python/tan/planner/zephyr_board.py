@@ -1156,7 +1156,7 @@ def _aen_i2c_pinctrl_group(links: dict[str, Any]) -> str:
     )
 
 
-def _aen_brd_i2c_dts(links: dict[str, Any]) -> list[str]:
+def _aen_brd_i2c_dts(links: dict[str, Any], part: str) -> list[str]:
     """`&i2c0` (BRD_I2C) + its on-module device nodes, `&lpgpio`, and the
     aliases that make all three reachable portably.
 
@@ -1165,6 +1165,9 @@ def _aen_brd_i2c_dts(links: dict[str, Any]) -> list[str]:
     board should get them for free -- while
     `zephyr/dts/alif/ensemble_e8_peripherals.dtsi` describes the E8 DIE, which
     every AEN SKU shares whether or not it carries these chips.
+
+    *part* (the SoC JSON's `part`, e.g. ``"E8"``, ``"E3"``) gates the
+    alarm-node risk comment below -- see that block for why.
     """
     bus = links["brd_i2c"]
     alarm = links["rtc_alarm"]
@@ -1205,12 +1208,23 @@ def _aen_brd_i2c_dts(links: dict[str, Any]) -> list[str]:
         " * open-drain, pulled up on-module by R98 (100k to +1V8, FITTED).  The pad",
         " * itself is muxed in the pinctrl dtsi's BRD_I2C group (that binding has no",
         " * pinctrl-0 of its own).",
-        " *",
     ]
-    # The port-15 control-register warning, straight from the metadata's own
-    # `risk:` string -- the most likely bench failure on this path, and the
-    # one a reader must not mistake for a dead RTC.
-    lines += _c_comment(alarm["risk"], "")[1:-1]
+    # RELOCATED divergence from alp-sdk's own scripts/gen_zephyr_board.py:
+    # upstream's `_aen_brd_i2c_dts()` emits this port-15 control-register
+    # warning (the metadata's own `risk:` string) for EVERY AEN SKU
+    # unconditionally. But the string's own evidence names only "The AE822
+    # DFP" -- the E8 part's datasheet -- and on-module-links.yaml's `risk:`
+    # is not corroborated against the E3/E4/E6 DFPs, so it is an E8 fact
+    # wearing a family-scoped file (tan-cli#493's
+    # test_a_non_e8_aen_sku_includes_its_own_peripherals_overlay caught it
+    # bleeding "AE822"/E8 register-layout guidance into an E1M-AEN301 (E3)
+    # board tree). Gated on the part it is actually evidenced against, until
+    # either the metadata grows a per-part risk or another Ensemble DFP
+    # confirms the same quirk (upstream issue filed against alp-sdk to
+    # converge the two generators).
+    if part == "E8":
+        lines += [" *"]
+        lines += _c_comment(alarm["risk"], "")[1:-1]
     lines += [
         " */",
         f"&{alarm['gpio_node']} {{",
@@ -1712,7 +1726,7 @@ def _aen_dts(
         "};",
         "",
     ]
-    lines += _aen_brd_i2c_dts(links)
+    lines += _aen_brd_i2c_dts(links, part)
 
     if ethos_u is not None:
         _accel, node = ethos_u
