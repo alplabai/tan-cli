@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`tan model build`/`tan model doctor`/`tan model check` -- compile +
-package `board.yaml`'s `models:` block into `.alpmodel` packages, report
-NPU-compiler toolchain availability, and statically screen a declared model's
-NPU eligibility against the SoM's own support tables.
+"""`tan model build`/`tan model doctor`/`tan model check`/`tan model list` --
+compile + package `board.yaml`'s `models:` block into `.alpmodel` packages,
+report NPU-compiler toolchain availability, statically screen a declared
+model's NPU eligibility against the SoM's own support tables, and list what
+is declared next to what is already built.
 
 Port of `scripts/alp_cli/model.py` (51 lines): the board.yaml discovery,
 per-model source/compile-option path resolution, and the `built <path>`
@@ -91,6 +92,18 @@ that engine per declared model, and shapes the envelope. `check`'s exit code
 is ALWAYS `SUCCESS` for a run that completed -- `partial`/`cpu-only`/
 `undetermined` are the feature this command exists to report, never a
 failure. See `tan.model.check`'s own module doc for `--exact`.
+
+**`list` is the smallest of the four (tan-cli#674): what `board.yaml`
+declares, next to what `--out` already holds for each one.** It mirrors
+`doctor`'s SDK-root TOLERANCE, not `build`'s `_require_metadata_sdk_root`
+refusal -- naming what is declared and what is already built on disk needs no
+`metadata/**` at all, so `list` never resolves or warns about an SDK root,
+unlike every other subcommand here. It is read-only and spawns nothing: a
+declared model's `.alpmodel` (`tan.model.build.build_model`'s own
+`{name}.alpmodel` naming) is only ever `stat()`-ed and its manifest read
+back, never compiled. See `tan.core.model_list`'s own module doc for the
+per-model `artifact` shape, including `stale` (has `source` changed since the
+package on disk was built).
 """
 
 from __future__ import annotations
@@ -112,6 +125,7 @@ from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.global_flags import accept_global_flags
 from tan.core.model_check import backend_report_as_dict, render_check_text
 from tan.core.model_doctor import backend_row, optional_row, registry_backends
+from tan.core.model_list import declared_sku, list_entry, render_list_text
 from tan.core.sdk_discovery import sdk_resolution_issues
 from tan.core.shapes import rejected_sdk_root_message
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -135,9 +149,13 @@ DOCTOR_DATA_SCHEMA_VERSION = "1"
 #: the other two for the same reason (`models[].backends[]`, a third shape).
 CHECK_DATA_SCHEMA_VERSION = "1"
 
+#: `data.schemaVersion` for `list`'s payload -- versioned independently of
+#: the other three (`models[].artifact`, a fourth shape).
+LIST_DATA_SCHEMA_VERSION = "1"
+
 #: `SUBCOMMANDS` names every subcommand this command accepts, in the order the
 #: unknown-subcommand refusal lists them.
-SUBCOMMANDS = ("build", "doctor", "check")
+SUBCOMMANDS = ("build", "doctor", "check", "list")
 
 
 class ModelError(Exception):
@@ -564,6 +582,45 @@ def _run_check(
     return reported_project, sdk_info, data, issues, exit_code
 
 
+def _run_list(
+    *,
+    context: ProjectContext,
+    out: str,
+) -> tuple[Project, SdkInfo | None, dict, list[Issue], ExitCode]:
+    """Every declared model next to what `--out` already holds for it (module
+    doc): no `--sdk-root`/`metadata_root` handling at all, unlike `_run_build`/
+    `_run_check` above -- `list` reads only `board.yaml` and `out`'s own
+    directory, so there is nothing here to resolve a checkout for. Never
+    refuses over a missing/invalid `som.sku` either (`declared_sku` degrades
+    to `None`): the SoM is not needed to say what is declared and what is
+    already on disk."""
+    workspace_root = Path(context.workspace_root)
+    board_path = Path(context.board_yaml)
+    reported_project = context.project()
+    sdk_info = context.sdk
+
+    board_doc = _load_board(board_path)
+    sku = declared_sku(board_doc)
+    models = _require_models_list(board_doc, board_path)
+
+    data: dict[str, Any] = {"schemaVersion": LIST_DATA_SCHEMA_VERSION, "sku": sku, "models": []}
+    if not models:
+        return reported_project, sdk_info, data, [], ExitCode.SUCCESS
+
+    base = board_path.parent
+    out_dir = Path(out)
+    if not out_dir.is_absolute():
+        out_dir = workspace_root / out_dir
+
+    entries = []
+    for m in models:
+        _require_model_entry(m, board_path)
+        source = (base / m["source"]).resolve()
+        entries.append(list_entry(m["name"], source, out_dir))
+    data["models"] = entries
+    return reported_project, sdk_info, data, [], ExitCode.SUCCESS
+
+
 def _backend_version(backend: str, *, available: bool) -> str | None:
     """Best-effort compiler-version string for an AVAILABLE backend --
     READ-ONLY, never a spawn (module doc). `None` whenever no non-spawning
@@ -813,19 +870,23 @@ def _run_doctor(
 
 def _empty_data(subcommand: str | None) -> dict[str, Any]:
     """The `data` shape for a refusal that never reached `_run_build`/
-    `_run_doctor`/`_run_check` -- each subcommand's OWN empty payload shape,
-    not a generic stand-in, so a consumer parsing `data.backends`/
-    `data.built`/`data.models` off a refusal envelope gets the same shape it
-    would from a run that resolved nothing."""
+    `_run_doctor`/`_run_check`/`_run_list` -- each subcommand's OWN empty
+    payload shape, not a generic stand-in, so a consumer parsing
+    `data.backends`/`data.built`/`data.models` off a refusal envelope gets the
+    same shape it would from a run that resolved nothing."""
     if subcommand == "doctor":
         return {"schemaVersion": DOCTOR_DATA_SCHEMA_VERSION, "backends": [], "optional": []}
     if subcommand == "check":
         return {"schemaVersion": CHECK_DATA_SCHEMA_VERSION, "sku": None, "exact": False, "models": []}
+    if subcommand == "list":
+        return {"schemaVersion": LIST_DATA_SCHEMA_VERSION, "sku": None, "models": []}
     return {"schemaVersion": DATA_SCHEMA_VERSION, "sku": None, "built": []}
 
 
 def model(
-    subcommand: str = typer.Argument(None, metavar="SUBCOMMAND", help="build | doctor | check."),
+    subcommand: str = typer.Argument(
+        None, metavar="SUBCOMMAND", help="build | doctor | check | list."
+    ),
     board: str = typer.Option(
         # tan-cli#398: `--board-yaml` is a REAL second spelling of this one
         # option, not a second option -- it is what `build`, `run`, `kconfig`,
@@ -857,13 +918,14 @@ def model(
         False,
         "--exact",
         help="With `check`: attempt a real compile (Ethos-U only, via `vela`) "
-        "instead of the static screen. Ignored by `build`/`doctor`.",
+        "instead of the static screen. Ignored by `build`/`doctor`/`list`.",
     ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """Compile + package board.yaml `models:` into `.alpmodel` packages
-    (`build`), report NPU-compiler toolchain availability (`doctor`), or
-    statically screen a declared model's NPU eligibility (`check`)."""
+    (`build`), report NPU-compiler toolchain availability (`doctor`),
+    statically screen a declared model's NPU eligibility (`check`), or list
+    what is declared next to what is already built (`list`)."""
     json_mode = output_format == "json"
 
     def finish(
@@ -926,6 +988,20 @@ def model(
                             f"{row['backend']}: optional (tool={tool}) not in use{suffix}",
                             file=sys.stderr,
                         )
+            elif subcommand == "list":
+                # `list`: checked by SUBCOMMAND, not by `"models" in data` --
+                # `check`'s payload carries that same key, so shape alone
+                # cannot tell the two apart (tan-cli#674). Rendered from the
+                # SAME serialised `data` dict `--format json` emits
+                # (`tan.core.model_list.render_list_text`), the identical
+                # one-source-two-renderers split `doctor`/`check` above use.
+                if not data.get("models") and not errors:
+                    print(
+                        "model list: no `models:` declared in board.yaml; nothing to list.",
+                        file=sys.stderr,
+                    )
+                for line in render_list_text(data):
+                    print(line, file=sys.stderr)
             elif "models" in data:
                 # `check`: rendered from the SAME serialised `data` dict
                 # `--format json` emits (`tan.core.model_check.render_check_text`),
@@ -1005,6 +1081,11 @@ def model(
                 metadata_root=metadata_root,
                 sdk_root=sdk_root,
                 exact=exact,
+            )
+        elif subcommand == "list":
+            project_, sdk, data, issues, exit_code = _run_list(
+                context=context,
+                out=out,
             )
         else:
             project_, sdk, data, issues, exit_code = _run_build(

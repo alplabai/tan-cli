@@ -635,4 +635,4 @@ def test_unknown_subcommand_lists_build_doctor_and_check(tmp_path):
     result = runner.invoke(app, ["bogus", "--format", "json"], catch_exceptions=False)
     assert result.exit_code == 1
     doc = envelope(result)
-    assert doc["issues"][0]["message"].endswith("Available: build, doctor, check.")
+    assert doc["issues"][0]["message"].endswith("Available: build, doctor, check, list.")
