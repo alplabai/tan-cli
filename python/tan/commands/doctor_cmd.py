@@ -1295,10 +1295,34 @@ def _host_toolchain_matching_pin(
     name guess. A missing or unreadable `sdk_version` -- an unusual layout
     `_zephyr_sdk_root_valid` still validated on compiler-binary presence
     alone -- is honestly "does not match", not a guessed pass.
+
+    **Never returns an entry inside tan's OWN ADR 0021 store
+    (`_toolchain_store_scan_root()`) -- this adoption path is for a toolchain
+    tan did NOT install (tan-cli#990's `~/zephyr-sdk-1.0.1` case), where a
+    version-string match is the only signal available. Since tan-cli#1186
+    widened `_zephyr_sdk_scan_roots` to also cover that store (for
+    `zephyrSdk`'s sake), `_zephyr_sdk_detected_root` can now return an entry
+    living INSIDE it too -- and that entry is already governed by the
+    stricter, digest-precise `stamp_matches_pin` check `toolchain_check` runs
+    first. A store directory can carry a real compiler and a `sdk_version`
+    matching the pin's nominal version while its stamp names a DIFFERENT
+    digest (the pin moved without the version string changing, ADR 0021's
+    own "stamped 1.0.1 against a moved pin" case) -- measured: without this
+    guard that combination made this function return the store entry as a
+    version-string match, turning the correct stamp-based `fail` a few lines
+    below in `toolchain_check` into a `pass` it never reaches. Trusting the
+    stamp alone for anything inside tan's own store, and never re-deriving a
+    looser verdict for it here, keeps the two checks from disagreeing on the
+    same directory.
     """
     root = _zephyr_sdk_detected_root()
     if root is None:
         return None
+    try:
+        if root.resolve().is_relative_to(_toolchain_store_scan_root().resolve()):
+            return None
+    except OSError:
+        pass
     version_text = _read_text(root / toolchain_provision.SDK_VERSION_FILE_RELPATH)
     if version_text is None or version_text.strip() != manifest.version:
         return None
@@ -2770,7 +2794,12 @@ def _zephyr_sdk_scan_roots() -> list[Path]:
     `${TOOLCHAIN_ROOT}` substitution (tan-cli#547) already scans, so this
     check and that one cannot independently drift on where tan's own
     installs live, and the SAME `.tmp-<pid>` wreckage exclusion applies (an
-    interrupted acquisition's leftover also starts with `zephyr-sdk`).
+    interrupted acquisition's leftover also starts with `zephyr-sdk`). Routed
+    through the same string-level `seen` dedup as the other four roots (an
+    `ALP_TOOLCHAIN_ROOT` pointed at `$HOME` or `/opt` -- both legitimate,
+    e.g. a bench-machine escape hatch -- would otherwise list that directory
+    twice; harmless for this yes/no scan but not for the invariant the other
+    roots already hold).
 
     Under Git Bash/MSYS on Windows, `HOME` is a POSIX-translated path
     (`/c/Users/dev`) while the real Zephyr SDK sits under the native
@@ -2784,7 +2813,7 @@ def _zephyr_sdk_scan_roots() -> list[Path]:
     not assumed redundant.
     """
     roots = [Path("/opt")]
-    seen: set[str] = set()
+    seen: set[str] = {str(roots[0])}
     for raw in (os.environ.get("HOME"), os.environ.get("USERPROFILE")):
         if raw and raw not in seen:
             seen.add(raw)
@@ -2795,7 +2824,10 @@ def _zephyr_sdk_scan_roots() -> list[Path]:
         home = None
     if home is not None and str(home) not in seen:
         roots.append(home)
-    roots.append(_toolchain_store_scan_root())
+        seen.add(str(home))
+    store_root = _toolchain_store_scan_root()
+    if str(store_root) not in seen:
+        roots.append(store_root)
     return roots
 
 

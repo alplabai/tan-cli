@@ -109,6 +109,35 @@ def test_a_stamp_for_a_moved_pin_is_a_fail_not_a_pass_version_skew_masquerading_
     assert "different pin" in check.detail
 
 
+def test_a_stamp_for_a_moved_pin_is_a_fail_even_with_a_real_compiler_in_the_store(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1186 review regression: widening `_zephyr_sdk_scan_roots` to
+    also cover the ADR 0021 store (so `zephyrSdk` stops missing a bootstrapped
+    toolchain) made `_host_toolchain_matching_pin`'s digest-blind
+    version-string adoption path reachable for an entry INSIDE tan's own
+    store -- one `_zephyr_sdk_detected_root` can now return directly. A store
+    directory can have a real compiler and a `sdk_version` marker matching
+    the pin's nominal version while its OWN stamp names a different digest
+    (the pin moved without the version string changing); the adoption path
+    must not let the version-string match preempt that stamp-based fail."""
+    _point_home_at(monkeypatch, tmp_path)
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    manifest = tp.parse_toolchain_manifest(MANIFEST)
+    store_dir = tmp_path / "home" / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
+    (store_dir / "gnu" / "arm-zephyr-eabi" / "bin").mkdir(parents=True)
+    gcc = store_dir / "gnu" / "arm-zephyr-eabi" / "bin" / _GCC_NAME
+    gcc.write_text("#!/bin/sh\necho fake gcc\n", encoding="utf-8")
+    gcc.chmod(0o755)
+    (store_dir / "sdk_version").write_text(f"{manifest.version}\n", encoding="utf-8")
+    stale_stamp = tp.ToolchainStamp(manifest.version, "not-the-current-digest", "old-triple")
+    (store_dir / tp.STAMP_FILENAME).write_text(tp.render_stamp(stale_stamp), encoding="utf-8")
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "fail"
+    assert "different pin" in check.detail
+
+
 def test_a_host_toolchain_at_the_pinned_version_is_a_pass_not_a_fail(tmp_path, monkeypatch):
     """tan-cli#990 review, BLOCKER: a host with a real, working, correctly
     pinned toolchain at a NON-tan path (`~/zephyr-sdk-1.0.1/`, the documented
