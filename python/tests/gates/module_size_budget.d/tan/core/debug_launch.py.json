@@ -1,8 +1,40 @@
 {
-  "$schema": "One module's entry in the tan-cli#668 size ratchet, produced by `python scripts/regen_module_size_budget.py` -- see module_size_budget.d/README.md. Do not hand-edit; a value that does not match a real measurement fails `regen_module_size_budget.py --check` and the gate.",
+  "$schema": "One module's entry in the tan-cli#668 size ratchet, produced by `python scripts/regen_module_size_budget.py` -- see module_size_budget.d/README.md. `long_functions` is the sorted [span, name] list of every function in this module over FUNCTION_CAP (tan-cli#1173) -- not a count, so a function crossing the cap while a different one drops below it in the same module is visible here instead of netting to no change. Do not hand-edit; a value that does not match a real measurement fails `regen_module_size_budget.py --check` and the gate.",
   "module": "tan/core/debug_launch.py",
   "kind": "budget",
   "lines": 1770,
-  "long_functions": 8,
-  "worst_function": 185
+  "long_functions": [
+    [
+      58,
+      "apply_launch_resolution"
+    ],
+    [
+      64,
+      "sdk_identity_stranded_appends"
+    ],
+    [
+      78,
+      "sdk_identity_overwrites"
+    ],
+    [
+      80,
+      "strip_jsonc"
+    ],
+    [
+      94,
+      "_merge_configuration"
+    ],
+    [
+      156,
+      "create_launch_draft"
+    ],
+    [
+      162,
+      "create_launch_json_write_plan"
+    ],
+    [
+      185,
+      "_merge_list_by_identity"
+    ]
+  ]
 }

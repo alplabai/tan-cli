@@ -1,8 +1,36 @@
 {
-  "$schema": "One module's entry in the tan-cli#668 size ratchet, produced by `python scripts/regen_module_size_budget.py` -- see module_size_budget.d/README.md. Do not hand-edit; a value that does not match a real measurement fails `regen_module_size_budget.py --check` and the gate.",
+  "$schema": "One module's entry in the tan-cli#668 size ratchet, produced by `python scripts/regen_module_size_budget.py` -- see module_size_budget.d/README.md. `long_functions` is the sorted [span, name] list of every function in this module over FUNCTION_CAP (tan-cli#1173) -- not a count, so a function crossing the cap while a different one drops below it in the same module is visible here instead of netting to no change. Do not hand-edit; a value that does not match a real measurement fails `regen_module_size_budget.py --check` and the gate.",
   "module": "tan/commands/generate_cmd.py",
   "kind": "budget",
   "lines": 1437,
-  "long_functions": 7,
-  "worst_function": 356
+  "long_functions": [
+    [
+      56,
+      "_finish"
+    ],
+    [
+      57,
+      "_emit_one"
+    ],
+    [
+      62,
+      "_ensure_writable"
+    ],
+    [
+      65,
+      "_emit_one_in_process"
+    ],
+    [
+      75,
+      "_missing_emit_output"
+    ],
+    [
+      75,
+      "resolve_targets"
+    ],
+    [
+      356,
+      "generate"
+    ]
+  ]
 }

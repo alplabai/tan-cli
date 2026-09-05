@@ -2141,13 +2141,30 @@ jobs:
           fi
           echo "bootstrap created .west/, .venv/, zephyr/ and modules/, and reported complete."
 
-      # BEFORE the toolchain exists, doctor must FAIL and must say why. This is
-      # the half a customer hits first: bootstrap has just succeeded, and the
-      # host still cannot build. Measured on this job's own first run -- doctor
-      # exits 4 here, because #159/#166 made a missing Zephyr SDK a hard Fail
-      # rather than a warning. Asserting the exit alone would pass for any
-      # failing check, so the zephyrSdk row itself is asserted.
-      - name: tan doctor reports the missing toolchain (expected to fail)
+      # This step used to assert the OPPOSITE -- that `zephyrSdk` is a hard
+      # `fail` right here -- on the premise that "bootstrap has just succeeded
+      # and the host still cannot build". That premise died at tan-cli#1186.
+      # This job passes TAN_GITHUB_TOKEN precisely so `tan bootstrap` can run
+      # its own ADR-0021 toolchain acquisition, and on a networked runner it
+      # does; the old assertion only held because `zephyrSdk` was BLIND to the
+      # store bootstrap fills (`~/.alp/toolchains/...`), which is the exact
+      # defect #1186 fixed. So the step was asserting the bug.
+      #
+      # It now asserts what is true and what #1186 is for: after a successful
+      # bootstrap, doctor SEES that toolchain. This is the end-to-end proof of
+      # that fix -- the unit tests cover the scan, only a real bootstrap on a
+      # real runner covers the handoff.
+      #
+      # The fail-side coverage is NOT lost with it: `scripts/e2e-full.sh`
+      # asserts `zephyrSdk` is `fail` with `west sdk install` named in its
+      # `fix` on a container that genuinely has no SDK, which is the honest
+      # place for it.
+      #
+      # NOTE: doctor seeing the toolchain does not mean the BUILD can use it --
+      # the ADR-0021 store is never exported as `ZEPHYR_SDK_INSTALL_DIR`
+      # (tan-cli#1209). That is why the manual install below still has to run
+      # before `tan build`, and why this step does not assert a buildable host.
+      - name: tan doctor sees the toolchain tan bootstrap acquired
         working-directory: ws/alp-sdk
         run: |
           set -euo pipefail
@@ -2156,10 +2173,6 @@ jobs:
               > /tmp/first-blink-doctor-before.json
           code=$?
           set -e
-          if [ "$code" -eq 0 ]; then
-            echo "::error::doctor exited 0 with no Zephyr SDK installed -- the hard Fail from #159/#166 is gone"
-            exit 1
-          fi
           python3 -c '
           import json, sys
           d = json.load(open("/tmp/first-blink-doctor-before.json"))
@@ -2168,11 +2181,15 @@ jobs:
           if row is None:
               sys.exit("zephyrSdk missing from checks[]; got: " + ", ".join(sorted(checks)))
           status = row["status"]
-          if status != "fail":
-              sys.exit("zephyrSdk status is " + status + ", expected fail")
-          print("doctor correctly fails on the missing toolchain:", row["detail"])
+          if status != "pass":
+              sys.exit(
+                  "zephyrSdk status is " + status + ", expected pass -- tan-cli#1186: "
+                  "doctor must see the store tan bootstrap just filled. detail: "
+                  + str(row.get("detail"))
+              )
+          print("doctor sees bootstrap own toolchain:", row["detail"])
           '
-          echo "doctor exit was ${code} (non-zero), and zephyrSdk is a hard fail."
+          echo "doctor exit was ${code}; zephyrSdk is a pass (tan-cli#1186)."
 
       # Pinned + sha256-verified, same source of truth as seam2: alp-sdk's own
       # metadata/toolchains.json, never a hardcoded version (see that file's

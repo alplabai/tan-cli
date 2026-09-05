@@ -52,8 +52,9 @@ Two kinds of record, and the difference is load-bearing:
 
 * **`"kind": "budget"`** — a `python/tan/**` module. `lines` is its ratcheted
   ceiling, or `null` when the module is under the 800-line cap and the record
-  exists only for its function facts. Raising `lines`, or raising the tree's
-  derived function totals, needs `--reason` and writes a ledger entry under
+  exists only for its function facts. Raising `lines`, or a function newly
+  over `FUNCTION_CAP` (or growing further) in `long_functions` (tan-cli#1173,
+  see below), needs `--reason` and writes a ledger entry under
   `../MODULE_SIZE_BUDGET_LOG.d/`; a later SHRINK of the same module is instead
   absorbed by a plain regen with no `--reason` and no new entry, because
   `_append_log` (`scripts/regen_module_size_budget.py`) fires only on growth,
@@ -75,15 +76,43 @@ never be read as a `tan/**` ceiling.
 
 `function_count_budget` and `function_worst_budget` — the count and worst span
 of every over-50-line function anywhere in `python/tan/**` — are gone as
-stored numbers. Each record carries only its OWN module's `long_functions` and
-`worst_function`, and `MeasuredState` exposes the whole-tree pair as a **sum**
-and a **max** over those. That is exactly how `measure_current` always computed
-them (`len(found)` and `max(span for span, _ in found)` over a list
-accumulated per module), so **nothing about what the ratchet means changed**:
-it is still whole-tree, a module gaining a long function while another loses
-one still needs no `--reason`, and
-`test_a_whole_tree_neutral_function_move_needs_no_reason` pins that rather
-than trusting this paragraph.
+stored numbers. Each record's `long_functions` is now the actual sorted
+`[span, name]` list for that module (see below), and `MeasuredState` exposes
+the whole-tree pair as a **sum** and a **max** over those lists' lengths and
+spans. That is exactly how `measure_current` always computed them (`len(found)`
+and `max(span for span, _ in found)` over a list accumulated per module), so
+**nothing about what those two whole-tree numbers mean changed** — they are
+still a sum and a max over the tree.
+
+## `long_functions` is a list, and growth is judged per FUNCTION (tan-cli#1173)
+
+Through 2026-09-04, `long_functions` was itself a count (and a sibling
+`worst_function` field the max), and `scripts/regen_module_size_budget.py`
+judged growth only on the two DERIVED whole-tree numbers above. That let a
+module have one function cross `FUNCTION_CAP` while a different function in
+the SAME module dropped below it, with both the count and the whole-tree max
+reading unchanged — not hypothetical: PR #1170 grew `_sdk_credential`
+`50 -> 63 -> 69` while `_data` fell `51 -> 47` in the same diff, and
+`bootstrap_cmd.py.json`'s `long_functions` read `19` before and after.
+
+`long_functions` is now the sorted `[span, name]` list itself — every function
+in the module over `FUNCTION_CAP`, not a count of them — and the regen script
+compares it per `module:name`. A function newly over the cap, or an
+already-over one growing further, is growth in its own right and needs
+`--reason` even when nothing else in the tree moved; a function dropping below
+the cap is reported as shrunk (never forces a flag, the same as a module
+shrinking) but — unlike a module-line shrink — it IS included in the
+`--reason`/`--merge-resync` ledger entry, so an offsetting pair's entry names
+both the function that grew and the one that dropped rather than only half of
+what moved.
+
+This is a narrower decision than tan-cli#1057's: that issue's own
+`test_a_whole_tree_neutral_function_move_needs_no_reason` used to pin that a
+function move ACROSS modules needed no reason, on the reasoning that the
+ratchet is whole-tree. tan-cli#1173 overturns that specifically for
+`FUNCTION_CAP` crossings — a function newly over the cap is judged on its own,
+regardless of whether the module (or the tree) it sits in grew, shrank, or
+stayed flat.
 
 ## Resolving a conflict, and the one thing never to do
 
