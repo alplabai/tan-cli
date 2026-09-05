@@ -363,6 +363,33 @@ def test_unfrozen_build_without_pyserial_reports_the_same_code(monkeypatch):
     assert result.exit_code == 1
 
 
+def test_test_ports_env_replaces_pyserial_enumeration_even_when_pyserial_is_blocked(
+    monkeypatch,
+):
+    """tan-cli#1165: `contract/envelopes/monitor-no-port` needs a deterministic,
+    non-empty `data.availablePorts` on any box, regardless of whether pyserial
+    happens to be installed there -- so `_TEST_PORTS_ENV` must bypass BOTH the
+    real `list_ports.comports()` call and `_run_monitor`'s own "pyserial is
+    importable" precheck. Blocking pyserial outright and still getting
+    `monitor.no-port` (not `monitor.pyserial-missing`) is the proof: if either
+    bypass regressed, this would report the pyserial-missing refusal instead.
+    """
+    _block_pyserial(monkeypatch)
+    monkeypatch.setenv(
+        monitor_cmd._TEST_PORTS_ENV,
+        json.dumps([["COM7", "USB Serial"], ["COM8", ""]]),
+    )
+
+    result = runner.invoke(app, ["--format", "json"])
+    assert result.exit_code == 1
+    doc = envelope(result)
+    assert doc["issues"][0]["code"] == "monitor.no-port"
+    assert doc["data"]["availablePorts"] == [
+        {"device": "COM7", "description": "USB Serial"},
+        {"device": "COM8", "description": ""},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # where miniterm's output goes (tan-cli#491 defect 6)
 # ---------------------------------------------------------------------------

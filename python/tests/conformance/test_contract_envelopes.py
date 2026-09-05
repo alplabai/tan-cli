@@ -449,9 +449,20 @@ def test_no_case_ships_an_env_json_it_does_not_need():
     golden depend on `tests/conftest.py`'s session-scoped PROBE_TOOLS scrub, a
     fixture in a different tree that the documented recording procedure
     (`contract/README.md`, which calls `case_env` but runs no session fixture)
-    never applies."""
+    never applies.
+
+    `monitor-no-port` is the third (tan-cli#1165). `_available_ports()`'s real
+    source, pyserial's `comports()`, enumerates whatever serial hardware is
+    physically attached to the host running it -- a fact about the RECORDING
+    MACHINE, not the contract -- so its `env.json` arms `_TEST_PORTS_ENV`
+    (`monitor_cmd.py`) to replace that enumeration with a fixed, two-entry list
+    instead."""
     carrying = sorted(f.name for f in FIXTURES if (f / CASE_ENV).is_file())
-    assert carrying == ["debug-config-preview-baremetal-mcu", "model-doctor-no-sdk"], (
+    assert carrying == [
+        "debug-config-preview-baremetal-mcu",
+        "model-doctor-no-sdk",
+        "monitor-no-port",
+    ], (
         "a new env.json appeared -- justify it in that case's PROVENANCE.txt and "
         "under 'Pinning host state a case reads' in contract/README.md, then add "
         "it here; pinning host state a case does not read only hides regressions"
