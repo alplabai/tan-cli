@@ -137,10 +137,10 @@ FUNCTION_CAP = 50
 #: (`test_planner_relocation_freshness.py`'s own module docstring) -- there is
 #: no base/theirs/ours triple for a split to break, so this repo may split one
 #: like any other oversized module (tan-cli#1142 did, for `template.py`).
-#: `test_module_size_budget.py::test_the_mirrored_planner_is_named_as_out_of_
-#: scope` checks only the `PINNED_HASHES` subset of this prefix, not the
-#: whole thing -- read that test before assuming every path under here is
-#: out of scope.
+#: `test_module_size_budget.py::
+#: test_the_mirrored_planner_is_named_as_out_of_scope` checks only the
+#: `PINNED_HASHES` subset of this prefix, not the whole thing -- read that
+#: test before assuming every path under here is out of scope.
 MIRRORED_PREFIX = "tan/planner/"
 
 #: The two record kinds. `budget` is the ratcheted `tan/**` side; `observed`

@@ -82,9 +82,10 @@ which still apply to every `.py` under it the same as anywhere else in
 regen like any other). What IS different for its `PINNED_HASHES` subset (a
 hash-audited, 3-way-merged mirror of upstream) is that SPLITTING one -- the
 usual remedy for an over-budget module -- would turn every future upstream
-hunk into a merge conflict, so `test_the_mirrored_planner_is_named_as_out_of_
-scope` records that an oversized one of them is upstream's to split, not this
-repo's, rather than demanding a split this repo cannot safely make. Its
+hunk into a merge conflict, so
+`test_the_mirrored_planner_is_named_as_out_of_scope` records that an
+oversized one of them is upstream's to split, not this repo's, rather than
+demanding a split this repo cannot safely make. Its
 `HAND_PORT_SOURCES` modules (e.g. `template.py`) are NOT mirrored the same
 way -- they are flagged against upstream, never merged -- so that remedy is
 available and a split is expected like any other oversized module

@@ -155,11 +155,13 @@ it as if it were new:
 * "One consumer, so extraction would be for its own sake." Answered by the
   format-symmetry condition above, and by SIZE, which is not a tiebreaker
   here but a real cost: at the time, `template.py` was 2206 lines -- the
-  FOURTH-largest module in the repo (`doctor_cmd.py` 4415, `flash_cmd.py`
-  3497, `bootstrap.py` 2558 all sat above it, measured at 658f2e37, the
-  commit that first wrote this paragraph -- not the most oversized, a
-  claim an earlier revision of this same correction made and got wrong the
-  same way) -- and `_module_size_budget_core.MIRRORED_PREFIX`'s comment
+  SIXTH-largest module under `python/tan/` (`bootstrap_cmd.py` 4450,
+  `doctor_cmd.py` 4415, `flash_cmd.py` 3497, `bootstrap.py` 2558,
+  `flash_plan.py` 2273 all sat above it, measured at the commit that first
+  wrote this paragraph -- not the fourth-largest, nor the most oversized,
+  two claims earlier revisions of this same correction each made and each
+  got wrong the same way: naming only some of what actually sat above it)
+  -- and `_module_size_budget_core.MIRRORED_PREFIX`'s comment
   ("upstream's to split, not this repo's") was read as barring a split of it
   here. WRONG, corrected in tan-cli#1142 alongside the split that comment was
   misread as forbidding: `MIRRORED_PREFIX` bars a `PINNED_HASHES` module's

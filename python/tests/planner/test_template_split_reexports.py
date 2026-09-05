@@ -110,7 +110,7 @@ def test_template_reexports_every_split_binding_by_identity():
 
 def test_substitute_board_yaml_pins_does_not_raise_nameerror():
     """The blocker, reproduced at its own call site
-    (`template_rewrite.py:157`), through `template_rewrite.py` directly --
+    (`template_rewrite.py:167`), through `template_rewrite.py` directly --
     not through `template.py`'s re-export, so a future re-export drop can't
     mask this one going back to raising."""
     import tan.planner.template_rewrite as template_rewrite
