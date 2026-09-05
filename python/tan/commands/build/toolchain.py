@@ -85,6 +85,12 @@ would be circular. (`token_substitution._is_own_git_checkout` is duplicated
 from the same module for its own reason -- this is the second instance of
 the same shape, not a new one.)
 
+That circularity is about `_scan_roots`/`_candidates`/`resolve_toolchain_root`
+specifically, not about every name in this module: `doctor_cmd` DOES import
+[`_is_toolchain_wreckage`] and [`_toolchain_store_scan_root`] directly from
+here (tan-cli#1186), since neither of those two touches `build_cmd` and the
+cycle above never applies to them.
+
 `doctor_cmd._zephyr_sdk_root_valid`'s stricter probe -- "does
 `gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc` exist" -- is deliberately NOT
 reused. Doctor answers a yes/no health question where a false PASS is the
