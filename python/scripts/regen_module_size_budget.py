@@ -86,10 +86,12 @@ So they are not stored. `function_count_budget` was always exactly a SUM over
 modules and `function_worst_budget` exactly a MAX over modules (see
 `measure_current` in `tests/gates/_module_size_budget_core.py`: `len(found)`
 and `max(span for span, _ in found)` over a list accumulated per module), so
-each record carries its own module's `long_functions` / `worst_function` and
-`MeasuredState` exposes the two whole-tree numbers as computed properties.
-The ratchet still compares whole-tree totals and still means exactly what it
-meant; there is simply no longer a stored number two branches can both write.
+each record carries its own module's `long_functions` -- since tan-cli#1173
+the actual sorted `[span, name]` list, not a count with a sibling
+`worst_function` max (see that section below) -- and `MeasuredState` exposes
+the two whole-tree numbers as computed properties. The ratchet still compares
+whole-tree totals and still means exactly what it meant; there is simply no
+longer a stored number two branches can both write.
 
 The residual 12.9% is real and is not claimed away: two branches that both
 change the SAME module still write the same record file and still conflict.
@@ -209,7 +211,9 @@ def _spans_by_name(facts: core.ModuleFunctions) -> dict[str, list[int]]:
 
 
 def _function_deltas(
-    old: dict[str, core.ModuleFunctions], new: dict[str, core.ModuleFunctions]
+    old: dict[str, core.ModuleFunctions],
+    new: dict[str, core.ModuleFunctions],
+    new_names: dict[str, set[str]],
 ) -> tuple[list[str], list[str]]:
     """(grown, shrunk) description lines for INDIVIDUAL functions crossing
     `FUNCTION_CAP` (tan-cli#1173) -- judged per `module:name`, never per
@@ -233,13 +237,24 @@ def _function_deltas(
     `main` still surfaces these lines in a `--reason`/`--merge-resync`
     ledger entry (unlike a module-line shrink) so the entry names the
     function that dropped, not only the one that grew -- otherwise an
-    offsetting pair's ledger line would tell only half of what moved."""
+    offsetting pair's ledger line would tell only half of what moved.
+
+    A dropped entry is only reported as a SHRINK when `name` still names a
+    function somewhere in that module per `new_names` (`core.
+    all_function_names_by_module()`) -- i.e. it is still there, just under
+    `FUNCTION_CAP` now. If it is not, the function did not shrink: it was
+    renamed, moved to a different module, or deleted, and saying "dropped
+    (now under the cap)" would put an untrue statement about a cap crossing
+    into the append-only ledger. Nothing here can say WHERE a renamed or
+    moved function went -- that identity is not tracked -- only that this
+    name, in this module, stopped meaning anything."""
     grown: list[str] = []
     shrunk: list[str] = []
     empty = core.ModuleFunctions(entries=())
     for module in sorted(set(old) | set(new)):
         old_by_name = _spans_by_name(old.get(module, empty))
         new_by_name = _spans_by_name(new.get(module, empty))
+        still_named = new_names.get(module, set())
         for name in sorted(set(old_by_name) | set(new_by_name)):
             before_spans = old_by_name.get(name, [])
             after_spans = new_by_name.get(name, [])
@@ -250,7 +265,13 @@ def _function_deltas(
                 if before is None:
                     grown.append(f"{label}: new entry at {after}")
                 elif after is None:
-                    shrunk.append(f"{label}: {before} -> dropped (now under the cap)")
+                    if name in still_named:
+                        shrunk.append(f"{label}: {before} -> dropped (now under the cap)")
+                    else:
+                        shrunk.append(
+                            f"{label}: {before} -> gone (renamed, moved, or "
+                            "deleted -- not a shrink)"
+                        )
                 elif after > before:
                     grown.append(f"{label}: {before} -> {after}")
                 else:
@@ -287,7 +308,10 @@ def main(argv: list[str] | None = None) -> int:
     # Judged per FUNCTION, not on the derived whole-tree numbers (tan-cli#1173)
     # -- see `_function_deltas`'s own docstring for why the derived pair alone
     # let an offsetting pair of per-function moves hide a cap crossing.
-    function_grown, function_shrunk = _function_deltas(committed.functions, current.functions)
+    current_names = core.all_function_names_by_module()
+    function_grown, function_shrunk = _function_deltas(
+        committed.functions, current.functions, current_names
+    )
     grown = module_grown + function_grown
     shrunk = module_shrunk + function_shrunk
 
@@ -351,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _append_log(reason: str, grown: list[str], function_shrunk: list[str] = ()) -> None:
+def _append_log(reason: str, grown: list[str], function_shrunk: list[str]) -> None:
     """tan-cli#907: writes one NEW file per entry under `core.LOG_DIR`,
     never an append to `core.LOG_PATH` (frozen -- see this script's module
     docstring). The filename carries the date for a human scanning the

@@ -197,17 +197,26 @@ def test_the_recorded_function_facts_match_the_measurement():
     been padded upward, or one that has gone stale downward, or one that is
     missing entirely -- all three leave the derived sum wrong while the `<=`
     still holds. This compares every module's stored facts to a fresh
-    measurement EXACTLY and names the module, which is precisely what the old
-    single file's `function_count_budget: 300 -> 301` could never do.
+    measurement EXACTLY and names the functions that appeared, disappeared,
+    or changed span, which is precisely what the old single file's
+    `function_count_budget: 300 -> 301` could never do.
 
     Exact rather than tolerant, unlike the `tests/**` drift window below.
     That is a real, small tax rather than a free one: measured against 68
-    non-merge `origin/dev` commits touching `python/tan/**.py`, 39 needed a
-    regen under both the old single-file scheme and this one, 15 under the old
-    scheme only, 11 under neither, and **3** are newly taxed here
-    (`8866d7fb5`, `dcf37ae45`, `3ff889093`) -- a whole-tree-neutral per-module
-    function growth, which the old file structurally could not see. The regen
-    those 3 force needs no `--reason` and writes no ledger entry.
+    non-merge `origin/dev` commits touching `python/tan/**.py` (against the
+    tan-cli#1057 scheme this paragraph describes, before tan-cli#1173 existed),
+    39 needed a regen under both the old single-file scheme and this one, 15
+    under the old scheme only, 11 under neither, and **3** are newly taxed
+    here (`8866d7fb5`, `dcf37ae45`, `3ff889093`) -- a whole-tree-neutral
+    per-module function growth, which the old file structurally could not
+    see. Under tan-cli#1057, the regen those 3 forced needed no `--reason` and
+    wrote no ledger entry. That consequence does NOT survive tan-cli#1173
+    (see `test_an_offsetting_pair_in_one_module_needs_a_reason_naming_both`
+    below): the whole point of that issue is that a per-module offsetting
+    move like this is now judged per function, not on the flat whole-tree
+    scalar, so it is no longer safe to assume a re-run of these 3 against
+    today's code stays `--reason`-free -- that would have to be re-measured
+    against the commits themselves, not assumed from this paragraph.
 
     Worth the tax, because it is exactly what makes a padded function record
     visible: an inflated budget still bounds the tree, so the `<=` ratchet
@@ -234,10 +243,19 @@ def test_the_recorded_function_facts_match_the_measurement():
                 "module now has none"
             )
         else:
-            wrong.append(
-                f"{rel}: recorded long_functions {was.count} / worst_function "
-                f"{was.worst}, measured {now.count} / {now.worst}"
-            )
+            appeared = sorted(set(now.entries) - set(was.entries))
+            disappeared = sorted(set(was.entries) - set(now.entries))
+            parts = []
+            if appeared:
+                parts.append(
+                    "now over cap: " + ", ".join(f"{name} at {span}" for span, name in appeared)
+                )
+            if disappeared:
+                parts.append(
+                    "no longer over cap (or renamed/moved/deleted): "
+                    + ", ".join(f"{name} at {span}" for span, name in disappeared)
+                )
+            wrong.append(f"{rel}: " + "; ".join(parts))
 
     assert wrong == [], (
         "the committed per-module function records disagree with the tree, so "
@@ -533,9 +551,12 @@ def test_a_whole_tree_neutral_function_move_now_needs_a_reason(tmp_path, monkeyp
     assert len(new_entries) == 1
     text = new_entries[0].read_text(encoding="utf-8")
     assert "b.py:g" in text and "new entry" in text
-    assert "a.py:f" in text and "dropped" in text, (
-        "the move's OTHER half -- f dropping below the cap -- must be named in "
-        "the same entry, or the entry tells only half of what moved"
+    # `f` did not shrink below the cap -- `a.py` no longer defines it at all
+    # (rewritten to `x = 1\n` above) -- so the ledger must say it is GONE, not
+    # falsely claim it "dropped (now under the cap)" (tan-cli#1173 review).
+    assert "a.py:f" in text and "gone" in text, (
+        "the move's OTHER half -- f no longer existing in a.py at all -- must "
+        "be named in the same entry, or the entry tells only half of what moved"
     )
 
     after = target.load_generated()
@@ -556,9 +577,19 @@ def test_an_offsetting_pair_in_one_module_needs_a_reason_naming_both(tmp_path, m
     `19` before and after, because a count and a max cannot tell that apart
     from no movement at all.
 
-    Mutation-proven in both directions, per the issue's acceptance text:
-    the offsetting pair is refused without `--reason` (below), and an
-    unrelated, non-crossing edit made afterwards is still silent (phase 3)."""
+    Mutation-proven in both directions, per the issue's acceptance text: the
+    offsetting pair is refused without `--reason` (below), and an unrelated,
+    non-crossing edit made afterwards is still silent (phase 3). The headline
+    `assert rc == 1` below has to be the thing tan-cli#1173's growth rule
+    (`_function_deltas`) actually earns: a review of this issue proved that
+    with `_giant` living in `tan/creds.py` itself, reverting ONLY that growth
+    rule back to the pre-tan-cli#1173 whole-tree `_scalar_delta` pair left
+    `assert rc == 1` PASSING anyway, because `_giant`'s 818 lines pushed
+    `tan/creds.py` itself (923 -> 938 lines) past the unrelated, pre-existing
+    `MODULE_CAP` (800) module-LINE ratchet -- a second, incidental reason to
+    refuse that has nothing to do with this issue. `_giant` now lives in its
+    own module (`tan/giant.py`) so the only thing left that can make this
+    assertion fail is the per-function growth rule under test."""
     regen = _load_regen("_regen_under_test_offsetting_pair")
     target = regen.core
 
@@ -578,36 +609,47 @@ def test_an_offsetting_pair_in_one_module_needs_a_reason_naming_both(tmp_path, m
 
     module = package / "creds.py"
 
-    # A dominant third function, unchanged throughout -- `bootstrap_cmd.py`'s
-    # real `_run` at 819 lines plays exactly this role. Without it, this
-    # module's own worst span WOULD move when `_sdk_credential` overtakes
-    # `_data` (69 > 51), which the pre-#1173 whole-tree `worst` scalar could
-    # still have caught -- so it would be a weaker reproduction than PR #1170,
-    # where a bigger function elsewhere absorbs the max and both derived
-    # scalars read flat. `_giant` pins that: worst stays 819 on both sides.
-    giant = long_fn("_giant", 818)
+    # A dominant function, unchanged throughout, in its OWN module --
+    # `bootstrap_cmd.py`'s real `_run` at 819 lines plays exactly this role.
+    # It has to dwarf both movers for the WHOLE-TREE derived pair
+    # (`function_count`/`function_worst`) to read flat across the move below
+    # -- the same way a bigger function elsewhere absorbed the max in PR
+    # #1170 -- and it has to be a SEPARATE module from `_sdk_credential`/
+    # `_data`, or its own 818-line body puts `tan/creds.py` itself over
+    # `MODULE_CAP` and the unrelated module-LINE ratchet forces `--reason` on
+    # its own (see this test's docstring). Whole tree, not per module, is
+    # what has to stay flat, and `function_count`/`function_worst` are
+    # summed/maxed across every module -- so keeping `_giant` in its own file
+    # still keeps it dominant for the tree-wide max without inflating
+    # `creds.py`'s own line count at all.
+    (package / "giant.py").write_text(long_fn("_giant", 818), encoding="utf-8")
 
     # Seed: `_data` already over the cap (51 lines); `_sdk_credential` sits
     # right AT the cap (50 lines: `span > FUNCTION_CAP` is strict, so 50 is
     # not yet tracked) -- the pre-PR #1170 state.
-    module.write_text(
-        giant + long_fn("_sdk_credential", 49) + long_fn("_data", 50), encoding="utf-8"
-    )
+    module.write_text(long_fn("_sdk_credential", 49) + long_fn("_data", 50), encoding="utf-8")
     assert regen.main(["--reason", "seed the fixture"]) == 0
     seeded_entries = sorted(ledger_dir.glob("*.md"))
-    before = target.load_generated().functions["tan/creds.py"]
-    assert dict((name, span) for span, name in before.entries) == {"_giant": 819, "_data": 51}
-    assert before.count == 2 and before.worst == 819
+    seeded = target.load_generated()
+    before = seeded.functions["tan/creds.py"]
+    assert dict((name, span) for span, name in before.entries) == {"_data": 51}
+    assert seeded.function_count == 2 and seeded.function_worst == 819, (
+        "the fixture is wrong unless the whole tree already reads 2 / 819 "
+        "before the move below -- that is the baseline the move must leave "
+        "unchanged"
+    )
 
     # 1. The offsetting pair, same module, same diff: `_sdk_credential` grows
     #    past the cap, `_data` shrinks below it. Both DERIVED whole-tree
     #    numbers stay exactly flat (count 2 -> 2, worst 819 -> 819, `_giant`
-    #    dwarfing both movers) -- the exact silence PR #1170 hit.
-    module.write_text(
-        giant + long_fn("_sdk_credential", 68) + long_fn("_data", 46), encoding="utf-8"
-    )
-    current = target.measure_current().functions["tan/creds.py"]
-    assert current.count == before.count and current.worst == before.worst, (
+    #    dwarfing both movers from its own module) -- the exact silence PR
+    #    #1170 hit.
+    module.write_text(long_fn("_sdk_credential", 68) + long_fn("_data", 46), encoding="utf-8")
+    current = target.measure_current()
+    assert (
+        current.function_count == seeded.function_count
+        and current.function_worst == seeded.function_worst
+    ), (
         "the fixture must reproduce a whole-tree-neutral move, or this is not "
         "actually testing what PR #1170 hit"
     )
@@ -630,10 +672,7 @@ def test_an_offsetting_pair_in_one_module_needs_a_reason_naming_both(tmp_path, m
         "too, or it tells only half of what moved in this diff"
     )
     after = target.load_generated().functions["tan/creds.py"]
-    assert dict((name, span) for span, name in after.entries) == {
-        "_giant": 819,
-        "_sdk_credential": 69,
-    }
+    assert dict((name, span) for span, name in after.entries) == {"_sdk_credential": 69}
 
     # 3. Mutation-proof, the other direction: an unrelated edit that does not
     #    cross FUNCTION_CAP anywhere stays silent, no flag needed.
@@ -642,6 +681,40 @@ def test_an_offsetting_pair_in_one_module_needs_a_reason_naming_both(tmp_path, m
     assert sorted(ledger_dir.glob("*.md")) == sorted(seeded_entries + new_entries), (
         "an unrelated, non-crossing change must not write a ledger entry either"
     )
+
+
+def test_a_dropped_entry_is_only_a_shrink_if_the_name_still_exists(tmp_path, monkeypatch):
+    """A review of tan-cli#1173 measured `_function_deltas` directly and found
+    a rename, a module move, or a plain deletion of an already-over-cap
+    function all produce the same false claim: `grown` gets a "new entry"
+    line (for a rename/move) and `shrunk` gets
+    `"{name}: {span} -> dropped (now under the cap)"` -- which is not true.
+    The function did not shrink under `FUNCTION_CAP`; it stopped existing
+    under that name in that module. The ledger is append-only, so a false
+    statement about a cap crossing lives there forever.
+
+    `_function_deltas`'s third argument (`new_names`, from
+    `core.all_function_names_by_module()`) is what tells the two apart: if
+    the name still labels SOME function in that module right now, it really
+    did shrink below the cap; if not, it is gone (renamed, moved elsewhere,
+    or deleted), and nothing here claims to know which."""
+    regen = _load_regen("_regen_under_test_disappearance")
+
+    old = {"a.py": regen.core.ModuleFunctions(entries=((63, "f"),))}
+    new = {"a.py": regen.core.ModuleFunctions(entries=())}
+
+    # `f` is still there in `a.py`, just shorter now -- a real shrink.
+    grown, shrunk = regen._function_deltas(old, new, {"a.py": {"f"}})
+    assert grown == []
+    assert shrunk == ["a.py:f: 63 -> dropped (now under the cap)"]
+
+    # `f` no longer names anything in `a.py` (renamed to `g` in the same
+    # module, moved to another module entirely, or just deleted) -- not a
+    # shrink, and the ledger must not say it is one.
+    for still_there in ({"a.py": {"g"}}, {"a.py": set()}, {}):
+        grown, shrunk = regen._function_deltas(old, new, still_there)
+        assert grown == []
+        assert shrunk == ["a.py:f: 63 -> gone (renamed, moved, or deleted -- not a shrink)"]
 
 
 def test_check_mode_reds_on_a_stale_record_and_passes_once_resynced(tmp_path, monkeypatch):

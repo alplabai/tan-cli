@@ -270,6 +270,30 @@ def long_functions(tree: ast.AST) -> list[tuple[int, str]]:
     return out
 
 
+def all_function_names_by_module() -> dict[str, set[str]]:
+    """Every function name in each `tan/**` module, over `FUNCTION_CAP` or
+    not -- used only to tell a function that shrank below the cap (still
+    there, just smaller) apart from one that stopped existing at that name
+    in that module altogether: a rename, a move to a different module, or an
+    outright deletion. `ModuleFunctions.entries` alone cannot draw that line
+    because it only ever held the over-cap functions; a name missing from it
+    was always ambiguous between "still here, now short" and "gone". This
+    re-walks the same trees `measure_current` does (a second `ast.parse` per
+    module, deliberately -- keeping it out of `MeasuredState` avoids widening
+    every existing two-field construction of that NamedTuple across the
+    suite for a fact only the regen script's delta report needs)."""
+    out: dict[str, set[str]] = {}
+    for path in modules():
+        names = {
+            node.name
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        if names:
+            out[rel(path)] = names
+    return out
+
+
 def measure_current() -> MeasuredState:
     """Walk the real tree. This is the ONLY function either the gate or the
     regen tool trusts for "what is true right now" -- neither ever reads the
@@ -399,7 +423,21 @@ def load_generated() -> MeasuredState:
         if lines is not None:
             module_map[key] = int(lines)
         raw = data.get("long_functions") or []
-        entries = tuple((int(span), str(name)) for span, name in raw)
+        if not isinstance(raw, list):
+            raise ValueError(
+                f"module_size_budget.d/{key}{RECORD_SUFFIX}'s long_functions "
+                f"is {raw!r}, not the `[[span, name], ...]` list this script "
+                "writes -- this looks like a pre-tan-cli#1173 record (a bare "
+                "count, with a sibling worst_function field). Regenerate it: "
+                "`python scripts/regen_module_size_budget.py --merge-resync`"
+            )
+        try:
+            entries = tuple((int(span), str(name)) for span, name in raw)
+        except (TypeError, ValueError) as err:
+            raise ValueError(
+                f"module_size_budget.d/{key}{RECORD_SUFFIX}'s long_functions "
+                f"has an entry that is not a `[span, name]` pair: {err}"
+            ) from err
         for span, name in entries:
             if span <= FUNCTION_CAP:
                 raise ValueError(
