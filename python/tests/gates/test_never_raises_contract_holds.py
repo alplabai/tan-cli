@@ -134,7 +134,11 @@ found, beyond the four issue-named sites:
     `UnicodeDecodeError` exactly like `perf_apply.py`'s pair --
     `tan/model/adapters/drpai.py::_compiler_version` (round 1, FIXED) and
     `tan/planner/kconfig.py::_emit_extra_library_profile` (round 1, found,
-    still NOT fixed -- but READ THE NEXT PARAGRAPH BEFORE REUSING THIS
+    **deferral reversed at tan-cli#1122 -- now FIXED and seeded**, the same
+    way tan-cli#1162 reversed the `_load_board_symbols` half; the upstream
+    half is tracked as alp-sdk#1961, since alp-sdk still carries the defect
+    and tan's planner-fallback path still executes it. READ THE NEXT
+    PARAGRAPH BEFORE REUSING THE ORIGINAL
     REASON. As written at tan-cli#1116 it says `kconfig.py` is a hash-pinned
     verbatim mirror of alp-sdk's `scripts/alp_orchestrate/kconfig.py` and
     that editing tan's copy would break `test_planner_relocation_freshness.
@@ -231,9 +235,11 @@ files** found in `PINNED_HASHES`-protected planner files -- `kconfig.py`
 `kconfig_symbols.py` (`_load_board_symbols`) -- named individually above and
 in `_SEEDED_CONTRACTS`' neighbouring comments, all deferred at that round on
 the `PINNED_HASHES` reasoning tan-cli#1122 has since refuted (see the
-`slugs.py` bullet above; five of the six deferrals stand, but on maintenance
-cost, not on the gate), all reported rather than silently skipped. **15** seeded
-into `_SEEDED_CONTRACTS` below AT THAT ROUND (twenty-five today; every
+`slugs.py` bullet above; FOUR of the six deferrals stand, on maintenance
+cost rather than on the gate -- `kconfig_symbols.py`'s was reversed at
+tan-cli#1162 and `kconfig.py`'s at tan-cli#1122), all reported rather than
+silently skipped. **15** seeded
+into `_SEEDED_CONTRACTS` below AT THAT ROUND (twenty-six today; every
 count in this paragraph is tan-cli#1116's own measurement, kept as the
 record of what that sweep found rather than silently re-stated) -- the
 twelve from review round 1 plus `som_buildability.hw_rev_not_buildable`,
@@ -585,6 +591,18 @@ _SEEDED_CONTRACTS: dict[str, str] = {
         "scaffold. Its per-file read_bytes() was bare: chmod 000 escaped as "
         "raw PermissionError, a deleted file as raw FileNotFoundError, a "
         "directory as raw IsADirectoryError, on 3.12.3/3.13.15/3.14.7 alike"
+    ),
+    "kconfig._emit_extra_library_profile": (
+        "tan-cli#1122: the sixth PINNED_HASHES-protected site the #1116 "
+        "sweep found and deferred on a since-refuted mechanical claim (see "
+        "this file's own module docstring) -- 'never fails the whole "
+        "build' was the contract, and `except (OSError, yaml.YAMLError)` "
+        "missed UnicodeDecodeError for a non-UTF-8 profile, the same shape "
+        "as drpai._compiler_version above. Also had its own version-skew "
+        "trap one level further in: the unguarded `.resolve()` this fix "
+        "removed raised a bare RuntimeError for a symlink loop on 3.12.3 "
+        "(the same shape template.py::_safe_join documents), which no "
+        "widening of the except tuple alone would have caught"
     ),
 }
 
@@ -2816,6 +2834,84 @@ class TestCoreOsChoices:
         metadata_root = self._prepared(tmp_path)
         with _permission_denied(metadata_root):
             assert "cannot read board schema at" in self._raises(metadata_root)
+
+
+@_needs_sdk
+@_covers("kconfig._emit_extra_library_profile")
+class TestEmitExtraLibraryProfile:
+    """tan-cli#1122, the sixth `PINNED_HASHES`-protected site (see this
+    file's own module docstring for why editing it is safe: the freshness
+    gate hashes only the alp-sdk SOURCE side of the comparison, never this
+    file).
+
+    `profile_rel` is joined onto the bound `REPO` inside the function
+    (`REPO / profile_rel`) -- but pathlib lets an ABSOLUTE `rel` replace
+    the left side outright (`Path("a") / "/etc/passwd" ==
+    Path("/etc/passwd")`, the same fact `template.py::_safe_join`'s own
+    docstring names for the identical join), so every case here passes an
+    absolute `tmp_path`-rooted string and reaches the real read without
+    writing anything into the bound SDK checkout. `project` is never
+    touched on any of these paths -- the function returns before its first
+    reference to it -- so `None` stands in for a real `BoardProject`.
+    """
+
+    _NAME = "seed1122"
+
+    def _call(self, path: Path, project=None):
+        m = _planner_module("kconfig")
+        return m._emit_extra_library_profile(self._NAME, str(path), project)
+
+    def _assert_parse_failed(self, lines: list[str]) -> None:
+        # One quiet-return message for every read/parse failure -- the
+        # function's own contract makes no distinction between "absent"
+        # and "there but broken", unlike the curated-raise family above.
+        assert len(lines) == 1
+        assert lines[0].startswith(
+            f"# extra_libraries[{self._NAME}] profile parse failed:")
+
+    def test_absent(self, tmp_path):
+        self._assert_parse_failed(self._call(tmp_path / "profile.yaml"))
+
+    def test_non_utf8(self, tmp_path):
+        path = tmp_path / "profile.yaml"
+        _non_utf8(path)
+        self._assert_parse_failed(self._call(path))
+
+    def test_directory_where_file_expected(self, tmp_path):
+        path = tmp_path / "profile.yaml"
+        _as_directory(path)
+        self._assert_parse_failed(self._call(path))
+
+    def test_parent_is_a_file(self, tmp_path):
+        path = tmp_path / "parent" / "profile.yaml"
+        _parent_is_a_file(path)
+        self._assert_parse_failed(self._call(path))
+
+    def test_symlink_loop(self, tmp_path):
+        # tan-cli#1122's own extra find: before this fix, the unguarded
+        # `.resolve()` this call used to run raised a bare `RuntimeError`
+        # for exactly this shape on 3.12.3 -- outside any `try` in the
+        # function, so no widening of the `except` tuple alone would have
+        # caught it. Removing the unneeded `.resolve()` (rather than
+        # adding a `RecursionError`-reraise dance around it, the fix
+        # `template.py::_safe_join` needed for the same trap) closes it by
+        # construction: `open()`'s own ELOOP is a plain `OSError` on every
+        # interpreter this repo supports.
+        path = tmp_path / "profile.yaml"
+        _symlink_loop(path)
+        self._assert_parse_failed(self._call(path))
+
+    @_skip_as_root
+    def test_permission_denied_file(self, tmp_path):
+        path = tmp_path / "profile.yaml"
+        path.write_text("accelerators: []\n", encoding="utf-8")
+        with _permission_denied_file(path):
+            self._assert_parse_failed(self._call(path))
+
+    def test_malformed_document(self, tmp_path):
+        path = tmp_path / "profile.yaml"
+        _malformed(path, "a: [1, 2\nb: }{\n")
+        self._assert_parse_failed(self._call(path))
 
 
 def test_every_seed_has_a_test():
