@@ -134,7 +134,11 @@ found, beyond the four issue-named sites:
     `UnicodeDecodeError` exactly like `perf_apply.py`'s pair --
     `tan/model/adapters/drpai.py::_compiler_version` (round 1, FIXED) and
     `tan/planner/kconfig.py::_emit_extra_library_profile` (round 1, found,
-    still NOT fixed -- but READ THE NEXT PARAGRAPH BEFORE REUSING THIS
+    **deferral reversed at tan-cli#1122 -- now FIXED and seeded**, the same
+    way tan-cli#1162 reversed the `_load_board_symbols` half; the upstream
+    half is tracked as alp-sdk#1961, since alp-sdk still carries the defect
+    and tan's planner-fallback path still executes it. READ THE NEXT
+    PARAGRAPH BEFORE REUSING THE ORIGINAL
     REASON. As written at tan-cli#1116 it says `kconfig.py` is a hash-pinned
     verbatim mirror of alp-sdk's `scripts/alp_orchestrate/kconfig.py` and
     that editing tan's copy would break `test_planner_relocation_freshness.
@@ -231,9 +235,11 @@ files** found in `PINNED_HASHES`-protected planner files -- `kconfig.py`
 `kconfig_symbols.py` (`_load_board_symbols`) -- named individually above and
 in `_SEEDED_CONTRACTS`' neighbouring comments, all deferred at that round on
 the `PINNED_HASHES` reasoning tan-cli#1122 has since refuted (see the
-`slugs.py` bullet above; five of the six deferrals stand, but on maintenance
-cost, not on the gate), all reported rather than silently skipped. **15** seeded
-into `_SEEDED_CONTRACTS` below AT THAT ROUND (twenty-five today; every
+`slugs.py` bullet above; FOUR of the six deferrals stand, on maintenance
+cost rather than on the gate -- `kconfig_symbols.py`'s was reversed at
+tan-cli#1162 and `kconfig.py`'s at tan-cli#1122), all reported rather than
+silently skipped. **15** seeded
+into `_SEEDED_CONTRACTS` below AT THAT ROUND (twenty-six today; every
 count in this paragraph is tan-cli#1116's own measurement, kept as the
 record of what that sweep found rather than silently re-stated) -- the
 twelve from review round 1 plus `som_buildability.hw_rev_not_buildable`,
