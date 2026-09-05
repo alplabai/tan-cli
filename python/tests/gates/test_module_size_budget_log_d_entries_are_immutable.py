@@ -96,12 +96,67 @@ choices this file is making on purpose the way the README.md filter is. The
 full reasoning for each (and why no addition to the walk closes either) is
 written out ONCE, in `entry_violations`'s own docstring, rather than
 restated here.
+
+## Why this file gets its own cross-OS run (tan-cli#1152)
+
+ci.yml's `python` job records `tests/gates` as ubuntu-latest-only on a "pure
+source parsing (`ast`/text scans), no OS-dependent behaviour" premise, with
+its own escape clause: a gate that shells a subprocess needs ITS OWN cross-OS
+run, not a blanket widening. This file is that gate -- since tan-cli#907 it
+shells real `git` (`rev-list --full-history`, `log --name-status`, merge
+construction, blob compares) -- so `parity.yml`'s `python-tests-shard` job now
+also runs THIS FILE ALONE (not the rest of `tests/gates`, which stays the pure
+parsing the premise describes) on `windows-latest` and `macos-latest`; see
+that job's own step for the two things doing so required: an explicit
+unshallow (a shallow clone reds `test_the_checkout_has_full_history` by
+design, measured locally on a shallow Windows checkout before this run
+existed) and the `PYTHONPATH`/import-root shape `working-directory: python`
+already gives every other step in that job.
+
+Measured, not assumed: run on Windows (git 2.38.1.windows.1, `core.autocrlf
+false`) BEFORE the unshallow fix, exactly one test failed --
+`test_the_checkout_has_full_history`, correctly, on a real shallow clone --
+and every other test in this file already PASSED. That is despite a second
+platform hazard that looks like it should have broken something: `_write`
+(imported from `test_module_size_budget_log_append_only.py`, out of this
+file's own scope to change) calls `Path.write_text` with no `newline=`, which
+writes `\r\n` on Windows, and `core.autocrlf false` means git commits those
+bytes verbatim rather than normalising them -- so a hermetic scratch repo
+built by this file's helpers on Windows contains genuinely different blob
+bytes than the same scenario built on Linux. It does not currently fail
+anything HERE because every assertion in this file that re-reads an entry's
+content does so through `Path.read_text()` with no `newline=` either (see the
+two `read_text()` calls below) -- Python's universal-newline translation on
+the READ side cancels the CRLF the WRITE side introduced, on the SAME host,
+symmetrically, for exactly the string-equality checks this file makes.
+Nothing here compares raw bytes or a blob's OID against a value captured on a
+different host, so the cancellation is complete, not a near-miss.
+
+Deliberately NOT "fixed" by adding `newline="\n"` to `_write` as part of this
+change: that helper lives in the sibling append-only gate file, shared by
+both, and out of this task's scope. Recorded here instead, as the reasoned
+decision this file's own docstring convention asks for: the two hosts commit
+byte-different blobs for identical scenarios, the read-side symmetry is what
+keeps that invisible today, and it stops being invisible the moment any
+future assertion in either file compares raw bytes (`read_bytes()`, a fixed
+hash, a byte-length) instead of `read_text()`'s normalised string. That is a
+real, narrow follow-up for `_write` itself, not a reason to hold this file's
+own cross-OS run.
+
+`_introducing_commit` and the test below it already record the git version
+their own history-simplification assertions were measured against (2.43.0);
+running this file on `windows-latest`/`macos-latest` runner images whose git
+version may differ from that is the point of the new run, not a gap in it --
+a runner shipping a git old enough to simplify history differently would
+show up as a real, actionable red here, not a silent pass.
 """
 from __future__ import annotations
 
 import re
 import subprocess
 from pathlib import Path
+
+import yaml
 
 from tests.gates import _module_size_budget_core as core
 from tests.gates.test_module_size_budget_log_append_only import (
@@ -1685,4 +1740,63 @@ def test_commits_outside_head_do_not_leak_in(tmp_path):
     assert violations == {}, (
         "a rewrite on a branch that is not an ancestor of HEAD must not "
         f"leak into HEAD's own check, but got: {violations}"
+    )
+
+
+def test_this_file_gets_its_own_cross_os_run_in_parity_yml():
+    """tan-cli#1152. ci.yml keeps `tests/gates` `ubuntu-latest`-only on a
+    pure-source-parsing premise, with its own escape clause: a gate that
+    shells a subprocess needs its OWN cross-OS run, not a blanket widening.
+    This file has shelled real `git` since tan-cli#907 (see the module
+    docstring's "Why this file gets its own cross-OS run" section) -- so
+    `parity.yml`'s `python-tests-shard` job, the only job in this repo that
+    runs on `windows-latest`/`macos-latest`, must carry a step that invokes
+    THIS FILE, gated to the non-`ubuntu-latest` legs. Derived off `__file__`
+    rather than a second hardcoded copy of the filename, so a rename of this
+    file cannot silently desync the two sides of that promise.
+
+    A future edit that drops the step, or narrows its `if:` back to
+    `ubuntu-latest` (making it a redundant third ubuntu run rather than a
+    real cross-OS one), fails HERE instead of silently losing the coverage
+    this change exists to add.
+    """
+    parity = yaml.safe_load(
+        (REPO / ".github" / "workflows" / "parity.yml").read_text(encoding="utf-8")
+    )
+    job = parity["jobs"]["python-tests-shard"]
+
+    matrix_os = job["strategy"]["matrix"]["os"]
+    assert "windows-latest" in matrix_os and "macos-latest" in matrix_os, (
+        "python-tests-shard's own os matrix must still carry windows-latest "
+        "and macos-latest, or there is no non-ubuntu leg left for this "
+        f"file's cross-OS step to run on: {matrix_os!r}"
+    )
+
+    this_file_name = Path(__file__).name
+    matching_steps = [step for step in job["steps"] if this_file_name in step.get("run", "")]
+    assert matching_steps, (
+        f"parity.yml's python-tests-shard job has no step invoking {this_file_name} -- "
+        "this file's own cross-OS run (tan-cli#1152) has gone missing"
+    )
+    assert len(matching_steps) == 1, (
+        f"expected exactly one step invoking {this_file_name} in "
+        f"python-tests-shard, found {len(matching_steps)}"
+    )
+
+    # Compared WHOLE against one exact expected expression, never searched --
+    # tan-cli#1145's own rule for a workflow `if:` key (see
+    # test_workflow_if_keys_are_compared_not_searched.py): a substring check
+    # like `"!= 'ubuntu-latest'" in condition` would still pass after the `!`
+    # was deleted, which is precisely the polarity flip that rule exists to
+    # catch. An exact `==` forces this assertion to move with any rewrite of
+    # the guard, rather than nodding along with one that "means the same
+    # thing".
+    condition = matching_steps[0].get("if", "")
+    expected_condition = "matrix.os != 'ubuntu-latest' && matrix.shard == 0"
+    assert condition == expected_condition, (
+        f"the step invoking {this_file_name} must gate on exactly "
+        f"{expected_condition!r} -- excluding ubuntu-latest (already covered "
+        "by ci.yml's `python` job and this workflow's own seam1-plan-shape "
+        "job) and picking exactly one shard leg so the step runs once per "
+        f"platform, not once per (os, shard) leg -- but got {condition!r}"
     )

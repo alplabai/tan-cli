@@ -2297,6 +2297,16 @@ jobs:
   # false-positive d9a22c0/ecab9da exists to prevent (PINNED_SDK_TAG can sit on
   # either side of the audit commit with no guarantee the two agree).
   #
+  # ONE exception, tan-cli#1152: `test_module_size_budget_log_d_entries_are_
+  # immutable.py` needs no alp-sdk ref at all (its own module docstring says
+  # so -- it walks THIS repo's own git history, not a bound checkout), so the
+  # "THIRD, uncoordinated ref" problem above does not apply to it. This
+  # `--ignore=tests/gates` still excludes it from the run below; it gets its
+  # own, narrowly-targeted invocation further down this job instead, because
+  # it is the one file in `tests/gates` ci.yml's decision comment flags as
+  # needing a cross-OS run of its own (it shells real `git`), and this job is
+  # the only place in the repo that runs on `windows-latest`/`macos-latest`.
+  #
   # No Zephyr SDK / west workspace here -- that stays seam2/
   # first-blink's job. `native_sim` e2e and the west-real-build parity cases
   # already self-skip, loudly, with a named reason when the toolchain is
@@ -2494,6 +2504,52 @@ jobs:
           # own model-compile comment in
           # pyproject.toml).
           python -m pip install --quiet -e ".[monitor,model-compile]" pytest pytest-shard
+
+      # tan-cli#1152: the one file `tests/gates` excludes from THIS job for a
+      # reason that has nothing to do with alp-sdk refs (see the
+      # `--ignore=tests/gates` note above) gets its own targeted, cross-OS
+      # run here instead of a blanket widening of ci.yml's ubuntu-only
+      # `python` job -- exactly what that job's own decision comment asks
+      # for. `test_module_size_budget_log_d_entries_are_immutable.py` has
+      # shelled real `git` subprocesses since tan-cli#907
+      # (`rev-list --full-history`, `log --name-status`, merge construction,
+      # blob compares), which is genuinely host-dependent in a way the rest
+      # of `tests/gates` (pure `ast`/text-scan parsing) is not -- see that
+      # file's own module docstring for the CRLF and git-version hazards this
+      # run exists to catch, and why neither currently breaks anything here.
+      #
+      # `matrix.os != 'ubuntu-latest'`: ubuntu-latest already runs this file,
+      # with full history, in ci.yml's `python` job and in this workflow's
+      # own `seam1-plan-shape` job (both `fetch-depth: 0`) -- a third ubuntu
+      # run here would be the "blanket widening" the decision comment argues
+      # against, not the "gate's own cross-OS run" it asks for.
+      #
+      # `matrix.shard == 0`: this job's matrix has 5 legs per OS (4 numbered
+      # shards + the unsharded `parity` leg); picking exactly one numbered
+      # shard runs this step once per platform, not once per (os, shard) leg.
+      #
+      # Unshallowed HERE, narrowly, rather than by adding `fetch-depth: 0` to
+      # the "checkout tan-cli" step above for all 15 (os, shard) legs: that
+      # step takes actions/checkout's default (`fetch-depth: 1`), and this
+      # gate's own `test_the_checkout_has_full_history` correctly hard-fails
+      # a shallow clone instead of silently skipping it (the same tan-cli#970
+      # shape as the sibling append-only gate) -- measured locally on a real
+      # shallow Windows checkout before this step existed: exactly that one
+      # test failed, and nothing else did. `git fetch --unshallow` is only
+      # run when the checkout actually IS shallow; calling it unconditionally
+      # fails outright ("does not make sense") on a checkout that already has
+      # full history, which this job's own checkout may or may not be
+      # depending on the runner and trigger.
+      - name: unshallow + run the ledger-immutability gate cross-OS (tan-cli#1152)
+        if: matrix.os != 'ubuntu-latest' && matrix.shard == 0
+        shell: bash
+        working-directory: python
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --unshallow
+          fi
+          python -m pytest -q tests/gates/test_module_size_budget_log_d_entries_are_immutable.py
 
       # The `python-tests` job below (the one wired into branch protection --
       # see .github/workflows/ci.yml's header for the full tan-cli#392 note and
