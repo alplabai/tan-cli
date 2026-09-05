@@ -28,18 +28,28 @@ in its own docstring -- read that one first if this import looks backwards.
 It works here for the same reason: `template.py` binds `TemplateError` (its
 exception classes, near the top of the file) before its own
 `from .template_rewrite import ...` line runs.
+
+Also imports `_pin_pad_and_macro` from `.template_pins` -- NOT circular: by
+the time `template.py` reaches its own `from .template_rewrite import ...`
+line, its preceding `from .template_pins import ...` line (tan-cli#1142's
+NameError fix) has already run `template_pins.py` to completion, so this
+module sees a fully-built `tan.planner.template_pins`, same as any ordinary
+import.
 """
 from __future__ import annotations
 
 import posixpath
 import re
 import subprocess
+from pathlib import Path
+from typing import Any
 
 import yaml
 
 from tan.core.subprocess_env import spawn_env
 
 from .template import TemplateError
+from .template_pins import _pin_pad_and_macro
 
 
 # Matches board.yaml's `som:\n  sku: E1M-...` line and the top-level

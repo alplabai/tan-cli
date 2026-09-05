@@ -73,12 +73,21 @@ that distinction is machine-checked rather than positional: a record's `kind`
 must agree with the tree its path sits in, or `core` refuses to load it at
 all.
 
-`tan/planner/**` is a third case, and only PART of it is out of scope: its
-`PINNED_HASHES` modules (a hash-audited, 3-way-merged mirror of upstream) are
-named out of scope inside the walk, because splitting one would turn every
-future upstream hunk into a merge conflict. Its `HAND_PORT_SOURCES` modules
-(e.g. `template.py`) are NOT mirrored the same way -- they are flagged
-against upstream, never merged -- and may be split like any other module
+`tan/planner/**` is a third case, and only PART of it is exempted from the
+GROWTH ratchet's practical remedy -- not from the walk or the ratchet itself,
+which still apply to every `.py` under it the same as anywhere else in
+`tan/**` (`core.modules()` is `PACKAGE.rglob("*.py")`, no prefix filter: a
+`PINNED_HASHES` module that grows past its recorded budget still fails
+`test_no_module_grows_past_its_recorded_budget` and still needs a `--reason`
+regen like any other). What IS different for its `PINNED_HASHES` subset (a
+hash-audited, 3-way-merged mirror of upstream) is that SPLITTING one -- the
+usual remedy for an over-budget module -- would turn every future upstream
+hunk into a merge conflict, so `test_the_mirrored_planner_is_named_as_out_of_
+scope` records that an oversized one of them is upstream's to split, not this
+repo's, rather than demanding a split this repo cannot safely make. Its
+`HAND_PORT_SOURCES` modules (e.g. `template.py`) are NOT mirrored the same
+way -- they are flagged against upstream, never merged -- so that remedy is
+available and a split is expected like any other oversized module
 (tan-cli#1142). See `test_the_mirrored_planner_is_named_as_out_of_scope`.
 
 ## Why a pytest gate and not a ruff job
