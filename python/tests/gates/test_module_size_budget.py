@@ -96,6 +96,7 @@ safe and the script applies it without asking.
 """
 from __future__ import annotations
 
+from itertools import zip_longest
 from pathlib import Path
 
 import pytest
@@ -188,6 +189,86 @@ def test_no_new_long_function_and_none_of_them_grows():
     )
 
 
+def _describe_function_mismatch(was: "core.ModuleFunctions", now: "core.ModuleFunctions") -> str:
+    """One module's `long_functions` disagreement, named per FUNCTION rather
+    than as a bare `set(now.entries) - set(was.entries)`.
+
+    Grouped by NAME (`core.spans_by_name`), not compared as a tuple set, for
+    two reasons a set diff gets wrong:
+
+    * a function that changed SPAN while staying over the cap (e.g.
+      `was=((63, "f"),)` -> `now=((70, "f"),)`) is neither new nor gone, but a
+      set diff puts it in BOTH buckets -- `(63, "f")` is "now missing" and
+      `(70, "f")` is "now present", so the message falsely claims `f` crossed
+      the cap in both directions at once when it did neither;
+    * two same-name, same-span functions in one module (two classes' own
+      `__init__`) collapse to ONE set element, so a real change -- a second
+      `__init__` appearing at the same span an existing one already occupies
+      -- can leave both set differences empty while `was != now`, producing a
+      content-free message with no diagnostic at all.
+
+    Grouping by name and pairing each name's spans positionally
+    (`zip_longest`, the same pairing `_function_deltas` in
+    `scripts/regen_module_size_budget.py` uses for the identical class of
+    bug) fixes both: a changed span pairs off as CHANGED, not
+    appeared-and-disappeared, and a duplicate name/span is one more entry in
+    that name's own span list rather than one set element two records share."""
+    was_by_name = core.spans_by_name(was)
+    now_by_name = core.spans_by_name(now)
+    appeared: list[str] = []
+    disappeared: list[str] = []
+    changed: list[str] = []
+    for name in sorted(set(was_by_name) | set(now_by_name)):
+        before_spans = was_by_name.get(name, [])
+        after_spans = now_by_name.get(name, [])
+        for before, after in zip_longest(before_spans, after_spans):
+            if before == after:
+                continue
+            if before is None:
+                appeared.append(f"{name} at {after}")
+            elif after is None:
+                disappeared.append(f"{name} at {before}")
+            else:
+                changed.append(f"{name}: {before} -> {after}")
+    parts = []
+    if appeared:
+        parts.append("now over cap: " + ", ".join(appeared))
+    if disappeared:
+        parts.append("no longer over cap (or renamed/moved/deleted): " + ", ".join(disappeared))
+    if changed:
+        parts.append("changed span while staying over cap: " + ", ".join(changed))
+    return "; ".join(parts)
+
+
+def test_a_function_that_only_changed_span_is_named_as_changed_not_both():
+    """A review of tan-cli#1173 measured the mismatch message directly and
+    found a function that merely changed span while staying over the cap
+    (`was=((63, "f"),)` -> `now=((70, "f"),)`) got BOTH crossing labels: "now
+    over cap: f at 70; no longer over cap (or renamed/moved/deleted): f at
+    63" -- `f` did neither, it was over the cap before and after. See
+    `_describe_function_mismatch`'s own docstring for why a bare
+    `set(now.entries) - set(was.entries)` cannot tell that apart from a real
+    appear/disappear pair."""
+    was = core.ModuleFunctions(entries=((63, "f"),))
+    now = core.ModuleFunctions(entries=((70, "f"),))
+    assert _describe_function_mismatch(was, now) == (
+        "changed span while staying over cap: f: 63 -> 70"
+    )
+
+
+def test_two_same_span_same_name_functions_are_not_a_silent_mismatch():
+    """A review of tan-cli#1173 found that two functions sharing a name AND a
+    span in one module (two classes' own `__init__`, both over the cap at
+    the same length) make `was != now` a no-op message ("tan/y.py: ", no
+    diagnostic) when only the DUPLICATE COUNT changed, because a bare set
+    collapses both occurrences to one element -- 0 of the 141 committed
+    records hit this today, but the failure mode was silent whenever it did."""
+    was = core.ModuleFunctions(entries=((55, "__init__"),))
+    now = core.ModuleFunctions(entries=((55, "__init__"), (55, "__init__")))
+    assert was != now
+    assert _describe_function_mismatch(was, now) == "now over cap: __init__ at 55"
+
+
 def test_the_recorded_function_facts_match_the_measurement():
     """The staleness half of the function ratchet, and the thing that makes a
     DERIVED scalar's inputs auditable per module (tan-cli#1057).
@@ -243,19 +324,10 @@ def test_the_recorded_function_facts_match_the_measurement():
                 "module now has none"
             )
         else:
-            appeared = sorted(set(now.entries) - set(was.entries))
-            disappeared = sorted(set(was.entries) - set(now.entries))
-            parts = []
-            if appeared:
-                parts.append(
-                    "now over cap: " + ", ".join(f"{name} at {span}" for span, name in appeared)
-                )
-            if disappeared:
-                parts.append(
-                    "no longer over cap (or renamed/moved/deleted): "
-                    + ", ".join(f"{name} at {span}" for span, name in disappeared)
-                )
-            wrong.append(f"{rel}: " + "; ".join(parts))
+            # `_describe_function_mismatch` above names appeared, disappeared,
+            # AND changed-span functions -- see its own docstring for why a
+            # bare `set(now.entries) - set(was.entries)` gets both wrong.
+            wrong.append(f"{rel}: " + _describe_function_mismatch(was, now))
 
     assert wrong == [], (
         "the committed per-module function records disagree with the tree, so "
@@ -715,6 +787,65 @@ def test_a_dropped_entry_is_only_a_shrink_if_the_name_still_exists(tmp_path, mon
         grown, shrunk = regen._function_deltas(old, new, still_there)
         assert grown == []
         assert shrunk == ["a.py:f: 63 -> gone (renamed, moved, or deleted -- not a shrink)"]
+
+
+def test_a_pure_rename_within_one_module_is_not_growth(tmp_path, monkeypatch):
+    """A review of tan-cli#1173 measured this directly: renaming `f` -> `g`
+    within the SAME module, same span (63 both sides), produced
+    `grown == ["a.py:g: new entry at 63"]` -- `main()` refuses without
+    `--reason` for a diff where nothing about the ceiling moved at all. A
+    same-span appearance and disappearance in one module is paired off as a
+    rename before either bucket is built (see `_function_deltas`'s own
+    docstring), so it forces neither `grown` nor a ledger line.
+
+    A rename that ALSO grows (different span), or a move to a DIFFERENT
+    module (same span, no same-module counterpart to pair with -- the exact
+    shape `test_a_whole_tree_neutral_function_move_now_needs_a_reason`
+    covers via `main()`), is not paired away: both still count as growth,
+    because both really do put a function over the cap somewhere it was not
+    before."""
+    regen = _load_regen("_regen_under_test_rename")
+
+    old = {"a.py": regen.core.ModuleFunctions(entries=((63, "f"),))}
+    new = {"a.py": regen.core.ModuleFunctions(entries=((63, "g"),))}
+    grown, shrunk = regen._function_deltas(old, new, {"a.py": {"g"}})
+    assert grown == []
+    assert shrunk == []
+
+    grown, shrunk = regen._function_deltas(
+        {"a.py": regen.core.ModuleFunctions(entries=((63, "f"),))},
+        {"a.py": regen.core.ModuleFunctions(entries=((90, "g"),))},
+        {"a.py": {"g"}},
+    )
+    assert grown == ["a.py:g: new entry at 90"]
+    assert shrunk == ["a.py:f: 63 -> gone (renamed, moved, or deleted -- not a shrink)"]
+
+    grown, shrunk = regen._function_deltas(
+        {"a.py": regen.core.ModuleFunctions(entries=((63, "f"),))},
+        {"b.py": regen.core.ModuleFunctions(entries=((63, "g"),))},
+        {"b.py": {"g"}},
+    )
+    assert grown == ["b.py:g: new entry at 63"]
+    assert shrunk == ["a.py:f: 63 -> gone (renamed, moved, or deleted -- not a shrink)"]
+
+
+def test_a_deleted_module_is_reported_as_gone_not_dropped():
+    """`_deltas` (the module-line-ceiling half) had the same false wording
+    `_function_deltas` was fixed for above: a module deleted outright -- not
+    shrunk, just gone -- was reported as "before -> dropped (now under the
+    cap)", which is not true of a module that no longer exists at all.
+    `still_exists` (every key the tree would still produce, over the cap or
+    not) is what tells the two apart, mirroring `new_names` on the function
+    side."""
+    regen = _load_regen("_regen_under_test_module_gone")
+
+    grown, shrunk = regen._deltas({"tan/x.py": 900}, {}, set())
+    assert grown == []
+    assert shrunk == ["tan/x.py: 900 -> gone (renamed, moved, or deleted -- not a shrink)"]
+
+    grown, shrunk = regen._deltas({"tan/x.py": 900}, {}, {"tan/x.py"})
+    assert grown == []
+    assert shrunk == ["tan/x.py: 900 -> dropped (now under the cap)"]
 
 
 def test_check_mode_reds_on_a_stale_record_and_passes_once_resynced(tmp_path, monkeypatch):

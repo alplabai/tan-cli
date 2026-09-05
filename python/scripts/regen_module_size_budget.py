@@ -175,8 +175,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "gates"))
 import _module_size_budget_core as core  # noqa: E402
 
 
-def _deltas(old: dict[str, int], new: dict[str, int]) -> tuple[list[str], list[str]]:
-    """(grown, shrunk-or-removed) description lines, module ceilings only."""
+def _deltas(
+    old: dict[str, int], new: dict[str, int], still_exists: set[str]
+) -> tuple[list[str], list[str]]:
+    """(grown, shrunk-or-removed) description lines, module ceilings only.
+
+    `still_exists` (every key `measure_current`/`measure_observed_tests`
+    would produce a KEY for, over the cap or not) is what tells "shrank
+    under the cap" apart from "the module is gone" for the `after is None`
+    case -- a module deleted outright, renamed, or moved is not IN the cap
+    any more either, but "dropped (now under the cap)" claims it is, which
+    is not true of a module that no longer exists at all (the same false
+    claim tan-cli#1173's review found on the function side; one wording
+    fixes both, see `_function_deltas` below)."""
     grown: list[str] = []
     shrunk: list[str] = []
     for name in sorted(set(old) | set(new)):
@@ -187,27 +198,17 @@ def _deltas(old: dict[str, int], new: dict[str, int]) -> tuple[list[str], list[s
         if before is None:
             grown.append(f"{name}: new entry at {after}")
         elif after is None:
-            shrunk.append(f"{name}: {before} -> dropped (now under the cap)")
+            if name in still_exists:
+                shrunk.append(f"{name}: {before} -> dropped (now under the cap)")
+            else:
+                shrunk.append(
+                    f"{name}: {before} -> gone (renamed, moved, or deleted -- not a shrink)"
+                )
         elif after > before:
             grown.append(f"{name}: {before} -> {after}")
         else:
             shrunk.append(f"{name}: {before} -> {after}")
     return grown, shrunk
-
-
-def _spans_by_name(facts: core.ModuleFunctions) -> dict[str, list[int]]:
-    """One module's over-cap functions grouped by name, spans sorted
-    ascending. A GROUP, not a plain dict, on purpose: two functions can share
-    a name in the same module (every class's own `__init__`, a redefinition
-    under a conditional, ...), and collapsing that to one dict entry would
-    silently drop one of them from comparison below -- the same silent-drop
-    shape `_load_json` elsewhere in `core` refuses for a duplicate JSON key."""
-    out: dict[str, list[int]] = {}
-    for span, name in facts.entries:
-        out.setdefault(name, []).append(span)
-    for spans in out.values():
-        spans.sort()
-    return out
 
 
 def _function_deltas(
@@ -247,14 +248,32 @@ def _function_deltas(
     (now under the cap)" would put an untrue statement about a cap crossing
     into the append-only ledger. Nothing here can say WHERE a renamed or
     moved function went -- that identity is not tracked -- only that this
-    name, in this module, stopped meaning anything."""
+    name, in this module, stopped meaning anything.
+
+    A name that goes away and a DIFFERENT name that appears, in the SAME
+    module, at the exact same span, is a pure RENAME -- nothing about the
+    ceiling moved (same module, same size), so it must not force `--reason`
+    on its own: a review of tan-cli#1173 measured `f` -> `g` (both 63 lines,
+    same module) producing `grown == ["mod:g: new entry at 63"]`, refusing
+    the regen for what is not a ceiling raise at all. Those are paired off
+    per module, by span, before either bucket is built -- a genuine new
+    over-cap function still counts as growth (a DIFFERENT span, or no
+    same-span disappearance in that module to pair it with -- e.g. the move
+    to a different module `test_a_whole_tree_neutral_function_move_now_needs_a_reason`
+    covers, which this pairing deliberately leaves alone: a different module
+    now holds an over-cap function it did not before, which is exactly the
+    growth tan-cli#1173 exists to catch)."""
     grown: list[str] = []
     shrunk: list[str] = []
     empty = core.ModuleFunctions(entries=())
     for module in sorted(set(old) | set(new)):
-        old_by_name = _spans_by_name(old.get(module, empty))
-        new_by_name = _spans_by_name(new.get(module, empty))
+        old_by_name = core.spans_by_name(old.get(module, empty))
+        new_by_name = core.spans_by_name(new.get(module, empty))
         still_named = new_names.get(module, set())
+        module_grown: list[str] = []
+        module_shrunk: list[str] = []
+        appeared: dict[int, list[str]] = {}  # span -> names newly over the cap
+        vanished: dict[int, list[str]] = {}  # span -> names gone (not still-named)
         for name in sorted(set(old_by_name) | set(new_by_name)):
             before_spans = old_by_name.get(name, [])
             after_spans = new_by_name.get(name, [])
@@ -263,19 +282,35 @@ def _function_deltas(
                 if before == after:
                     continue
                 if before is None:
-                    grown.append(f"{label}: new entry at {after}")
+                    appeared.setdefault(after, []).append(name)
                 elif after is None:
                     if name in still_named:
-                        shrunk.append(f"{label}: {before} -> dropped (now under the cap)")
+                        module_shrunk.append(f"{label}: {before} -> dropped (now under the cap)")
                     else:
-                        shrunk.append(
-                            f"{label}: {before} -> gone (renamed, moved, or "
-                            "deleted -- not a shrink)"
-                        )
+                        vanished.setdefault(before, []).append(name)
                 elif after > before:
-                    grown.append(f"{label}: {before} -> {after}")
+                    module_grown.append(f"{label}: {before} -> {after}")
                 else:
-                    shrunk.append(f"{label}: {before} -> {after}")
+                    module_shrunk.append(f"{label}: {before} -> {after}")
+
+        # Pair same-span appear/vanish within this module as renames: neither
+        # side is reported (see the docstring paragraph above).
+        for span, gone_names in vanished.items():
+            new_at_span = appeared.pop(span, [])
+            paired = min(len(gone_names), len(new_at_span))
+            for name in gone_names[paired:]:
+                module_shrunk.append(
+                    f"{module}:{name}: {span} -> gone (renamed, moved, or "
+                    "deleted -- not a shrink)"
+                )
+            for name in new_at_span[paired:]:
+                module_grown.append(f"{module}:{name}: new entry at {span}")
+        for span, names in appeared.items():
+            for name in names:
+                module_grown.append(f"{module}:{name}: new entry at {span}")
+
+        grown.extend(sorted(module_grown))
+        shrunk.extend(sorted(module_shrunk))
     return grown, shrunk
 
 
@@ -304,7 +339,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {err}", file=sys.stderr)
         return 1
 
-    module_grown, module_shrunk = _deltas(committed.modules, current.modules)
+    current_modules = {core.rel(path) for path in core.modules()}
+    module_grown, module_shrunk = _deltas(committed.modules, current.modules, current_modules)
     # Judged per FUNCTION, not on the derived whole-tree numbers (tan-cli#1173)
     # -- see `_function_deltas`'s own docstring for why the derived pair alone
     # let an offsetting pair of per-function moves hide a cap crossing.
@@ -320,7 +356,8 @@ def main(argv: list[str] | None = None) -> int:
     # what the `--reason` refusal below reads, so folding the observed side
     # into them would silently convert this record into the ratchet the scope
     # decision rejected -- see `TEST_ROOT` in _module_size_budget_core.py.
-    observed_moved, observed_settled = _deltas(committed_observed, observed)
+    current_test_tree = {core.rel(path) for path in core.test_tree_modules()}
+    observed_moved, observed_settled = _deltas(committed_observed, observed, current_test_tree)
 
     stale_caps = not core.CAPS_PATH.exists() or core.CAPS_PATH.read_text(
         encoding="utf-8"

@@ -270,6 +270,28 @@ def long_functions(tree: ast.AST) -> list[tuple[int, str]]:
     return out
 
 
+def spans_by_name(facts: ModuleFunctions) -> dict[str, list[int]]:
+    """One module's over-cap functions grouped by name, spans sorted
+    ascending. A GROUP, not a plain dict, on purpose: two functions can share
+    a name in the same module (every class's own `__init__`, a redefinition
+    under a conditional, ...), and collapsing that to one dict entry would
+    silently drop one of them from comparison -- the same silent-drop shape
+    `_load_json` elsewhere in this module refuses for a duplicate JSON key.
+    Shared by `regen_module_size_budget.py`'s `_function_deltas` and
+    `test_module_size_budget.py`'s own record-vs-measurement diff, so a
+    duplicate name/span pair is paired up POSITIONALLY (via `zip_longest`) in
+    both places rather than compared as a bare set -- a set collapses two
+    identical `(span, name)` entries to one and can report "nothing changed"
+    when one of a pair of same-name, same-span functions (two classes' own
+    `__init__`, at the same span) actually did."""
+    out: dict[str, list[int]] = {}
+    for span, name in facts.entries:
+        out.setdefault(name, []).append(span)
+    for spans in out.values():
+        spans.sort()
+    return out
+
+
 def all_function_names_by_module() -> dict[str, set[str]]:
     """Every function name in each `tan/**` module, over `FUNCTION_CAP` or
     not -- used only to tell a function that shrank below the cap (still
