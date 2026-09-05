@@ -147,24 +147,43 @@ jobs:
   # xfails are green. Pinning a number would turn every landed port into a red
   # build.
   #
-  # tan-cli#372: this is also the ONLY place in CI that runs `python/tests/gates`
-  # (which includes the frozen-issue-code delegate `test_frozen_issue_codes.py`)
-  # on a non-Linux host -- and it does not, since this job is `ubuntu-latest`
-  # only. `parity.yml`'s cross-OS `python-tests` job explicitly
-  # `--ignore=tests/gates` (that suite already runs, always, in `parity.yml`'s
-  # `seam1-plan-shape` job and in `python-newest` below -- both also
-  # `ubuntu-latest` only, so the non-Linux claim above is untouched by either).
-  # Recorded as a decision, not an oversight: `tests/gates` is pure source
-  # parsing (`ast` over `python/tan/**`, text scans over the same), with no
-  # OS-dependent behaviour to lose by staying single-platform -- the path
-  # handling it does do is verified platform-clean (`_rel` in
-  # `test_frozen_issue_codes.py` normalises `\`->`/`; every cross-file assembled
-  # suffix resolves via `_ASSEMBLED_SUFFIXES` regardless of host). Adding a
-  # second or third OS here would cost real CI minutes for zero coverage this
-  # scan can lose on Windows or macOS specifically. Revisit if a future gate
-  # under `tests/gates` reads something host-dependent (a real path separator, a
-  # subprocess, PATH resolution) -- that gate would need its own cross-OS run,
-  # not a blanket widening of this job.
+  # tan-cli#372: this is also the ONLY place in CI that runs the WHOLE of
+  # `python/tests/gates` (which includes the frozen-issue-code delegate
+  # `test_frozen_issue_codes.py`) on a non-Linux host -- and it does not,
+  # since this job is `ubuntu-latest` only. `parity.yml`'s cross-OS
+  # `python-tests-shard` job explicitly `--ignore=tests/gates` (that suite
+  # already runs, always, in `parity.yml`'s `seam1-plan-shape` job and in
+  # `python-newest` below -- both also `ubuntu-latest` only, so the non-Linux
+  # claim above is untouched by either). Recorded as a decision, not an
+  # oversight: `tests/gates` is, with the one exception recorded below
+  # (tan-cli#1152), pure source parsing (`ast` over `python/tan/**`, text
+  # scans over the same), with no OS-dependent behaviour to lose by staying
+  # single-platform -- the path handling it does do is verified
+  # platform-clean (`_rel` in `test_frozen_issue_codes.py` normalises
+  # `\`->`/`; every cross-file assembled suffix resolves via
+  # `_ASSEMBLED_SUFFIXES` regardless of host). Adding a second or third OS
+  # here would cost real CI minutes for zero coverage this scan can lose on
+  # Windows or macOS specifically.
+  #
+  # tan-cli#1152: the premise broke for exactly the shape this paragraph's
+  # own escape clause (below) names -- a gate that reads a subprocess. Since
+  # tan-cli#907 `tests/gates/test_module_size_budget_log_d_entries_are_immutable.py`
+  # shells real `git` (`rev-list --full-history`, `log --name-status`, merge
+  # construction, blob compares), which IS host-dependent in a way the rest
+  # of `tests/gates` is not -- measured red on a shallow local Windows
+  # checkout for a real reason (git 2.38.1.windows.1) before this was fixed.
+  # That one file, and only that file, now gets its own cross-OS run:
+  # `parity.yml`'s `python-tests-shard` job runs it a second time, on
+  # `windows-latest` and `macos-latest` (`ubuntu-latest` already has it, here
+  # and in `seam1-plan-shape` and `python-newest`) -- see that job's own step
+  # and `test_module_size_budget_log_d_entries_are_immutable.py`'s own module
+  # docstring for the CRLF/history-simplification hazards that run exists to
+  # catch. This is that gate's own cross-OS run, not a blanket widening of
+  # this job -- the rest of `tests/gates` stays exactly as single-platform as
+  # the paragraph above argues for. Revisit only if ANOTHER gate under
+  # `tests/gates` starts reading something host-dependent (a real path
+  # separator, a subprocess, PATH resolution); it would need the same
+  # treatment, not a rerun of this one's widening.
   python:
     runs-on: ubuntu-latest
     # Two numbers, because this job has two workloads and one flat cap has to
