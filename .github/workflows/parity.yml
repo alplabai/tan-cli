@@ -2422,7 +2422,20 @@ jobs:
           # unauthenticated `git fetch --unshallow` only works because this
           # repo is public today -- `fetch-depth: 0` here needs no fetch, no
           # credentials, and no assumption about repo visibility.
-          fetch-depth: ${{ (matrix.os != 'ubuntu-latest' && matrix.shard == 0) && 0 || 1 }}
+          #
+          # '0' is quoted, not bare 0: GitHub Actions' `&&`/`||` return an
+          # OPERAND, not a coerced boolean, and its truthiness table treats
+          # the number 0 as falsy -- so `cond && 0 || 1` collapses to `1` on
+          # EVERY leg (0 is deemed falsy, so `0 || 1` always yields 1), a
+          # documented ternary-with-falsy-true-branch footgun. Verified with
+          # the official `@actions/expressions` evaluator: the bare-`0` form
+          # returns `"1"` for all four (os, shard) combinations tried,
+          # including windows-latest+0; quoting the true branch as the
+          # non-empty string `'0'` (which IS truthy, same trick `release.yml`
+          # already uses for its `make_latest` ternary's `'false'` branch)
+          # makes it evaluate to `"0"` on exactly the two intended legs and
+          # `"1"` everywhere else.
+          fetch-depth: ${{ (matrix.os != 'ubuntu-latest' && matrix.shard == 0) && '0' || 1 }}
 
       # Env var + allow-list, not interpolation -- see seam1's comment above.
       - name: resolve alp-sdk ref

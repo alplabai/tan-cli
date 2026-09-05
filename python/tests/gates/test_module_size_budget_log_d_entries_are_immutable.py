@@ -126,9 +126,10 @@ built by this file's helpers on Windows contains genuinely different blob
 bytes than the same scenario built on Linux. It does not currently fail
 anything HERE because every assertion in this file that re-reads an entry's
 content does so through `Path.read_text()` with no `newline=` either (see the
-two entry-content `read_text()` calls below -- a third `read_text()` in this
-file reads `parity.yml`'s own YAML in the cross-OS regression test further
-down and is unrelated to this cancellation argument) -- Python's
+two entry-content `read_text()` calls below -- two more `read_text()` calls
+further down read `parity.yml`'s own YAML, in the cross-OS regression test and
+its fetch-depth-ternary follow-up, and are unrelated to this cancellation
+argument) -- Python's
 universal-newline translation on the READ side cancels the CRLF the WRITE
 side introduced, on the SAME host, symmetrically, for exactly the
 string-equality checks this file makes. Nothing here compares raw bytes or a
@@ -1830,4 +1831,49 @@ def test_this_file_gets_its_own_cross_os_run_in_parity_yml():
         "by ci.yml's `python` job and this workflow's own seam1-plan-shape "
         "job) and picking exactly one shard leg so the step runs once per "
         f"platform, not once per (os, shard) leg -- but got {condition!r}"
+    )
+
+
+def test_the_checkout_fetch_depth_ternary_quotes_its_zero():
+    """tan-cli#1152 follow-up. `python-tests-shard`'s "checkout tan-cli" step
+    computes `fetch-depth` with a `cond && TRUE_VAL || FALSE_VAL` ternary, the
+    same pattern `release.yml`'s `make_latest` uses. GitHub Actions' `&&`/`||`
+    return an OPERAND, not a coerced boolean, and its truthiness table treats
+    the number `0` as falsy -- so a bare (unquoted) `0` as TRUE_VAL is a
+    documented footgun: `cond && 0` returns `0` when `cond` is true, then
+    `0 || 1` returns `1` anyway (0 is falsy), so the WHOLE expression
+    evaluates to `1` on every leg, windows-latest+0 and macos-latest+0
+    included -- exactly the two legs this ternary exists to give full history.
+
+    Verified against the official `@actions/expressions` evaluator (the same
+    one GitHub Actions runs): the bare-`0` form returns `"1"` for all four
+    (os, shard) combinations tried, including windows-latest+0; quoting the
+    true branch as the non-empty string `'0'` (truthy, same trick
+    `release.yml` already uses for its `'false'` branch) returns `"0"` on
+    exactly the two intended legs and `"1"` elsewhere.
+
+    Compared WHOLE against one exact string, never searched -- same rule as
+    the `if:` check above (tan-cli#1145) -- so a rewrite that reintroduces a
+    bare `0` fails HERE instead of silently going shallow on windows-latest
+    and macos-latest, where `test_the_checkout_has_full_history` above would
+    then hard-fail on those two legs at CI time instead.
+    """
+    parity = yaml.safe_load(
+        (REPO / ".github" / "workflows" / "parity.yml").read_text(encoding="utf-8")
+    )
+    job = parity["jobs"]["python-tests-shard"]
+    checkout_step = job["steps"][0]
+    assert checkout_step["name"] == "checkout tan-cli", (
+        "python-tests-shard's steps[0] must still be the checkout step, or "
+        f"this test is pinning the wrong step's fetch-depth: {checkout_step.get('name')!r}"
+    )
+
+    fetch_depth = checkout_step["with"]["fetch-depth"]
+    expected_fetch_depth = (
+        "${{ (matrix.os != 'ubuntu-latest' && matrix.shard == 0) && '0' || 1 }}"
+    )
+    assert fetch_depth == expected_fetch_depth, (
+        "the checkout step's fetch-depth must gate on exactly "
+        f"{expected_fetch_depth!r} -- with '0' QUOTED so it survives the "
+        f"trailing `|| 1` truthiness check -- but got {fetch_depth!r}"
     )
