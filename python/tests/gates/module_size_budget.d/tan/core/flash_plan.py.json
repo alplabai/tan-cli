@@ -1,8 +1,36 @@
 {
-  "$schema": "One module's entry in the tan-cli#668 size ratchet, produced by `python scripts/regen_module_size_budget.py` -- see module_size_budget.d/README.md. Do not hand-edit; a value that does not match a real measurement fails `regen_module_size_budget.py --check` and the gate.",
+  "$schema": "One module's entry in the tan-cli#668 size ratchet, produced by `python scripts/regen_module_size_budget.py` -- see module_size_budget.d/README.md. `long_functions` is the sorted [span, name] list of every function in this module over FUNCTION_CAP (tan-cli#1173) -- not a count, so a function crossing the cap while a different one drops below it in the same module is visible here instead of netting to no change. Do not hand-edit; a value that does not match a real measurement fails `regen_module_size_budget.py --check` and the gate.",
   "module": "tan/core/flash_plan.py",
   "kind": "budget",
   "lines": 2273,
-  "long_functions": 7,
-  "worst_function": 195
+  "long_functions": [
+    [
+      74,
+      "flow_d_preflight_script"
+    ],
+    [
+      96,
+      "parse_system_manifest"
+    ],
+    [
+      98,
+      "validate_flow_d_preflight_args"
+    ],
+    [
+      116,
+      "plan_yocto_wic"
+    ],
+    [
+      129,
+      "validate_flow_d_shape"
+    ],
+    [
+      168,
+      "plan_flash_targets"
+    ],
+    [
+      195,
+      "plan_alif_mram_jlink"
+    ]
+  ]
 }

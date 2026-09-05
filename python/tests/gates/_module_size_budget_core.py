@@ -39,6 +39,23 @@ where `found` accumulates per module, and `function_worst` exactly
 `MeasuredState` exposes them as computed PROPERTIES over `functions`, not as
 stored fields: the gate still compares whole-tree totals, and there is no
 longer a stored number two branches can both write.
+
+## Per-module records still stored a COUNT, not the functions (tan-cli#1173)
+
+Deriving the whole-tree pair did not change what each per-module record held:
+`ModuleFunctions` stored `count`/`worst` (the same two numbers, one level
+down), so a module could have one function cross `FUNCTION_CAP` while a
+different function in the SAME module dropped below it, and the count and
+the worst span would both read unchanged -- `regen_module_size_budget.py`
+would see no growth and never ask for `--reason`. Measured for real in PR
+#1170: `_sdk_credential` grew `50 -> 63 -> 69` while `_data` fell `51 -> 47`
+in the same diff, and `bootstrap_cmd.py.json`'s `long_functions` read `19`
+before and after.
+
+`ModuleFunctions.entries` now stores the actual sorted `(span, name)` list --
+see its own docstring -- and `regen_module_size_budget.py`'s `_function_deltas`
+compares it per function, not per module or per whole tree, so that exact
+shape is growth in its own right.
 """
 from __future__ import annotations
 
@@ -154,12 +171,32 @@ KIND_OBSERVED = "observed"
 
 
 class ModuleFunctions(NamedTuple):
-    """The per-module function facts the two whole-tree scalars are derived
-    from: how many of this module's functions are over `FUNCTION_CAP`, and
-    the longest one's span."""
+    """One module's over-`FUNCTION_CAP` functions, as a SORTED `(span, name)`
+    tuple list (tan-cli#1173) -- not a count and a max. A count and a max
+    cannot tell "one function crossed `FUNCTION_CAP` while a different one in
+    the same module dropped below it" apart from "nothing moved": both leave
+    the count and the worst-span unchanged, which is exactly how PR #1170
+    crossed the cap (`_sdk_credential: 50 -> 63 -> 69`) with
+    `bootstrap_cmd.py.json`'s old `long_functions` reading 19 before and
+    after. Storing the actual list makes the crossing visible in the record
+    itself; `regen_module_size_budget.py` is what turns it into a growth
+    event (see `_function_deltas` there).
 
-    count: int
-    worst: int
+    `count` and `worst` keep their old names but are now PROPERTIES derived
+    from `entries`, the same move tan-cli#1057 made for the two whole-tree
+    scalars: nothing stored can drift from what it is computed from, and the
+    old "count == 0 iff worst == 0" hand invariant is no longer needed --
+    both are now trivially true by construction."""
+
+    entries: tuple[tuple[int, str], ...]
+
+    @property
+    def count(self) -> int:
+        return len(self.entries)
+
+    @property
+    def worst(self) -> int:
+        return max((span for span, _ in self.entries), default=0)
 
 
 class MeasuredState(NamedTuple):
@@ -170,7 +207,11 @@ class MeasuredState(NamedTuple):
     `functions`, exactly as `measure_current` always computed them, so no
     branch can write them and no merge can reconcile two committed opinions
     about them. The gate reads the same two names it always did and still
-    compares WHOLE-TREE totals -- the ratchet's meaning is unchanged."""
+    compares WHOLE-TREE totals -- the ratchet's meaning is unchanged. (This
+    whole-tree pair no longer tells the whole story on its own -- see
+    `ModuleFunctions` above and `_function_deltas` in
+    `scripts/regen_module_size_budget.py` for the per-function half,
+    tan-cli#1173.)"""
 
     modules: dict[str, int]
     functions: dict[str, ModuleFunctions]
@@ -240,6 +281,52 @@ def long_functions(tree: ast.AST) -> list[tuple[int, str]]:
     return out
 
 
+def spans_by_name(facts: ModuleFunctions) -> dict[str, list[int]]:
+    """One module's over-cap functions grouped by name, spans sorted
+    ascending. A GROUP, not a plain dict, on purpose: two functions can share
+    a name in the same module (every class's own `__init__`, a redefinition
+    under a conditional, ...), and collapsing that to one dict entry would
+    silently drop one of them from comparison -- the same silent-drop shape
+    `_load_json` elsewhere in this module refuses for a duplicate JSON key.
+    Shared by `regen_module_size_budget.py`'s `_function_deltas` and
+    `test_module_size_budget.py`'s own record-vs-measurement diff, so a
+    duplicate name/span pair is paired up POSITIONALLY (via `zip_longest`) in
+    both places rather than compared as a bare set -- a set collapses two
+    identical `(span, name)` entries to one and can report "nothing changed"
+    when one of a pair of same-name, same-span functions (two classes' own
+    `__init__`, at the same span) actually did."""
+    out: dict[str, list[int]] = {}
+    for span, name in facts.entries:
+        out.setdefault(name, []).append(span)
+    for spans in out.values():
+        spans.sort()
+    return out
+
+
+def all_function_names_by_module() -> dict[str, set[str]]:
+    """Every function name in each `tan/**` module, over `FUNCTION_CAP` or
+    not -- used only to tell a function that shrank below the cap (still
+    there, just smaller) apart from one that stopped existing at that name
+    in that module altogether: a rename, a move to a different module, or an
+    outright deletion. `ModuleFunctions.entries` alone cannot draw that line
+    because it only ever held the over-cap functions; a name missing from it
+    was always ambiguous between "still here, now short" and "gone". This
+    re-walks the same trees `measure_current` does (a second `ast.parse` per
+    module, deliberately -- keeping it out of `MeasuredState` avoids widening
+    every existing two-field construction of that NamedTuple across the
+    suite for a fact only the regen script's delta report needs)."""
+    out: dict[str, set[str]] = {}
+    for path in modules():
+        names = {
+            node.name
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        if names:
+            out[rel(path)] = names
+    return out
+
+
 def measure_current() -> MeasuredState:
     """Walk the real tree. This is the ONLY function either the gate or the
     regen tool trusts for "what is true right now" -- neither ever reads the
@@ -259,9 +346,7 @@ def measure_current() -> MeasuredState:
             module_lines[key] = lines
         found = long_functions(ast.parse(text))
         if found:
-            functions[key] = ModuleFunctions(
-                count=len(found), worst=max(span for span, _ in found)
-            )
+            functions[key] = ModuleFunctions(entries=tuple(sorted(found)))
     return MeasuredState(modules=module_lines, functions=functions)
 
 
@@ -360,8 +445,25 @@ def _load_records() -> dict[str, dict]:
     return out
 
 
-def load_generated() -> MeasuredState:
-    """The GATED half of the record tree (`kind: budget`)."""
+def load_generated(*, tolerate_legacy_records: bool = False) -> MeasuredState:
+    """The GATED half of the record tree (`kind: budget`).
+
+    `tolerate_legacy_records` exists for ONE caller:
+    `regen_module_size_budget.py --merge-resync`. Merging a branch that
+    predates tan-cli#1173 brings in records whose `long_functions` is still a
+    bare count, and the whole job of `--merge-resync` is to rewrite exactly
+    those. Raising on them made the flag unreachable -- the error told you to
+    run `--merge-resync`, and `--merge-resync` hit the same error, because
+    `main()` loads the records before it can act on any flag. Under the flag a
+    legacy record reads as "no recorded entries", which forces a rewrite from
+    the measured tree; that is the correct outcome, since the script never
+    derives new records from committed ones (see `measure_current`).
+
+    It stays strict everywhere else. The gate itself must keep refusing a
+    record it cannot interpret, or a stale count would be silently coerced
+    into "nothing to report" -- which is the blindness tan-cli#1173 exists to
+    remove.
+    """
     module_map: dict[str, int] = {}
     functions: dict[str, ModuleFunctions] = {}
     for key, data in _load_records().items():
@@ -370,17 +472,35 @@ def load_generated() -> MeasuredState:
         lines = data.get("lines")
         if lines is not None:
             module_map[key] = int(lines)
-        count = int(data.get("long_functions", 0))
-        worst = int(data.get("worst_function", 0))
-        if (count == 0) != (worst == 0):
+        raw = data.get("long_functions") or []
+        if not isinstance(raw, list) and tolerate_legacy_records:
+            raw = []
+        if not isinstance(raw, list):
             raise ValueError(
-                f"module_size_budget.d/{key}{RECORD_SUFFIX} records "
-                f"long_functions={count} with worst_function={worst} -- a "
-                "module has a longest over-cap function exactly when it has "
-                "any, so one of the two is a hand-edit"
+                f"module_size_budget.d/{key}{RECORD_SUFFIX}'s long_functions "
+                f"is {raw!r}, not the `[[span, name], ...]` list this script "
+                "writes -- this looks like a pre-tan-cli#1173 record (a bare "
+                "count, with a sibling worst_function field). Regenerate it: "
+                "`python scripts/regen_module_size_budget.py --merge-resync`"
             )
-        if count:
-            functions[key] = ModuleFunctions(count=count, worst=worst)
+        try:
+            entries = tuple((int(span), str(name)) for span, name in raw)
+        except (TypeError, ValueError) as err:
+            raise ValueError(
+                f"module_size_budget.d/{key}{RECORD_SUFFIX}'s long_functions "
+                f"has an entry that is not a `[span, name]` pair: {err}"
+            ) from err
+        for span, name in entries:
+            if span <= FUNCTION_CAP:
+                raise ValueError(
+                    f"module_size_budget.d/{key}{RECORD_SUFFIX} lists "
+                    f"{name!r} at {span} lines, at or under FUNCTION_CAP "
+                    f"({FUNCTION_CAP}) -- long_functions holds only over-cap "
+                    "functions, so an entry at or under the cap could not "
+                    "come from a real measurement"
+                )
+        if entries:
+            functions[key] = ModuleFunctions(entries=entries)
     return MeasuredState(modules=module_map, functions=functions)
 
 
@@ -414,14 +534,17 @@ def dump_budget_record(key: str, lines: int | None, facts: ModuleFunctions) -> s
         {
             "$schema": "One module's entry in the tan-cli#668 size ratchet, "
             "produced by `python scripts/regen_module_size_budget.py` -- see "
-            "module_size_budget.d/README.md. Do not hand-edit; a value that "
-            "does not match a real measurement fails "
-            "`regen_module_size_budget.py --check` and the gate.",
+            "module_size_budget.d/README.md. `long_functions` is the sorted "
+            "[span, name] list of every function in this module over "
+            "FUNCTION_CAP (tan-cli#1173) -- not a count, so a function "
+            "crossing the cap while a different one drops below it in the "
+            "same module is visible here instead of netting to no change. Do "
+            "not hand-edit; a value that does not match a real measurement "
+            "fails `regen_module_size_budget.py --check` and the gate.",
             "module": key,
             "kind": KIND_BUDGET,
             "lines": lines,
-            "long_functions": facts.count,
-            "worst_function": facts.worst,
+            "long_functions": [[span, name] for span, name in facts.entries],
         }
     )
 
@@ -461,7 +584,7 @@ def render_records(state: MeasuredState, observed_tests: dict[str, int]) -> dict
     any test can compare against it without either re-deriving the layout."""
     out: dict[str, str] = {"_caps.json": dump_caps()}
     for key in sorted(set(state.modules) | set(state.functions)):
-        facts = state.functions.get(key, ModuleFunctions(count=0, worst=0))
+        facts = state.functions.get(key, ModuleFunctions(entries=()))
         out[key + RECORD_SUFFIX] = dump_budget_record(key, state.modules.get(key), facts)
     for key, lines in sorted(observed_tests.items()):
         out[key + RECORD_SUFFIX] = dump_observed_record(key, lines)

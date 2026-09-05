@@ -1,8 +1,84 @@
 {
-  "$schema": "One module's entry in the tan-cli#668 size ratchet, produced by `python scripts/regen_module_size_budget.py` -- see module_size_budget.d/README.md. Do not hand-edit; a value that does not match a real measurement fails `regen_module_size_budget.py --check` and the gate.",
+  "$schema": "One module's entry in the tan-cli#668 size ratchet, produced by `python scripts/regen_module_size_budget.py` -- see module_size_budget.d/README.md. `long_functions` is the sorted [span, name] list of every function in this module over FUNCTION_CAP (tan-cli#1173) -- not a count, so a function crossing the cap while a different one drops below it in the same module is visible here instead of netting to no change. Do not hand-edit; a value that does not match a real measurement fails `regen_module_size_budget.py --check` and the gate.",
   "module": "tan/commands/bootstrap_cmd.py",
   "kind": "budget",
   "lines": 4553,
-  "long_functions": 19,
-  "worst_function": 819
+  "long_functions": [
+    [
+      51,
+      "_print_env_outcome"
+    ],
+    [
+      51,
+      "_read_board_slice"
+    ],
+    [
+      54,
+      "_origin_exists"
+    ],
+    [
+      54,
+      "run"
+    ],
+    [
+      60,
+      "reconcile_west_manifest_path"
+    ],
+    [
+      67,
+      "pip_phase"
+    ],
+    [
+      69,
+      "_sdk_credential"
+    ],
+    [
+      69,
+      "_undo_relocation"
+    ],
+    [
+      70,
+      "check_prerequisites"
+    ],
+    [
+      79,
+      "_write_global_sdk_registry"
+    ],
+    [
+      79,
+      "west_phase"
+    ],
+    [
+      80,
+      "rollback_relocation_after"
+    ],
+    [
+      87,
+      "_finish_toolchain_install"
+    ],
+    [
+      91,
+      "_select_workspace"
+    ],
+    [
+      92,
+      "toolchain_phase"
+    ],
+    [
+      103,
+      "_acquire_toolchain"
+    ],
+    [
+      104,
+      "ensure_venv"
+    ],
+    [
+      136,
+      "bootstrap"
+    ],
+    [
+      819,
+      "_run"
+    ]
+  ]
 }
