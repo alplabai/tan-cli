@@ -228,6 +228,29 @@ def test_an_unreadable_package_degrades_to_bare_exists_true(tmp_path):
     assert "stale" not in artifact
 
 
+def test_a_source_that_no_longer_resolves_reports_a_warning_not_silence(tmp_path):
+    """tan-cli#674 review MAJOR 1: a `board.yaml` declaring a `source` that no
+    longer resolves, with a VALID package already on disk, must not answer a
+    clean `exists: True` row with no sign the staleness check never ran --
+    that used to leave `ok: true` / `issues: []` / no `stale` key, which reads
+    identically to a package the tool successfully confirmed is fresh."""
+    board_yaml(tmp_path, models="models:\n  - name: m\n    source: gone.tflite\n")
+    write_built_package(tmp_path / "build" / "models", "m", built_from=b"whatever")
+
+    result = runner.invoke(
+        app, ["list", "--project", str(tmp_path), "--format", "json"], catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    doc = envelope(result)
+    artifact = doc["data"]["models"][0]["artifact"]
+    assert artifact["exists"] is True
+    assert "stale" not in artifact
+    codes = [i["code"] for i in doc["issues"]]
+    assert "model.artifact-stale-unknown" in codes
+    severities = {i["code"]: i["severity"] for i in doc["issues"]}
+    assert severities["model.artifact-stale-unknown"] == "warning"
+
+
 # --------------------------------------------------------------------------
 # text mode
 # --------------------------------------------------------------------------

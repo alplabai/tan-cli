@@ -97,13 +97,30 @@ failure. See `tan.model.check`'s own module doc for `--exact`.
 declares, next to what `--out` already holds for each one.** It mirrors
 `doctor`'s SDK-root TOLERANCE, not `build`'s `_require_metadata_sdk_root`
 refusal -- naming what is declared and what is already built on disk needs no
-`metadata/**` at all, so `list` never resolves or warns about an SDK root,
-unlike every other subcommand here. It is read-only and spawns nothing: a
-declared model's `.alpmodel` (`tan.model.build.build_model`'s own
-`{name}.alpmodel` naming) is only ever `stat()`-ed and its manifest read
-back, never compiled. See `tan.core.model_list`'s own module doc for the
-per-model `artifact` shape, including `stale` (has `source` changed since the
-package on disk was built).
+`metadata/**` at all, so `_run_list` itself never resolves, refuses, or warns
+over a *metadata* SDK root the way `_run_build`/`_run_check`/`_run_doctor` do
+(no `--sdk-root`/`--metadata-root` handling inside it, no `model.sdk-root-
+unresolved`/`model.doctor-sdk-unresolved`).
+
+**That is narrower than "never resolves or warns about an SDK root" (tan-cli#674
+review MAJOR 2)** -- `list` still goes through the SAME shared project-context
+preamble every subcommand here does (`resolve_project_context`, below), and
+that preamble's own resolution is what populates the envelope's `sdk` block
+and what `sdk_resolution_issues` reads to warn about a broken `.alp/sdk-path`
+pin or a foreign global default. Measured: `tan model list --format json` from
+a workspace with a resolvable alp-sdk checkout emits a real `"sdk":{"root":
+...,"sourceTier":...}` block, and `test_a_broken_project_pin_is_reported_on_a_
+model_list` (`tests/commands/test_model_list_command.py`) already pins a
+`sdk.project-pin-unresolved` warning on this exact subcommand. `list` opts out
+of only the SECOND, metadata-reading resolution `build`/`check`/`doctor`
+additionally perform -- not the first.
+
+It is read-only and spawns nothing: a declared model's `.alpmodel`
+(`tan.model.build.build_model`'s own `{name}.alpmodel` naming) is only ever
+`stat()`-ed and its manifest read back, never compiled. See
+`tan.core.model_list`'s own module doc for the per-model `artifact` shape,
+including `stale` (has `source` changed since the package on disk was built)
+and the `model.artifact-stale-unknown` warning a readback failure there emits.
 """
 
 from __future__ import annotations
@@ -613,12 +630,16 @@ def _run_list(
         out_dir = workspace_root / out_dir
 
     entries = []
+    issues: list[Issue] = []
     for m in models:
         _require_model_entry(m, board_path)
         source = (base / m["source"]).resolve()
-        entries.append(list_entry(m["name"], source, out_dir))
+        entry, issue = list_entry(m["name"], source, out_dir)
+        entries.append(entry)
+        if issue is not None:
+            issues.append(issue)
     data["models"] = entries
-    return reported_project, sdk_info, data, [], ExitCode.SUCCESS
+    return reported_project, sdk_info, data, issues, ExitCode.SUCCESS
 
 
 def _backend_version(backend: str, *, available: bool) -> str | None:
