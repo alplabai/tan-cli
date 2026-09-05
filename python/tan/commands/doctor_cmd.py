@@ -1296,13 +1296,13 @@ def _host_toolchain_matching_pin(
     `_zephyr_sdk_root_valid` still validated on compiler-binary presence
     alone -- is honestly "does not match", not a guessed pass.
 
-    **Never returns an entry inside tan's OWN ADR 0021 store
-    (`_toolchain_store_scan_root()`) -- this adoption path is for a toolchain
-    tan did NOT install (tan-cli#990's `~/zephyr-sdk-1.0.1` case), where a
-    version-string match is the only signal available. Since tan-cli#1186
-    widened `_zephyr_sdk_scan_roots` to also cover that store (for
-    `zephyrSdk`'s sake), `_zephyr_sdk_detected_root` can now return an entry
-    living INSIDE it too -- and that entry is already governed by the
+    **Never returns an entry inside tan's OWN ADR 0021 store for THIS pin
+    (`_toolchain_store_dir(manifest)`) -- this adoption path is for a
+    toolchain tan did NOT install (tan-cli#990's `~/zephyr-sdk-1.0.1` case),
+    where a version-string match is the only signal available. Since
+    tan-cli#1186 widened `_zephyr_sdk_scan_roots` to also cover that store
+    (for `zephyrSdk`'s sake), `_zephyr_sdk_detected_root` can now return an
+    entry living INSIDE it too -- and that entry is already governed by the
     stricter, digest-precise `stamp_matches_pin` check `toolchain_check` runs
     first. A store directory can carry a real compiler and a `sdk_version`
     matching the pin's nominal version while its stamp names a DIFFERENT
@@ -1314,12 +1314,27 @@ def _host_toolchain_matching_pin(
     stamp alone for anything inside tan's own store, and never re-deriving a
     looser verdict for it here, keeps the two checks from disagreeing on the
     same directory.
+
+    Deliberately keyed on `_toolchain_store_dir(manifest)` -- the one
+    per-version LEAF tan's own installs use -- rather than the broader
+    `_toolchain_store_scan_root()` (the whole configured root, `~/.alp/
+    toolchains` or `$ALP_TOOLCHAIN_ROOT` verbatim). `resolve_toolchain_root`
+    takes an env override VERBATIM as the root, with no `/toolchains`
+    suffix (`toolchain_provision.resolve_toolchain_root`), so ADR 0021's own
+    documented bench/CI escape hatch -- `$ALP_TOOLCHAIN_ROOT` pointed at an
+    ancestor like `$HOME` or `/opt` -- makes the store root coincide with a
+    directory a hand-installed host toolchain also legitimately lives under.
+    Excluding the whole root there would misread that adopted toolchain as
+    "inside tan's own store" and refuse to adopt it, turning a
+    previously-passing configuration into a `toolchain` FAIL; excluding only
+    the specific `<root>/<store leaf for this manifest version>` directory
+    keeps the guard narrow enough to still hold under that escape hatch.
     """
     root = _zephyr_sdk_detected_root()
     if root is None:
         return None
     try:
-        if root.resolve().is_relative_to(_toolchain_store_scan_root().resolve()):
+        if root.resolve().is_relative_to(_toolchain_store_dir(manifest).resolve()):
             return None
     except OSError:
         pass
@@ -2865,7 +2880,7 @@ def _zephyr_sdk_detected() -> bool:
     """`True` when a Zephyr SDK toolchain is installed anywhere this host
     would resolve one from. Descends from `crate::toolchain::
     resolve_toolchain_root`/`zephyr_sdk_detected` in the now-deleted Rust
-    oracle (`crates/` retired in 2883cdf4) -- doctor only ever needed that
+    oracle (`crates/` retired in tan-cli#601) -- doctor only ever needed that
     pair's yes/no half. Build-plan `${TOOLCHAIN_ROOT}` substitution is its own
     resolver now, not `None` as it was when this docstring was last true:
     `build.toolchain.resolve_toolchain_root` (tan-cli#547), which

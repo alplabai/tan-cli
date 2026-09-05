@@ -168,6 +168,39 @@ def test_a_host_toolchain_at_the_pinned_version_is_a_pass_not_a_fail(tmp_path, m
     assert not (store_dir / tp.STAMP_FILENAME).exists()
 
 
+def test_a_host_toolchain_under_an_alp_toolchain_root_ancestor_still_passes(
+    tmp_path, monkeypatch
+):
+    """ADR 0021's own escape hatch (`$ALP_TOOLCHAIN_ROOT` pointed at a
+    bench/CI ancestor like `$HOME` or `/opt`) must not turn
+    `_host_toolchain_matching_pin`'s "is this entry inside tan's OWN store"
+    guard into "is this entry anywhere under the override root at all".
+    `resolve_toolchain_root` takes an env override VERBATIM as the store
+    root (no `/toolchains` suffix), so with the override set to `$HOME` a
+    hand-installed `$HOME/zephyr-sdk-1.0.1/` sits directly inside that
+    root -- and a guard keyed on the whole root, rather than tan's own
+    per-version store leaf, misreads a legitimate adopted host toolchain as
+    "tan's own store" and refuses to adopt it, turning a previously-passing
+    configuration into a `toolchain` FAIL."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("ALP_TOOLCHAIN_ROOT", str(home))
+    sdk_root = _sdk_with_manifest(tmp_path, MANIFEST)
+    host_sdk = home / "zephyr-sdk-1.0.1"
+    (host_sdk / "gnu" / "arm-zephyr-eabi" / "bin").mkdir(parents=True)
+    gcc = host_sdk / "gnu" / "arm-zephyr-eabi" / "bin" / _GCC_NAME
+    gcc.write_text("#!/bin/sh\necho fake gcc\n", encoding="utf-8")
+    gcc.chmod(0o755)
+    (host_sdk / "sdk_version").write_text("1.0.1\n", encoding="utf-8")
+
+    check = doctor_cmd.toolchain_check(sdk_root)
+    assert check.status == "pass"
+    assert "1.0.1" in check.detail
+    assert str(host_sdk) in check.detail
+
+
 def test_a_host_toolchain_at_the_wrong_version_still_fails(tmp_path, monkeypatch):
     """The adoption path is version-specific, not "any toolchain present":
     a host SDK whose `sdk_version` does NOT match the pin must not silently
