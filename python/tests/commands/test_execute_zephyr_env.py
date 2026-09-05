@@ -26,6 +26,7 @@ from pathlib import Path
 
 from tan.core.build_plan import parse_build_plan
 from tan.commands.build.execute import execute_slices
+from tan.core import toolchain_provision as tp
 
 PYTHON = json.dumps(sys.executable)
 SEP = os.pathsep
@@ -318,3 +319,245 @@ def test_a_plan_pinned_zephyr_base_survives_both_the_fill_and_the_pop(tmp_path, 
     assert out[0].status == "succeeded", out[0].message
     seen = json.loads(out_file.read_text(encoding="utf-8"))
     assert seen["ZEPHYR_BASE"] == pinned
+
+
+# --------------------------------------------------------------------------
+# tan-cli#1209: `ZEPHYR_SDK_INSTALL_DIR` handoff. `tan bootstrap` acquires
+# the cross toolchain into `~/.alp/toolchains/zephyr-sdk-<v>-arm-zephyr-eabi/`
+# and stamps it; CMake's own `FindZephyr-sdk.cmake` prefix scan never looks
+# that deep under `$HOME`, so without this fill-in `tan build` fails to
+# configure right after `tan bootstrap` reported success. Mirrors
+# `test_doctor_toolchain_check.py`'s own manifest/stamp fixture shapes --
+# the doctor `toolchain` check and this gap-filler both key off the exact
+# same `stamp_matches_pin` predicate (`tan.commands.build.toolchain.
+# verified_store_dir`), and must not independently drift on it.
+# --------------------------------------------------------------------------
+
+
+def _small_toolchain_manifest(*, version: str = "1.0.1") -> str:
+    return json.dumps(
+        {
+            "zephyrSdk": {
+                "version": version,
+                "baseUrl": "https://example.invalid/",
+                "artifacts": [
+                    {
+                        "host": "linux-x86_64", "component": "minimal-sdk",
+                        "filename": "x.tar.xz", "sizeBytes": 1, "sha256": "a" * 64,
+                    }
+                ],
+            }
+        }
+    )
+
+
+def _write_toolchain_manifest(sdk_root: Path, manifest_text: str) -> None:
+    metadata_dir = sdk_root / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    (metadata_dir / "toolchains.json").write_text(manifest_text, encoding="utf-8")
+
+
+def _write_verified_stamp(store_dir: Path, manifest: tp.ToolchainManifest) -> None:
+    store_dir.mkdir(parents=True, exist_ok=True)
+    stamp = tp.ToolchainStamp(manifest.version, manifest.digest(), "arm-zephyr-eabi-gcc 14.3.0")
+    (store_dir / tp.STAMP_FILENAME).write_text(tp.render_stamp(stamp), encoding="utf-8")
+
+
+def _point_home_at(monkeypatch, home: Path) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("ALP_TOOLCHAIN_ROOT", raising=False)
+    monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
+
+
+def test_fills_zephyr_sdk_install_dir_from_tans_verified_store(tmp_path, monkeypatch):
+    """tan-cli#1209's actual reported defect: `tan bootstrap` acquires the
+    cross toolchain and stamps it, `tan doctor` reports it present, and `tan
+    build`'s spawned `west`/CMake child still cannot find it -- CMake's own
+    prefix scan looks one level too shallow under `$HOME`. Fails before the
+    fix with a `KeyError` below (the key is simply absent from the child's
+    environment); passes once the verified store is exported."""
+    real_ws, sdk_root, build_root = _make_workspace(tmp_path)
+    manifest_text = _small_toolchain_manifest()
+    _write_toolchain_manifest(sdk_root, manifest_text)
+    manifest = tp.parse_toolchain_manifest(manifest_text)
+    home = tmp_path / "home"
+    _point_home_at(monkeypatch, home)
+    store_dir = home / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
+    _write_verified_stamp(store_dir, manifest)
+    out_file = tmp_path / "env.json"
+
+    out = execute_slices(
+        parse_build_plan(_plan(_probe_cmd(out_file))),
+        build_root=build_root,
+        env_lookup=lambda k: None,
+        gap_fillers=[],
+        on_output=lambda s: None,
+        sdk_root=str(sdk_root),
+    )
+
+    assert out[0].status == "succeeded", out[0].message
+    seen = json.loads(out_file.read_text(encoding="utf-8"))
+    assert Path(seen["ZEPHYR_SDK_INSTALL_DIR"]).samefile(store_dir)
+
+
+def test_an_inherited_zephyr_sdk_install_dir_survives_verbatim_despite_a_valid_stamp(
+    tmp_path, monkeypatch
+):
+    """Precedence: an inherited, non-blank `ZEPHYR_SDK_INSTALL_DIR` is the
+    user's own deliberate choice and wins outright, even with a verified
+    stamped store available -- taken verbatim, never probed for existence
+    or overridden by tan's own store."""
+    real_ws, sdk_root, build_root = _make_workspace(tmp_path)
+    manifest_text = _small_toolchain_manifest()
+    _write_toolchain_manifest(sdk_root, manifest_text)
+    manifest = tp.parse_toolchain_manifest(manifest_text)
+    home = tmp_path / "home"
+    _point_home_at(monkeypatch, home)
+    store_dir = home / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
+    _write_verified_stamp(store_dir, manifest)
+    user_sdk = tmp_path / "user-installed-sdk-9.9.9"
+    user_sdk.mkdir()
+    monkeypatch.setenv("ZEPHYR_SDK_INSTALL_DIR", str(user_sdk))
+    out_file = tmp_path / "env.json"
+
+    out = execute_slices(
+        parse_build_plan(_plan(_probe_cmd(out_file))),
+        build_root=build_root,
+        env_lookup=os.environ.get,
+        gap_fillers=[],
+        on_output=lambda s: None,
+        sdk_root=str(sdk_root),
+    )
+
+    assert out[0].status == "succeeded", out[0].message
+    seen = json.loads(out_file.read_text(encoding="utf-8"))
+    assert seen["ZEPHYR_SDK_INSTALL_DIR"] == str(user_sdk)
+
+
+def test_a_stale_digest_stamp_exports_nothing(tmp_path, monkeypatch):
+    """ADR 0021's own words: 'a stamped 1.0.1 store against a moved pin is a
+    Fail with a fix, not "a toolchain exists"'. A stamp naming the right
+    version but a manifest digest that no longer matches must not be
+    trusted -- `ZEPHYR_SDK_INSTALL_DIR` stays unfilled, same as no stamp."""
+    real_ws, sdk_root, build_root = _make_workspace(tmp_path)
+    manifest_text = _small_toolchain_manifest()
+    _write_toolchain_manifest(sdk_root, manifest_text)
+    manifest = tp.parse_toolchain_manifest(manifest_text)
+    home = tmp_path / "home"
+    _point_home_at(monkeypatch, home)
+    store_dir = home / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
+    store_dir.mkdir(parents=True)
+    stale_stamp = tp.ToolchainStamp(manifest.version, "f" * 64, "arm-zephyr-eabi-gcc 14.3.0")
+    (store_dir / tp.STAMP_FILENAME).write_text(tp.render_stamp(stale_stamp), encoding="utf-8")
+    out_file = tmp_path / "env.json"
+
+    out = execute_slices(
+        parse_build_plan(_plan(_probe_cmd(out_file))),
+        build_root=build_root,
+        env_lookup=lambda k: None,
+        gap_fillers=[],
+        on_output=lambda s: None,
+        sdk_root=str(sdk_root),
+    )
+
+    assert out[0].status == "succeeded", out[0].message
+    seen = json.loads(out_file.read_text(encoding="utf-8"))
+    assert "ZEPHYR_SDK_INSTALL_DIR" not in seen
+
+
+def test_alp_toolchain_root_ancestor_with_unstamped_hand_install_exports_nothing(
+    tmp_path, monkeypatch
+):
+    """The `$ALP_TOOLCHAIN_ROOT` ancestor trap: pointed at `$HOME`, tan's
+    store root coincides with where a hand-installed `zephyr-sdk-1.0.1`
+    legitimately lives. Unstamped, it must never be mistaken for tan's own
+    verified store."""
+    real_ws, sdk_root, build_root = _make_workspace(tmp_path)
+    _write_toolchain_manifest(sdk_root, _small_toolchain_manifest())
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("ALP_TOOLCHAIN_ROOT", str(home))
+    monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
+    (home / "zephyr-sdk-1.0.1").mkdir()
+    out_file = tmp_path / "env.json"
+
+    out = execute_slices(
+        parse_build_plan(_plan(_probe_cmd(out_file))),
+        build_root=build_root,
+        env_lookup=lambda k: None,
+        gap_fillers=[],
+        on_output=lambda s: None,
+        sdk_root=str(sdk_root),
+    )
+
+    assert out[0].status == "succeeded", out[0].message
+    seen = json.loads(out_file.read_text(encoding="utf-8"))
+    assert "ZEPHYR_SDK_INSTALL_DIR" not in seen
+
+
+def test_alp_toolchain_root_ancestor_with_stamped_leaf_exports_the_leaf_never_home(
+    tmp_path, monkeypatch
+):
+    """Same ancestor override, but the leaf IS stamped: the fill-in exports
+    that per-version leaf, never the ancestor root itself."""
+    real_ws, sdk_root, build_root = _make_workspace(tmp_path)
+    manifest_text = _small_toolchain_manifest()
+    _write_toolchain_manifest(sdk_root, manifest_text)
+    manifest = tp.parse_toolchain_manifest(manifest_text)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("ALP_TOOLCHAIN_ROOT", str(home))
+    monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
+    store_dir = home / tp.store_dir_name(manifest.version)
+    _write_verified_stamp(store_dir, manifest)
+    out_file = tmp_path / "env.json"
+
+    out = execute_slices(
+        parse_build_plan(_plan(_probe_cmd(out_file))),
+        build_root=build_root,
+        env_lookup=lambda k: None,
+        gap_fillers=[],
+        on_output=lambda s: None,
+        sdk_root=str(sdk_root),
+    )
+
+    assert out[0].status == "succeeded", out[0].message
+    seen = json.loads(out_file.read_text(encoding="utf-8"))
+    assert Path(seen["ZEPHYR_SDK_INSTALL_DIR"]).samefile(store_dir)
+    assert not Path(seen["ZEPHYR_SDK_INSTALL_DIR"]).samefile(home)
+
+
+def test_a_plan_pinned_zephyr_sdk_install_dir_is_not_overwritten(tmp_path, monkeypatch):
+    """Plan wins: a slice pinning `ZEPHYR_SDK_INSTALL_DIR` in its own `env`
+    keeps that exact value even with a verified store available."""
+    real_ws, sdk_root, build_root = _make_workspace(tmp_path)
+    manifest_text = _small_toolchain_manifest()
+    _write_toolchain_manifest(sdk_root, manifest_text)
+    manifest = tp.parse_toolchain_manifest(manifest_text)
+    home = tmp_path / "home"
+    _point_home_at(monkeypatch, home)
+    store_dir = home / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
+    _write_verified_stamp(store_dir, manifest)
+    pinned = str(tmp_path / "plan-pinned-sdk")
+    out_file = tmp_path / "env.json"
+
+    out = execute_slices(
+        parse_build_plan(
+            _plan(_probe_cmd(out_file), env=json.dumps({"ZEPHYR_SDK_INSTALL_DIR": pinned}))
+        ),
+        build_root=build_root,
+        env_lookup=lambda k: None,
+        gap_fillers=[],
+        on_output=lambda s: None,
+        sdk_root=str(sdk_root),
+    )
+
+    assert out[0].status == "succeeded", out[0].message
+    seen = json.loads(out_file.read_text(encoding="utf-8"))
+    assert seen["ZEPHYR_SDK_INSTALL_DIR"] == pinned

@@ -29,8 +29,10 @@ from tan.commands.build.toolchain import (
     ToolchainResolution,
     _scan_roots,
     resolve_toolchain_root,
+    verified_store_dir,
 )
 from tan.commands.build_cmd import _toolchain_for_plan
+from tan.core import toolchain_provision as tp
 
 
 def _install(parent, name="zephyr-sdk-1.0.1"):
@@ -391,3 +393,101 @@ def test_the_token_is_found_through_a_json_escaped_dollar(monkeypatch):
     )
     assert '\\u0024' in text
     assert _toolchain_for_plan(text) is sentinel
+
+
+# ---------------------------------------------------------------------------
+# `verified_store_dir` (tan-cli#1209) -- pin+stamp, not the `zephyr-sdk*`
+# scan above: ONE trustworthy answer for a caller wiring
+# `ZEPHYR_SDK_INSTALL_DIR` into a spawned child's env, using the SAME
+# `stamp_matches_pin` predicate `bootstrap_cmd.toolchain_phase` and
+# `doctor_cmd.toolchain_check` already apply -- never `resolve_toolchain_
+# root`'s own ambiguity-refusing scan, which this function does not call.
+# `tests/conftest.py`'s autouse `_scrub_sdk_discovery_env` already points
+# `HOME`/`USERPROFILE` at a fresh per-test directory and scrubs
+# `ALP_TOOLCHAIN_ROOT`/`ZEPHYR_SDK_INSTALL_DIR`, so `verified_store_dir`'s
+# own `_toolchain_store_scan_root()` call resolves to a `.alp/toolchains`
+# under that fresh HOME here too.
+# ---------------------------------------------------------------------------
+
+_MANIFEST_TEXT = json.dumps(
+    {
+        "zephyrSdk": {
+            "version": "1.0.1",
+            "baseUrl": "https://example.invalid/",
+            "artifacts": [
+                {
+                    "host": "linux-x86_64", "component": "minimal-sdk",
+                    "filename": "x.tar.xz", "sizeBytes": 1, "sha256": "a" * 64,
+                }
+            ],
+        }
+    }
+)
+
+
+def _sdk_root_with_manifest(tmp_path, manifest_text: str = _MANIFEST_TEXT):
+    sdk_root = tmp_path / "alp-sdk"
+    (sdk_root / "metadata").mkdir(parents=True)
+    (sdk_root / "metadata" / "toolchains.json").write_text(manifest_text, encoding="utf-8")
+    return sdk_root
+
+
+def _write_stamp(store_dir, manifest, *, digest=None) -> None:
+    store_dir.mkdir(parents=True, exist_ok=True)
+    stamp = tp.ToolchainStamp(manifest.version, digest or manifest.digest(), "triple")
+    (store_dir / tp.STAMP_FILENAME).write_text(tp.render_stamp(stamp), encoding="utf-8")
+
+
+def test_verified_store_dir_is_none_without_an_sdk_root():
+    assert verified_store_dir(None) is None
+
+
+def test_verified_store_dir_is_none_with_no_manifest(tmp_path):
+    sdk_root = tmp_path / "alp-sdk-with-nothing"
+    sdk_root.mkdir()
+    assert verified_store_dir(str(sdk_root)) is None
+
+
+def test_verified_store_dir_is_none_with_a_malformed_manifest(tmp_path):
+    sdk_root = _sdk_root_with_manifest(tmp_path, "not json")
+    assert verified_store_dir(str(sdk_root)) is None
+
+
+def test_verified_store_dir_is_none_with_no_stamp(tmp_path):
+    """A store directory that exists but was never stamped (or was never
+    installed at all) is not trusted -- directory-exists is never the
+    predicate, matching `stamp_matches_pin`'s own contract."""
+    sdk_root = _sdk_root_with_manifest(tmp_path)
+    from tan.commands.build import toolchain as bt
+
+    store_dir = bt._toolchain_store_scan_root() / tp.store_dir_name("1.0.1")
+    store_dir.mkdir(parents=True)
+
+    assert verified_store_dir(str(sdk_root)) is None
+
+
+def test_verified_store_dir_is_none_with_a_stale_digest_stamp(tmp_path):
+    """ADR 0021: 'a stamped 1.0.1 store against a moved pin is a Fail with a
+    fix, not "a toolchain exists"' -- a version-matching stamp with the WRONG
+    manifest digest must not be trusted."""
+    sdk_root = _sdk_root_with_manifest(tmp_path)
+    manifest = tp.parse_toolchain_manifest(_MANIFEST_TEXT)
+    from tan.commands.build import toolchain as bt
+
+    store_dir = bt._toolchain_store_scan_root() / tp.store_dir_name(manifest.version)
+    _write_stamp(store_dir, manifest, digest="f" * 64)
+
+    assert verified_store_dir(str(sdk_root)) is None
+
+
+def test_verified_store_dir_returns_the_store_when_the_stamp_matches_the_pin(tmp_path):
+    sdk_root = _sdk_root_with_manifest(tmp_path)
+    manifest = tp.parse_toolchain_manifest(_MANIFEST_TEXT)
+    from tan.commands.build import toolchain as bt
+
+    store_dir = bt._toolchain_store_scan_root() / tp.store_dir_name(manifest.version)
+    _write_stamp(store_dir, manifest)
+
+    result = verified_store_dir(str(sdk_root))
+    assert result is not None
+    assert result.resolve() == store_dir.resolve()

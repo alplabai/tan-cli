@@ -202,6 +202,49 @@ def _toolchain_store_scan_root() -> Path:
     return Path(root.path_str)
 
 
+def verified_store_dir(sdk_root: str | None) -> Path | None:
+    """tan's own ADR 0021 store for the checkout's PINNED cross-toolchain
+    version, iff `.alp-toolchain-stamp.json` there matches that pin -- the
+    identical pin+stamp predicate `bootstrap_cmd.toolchain_phase`
+    (skip-if-already-installed) and `doctor_cmd.toolchain_check` (the
+    `toolchain` check) already apply via `stamp_matches_pin`, reused here
+    rather than re-derived a third time (tan-cli#1209: `ZEPHYR_SDK_INSTALL_DIR`
+    handoff into a spawned build's env).
+
+    `None` on ANY of: no `sdk_root`, an unreadable/malformed
+    `metadata/toolchains.json`, no stamp file, or a stamp that does not
+    match -- never raises, matching every other reader in this module.
+
+    Deliberately NOT [`resolve_toolchain_root`] (this module's
+    `${TOOLCHAIN_ROOT}` resolver): that scans every `zephyr-sdk*` under
+    `_scan_roots()` PLUS this store and refuses outright on ambiguity
+    ("several installs"). A caller wiring `ZEPHYR_SDK_INSTALL_DIR` for a
+    spawned child wants tan's own stamped, digest-verified store for
+    EXACTLY this pin -- never a scan that can be defeated by an unrelated
+    hand-installed SDK sitting elsewhere on the same host.
+    """
+    if sdk_root is None:
+        return None
+    manifest_path = Path(sdk_root) / "metadata" / "toolchains.json"
+    try:
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        manifest = _tp.parse_toolchain_manifest(manifest_text)
+    except _tp.ToolchainManifestError:
+        return None
+    store_dir = _toolchain_store_scan_root() / _tp.store_dir_name(manifest.version)
+    try:
+        stamp_text = (store_dir / _tp.STAMP_FILENAME).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    stamp = _tp.parse_stamp(stamp_text)
+    if not _tp.stamp_matches_pin(stamp, manifest):
+        return None
+    return store_dir
+
+
 def _is_toolchain_wreckage(name: str) -> bool:
     """`True` for a `.tmp-<pid>` sibling of an interrupted acquisition
     (`toolchain_provision.TMP_SUFFIX_PREFIX`) -- it starts with

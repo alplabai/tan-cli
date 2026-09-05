@@ -29,6 +29,7 @@ def zephyr_env_overrides(
     slice_env: dict[str, str],
     env_append_path: dict[str, list[str]],
     inherited: Callable[[str], str | None],
+    toolchain_store: Path | None = None,
 ) -> list[tuple[str, str]]:
     """Consumer-mechanism env the plan deliberately does NOT carry, filled in
     as a gap-filler so `tan build` runs a plan slice with no manual setup:
@@ -40,6 +41,21 @@ def zephyr_env_overrides(
       `env_append_path` for an SDK-emitted plan; the hand-derived value here
       is only a FALLBACK for a plan that carries neither the slice-env pin
       nor the `env_append_path` entry (plan wins / CLI fills gaps).
+    * `ZEPHYR_SDK_INSTALL_DIR` (tan-cli#1209) -- CMake's `FindZephyr-sdk.cmake`
+      only finds `~/.alp/toolchains/zephyr-sdk-<v>-arm-zephyr-eabi/` by being
+      TOLD where it is: the module's own prefix scan looks one level too
+      shallow under `$HOME` to ever see it. `toolchain_store` is that
+      store's path, already verified (`tan.commands.build.toolchain.
+      verified_store_dir`) against THIS checkout's pinned manifest digest --
+      callers pass `None` when it isn't verified, and this function fills
+      nothing in that case. Precedence, per the ruling: a plan slice pin
+      wins outright (checked below); an inherited, non-blank
+      `ZEPHYR_SDK_INSTALL_DIR` is the user's deliberate choice and is taken
+      verbatim, never probed for existence or overridden; only then does
+      tan's own stamped store fill the gap. A wrong/missing `sdk_root` or an
+      unstamped/stale store already resolves `toolchain_store` to `None`
+      upstream, so this function's own contribution is exactly the three-way
+      precedence, nothing more.
 
     Never overrides a key THIS slice's env pins.
 
@@ -70,4 +86,14 @@ def zephyr_env_overrides(
             apply_env_append(base, {"EXTRA_ZEPHYR_MODULES": [sdk]})
             if base:
                 out.append(("EXTRA_ZEPHYR_MODULES", base[0][1]))
+
+    # tan-cli#1209: plan pin > inherited (verbatim, no existence probe -- a
+    # stale inherited value is the user's deliberate choice, not tan's to
+    # second-guess) > tan's own verified store > nothing.
+    if (
+        "ZEPHYR_SDK_INSTALL_DIR" not in slice_env
+        and not inherited("ZEPHYR_SDK_INSTALL_DIR")
+        and toolchain_store is not None
+    ):
+        out.append(("ZEPHYR_SDK_INSTALL_DIR", str(toolchain_store)))
     return out
