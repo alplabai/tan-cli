@@ -612,8 +612,8 @@ just the one that captured it:
   environment replays it (`ci.yml`'s gates job installs no extras, on
   purpose). Its `env.json` sets only `TAN_MONITOR_TEST_PORTS_JSON`; nothing on
   this command's path calls `shutil.which`, so `PATH` needs no pin. See its own
-  `PROVENANCE.txt` for the measured live port list this case's fixture stands
-  in for.
+  `PROVENANCE.txt` for why a host-read port list cannot be a golden, which is
+  what this case's fixture stands in for.
 
   The other twenty-four cases answer from their own copied inputs and carry
   no `env.json`; pinning host state they never read would only hide a real

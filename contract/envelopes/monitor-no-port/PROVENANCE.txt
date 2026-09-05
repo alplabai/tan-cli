@@ -7,7 +7,7 @@ Recorded on    : 2026-09-05
 Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
                  (`python/tan/version.py::TAN_VERSION`).
 Issue          : tan-cli#1165
-Branch         : feat/1165-monitor-no-port-envelope (off dev @ 4d4190a2)
+Branch         : feat/1165-monitor-no-port-envelope
 
 This is a NEW golden, not a re-recording: there was no previous recording to
 be wrong. `monitor` was the only command surface with a `data` field a
@@ -60,10 +60,10 @@ Why this case carries an `env.json` -- the "reads a live serial port" problem
 -------------------------------------------------------------------------
 `_available_ports()`'s real source, pyserial's own
 `serial.tools.list_ports.comports()`, enumerates whatever serial hardware is
-physically attached to the host running it. Measured live on the recording
-box: eight ports, in two families -- six Bluetooth virtual serial pairs and
-two USB serial adapters (each described only as "Standard Serial over
-Bluetooth link" or "USB Serial Port", never a vendor/product string).
+physically attached to the host running it. On the recording box that was a
+handful of generic Windows virtual and USB serial ports, none of them the
+board this case is about -- the specific list is deliberately not reproduced
+here, since it is a fact about one machine rather than about the contract.
 
 A golden recorded straight off that list would pin this specific machine's
 Bluetooth pairing count and a USB adapter's enumeration order -- not the CONTRACT --
