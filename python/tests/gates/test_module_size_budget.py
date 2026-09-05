@@ -73,8 +73,13 @@ that distinction is machine-checked rather than positional: a record's `kind`
 must agree with the tree its path sits in, or `core` refuses to load it at
 all.
 
-`tan/planner/**` is a third case: inside the walk, named as out of scope
-because it is a hash-audited mirror of upstream.
+`tan/planner/**` is a third case, and only PART of it is out of scope: its
+`PINNED_HASHES` modules (a hash-audited, 3-way-merged mirror of upstream) are
+named out of scope inside the walk, because splitting one would turn every
+future upstream hunk into a merge conflict. Its `HAND_PORT_SOURCES` modules
+(e.g. `template.py`) are NOT mirrored the same way -- they are flagged
+against upstream, never merged -- and may be split like any other module
+(tan-cli#1142). See `test_the_mirrored_planner_is_named_as_out_of_scope`.
 
 ## Why a pytest gate and not a ruff job
 
@@ -99,6 +104,7 @@ from pathlib import Path
 import pytest
 
 from tests.gates import _module_size_budget_core as core
+from tests.gates.test_planner_relocation_freshness import PINNED_HASHES
 
 
 def test_no_module_grows_past_its_recorded_budget():
@@ -267,16 +273,31 @@ def test_every_record_describes_a_module_that_still_exists():
 
 
 def test_the_mirrored_planner_is_named_as_out_of_scope():
-    """`tan/planner/**` is a hash-audited relocation of alp-sdk's
-    `scripts/alp_orchestrate/**`. Splitting a mirror file here would make it
-    diverge in SHAPE from upstream, which
-    `test_planner_relocation_freshness.py` exists to prevent -- so any
-    oversized module under it is upstream's to fix, and this records that
-    rather than leaving the next reader to rediscover it from a failing
-    hash."""
+    """Only `tan/planner/**`'s `PINNED_HASHES` modules are a hash-audited,
+    3-way-MERGED relocation of alp-sdk's `scripts/alp_orchestrate/**`.
+    Splitting one of THOSE would make it diverge in SHAPE from a moving
+    upstream file, turning every future upstream hunk into a merge conflict --
+    which `test_planner_relocation_freshness.py` exists to prevent -- so an
+    oversized one of them is upstream's to fix, and this records that rather
+    than leaving the next reader to rediscover it from a failing hash.
+
+    Deliberately narrower than "every budgeted module under `MIRRORED_PREFIX`"
+    (tan-cli#1142 review): a `HAND_PORT_SOURCES` module living under the same
+    prefix (e.g. `template.py`) is FLAGGED against upstream, never merged, so
+    it has no base/theirs/ours triple for a split to break, and this repo may
+    split one like any other oversized module -- `template.py` itself did, in
+    the same change that narrowed this assertion. Widening it back to the
+    whole prefix would re-assert the false "cannot be split" claim tan-cli#1142
+    corrected in three other places (`_module_size_budget_core.MIRRORED_PREFIX`,
+    `template.py`'s former `_GUARDS` comment, `document_guards.py`)."""
     budget = core.load_generated()
-    mirrored = [rel for rel in budget.modules if rel.startswith(core.MIRRORED_PREFIX)]
-    assert mirrored, "no mirrored planner module is budgeted -- has the mirror moved?"
+    mirrored = [
+        rel
+        for rel in budget.modules
+        if rel.startswith(core.MIRRORED_PREFIX)
+        and rel[len(core.MIRRORED_PREFIX):] in PINNED_HASHES
+    ]
+    assert mirrored, "no PINNED_HASHES planner module is budgeted -- has the mirror moved?"
     for rel in mirrored:
         assert (core.PACKAGE.parent / rel).exists(), f"{rel} is budgeted but missing"
 

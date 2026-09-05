@@ -127,9 +127,20 @@ MODULE_CAP = 800
 #: The guideline for a function body, same role for the function ratchet.
 FUNCTION_CAP = 50
 
-#: `tan/planner/**` is a hash-audited relocation of alp-sdk's
-#: `scripts/alp_orchestrate/**` (see `test_planner_relocation_freshness.py`).
-#: An oversized module under it is upstream's to split, not this repo's.
+#: `tan/planner/**` is a MIX (see `test_planner_relocation_freshness.py`):
+#: `PINNED_HASHES` modules are a hash-audited, 3-WAY-MERGED relocation of
+#: alp-sdk's `scripts/alp_orchestrate/**` -- an oversized one of THOSE is
+#: upstream's to split, not this repo's, because a shape change here would
+#: turn every future upstream hunk into a merge conflict against a moving
+#: file. `HAND_PORT_SOURCES` modules (e.g. `template.py`) live under this
+#: same prefix but are FLAGGED, never merged, against their upstream source
+#: (`test_planner_relocation_freshness.py`'s own module docstring) -- there is
+#: no base/theirs/ours triple for a split to break, so this repo may split one
+#: like any other oversized module (tan-cli#1142 did, for `template.py`).
+#: `test_module_size_budget.py::test_the_mirrored_planner_is_named_as_out_of_
+#: scope` checks only the `PINNED_HASHES` subset of this prefix, not the
+#: whole thing -- read that test before assuming every path under here is
+#: out of scope.
 MIRRORED_PREFIX = "tan/planner/"
 
 #: The two record kinds. `budget` is the ratcheted `tan/**` side; `observed`

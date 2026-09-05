@@ -154,13 +154,19 @@ it as if it were new:
   test rather than by the absence of the import.
 * "One consumer, so extraction would be for its own sake." Answered by the
   format-symmetry condition above, and by SIZE, which is not a tiebreaker
-  here but a real cost: `template.py` is this repo's most oversized module
-  and sits under `_module_size_budget_core.MIRRORED_PREFIX`, so it cannot be
-  split in this repo at all -- every line added to it is permanent. This
-  module is 400-odd lines, well under the cap, and splittable. Keeping 71
-  lines of shared-shape code in the one file that can never shed them, to
-  satisfy a bar written to prevent gratuitous extraction, would have been
-  the letter of the rule against its purpose.
+  here but a real cost: at the time, `template.py` was this repo's most
+  oversized module, and `_module_size_budget_core.MIRRORED_PREFIX`'s comment
+  ("upstream's to split, not this repo's") was read as barring a split of it
+  here. WRONG, corrected in tan-cli#1142 alongside the split that comment was
+  misread as forbidding: `MIRRORED_PREFIX` bars a `PINNED_HASHES` module's
+  shape from diverging from a moving upstream file it is 3-way-merged
+  against; `template.py` is `HAND_PORT_SOURCES` instead, flagged against
+  upstream and never merged, so it has no such cost (see
+  `tan/planner/template_pins.py`'s own docstring). This module is 400-odd
+  lines, well under the cap, and splittable regardless. Keeping 71 lines of
+  shared-shape code in a file everyone at the time believed could never shed
+  them, to satisfy a bar written to prevent gratuitous extraction, would have
+  been the letter of the rule against its purpose.
 
 WHAT IS DELIBERATELY NOT HERE
 ------------------------------
