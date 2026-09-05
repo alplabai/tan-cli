@@ -713,7 +713,27 @@ env:
   #   - kconfig-fixture + toolchain-lock: unchanged in range
   #     (`metadata/toolchains.json` and the kconfig golden do not appear in
   #     `gh api .../compare/0914da38...ff27f179`'s 79-path file list).
-  PINNED_SDK_TAG: ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2
+  #
+  # `ff27f179` -> `eff266b6` (tan-cli#1210/#1156, the hand-port re-sync):
+  # moved together with `test_planner_relocation_freshness.py`'s
+  # `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT`, `ci.yml`'s
+  # `sdk_parity` `ref:`, and `PINNED_PLANNER_ORACLE_SDK_REF` below --
+  # PR #1210's automated proposal had left THIS pin at `ff27f179` while
+  # those other three had already moved, which is exactly the "WARNING
+  # (tan-cli#691): tan's two alp-sdk pins disagree with EACH OTHER" split;
+  # moving it closes that warning. Also load-bearing on its own: the
+  # hand-ported `zephyr_board` V2N/V2M pinctrl.dtsi/`_defconfig` and AEN
+  # BRD_I2C emitters hard-require `metadata/e1m_modules/v2n/supervisor-
+  # links.yaml` and `.../aen/on-module-links.yaml`, neither of which exists
+  # at `ff27f179`. Re-measured against `eff266b6`:
+  # `python scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+  # eff266b67f6c45bbe9182d48bbd08d01db6af24b` produced a REAL diff (99 ->
+  # 100 boards, 693 -> 700 emits, 1,129,537 -> 1,205,650 bytes): one new
+  # board (`examples/aen/aen-eeprom-provision`), plus the new AEN BRD_I2C +
+  # V2N/V2M pinctrl/`_defconfig` bytes `tan/planner/zephyr_board.py` now
+  # emits -- see `test_planner_relocation_freshness.py`'s own `eff266b6`
+  # paragraph for the full hand-port accounting.
+  PINNED_SDK_TAG: eff266b67f6c45bbe9182d48bbd08d01db6af24b
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -819,7 +839,18 @@ env:
   # touches `scripts/alp_template.py`, whose `--emit scaffold` output this
   # fixture does not capture (it freezes the per-board planner emits), so
   # only `PROVENANCE.txt`'s own `alp-sdk ref` line moved.
-  PINNED_PLANNER_ORACLE_SDK_REF: ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2
+  # `ff27f179` -> `eff266b6` (tan-cli#1210/#1156): moved in lockstep with
+  # `PINNED_SDK_TAG` above per this pin's own rule -- #270 has not landed.
+  # `python scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+  # eff266b67f6c45bbe9182d48bbd08d01db6af24b` regenerated
+  # `tests/fixtures/planner_oracle/` with a REAL diff, unlike the last three
+  # moves: 99 -> 100 boards, 693 -> 700 emits, 1,129,537 -> 1,205,650 bytes
+  # -- one new board (`examples/aen/aen-eeprom-provision`) plus the new AEN
+  # BRD_I2C + V2N/V2M pinctrl.dtsi/`_defconfig` bytes the hand-ported
+  # `tan/planner/zephyr_board.py` now emits (see `PINNED_SDK_TAG`'s own
+  # comment above, and `test_planner_relocation_freshness.py`'s `eff266b6`
+  # paragraph, for the full accounting).
+  PINNED_PLANNER_ORACLE_SDK_REF: eff266b67f6c45bbe9182d48bbd08d01db6af24b
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

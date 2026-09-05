@@ -4,7 +4,7 @@
 RELOCATED (was alp-sdk `scripts/alp_project_emit/hw_info.py`) -- see this
 package's `__init__.py` for the move's contract.
 
-alp-sdk#1909 (tan-cli#1156 hand-port) made this emitter a second reader of
+alp-sdk#1964 (tan-cli#1156 hand-port) made this emitter a second reader of
 `hw-revisions.yaml`, through `board_designator()`: `ALP_HW_BUILD_SOM_HW_REV`
 now carries the COMPOSED `<board_datecode>-<hw_rev>` form (`"2626-r2"`), not
 the bare revision key, matching what `scripts/program_eeprom.py` writes into
@@ -100,7 +100,7 @@ def _emit_hw_info_h(
     every non-off core id) and one `ALP_HW_BUILD_HAS_<id>` macro per
     non-off core so consumers can `#ifdef` on the topology.
 
-    `metadata_root` (alp-sdk#1909) resolves this SKU's family
+    `metadata_root` (alp-sdk#1964) resolves this SKU's family
     `hw-revisions.yaml` (via `load_family_table`) so `ALP_HW_BUILD_SOM_HW_REV`
     can be composed through `board_designator` -- see the module docstring.
     """

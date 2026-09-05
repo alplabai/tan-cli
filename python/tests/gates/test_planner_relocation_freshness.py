@@ -1349,7 +1349,7 @@ PINNED_HASHES: dict[str, str] = {
 #: -- `git log ff27f179..eff266b6 -- <path>` per file, not assumed from the
 #: PINNED_HASHES paragraph's own range summary:
 #:
-#:   - `scripts/gen_zephyr_board.py` (+617/-8 net, two commits):
+#:   - `scripts/gen_zephyr_board.py` (+584/-31 net, two commits):
 #:     `dbfa06bd` (#655, alp-sdk#1924) adds the first V2N/V2M-family
 #:     pinctrl.dtsi/_defconfig emitter (`_load_supervisor_links_doc`,
 #:     `_v2n_declared_families`, `_load_supervisor_links`,
@@ -1389,7 +1389,7 @@ PINNED_HASHES: dict[str, str] = {
 #:     five files byte-identical, including the two new
 #:     `alp_e1m_v2n101_m33_sm-pinctrl.dtsi` / `..._defconfig` files.
 #:
-#:   - `scripts/alp_project_emit/hw_info.py` (+13/-1, `eff266b6` /
+#:   - `scripts/alp_project_emit/hw_info.py` (+14/-1, `eff266b6` /
 #:     alp-sdk#1964): composes `ALP_HW_BUILD_SOM_HW_REV` through the new
 #:     `sdk_compat.board_designator()` (already relocated into
 #:     `tan/planner/sdk_compat.py` by this same re-sync's `PINNED_HASHES`
@@ -1426,7 +1426,7 @@ PINNED_HASHES: dict[str, str] = {
 #:     in the message, not a behavioural difference. Hash re-pinned; no
 #:     code change.
 #:
-#: `scripts/alp_cli/diagnostic_format.py` (+50/-1, SAME `43e5b2cb` /
+#: `scripts/alp_cli/diagnostic_format.py` (+53/-2, SAME `43e5b2cb` /
 #: alp-sdk#1932) also moved in this range -- the commit's own subject
 #: line ("...; render URI-shaped diagnostic paths") is its OTHER half.
 #: alp-sdk#1909 makes `_uri()`/`to_sarif` render a proper URI reference

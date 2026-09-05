@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """`--emit hw-info-h`'s `ALP_HW_BUILD_SOM_HW_REV` must carry the COMPOSED
 `<board_datecode>-<hw_rev>` form (`"2626-r2"`), not the bare revision key
-(alp-sdk#1909, tan-cli#1156's hand-port of
+(alp-sdk#1964, tan-cli#1156's hand-port of
 `scripts/alp_project_emit/hw_info.py`).
 
 Before this port, `_emit_hw_info_h` baked the bare `hw_rev` straight into the

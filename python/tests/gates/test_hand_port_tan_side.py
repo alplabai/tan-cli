@@ -136,9 +136,13 @@ HAND_PORT_TAN_SIDE: dict[str, tuple[str, ...]] = {
 #: below bounds the set the same way the drift ledger is bounded.
 HAND_PORT_NO_TAN_FILE_PAIRING: dict[str, str] = {
     "scripts/alp_cli/diagnostic_format.py": (
-        "the port is a ~150-line region inside tan/commands/validate_cmd.py "
-        "(1613 lines), a file under active change for stderr parsing, "
-        "exit-code classification and spawn behaviour"
+        "the port is split across two files: a ~150-line region inside "
+        "tan/commands/validate_cmd.py (1702 lines, under active change for "
+        "stderr parsing, exit-code classification and spawn behaviour) for "
+        "the SARIF emission, and tan/core/uri_reference.py for the "
+        "`_is_windows_spelled`/`_path_to_uri_reference` URI half. Naming "
+        "only the first would have been the incomplete-mapping defect #778 "
+        "is about"
     ),
     "scripts/sentinels.py": (
         "INLINED, not ported as a file: `sentinels.is_tbd` is spelled "

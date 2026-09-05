@@ -54,6 +54,7 @@ from .slugs import (
     _BLOCK_SLUGS,
     _CHIP_SUBSYSTEMS,
     _board_define_slug,
+    _is_tbd,
     _slugs_from_helper_firmware,
     _slugs_from_on_module,
     _som_define_slug,
@@ -703,10 +704,10 @@ def _emit_soc_summary(project: "BoardProject", slice_: "Slice") -> list[str]:
     # above).  `is_tbd`/absent/non-positive all mean "don't claim it".
     mem = project.som_preset.get("memory") or {}
     dram_mbit = mem.get("dram_mbit")
-    if isinstance(dram_mbit, (int, float)) and not is_tbd(dram_mbit) and dram_mbit > 0:
+    if isinstance(dram_mbit, (int, float)) and not _is_tbd(dram_mbit) and dram_mbit > 0:
         lines.append(f"CONFIG_ALP_SDK_SOM_DRAM_MBIT={int(dram_mbit)}")
     flash_mbit = mem.get("flash_mbit")
-    if isinstance(flash_mbit, (int, float)) and not is_tbd(flash_mbit) and flash_mbit > 0:
+    if isinstance(flash_mbit, (int, float)) and not _is_tbd(flash_mbit) and flash_mbit > 0:
         lines.append(f"CONFIG_ALP_SDK_SOM_FLASH_MBIT={int(flash_mbit)}")
 
     lines.append("")
