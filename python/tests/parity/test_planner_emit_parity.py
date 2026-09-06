@@ -80,12 +80,21 @@ from pathlib import Path
 
 import pytest
 
+from tan import planner_emit
 from tests.conftest import sdk_root
 
 # The project-scoped emit modes `tan.planner` owns. `kconfig` is excluded (see
 # the module docstring); the other seven need nothing but `metadata/**`.
-MODES = (
-    "build-plan",
+#
+# Split in two (tan-cli#1215, ADR-0026 §D/§G): `PLANNER_MODES` is the
+# "planner axis" -- `build-plan`, the one mode §G step 6 deletes once `tan
+# build` plans without alp-sdk at all. `RENDER_MODES` is the "render axis"
+# §D requires to survive that deletion: the remaining six system-scoped emits.
+# Both still feed `test_every_mode_is_byte_identical` below; kept as two names
+# rather than one re-merged tuple so a future PR can delete `PLANNER_MODES`
+# without touching `RENDER_MODES`.
+PLANNER_MODES = ("build-plan",)
+RENDER_MODES = (
     "system-manifest",
     "ipc-contract-h",
     "dts-reservations",
@@ -400,7 +409,7 @@ def _first_diff(a: str, b: str) -> str:
 @pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
 def test_every_mode_is_byte_identical(planners, board):
     upstream, relocated = planners
-    for mode in MODES:
+    for mode in (*PLANNER_MODES, *RENDER_MODES):
         want_kind, want = _render(upstream, board, mode)
         got_kind, got = _render(relocated, board, mode)
         assert got_kind == want_kind, (
@@ -1012,6 +1021,77 @@ GENERATE_MODES = (
     ("carrier-netlist", None),
     ("composed-route-table", None),
 )
+
+
+def _registry_modes() -> set[str]:
+    """The full `--emit` mode set alp-sdk's `metadata/emit-registry-v1.json`
+    declares, read off the bound checkout -- never hand-copied, so a mode the
+    SDK adds or removes changes this set the next run, not the next person to
+    remember to update a literal here."""
+    assert SDK is not None
+    registry = json.loads(
+        (SDK / "metadata" / "emit-registry-v1.json").read_text(encoding="utf-8"))
+    return {entry["mode"] for entry in registry["modes"]}
+
+
+#: The registry modes this render-parity axis does NOT cover, each with the
+#: reason it is legitimately absent -- ADR-0026 §D's three named exemptions,
+#: no more. Anything else absent from `rendered` below is unmeasured, and
+#: `test_the_render_axis_mode_set_is_fully_accounted_for` treats that as a
+#: failure rather than a silent gap.
+_NAMED_EXEMPTIONS = {
+    "build-plan": "the planner axis (PLANNER_MODES above); ADR-0026 §G "
+                  "step 6 deletes it once `tan build` plans with no alp-sdk "
+                  "counterpart at all",
+    "kconfig": "non-hermetic -- shells `west build`; covered by "
+               "tests/core/test_kconfig_symbols.py and alp-sdk's "
+               "check_emit_kconfig_contract.py in the pr-twister CI job",
+    "scaffold": "vendored into `tan init` (I-32); its own byte-parity gate "
+                "is tests/parity/scaffold_byte_parity.py",
+}
+
+
+def test_the_render_axis_mode_set_is_fully_accounted_for():
+    """ADR-0026 §D's mode-set pin, mechanical rather than hand-maintained.
+
+    Every mode `metadata/emit-registry-v1.json` declares is in exactly one of
+    three states: RENDERED (covered by `RENDER_MODES`, `GENERATE_MODES` or
+    `planner_emit.TREE_MODES` -- the three sets this module's own byte-parity
+    tests already iterate), a NAMED EXEMPTION (`_NAMED_EXEMPTIONS`, each with
+    its reason), or -- if neither -- an unmeasured gap, which is a failure
+    naming the mode. Before this test existed, a mode falling out of
+    `GENERATE_MODES` (say) stayed invisible: every per-board assertion still
+    passed, and `test_the_breadth_layer_still_covers_every_board`'s `>= 2900`
+    floor has enough slack to absorb one mode's ~100 artefacts and stay green.
+
+    This is also what makes ADR-0026 §G step 6 ("delete the planner axis,
+    keep the render gate") executable: deleting a tan renderer drops its mode
+    out of `rendered` by construction, so it must simultaneously gain a
+    `_NAMED_EXEMPTIONS` entry (a reviewed, deliberate decision) or this test
+    reds naming it. §F's envelope-conformance gate does not exist yet, so no
+    mode is "consumed" today -- when one is, its check moves out of this
+    module into §F's gate and out of `rendered` here in the same change; if
+    that ever happens out of order, this test reds for that mode, which is the
+    correct pressure.
+    """
+    registry = _registry_modes()
+    rendered = (
+        set(RENDER_MODES)
+        | {mode for mode, _ in GENERATE_MODES}
+        | set(planner_emit.TREE_MODES)
+    )
+
+    phantom = rendered - registry
+    assert not phantom, (
+        "a set above names a mode the SDK's emit registry does not declare: "
+        f"{sorted(phantom)}")
+
+    exempted = registry - rendered
+    assert exempted == set(_NAMED_EXEMPTIONS), (
+        "registry mode(s) with no renderer and no named exemption -- "
+        f"unmeasured: {sorted(exempted - set(_NAMED_EXEMPTIONS))}; "
+        "exemption(s) no longer needed (now rendered somewhere above): "
+        f"{sorted(set(_NAMED_EXEMPTIONS) - exempted)}")
 
 
 #: `{board dir name: artefacts compared byte for byte}`, filled in by the breadth
