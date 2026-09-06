@@ -50,11 +50,23 @@ below is the one case proven length-for-length against the confirmed REAL
 Windows failure (`.resolve()` silently succeeds, `.is_file()` raises a plain
 `OSError`) via a deterministic monkeypatch, and is the case this host can
 actually run and watch go red against the unfixed source.
+
+tan-cli#1234 splits the symlink-loop case itself by CPython version, and that
+split interacts with this host's own gap. On a >= 3.13 interpreter (this
+host's own `py -3.14`), `Path.resolve()` no longer raises on a symlink loop
+at all, so `test_symlink_loop_clean_error` below now carries a version
+`skipif` and never even reaches its `path.symlink_to(path)` line here;
+`test_symlink_loop_py313_clean_error` is its >= 3.13 sibling, and it hits
+this SAME Developer-Mode gap in its own right (real symlink creation is a
+platform fact, independent of interpreter version) and skips for that
+reason instead of asserting anything -- real end-to-end coverage of the
+>= 3.13 shape, like the < 3.13 shape before it, needs a POSIX host.
 """
 from __future__ import annotations
 
 import contextlib
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -153,6 +165,16 @@ def test_an_absent_profile_keeps_its_existing_message(tmp_path):
     assert "could not be resolved" not in msg
 
 
+@pytest.mark.skipif(
+    sys.version_info >= (3, 13),
+    reason="CPython >= 3.13 stopped raising RuntimeError out of "
+           "Path.resolve() for a symlink loop (measured, tan-cli#1234: "
+           "3.12.14 raises; 3.13.15 and 3.14.7 both return the path "
+           "unresolved and let is_file() answer False without raising), so "
+           "this profile no longer reaches the except (OSError, "
+           "RuntimeError) handler at all -- see "
+           "test_symlink_loop_py313_clean_error below for that shape.",
+)
 def test_symlink_loop_clean_error(tmp_path):
     """The reachable half of alp-sdk#1961's "same defect class" note: a
     `profile:` that hits a symlink loop (ELOOP) must fail with a clean
@@ -166,13 +188,71 @@ def test_symlink_loop_clean_error(tmp_path):
     this fix replaced turns this red with an unhandled `RuntimeError`
     (verified on this host by reverting, see the PR description; not
     re-asserted here since Windows cannot construct the shape at all --
-    see the module docstring)."""
+    see the module docstring).
+
+    Only reachable at all on CPython <= 3.12 (see the `skipif` above);
+    `Path.resolve()` stopped raising on a symlink loop in 3.13, which is
+    exactly what makes this assertion version-specific rather than a
+    platform-specific fact like the `WinError 1314` this host already
+    cannot get past."""
     path = tmp_path / "loopy-hw-backends.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.symlink_to(path)
     msg = _raises(tmp_path, path)
     assert _NAME in msg
     assert "could not be resolved" in msg
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 13),
+    reason="This pins the CPython >= 3.13 shape (measured, tan-cli#1234): "
+           "Path.resolve() no longer raises on a symlink loop, so this "
+           "profile falls through to the ordinary `not prof_is_file` "
+           "branch instead -- see test_symlink_loop_clean_error above for "
+           "the <= 3.12 shape it replaces.",
+)
+def test_symlink_loop_py313_clean_error(tmp_path):
+    """tan-cli#1234's >= 3.13 sibling of `test_symlink_loop_clean_error`
+    above: on CPython >= 3.13, `Path.resolve()` no longer raises on a
+    symlink loop at all (measured: 3.12.14 raises `RuntimeError`; 3.13.15
+    and 3.14.7 both return the path unresolved and let `.is_file()` answer
+    `False` without raising), so this profile never reaches the `except
+    (OSError, RuntimeError)` handler -- it falls through to the ordinary
+    `not prof_is_file` branch instead, the same one
+    `test_an_absent_profile_keeps_its_existing_message` exercises for a
+    plain absent path, and must still come out as a clean
+    `OrchestratorError` naming "does not resolve", never an unhandled
+    exception and never the <= 3.12 wording `test_symlink_loop_clean_error`
+    pins.
+
+    Real `path.symlink_to(path)`, the same construction
+    `test_symlink_loop_clean_error` above uses, wrapped in the same
+    `except OSError: pytest.skip(...)` shape
+    `test_never_raises_contract_holds.py`'s own `test_symlink_loop`
+    (tan-cli#1209 follow-up) established for a NEW symlink-loop test on a
+    host that cannot create one at all: "not applicable", not "the contract
+    broke". On this Windows host that is exactly what happens -- the same
+    `WinError 1314` Developer-Mode gap `test_symlink_loop_clean_error` would
+    hit if its own version gate didn't already skip it first (see the
+    module docstring) -- so this test SKIPS here rather than asserting
+    anything; it runs for real on a POSIX host, and is verified for real
+    against this repo's `validate.py` via a WSL-created symlink loop read
+    back through Windows CPython 3.14 (the same cross-filesystem construction
+    `test_windows_shape_clean_error`'s own docstring cites for its confirmed
+    repro) -- against the shipped `validate.py` this comes out exactly as
+    asserted below; temporarily dropping the trailing `if not prof_is_file:
+    raise OrchestratorError(...)` block turns it silent instead (see the PR
+    description)."""
+    path = tmp_path / "loopy-hw-backends-py313.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.symlink_to(path)
+    except OSError as exc:
+        pytest.skip(f"host cannot create a symlink loop: {exc}")
+    msg = _raises(tmp_path, path)
+    assert _NAME in msg
+    assert "does not resolve" in msg
+    assert "could not be resolved" not in msg
 
 
 @_skip_as_root
