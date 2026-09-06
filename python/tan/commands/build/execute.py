@@ -1180,18 +1180,25 @@ def execute_slices(
     # match this checkout's pin -- [`zephyr_env_overrides`] then fills
     # nothing, matching today's behaviour exactly.
     #
-    # tan-cli#1209 review MINOR: also `None` when `host_scan_has_toolchain()`
-    # -- a `zephyr-sdk*` install CMake's own prefix scan (or the user package
-    # registry) can already find on this host, independent of tan's store.
-    # tan's own store is `-t arm-zephyr-eabi` ONLY; forcing it ahead of a
-    # fuller, scan-visible host SDK could fail a non-ARM slice that
-    # configured fine unaided, and would make `tan build` trust a different
-    # toolchain than `tan doctor` reports (`doctor_cmd._zephyr_sdk_scan_roots`
-    # ranks that same store LAST, never first). Checked here, not inside
-    # `verified_store_dir` itself: that function answers "is the pin
-    # satisfied", a fact independent of what else is on the host.
+    # tan-cli#1209 review MINOR: also `None` when `host_scan_has_toolchain
+    # (sdk_root)` -- a USABLE `zephyr-sdk*` install (a real cross compiler
+    # inside it, not just a name match) CMake's own prefix scan (or the
+    # user package registry) can already find on this host, independent of
+    # tan's store. tan's own store is `-t arm-zephyr-eabi` ONLY; forcing it
+    # ahead of a fuller, scan-visible host SDK could fail a non-ARM slice
+    # that configured fine unaided, and would make `tan build` trust a
+    # different toolchain than `tan doctor` reports
+    # (`doctor_cmd._zephyr_sdk_scan_roots` ranks that same store LAST, never
+    # first). Checked here, not inside `verified_store_dir` itself: that
+    # function answers "is the pin satisfied", a fact independent of what
+    # else is on the host.
+    #
+    # tan-cli#1209 review MAJOR: `host_scan_has_toolchain` requires an
+    # actual compiler inside the candidate, not merely a directory whose
+    # name STARTS WITH `zephyr-sdk` -- an empty `~/zephyr-sdk-leftover/`
+    # must not silently disable tan's own verified store below.
     verified_store = (
-        verified_store_dir(sdk_root) if not host_scan_has_toolchain() else None
+        verified_store_dir(sdk_root) if not host_scan_has_toolchain(sdk_root) else None
     )
 
     for sl in plan.slices:

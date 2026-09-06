@@ -363,6 +363,26 @@ def _write_verified_stamp(store_dir: Path, manifest: tp.ToolchainManifest) -> No
     (store_dir / tp.STAMP_FILENAME).write_text(tp.render_stamp(stamp), encoding="utf-8")
 
 
+def _plant_compiler(root: Path) -> Path:
+    """Make @root pass `host_scan_has_toolchain`'s validity probe
+    (`build.toolchain._host_toolchain_is_usable`) -- the real
+    `arm-zephyr-eabi-gcc` binary, at the same path
+    `doctor_cmd._zephyr_sdk_root_valid` checks. Reads
+    `bt._ZEPHYR_SDK_TOOLCHAIN_DIR`/`bt.os.name` -- the SAME constant and
+    module the production probe reads (tan-cli#286 third pass's own lesson
+    against two independently spelled layouts silently agreeing with each
+    other instead of with the real probe), mirroring
+    `test_build_toolchain_root._plant_compiler` /
+    `test_doctor_command._plant_zephyr_sdk`."""
+    from tan.commands.build import toolchain as bt
+
+    exe = "arm-zephyr-eabi-gcc.exe" if bt.os.name == "nt" else "arm-zephyr-eabi-gcc"
+    bin_dir = root.joinpath(*bt._ZEPHYR_SDK_TOOLCHAIN_DIR)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / exe).write_bytes(b"")
+    return root
+
+
 def _point_home_at(monkeypatch, home: Path) -> None:
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
@@ -425,7 +445,11 @@ def test_a_scan_visible_host_sdk_beats_tans_own_arm_only_store(tmp_path, monkeyp
     # A full, independent host SDK -- top-level under HOME, exactly where
     # `_scan_roots()`/CMake's own prefix scan looks, and where tan's own
     # store (two levels deeper, under `.alp/toolchains/`) is invisible.
-    (home / "zephyr-sdk-9.9.9").mkdir()
+    # tan-cli#1209 review MAJOR: a real compiler inside it, not just the
+    # name -- `host_scan_has_toolchain` now requires one (an empty
+    # `zephyr-sdk*` directory must not count as "the host already has a
+    # toolchain").
+    _plant_compiler(home / "zephyr-sdk-9.9.9")
     out_file = tmp_path / "env.json"
 
     out = execute_slices(
@@ -440,6 +464,46 @@ def test_a_scan_visible_host_sdk_beats_tans_own_arm_only_store(tmp_path, monkeyp
     assert out[0].status == "succeeded", out[0].message
     seen = json.loads(out_file.read_text(encoding="utf-8"))
     assert "ZEPHYR_SDK_INSTALL_DIR" not in seen
+
+
+def test_an_empty_name_only_leftover_does_not_suppress_the_verified_store(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1209 review MAJOR: `_candidates` applies no validity or
+    version probe by design (`toolchain.py:96-105`), so a directory that
+    merely STARTS WITH `zephyr-sdk` -- a stale download, an interrupted
+    manual extraction, with no compiler inside it -- used to make
+    `host_scan_has_toolchain()` report `True` on name alone, which
+    suppressed `verified_store_dir` here at `execute.py:1193` and silently
+    disabled tan's own verified store below, even though it is the ONLY
+    usable toolchain on the host. Fails before the fix
+    (`ZEPHYR_SDK_INSTALL_DIR` absent from `seen`, same bare-`KeyError`
+    failure mode as tan-cli#1209's own original defect); passes once
+    `host_scan_has_toolchain` requires a real compiler before it counts."""
+    real_ws, sdk_root, build_root = _make_workspace(tmp_path)
+    manifest_text = _small_toolchain_manifest()
+    _write_toolchain_manifest(sdk_root, manifest_text)
+    manifest = tp.parse_toolchain_manifest(manifest_text)
+    home = tmp_path / "home"
+    _point_home_at(monkeypatch, home)
+    store_dir = home / ".alp" / "toolchains" / tp.store_dir_name(manifest.version)
+    _write_verified_stamp(store_dir, manifest)
+    # Name-only leftover: no compiler planted inside it.
+    (home / "zephyr-sdk-leftover").mkdir()
+    out_file = tmp_path / "env.json"
+
+    out = execute_slices(
+        parse_build_plan(_plan(_probe_cmd(out_file))),
+        build_root=build_root,
+        env_lookup=lambda k: None,
+        gap_fillers=[],
+        on_output=lambda s: None,
+        sdk_root=str(sdk_root),
+    )
+
+    assert out[0].status == "succeeded", out[0].message
+    seen = json.loads(out_file.read_text(encoding="utf-8"))
+    assert Path(seen["ZEPHYR_SDK_INSTALL_DIR"]).samefile(store_dir)
 
 
 def test_an_inherited_zephyr_sdk_install_dir_survives_verbatim_despite_a_valid_stamp(

@@ -45,6 +45,28 @@ def _install(parent, name="zephyr-sdk-1.0.1"):
     return root
 
 
+def _plant_compiler(root):
+    """Make @root pass `host_scan_has_toolchain`'s validity probe
+    (`_host_toolchain_is_usable`) -- the real `arm-zephyr-eabi-gcc` binary,
+    at the same path `doctor_cmd._zephyr_sdk_root_valid` checks. Unlike
+    `_install` above, this IS a requirement here: `host_scan_has_toolchain`
+    (unlike `_candidates`/`resolve_toolchain_root`) refuses to count a
+    name-only directory (tan-cli#1209 review MAJOR).
+
+    Reads `bt._ZEPHYR_SDK_TOOLCHAIN_DIR`/`bt.os.name` -- the SAME constant
+    and module the production probe reads, not a second, independently
+    spelled literal here -- mirroring `test_doctor_command._plant_zephyr_sdk`
+    exactly (tan-cli#286 third pass's own lesson: two hand-spelled layouts
+    can silently agree with each other instead of with the real probe)."""
+    from tan.commands.build import toolchain as bt
+
+    exe = "arm-zephyr-eabi-gcc.exe" if bt.os.name == "nt" else "arm-zephyr-eabi-gcc"
+    bin_dir = root.joinpath(*bt._ZEPHYR_SDK_TOOLCHAIN_DIR)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / exe).write_bytes(b"")
+    return root
+
+
 @pytest.fixture
 def scan(monkeypatch, tmp_path):
     """Bind `_scan_roots` to one controlled directory and return it."""
@@ -503,13 +525,24 @@ def test_verified_store_dir_returns_the_store_when_the_stamp_matches_the_pin(tmp
 
 def test_host_scan_has_toolchain_is_false_with_nothing_on_the_host(monkeypatch, tmp_path):
     monkeypatch.setattr("tan.commands.build.toolchain._scan_roots", lambda: [tmp_path])
-    assert host_scan_has_toolchain() is False
+    assert host_scan_has_toolchain(None) is False
 
 
 def test_host_scan_has_toolchain_is_true_for_an_independent_host_install(monkeypatch, tmp_path):
-    _install(tmp_path, "zephyr-sdk-9.9.9")
+    _plant_compiler(_install(tmp_path, "zephyr-sdk-9.9.9"))
     monkeypatch.setattr("tan.commands.build.toolchain._scan_roots", lambda: [tmp_path])
-    assert host_scan_has_toolchain() is True
+    assert host_scan_has_toolchain(None) is True
+
+
+def test_host_scan_has_toolchain_ignores_an_empty_name_only_leftover(monkeypatch, tmp_path):
+    """tan-cli#1209 review MAJOR: `_candidates` applies no validity probe
+    by design (a non-ARM install is still a real `${TOOLCHAIN_ROOT}`
+    candidate there) -- but a directory that merely STARTS WITH
+    `zephyr-sdk`, with nothing inside it, is not a usable toolchain and
+    must not silently disable tan's own verified store."""
+    _install(tmp_path, "zephyr-sdk-leftover")  # empty: no compiler planted
+    monkeypatch.setattr("tan.commands.build.toolchain._scan_roots", lambda: [tmp_path])
+    assert host_scan_has_toolchain(None) is False
 
 
 def test_host_scan_has_toolchain_ignores_tans_own_store_leaf(monkeypatch, tmp_path):
@@ -520,21 +553,43 @@ def test_host_scan_has_toolchain_ignores_tans_own_store_leaf(monkeypatch, tmp_pa
     never be double-counted as an INDEPENDENT host toolchain."""
     from tan.commands.build import toolchain as bt
 
-    store_leaf = _install(tmp_path, "zephyr-sdk-1.0.1-arm-zephyr-eabi")
+    sdk_root = _sdk_root_with_manifest(tmp_path)  # pins version 1.0.1
+    store_leaf = _plant_compiler(tmp_path / tp.store_dir_name("1.0.1"))
     monkeypatch.setattr(bt, "_scan_roots", lambda: [tmp_path])
     monkeypatch.setattr(bt, "_toolchain_store_scan_root", lambda: tmp_path)
     assert store_leaf.exists()
-    assert host_scan_has_toolchain() is False
+    assert host_scan_has_toolchain(str(sdk_root)) is False
+
+
+def test_host_scan_has_toolchain_sees_a_different_version_leaf_inside_the_store(
+    monkeypatch, tmp_path
+):
+    """tan-cli#1209 review BLOCKER: the store exclusion is keyed on the
+    PER-VERSION leaf (`doctor_cmd._toolchain_store_dir`'s documented form),
+    never the whole store root -- a stamped leaf for a version this
+    checkout no longer pins, sitting in the SAME store next to the current
+    leaf, is a real, independent host toolchain and must still count.
+    Excluding the whole root (the pre-fix form) hid this leaf too, exactly
+    the same mistake tan-cli#1186 already shipped and fixed once for
+    `doctor_cmd`."""
+    from tan.commands.build import toolchain as bt
+
+    sdk_root = _sdk_root_with_manifest(tmp_path)  # pins version 1.0.1
+    old_leaf = _plant_compiler(tmp_path / tp.store_dir_name("0.16.5"))
+    monkeypatch.setattr(bt, "_scan_roots", lambda: [tmp_path])
+    monkeypatch.setattr(bt, "_toolchain_store_scan_root", lambda: tmp_path)
+    assert old_leaf.exists()
+    assert host_scan_has_toolchain(str(sdk_root)) is True
 
 
 def test_host_scan_has_toolchain_still_sees_a_sibling_outside_the_store(monkeypatch, tmp_path):
     """The ancestor-coincidence exclusion is scoped to the store's own
-    subtree -- a genuinely separate install living OUTSIDE it (a normal
-    scan root with no `$ALP_TOOLCHAIN_ROOT` override at all) still counts,
-    proving the exclusion above is not simply "always False"."""
+    per-version leaf -- a genuinely separate install living OUTSIDE it (a
+    normal scan root with no `$ALP_TOOLCHAIN_ROOT` override at all) still
+    counts, proving the exclusion above is not simply "always False"."""
     from tan.commands.build import toolchain as bt
 
-    _install(tmp_path / "scan", "zephyr-sdk-9.9.9")
+    _plant_compiler(_install(tmp_path / "scan", "zephyr-sdk-9.9.9"))
     monkeypatch.setattr(bt, "_scan_roots", lambda: [tmp_path / "scan"])
     monkeypatch.setattr(bt, "_toolchain_store_scan_root", lambda: tmp_path / "store")
-    assert host_scan_has_toolchain() is True
+    assert host_scan_has_toolchain(None) is True
