@@ -113,6 +113,7 @@ from tan.commands.build.manifest import (
     zephyr_boilerplate_loaded,
 )
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
+from tan.commands.build.toolchain import host_scan_has_toolchain, verified_store_dir
 from tan.core.plan_exec import (
     CROSS_DRIVE_MSG,
     ExecutionPolicy,
@@ -1170,6 +1171,35 @@ def execute_slices(
     zephyr_base = workspace_dir / "zephyr" if workspace_dir is not None else None
     if zephyr_base is not None and not zephyr_base.is_dir():
         zephyr_base = None
+    # tan-cli#1209: resolved ONCE for the whole run, same reasoning as
+    # `zephyr_base` just above -- it depends only on `sdk_root` (this run's
+    # checkout), never on a per-slice plan field, so recomputing it inside
+    # the loop below would just repeat the same read+stamp-check on every
+    # slice for no different answer. `None` when `sdk_root` is unresolved,
+    # the manifest is missing/malformed, or the stamped store does not
+    # match this checkout's pin -- [`zephyr_env_overrides`] then fills
+    # nothing, matching today's behaviour exactly.
+    #
+    # tan-cli#1209 review MINOR: also `None` when `host_scan_has_toolchain
+    # (sdk_root)` -- a USABLE `zephyr-sdk*` install (a real cross compiler
+    # inside it, not just a name match) CMake's own prefix scan (or the
+    # user package registry) can already find on this host, independent of
+    # tan's store. tan's own store is `-t arm-zephyr-eabi` ONLY; forcing it
+    # ahead of a fuller, scan-visible host SDK could fail a non-ARM slice
+    # that configured fine unaided, and would make `tan build` trust a
+    # different toolchain than `tan doctor` reports
+    # (`doctor_cmd._zephyr_sdk_scan_roots` ranks that same store LAST, never
+    # first). Checked here, not inside `verified_store_dir` itself: that
+    # function answers "is the pin satisfied", a fact independent of what
+    # else is on the host.
+    #
+    # tan-cli#1209 review MAJOR: `host_scan_has_toolchain` requires an
+    # actual compiler inside the candidate, not merely a directory whose
+    # name STARTS WITH `zephyr-sdk` -- an empty `~/zephyr-sdk-leftover/`
+    # must not silently disable tan's own verified store below.
+    verified_store = (
+        verified_store_dir(sdk_root) if not host_scan_has_toolchain(sdk_root) else None
+    )
 
     for sl in plan.slices:
         if sl.backend not in KNOWN_BACKENDS:
@@ -1286,7 +1316,12 @@ def execute_slices(
         slice_gap_fillers = [
             *gap_fillers,
             *zephyr_env_overrides(
-                zephyr_base, sdk_root_path, sl.env, sl.env_append_path, env_lookup
+                zephyr_base,
+                sdk_root_path,
+                sl.env,
+                sl.env_append_path,
+                env_lookup,
+                toolchain_store=verified_store,
             ),
         ]
         # Bound to a name rather than inlined into the `update` call: the

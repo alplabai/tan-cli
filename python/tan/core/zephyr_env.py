@@ -29,6 +29,7 @@ def zephyr_env_overrides(
     slice_env: dict[str, str],
     env_append_path: dict[str, list[str]],
     inherited: Callable[[str], str | None],
+    toolchain_store: Path | None = None,
 ) -> list[tuple[str, str]]:
     """Consumer-mechanism env the plan deliberately does NOT carry, filled in
     as a gap-filler so `tan build` runs a plan slice with no manual setup:
@@ -40,6 +41,29 @@ def zephyr_env_overrides(
       `env_append_path` for an SDK-emitted plan; the hand-derived value here
       is only a FALLBACK for a plan that carries neither the slice-env pin
       nor the `env_append_path` entry (plan wins / CLI fills gaps).
+    * `ZEPHYR_SDK_INSTALL_DIR` (tan-cli#1209) -- CMake's `FindZephyr-sdk.cmake`
+      only finds `~/.alp/toolchains/zephyr-sdk-<v>-arm-zephyr-eabi/` by being
+      TOLD where it is: the module's own prefix scan looks one level too
+      shallow under `$HOME` to ever see it. `toolchain_store` is that
+      store's path, already verified (`tan.commands.build.toolchain.
+      verified_store_dir`) against THIS checkout's pinned manifest digest --
+      callers pass `None` when it isn't verified, and this function fills
+      nothing in that case. Precedence, per the ruling: a plan slice pin
+      wins outright (checked below); an inherited `ZEPHYR_SDK_INSTALL_DIR`
+      naming a path that EXISTS is the user's deliberate choice and is taken
+      verbatim (never normalised, never probed for anything beyond
+      existence); only when it is unset, blank, or names a path that does
+      NOT exist does tan's own stamped store fill the gap (tan-cli#1209
+      review MINOR: an earlier version skipped the existence probe here,
+      diverging from `build.toolchain.resolve_toolchain_root`'s own rule for
+      the SAME variable -- "set but naming a path that does NOT exist -- and
+      the empty string -- fall THROUGH to the scan" -- and from
+      `doctor_cmd._zephyr_sdk_detected_root`'s stricter validity check; a
+      stale pointer to a deleted SDK made `tan build` fail cmake's configure
+      while `tan doctor` reported the store present). A wrong/missing
+      `sdk_root` or an unstamped/stale store already resolves
+      `toolchain_store` to `None` upstream, so this function's own
+      contribution is exactly the precedence, nothing more.
 
     Never overrides a key THIS slice's env pins.
 
@@ -70,4 +94,31 @@ def zephyr_env_overrides(
             apply_env_append(base, {"EXTRA_ZEPHYR_MODULES": [sdk]})
             if base:
                 out.append(("EXTRA_ZEPHYR_MODULES", base[0][1]))
+
+    # tan-cli#1209: plan pin > inherited (verbatim, IFF it names a path that
+    # still exists -- a stale pointer to a deleted SDK is not tan's to keep
+    # deferring to, matching resolve_toolchain_root's rule for the same
+    # variable) > tan's own verified store > nothing.
+    if (
+        "ZEPHYR_SDK_INSTALL_DIR" not in slice_env
+        and not _inherited_path_exists(inherited("ZEPHYR_SDK_INSTALL_DIR"))
+        and toolchain_store is not None
+    ):
+        out.append(("ZEPHYR_SDK_INSTALL_DIR", str(toolchain_store)))
     return out
+
+
+def _inherited_path_exists(value: str | None) -> bool:
+    """Existence probe for an inherited env value that names a path -- the
+    same rule `build.toolchain.resolve_toolchain_root` already applies to
+    this SAME `ZEPHYR_SDK_INSTALL_DIR` variable: blank is never trusted, and
+    neither is a path that does not exist. `OSError` (an unencodable or
+    too-long path on this platform) reads as "cannot confirm it exists",
+    not a crash -- matching that function's own `except OSError: exists =
+    False`."""
+    if not value:
+        return False
+    try:
+        return Path(value).exists()
+    except OSError:
+        return False
