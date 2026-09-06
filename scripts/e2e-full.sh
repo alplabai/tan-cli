@@ -1233,6 +1233,24 @@ PY
     # clean-container run, not by reading this diff. `doctorPre.out` stays
     # captured, and its verdict printed, purely so a reader of this log can
     # see what doctor reported at this point in the run.
+    #
+    # tan-cli#1209 review MAJOR, said plainly rather than left to a source
+    # comment nobody reading the CI log sees: issue #1209's own stated
+    # acceptance is "a genuine end-to-end run: `tan bootstrap` on a host
+    # with no pre-existing SDK, then `tan build`, with no manual SDK
+    # install and no hand-exported `ZEPHYR_SDK_INSTALL_DIR`, producing a
+    # real ELF." This step's own `west sdk install` below still runs on
+    # EVERY host, unconditionally -- so THAT scenario is NOT exercised by
+    # any leg of this harness today, and the `ZEPHYR_SDK_INSTALL_DIR`
+    # gap-filler #1209 actually ships is verified only by
+    # `tests/commands/test_execute_zephyr_env.py` and
+    # `tests/commands/test_build_toolchain_root.py`, never end-to-end
+    # against a real `west build`. This is not fixed here: doing so means
+    # flipping the guard above unverified against a real clean container,
+    # exactly the mistake tan-cli#1186's own guard here was reverted for
+    # (see the tan-cli#1206 review paragraph above) -- trusting insufficient
+    # evidence a second time would not close this gap, it would repeat it.
+    note "ACCEPTANCE GAP (#1209): this step's own west sdk install runs unconditionally below -- the issue's stated 'no manual SDK install, no hand-exported ZEPHYR_SDK_INSTALL_DIR' scenario is NOT exercised by this harness"
     PRE_DETAIL=$(python3 - "$WORK/doctorPre.out" <<'PY'
 import json,sys
 try: d=json.load(open(sys.argv[1]))
