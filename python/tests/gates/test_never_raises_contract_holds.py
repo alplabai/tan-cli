@@ -2973,7 +2973,23 @@ class TestVerifiedStoreDir:
         assert toolchain.verified_store_dir(str(tmp_path)) is None
 
     def test_symlink_loop(self, tmp_path):
-        _symlink_loop(self._manifest_path(tmp_path))
+        # tan-cli#1209 follow-up review: this test's own added-line-vs-
+        # baseline check flagged this as a regression against a clean-`dev`
+        # baseline run on a Windows host with no symlink privilege
+        # (`WinError 1314`) -- `_symlink_loop`'s bare `path.symlink_to(path)`
+        # raises OUTSIDE the function under test, before
+        # `verified_store_dir` ever runs, so this failed for a reason
+        # unrelated to the contract it exists to check. The file's other
+        # ~18 pre-existing `test_symlink_loop` siblings share the same
+        # unguarded shape and are each already an accepted baseline entry on
+        # `dev` -- out of scope to retrofit here. This one is NEW on this
+        # branch, so it gets the skip instead of joining them: a host that
+        # cannot create the symlink cannot exercise this shape at all,
+        # which is "not applicable", not "the contract broke".
+        try:
+            _symlink_loop(self._manifest_path(tmp_path))
+        except OSError as exc:
+            pytest.skip(f"host cannot create a symlink loop: {exc}")
         assert toolchain.verified_store_dir(str(tmp_path)) is None
 
     @_skip_as_root
