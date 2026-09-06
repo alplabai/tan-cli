@@ -528,8 +528,13 @@ def test_every_extra_conf_file_named_by_a_template_is_a_planned_file(template_id
 #:
 #: * the `E1M-AEN801` tree's `README.md`/`board.yaml` both tell an Alif
 #:   customer to re-scaffold at `E1M-V2M101` for the DEEPX path
-#:   (tan-cli#814) -- six entries, each counting 2 (one mention per file),
-#:   one per AEN-family SKU that renders this tree (`E1M-AEN301`..`E1M-AEN801`);
+#:   (tan-cli#814) -- one entry per AEN-family SKU that renders this tree,
+#:   each counting 2 (one mention per file): `E1M-AEN301`..`E1M-AEN801`, plus
+#:   `E1M-AEN803` (tan-cli#1218 -- a memory-population variant of the same
+#:   Ensemble E8 module added to the catalogue after this comment and the
+#:   six-entry count above it were written; its `edge-ai-starter` tree is
+#:   byte-identical to `E1M-AEN801`'s for this sentence, so it carries the
+#:   same legitimate pointer, not a substitution gap);
 #: * the `E1M-V2N101` tree's `README.md` names BOTH `E1M-V2M101` and
 #:   `E1M-V2M102` as DEEPX-equipped (tan-cli#946 -- see
 #:   `scaffold_byte_parity.py`'s `DELIBERATE_EDITS` entry
@@ -594,6 +599,13 @@ _ALLOWED_CROSS_SKU_MENTIONS: dict[tuple[str, str, str], int] = {
     ("edge-ai-starter", "E1M-AEN601", "E1M-V2M101"): 2,
     ("edge-ai-starter", "E1M-AEN701", "E1M-V2M101"): 2,
     ("edge-ai-starter", "E1M-AEN801", "E1M-V2M101"): 2,
+    # tan-cli#1218: E1M-AEN803 (a memory-population variant of E1M-AEN801's
+    # Ensemble E8 module, added to the SKU catalogue after the entries
+    # above) renders this tree byte-identical to E1M-AEN801's for the same
+    # DEEPX re-scaffold sentence in README.md and board.yaml -- the same
+    # legitimate pointer, not a substitution gap; verified by diffing the
+    # planned content, not assumed from the naming.
+    ("edge-ai-starter", "E1M-AEN803", "E1M-V2M101"): 2,
     ("edge-ai-starter", "E1M-V2N101", "E1M-V2M101"): 1,
     ("edge-ai-starter", "E1M-V2N101", "E1M-V2M102"): 1,
     ("edge-ai-starter", "E1M-V2N102", "E1M-V2M101"): 1,
