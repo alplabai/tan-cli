@@ -91,6 +91,23 @@ needs_oracle_sdk = pytest.mark.skipif(
     ),
 )
 
+#: `needs_oracle_sdk` requires the RETIRED `scripts/alp_cli/new_som.py` to
+#: still exist. tan-cli#1220's `ospi_memories:`/`hyperram:` scaffold has no
+#: oracle to diff against at all -- alp-sdk#1944 declined to add one, and this
+#: port is the native destination -- so gating it behind `needs_oracle_sdk`
+#: would skip on every current alp-sdk checkout (`210e9fedc` retired the whole
+#: `scripts/alp_cli/` surface) and prove nothing. It needs only the real
+#: `som-preset-v1.schema.json` / `metadata/boards/*.yaml` a bound
+#: `ALP_SDK_ROOT` provides, so it gets its own, lighter skip condition.
+needs_sdk_schemas = pytest.mark.skipif(
+    _SDK_ROOT is None
+    or not (_SDK_ROOT / "metadata" / "schemas" / "som-preset-v1.schema.json").is_file(),
+    reason=(
+        "set ALP_SDK_ROOT to an alp-sdk checkout carrying "
+        "metadata/schemas/som-preset-v1.schema.json"
+    ),
+)
+
 
 def _load_oracle_command():
     sdk_scripts = str(_SDK_ROOT / "scripts")
@@ -579,6 +596,100 @@ def test_written_preset_and_soc_content_are_correct(tmp_path):
         )
     )
     assert soc_doc["notes"], "SoC skeleton notes[] must not be empty"
+
+
+# ---------------------------------------------------------------------------
+# ospi_memories:/hyperram: scaffold for alif:ensemble parts (tan-cli#1220)
+# ---------------------------------------------------------------------------
+
+
+@needs_sdk_schemas
+def test_alif_ensemble_scaffolds_ospi_memories_and_hyperram(tmp_path):
+    """tan-cli#1220: `ospi_memories:` is a MAPPING keyed by OSPI controller
+    instance (`ospi0`, `ospi1`, ...), per `som-preset-v1.schema.json`
+    `on_module.ospi_memories.propertyNames.pattern == "^ospi[0-9]+$"` -- NOT
+    the flat list the issue's own wording implied. Written (not dry-run) so
+    the assertions read the real generated file; exit 0 already proves the
+    block validates against the real schema self-check (`_internal_error`
+    exits 1 and never reaches `Created` otherwise)."""
+    import yaml
+
+    result = runner.invoke(
+        app,
+        [
+            "--sdk-root",
+            str(_SDK_ROOT),
+            "--output-root",
+            str(tmp_path),
+            "--sku",
+            "E1M-AEN302",
+            "--soc-ref",
+            "alif:ensemble:e9",
+            "--family",
+            "alif-ensemble",
+            "--default-board",
+            "E1M-EVK",
+            "--default-hw-rev",
+            "r1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "validates against som-preset-v1" in result.output
+
+    preset_text = (tmp_path / "metadata" / "e1m_modules" / "E1M-AEN302.yaml").read_text(
+        encoding="utf-8"
+    )
+    doc = yaml.safe_load(preset_text)
+    ospi = doc["on_module"]["ospi_memories"]
+    assert set(ospi) == {"ospi0"}, "keyed by OSPI controller instance, not a flat list"
+    assert ospi["ospi0"] == {
+        "chip": "TBD",
+        "capacity_mbit": "TBD",
+        "chip_select": 0,
+        "role": "tbd",
+    }
+    hyperram = doc["on_module"]["hyperram"]
+    assert hyperram == {
+        "chip": "TBD",
+        "capacity_mbit": "TBD",
+        "interface": "ospi0",
+        "chip_select": 1,
+    }
+
+
+@needs_sdk_schemas
+def test_ospi_memories_and_hyperram_are_not_scaffolded_outside_alif_ensemble(tmp_path):
+    """Negative control for tan-cli#1220's gate: a non-`alif:ensemble` part
+    gets neither block -- `ospi_memories:`'s own schema description scopes
+    the field to the AEN family, and this must stay a `soc_ref`-vendor/family
+    check, not a blanket render."""
+    import yaml
+
+    result = runner.invoke(
+        app,
+        [
+            "--sdk-root",
+            str(_SDK_ROOT),
+            "--output-root",
+            str(tmp_path),
+            "--sku",
+            "E1M-XTST9",
+            "--soc-ref",
+            "test:testfam:testpart9",
+            "--family",
+            "test-fam",
+            "--default-board",
+            "E1M-EVK",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    preset_text = (tmp_path / "metadata" / "e1m_modules" / "E1M-XTST9.yaml").read_text(
+        encoding="utf-8"
+    )
+    doc = yaml.safe_load(preset_text)
+    assert "ospi_memories" not in doc["on_module"]
+    assert "hyperram" not in doc["on_module"]
 
 
 @needs_oracle_sdk

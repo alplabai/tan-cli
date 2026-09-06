@@ -105,6 +105,7 @@ import typer
 from tan.commands.doctor_cmd import probe
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.metadata_schema import schema_errors
+from tan.core.new_som_ospi import is_alif_ensemble, render_ospi_memories_and_hyperram
 from tan.core.sdk_discovery import (
     _planner_python,
     global_default_foreign_project_issue,
@@ -707,6 +708,8 @@ def _render_preset(
     a(f"  silicon:              {soc_ref}")
     a("  pmic_main:            TBD                    # main PMIC part (BOM)")
     a("  eeprom:               TBD                    # identity EEPROM part (BOM)")
+    if is_alif_ensemble(vendor_slug, family_slug):
+        lines.extend(render_ospi_memories_and_hyperram())
     a("  # i2c_devices:                               # per-bus I2C device tables;")
     a("  #   <bus_name>:                              # bus names are a per-family")
     a("  #     bus_master: TBD                        # fact (schematic).  Chip")
