@@ -9,7 +9,15 @@
       "_place_pinned"
     ],
     [
-      432,
+      84,
+      "_candidate_regions"
+    ],
+    [
+      133,
+      "_region_ipc_eligibility"
+    ],
+    [
+      476,
       "resolve_carve_outs"
     ]
   ]

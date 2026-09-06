@@ -1573,6 +1573,22 @@ EXEMPT_FROM_RELOCATION_TRACKING: frozenset[str] = frozenset({
     # tracks is a REGISTRY of alp-sdk facts (a schema property, a
     # metadata/quality-tasks-v1.json task id), not a port of alp-sdk code.
     "sdk_capability.py",
+    # alp-sdk#1365 split B hand-port: `aperture.py` DOES have
+    # an alp-sdk origin -- `scripts/alp_orchestrate/aperture.py`, added by
+    # alp-sdk#1365 split B (commits 89b619a5 / 1f132f4f on
+    # feat/1365b-derived-memory-class) -- so this is a DELIBERATE, TEMPORARY
+    # stretch of this set's own "no alp-sdk source at all" rule, not a claim
+    # that the module is tan-native. It cannot join PINNED_HASHES today: that
+    # dict is asserted against the single shared PINNED_SDK_COMMIT
+    # (ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2), which predates split B, so
+    # `scripts/alp_orchestrate/aperture.py` does not exist there yet --
+    # adding it to PINNED_HASHES now would fail
+    # `test_relocated_planner_modules_match_the_pinned_sdk_audit` the moment
+    # CI binds a checkout at that pin ("gone from the bound SDK checkout").
+    # Move this entry to PINNED_HASHES (keyed the same as its alp-sdk
+    # basename) the same day PINNED_SDK_COMMIT advances past split B's merge
+    # -- do not leave it here once that pin moves.
+    "aperture.py",
 })
 
 
