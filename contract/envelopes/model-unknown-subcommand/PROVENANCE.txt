@@ -42,3 +42,32 @@ also pins the shipped subcommand list. `data` is `_empty_data(None)`'s
 subcommand falls back to.
 
 Fully deterministic: nothing on this path reads the host, so no `env.json`.
+
+Re-recorded on : 2026-09-05
+Recorded from  : the SHIPPING Python CLI, `tan 0.6.1-rc1.dev0`
+                 (`python/tan/version.py::TAN_VERSION`).
+Issue          : tan-cli#674
+Branch         : feat/674-tan-model-list (off dev @ 2bf473ed)
+
+What changed in the golden (re-record)
+---------------------------------------
+One word added to the message's trailing inventory, nothing else moved,
+`expected.exit` still 1:
+
+    - "issues"[0]."message": "Unknown model subcommand: bogus. Available: build, doctor, check."
+    + "issues"[0]."message": "Unknown model subcommand: bogus. Available: build, doctor, check, list."
+
+Why: `python/tan/commands/model_cmd.py`'s `SUBCOMMANDS` gained a fourth,
+real, in-process subcommand, `list` (tan-cli#674 -- what `board.yaml`
+declares next to what `--out` already holds, read-only, no SDK metadata
+consulted at all). The unknown-subcommand refusal's trailing inventory is
+rendered straight from `SUBCOMMANDS` itself (`', '.join(SUBCOMMANDS)`), so
+adding the fourth name to that tuple is exactly the wire change this golden
+exists to catch -- `data` is untouched (still `_empty_data(None)`'s
+`build`-shaped fallback: an unrecognised subcommand never reaches `list`'s
+own empty payload either).
+
+How it was captured: identical procedure to the first recording above
+(`fresh_dir` / `copy_fixture_inputs` / `case_env` / `normalise`, the same
+`args.txt`), re-run against the shipping CLI after `list` landed. Still fully
+deterministic, still no `env.json`.
