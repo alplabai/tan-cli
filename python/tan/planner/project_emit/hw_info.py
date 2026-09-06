@@ -2,14 +2,25 @@
 """C header emission for `<alp/hw_info.h>` (`--emit hw-info-h`).
 
 RELOCATED (was alp-sdk `scripts/alp_project_emit/hw_info.py`) -- see this
-package's `__init__.py` for the move's contract. Import repoint only; this
-emitter reads nothing off disk, so nothing else could change.
+package's `__init__.py` for the move's contract.
+
+alp-sdk#1964 (tan-cli#1156 hand-port) made this emitter a second reader of
+`hw-revisions.yaml`, through `board_designator()`: `ALP_HW_BUILD_SOM_HW_REV`
+now carries the COMPOSED `<board_datecode>-<hw_rev>` form (`"2626-r2"`), not
+the bare revision key, matching what `scripts/program_eeprom.py` writes into
+the manifest and what the boot banner compares the live EEPROM read
+against. The bare key is untouched everywhere it is a LOOKUP key
+(board.yaml, `family_revision_known()`, `pad_route_overrides`) -- only this
+identity/compare surface composes. A family that declares no
+`board_datecode:` is unaffected (`board_designator` returns the bare key).
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
+from ..sdk_compat import board_designator, load_family_table
 from ..som_metadata import _sku_family
 
 
@@ -71,6 +82,7 @@ def _emit_hw_info_h(
     *,
     v2_cores: dict[str, str] | None = None,
     v2_selected_core: str | None = None,
+    metadata_root: Path,
 ) -> str:
     """Emit <alp_hw_info_build.h> -- build-time identifier companion to
     <alp/hw_info.h>.
@@ -87,12 +99,18 @@ def _emit_hw_info_h(
     The v2 path also emits `ALP_HW_BUILD_CORES` (comma-separated list of
     every non-off core id) and one `ALP_HW_BUILD_HAS_<id>` macro per
     non-off core so consumers can `#ifdef` on the topology.
+
+    `metadata_root` (alp-sdk#1964) resolves this SKU's family
+    `hw-revisions.yaml` (via `load_family_table`) so `ALP_HW_BUILD_SOM_HW_REV`
+    can be composed through `board_designator` -- see the module docstring.
     """
     sku = project["som"]["sku"]
     som_hw_rev = (project["som"].get("hw_rev")
                   or sku_preset.get("default_hw_rev")
                   or "unknown")
     family = _sku_family(sku)
+    som_hw_rev = board_designator(
+        load_family_table(metadata_root, family), som_hw_rev)
 
     board_block = project.get("board") or {}
     board_name = board_block.get("name") or ""

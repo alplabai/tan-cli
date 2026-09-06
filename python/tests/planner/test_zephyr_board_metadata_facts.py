@@ -235,6 +235,30 @@ def test_a_non_e8_aen_sku_includes_its_own_peripherals_overlay():
         assert "ensemble_e8" not in emitted, f"{name} still includes the E8 overlay"
 
 
+def test_the_ae822_port15_risk_note_is_scoped_to_actual_e8_silicon():
+    """The regression `test_a_non_e8_aen_sku_includes_its_own_peripherals_overlay`
+    above caught for real: `on-module-links.yaml`'s `rtc_alarm.risk` string
+    is evidenced ONLY against "The AE822 DFP" (the E8 part's own datasheet),
+    but the file scopes itself to "the E1M-AEN family", not to a part -- so
+    an unscoped emitter put an E8-specific register-layout warning into
+    every AEN SKU's `.dts`, E3/E4/E6 included. The fix gates it on the SoC
+    JSON's own `part`, not on the on-module wiring (which IS shared across
+    the family): an E1M-AEN301 (E3) must not carry it, an E1M-AEN801 (E8,
+    unmutated -- this IS the AE822 part the note is evidenced against) must
+    still carry it.
+    """
+    with _MutatedMetadata() as mm:
+        dts_e8 = _dts(_emit("E1M-AEN801", "m55_hp", mm.root))
+    assert "AE822 DFP warns for port 15" in dts_e8
+    assert "LPGPIO_CTRL_n register" in dts_e8
+
+    with _MutatedMetadata() as mm:
+        _port_aen301(mm)
+        dts_e3 = _dts(_emit("E1M-AEN301", "m55_hp", mm.root))
+    assert "AE822 DFP warns for port 15" not in dts_e3
+    assert "LPGPIO_CTRL_n register" not in dts_e3
+
+
 def test_the_peripherals_overlay_is_read_from_the_soc_json():
     """Not merely derived from the part name: change only the declared
     overlay and the emitted include follows it."""

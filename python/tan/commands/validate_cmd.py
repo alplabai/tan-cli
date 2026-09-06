@@ -1010,11 +1010,13 @@ def _sarif_document(
     SARIF 2.1.0 schema.
 
     tan-cli#1097 review measured that alp-sdk's own `to_sarif`/`_uri` --
-    what "mirroring" above still means for shape -- emits `artifactLocation
-    .uri` bare, with no scheme; this function's `uri` handling has diverged
-    from it on purpose (see [`path_to_uri_reference`]). alp-sdk owes the
-    same fix -- tracked as alp-sdk#1909, not fixed here (a different repo,
-    different release cadence).
+    what "mirroring" above still means for shape -- used to emit
+    `artifactLocation.uri` bare, with no scheme, before this function's `uri`
+    handling diverged from it on purpose (see [`path_to_uri_reference`]).
+    alp-sdk has since paid that same fix upstream (alp-sdk#1932, `43e5b2cb`,
+    inside the `eff266b6` re-sync range this repo now pins) -- confirmed by
+    reading `diagnostic_format.py`'s own `to_sarif`/`_uri` at that ref, not
+    fixed here (a different repo, different release cadence).
 
     tan-cli#1117: a RELATIVE `artifactLocation.uri` now carries a
     `uriBaseId` naming `_SARIF_URI_BASE_ID`, and the `run` declares that id

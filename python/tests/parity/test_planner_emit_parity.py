@@ -899,7 +899,15 @@ def _tan_generate_tree(args: list[str], destination: Path,
     return {p.name: p.read_bytes() for p in destination.iterdir()}
 
 
-def test_tan_generate_writes_a_zephyr_board_tree_byte_for_byte(planners, tmp_path):
+@pytest.mark.parametrize(
+    "board_rel,core",
+    [
+        ("multicore/rpmsg-aen", "m55_he"),
+        ("multicore/rpmsg-v2n", "m33_sm"),
+    ],
+    ids=["aen", "v2n"],
+)
+def test_tan_generate_writes_a_zephyr_board_tree_byte_for_byte(planners, tmp_path, board_rel, core):
     """`--emit zephyr-board` end to end, both engines, through the real CLI.
 
     The one target whose `--output` is a DIRECTORY, so it is the only one
@@ -908,14 +916,23 @@ def test_tan_generate_writes_a_zephyr_board_tree_byte_for_byte(planners, tmp_pat
     beside the board directory instead of inside it. `west build --board-root
     build/boards` is what consumes the result, so a stray level of nesting makes
     the board undiscoverable rather than wrong.
+
+    Parametrised over BOTH families the hand-ported `eff266b6` re-sync taught
+    `zephyr_board.py` to emit (tan-cli#1156): the pre-existing AEN branch
+    (`m55_he`) and the new V2N/V2M pinctrl.dtsi/`_defconfig` branch (`m33_sm`,
+    `_v2n_pinctrl_dtsi`/`_v2n_defconfig`). Before this, the V2N/V2M half --
+    ~230 new emitted lines -- had zero coverage in this automated parity
+    layer; a silent regression there is a wrong pin in a generated `.dtsi`.
     """
     upstream, _ = planners
     assert SDK is not None
-    board = SDK / "examples" / "multicore" / "rpmsg-aen" / "board.yaml"
+    board = SDK / "examples" / board_rel / "board.yaml"
     if not board.is_file():
         pytest.skip(f"{board} not in this checkout")
-    core = _first_core_with_os(upstream.load_board_yaml(board), "zephyr")
-    assert core is not None
+    resolved_core = _first_core_with_os(upstream.load_board_yaml(board), "zephyr")
+    assert resolved_core == core, (
+        f"{board}: expected zephyr core {core!r}, board.yaml resolves to "
+        f"{resolved_core!r} -- update the parametrize table above")
 
     args = ["--target", "zephyr-board", "--core", core, "--board-yaml", str(board)]
     spawned = _tan_generate_tree(args, tmp_path / "sub", "subprocess")

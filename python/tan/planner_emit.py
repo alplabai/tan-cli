@@ -438,6 +438,7 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
             shaped, project.som_preset, project.board_preset,
             v2_cores={cid: s.os for cid, s in project.cores.items()},
             v2_selected_core=core,
+            metadata_root=project.effective_metadata_root(),
         )
 
     # west-libraries
