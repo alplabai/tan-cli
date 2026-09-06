@@ -347,6 +347,12 @@ def test_frozen_build_without_the_extra_reports_pyserial_missing_not_a_tan_bug(m
     assert "monitor.internal-failure" not in codes
     assert result.exit_code == 1, f"expected RUNTIME_FAILURE, got {result.exit_code}"
     assert 'tan-cli[monitor]' in envelope["issues"][0]["message"]
+    # tan-cli#1213: `contract/envelopes/monitor-no-port` is PUBLISHED, pairing
+    # `["monitor", "--format", "json"]` with a `data.availablePorts` -- and this
+    # is that same argv answering without the extra. The ABSENCE of that key
+    # here is the caveat `contract/issue-codes.json`'s `monitor.no-port` entry
+    # states to consumers, so it is pinned rather than left to prose.
+    assert envelope["data"] == {"schemaVersion": "1"}, envelope
 
 
 def test_unfrozen_build_without_pyserial_reports_the_same_code(monkeypatch):
@@ -361,6 +367,10 @@ def test_unfrozen_build_without_pyserial_reports_the_same_code(monkeypatch):
     envelope = json.loads(result.stdout)
     assert [i["code"] for i in envelope["issues"]] == ["monitor.pyserial-missing"], envelope
     assert result.exit_code == 1
+    # The `data` payload must not diverge either (tan-cli#1213): a consumer
+    # replaying the published `monitor-no-port` args on a `pip install tan-cli`
+    # gets THIS envelope, and it carries no `availablePorts` at all.
+    assert envelope["data"] == {"schemaVersion": "1"}, envelope
 
 
 def test_test_ports_env_replaces_pyserial_enumeration_even_when_pyserial_is_blocked(
