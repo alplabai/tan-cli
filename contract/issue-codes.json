@@ -2132,6 +2132,14 @@
       "note": "tan-cli#789 review (f): `model build` wrote a package but could not decode its manifest to report the compiler caveats it ships with (`package.read_manifest_file` raised). Reported rather than swallowed because silence here is indistinguishable from `model.target-caveat`'s absence, i.e. from \"this package has no caveats\" -- the exact ambiguity the caveat field exists to end. A WARNING, not an error: the artifact IS on disk, and downgrading a successful build to a failure over a diagnostic read would be the wrong trade. A plain `Issue(\"model.caveat-readback-failed\", ...)` construction in `_shipped_caveat_issues`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.artifact-stale-unknown",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/core/model_list.py",
+      "note": "tan-cli#674 review MAJOR 1: `model list`'s per-model staleness check (`_artifact_status`) could not read back what it needed to compare a package's recorded `src_sha` against its CURRENT `source` file -- a `board.yaml` naming a `source` that no longer resolves, or a corrupt/truncated `.alpmodel` container, both raise here. The row still degrades to the bare `exists: True` shape (staleness is a bonus fact about a build that DID succeed, not a reason to hide that the package exists), but the degrade used to be entirely silent: `ok: true`, `issues: []`, no `stale` key, indistinguishable from a package `list` successfully confirmed is fresh. A plain `Issue(\"model.artifact-stale-unknown\", ...)` construction in `_artifact_status`, mirroring `model.caveat-readback-failed`'s own readback-failure shape above. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "monitor.launch-failed",
       "status": "reserved",
       "severity": "error",

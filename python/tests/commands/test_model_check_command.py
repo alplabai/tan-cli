@@ -109,7 +109,7 @@ def test_unknown_subcommand_now_lists_check_too(tmp_path):
     result = runner.invoke(app, ["bogus", "--format", "json"], catch_exceptions=False)
     assert result.exit_code == 1
     doc = envelope(result)
-    assert doc["issues"][0]["message"].endswith("Available: build, doctor, check.")
+    assert doc["issues"][0]["message"].endswith("Available: build, doctor, check, list.")
 
 
 def test_no_sdk_resolvable_refuses(tmp_path):
