@@ -28,9 +28,12 @@ from tan.commands.build.toolchain import (
     NO_TOOLCHAIN_ADVICE,
     ToolchainResolution,
     _scan_roots,
+    host_scan_has_toolchain,
     resolve_toolchain_root,
+    verified_store_dir,
 )
 from tan.commands.build_cmd import _toolchain_for_plan
+from tan.core import toolchain_provision as tp
 
 
 def _install(parent, name="zephyr-sdk-1.0.1"):
@@ -39,6 +42,28 @@ def _install(parent, name="zephyr-sdk-1.0.1"):
     (measured -- an empty `zephyr-sdk-9.9.9` resolved)."""
     root = parent / name
     root.mkdir(parents=True)
+    return root
+
+
+def _plant_compiler(root):
+    """Make @root pass `host_scan_has_toolchain`'s validity probe
+    (`_host_toolchain_is_usable`) -- the real `arm-zephyr-eabi-gcc` binary,
+    at the same path `doctor_cmd._zephyr_sdk_root_valid` checks. Unlike
+    `_install` above, this IS a requirement here: `host_scan_has_toolchain`
+    (unlike `_candidates`/`resolve_toolchain_root`) refuses to count a
+    name-only directory (tan-cli#1209 review MAJOR).
+
+    Reads `bt._ZEPHYR_SDK_TOOLCHAIN_DIR`/`bt.os.name` -- the SAME constant
+    and module the production probe reads, not a second, independently
+    spelled literal here -- mirroring `test_doctor_command._plant_zephyr_sdk`
+    exactly (tan-cli#286 third pass's own lesson: two hand-spelled layouts
+    can silently agree with each other instead of with the real probe)."""
+    from tan.commands.build import toolchain as bt
+
+    exe = "arm-zephyr-eabi-gcc.exe" if bt.os.name == "nt" else "arm-zephyr-eabi-gcc"
+    bin_dir = root.joinpath(*bt._ZEPHYR_SDK_TOOLCHAIN_DIR)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / exe).write_bytes(b"")
     return root
 
 
@@ -391,3 +416,180 @@ def test_the_token_is_found_through_a_json_escaped_dollar(monkeypatch):
     )
     assert '\\u0024' in text
     assert _toolchain_for_plan(text) is sentinel
+
+
+# ---------------------------------------------------------------------------
+# `verified_store_dir` (tan-cli#1209) -- pin+stamp, not the `zephyr-sdk*`
+# scan above: ONE trustworthy answer for a caller wiring
+# `ZEPHYR_SDK_INSTALL_DIR` into a spawned child's env, using the SAME
+# `stamp_matches_pin` predicate `bootstrap_cmd.toolchain_phase` and
+# `doctor_cmd.toolchain_check` already apply -- never `resolve_toolchain_
+# root`'s own ambiguity-refusing scan, which this function does not call.
+# `tests/conftest.py`'s autouse `_scrub_sdk_discovery_env` already points
+# `HOME`/`USERPROFILE` at a fresh per-test directory and scrubs
+# `ALP_TOOLCHAIN_ROOT`/`ZEPHYR_SDK_INSTALL_DIR`, so `verified_store_dir`'s
+# own `_toolchain_store_scan_root()` call resolves to a `.alp/toolchains`
+# under that fresh HOME here too.
+# ---------------------------------------------------------------------------
+
+_MANIFEST_TEXT = json.dumps(
+    {
+        "zephyrSdk": {
+            "version": "1.0.1",
+            "baseUrl": "https://example.invalid/",
+            "artifacts": [
+                {
+                    "host": "linux-x86_64", "component": "minimal-sdk",
+                    "filename": "x.tar.xz", "sizeBytes": 1, "sha256": "a" * 64,
+                }
+            ],
+        }
+    }
+)
+
+
+def _sdk_root_with_manifest(tmp_path, manifest_text: str = _MANIFEST_TEXT):
+    sdk_root = tmp_path / "alp-sdk"
+    (sdk_root / "metadata").mkdir(parents=True)
+    (sdk_root / "metadata" / "toolchains.json").write_text(manifest_text, encoding="utf-8")
+    return sdk_root
+
+
+def _write_stamp(store_dir, manifest, *, digest=None) -> None:
+    store_dir.mkdir(parents=True, exist_ok=True)
+    stamp = tp.ToolchainStamp(manifest.version, digest or manifest.digest(), "triple")
+    (store_dir / tp.STAMP_FILENAME).write_text(tp.render_stamp(stamp), encoding="utf-8")
+
+
+def test_verified_store_dir_is_none_without_an_sdk_root():
+    assert verified_store_dir(None) is None
+
+
+def test_verified_store_dir_is_none_with_no_manifest(tmp_path):
+    sdk_root = tmp_path / "alp-sdk-with-nothing"
+    sdk_root.mkdir()
+    assert verified_store_dir(str(sdk_root)) is None
+
+
+def test_verified_store_dir_is_none_with_a_malformed_manifest(tmp_path):
+    sdk_root = _sdk_root_with_manifest(tmp_path, "not json")
+    assert verified_store_dir(str(sdk_root)) is None
+
+
+def test_verified_store_dir_is_none_with_no_stamp(tmp_path):
+    """A store directory that exists but was never stamped (or was never
+    installed at all) is not trusted -- directory-exists is never the
+    predicate, matching `stamp_matches_pin`'s own contract."""
+    sdk_root = _sdk_root_with_manifest(tmp_path)
+    from tan.commands.build import toolchain as bt
+
+    store_dir = bt._toolchain_store_scan_root() / tp.store_dir_name("1.0.1")
+    store_dir.mkdir(parents=True)
+
+    assert verified_store_dir(str(sdk_root)) is None
+
+
+def test_verified_store_dir_is_none_with_a_stale_digest_stamp(tmp_path):
+    """ADR 0021: 'a stamped 1.0.1 store against a moved pin is a Fail with a
+    fix, not "a toolchain exists"' -- a version-matching stamp with the WRONG
+    manifest digest must not be trusted."""
+    sdk_root = _sdk_root_with_manifest(tmp_path)
+    manifest = tp.parse_toolchain_manifest(_MANIFEST_TEXT)
+    from tan.commands.build import toolchain as bt
+
+    store_dir = bt._toolchain_store_scan_root() / tp.store_dir_name(manifest.version)
+    _write_stamp(store_dir, manifest, digest="f" * 64)
+
+    assert verified_store_dir(str(sdk_root)) is None
+
+
+def test_verified_store_dir_returns_the_store_when_the_stamp_matches_the_pin(tmp_path):
+    sdk_root = _sdk_root_with_manifest(tmp_path)
+    manifest = tp.parse_toolchain_manifest(_MANIFEST_TEXT)
+    from tan.commands.build import toolchain as bt
+
+    store_dir = bt._toolchain_store_scan_root() / tp.store_dir_name(manifest.version)
+    _write_stamp(store_dir, manifest)
+
+    result = verified_store_dir(str(sdk_root))
+    assert result is not None
+    assert result.resolve() == store_dir.resolve()
+
+
+# ---------------------------------------------------------------------------
+# `host_scan_has_toolchain` (tan-cli#1209 review MINOR) -- the precedence
+# narrowing: tan's own arm-only store must not outrank a fuller, independent
+# host SDK that CMake's own prefix scan would already find.
+# ---------------------------------------------------------------------------
+
+
+def test_host_scan_has_toolchain_is_false_with_nothing_on_the_host(monkeypatch, tmp_path):
+    monkeypatch.setattr("tan.commands.build.toolchain._scan_roots", lambda: [tmp_path])
+    assert host_scan_has_toolchain(None) is False
+
+
+def test_host_scan_has_toolchain_is_true_for_an_independent_host_install(monkeypatch, tmp_path):
+    _plant_compiler(_install(tmp_path, "zephyr-sdk-9.9.9"))
+    monkeypatch.setattr("tan.commands.build.toolchain._scan_roots", lambda: [tmp_path])
+    assert host_scan_has_toolchain(None) is True
+
+
+def test_host_scan_has_toolchain_ignores_an_empty_name_only_leftover(monkeypatch, tmp_path):
+    """tan-cli#1209 review MAJOR: `_candidates` applies no validity probe
+    by design (a non-ARM install is still a real `${TOOLCHAIN_ROOT}`
+    candidate there) -- but a directory that merely STARTS WITH
+    `zephyr-sdk`, with nothing inside it, is not a usable toolchain and
+    must not silently disable tan's own verified store."""
+    _install(tmp_path, "zephyr-sdk-leftover")  # empty: no compiler planted
+    monkeypatch.setattr("tan.commands.build.toolchain._scan_roots", lambda: [tmp_path])
+    assert host_scan_has_toolchain(None) is False
+
+
+def test_host_scan_has_toolchain_ignores_tans_own_store_leaf(monkeypatch, tmp_path):
+    """The `$ALP_TOOLCHAIN_ROOT`-pointed-at-an-ancestor coincidence
+    (`test_alp_toolchain_root_ancestor_with_stamped_leaf_exports_the_leaf_
+    never_home`, `test_execute_zephyr_env.py`): tan's own stamped leaf can
+    sit directly under a directory `_scan_roots()` also names. It must
+    never be double-counted as an INDEPENDENT host toolchain."""
+    from tan.commands.build import toolchain as bt
+
+    sdk_root = _sdk_root_with_manifest(tmp_path)  # pins version 1.0.1
+    store_leaf = _plant_compiler(tmp_path / tp.store_dir_name("1.0.1"))
+    monkeypatch.setattr(bt, "_scan_roots", lambda: [tmp_path])
+    monkeypatch.setattr(bt, "_toolchain_store_scan_root", lambda: tmp_path)
+    assert store_leaf.exists()
+    assert host_scan_has_toolchain(str(sdk_root)) is False
+
+
+def test_host_scan_has_toolchain_sees_a_different_version_leaf_inside_the_store(
+    monkeypatch, tmp_path
+):
+    """tan-cli#1209 review BLOCKER: the store exclusion is keyed on the
+    PER-VERSION leaf (`doctor_cmd._toolchain_store_dir`'s documented form),
+    never the whole store root -- a stamped leaf for a version this
+    checkout no longer pins, sitting in the SAME store next to the current
+    leaf, is a real, independent host toolchain and must still count.
+    Excluding the whole root (the pre-fix form) hid this leaf too, exactly
+    the same mistake tan-cli#1186 already shipped and fixed once for
+    `doctor_cmd`."""
+    from tan.commands.build import toolchain as bt
+
+    sdk_root = _sdk_root_with_manifest(tmp_path)  # pins version 1.0.1
+    old_leaf = _plant_compiler(tmp_path / tp.store_dir_name("0.16.5"))
+    monkeypatch.setattr(bt, "_scan_roots", lambda: [tmp_path])
+    monkeypatch.setattr(bt, "_toolchain_store_scan_root", lambda: tmp_path)
+    assert old_leaf.exists()
+    assert host_scan_has_toolchain(str(sdk_root)) is True
+
+
+def test_host_scan_has_toolchain_still_sees_a_sibling_outside_the_store(monkeypatch, tmp_path):
+    """The ancestor-coincidence exclusion is scoped to the store's own
+    per-version leaf -- a genuinely separate install living OUTSIDE it (a
+    normal scan root with no `$ALP_TOOLCHAIN_ROOT` override at all) still
+    counts, proving the exclusion above is not simply "always False"."""
+    from tan.commands.build import toolchain as bt
+
+    _plant_compiler(_install(tmp_path / "scan", "zephyr-sdk-9.9.9"))
+    monkeypatch.setattr(bt, "_scan_roots", lambda: [tmp_path / "scan"])
+    monkeypatch.setattr(bt, "_toolchain_store_scan_root", lambda: tmp_path / "store")
+    assert host_scan_has_toolchain(None) is True

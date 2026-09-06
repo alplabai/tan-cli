@@ -396,9 +396,10 @@ from pathlib import Path
 import pytest
 
 from tan.commands import new_som_cmd
-from tan.commands.build import configure_inputs
+from tan.commands.build import configure_inputs, toolchain
 from tan.core import document_guards, error_catalog, example_catalog, example_facets
 from tan.core import metadata_schema, scaffold, sdk_discovery, shapes, som_buildability
+from tan.core import toolchain_provision as tp
 from tan.model import analyze, perf, perf_apply
 from tan.model.adapters import drpai
 # `SDK` ONLY -- deliberately NOT the `_bound_sdk` fixture next to it, which
@@ -603,6 +604,20 @@ _SEEDED_CONTRACTS: dict[str, str] = {
         "removed raised a bare RuntimeError for a symlink loop on 3.12.3 "
         "(the same shape template.py::_safe_join documents), which no "
         "widening of the except tuple alone would have caught"
+    ),
+    "toolchain.verified_store_dir": (
+        "tan-cli#1209 review MAJOR: the exact class tan-cli#1116 exists "
+        "for, found in a follow-up review rather than the original sweep. "
+        "Two read_text(encoding='utf-8') calls (the checkout's "
+        "metadata/toolchains.json, then the resolved store's "
+        ".alp-toolchain-stamp.json) caught only OSError, past this "
+        "function's own 'never raises' docstring -- a non-UTF-8 byte in "
+        "either raised UnicodeDecodeError straight through execute_slices "
+        "before any slice dispatched, with no envelope at all under "
+        "--format json. doctor_cmd._read_text reads the identical files "
+        "with except (OSError, ValueError) and errors='replace', so build "
+        "and doctor disagreed on a corrupt manifest; fixed in the same "
+        "change by reusing that exact technique"
     ),
 }
 
@@ -2912,6 +2927,97 @@ class TestEmitExtraLibraryProfile:
         path = tmp_path / "profile.yaml"
         _malformed(path, "a: [1, 2\nb: }{\n")
         self._assert_parse_failed(self._call(path))
+
+
+# ---------------------------------------------------------------------------
+# toolchain.verified_store_dir -- quiet-return: None on every failure,
+# across BOTH of its own read sites (the manifest, then the stamp).
+# ---------------------------------------------------------------------------
+
+_VALID_TOOLCHAIN_MANIFEST = (
+    '{"zephyrSdk": {"version": "1.0.1", '
+    '"baseUrl": "https://example.invalid/", "artifacts": []}}'
+)
+
+
+@_covers("toolchain.verified_store_dir")
+class TestVerifiedStoreDir:
+    """The manifest read (`<sdk_root>/metadata/toolchains.json`) is driven
+    through every standard shape below via `sdk_root`. The stamp read (the
+    resolved store's own `.alp-toolchain-stamp.json`) is the SECOND site
+    the same bug lived in -- `test_non_utf8_stamp` drives that one
+    directly, with a valid manifest and a monkeypatched store root so the
+    stamp path is under this test's own `tmp_path`."""
+
+    def _manifest_path(self, sdk_root: Path) -> Path:
+        return sdk_root / "metadata" / "toolchains.json"
+
+    def test_no_sdk_root(self):
+        assert toolchain.verified_store_dir(None) is None
+
+    def test_absent(self, tmp_path):
+        assert toolchain.verified_store_dir(str(tmp_path)) is None
+
+    def test_non_utf8(self, tmp_path):
+        path = self._manifest_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        _non_utf8(path)
+        assert toolchain.verified_store_dir(str(tmp_path)) is None
+
+    def test_directory_where_file_expected(self, tmp_path):
+        _as_directory(self._manifest_path(tmp_path))
+        assert toolchain.verified_store_dir(str(tmp_path)) is None
+
+    def test_parent_is_a_file(self, tmp_path):
+        _parent_is_a_file(self._manifest_path(tmp_path))
+        assert toolchain.verified_store_dir(str(tmp_path)) is None
+
+    def test_symlink_loop(self, tmp_path):
+        # tan-cli#1209 follow-up review: this test's own added-line-vs-
+        # baseline check flagged this as a regression against a clean-`dev`
+        # baseline run on a Windows host with no symlink privilege
+        # (`WinError 1314`) -- `_symlink_loop`'s bare `path.symlink_to(path)`
+        # raises OUTSIDE the function under test, before
+        # `verified_store_dir` ever runs, so this failed for a reason
+        # unrelated to the contract it exists to check. The file's other
+        # ~18 pre-existing `test_symlink_loop` siblings share the same
+        # unguarded shape and are each already an accepted baseline entry on
+        # `dev` -- out of scope to retrofit here. This one is NEW on this
+        # branch, so it gets the skip instead of joining them: a host that
+        # cannot create the symlink cannot exercise this shape at all,
+        # which is "not applicable", not "the contract broke".
+        try:
+            _symlink_loop(self._manifest_path(tmp_path))
+        except OSError as exc:
+            pytest.skip(f"host cannot create a symlink loop: {exc}")
+        assert toolchain.verified_store_dir(str(tmp_path)) is None
+
+    @_skip_as_root
+    def test_permission_denied(self, tmp_path):
+        path = self._manifest_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        path.write_text(_VALID_TOOLCHAIN_MANIFEST, encoding="utf-8")
+        with _permission_denied(path.parent):
+            assert toolchain.verified_store_dir(str(tmp_path)) is None
+
+    def test_malformed_document(self, tmp_path):
+        path = self._manifest_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        _malformed(path, "not json")
+        assert toolchain.verified_store_dir(str(tmp_path)) is None
+
+    def test_non_utf8_stamp(self, tmp_path, monkeypatch):
+        # The SECOND read site: a valid, parseable manifest but a
+        # non-UTF-8 `.alp-toolchain-stamp.json` at the resolved store dir.
+        path = self._manifest_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        path.write_text(_VALID_TOOLCHAIN_MANIFEST, encoding="utf-8")
+        store_root = tmp_path / "store"
+        store_dir = store_root / "zephyr-sdk-1.0.1-arm-zephyr-eabi"
+        store_dir.mkdir(parents=True)
+        _non_utf8(store_dir / tp.STAMP_FILENAME)
+        monkeypatch.setattr(toolchain, "_toolchain_store_scan_root", lambda: store_root)
+        assert toolchain.verified_store_dir(str(tmp_path)) is None
 
 
 def test_every_seed_has_a_test():

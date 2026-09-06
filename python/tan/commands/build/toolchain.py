@@ -202,6 +202,102 @@ def _toolchain_store_scan_root() -> Path:
     return Path(root.path_str)
 
 
+def _read_text_or_none(path: Path) -> str | None:
+    """`None` on ANY read failure -- `OSError` (missing/unreadable/a
+    directory) AND `UnicodeDecodeError` (a subclass of `ValueError`) alike.
+
+    tan-cli#1209 review MAJOR: `verified_store_dir`'s two callers of this
+    used to write `path.read_text(encoding="utf-8")` under a bare
+    `except OSError`, so one non-UTF-8 byte in either
+    `<sdk_root>/metadata/toolchains.json` or the store's own
+    `.alp-toolchain-stamp.json` raised `UnicodeDecodeError` straight past
+    this function's own "never raises" contract and out of `execute_slices`
+    before any slice dispatched -- with no envelope at all under
+    `--format json`. `errors="replace"` plus `except (OSError, ValueError)`
+    mirrors `doctor_cmd._read_text` exactly (same two files, read from the
+    same two call sites in that module), so `tan build` and `tan doctor`
+    can no longer disagree on a corrupt manifest or stamp: neither raises,
+    and a mangled byte fails the JSON/shape parse that follows rather than
+    the read itself."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+
+
+def _read_manifest(sdk_root: str | None) -> _tp.ToolchainManifest | None:
+    """@sdk_root's `metadata/toolchains.json`, parsed -- `None` on no
+    `sdk_root`, an unreadable file, or a malformed manifest. Shared by
+    [`verified_store_dir`] and [`host_scan_has_toolchain`] so the two can
+    never independently disagree on what THIS checkout's pin says; never
+    raises, matching every other reader in this module."""
+    if sdk_root is None:
+        return None
+    manifest_path = Path(sdk_root) / "metadata" / "toolchains.json"
+    manifest_text = _read_text_or_none(manifest_path)
+    if manifest_text is None:
+        return None
+    try:
+        return _tp.parse_toolchain_manifest(manifest_text)
+    except _tp.ToolchainManifestError:
+        return None
+
+
+def _toolchain_store_dir(manifest: _tp.ToolchainManifest) -> Path:
+    """`<store-root>/<per-version leaf>` for @manifest -- the ONE directory
+    tan's own installs use for this exact pin. Mirrors
+    `doctor_cmd._toolchain_store_dir` byte-for-byte (same formula: `_
+    toolchain_store_scan_root() / store_dir_name(manifest.version)`) so the
+    two modules can never independently compute a different answer for
+    "which directory is tan's own install for this pin".
+
+    [`verified_store_dir`] and [`host_scan_has_toolchain`] both key their
+    store exclusion off THIS leaf, never the whole `_toolchain_store_
+    scan_root()` -- tan-cli#1209 review BLOCKER. See `doctor_cmd.
+    _host_toolchain_matching_pin`'s docstring for why the narrower leaf,
+    not the whole configured root, is the correct exclusion under the ADR
+    0021 `$ALP_TOOLCHAIN_ROOT`-pointed-at-an-ancestor escape hatch: a
+    stamped leaf for a DIFFERENT, no-longer-pinned version can sit right
+    next to the current one inside the same store, and is a real,
+    independent host toolchain that must not be hidden by excluding the
+    whole root."""
+    return _toolchain_store_scan_root() / _tp.store_dir_name(manifest.version)
+
+
+def verified_store_dir(sdk_root: str | None) -> Path | None:
+    """tan's own ADR 0021 store for the checkout's PINNED cross-toolchain
+    version, iff `.alp-toolchain-stamp.json` there matches that pin -- the
+    identical pin+stamp predicate `bootstrap_cmd.toolchain_phase`
+    (skip-if-already-installed) and `doctor_cmd.toolchain_check` (the
+    `toolchain` check) already apply via `stamp_matches_pin`, reused here
+    rather than re-derived a third time (tan-cli#1209: `ZEPHYR_SDK_INSTALL_DIR`
+    handoff into a spawned build's env).
+
+    `None` on ANY of: no `sdk_root`, an unreadable/malformed
+    `metadata/toolchains.json`, no stamp file, or a stamp that does not
+    match -- never raises, matching every other reader in this module.
+
+    Deliberately NOT [`resolve_toolchain_root`] (this module's
+    `${TOOLCHAIN_ROOT}` resolver): that scans every `zephyr-sdk*` under
+    `_scan_roots()` PLUS this store and refuses outright on ambiguity
+    ("several installs"). A caller wiring `ZEPHYR_SDK_INSTALL_DIR` for a
+    spawned child wants tan's own stamped, digest-verified store for
+    EXACTLY this pin -- never a scan that can be defeated by an unrelated
+    hand-installed SDK sitting elsewhere on the same host.
+    """
+    manifest = _read_manifest(sdk_root)
+    if manifest is None:
+        return None
+    store_dir = _toolchain_store_dir(manifest)
+    stamp_text = _read_text_or_none(store_dir / _tp.STAMP_FILENAME)
+    if stamp_text is None:
+        return None
+    stamp = _tp.parse_stamp(stamp_text)
+    if not _tp.stamp_matches_pin(stamp, manifest):
+        return None
+    return store_dir
+
+
 def _is_toolchain_wreckage(name: str) -> bool:
     """`True` for a `.tmp-<pid>` sibling of an interrupted acquisition
     (`toolchain_provision.TMP_SUFFIX_PREFIX`) -- it starts with
@@ -214,10 +310,13 @@ def _is_toolchain_wreckage(name: str) -> bool:
     return _tp.TMP_SUFFIX_PREFIX in name
 
 
-def _candidates() -> list[str]:
-    """Every distinct `zephyr-sdk*` install directory found under
-    `_scan_roots()` PLUS `_toolchain_store_scan_root()`, as POSIX-separator
-    strings, SORTED.
+def _candidates(roots: list[Path] | None = None) -> list[str]:
+    """Every distinct `zephyr-sdk*` install directory found under @roots, as
+    POSIX-separator strings, SORTED. @roots defaults to `_scan_roots()` PLUS
+    `_toolchain_store_scan_root()` -- the full set `resolve_toolchain_root`
+    needs. [`host_scan_has_toolchain`] passes `_scan_roots()` alone, to ask
+    the narrower "does the HOST carry one, never mind tan's own store"
+    question.
 
     Deduplicated on `Path.resolve()`, keeping the FIRST literal spelling
     seen. This is the guard that stops `_scan_roots()`'s deliberate overlap
@@ -236,8 +335,10 @@ def _candidates() -> list[str]:
     Never raises: an unreadable or missing scan root is "nothing found
     there", not a failed build.
     """
+    if roots is None:
+        roots = [*_scan_roots(), _toolchain_store_scan_root()]
     found: dict[str, str] = {}
-    for root in [*_scan_roots(), _toolchain_store_scan_root()]:
+    for root in roots:
         try:
             entries = sorted(root.iterdir())
         except OSError:
@@ -255,6 +356,99 @@ def _candidates() -> list[str]:
                 continue
             found.setdefault(key, entry.as_posix())
     return sorted(found.values())
+
+
+#: Duplicated from `doctor_cmd.ZEPHYR_SDK_TOOLCHAIN_DIR` -- see this
+#: module's own docstring on why `doctor_cmd` is not imported here.
+_ZEPHYR_SDK_TOOLCHAIN_DIR = ("gnu", "arm-zephyr-eabi", "bin")
+
+
+def _host_toolchain_is_usable(root: Path) -> bool:
+    """`True` when @root actually contains the `arm-zephyr-eabi` cross
+    compiler, not merely a directory named right. Duplicated from
+    `doctor_cmd._zephyr_sdk_root_valid` (import cycle, see module
+    docstring) for [`host_scan_has_toolchain`] ALONE -- never for
+    `_candidates`/`resolve_toolchain_root` above, which deliberately accept
+    a name-only or non-ARM directory as a real, substitutable toolchain
+    (see this module's docstring on the two deliberate divergences).
+
+    `host_scan_has_toolchain` asks a different question -- "does the host
+    already have ITS OWN working toolchain, independent of tan's store" --
+    and a directory that merely STARTS WITH `zephyr-sdk`, with no compiler
+    inside it, answers "no", not "yes" (tan-cli#1209 review MAJOR: an empty
+    `~/zephyr-sdk-leftover/` -- a stale download, an interrupted manual
+    extraction -- was silently disabling tan's own verified store on any
+    host carrying one, because `_candidates` applies no validity probe by
+    design)."""
+    exe = "arm-zephyr-eabi-gcc.exe" if os.name == "nt" else "arm-zephyr-eabi-gcc"
+    try:
+        return root.joinpath(*_ZEPHYR_SDK_TOOLCHAIN_DIR, exe).is_file()
+    except OSError:
+        return False
+
+
+def host_scan_has_toolchain(sdk_root: str | None) -> bool:
+    """`True` when a USABLE `zephyr-sdk*` directory is visible under
+    `_scan_roots()` -- CMake's own `FindZephyr-sdk.cmake` prefix-scan
+    territory -- that is NOT itself tan's own ADR 0021 store leaf for
+    @sdk_root's pinned version.
+
+    tan-cli#1209 review MINOR: `verified_store_dir`'s caller
+    (`zephyr_env_overrides`, wired from `execute.py`) used to fill
+    `ZEPHYR_SDK_INSTALL_DIR` from tan's own store whenever it verified,
+    full stop -- outranking CMake's own prefix scan and the CMake user
+    package registry for EVERY slice, on EVERY host. `doctor_cmd.
+    _zephyr_sdk_scan_roots` never does that: it lists `_toolchain_store_
+    scan_root()` LAST among its scan roots, so a full, pre-existing host
+    SDK always wins there. tan's own store is installed `-t
+    arm-zephyr-eabi` ONLY, so forcing it into a spawned child's env ahead
+    of a fuller host SDK can fail a non-ARM slice (e.g.
+    `aarch64-zephyr-elf`) that configured fine without any
+    `ZEPHYR_SDK_INSTALL_DIR` override at all, and makes `tan build` use a
+    different toolchain than `tan doctor` reports. `execute_slices` calls
+    this before deciding whether to pass `verified_store_dir`'s result
+    through at all, so tan's own store fills the gap only when the host
+    scan finds nothing else -- the same "last resort" precedence doctor
+    already gives it.
+
+    The store exclusion is keyed on `_toolchain_store_dir(manifest)` -- the
+    one PER-VERSION leaf tan's own install for THIS pin uses -- never the
+    whole `_toolchain_store_scan_root()` (tan-cli#1209 review BLOCKER: this
+    used to key on the whole root, the exact form `doctor_cmd.
+    _host_toolchain_matching_pin`'s own docstring documents as wrong, and the
+    same mistake tan-cli#1186 already shipped and had to fix once).
+    Excluding the whole root hides every OTHER leaf living in the same
+    store too -- e.g. a stamped leaf for a version this checkout no longer
+    pins, still a real, independent, usable toolchain -- as well as
+    misreading path containment under the ADR 0021
+    `$ALP_TOOLCHAIN_ROOT`-pointed-at-an-ancestor escape hatch (`$HOME` or
+    `/opt`, ADR 0021's own documented bench/CI case), where the whole store
+    root coincides with a `_scan_roots()` root and would otherwise
+    swallow a genuinely independent, adjacent hand-install along with tan's
+    own leaf. `sdk_root=None` (no checkout resolved, no pin to protect)
+    excludes nothing -- matching `verified_store_dir(None)`, which returns
+    `None` regardless of this function's answer in that case.
+
+    Never raises: an unresolvable path reads as itself, matching
+    `_candidates`'s own `except OSError` fallbacks."""
+    manifest = _read_manifest(sdk_root)
+    store_leaf: Path | None = None
+    if manifest is not None:
+        try:
+            store_leaf = _toolchain_store_dir(manifest).resolve()
+        except OSError:
+            store_leaf = _toolchain_store_dir(manifest)
+    for candidate in _candidates(_scan_roots()):
+        entry = Path(candidate)
+        try:
+            resolved = entry.resolve()
+        except OSError:
+            resolved = entry
+        if store_leaf is not None and resolved.is_relative_to(store_leaf):
+            continue
+        if _host_toolchain_is_usable(resolved):
+            return True
+    return False
 
 
 def resolve_toolchain_root() -> ToolchainResolution:

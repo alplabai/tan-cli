@@ -2160,10 +2160,21 @@ jobs:
       # `fix` on a container that genuinely has no SDK, which is the honest
       # place for it.
       #
-      # NOTE: doctor seeing the toolchain does not mean the BUILD can use it --
-      # the ADR-0021 store is never exported as `ZEPHYR_SDK_INSTALL_DIR`
-      # (tan-cli#1209). That is why the manual install below still has to run
-      # before `tan build`, and why this step does not assert a buildable host.
+      # NOTE (updated, tan-cli#1209): doctor seeing the toolchain used NOT to
+      # mean the BUILD could use it -- the ADR-0021 store was never exported
+      # as `ZEPHYR_SDK_INSTALL_DIR`, which was why the manual install below
+      # ran before `tan build` even on a host `tan doctor` already reported
+      # as passing. #1209 closes that gap: `tan build` now resolves
+      # `build.toolchain.verified_store_dir(sdk_root)` itself and fills
+      # `ZEPHYR_SDK_INSTALL_DIR` for every spawned west/CMake child, so on
+      # THIS job's runner (nothing but `tan bootstrap`'s own store, no
+      # competing host SDK) `tan build` alone would now resolve it too. The
+      # manual install below is kept anyway, unchanged: this step still does
+      # not assert a buildable host on its own, and the install +
+      # `tan doctor passes once the toolchain is installed` step remain the
+      # independent, SHA256-pin-verified proof that a hand-installed SDK
+      # ALSO satisfies `zephyrSdk` -- a fact this job asserts regardless of
+      # #1209, not a workaround for its absence.
       - name: tan doctor sees the toolchain tan bootstrap acquired
         working-directory: ws/alp-sdk
         run: |
@@ -3197,7 +3208,17 @@ jobs:
             # ::error:: below renders (tan-cli#500 shape, nit-level in this
             # review but the same defect).
             set +e
-            python3 -m pytest tests/parity/test_planner_emit_parity.py -v 2>&1 | tee /tmp/release-sdk-parity.log
+            # tan-cli#1215 split `--emit build-plan`'s own byte-identity case
+            # into its sibling `test_planner_axis_build_plan_parity.py` (the
+            # "planner axis" ADR-0026 §G retires; this file stays the "render
+            # axis" ADR-0026 §D keeps) -- both named here so this job's
+            # "does tan, as released, still emit what alp-sdk, as released,
+            # expects" question still covers build-plan too, not just the
+            # seventeen renderers. The breadth-floor grep below still targets
+            # `test_planner_emit_parity.py` alone; that test never moved.
+            python3 -m pytest tests/parity/test_planner_emit_parity.py \
+              tests/parity/test_planner_axis_build_plan_parity.py \
+              -v 2>&1 | tee /tmp/release-sdk-parity.log
             set -e
             # `test_the_breadth_layer_still_covers_every_board` is this
             # module's own non-vacuity floor (>=90 boards, >=2900 artefacts
