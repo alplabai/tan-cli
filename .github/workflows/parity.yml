@@ -3166,7 +3166,17 @@ jobs:
             # ::error:: below renders (tan-cli#500 shape, nit-level in this
             # review but the same defect).
             set +e
-            python3 -m pytest tests/parity/test_planner_emit_parity.py -v 2>&1 | tee /tmp/release-sdk-parity.log
+            # tan-cli#1215 split `--emit build-plan`'s own byte-identity case
+            # into its sibling `test_planner_axis_build_plan_parity.py` (the
+            # "planner axis" ADR-0026 §G retires; this file stays the "render
+            # axis" ADR-0026 §D keeps) -- both named here so this job's
+            # "does tan, as released, still emit what alp-sdk, as released,
+            # expects" question still covers build-plan too, not just the
+            # seventeen renderers. The breadth-floor grep below still targets
+            # `test_planner_emit_parity.py` alone; that test never moved.
+            python3 -m pytest tests/parity/test_planner_emit_parity.py \
+              tests/parity/test_planner_axis_build_plan_parity.py \
+              -v 2>&1 | tee /tmp/release-sdk-parity.log
             set -e
             # `test_the_breadth_layer_still_covers_every_board` is this
             # module's own non-vacuity floor (>=90 boards, >=2900 artefacts
