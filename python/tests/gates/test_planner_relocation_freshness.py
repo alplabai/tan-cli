@@ -766,7 +766,21 @@ from tests.conftest import sdk_root
 #:
 #: Upstream commits in range touching this table's files:
 #:   (none)
-PINNED_SDK_COMMIT = "ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2"  # alp-sdk, past 0914da38 -- see above
+#: AUTOMATED RE-SYNC (mirror / PINNED_HASHES): `ff27f179` -> `eff266b6`, proposed by
+#: `python/scripts/planner_resync.py`. THIS BLOCK IS MACHINE-WRITTEN and
+#: records only WHAT moved -- it makes no claim about behaviour, and no
+#: claim that anything was audited. Replace it with the audited narrative
+#: (which of the commits below are behavioural, what was ported, what was
+#: re-measured rather than taken on a subject line) before merging. That
+#: narrative is the reviewer's job and is the reason this PR does not
+#: auto-merge.
+#:
+#:   scripts/alp_orchestrate/kconfig.py: merged
+#:   scripts/alp_orchestrate/sdk_compat.py: merged
+#:
+#: Upstream commits in range touching this table's files:
+#:   - eff266b6 feat(aen): make the on-module RTC and temperature sensor first-class, and correct what the module reports about itself (#1964)
+PINNED_SDK_COMMIT = "eff266b67f6c45bbe9182d48bbd08d01db6af24b"  # alp-sdk, past 0914da38 -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -808,7 +822,7 @@ PINNED_HASHES: dict[str, str] = {
     "carveout.py": "c05826e4b784965c332dc662c9aa82b993787d7ab588771c7aee5feaa93feb4e",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "897a4e86f74b2c5633d640a00968cf1feaf9ea2a733b0eea5904115d91489ecc",
+    "kconfig.py": "1a6d5c26b05cb3f07b02fc06154bcb7bb48e2d11d4a96a2c3e622aab1ee92208",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
     "loader.py": "136e674d0b2594f99004d99dc0e1c9e116c477f764d759a3919668141182cffe",
@@ -818,7 +832,7 @@ PINNED_HASHES: dict[str, str] = {
     "orchestrator.py": "cb6a38e1a2f4200b16da93c1b11512c6e59b963e8e08279d801b8d38e57c3002",
     "partition.py": "e5b52e5b99971a7ae39805ccb8e6f30f0c304f5e0b09ba550e6eab65ea0047f6",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
-    "sdk_compat.py": "db2c6658b421cf862118b468ff164cdeea36debae291af37ad6f840fe9565970",
+    "sdk_compat.py": "ef9adb68a4cc9f18fe25bba7c0a4c2e9eabd2955166e2c5a8f6f92db0993e805",
     "secure.py": "44743b887ab8d29293469f2574b6d88e0d433c9b9ba1f1001709f51104716c0c",
     "slugs.py": "93b94c2e950f47bca303cf06894f03a3bc04b4323f7627af7c0836e7c4949355",
     "topology.py": "fcd81eaaaeeb116151229ca118c2991f0befa13b4e1039d11a0ee65056eb9015",
@@ -1329,7 +1343,126 @@ PINNED_HASHES: dict[str, str] = {
 #:
 #: Upstream commits in range touching this table's files:
 #:   - 5c33ef04 fix(scaffold): emit a buildable multicore-rpmsg tree, and rewrite bare alp-sdk-tree paths in scaffolded comments (#1906)
-HAND_PORT_PINNED_SDK_COMMIT = "ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2"  # alp-sdk, past 0914da38 -- see above (tan-cli#996 closes tan-cli#913)
+#: AUDITED RE-SYNC (hand-port / HAND_PORT_HASHES): `ff27f179` -> `eff266b6`
+#: (tan-cli#1156). THREE upstream commits in range touch this table's
+#: files, none of them the tip commit the PINNED_HASHES merge above cites
+#: -- `git log ff27f179..eff266b6 -- <path>` per file, not assumed from the
+#: PINNED_HASHES paragraph's own range summary:
+#:
+#:   - `scripts/gen_zephyr_board.py` (+584/-31 net, two commits):
+#:     `dbfa06bd` (#655, alp-sdk#1924) adds the first V2N/V2M-family
+#:     pinctrl.dtsi/_defconfig emitter (`_load_supervisor_links_doc`,
+#:     `_v2n_declared_families`, `_load_supervisor_links`,
+#:     `_pin_by_peripheral`, `_rzv_pinmux`, `_v2n_sci_channel`,
+#:     `_v2n_spi_pfc_mnemonic`, `_v2n_pinctrl_dtsi`, `_v2n_defconfig`,
+#:     wired into `emit_zephyr_board()`'s new `elif family in
+#:     _v2n_declared_families(...)` branch), reading a new hand-authored
+#:     `metadata/e1m_modules/v2n/supervisor-links.yaml`; `eff266b6`
+#:     (alp-sdk#1964) adds the AEN BRD_I2C (RTC + temperature sensor)
+#:     pinctrl/dts emission (`_load_aen_on_module_links`, `_c_comment`,
+#:     `_dt_property`, `_aen_i2c_device_nodes`, `_aen_i2c_pinctrl_group`,
+#:     `_aen_brd_i2c_dts`, plus a `links` parameter threaded through
+#:     `_aen_pinctrl_dtsi`/`_aen_dts`), reading a new
+#:     `metadata/e1m_modules/aen/on-module-links.yaml`. Both also extend
+#:     `_generated_banner`/`_with_generated_banner` with an optional
+#:     `extra_source` naming whichever of the two files backs a given
+#:     emitted file. PORTED BY HAND into `tan/planner/zephyr_board.py`,
+#:     both halves, in this same change -- neither new metadata source
+#:     needed vendoring (ADR-0017: alp-sdk DATA, read from the bound SDK
+#:     root at run time).
+#:
+#:     PROVEN, not asserted: the AEN half is covered by an EXISTING node,
+#:     `tests/parity/test_planner_emit_parity.py::test_tan_generate_
+#:     writes_a_zephyr_board_tree_byte_for_byte` -- `1 passed` with this
+#:     port (`ALP_SDK_ROOT` bound to a real `eff266b6` checkout), `1
+#:     failed` (byte-diverging at `alp_e1m_aen801_m55_he-pinctrl.dtsi`
+#:     line 5, the banner's missing `extra_source`) with the port
+#:     reverted -- measured both ways, not estimated. The V2N half has no
+#:     existing test node (nothing previously exercised the V2N/V2M
+#:     branch of `--emit zephyr-board` at all), so it was checked the
+#:     same way this test checks the AEN half, by hand: `tan generate
+#:     --target zephyr-board --core m33_sm --board-yaml examples/
+#:     multicore/rpmsg-v2n/board.yaml`, once with
+#:     `TAN_GENERATE_EXECUTOR=subprocess` (the alp-sdk oracle) and once
+#:     with `=in-process` (tan), against the same bound `eff266b6`
+#:     checkout -- `diff -rq` on the two output directories is empty, all
+#:     five files byte-identical, including the two new
+#:     `alp_e1m_v2n101_m33_sm-pinctrl.dtsi` / `..._defconfig` files.
+#:
+#:   - `scripts/alp_project_emit/hw_info.py` (+14/-1, `eff266b6` /
+#:     alp-sdk#1964): composes `ALP_HW_BUILD_SOM_HW_REV` through the new
+#:     `sdk_compat.board_designator()` (already relocated into
+#:     `tan/planner/sdk_compat.py` by this same re-sync's `PINNED_HASHES`
+#:     merge -- see that pin's own paragraph above) instead of emitting
+#:     the bare `hw_rev`. PORTED BY HAND into `tan/planner/project_emit/
+#:     hw_info.py`: `_emit_hw_info_h` gains a required `metadata_root`
+#:     parameter (threaded from `planner_emit.py`'s `project.
+#:     effective_metadata_root()`, matching `west-libraries`'s existing
+#:     call-site pattern) and composes `som_hw_rev` the same way alp-sdk
+#:     does. New `tests/planner/test_hw_info_board_designator.py`
+#:     (hermetic -- a synthetic `hw-revisions.yaml` under `tmp_path`,
+#:     needs no bound SDK) reds on the composition case when the port is
+#:     byte-reverted: `1 failed, 2 passed` reverted, `3 passed` restored
+#:     -- measured both ways. The two no-datecode / no-file-at-all
+#:     controls stay green either way, on purpose (no-regression pins).
+#:
+#:   - `scripts/alp_template.py` (+13/-0, `43e5b2cb` / alp-sdk#1932,
+#:     closing alp-sdk#1916): refuses `constraints.minimum`/`maximum` on
+#:     a non-`integer` parameter with a curated `ParameterError`, where it
+#:     used to raise a bare `TypeError` on a schema-valid catalog record.
+#:     NOT ported -- tan's own `tan/planner/template.py::_check_
+#:     constraints` ALREADY carries this exact refusal (tan-cli#1087,
+#:     landed well before alp-sdk#1932 closed the gap on alp-sdk's own
+#:     side; that function's docstring says so in so many words:
+#:     "DIVERGES FROM alp-sdk on this input class, deliberately ...
+#:     alp-sdk#1916 tracks closing the gap; until then tan refuses where
+#:     alp-sdk still crashes"). alp-sdk#1932 IS that closing commit; tan
+#:     was the reference here, not the follower. Confirmed by reading
+#:     both bodies side by side, not by the docstring's claim alone: same
+#:     three `constraints:` keys guarded (`enum`/`minimum`/`maximum`),
+#:     same `type != "integer"` refusal, same error-string shape -- the
+#:     only textual difference is `{constraints[bound]!r}` (tan) vs bare
+#:     `{constraints[bound]}` (alp-sdk), a repr-vs-str formatting choice
+#:     in the message, not a behavioural difference. Hash re-pinned; no
+#:     code change.
+#:
+#: `scripts/alp_cli/diagnostic_format.py` (+53/-2, SAME `43e5b2cb` /
+#: alp-sdk#1932) also moved in this range -- the commit's own subject
+#: line ("...; render URI-shaped diagnostic paths") is its OTHER half.
+#: alp-sdk#1909 makes `_uri()`/`to_sarif` render a proper URI reference
+#: (`_is_windows_spelled` + `_path_to_uri_reference`) instead of a bare
+#: filesystem path, and its own new docstring says this "Mirrors tan-cli's
+#: `path_to_uri_reference` (alplabai/tan-cli#1111, python/tan/core/
+#: uri_reference.py) -- ported rather than reimplemented from scratch".
+#: tan-cli#1097/#1111/#1117/#1140 landed `tan/core/uri_reference.py` and
+#: wired it into `validate_cmd.py`'s `_sarif_document`/diagnostic-v1
+#: exporters well before this; that function's own docstring already
+#: said "alp-sdk owes the same fix -- tracked as alp-sdk#1909, not fixed
+#: here (a different repo, different release cadence)". alp-sdk#1932 is
+#: alp-sdk paying that debt, one-directionally (alp-sdk copying tan, not
+#: the reverse) -- confirmed by reading both bodies: alp-sdk's ported
+#: copy uses the pre-tan-cli#1140 shape (`PureWindowsPath.as_uri()` /
+#: `PurePosixPath.as_uri()` called directly, the deprecated stdlib method
+#: tan-cli#1140 has since retired on tan's own side), which is fine --
+#: alp-sdk is not obliged to track tan's later internal refinements, only
+#: to reach the same URI-reference OUTPUT, which it now does for the same
+#: inputs. Not counted as a fourth hand-port above: it is the SAME commit
+#: as `alp_template.py`'s, just its other file. No port; hash re-pinned.
+#:
+#: The remaining EIGHT pinned paths (`scripts/sentinels.py`,
+#: `scripts/alp_project_loader.py`, `scripts/alp_project_emit/{__init__,
+#: bom_netlist,dts,native_sim,west_libs}.py`,
+#: `scripts/alp_cli/validator.py`) are untouched in this range: each was
+#: diffed byte-for-byte against `eff266b6` directly (`diff -q <ff27f179
+#: blob> <eff266b6 blob>`), not inferred from a commit-touches-file log,
+#: and all eight came back identical. Their `HAND_PORT_HASHES` literals
+#: below are therefore UNCHANGED by this move.
+#:
+#: Upstream commits in range touching this table's files:
+#:   - dbfa06bd feat(boards): generate the V2N/V2M pinctrl.dtsi + _defconfig from a supervisor-links metadata source (#655) (#1924)
+#:   - eff266b6 feat(aen): make the on-module RTC and temperature sensor first-class, and correct what the module reports about itself (#1964)
+#:   - 43e5b2cb fix(scripts): refuse non-integer min/max bounds; render URI-shaped diagnostic paths (#1932)
+HAND_PORT_PINNED_SDK_COMMIT = "eff266b67f6c45bbe9182d48bbd08d01db6af24b"  # alp-sdk, past ff27f179 -- see above (tan-cli#1156)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -1393,17 +1526,17 @@ HAND_PORT_PINNED_SDK_COMMIT = "ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2"  # alp-
 #: `sentinels.py` set the precedent for. Neither lives under `tan/planner/`
 #: itself, so neither is in `HAND_PORT_SOURCES` below.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "c7a44b285e5f8d944544ac8ca6d3a060470befdfe5401772707bec6820621b0c",
+    "scripts/gen_zephyr_board.py": "579688eb036f5dbed32827bd1e02af75444ebe0ec5073aa9a6b8cf9b1d5fad67",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/alp_project_loader.py": "4e355a59fb37457ce0479c59d06863dacfd20144f59dd0eb6dc197ac5ba19f66",
-    "scripts/alp_template.py": "f8469b99d24b58450793bcd2e00e9fd30a7a70c1e66e4a39303b785407abc7ee",
+    "scripts/alp_template.py": "63af799b714a00a7969774ede8971c619504aa40b5a472f4503f288495963e22",
     "scripts/alp_project_emit/__init__.py": "9213c745751e23a36b3f582846a147fb9060386992ff7b8244a0c1d44d5987cf",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
     "scripts/alp_project_emit/dts.py": "cb6d4278e2fc886a23c28f2ef30b4ae9714738071219f7c29cbccbbeb1bc1782",
-    "scripts/alp_project_emit/hw_info.py": "25673bb45305ce3f54280560beea8577bdf04bfdada44a133ff7ca48fbe05167",
+    "scripts/alp_project_emit/hw_info.py": "529376975b1f684ea1d88a743add46214b934428f92311612d15812f070a316e",
     "scripts/alp_project_emit/native_sim.py": "24943e7099d745b254b853135ff0b4ae8415be7946d93170d479b637105f18c0",
     "scripts/alp_project_emit/west_libs.py": "bfd9735519d120d2a32bd054a69838c32e339a04cd977521fc5a53c950055392",
-    "scripts/alp_cli/diagnostic_format.py": "44532953d828dd00af524238b89726ecb0bd4b472b662a9d4c5dcc1d33a16680",
+    "scripts/alp_cli/diagnostic_format.py": "9fd45d268b12527b8e93720a380dab57d4bd67e00c0066505e7d587eea19eb18",
     "scripts/alp_cli/validator.py": "5968691c316370a6369ff3096f89e9b77bc2e359ac200184a9accffe9455e3ac",
 }
 
