@@ -766,7 +766,21 @@ from tests.conftest import sdk_root
 #:
 #: Upstream commits in range touching this table's files:
 #:   (none)
-PINNED_SDK_COMMIT = "ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2"  # alp-sdk, past 0914da38 -- see above
+#: AUTOMATED RE-SYNC (mirror / PINNED_HASHES): `ff27f179` -> `4ca53589`, proposed by
+#: `python/scripts/planner_resync.py`. THIS BLOCK IS MACHINE-WRITTEN and
+#: records only WHAT moved -- it makes no claim about behaviour, and no
+#: claim that anything was audited. Replace it with the audited narrative
+#: (which of the commits below are behavioural, what was ported, what was
+#: re-measured rather than taken on a subject line) before merging. That
+#: narrative is the reviewer's job and is the reason this PR does not
+#: auto-merge.
+#:
+#:   scripts/alp_orchestrate/kconfig.py: merged
+#:   scripts/alp_orchestrate/sdk_compat.py: merged
+#:
+#: Upstream commits in range touching this table's files:
+#:   - eff266b6 feat(aen): make the on-module RTC and temperature sensor first-class, and correct what the module reports about itself (#1964)
+PINNED_SDK_COMMIT = "4ca5358982d4e6b0817604d60e4d83c0c9a64a49"  # alp-sdk, past 0914da38 -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -808,7 +822,7 @@ PINNED_HASHES: dict[str, str] = {
     "carveout.py": "c05826e4b784965c332dc662c9aa82b993787d7ab588771c7aee5feaa93feb4e",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "897a4e86f74b2c5633d640a00968cf1feaf9ea2a733b0eea5904115d91489ecc",
+    "kconfig.py": "1a6d5c26b05cb3f07b02fc06154bcb7bb48e2d11d4a96a2c3e622aab1ee92208",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
     "loader.py": "136e674d0b2594f99004d99dc0e1c9e116c477f764d759a3919668141182cffe",
@@ -818,7 +832,7 @@ PINNED_HASHES: dict[str, str] = {
     "orchestrator.py": "cb6a38e1a2f4200b16da93c1b11512c6e59b963e8e08279d801b8d38e57c3002",
     "partition.py": "e5b52e5b99971a7ae39805ccb8e6f30f0c304f5e0b09ba550e6eab65ea0047f6",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
-    "sdk_compat.py": "db2c6658b421cf862118b468ff164cdeea36debae291af37ad6f840fe9565970",
+    "sdk_compat.py": "ef9adb68a4cc9f18fe25bba7c0a4c2e9eabd2955166e2c5a8f6f92db0993e805",
     "secure.py": "44743b887ab8d29293469f2574b6d88e0d433c9b9ba1f1001709f51104716c0c",
     "slugs.py": "93b94c2e950f47bca303cf06894f03a3bc04b4323f7627af7c0836e7c4949355",
     "topology.py": "fcd81eaaaeeb116151229ca118c2991f0befa13b4e1039d11a0ee65056eb9015",
