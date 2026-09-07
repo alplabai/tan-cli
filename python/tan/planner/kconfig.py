@@ -93,20 +93,14 @@ def _emit_extra_library_profile(
     diagnostic comment so the customer sees the failure in the slice's
     alp.conf rather than silent drop-out.
     """
-    # RELOCATED divergence from alp-sdk's own scripts/alp_orchestrate/
-    # kconfig.py: BOTH hunks below are tan-only (tan-cli#1122). alp-sdk's
-    # copy still spells this as `profile_path = (REPO / profile_rel)
-    # .resolve()` on its own line followed by `except (OSError,
-    # yaml.YAMLError)`, which raises out of a function contracted never to
-    # in two ways -- `UnicodeDecodeError` is a `ValueError`, not an
-    # `OSError`, so `read_text(encoding="utf-8")` escapes the clause before
-    # any parser runs; and `.resolve()` raises `RuntimeError("Symlink loop
-    # from %r")` on ELOOP from OUTSIDE the `try` entirely. Here the
-    # `.resolve()` is dropped (nothing downstream needs a real path -- only
-    # the read does) and the clause carries `UnicodeDecodeError`.
-    # The upstream fix is tracked as alp-sdk#1961; until it lands and a
-    # re-sync converges the two, `planner_resync.py` will surface this as a
-    # merge conflict rather than silently revert it.
+    # No longer a divergence: alp-sdk#1961 landed as alp-sdk PR #2005 and
+    # this repo's #1241 re-sync (to alp-sdk 15b2f32c) converged the two
+    # copies, so the RELOCATED marker that stood here is retired with
+    # tan-cli#1122. Upstream now spells these three lines identically --
+    # `.resolve()` dropped (nothing downstream needs a real path, only the
+    # read does) and `UnicodeDecodeError` in the clause, because it is a
+    # `ValueError` not an `OSError` and `read_text(encoding="utf-8")` would
+    # otherwise escape a function contracted never to raise.
     try:
         profile_path = REPO / profile_rel
         doc = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
