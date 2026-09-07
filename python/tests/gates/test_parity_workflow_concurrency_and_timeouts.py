@@ -520,6 +520,12 @@ _MIN_BOUNDED_JOBS = {
     "pin-move-verify.yml": 1,
     "planner-resync.yml": 1,
     "python-binaries.yml": 4,
+    # tan-cli#1236: the bound counterpart of ci.yml's `python-newest`, kept in
+    # its own file rather than a third ci.yml job because
+    # pin_move_verify.py's `extract_ci_sdk_parity_ref` demands exactly ONE
+    # `repository: alplabai/alp-sdk` checkout inside ci.yml -- see that file's
+    # own header for the full reasoning.
+    "python-newest-bound.yml": 1,
     "release-combination.yml": 4,
     "release-lock-update.yml": 1,
     # 6, not 5: the real count was already 6 when this said 5 (the comment
@@ -541,10 +547,11 @@ def test_the_every_workflow_job_set_is_not_empty():
     jobs actually got counted, so every non-`parity.yml` workflow is
     additionally held to a minimum bounded-job count (`_MIN_BOUNDED_JOBS`);
     `parity.yml` gets the same coverage from `_PARITY_JOBS` instead. And a
-    COMPLETENESS check: `_MIN_BOUNDED_JOBS` naming exactly eleven of today's
-    files says nothing about tomorrow's twelfth -- a newly added workflow
-    would carry no floor at all and could grow or shrink invisibly until
-    someone remembered to add an entry for it by hand."""
+    COMPLETENESS check: `_MIN_BOUNDED_JOBS` naming exactly thirteen of today's
+    files (tan-cli#1236 added `python-newest-bound.yml`) says nothing about
+    tomorrow's fourteenth -- a newly added workflow would carry no floor at
+    all and could grow or shrink invisibly until someone remembered to add an
+    entry for it by hand."""
     assert set(_MIN_BOUNDED_JOBS) | {"parity.yml"} == {
         p.name for p in _workflow_files(WORKFLOWS)
     }, (

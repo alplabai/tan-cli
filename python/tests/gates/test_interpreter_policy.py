@@ -9,8 +9,12 @@ OPEN-ENDED promise -- and this repo keeps it by testing BOTH ends deliberately:
   Zephyr's own `python.cmake` floor forces (`tan build` bakes the resolved
   interpreter into every slice it configures).
 * the **ceiling** (`"3.x"` -- setup-python's newest available CPython, 3.14.7
-  at the time of writing) is floated by exactly two jobs:
-  `parity.yml`'s `seam1-plan-shape` and `ci.yml`'s `python-newest`.
+  at the time of writing) is floated by exactly three jobs:
+  `parity.yml`'s `seam1-plan-shape`, `ci.yml`'s `python-newest`, and (tan-cli#1236)
+  `python-newest-bound.yml`'s `python-newest-bound` -- the BOUND counterpart of
+  `python-newest`, which binds no alp-sdk at all and so never exercises the
+  planner/parity suites above the floor. See that job's own file header for the
+  full accounting of the gap it closes.
 
 ## Why the spread stays, rather than pinning everything to the floor
 
@@ -157,19 +161,25 @@ PYPROJECT = REPO_ROOT / "python" / "pyproject.toml"
 CEILING = "3.x"
 
 #: The `(workflow file, job id)` pairs allowed -- and required -- to float the
-#: ceiling. Named, not derived, so that DELETING either one is a failure here
-#: rather than a silent shrink of what the policy covers (the same reason
+#: ceiling. Named, not derived, so that DELETING any one of them is a failure
+#: here rather than a silent shrink of what the policy covers (the same reason
 #: `test_parity_workflow_concurrency_and_timeouts.py` keeps `_PARITY_JOBS` as a
 #: literal tuple).
 #:
-#: The two are not interchangeable and both are required:
+#: The three are not interchangeable and all three are required:
 #:   * `seam1-plan-shape` floats it against `tests/gates` plus the SDK emit
 #:     parity steps -- it is where the ceiling first got exercised at all;
-#:   * `python-newest` floats it against the FULL suite -- it is the half that
-#:     can actually report a divergence (tan-cli#1126).
+#:   * `python-newest` floats it against the FULL suite, UNBOUND -- it is the
+#:     half that can actually report a divergence (tan-cli#1126);
+#:   * `python-newest-bound` (tan-cli#1236) floats it against the FULL suite
+#:     too, but WITH an alp-sdk bound (`parity.yml`'s own `PINNED_SDK_TAG`) --
+#:     without it, every `tests/planner`/`tests/parity` case that needs a
+#:     bound root skips on both of the other two floating jobs, so the
+#:     ceiling interpreter never actually exercises them at all.
 FLOATING_JOBS = {
     ("parity.yml", "seam1-plan-shape"),
     ("ci.yml", "python-newest"),
+    ("python-newest-bound.yml", "python-newest-bound"),
 }
 
 #: The job that must run the whole suite on the ceiling, and the exact command
