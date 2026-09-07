@@ -1,0 +1,237 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# tan-cli#1236. The BOUND counterpart to `ci.yml`'s `python-newest` job.
+#
+# THE GAP THIS CLOSES
+#
+# `ci.yml`'s `python` job pins the `requires-python` FLOOR (`"3.12"`) and,
+# with `sdk_parity: true`, binds `ALP_SDK_ROOT` -- but that input is only ever
+# `true` on the release path. `ci.yml`'s `python-newest` job floats the
+# CEILING (`"3.x"`) but binds no alp-sdk at all. The result: every
+# `tests/planner`/`tests/parity` case that needs a bound root SKIPS on every
+# job that runs above the floor, on every PR, always. Measured on CPython
+# 3.14.7, unbound: `tests/planner tests/parity` gives `44 passed, 1135
+# skipped`. tan-cli#1234 (a real `Path.resolve(strict=False)` behaviour
+# change in 3.13, invisible to CI for exactly this reason) and its own
+# regression test, `test_symlink_loop_py313_clean_error`
+# (`skipif(sys.version_info < (3, 13))`), are the concrete cost: that test
+# skips on the version guard on every `"3.12"` job and skips SDK-gated on
+# `python-newest` -- it has never executed in CI.
+#
+# This job is the missing cell of that 2x2: ceiling interpreter, bound SDK,
+# whole suite. It is a SEPARATE job/workflow rather than a change to
+# `python-newest` on purpose -- that job stays fast and unbound, and its
+# meaning (does the newest interpreter agree with the floor, with no alp-sdk
+# variable in the comparison) must survive.
+#
+# WHY A NEW FILE, NOT A THIRD JOB IN `ci.yml`
+#
+# `python/scripts/pin_move_verify.py`'s `extract_ci_sdk_parity_ref` demands
+# EXACTLY ONE `repository: alplabai/alp-sdk` checkout inside `ci.yml` --
+# `python/tests/scripts/test_pin_move_verify.py::
+# test_extract_ci_sdk_parity_ref_against_the_real_file` proves it against the
+# real file, and that function's own docstring names a second checkout inside
+# `ci.yml` as the exact failure mode it refuses rather than guesses at. A
+# second alp-sdk checkout living in `ci.yml` would make that extractor raise
+# on every future PR that so much as touches `ci.yml`, which `moved_pin_sites`
+# then reports as a pin MOVE it cannot verify -- not a one-time cost, a
+# permanent one. Landing the bound leg in its OWN file sidesteps that
+# extractor entirely: this file is not one of `PIN_SITES`, and correctly so
+# -- see the next section.
+#
+# WHY THE ALP-SDK REF IS RESOLVED AT RUNTIME, NOT PINNED HERE
+#
+# `.github/workflows/parity.yml`'s `PINNED_SDK_TAG` is already "the single
+# source for the alp-sdk pin" (`getting-started.yml`'s own words for the
+# identical mechanism it reuses) -- a fourth literal copy here would be a
+# fourth place to bump in lockstep, exactly the drift class tan-cli#1069
+# exists to prevent (three literal SHAs already exist: `ci.yml`'s
+# `sdk_parity` checkout, `parity.yml`'s two audit-commit checkouts). Instead
+# this job reads `PINNED_SDK_TAG` out of `parity.yml` at runtime, byte-for-
+# byte the same `sed` + hard-fail-on-empty shape `getting-started.yml` and
+# `unsharded-python-canary.yml` already use for the same reason. A pin bump
+# there moves this job with it automatically; nothing here needs touching.
+#
+# INFORMATIONAL, NOT REQUIRED -- read before adding this to branch protection
+#
+# Same shape as `pin-move-verify.yml`'s `pin-move-verify · sender` (see that
+# file's own header for the fuller precedent of an intentionally-non-required
+# job in this repo). This job's `name:` below must never collide with `dev`'s
+# five required contexts (`seam1 -- plan-shape parity`; the three
+# `python -- pytest across python/ (<os>)` legs; `zizmor · workflow
+# security`) and must not be added to branch protection until the reason
+# below no longer applies. Branch protection is a repo SETTING, not a file --
+# see `ci.yml`'s own header for how to inspect it; nothing in this repo can
+# change it from here regardless.
+#
+# The reason: this is expected to surface a first-run backlog of real,
+# interpreter-specific failures the very first time it runs for real on
+# GitHub -- ~1100 tests that have NEVER executed on a modern interpreter
+# (the 1135-skip measurement above), including `test_symlink_loop_py313_
+# clean_error`. That backlog is the whole point of this leg, but triaging it
+# takes more than one PR cycle, and a required context cannot stay red that
+# long without blocking every merge in the repo. A floating interpreter must
+# also never be allowed to decide whether an UNRELATED PR can merge -- the
+# same reasoning `ci.yml`'s `python-newest` job documents for its own
+# `skip_ceiling_interpreter` guard (a `getting-started.yml` job that floated
+# "3.x" once reddened for a reason no change to this repo could fix, and the
+# fix there was to stop floating -- this job accepts that cost deliberately,
+# the same way `python-newest` does, by staying off branch protection rather
+# than by not floating at all).
+#
+# This job also stays off the release path for the identical reason
+# `python-newest` does: a CPython minor shipping between the last PR run and
+# a tag must not be able to spend that tag. It carries no `workflow_call`
+# trigger at all (nothing calls it), so there is no release-path opt-out to
+# wire -- it simply never runs there.
+name: python-newest-bound
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+
+# Same rule as ci.yml: a newer push to a PR supersedes the run in flight, but
+# a push-to-main run is never cancelled -- a rapid second merge would
+# otherwise leave the first commit with no status.
+concurrency:
+  group: python-newest-bound-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  # Least privilege by default (tan-cli#435). This job only checks out two
+  # public repos and runs pytest; it needs no token at all, and declaring the
+  # block rather than inheriting keeps a future repository-default widening
+  # from silently widening this workflow too.
+  contents: read
+
+jobs:
+  python-newest-bound:
+    name: "python · pytest on the newest CPython (SDK-bound)"
+    runs-on: ubuntu-latest
+    # ci.yml's `python` job measures up to ~24 minutes bound (sdk_parity:
+    # true, release path); this job runs the identical bound, whole-suite
+    # selection on a (typically faster, sometimes slower) ceiling
+    # interpreter instead of the floor. 60 mirrors that job's own
+    # sdk_parity-true budget rather than inventing a new number.
+    timeout-minutes: 60
+    steps:
+      # fetch-depth: 0 for the same reason ci.yml's `python`/`python-newest`
+      # jobs take it: `tests/gates/test_module_size_budget_log_append_only.py`
+      # and `test_module_size_budget_log_d_entries_are_immutable.py` walk
+      # real git ancestry and SKIP silently on a depth-1 graft.
+      - name: checkout tan-cli
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # THE INTERPRETER POLICY, ceiling half, bound variant -- see ci.yml's
+      # `python-newest` job for the fuller rationale and
+      # python/tests/gates/test_interpreter_policy.py for the gate that
+      # enforces the floor/ceiling pair across every job that floats "3.x".
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x" # ceiling -- NOT the floor every other job pins
+
+      # Reported, not assumed -- same fail-fast ci.yml's `python-newest` job
+      # runs: if "3.x" ever resolved to the floor itself, this job would be a
+      # bound duplicate of ci.yml's `python` job and report agreement it
+      # never tested.
+      - name: report (and require) an interpreter above the floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -c 'import sys; print("resolved interpreter:", sys.version)'
+          floor="$(python -c 'import re,tomllib;print(re.search(r">=\s*([0-9]+\.[0-9]+)",tomllib.load(open("python/pyproject.toml","rb"))["project"]["requires-python"]).group(1))')"
+          have="$(python -c 'import sys;print("%d.%d" % sys.version_info[:2])')"
+          echo "requires-python floor: ${floor}; this job: ${have}"
+          if [ "${have}" = "${floor}" ]; then
+            echo "::error::\"3.x\" resolved to ${have}, which IS the declared floor -- this job would duplicate ci.yml's \`python\` job and report agreement it never tested. Either a newer CPython is not yet available to setup-python (wait), or the floor has been raised to meet the ceiling, in which case the spread is over and python/tests/gates/test_interpreter_policy.py is where that decision gets recorded."
+            exit 1
+          fi
+
+      # Single source for the alp-sdk pin: parity.yml's PINNED_SDK_TAG, the
+      # same value `python-tests-shard` binds ALP_SDK_ROOT to at the FLOOR on
+      # every PR -- byte-identical `sed` shape to getting-started.yml's and
+      # unsharded-python-canary.yml's own "resolve the pinned alp-sdk ref"
+      # steps. A second hardcoded ref here would rot independently, and this
+      # job would then quietly exercise a different SDK than the floor legs
+      # do while both reported green. Hard-fail when the line is not where
+      # this expects, rather than falling back to anything -- a fallback
+      # would make the pin meaningless in exactly the case where somebody
+      # moved it and did not know this file was reading it.
+      - name: resolve the pinned alp-sdk ref (from parity.yml)
+        id: sdk_ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="$(sed -n 's/^[[:space:]]*PINNED_SDK_TAG:[[:space:]]*//p' \
+                 .github/workflows/parity.yml | head -1)"
+          if [ -z "${ref}" ]; then
+            echo "::error::could not read PINNED_SDK_TAG out of .github/workflows/parity.yml -- the pin moved or was reshaped. Point this step at its new home; do NOT add a second copy of the SHA here."
+            exit 1
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "::notice::bound ceiling-interpreter run against pinned alp-sdk ${ref}"
+
+      - name: clone alp-sdk
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: alplabai/alp-sdk
+          ref: ${{ steps.sdk_ref.outputs.ref }}
+          path: alp-sdk
+
+      # The binding is ASSERTED, not assumed -- same shape as ci.yml's
+      # `python` job. `tests/conftest.py`'s `sdk_root()` accepts a root only
+      # when `scripts/alp_project.py` is a file under it, and returns `None`
+      # for every other outcome -- an unreachable path, a partial clone. A
+      # `None` is a per-module SKIP, which pytest reports as green: this
+      # whole job exists to stop the SDK-gated tests self-skipping, and
+      # without this assertion a broken checkout would silently restore
+      # exactly the gap tan-cli#1236 files against.
+      - name: enable the SDK-dependent tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$PWD/alp-sdk/scripts/alp_project.py" ]; then
+            echo "::error::alp-sdk has no scripts/alp_project.py at $PWD/alp-sdk -- tests/conftest.py::sdk_root() would return None and every SDK-gated test would SKIP while this job still reported green. Fix the 'clone alp-sdk' step above."
+            exit 1
+          fi
+          echo "ALP_SDK_ROOT=$PWD/alp-sdk" >> "$GITHUB_ENV"
+
+      # tan-cli#503: the zsh-driven completion cases are skipif(not zsh on
+      # PATH) -- installed explicitly so this job's pytest run actually
+      # exercises that loop rather than silently skipping it, the same
+      # reason ci.yml's `python`/`python-newest` jobs install it.
+      - name: ensure zsh is on PATH (zsh-driven completion tests)
+        run: |
+          if ! command -v zsh >/dev/null 2>&1; then
+            bash scripts/ci/apt-bounded.sh update
+            bash scripts/ci/apt-bounded.sh install -y --no-install-recommends zsh
+          fi
+
+      - name: install the declared package
+        run: pip install -e ./python
+
+      - name: install the test runner
+        run: pip install pytest pytest-xdist
+
+      # Whole suite, unnarrowed -- ci.yml:python-newest's own lesson
+      # (tan-cli#1126) is that a narrowed selection on a floating ceiling can
+      # sit red on an untested slice while every required context stays
+      # green. This job's entire value is running the SAME selection as the
+      # bound floor legs (`ci.yml`'s `python`, `parity.yml`'s
+      # `python-tests-shard`) on the ceiling interpreter instead.
+      - name: pytest
+        working-directory: python
+        env:
+          # ALP_SDK_ROOT is already in the job environment (the previous step
+          # exported it via $GITHUB_ENV); only the merge_group binding needs
+          # setting here. merge_group does not populate GITHUB_BASE_REF --
+          # same binding ci.yml's `python`/`python-newest` jobs make, same
+          # gate depending on it (test_module_size_budget_log_append_only.py).
+          TAN_MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+        run: python -m pytest tests -q
