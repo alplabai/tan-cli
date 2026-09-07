@@ -375,9 +375,10 @@ def main(argv: list[str] | None = None) -> int:
     current_test_tree = {core.rel(path) for path in core.test_tree_modules()}
     observed_moved, observed_settled = _deltas(committed_observed, observed, current_test_tree)
 
-    stale_caps = not core.CAPS_PATH.exists() or core.CAPS_PATH.read_text(
-        encoding="utf-8"
-    ) != core.dump_caps()
+    # `core.read_exact`, not `Path.read_text`: a `_caps.json` already
+    # CRLF-corrupted must not read as if it matched the freshly rendered LF
+    # `dump_caps()` and be left uncorrected (tan-cli#1243).
+    stale_caps = not core.CAPS_PATH.exists() or core.read_exact(core.CAPS_PATH) != core.dump_caps()
 
     if not (
         grown or shrunk or observed_moved or observed_settled or stale_caps or functions_stale

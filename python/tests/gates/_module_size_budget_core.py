@@ -591,6 +591,20 @@ def render_records(state: MeasuredState, observed_tests: dict[str, int]) -> dict
     return out
 
 
+def read_exact(path: Path) -> str:
+    """Read `path` as UTF-8 with NO newline translation (tan-cli#1243).
+
+    `Path.read_text`'s universal-newlines mode silently normalises a `\\r\\n`
+    on disk to `\\n` in the returned string -- so a record already CRLF-
+    corrupted (Windows `Path.write_text` with no `newline=` argument, the bug
+    #1243 fixes on the write side) reads as if it were LF and compares EQUAL
+    to freshly rendered LF `text`, and is never rewritten. Decoding the raw
+    bytes instead of going through text mode makes the comparison exact, so a
+    corrupted record on disk is detected as stale and repaired by the next
+    regen run rather than left corrupted forever."""
+    return path.read_bytes().decode("utf-8")
+
+
 def write_records(state: MeasuredState, observed_tests: dict[str, int]) -> None:
     """Write the record tree, and DELETE any record the measurement no longer
     produces. The delete half matters: a module that dropped under the cap and
@@ -602,8 +616,14 @@ def write_records(state: MeasuredState, observed_tests: dict[str, int]) -> None:
     for name, text in wanted.items():
         path = RECORD_DIR / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists() or path.read_text(encoding="utf-8") != text:
-            path.write_text(text, encoding="utf-8")
+        if not path.exists() or read_exact(path) != text:
+            # newline="\n": `text` holds only "\n" (see `dump_budget_record`/
+            # `dump_caps`); default newline=None would translate that to
+            # `os.linesep` on write, i.e. CRLF on Windows, against
+            # `.gitattributes`' `* text=auto eol=lf` (tan-cli#1243). Same fix
+            # `_append_log` in `regen_module_size_budget.py` already carries
+            # for `MODULE_SIZE_BUDGET_LOG.d/` (tan-cli#1152).
+            path.write_text(text, encoding="utf-8", newline="\n")
     for path in sorted(RECORD_DIR.rglob("*"), reverse=True):
         if path.is_dir():
             if not any(path.iterdir()):
