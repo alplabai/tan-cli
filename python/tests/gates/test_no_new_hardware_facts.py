@@ -102,6 +102,21 @@ ALLOWED: dict[str, str] = {
         "explain_cmd.py/bootstrap.py are OK for, not a fact tan decides "
         "anything from silently."
     ),
+    "orchestrator.py": (
+        "OK: `YOCTO_MACHINE_UNBUILDABLE`'s per-MACHINE refusal messages (#1982, "
+        "tan-cli#1239) name the five AEN A32-cluster SKUs (E1M-AEN{501,601,701,"
+        "801,803}) in EMITTED customer-facing prose explaining WHY a `bitbake` "
+        "target was refused -- 'naming real parts is the feature' category "
+        "explain_cmd.py/bootstrap.py/pinmux_cmd.py are OK for, not a fact tan "
+        "decides anything from: the dict is keyed by MACHINE string (the "
+        "decision input), and the SKU mentions are inside the message VALUE "
+        "only. Ported verbatim, byte-for-byte, from alp-sdk's own "
+        "scripts/alp_orchestrate/orchestrator.py -- the SAME dict "
+        "scripts/check_yocto_machine_tree_parity.py consults there (that file's "
+        "own comment: 'do not fork a second list') -- so paraphrasing the "
+        "prose here would make the next planner re-sync a hand-merge instead "
+        "of a diff, the same reasoning zephyr_board.py's entry below gives."
+    ),
     "zephyr_board.py": (
         "DEBT: two `E1M-EVK` mentions inside EMITTED devicetree prose (the generated "
         "`-pinctrl.dtsi` and `.dts` say which carrier wires the console). Not a fact "
