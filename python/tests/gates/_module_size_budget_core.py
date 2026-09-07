@@ -591,19 +591,59 @@ def render_records(state: MeasuredState, observed_tests: dict[str, int]) -> dict
     return out
 
 
-def write_records(state: MeasuredState, observed_tests: dict[str, int]) -> None:
+def read_exact(path: Path) -> str:
+    """Read `path` as UTF-8 with NO newline translation (tan-cli#1243).
+
+    `Path.read_text`'s universal-newlines mode silently normalises a `\\r\\n`
+    on disk to `\\n` in the returned string -- so a record already CRLF-
+    corrupted (Windows `Path.write_text` with no `newline=` argument, the bug
+    #1243 fixes on the write side) reads as if it were LF and compares EQUAL
+    to freshly rendered LF `text`, and is never rewritten. Decoding the raw
+    bytes instead of going through text mode makes the comparison exact, so
+    `write_records` sees the drift and repairs it on a plain regen -- even
+    though nothing about the MEASUREMENT changed, which is why `main()` in
+    `regen_module_size_budget.py` cannot decide "nothing to do" from the
+    structured `grown`/`shrunk`/... deltas alone and instead reads
+    `write_records`'s own return value. `--check` does NOT run this repair
+    (it never writes); it only reports the structural deltas, unchanged from
+    before this fix -- a CRLF-only record is invisible to `--check`, on
+    purpose: `--check`'s own contract compares a fresh MEASUREMENT against
+    the parsed record, not bytes on disk (see `regen_module_size_budget.py`'s
+    module docstring on the related `--check`-vs-pytest-gate tolerance
+    split)."""
+    return path.read_bytes().decode("utf-8")
+
+
+def write_records(state: MeasuredState, observed_tests: dict[str, int]) -> bool:
     """Write the record tree, and DELETE any record the measurement no longer
     produces. The delete half matters: a module that dropped under the cap and
     lost its long functions leaves a record describing a module that is no
     longer measured, which is the stale-ceiling shape
-    `test_the_module_budget_has_not_gone_stale` exists to catch."""
+    `test_the_module_budget_has_not_gone_stale` exists to catch.
+
+    Returns whether anything on disk actually changed (a write or a delete).
+    `main()` in `regen_module_size_budget.py` needs this, not just the
+    structured `grown`/`shrunk`/... deltas it also computes: a record whose
+    MEASURED content is unchanged but whose BYTES are not (tan-cli#1243's
+    CRLF case, caught by the `read_exact` comparison below rather than by
+    `Path.read_text`'s newline-normalising one) is real drift with no
+    corresponding structural delta -- the caller's own early-exit shortcut
+    must not fire before this loop has had a chance to run and repair it."""
+    changed = False
     wanted = render_records(state, observed_tests)
     RECORD_DIR.mkdir(parents=True, exist_ok=True)
     for name, text in wanted.items():
         path = RECORD_DIR / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists() or path.read_text(encoding="utf-8") != text:
-            path.write_text(text, encoding="utf-8")
+        if not path.exists() or read_exact(path) != text:
+            # newline="\n": `text` holds only "\n" (see `dump_budget_record`/
+            # `dump_caps`); default newline=None would translate that to
+            # `os.linesep` on write, i.e. CRLF on Windows, against
+            # `.gitattributes`' `* text=auto eol=lf` (tan-cli#1243). Same fix
+            # `_append_log` in `regen_module_size_budget.py` already carries
+            # for `MODULE_SIZE_BUDGET_LOG.d/` (tan-cli#1152).
+            path.write_text(text, encoding="utf-8", newline="\n")
+            changed = True
     for path in sorted(RECORD_DIR.rglob("*"), reverse=True):
         if path.is_dir():
             if not any(path.iterdir()):
@@ -613,3 +653,5 @@ def write_records(state: MeasuredState, observed_tests: dict[str, int]) -> None:
         if name == "README.md" or name in wanted:
             continue
         path.unlink()
+        changed = True
+    return changed

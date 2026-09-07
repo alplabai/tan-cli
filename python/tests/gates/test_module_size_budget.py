@@ -1150,3 +1150,38 @@ def test_the_record_tree_declares_the_caps_this_gate_uses():
     caps = core.load_caps()
     assert caps["module_cap"] == core.MODULE_CAP
     assert caps["function_cap"] == core.FUNCTION_CAP
+
+
+def test_no_record_file_contains_a_carriage_return(tmp_path):
+    """`Path.write_text` with no `newline=` argument translates `"\\n"` to
+    `os.linesep` on write -- CRLF on Windows -- against `.gitattributes`'
+    `* text=auto eol=lf` (tan-cli#1243). Read with `read_bytes()`, never
+    `read_text()`: universal-newlines mode normalises a CRLF already on disk
+    back to LF, which is the exact corruption this test exists to catch --
+    reading through it would make a poisoned file compare as clean.
+
+    tan-cli#275 shipped a gate that could never fail because an autouse
+    fixture scrubbed the env var its own check read, silently, for eleven
+    commits. Proven here not to be that shape: `_scan` below is run first
+    against a deliberately poisoned copy and must catch it, before it is
+    trusted against the real, committed tree."""
+
+    def _scan(record_dir: Path) -> list[Path]:
+        return [
+            path
+            for path in record_dir.rglob("*")
+            if path.is_file() and b"\r" in path.read_bytes()
+        ]
+
+    poisoned_dir = tmp_path / "poisoned"
+    poisoned_dir.mkdir()
+    (poisoned_dir / "_caps.json").write_bytes(b'{\r\n  "module_cap": 800\r\n}\r\n')
+    assert _scan(poisoned_dir), "self-check: _scan must catch a poisoned copy -- RED proof"
+
+    offenders = _scan(core.RECORD_DIR) + _scan(core.LOG_DIR)
+    assert not offenders, (
+        "these committed files carry a CRLF byte, against .gitattributes' "
+        "`* text=auto eol=lf` (tan-cli#1243) -- regenerate with "
+        "`python scripts/regen_module_size_budget.py` to normalise them "
+        f"back to LF: {offenders}"
+    )
