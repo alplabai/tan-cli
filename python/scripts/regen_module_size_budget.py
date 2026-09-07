@@ -380,13 +380,21 @@ def main(argv: list[str] | None = None) -> int:
     # `dump_caps()` and be left uncorrected (tan-cli#1243).
     stale_caps = not core.CAPS_PATH.exists() or core.read_exact(core.CAPS_PATH) != core.dump_caps()
 
-    if not (
+    # This is a MEASUREMENT-level verdict only (module/function line counts,
+    # the two whole-tree scalars, `_caps.json`'s two numbers) -- it says
+    # nothing about whether a record's raw BYTES already match what a regen
+    # would write, which is deliberate: `--check` below is judged on this
+    # alone (tan-cli#1243 review), never on byte drift, so its meaning of
+    # "stale" stays what its own module docstring already promises (a
+    # measurement mismatch, not a whitespace/newline one).
+    structurally_stale = bool(
         grown or shrunk or observed_moved or observed_settled or stale_caps or functions_stale
-    ):
-        print("module_size_budget.d/ already matches the measured tree.")
-        return 0
+    )
 
     if args.check:
+        if not structurally_stale:
+            print("module_size_budget.d/ already matches the measured tree.")
+            return 0
         print("module_size_budget.d/ is stale:")
         for line in grown + shrunk:
             print(f"  {line}")
@@ -415,7 +423,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    core.write_records(current, observed)
+    # `write_records` (not `structurally_stale`) decides "did anything
+    # change": tan-cli#1243 review found a record whose bytes are CRLF but
+    # whose MEASURED content is identical sets none of the flags above, so
+    # `structurally_stale` alone would have this function report "already
+    # matches" and return before `write_records` ever ran -- exactly the
+    # early-return this used to share with `--check`, and exactly why a
+    # CRLF-only record survived a plain regen unrepaired. `write_records`
+    # itself compares raw bytes (`core.read_exact`) per file and is the only
+    # thing that can see that drift.
+    wrote = core.write_records(current, observed)
+    if not wrote and not structurally_stale:
+        print("module_size_budget.d/ already matches the measured tree.")
+        return 0
+
     print(f"wrote {core.RECORD_DIR}")
     for line in shrunk:
         print(f"  shrunk: {line}")
