@@ -1216,6 +1216,59 @@ def test_the_in_process_engine_matches_alp_project_for_every_mode(
         _ARTEFACTS_COMPARED.get(board.parent.name, 0) + compared)
 
 
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_zephyr_conf_matches_the_build_plans_own_config_artefact(
+    planners, board
+):
+    """tan-cli#1216 (ADR-0026 §D): the ONE renderer-re-implementation
+    retirement this slice makes. `configArtefacts[].contents` is documented
+    (`metadata/schemas/build-plan-v1.schema.json`) as "byte-identical to what
+    a consumer's own materialise step writes to buildDir" -- this test is
+    that promise, checked, rather than merely written down.
+
+    `tan generate --target zephyr-conf --core <id>` now renders through the
+    SAME `buildplan._slice_config_artefact` call `emit_build_plan` uses to
+    fill a slice's `configArtefacts[].contents` (see `planner_emit.
+    _render_per_core`), so a mutation to either call site -- or a revert back
+    to the old two-dispatch-tables shape -- reds here even though
+    `test_the_in_process_engine_matches_alp_project_for_every_mode` alone
+    would not notice: that test only proves tan agrees with alp-sdk's
+    independent copy, not that tan's own two internal consumers of zephyr-conf
+    bytes are pinned to one call site rather than two that happen to agree.
+    """
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    plan_text = relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build"))
+    plan = json.loads(plan_text)
+    artefacts_by_core = {sl["coreId"]: sl["configArtefacts"] for sl in plan["slices"]}
+
+    from tan import planner_emit
+
+    compared = 0
+    for core_id in sorted(project.cores):
+        alp_conf = next(
+            (a for a in artefacts_by_core.get(core_id, [])
+             if a["path"].rsplit("/", 1)[-1] == "alp.conf"),
+            None,
+        )
+        if alp_conf is None:
+            continue  # not a zephyr slice; --emit zephyr-conf --core <id> would refuse it too
+        got = planner_emit.render(
+            "zephyr-conf", sdk_root=SDK, board_yaml=board, core=core_id)
+        assert got == alp_conf["contents"], (
+            f"{board} --core {core_id}: `tan generate --target zephyr-conf` "
+            "diverges from the build-plan's own configArtefacts[].contents -- "
+            + _first_diff(alp_conf["contents"], got))
+        compared += 1
+    if compared == 0:
+        pytest.skip(f"{board}: no zephyr slice to compare")
+
+
 def _oracle_board_tree(board: Path, core: str, destination: Path) -> tuple[int, dict]:
     """`alp_project.py --emit zephyr-board --output <dir>`, in-process.
 

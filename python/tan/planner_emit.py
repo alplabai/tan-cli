@@ -106,9 +106,14 @@ IN_PROCESS_MODES = frozenset({
 #: `--emit zephyr-board` emits a whole Zephyr board tree named per SKU+core.
 TREE_MODES = frozenset({"zephyr-board"})
 
-#: The three per-core config slices, each mapped to the `tan.planner` renderer
-#: `alp_project.py` calls for it. Rendered by name via `getattr` so this table
-#: cannot drift from the package's own public surface.
+#: The three per-core config slices this mode set names -- still the
+#: membership test `render()` uses to route into `_render_per_core` at all
+#: (`if mode in _SLICE_RENDERER`). `yocto-conf` and `cmake-args` still resolve
+#: their renderer BY NAME via `getattr` here, so this table cannot drift from
+#: the package's own public surface for those two. `zephyr-conf` renders
+#: through `buildplan._slice_config_artefact` instead (tan-cli#1216) -- see
+#: `_render_per_core` -- so its value below documents the leaf renderer that
+#: helper still calls, rather than naming a `getattr` target itself.
 _SLICE_RENDERER = {
     "zephyr-conf": "_slice_alp_conf",
     "yocto-conf": "_slice_local_conf",
@@ -461,7 +466,19 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
 def _render_per_core(planner, project, mode: str, *, core: str | None,
                      sdk_root: Path) -> str:
     """`zephyr-conf` / `cmake-args` / `yocto-conf`, mirroring
-    `alp_project._run_v2_per_core_emit`'s per-core section exactly."""
+    `alp_project._run_v2_per_core_emit`'s per-core section exactly.
+
+    `zephyr-conf` renders through `buildplan._slice_config_artefact` -- the
+    SAME helper `emit_build_plan` calls to fill a slice's
+    `configArtefacts[].contents` (tan-cli#1216, ADR-0026 §D) -- rather than a
+    second, independent dispatch straight to the leaf renderer. The bytes are
+    unchanged (`_slice_config_artefact`'s zephyr branch IS `_slice_alp_conf`);
+    what changes is that `tan generate --target zephyr-conf` and `tan build`'s
+    plan are now structurally pinned to the one call site the schema's own
+    words describe ("byte-identical to what a consumer's own materialise step
+    writes to buildDir") instead of merely agreeing today by coincidence of
+    two dispatch tables that happen to name the same function.
+    """
     if core is not None and core not in project.cores:
         raise PlannerEmitError(
             f"--core {core} not present in board.yaml "
@@ -476,7 +493,28 @@ def _render_per_core(planner, project, mode: str, *, core: str | None,
         resolve_selection(project, project.effective_metadata_root())
 
     allowed_os = _os_classes(sdk_root).get(mode)
-    slice_renderer = getattr(planner, _SLICE_RENDERER[mode])
+    if mode == "zephyr-conf":
+        # Already imported (`tan.planner.__init__` imports `.buildplan` at
+        # module scope) by the time `render()` reaches here -- this is a
+        # `sys.modules` cache hit, not a fresh load, and it must stay lazy
+        # like every other `tan.planner*` import in this file: importing it
+        # before `bind_sdk_root` has run would raise.
+        from tan.planner.buildplan import _slice_config_artefact  # noqa: PLC0415
+
+        def slice_renderer(proj, sl):
+            artefact = _slice_config_artefact(proj, sl)
+            if artefact is None:
+                # Unreachable in practice: `allowed_os` above already confines
+                # this branch to `os: zephyr`, the one shape
+                # `_slice_config_artefact` never returns `None` for. A coded
+                # refusal beats a bare `NoneType` subscript if that invariant
+                # ever breaks.
+                raise PlannerEmitError(
+                    f"no config artefact for core `{sl.core_id}` "
+                    f"(os: {sl.os})")
+            return artefact[1]
+    else:
+        slice_renderer = getattr(planner, _SLICE_RENDERER[mode])
     core_ids = [core] if core is not None else sorted(project.cores.keys())
 
     parts: list[str] = []

@@ -13,6 +13,10 @@
       "_render_route_table"
     ],
     [
+      77,
+      "_render_per_core"
+    ],
+    [
       80,
       "_render_v1_shaped"
     ]
