@@ -733,7 +733,36 @@ env:
   # V2N/V2M pinctrl/`_defconfig` bytes `tan/planner/zephyr_board.py` now
   # emits -- see `test_planner_relocation_freshness.py`'s own `eff266b6`
   # paragraph for the full hand-port accounting.
-  PINNED_SDK_TAG: eff266b67f6c45bbe9182d48bbd08d01db6af24b
+  #
+  # `eff266b6` -> `15b2f32c` (tan-cli#1239/#1223): moved together with
+  # `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT` AND
+  # `HAND_PORT_PINNED_SDK_COMMIT` (see that pin's own comment: moving one
+  # without the other is not an option here -- this job's own
+  # `test_planner_emit_parity.py` binds `ALP_SDK_ROOT` to THIS tag and
+  # exercises the hand-ported `gen_zephyr_board.py` code for every board,
+  # so a `PINNED_SDK_TAG` bump with the hand-port audit left behind reds
+  # regardless of which freshness pin moved), `ci.yml`'s `sdk_parity`
+  # `ref:`, and `PINNED_PLANNER_ORACLE_SDK_REF`
+  # below. Four upstream commits touch `scripts/alp_orchestrate/` in this
+  # range (alp-sdk#1365 split B, #1961/#1987, #1967, #1980) -- see
+  # `test_planner_relocation_freshness.py`'s own `eff266b6` paragraph for
+  # the full per-commit audit. Re-measured against `15b2f32c`:
+  #   - planner oracle: a REAL 87-of-700-file diff (see
+  #     `PINNED_PLANNER_ORACLE_SDK_REF` below) -- every file explained by
+  #     the #1967 yocto refusal, the #1980 Optiga DNP fix, or the #1365
+  #     split B carve-out reason-text rewording, none by anything else.
+  #   - scaffold / toolchain-lock / bootstrap: unchanged in range -- no
+  #     `templates/`, `README.md`, `metadata/toolchains.json` or
+  #     `metadata/bootstrap.json` path appears in the four-commit diff.
+  #   - `test_the_in_process_engine_matches_alp_project_for_every_board_tree`:
+  #     89 failed before the two `gen_zephyr_board.py` hand-port fixes this
+  #     same change carries (a `rtc_alarm.risk` shape change crashing the
+  #     AEN board-tree emit outright, and the V2N/V2M board `.dts` this
+  #     tag's alp-sdk now generates but `tan/planner/zephyr_board.py` did
+  #     not yet) -- 0 failed after both; see
+  #     `test_planner_relocation_freshness.py`'s `HAND_PORT_PINNED_SDK_COMMIT`
+  #     paragraph for the full account.
+  PINNED_SDK_TAG: 15b2f32ce82b0ff088b850723e10f1d38f8060b4
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -850,7 +879,20 @@ env:
   # `tan/planner/zephyr_board.py` now emits (see `PINNED_SDK_TAG`'s own
   # comment above, and `test_planner_relocation_freshness.py`'s `eff266b6`
   # paragraph, for the full accounting).
-  PINNED_PLANNER_ORACLE_SDK_REF: eff266b67f6c45bbe9182d48bbd08d01db6af24b
+  # `eff266b6` -> `15b2f32c` (tan-cli#1239/#1223): moved in lockstep with
+  # `PINNED_SDK_TAG` above per this pin's own rule -- #270 has not landed.
+  # `python scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+  # 15b2f32ce82b0ff088b850723e10f1d38f8060b4` regenerated `tests/fixtures/
+  # planner_oracle` and `PROVENANCE.txt`: board/emit counts unchanged (100
+  # boards, 700 emits, 7 error-contract), bytes 1,205,650 -> 1,220,703;
+  # `git status` on the fixture tree after the capture shows 87 of 700
+  # emit files moved, all `build-plan.json`/`system-manifest.yaml`/
+  # `dts-reservations.dtsi`/`ipc-contract-h.h` -- every AEN801-based
+  # board's `a32_cluster` slice (the #1967 yocto refusal + the #1980
+  # Optiga DNP fix) or `multicore/rpmsg-aen` and `multicore/mproc-mailbox`
+  # (the #1365 split B reason-text rewording). See `PINNED_SDK_TAG`'s own
+  # comment above for the full accounting.
+  PINNED_PLANNER_ORACLE_SDK_REF: 15b2f32ce82b0ff088b850723e10f1d38f8060b4
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

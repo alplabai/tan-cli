@@ -780,7 +780,93 @@ from tests.conftest import sdk_root
 #:
 #: Upstream commits in range touching this table's files:
 #:   - eff266b6 feat(aen): make the on-module RTC and temperature sensor first-class, and correct what the module reports about itself (#1964)
-PINNED_SDK_COMMIT = "eff266b67f6c45bbe9182d48bbd08d01db6af24b"  # alp-sdk, past 0914da38 -- see above
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `eff266b6` -> `15b2f32c`
+#: (tan-cli#1239/#1223, auditing `auto/planner-resync`'s machine proposal at
+#: `e52bec2a`). Four upstream commits touch `scripts/alp_orchestrate/` in
+#: this range, all four BEHAVIOURAL:
+#:
+#:   - `2fd045411` (alp-sdk#1365 split B, #1983): `aperture.py`, `carveout.py`,
+#:     `memregion.py`, `partition.py` gain the derived flash-class /
+#:     write-authority IPC-eligibility split (P1/P2). Already present in
+#:     `tan/planner/` AHEAD of this pin -- measured, not assumed: diffed all
+#:     four tan-side files against their 15b2f32c counterparts line-by-line;
+#:     every difference is a known relocation shape (`alp-sdk#1365` vs bare
+#:     `#1365` in a same-repo comment, `.som_metadata`/`alp_project` import
+#:     paths, the inlined TBD-string check vs the shared `sentinels.is_tbd`
+#:     upstream factored out), none behavioural. `aperture.py` itself was
+#:     the one entry in `EXEMPT_FROM_RELOCATION_TRACKING` -- that entry's own
+#:     comment named "the same day `PINNED_SDK_COMMIT` advances past split
+#:     B's merge" as when to retire it into this table instead; this is
+#:     that day.
+#:   - `8ac9b3707` (alp-sdk#1961/#1987, #2005): `loader.py`/`orchestrator.py`
+#:     (`_load_yaml`, `_resolve_app_path`, `_zephyr_app_dir`) wrap
+#:     `.resolve()`/`.is_file()` so a symlink-loop or otherwise-unresolvable
+#:     `app:`/`profile:` path raises a clean `OrchestratorError` instead of
+#:     an unhandled `OSError`/`RuntimeError` escaping the loader. Ported
+#:     verbatim by `auto/planner-resync`'s 3-way merge (the +19 `loader.py` /
+#:     part of the +172 `orchestrator.py` in `e52bec2a`); tan-cli#1237's
+#:     CPython-version split already covers the one platform difference
+#:     (`RuntimeError` on POSIX ELOOP vs a plain Windows `OSError`) in the
+#:     test suite.
+#:   - `3211dc850` (alp-sdk#1967, #2006) -- the commit tan-cli#1223 was filed
+#:     for: `YOCTO_MACHINE_UNBUILDABLE` + `UnbuildableYoctoMachineError` in
+#:     `orchestrator.py`, consulted by `_slice_command` before considering
+#:     `image`/`app`/`recipe` for a yocto slice (five AEN A32-cluster
+#:     MACHINEs, three distinct failure shapes -- see the dict's own
+#:     comment); `buildplan.py` catches it and emits `command: null` plus a
+#:     `yocto-machine-unbuildable` warning, the same "carry the slice, never
+#:     emit a broken command" shape `no-command` already used. Ported
+#:     verbatim by the same merge (the rest of the +172/+16).
+#:   - `f133da463` (alp-sdk#1980, #2008): `slugs.py`'s
+#:     `_slugs_from_on_module` stops auto-enabling a chip named by a
+#:     top-level scalar field (e.g. `secure_element:`) when the SAME chip's
+#:     `i2c_devices[].assembled` is `false` (hard DNP) or `optional` --
+#:     E1M-AEN801's Optiga (DNP, footprint shared with E1M-AEN803) was
+#:     reaching `CONFIG_ALP_SDK_CHIP_OPTIGA_TRUST_M=y` before this. Ported
+#:     verbatim (the +38 `slugs.py`).
+#:
+#: MEASURED, not assumed: re-captured the full 100-board oracle
+#: (`python scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+#: 15b2f32ce82b0ff088b850723e10f1d38f8060b4`) -- 700 emits (7 error-contract),
+#: 1,220,703 B (was 1,205,650). 87 of 700 files move; every one is explained
+#: by the three behavioural commits above and none by anything else: every
+#: AEN801-based board's `a32_cluster` yocto slice gains `command: null` plus
+#: the `yocto-machine-unbuildable` warning (#1967); every AEN801-based
+#: zephyr slice's `alp.conf` drops `CONFIG_ALP_SDK_CHIP_OPTIGA_TRUST_M=y`
+#: (#1980); `multicore/rpmsg-aen` and `multicore/mproc-mailbox`'s
+#: IPC-blocked reason text is reworded from "hasn't been HW-mapped yet" to
+#: naming the derived flash class / write authority (#1365 split B, already-
+#: ported `carveout.py`). alp-sdk's OWN much smaller
+#: `tests/parity/oracle/{audio_i2s-tone,multicore_rpmsg-aen}.build-plan.json`
+#: -- tan-cli#1223's own prediction, a DIFFERENT, alp-sdk-repo-internal
+#: fixture pair tan-cli has no file at that path for -- show the identical
+#: two-part diff (`command: null` + the warning): confirms #1223's
+#: prediction was correct, just not yet landed at the time of that issue's
+#: own last comment ("zero commits touch those two files", measured against
+#: a pre-`3211dc850` tree).
+#:
+#: `HAND_PORT_PINNED_SDK_COMMIT` moves to `15b2f32c` in this SAME change --
+#: see that pin's own comment for the two-commit audit
+#: (`scripts/alp_project_loader.py` INERT, `scripts/gen_zephyr_board.py`
+#: NOT: the rtc_alarm.risk dict crash and the missing V2N/V2M `.dts`
+#: generator, both found only once `PINNED_SDK_TAG` moved and
+#: `test_planner_emit_parity.py`'s live comparison actually exercised
+#: them). A first pass at this re-sync left it behind, reasoning the two
+#: audits were independent -- they are not: `test_planner_emit_parity.py`
+#: binds `ALP_SDK_ROOT` to `PINNED_SDK_TAG` and calls
+#: `emit_zephyr_board()`, the SAME hand-ported code
+#: `HAND_PORT_PINNED_SDK_COMMIT` audits, for every board. Moving
+#: `PINNED_SDK_TAG`/`PINNED_SDK_COMMIT` without also auditing and porting
+#: `gen_zephyr_board.py`'s own delta reds that comparison regardless of
+#: which freshness pin is left behind -- there is no shape in which the
+#: mirror moves and the hand-port audit can safely wait.
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 2fd045411 feat(build): derive a memory region's flash class and split the two eligibility predicates (#1365 split B) (#1983)
+#:   - 3211dc850 fix(aen): make the A32 Yocto path honest about not building (#1967) (#2006)
+#:   - 8ac9b3707 fix(alp_orchestrate): make three user-supplied paths fail cleanly instead of crashing (#1961, #1987) (#2005)
+#:   - f133da463 fix(metadata): gen_board_header.py honours i2c_devices assembled: false (#1980) (#2008)
+PINNED_SDK_COMMIT = "15b2f32ce82b0ff088b850723e10f1d38f8060b4"  # alp-sdk, past eff266b6 -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -818,25 +904,26 @@ PINNED_SDK_COMMIT = "eff266b67f6c45bbe9182d48bbd08d01db6af24b"  # alp-sdk, past 
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "03b610ce02d1819d09ad3d5d233bbbd46b950bdc09448748b17ebc5a1b57f272",
-    "buildplan.py": "72b2f5227b57674f4e752c8a6578f0d703c10d0b6d2e3df8c41872f8fd748cb1",
-    "carveout.py": "c05826e4b784965c332dc662c9aa82b993787d7ab588771c7aee5feaa93feb4e",
+    "aperture.py": "719fcb92a622f1a772009709b85fc4619fb09890e0b6bf52418e1d1674b47082",
+    "buildplan.py": "8954a83db046cc46b57f8c2e09a5fee3607da0e3caf2fac176c106a7643789dd",
+    "carveout.py": "97b4f4805a817cc466b1e829c97614bed56317bdf47dde18753f38b2a202df48",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "1a6d5c26b05cb3f07b02fc06154bcb7bb48e2d11d4a96a2c3e622aab1ee92208",
+    "kconfig.py": "0d1c2bc57acba1764b8f18f1694bfe3e4c9ed5d0c4d6cd230183205dc40cc210",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
-    "loader.py": "136e674d0b2594f99004d99dc0e1c9e116c477f764d759a3919668141182cffe",
+    "loader.py": "36b75774b3ff4dd2005613bd1b024d7438f025b5ac586b2516eb830b669f2a30",
     "manifest.py": "f38de96a9626672bc08f181e09b3a545d8dc846c0423cc6e9dd08c3b96a87d1d",
-    "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
+    "memregion.py": "c70404b00ad857d65ac3dcd997adbf18ac6449ff4d99ec0683654979a5527c94",
     "models.py": "7e174871caa49f4d7f877dc0229571f1961d29d5c6d2214ced58aa1b86b11585",
-    "orchestrator.py": "cb6a38e1a2f4200b16da93c1b11512c6e59b963e8e08279d801b8d38e57c3002",
-    "partition.py": "e5b52e5b99971a7ae39805ccb8e6f30f0c304f5e0b09ba550e6eab65ea0047f6",
+    "orchestrator.py": "b7a2044fa062335f539d456a1da01f20b11f1b780f41b4bbc346c34ad56d2a6b",
+    "partition.py": "070b43d2a76b119c418d0e7d4f8f1d7157a9081af501a09ea200562048eec002",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "ef9adb68a4cc9f18fe25bba7c0a4c2e9eabd2955166e2c5a8f6f92db0993e805",
     "secure.py": "44743b887ab8d29293469f2574b6d88e0d433c9b9ba1f1001709f51104716c0c",
-    "slugs.py": "93b94c2e950f47bca303cf06894f03a3bc04b4323f7627af7c0836e7c4949355",
+    "slugs.py": "7db83e2dd4ea8b47edb81ad657bfc30d62ca283d51e99cd275ce2578de0dd3ed",
     "topology.py": "fcd81eaaaeeb116151229ca118c2991f0befa13b4e1039d11a0ee65056eb9015",
-    "validate.py": "3a8458d1ab417559532b5dd9dce7853820482d0af42534431a970e76f1002360",
+    "validate.py": "9d66cc7cebfe4bbb355b8d424f784f62ad652a9fa6560280942198c16079a5f2",
 }
 
 #: alp-sdk commit the SDK-SIDE SOURCE FILES in HAND_PORT_HASHES were last
@@ -1462,7 +1549,48 @@ PINNED_HASHES: dict[str, str] = {
 #:   - dbfa06bd feat(boards): generate the V2N/V2M pinctrl.dtsi + _defconfig from a supervisor-links metadata source (#655) (#1924)
 #:   - eff266b6 feat(aen): make the on-module RTC and temperature sensor first-class, and correct what the module reports about itself (#1964)
 #:   - 43e5b2cb fix(scripts): refuse non-integer min/max bounds; render URI-shaped diagnostic paths (#1932)
-HAND_PORT_PINNED_SDK_COMMIT = "eff266b67f6c45bbe9182d48bbd08d01db6af24b"  # alp-sdk, past ff27f179 -- see above (tan-cli#1156)
+#: AUDITED RE-SYNC: `eff266b6` -> `15b2f32c` (tan-cli#1239/#1223, moved
+#: alongside `PINNED_SDK_COMMIT` above -- both changed in this range).
+#:
+#:   - `scripts/alp_project_loader.py` (alp-sdk#1943): moves `TargetSpec`/
+#:     `resolve_targets`/`npu_backend`/`accel_config` in from
+#:     `scripts/alp_model/targets.py` (ADR-0028 prep, the eventual deletion
+#:     of `alp_model`). INERT for `tan/planner/`: `project_loader.py`/
+#:     `som_metadata.py` (the two tan-side hand-ports of this file) call
+#:     none of the four new names, and the one docstring line they DO
+#:     hand-port (the `resolve_soc_path()` callsite paragraph) is untouched
+#:     by the move -- confirmed by diffing the two files directly, not
+#:     inferred from the commit subject.
+#:   - `scripts/gen_zephyr_board.py`: two commits, both ported.
+#:     `bc83ce877` (alp-sdk#1988) reshapes `on-module-links.yaml`'s
+#:     `rtc_alarm.risk` from a plain string into a per-part map
+#:     (`{E8: "..."}`) -- tan's OWN independent fix for the same hazard
+#:     (tan-cli#493, gating emission on a hardcoded `if part == "E8"`
+#:     against the OLD string shape) went stale the moment this pin moved:
+#:     `_aen_brd_i2c_dts()` called `_c_comment(alarm["risk"], "")` against
+#:     a dict, crashing `--emit zephyr-board` for every AEN SKU with
+#:     `AttributeError: 'dict' object has no attribute 'split'`
+#:     (measured: `test_planner_emit_parity.py`'s in-process/subprocess
+#:     comparison failed on all ~90 boards touching that code path, not
+#:     just AEN ones, because the subprocess crash starved every mode
+#:     after it). Re-pointed at `(alarm.get("risk") or {}).get(part)`,
+#:     matching upstream's own fix exactly. `e4f2f60e4` (alp-sdk#655
+#:     slice 2, #1947) adds `_v2n_dts()` (~190 lines) + `_v2n_part_display()`
+#:     + the `_V2N_WDT0_*`/`_V2N_OPENAMP_TAIL` string tables, generating the
+#:     V2N/V2M board `.dts` from the SoM preset + SoC JSON +
+#:     `supervisor-links.yaml` -- the "future slice" this file's own
+#:     docstring had flagged as deferred. Ported verbatim (the new content
+#:     is prose/DTS string tables plus one regex-based part-display split,
+#:     no invented logic) and wired into `emit_zephyr_board()`'s `v2n`/
+#:     `v2n-m1` branch. MEASURED, not assumed:
+#:     `test_the_in_process_engine_matches_alp_project_for_every_board_tree`
+#:     -- 89 failed before either fix (crash on every board reaching
+#:     `_aen_brd_i2c_dts`, plus a board-tree FILE SET mismatch on every
+#:     V2N-family board missing its `.dts`) -- 0 failed after both,
+#:     `tests/parity -q` (serial, to rule out the known
+#:     `test_the_breadth_layer_still_covers_every_board` xdist artefact):
+#:     767 passed, 8 skipped, 0 failed.
+HAND_PORT_PINNED_SDK_COMMIT = "15b2f32ce82b0ff088b850723e10f1d38f8060b4"  # alp-sdk, past eff266b6 -- see above (tan-cli#1239)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -1526,9 +1654,9 @@ HAND_PORT_PINNED_SDK_COMMIT = "eff266b67f6c45bbe9182d48bbd08d01db6af24b"  # alp-
 #: `sentinels.py` set the precedent for. Neither lives under `tan/planner/`
 #: itself, so neither is in `HAND_PORT_SOURCES` below.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "579688eb036f5dbed32827bd1e02af75444ebe0ec5073aa9a6b8cf9b1d5fad67",
+    "scripts/gen_zephyr_board.py": "066eb3d6fe7b4981f56b4916a0b85e02220d8afd0ec089184bba170b44f19148",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
-    "scripts/alp_project_loader.py": "4e355a59fb37457ce0479c59d06863dacfd20144f59dd0eb6dc197ac5ba19f66",
+    "scripts/alp_project_loader.py": "0812e23eb161250d2a0fc87ce73a53f63f0463ead5e5a1f705974a6a5827cf40",
     "scripts/alp_template.py": "63af799b714a00a7969774ede8971c619504aa40b5a472f4503f288495963e22",
     "scripts/alp_project_emit/__init__.py": "9213c745751e23a36b3f582846a147fb9060386992ff7b8244a0c1d44d5987cf",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
@@ -1706,22 +1834,10 @@ EXEMPT_FROM_RELOCATION_TRACKING: frozenset[str] = frozenset({
     # tracks is a REGISTRY of alp-sdk facts (a schema property, a
     # metadata/quality-tasks-v1.json task id), not a port of alp-sdk code.
     "sdk_capability.py",
-    # alp-sdk#1365 split B hand-port: `aperture.py` DOES have
-    # an alp-sdk origin -- `scripts/alp_orchestrate/aperture.py`, added by
-    # alp-sdk#1365 split B (commits 89b619a5 / 1f132f4f on
-    # feat/1365b-derived-memory-class) -- so this is a DELIBERATE, TEMPORARY
-    # stretch of this set's own "no alp-sdk source at all" rule, not a claim
-    # that the module is tan-native. It cannot join PINNED_HASHES today: that
-    # dict is asserted against the single shared PINNED_SDK_COMMIT
-    # (ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2), which predates split B, so
-    # `scripts/alp_orchestrate/aperture.py` does not exist there yet --
-    # adding it to PINNED_HASHES now would fail
-    # `test_relocated_planner_modules_match_the_pinned_sdk_audit` the moment
-    # CI binds a checkout at that pin ("gone from the bound SDK checkout").
-    # Move this entry to PINNED_HASHES (keyed the same as its alp-sdk
-    # basename) the same day PINNED_SDK_COMMIT advances past split B's merge
-    # -- do not leave it here once that pin moves.
-    "aperture.py",
+    # `aperture.py` RETIRED from this set at the eff266b6 -> 15b2f32c bump
+    # (tan-cli#1239/#1223): PINNED_SDK_COMMIT now advances past alp-sdk#1365
+    # split B, the commit that added `scripts/alp_orchestrate/aperture.py`,
+    # so it moved into PINNED_HASHES instead -- see that pin's own comment.
 })
 
 
