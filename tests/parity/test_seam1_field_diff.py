@@ -40,10 +40,27 @@ def _fails(oracle: dict, mutated: dict) -> bool:
     return bool(failing)
 
 
+def _first_commanded_slice(plan: dict) -> int:
+    """Index of the first slice that actually carries a command.
+
+    NOT hardcoded to 0: tan-cli#1223 made the AEN A32 `a32_cluster` slice
+    resolve `command: null` (the Yocto MACHINE is unbuildable), and that
+    slice is index 0 in these fixtures.  Selecting by property keeps these
+    tests pinned to what they mean -- "a slice with a real command" -- so
+    the next re-vendor that refuses a different slice cannot silently turn
+    them into `NoneType` errors the way it did here.
+    """
+    for i, sl in enumerate(plan.get("slices", [])):
+        if sl.get("command") is not None:
+            return i
+    raise AssertionError("fixture has no slice with a command")
+
+
 def test_mutated_command_fails():
     oracle = _load("multicore_rpmsg-aen")
     mutated = copy.deepcopy(oracle)
-    mutated["slices"][0]["command"]["tool"] = "not-cmake"
+    i = _first_commanded_slice(mutated)
+    mutated["slices"][i]["command"]["tool"] = "not-cmake"
     assert _fails(oracle, mutated)
 
 
@@ -149,7 +166,7 @@ def test_non_sysbuild_slice_extra_conf_file_still_stripped():
     stripped and does not, on its own, fail the comparator."""
     oracle = _load("multicore_rpmsg-aen")
     mutated = copy.deepcopy(oracle)
-    sl = mutated["slices"][0]
+    sl = mutated["slices"][_first_commanded_slice(mutated)]
     assert "--sysbuild" not in (sl["command"].get("args") or [])
     sl["command"]["args"] = list(sl["command"]["args"]) + [
         "-DEXTRA_CONF_FILE=/some/path/alp.conf"]
