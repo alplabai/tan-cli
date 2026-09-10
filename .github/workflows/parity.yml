@@ -3043,13 +3043,13 @@ jobs:
   # confines `seam1-plan-shape` to its tests/gates block and still binds
   # `python-tests-shard`'s `ALP_SDK_ROOT` to the SAME `PINNED_SDK_TAG`
   # checkout as a plain PR. `PINNED_SDK_TAG` equalled alp-sdk v0.16.0 when
-  # this was written (tan-cli#888's fix) and has since moved past every
-  # published alp-sdk tag (`20fec7a7` as of tan-cli#1251, untagged -- see
-  # tan-cli#1258), and nothing keeps it on a tag at all: it moves only when
-  # someone re-bumps it for an unrelated reason, so the day a release is cut
-  # after alp-sdk publishes a NEWER tag with no matching tan-cli pin bump,
-  # the release ships having been measured against a released alp-sdk that
-  # is no longer the one customers pairing this tag would install. tan-
+  # this was written (tan-cli#888's fix). It now names a `dev` commit that no
+  # published alp-sdk tag contains (`20fec7a7` as of tan-cli#1251 -- see
+  # tan-cli#1258), and nothing keeps it on a tag: it moves only when someone
+  # re-bumps it for an unrelated reason. So a plain PR's legs measure
+  # whatever commit the pin names -- today one no customer can install --
+  # and never the released alp-sdk a customer pairing this tag would
+  # install. tan-
   # cli#843/#888 both record this exact gap firing for real, the second time
   # via the ONE path that ever did catch it -- a `repository_dispatch` fired
   # by the alp-sdk release itself, which has no vote on whether the tan tag
@@ -3225,19 +3225,21 @@ jobs:
       # `if: ${{ !inputs.python_only }}` -- i.e. exactly this release call
       # never reached them before. Run against the SAME `alp-sdk-released`
       # checkout above. The three scripts do NOT share one skip rule, and
-      # each module docstring is authoritative:
+      # each script's CODE is authoritative -- `kconfig_fixture_parity.py`'s
+      # module docstring disagrees with its own code:
       #   - all three: an explicit `--sdk` that does not resolve is a hard
       #     FAIL;
-      #   - only `kconfig_fixture_parity.py` passes (with a NOTICE) when the
-      #     ref predates the fixture it checks;
+      #   - `kconfig_fixture_parity.py` passes (with a NOTICE) whenever its
+      #     fixture is absent from the `--sdk` tree, at any ref -- including
+      #     a release that removed it;
       #   - `toolchain_lock_parity.py` treats a missing upstream file as a
       #     real failure;
       #   - `scaffold_byte_parity.py` byte-compares the live `--emit
-      #     scaffold`, so a released alp-sdk older than the vendored scaffold
-      #     point FAILS rather than skipping. Measured 2026-09-10 against
-      #     `v0.16.0`, which predates the `ff27f179` vendor point: exit 1, 8
-      #     of 10 pairs (tan-cli#1258). kconfig and toolchain both exit 0
-      #     there.
+      #     scaffold`, so a released alp-sdk that does not contain the
+      #     vendored scaffold point FAILS rather than skipping. Measured
+      #     2026-09-10 against `v0.16.0`, which does not contain the
+      #     `ff27f179` vendor point: exit 1, 8 of 10 pairs (tan-cli#1258).
+      #     kconfig and toolchain both exit 0 there.
       - name: kconfig fixture byte-parity (vendored vs. published alp-sdk)
         run: python3 tests/parity/kconfig_fixture_parity.py --sdk alp-sdk-released
 

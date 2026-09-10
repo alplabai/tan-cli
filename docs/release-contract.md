@@ -435,38 +435,71 @@ the v0.6.0 triage sweep, and the maintainer's 2026-08-09 decision on it was
 version floor in tan, no graceful degradation. This section is where that
 decision lives, because an issue is not a checklist.
 
-**The check.** Three kinds of change bind a tan tag to an alp-sdk release. The
-tag-time `release-sdk-parity` job (`parity.yml`, measured against alp-sdk's
-`releases/latest`) reds on each:
+**The check.** Three kinds of change bind a tan tag to an alp-sdk release:
 
 1. **A requirement.** The planner has started requiring a `metadata/**` fact.
    This is the tan-cli#591 class: a released `tan` refuses on a released
    alp-sdk.
 2. **An emit difference.** tan now emits bytes that differ from the released
    alp-sdk's own emitter: an added manifest key, a new `alp.conf` line. Nothing
-   refuses, so a check limited to the first kind passes, but the job still reds
-   at tag time. The `memory[]` pane (tan-cli#1251) is exactly this.
+   refuses, so a check limited to the first kind lets it through.
 3. **The vendored scaffold point.** `python/tan/templates/vendored/MANIFEST.md`
-   moved past the released tag. `scaffold_byte_parity.py` byte-compares the
-   released `--emit scaffold` output and has no "predates the fixture" skip.
+   names an alp-sdk commit that the released tag does not contain.
 
-For every such change since the last tag, confirm its alp-sdk commit is
-contained in a published alp-sdk **tag**. The planner mirror and every vendored
-fixture are pinned no later than `PINNED_SDK_COMMIT`, so one command settles
-all three kinds when it is non-empty:
+**Tag containment is the check; the job is only a backstop.** For every such
+change since the last tag, confirm its alp-sdk commit is contained in the
+release a tag push is measured against, which is `releases/latest`.
+`git tag --contains` is not that test: it also lists pre-release tags, and
+`releases/latest` never returns one.
 
 ```
-git -C <alp-sdk> tag --contains <PINNED_SDK_COMMIT>   # non-empty: covered
-git -C <alp-sdk> tag --contains <commit>              # otherwise, per change: non-empty, or the tag is premature
+T=$(gh api repos/alplabai/alp-sdk/releases/latest --jq .tag_name)
+git -C <alp-sdk> merge-base --is-ancestor <PINNED_SDK_COMMIT> "$T" && echo contained
+git -C <alp-sdk> merge-base --is-ancestor <commit> "$T" && echo contained   # per change
 ```
 
-Then confirm on the tag push itself that the **whole** `release-sdk-parity` job
-is green. That means scaffold byte-parity exits 0 and the breadth node PASSES,
-not just one test id. `test_every_mode_is_byte_identical` passing on its own
-once hid five of the six rows below.
+The planner mirror and the vendored fixtures are pinned no later than
+`PINNED_SDK_COMMIT`. So when the first command says `contained`, every change
+taken from upstream is covered. It does not cover a tan-side forward-port that
+landed ahead of the pin; that still needs the job.
 
-**CLEARED on a STABLE floor as of 2026-08-23 — this gate no longer withholds
-a tan release carrying the AEN board emit:**
+**What the tag-time `release-sdk-parity` job (`parity.yml`) actually decides.**
+Its verdict is narrower than "any difference reds it":
+
+- `kconfig_fixture_parity.py`, `toolchain_lock_parity.py` and
+  `scaffold_byte_parity.py` each fail the job on a non-zero exit. Kind 3 reds
+  the job here, reliably.
+- The planner step runs pytest under `set +e` and does not act on its exit
+  status. Once the guard (`test_a_bound_sdk_root_still_ships_the_planner_oracle`)
+  PASSES, the only verdict is whether
+  `test_the_breadth_layer_still_covers_every_board` PASSED, meaning at least 90
+  boards and 2900 artefacts were compared. A SKIPPED guard is accepted only
+  when the released alp-sdk has retired `scripts/alp_orchestrate/` and the
+  frozen planner oracle is bound.
+- Only `GENERATE_MODES` and the board-tree comparison feed that counter. A
+  difference confined to a mode that appears only in `RENDER_MODES`
+  (`system-manifest`, `dts-reservations`, `dts-partitions`,
+  `storage-mounts-c`, `tfm-sysbuild-conf`) fails
+  `test_every_mode_is_byte_identical` and still leaves the job green. The
+  `memory[]` pane (tan-cli#1251) is exactly that case: on its own it does
+  **not** red the job. Kinds 1 and 2 red the job only when they drop enough
+  boards below the breadth floor.
+
+So "green" on a tag push means all of the following, not one test id:
+
+- all three `--sdk` scripts exit 0;
+- the guard PASSED;
+- the breadth node PASSED;
+- the pytest log shows no failures in `test_planner_emit_parity.py` or
+  `test_planner_axis_build_plan_parity.py`, because the step itself ignores
+  them.
+
+`test_every_mode_is_byte_identical`, taken on its own, once hid five of the six
+rows below.
+
+**CLEARED for tan `0.6.0` on a STABLE floor as of 2026-08-23. These two rows
+stopped withholding that tag; the next tag is withheld by the NOT CLEARED
+section below:**
 
 | Requirement | alp-sdk commit | In a tag? |
 |---|---|---|
@@ -490,25 +523,29 @@ prescribes, so the two now agree rather than trading off. The choice is
 recorded here as well as in the release PR, because a release PR is harder to
 find later than this file.
 
-**For those two rows the trigger has fired.** The other half
-is NOT done: `zephyr_board.py`'s ATOC refusal still says *"upgrade alp-sdk to
-a release that includes alp-sdk#1289"* (an issue number, not a version —
-replace it with the actual floor, which now exists). It lives upstream in
-alp-sdk `scripts/gen_zephyr_board.py:687`, so the string fix is an alp-sdk
-change re-synced in, never a patch to the mirror. Tracked as **alp-sdk#1354**
-(open), which
-also carries the reason the ATOC message is not the one a user actually sees
-today: `_aen_peripherals_dtsi()` runs first, and `d639e777` is an ancestor of
-`7d58ef32`, so every checkout with the field already has the region.
+**For those two rows the trigger has fired.** The refusal this section used to
+quote (*"upgrade alp-sdk to a release that includes alp-sdk#1289"*) no longer
+exists in tan's `zephyr_board.py`. A checkout that predates either requirement
+now gets `SdkTooOldError` from `tan/planner/sdk_capability.py` (tan-cli#591).
+That error names the missing capability and its alp-sdk issue, and says
+*"upgrade alp-sdk, or pin tan to a release that predates the requirement"*. It
+still names an issue rather than a released version. **alp-sdk#1354** was
+closed on 2026-08-27 (alp-sdk#1732). The ATOC message is still not the one a
+user sees first: `_aen_peripherals_dtsi()` runs first, and `d639e777` is an
+ancestor of `7d58ef32`, so every checkout with the field already has the
+region.
 
 **NOT CLEARED as of 2026-09-10 — `dev` is not taggable.** The planner mirror
-is pinned at alp-sdk `20fec7a7` (tan-cli#1251). No alp-sdk tag contains any of
-the six commits below: `git tag --contains` is empty for each, all six are
-ancestors of `20fec7a7`, and the newest stable tag is `v0.16.0`.
+is pinned at alp-sdk `20fec7a7` (tan-cli#1251). The release a tag push is
+measured against is `v0.16.0`, which contains none of the six commits below.
+All six are ancestors of `20fec7a7`. No alp-sdk tag of any kind contains them,
+and `v0.16.0` is not itself an ancestor of `20fec7a7`: the two diverged at
+`f78427c6`.
 
-The `release-sdk-parity` job was replicated step by step with the SDK at
-`v0.16.0`. It fails on `dev` both before #1251 (`56f4ef14`) and after it
-(`dba292fe`):
+Four of the six were already on `dev` before #1251, as ancestors of that pin
+`15b2f32c`. `96a382929b` and `20fec7a7` arrived with #1251. The
+`release-sdk-parity` job was replicated step by step with the SDK at `v0.16.0`.
+It fails on `dev` both before #1251 (`56f4ef14`) and after it (`dba292fe`):
 
 - `scaffold_byte_parity.py` exits 1 on 8 of 10 (template, SKU) pairs.
 - The planner step's breadth node fails.
@@ -516,14 +553,14 @@ The `release-sdk-parity` job was replicated step by step with the SDK at
 
 Tracked in tan-cli#1258, with the full measurement.
 
-| Change | Kind | alp-sdk commit | Effect against `v0.16.0` | In a tag? |
-|---|---|---|---|---|
-| Vendored scaffold point — alp-sdk#1914 | scaffold point | `ff27f179` | `scaffold_byte_parity.py` exit 1, 8 of 10 pairs FAIL (10 of 10 PASS against `20fec7a7`) | **NO** |
-| `CONFIG_ALP_SDK_SOM_HW_REV` in per-core `alp.conf` — alp-sdk#1862 | emit | `b3775381` | zephyr-conf render differs; boards drop out of the breadth count | **NO** |
-| Boot-banner block in `alp.conf`, and a **requirement** on `metadata/e1m_modules/aen/on-module-links.yaml` — alp-sdk#1964 | emit + requirement | `eff266b6` | AEN `tan generate --target zephyr-board` exits 3: `ZephyrBoardEmitError: no <sdk>/metadata/e1m_modules/aen/on-module-links.yaml` | **NO** |
-| **Requirement** on `metadata/e1m_modules/v2n/supervisor-links.yaml` — alp-sdk#1924 | requirement | `dbfa06bd` | V2N/V2M `tan generate --target zephyr-board` exits 3: `ZephyrBoardEmitError: no <sdk>/metadata/e1m_modules/v2n/supervisor-links.yaml` | **NO** |
-| `memory[]` pane in `system-manifest.yaml` — alp-sdk#1365 / #2030 | emit | `96a382929b` | `--emit system-manifest` differs on 99 of 100 boards | **NO** |
-| `e1m_i2c0` **required** in `on-module-links.yaml` — alp-sdk#2036 | requirement | `20fec7a7` | not reached against `v0.16.0`, because the file is missing first; refuses on alp-sdk trees in [`eff266b6`, `20fec7a7`) | **NO** |
+| Change | Kind | alp-sdk commit | On `dev` since | Effect against `v0.16.0` | In a tag? |
+|---|---|---|---|---|---|
+| Vendored scaffold point — alp-sdk#1914 | scaffold point | `ff27f179` | before #1251 | `scaffold_byte_parity.py` exit 1, 8 of 10 pairs FAIL (10 of 10 PASS against `20fec7a7`). This alone reds the job | **NO** |
+| `CONFIG_ALP_SDK_SOM_HW_REV` in per-core `alp.conf` — alp-sdk#1862 | emit | `b3775381` | before #1251 | zephyr-conf render differs; boards drop out of the breadth count | **NO** |
+| Boot-banner block in `alp.conf`, and a **requirement** on `metadata/e1m_modules/aen/on-module-links.yaml` — alp-sdk#1964 | emit + requirement | `eff266b6` | before #1251 | The Boot-banner block is the first diff on all 98 failing `--emit zephyr-conf` renders, which is what drops those boards out of the breadth count. AEN `tan generate --target zephyr-board` also exits 3: `ZephyrBoardEmitError: no <sdk>/metadata/e1m_modules/aen/on-module-links.yaml` | **NO** |
+| **Requirement** on `metadata/e1m_modules/v2n/supervisor-links.yaml` — alp-sdk#1924 | requirement | `dbfa06bd` | before #1251 | V2N/V2M `tan generate --target zephyr-board` exits 3: `ZephyrBoardEmitError: no <sdk>/metadata/e1m_modules/v2n/supervisor-links.yaml` | **NO** |
+| `memory[]` pane in `system-manifest.yaml` — alp-sdk#1365 / #2030 | emit | `96a382929b` | #1251 | `--emit system-manifest` differs on 99 of 100 boards. `system-manifest` is in `RENDER_MODES` only, so on its own this does **not** red the job (see "The check.") | **NO** |
+| `e1m_i2c0` **required** in `on-module-links.yaml` — alp-sdk#2036 | requirement | `20fec7a7` | #1251 | Not reached against `v0.16.0`, because the file is missing first. Refuses on alp-sdk trees in [`eff266b6`, `20fec7a7`) | **NO** |
 
 Released `tan` `0.6.0` is unaffected; this binds the next tag cut from `dev`.
 Against `v0.16.0`, `tan build --materialise` on an AEN example still exits 0,
@@ -537,7 +574,10 @@ tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag contains
 around `memory[]` or any other row. Done when:
 
 - every row above reads **YES** and names that tag;
-- the **whole** `release-sdk-parity` job is green on the tag push;
+- the **whole** `release-sdk-parity` job is green on the tag push, in the sense
+  defined under "The check.": all three `--sdk` scripts exit 0, the guard and
+  the breadth node PASSED, and the pytest log shows no parity failures (the
+  planner step does not act on them);
 - the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s did for `v0.16.0`.
 
 ## Decisions
