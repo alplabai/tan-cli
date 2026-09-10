@@ -435,13 +435,35 @@ the v0.6.0 triage sweep, and the maintainer's 2026-08-09 decision on it was
 version floor in tan, no graceful degradation. This section is where that
 decision lives, because an issue is not a checklist.
 
-**The check.** For each `metadata/**` fact the planner has started requiring
-since the last tag, confirm the alp-sdk commit that introduced it is contained
-in a published alp-sdk **tag**:
+**The check.** Three kinds of change bind a tan tag to an alp-sdk release. The
+tag-time `release-sdk-parity` job (`parity.yml`, measured against alp-sdk's
+`releases/latest`) reds on each:
+
+1. **A requirement.** The planner has started requiring a `metadata/**` fact.
+   This is the tan-cli#591 class: a released `tan` refuses on a released
+   alp-sdk.
+2. **An emit difference.** tan now emits bytes that differ from the released
+   alp-sdk's own emitter: an added manifest key, a new `alp.conf` line. Nothing
+   refuses, so a check limited to the first kind passes, but the job still reds
+   at tag time. The `memory[]` pane (tan-cli#1251) is exactly this.
+3. **The vendored scaffold point.** `python/tan/templates/vendored/MANIFEST.md`
+   moved past the released tag. `scaffold_byte_parity.py` byte-compares the
+   released `--emit scaffold` output and has no "predates the fixture" skip.
+
+For every such change since the last tag, confirm its alp-sdk commit is
+contained in a published alp-sdk **tag**. The planner mirror and every vendored
+fixture are pinned no later than `PINNED_SDK_COMMIT`, so one command settles
+all three kinds when it is non-empty:
 
 ```
-git -C <alp-sdk> tag --contains <commit>      # non-empty, or the tag is premature
+git -C <alp-sdk> tag --contains <PINNED_SDK_COMMIT>   # non-empty: covered
+git -C <alp-sdk> tag --contains <commit>              # otherwise, per change: non-empty, or the tag is premature
 ```
+
+Then confirm on the tag push itself that the **whole** `release-sdk-parity` job
+is green. That means scaffold byte-parity exits 0 and the breadth node PASSES,
+not just one test id. `test_every_mode_is_byte_identical` passing on its own
+once hid five of the six rows below.
 
 **CLEARED on a STABLE floor as of 2026-08-23 — this gate no longer withholds
 a tan release carrying the AEN board emit:**
@@ -468,7 +490,7 @@ prescribes, so the two now agree rather than trading off. The choice is
 recorded here as well as in the release PR, because a release PR is harder to
 find later than this file.
 
-**The trigger has fired and the table is current.** The other half
+**For those two rows the trigger has fired.** The other half
 is NOT done: `zephyr_board.py`'s ATOC refusal still says *"upgrade alp-sdk to
 a release that includes alp-sdk#1289"* (an issue number, not a version —
 replace it with the actual floor, which now exists). It lives upstream in
@@ -478,6 +500,45 @@ change re-synced in, never a patch to the mirror. Tracked as **alp-sdk#1354**
 also carries the reason the ATOC message is not the one a user actually sees
 today: `_aen_peripherals_dtsi()` runs first, and `d639e777` is an ancestor of
 `7d58ef32`, so every checkout with the field already has the region.
+
+**NOT CLEARED as of 2026-09-10 — `dev` is not taggable.** The planner mirror
+is pinned at alp-sdk `20fec7a7` (tan-cli#1251). No alp-sdk tag contains any of
+the six commits below: `git tag --contains` is empty for each, all six are
+ancestors of `20fec7a7`, and the newest stable tag is `v0.16.0`.
+
+The `release-sdk-parity` job was replicated step by step with the SDK at
+`v0.16.0`. It fails on `dev` both before #1251 (`56f4ef14`) and after it
+(`dba292fe`):
+
+- `scaffold_byte_parity.py` exits 1 on 8 of 10 (template, SKU) pairs.
+- The planner step's breadth node fails.
+- `kconfig_fixture_parity.py` and `toolchain_lock_parity.py` both exit 0.
+
+Tracked in tan-cli#1258, with the full measurement.
+
+| Change | Kind | alp-sdk commit | Effect against `v0.16.0` | In a tag? |
+|---|---|---|---|---|
+| Vendored scaffold point — alp-sdk#1914 | scaffold point | `ff27f179` | `scaffold_byte_parity.py` exit 1, 8 of 10 pairs FAIL (10 of 10 PASS against `20fec7a7`) | **NO** |
+| `CONFIG_ALP_SDK_SOM_HW_REV` in per-core `alp.conf` — alp-sdk#1862 | emit | `b3775381` | zephyr-conf render differs; boards drop out of the breadth count | **NO** |
+| Boot-banner block in `alp.conf`, and a **requirement** on `metadata/e1m_modules/aen/on-module-links.yaml` — alp-sdk#1964 | emit + requirement | `eff266b6` | AEN `tan generate --target zephyr-board` exits 3: `ZephyrBoardEmitError: no <sdk>/metadata/e1m_modules/aen/on-module-links.yaml` | **NO** |
+| **Requirement** on `metadata/e1m_modules/v2n/supervisor-links.yaml` — alp-sdk#1924 | requirement | `dbfa06bd` | V2N/V2M `tan generate --target zephyr-board` exits 3: `ZephyrBoardEmitError: no <sdk>/metadata/e1m_modules/v2n/supervisor-links.yaml` | **NO** |
+| `memory[]` pane in `system-manifest.yaml` — alp-sdk#1365 / #2030 | emit | `96a382929b` | `--emit system-manifest` differs on 99 of 100 boards | **NO** |
+| `e1m_i2c0` **required** in `on-module-links.yaml` — alp-sdk#2036 | requirement | `20fec7a7` | not reached against `v0.16.0`, because the file is missing first; refuses on alp-sdk trees in [`eff266b6`, `20fec7a7`) | **NO** |
+
+Released `tan` `0.6.0` is unaffected; this binds the next tag cut from `dev`.
+Against `v0.16.0`, `tan build --materialise` on an AEN example still exits 0,
+because it never reaches the zephyr-board emitter. The failure a customer would
+see is `tan generate --target zephyr-board`, which is the tan-cli#591 class this
+section exists for.
+
+**Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
+tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag contains
+`20fec7a7` (alp-sdk#2047, milestone `v0.17.0`). No SDK-capability gate is added
+around `memory[]` or any other row. Done when:
+
+- every row above reads **YES** and names that tag;
+- the **whole** `release-sdk-parity` job is green on the tag push;
+- the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s did for `v0.16.0`.
 
 ## Decisions
 
