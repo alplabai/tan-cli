@@ -285,18 +285,26 @@ class TestMramMainOrderingGuard:
 
 
 class TestUnclassifiedWriteAuthorityLegCoverage:
-    """The ordering guard above has zero coverage on the leg that stops a
-    future authored OSPI XIP row from silently becoming an IPC candidate
-    just because it resolves outside the aperture -- dropping ONLY the
-    `write_authority == "customer_runtime"` check on the
-    `cls == "unclassified"` branch (`carveout.py`'s
+    """MAJOR 4 / alp-sdk#2010: the ordering guard above had zero coverage on
+    the leg that stops a future authored OSPI XIP row from silently
+    becoming an IPC candidate just because it resolves outside the
+    aperture -- dropping ONLY the `write_authority == "customer_runtime"`
+    check on the `cls == "unclassified"` branch (`carveout.py`'s
     `_region_ipc_eligibility()`) is caught by NOTHING else.
 
-    This test is the positive mirror of `TestMramMainOrderingGuard`: it
-    asserts a preset-authored row OUTSIDE the aperture with
-    `write_authority: customer_runtime` DOES resolve `status: ok` --
-    losing that leg (mutated to never grant eligibility) flips this entry
-    to `blocked` and turns this test red.
+    The first test below is the positive mirror of
+    `TestMramMainOrderingGuard`: it asserts a preset-authored row OUTSIDE
+    the aperture with `write_authority: customer_runtime` DOES resolve
+    `status: ok` -- losing that leg (mutated to never grant eligibility)
+    flips this entry to `blocked` and turns this test red.
+
+    That test is positive-only, though, so it is blind to the OPPOSITE
+    mutation -- `derived_eligible = wa == "customer_runtime"` replaced
+    with `derived_eligible = True` unconditionally, dropping the
+    requirement rather than inverting it (alp-sdk#2010, mutant C4). The
+    second and third tests below close that: an outside-aperture,
+    preset-authored row whose `write_authority` is anything OTHER than
+    `customer_runtime` (or absent) must still be refused.
     """
 
     def test_outside_aperture_authored_row_with_customer_runtime_resolves_ok(
@@ -313,6 +321,44 @@ class TestUnclassifiedWriteAuthorityLegCoverage:
         assert entry.region == "ospi_xip_test"
         assert _OUTSIDE_APERTURE_BASE <= entry.base < (
             _OUTSIDE_APERTURE_BASE + 1024 * 1024)
+
+    def test_outside_aperture_authored_row_with_wrong_write_authority_blocks(self):
+        """alp-sdk#2010 mutant C4: `derived_eligible = wa ==
+        "customer_runtime"` mutated to `derived_eligible = True`
+        unconditionally survived every gate because nothing exercised the
+        refusal direction on this branch. A preset-authored row resolving
+        OUTSIDE the aperture with `write_authority: vendor_image` (any
+        value other than `customer_runtime`) must be refused -- this is
+        exactly the hazard `_region_ipc_eligibility()`'s own docstring
+        names: "a future authored OSPI XIP row must NOT silently become an
+        IPC candidate just because it resolves outside the aperture."."""
+        from tan.planner.carveout import _region_ipc_eligibility
+
+        eligible, reason = _region_ipc_eligibility(
+            {"base": _OUTSIDE_APERTURE_BASE, "size_kib": 1024,
+             "write_authority": "vendor_image"},
+            (_E8_APERTURE_BASE, 0x80580000),
+            True)
+        assert eligible is False, (
+            "an outside-aperture, preset-authored row with "
+            "write_authority: vendor_image (not customer_runtime) "
+            "became IPC-eligible -- mutant C4 (derived_eligible -> True "
+            "unconditionally) is back")
+        assert "vendor_image" in reason
+        assert "customer_runtime" in reason
+
+    def test_outside_aperture_authored_row_with_no_write_authority_blocks(self):
+        """Same hazard, absent `write_authority:` rather than a wrong
+        value -- `ABSENT MEANS UNRESOLVED, NEVER customer_runtime`
+        (`som-preset-v1.schema.json`'s `write_authority` description)."""
+        from tan.planner.carveout import _region_ipc_eligibility
+
+        eligible, reason = _region_ipc_eligibility(
+            {"base": _OUTSIDE_APERTURE_BASE, "size_kib": 1024},
+            (_E8_APERTURE_BASE, 0x80580000),
+            True)
+        assert eligible is False
+        assert "None" in reason
 
 
 class TestCarveoutAgreementBlocker:
@@ -348,3 +394,236 @@ class TestCarveoutAgreementBlocker:
         assert "0xa0000000" in entry.reason and "0xa0100000" in entry.reason
         assert "carveout: False" in entry.reason
         assert "disagrees" in entry.reason
+
+
+def _with_mram_main_resolved_and_customer_runtime(project):
+    """Like `_with_mram_main_resolved` above, but ALSO overwrites
+    `mram_main`'s authored `write_authority` to `customer_runtime` --
+    the exact edit issue alp-sdk#2009's refused-remedy text used to
+    instruct a reader to make (`carveout.py`'s old wording: "...outside
+    the ... aperture (or, if inside it, one that resolves
+    `write_authority: customer_runtime`)"). `mram_main`'s real authored
+    value is `composite` (`metadata/e1m_modules/E1M-AEN801.yaml`); this
+    overwrite simulates a customer who followed that remedy verbatim.
+
+    Deep-copies `som_preset` first -- never mutates the tracked YAML."""
+    project.som_preset = copy.deepcopy(project.som_preset)
+    found = False
+    for region in project.som_preset["memory_map"]:
+        if region.get("name") == "mram_main":
+            region["base"] = _E8_APERTURE_BASE
+            region["write_authority"] = "customer_runtime"
+            found = True
+    assert found, "fixture drift: E1M-AEN801.yaml no longer declares mram_main"
+    return project
+
+
+class TestContainedRegionWriteAuthorityNeverRescues:
+    """alp-sdk#2009: `carveout.py`'s refused-remedy message (and
+    `docs/board-config-features.md`'s prose) used to tell the reader that
+    a region CONTAINED in the declared MRAM aperture could be made
+    IPC-eligible by adding `write_authority: customer_runtime`. False --
+    `cls == "flash"` refuses UNCONDITIONALLY
+    (`_region_ipc_eligibility()`); `write_authority` is consulted ONLY on
+    the `cls == "unclassified"` (outside-aperture) branch. These tests
+    pin the BEHAVIOUR the corrected remedy now describes truthfully, not
+    the wording -- a future change that made `write_authority` actually
+    override flash-class containment (implementing the OLD, false
+    remedy) would turn this red even though it never touches this file's
+    string literals.
+    """
+
+    def test_issue_repro_contained_region_with_customer_runtime_still_refuses(self):
+        """Direct repro from alp-sdk#2009: a region whose resolved extent
+        sits INSIDE the declared aperture, carrying `write_authority:
+        customer_runtime`, must still refuse as flash-class -- exactly
+        the call the issue used to prove the old remedy false."""
+        from tan.planner.carveout import _region_ipc_eligibility
+
+        eligible, reason = _region_ipc_eligibility(
+            {"base": 0x80500000, "size_kib": 64,
+             "write_authority": "customer_runtime"},
+            (0x80000000, 0x80580000),
+            True)
+        assert eligible is False, (
+            "a region CONTAINED in the aperture became IPC-eligible via "
+            "write_authority: customer_runtime -- the alp-sdk#2009 "
+            "inversion is back")
+        assert "flash-class" in reason
+
+    def test_mram_main_resolved_with_customer_runtime_stays_blocked(
+            self, split_a_metadata):
+        """End-to-end mirror of the unit repro above, through the same
+        `rpmsg-aen` project `TestMramMainOrderingGuard` uses: a customer
+        who followed the OLD (false) remedy on `mram_main` -- filling in
+        its `base` AND setting `write_authority: customer_runtime` --
+        must still see the ipc entry blocked, not resolved `status: ok`
+        inside the live ATOC-tiled aperture."""
+        from tan.planner import resolve_carve_outs
+
+        project = _with_mram_main_resolved_and_customer_runtime(
+            _load(_rpmsg_aen_board(), split_a_metadata))
+        entry = _by_name(resolve_carve_outs(project))["alp_default_rpmsg"]
+
+        assert entry.status == "blocked", (
+            f"a32_cluster ipc entry resolved {entry.status!r} after "
+            f"mram_main was given write_authority: customer_runtime -- "
+            f"the old (false) remedy would now silently work; "
+            f"reason={entry.reason!r}")
+        assert "flash-class" in entry.reason
+
+    def test_outside_aperture_authored_customer_runtime_is_actually_eligible(self):
+        """The positive half of the CORRECTED remedy: a region resolving
+        OUTSIDE the declared aperture, authored by the SoM preset itself,
+        with `write_authority: customer_runtime`, IS eligible -- proving
+        the new wording ("...sits outside the declared MRAM aperture
+        (and, if the SoM preset authors the row itself, carries
+        `write_authority: customer_runtime`)") describes a real, working
+        fix, not just different false wording."""
+        from tan.planner.carveout import _region_ipc_eligibility
+
+        eligible, reason = _region_ipc_eligibility(
+            {"base": _OUTSIDE_APERTURE_BASE, "size_kib": 64,
+             "write_authority": "customer_runtime"},
+            (_E8_APERTURE_BASE, 0x80580000),
+            True)
+        assert eligible is True, (
+            f"a region OUTSIDE the aperture, preset-authored, carrying "
+            f"write_authority: customer_runtime was refused: {reason!r} "
+            f"-- the corrected remedy no longer describes a working fix")
+
+
+class TestUnresolvedLegOrdering:
+    """alp-sdk#2010: the `cls == "unresolved"` tail of
+    `_region_ipc_eligibility()` (this region's OWN `base` doesn't
+    resolve) had zero direct coverage of its own precedence and terminal
+    cases -- every existing end-to-end test that reaches this tail
+    (`mram_main`) carries `write_authority: composite` and no
+    `carveout:` key at all, so it only ever exercises the "neither field
+    customer_runtime" refusal, never the ordering between the two fields
+    or the true no-authored-flag terminal case."""
+
+    def test_unresolved_base_honours_carveout_false_over_customer_runtime(self):
+        """C6 (alp-sdk#1365 split B review, MAJOR 2): `carveout:` must be
+        checked BEFORE `write_authority` on this tail -- this used to
+        check `write_authority` first, silently dropping an authored
+        `carveout: false` whenever `write_authority: customer_runtime`
+        was also present. No shipped preset authors both fields on an
+        unresolved-base row (defensive-only), so this is a direct-call
+        pin, not an end-to-end one."""
+        from tan.planner.carveout import _region_ipc_eligibility
+
+        eligible, reason = _region_ipc_eligibility(
+            {"base": "TBD", "carveout": False,
+             "write_authority": "customer_runtime"},
+            (0x80000000, 0x80580000),
+            True)
+        assert eligible is False, (
+            "an unresolved-base region with carveout: False became "
+            "IPC-eligible because write_authority: customer_runtime was "
+            "checked first -- MAJOR 2 is back")
+        assert "carveout: false" in reason.lower()
+
+    def test_unresolved_base_with_neither_flag_refuses_terminal(self):
+        """C12 (ADR-0034 clause 4): with base unresolved and NEITHER
+        `carveout:` nor `write_authority:` authored, the region must
+        refuse -- never guess. This is the function's terminal fallback,
+        reached by nothing else in the existing suite.
+
+        Deviation from upstream: the reason string this repo's
+        `_region_ipc_eligibility()` returns on this leg does not carry
+        the literal `"(ADR-0034 clause 4)"` citation upstream's does --
+        a pre-existing divergence in `tan/planner/carveout.py` unrelated
+        to this alp-sdk#2010 port (confirmed: `git diff 15b2f32c 20fec7a7
+        -- scripts/alp_orchestrate/carveout.py` touches neither this
+        message nor the ADR-0034 citation), so this test pins the
+        BEHAVIOUR (never-guess refusal, "neither" named) rather than that
+        substring."""
+        from tan.planner.carveout import _region_ipc_eligibility
+
+        eligible, reason = _region_ipc_eligibility(
+            {"base": "TBD"},
+            (0x80000000, 0x80580000),
+            True)
+        assert eligible is False, (
+            "an unresolved-base region with neither `carveout` nor "
+            "`write_authority` authored became IPC-eligible -- ADR-0034 "
+            "clause 4 (never guess) is broken")
+        assert "neither" in reason
+        assert "never guessed" in reason
+
+
+class TestMaxExcludedDetailCap:
+    def test_cap_is_six(self):
+        """C9 (alp-sdk#2010): the value is unpinned by any behavioural
+        test -- pinned directly here. `board.schema.json`'s
+        `/$defs/ipc_entry` sets `endpoints.minItems: 2`, and every AEN
+        SKU's `memory_map:` has exactly 7 rows, so the true maximum
+        simultaneous exclusion count on any SKU shipped today is 5 --
+        this cap (6) sits one above that proven ceiling deliberately
+        (see `changelog.d/1365-split-b.md` in alp-sdk); it is not itself
+        derived from anything that would break if it drifted by one,
+        hence the direct pin rather than a behavioural fixture with 7
+        excluded regions."""
+        from tan.planner.carveout import _MAX_EXCLUDED_DETAIL
+
+        assert _MAX_EXCLUDED_DETAIL == 6
+
+
+class TestRamLegReachability:
+    """C3 / C11 (alp-sdk#2010): the `cls == "ram"` leg of
+    `_region_ipc_eligibility()` -- a region OUTSIDE the aperture that the
+    SoM preset did NOT author -- is likely UNREACHABLE through any real
+    project today: `classify_region()` only returns `"ram"` when
+    `is_preset_authored` is False, but every Alif SoM preset in
+    `metadata/e1m_modules/*.yaml` that declares an aperture (i.e.
+    resolves to an Ensemble SoC with `soc_flash_base`) ALSO authors an
+    explicit `memory_map:` block, making `is_preset_authored` True for
+    every row `_region_ipc_eligibility()` is ever called with on a live
+    preset. `git grep -n "carveout:" metadata/socs/` returns zero hits,
+    confirming a SoC-derived (non-preset-authored) row never carries the
+    flag either.
+
+    Kept (not deleted): a future minimal Alif SoM port that relies
+    entirely on SoC-level `memory_regions:` (no preset `memory_map:`
+    override) would make `is_preset_authored` False while an aperture
+    still resolves, reaching this leg for real -- the same shape every
+    non-Alif SoM already uses, just with an aperture declared. Pinned by
+    direct call, the only way to exercise it today; NOT reachable via
+    `load_board_yaml()` + `resolve_carve_outs()` against any board.yaml
+    in this tree."""
+
+    def test_ram_class_outside_aperture_not_preset_authored_is_eligible(self):
+        """C11: the leg's own unconditional `return True, ""` once
+        `_agree_or_refuse` finds no disagreement (`carveout:` absent)."""
+        from tan.planner.carveout import _region_ipc_eligibility
+
+        eligible, reason = _region_ipc_eligibility(
+            {"base": _OUTSIDE_APERTURE_BASE, "size_kib": 64},
+            (_E8_APERTURE_BASE, 0x80580000),
+            False)
+        assert eligible is True, (
+            f"a ram-class region (outside the aperture, not preset-"
+            f"authored) with no `carveout:` override was refused: "
+            f"{reason!r}")
+        assert reason == ""
+
+    def test_ram_class_disagreeing_carveout_false_refuses(self):
+        """C3: an authored `carveout: false` disagreeing with the
+        derived ram-eligible verdict must refuse, naming both facts --
+        the same AGREE contract `TestCarveoutAgreementBlocker` proves on
+        the `unclassified` branch, exercised here on the `ram` branch
+        instead."""
+        from tan.planner.carveout import _region_ipc_eligibility
+
+        eligible, reason = _region_ipc_eligibility(
+            {"base": _OUTSIDE_APERTURE_BASE, "size_kib": 64,
+             "carveout": False},
+            (_E8_APERTURE_BASE, 0x80580000),
+            False)
+        assert eligible is False, (
+            "a ram-class region with an authored carveout: False became "
+            "eligible anyway -- the AGREE contract did not hold on the "
+            "ram leg")
+        assert "ram-class" in reason
+        assert "disagrees" in reason

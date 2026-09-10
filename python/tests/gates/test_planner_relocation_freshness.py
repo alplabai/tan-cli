@@ -866,7 +866,75 @@ from tests.conftest import sdk_root
 #:   - 3211dc850 fix(aen): make the A32 Yocto path honest about not building (#1967) (#2006)
 #:   - 8ac9b3707 fix(alp_orchestrate): make three user-supplied paths fail cleanly instead of crashing (#1961, #1987) (#2005)
 #:   - f133da463 fix(metadata): gen_board_header.py honours i2c_devices assembled: false (#1980) (#2008)
-PINNED_SDK_COMMIT = "15b2f32ce82b0ff088b850723e10f1d38f8060b4"  # alp-sdk, past eff266b6 -- see above
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `15b2f32c` -> `20fec7a7`
+#: (tan-cli#1248, auditing `auto/planner-resync`'s machine proposal at
+#: `7a8e619d`, tan-cli#1249, which exited "needs a human"). Three upstream
+#: commits touch `scripts/alp_orchestrate/` in this range:
+#:
+#:   - `96a382929` (alp-sdk#2030, #1365 item 3): NEW module `memory.py`
+#:     (`resolve_memory_regions`), plus the `__init__.py` re-export, the
+#:     `manifest.py` call and `models.py`'s `SystemManifest.memory_regions`
+#:     field -- `system-manifest.yaml` gains a `memory[]` pane, OMITTED
+#:     rather than emitted empty. BEHAVIOURAL. The bot 3-way-merged the three
+#:     existing files faithfully (measured: each file's upstream-vs-tan
+#:     relocation delta is line-for-line the same before and after its
+#:     merge) but, correctly, would not invent `memory.py` -- so its branch
+#:     imported a module that did not exist, and `import tan.planner` raised
+#:     `ImportError` there. Merging that proposal unread would have broken
+#:     every in-process plan render. `memory.py` is relocated by hand:
+#:     `from alp_project import resolve_memory_map` becomes
+#:     `from .som_metadata import resolve_memory_map` (the `carveout.py`
+#:     precedent); its code is AST-identical to upstream's.
+#:   - `23e265203` (alp-sdk#2010/#2022, pinning the mutants a post-merge
+#:     review of split B found): `memregion.py`'s `_region_size_bytes` flips
+#:     to `size_mib`-FIRST and records why kib-first misread the module's own
+#:     history; `aperture.py` gains a docstring note that the move from
+#:     `check_atoc_reservation.py` also hardened a `bool` guard; `carveout.py`
+#:     gains a reachability comment on its `ram` leg. The bot flagged
+#:     `memregion.py` and `aperture.py` as conflicts. Only `memregion.py` is
+#:     BEHAVIOURAL, and only for a region authoring BOTH `size_mib` and
+#:     `size_kib` as integers -- no preset under `metadata/e1m_modules/` does,
+#:     so no emitted byte moves -- and it is taken verbatim because this
+#:     table is a mirror and upstream's own `system-manifest-v1` schema now
+#:     documents `size_bytes` as "from `size_mib` (preferred)". tan's
+#:     previous kib-first docstring called that order "the alp-sdk#1365
+#:     split B fix"; #2022 is upstream saying otherwise. `aperture.py` needs
+#:     NO tan-side change: tan's code was already AST-identical to upstream's
+#:     at both pins (the guard predates `15b2f32c`; #2022 only documents it),
+#:     and the paragraph upstream rewrote was never in tan's relocated
+#:     docstring.
+#:   - `55fa73f04` (alp-sdk#2009/#2018): `carveout.py`'s IPC-blocked message
+#:     stops implying `write_authority: customer_runtime` rescues a region
+#:     CONTAINED in the aperture. Text-only, but emitted: it reaches
+#:     `ipc-contract-h`, `dts-reservations`, their embedded copies in
+#:     `build-plan.json`, and `system-manifest.yaml`'s `ipc[].reason`. Merged
+#:     cleanly by the bot.
+#:
+#: MEASURED, not assumed: re-captured the 100-board oracle at
+#: `20fec7a7e9ea0479e5a9241edc75c6a8354d0fd0` -- 700 emits (7 error-contract,
+#: all `multicore/rpmsg-imx93`, none of them moved), 1,220,703 -> 1,343,563 B.
+#: 105 emit files move, and a script attributed every changed byte to one of
+#: three causes with zero left unexplained: `memory[]` added to all 99
+#: `system-manifest.yaml` goldens (#2030; 74 carry 7 rows, 25 carry 3);
+#: `hw_info.board_hw_rev: r1 -> r2` on 74 of them, which is not a planner
+#: change at all -- #2036 moves `metadata/boards/e1m-evk.yaml`'s
+#: `default_hw_rev` to the E1M-EVK-2626-R2 bench revision, and tan reads that
+#: data late; and #2018's rewording in 8 goldens across
+#: `multicore/rpmsg-aen` and `multicore/mproc-mailbox` (6 moved for it alone;
+#: the other two are those boards' `system-manifest.yaml` `ipc[].reason`,
+#: already counted in the 99).
+#:
+#: `HAND_PORT_PINNED_SDK_COMMIT` moves to `20fec7a7` in this SAME change, for
+#: the reason the `eff266b6 -> 15b2f32c` paragraph above already measured:
+#: `scripts/gen_zephyr_board.py` changed in range (#2036), and
+#: `test_planner_emit_parity.py` exercises that hand-port for every board once
+#: `PINNED_SDK_TAG` moves -- see that pin's own comment.
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 55fa73f04 fix(build): stop telling readers write_authority rescues a contained carve-out (#2009) (#2018)
+#:   - 23e265203 test(build): pin the 12 mutants that survived a post-merge review of #1365 split B (#2010) (#2022)
+#:   - 96a382929 feat(build): emit the system manifest's memory[] pane, and type its rows (#1365 item 3) (#2030)
+PINNED_SDK_COMMIT = "20fec7a7e9ea0479e5a9241edc75c6a8354d0fd0"  # alp-sdk, past 15b2f32c -- see above
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -903,19 +971,20 @@ PINNED_SDK_COMMIT = "15b2f32ce82b0ff088b850723e10f1d38f8060b4"  # alp-sdk, past 
 #: upstream is the one carrying the bug here.
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
-    "__init__.py": "03b610ce02d1819d09ad3d5d233bbbd46b950bdc09448748b17ebc5a1b57f272",
-    "aperture.py": "719fcb92a622f1a772009709b85fc4619fb09890e0b6bf52418e1d1674b47082",
+    "__init__.py": "bc8a414122a59e04dcd37087328d692c15b8574bf6d470d6881d8f2866735aff",
+    "aperture.py": "02e16870789549a6f00ac95a28b2a860f7ae1dc716c99398be1f6700034d925b",
     "buildplan.py": "8954a83db046cc46b57f8c2e09a5fee3607da0e3caf2fac176c106a7643789dd",
-    "carveout.py": "97b4f4805a817cc466b1e829c97614bed56317bdf47dde18753f38b2a202df48",
+    "carveout.py": "4be729ee1f996f83de6594f7fa2e087bd757e95228ed21b9f91f1b480d048eab",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
     "kconfig.py": "0d1c2bc57acba1764b8f18f1694bfe3e4c9ed5d0c4d6cd230183205dc40cc210",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
     "loader.py": "36b75774b3ff4dd2005613bd1b024d7438f025b5ac586b2516eb830b669f2a30",
-    "manifest.py": "f38de96a9626672bc08f181e09b3a545d8dc846c0423cc6e9dd08c3b96a87d1d",
-    "memregion.py": "c70404b00ad857d65ac3dcd997adbf18ac6449ff4d99ec0683654979a5527c94",
-    "models.py": "7e174871caa49f4d7f877dc0229571f1961d29d5c6d2214ced58aa1b86b11585",
+    "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
+    "memory.py": "7b3ef1f064d5fa3c3240ca269565a059c2a65bcb889a88aef534bc560954a66b",
+    "memregion.py": "45d10e7ac94b0febbcf66df70324eb7b9a6fcc0dd09617d3de5aefc65b7c4879",
+    "models.py": "3ba426ab5477bedc446bee7ab63eeb9cf56fc1b677397fdc892ba3826567a45c",
     "orchestrator.py": "b7a2044fa062335f539d456a1da01f20b11f1b780f41b4bbc346c34ad56d2a6b",
     "partition.py": "070b43d2a76b119c418d0e7d4f8f1d7157a9081af501a09ea200562048eec002",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
@@ -1590,7 +1659,63 @@ PINNED_HASHES: dict[str, str] = {
 #:     `tests/parity -q` (serial, to rule out the known
 #:     `test_the_breadth_layer_still_covers_every_board` xdist artefact):
 #:     767 passed, 8 skipped, 0 failed.
-HAND_PORT_PINNED_SDK_COMMIT = "15b2f32ce82b0ff088b850723e10f1d38f8060b4"  # alp-sdk, past eff266b6 -- see above (tan-cli#1239)
+#: AUDITED RE-SYNC: `15b2f32c` -> `20fec7a7` (tan-cli#1248, moved alongside
+#: `PINNED_SDK_COMMIT` above -- both changed in this range). ONE upstream
+#: commit touches this table's files; every other `HAND_PORT_HASHES` source
+#: re-hashed identically against the `20fec7a7` checkout, so only the
+#: `gen_zephyr_board.py` literal below moves.
+#:
+#:   - `20fec7a7e` (alp-sdk#2036): `scripts/gen_zephyr_board.py` wires SoC
+#:     I2C2 -- `e1m_i2c0`, portable `alp-i2c0` -- into the AEN board layer,
+#:     because the SoM's own 24C128 manifest EEPROM sits on that bus.
+#:     `_load_aen_on_module_links()` now requires an `e1m_i2c0` entry in
+#:     `metadata/e1m_modules/aen/on-module-links.yaml`; the pinctrl dtsi
+#:     gains a `pinctrl_i2c2` group (`I2C2_SCL_C`/`I2C2_SDA_C` on
+#:     `P5_6`/`P5_7`, pinmux SCL then SDA, `input-enable;` +
+#:     `bias-pull-down;`); the board `.dts` gains `&i2c2` at
+#:     `I2C_BITRATE_STANDARD` plus the `alp-i2c0 = &i2c2;` alias.
+#:     BEHAVIOURAL -- every AEN board tree's bytes move. Ported by applying
+#:     the upstream diff (5 of 6 hunks clean; the sixth, inserting
+#:     `_aen_e1m_i2c0_pinctrl_group()`, rejected only on blank-line context
+#:     and went in by hand). MEASURED by extracting each function from both
+#:     files: `_aen_pinctrl_dtsi`, `_aen_e1m_i2c0_pinctrl_group` and
+#:     `_aen_e1m_i2c0_dts` are byte-identical to upstream's.
+#:     `_load_aen_on_module_links` and `_aen_brd_i2c_dts` still differ, and
+#:     their diff against upstream is line-for-line the one they already
+#:     had at `15b2f32c` -- this port moved neither.
+#:     KNOWN, PRE-EXISTING, NOT FIXED HERE: one of those two differences is
+#:     a real gap, not a relocation shape. Upstream's
+#:     `_load_aen_on_module_links` refuses a bare-string
+#:     `rtc_alarm.risk` with a `ZephyrBoardEmitError` (alp-sdk#1988); tan's
+#:     never got that check, so a pre-#1988-shaped `risk:` reaches
+#:     `_aen_brd_i2c_dts`'s `(alarm.get("risk") or {}).get(part)` and
+#:     raises `AttributeError` instead. The `eff266b6 -> 15b2f32c` paragraph
+#:     above ported the reader half of #1988 and missed this half; this
+#:     table hashes only the upstream side, so it could not see that.
+#:     No `sdk_capability` floor for `e1m_i2c0`, deliberately: `rtc_alarm`
+#:     is hard-required without one, and no released alp-sdk ships
+#:     `on-module-links.yaml` at all (measured: absent at `v0.16.0`, the
+#:     newest tag), so tan's AEN board emit already needs an unreleased
+#:     checkout and a floor would guard nothing a real checkout can reach.
+#:     One tan-only regression guard needed narrowing:
+#:     `test_a_non_e8_aen_sku_includes_its_own_peripherals_overlay`
+#:     (tan-cli#493) forbids any "E8" in a non-E8 AEN board tree, and the
+#:     ported group comment cites its bench validation "on the E8" for every
+#:     AEN part -- provenance for a family-scoped pad config (one
+#:     `on-module-links.yaml` backs every AEN SKU), not an E8 silicon fact.
+#:     The test scrubs exactly that citation string before scanning, and its
+#:     `ensemble_e8` overlay check is untouched; the comment itself stays
+#:     verbatim, since board-tree parity compares it byte-for-byte.
+#:     UPSTREAM PROSE CONTRADICTION, ported verbatim and NOT reconciled here:
+#:     the BRD_I2C group's comment calls `bias-pull-up` DSC=1 "a REAL
+#:     pull-up", while the new `e1m_i2c0` comment says `bias-pull-up` gives a
+#:     DEAD bus because `pinctrl_soc.h`'s encoding "reads inverted vs the
+#:     Alif pad hardware". Each bus emits its own bench-validated value; only
+#:     the explanations disagree, and reconciling them belongs to alp-sdk.
+#:
+#: Upstream commits in range touching this table's files:
+#:   - 20fec7a7 fix(aen): repair five E1M-EVK drivers, correct the TMP112 address, and add the phased EVK demo (#2036)
+HAND_PORT_PINNED_SDK_COMMIT = "20fec7a7e9ea0479e5a9241edc75c6a8354d0fd0"  # alp-sdk, past 15b2f32c -- see above (tan-cli#1248)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -1654,7 +1779,7 @@ HAND_PORT_PINNED_SDK_COMMIT = "15b2f32ce82b0ff088b850723e10f1d38f8060b4"  # alp-
 #: `sentinels.py` set the precedent for. Neither lives under `tan/planner/`
 #: itself, so neither is in `HAND_PORT_SOURCES` below.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "066eb3d6fe7b4981f56b4916a0b85e02220d8afd0ec089184bba170b44f19148",
+    "scripts/gen_zephyr_board.py": "64ae994dbec1e24b9ed98aa7d37d612ec50f5fd9c6a4a0d9e4805c3f487d3042",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/alp_project_loader.py": "0812e23eb161250d2a0fc87ce73a53f63f0463ead5e5a1f705974a6a5827cf40",
     "scripts/alp_template.py": "63af799b714a00a7969774ede8971c619504aa40b5a472f4503f288495963e22",

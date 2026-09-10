@@ -143,6 +143,23 @@ class TestResolveAperture:
 
         assert resolve_aperture(_PRESET, tmp_path) is None
 
+    def test_none_when_soc_flash_base_is_a_bool(self, tmp_path):
+        """alp-sdk#2010 (A9): `soc_flash_base` is schema-typed `integer`
+        (`soc-spec-v1.schema.json`), but `resolve_aperture()` guards
+        against a Python `bool` anyway (`isinstance(base, bool)`) -- a
+        guard `check_atoc_reservation.py`'s original `_resolve_aperture`
+        (alp-sdk#1365 split A) did NOT have, despite this module's
+        docstring claiming the move was "unchanged in behaviour". Pins
+        the guard's actual behaviour directly, via a synthetic SoC spec,
+        since no real `metadata/socs/**` file can carry a JSON boolean
+        there (`validate_metadata.py` would already reject it)."""
+        from tan.planner.aperture import resolve_aperture
+
+        _write_soc_json(
+            tmp_path, soc_flash_base=True,
+            variant={"order_code": _ORDER_CODE, "mram_mb": 1})
+        assert resolve_aperture(_PRESET, tmp_path) is None
+
 
 class TestRegionExtent:
     def test_size_kib_field(self):
@@ -168,6 +185,17 @@ class TestRegionExtent:
 
         assert region_extent({"name": "r", "size_kib": 4}) is None
 
+    def test_unresolved_when_base_is_a_bool(self):
+        """alp-sdk#2010 (A10): pre-existing behaviour (carried over
+        verbatim from `check_atoc_reservation.py`'s original
+        `_region_extent`), never directly tested until now -- `base`
+        must be a real `int`, not a Python `bool` (a JSON `true`/`false`
+        would decode to one)."""
+        from tan.planner.aperture import region_extent
+
+        assert region_extent(
+            {"name": "r", "base": True, "size_kib": 4}) is None
+
     def test_unresolved_when_neither_size_field_is_set(self):
         from tan.planner.aperture import region_extent
 
@@ -188,6 +216,19 @@ class TestRegionExtent:
 
         r = _region(0x1000, size_mib=1, size_kib="TBD")
         assert region_extent(r) == (0x1000, 0x1000 + 1024 * 1024)
+
+    def test_size_mib_wins_when_both_fields_are_valid_ints(self):
+        """alp-sdk#2010 (M1): `size_mib` and `size_kib` may both be
+        authored as real integers (the schema does not forbid it, though
+        no shipped preset does it). `_region_size_bytes()` -- and so
+        `region_extent()` -- must resolve via `size_mib` in that case:
+        mib-first is this module's real precedent (`carveout.py` /
+        `partition.py`, both mib-first before alp-sdk#1365 split B), not
+        kib-first."""
+        from tan.planner.aperture import region_extent
+
+        r = _region(0x1000, size_kib=64, size_mib=2)
+        assert region_extent(r) == (0x1000, 0x1000 + 2 * 1024 * 1024)
 
 
 class TestClassifyRegion:
@@ -276,6 +317,20 @@ class TestIsPartitionInsideAperture:
         from tan.planner.aperture import is_partition_inside_aperture
 
         r = _region(APERTURE[0] + 0x10000, size_kib=64)
+        assert is_partition_inside_aperture(r, APERTURE) is True
+
+    def test_true_for_a_proper_subset_flush_with_the_low_edge(self):
+        """alp-sdk#2010 (A8): a region whose base is EXACTLY the
+        aperture floor but whose extent is smaller than the whole
+        aperture is still a proper subset (`lo >= full_lo`, not
+        `lo > full_lo`) -- this is the real shape of `mcuboot` on every
+        AEN SKU (metadata/e1m_modules/E1M-AEN801.yaml: base
+        0x80000000, size_kib 64, flush with `soc_flash_base`)."""
+        from tan.planner.aperture import (
+            is_partition_inside_aperture, region_extent)
+
+        r = _region(APERTURE[0], size_kib=64)
+        assert region_extent(r) != APERTURE
         assert is_partition_inside_aperture(r, APERTURE) is True
 
     def test_false_only_when_extent_equals_the_aperture_exactly(self):

@@ -10,7 +10,7 @@
 #define ALP_IPC_SKU "E1M-AEN801"
 
 /* rpmsg channel 'alp_default_rpmsg' -- endpoints a32_cluster, m55_hp */
-/* BLOCKED: ipc entry 'alp_default_rpmsg' endpoints ['a32_cluster', 'm55_hp'] only match memory_map region(s) in SoM E1M-AEN801 that are ineligible for an IPC carve-out: 'mram_main' (region 'mram_main' has an unresolved base ('TBD') so containment against the declared MRAM aperture can't be verified, and its authored write_authority is 'composite', not 'customer_runtime').  Add a region whose resolved base sits outside the SoC's declared MRAM aperture (or, if inside it, one that resolves `write_authority: customer_runtime`) to metadata/e1m_modules/E1M-AEN801.yaml, or remove the matching ipc entry from board.yaml. */
+/* BLOCKED: ipc entry 'alp_default_rpmsg' endpoints ['a32_cluster', 'm55_hp'] only match memory_map region(s) in SoM E1M-AEN801 that are ineligible for an IPC carve-out: 'mram_main' (region 'mram_main' has an unresolved base ('TBD') so containment against the declared MRAM aperture can't be verified, and its authored write_authority is 'composite', not 'customer_runtime').  Add a region whose resolved base sits outside the SoC's declared MRAM aperture (and, if the SoM preset authors the row itself, carries `write_authority: customer_runtime`) to metadata/e1m_modules/E1M-AEN801.yaml, or remove the matching ipc entry from board.yaml. */
 /* IPC channel 'alp_default_rpmsg' is blocked; fix the SoM metadata before depending on this channel at runtime. */
 #define ALP_IPC_ALP_DEFAULT_RPMSG_NAME       "alp_default_rpmsg"
 #define ALP_IPC_ALP_DEFAULT_RPMSG_ADDR       0x0u  /* stub: blocked */
