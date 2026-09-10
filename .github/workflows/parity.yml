@@ -762,7 +762,29 @@ env:
   #     not yet) -- 0 failed after both; see
   #     `test_planner_relocation_freshness.py`'s `HAND_PORT_PINNED_SDK_COMMIT`
   #     paragraph for the full account.
-  PINNED_SDK_TAG: 15b2f32ce82b0ff088b850723e10f1d38f8060b4
+  #
+  # `15b2f32c` -> `20fec7a7` (tan-cli#1248; the `auto/planner-resync`
+  # proposal, tan-cli#1249, exited "needs a human"): moved together with
+  # `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT` AND
+  # `HAND_PORT_PINNED_SDK_COMMIT`, `ci.yml`'s `sdk_parity` `ref:`, and
+  # `PINNED_PLANNER_ORACLE_SDK_REF` below -- all six sites in lockstep, for
+  # the same reason as the move above. Three upstream commits touch
+  # `scripts/alp_orchestrate/` in this range (alp-sdk#2030's new `memory.py`
+  # and `memory[]` manifest pane, #2022's `size_mib`-first
+  # `_region_size_bytes`, #2018's IPC-blocked rewording) and one touches the
+  # hand-ported `scripts/gen_zephyr_board.py` (#2036's `e1m_i2c0` board-layer
+  # pinctrl group + `&i2c2` node) -- see `test_planner_relocation_freshness.py`'s
+  # `15b2f32c -> 20fec7a7` paragraphs for the per-commit audit. Re-measured
+  # against `20fec7a7`:
+  #   - planner oracle: a REAL 105-of-700-file diff (see
+  #     `PINNED_PLANNER_ORACLE_SDK_REF` below), every changed byte attributed
+  #     to #2030, #2018, or #2036's `e1m-evk.yaml` `default_hw_rev: r2`.
+  #   - scaffold / toolchain-lock / bootstrap: no `templates/`, `README.md`,
+  #     `metadata/toolchains.json` or `metadata/bootstrap.json` path appears
+  #     in the 12-commit diff. `west.yml` does change, but only by one
+  #     `name-allowlist` entry (`fatfs`) plus comments -- no `revision:` line
+  #     moves, so the Zephyr pin `tan/core/bootstrap.py` reads is unchanged.
+  PINNED_SDK_TAG: 20fec7a7e9ea0479e5a9241edc75c6a8354d0fd0
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -892,7 +914,22 @@ env:
   # Optiga DNP fix) or `multicore/rpmsg-aen` and `multicore/mproc-mailbox`
   # (the #1365 split B reason-text rewording). See `PINNED_SDK_TAG`'s own
   # comment above for the full accounting.
-  PINNED_PLANNER_ORACLE_SDK_REF: 15b2f32ce82b0ff088b850723e10f1d38f8060b4
+  # `15b2f32c` -> `20fec7a7` (tan-cli#1248): moved in lockstep with
+  # `PINNED_SDK_TAG` above per this pin's own rule -- #270 has not landed.
+  # `python scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+  # 20fec7a7e9ea0479e5a9241edc75c6a8354d0fd0` regenerated `tests/fixtures/
+  # planner_oracle` and `PROVENANCE.txt`: board/emit counts unchanged (100
+  # boards, 700 emits, 7 error-contract), bytes 1,220,703 -> 1,343,563.
+  # 105 of 700 emit files moved, and a script attributed every changed byte
+  # to one of three upstream causes with none left over: the `memory[]` pane
+  # (alp-sdk#2030) on all 99 `system-manifest.yaml` goldens,
+  # `hw_info.board_hw_rev: r1 -> r2` on 74 of them (alp-sdk#2036 moves
+  # `metadata/boards/e1m-evk.yaml`'s `default_hw_rev`), and alp-sdk#2018's
+  # IPC-blocked rewording in 8 goldens across `multicore/rpmsg-aen` and
+  # `multicore/mproc-mailbox` (6 moved for it alone; the other two are
+  # those boards' `system-manifest.yaml` `ipc[].reason`, already counted in
+  # the 99). See `PINNED_SDK_TAG`'s own comment above.
+  PINNED_PLANNER_ORACLE_SDK_REF: 20fec7a7e9ea0479e5a9241edc75c6a8354d0fd0
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

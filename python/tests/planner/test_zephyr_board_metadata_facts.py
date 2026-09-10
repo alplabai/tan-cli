@@ -37,6 +37,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 # `_bound_sdk` is a pytest fixture, imported for its side effect -- the
 # same idiom `_baremetal_support`'s consumers use for `bound_sdk_root`.
@@ -150,6 +151,20 @@ class _MutatedMetadata:
             f"quality-tasks-v1.json declares no task {task_id!r}")
         path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
+    def drop_yaml_key(self, relpath: str, *keys: str) -> None:
+        """Delete a nested YAML key via a `yaml.safe_load`/`safe_dump`
+        round-trip -- simulates an alp-sdk checkout whose YAML predates the
+        key's introduction (alp-sdk#2036's `e1m_i2c0` on-module link), the
+        YAML counterpart of `json_del` for a JSON spec."""
+        path = self.root / relpath
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        node = doc
+        for key in keys[:-1]:
+            node = node[key]
+        assert keys[-1] in node, f"{relpath} has no {'.'.join(keys)}"
+        del node[keys[-1]]
+        path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
     def drop_schema_property(self, schema_relpath: str, prop: str) -> None:
         """Simulate an alp-sdk checkout that predates the commit which added
         *prop* to `metadata/schemas/<schema_relpath>` --
@@ -229,9 +244,29 @@ def test_a_non_e8_aen_sku_includes_its_own_peripherals_overlay():
     assert "(Alif Ensemble E3)" in pinctrl
     # No E8 fact may survive anywhere in the E3 tree. The SoC-JSON path in
     # the generated-file banner legitimately says `e3.json`, never `e8`.
+    #
+    # ONE exception, scrubbed from pinctrl.dtsi ONLY and only after pinning
+    # that it occurs there exactly once: alp-sdk#2036's
+    # `_aen_e1m_i2c0_pinctrl_group()` cites "bench-validated 2026-06-15 on
+    # the E8" as the PROVENANCE of a pad config that on-module-links.yaml
+    # itself scopes to the whole AEN family ("Family-scoped -- one file
+    # backs every AEN SKU and both M55 cores"), not as a claim about THIS
+    # SKU's own silicon identity -- unlike the header banner / overlay
+    # include / IRQ-count facts this loop exists to catch, which genuinely
+    # differ per SoC and must never leak. The `.dts` and `Kconfig.defconfig`
+    # scans get no exception at all, and a second copy of the sentence in
+    # pinctrl.dtsi fails the count below rather than hiding behind the scrub.
+    # Whether E8-evidenced `bias-pull-down` holds on E3 silicon is alp-sdk's
+    # question (the #1988 per-part-map class); tan emits the bytes verbatim.
+    _e1m_i2c0_bench_citation = "bench-validated 2026-06-15 on the E8"
+    assert pinctrl.count(_e1m_i2c0_bench_citation) == 1, (
+        "the one sanctioned E8 citation must appear exactly once, in "
+        "pinctrl.dtsi -- a second copy is not covered by this exception")
     for name, emitted in (("dts", dts), ("Kconfig.defconfig", kconfig),
                           ("pinctrl.dtsi", pinctrl)):
-        assert "E8" not in emitted, f"{name} still carries an E8 fact"
+        scanned = (emitted.replace(_e1m_i2c0_bench_citation, "")
+                   if name == "pinctrl.dtsi" else emitted)
+        assert "E8" not in scanned, f"{name} still carries an E8 fact"
         assert "ensemble_e8" not in emitted, f"{name} still includes the E8 overlay"
 
 
@@ -537,3 +572,55 @@ def test_an_mcuboot_base_off_the_mram_window_raises():
     message = str(excinfo.value)
     assert "anchors 'mcuboot' at 0x80008000" in message
     assert "0x80000000" in message
+
+
+# ======================================================================
+# alp-sdk#2036: e1m_i2c0 (SoC I2C2) board-layer pinctrl group + DT node
+# ======================================================================
+
+
+def test_the_e1m_i2c0_pinctrl_group_carries_the_metadata_pads_and_pinmux_order():
+    """SoC I2C2 (e1m_i2c0, portable alp-i2c0) gets its own board-layer
+    pinctrl group.  Pinmux order is SCL then SDA, matching the
+    bench-validated `aen-i2c2-eeprom-regcheck` / `aen-eeprom-manifest`
+    overlays verbatim -- NOT the SDA-first order `_aen_i2c_pinctrl_group`'s
+    BRD_I2C group above happens to use."""
+    with _MutatedMetadata() as mm:
+        pinctrl = _emit("E1M-AEN801", "m55_hp", mm.root)[
+            "alp_e1m_aen801_m55_hp/alp_e1m_aen801_m55_hp-pinctrl.dtsi"]
+    assert "\tpinctrl_i2c2: pinctrl_i2c2 {\n" in pinctrl
+    assert (
+        "\t\t\tpinmux = <PIN_P5_6__I2C2_SCL_C>, <PIN_P5_7__I2C2_SDA_C>;\n"
+        in pinctrl
+    )
+    assert "\t\t\tinput-enable;\n" in pinctrl
+    assert "\t\t\tbias-pull-down;\n" in pinctrl
+
+
+def test_the_e1m_i2c0_dts_node_and_alias_are_emitted():
+    """The `&i2c2` board-layer node + the `alp-i2c0` alias
+    `alp_i2c_open(.bus_id = ALP_E1M_I2C0)` resolves through
+    `DT_ALIAS(alp_i2c0)` -- alp-sdk#2036's `_aen_e1m_i2c0_dts()`."""
+    with _MutatedMetadata() as mm:
+        dts = _dts(_emit("E1M-AEN801", "m55_hp", mm.root))
+    assert "&i2c2 {\n" in dts
+    assert '\tstatus = "okay";\n' in dts
+    assert "\tpinctrl-0 = <&pinctrl_i2c2>;\n" in dts
+    assert "\tclock-frequency = <I2C_BITRATE_STANDARD>;\n" in dts
+    assert "\t\talp-i2c0 = &i2c2;\n" in dts
+
+
+def test_a_missing_e1m_i2c0_on_module_link_is_refused():
+    """Every AEN board tree needs `e1m_i2c0` alongside `brd_i2c` /
+    `rtc_alarm` in `on-module-links.yaml` -- alp-sdk#2036 hard-requires it
+    the same way those two are already hard-required, no SDK-vintage floor
+    (every released alp-sdk predates `on-module-links.yaml` entirely, so
+    this emitter already needs a post-release checkout regardless)."""
+    with _MutatedMetadata() as mm:
+        mm.drop_yaml_key(
+            "e1m_modules/aen/on-module-links.yaml", "on_module_links",
+            "e1m_i2c0")
+        with pytest.raises(_emit_error()) as excinfo:
+            _emit("E1M-AEN801", "m55_hp", mm.root)
+    message = str(excinfo.value)
+    assert "'e1m_i2c0'" in message
