@@ -1092,6 +1092,14 @@
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "flash.atoc-replacement-unacknowledged",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1252, porting alp-sdk#2025 (PR alp-sdk#2029, which made scripts/bench/aen/flash-jlink.sh, flash-jlink-hp.sh and flash-jlink-mramxip.sh refuse with exit 8 for the same reason). EMISSION CONDITION: a Flow D (alif_mram_jlink) write that would REALLY proceed -- the confirm gate armed AND not --dry-run -- where neither the --atoc-unqueryable flag nor flash_args.atoc_unqueryable: true acknowledged that the write REPLACES the entire ATOC. Flow D burns the ATOC over SWD with no SE-UART channel to enumerate what is resident first, so every boot entry already in MRAM that the new ATOC does not name (an A32 boot chain, an HP app, a diagnostic image) is silently delisted -- and the Secure Enclave still prints \"[SES] ATOC ok\" afterwards, so the transcript looks clean. Deliberately DISTINCT from flash.entry-failed: every flash refusal shares rc 1 and status failed, so the code is the only channel that can tell a consumer this particular one is answered by a single documented acknowledgement rather than by fixing a manifest, a probe or a path. Deliberately an error, not a warning: unlike flash.dpidr-preflight-unarmed the write does not proceed. The acknowledgement has EXACTLY two spellings and no environment variable, on purpose -- an exported env var acknowledges every later write including the unattended ones, which is the habit alp-sdk#2025's own header warns against when it says the Flow D flag must never be merged or aliased with Flow A's --replace-atoc. A preview (--dry-run, or an unconfirmed run) never emits this: it still previews, and carries the replacement warning in its own message instead. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "flash.entries-skipped",
       "status": "reserved",
       "severity": "warning",

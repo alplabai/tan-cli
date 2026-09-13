@@ -302,7 +302,10 @@ What those commands do:
    `ALP_FLASH_FORCE=1` in the environment, or `flash_args.confirm: true` in
    the manifest -- the same three-way gate `tan flash --confirm` already has.
    This is deliberate, not a bug: a fresh checkout must not silently
-   reprogram an attached module.
+   reprogram an attached module. On an Alif Flow D slice (`alif_mram_jlink`,
+   the AEN MRAM path) the write also needs `--atoc-unqueryable`, a separate
+   acknowledgement that it replaces the board's entire ATOC -- see
+   [SETOOLS setup](docs/setools.md).
 
 Run `tan doctor` if setup or toolchain discovery fails; its `toolchain` check
 reports stamp-vs-pin for the resolved project (a version-skewed or
@@ -339,7 +342,7 @@ move.
 | Check a project | `tan validate` |
 | Build firmware | `tan build` |
 | Build and run or flash | `tan run --flash --confirm` (`--confirm` arms the write on a hardware target; see the quickstart) |
-| Flash an existing build | `tan flash --confirm` |
+| Flash an existing build | `tan flash --confirm` (an Alif Flow D slice also needs `--atoc-unqueryable`, which acknowledges the whole-ATOC replacement rather than arming the write — see [SETOOLS setup](docs/setools.md)) |
 | Inspect firmware size | `tan size` |
 | Create an image | `tan image` |
 | Remove build output | `tan clean` |

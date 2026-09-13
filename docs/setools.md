@@ -165,6 +165,83 @@ shipped alp-sdk preset carries a SW-DP ID today, and `tan` is forbidden from
 deriving one — until metadata populates the field, exporting this variable
 refuses these writes rather than guarding them.
 
+## `--atoc-unqueryable` — a Flow D write replaces the *whole* ATOC
+
+A Flow D write does not add an entry to the ATOC. It `loadbin`s a new ATOC over
+the old one, **replacing the entire table** — and, unlike Flow A over the
+SE-UART, there is no channel to ask the part what is resident first. So every
+boot entry already in MRAM that your new ATOC does not name (an A32 boot chain,
+an HP-core app, a diagnostic image) is **silently delisted** by the write. The
+Secure Enclave then reports `[SES] ATOC ok`, because from its point of view the
+table it was handed is perfectly valid — nothing in the transcript says
+anything was lost.
+
+Because `tan` cannot enumerate what it is about to replace, it asks *you* to
+say you accept it. A confirmed Flow D write refuses
+(`flash.atoc-replacement-unacknowledged`, exit 1) unless one of **exactly two**
+spellings acknowledges the replacement:
+
+- **`--atoc-unqueryable`** on `tan flash` (and on `tan run --flash`);
+- **`flash_args.atoc_unqueryable: true`** in `build/system-manifest.yaml` — for
+  `tan flash`, which reads that file as it stands. It is **not** an option for
+  `tan run --flash`: every such run regenerates `build/system-manifest.yaml`
+  from the planner before flashing, and the planner composes `flash_args` from
+  the keys it knows, so a hand-added acknowledgement is overwritten by the same
+  command that then asks for it. On `tan run`, pass the flag.
+
+This is the same guard alp-sdk#2025 put on the bench scripts themselves —
+`scripts/bench/aen/flash-jlink.sh`, `flash-jlink-hp.sh` and
+`flash-jlink-mramxip.sh` refuse with exit 8 without the identical flag.
+
+Three properties worth knowing:
+
+- **It is not `--confirm`, and never an alias for it.** `--confirm` means "yes,
+  write"; this means "yes, I accept that the entire ATOC is replaced". A
+  confirmed run still refuses without it — including an `ALP_FLASH_FORCE=1`
+  bench, deliberately.
+- **There is no environment variable, on purpose.** Unlike `ALP_FLASH_FORCE`
+  and `ALP_FLASH_REQUIRE_DPIDR`, which are properties of the *host*, this is a
+  statement about *this* write's ATOC. An env var would be exported once into a
+  shell profile or a CI job and then acknowledge every future write, including
+  the unattended ones — which is exactly what alp-sdk#2025's own header warns
+  against when it says the Flow D flag must never be merged or aliased with
+  Flow A's `--replace-atoc`.
+- **Previews still preview.** The refusal fires only where the write would
+  really proceed (confirm gate armed *and* not `--dry-run`). `tan flash
+  --dry-run` and an unconfirmed run both still report what they would do — and
+  their message now states the whole-ATOC replacement, so you read it *before*
+  arming the write rather than after.
+
+A present-but-null or non-boolean `flash_args.atoc_unqueryable` is refused at
+plan time — under `--dry-run`, and before any SETOOLS spawn — rather than read
+as an absent key, so a mistyped acknowledgement is never quietly the same as no
+acknowledgement.
+
+On Flow D the refusal fires ahead of the SETOOLS auto-sign (same placement, and
+same reason, as the wrong-board refusal above: `app-gen-toc` writes into your
+SETOOLS install, and a refusal that fires after it has already run is a refusal
+that did not prevent the mutation), and after the `ALP_FLASH_REQUIRE_DPIDR`
+gate — writing the right table to the wrong board is the worse of the two
+failures.
+
+### What this guard does *not* cover: Flow A
+
+This is a **Flow D** guard, and only a Flow D guard. A slice that stays on
+`zephyr_west_flash` — no `jlink_flash_device` on its `flash_args`, so `west
+flash` picks the board.cmake default `alif_flash` runner and burns the ATOC
+over the SE-UART (Flow A) — writes with no acknowledgement and no warning
+today. Every published Ensemble variant in alp-sdk metadata carries
+`debug.jlink_flash_device`, so a planner-emitted AEN manifest dispatches Flow D
+and *is* guarded; a hand-written or legacy manifest without that key is not.
+
+That gap is deliberately left open rather than closed by widening this flag:
+alp-sdk#2025's own header says the Flow D flag must never be merged or aliased
+with Flow A's `--replace-atoc`, precisely because an operator on a no-SE-UART
+slot passes the Flow D one on every run — and a flag that answered both gates
+would silence the one that *can* query the part first. Flow A's answer is a
+query-based check (upstream's `bench_atoc_replace_guard`), which is its own
+piece of work.
+
 ## GD32 bridge programming: not this backend, not `tan` any more
 
 `tan flash` no longer has a local-write path for the E1M-X V2N/V2M SoMs' GD32
@@ -195,3 +272,7 @@ programming the GD32 will still need.
   itself, the opt-in strict switch, and making both method-independent.
 - tan-cli#732 — removed the `swd_probe` flash backend (GD32 programming
   separating out of `tan`); #610 above is the open follow-up it leaves.
+- tan-cli#1252 — `--atoc-unqueryable`: a Flow D write replaces the whole ATOC
+  and cannot enumerate what is resident first, so the replacement must be
+  acknowledged. Ports alp-sdk#2025 (PR alp-sdk#2029), which put the same
+  refusal on the AEN bench scripts.

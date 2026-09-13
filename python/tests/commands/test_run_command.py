@@ -29,6 +29,7 @@ registration lands. Exercising the exact same `run_cmd.run` callable through
 `CliRunner` is the same test either way -- only the transport differs -- and
 lets this suite pass today.
 """
+import inspect
 import json
 
 import typer
@@ -286,6 +287,157 @@ def test_internal_run_flash_defaults_confirm_false_when_omitted(tmp_path, monkey
         flash=True, core=None, json_mode=False,
     )
     assert calls["confirm_flag"] is False
+
+
+def test_run_parser_actually_accepts_atoc_unqueryable():
+    """tan-cli#1252. `run_cmd.py:323` hardcodes `dry_run=False`, so `run
+    --flash --confirm` on an AEN Flow D slice can never take a preview path --
+    it goes straight to the whole-ATOC guard. Without this flag that command
+    would hit a refusal naming a flag `run` does not accept.
+
+    Asserted on the parser for the same reason `--confirm`'s twin above is:
+    `--flash`'s own help text mentions other flags, so a substring check on
+    `--help` output can stay green with the option removed entirely."""
+    from typer.main import get_command
+
+    run_click_command = get_command(_app()).get_command(None, "run")
+    registered = [
+        param
+        for param in run_click_command.params
+        if "--atoc-unqueryable" in getattr(param, "opts", ())
+    ]
+    assert registered, (
+        f"no --atoc-unqueryable option registered on `run`; opts were "
+        f"{[getattr(p, 'opts', None) for p in run_click_command.params]}"
+    )
+
+
+def test_run_atoc_unqueryable_is_accepted_by_the_real_parser(tmp_path, monkeypatch):
+    """Same proof end to end: `run --flash --confirm --atoc-unqueryable` must
+    never hit Click's own "No such option"."""
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(
+        _app(),
+        ["run", "--flash", "--confirm", "--atoc-unqueryable", "--format", "json"],
+    )
+    assert "No such option" not in result.output, result.output
+
+
+def test_the_run_callback_forwards_atoc_unqueryable_to_its_own_internal_run(
+    tmp_path, monkeypatch
+):
+    """The CLI half of the hand-off, which neither the parser test above nor
+    the `_run(...)` tests below can see: both stay green if `run()`'s call to
+    `_run` simply stops passing the value (measured -- the flag still renders
+    in `--help`, still parses, and is silently dropped, so `run --flash
+    --confirm --atoc-unqueryable` would be refused by a message naming the
+    flag just passed).
+
+    Drives the REAL Typer callback with real argv and records what reached
+    `_run`, plus the companion `False` for an invocation without the flag."""
+    calls: list[dict] = []
+
+    def fake_internal_run(**kwargs):
+        calls.append(kwargs)
+        return (ExitCode.SUCCESS, None, [], ["run: ok."])
+
+    monkeypatch.setattr(run_cmd, "_run", fake_internal_run)
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    runner.invoke(_app(), ["run", "--flash", "--confirm", "--atoc-unqueryable"])
+    assert calls, "the run callback never reached _run"
+    assert calls[-1]["atoc_unqueryable"] is True, calls[-1]
+    # ...and it stayed its own gate on the way through.
+    assert calls[-1]["confirm"] is True, calls[-1]
+
+    runner.invoke(_app(), ["run", "--flash", "--confirm"])
+    assert calls[-1]["atoc_unqueryable"] is False, calls[-1]
+    assert calls[-1]["confirm"] is True, calls[-1]
+
+
+def test_run_flash_and_confirm_help_do_not_claim_to_be_the_whole_gate(tmp_path):
+    """tan-cli#1252. `--flash` and `--confirm` both told the operator that
+    without `--confirm` every slice comes back `planned` -- which stopped
+    being the whole truth for an Alif Flow D slice: `run` hardcodes
+    `dry_run=False` on its flash call, so such a slice cannot preview and
+    comes back `failed` until the ATOC replacement is acknowledged. Both help
+    texts have to say so, and neither may read as though the new flag arms a
+    write on its own."""
+    sig = inspect.signature(run_cmd.run)
+    flash_help = sig.parameters["flash"].default.help
+    confirm_help = sig.parameters["confirm"].default.help
+    atoc_help = sig.parameters["atoc_unqueryable"].default.help
+
+    for text in (flash_help, confirm_help):
+        assert "--atoc-unqueryable" in text, text
+        assert "alif_mram_jlink" in text, text
+    assert "`failed`" in flash_help, flash_help
+    assert "`failed`" in confirm_help, confirm_help
+    # The new flag must still disclaim arming the write itself.
+    assert "still needs --confirm" in atoc_help, atoc_help
+    # `run` regenerates the manifest every invocation, so the manifest
+    # spelling cannot be offered here as an equal alternative.
+    assert "regenerates build/system-manifest.yaml" in atoc_help, atoc_help
+
+
+def test_internal_run_flash_forwards_atoc_unqueryable_to_the_flash_engine(
+    tmp_path, monkeypatch
+):
+    """The wiring itself: the flag has to reach `flash_cmd._run`, which is
+    where the Flow D guard reads it."""
+    monkeypatch.setattr(run_cmd, "_build", _stub_build)
+    monkeypatch.setattr(run_cmd, "decide_run_action", lambda *a, **k: RunAction.FLASH)
+    calls = {}
+
+    def fake_flash_run(**kwargs):
+        calls.update(kwargs)
+        return (
+            ExitCode.SUCCESS,
+            {"schemaVersion": "1", "buildRoot": kwargs["app_path"], "entries": []},
+            [],
+            ["flash: 0 failure(s)."],
+            None,
+        )
+
+    monkeypatch.setattr(flash_cmd, "_run", fake_flash_run)
+    run_cmd._run(
+        build_root=str(tmp_path), sdk_root=None, sdk_root_for_stamp=None, board_yaml=None,
+        flash=True, core=None, json_mode=False, confirm=True, atoc_unqueryable=True,
+    )
+    assert calls["atoc_unqueryable"] is True
+    # ...and it did not quietly become the confirm gate on the way.
+    assert calls["confirm_flag"] is True
+
+
+def test_internal_run_flash_defaults_atoc_unqueryable_false_when_omitted(
+    tmp_path, monkeypatch
+):
+    """The companion: an ordinary `run --flash --confirm` must NOT silently
+    acknowledge the ATOC replacement. `--confirm` alone reaches the flash
+    engine with `atoc_unqueryable=False`, so an AEN Flow D slice refuses --
+    which is the entire point of keeping the two gates separate."""
+    monkeypatch.setattr(run_cmd, "_build", _stub_build)
+    monkeypatch.setattr(run_cmd, "decide_run_action", lambda *a, **k: RunAction.FLASH)
+    calls = {}
+
+    def fake_flash_run(**kwargs):
+        calls.update(kwargs)
+        return (
+            ExitCode.SUCCESS,
+            {"schemaVersion": "1", "buildRoot": kwargs["app_path"], "entries": []},
+            [],
+            ["flash: 0 failure(s)."],
+            None,
+        )
+
+    monkeypatch.setattr(flash_cmd, "_run", fake_flash_run)
+    run_cmd._run(
+        build_root=str(tmp_path), sdk_root=None, sdk_root_for_stamp=None, board_yaml=None,
+        flash=True, core=None, json_mode=False, confirm=True,
+    )
+    assert calls["atoc_unqueryable"] is False
+    assert calls["confirm_flag"] is True
 
 
 def test_internal_run_reaches_flash_via_the_real_recorded_signal_not_a_stub(tmp_path, monkeypatch):

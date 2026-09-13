@@ -261,6 +261,10 @@ def _run(
     # stubbing `flash_cmd._run` themselves. `False` preserves the exact
     # pre-#809 behaviour for every one of them.
     confirm: bool = False,
+    # tan-cli#1252: defaulted for the same reason `confirm` above is -- the
+    # tests that call `_run` directly predate it and reach paths it never
+    # touches.
+    atoc_unqueryable: bool = False,
 ) -> tuple[ExitCode, dict[str, Any] | None, list[Issue], list[str]]:
     """Everything between the resolved paths and the envelope. Returns
     `(exit_code, data, issues, text_lines)`."""
@@ -331,6 +335,12 @@ def _run(
         # itself stays deliberate (see flash_plan.py); this only gives `run`
         # the same opt-in `tan flash --confirm` already has.
         confirm_flag=confirm,
+        # tan-cli#1252: forwarded for a sharper reason than `--confirm` above.
+        # `dry_run=False` is HARDCODED on this call, so `run --flash --confirm`
+        # on an AEN Flow D slice can never take a preview path -- it goes
+        # straight to the whole-ATOC guard. Without this line that command
+        # would hit a refusal naming a flag `run` does not accept.
+        atoc_unqueryable=atoc_unqueryable,
     )
     return flash_exit, flash_data, flash_issues, flash_text
 
@@ -344,7 +354,10 @@ def run(
         "never flashes. Arming the write also needs --confirm (or "
         "ALP_FLASH_FORCE=1, or flash_args.confirm: true in the manifest); "
         "without it every slice comes back `planned` and the run exits "
-        "non-zero. Ignored for a native_sim/host target, which always runs "
+        "non-zero. An Alif Flow D slice (alif_mram_jlink) has a SECOND gate and "
+        "can instead come back `failed` once armed, until --atoc-unqueryable "
+        "acknowledges that the write replaces the entire ATOC (tan-cli#1252). "
+        "Ignored for a native_sim/host target, which always runs "
         "the produced binary and never flashes.",
     ),
     core: str = typer.Option(
@@ -361,7 +374,33 @@ def run(
         "Without it (and without ALP_FLASH_FORCE=1 or flash_args.confirm: true "
         "in the manifest) a hardware target is only previewed -- every slice "
         "comes back `planned`, nothing reaches the device, and the run exits "
-        "non-zero (tan-cli#809). Ignored without --flash.",
+        "non-zero (tan-cli#809). On an Alif Flow D slice (alif_mram_jlink) this "
+        "arms the write but does not acknowledge that it replaces the entire "
+        "ATOC: such a slice additionally needs --atoc-unqueryable and is refused "
+        "(`failed`, not `planned`) without it (tan-cli#1252). Ignored without "
+        "--flash.",
+    ),
+    atoc_unqueryable: bool = typer.Option(
+        False,
+        "--atoc-unqueryable",
+        # tan-cli#1252 review: `run` deliberately does NOT offer the manifest
+        # spelling as an alternative here, unlike `tan flash`'s own help. Every
+        # `run --flash` REGENERATES build/system-manifest.yaml before flashing
+        # (RunAction.FLASH requires THIS run's own manifest write), and
+        # `planner/orchestrator._slice_flash_recipe` composes `flash_args` from
+        # a fresh dict carrying only the keys it knows -- so an operator-added
+        # `atoc_unqueryable` is destroyed by the same command that would then
+        # demand it. On `run` the flag is the only spelling that survives.
+        help="With --flash on an Alif Flow D slice (alif_mram_jlink), acknowledge "
+        "that the write REPLACES the entire ATOC: Flow D cannot enumerate what is "
+        "resident, so any boot entry the new ATOC does not name is silently delisted "
+        "while the SES still reports \"[SES] ATOC ok\". Without it such a slice "
+        "refuses. Use the flag here rather than flash_args.atoc_unqueryable: true -- "
+        "that manifest spelling works for `tan flash`, which reads the manifest as "
+        "it stands, but every `run --flash` regenerates build/system-manifest.yaml "
+        "first and a hand-added key does not survive it. This acknowledges the "
+        "replacement only -- arming the write itself still needs --confirm "
+        "(tan-cli#1252).",
     ),
     project: str = typer.Option(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
@@ -445,6 +484,7 @@ def run(
             flash=flash,
             core=core,
             confirm=confirm,
+            atoc_unqueryable=atoc_unqueryable,
             json_mode=json_mode,
         )
     except Exception as err:  # noqa: BLE001 -- see build_cmd.build's identical guard
