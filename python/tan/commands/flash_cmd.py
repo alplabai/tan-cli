@@ -106,6 +106,7 @@ from tan.core.dp_id import (
     _dp_id_value,
 )
 from tan.core.flash_plan import (
+    ATOC_REPLACEMENT_PREVIEW_NOTE,
     DPIDR_GUARD_COVERAGE,
     FAIL,
     FLASH_POLICY_RECOVERY_ONLY,
@@ -121,6 +122,8 @@ from tan.core.flash_plan import (
     YOCTO_WIC_METHODS,
     _DEV_ROOT,
     CONFIRM_REMEDY,
+    atoc_replacement_acknowledged,
+    atoc_replacement_refusal,
     backend_for,
     confirm_gate_note,
     display_argv,
@@ -244,6 +247,16 @@ class _Entry:
     #: (and the matching text line) saying what was armed. NOT part of the
     #: envelope contract -- `as_dict()` never emits it, like the two above.
     recovery_armed: bool = False
+    #: tan-cli#1252: set on the one refusal that must NOT report the generic
+    #: `flash.entry-failed` -- a confirmed Flow D write whose whole-ATOC
+    #: replacement was never acknowledged. `_run` reads it to pick
+    #: `flash.atoc-replacement-unacknowledged` instead, so a `--format json`
+    #: consumer can tell "this manifest/flag combination was refused, and one
+    #: flag answers it" from any other failed entry -- every flash refusal
+    #: shares rc 1 / `status: failed`, so the CODE is the only channel that
+    #: distinguishes them. NOT part of the envelope contract -- `as_dict()`
+    #: never emits it, like the two above.
+    atoc_unacknowledged: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"kind": self.kind, "id": self.id}
@@ -1976,6 +1989,14 @@ class _Context:
     #: a filtered target list alone cannot say (a manifest with a single helper
     #: yields the same list unfiltered).
     helper_filter: str | None = None
+    #: `--atoc-unqueryable` (tan-cli#1252) -- the CLI half of the whole-ATOC
+    #: acknowledgement, OR-ed with `flash_args.atoc_unqueryable` at the one
+    #: Flow D site that decides. Default `False`, so every existing invocation
+    #: behaves as before EXCEPT a confirmed Flow D write, which now refuses
+    #: until one of the two spellings acknowledges it. Deliberately has no
+    #: environment-variable half, unlike `force_confirm`/`require_dpidr` --
+    #: see `flash_plan.atoc_replacement_acknowledged` for why.
+    atoc_unqueryable: bool = False
 
 
 def _recovery_armed_for(target: FlashTarget, ctx: _Context) -> bool:
@@ -2249,10 +2270,12 @@ def _flash_entry(
         message: str,
         *,
         preflight_unarmed: bool = False,
+        atoc_unacknowledged: bool = False,
     ) -> _Entry:
         return _Entry(
             kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message,
             preflight_unarmed=preflight_unarmed, recovery_armed=recovery,
+            atoc_unacknowledged=atoc_unacknowledged,
         )
 
     # tan-cli#611, THE HOIST. WHO may flash this entry is decided BEFORE
@@ -2500,6 +2523,40 @@ def _flash_entry(
                         lines.append(f"flash: {kind} '{entry_id}' -> {method}")
                         lines.append(f"  FAIL: {refusal}")
                         return 1, entry(method, "failed", 1, refusal), lines
+                # tan-cli#1252 (porting alp-sdk#2025). A Flow D `loadbin` of
+                # the ATOC REPLACES the whole table, and Flow D has no
+                # SE-UART channel to enumerate what is resident first -- so
+                # every resident boot entry this ATOC does not name is
+                # delisted, and the SES's own "[SES] ATOC ok" says nothing
+                # about it. Upstream made the three bench scripts refuse
+                # (exit 8) without `--atoc-unqueryable` for exactly this;
+                # tan's equivalent lives HERE, with the same placement
+                # argument tan-cli#512 made for the preflight above: the
+                # SETOOLS auto-sign a few lines down is itself a real write
+                # into the customer's SETOOLS install, so a refusal that
+                # fires after it is a refusal that did not prevent the
+                # mutation. It is also why this cannot live in
+                # `plan_alif_mram_jlink`, which only runs after that sign.
+                #
+                # ORDER: after the `ALP_FLASH_REQUIRE_DPIDR` gate above, so a
+                # run with neither answered reports the WRONG-BOARD refusal
+                # first -- writing the right table to the wrong board is the
+                # worse of the two, and delisting is moot if the probe is on
+                # someone else's silicon. Both fire before anything spawns.
+                #
+                # Reached only under `not ctx.dry_run and confirm`, the
+                # enclosing condition: a preview stays a preview and instead
+                # carries `ATOC_REPLACEMENT_PREVIEW_NOTE`, so the operator
+                # reads what arming means before they arm it.
+                if not atoc_replacement_acknowledged(flash_args, ctx.atoc_unqueryable):
+                    refusal = atoc_replacement_refusal(method, entry_id)
+                    lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+                    lines.append(f"  FAIL: {refusal}")
+                    return (
+                        1,
+                        entry(method, "failed", 1, refusal, atoc_unacknowledged=True),
+                        lines,
+                    )
                 preflight_inputs = FlashInputs(
                     artefact=artefact_path,
                     flash_args=flash_args,
@@ -2539,10 +2596,18 @@ def _flash_entry(
             # "nothing was written" from "programmed the device" applies to
             # the SETOOLS half of Flow D exactly as it does to the MRAM
             # write it feeds.
+            # tan-cli#1252: Flow D's OTHER preview return. It fires before
+            # `meta.build` is ever called -- a fresh AEN manifest with no
+            # `atoc`/`atoc_address` never reaches `plan_alif_mram_jlink` at
+            # all -- so the whole-ATOC note has to be appended here too, not
+            # only at the shared preview block below. This is the most common
+            # AEN preview of the two, and omitting it here would leave exactly
+            # the operator who has not signed yet uninformed.
+            previewed = f"{setools_note} {ATOC_REPLACEMENT_PREVIEW_NOTE}"
             lines.append(f"flash: {kind} '{entry_id}' -> {method}")
-            lines.append(f"  {setools_note}")
+            lines.append(f"  {previewed}")
             status = "ok" if ctx.dry_run else "planned"
-            return 0, entry(method, status, 0, setools_note), lines
+            return 0, entry(method, status, 0, previewed), lines
 
     inputs = FlashInputs(
         artefact=artefact_path,
@@ -2564,10 +2629,17 @@ def _flash_entry(
 
     if plan.planning_only or ctx.dry_run:
         shown = display_argv(plan)
+        # tan-cli#1252: Flow D ONLY. This block is shared with `yocto_wic` and
+        # `xspi_flashwriter`, neither of which has an ATOC to replace -- an
+        # unguarded note here would tell an SD-card user their boot table is
+        # being rewritten. Appended to BOTH arms: the `--dry-run` arm carries
+        # no gate note at all today, and a preview that says nothing about the
+        # replacement is exactly the silence this issue is about.
+        atoc_note = f" {ATOC_REPLACEMENT_PREVIEW_NOTE}" if method == FLOW_D_METHOD else ""
         if ctx.dry_run:
             # The user explicitly asked for a preview -- nothing was ever going
             # to run. rc 0 / status "ok" (alp_flash's "clean-dry-run").
-            msg = f"would run {shown}"
+            msg = f"would run {shown}{atoc_note}"
             lines.append(f"  {msg}")
             return 0, entry(method, "ok", 0, msg), lines
         # The BACKEND declined a real write because the confirm gate is not
@@ -2577,7 +2649,7 @@ def _flash_entry(
         # cannot tell "nothing was written" from "programmed the device".
         msg = (
             f"would run {shown} -- NOT written: "
-            f"{confirm_gate_note('flash_args.confirm is false')}"
+            f"{confirm_gate_note('flash_args.confirm is false')}{atoc_note}"
         )
         lines.append(f"  {msg}")
         return 0, entry(method, "planned", 0, msg), lines
@@ -2963,6 +3035,7 @@ def _run(
     setools_dir_arg: str | None = None,
     recover: bool = False,
     confirm_flag: bool = False,
+    atoc_unqueryable: bool = False,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -3047,6 +3120,13 @@ def _run(
     # not truthiness, so an empty or `0` value is off and the two gates cannot
     # be armed by different spellings of the same intent.
     require_dpidr = os.environ.get(REQUIRE_DPIDR_ENV) == "1"
+    # tan-cli#1252: `atoc_unqueryable` deliberately gets NO third line here.
+    # The two reads above are a pattern that invites a matching
+    # `ALP_FLASH_ATOC_UNQUERYABLE`; do not add one -- an env var is exported
+    # once and then acknowledges every future write, including the unattended
+    # ones, which is the habit alp-sdk#2025's own header warns against. Its
+    # only two spellings are the `--atoc-unqueryable` flag and
+    # `flash_args.atoc_unqueryable` (`flash_plan.atoc_replacement_acknowledged`).
     plan = plan_flash_targets(manifest, core, helper)
 
     # tan-cli#289/#59/#61: resolved ONCE for the whole run, keyed on the SAME
@@ -3135,6 +3215,7 @@ def _run(
         # manifest carrying exactly one helper produces the same target list
         # whether or not `--helper` was given (tan-cli#611).
         helper_filter=helper,
+        atoc_unqueryable=atoc_unqueryable,
     )
     for target in plan.targets:
         rc, entry, lines = _flash_entry(target, ctx)
@@ -3160,7 +3241,20 @@ def _run(
         # is the channel `--format json` consumers key error rendering off, so
         # `ok:false` must never ship with an empty issues list.
         if rc > 0:
-            issues.append(Issue("flash.entry-failed", "error", entry.message))
+            if entry.atoc_unacknowledged:
+                # tan-cli#1252: the ONE failed entry that does not report the
+                # generic code. Every flash refusal returns rc 1 / `status:
+                # failed`, so `flash.entry-failed` cannot tell a consumer that
+                # THIS one is answered by a single documented flag rather than
+                # by fixing a manifest or a probe. Written as two literal
+                # `Issue(...)` calls rather than one with a conditional code so
+                # both spellings stay statically visible to
+                # `tests/gates/test_every_issue_code_is_registered.py`.
+                issues.append(
+                    Issue("flash.atoc-replacement-unacknowledged", "error", entry.message)
+                )
+            else:
+                issues.append(Issue("flash.entry-failed", "error", entry.message))
         if entry.status == "planned":
             # `status` alone is prose no automated consumer parses.
             issues.append(Issue("flash.confirm-required", "warning", entry.message))
@@ -3387,13 +3481,40 @@ def flash(
         # the flag that actually previews all of them. tan-cli#732 removed
         # the fifth backend this help text used to name (swd_probe, also
         # unconditional).
+        #
+        # tan-cli#1252 applies the SAME #796 rule to a new gap: this is the
+        # one help entry a Flow D operator reads before arming a write, so
+        # leaving it as the whole story would again describe a gate that no
+        # longer arms what it claims -- on alif_mram_jlink a confirmed write
+        # now ALSO needs --atoc-unqueryable and refuses without it. Worded so
+        # neither flag reads as sufficient on its own.
         help="Arm the confirm gate on the backends that have one -- yocto_wic, "
         "xspi_flashwriter, and Flow D MRAM (alif_mram_jlink). Without it (and "
         "without ALP_FLASH_FORCE=1 or flash_args.confirm: true) those three preview "
-        "only and the run exits non-zero (tan-cli#719). zephyr_west_flash and "
+        "only and the run exits non-zero (tan-cli#719). On alif_mram_jlink it arms "
+        "the write but does NOT acknowledge that the write replaces the entire ATOC: "
+        "a confirmed Flow D write also needs --atoc-unqueryable (or "
+        "flash_args.atoc_unqueryable: true) and is refused without it, reporting "
+        "flash.atoc-replacement-unacknowledged (tan-cli#1252). zephyr_west_flash and "
         "baremetal_cmake_flash have no confirm gate and write the attached device "
         "regardless of this flag. Use --dry-run for a preview that works on every "
         "backend.",
+    ),
+    atoc_unqueryable: bool = typer.Option(
+        False,
+        "--atoc-unqueryable",
+        # tan-cli#1252 / alp-sdk#2025. A SEPARATE acknowledgement from
+        # --confirm on purpose, never an alias: --confirm says "yes, write",
+        # this says "yes, I accept that the entire ATOC is replaced". There is
+        # deliberately no environment variable for it -- see
+        # `flash_plan.atoc_replacement_acknowledged`.
+        help="Acknowledge that a Flow D MRAM write (alif_mram_jlink) REPLACES the "
+        "entire ATOC. Flow D has no SE-UART channel to enumerate what is resident, "
+        "so any boot entry the new ATOC does not name is silently delisted -- and the "
+        "SES still reports \"[SES] ATOC ok\". Without this (or "
+        "flash_args.atoc_unqueryable: true) a confirmed Flow D write refuses; a "
+        "preview still previews. Separate from --confirm, which only arms the write "
+        "itself, and it has no effect on any other backend.",
     ),
     skip_missing_tools: bool = typer.Option(
         False,
@@ -3462,6 +3583,7 @@ def flash(
             cwd=cwd,
             setools_dir_arg=setools_dir,
             confirm_flag=confirm,
+            atoc_unqueryable=atoc_unqueryable,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an

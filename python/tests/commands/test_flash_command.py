@@ -1576,11 +1576,13 @@ def _flow_d_run(
     *,
     flash_args: str = (
         '{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000", '
-        'atoc: atoc.bin, atoc_address: "0x8057F5B0", confirm: true}'
+        'atoc: atoc.bin, atoc_address: "0x8057F5B0", confirm: true, '
+        "atoc_unqueryable: true}"
     ),
     require: str | None = None,
     dry_run: bool = False,
     spawned: list | None = None,
+    atoc_unqueryable: bool = False,
 ):
     """A confirmed, real Flow D write with every spawn stubbed.
 
@@ -1588,7 +1590,14 @@ def _flow_d_run(
     `expect_dpidr`/`jlink_device`. `require` sets `ALP_FLASH_REQUIRE_DPIDR`
     (absent by default -- the shipped, advisory-only behaviour). `spawned`
     collects `_spawn` calls, so a test can prove a refusal landed before
-    anything ran."""
+    anything ran. `atoc_unqueryable` passes the CLI flag of the same name.
+
+    The default `flash_args` carries `atoc_unqueryable: true` since
+    tan-cli#1252: a confirmed Flow D write REPLACES the whole ATOC and now
+    refuses without that acknowledgement, and every case in this block is
+    about something else (the DPIDR advisory, the strict switch, the reset
+    report). A test that is about the acknowledgement itself withholds the key
+    by passing its own `flash_args`."""
     (tmp_path / "build").mkdir(exist_ok=True)
     (tmp_path / "build" / "a.bin").write_bytes(b"\x00")
     (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00")
@@ -1634,6 +1643,7 @@ boot_order: []
         app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
         board_yaml=None, core=None, helper=None, dry_run=dry_run,
         skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+        atoc_unqueryable=atoc_unqueryable,
     )
 
 
@@ -1695,6 +1705,7 @@ def test_flow_d_write_with_expect_dpidr_armed_does_not_warn(tmp_path, monkeypatc
     armed = (
         '{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000", '
         'atoc: atoc.bin, atoc_address: "0x8057F5B0", confirm: true, '
+        "atoc_unqueryable: true, "
         'expect_dpidr: "0x00000000", jlink_device: Cortex-M55}'
     )
     exit_code, data, issues, _lines, _sdk = _flow_d_run(
@@ -1801,6 +1812,7 @@ def test_require_dpidr_lets_an_armed_flow_d_write_through(tmp_path, monkeypatch)
     armed = (
         '{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000", '
         'atoc: atoc.bin, atoc_address: "0x8057F5B0", confirm: true, '
+        "atoc_unqueryable: true, "
         'expect_dpidr: "0x00000000", jlink_device: Cortex-M55}'
     )
     exit_code, data, issues, _lines, _sdk = _flow_d_run(
@@ -1822,6 +1834,261 @@ def test_require_dpidr_does_not_refuse_a_flow_d_dry_run(tmp_path, monkeypatch):
     assert exit_code == 0
     assert not any(i.code == "flash.entry-failed" for i in issues), issues
     assert "ALP_FLASH_REQUIRE_DPIDR" not in data["entries"][0]["message"], data["entries"][0]
+
+
+# ── tan-cli#1252: a Flow D write REPLACES the whole ATOC ───────────────────
+#
+# alp-sdk#2025 (PR alp-sdk#2029) made the three AEN bench scripts refuse with
+# exit 8 without `--atoc-unqueryable`, because Flow D has no SE-UART channel to
+# enumerate what is resident before it overwrites the table. tan's Flow D had
+# the same defect and no acknowledgement at all.
+
+#: The whole-ATOC refusal, byte-for-byte.
+_ATOC_REPLACEMENT_REFUSAL = (
+    "alif_mram_jlink[m55_hp]: this write REPLACES the ENTIRE ATOC, and Flow D has no "
+    "SE-UART channel to enumerate what is resident first -- so any boot entry already "
+    "in MRAM that this ATOC does not name (an A32 boot chain, an HP app, a diagnostic "
+    'image) is silently DELISTED, and the SES still prints "[SES] ATOC ok" '
+    "afterwards. Refusing until that is acknowledged: pass "
+    "--atoc-unqueryable on the command line, or set flash_args.atoc_unqueryable: true in "
+    'the manifest. --confirm does NOT acknowledge this -- it only means "yes, write" '
+    "(alp-sdk#2025, tan-cli#1252)."
+)
+
+#: A confirmed Flow D entry with the acknowledgement WITHHELD -- `_flow_d_run`'s
+#: own default carries it, so every case about the acknowledgement itself has to
+#: spell its `flash_args` out.
+_UNACKNOWLEDGED_FLOW_D_ARGS = (
+    '{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000", '
+    'atoc: atoc.bin, atoc_address: "0x8057F5B0", confirm: true}'
+)
+
+#: The same entry, acknowledged by the MANIFEST rather than by the flag.
+_MANIFEST_ACKNOWLEDGED_FLOW_D_ARGS = (
+    '{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000", '
+    'atoc: atoc.bin, atoc_address: "0x8057F5B0", confirm: true, '
+    "atoc_unqueryable: true}"
+)
+
+
+def test_a_confirmed_flow_d_write_refuses_until_the_atoc_replacement_is_acknowledged(
+    tmp_path, monkeypatch
+):
+    """The headline defect. A confirmed, non-dry-run Flow D write used to
+    `loadbin` a whole new ATOC over the resident one and report `ok`, silently
+    delisting every boot entry the new table does not name -- with the SES
+    printing `[SES] ATOC ok` on top, so even the transcript said nothing.
+
+    Asserts the CODE, not just the exit status: `flash.entry-failed` is what
+    every other rc>0 entry reports, and a refusal that emitted the generic code
+    (or emitted both) would be indistinguishable from a dead probe or a bad
+    path -- the one thing a consumer needs to know here is that a single
+    documented flag answers it."""
+    spawned: list = []
+    exit_code, data, issues, lines, _sdk = _flow_d_run(
+        tmp_path, monkeypatch, flash_args=_UNACKNOWLEDGED_FLOW_D_ARGS, spawned=spawned
+    )
+
+    assert exit_code == 1
+    entry = data["entries"][0]
+    assert entry["status"] == "failed", entry
+    assert entry["message"] == _ATOC_REPLACEMENT_REFUSAL, entry
+    assert [i.code for i in issues] == ["flash.atoc-replacement-unacknowledged"], issues
+    assert issues[0].severity == "error"
+    assert issues[0].message == _ATOC_REPLACEMENT_REFUSAL
+    # Text mode is the default human invocation and prints only these lines.
+    assert any(_ATOC_REPLACEMENT_REFUSAL in line for line in lines), lines
+    # And nothing was spawned: the refusal is the last word before any tool runs.
+    assert spawned == [], spawned
+
+
+def test_the_atoc_refusal_carries_every_fact_upstream_refuses_on():
+    """The message is the whole remedy here -- an operator who cannot see WHY
+    the write is refused will pass the flag reflexively, which is the outcome
+    upstream's own header warns against. Pinned against the product function,
+    with the byte-for-byte constant above proven equal to it, so neither can
+    drift without this failing."""
+    refusal = flash_plan.atoc_replacement_refusal("alif_mram_jlink", "m55_hp")
+    assert refusal == _ATOC_REPLACEMENT_REFUSAL
+    for fact in (
+        "REPLACES the ENTIRE ATOC",
+        "no SE-UART channel to enumerate what is resident",
+        "silently DELISTED",
+        '"[SES] ATOC ok"',
+        "--atoc-unqueryable",
+        "flash_args.atoc_unqueryable: true",
+        "alp-sdk#2025",
+        "tan-cli#1252",
+    ):
+        assert fact in refusal, fact
+    # It must never read as an alias for the confirm gate: upstream's header
+    # says outright that the Flow D flag must not be merged with Flow A's.
+    assert "--confirm does NOT acknowledge this" in refusal
+
+
+def test_the_atoc_unqueryable_flag_lets_a_confirmed_flow_d_write_through(
+    tmp_path, monkeypatch
+):
+    """The complement that keeps the refusal honest: this guard refuses
+    UNACKNOWLEDGED writes, not all writes."""
+    exit_code, data, issues, _lines, _sdk = _flow_d_run(
+        tmp_path,
+        monkeypatch,
+        flash_args=_UNACKNOWLEDGED_FLOW_D_ARGS,
+        atoc_unqueryable=True,
+    )
+
+    assert exit_code == 0
+    assert data["entries"][0]["status"] == "ok", data["entries"][0]
+    assert not any(
+        i.code == "flash.atoc-replacement-unacknowledged" for i in issues
+    ), issues
+
+
+def test_the_manifest_key_acknowledges_exactly_like_the_flag(tmp_path, monkeypatch):
+    """`flash_args.atoc_unqueryable: true` is the second of the two spellings
+    -- for a manifest whose author knows that board's whole boot layout, where
+    re-typing a flag on every invocation is the thing that gets automated
+    away."""
+    exit_code, data, issues, _lines, _sdk = _flow_d_run(
+        tmp_path, monkeypatch, flash_args=_MANIFEST_ACKNOWLEDGED_FLOW_D_ARGS
+    )
+
+    assert exit_code == 0
+    assert data["entries"][0]["status"] == "ok", data["entries"][0]
+    assert not any(
+        i.code == "flash.atoc-replacement-unacknowledged" for i in issues
+    ), issues
+
+
+def test_alp_flash_force_arms_the_write_but_does_not_acknowledge_the_replacement(
+    tmp_path, monkeypatch
+):
+    """The env var that arms the CONFIRM gate must not double as the
+    acknowledgement -- otherwise a bench that exported `ALP_FLASH_FORCE=1`
+    once (the documented way to run unattended) silently keeps the old
+    behaviour forever, which is the whole failure mode this guard exists for.
+
+    Proven by the shape: this manifest carries no `flash_args.confirm`, so
+    reaching the refusal AT ALL proves the env var armed the write -- an
+    unarmed run would have previewed with `status: planned` instead."""
+    monkeypatch.setenv("ALP_FLASH_FORCE", "1")
+    forced_not_acknowledged = (
+        '{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000", '
+        'atoc: atoc.bin, atoc_address: "0x8057F5B0"}'
+    )
+    exit_code, data, issues, _lines, _sdk = _flow_d_run(
+        tmp_path, monkeypatch, flash_args=forced_not_acknowledged
+    )
+
+    assert exit_code == 1
+    entry = data["entries"][0]
+    assert entry["status"] == "failed", entry
+    assert entry["message"] == _ATOC_REPLACEMENT_REFUSAL, entry
+    assert [i.code for i in issues] == ["flash.atoc-replacement-unacknowledged"], issues
+
+
+def test_the_atoc_refusal_fires_before_the_setools_sign(tmp_path, monkeypatch):
+    """WHERE this refusal fires is load-bearing, for exactly the reason
+    tan-cli#512 hoisted the DPIDR preflight: the SETOOLS auto-sign is itself a
+    real write into the customer's install (`app-gen-toc` REWRITES
+    `build/app-package-map.txt`), so a refusal that fires after it is a
+    refusal that did not prevent the mutation.
+
+    The manifest withholds `atoc`/`atoc_address` on purpose -- with them
+    present `_resolve_flow_d_atoc_via_setools` returns immediately and the
+    ordering is unobservable."""
+    signed: list = []
+    monkeypatch.setattr(
+        flash_cmd, "resolve_setools_dir",
+        lambda *_a, **_k: types.SimpleNamespace(
+            path=str(tmp_path / "setools"), source="SETOOLS_DIR"
+        ),
+    )
+    monkeypatch.setattr(
+        flash_cmd, "find_app_gen_toc",
+        lambda *_a, **_k: str(tmp_path / "setools" / "app-gen-toc"),
+    )
+
+    def _fake_sign(*args, **_kwargs):
+        signed.append(args)
+        return "atoc.bin", "0x8057F5B0"
+
+    monkeypatch.setattr(flash_cmd, "sign_slot0", _fake_sign)
+
+    spawned: list = []
+    exit_code, _data, issues, _lines, _sdk = _flow_d_run(
+        tmp_path,
+        monkeypatch,
+        flash_args=(
+            '{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000", '
+            "confirm: true}"
+        ),
+        spawned=spawned,
+    )
+
+    assert exit_code == 1
+    assert signed == [], "the SETOOLS auto-sign ran before the refusal"
+    assert spawned == [], spawned
+    assert [i.code for i in issues] == ["flash.atoc-replacement-unacknowledged"], issues
+
+
+def test_an_unconfirmed_flow_d_run_still_previews_and_names_the_replacement(
+    tmp_path, monkeypatch
+):
+    """A preview must stay a preview -- the refusal fires only where the write
+    would REALLY proceed. But the preview is the one moment the operator is
+    reading, so it has to STATE the replacement, before they arm anything."""
+    unconfirmed = (
+        '{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000", '
+        'atoc: atoc.bin, atoc_address: "0x8057F5B0"}'
+    )
+    _exit_code, data, issues, _lines, _sdk = _flow_d_run(
+        tmp_path, monkeypatch, flash_args=unconfirmed
+    )
+
+    entry = data["entries"][0]
+    assert entry["status"] == "planned", entry
+    assert "would run" in entry["message"], entry
+    assert "REPLACES the ENTIRE ATOC" in entry["message"], entry
+    assert "--atoc-unqueryable" in entry["message"], entry
+    assert not any(
+        i.code == "flash.atoc-replacement-unacknowledged" for i in issues
+    ), issues
+
+
+def test_a_flow_d_dry_run_previews_and_names_the_replacement(tmp_path, monkeypatch):
+    """The `--dry-run` arm of the same rule. It carries no confirm-gate note at
+    all today, so without this it would be the one preview that says nothing
+    about the replacement."""
+    exit_code, data, issues, _lines, _sdk = _flow_d_run(
+        tmp_path, monkeypatch, flash_args=_UNACKNOWLEDGED_FLOW_D_ARGS, dry_run=True
+    )
+
+    assert exit_code == 0
+    entry = data["entries"][0]
+    assert entry["status"] == "ok", entry
+    assert "REPLACES the ENTIRE ATOC" in entry["message"], entry
+    assert not any(
+        i.code == "flash.atoc-replacement-unacknowledged" for i in issues
+    ), issues
+
+
+def test_the_wrong_board_refusal_still_wins_when_neither_gate_is_answered(
+    tmp_path, monkeypatch
+):
+    """The gate ORDER, pinned rather than left to whichever `if` came first.
+    With both `ALP_FLASH_REQUIRE_DPIDR=1` unarmed AND the ATOC replacement
+    unacknowledged, the WRONG-BOARD refusal is the one reported: writing the
+    right table to the wrong board is the worse of the two failures, and
+    delisting is moot if the probe is on someone else's silicon."""
+    exit_code, data, issues, _lines, _sdk = _flow_d_run(
+        tmp_path, monkeypatch, flash_args=_UNACKNOWLEDGED_FLOW_D_ARGS, require="1"
+    )
+
+    assert exit_code == 1
+    assert data["entries"][0]["message"] == _REQUIRE_DPIDR_FLOW_D_REFUSAL, data["entries"][0]
+    assert [i.code for i in issues] == ["flash.entry-failed"], issues
 
 
 def test_a_non_probe_method_never_warns_unarmed(tmp_path, monkeypatch):
@@ -3867,7 +4134,8 @@ slices:
    flash_method: alif_mram_jlink,
    flash_args: {{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
                 expect_dpidr: "0x0BE12477", jlink_device: Generic-Attach,
-                setools_dir: "{setools_dir.as_posix()}", confirm: true}}}}
+                setools_dir: "{setools_dir.as_posix()}", confirm: true,
+                atoc_unqueryable: true}}}}
 helper_mcus: []
 boot_order: []
 """
@@ -4763,7 +5031,7 @@ slices:
 - {core_id: c1, os: zephyr, output_artefact: a.bin, status: ok,
    flash_method: alif_mram_jlink,
    flash_args: {jlink_flash_device: PART_PROFILE, atoc: atoc.bin,
-                atoc_address: "0x8057F5B0", confirm: true}}
+                atoc_address: "0x8057F5B0", confirm: true, atoc_unqueryable: true}}
 helper_mcus: []
 boot_order: []
 """
@@ -4861,7 +5129,7 @@ slices:
 - {core_id: m55_he, os: zephyr, output_artefact: a.bin, status: ok,
    flash_method: alif_mram_jlink,
    flash_args: {jlink_flash_device: PART_PROFILE, atoc: atoc.bin,
-                atoc_address: "0x8057F5B0", confirm: true}}
+                atoc_address: "0x8057F5B0", confirm: true, atoc_unqueryable: true}}
 helper_mcus: []
 boot_order: []
 """
@@ -5874,7 +6142,14 @@ def test_confirm_help_names_which_backends_are_gated_vs_unconditional():
     `--confirm` (a third such backend, `swd_probe`, was removed by tan-cli
     #732). The reworded help must name the gated backends, name the
     unconditional ones, and point at `--dry-run` as the preview that works
-    on every backend -- not claim blanket coverage again."""
+    on every backend -- not claim blanket coverage again.
+
+    tan-cli#1252 extends the same rule rather than adding a second test: this
+    is the one help entry a Flow D operator reads BEFORE arming, and since
+    that issue `--confirm` is no longer sufficient on `alif_mram_jlink`. A
+    help text that still presented itself as the whole gate would repeat
+    #796's defect verbatim, so the qualifier is pinned here, next to the
+    claim it qualifies, where the two cannot drift apart."""
     sig = inspect.signature(flash_cmd.flash)
     help_text = sig.parameters["confirm"].default.help
     for gated in ("yocto_wic", "xspi_flashwriter", "alif_mram_jlink"):
@@ -5884,6 +6159,10 @@ def test_confirm_help_names_which_backends_are_gated_vs_unconditional():
     assert "swd_probe" not in help_text, help_text
     assert "--dry-run" in help_text
     assert "every slice is previewed, nothing is written" not in help_text
+    # tan-cli#1252: names the second Flow D gate, and says what it is NOT --
+    # `--confirm` arms the write, the other flag acknowledges the ATOC.
+    assert "--atoc-unqueryable" in help_text, help_text
+    assert "does NOT acknowledge" in help_text, help_text
 
 
 def test_the_confirm_message_names_every_spelling_that_arms_the_gate(tmp_path):
@@ -5900,3 +6179,469 @@ def test_the_confirm_message_names_every_spelling_that_arms_the_gate(tmp_path):
     assert "--confirm" in blob
     assert "ALP_FLASH_FORCE=1" in blob
     assert "flash_args.confirm: true" in blob
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1252: the `--atoc-unqueryable` flag, its help, its registration, and
+# the backends it must NOT reach.
+# ---------------------------------------------------------------------------
+
+
+def test_atoc_unqueryable_help_says_what_it_acknowledges_and_what_it_does_not():
+    """The flag is the whole remedy, so its help has to answer the two
+    questions an operator will have: what am I acknowledging, and is this the
+    same thing as `--confirm`? Read off the signature rather than the rendered
+    `--help`: Rich splits an option name into styled segments and eats square
+    brackets, so a substring check on the output proves less than it looks."""
+    sig = inspect.signature(flash_cmd.flash)
+    help_text = sig.parameters["atoc_unqueryable"].default.help
+
+    assert "alif_mram_jlink" in help_text, help_text
+    assert "entire ATOC" in help_text, help_text
+    assert "flash_args.atoc_unqueryable" in help_text, help_text
+    # It must say it is NOT the confirm gate -- an operator who reads the two
+    # as interchangeable is the exact reader upstream's header warns about.
+    assert "--confirm" in help_text, help_text
+    assert "Separate from --confirm" in help_text, help_text
+
+
+def test_the_flash_parser_actually_registers_atoc_unqueryable():
+    """Asserted on the PARSER, not on help output: `--confirm`'s own help text
+    would happily contain the literal `--atoc-unqueryable` and keep a substring
+    check green with the option deleted (the tan-cli#799 false-green, measured
+    on `run`)."""
+    import typer
+    from typer.main import get_command
+
+    app = typer.Typer(add_completion=False)
+    app.command("flash")(flash_cmd.flash)
+    app.command("_unused")(lambda: None)
+    flash_click_command = get_command(app).get_command(None, "flash")
+    # Not `isinstance(param, click.Option)`: typer vendors its own click fork,
+    # so that test silently collects zero.
+    registered = [
+        param
+        for param in flash_click_command.params
+        if "--atoc-unqueryable" in getattr(param, "opts", ())
+    ]
+    assert registered, [getattr(p, "opts", None) for p in flash_click_command.params]
+
+
+def test_the_atoc_refusal_code_is_registered_in_the_contract():
+    """The tree-wide gates only ever say "some code is missing". This says
+    WHICH one, at the site that introduced it, and pins the three fields a
+    consumer binds to."""
+    registry = json.loads(
+        (PACKAGE_ROOT.parent / "contract" / "issue-codes.json").read_text(encoding="utf-8")
+    )
+    entry = next(
+        e
+        for e in registry["issueCodes"]
+        if e["code"] == "flash.atoc-replacement-unacknowledged"
+    )
+    assert entry["severity"] == "error", entry
+    assert entry["status"] == "reserved", entry
+    assert entry["emittedBy"] == "python/tan/commands/flash_cmd.py", entry
+    # tan-cli#372: nothing reads `literal` for a python/ entry, and a gate
+    # fails on its mere presence.
+    assert "literal" not in entry, entry
+
+
+def _atoc_free(payload):
+    """Every field the ATOC note or refusal could land in, and nothing else.
+
+    NOT `json.dumps(payload)`: a whole-envelope substring check also reads the
+    text of any UNRELATED failure, and tan's own internal-failure message
+    quotes the symbol that raised -- so a transient child-process fault
+    naming `ATOC_REPLACEMENT_PREVIEW_NOTE` or
+    `atoc_replacement_refusal` would fail a SCOPE assertion while proving
+    nothing about scope. The note and the refusal only ever reach a consumer
+    through an entry `message` or an issue (`code`/`message`), so those are
+    what this reads.
+
+    Matches the note's and the refusal's own markers, NOT a bare lowercase
+    "atoc": pytest names `tmp_path` after the test function, this test's name
+    contains "atoc", and a backend message quotes that path back (measured:
+    `would run dd if=.../test_the_atoc_guard_does_not_r0/./build/a.wic ...`),
+    so the looser check reds on its own fixture directory."""
+    markers = ("ATOC", "--atoc-unqueryable", "atoc-replacement", "atoc_unqueryable")
+    parts = [entry.get("message", "") for entry in payload["data"]["entries"]]
+    parts += [issue["code"] for issue in payload["issues"]]
+    parts += [issue["message"] for issue in payload["issues"]]
+    return [part for part in parts if any(marker in part for marker in markers)]
+
+
+def test_the_atoc_guard_does_not_reach_the_other_confirm_gated_backends(tmp_path):
+    """Scope. The preview block the ATOC note rides on is SHARED with
+    `yocto_wic` and `xspi_flashwriter`, neither of which has an ATOC at all --
+    an unguarded note there would tell an SD-card user their boot table is
+    being rewritten, and an unguarded refusal would break two working
+    backends.
+
+    Both PREVIEW arms are `--dry-run` on purpose. A CONFIRMED `xspi_flashwriter`
+    run looks like the sharper probe and is in fact vacuous: that backend
+    short-circuits on its own HW-gated refusal (`the real SCIF write is
+    HW-gated and not yet validated on silicon`) before reaching either the
+    Flow D refusal site or the shared preview block, so no change to either
+    could ever be observed through it. `--dry-run` is what actually reaches
+    the shared block -- measured: it returns `would run flash-writer-scif ...`
+    from exactly the code path the ATOC note is appended to."""
+    # xspi_flashwriter, DRY-RUN: reaches the shared preview block the note
+    # rides on. This is the arm that would fail if the note lost its
+    # `method == FLOW_D_METHOD` guard.
+    _exit_code, out, _ = run_flash(
+        tmp_path, "--dry-run", "--format", "json", manifest=_UNCONFIRMED_MANIFEST
+    )
+    payload = envelope(out)
+    assert "would run flash-writer-scif" in payload["data"]["entries"][0]["message"], payload
+    assert _atoc_free(payload) == [], payload
+
+    # xspi_flashwriter, CONFIRMED: proves the refusal does not fire on a
+    # confirmed NON-Flow-D write. Weaker than it looks (see the docstring:
+    # this backend fails earlier than either site), kept as the cheap
+    # regression that a future, unscoped refusal would still red.
+    _exit_code, out, _ = run_flash(
+        tmp_path, "--confirm", "--format", "json", manifest=_UNCONFIRMED_MANIFEST
+    )
+    payload = envelope(out)
+    assert "flash.atoc-replacement-unacknowledged" not in codes(payload), payload
+    assert _atoc_free(payload) == [], payload
+
+    # yocto_wic, PREVIEWED: the other backend on the shared block.
+    yocto = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: c1, os: yocto, output_artefact: a.wic, status: ok,
+   flash_method: yocto_wic, flash_args: {target: /dev/sdb}}
+helper_mcus: []
+boot_order: []
+"""
+    _exit_code, out, _ = run_flash(
+        tmp_path, "--dry-run", "--format", "json", manifest=yocto
+    )
+    payload = envelope(out)
+    assert _atoc_free(payload) == [], payload
+
+
+def test_the_setools_preview_also_names_the_atoc_replacement(tmp_path):
+    """Flow D has TWO preview returns, and this is the one a FRESH AEN
+    manifest actually takes: with no `atoc`/`atoc_address` yet, the SETOOLS
+    auto-sign preview returns before `meta.build` is ever called, so the entry
+    never reaches `plan_alif_mram_jlink` at all. A note added only to the
+    shared preview block below would be missing from exactly the most common
+    AEN preview."""
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    # Present but never spawnable (no execute bit): --dry-run must not run it.
+    (setools_dir / "app-gen-toc").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000"}}
+helper_mcus: []
+boot_order: []
+"""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir)},
+    )
+    payload = envelope(out)
+    assert exit_code == 0
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "ok", entry
+    # Still the SETOOLS preview it always was...
+    assert "would sign" in entry["message"], entry
+    # ...now also stating what arming the write would do to the ATOC.
+    assert "REPLACES the ENTIRE ATOC" in entry["message"], entry
+    assert "--atoc-unqueryable" in entry["message"], entry
+
+
+def test_a_malformed_atoc_unqueryable_refuses_at_plan_time(tmp_path):
+    """The acknowledgement is read with `fa_bool_checked`, like every other
+    behaviour-affecting bool: a quoted `"yes"` is not a bool, and a tolerant
+    reader would treat it as absent and refuse the write with a message about
+    something the operator thought they had already answered. Validated in
+    `validate_flow_d_shape`, so it surfaces under `--dry-run` and before any
+    SETOOLS spawn -- not only once a real write is armed.
+
+    The GENERIC code here is deliberate: a malformed manifest value is not an
+    unacknowledged write."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr/zephyr.bin, status: ok,
+   flash_method: alif_mram_jlink,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                atoc: atoc.bin, atoc_address: "0x8057F5B0",
+                atoc_unqueryable: "yes"}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed", entry
+    assert "flash_args.atoc_unqueryable must be a bare boolean" in entry["message"], entry
+    assert codes(payload) == ["flash.entry-failed"], payload
+
+
+def test_a_null_atoc_unqueryable_is_malformed_not_a_silent_no(tmp_path):
+    """`fa_bool_checked` collapses a present-but-null key and an absent one to
+    the same `None`. Both REFUSE the write -- the acknowledgement is fail-safe
+    -- but an operator who TRIED to acknowledge and mistyped it must be told
+    the value is malformed rather than reading a refusal saying they never
+    acknowledged at all. Same shape as `slot0_load_address`'s own
+    `_fa_has_key` refusal."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr/zephyr.bin, status: ok,
+   flash_method: alif_mram_jlink,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                atoc: atoc.bin, atoc_address: "0x8057F5B0",
+                atoc_unqueryable: null}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed", entry
+    assert "flash_args.atoc_unqueryable is present but null/empty" in entry["message"], entry
+    assert codes(payload) == ["flash.entry-failed"], payload
+
+
+# ── the flag is WIRED, not merely registered ───────────────────────────────
+#
+# Registration tests (`--atoc-unqueryable` appears in the parser's `opts`) and
+# engine tests (`_flow_d_run(atoc_unqueryable=True)` passes the guard) can BOTH
+# be green while the value is dropped in between: measured by replacing
+# `atoc_unqueryable=atoc_unqueryable` with `atoc_unqueryable=False` at the one
+# `flash()` -> `_run()` call, which left the whole suite passing and the
+# shipped flag inert -- an operator would then be refused by a message naming
+# the exact flag they just passed, with no escape but editing the manifest.
+# The two tests below pin that hand-off from both ends.
+
+_FLOW_D_CONFIRMED_MANIFEST = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_hp, os: zephyr, output_artefact: a.bin, status: ok,
+   flash_method: alif_mram_jlink,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                atoc: atoc.bin, atoc_address: "0x8057F5B0", confirm: true}}
+helper_mcus: []
+boot_order: []
+"""
+
+
+def test_the_real_cli_refuses_a_confirmed_flow_d_write_without_the_flag(tmp_path):
+    """The shipped command, end to end: a real `python -m tan flash --confirm`
+    subprocess, not `_run` called in-process.
+
+    The seeded `JLinkExe` is LOAD-BEARING, and an earlier version of this test
+    that omitted it was green only on a bench host. `tests/conftest.py`'s
+    session-wide autouse `_probe_tools_are_a_property_of_the_test` rebuilds
+    `PATH` so no probe-tool identity resolves -- deliberately, so which()-gated
+    branches answer the way they answer on CI. Without a tool the run refuses
+    one gate EARLIER, with `flash: slice 'm55_hp' backend 'alif_mram_jlink'
+    needs one of ... on PATH; none found.` (measured: that is exactly how this
+    test failed before the seed was added). That refusal would still leave
+    `exit_code == 1` and `status == "failed"`, so a weaker test would have
+    passed while proving nothing about the ATOC guard -- the tool gate sits
+    ahead of it in `_flash_entry`. Seeding the identity the way the other
+    PATH-seeding tests here do (zero-byte file, `0o755` on POSIX, `.exe` on
+    Windows) makes the whole-ATOC refusal the thing the shipped command
+    actually returns with the backend's own tool present.
+
+    Nothing spawns that file: the refusal is returned before
+    `plan_alif_mram_jlink` builds any argv. Its complement below stops at
+    `_run`, deliberately -- an ACKNOWLEDGED confirmed write proceeds to the
+    backend and really does spawn J-Link (verified: the subprocess reaches
+    `Connecting to J-Link via USB...`), which on a bench host with a probe
+    attached is a live SWD session against whatever is connected. No test in
+    this file may do that."""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "a.bin").write_bytes(b"\x00")
+    (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00")
+    tools = tmp_path / "faketools"
+    tools.mkdir(exist_ok=True)
+    jlink_path = tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    jlink_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(jlink_path, 0o755)
+    exit_code, out, _ = run_flash(
+        tmp_path,
+        "--confirm",
+        "--format",
+        "json",
+        env={"PATH": str(tools)},
+        manifest=_FLOW_D_CONFIRMED_MANIFEST,
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed", entry
+    assert entry["message"] == _ATOC_REPLACEMENT_REFUSAL, entry
+    assert codes(payload) == ["flash.atoc-replacement-unacknowledged"], payload
+
+
+def test_the_flash_callback_forwards_the_flag_to_the_engine(tmp_path, monkeypatch):
+    """The other end of the hand-off: the REAL Typer callback is invoked with
+    the real argv, and `_run` -- the function that reads the acknowledgement --
+    records what reached it. Stubbing `_run` is what keeps this safe to run
+    anywhere (see the test above: the acknowledged path spawns J-Link).
+
+    Asserts the companion `False` too: without the flag the engine must NOT be
+    told the replacement was acknowledged, and `--confirm` must not leak into
+    it -- the two gates are separate by design."""
+    import typer
+    from typer.testing import CliRunner
+
+    from tan.exit_codes import ExitCode
+
+    calls: list[dict] = []
+
+    def fake_run(**kwargs):
+        calls.append(kwargs)
+        return (
+            ExitCode.SUCCESS,
+            {"schemaVersion": "1", "buildRoot": str(tmp_path / "build"), "entries": []},
+            [],
+            ["flash: 0 failure(s)."],
+            None,
+        )
+
+    monkeypatch.setattr(flash_cmd, "_run", fake_run)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        _FLOW_D_CONFIRMED_MANIFEST, encoding="utf-8"
+    )
+
+    app = typer.Typer(add_completion=False)
+    app.command("flash")(flash_cmd.flash)
+    app.command("_unused")(lambda: None)
+    runner = CliRunner()
+
+    runner.invoke(app, ["flash", "--confirm", "--atoc-unqueryable", "--format", "json", "."])
+    assert calls, "the flash callback never reached _run"
+    assert calls[-1]["atoc_unqueryable"] is True, calls[-1]
+    assert calls[-1]["confirm_flag"] is True, calls[-1]
+
+    runner.invoke(app, ["flash", "--confirm", "--format", "json", "."])
+    assert calls[-1]["atoc_unqueryable"] is False, calls[-1]
+    assert calls[-1]["confirm_flag"] is True, calls[-1]
+
+
+# ── exactly two spellings: the missing third is a DESIGN rule ──────────────
+#
+# "No environment variable" is stated in three code comments and, before these
+# two tests, pinned by nothing: inserting
+# `atoc_unqueryable = atoc_unqueryable or os.environ.get(
+# "ALP_FLASH_ATOC_UNQUERYABLE") == "1"` next to the `ALP_FLASH_FORCE` /
+# `ALP_FLASH_REQUIRE_DPIDR` reads -- the exact symmetry a future contributor
+# reaches for -- left the suite green while making the guard silenceable
+# forever by one `export` in a bench profile or a CI job. That is the habit
+# alp-sdk#2025's own header warns against.
+
+
+def test_no_environment_variable_acknowledges_the_atoc_replacement(
+    tmp_path, monkeypatch
+):
+    """The behavioural half, mirroring
+    `test_alp_flash_force_arms_the_write_but_does_not_acknowledge_the_
+    replacement`: the plausible spellings are all set at once, and the
+    confirmed write still refuses with the same code."""
+    for spelling in (
+        "ALP_FLASH_ATOC_UNQUERYABLE",
+        "ALP_FLASH_ATOC_REPLACEMENT",
+        "ALP_FLASH_ATOC_ACK",
+        "ALP_ATOC_UNQUERYABLE",
+        "TAN_ATOC_UNQUERYABLE",
+    ):
+        monkeypatch.setenv(spelling, "1")
+
+    exit_code, data, issues, _lines, _sdk = _flow_d_run(
+        tmp_path, monkeypatch, flash_args=_UNACKNOWLEDGED_FLOW_D_ARGS
+    )
+
+    assert exit_code == 1
+    assert data["entries"][0]["message"] == _ATOC_REPLACEMENT_REFUSAL, data["entries"][0]
+    assert [i.code for i in issues] == ["flash.atoc-replacement-unacknowledged"], issues
+
+
+def test_no_atoc_environment_variable_is_read_anywhere_in_the_flash_path():
+    """The structural half, which the behavioural one above cannot give:
+    it catches EVERY spelling, including one nobody thought to guess.
+
+    Reads the two modules' ASTs for every environment lookup -- `os.environ
+    .get(...)`, `os.getenv(...)`, `os.environ[...]` -- and asserts none of
+    them names an ATOC variable. An AST walk sees only real code, so the
+    `flash_cmd` comment that mentions `ALP_FLASH_ATOC_UNQUERYABLE` by name
+    (to tell the next contributor not to add it) cannot make this pass or
+    fail."""
+    import ast
+
+    def environ_names(module_path):
+        tree = ast.parse(module_path.read_text(encoding="utf-8"))
+        # Module-level `NAME = "literal"` constants, so a lookup written as
+        # `os.environ.get(REQUIRE_DPIDR_ENV)` resolves to the variable it
+        # actually reads. This is not a nicety: `ALP_FLASH_REQUIRE_DPIDR` is
+        # spelled exactly that way, so it is also the shape an ATOC env var
+        # would most likely arrive in -- a literal-only walk would miss it.
+        constants = {
+            target.id: node.value.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        names = []
+        for node in ast.walk(tree):
+            read = None
+            if isinstance(node, ast.Call):
+                func = node.func
+                is_getenv = isinstance(func, ast.Attribute) and func.attr == "getenv"
+                is_environ_get = (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "get"
+                    and isinstance(func.value, ast.Attribute)
+                    and func.value.attr == "environ"
+                )
+                if (is_getenv or is_environ_get) and node.args:
+                    read = node.args[0]
+            elif isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute):
+                if node.value.attr == "environ":
+                    read = node.slice
+            if isinstance(read, ast.Constant) and isinstance(read.value, str):
+                names.append(read.value)
+            elif isinstance(read, ast.Name) and read.id in constants:
+                names.append(constants[read.id])
+        return names
+
+    looked_up = []
+    for module in ("tan/commands/flash_cmd.py", "tan/core/flash_plan.py"):
+        looked_up += environ_names(PACKAGE_ROOT / module)
+
+    # Sanity: the walk really finds this module's known env reads, so an
+    # assertion over an empty list can never pass vacuously.
+    assert "ALP_FLASH_FORCE" in looked_up, looked_up
+    assert "ALP_FLASH_REQUIRE_DPIDR" in looked_up, looked_up
+
+    offenders = [name for name in looked_up if "ATOC" in name.upper()]
+    assert offenders == [], (
+        f"the whole-ATOC acknowledgement has exactly two spellings -- the "
+        f"--atoc-unqueryable flag and flash_args.atoc_unqueryable -- and an "
+        f"environment variable is deliberately not one of them (tan-cli#1252, "
+        f"alp-sdk#2025): an exported variable acknowledges every later write, "
+        f"including unattended ones. Found: {offenders}"
+    )
