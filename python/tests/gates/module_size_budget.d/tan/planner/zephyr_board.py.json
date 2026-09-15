@@ -2,15 +2,27 @@
   "$schema": "One module's entry in the tan-cli#668 size ratchet, produced by `python scripts/regen_module_size_budget.py` -- see module_size_budget.d/README.md. `long_functions` is the sorted [span, name] list of every function in this module over FUNCTION_CAP (tan-cli#1173) -- not a count, so a function crossing the cap while a different one drops below it in the same module is visible here instead of netting to no change. Do not hand-edit; a value that does not match a real measurement fails `regen_module_size_budget.py --check` and the gate.",
   "module": "tan/planner/zephyr_board.py",
   "kind": "budget",
-  "lines": 2680,
+  "lines": 2992,
   "long_functions": [
+    [
+      58,
+      "_aen_ospi_population_clause"
+    ],
     [
       58,
       "_aen_role_slot0_map"
     ],
     [
-      65,
+      59,
+      "_aen_kconfig_defconfig"
+    ],
+    [
+      69,
       "_aen_i2c_pinctrl_group"
+    ],
+    [
+      70,
+      "_aen_check_map_overlaps"
     ],
     [
       70,
@@ -21,11 +33,15 @@
       "_v2n_pinctrl_dtsi"
     ],
     [
+      87,
+      "_aen_e1m_i2c0_pinctrl_group"
+    ],
+    [
       104,
       "_aen_brd_i2c_dts"
     ],
     [
-      111,
+      112,
       "emit_zephyr_board"
     ],
     [
@@ -37,7 +53,7 @@
       "_v2n_dts"
     ],
     [
-      329,
+      332,
       "_aen_dts"
     ]
   ]

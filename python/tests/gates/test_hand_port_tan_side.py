@@ -79,6 +79,19 @@ PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[2]
 #: not have.
 HAND_PORT_TAN_SIDE: dict[str, tuple[str, ...]] = {
     "scripts/gen_zephyr_board.py": ("tan/planner/zephyr_board.py",),
+    # tan-cli#1265: one upstream file answered by one tan file, the clean shape
+    # this table is for. Upstream keeps the predicate in a FLAT, package-free
+    # module so `gen_zephyr_board.py` -- which lives OUTSIDE the
+    # `alp_orchestrate` package -- can import it without dragging in the
+    # orchestrator (jsonschema, alp_project, alp_cli) or adding a
+    # package-to-generator import loop against `loader.py`/`secure.py`'s
+    # existing deferred import going the other way. Neither hazard exists here:
+    # both callers are inside `tan.planner`, so it relocates as an ordinary
+    # sibling that `aperture.py` imports twice and `zephyr_board.py` once
+    # (alp-sdk#2073). Deliberately NOT inlined the way `sentinels.is_tbd` became
+    # `zephyr_board.py::_is_tbd` -- that inline has ONE calling module, this
+    # predicate has two, and not drifting is the whole point of #2073.
+    "scripts/whole_device_alias.py": ("tan/planner/whole_device_alias.py",),
     "scripts/alp_project_loader.py": (
         "tan/planner/project_loader.py",
         "tan/planner/som_metadata.py",
