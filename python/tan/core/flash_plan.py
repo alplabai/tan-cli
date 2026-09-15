@@ -1498,9 +1498,14 @@ def select_flash_method(target: FlashTarget) -> str | None:
     slice on a SoC variant that publishes a part-number J-Link profile already carries
     `FLOW_D_KEYS` on emit and dispatches to Flow D, not Flow A. A slice on a variant with no such
     profile still emits `args={}` and stays on Flow A, which is correct: that silicon has no J-Link
-    MRAM loader for tan to arm. That is most of today's shipped Alif metadata (13 Ensemble variants
-    total; only 2 carry `jlink_flash_device`, and of those only 1 also carries `expect_dpidr`) -- a
-    fact about what's published today, not an invariant of the emitter itself.
+    MRAM loader for tan to arm. That used to be most of today's shipped Alif metadata; it no longer
+    is. Measured against alp-sdk `origin/dev` on 2026-09-13: all 10 published Ensemble variants
+    (`metadata/socs/alif/ensemble/e3..e8.json`) carry `jlink_flash_device`, and 1 of those also
+    carries `expect_dpidr` -- a fact about what's published today, not an invariant of the emitter
+    itself. It is also the fact that sizes the gap `docs/setools.md` records under tan-cli#1252:
+    a planner-emitted AEN manifest dispatches Flow D and is covered by the whole-ATOC
+    acknowledgement, so what still reaches an ATOC unguarded, over Flow A, is a hand-written or
+    legacy manifest -- not the published catalogue.
     """
     method = target.flash_method or None
     if method == "zephyr_west_flash" and flow_d_available(target.flash_args):
@@ -1585,6 +1590,86 @@ def resolve_slot0_binary(artefact: str, is_file: Callable[[str], bool]) -> str |
         return None
     sibling = os.path.splitext(artefact)[0] + ".bin"
     return sibling if is_file(sibling) else None
+
+
+#: The manifest spelling of the whole-ATOC acknowledgement (tan-cli#1252).
+#: Deliberately the SAME word upstream's bench scripts use for the flag
+#: (`--atoc-unqueryable`), so an operator who has read either one recognises
+#: the other.
+ATOC_ACK_KEY = "atoc_unqueryable"
+
+#: The command-line spelling of the same acknowledgement. EXACTLY two spellings
+#: exist -- this flag and `flash_args.atoc_unqueryable` -- and see
+#: [`atoc_replacement_acknowledged`] for why there is deliberately no third.
+ATOC_ACK_FLAG = "--atoc-unqueryable"
+
+
+def atoc_replacement_acknowledged(fa: Any, cli_flag: bool) -> bool:
+    """Has the operator accepted that this Flow D write REPLACES the whole
+    ATOC (tan-cli#1252, porting alp-sdk#2025)? Pure.
+
+    Two spellings, OR-ed: `--atoc-unqueryable` on the command line (`cli_flag`)
+    and `flash_args.atoc_unqueryable: true` in the manifest.
+
+    **Deliberately NO environment variable**, unlike `ALP_FLASH_FORCE` /
+    `ALP_FLASH_REQUIRE_DPIDR` next to it in `flash_cmd`, whose obvious shape
+    invites a third one for symmetry. An env var is exported ONCE into a shell
+    profile or a CI job and then silences this guard forever, on every
+    subsequent run, including the runs nobody is watching -- which is exactly
+    the habit alp-sdk#2025's own header warns about when it says the Flow D
+    flag must never be merged or aliased with Flow A's `--replace-atoc`. The
+    acknowledgement is a statement about THIS write's ATOC, not a property of
+    the host, so it has to be re-stated per invocation (the flag) or recorded
+    against the specific manifest that knows its own boot layout (the key).
+    That is the opposite trade from `ALP_FLASH_REQUIRE_DPIDR`, which IS a
+    property of the host and is therefore an env var on purpose -- see
+    `flash_cmd._require_dpidr_refusal`.
+
+    **Not the confirm gate, and never aliased to it.** `--confirm` means "yes,
+    write"; this means "yes, I accept that the entire ATOC is replaced". A run
+    can legitimately be confirmed and still refuse here.
+
+    `_default(fa_bool_checked(...), False)` -- the same shape
+    `plan_alif_mram_jlink` reads `confirm` with -- makes an ABSENT key and a
+    present-but-null one both read `False`, i.e. both REFUSE. Fail-safe by
+    construction: no manifest shape can accidentally acknowledge. (A
+    present-but-null value is additionally called out as malformed at plan
+    time by `validate_flow_d_shape`, so it never reaches here silently.)
+    """
+    return cli_flag or _default(fa_bool_checked(fa, ATOC_ACK_KEY), False)
+
+
+def atoc_replacement_refusal(method: str, entry_id: str) -> str:
+    """The refusal text for a confirmed Flow D write that has not acknowledged
+    the whole-ATOC replacement. Pure.
+
+    Carries upstream's facts (alp-sdk#2025, which made
+    `scripts/bench/aen/flash-jlink.sh`, `flash-jlink-hp.sh` and
+    `flash-jlink-mramxip.sh` refuse with exit 8 for the same reason) in tan's
+    own voice, then the two remedies."""
+    return (
+        f"{method}[{entry_id}]: this write REPLACES the ENTIRE ATOC, and Flow D has no "
+        "SE-UART channel to enumerate what is resident first -- so any boot entry already "
+        "in MRAM that this ATOC does not name (an A32 boot chain, an HP app, a diagnostic "
+        "image) is silently DELISTED, and the SES still prints \"[SES] ATOC ok\" "
+        "afterwards. Refusing until that is acknowledged: pass "
+        f"{ATOC_ACK_FLAG} on the command line, or set flash_args.{ATOC_ACK_KEY}: true in "
+        "the manifest. --confirm does NOT acknowledge this -- it only means \"yes, write\" "
+        "(alp-sdk#2025, tan-cli#1252)."
+    )
+
+
+#: Appended to every Flow D PREVIEW message (tan-cli#1252). A preview must stay
+#: a preview -- the refusal above fires only on a write that would really
+#: proceed -- but the operator has to learn what arming the write means BEFORE
+#: they arm it, and a preview is the one moment they are reading.
+ATOC_REPLACEMENT_PREVIEW_NOTE = (
+    "NOTE: a real write REPLACES the ENTIRE ATOC -- Flow D cannot enumerate what is "
+    "resident, so any boot entry this ATOC does not name is silently delisted and the SES "
+    f"still reports \"[SES] ATOC ok\". Arming the write therefore also needs {ATOC_ACK_FLAG} "
+    f"(or flash_args.{ATOC_ACK_KEY}: true) alongside the confirm gate "
+    "(alp-sdk#2025, tan-cli#1252)."
+)
 
 
 @dataclass(frozen=True)
@@ -1713,6 +1798,30 @@ def validate_flow_d_shape(fa: Any, artefact: str, is_file: Callable[[str], bool]
     # the entry takes afterward.
     fa_int_checked(fa, "jlink_speed")
     fa_bool_checked(fa, "confirm")
+    # tan-cli#1252: the whole-ATOC acknowledgement is the same class of key as
+    # the two above -- it does not depend on `atoc`/`atoc_address` either -- so
+    # its SHAPE is validated (and the result discarded; the guard reads it
+    # again at the one place that decides) here, for the reason the #373
+    # comment above gives: otherwise `atoc_unqueryable: "yes"` would report
+    # `ok:true` from `tan flash --dry-run` and, on a real run, only be refused
+    # AFTER the SETOOLS auto-sign had already written into the customer's
+    # install. `fa_bool_checked` raises for every non-bool shape.
+    #
+    # The present-but-NULL case needs the explicit `_fa_has_key` pairing, the
+    # same way `slot0_load_address` above does: `fa_bool_checked` collapses a
+    # bare `atoc_unqueryable:` and an absent key to the same `None`. Both
+    # REFUSE the write either way -- `atoc_replacement_acknowledged` is
+    # fail-safe -- but an operator who TRIED to acknowledge and mistyped it
+    # deserves to be told the value is malformed, at plan time, rather than
+    # reading a refusal that says they never acknowledged at all.
+    if _fa_has_key(fa, ATOC_ACK_KEY) and fa_bool_checked(fa, ATOC_ACK_KEY) is None:
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: flash_args.{ATOC_ACK_KEY} is present but null/empty -- "
+            "refusing to read that as a whole-ATOC acknowledgement, and refusing to "
+            f"read it as an absent one. Write `{ATOC_ACK_KEY}: true` (a bare, unquoted "
+            "boolean) to acknowledge that this write replaces the entire ATOC, or "
+            "remove the key entirely (tan-cli#1252)."
+        )
     # tan-cli#486 review: `jlink_serial` is the same class of "checkable
     # early" field as `jlink_speed`/`confirm` just above -- it does not
     # depend on `atoc`/`atoc_address` either -- but was left validated only
