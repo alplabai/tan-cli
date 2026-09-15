@@ -8,8 +8,14 @@
 trusting the legacy `carveout:` flag outright.
 
 Depends only downward -- som_metadata (`resolve_soc_path`,
-`_resolve_silicon_variant`) and memregion (`_region_size_bytes`); nothing
-calls back into the `tan.planner` package.
+`_resolve_silicon_variant`), memregion (`_region_size_bytes`), and
+whole_device_alias (`is_whole_device_alias`, alp-sdk#2073); nothing
+calls back into the `tan.planner` package. Upstream keeps that last
+dependency flat and package-free because `gen_zephyr_board.py` sits
+outside the `alp_orchestrate` package; here both callers live inside
+`tan.planner`, so it is an ordinary sibling module -- see its own
+docstring for why it stays a module rather than being inlined into
+each caller.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from typing import Any, Optional
 
 from .memregion import _region_size_bytes
 from .som_metadata import _resolve_silicon_variant, resolve_soc_path
+from .whole_device_alias import is_whole_device_alias
 
 # The four verdicts `classify_region()` can return.  Not an enum -- every
 # caller compares against a string literal, matching the rest of this
@@ -141,7 +148,7 @@ def classify_region(
         return "unresolved"
     lo, hi = ext
     full_lo, full_hi = aperture
-    if lo == full_lo and hi == full_hi:
+    if is_whole_device_alias(ext, aperture):
         return "flash"  # whole-device alias -- the device itself
     if lo >= full_lo and hi <= full_hi:
         return "flash"  # strictly contained -- a partition inside the device
@@ -186,7 +193,7 @@ def is_partition_inside_aperture(
         return None
     lo, hi = ext
     full_lo, full_hi = aperture
-    if lo == full_lo and hi == full_hi:
+    if is_whole_device_alias(ext, aperture):
         return False  # the device itself -- extent equals the aperture exactly
     if lo >= full_lo and hi <= full_hi:
         return True  # proper subset -- a partition inside the device
