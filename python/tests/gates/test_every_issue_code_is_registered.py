@@ -1126,10 +1126,20 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
     # unavailable`/`schema-violation` from `_load_document`/`_parse_fields`;
     # `python-too-old`/`spawn-failed` from `_reject_if_sdk_validator_disagrees`'s
     # own two direct refusals; `schema-violation`/`missing-preset`/
-    # `hardware-revision`/`failed` (the fifth, `clean`, never reaches a raise)
+    # `hardware-revision`/`hardware-revision-unknown`/
+    # `hardware-revision-not-buildable`/`failed` (the seventh, `clean`, never
+    # reaches a raise -- `_reject_if_sdk_validator_disagrees` returns on it)
     # from `_spawn_validator`'s outcome, the same `_STATUS_OUTCOME` +
     # `OUTCOME_FAILED` vocabulary `validate_cmd`'s own `result.outcome` entry
     # below declares (tan-cli#455 review round).
+    # The two `hardware-revision-*` siblings arrived with tan-cli#1262: that
+    # change added validator exits 4 and 5 to `_STATUS_OUTCOME`, and because
+    # `diff` raises `ParseFailure(outcome, ...)` with whatever
+    # `_spawn_validator` returns, the SAME edit widened THIS site's value
+    # space too. Declaring them only on the `validate_cmd` entry would have
+    # left `diff` emitting a code nothing registers -- the exact hole this
+    # gate exists to close -- so both codes are registered under `diff.` as
+    # well as under `validate.`.
     ("tan/commands/diff_cmd.py", "failure.code"): dict(
         suffixes=frozenset(
             {
@@ -1140,6 +1150,8 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
                 "failed",
                 "missing-preset",
                 "hardware-revision",
+                "hardware-revision-unknown",
+                "hardware-revision-not-buildable",
             }
         ),
         sites=1,
@@ -1216,11 +1228,24 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
     # of `validate()`'s paths (that single funnel is deliberate: a second
     # template for the spawn path would be a second, separately-declared site
     # for the same wire fact). `result.outcome`'s value space is
-    # `validate_cmd._STATUS_OUTCOME`'s four outcomes plus `failed`, ALL FIVE
+    # `validate_cmd._STATUS_OUTCOME`'s SIX outcomes plus `failed`, ALL SEVEN
     # of them. Was `{"schema-violation"}` alone until tan-cli#376 ported the
     # spawn path -- offline can still only reach `schema-violation` (`outcome
     # = OUTCOME_CLEAN if not messages else OUTCOME_SCHEMA_VIOLATION`), the
-    # other four arrive only from a spawned validator.
+    # other six arrive only from a spawned validator.
+    # `hardware-revision-unknown` and `hardware-revision-not-buildable` are
+    # tan-cli#1262's: validator exits 4 and 5 (`EXIT_SDK_REVISION_UNKNOWN`,
+    # `EXIT_SDK_REVISION_NOT_BUILDABLE`), which alp-sdk has returned all along
+    # -- measured at v0.16.0 and at `dev`/`cfeafd148cb16d24a0e6c2feb7749769
+    # fec8f992` -- and which used to fall through `.get(..., OUTCOME_FAILED)`
+    # onto `failed`, i.e. onto a code published as "produced no usable
+    # verdict". Every row of that map is reachable, `missing-preset`
+    # included: the SCRIPT's `main()` never returns 2, but `_STATUS_OUTCOME`
+    # keys off the spawned PROCESS's exit status, and that is 2 when the
+    # interpreter cannot open the script or when argparse rejects a flag --
+    # both measured, both recorded in `validate_cmd`'s module docstring.
+    # Either way this set is `_STATUS_OUTCOME`'s VALUE SPACE, which is what
+    # the emit site can produce, not a claim about what the SDK returns.
     # `clean` IS reachable, counter-intuitively: `validate_board_yaml.py`
     # renders every diagnostic to stderr and only RETURNS 1 when
     # `collector.has_errors()`, so a board carrying warnings only exits 0 with
@@ -1231,7 +1256,15 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
     # invention of this port.
     ("tan/commands/validate_cmd.py", "result.outcome"): dict(
         suffixes=frozenset(
-            {"clean", "schema-violation", "missing-preset", "hardware-revision", "failed"}
+            {
+                "clean",
+                "schema-violation",
+                "missing-preset",
+                "hardware-revision",
+                "hardware-revision-unknown",
+                "hardware-revision-not-buildable",
+                "failed",
+            }
         ),
         sites=1,
     ),
