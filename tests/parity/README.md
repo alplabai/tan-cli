@@ -198,16 +198,34 @@ own copy — wired into `seam1-plan-shape` (it reuses that job's `alp-sdk`
 checkout rather than cloning a second time). Like `scaffold_byte_parity.py`
 it self-skips with no reachable alp-sdk checkout
 (`test_kconfig_command.py` already covers the vendored copy's internal
-consistency); unlike it,
-a fixture simply absent at the *pinned* ref is ALSO not a fail (see
-`PINNED_SDK_TAG`'s comment in `.github/workflows/parity.yml` and the
-script's own docstring) — that branch only fires for a pin predating
-alp-sdk#897 landing this fixture; the current pin is past #897, so the gate
-byte-diffs for real. A byte MISMATCH (fixture present upstream, content
-differs) always fails.
+consistency).
+
+A byte MISMATCH (fixture present upstream, content differs) fails, and so
+does an ABSENT upstream fixture. There is no "predates the feature" branch,
+close to the rule `toolchain_lock_parity.py` states, and on a measurement
+rather than a generalisation: of the 31 distinct values `PINNED_SDK_TAG` has
+held across `parity.yml`'s history, the fixture is present at 29. The two
+exceptions, `df312cec` and `f04ea42e`, are July-2026 pins predating the
+fixture upstream — `f04ea42e` was the pin in force when this script was first
+written (tan-cli `ca34090e`, #40). Every pin since carries it, `81a9d515`
+(the current one), the released `v0.16.0` and alp-sdk `origin/dev` included,
+so an absent upstream fixture is a removal, not a legitimate skip.
+
+tan-cli#1261 deleted the NOTICE-and-pass branch that used to stand here
+rather than ancestry-gating it on alp-sdk#897's commit: unconditional, it
+made `release-sdk-parity` — which runs this script against whatever alp-sdk
+tag `releases/latest` resolves to — report PASS for exactly the removal the
+gate exists to catch, and an ancestry check buys nothing over deleting it:
+the pin is hand-bumped forward-only, and every published alp-sdk release from
+`v0.13.0` on carries the fixture (`v0.12.0` and older do not), so reaching a
+pre-#897 ref would take withdrawing four releases — where a FAIL is the right
+answer anyway. `test_kconfig_fixture_parity.py` (its own named step in
+`parity.yml`) pins all four verdicts, that each verdict reaches the process
+exit code, and the two invariants that fix must not disturb.
 
 ```
 python3 tests/parity/kconfig_fixture_parity.py --sdk /path/to/an/alp-sdk/checkout
+python3 -m pytest tests/parity/test_kconfig_fixture_parity.py -q
 ```
 
 ## Bootstrap manifest byte-parity (alp-sdk#917)
@@ -293,10 +311,14 @@ updated too. (Its Rust twin in `host_env.rs` went with `crates/` in
 tan-cli#269.)
 
 Self-skips with no reachable alp-sdk checkout, like the gates above. Unlike
-the bootstrap/kconfig gates, there is no "predates the feature" branch:
-`metadata/toolchains.json` already exists at every ref this repo's
-`PINNED_SDK_TAG` has pointed at, so an upstream file missing at the pinned
-ref is a real regression, not a legitimate skip.
+the bootstrap gate (and unlike the kconfig gate before tan-cli#1261 removed
+its own copy of that branch), there is no "predates the feature" branch. Same
+measurement as the kconfig section above: of the 31 distinct values
+`PINNED_SDK_TAG` has held, `metadata/toolchains.json` is present at 27, the
+four exceptions (`df312cec`, `f04ea42e`, `v0.13.0`, `8b216a04`) all being
+July-2026 pins predating the file upstream. The pin is hand-bumped
+forward-only, so an upstream file missing at the ref under test is a real
+regression, not a legitimate skip.
 
 ```
 python3 tests/parity/toolchain_lock_parity.py --sdk /path/to/an/alp-sdk/checkout

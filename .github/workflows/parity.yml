@@ -1228,6 +1228,20 @@ jobs:
         working-directory: python
         run: python3 scripts/regen_module_size_budget.py --check
 
+      # tan-cli#1261's self-test, deliberately placed ABOVE the
+      # `!inputs.python_only` block below and carrying no such condition of
+      # its own. The gate it covers, `kconfig_fixture_parity.py`, runs in TWO
+      # jobs: the `python_only`-skipped step below, and `release-sdk-parity`,
+      # which runs ONLY under `if: ${{ inputs.python_only }}` -- so gating
+      # this self-test the way that block is gated would switch it off on
+      # exactly the run where the gate is release-blocking. Needs no alp-sdk
+      # checkout (it builds its own temp trees) and costs under a second, so
+      # there is nothing to save by skipping it. Same "a broken gate must be
+      # caught before it is trusted" reasoning as the two seam1 comparator
+      # self-tests below.
+      - name: kconfig fixture gate self-test (test_kconfig_fixture_parity.py)
+        run: python3 -m pytest tests/parity/test_kconfig_fixture_parity.py -q
+
       # These five steps (through scaffold byte-parity) are the ones the
       # `push`/`pull_request` triggers above already ran for this exact commit
       # once it landed on `main` -- re-running them under `python_only: true`
@@ -3242,13 +3256,16 @@ jobs:
       # `if: ${{ !inputs.python_only }}` -- i.e. exactly this release call
       # never reached them before. Run against the SAME `alp-sdk-released`
       # checkout above. The three scripts do NOT share one skip rule, and
-      # each script's CODE is authoritative -- `kconfig_fixture_parity.py`'s
-      # module docstring disagrees with its own code:
+      # each script's CODE is authoritative:
       #   - all three: an explicit `--sdk` that does not resolve is a hard
       #     FAIL;
-      #   - `kconfig_fixture_parity.py` passes (with a NOTICE) whenever its
-      #     fixture is absent from the `--sdk` tree, at any ref -- including
-      #     a release that removed it;
+      #   - `kconfig_fixture_parity.py` treats a missing upstream fixture as
+      #     a real failure. It used to pass with a NOTICE whenever
+      #     `tests/fixtures/kconfig-contract/emit-kconfig.golden.json` was
+      #     absent from the `--sdk` tree, at any ref -- including a release
+      #     that removed it, i.e. the one case THIS step exists to catch.
+      #     tan-cli#1261 deleted that branch, so the script now agrees with
+      #     its own docstring and with the sibling below;
       #   - `toolchain_lock_parity.py` treats a missing upstream file as a
       #     real failure;
       #   - `scaffold_byte_parity.py` byte-compares the live `--emit
