@@ -44,11 +44,18 @@ a fall-through to the other two (tan-cli#172 review; see
 `_sdk_checkout.sdk_root_or_exit_code`).
 
 A byte MISMATCH (vendored copy differs from the pinned upstream file) always
-fails -- that is the actual drift this gate exists to catch. There is no
-"absent upstream / predates the feature" branch the way the bootstrap/kconfig
-gates have: `metadata/toolchains.json` already exists at every ref this
-repo's `PINNED_SDK_TAG` has ever pointed at, so an upstream file missing at
-the pinned ref would itself be a real regression, not a legitimate skip.
+fails -- that is the actual drift this gate exists to catch -- and so does an
+absent upstream file. There is no "predates the feature" branch the way the
+bootstrap gate has. Measured, not generalised (tan-cli#1261): of the 31
+distinct values `PINNED_SDK_TAG` has held across
+`.github/workflows/parity.yml`'s history, `metadata/toolchains.json` is
+present at 27. The four exceptions -- `df312cec`, `f04ea42e`, `v0.13.0` and
+`8b216a04` -- are July-2026 pins predating the file upstream, and this pin is
+hand-bumped forward-only, so an upstream file missing at the ref under test
+is a real regression, not a legitimate skip. `kconfig_fixture_parity.py` was
+on the other side of this split until tan-cli#1261 deleted its
+NOTICE-and-pass branch on the same kind of measurement; the two CI-wired
+gates now read, and behave, as siblings.
 """
 
 from __future__ import annotations
@@ -73,8 +80,9 @@ def run(sdk_root: Path) -> bool:
         return False
     if not upstream_path.is_file():
         print(f"FAIL: no {UPSTREAM_RELPATH} in this alp-sdk checkout ({upstream_path}) -- "
-              f"metadata/toolchains.json (alp-sdk issue #949 item 3) is expected to exist at "
-              f"every ref this repo's PINNED_SDK_TAG points at.")
+              f"metadata/toolchains.json (alp-sdk issue #949 item 3) is expected at "
+              f"every ref PINNED_SDK_TAG has named since the file landed upstream; "
+              f"only four July-2026 pins predate it.")
         return False
 
     vendored = VENDORED_PATH.read_bytes()
