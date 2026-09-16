@@ -44,7 +44,7 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   could not produce a verdict" is still the validator's verdict, in every
   shape it takes here -- GENERALLY, and now that #376 has landed the spawn
   path, that generality is what carries the decision: every reachable
-  ``OUTCOME_FAILED`` (an exit status outside the 0-3 range the resolver
+  ``OUTCOME_FAILED`` (an exit status outside the 0-5 range the resolver
   names, a validator that crashed with a traceback, a validator that ran past
   [`VALIDATOR_TIMEOUT_S`]) emits ``ExitCode.VALIDATION_FAILURE`` (2), not
   ``RuntimeFailure`` (1) -- do not "fix" that back to oracle parity; that
@@ -90,9 +90,9 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   5, 77            failed                            1
   =============== =============================== ===
 
-  So ``validate.failed`` is specifically the "anything outside the 0-3 range
-  the resolver maps by number" case -- NOT every non-clean status, and in
-  particular not exit 2 or 3, which have their own named outcomes. A reader
+  So ``validate.failed`` is specifically the "anything outside the range the
+  resolver maps by number" case -- NOT every non-clean status, and in
+  particular not 2, 3, 4 or 5, which have their own named outcomes. A reader
   must not infer "any nonzero -> failed" from this docstring. The ``rc``
   column above is the ORACLE's, measured, and stays 1 for the ``failed`` row
   -- that is a fact about ``target/debug/tan.exe``, not a decision, and must
@@ -100,6 +100,21 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   tan-cli#262 above -- a divergence recorded in prose here rather than in the
   table because the table is a record of what was measured, not of this
   port's choices.
+
+  **tan-cli#1262: this port's range is 0-5, so the table above is the
+  oracle's history, not this command's map.** The oracle was measured against
+  a contrived validator; the REAL one returns 4 and 5 as well, and those get
+  their own outcomes here rather than the oracle's ``failed`` -- see
+  [`_STATUS_OUTCOME`], which carries the measurement and the argument.
+
+  **The raw status is now carried too** (also #1262):
+  ``data.validatorExitStatus`` reports ``out.returncode`` verbatim on the
+  spawn path, so the ``.get(..., OUTCOME_FAILED)`` fallback stops being
+  lossy -- a future validator exit this table does not yet name still arrives
+  as a NUMBER a consumer can act on, not just as ``failed``. The key is
+  OMITTED, not ``null``, wherever no validator returned a status: the whole
+  ``--offline`` path, all three guards, a spawn-LAUNCH failure, and a timeout
+  (the child was killed, so ``TimeoutExpired`` carries no returncode).
 
   ``validate.spawn-not-implemented`` is GONE as of #376 (the branch that
   emitted it is), and its ``contract/issue-codes.json`` entry deleted rather
@@ -381,25 +396,62 @@ _SARIF_SCHEMA_URI = (
 #: spelling is followed.
 _SARIF_URI_BASE_ID = "%CWD%"
 
-#: Outcome strings, verbatim from `tan_core::validate::Outcome::as_str`. The
-#: issue code is `validate.<outcome>`, so these strings are wire contract.
+#: Outcome strings. The first five are verbatim from
+#: `tan_core::validate::Outcome::as_str`; the two `hardware-revision-*`
+#: siblings are this port's own (tan-cli#1262 -- the frozen oracle has no
+#: `Outcome` variant for either). The issue code is `validate.<outcome>`, so
+#: these strings are wire contract.
 OUTCOME_CLEAN = "clean"
 OUTCOME_SCHEMA_VIOLATION = "schema-violation"
 OUTCOME_MISSING_PRESET = "missing-preset"
 OUTCOME_HARDWARE_REVISION = "hardware-revision"
+#: tan-cli#1262. Named after the upstream constants they carry
+#: (`EXIT_SDK_REVISION_UNKNOWN` = 4, `EXIT_SDK_REVISION_NOT_BUILDABLE` = 5)
+#: rather than invented here, because the whole reason each has its OWN exit
+#: code upstream is that a caller can act on it mechanically: alp-sdk's own
+#: comments give the remedies as "pick a revision that exists" (4) and "pick a
+#: revision whose status is buildable" (5), neither of which is exit 3's "pin a
+#: different SDK, or change hw_rev".
+OUTCOME_HARDWARE_REVISION_UNKNOWN = "hardware-revision-unknown"
+OUTCOME_HARDWARE_REVISION_NOT_BUILDABLE = "hardware-revision-not-buildable"
 OUTCOME_FAILED = "failed"
 
-#: Validator exit status -> outcome, verbatim from
-#: `tan_core::validate::classify_validation_outcome`. Anything else -- and a
-#: `None` status (killed, never started) -- is `OUTCOME_FAILED`. Today's
-#: `validate_board_yaml.py` only ever exits 0 or 1; 2 and 3 are kept because
-#: they are the shared vocabulary the TS/extension side classifies by, not
-#: because this SDK reaches them.
+#: Validator exit status -> outcome. Rows 0-3 are verbatim from
+#: `tan_core::validate::classify_validation_outcome`; rows 4 and 5 are this
+#: port's own (tan-cli#1262). Anything else -- and a `None` status (killed,
+#: never started) -- is `OUTCOME_FAILED`.
+#:
+#: **Reachability, MEASURED against alp-sdk v0.16.0 and `dev` at
+#: `cfeafd148cb16d24a0e6c2feb7749769fec8f992`** (both identical on this point;
+#: re-measure rather than trusting this line, and re-pin it when you do):
+#: `scripts/validate_board_yaml.py` returns 0, 1, 3, 4 and 5 -- 3, 4 and 5
+#: being `EXIT_SDK_REVISION_UNSUPPORTED`, `EXIT_SDK_REVISION_UNKNOWN` and
+#: `EXIT_SDK_REVISION_NOT_BUILDABLE`, all three returned from its `main()`.
+#: It never returns 2.
+#:
+#: **Exit 2's row is nonetheless LIVE, and the distinction is the whole
+#: point of this paragraph**: these keys are the CHILD PROCESS's exit status,
+#: not the script's return value. `main()` never returns 2, but the process
+#: still exits 2 when the interpreter cannot open the script (MEASURED -- see
+#: this module's docstring at the tan-cli#257/#258 guard, `python.exe: can't
+#: open file '...\\scripts\\validate_board_yaml.py'`, exit 2, read here as
+#: `missing-preset`) or when argparse rejects a flag (measured too, in the
+#: `--no-color` paragraph of that same docstring). The #257/#258 guard below
+#: closes only the `sdkRootFlag` tier; a stub checkout resolved through
+#: `discovery` or a project pin, or a present-but-unreadable script, still
+#: reaches this row. Do not re-derive it as dead: an earlier revision of this
+#: very comment did, contradicting both docstring measurements above it.
+#: Until #1262 rows 4 and 5 were absent, so both fell through to
+#: `OUTCOME_FAILED` -- a code published as "produced no usable verdict ... a
+#: crash" -- which made a real hw_rev refusal indistinguishable from `tan`
+#: falling over and left alp-studio's pre-build gate no choice but to degrade.
 _STATUS_OUTCOME = {
     0: OUTCOME_CLEAN,
     1: OUTCOME_SCHEMA_VIOLATION,
     2: OUTCOME_MISSING_PRESET,
     3: OUTCOME_HARDWARE_REVISION,
+    4: OUTCOME_HARDWARE_REVISION_UNKNOWN,
+    5: OUTCOME_HARDWARE_REVISION_NOT_BUILDABLE,
 }
 
 #: `Issue.severity` -> SARIF `level`, mirroring
@@ -1134,6 +1186,18 @@ def _emit(
     command_line: str = "",
     sdk: SdkInfo | None = None,
     findings: tuple[_Finding, ...] | None = None,
+    # tan-cli#1262: the validator's RAW exit status, for
+    # `data.validatorExitStatus`. `None` means "no validator returned a
+    # status", and the key is then OMITTED rather than emitted as `null` --
+    # the same absent-not-null rule `sdk` follows. `None` is unambiguous here
+    # in a way it is not in `classify_validator_status` (whose `None` is the
+    # oracle's `Option<i32>`): `subprocess.run` yields an `int` returncode on
+    # every platform, so this stays `None` only when none completed.
+    # The value is that returncode VERBATIM, which on POSIX is NEGATIVE for a
+    # signal death (`-9` for SIGKILL) despite the field being named for an
+    # exit status -- the same `-N` `classify_validator_status`'s docstring
+    # already calls out as equally unmapped and equally `failed`.
+    validator_status: int | None = None,
     # tan-cli#1117 review round 3: NO DEFAULT, deliberately -- see
     # `cwd_base_uri_or_none`'s own docstring for why this is precomputed
     # rather than read here. A dropped `sarif_base=` kwarg at any of the
@@ -1205,6 +1269,17 @@ def _emit(
             # existence-filtered.
             "boardYamlPath": board_path,
         }
+        # tan-cli#1262. Set only when a validator actually returned a status,
+        # ABSENT otherwise -- never `null`. Conditional rather than nullable
+        # because the offline path spawns nothing, so a `null` there would
+        # assert a run that did not happen, and because TWO of the three
+        # committed `validate-offline-*` conformance goldens pin `data`
+        # byte-for-byte (`validate-offline-clean` is in
+        # `test_contract_envelopes.DELIBERATE_DIVERGENCE` and therefore
+        # `xfail(strict=True)`, so its `data` is not compared at all -- it
+        # would NOT have caught a leak here).
+        if validator_status is not None:
+            data["validatorExitStatus"] = validator_status
         envelope = Envelope(
             "validate",
             Project.resolved(root, board_path),
@@ -1469,6 +1544,13 @@ def validate(
         #: path and on every guard -- nothing ran.
         command_line = ""
 
+        #: tan-cli#1262: the validator's raw exit status, for
+        #: `data.validatorExitStatus`. Stays `None` -- so `_emit` OMITS the key
+        #: -- everywhere no validator returned one: the whole offline path, all
+        #: three guards, a spawn that failed to launch, and a timeout (the child
+        #: was killed; `TimeoutExpired` carries no returncode).
+        validator_status: int | None = None
+
         if offline:
             try:
                 text = Path(board_path).read_text(encoding="utf-8")
@@ -1627,6 +1709,12 @@ def validate(
                 )
                 return
             else:
+                # tan-cli#1262: captured BEFORE the mapping consumes it. The
+                # `.get(..., OUTCOME_FAILED)` fallback is the right default
+                # for an exit this build does not name, but it must not be all
+                # a consumer is left with -- an UNMAPPED status reaches the
+                # wire as a NUMBER, not only as `failed`.
+                validator_status = out.returncode
                 result = analyze_validator_output(out.returncode, out.stderr)
                 if result.outcome != OUTCOME_CLEAN and not result.findings:
                     # `to_cli_issues`' synthesis: a non-clean run must never reach a
@@ -1665,6 +1753,9 @@ def validate(
             issues=issues,
             exit_code=exit_code,
             command_line=command_line,
+            # tan-cli#1262. `None` -- key absent, not null -- everywhere no
+            # validator returned a status, the offline path included.
+            validator_status=validator_status,
             # `None` on the offline path (never resolved) -- the two committed
             # conformance fixtures are offline runs and stay `sdk`-less.
             sdk=sdk_info,

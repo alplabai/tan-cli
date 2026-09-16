@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -858,6 +859,34 @@ def _spawn(tmp_path, monkeypatch, validator_body: str, fmt: str = "json"):
     return result, sdk
 
 
+def _spawn_refused(root, monkeypatch, *patches):
+    """tan-cli#1262: a spawn-path run whose validator script EXISTS (so none
+    of the three guards fires on the setup itself), with `patches` then
+    installing whatever makes this particular run refuse. Returns the parsed
+    envelope. Used only to assert what is ABSENT from `data`, so the helper
+    deliberately does not care about the exit code.
+
+    Patching the global `subprocess.run` is NOT enough to reach the spawn:
+    guard 3 probes the interpreter's version with a `subprocess.run` of its
+    own, so a patch that raises lands on the GUARD and the run refuses with
+    `validate.python-too-old` having never spawned anything. Measured, as the
+    first red run of the test below. Callers that want the spawn must
+    neutralise guard 3 explicitly -- which is why this takes a varargs list
+    rather than a single patch."""
+    project = root / "project"
+    project.mkdir(parents=True)
+    (project / "board.yaml").write_text(_BOARD, encoding="utf-8")
+    sdk = _make_sdk(root / "alp-sdk", _stub(code=0))
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(
+        validate_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
+    for patch in patches:
+        patch()
+    result = runner.invoke(app, ["validate", "--sdk-root", str(sdk), "--format", "json"])
+    return json.loads(result.output)
+
+
 def test_a_valid_board_passes_without_offline(tmp_path, monkeypatch):
     """tan-cli#376, THE regression: the default invocation the root quickstart
     documents (`tan validate`, no `--offline`) reaches a real validator and
@@ -1127,17 +1156,276 @@ def test_legacy_fail_and_warn_lines_keep_their_own_severities(tmp_path, monkeypa
     assert {i["code"] for i in envelope["issues"]} == {"validate.schema-violation"}
 
 
-def test_the_exit_status_to_outcome_map_is_the_oracles(tmp_path, monkeypatch):
-    """`classify_validation_outcome`, verbatim -- including that 2 and 3 are
-    NOT `failed` (they are their own named outcomes) and that everything
-    outside 0-3 is. Pinned as a unit, since today's SDK validator only ever
-    exits 0 or 1 and no end-to-end test can reach the other rows."""
+def test_the_exit_status_to_outcome_map_covers_every_status_the_sdk_returns(
+    tmp_path, monkeypatch
+):
+    """The whole of `_STATUS_OUTCOME`, pinned as a unit.
+
+    Rows 0-3 are `classify_validation_outcome` verbatim -- including that 2
+    and 3 are NOT `failed` (they are their own named outcomes). Rows 4 and 5
+    are tan-cli#1262's, and are this port's own: the frozen oracle maps
+    neither, and its measured table in `validate_cmd`'s module docstring shows
+    exit 5 landing on `failed` there.
+
+    This test was named `..._is_the_oracles` and its docstring said "today's
+    SDK validator only ever exits 0 or 1 and no end-to-end test can reach the
+    other rows". Both halves were wrong, and the second is what made the
+    first survive review: `scripts/validate_board_yaml.py` RETURNS 0, 1, 3, 4
+    and 5, and never 2 (measured at alp-sdk v0.16.0 and at
+    `dev`/`cfeafd148cb16d24a0e6c2feb7749769fec8f992`, identical at both; 3, 4
+    and 5 are `EXIT_SDK_REVISION_UNSUPPORTED`, `EXIT_SDK_REVISION_UNKNOWN` and
+    `EXIT_SDK_REVISION_NOT_BUILDABLE`, each returned from its `main()`).
+
+    EVERY row here is reachable end-to-end, exit 2 included -- a claim the
+    first revision of tan-cli#1262 got wrong in the other direction, writing
+    "exit 2 is the ONE row here no end-to-end test can reach". `main()`'s
+    return value is not the child's exit status: the PROCESS exits 2 when the
+    interpreter cannot open the script, which
+    `test_a_stub_sdk_without_the_validator_script_still_reaches_exit_2` below
+    now pins end-to-end. Rows 3, 4 and 5 are reached by the tests just
+    below."""
     assert validate_cmd.classify_validator_status(0) == "clean"
     assert validate_cmd.classify_validator_status(1) == "schema-violation"
     assert validate_cmd.classify_validator_status(2) == "missing-preset"
     assert validate_cmd.classify_validator_status(3) == "hardware-revision"
+    assert validate_cmd.classify_validator_status(4) == "hardware-revision-unknown"
+    assert validate_cmd.classify_validator_status(5) == "hardware-revision-not-buildable"
     assert validate_cmd.classify_validator_status(77) == "failed"
     assert validate_cmd.classify_validator_status(None) == "failed"
+    # The constants, not just the strings: these are wire contract (the issue
+    # code is `validate.<outcome>`), so a rename that kept the mapping intact
+    # would still be a breaking change and must be seen here.
+    assert validate_cmd.OUTCOME_HARDWARE_REVISION_UNKNOWN == "hardware-revision-unknown"
+    assert (
+        validate_cmd.OUTCOME_HARDWARE_REVISION_NOT_BUILDABLE
+        == "hardware-revision-not-buildable"
+    )
+
+
+def test_a_stub_sdk_without_the_validator_script_still_reaches_exit_2(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1262 review: exit 2's row in `_STATUS_OUTCOME` is LIVE, and
+    this is the end-to-end proof. The first revision of #1262 rewrote four
+    registry notes and two comments to call it unreachable, reasoning from
+    `validate_board_yaml.py`'s `main()` never RETURNING 2 -- but the map keys
+    off the spawned CHILD PROCESS's exit status, and the process exits 2 when
+    the interpreter cannot open the script at all. This module's own docstring
+    had recorded that measurement twice, at the tan-cli#257/#258 guard and in
+    its `--no-color` paragraph, and the claim was written anyway.
+
+    The input: a checkout carrying the `scripts/alp_project.py` loader marker
+    -- so `is_sdk_root` accepts it and the tan-cli#257/#258 guard does NOT
+    fire -- but no `scripts/validate_board_yaml.py`. That is what a stub or
+    half-synced SDK looks like, and it is reachable through the `discovery`
+    and project-pin tiers too, where no guard screens it at all.
+
+    What the user gets is the wrong-verdict class #1262 was filed about,
+    inverted: a BROKEN SDK INSTALL reported under a code whose registered
+    severity is `warning`, naming the customer's board. Not fixed here --
+    fixing it is a separate refusal-guard change -- but pinned, so nobody
+    deletes the row on the theory that nothing reaches it."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text(_BOARD, encoding="utf-8")
+    scripts = tmp_path / "alp-sdk" / "scripts"
+    scripts.mkdir(parents=True)
+    # The loader marker EXISTS -- this is a real-looking checkout ...
+    (scripts / "alp_project.py").write_text("", encoding="utf-8")
+    # ... but the validator it must spawn does not.
+    assert not (scripts / "validate_board_yaml.py").exists()
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(
+        validate_cmd, "_planner_python_resolution", lambda *_a, **_k: (sys.executable, True)
+    )
+
+    result = runner.invoke(
+        app, ["validate", "--sdk-root", str(tmp_path / "alp-sdk"), "--format", "json"]
+    )
+    envelope = json.loads(result.output)
+    # The row is reached: the child exited 2, and 2 maps to `missing-preset`.
+    assert envelope["data"]["validatorExitStatus"] == 2
+    assert envelope["data"]["outcome"] == "missing-preset"
+    assert [i["code"] for i in envelope["issues"]] == ["validate.missing-preset"]
+    # And the reason it is the WRONG verdict, pinned as the defect it is: the
+    # message is about tan's own broken checkout, under a code about the
+    # customer's board.
+    assert "validate_board_yaml.py" in envelope["issues"][0]["message"]
+
+
+def test_a_hw_rev_that_is_not_in_the_table_is_not_reported_as_a_tan_crash(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1262, THE regression, exit-4 half. alp-sdk returns
+    `EXIT_SDK_REVISION_UNKNOWN` (4) when the requested `hw_rev` is not a key
+    in its resolved table at all. Before #1262 that fell through
+    `_STATUS_OUTCOME.get(status, OUTCOME_FAILED)` onto `validate.failed`,
+    whose published description is "the validator ran but produced no usable
+    verdict ... a crash" -- so a user-actionable refusal was indistinguishable
+    from tan falling over, and alp-studio's pre-build gate had to degrade and
+    let the build proceed rather than hard-block on what might be an
+    infrastructure fault.
+
+    The exit CODE is unchanged at 2 (`ValidationFailure`) -- it always was,
+    since every non-clean outcome exits 2 here per tan-cli#262. The code alone
+    was never the distinction; the issue code is."""
+    result, _sdk = _spawn(
+        tmp_path,
+        monkeypatch,
+        _stub(stderr="FAIL sdk-compat: hw_rev 'rev-z' is not a known revision\n", code=4),
+    )
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    envelope = json.loads(result.output)
+    assert envelope["data"]["outcome"] == "hardware-revision-unknown"
+    assert [i["code"] for i in envelope["issues"]] == [
+        "validate.hardware-revision-unknown"
+    ]
+    # The whole point: NOT the generic crash code.
+    assert "validate.failed" not in result.output
+    # `_severity_for_outcome`'s default -- only `missing-preset` is a warning.
+    assert envelope["issues"][0]["severity"] == "error"
+    # The validator's own diagnostic reaches the user, not a synthesized
+    # "Validation ended with outcome ..." placeholder.
+    assert "is not a known revision" in envelope["issues"][0]["message"]
+
+
+def test_a_hw_rev_whose_status_refuses_a_build_is_not_reported_as_a_tan_crash(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1262, exit-5 half. `EXIT_SDK_REVISION_NOT_BUILDABLE` (5): the
+    `hw_rev` IS a key in the resolved table, but its declared `status:`
+    (`reserved`, `tbd`, or absent) refuses a build. Its own code upstream
+    because its remedy is its own -- "pick a revision whose status is
+    buildable", not exit 4's "pick a revision that exists" and not exit 3's
+    "pin a different SDK" -- and therefore its own outcome here, for the same
+    reason. It too used to arrive as `validate.failed`."""
+    result, _sdk = _spawn(
+        tmp_path,
+        monkeypatch,
+        _stub(stderr="FAIL sdk-compat: hw_rev 'rev-c' has status 'reserved'\n", code=5),
+    )
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    envelope = json.loads(result.output)
+    assert envelope["data"]["outcome"] == "hardware-revision-not-buildable"
+    assert [i["code"] for i in envelope["issues"]] == [
+        "validate.hardware-revision-not-buildable"
+    ]
+    assert "validate.failed" not in result.output
+    # Exit 5 is NOT exit 4: the two refusals stay apart on the wire, which is
+    # the whole reason alp-sdk spends two exit codes on them.
+    assert "validate.hardware-revision-unknown" not in result.output
+    assert "has status 'reserved'" in envelope["issues"][0]["message"]
+
+
+def test_the_spawn_envelope_carries_the_raw_validator_exit_status(tmp_path, monkeypatch):
+    """tan-cli#1262 item 3: `data.validatorExitStatus` reports the child's
+    returncode VERBATIM, so `.get(..., OUTCOME_FAILED)` stops being lossy.
+
+    77 deliberately: an UNMAPPED status is the case the key exists for. A
+    validator that grows an exit this build does not name still reaches the
+    consumer as a number it can act on, instead of collapsing into `failed`
+    with nothing left to re-derive the distinction from. A mapped status is
+    covered too, so the field is proven to carry the real number rather than
+    only appearing on the fallback path."""
+    # A fresh tmp subdirectory per run: `_spawn` mkdirs both the project and
+    # the stand-in SDK, so the three cases cannot share one root.
+    result, _sdk = _spawn(tmp_path / "a", monkeypatch, _stub(stderr="mystery\n", code=77))
+    envelope = json.loads(result.output)
+    assert envelope["data"]["outcome"] == "failed"
+    assert envelope["data"]["validatorExitStatus"] == 77
+
+    mapped, _sdk = _spawn(
+        tmp_path / "b", monkeypatch, _stub(stderr="FAIL sdk-compat: nope\n", code=4)
+    )
+    assert json.loads(mapped.output)["data"]["validatorExitStatus"] == 4
+
+    clean, _sdk = _spawn(tmp_path / "c", monkeypatch, _stub(stdout="board.yaml: clean\n"))
+    assert json.loads(clean.output)["data"]["validatorExitStatus"] == 0
+
+
+def test_the_spawn_path_guards_carry_no_validator_exit_status(tmp_path, monkeypatch):
+    """tan-cli#1262 review item 13. `data.validatorExitStatus` must be absent
+    on every spawn-path refusal that never got a returncode, so a future
+    refactor threading the status into `fail()` cannot publish a STALE number
+    -- which would be worse than omitting it, since the whole value of the
+    field is that a consumer can trust it as the child's real exit.
+
+    Three shapes, all routed through `fail()`: guard 3's interpreter floor
+    (nothing spawned yet), a spawn that could not launch (no process at all),
+    and a timeout (the child started, so `TimeoutExpired` carries no
+    returncode to report). The timeout is the subtle one -- it does NOT go
+    through `fail()`, it builds a `_Result` and falls through to the shared
+    `_emit`, which is exactly the path a careless `validator_status=` default
+    would contaminate."""
+    def _boom(*_a, **_k):
+        raise OSError("no such interpreter")
+
+    def _hang(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd="validator", timeout=1)
+
+    # Guard 3: the interpreter is below the SDK's declared floor.
+    too_old = _spawn_refused(
+        tmp_path / "floor",
+        monkeypatch,
+        lambda: monkeypatch.setattr(
+            validate_cmd, "_python_too_old", lambda *_a, **_k: "interpreter too old"
+        ),
+    )
+    assert [i["code"] for i in too_old["issues"]] == ["validate.python-too-old"]
+    assert "validatorExitStatus" not in too_old["data"]
+
+    # Guard 3 has to be neutralised in the two cases below, or the patched
+    # `subprocess.run` trips ITS interpreter probe first and nothing spawns --
+    # see `_spawn_refused`'s docstring.
+    def _floor_ok():
+        monkeypatch.setattr(validate_cmd, "_python_too_old", lambda *_a, **_k: None)
+
+    # A spawn that never launched.
+    launch_failed = _spawn_refused(
+        tmp_path / "launch",
+        monkeypatch,
+        _floor_ok,
+        lambda: monkeypatch.setattr(subprocess, "run", _boom),
+    )
+    assert [i["code"] for i in launch_failed["issues"]] == ["validate.spawn-failed"]
+    assert "validatorExitStatus" not in launch_failed["data"]
+
+    # A timeout: the child STARTED, so there is still no returncode.
+    timed_out = _spawn_refused(
+        tmp_path / "timeout",
+        monkeypatch,
+        _floor_ok,
+        lambda: monkeypatch.setattr(subprocess, "run", _hang),
+    )
+    assert timed_out["data"]["outcome"] == "failed"
+    assert "did not finish within" in timed_out["issues"][0]["message"]
+    assert "validatorExitStatus" not in timed_out["data"]
+
+
+def test_the_offline_envelope_carries_no_validator_exit_status(tmp_path, monkeypatch):
+    """The other half of tan-cli#1262 item 3, and the half that protects the
+    three committed `validate-offline-*` conformance goldens: `--offline`
+    spawns nothing, so there is no validator exit status and the key is
+    ABSENT -- never `null`, which would assert a run that did not happen.
+
+    Asserted on a CLEAN offline run and on a refusing one, because the key is
+    added at one place in `_emit` that both reach."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text(_BOARD, encoding="utf-8")
+    monkeypatch.chdir(project)
+
+    clean = runner.invoke(app, ["validate", "--offline", "--format", "json"])
+    assert clean.exit_code == int(ExitCode.SUCCESS), clean.output
+    assert "validatorExitStatus" not in json.loads(clean.output)["data"]
+
+    (project / "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN701\npreset: e1m-evk\n", encoding="utf-8"
+    )
+    refused = runner.invoke(app, ["validate", "--offline", "--format", "json"])
+    assert refused.exit_code == int(ExitCode.VALIDATION_FAILURE), refused.output
+    assert json.loads(refused.output)["data"]["outcome"] == "schema-violation"
+    assert "validatorExitStatus" not in json.loads(refused.output)["data"]
 
 
 def test_an_unparseable_refusal_still_puts_one_issue_on_the_wire(tmp_path, monkeypatch):
