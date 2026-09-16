@@ -133,8 +133,14 @@ that reclassifies to `failed` rather than a silent skip, an unstartable
 subprocess that refuses as `spawn-failed` (`RUNTIME_FAILURE`) rather than a
 silent skip, and `ParseFailure(result.outcome, ...)` instead of a hardcoded
 `"schema-violation"` -- so `diff.failed`/`diff.missing-preset`/
-`diff.hardware-revision`/`diff.spawn-failed`/`diff.python-too-old` are now
-real, registered outcomes alongside `diff.schema-violation`. The ONLY
+`diff.hardware-revision`/`diff.hardware-revision-unknown`/
+`diff.hardware-revision-not-buildable`/`diff.spawn-failed`/
+`diff.python-too-old` are now real, registered outcomes alongside
+`diff.schema-violation`. The last two `hardware-revision-*` arrived with
+tan-cli#1262, which added validator exits 4 and 5 to the shared
+`_STATUS_OUTCOME` and so widened THIS command's wire as a side effect; both
+registry entries name this file as `emittedBy`, so this list is where a
+reader looking one of them up lands. The ONLY
 remaining silent no-op is the ORIGINAL one this section already documented:
 no `validate_board_yaml.py` at the resolved checkout at all -- there is
 nothing there to reuse, which is different in kind from a reuse attempt that
@@ -541,7 +547,22 @@ def _data(
     its (always-empty) `changes` list -- verbatim from `diff.rs`'s `failure()`
     -- so `_emit_failure` passes it explicitly rather than letting an empty
     `changes: []` compute `unchanged: true` for a run that never got far
-    enough to answer that question."""
+    enough to answer that question.
+
+    **No `validatorExitStatus` here, knowingly (tan-cli#1262).** That change
+    gave `validate` a `data.validatorExitStatus` carrying the spawned
+    validator's raw returncode, so a consumer keeps the distinction when an
+    exit falls through `_STATUS_OUTCOME.get(..., OUTCOME_FAILED)`. `diff`
+    reuses the same `_spawn_validator`/`_STATUS_OUTCOME` and so inherited the
+    two new `hardware-revision-*` outcome codes -- but NOT the raw status,
+    because it never reaches this function on that path: the outcome travels
+    as a `ParseFailure.code` through `_emit_failure`, which builds its `data`
+    from `_data(...)` alone and has no channel for a number. So a `tan diff`
+    against an unmapped validator exit is still lossy, arriving as
+    `diff.failed` with nothing to re-derive it from. Threading the status
+    through `_spawn_validator` -> `ParseFailure` -> `_emit_failure` is a
+    second wire change on a second command and is tracked separately; it was
+    deliberately NOT folded into #1262."""
     return {
         "schemaVersion": DATA_SCHEMA_VERSION,
         "boardYamlPath": board_path,
