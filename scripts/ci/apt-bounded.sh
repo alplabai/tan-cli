@@ -110,6 +110,113 @@ if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
 
 ACQ=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3)
 
+# BULLSEYE ONLY: waive the Release file's FRESHNESS WINDOW, and nothing else.
+#
+# tan-cli#1257. Debian 11 "bullseye" left LTS on 2026-08-31. On 2026-09-07 the
+# `Valid-Until` on bullseye-security's InRelease lapsed, and every job that
+# freezes tan inside `python:3.12-slim-bullseye` died at its FIRST update with
+#
+#   E: Release file for http://deb.debian.org/debian-security/dists/bullseye-security/InRelease
+#      is expired (invalid since 2d 13h 56min 35s).
+#
+# apt reports that as rc=100, which this wrapper classes as transient, so all
+# three attempts burned on a condition no retry can change. release.yml's `-gnu`
+# freeze is one of the five call sites, which is what made #1257 a release
+# blocker.
+#
+# STATE AS MEASURED 2026-09-17 -- this is HARDENING, not the repair of a live
+# red. Debian re-signed the suite (`Suite: oldoldstable-security`, `Date: Sat,
+# 12 Sep 2026 09:27:08 UTC`) carrying NO `Valid-Until:` field at all, so apt
+# has nothing left to expire and the symptom is currently GONE on its own. The
+# flag is here against recurrence: a re-added `Valid-Until`, or a mirror
+# serving a stale index, reds the release freeze again on a date, with nothing
+# in the diff under test to explain it.
+#
+# WHICH CHECK THIS DROPS (verified against apt.conf(5) and sources.list(5),
+# bookworm, not asserted from memory): `Acquire::Check-Valid-Until` is the
+# replay-attack / expiry check and only that -- "a repository creator can
+# declare a time until which the data provided in the repository should be
+# considered valid". The InRelease GPG signature is STILL verified, and package
+# hashes are STILL checked against that signed index. This is NOT
+# `--allow-unauthenticated` and NOT `[trusted=yes]` -- sources.list(5)'s
+# `Trusted`, of which it says "The value `yes` tells APT always to consider
+# this source as trusted, even if it doesn't pass authentication checks. It
+# disables parts of apt-secure(8)". Signature checking is not downgraded.
+#
+# HOW WIDE IT IS, which is a separate question from which check it drops: this
+# is apt's GLOBAL override, so it applies to every source configured in the
+# container -- `bullseye`, `bullseye-updates` and `bullseye-security` alike --
+# not only to the suite that expired. apt.conf(5) is explicit that the
+# per-source `Check-Valid-Until` in sources.list(5) "should be preferred to
+# disable the check selectively instead of using this global override". Editing
+# sources.list per suite is not taken here: it means rewriting a file whose
+# layout differs across base images (`/etc/apt/sources.list` vs a
+# `.sources` deb822 file) from a wrapper that is shared by every call site,
+# to narrow an exposure that is already bounded by the paragraph below.
+#
+# THE RISK, NOT UNDERSTATED: a stale security index means a known-vulnerable
+# `binutils` could be installed without apt objecting. Accepted, with the blast
+# radius stated honestly -- this is not a scratch container. release.yml:517-527
+# is where the PUBLISHED `tan-x86_64-unknown-linux-gnu` /
+# `tan-aarch64-unknown-linux-gnu` assets are frozen, and `objdump` (from
+# `binutils`, the one package installed) is what PyInstaller walks the
+# artifact's shared-library graph with. The container is discarded when the
+# freeze finishes; its OUTPUT ships to customers.
+#
+# SCOPED TO THE CODENAME so no other call site loses the check: the others run
+# on `ubuntu-latest` or inside `ubuntu:24.04`, and keep it in full.
+#
+# WHEN THIS STOPS WORKING: bullseye is still served from `deb.debian.org`
+# (measured 2026-09-17: `dists/bullseye/InRelease` -> HTTP 200). Once it moves
+# to `archive.debian.org`, `deb.debian.org` stops serving it and this flag will
+# NOT help -- a 404 is not an expiry. THAT is the point to revisit repointing
+# sources.list at `archive.debian.org`, tracked on the still-open #1257.
+# Deliberately not implemented now: it would be untested speculation against a
+# URL that currently answers 200.
+#
+# THE TEST SEAM IS THE FILE PATH, NOT THE CODENAME, deliberately. An
+# `APT_OS_CODENAME` override would also be the one way a NON-bullseye host
+# could acquire the waiver from an ambient environment variable; overriding
+# which file is read gives the tests the same reach with no such path, and
+# lets them exercise this probe's own guards (an absent file, one with no
+# `VERSION_CODENAME`, a malformed one) instead of bypassing it. It is not a
+# caller knob like APT_STEP_BUDGET/APT_ATTEMPTS above -- no call site sets it.
+: "${APT_OS_RELEASE_FILE:=/etc/os-release}"
+APT_OS_CODENAME=""
+if [ -r "$APT_OS_RELEASE_FILE" ]; then
+  # SOURCED IN A SUBSHELL, deliberately: os-release defines NAME/ID/VERSION/...
+  # which would otherwise land in this script's own scope.
+  #
+  # `|| APT_OS_CODENAME=""` keeps `set -euo pipefail` from turning a hostile
+  # os-release into a hard failure of the WRAPPER. Precisely what it catches,
+  # measured rather than assumed: a top-level `exit` INSIDE the sourced file.
+  # Without it, an os-release ending in `exit 7` makes THIS SCRIPT exit 7.
+  # A merely malformed file does NOT need it -- `printf` is the last command in
+  # the subshell, so the substitution's status is printf's 0 however badly the
+  # `.` went (measured: an unterminated quote gives `.` rc=1 and the
+  # substitution rc=0). That is also why no separate `|| true` on the `.` is
+  # carried: measured, adding one changes no outcome. An unknown codename must
+  # fall through to "not bullseye", never to an exit.
+  #
+  # `${VERSION_CODENAME:-}` is its own guard: os-release need not carry the key
+  # at all (Alpine's does not), and a bare `$VERSION_CODENAME` would trip `-u`.
+  # shellcheck source=/dev/null  # a runtime host file, not a repo source
+  APT_OS_CODENAME="$( . "$APT_OS_RELEASE_FILE" 2>/dev/null; printf '%s' "${VERSION_CODENAME:-}" )" || APT_OS_CODENAME=""
+  # A CRLF os-release yields `bullseye<CR>`, which matches no `case` arm below
+  # -- the fix would silently become a no-op on a real bullseye host, with no
+  # diagnostic. Measured, and trimmed.
+  APT_OS_CODENAME="${APT_OS_CODENAME%$'\r'}"
+fi
+case "$APT_OS_CODENAME" in
+  bullseye)
+    ACQ+=(-o Acquire::Check-Valid-Until=false)
+    # Named, on stderr: a reader seeing bullseye behave differently from every
+    # other call site should find the reason in the log rather than bisect for
+    # it.
+    echo "apt-bounded: NOTICE bullseye detected -- adding -o Acquire::Check-Valid-Until=false (tan-cli#1257, Debian 11 left LTS 2026-08-31). Drops the Release file freshness check ONLY, and does so for every source in this container; the InRelease signature and package hashes are still verified." >&2
+    ;;
+esac
+
 rc=0
 for attempt in $(seq 1 "$APT_ATTEMPTS"); do
   remaining=$(( DEADLINE - $(_now) ))

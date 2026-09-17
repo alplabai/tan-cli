@@ -83,6 +83,16 @@ def _env(tmp_path: Path, *, step: str = "teststep") -> dict[str, str]:
     return env
 
 
+def _apt_argv_log(tmp_path: Path) -> Path:
+    """Where `_fake_apt`'s apt-get shim records the argv it was handed.
+
+    Kept a free function rather than a second return value from `_fake_apt`,
+    so the four existing call sites (`f"{_fake_apt(...)}:{env['PATH']}"`) keep
+    working unchanged.
+    """
+    return tmp_path / "bin" / "apt-argv.log"
+
+
 def _fake_apt(tmp_path: Path, exit_code: int = 0) -> Path:
     """PATH shims for apt-get and sudo, so no network, no root, no password.
 
@@ -95,7 +105,16 @@ def _fake_apt(tmp_path: Path, exit_code: int = 0) -> Path:
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     apt = bindir / "apt-get"
-    apt.write_text(f"#!/bin/sh\nexit {exit_code}\n", encoding="utf-8")
+    # RECORD THE ARGV, one argument per line, before exiting: the
+    # Acquire-option tests below assert on what the wrapper actually handed
+    # apt-get, which is otherwise unobservable from outside. One line per
+    # argument rather than `"$*"` so an assertion cannot be fooled by an
+    # argument that merely CONTAINS a space-joined spelling of another.
+    # Appended, so a retry's second invocation is visible too.
+    apt.write_text(
+        f'#!/bin/sh\nprintf \'%s\\n\' "$@" >> "{_apt_argv_log(tmp_path)}"\nexit {exit_code}\n',
+        encoding="utf-8",
+    )
     apt.chmod(0o755)
     sudo = bindir / "sudo"
     sudo.write_text('#!/bin/sh\nexec "$@"\n', encoding="utf-8")
@@ -337,3 +356,276 @@ def test_a_hung_dpkg_recovery_is_actually_killed_by_the_deadline(tmp_path: Path)
         f"expected the exhausted-retries rc from the always-100 fake "
         f"apt-get, got {proc.returncode}. stderr:\n{proc.stderr}"
     )
+
+
+# --------------------------------------------------------------------------
+# tan-cli#1257: `Acquire::Check-Valid-Until=false`, scoped to bullseye alone.
+#
+# Debian 11 "bullseye" left LTS on 2026-08-31 and its security suite's
+# `Valid-Until` lapsed on 2026-09-07, killing every job that freezes tan inside
+# `python:3.12-slim-bullseye` -- release.yml's `-gnu` freeze included -- at its
+# first update, with rc=100 that no retry could change. Debian has since
+# re-signed the suite WITHOUT a `Valid-Until` field (measured 2026-09-17), so
+# these tests pin hardening against recurrence, not a live failure.
+#
+# The scoping is the whole point and is what these tests exist to hold: a
+# blanket flag would quietly drop the replay-attack check on `ubuntu-latest`
+# and `ubuntu:24.04` too, where the suite is current and the check costs
+# nothing.
+#
+# THE SEAM IS `APT_OS_RELEASE_FILE`, the path the wrapper reads, NOT an
+# override of the codename it derives. Deliberate on both counts: a codename
+# override would be a way for a non-bullseye host to acquire the waiver from an
+# ambient variable, and -- the reason it matters here -- it would let every
+# test below BYPASS the probe instead of exercising it. With the path as the
+# seam, each guard inside the probe (`[ -r ... ]`, `|| APT_OS_CODENAME=""`,
+# `${VERSION_CODENAME:-}`, the CRLF trim) is reachable from a fixture file and
+# has a test that reds when it is removed. Under a codename seam they were
+# reachable from NO test on ANY platform: macOS has no /etc/os-release so the
+# branch never ran, and ubuntu-latest's is well-formed and carries the key --
+# measured, by making the branch `exit 99` and watching all 13 tests stay green.
+# --------------------------------------------------------------------------
+
+_CHECK_VALID_UNTIL = "Acquire::Check-Valid-Until=false"
+
+# A well-formed Debian os-release, minus the codename line the tests supply.
+_OS_RELEASE_BASE = 'PRETTY_NAME="Debian GNU/Linux"\nNAME="Debian GNU/Linux"\nID=debian\n'
+
+
+def _os_release(tmp_path: Path, body: str, *, name: str = "os-release") -> Path:
+    """Write an /etc/os-release stand-in and return its path."""
+    path = tmp_path / name
+    path.write_bytes(body.encode("utf-8"))
+    return path
+
+
+def _run_wrapper(
+    tmp_path: Path, os_release: Path | str, *, step: str
+) -> tuple[list[str], subprocess.CompletedProcess[str]]:
+    """Run the wrapper with `APT_OS_RELEASE_FILE` bound, return apt-get's argv.
+
+    The path may legitimately not exist -- that is one of the cases under test.
+    """
+    env = _env(tmp_path, step=step)
+    env["PATH"] = f"{_fake_apt(tmp_path, exit_code=0)}:{env['PATH']}"
+    env["APT_OS_RELEASE_FILE"] = str(os_release)
+    proc = subprocess.run(
+        ["bash", str(_WRAPPER), "update", "-qq"],
+        env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, (
+        f"the fake apt-get exits 0, so the wrapper must too -- got "
+        f"{proc.returncode}. The codename probe must never fail the wrapper, "
+        f"whatever it finds in os-release. stderr:\n{proc.stderr}"
+    )
+    log = _apt_argv_log(tmp_path)
+    assert log.is_file(), (
+        f"the apt-get shim recorded no argv at {log} -- it was never invoked, "
+        f"so any assertion about the options below would be vacuous. "
+        f"stderr:\n{proc.stderr}"
+    )
+    return log.read_text(encoding="utf-8").splitlines(), proc
+
+
+def _dash_o_values(argv: list[str]) -> list[str]:
+    """The VALUE of every `-o <value>` pair, in the order apt-get saw them."""
+    return [argv[i + 1] for i, arg in enumerate(argv) if arg == "-o" and i + 1 < len(argv)]
+
+
+def _assert_no_waiver(argv: list[str], proc, why: str) -> None:
+    assert _CHECK_VALID_UNTIL not in _dash_o_values(argv), (
+        f"{why} -- the waiver leaked out of its `case` arm and this source "
+        f"lost its replay-attack check. argv:\n{argv}"
+    )
+    assert "NOTICE" not in proc.stderr, (
+        f"nothing was waived, so nothing should be announced. "
+        f"stderr:\n{proc.stderr}"
+    )
+
+
+def _assert_probe_was_silent(proc) -> None:
+    """The probe must leave no diagnostic behind, whatever it read.
+
+    Not redundant with the rc==0 assertion in `_run_wrapper`: with the
+    `|| APT_OS_CODENAME=""` guard in place, dropping `${VERSION_CODENAME:-}`
+    still yields rc=0 and an empty codename -- the subshell dies, `printf`
+    never runs, and the outer guard swallows the status. The ONLY externally
+    visible trace is bash's own `VERSION_CODENAME: unbound variable` on stderr
+    (measured), so a test that checks only rc/argv cannot see that regression.
+    """
+    for noise in ("unbound variable", "syntax error", "unexpected EOF"):
+        assert noise not in proc.stderr, (
+            f"the codename probe leaked {noise!r} onto stderr -- it must read "
+            f"os-release silently or not at all. stderr:\n{proc.stderr}"
+        )
+
+
+@needs_the_wrappers_own_tools
+def test_bullseye_gets_the_check_valid_until_waiver(tmp_path: Path) -> None:
+    """The #1257 fix itself: on bullseye, and only there, the flag is passed.
+
+    Asserted as an ADJACENT `-o` / value pair in the real argv, not as a
+    substring of a joined command line -- the wrapper builds `ACQ` as an array
+    and a value that arrived detached from its `-o` would be an apt syntax
+    error, not a waiver.
+    """
+    osr = _os_release(tmp_path, _OS_RELEASE_BASE + "VERSION_CODENAME=bullseye\n")
+    argv, proc = _run_wrapper(tmp_path, osr, step="bullseye-step")
+    assert _CHECK_VALID_UNTIL in _dash_o_values(argv), (
+        f"bullseye did NOT get `-o {_CHECK_VALID_UNTIL}` -- an expired "
+        f"bullseye-security index would fail this apt-get with rc=100 again "
+        f"(tan-cli#1257). argv:\n{argv}"
+    )
+    assert "NOTICE" in proc.stderr and "bullseye" in proc.stderr, (
+        "the waiver must announce itself, so a CI reader can see WHY bullseye "
+        f"behaves differently instead of wondering. stderr:\n{proc.stderr}"
+    )
+    assert _CHECK_VALID_UNTIL in proc.stderr, (
+        f"the NOTICE must name the option it applied. stderr:\n{proc.stderr}"
+    )
+
+
+@needs_the_wrappers_own_tools
+@pytest.mark.parametrize("codename", ["bookworm", "trixie"])
+def test_a_supported_debian_keeps_the_valid_until_check(
+    tmp_path: Path, codename: str
+) -> None:
+    """Scoping, the security-relevant half: nothing but bullseye loses it.
+
+    bookworm (Debian 12) and trixie (Debian 13) are both still receiving
+    security updates, so their `Valid-Until` is meaningful and its check is the
+    replay-attack protection apt.conf(5) describes. A blanket flag -- the
+    obvious wrong fix for #1257 -- would strip it here too.
+    """
+    osr = _os_release(tmp_path, _OS_RELEASE_BASE + f"VERSION_CODENAME={codename}\n")
+    argv, proc = _run_wrapper(tmp_path, osr, step=f"{codename}-step")
+    _assert_no_waiver(argv, proc, f"{codename} is not bullseye")
+    _assert_probe_was_silent(proc)
+
+
+@needs_the_wrappers_own_tools
+def test_an_absent_os_release_is_a_silent_empty_codename(tmp_path: Path) -> None:
+    """No os-release at all (macOS, a scratch image) must not fail the wrapper.
+
+    This is the `[ -r "$APT_OS_RELEASE_FILE" ]` guard: the probe is skipped
+    entirely and the codename stays empty, so apt-get still runs, unwaived.
+    """
+    argv, proc = _run_wrapper(
+        tmp_path, tmp_path / "definitely-not-here", step="absent-osr-step"
+    )
+    _assert_no_waiver(argv, proc, "there is no os-release to name a codename")
+    _assert_probe_was_silent(proc)
+
+
+@needs_the_wrappers_own_tools
+def test_an_os_release_without_a_codename_key_is_silently_empty(tmp_path: Path) -> None:
+    """`VERSION_CODENAME` is OPTIONAL in os-release -- Alpine's omits it.
+
+    This is what `${VERSION_CODENAME:-}` is for: under the wrapper's `set -u` a
+    bare `$VERSION_CODENAME` makes bash write `VERSION_CODENAME: unbound
+    variable` to stderr, which `_assert_probe_was_silent` is what catches
+    (rc and argv both stay correct, so nothing else here would).
+    """
+    osr = _os_release(
+        tmp_path, 'NAME="Alpine Linux"\nID=alpine\nVERSION_ID=3.20.0\n'
+    )
+    argv, proc = _run_wrapper(tmp_path, osr, step="no-codename-step")
+    _assert_no_waiver(argv, proc, "os-release declares no codename")
+    _assert_probe_was_silent(proc)
+
+
+@needs_the_wrappers_own_tools
+def test_a_malformed_os_release_does_not_abort_the_wrapper(tmp_path: Path) -> None:
+    """A syntax error in the sourced file must not take the wrapper with it.
+
+    HONEST ABOUT ITS OWN STRENGTH: this is a characterization test, not a
+    mutation-sensitive one. An unterminated quote does make the `.` builtin
+    return 1, but `printf` is the last command in the subshell, so the command
+    substitution's status is printf's 0 and `set -e` never sees the failure --
+    measured, including with `|| APT_OS_CODENAME=""` removed, where this test
+    still passes. What it pins is the OUTCOME (a garbage os-release yields no
+    codename, no waiver, no crash, and no leaked parser noise); the guard that
+    is actually load-bearing has its own test below.
+    """
+    osr = _os_release(tmp_path, 'ID=debian\nVERSION_CODENAME="unterminated\n')
+    argv, proc = _run_wrapper(tmp_path, osr, step="malformed-osr-step")
+    _assert_no_waiver(argv, proc, "a malformed os-release names no codename")
+    # The `2>/dev/null` on the `.` is what keeps bash's parser complaint off
+    # the CI log; without it every bullseye step would print one.
+    _assert_probe_was_silent(proc)
+
+
+@needs_the_wrappers_own_tools
+def test_an_os_release_that_exits_does_not_abort_the_wrapper(tmp_path: Path) -> None:
+    """A top-level `exit` INSIDE the sourced file is the sharper version.
+
+    `exit` in a sourced file is executed by the shell doing the sourcing, so it
+    is not something a `|| true` on the `.` builtin would catch -- the status
+    has to be absorbed on the ASSIGNMENT. Measured: without
+    `|| APT_OS_CODENAME=""`, an os-release ending in `exit 7` makes this
+    wrapper exit 7, so a CI step dies with a status that has nothing to do
+    with apt. Unrealistic for a real Debian os-release, which is why it is
+    pinned here rather than left to the comment.
+    """
+    osr = _os_release(tmp_path, "VERSION_CODENAME=bullseye\nexit 7\n")
+    argv, proc = _run_wrapper(tmp_path, osr, step="exiting-osr-step")
+    # No waiver: the `exit` pre-empts the `printf`, so the codename never
+    # reaches the parent. Failing CLOSED (no waiver) is the right direction.
+    _assert_no_waiver(argv, proc, "the sourced file exited before printing")
+
+
+@needs_the_wrappers_own_tools
+def test_a_crlf_os_release_still_matches_bullseye(tmp_path: Path) -> None:
+    """A CRLF os-release must not silently turn the fix into a no-op.
+
+    Measured with `od -c`: without the `%$'\\r'` trim the codename is
+    `bullseye<CR>`, which matches NO `case` arm -- so on a real bullseye host
+    with a CRLF os-release the waiver would simply never be applied, and
+    nothing would say so. The failure direction is safe but silent, which is
+    exactly the kind that survives review.
+    """
+    osr = _os_release(tmp_path, "ID=debian\r\nVERSION_CODENAME=bullseye\r\n")
+    argv, proc = _run_wrapper(tmp_path, osr, step="crlf-osr-step")
+    assert _CHECK_VALID_UNTIL in _dash_o_values(argv), (
+        f"a CRLF os-release left the codename as 'bullseye\\r', which matches "
+        f"no `case` arm -- the #1257 fix became a silent no-op. argv:\n{argv}"
+    )
+    _assert_probe_was_silent(proc)
+
+
+@needs_the_wrappers_own_tools
+@pytest.mark.parametrize("codename", ["bullseye", "bookworm"])
+def test_the_waiver_is_appended_not_substituted(tmp_path: Path, codename: str) -> None:
+    """The timeout/retry options `ACQ` exists for must survive the new arm.
+
+    `ACQ` is what bounds the IDLE-read half of tan-cli#860/alp-sdk#1575. An
+    `ACQ=(...)` assignment where `ACQ+=(...)` was meant would replace those
+    three options with the waiver and pass every other test in this file --
+    including the bullseye one above -- while silently unbounding apt. Measured:
+    that mutation reds THIS test and nothing else, which is why it is separate.
+
+    The caller's own arguments must also stay last and intact: the waiver
+    belongs to `ACQ`, which the wrapper expands BEFORE `"$@"`.
+    """
+    osr = _os_release(tmp_path, _OS_RELEASE_BASE + f"VERSION_CODENAME={codename}\n")
+    argv, _ = _run_wrapper(tmp_path, osr, step=f"{codename}-append-step")
+    values = _dash_o_values(argv)
+    for required in (
+        "Acquire::http::Timeout=30",
+        "Acquire::https::Timeout=30",
+        "Acquire::Retries=3",
+    ):
+        assert required in values, (
+            f"`-o {required}` vanished on {codename} -- the #1257 waiver "
+            f"replaced ACQ instead of appending to it, which unbounds the "
+            f"idle-read case tan-cli#860 exists to bound. argv:\n{argv}"
+        )
+    assert argv[-2:] == ["update", "-qq"], (
+        f"the caller's own `update -qq` must arrive last and unmangled, after "
+        f"every ACQ option. argv:\n{argv}"
+    )
+    if codename == "bullseye":
+        assert values.index(_CHECK_VALID_UNTIL) > values.index("Acquire::Retries=3"), (
+            f"the waiver must be APPENDED after the pre-existing options, not "
+            f"spliced in front of them. argv:\n{argv}"
+        )
