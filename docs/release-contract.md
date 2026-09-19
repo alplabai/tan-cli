@@ -574,8 +574,8 @@ of `81a9d515`) when tan-cli#1268 re-synced `tan/planner/`. `81a9d515` is now
 the actual floor the next tag needs, superseding `20fec7a7` below. The
 specific facts named in the table above (`aen/on-module-links.yaml`,
 `v2n/supervisor-links.yaml`) are unchanged, since both predate even
-`20fec7a7`. alp-sdk#2047 already tracks this: its title reads "Cut a stable
-release containing 81a9d515."
+`20fec7a7`. alp-sdk#2047 already tracks this, titled around cutting a stable
+release containing `81a9d515` (see the issue for its exact current title).
 
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
 tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag contains
@@ -592,10 +592,15 @@ SDK-capability gate is added around `memory[]` or any other row. Done when:
 
 **Addendum (renumbered 0.6.1 -> 0.7.0, maintainer, 2026-09-19).** Pre-1.0
 SemVer puts a break in the minor, not the patch: the alp-sdk-floor bump this
-section describes breaks a v0.6.0 consumer's `tan generate --target
-zephyr-board` on AEN and V2N/V2M boards, so the release renumbers from the
-`0.6.1` named above to `0.7.0`. See `CHANGELOG.md`'s `## [0.7.0]` header and
-its `### Changed` **BREAKING** entry.
+section describes breaks a v0.6.0 consumer's `tan build` on *any* Zephyr
+board (Kconfig configure aborts on the undefined `ALP_SDK_SOM_HW_REV`
+symbol — commit `b3775381`/alp-sdk#1862 is an ancestor of the named floor
+commit `81a9d515` — measured against `v0.16.0`, see `CHANGELOG.md`'s floor
+entry), not just AEN/V2N/V2M's `tan generate --target zephyr-board`, so the
+release renumbers from the `0.6.1` named above to `0.7.0`. That is one of
+several `BREAKING`-marked entries in this release, not the only one — see
+`CHANGELOG.md`'s `## [0.7.0]` preamble list of breaks, which names every one
+of them, rather than this section's single floor entry.
 
 ## Decisions
 

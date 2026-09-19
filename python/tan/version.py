@@ -79,7 +79,10 @@
 # carry a plain, non-`.dev0` release number -- but the number itself was
 # wrong: this tree's content breaks v0.6.0 consumers, and pre-1.0 SemVer puts
 # a break in the MINOR, not the patch. `## [0.6.1]` becomes `## [0.7.0]` in
-# CHANGELOG.md (same section, same 204 folded fragments, just renamed), and
+# CHANGELOG.md (same section, same 204 folded fragments, renamed, then
+# extended with hand-written entries -- the floor, the doctor sub-bullet,
+# `debug-config.sdk-identity-appended`, the model-code removal -- and with
+# the preamble + BREAKING leads a follow-up review added), and
 # `python/pyproject.toml` moves with it. Nothing else about the readiness
 # picture above changes: the alp-sdk-floor blocker this file already
 # documented (tan-cli#1258) still gates the tag push, under the new number.

@@ -7,15 +7,17 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [0.7.0] — Unreleased
 
-**BREAKING: this release ships eleven changes that break a v0.6.0
+**BREAKING: this release ships changes that break a v0.6.0
 consumer**, which is why it is a minor (`0.7.0`), not the originally-planned
-patch (`0.6.1`) — see the linked entry below for each one's exact
-before/after and who must act:
+patch (`0.6.1`) — see the matching `BREAKING` entry below for each one's
+exact before/after:
 
 - tan's effective alp-sdk floor rises to the first alp-sdk release
-  containing commit `81a9d515a90403cce30588704e31faf9dc893838`; `tan
-  generate --target zephyr-board` for AEN and V2N/V2M boards exits 3
-  (`generate.emit-failed`) against an older alp-sdk (tan-cli#1268)
+  containing commit `81a9d515a90403cce30588704e31faf9dc893838`; `tan build`
+  on *any* Zephyr board against an older alp-sdk fails Kconfig configure
+  (`Aborting due to Kconfig warnings`, an undefined `ALP_SDK_SOM_HW_REV`),
+  and AEN and V2N/V2M boards additionally fail earlier, at `tan generate
+  --target zephyr-board` (exit 3, `generate.emit-failed`) (tan-cli#1268)
 - a confirmed Flow D (`alif_mram_jlink`) MRAM write now refuses until
   `--atoc-unqueryable` / `flash_args.atoc_unqueryable: true` acknowledges
   that it replaces the whole ATOC (tan-cli#1252)
@@ -23,21 +25,26 @@ before/after and who must act:
   blocking phase; `--no-toolchain` opts out (#474)
 - `tan doctor` gains a `toolchain` check that can `fail` (exit 4,
   `doctor.toolchain`) on a host that passed before (#474)
-- `tan build --plan` / `--manifest` / `--manifest-from` now refuse with
-  `build.flag-retired` (exit 2) instead of `cli.command-deferred` (exit 1)
-  (#427)
+- `tan build --plan` / `--manifest` / `--manifest-from` /
+  `--no-auto-bootstrap` now refuse with `build.flag-retired` (exit 2)
+  instead of `cli.command-deferred` (exit 1) (#427)
 - `tan validate` / `tan diff` hw_rev refusals move off the generic
   `validate.failed` / `diff.failed` onto
   `validate.hardware-revision-unknown` / `-not-buildable` (and the `diff.`
   equivalents) (#1262)
-- `tan lock` / `tan migrate` / `tan quality` now prepend
+- `tan lock` / `tan migrate` / `tan quality` / `tan examples` / `tan
+  generate` / `tan bootstrap` / `tan new-som` / `tan explain --code` now
+  prepend (or, for `tan generate`'s resolvable path, reorder to prepend)
   `sdk.project-pin-unresolved` ahead of the command's own refusal in
   `issues[]`, so a consumer keyed on `issues[0]` sees a different code
+  (`generate`'s is what alp-sdk-vscode's toast reads,
+  `src/alpCli/service.ts:1310`)
 - `tan validate --format sarif` / `--format diagnostic-v1` now emit a
   `file:` URI, or a percent-encoded relative reference, instead of a raw
   host path for `uri` / `artifactLocation.uri` (#1097)
 - the `swd_probe` flash backend is removed; a manifest declaring it now
-  refuses with `flash.entry-failed` (alp-sdk#1439)
+  refuses with `flash.entry-failed` (tan-cli#732; safe to land now that
+  alp-sdk#1439 stopped emitting `flash_method: swd_probe`)
 - generated firmware config composes `ALP_HW_BUILD_SOM_HW_REV` as
   `"2626-r2"` rather than the bare `"r2"` for families that declare a
   `board_datecode` (#1156)
@@ -54,10 +61,11 @@ tan-cli#1258's "Done when" list) — see `docs/release-contract.md`'s own
 tag-day checklist. Measured 2026-09-19, for reference only — re-check both
 facts before the tag, they move independently of this note: the newest
 stable alp-sdk release is `v0.16.0` (`gh release list --repo
-alplabai/alp-sdk`), which carries neither `metadata/e1m_modules/aen/
-on-module-links.yaml` nor `metadata/e1m_modules/v2n/supervisor-links.yaml`,
-both of which the pinned planner now requires. See `docs/release-contract.md`
-and tan-cli#1258 for the full gate measurement.*
+alplabai/alp-sdk`), which carries neither
+`metadata/e1m_modules/aen/on-module-links.yaml` nor
+`metadata/e1m_modules/v2n/supervisor-links.yaml`, both of which the pinned
+planner now requires. See `docs/release-contract.md` and tan-cli#1258 for
+the full gate measurement.
 
 ### Fixed
 
@@ -6298,9 +6306,10 @@ and tan-cli#1258 for the full gate measurement.*
   bigger lift filed as tan-cli#929 rather than built here (see
   `.github/zizmor.yml`'s own header for both notes).
 
-- **`tan examples` and `tan generate` now report *why* no SDK resolved, not
-  only that none did.** Each command carried a private `_resolve_sdk`/
-  `_resolve_sdk_root` wrapper around `build_cmd.resolve_sdk_root_wide` that
+- **BREAKING (wire): `tan examples` and `tan generate` now report *why* no
+  SDK resolved, not only that none did.** Each command carried a private
+  `_resolve_sdk`/`_resolve_sdk_root` wrapper around
+  `build_cmd.resolve_sdk_root_wide` that
   collapsed to a bare `None` whenever nothing usable resolved, discarding
   `broken_project_pin`/`foreign_global_default_for` on the way -- the same
   shape tan-cli#468 fixed for `presets_cmd.resolve_sdk`. So a workspace whose
@@ -6979,9 +6988,10 @@ and tan-cli#1258 for the full gate measurement.*
   default channel from ordinary boards — the same silent class as the defect,
   pointed the other way.
 
-- **`tan bootstrap` and `tan new-som` now report *why* no SDK resolved, not
-  only that none did.** Both were the sixth and seventh instance of the
-  tan-cli#900 class (`presets`/`clean` had this from tan-cli#468;
+- **BREAKING (wire): `tan bootstrap` and `tan new-som` now report *why* no
+  SDK resolved, not only that none did.** Both were the sixth and seventh
+  instance of the tan-cli#900 class (`presets`/`clean` had this from
+  tan-cli#468;
   `examples`/`generate` got it in #900): `bootstrap_cmd._run` returned its
   `bootstrap.sdk-root-unresolved` refusal, and `new_som_cmd.new_som` its
   `new-som.failed` refusal, the moment nothing usable resolved, BEFORE either
@@ -7388,7 +7398,7 @@ and tan-cli#1258 for the full gate measurement.*
   generator (no `yield`)" instead of a bare "lifecycle probe crashed" that
   would point a future reader at the probe rather than the fixture.
 
-- **`tan explain --code` now reports *why* no SDK resolved, not only that
+- **BREAKING (wire): `tan explain --code` now reports *why* no SDK resolved, not only that
   none did.** `explain_cmd.bind_sdk` called `resolve_sdk_root_ladder`, then
   raised `explain.sdk-root-unresolved` while discarding
   `resolution.broken_project_pin` on the way -- the eighth instance of the
@@ -7676,7 +7686,7 @@ and tan-cli#1258 for the full gate measurement.*
   other `explain` stderr line already is. `ok`/`exitCode`/JSON output are
   unchanged on every path.
 
-- **`tan generate` ordered its SDK-resolution advisories two different ways
+- **BREAKING (wire): `tan generate` ordered its SDK-resolution advisories two different ways
   depending on which of its own paths it took.** The unresolved path (no
   SDK could be resolved at all) already prepended a broken `.alp/sdk-path`
   pin's `sdk.project-pin-unresolved` warning ahead of its own refusal, per
@@ -9508,7 +9518,7 @@ and tan-cli#1258 for the full gate measurement.*
   - **`--dry-run` reports the real `west sdk install` argv in `data.plannedCommands` and writes nothing** — no store directory, no stamp, no network call, no retry, no sleep.
 - **BREAKING: `tan doctor` gains a `toolchain` check (#474): stamp-vs-pin, never directory-exists.** Distinct from the existing `zephyrSdk` check (an unconditional, host-only "does any toolchain exist" probe): `toolchain` needs a resolved SDK checkout, reads its pinned version, and reports `pass` only when a verified stamp matches that exact pin — a stamped install against a MOVED pin (alp-sdk's `metadata/toolchains.json` changed since the last `tan bootstrap`) is a `fail` naming `tan bootstrap` as the fix, not "a toolchain exists" (ADR 0021's own words). `unknown` (never a guess) when no SDK checkout resolves or its `metadata/toolchains.json` is unreadable.
   - **Has an adoption path for a toolchain `tan bootstrap` did not install.** A host with a real, working, correctly-pinned Zephyr SDK already on it — `ZEPHYR_SDK_INSTALL_DIR` set, or the SAME scan `zephyrSdk` already trusts, at a `sdk_version` matching this checkout's pin — reports `pass`, never a `fail` whose only prescribed remedy (`tan bootstrap`) would otherwise re-download a second, redundant copy of a toolchain the host already has (or fail outright offline, or on the README's own documented hand-`west sdk install` path). A stamp is tan's own bookkeeping for what it installed, not the only proof a working toolchain exists.
-  - **On a host that the bound alp-sdk checkout's `metadata/toolchains.json` has no artifact row for (at alp-sdk `81a9d515`: every host except `linux-x86_64`, `windows-x86_64` and `macos-aarch64` — so Intel Mac (`macos-x86_64`), arm64 Linux (`linux-aarch64`) and `windows-arm64`)** — `tan bootstrap`'s toolchain phase skips honestly rather than failing (above), so no stamp is ever written there. (The Zephyr SDK itself does publish a `linux-aarch64` host build — see `zephyrSdkAvailableForHost` above; it is alp-sdk's own `metadata/toolchains.json` manifest that carries no row for it, which `artifacts_missing_for_host` reads.) `toolchain` therefore reports `fail` (exit 4) on exactly those hosts, unless the adoption path immediately above finds a pre-existing, hand- or otherwise-installed toolchain whose own `sdk_version` already matches this checkout's pin.
+  - **On a host that the bound alp-sdk checkout's `metadata/toolchains.json` has no artifact row for (at alp-sdk `81a9d515`: every host except `linux-x86_64`, `windows-x86_64` and `macos-aarch64` — so Intel Mac (`macos-x86_64`), arm64 Linux (`linux-aarch64`) and `windows-arm64`)** — `tan bootstrap`'s toolchain phase skips honestly rather than failing (above), so no stamp is ever written there. (The Zephyr SDK itself does publish a `linux-aarch64` host build — see `doctor_cmd.ZEPHYR_SDK_HOSTS`, which lists it; it is alp-sdk's own `metadata/toolchains.json` manifest that carries no row for it, which `artifacts_missing_for_host` reads.) `toolchain` therefore reports `fail` (exit 4) on exactly those hosts, unless the adoption path immediately above finds a pre-existing, hand- or otherwise-installed toolchain whose own `sdk_version` already matches this checkout's pin.
 - **`tan build`'s `${TOOLCHAIN_ROOT}` resolution now also finds a toolchain `tan bootstrap` acquired** — the artifact-keyed store (`~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`, or `$ALP_TOOLCHAIN_ROOT`) is now scanned alongside the existing `/opt`/`$HOME`/`%USERPROFILE%`/`Path.home()` roots, so a customer who ran nothing but `tan bootstrap` gets a build that finds it without also hand-exporting `ZEPHYR_SDK_INSTALL_DIR`. A `.tmp-<pid>` wreckage sibling from an interrupted acquisition is excluded by name so it can never fake a second, ambiguous candidate.
 
 - **`tan examples`' envelope carries per-example facets now, not just
@@ -10451,10 +10461,24 @@ and tan-cli#1258 for the full gate measurement.*
   `metadata/e1m_modules/aen/on-module-links.yaml` and
   `metadata/e1m_modules/v2n/supervisor-links.yaml`; an alp-sdk checkout that
   predates `81a9d515` — every stable release through `v0.16.0` — carries
-  neither. **Who must act:** anyone building AEN or V2N/V2M boards —
-  `tan generate --target zephyr-board` exits 3 (`generate.emit-failed`)
-  against an older alp-sdk; other targets and boards are unaffected. See
-  `docs/release-contract.md` and tan-cli#1258.
+  neither. `81a9d515` also has commit `b3775381` (alp-sdk#1862, the
+  `CONFIG_ALP_SDK_SOM_HW_REV` symbol below) as an ancestor, and
+  `python/tan/planner/kconfig.py:777` writes that symbol into every Zephyr
+  slice's `alp.conf` unconditionally, not just AEN/V2N's — so the floor is
+  universal, not narrow. **Who must act:** anyone running `tan build` on
+  *any* Zephyr board against a pre-floor alp-sdk. Measured against `v0.16.0`
+  (which defines no `ALP_SDK_SOM_HW_REV` Kconfig symbol at all —
+  `git grep ALP_SDK_SOM_HW_REV v0.16.0` finds nothing): Zephyr's own
+  `scripts/kconfig/kconfig.py --handwritten-input-configs`, the exact script
+  and flag `west build`'s CMake configure step invokes for `EXTRA_CONF_FILE`
+  fragments, aborts with `error: Aborting due to Kconfig warnings` on the
+  resulting `alp.conf:N: warning: attempt to assign the value ... to the
+  undefined symbol ALP_SDK_SOM_HW_REV` — reproduced directly against the
+  pinned Zephyr `v4.4.1` `kconfig.py` + `kconfiglib`. AEN and V2N/V2M boards
+  additionally fail earlier, at `tan generate --target zephyr-board` (exit 3,
+  `generate.emit-failed`), for the on-module-links/supervisor-links gate
+  above; every other Zephyr board fails later, at `west build` configure.
+  See `docs/release-contract.md` and tan-cli#1258.
 - **Every board's generated Zephyr `alp.conf` now carries
   `CONFIG_ALP_SDK_SOM_HW_REV="<hw_rev>"`, unconditionally.** Planner re-sync
   to alp-sdk `f1b1c9df` (alp-sdk#1862) ports the upstream change: `alp.conf`
@@ -11109,8 +11133,9 @@ and tan-cli#1258 for the full gate measurement.*
   skipped, 1 xfailed, 0 failed across the full suite, matching the branch's
   own reference count on the merge base.
 
-- **BREAKING: `tan build`'s eleven declared-but-refused oracle flags are
-  resolved into three buckets, per the maintainer's decision on #427.** All eleven used to
+- **BREAKING (wire): `tan build`'s eleven declared-but-refused oracle flags
+  are resolved into three buckets, per the maintainer's decision on #427.**
+  All eleven used to
   refuse with the shared `cli.command-deferred` (exit 1), each pointing at
   the same #427 -- fine until #260 closed and the same treatment started
   pointing at a closed issue about unrelated commands; that pointer defect is
@@ -11500,8 +11525,9 @@ and tan-cli#1258 for the full gate measurement.*
 
 ### Removed
 
-- **BREAKING: the `swd_probe` flash backend is removed -- GD32 bridge
-  programming is separating out of `tan` entirely.** `flash_method: swd_probe` was the local
+- **BREAKING: the `swd_probe` flash backend is removed (tan-cli#732) -- GD32
+  bridge programming is separating out of `tan` entirely.**
+  `flash_method: swd_probe` was the local
   SWD write path for the E1M-X V2N/V2M SoMs' GD32G553 supervisor bridge
   (`plan_swd_probe`, J-Link/OpenOCD/pyOCD arms, its own read-only DPIDR
   preflight, and the `#540`/`#590` write-verification qualification built on
