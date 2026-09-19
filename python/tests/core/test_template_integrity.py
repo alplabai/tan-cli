@@ -550,6 +550,17 @@ def test_every_extra_conf_file_named_by_a_template_is_a_planned_file(template_id
 #: once in `board.yaml`'s comment and twice in `README.md`.
 _ALLOWED_CROSS_SKU_MENTIONS: dict[tuple[str, str, str], int] = {
     ("iot-starter", "E1M-AEN801", "E1M-V2N101"): 3,
+    # tan-cli#1275 (alp-sdk c81cb5db re-sync): `src/cc3501e_bridge.h`
+    # (vendored via `scaffold_byte_parity.py`'s `NON_ENVELOPE_EXTRAS`,
+    # alp-sdk#2112 -- the shared CC3501E bring-up template every
+    # `examples/aen/aen-cc3501e-*` app and now `mqtt-telemetry` copies)
+    # cites the real bench where its `RX_SAMPLE_DLY` value was
+    # silicon-measured: E1M-AEN803 serial 2026W36-0002. A provenance
+    # citation, not a SKU-substitution gap -- the same file is byte-
+    # identical across every AEN SoM it ships on, so it names the ONE real
+    # bench that measured the constant rather than every SoM that reuses
+    # the result.
+    ("iot-starter", "E1M-AEN801", "E1M-AEN803"): 1,
     # tan-cli#996/#1001 (the 722320a1 re-vendor): alp-sdk's own DEEPX-note
     # rewrite (see MANIFEST.md's "Current vendor point" bullet) made the
     # sentence SKU-neutral for BOTH SKU pairs, not just the V2M101/V2M102

@@ -95,12 +95,34 @@ VENDORED_ROOT = Path(__file__).resolve().parent.parent.parent / (
 # tuple's whole job is to be an exact, reviewed list. A per-template mapping
 # is the right shape once a THIRD nested extra appears; one entry does not pay
 # for it.
+#
+# `src/cc3501e_bridge.{c,h}` (tan-cli#1275) are the SECOND and THIRD nested
+# entries -- the "per-template mapping" threshold this tuple's own design
+# comment above flags, crossed here rather than pre-emptively restructured
+# because these two entries are still literal, unambiguous paths that work
+# exactly like `peer/testcase.yaml` does; restructuring is a separate unit
+# of work if a fourth nested entry ever needs it. `iot`/E1M-AEN801's
+# CMakeLists.txt gained `target_sources(app PRIVATE src/cc3501e_bridge.c)`
+# (alp-sdk#2112/#2172), but alp-sdk's own `metadata/templates/
+# catalog-v1.json` `iot` entry's `files.user_owned` was never updated to
+# match, so `--emit scaffold` never returns either file -- a genuine
+# upstream catalog gap (see `python/tan/templates/vendored/MANIFEST.md`'s
+# "Current vendor point" bullet), not something this tuple can route
+# around by omission: `tan/core/scaffold.py`'s own `TemplateDataError`
+# cross-checks every `target_sources()` token in a vendored `CMakeLists.txt`
+# against the files actually present, and refuses a scaffold that would
+# fail to link. Declaring these two here (compared against the catalog
+# example's real, on-disk copy, same mechanism as `native_sim.conf`) is
+# what lets the vendored tree carry real bytes instead of either shipping
+# broken or inventing content `--emit scaffold` never produced.
 NON_ENVELOPE_EXTRAS = (
     "testcase.yaml",
     "native_sim.conf",
     "boards/native_sim_native_64.overlay",
     "boards/native_sim_native_64.conf",
     "peer/testcase.yaml",
+    "src/cc3501e_bridge.c",
+    "src/cc3501e_bridge.h",
 )
 
 
@@ -1340,26 +1362,22 @@ DELIBERATE_EDITS: dict[
         "-- the emit says so nowhere",
         un_edit_mailbox_blocked_caveat,
     ),
-    ("iot", "E1M-AEN801", "CMakeLists.txt", "extra_conf_order"): (
-        "tan-cli#379: list(PREPEND EXTRA_CONF_FILE ...) so a caller's own "
-        "-DEXTRA_CONF_FILE=native_sim.conf wins over the generated alp.conf",
-        un_edit_iot_extra_conf_order,
-    ),
-    ("iot", "E1M-AEN801", "README.md", "native_sim_conf_link"): (
-        "tan-cli#1001 review (major): alp-sdk's own README links "
-        "native_sim.conf via a self-referential ../mqtt-telemetry/ detour, "
-        "which the doc-link rewriter renders as a GitHub blob link -- wrong "
-        "here, native_sim.conf ships as a sibling of this README in every "
-        "scaffold this template produces",
-        un_edit_iot_aen801_readme_native_sim_conf_link,
-    ),
-    ("iot", "E1M-AEN801", "README.md", "native_sim_conf_copy_comment"): (
-        "tan-cli#1001 review (major): the emit tells the customer "
-        "native_sim.conf ships only in the alp-sdk tree and must be copied "
-        "in -- false here, tan init --template iot-starter vendors and "
-        "writes native_sim.conf itself (tan-cli#379, NON_ENVELOPE_EXTRAS)",
-        un_edit_iot_aen801_readme_native_sim_copy_comment,
-    ),
+    # tan-cli#1275 (alp-sdk c81cb5db re-sync): the three `native_sim.conf`-era
+    # entries that used to live here (`extra_conf_order`, `native_sim_conf_
+    # link`, `native_sim_conf_copy_comment`) are RETIRED, not silently
+    # dropped -- alp-sdk#2173 fixed the ssl_misc.h/PSA-crypto break these
+    # existed to work around at its root (`ALP_SDK_MBEDTLS_PSA_CRYPTO` in
+    # `zephyr/Kconfig.alp-libraries`), so `examples/connectivity/mqtt-
+    # telemetry` no longer ships a `native_sim.conf` at all -- confirmed by
+    # `scaffold_byte_parity.py`'s own strict half (`undo_declared_edits`)
+    # refusing to run with them left in place, naming each one "no longer
+    # there" rather than silently passing. The vendored
+    # `iot/E1M-AEN801/native_sim.conf` file is deleted to match; every other
+    # vendored file in this (template, sku) is a straight re-vendor of the
+    # live emit, no edit needed. See MANIFEST.md's "Source" section for the
+    # full re-vendor entry (also carries alp-sdk#2112's cc3501e_bridge_
+    # bringup addition and the CMakeLists.txt APPEND revert this same
+    # re-vendor picked up).
     # tan-cli#996/#1001 (the 722320a1 re-vendor): the dict went 31 -> 11
     # entries here, 20 retired, 0 added (tan-cli#1001 review correction --
     # an earlier revision of this comment said "eight entries retired" and
@@ -1698,13 +1716,13 @@ DELIBERATE_EDITS: dict[
         "(iot/E1M-AEN801/prj.conf:4 in the review's line numbering)",
         un_edit_iot_prj_conf_workflow_pointer,
     ),
-    ("iot", "E1M-AEN801", "prj.conf", "fleet_ota_pointer"): (
-        "tan-cli#1009: iot's prj.conf migration-note bare "
-        "examples/connectivity/iot-fleet-ota/prj.conf mention -- the "
-        "reviewer's own iot/E1M-AEN801/prj.conf:18 finding, own entry from "
-        "the workflow_pointer fix above, a different paragraph",
-        un_edit_iot_prj_conf_fleet_ota_pointer,
-    ),
+    # `fleet_ota_pointer` (the sibling of `workflow_pointer` above, same
+    # file, its migration-note paragraph) is RETIRED as of tan-cli#1275:
+    # alp-sdk#2173 replaced the whole mbedtls-workaround paragraph this
+    # edit targeted with a new one describing the PSA-crypto root fix (see
+    # the retirement note above `DELIBERATE_EDITS`'s opening entries) --
+    # the paragraph naming `examples/connectivity/iot-fleet-ota/prj.conf`
+    # no longer exists in the live emit at all.
     ("multicore-mailbox", "E1M-AEN801", "board.yaml", "e1m_modules_pointer"): (
         "tan-cli#1009: multicore-mailbox's board.yaml bare "
         "metadata/e1m_modules/E1M-AEN801.yaml mention -- the reviewer's own "
@@ -1944,16 +1962,20 @@ def self_check() -> None:
     by one, and this script is already named there."""
     link = "https://github.com/alplabai/alp-sdk/blob/{}/docs/x.md"
     assert un_edit_doc_link_ref(link.format("v0.15.0-rc1")) == link.format("v0.15.0")
-    assert (
-        un_edit_iot_extra_conf_order(
-            "# why\n# more why\nlist(PREPEND EXTRA_CONF_FILE ${_alp_generated})\n"
-        )
-        == "list(APPEND EXTRA_CONF_FILE ${_alp_generated})\n"
-    )
+    # tan-cli#1275: `un_edit_iot_extra_conf_order`'s own former fixture here
+    # (a regex-`.sub`-based transform, not a plain constant pair) was
+    # retired from DELIBERATE_EDITS in the same change that removed this
+    # function -- alp-sdk#2173 dropped the `native_sim.conf`/PREPEND
+    # mechanism it existed to un-edit. `un_edit_doc_link_ref` immediately
+    # above is the precedent for keeping a retired transform's OWN
+    # mechanics-only round-trip proof (see its docstring); this one had no
+    # such round-trip separate from its registration, so it is gone
+    # entirely rather than kept half-alive.
 
-    template, sku, path = "iot", "E1M-AEN801", "CMakeLists.txt"
-    edit_id = "extra_conf_order"
-    emitted = "list(APPEND EXTRA_CONF_FILE ${_alp_generated})\n"
+    template, sku, path = "minimal", "E1M-AEN801", "board.yaml"
+    edit_id = "workflow_pointer"
+    emitted = _MINIMAL_DIAGNOSTICS_BOARD_YAML_WORKFLOW_POINTER_EMITTED
+    edited = _MINIMAL_DIAGNOSTICS_BOARD_YAML_WORKFLOW_POINTER_EDITED
     assert (template, sku, path, edit_id) in DELIBERATE_EDITS
 
     # A declared edit that is no longer there FAILS instead of passing quietly
@@ -1964,7 +1986,7 @@ def self_check() -> None:
 
     # ...and a declaration excuses ONLY the edit it describes: an unrelated
     # change in the same file survives the un-edit and reaches `diff_trees`.
-    drifted = "stray line\n# why\nlist(PREPEND EXTRA_CONF_FILE ${_alp_generated})\n"
+    drifted = "stray line\n" + edited
     as_emitted, failures = undo_declared_edits(template, sku, {path: drifted})
     assert not [f for f in failures if f.startswith(f"{path}:")], failures
     assert diff_trees({path: as_emitted[path]}, {path: emitted}) == [f"{path}: content differs"]
@@ -2171,8 +2193,6 @@ def self_check() -> None:
          _DIAGNOSTICS_PRJ_CONF_WORKFLOW_POINTER_EMITTED),
         ("iot", "E1M-AEN801", "prj.conf", "workflow_pointer",
          _IOT_PRJ_CONF_WORKFLOW_POINTER_EMITTED),
-        ("iot", "E1M-AEN801", "prj.conf", "fleet_ota_pointer",
-         _IOT_PRJ_CONF_FLEET_OTA_POINTER_EMITTED),
         ("multicore-mailbox", "E1M-AEN801", "board.yaml",
          "e1m_modules_pointer",
          _MULTICORE_MAILBOX_BOARD_YAML_E1M_MODULES_POINTER_EMITTED),
@@ -2324,10 +2344,6 @@ def self_check() -> None:
          _MINIMAL_README_EXAMPLE_POINTERS_EMITTED),
         ("minimal", "E1M-V2N101", "README.md", "example_pointers",
          _MINIMAL_README_EXAMPLE_POINTERS_EMITTED),
-        ("iot", "E1M-AEN801", "README.md", "native_sim_conf_link",
-         _IOT_AEN801_README_NATIVE_SIM_CONF_LINK_EMITTED),
-        ("iot", "E1M-AEN801", "README.md", "native_sim_conf_copy_comment",
-         _IOT_AEN801_README_NATIVE_SIM_COPY_COMMENT_EMITTED),
         ("multicore-mailbox", "E1M-AEN801", "board.yaml", "zephyr_drv_pointer",
          _MULTICORE_MAILBOX_BOARD_YAML_ZEPHYR_DRV_POINTER_EMITTED),
         ("multicore-mailbox", "E1M-AEN801", "README.md", "peer_main_link_pointer",
@@ -2349,18 +2365,16 @@ def self_check() -> None:
     # friends), so its pre-existing un-filtered "any failure" assert could
     # in principle pass on one of THEIR failures rather than its own (the
     # exact class this round's reason-string-filter discipline exists to
-    # catch). `deepx_v2m_note`'s pair and `extra_conf_order` are each the
-    # only entry on their own path, so were never vacuity-exposed -- re-
-    # proven here anyway, for uniformity, so all 45 entries the table still
-    # carries after tan-cli#1151's seventeen retirements share the same
-    # reason-filtered proof rather than two different proof shapes.
+    # catch). `deepx_v2m_note`'s pair was the only entry on its own path,
+    # so was never vacuity-exposed -- re-proven here anyway, for uniformity.
+    # (`extra_conf_order`, the other single-path entry this comment used to
+    # name, retired at tan-cli#1275 -- see the primary mechanism-demo note
+    # near the top of this function.)
     for template, sku, path, edit_id, emitted in (
         ("edge-ai", "E1M-AEN801", "board.yaml", "deepx_v2m_note",
          _EDGE_AI_AEN801_BOARD_YAML_DEEPX_NOTE_EMITTED),
         ("edge-ai", "E1M-AEN801", "README.md", "deepx_v2m_note",
          _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED),
-        ("iot", "E1M-AEN801", "CMakeLists.txt", "extra_conf_order",
-         "list(APPEND EXTRA_CONF_FILE ${_alp_generated})\n"),
     ):
         _, mut_failures = undo_declared_edits(template, sku, {path: emitted})
         reason, _ = DELIBERATE_EDITS[(template, sku, path, edit_id)]
