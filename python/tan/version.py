@@ -55,4 +55,22 @@
 # `X.devN` as "before X", so neither an actual rc2 nor the eventual 0.6.0 is
 # guaranteed by this string, only that both sort above it. CHANGELOG home is
 # `## [0.6.0] — Unreleased`, per `release_target()`.
-TAN_VERSION = "0.6.1-rc1.dev0"
+#
+# 0.6.1 RELEASE BUMP. The three prior notes above all record the same recurring
+# defect -- a development tree carrying a PUBLISHED tag's exact version -- and
+# are about moving OFF a released number. This one is the other direction: the
+# `.dev0` tail comes off because this tree is what `v0.6.1` will name. Per
+# `release_target()` a releasable version is its own CHANGELOG section verbatim,
+# and `## [0.6.1]` already exists (the 204 `changelog.d/` fragments were folded
+# into it in this same change), so no heading moves.
+#
+# The tag is NOT pushed by this change, deliberately. `release.yml`'s `build`
+# job is `needs: [verify-version, gates, python-gates]`, and `python-gates`
+# calls `parity.yml` with `python_only: true`, whose `release-sdk-parity` job
+# byte-compares tan's renders against alp-sdk's `releases/latest`. That is
+# `v0.16.0` today, against which `tests/parity/scaffold_byte_parity.py` exits 1
+# (8 of 10 trees, 23 files -- measured 2026-09-17). A tag pushed now would fail
+# `python-gates`, never reach `build`, and publish ZERO assets under an
+# immutable tag -- the exact shape `release.yml:300`'s own comment warns about.
+# tan-cli#1258 tracks the alp-sdk release that clears it; tag after that lands.
+TAN_VERSION = "0.6.1"

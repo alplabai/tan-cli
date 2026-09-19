@@ -39,6 +39,11431 @@ All notable changes to `tan` are documented here. Format follows
   probably already gone, though no run since has had a diff to prove the
   `gh pr create` path clean again. tan-cli#770.
 
+- **A build plan's own warnings now reach `issues[]` and text output, not just
+  `data.warnings`.** `plan.warnings` had exactly one sink -- the JSON
+  envelope's `data.warnings` -- so the message that explains WHY a build
+  produced nothing was invisible to a human reading the terminal and to a
+  consumer branching on `issues[]`. Measured on `E1M-AEN301`, a SKU
+  `tan presets` lists: `tan init` rc=0, `tan validate` rc=0 `clean`, then
+  `tan build` rc=1 whose complete text output was four lines whose only
+  cause-bearing words were ``slice `m55_hp` has no command``, while
+  `data.warnings` held "SoM 'E1M-AEN301' core 'm55_hp' wants Zephyr board
+  'alp_e1m_aen301_m55_hp', which has no tree under `zephyr/boards/alp/` --
+  board bring-up for this target has not happened yet."
+
+  Each warning is promoted to one `build.plan-warning` issue carrying the
+  warning's own code, its optional `coreId` and its message. ONE registered
+  code for every warning rather than `build.<the warning's code>`: the plan's
+  warning codes are a deliberately OPEN set, and `contract/issue-codes.json`
+  is a closed registry a consumer matches with `===`, so per-code minting
+  would emit unregistered codes the moment the planner adds one. Text mode
+  needed no separate change -- `_print_text_issues` already prints every
+  surviving issue, and the tan-cli#746 dedup only drops a message that ENDS
+  WITH a slice's own `reason`, which a warning's text does not.
+
+  This is the third door on a silence class already closed twice, for
+  `build.missing-tool` (tan-cli#283, widened by tan-cli#801) and
+  `build.cross-drive-workspace` (tan-cli#697). Both promoters match a
+  missing-tool marker, so a warning that is not about a missing tool was
+  outside the pattern.
+
+  `tan build --plan-from`'s recap also expands warnings again instead of
+  counting them. That restores parity with the retired Rust oracle's
+  `summarize_plan` (`crates/tan-core/src/build_plan.rs:358`, read at
+  `2883cdf^` -- `crates/` was deleted by tan-cli#269/#601), which printed
+  `warnings: 0` when empty and otherwise one `- [code] coreId: message` line
+  per entry; the port printed only `warnings: {n}`. Two sibling divergences
+  in that same recap are NOT fixed here and stay recorded on tan-cli#1000:
+  it still counts shared artefacts instead of listing their paths, and its
+  slice line has no slot for the command the oracle printed (or for the
+  literal `(no command)` the oracle printed in its place).
+
+- **`planner-resync.yml` no longer force-pushes `auto/planner-resync` over a
+  commit the automation did not write.** The workflow's own PR body tells a
+  human "NEEDS A HUMAN -- part of this re-sync could not be applied" and
+  lists hand-ports to do by hand on that branch; someone did exactly that on
+  PR #996, and the very next scheduled run force-pushed `dev` + one fresh
+  machine commit over it, silently destroying 1096 insertions across 15
+  files (recovered only because GitHub had not yet garbage-collected the
+  unreachable commit). `python/scripts/planner_resync_branch_guard.py` now
+  inspects `origin/auto/planner-resync`'s full commit range before any push:
+  a branch carrying only automation-authored commits (or that does not exist
+  yet) is force-pushed as before, but a branch carrying so much as one
+  commit whose AUTHOR pair OR whose COMMITTER pair is outside the
+  automation's own git identity is left completely untouched and the
+  proposal is opened against a diverted `auto/planner-resync-<sdk-short-sha>
+  [-N]` branch instead -- the guard re-checks that diverted name too, rather
+  than trusting its own escape hatch blindly. Checking both identity halves
+  (not author alone) closes a second way PR #996's loss could recur: a human
+  folding hand-port work into the automation's own commit via `git commit
+  --amend` or an `--autosquash` `fixup!` rebase keeps the automation's author
+  identity and changes only the committer, which an author-only check reads
+  as safe. The scan covers the branch's FULL history, not just the tip, so a
+  human commit sitting behind a later automation commit is still protected.
+  The push itself is now `git push --force-with-lease=<branch>:<the sha the
+  guard actually inspected>` rather than a bare `-f`, so a commit landing on
+  `origin/<branch>` in the window between the guard's check and the push
+  (this step's own `git config`/`checkout -B`/`add -A`/`commit` all run in
+  between) is caught by the push rather than silently overwritten. On a
+  cascaded diversion (this run's own primary branch AND an earlier run's
+  diversion target both already occupied), the PR body now names every
+  occupied branch and the commit protecting it, not just the first, and a
+  diverted run now emits a `::warning::` annotation so the finding is visible
+  even when the job otherwise goes green. The PR body still states plainly,
+  in the "What a human must do" section, that hand-port work belongs on a
+  branch of the reviewer's own -- the wording that invited the original loss.
+
+- **`tan model check` now reports a malformed SoM preset YAML as a
+  validation failure, not an internal one.** `resolve_targets()`'s
+  `preset = yaml.safe_load(...)` read had no `isinstance(preset, dict)`
+  guard before the very next line bare-subscripted it (`preset["silicon"]`),
+  twenty lines before the same function applies exactly that guard to
+  `host_soc` and raises a curated `ValueError`. Measured on the unguarded
+  code: a bare-list preset raised `TypeError: list indices must be integers
+  or slices, not str`; a bare-scalar preset raised `TypeError: string
+  indices must be integers, not 'str'`. Both shapes now raise `ValueError:
+  malformed SoM preset at <path>: expected a YAML mapping, got <type>`
+  instead, matching the `host_soc` guard's message register. The citable
+  behaviour change is `tan model check`: it moves from exit `5`
+  (`model.internal-failure`, `ExitCode.INTERNAL_FAILURE`) to exit `2`
+  (`model.check-sku-unresolved`, `ExitCode.VALIDATION_FAILURE`) for this
+  input. `tan model build` still exits `3` under `model.build-failed` for
+  the same input either way -- only its error message text changes, from a
+  raw `TypeError` to the curated `ValueError` above.
+
+- **`ethos_u` compiler adapter: `req_sram_kib`'s `Sram_Only` scope is now a
+  documented contract, not an unlabelled gap (tan-cli#1011).** Under
+  `--memory-mode Sram_Only` (every Alif Ensemble part), vela reports a
+  model's const/weights region under `on_chip_flash_memory_used` as a pure
+  bookkeeping rename (`architecture_features.py`: "Changing const_mem_area
+  from Sram to OnChipFlash. This will use the same characteristics as
+  Sram."), and that region really is SRAM0-resident on an AEN module.
+  `_footprint`'s docstring had recorded the resulting gap between
+  `req_sram_kib` (72 KiB, measured on `person_detect_int8.tflite` at
+  `ethos-u85-256`) and the model's real SRAM0 residency (72.0 + 235.265625 =
+  307.265625 KiB) as an unresolved "KNOWN GAP" -- an under-report, framed as
+  something still owed a fix -- with no decision on record for what
+  `req_sram_kib` is contractually supposed to mean.
+
+  It now is: `req_sram_kib` is the tensor **arena** requirement only, and
+  that is correct, not incomplete. The consumer, `e->arena_sram_kib`
+  (`src/backends/inference/alp_model_select.c`), is sourced from the SoC
+  spec's `inference_arena_sram_kib`, whose own schema description
+  (`metadata/schemas/soc-spec-v1.schema.json`) states its scope verbatim:
+  "Usable SRAM budget (KiB) for an NPU tensor arena on this SoC" -- an arena
+  budget, not a whole-model-footprint budget. The const/weights region is
+  not sized by this field on the device side either:
+  `alp_inference_open_alpmodel()` hands it to the engine as
+  `model_data`/`model_size` (`src/common/alp_model_loader.c`), entirely
+  separate from `arena`/`arena_bytes`, and a `Sram_Only` integration
+  provisions its storage independently -- the way
+  `examples/aen/aen-npu-inference-alp/src/main.c` sizes its own
+  `model_sram[NETWORK_MODEL_LEN]` off the blob's own byte length, never off
+  `req_sram_kib`. Summing the two columns into `req_sram_kib` would have been
+  the wrong fix, not merely an unneeded one: both `arena_bytes` and
+  `req_sram_kib` derive from the same `sram_kib` value, so summing would
+  have inflated the scratch-buffer sizing right along with the fit-gate
+  figure, and for a `Shared_Sram`/`Dedicated_Sram*` part whose const region
+  genuinely lands on a different AXI port it would over-report and refuse a
+  board the model actually fits. No arithmetic changed; `_footprint`'s
+  docstring now records the decision and the evidence for it instead of an
+  open question.
+
+  The one customer-facing string this left inconsistent is now fixed too:
+  the `Sram_Only` caveat said "The arena/SRAM figures are unaffected" with
+  no scope qualifier, on the exact path the module's own docstring called an
+  under-report. It now adds that the reported SRAM figure is the tensor
+  arena only, and that the const/weights region -- also SRAM-resident under
+  `Sram_Only` -- is provisioned separately, never folded into it. That scope
+  clause is a CONTRACT about what `req_sram_kib` means, not an artefact of a
+  defaulted profile, so it reaches a fully-specified `Sram_Only` compile too
+  (tan-cli#1021 review), not only the case where vela had to default a
+  system-config or memory-mode flag.
+
+- **`test_planner_resync_pr_step_executes.py` now drives the two everyday
+  `planner-resync.yml` shapes `#1014`'s fix left untested, plus two review
+  nits on the gate itself.** Fixes `#1015`. `#1014` closed a live breakage in
+  the "Open or refresh the proposal PR" step's shell body, but the gate that
+  proved the fix only ever exercised "branch absent" (the first run in a
+  repo's history) and "single-occupancy divert" -- the `occupied_count -eq 1`
+  arm -- so nothing executed either of the two shapes every SUBSEQUENT run
+  actually takes: a "refresh" (`auto/planner-resync` already exists and is
+  automation-owned, forcing a real, non-empty `--force-with-lease` tip
+  instead of the empty one the clean shape always exercises) and the
+  cascaded `credit` loop (`occupied_count >= 2`, reached only when a prior
+  run's own diversion target is ALSO occupied by foreign work). Two new
+  `_run_step` shapes close both, using the same YAML-extraction mechanism
+  the existing gate already uses (`yaml.safe_load` reads the step's `run:`
+  body straight out of `planner-resync.yml`, no embedded copy, so a rename
+  fails loudly rather than silently going stale). Mutation-proved: re-
+  introducing `#1014`'s original bug (writing `protected_commit=` only when
+  something is protected) reds the new refresh-shape test on its own
+  `STEP EXIT` assertion, the same way it already reds the pre-existing
+  clean-run test.
+
+  Two nits from the same review, fixed alongside: the `${{ }}` substitution
+  used to blank every GitHub Actions expression in the PR step's `run:` text
+  indiscriminately (`_GHA_EXPR.sub("TESTVAL", run)`) with no allow-list --
+  exact today (all four expressions are cosmetic `github.*` reads inside an
+  `echo`), but a future load-bearing `${{ steps.*.outputs.* }}` token would
+  silently run as the literal string `TESTVAL` and the gate would keep
+  passing; it now asserts on any expression outside a fixed allow-list, the
+  same posture the sibling `_render_verdict` substitution already takes for
+  the Verdict step. The module also gained the
+  `skipif(shutil.which("bash") is None)` guard every other bash-driving gate
+  in this suite already carries.
+
+  `planner-resync.yml`'s own "Verdict" step comment was also stale: it still
+  described the `rc == 0` arm as reporting a diversion as nothing more than
+  "Re-sync clean (or nothing owed)." even though the same PR that added the
+  comment changed that arm to call out a diversion on its own line.
+
+- **The relocated model engine's tests no longer red-line CI against an
+  alp-sdk pin that predates the metadata they assert on.** `ci.yml`'s
+  `sdk_parity` checkout `ref:` and `parity.yml`'s `PINNED_SDK_TAG` are both
+  `88318e759958529fbbd8fe9d481373681c0fa78d`, which predates every artefact
+  ADR-0028 publishes on the alp-sdk side. Those all land together in
+  `alplabai/alp-sdk#1470`, still open, so there is no post-merge SHA to move
+  the pin to — and twelve tests under `python/tests/model/` were failing
+  against the checkout CI clones rather than skipping against it, on every
+  shard of all three OSes. `tests/conftest.py` now carries four capability
+  predicates in the same discipline as `pytest.importorskip("tflite")`, each
+  naming ONE missing artefact, each firing only when a root IS bound (so the
+  existing `ALP_SDK_ROOT is not set` reason still wins when none is), and each
+  testing for the artefact's PRESENCE rather than for "would this assertion
+  fail" — so none of them can fire once the pin moves:
+  - `npu_toolchain.vela` in `metadata/socs/**` (alp-sdk `fff41087`) — without
+    it `resolve_targets()` yields `vela_memory_mode=None`, tan invokes vela
+    flagless, and `VelaFootprintRefused` fires correctly. Gates two tests in
+    `test_targets.py` and five in `test_build.py`.
+  - `metadata/npu_ops/**`, the committed op-support tables — gates two tests
+    in `test_analyze.py`.
+  - `scripts/alp_model/` still present, i.e. alp-sdk before `ab6968e2`
+    regenerated its three committed C fixtures through the relocated
+    generator and moved their banner to `python -m tan.model._gen_fixture`.
+    Gates the C-HEADER halves only: `test_committed_fixture_matches_generator`
+    is split so its container-BYTE comparison — the strongest half of that
+    cross-repo guard, and identical either side of the relocation — keeps
+    running unconditionally.
+- **`test_vela_yolo_internal.py` no longer accepts a 712-byte toy as the
+  real-model proof.** `_real_int8_models()` globbed `*_int8.tflite` over the
+  bound alp-sdk's fixture directory, and alp-sdk's own 1-operator
+  `tiny_int8.tflite` matches that pattern — so against an SDK pinned before
+  `person_detect_int8.tflite` landed (alp-sdk `4fd5fab5`) the test did not
+  skip, it silently substituted the toy. Measured, flagless
+  `VelaAdapter().compile()` on `ethos-u-vela` 5.1.0: `tiny_int8.tflite` gives
+  `ethos-u85-256` REFUSED (0 KiB SRAM) and `ethos-u55-256`
+  `req_sram_kib=1 / arena_bytes=32`, while `person_detect_int8.tflite` gives
+  `req_sram_kib=73 / arena_bytes=74480` at both. One half of the pair went red
+  for the right reason; the other reported **PASSED** on the toy — and
+  `cutting-a-tan-release`'s release checklist reads exactly that word, per
+  node ID, as its evidence that the real-model proofs ran. The public fixture
+  is now NAMED rather than globbed, so an alp-sdk without it produces a SKIP
+  the releaser has to record instead of a pass nothing can distinguish from
+  the real thing. (This paragraph originally cited a grading recipe -- `-rA`,
+  `grep -c '^PASSED'` MUST be 3 and `grep -c '^SKIPPED'` MUST be 0 -- that the
+  checklist did not then contain and, when it was finally written in
+  alplabai/alp-lab-plugin#65, deliberately did not adopt: `-rA` groups skips by
+  (location, reason), so the two Vela node IDs share one `SKIPPED` line and a
+  fully-skipped run of all three prints 2, not 3. Corrected in tan-cli#785.)
+  The private `alp-sdk-internal` sample-models directory keeps its glob; it
+  holds no toy, and its contents are not this repo's to enumerate.
+
+- **`.alpmodel` manifest decoding now reports a malformed top-level document
+  or a malformed `name`/`src_sha` field as a curated error, not an internal
+  one.** `Manifest.from_json` and `Manifest.from_cbor` bare-subscripted their
+  decoded document (`d["src_sha"]`, `d["name"]`) with no `isinstance(d, dict)`
+  guard -- the same defect class tan-cli#1018 fixed for `resolve_targets()`'s
+  `preset["silicon"]` read. Measured on the unguarded code: a bare-list
+  JSON/CBOR manifest raised `TypeError: list indices must be integers or
+  slices, not str`; a bare-scalar manifest raised `TypeError: string indices
+  must be integers, not 'str'`. Both shapes now raise a curated `ValueError`
+  naming the actual type instead (`malformed .alpmodel manifest: expected a
+  JSON object/CBOR map, got <type>`), reached through
+  `Manifest.from_json`/`from_cbor` directly and through
+  `package.read_manifest_file`/`read_package`, which decode a manifest region
+  off an untrusted `.alpmodel` container.
+
+  A first pass at this guard stopped one field short: `d["name"]` and
+  `d["src_sha"]` were still bare subscripts past the document-level check, and
+  `from_cbor`'s `bytes(d["src_sha"])` didn't even raise for a wrong-typed
+  `src_sha` -- `bytes(int)` zero-fills and `bytes(list[int])` byte-wise
+  constructs, so a manifest whose `src_sha` CBOR major type got corrupted from
+  byte-string to int/list/bool silently produced a `Manifest` carrying an
+  INVENTED source hash with no diagnostic at all. Both `name` and `src_sha`
+  are now required, type-checked fields in `Manifest.from_json`/`from_cbor`,
+  raising the same curated `ValueError` for a missing field, a wrong-typed
+  field, or (in `from_json`) a `src_sha` that isn't valid hex.
+
+  `.alpmodel` packages are machine-generated binary/CBOR artifacts, not
+  hand-authored documents, but `package.py`'s own bounds-checked header reads
+  already treat their bytes as wire data rather than trusted first-party
+  output; a corrupt or truncated top-level document, or a corrupt/missing
+  `name`/`src_sha` field, now fails the same way -- loudly, with a named
+  field and type -- rather than surfacing a raw `TypeError`/`KeyError` a
+  caller cannot distinguish from any other bug in the call stack, or (for
+  `src_sha`) silently fabricating a value. Fields nested deeper in the
+  document (tensor/target/coverage entries) are unchanged by this fix and
+  remain out of scope, the same deferral `#1018`'s own register made for its
+  sibling.
+
+- **A malformed SoM preset no longer crashes `--emit scaffold` with a raw
+  `AttributeError`, at the outer document shape or a nested field.**
+  `tan/planner/template.py`'s `_load_som_doc` (shared by
+  `_default_preset_for_sku`, `_derive_core_renames`, and `_core_board`) had
+  no `isinstance(doc, dict)` guard before its callers' bare
+  `.get(...)` reads. Measured on the unguarded code: a
+  `metadata/e1m_modules/<sku>.yaml` that parses to a bare list raised
+  `AttributeError: 'list' object has no attribute 'get'` from all three call
+  sites. It now raises the module's own curated `TemplateError` --
+  `malformed SoM preset at <path>: expected a YAML mapping, got list` --
+  which `python -m tan.planner_cli --emit scaffold` already catches and
+  prints as `alp-orchestrate: <message>` (exit `1`) instead of letting an
+  uncaught traceback escape. Mirrors the `preset["silicon"]` guard
+  `tan/model/targets.py` gained for `tan model check`/`tan model build`
+  (#1010, #1018).
+
+  A well-formed document whose `default_board:` or `topology:` (or a
+  `topology:` entry) is itself the wrong shape reached the same unguarded
+  bare calls one level in -- `default_board: [a, b]` raised `AttributeError:
+  'list' object has no attribute 'lower'`; a non-mapping `topology:` or
+  `topology.<core>` raised the same class of error from `.items()`/`.get()`
+  in `_derive_core_renames` and `_core_board`. `_default_preset_for_sku` now
+  type-checks `default_board` directly, and a new shared `_topology_for_sku`
+  type-checks `topology:` and every one of its entries for both callers.
+
+- **`tan init` now refuses a `--som` retarget onto a flow-style `som:` block
+  instead of silently discarding it.** `som: {sku: ..., hw_rev: ...}` (valid
+  YAML, but on one physical line) is a shape `tan.core.scaffold`'s
+  line-oriented `som:` reader/writer never parsed. Measured before this fix:
+
+  ```
+  $ cat board.yaml
+  som: {sku: E1M-AEN801, hw_rev: r1}
+  cores:
+  $ tan init --from-example peripheral-io/hello-world --som E1M-NX9101 ...
+  init rc=0, issues: []
+  $ cat copy/board.yaml
+  som: {sku: E1M-AEN801, hw_rev: r1}   # unchanged -- --som silently ignored
+  ```
+
+  Unlike tan-cli#743/#1008, the file stays self-consistent either way (`tan
+  validate` reads the same flow-style-blind `vendored_som`, so there is no
+  init/validate contradiction) -- this was purely a silently-discarded
+  argument. `tan init` now answers `init.som-flow-style-unsupported`
+  (validation failure, exit 2) and writes nothing, naming the unsupported
+  shape and asking for block style (`som:` on its own line, `sku:`/`hw_rev:`
+  indented beneath it) instead. `--from-example`/`--topology` with no `--som`
+  at all are unaffected -- a flow-style `som:` copied through unretargeted is
+  still `ok:true`, since nothing was asked to change.
+
+  Reachability: 0 of the SDK's 100 tracked `board.yaml` files and 0 vendored
+  templates use flow style -- hand-authored only, the same reachability as
+  the spaced/quoted shapes tan-cli#1008 rounds 5-6 fixed. Refusing loudly was
+  chosen over teaching the scanner to parse it: doing so safely needs a real
+  YAML parser, not a seventh line-oriented special case on top of
+  tan-cli#1008's own six-round history of exactly that growth pattern.
+
+- **`tan scaffold` now resolves the project's `board.yaml` instead of never
+  looking at it.** Every run reported `"project":{"root":"<p>","boardYaml":
+  null}` and wrote `// Board context: unavailable` into the generated module
+  source -- including a run that passed `--board-yaml <p>/board.yaml`
+  explicitly, whose own help text promises it "overrides project resolution".
+  Measured on tan 0.6.0 against a project made by `tan init --name proj --som
+  E1M-AEN801 --template zephyr-app`, all four of `--sdk-root <sdk> scaffold
+  --project <p>`, that same run plus `--board-yaml <p>/board.yaml`, the same
+  run with no SDK at all, and `cd <p> && tan scaffold` reported `boardYaml:
+  null`; `tan validate --project <p>` resolved the same file fine, so the file
+  was well-formed and discoverable and `scaffold` specifically did not look.
+  `project.boardYaml` now carries the resolved path (and still reports `null`
+  when there is genuinely no board.yaml -- through `Project.resolved`, so a
+  path that resolved but is not there is not handed to a consumer that would
+  ENOENT on it), and the generated line reads `// Board context: <som.sku> /
+  <os>`.
+
+  It reuses `tan validate`'s own resolver rather than adding a SEVENTH
+  project/board resolver to a repo that already had six
+  (`presets_cmd.resolve_project_paths`, `build_output.resolve_project_context`,
+  `inspect_cmd.resolve_debug_project_context`, `flash_cmd._resolve_project`,
+  `generate_cmd._resolve_board_path`, and validate's own): the function moved
+  verbatim out of `validate_cmd` into the new binding-free
+  `tan.core.board_context`, which both commands now import. The count does NOT
+  go down -- it stays at six, each pinned to a different oracle shape and so
+  distinct by design; what this change avoids is a seventh. `tan.core.
+  board_context`'s module docstring states the criterion the six are counted
+  by, and names `generate_cmd`'s as the one that does not report through
+  `Project.resolved`.
+  A second copy of this generator is exactly what alp-sdk-vscode#601/#633 had
+  just finished deleting -- that copy lost the README's `## Wiring` section and
+  shipped modules that never compiled -- and the extension is explicitly not
+  adding the board read back on its side, so the capability comes from here or
+  from nowhere.
+
+  The read is `board.yaml`-only and resolves no alp-sdk checkout, which
+  `scaffold` has never done and still does not. The consequence is stated
+  rather than hidden: a v2 `board.yaml` that omits `os:` genuinely does not
+  carry one -- alp-sdk's `board.schema.json` says of `cores.<id>.os` that the
+  runtime "is DERIVED from the core's silicon class and is not selectable...
+  Omit `os:` to take that runtime" -- so that half renders `<unset>`, the
+  retired alp-sdk-vscode generator's own spelling for the same case, and is
+  never guessed from a core id. A v1 top-level `os:` (the field that generator
+  read) and a v2 `cores.<id>.os` are both read; `off` is skipped, since it
+  parks a core rather than naming a runtime and, of the 100 example board.yaml
+  files in alp-sdk `v0.16.0` (`eb96112ba`), 53 declare `os:` at all and 51 of
+  those declare ONLY that. Zero carry a top-level `os:`; the two that name a
+  real runtime are `examples/connectivity/modbus-server/board.yaml` and
+  `examples/power-timing/power-managed-sensor/board.yaml`.
+
+  One Windows-only correction rides along, in the resolver that moved.
+  `resolve_board_path` joined the leaf with a hardcoded `/`, which is right
+  only while the root is posix-spelled: on Windows, `tan validate --project
+  C:\w\proj` reported `project.root` as `C:\w\proj` and
+  `project.boardYaml` as the MIXED `C:\w\proj/board.yaml` -- two spellings
+  of one directory in one envelope. The separator now follows the root's own
+  spelling, so `project.boardYaml` is always `project.root` + one separator +
+  the leaf, the invariant `tan build`/`tan presets`/`tan inspect` already
+  satisfy. `project.root` itself is unchanged (it is still the string the
+  caller typed), a root carrying no separator still yields `./board.yaml`
+  byte-identically on every host, and every posix-spelled root is unaffected
+  -- so the committed conformance goldens do not move. `tan validate` on
+  Windows is the other beneficiary; mixed separators were never a contracted
+  spelling. Scoped precisely: validate's `project.boardYaml`,
+  `data.boardYamlPath` and the argv it hands its validator are fixed; its
+  SARIF and LSP `uri` fields carry a filesystem path where those formats
+  require a URI reference, which was invalid before this change and is equally
+  invalid after it -- neither fixed nor broken here, tracked at tan-cli#1097.
+
+  A broken `board.yaml` costs the customer nothing: absent, empty, a
+  directory, non-UTF-8, malformed YAML, a document that is not a mapping, a
+  missing/non-mapping `som`, and a missing/empty/non-string `som.sku` all fall
+  back to `unavailable` and still write the module, and PyYAML failing to
+  import (a stale venv or a broken freeze -- it is a declared BASE dependency,
+  not an optional one) degrades the same way rather than raising.
+
+- **`_slice_post_commands` (`tan/planner/orchestrator.py`) now has direct
+  regression coverage; reverting it to its pre-#550 shape used to leave the
+  whole suite green.** `tests/parity/test_planner_oracle_regression.py` and
+  `tests/parity/test_planner_emit_parity.py` parametrize over the
+  `build-plan.json`/board.yaml corpus, and every slice in it is `zephyr` or
+  `yocto` -- alp-sdk carries zero `os: baremetal` examples, so neither suite
+  can reach the branch that emits `postCommands == [["cmake", "--build",
+  "."]]` for a baremetal slice. A new hermetic planner-level unit test
+  (`tests/planner/test_baremetal_slice_post_commands_coverage.py`) asserts
+  both the baremetal case and the zephyr/yocto/off controls directly, needs
+  no bound `ALP_SDK_ROOT`, and so runs in the default `gates` job rather than
+  only the SDK-bound one.
+
+- **A malformed `metadata/boards/<board>.yaml` no longer crashes `--emit
+  scaffold` with a raw `AttributeError`/`TypeError`, at the outer document
+  shape, the nested `e1m_routes:` field, or a per-section value.**
+  `tan/planner/template.py`'s `_board_route_entries` (shared by
+  `_board_alias_to_entry` and, through it, `_resolve_pin_target`) had no
+  `isinstance` guard at any of three levels before its bare `.get(...)`
+  reads and the iteration over each section. Measured on the unguarded
+  code: a `metadata/boards/<board>.yaml` that parses to a bare list raised
+  `AttributeError: 'list' object has no attribute 'get'` from the outer
+  `.get("e1m_routes")`; a well-formed board document whose `e1m_routes:`
+  field itself is not a mapping raised the same class of error one line
+  deeper, from the per-section `.get(section)`; and a well-formed
+  `e1m_routes:` mapping whose value for one section (e.g. `gpio:`) is not
+  itself a list raised `TypeError: '<type>' object is not iterable` from
+  the flattening comprehension -- all three reachable through
+  `tan ... --template peripheral|sensor|edge-ai --sku E1M-V2N101`. All
+  three now raise the module's own curated `TemplateError` naming the
+  board path (and, for the third, the section) and the actual type,
+  mirroring the `_load_som_doc`/`_topology_for_sku` outer-plus-per-entry
+  guard shape (#1025, #1034).
+
+  `_docs_ref`'s `metadata/sdk_version.yaml` read gains the same
+  `isinstance(dict)` guard, degrading to `main` (as a missing/unreadable
+  file already does) rather than raising `AttributeError: 'list' object has
+  no attribute 'get'` on a bare-list document -- a README doc-link decision
+  is not a fatal scaffold input.
+
+- **`Manifest.from_cbor` now enforces `MANIFEST_SCHEMA_VERSION`, the same way
+  `Manifest.from_json` already did.** Measured on the unguarded code:
+  `from_cbor(cbor2.dumps({"v": 99, ...}))` did not raise -- a `v: 99`
+  document was silently parsed as though it were v1 -- while
+  `from_json('{"v": 99, ...}')` correctly raised `ValueError: unsupported
+  manifest version 99; expected 1`. CBOR is the PRODUCTION reader path for
+  `.alpmodel` packages, so the stricter check sat on the path that matters
+  less: a future manifest version read by an older `tan` would have been
+  parsed as v1 rather than refused, and field meanings can change between
+  versions, so this was the silent-wrong-value class rather than a crash --
+  the same shape as tan-cli#1023's `bytes(int)` `src_sha` fabrication.
+
+  The fix routes both `from_json` and `from_cbor` through the same
+  `Manifest.from_dict`, which is now the one place the version check (and
+  the nested-decode guard from tan-cli#1040) lives, rather than duplicating
+  either check per reader.
+
+- **A wrong-typed or incomplete `inputs`/`outputs`/`targets`/`coverage`
+  element in a `.alpmodel` manifest now raises a curated error naming the
+  list, the element's index and the missing field, instead of a raw
+  `TypeError` out of `Tensor`/`Target`/`Coverage`'s constructor.** Measured
+  on the unguarded code: `inputs=['abc']` raised `TypeError:
+  Tensor.__init__() missing 5 required positional arguments`, and an
+  incomplete `targets[]` entry raised the same shape naming up to 7
+  arguments -- on both `Manifest.from_cbor` (`_pick`-based) and
+  `Manifest.from_json` (a bare `Tensor(**t)`, which failed even earlier, on
+  the `**` unpack itself, for a non-mapping element). Deliberately deferred
+  out of tan-cli#1023's top-level-document fix, and filed once no issue yet
+  existed for the deferral (tan-cli#1023 review round 2).
+
+  Reuses `_required_field` (added by tan-cli#1023, extended with an optional
+  `context` for "which nested element") through a new `_decode_list_field`
+  helper both readers now call via `Manifest.from_dict` -- the same shared
+  check proven genuinely shared the same way #1023's was: mutating
+  `_required_field`'s body reds 10 pre-existing top-level tests (4 JSON-side
+  + 6 CBOR-side) plus every new nested-element test, across both reader
+  paths.
+
+  Sweeping `manifest.py`/`package.py` for the rest of this class surfaced one
+  further gap, deferred to tan-cli#1045 as a separate defect shape (bounds
+  checking a binary offset/length against a buffer, not a nested dataclass
+  decode): `package.read_package` doesn't bounds-check the manifest/blob
+  regions against the buffer the way `read_manifest_file` already does,
+  so a corrupted offset/length silently returns wrong or truncated bytes
+  instead of raising.
+
+- **`tan init --som` no longer silently discards itself on a quoted `som:`
+  key, a merge key, an alias, or a `som:` block written across more than one
+  line.** Fixes `#1041`. `tan.core.scaffold`'s line-oriented `som:` scanner
+  read a bare `som:` line and its literal `sku:`/`hw_rev:` children, but
+  `yaml.safe_load` accepts several more spellings without complaint:
+  `"som":` (a quoted key), `<<:` (a merge key, inside the `som:` block or at
+  the document root), `som: *base` (an alias), and a flow mapping whose `{`
+  opens on the line AFTER `som:` rather than on it (with or without a
+  leading comment or `&anchor`). Every one of these gave `exitCode 0`,
+  `issues: []`, and a `board.yaml` `--som` never touched — the same silent
+  discard `#1029` closed for the same-line flow shape.
+
+  A quoted `som:`/`"som":` key now retargets **correctly**: the shared
+  `top_level_key_name` rule both the reader (`vendored_som`) and the writer
+  (`retarget_board_yaml_som`) route through unquotes it before either ever
+  sees the line, so a perfectly ordinary literal `sku:` line beneath it
+  still gets found and rewritten. The other three shapes **refuse loudly**
+  instead — a new `UnreadableSomBlockError` (a `SomBlockUnsupportedError`
+  sibling of `FlowStyleSomError`, both now caught at the same three
+  `init_cmd.py` sites) fires whenever `vendored_som` recognises a `som:`
+  entry but finds no literal `sku:` line nested beneath it: an alias or an
+  un-overridden merge key leave no `sku:` line to find at all, and a
+  multi-line flow mapping's own child line never matches the `sku:` shape
+  the scanner looks for. A merge key **with** an explicit `sku:` override
+  alongside it still retargets correctly, unaffected — YAML's own override
+  rule (an explicit key beats a merged one) means the literal `sku:` line
+  the writer needs was already there. New `init.som-block-unsupported`
+  issue code, distinct from `init.som-flow-style-unsupported`, for the
+  `--from-example`/`--topology` path.
+
+  Reachability, measured at `PINNED_SDK_TAG`: 0 of 100 tracked `board.yaml`
+  files and 0 of 10 vendored templates use any of these six spellings —
+  hand-authored only, the same as every prior round of this defect class
+  (`#1008`, `#1029`, `#1035`).
+
+- **The rest of the planner's `os: baremetal` branch family now has direct
+  regression coverage, not just `_slice_post_commands`.** tan-cli#1036 closed
+  that one function; the same structural blind spot covered eight more sites,
+  and reverting any of them left the whole suite green. The two parity suites
+  (`tests/parity/test_planner_emit_parity.py`,
+  `tests/parity/test_planner_oracle_regression.py`) are the only non-unit
+  route to every one of them, and neither can reach a baremetal arm: alp-sdk's
+  pinned tree carries zero `os: baremetal` board.yaml examples across all 99,
+  and all 213 slices in the `build-plan.json` fixtures are `zephyr` or
+  `yocto`. Two new hermetic planner-level modules --
+  `tests/planner/test_baremetal_command_and_flash_coverage.py` (orchestrator:
+  `_slice_flash_recipe`'s `baremetal_cmake_flash` recipe, `_slice_command`'s
+  `cmake -S <app> -B .` construction with `--no-warn-unused-cli`,
+  `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`, the multi-config-safe
+  `-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=$<1:...>` and both `-D` fan-ins, plus
+  `_baremetal_output_dir` / `_baremetal_cache_args` /
+  `_baremetal_project_include` / `_baremetal_project_include_arg`) and
+  `tests/planner/test_baremetal_plan_emit_coverage.py` (`buildplan`'s
+  `_slice_config_artefact` both ways round, `_slice_artifacts`' `outputDir`,
+  `validate._enforce_loader_rules`' "os: baremetal requires `app:`" refusal,
+  and the `postCommands` emit site that consumes `_slice_post_commands`) --
+  assert every one of them verbatim against a synthetic `BoardProject`, each
+  with a non-baremetal control so a hard-coded constant cannot pass. Neither
+  needs a bound `ALP_SDK_ROOT`, so both run in the default `gates` job rather
+  than only the SDK-bound one.
+
+- **`model.package.read_package` now bounds-checks the manifest, blob-table
+  and per-blob regions against the buffer before slicing them.** Fixes
+  `#1045`. Unlike its file-based sibling `read_manifest_file` (which already
+  bounded `mft_off`/`mft_len` against the real file size), `read_package`
+  sliced `raw[mft_off:mft_off + mft_len]` and, per blob-table entry,
+  `raw[off:off + length]` directly with no check against `len(raw)` -- Python
+  slicing past the end of a buffer does not raise, it silently truncates
+  (`b"AB"[0:999999] == b"AB"`). A corrupted or adversarial offset/length now
+  raises a `ValueError` naming the region and the byte count involved instead
+  of returning an empty or truncated blob with no diagnostic.
+
+- **`.alpmodel` manifest decoding now type-checks every required nested
+  `Tensor`/`Target`/`Coverage` field, not just its presence.** Fixes `#1049`.
+  `#1040`'s nested-element guard called `_required_field(elem, field_name,
+  object, "present", ...)` -- `object` accepts any value, so a well-formed
+  element carrying a wrong-typed value (`{"dtype": 5, "rank": "nope", "shape":
+  None, ...}`) was silently accepted as `Tensor(dtype=5, rank='nope',
+  shape=None, ...)`. `Target.arena` and `requires["sram_kib"]` are exactly the
+  figures `src/backends/inference/alp_model_select.c`'s fit gate reads, so a
+  wrong-typed value there was the silent-wrong-answer class, not a crash.
+  `_decode_list_field` now takes a per-field `(expected type, type_desc)` map
+  and reuses it on both the JSON and CBOR reader paths, plus an optional
+  `nested_types` map so `requires["sram_kib"]` -- one level under `Target`'s
+  own `requires: (dict, "a mapping")` entry -- gets the same real type check,
+  not just its container. The type check itself now also rejects `bool`
+  wherever it names `int`: Python's `bool` is an `int` subclass
+  (`isinstance(True, int)` is `True`), so `arena=True` /
+  `requires={"sram_kib": True}` would otherwise still decode silently and
+  re-emit on the wire as CBOR byte `0xf5` (major type 7, "true"), not an
+  unsigned int, at the exact figures the fit gate reads. The `bool` guard
+  lives in the shared `_required_field` checker, so every current and future
+  `(int, ...)` field inherits it.
+
+- **`release-combination.yml`'s consumer-pin leg now reads BOTH of
+  alp-sdk-vscode's branches, so the pin it actually SHIPS is tested too.**
+  tan-cli#767's `resolve-consumer-pin` fetched `SUPPORTED_CLI_VERSION` off
+  alp-sdk-vscode's `dev` branch alone. `dev` is structurally the one branch
+  whose pin cannot stay diverged from tan's own `latest` -- it moves to the
+  newest pin as soon as one is cut -- so the skip condition
+  (`pin == latest`) fired on every scheduled run and the leg #767 added
+  executed on no day at all. Meanwhile `main` carried the pin shipped to
+  users and was read by nothing: measured 2026-08-31, `dev` = `0.6.0`
+  (== `latest`) while `main` = `0.5.1`, and PR #1047's own dispatched proof
+  (run 33397989209) shows `v0.5.1` x alp-sdk `v0.16.0` is RED on both
+  buildable SKUs -- `tan build` fails with `build.slice-failed` on
+  `E1M-AEN801` and `E1M-V2N101`. A gate that never ran, hiding a shipped
+  combination that was broken.
+
+  `resolve-consumer-pin` now resolves `SUPPORTED_CLI_VERSION` from BOTH
+  `alp-sdk-vscode@dev` and `@main`, dedups the two pins against the version
+  the `latest` leg will actually install, and emits the survivors as a JSON
+  array `build-matrix` fans across the SKU catalogue -- the journey runs
+  **once per distinct tan version**, never twice for the same binary. All
+  three equal (the common day) leaves no extra leg and keeps #767's loud
+  `::notice::` skip; both branches agreeing but differing from `latest`
+  gives ONE leg credited to both (`consumer-pin-dev+main`); all three
+  differing gives TWO (`consumer-pin-dev` and `consumer-pin-main`).
+
+  A fetch or grep that fails on **either** branch is a hard `::error::` and a
+  non-zero exit that fails the whole job, naming the branch -- never a silent
+  skip of just the branch that failed. Continuing on a partial pin set would
+  recreate this defect exactly: a leg that does not run, hiding a shipped
+  combination. Both pipelines keep the `|| true` + explicit emptiness check
+  that stops a legitimately-empty `grep` from being killed by `pipefail`
+  before it can produce that deliberate error (tan-cli#1013).
+
+  That verdict is fatal for the whole job -- including tan-cli#639's `latest`
+  axis, which has nothing to do with the consumer pin -- so both fetches now
+  run with `--retry 3 --retry-connrefused`. A 404 or a renamed constant is
+  real signal and still fails fast (curl does not retry a 404); a transient
+  raw.githubusercontent.com blip is not signal, and reading two branches
+  instead of one would otherwise have doubled the daily run's exposure to it.
+
+  New gate `python/tests/gates/test_release_combination_consumer_pin.py`
+  executes the job's own `run:` body under a stubbed `curl`/`gh` and asserts
+  every dedup case and every failure verdict on the real emitted output --
+  this workflow is `schedule`/`workflow_dispatch` only, so no PR run can
+  exercise it and nothing else in the suite covered it. Still not a required
+  PR check, same reasoning as tan-cli#639/#767.
+
+- **`tan sdk remove` now says so when it leaves a workspace's `.alp/sdk-path`
+  pin dangling, instead of an envelope indistinguishable from a workspace
+  that was never pinned.** Fixes `#1051`. `sdk remove` deletes the install a
+  project pin names but never touches the pin file, so after `--force` the
+  pin points at a path that is gone -- and `data.resolvesToAfter`
+  (tan-cli#1028) reported `sourceTier: "none"`, which is also exactly what an
+  unpinned workspace reports. Measured: the removal came back `issues: []`,
+  while `tan sdk current` in that same directory a moment later carried
+  `sdk.project-pin-unresolved` naming the dangling pointer. Two commands
+  disagreeing about one workspace was the defect.
+
+  `sdk remove` now carries a `sdk.project-pin-unresolved` warning on its own
+  `issues[]`, from the same `project_pin_issue` helper `sdk current` uses,
+  applied to the SAME `resolve_sdk_tiered` result the `resolvesToAfter`
+  payload is built from -- one resolution, one rule, no second copy to drift.
+  It reaches EVERY branch (refusal, idempotent no-op, removal failure,
+  success), because a dangling pin is a fact about the workspace rather than
+  about whether this particular call deleted anything. On a refusal it follows
+  the refusal, so `issues[0]` still names what blocked the removal.
+
+  It is NOT always byte-identical to the issue `sdk current` emits, and is not
+  claimed to be. `remove`'s warning names `resolvesToAfter`'s own NARROW tier,
+  while `sdk current` falls through to the wide discovery ladder
+  (tan-cli#497). In a workspace with a child `<ws>/alp-sdk`, measured at the
+  same instant: `remove` says "falling through to the none tier instead",
+  `current` says "falling through to the discovery tier instead". That
+  divergence is inherited from `resolvesToAfter`, which has reported the
+  narrow ladder since tan-cli#1028 so that what `remove` reports comes from
+  the same ladder its own refusal consulted. Widening only the warning would
+  make one envelope say `"none"` in `data` and "discovery" in `issues[]`;
+  widening both would change a released field. What tan-cli#1051 asked for,
+  and what now holds, is that `sdk remove` no longer stays SILENT about a pin
+  `sdk current` warns about.
+
+  Deliberately REPORTING, not repair: clearing `.alp/sdk-path` was the other
+  option and is rejected. `--force` on `remove <version>` is consent to
+  delete that install, not to rewrite a workspace config file the caller
+  never named, and `sdk remove`'s whole design is that the only thing it
+  writes to is the target itself. Repair would also be structurally partial
+  -- `remove` can only reach the one workspace it ran in, while every other
+  project on the host pinned at the same install stays dangling either way.
+
+- **`--emit scaffold` no longer crashes with a raw traceback on a malformed
+  template example `board.yaml`, and the guard the last four rounds kept
+  re-writing is now one shared rule.** Fixes `#1052`.
+  `tan/planner/template.py::render_to_envelope` read the catalog template's
+  own `examples/<...>/board.yaml` through four bare `.get(...)`/`list(...)`
+  calls with no `isinstance` guard at any of them — the FIFTH sibling of the
+  malformed-YAML family `#1025` → `#1034` → `#1037`/`#1048` had already swept
+  twice, one document over each time. All four are reachable from ONE
+  command. Re-derived on the pre-fix tree with
+  `--emit scaffold --template peripheral --sku E1M-V2N101`, against a
+  `metadata/` + `examples/peripheral-io/gpio-button-led/` copy whose only edit
+  is the field named:
+
+  ```
+  <the whole doc> = "- one\n- two\n"
+      -> AttributeError: 'list' object has no attribute 'get'   template.py:1542
+  cores: 3
+      -> AttributeError: 'int' object has no attribute 'keys'   template.py:1542
+  som: 3
+      -> AttributeError: 'int' object has no attribute 'get'    template.py:1543
+  pins: 3
+      -> TypeError: 'int' object is not iterable                template.py:1551
+  ```
+
+  `pins:` (`:1551`) is the site the issue names — `list(example_doc.get("pins")
+  or [])`, the same `or []`-then-iterate shape `#1048` guarded for
+  `e1m_routes.<section>`. The other three were found by sweeping the whole
+  function instead of fixing only the named line, which is what every previous
+  round of this family did and why each was followed by another. A fifth read,
+  `preset:`, never raised a raw exception but produced an untrue curated
+  message (measured: `preset: [a]` → `no metadata/boards/['a'].yaml for board
+  ['a']`, which reads as a missing file rather than a malformed field); it is
+  guarded too, so the function has no unguarded `board.yaml` read left.
+
+  The sweep also found that `pins:` had a QUIETER half than the `TypeError`
+  the issue names: `str` and `dict` are both iterable, so `pins: E1M_GPIO_IO4`
+  iterated the string character by character and `pins: {e1m: ...}` iterated
+  its keys — feeding `_derive_pin_renames` garbage rather than refusing at
+  all. One `isinstance(..., list)` rule closes both halves.
+
+  **The guards are a shared register, not a sixth hand-written block.**
+  `_require_mapping_doc` (outer document) and `_require_field` (one level in)
+  now serve all three documents this module reads — the SoM preset
+  (`metadata/e1m_modules/<sku>.yaml`), the board metadata
+  (`metadata/boards/<board>.yaml`) and the template example `board.yaml` —
+  across nine call sites. The message register `#1034`/`#1048` landed is
+  preserved byte for byte: this de-duplicates it, it does not re-word it, and
+  all 35 pre-existing tests in `test_load_som_doc_malformed_preset.py` /
+  `test_board_route_entries_malformed_board.py` / `test_docs_ref_tag_
+  resolution.py` pass unchanged. Two register-consistency tests assert the
+  sharing directly, so a future hand-rolled copy of the block is a red rather
+  than a silent divergence.
+
+  **Falsy but illegal is refused, not silently emptied.** The three example-
+  `board.yaml` reads normalise `None` only (`[] if raw is None else raw`),
+  never the `raw or []` the sibling documents use. `or` collapses *every*
+  falsy value, so the first cut of this fix refused `pins: 3` and `pins: true`
+  while `pins: 0`, `pins: false`, `pins: ''` and `cores: 0` rendered silently
+  — an unpinned asymmetry of exactly the shape every previous round of this
+  family was filed about. The sibling documents keep the opposite behaviour on
+  purpose: `topology: 0` / `e1m_routes.gpio: 0` still degrade to empty, which
+  is `#1048`'s own recorded decision and is pinned by a live test
+  (`test_a_falsy_scalar_section_value_still_degrades_silently`); changing it
+  would be a behaviour change to two documents `#1052` does not name.
+
+  **Not stricter than the schema.** `metadata/schemas/board.schema.json` gives
+  `pins:` `"type": "array"` with no `minItems`, so `pins: []` still renders, as
+  do an absent or explicitly-`null` `pins:` and an empty `cores: {}`. Two
+  further empty-container cases (`som: {}`, an absent optional `preset:`) do
+  still fail the render — but on `_substitute_board_yaml_sku`'s pre-existing
+  "exactly one `som.sku:` / top-level `preset:` line" rule and on the empty
+  `som.sku`, neither of which is a type check; that distinction is asserted
+  explicitly rather than assumed.
+
+  Two of the guards are, honestly, **new refusals of previously-rendering
+  input** rather than re-wordings of an existing error — the falsy-illegal
+  scalars above, and a non-string `preset:` in a document with no `pins:` key
+  (re-driven against `origin/dev`: with no `pins:`, `source_preset` was never
+  consulted, so `preset: [a]` rendered and discarded the malformed value; the
+  `no metadata/boards/['a'].yaml` message this entry quotes reproduces only
+  *with* a `pins:` block). Both are schema-correct — `preset:` is `"type":
+  "string"` — and both are asserted as their own separate cases rather than
+  folded into the re-wording claim.
+
+  The same sweep enumerated a sixth document, `metadata/templates/
+  catalog-v1.json`, which is `json.loads`-ed unguarded and bare-subscripted at
+  16 sites. Left out of this change deliberately — a different decode with a
+  `KeyError` rather than a shape failure, and not named by `#1052` — and filed
+  as `#1077` rather than left in a PR body.
+
+  Mutation-proven, byte-copy restore with `__pycache__` cleared before and
+  after each mutant, over 62 tests in three files: reverting only
+  `render_to_envelope`'s new guards reds 26 cases, all in the new test file and
+  all on its own assertions, with both sibling files staying green; reverting
+  only the `None`-vs-falsy normalisation reds exactly the 7 falsy-illegal cases
+  and nothing else; neutering `_require_field` reds 34 across all three files
+  (21/6/7) and neutering `_require_mapping_doc` reds 14 across all three
+  (5/5/4) — the last two being the evidence the helpers are genuinely shared
+  rather than one-caller wrappers.
+
+- **`tan sdk remove`'s load-bearing refusal now compares paths the way the
+  FILESYSTEM does, so a second spelling of one directory can no longer slip
+  past it and orphan a project.** Fixes `#1053`. All four comparisons behind
+  that refusal were a plain string `==`
+  (`python/tan/commands/sdk_cmd.py`), and every one of them failed in the
+  UNSAFE direction: on a case-INSENSITIVE volume -- NTFS, and macOS's
+  DEFAULT APFS volume, so this reproduced on a maintainer laptop, not only on
+  Windows -- `<cache>/SdkVersion` and `<cache>/sdkversion` are ONE directory
+  that compares unequal, the refusal never fires, and the install is removed
+  with no `--force`. Measured on macOS against `dev` @ `d5222c3a`:
+  `os.path.samefile` said `True`, `_registered_origins_for` returned `[]`,
+  and the removal proceeded; the same spelling with the registry's own casing
+  refused correctly. That is precisely the outcome tan-cli#790's first design
+  bar exists to prevent.
+
+  The four sites and what each one let through: another project's registered
+  global default neither refused nor pruned; the ACTIVE SDK for this
+  workspace removed without `--force`; the machine-global default
+  (`~/.alp/sdk-default`) removed without `--force`; and `data.wasActive`
+  reporting `false` for an install that was active.
+
+  They now share one helper, `sdk_removal.removal_would_take_out`, which
+  folds case only where the platform does. `os.path.normcase` first -- the
+  stdlib's own answer, which lowercases and flips separators on Windows and
+  is the IDENTITY on POSIX, so `/home/me/sdk` and `/home/Me/sdk` stay the two
+  genuinely different directories they really are. That alone is not the fix,
+  because `normcase` is the identity on darwin too, so the reported macOS
+  case would still have orphaned the project; when the lexical arm misses and
+  both sides are absolute, `os.path.samefile` is consulted as a non-mutating
+  probe of the actual volume -- identical `st_dev`/`st_ino` is the
+  filesystem's own answer to "one directory?", and it is right on a
+  case-SENSITIVE APFS volume too, where a blanket "fold on darwin" would have
+  been wrong in the other direction. `samefile` raises for a path that does
+  not exist -- and a removal target legitimately stops existing partway
+  through this command -- so that arm degrades to the lexical answer rather
+  than propagating, and it is skipped entirely unless both sides are absolute,
+  so a relative registry value is never anchored to the removing process's
+  cwd.
+
+  The predicate is deliberately ASYMMETRIC about symlinks, which the first
+  version of this fix got wrong in review: `remove_dir` unlinks a link it is
+  handed and never follows it, so removing `<cache>/current` destroys nothing
+  behind it, while removing the real directory a link points at does orphan
+  whoever resolves through that link. `samefile` follows links on both sides
+  and so refused a harmless alias removal, reporting `data.wasActive: true` in
+  the very envelope whose `resolvesToAfter` said the workspace still resolved
+  at `projectPin` to a live SDK. A symlinked target is now compared with
+  `os.path.samestat` over two `os.lstat`s instead of `samefile`, mirroring
+  the asymmetry `remove_dir` already has. An INTERMEDIATE link in the target's path
+  (`<cache-link>/v0.19.0`) is not vetoed, and correctly so -- that removal
+  really does delete the real directory.
+
+  One behaviour change remains, toward refusing: an install whose pin or
+  registry entry is SPELLED through a link now matches the real directory
+  being removed, and on Windows `ntpath.normcase` folds case even inside a
+  directory carrying the per-directory case-sensitivity flag. Both are
+  recoverable with `--force`; a silent orphan is not.
+
+  A FIFTH comparison of the same question, in
+  `sdk_default_registry.prune_entries_by_sdk_path`, is fixed with it: an
+  alias-spelled registry entry was correctly REFUSED and then, on the
+  `--force` run, not pruned, leaving the registry naming a checkout the same
+  call had just deleted. It degrades safely (`deepest_covering_entry` gates a
+  hit on `has_loader_script`, so a dead entry mis-resolves nobody) but only
+  half of "neither refused nor pruned" had landed. Routing it through the same
+  predicate is not enough on its own -- the prune runs AFTER `remove_sdk_tree`,
+  when the target directory is gone and there are no inodes left to compare --
+  so the match set is captured before the removal and threaded through. The
+  comparison is INJECTED into that pure, IO-free module rather than imported,
+  matching how `deepest_covering_entry` already takes `covers`/
+  `has_loader_script`.
+
+  The two `Path`-based guards in `python/tan/core/sdk_removal.py`
+  (`is_outside_cache_root`, `is_cache_root_itself`) are unchanged, as the
+  issue scopes them. Note the narrower reason: `pathlib` folds case on the
+  WINDOWS flavour only, so on macOS's default case-insensitive APFS volume
+  `is_cache_root_itself` does NOT recognise a differently-cased spelling of
+  the cache root -- that spelling is still caught one rung up by
+  `is_outside_cache_root`'s containment check, so nothing is removed
+  unguarded, but it refuses under `sdk.remove-outside-root` rather than
+  `sdk.remove-is-cache-root`. Reported as the wrong code with the wrong
+  message, not as a missing refusal; tracked separately rather than widened
+  here.
+
+  The symlink rule is asymmetric in BOTH directions, which took two rounds to
+  get right. Removing a link cannot destroy what it points at -- so
+  `remove <cache>/current` is allowed even when a workspace is pinned at the
+  real directory behind it -- but removing a link DOES destroy that same link
+  under any other spelling, so a workspace pinned at `<alias>/current` (where
+  `alias -> <cache>`) is still owed a refusal. A blanket veto on a symlinked
+  target got the first right and the second wrong, orphaning that pin with no
+  refusal at all (`projectPin` -> `none`, no `--force` required). The veto is
+  now `os.path.samestat` over two `os.lstat`s, which follows neither final
+  component: two spellings of one link share an inode, a link and its own
+  target do not.
+
+- **`Manifest.from_cbor` now raises a curated `ValueError` on malformed wire
+  bytes instead of letting `cbor2.CBORDecodeEOF` escape.** cbor2's decode
+  exceptions are not `ValueError` subclasses; `from_json`'s
+  `json.JSONDecodeError` is. The two reader paths therefore disagreed on what
+  a caller must catch for the equivalent failure, and CBOR is the PRODUCTION
+  reader path for `.alpmodel` packages. Measured on the unguarded code:
+  `from_json("{not json")` -> `json.decoder.JSONDecodeError` (isinstance
+  ValueError: True); `from_cbor(b"\xa1")` -> `cbor2.CBORDecodeEOF: premature
+  end of stream` (isinstance ValueError: False); `from_cbor(b"")` -> the
+  same. `package.read_package`/`read_manifest_file` bounds-check the manifest
+  region's offset and length (tan-cli#1045) but never that its bytes are
+  well-formed CBOR, so a bit flip, a truncated write or plain non-CBOR bytes
+  reached this decode in-bounds and escaped as an exception no `except
+  ValueError` around a `.alpmodel` read would catch.
+
+  `_cbor2.loads` is now wrapped, catching `cbor2.CBORDecodeError` -- the
+  common base of cbor2's decode exceptions -- and re-raising as `ValueError:
+  malformed .alpmodel manifest: not valid CBOR (CBORDecodeEOF: premature end
+  of stream ...)`. The cbor2 exception's own class and message are carried
+  into the curated one rather than swallowed: "premature end of stream" is
+  the difference between a truncated write and a bit-flipped major type.
+  `from_json` is deliberately left alone -- its `JSONDecodeError` already IS
+  a `ValueError`, so the two paths now agree on what they raise, and wrapping
+  it would strip the `lineno`/`colno` attributes a caller may read.
+
+- **`Target`'s OPTIONAL wire fields `compiler_version` and `caveats` are now
+  type-checked when present.** `_decode_list_field` only type-checked fields
+  in `required`; both of these sit in `item_keys` (so `_pick` carried them
+  through to the constructor) but in no `required` set, so nothing checked
+  them at all. Measured on the unguarded code: `targets=[{...every required
+  field valid..., "compiler_version": 12345, "caveats": "not-a-list"}]` ->
+  `Target(compiler_version=12345, caveats='not-a-list')`, no raise, both
+  wrong-typed. `caveats` is `list[str]` -- each entry a complete
+  customer-readable sentence that `tan model build` and `tan model check
+  --exact` render verbatim -- so a wrong-typed value degraded a diagnostic
+  surface silently rather than failing loudly.
+
+  Closed with a sibling helper, `_optional_field`, not by overloading
+  `_required_field`'s missing-key branch: ABSENT skips the check (the
+  dataclass default stands, which is what keeps `caveats` additive against
+  alp-sdk's committed `.alpmodel` fixtures -- `_target_dict` omits an empty
+  one entirely), PRESENT-but-wrong-typed raises exactly the curated
+  `ValueError` a required field raises. Required fields are still checked
+  first and alphabetically, so no existing message changes which field it
+  names.
+
+  `caveats=[1, 2]` -- a value that IS a list but carries non-strings -- is
+  refused too, by the element mechanism tan-cli#1063 added in the same
+  change: `element 0 must be a string, got int in targets[0].caveats`.
+
+- **A `Tensor.shape` whose ELEMENTS are not ints is now refused, not decoded
+  silently.** `_TENSOR_TYPES["shape"] = (list, "a list")` guarded the
+  container only -- the same container-only shape tan-cli#1049 closed for
+  `Target.requires` -- so every one of these decoded with no diagnostic:
+  `shape=["a", "b"]` -> `Tensor(shape=['a', 'b'])`; `shape=[None, None]` ->
+  `Tensor(shape=[None, None])`; `shape=[{"a": 1}]` -> `Tensor(shape=[{'a':
+  1}])`. `shape` feeds tensor-shape maths downstream the way
+  `requires["sram_kib"]` feeds `src/backends/inference/alp_model_select.c`'s
+  fit gate, so a wrong-typed element is a silent-wrong value, not a crash.
+
+  Closed by generalising the mechanism rather than special-casing one field:
+  `_check_element_types` is `_check_nested_types`'s list-shaped sibling (the
+  dict helper takes a per-KEY map; a list has no keys, so this one takes a
+  single ELEMENT type), `_decode_list_field` takes an `element_types` map
+  alongside its existing `nested_types`, and both now route through one
+  shared `_check_type` gate. The error names the offending INDEX where the
+  dict side names the key -- `element 1 must be an int, got str in
+  inputs[0].shape` is the exact counterpart of `field 'sram_kib' must be an
+  int, got str in targets[0].requires` -- and every element is checked, not
+  just the first.
+
+  `shape=[True, False]` comes with it, unmeasured in the issue but the same
+  hole one type over: `bool` is an `int` subclass, so it decoded silently too
+  and re-emitted as CBOR `0xf5`/`0xf4`, not as unsigned ints. It is refused
+  because the shared `_check_type` gate carries tan-cli#1058's `bool` rule.
+  An empty `shape` (a scalar tensor) has no elements to check and stays
+  legal. `requires["op_features"]` deliberately gets no element type, for the
+  same reason `_REQUIRES_TYPES` omits it: nothing downstream reads it as
+  anything but an opaque list, so a shape requirement there would be a new
+  restriction rather than a closed gap.
+
+- **`Manifest`'s schema-version gate now refuses `v=True` and `v=1.0` instead
+  of reading both as v1.** `from_dict`'s `if v != MANIFEST_SCHEMA_VERSION` was
+  the one comparison in `python/tan/model/manifest.py` that reads a decoded
+  value without routing through `_required_field`, so it never inherited that
+  helper's `bool` rule -- Python's `bool` is an `int` subclass and `True == 1`,
+  and `1.0 == 1` too. Measured on the unguarded code, over the PRODUCTION CBOR
+  reader path: `v=True` -> NO RAISE, accepted as v1; `v=1.0` -> NO RAISE,
+  accepted as v1; `v=2` -> `ValueError: unsupported manifest version 2;
+  expected 1`; `v='1'` -> refused. The gate is now `if type(v) is not int or v
+  != MANIFEST_SCHEMA_VERSION` -- `type(v) is not int`, not `isinstance`, for
+  exactly the reason tan-cli#1058 round three had to add a `bool` rejection to
+  `_required_field` after round two reproduced round one's hole one level down
+  at `requires["sram_kib"]`. Both readers now refuse both shapes with the
+  message `v=2` always got; a real int `1`, and an absent `v` (the
+  older-writer case), still decode.
+
+  Scope, stated as the issue states it: this was bounded. The re-emit
+  normalises to int `1` and nothing downstream read the decoded value, so
+  there is no known wrong-value path that shipped. It is fixed because it is
+  the same defect class, in the same file, that tan-cli#1058 described as
+  "closed at the mechanism".
+
+  The issue's sibling sweep found no second comparison of this shape -- this
+  was the only one. Two adjacent exposures that are NOT comparisons are
+  recorded on the PR rather than changed here: `from_dict`'s own
+  `d["name"]`/`d["src_sha"]` bare subscripts (guarded by both public readers
+  before they reach it, raw `KeyError` only if `from_dict` is called
+  directly), and `VALID_BLOB_FORMATS`, which is declared as "a real constant,
+  not a comment, so a new backend cannot silently invent a format string" but
+  is never enforced at decode -- `blob_format` is checked only as `str`.
+
+- **The `MODULE_SIZE_BUDGET_LOG.d/` immutability gate now measures every entry
+  in HEAD's tree against the commit that INTRODUCED it, not just against the
+  commit that recorded its add.** Fixes `#1065` (first of the two halves that issue tracks). `#1059`'s blob compare was
+  anchored on the `git log --name-status` walk's `"A"` record, and a merge
+  commit emits no record for anything -- so an entry a merge introduced was
+  never compared at all, and a second merge could rewrite it for free:
+
+  ```
+  entry introduced by a merge commit, then rewritten by a second merge
+    tree_has_entry = True
+    violations     = {}          <- not caught
+  same shape, but followed by a NORMAL delete
+    violations     = {'LOG.d/2026-08-27-22222222.md': ['D at 8d659323']}
+  ```
+
+  A fourth check closes it, anchored on HEAD's own tree: every entry-shaped
+  path present at HEAD must still hold the content its introducing commit
+  gave it, where `_introducing_commit` resolves the earliest commit reachable
+  from HEAD whose tree actually contains the path (for a merge-introduced
+  entry, the merge itself -- `git rev-list --full-history` lists it because a
+  merge introducing a path present in neither parent is TREESAME to neither).
+
+  It runs for EVERY entry path at HEAD, not only the record-less ones. That
+  distinction is a defect on its own, found in this PR's review: compose the
+  two merge shapes with the obvious human recovery -- a merge INTRODUCES the
+  entry, a later merge DROPS it, an ordinary commit RE-ADDS it with different
+  content -- and the path arrives with one `"A"` record and in HEAD's tree, so
+  a record-anchored compare measures it against the re-add and the loss goes
+  unseen (`VIOLATIONS: {}` with the original content gone).
+
+  The two anchors are kept because neither subsumes the other, measured both
+  ways: the introduction anchor catches the compose-three-steps shape; the add
+  anchor catches its mirror (introduce X, drop, re-add Z, a third merge
+  rewrites Z back to X -- HEAD and the introduction agree while committed
+  content Z was silently lost). Both directions have a regression test.
+
+  None of this fires on the squash-merge shape `dev` lands: a squash commit is
+  single-parent, so it emits a normal `"A"` record AND is itself the earliest
+  commit on this branch containing the path -- both anchors resolve to it and
+  agree. `test_a_squash_merged_entry_passes_clean` asserts that mechanism
+  (parent count, record shape), not just the clean result.
+
+  One shape remains out of reach and is now documented beside the squash
+  exclusion in all three places `#1059` used: an entry a merge INTRODUCED, a
+  later merge DROPPED, and nothing ever re-added -- no record and not in
+  HEAD's tree, so neither anchor has anything to hold. The "never re-added"
+  clause is load-bearing; a re-add is caught.
+
+- **The append-only ledger gate now also protects the lines the PR's OWN branch
+  committed, when a MERGE commit drops them.** Fixes `#1065` (second half, filed
+  in that issue's comment). `ledger_violations` only ever asserts that the
+  ANCHOR's lines survive, and on a `pull_request` run the anchor is the PR's
+  base (`dev`) -- a line the branch itself committed is by construction never
+  one of the base's lines, so discarding it cost the check nothing to detect.
+  Re-derived against PR `#1062`'s real pre-merge head `f77f4818` merged with
+  `1f06a426` (`dev` as it stood then), the `MODULE_SIZE_BUDGET_LOG.md` conflict
+  resolved with `git checkout --theirs`: four committed lines (two `tan-cli#427`
+  entries and their sub-bullets) gone,
+  `ledger_violations(base='1f06a426')` → `[]`, whole gate file
+  `14 passed in 0.59s` under `GITHUB_EVENT_NAME=pull_request`. That is the
+  `tan-cli#902` incident in the one context that matters.
+
+  Closed by `merge_loss_violations`, a second decision that splits on WHICH
+  commit dropped the line -- the distinction that keeps it from re-opening the
+  `tan-cli#971` false positive the round-3 major fix exists to prevent. An
+  ordinary, single-parent commit revising an entry the branch itself added is a
+  deliberate correction of not-yet-merged prose and stays allowed; a MERGE
+  commit discarding an already-committed entry the other parent never had is a
+  bad conflict resolution and is now flagged. Both of its conditions are
+  load-bearing and mutation-proven: *missing from the merge commit's own
+  content* is what excludes the `tan-cli#971` shape, and *still missing at HEAD*
+  preserves the net-state principle, so restoring the line in a normal
+  follow-up commit clears the failure with no history rewrite.
+
+  Deliberately narrower than `ledger_violations` in one respect, stated rather
+  than left implicit: membership, not ordered subsequence, so a merge that
+  reorders without losing anything is not flagged. Order relative to the base
+  is still enforced unchanged.
+
+  The discriminator is COMMIT SHAPE, which does not carry intent, and that is
+  a chosen strictness rather than an approximation: a branch rewording its own
+  draft *inside* the merge is the `tan-cli#971` shape and IS flagged, because
+  no git signal separates it from `tan-cli#902` — the same edit made in an
+  ordinary follow-up commit after the merge is clean. Both shapes are pinned
+  by tests, and the failure text now prints TWO remedies rather than one: paste
+  the line back when it was somebody's real entry, or — when it was your own
+  entry you deliberately superseded while resolving — keep both parents' lines
+  in the merge and redo the revision in its own follow-up commit. The old
+  single remedy would have parked a superseded entry in an append-only ledger
+  next to its own replacement.
+
+  Both the enforcement and its advice are pinned against silent removal, which
+  is the failure mode this particular gate has shipped twice before. The whole
+  enforcement path lives in `_enforce`, driven end-to-end by a hermetic test;
+  the one line connecting it to the real repository — which no runtime test can
+  reach, because a clean ledger makes "called" and "never called" identical — is
+  pinned at the source level by an AST assertion, in the repo's own existing
+  idiom (`test_subprocess_env_routes_through_the_helper.py`,
+  `test_module_size_budget_check_is_wired_into_ci.py`). The failure text's advice
+  is pinned as a case→remedy MAPPING rather than as a bag of strings, so deleting
+  one remedy, or swapping which situation each remedy is attached to, both red.
+
+  Reachability was measured, not assumed: `MODULE_SIZE_BUDGET_LOG.md` is frozen
+  against `regen_module_size_budget.py`, not against people -- two of the four
+  `dev` commits after `#907` landed appended correction notes to it by hand
+  (`1f06a426` +7, `b3c40619` +4), in the same tail region, and `#907` also
+  removed the file's `merge=union` attribute, so those appends now conflict
+  outright. `MODULE_SIZE_BUDGET_LOG.d/` needs none of this: a merge that drops
+  an entry file is caught by the immutability gate's tree cross-check, which is
+  anchored on no base ref at all.
+
+- **`Manifest.from_dict` now enforces `blob_format` against
+  `VALID_BLOB_FORMATS` -- and the set itself was wrong, not just
+  unenforced.** A manifest naming an unlisted `blob_format` (a typo'd
+  `dxnn`, or a stale/foreign format string) used to decode clean; nothing
+  in `python/tan/model/manifest.py` compared a decoded value against the
+  frozenset it was declared to guard. Auditing every real producer before
+  enforcing turned up the sharper half of the bug: `adapters/executorch.py`'s
+  `ExecutorchAdapter` -- registered by default in `build.py`'s `_ADAPTERS`,
+  reached automatically the moment a `board.yaml` `models[].source` ends in
+  `.pte` -- emits `blob_format: "executorch"`, which was missing from
+  `VALID_BLOB_FORMATS` even though the format is real, documented, and
+  live. The set (not the adapter) was the thing that had drifted; enforcing
+  it as originally declared would have rejected a package `tan model build`
+  produces today. `VALID_BLOB_FORMATS` now includes `"executorch"`,
+  reconciled against all five compiler-adapter emitters plus
+  `_gen_fixture.py`'s `"onnx"` regression fixture, and an unlisted format
+  now raises a curated `ValueError` naming the offending value and the
+  accepted set. A new gate
+  (`test_blob_format_producers_stay_in_valid_blob_formats.py`) AST-walks the
+  adapter and fixture source for every literal `blob_format` a producer
+  writes and fails if one is missing from the set, so the census this fix
+  relies on cannot silently drift again -- the round-trip test alone could
+  not have caught the regression this fix closes, because it only proves
+  membership round-trips, never that every producer is a member.
+- **`Manifest.from_dict` no longer lets a missing `name`/`src_sha` escape as a
+  raw `KeyError`.** Both were still bare subscripts even after PR #1068
+  curated every other decode path in `python/tan/model/manifest.py` into a
+  `ValueError`; a mapping missing either key raised `KeyError('name')` (or
+  `'src_sha'`) with no manifest context, not the "malformed .alpmodel
+  manifest" framing the rest of this module's contract promises. Both now
+  route through `_required_field`, and `src_sha` is checked against
+  `from_dict`'s established post-normalisation contract (`bytes`, matching
+  what `from_json` and `from_cbor` already hand it).
+
+- **`--emit scaffold` no longer crashes with a raw traceback on a malformed
+  `metadata/templates/catalog-v1.json`, and the shared malformed-document
+  register now covers the one document it could not express.** Fixes `#1077`.
+  `tan/planner/template.py` decoded the template catalog through an unguarded
+  `json.loads` and then bare-subscripted the result at sixteen sites. This is
+  the SIXTH round of one family (`#1025` → `#1034` → `#1037`/`#1048` → `#1052`
+  → this) and the first on a document that is not YAML — which is exactly why
+  it was filed separately rather than folded into `#1052`: the three documents
+  that round guarded are `yaml.safe_load`-ed and read with `.get(...)`, so a
+  wrong-SHAPE document fails as `AttributeError`/`TypeError`; the catalog is
+  `json.loads`-ed and read by bare SUBSCRIPT, so a wrong-KEYED document fails
+  as `KeyError`. Same escape route either way — `cli._emit_scaffold` catches
+  `TemplateError` and lets everything else out as a traceback — but a
+  different check. Re-derived on `dev@0ca54fbf` before fixing, one edit per
+  row, verbatim with the frame `traceback` reports:
+
+  ```
+  catalog = "[1, 2]"          AttributeError: 'list' object has no
+                                attribute 'get'                template.py:123
+  catalog = "{"               json.decoder.JSONDecodeError: Expecting
+                                property name ...              template.py:119
+  templates: 3                TypeError: 'int' object is not
+                                iterable                       template.py:123
+  a record with no `id`       KeyError: 'id'                   template.py:124
+  cores: [{os: zephyr}]       KeyError: 'id'                   template.py:166
+  no `supported` key          KeyError: 'supported'            template.py:1527
+  no `files` key              KeyError: 'files'                template.py:80
+  files.user_owned: [3, 'a']  TypeError: '<' not supported between
+                                instances of 'str' and 'int'   template.py:80
+  no `example` key            KeyError: 'example'              template.py:1539
+  parameters: [{name: n}]     KeyError: 'default'              template.py:239
+  substitute: {literal: x}    KeyError: 'file'                 template.py:266
+  cores: [{... dir: 3}]       TypeError: argument should be a str or an
+                                os.PathLike object             template.py:1155
+  ```
+
+  All sixteen sites the issue enumerates are guarded, plus the siblings the
+  sweep found alongside them: the `json.JSONDecodeError` at the same decode
+  (a `ValueError`, so `except TemplateError` never caught it — a half-written
+  catalog in a developer's checkout reached the user as a traceback), the
+  quieter half of `files.user_owned` (`sorted("board.yaml")` never raised at
+  all; a string IS iterable, so it sorted into single CHARACTERS and every one
+  of them became a template file to read), and the same quiet half on
+  `supported.som_skus`, whose `sorted()` runs inside the
+  `SkuNotSupportedError` message and turned a curated "sku not supported" into
+  a raw `TypeError` on a mixed list.
+
+  One of those siblings lives OUTSIDE this module: `cli._emit_scaffold`'s own
+  `record["id"]` (`tan/planner/cli.py:186`). `find_template_by_cores`
+  subscripted `id` only in its AMBIGUOUS branch, so a UNIQUE match with no
+  `id:` was returned happily and the CLI raised `KeyError: 'id'` one line
+  later, outside every `except TemplateError` on the path. The ids of the
+  matches are resolved before the `>1` test now, which closes it without
+  touching `cli.py`.
+
+  **The guard is one new helper on the EXISTING register, not a third
+  register.** `_require_key(mapping, key, kind=None, *, doc, field)` adds
+  exactly the check that was missing — the key is present — and DELEGATES
+  both type checks (the container is a mapping; the value is `kind`) to
+  `_require_field`, whose message `#1034`/`#1048`/`#1052` already share across
+  the module's three YAML documents. `kind` is optional because
+  `$defs/parameter`'s `default:` is the one schema-required key with no
+  declared type, so presence alone is required there. `_require_mapping_doc`
+  gained one keyword, `noun`, so the catalog's outer message can say "a JSON
+  object" — true of a JSON file — while the three YAML callers keep "a YAML
+  mapping" byte for byte, and their tests pass unedited.
+
+  **Not stricter than `metadata/schemas/template-catalog-v1.schema.json`.**
+  Every key required here is `required` there: `id`, `example`, `supported`,
+  `supported.som_skus`, `files`, `files.user_owned`, `cores[].id`/`cores[].os`
+  and `$defs/parameter`'s `name`/`type`/`default`. `description` is required
+  by the schema and deliberately NOT checked — this module never subscripts
+  it, and guarding a key nobody reads would be the stricter-than-the-schema
+  the issue rules out. An absent `templates:`/`cores:`/`parameters:` still
+  degrades to `[]` exactly as the pre-existing `.get(..., [])` did, so nothing
+  that rendered before stops rendering: the real shipped catalog renders all
+  **14** of its `template × sku` pairs to byte-identical envelopes
+  (sha256-compared before and after), and every record in it is re-resolved
+  through every helper this change touched.
+
+  One guard is, honestly, a **new refusal of previously-rendering input**
+  rather than a re-wording. `find_template` used to stop at the match, so a
+  junk record AFTER the requested one was never touched; every id is resolved
+  up front now, as the not-found path always did, so such a catalog reds. It
+  was never schema-valid (`id` is `required` on every record), and the
+  alternative is a selector whose strictness depends on catalog ORDER — the
+  unpinned asymmetry every round of this family was filed about. It is
+  asserted as its own case rather than folded into the crash-became-curated
+  claim. The two `known:` / `matches multiple templates` messages are
+  otherwise unchanged, asserted byte for byte.
+
+  **A sixth subscript, one function over.** `_check_constraints` read
+  `spec.get("constraints") or {}` and then membership-tested and subscripted
+  it — inside a function the first sweep table declared cleared. Five raw
+  `TypeError`s (`constraints: 3`, `['enum']`, `['minimum']`, `['maximum']`,
+  `{minimum: 'a'}`) and, worse, one SILENT failure: `constraints: 'abc'`
+  rendered with **every bound dropped**, because `"enum" in "abc"` is a
+  substring test, so an out-of-range override was accepted without a word.
+  Same shape as the `pins: 'E1M_GPIO_IO4'` character-iteration bug `#1073`
+  found on this file — no exception, wrong behaviour — and the behaviour even
+  depended on the spelling of the junk (`constraints: 'an enum'` DOES contain
+  the substring, and took the `TypeError` branch). Guarded by
+  `_require_constraints` on the same register, and the silent case is asserted
+  as a pair: the well-formed bound refuses the override, the malformed one
+  used to render it.
+
+  **The absent-document class is closed too, and the deferral that stood here
+  was factually wrong.** The first cut left `path.read_text` unguarded on the
+  ground that this was "equally true of all four documents this module reads".
+  Measured, it was not: `_load_som_doc` and `_board_route_entries` carry an
+  `is_file()` check and `_docs_ref` an `except OSError`, so **three of the
+  module's five reads were already handled** and only `load_catalog`'s and
+  `render_to_envelope`'s example `board.yaml` were bare. Both are curated now
+  — `except OSError`, not a pre-flight `is_file()`, so a present-but-
+  unreadable path (a directory, a permissions error) is named too. A false
+  symmetry claim in a docstring is the same defect class this round exists to
+  close, so it is gone rather than re-worded.
+
+  **Three redundant guard PAIRS, both halves pinned.** Three guards sit
+  downstream of an identical check on the same value, so reverting either one
+  alone left the whole scope green: `load_catalog` vs `_catalog_templates`,
+  `render_to_envelope` vs `_rendered_bytes` on `example`, and
+  `_resolve_params` vs `_substitutions_for` on `parameters`. The redundancy is
+  worth keeping — each of those functions takes the value as a parameter and
+  is reachable on its own — but an unpinned guard is not a guard, so each
+  downstream half is now asserted at its own call site.
+
+  Mutation-proven over **20** mutants against 165 tests in five files
+  (byte-copy restore with `cp`, never `git checkout`; `__pycache__` cleared
+  before and after each; md5 re-verified after every restore). No mutant
+  stays green. Neutering `_require_field` reds **77** across FOUR files
+  (43 catalog / 21 example-`board.yaml` / 7 board-metadata / 6 SoM-preset) and
+  neutering `_require_mapping_doc` reds **25** across the same four — the
+  evidence the extension is genuinely on the shared rule rather than a fourth
+  hand-rolled copy. Neutering only `_require_key`'s missing-key check, with
+  both type checks intact, reds 16 — all in the new file, all on the
+  `KeyError` half this round exists to close.
+
+- **`_enforce`'s `ledger_violations` half is now pinned end to end, so the
+  ordinary append-only check can no longer be silently unwired.** Fixes `#1080`.
+  `#1070` gave `_enforce` a hermetic test that drives it end to end, but that
+  test's `--theirs` repro exercises only the `merge_loss_violations` half -- it
+  is chosen precisely BECAUSE `ledger_violations` is blind to it, and its
+  sibling asserts `ledger_violations(...) == []` as the premise of the whole
+  exercise. Every other `ledger_violations` test calls the function directly.
+  So no scenario in the file was both caught by `ledger_violations` and routed
+  through `_enforce`, and two independent mutants stayed green -- re-derived on
+  this branch against the file as it stood at `8b4e3f43`, the pair being this
+  gate file plus its `..._log_d_entries_are_immutable.py` sibling:
+
+  ```
+  Y1  delete the ledger_violations assertion from _enforce   -> 39 passed
+  Y2  replace both ledger_violations(...) calls with []      -> 39 passed
+  ```
+
+  Not a `#1070` regression: that wiring was equally unpinned before `_enforce`
+  existed. `#1070` factored the enforcement body out and pinned the half it was
+  closing, which is what made the other half nameable in the first place.
+
+  Closed by `test_the_enforcement_path_itself_rejects_a_dropped_base_entry`,
+  the complement of the `--theirs` test: a hermetic repo whose branch deletes
+  one of the base's entries outright, with no merge commit anywhere, so
+  `merge_loss_violations` has nothing to look at and only `ledger_violations`
+  can catch it. That blindness is asserted as the test's own premise rather
+  than assumed. The test is parametrised over both `base_ref` shapes (a
+  resolved base ref and `None`) so neither of `_enforce`'s two
+  `ledger_violations` calls can be stubbed alone and stay green -- measured,
+  Y1 and Y2 now red 2/2, and stubbing either call by itself reds exactly its
+  own parametrisation.
+
+  The scenario repo is a shared `_dropped_base_entry_repo` helper that
+  `test_an_existing_entry_deleted_outright_with_no_replacement_is_caught` now
+  builds on too, so the file gains a scenario without gaining a seventh copy of
+  the rationale.
+
+  `_enforce`'s docstring, which said the `ledger_violations` half was
+  "Deliberately NOT claimed", now claims BOTH halves -- each scoped to the
+  scenario that actually reds it, and no wider.
+
+- **Both `_enforce` failure messages are now pinned to name the lost line in
+  their OWN text, not via pytest's assertion-rewriting repr.** A
+  `pytest.raises(AssertionError)` around a function that lives in a rewritten
+  test module gets the repr of the bare `not <expr>` appended to
+  `str(excinfo.value)`, and that repr names the lost lines by itself -- so a
+  plain `"<lost line>" in message` check is satisfied even when the production
+  message contributes nothing. Measured on both sites, each with the message's
+  own interpolation replaced by a literal and the tests otherwise intact:
+
+  ```
+  Y3b  {violations} redacted from the ledger message         -> 41 passed (before hardening)
+  C1   {merge_losses} redacted from the tan-cli#902 message  -> 41 passed (before hardening)
+  ```
+
+  C1 is the concrete regression that mattered: somebody simplifies the
+  tan-cli#902 message and drops the `{merge_losses}` listing, CI stays green,
+  and the next real `--theirs` victim reads a failure whose production text
+  never names the destroyed entry -- which is the entire point of that message.
+  Both assertions now read their listing's own span (markers
+  `Missing/reordered line(s): ` and `restored them: `), in the interval idiom
+  the same file already uses for its case-to-remedy mapping. Both mutants red;
+  neutering the corresponding assertion returns each to `41 passed`, which is
+  what proves the assertion is the thing catching it.
+
+  The class is bounded and closed repo-wide, not sampled: `python/tests/` and
+  `python/scripts/` hold NINE `pytest.raises(AssertionError)` sites, and only
+  these two capture `excinfo` at all. Three of the rest use `match=`, each
+  against message-only prose (`"drifted after"`,
+  `r"re-pins harness-owned variable\(s\) \['HOME'\]"`,
+  `"is bool, not a string or null"`) that no repr of an asserted expression can
+  produce; the remaining four assert nothing about the text. Every other
+  `str(excinfo.value)` assertion in the tree catches an exception raised by
+  production `tan/**` code, which pytest does not rewrite, so no repr is
+  appended and the trap cannot arise there at all. No further sweep is needed.
+
+- **`tan init --topology` and `--from-example` no longer crash with a raw
+  traceback on a malformed `metadata/templates/catalog-v1.json`, and the two
+  readers of that document are on ONE register instead of two that happened to
+  agree.** Fixes `#1084`. `tan/core/example_catalog.py` is a DELIBERATE second
+  implementation of the catalog read — `find_example_by_cores` and
+  `unsupported_som` exist alongside `tan/planner/template.py`'s selector
+  because `tan.planner.paths` binds `REPO = sdk_root()` at MODULE scope, so
+  importing anything under `tan.planner` before `bind_sdk_root` has run raises
+  `PlannerRootError` and `tan init`'s SDK-free path (invariant I-32) must keep
+  working with no checkout bound at all. It carried the same `json.loads`-plus-
+  bare-subscript shape `#1077` closed on the planner side.
+
+  **The strictness had diverged, and nothing pinned the divergence.** Before
+  `#1082` both readers were equally unguarded, so
+  `test_example_catalog_cores_selector_agrees_with_planner.py` held trivially
+  on malformed input — both blew up. After it, the planner refused with a
+  curated error while this reader still crashed raw or silently mis-read, and
+  the agreement test covered only well-formed documents, so the gap was
+  invisible to CI. Two implementations of one read that agree on good input and
+  diverge on bad, with a test asserting they agree.
+
+  Re-derived on `dev@be3a44b6` before fixing, one edit per row, both readers
+  driven on the same synthetic tree with `{"m33_sm": "zephyr"}` requested:
+
+  ```
+  row                             planner (after #1082)   example_catalog (dev)
+  not valid JSON                  TemplateError           JSONDecodeError
+  a JSON list                     TemplateError           AttributeError
+  a JSON string                   TemplateError           AttributeError
+  templates: 3                    TemplateError           TypeError
+  templates: 'abc'                TemplateError           *silent* not-found
+  a record that is not a mapping  TemplateError           *silent* skip
+  cores: 3                        TemplateError           TypeError
+  cores: 'abc'                    TemplateError           TypeError
+  a cores entry not a mapping     TemplateError           TypeError
+  a cores entry with no id        TemplateError           KeyError
+  a cores entry with no os        TemplateError           KeyError
+  a cores entry, id: 3            TemplateError           *silent* not-found
+  the matched record has no id    TemplateError           *silent* OK
+  the matched record id: 3        TemplateError           *silent* OK
+  the matched record example: 3   OK (record)             *silent* OK, src '3'
+  catalog file absent             TemplateError           FileNotFoundError
+  ```
+
+  Ten raw crashes and six silent mis-reads. The worst is the last: a record
+  carrying `example: 3` resolved to the literal src `'3'`, and `tan init
+  --topology` went looking for a directory of that name.
+
+  Every one of those rows now produces the BYTE-IDENTICAL curated message on
+  both sides, and none of them reaches the customer as a traceback:
+  `_plan_from_topology` gained an `except MalformedCatalogError` emitting the
+  new `init.catalog-malformed`, because the curated error would otherwise have
+  escaped its two existing handlers exactly as the raw ones did — the same
+  escape route `#1082` found on `cli._emit_scaffold`'s own `record["id"]`.
+
+  **`unsupported_som`'s written "Never raises" contract was not held.**
+  Measured, `templates: 3` escaped it as `TypeError: 'int' object is not
+  iterable` and a record with `supported: 3` as `AttributeError: 'int' object
+  has no attribute 'get'` — out of a function whose docstring promises "a
+  scaffold must not fail because a catalog could not be read". Both return
+  `None` now, and no outcome that was already `None` or a support set changes.
+  The per-record SKIP is kept deliberately and pinned on its own: a record
+  whose `example:` cannot be read is simply not the record the scan is looking
+  for, so a malformed record cannot silence the warning a well-formed one
+  later in the list would have produced.
+
+  **The register MOVED, it was not copied.** `_require_mapping_doc`,
+  `_require_field`, `_require_key` and the catalog's two readers
+  (`read_catalog_document`, `catalog_templates`) now live in
+  `tan/core/document_guards.py` — stdlib-only, with no `tan.planner` in its
+  import closure, so the constraint that forced the second implementation
+  still holds. `template.py` binds the same objects
+  (`_require_field = _GUARDS.require_field` and friends), so its ~40 call
+  sites are byte-identical to what `#1073`/`#1082` landed and its tests pass
+  unedited. The exception TYPE is a constructor argument rather than a fixed
+  class, because `planner/cli._emit_scaffold` catches `TemplateError` and
+  `init_cmd._plan_from_topology` catches `CoresTopologyError`; a register that
+  raised one fixed class would leave the other caller's curated error escaping.
+  `_require_constraints` deliberately did NOT move — it guards
+  `$defs/parameter`'s bounds, which only the planner's parameter resolution
+  reads, so it has no second caller to prove it shared. `#1085` tracks the
+  full extraction.
+
+  **The agreement test now covers malformed input, which is what stops the
+  divergence recurring.** Eighteen malformed documents are driven through BOTH
+  selectors and compared on verdict AND message text, byte for byte — "both
+  raise" would have held on `dev` for several of those rows, one a curated
+  `TemplateError` and the other a raw `KeyError`, which is precisely what the
+  file failed to catch. A structural case asserts the two are bound to the
+  same register OBJECTS, so a copy-paste re-divergence reds even if the copies
+  still produce identical text on the day it lands.
+
+  **The one remaining divergence is now pinned by name rather than left
+  undocumented.** `find_example_by_cores` returns the PATH, so it excludes a
+  record with no usable `example:` from its match set ("cannot tell means
+  silent", scoped to the one record — its own documented posture);
+  `find_template_by_cores` returns the RECORD, so it never reads that field
+  and answers "found". Both are unreachable against a schema-valid catalog
+  (`example` is `required`, pattern `^examples/...`), and closing the gap would
+  change one selector's documented contract — a SELECTION question, not the
+  strictness question this issue is about.
+
+  **Two new refusals, stated plainly**, both of documents the schema never
+  accepted and both taken to MATCH the planner rather than invented here: the
+  matched record's `id:` is resolved before the ambiguity test, as
+  `find_template_by_cores` has done since `#1082` (dev returned a unique match
+  with no `id:` happily, and formatted a missing one as the literal `'?'` into
+  the ambiguous candidate list); and the matched record's `example:` must be a
+  string rather than being run through `str(...)`.
+
+  **Not stricter than `metadata/schemas/template-catalog-v1.schema.json`.**
+  Every key required here is `required` there — `id`, `example`, `supported`,
+  `supported.som_skus`, `cores[].id`, `cores[].os` — and `description` /
+  `files` / `parameters` are required by the schema and deliberately NOT
+  checked, because this reader never touches them. An absent `templates:` /
+  `cores:` still degrades exactly as before, on both sides. The real shipped
+  catalog renders all **14** of its `template × sku` pairs to byte-identical
+  envelopes (sha256-compared before and after) and every live-catalog topology
+  and support set resolves to the same answer.
+
+- **`tan.planner.template`'s `_check_constraints` no longer raises a bare
+  `TypeError` on a schema-valid `template-catalog-v1.json` record.** Fixes
+  `#1087`. `$defs/parameter` permits `constraints.minimum`/`maximum`
+  alongside a `type: string` (or `enum`, or `boolean`) parameter -- the
+  schema does not cross-reference `constraints` against `type` at all, and
+  `_require_constraints` (`#1082`) guarantees the bound itself is an `int`
+  -- so a schema-valid catalog carrying, say, a `type: string` parameter
+  with `constraints.minimum: 5` reached `value < constraints["minimum"]` as
+  `"a" < 5`: a raw `TypeError` past every `except TemplateError` both
+  callers of this module declare, on a document nothing upstream refused.
+  `_check_constraints` now refuses `minimum`/`maximum` on any non-`integer`
+  parameter with a curated `ParameterError` naming the template, the field,
+  its value, its declared type and the inapplicable bound, before it ever
+  compares the two.
+
+- **The `MODULE_SIZE_BUDGET_LOG.d/` immutability gate no longer sends a
+  branch-side delete down a dead end.** Its failure text prescribed one
+  remedy for every violation shape — "a normal follow-up commit that
+  restores the original content" — which is wrong for both a delete and a
+  modify: check 1 wants exactly one `A` record per entry, and any later
+  commit, including one that restores good content, is itself a new record
+  that keeps the count above one. PR #1089 hit this for real: a branch-local
+  delete restored forward walked `A`, `D`, `A`, still flagged, with no
+  forward move left. The message now branches on the violation's own record
+  shape and names the actual remedy for each — `git rebase -i` dropping the
+  deleting commit for a delete, dropping or rewording the modifying commit
+  for a modify — plus why neither shape can be fixed by adding a commit and
+  why the rebase costs `dev` nothing (`dev` only ever receives one squashed
+  commit per PR). The catch itself is unchanged: a branch-side delete is
+  still a violation.
+
+- **`tan validate`'s `--format diagnostic-v1` (LSP) and `--format sarif` now
+  emit a valid URI reference for `uri`/`artifactLocation.uri`, not a raw
+  filesystem path.** Fixes `#1097`. SARIF 2.1.0 defines `artifactLocation.uri`
+  as a URI reference, and LSP diagnostics are keyed by document URI, which an
+  editor compares against the URI of an open buffer. Both sites emitted
+  `board_path` bare, so an absolute, Windows-spelled root rendered
+  `C:\w\proj\board.yaml` — the drive-letter colon and backslashes are invalid
+  in that position, and the string carries no scheme. Neither consumer raised
+  or crashed on it; the diagnostic simply failed to resolve or attach,
+  silently, the same failure class `#1073`/`#1077`/`#1082`/`#1084` already
+  closed elsewhere in this repo. Pre-existing, not a regression from `#1090`:
+  before it, the same field rendered the mixed `C:\w\proj/board.yaml`, which
+  was invalid for the same reasons.
+
+  Fixed at the two exporters (`validate_cmd._issue_to_diagnostic`,
+  `validate_cmd._sarif_document`), not in
+  `tan.core.board_context.resolve_board_path` — that function answers "where
+  is the file" and keeps `#1090`'s deliberate separator-follows-root rule
+  unchanged; the URI is a rendering concern of the two ported documents. The
+  new helper, `tan.core.uri_reference.path_to_uri_reference`, renders an
+  ABSOLUTE path (Windows- or POSIX-spelled, judged from the string itself via
+  `PureWindowsPath`/`PurePosixPath`, never from the CI host's own `os.name` —
+  this repo has no Windows host, following the pattern `#1089`/`#1090`
+  established, with a leading `/` decided POSIX before any later backslash is
+  even consulted — a backslash is a legal POSIX filename character) as an
+  absolute `file:` URI. A RELATIVE, POSIX-spelled path (`resolve_board_path`'s
+  own default, `"./board.yaml"`) is returned percent-encoded but otherwise
+  unchanged: it is already a legal relative URI reference per RFC 3986 §4.2,
+  and resolving it to an absolute `file:` URI would bake the process's CWD
+  into an otherwise portable document for no consumer-facing gain, moving the
+  pinned separator-less golden for nothing. A RELATIVE, WINDOWS-spelled path
+  has its backslashes swapped for forward slashes and the same
+  percent-encoding applied — a bare backslash is not a legal URI-reference
+  character at all, so leaving it alone would still be invalid, and Windows
+  itself accepts `/` as an equally valid separator.
+
+  A relative `uri` is left with NO declared base — valid SARIF and valid
+  `diagnostic-v1`, but the base a consumer resolves it against is
+  implementation-defined, same as `dev` before this PR. A round-2 draft of
+  this fix added `runs[].originalUriBaseIds` to close that gap for SARIF;
+  review found the declared base did not actually resolve the reference in
+  the default case (an anchoring mismatch between the project root and the
+  CWD the reference is really relative to) and reached it through an
+  unguarded filesystem call that could crash `--format sarif` outright on a
+  caller-supplied `--project` — so that addition was reverted rather than
+  patched a third time in place. Closing this defect for the RELATIVE case
+  (SARIF's `uriBaseId`, and the LSP client-resolution question) is tracked
+  as `#1117`, filed with both measurements (the wrong-base `urljoin` result
+  and the `Path.resolve(strict=False)` symlink-loop crash) so a reader
+  gets the full history rather than rediscovering it.
+
+  `data.boardYamlPath`, the `--input` argv passed to the SDK validator
+  subprocess, and every other `Path()` consumer in `validate_cmd.py` stay
+  host-native — only the two `uri` fields are rendered through
+  `path_to_uri_reference`. A new integration test drives the SAME absolute
+  `--board-yaml` through `--format json` and `--format diagnostic-v1` and
+  asserts the two documents DISAGREE on this field's spelling, so a future
+  "tidy this up" sweep that unifies the two contracts is caught rather than
+  silently landing. No `contract/envelopes/` golden carries either field
+  (all three `validate-*` fixtures there exercise `--format json` only), so
+  nothing moved.
+
+  alp-sdk's own `scripts/alp_cli/diagnostic_format.py:_uri()` still emits a
+  bare path for the same two documents' `uri` field and now diverges from
+  this fix — tracked as alp-sdk#1909, not fixed here.
+
+- **`tan init --from-example --som` no longer reports `issues: []` when the SoM-support check could not run at all.** After #1096 an unreadable SDK scaffold catalog (non-UTF-8 bytes, a directory where a file was expected, a permissions failure, invalid JSON, the wrong top-level shape) degrades silently -- by design, since refusing there would be worse than a check that never ran. But `issues: []` told the customer the check had *passed*, not that it never ran. `--from-example --som <SKU>` now emits a new warning, `init.example-som-unchecked`, naming why the catalog (or the example's own matching catalog record, e.g. a malformed `supported.som_skus`) could not be read; `ok`, `exitCode`, and the scaffolded files are unchanged -- the command still succeeds, it just stops claiming a check it did not perform. A catalog that reads cleanly, or is simply absent (an older SDK checkout), still reports `issues: []`, and `--topology`'s own refusal (`init.catalog-malformed`, exitCode 2) on the identical unreadable catalog is unchanged (#1101).
+
+- **`os: baremetal` now refuses an `app:` that resolved to a Zephyr/Yocto
+  stock token instead of silently building it.** Planner re-sync to alp-sdk
+  `0914da38` (alp-sdk#1897) ports the upstream fix: a baremetal core with no
+  real `app:` of its own still resolved one, because the SoM topology preset
+  merges its own default (`alp-stock-shim` for Cortex-M, `alp-image-edge`
+  for Cortex-A) over a project entry that omits `app:` — and neither token
+  is a bare-metal app. Before this, `tan build` emitted a real, wrong-target
+  configure command for that slice (a Zephyr shim `cmake` invocation with no
+  `west build -b <board>` context, or a Yocto recipe name resolved as a
+  nonexistent source directory) that failed downstream with a confusing,
+  off-target CMake error. It now fails fast at validate, naming the stock
+  token and that there is no bare-metal stock default to fall back to.
+
+- **The model-perf reader now parses what alp-sdk actually publishes (YAML),
+  its discovery predicates and the production lookup glob can now actually
+  find it, and a non-UTF-8 document can no longer take the whole lookup
+  down.** Four faults:
+  - `tests/conftest.py`'s `sdk_ships_the_model_perf_fixture` globbed
+    `<sdk>/tests/fixtures/model_perf/` for `*.json`, but alp-sdk ships that
+    fixture as YAML (`e1m_aen801_ethos_u55_hp.yaml`) — the predicate was
+    permanently `False`, so
+    `test_alp_sdks_own_synthetic_fixture_point_is_refused_by_this_reader`
+    skipped on every run, including every green CI run, despite the fixture
+    having landed upstream (alp-sdk `9b466018`, "feat(metadata): tier-2
+    model-perf perf-point contract (Refs #1520) (#1884)").
+  - `tan.model.perf.read_perf_point` called `json.loads`, which cannot parse
+    what alp-sdk publishes either way — fixing the glob alone would have
+    turned a silent, permanent skip into a hard failure. `read_perf_point`
+    now parses with `yaml.safe_load` instead: valid JSON is valid YAML, so one
+    parser reads both alp-sdk's real YAML documents and the JSON synthetics
+    `tan`'s own test suite writes, with no format-sniff of its own to drift
+    from what either side writes. The `yaml` import stays deferred inside the
+    function, not module scope, so `tan.model.perf` sitting on `tan.cli`'s
+    eager import graph does not make every `tan` invocation pay for PyYAML
+    (tan-cli#810). A newly added test asserts this against a hand-written,
+    real-YAML-syntax document (block mappings, a comment — not `json.dumps`
+    output that merely happens to overlap with YAML's grammar), the first
+    case in this suite that actually distinguishes a YAML-capable reader from
+    a JSON-only one.
+  - The narrowed `except (OSError, yaml.YAMLError)` dropped
+    `UnicodeDecodeError` — a `ValueError` subclass `path.read_text(encoding=
+    "utf-8")` raises on non-UTF-8 bytes before the parser ever runs, so one
+    bad-encoding file used to take down the whole `find_perf_points` lookup
+    with a traceback instead of degrading quietly. Now
+    `except (OSError, ValueError, yaml.YAMLError)`, with a non-UTF-8 case
+    added to the malformed-document coverage.
+  - `find_perf_points`'s own discovery, `target_dir.glob("*.json")`, carried
+    the identical never-fires shape the two test-side predicates above were
+    fixed for — the *production* lookup path could not find a real
+    YAML-published point either. Now discovers both `*.yaml` and `*.json`,
+    with a test proving a `.yaml`-suffixed point is found.
+
+  `sdk_publishes_model_perf_points` (the sibling predicate guarding the
+  *published* `metadata/model_perf/` tree, currently empty either way) is
+  narrowed to `*.yaml` only, matching alp-sdk's own
+  `scripts/validate_metadata.py`, which rejects any other suffix there
+  outright.
+
+- **`planner-resync.yml` no longer regenerates against a stale base, caps
+  itself at one open `auto/planner-resync-*` proposal, and says why when it
+  proposes nothing.** Fixes `#1109`. Three PRs (`#1106`/`#1107`/`#1108`)
+  opened in 55 minutes for the same range (`alp-sdk` `0914da38...5c33ef04`,
+  `gh api .../compare` confirms **zero** files under `scripts/alp_orchestrate/`
+  changed in it) — and each one's diff, `51 insertions(+), 38 deletions(-)` in
+  `python/tan/planner/validate.py`, silently **reverted** the
+  `_enforce_baremetal_app_rule` extraction `#1103` had just landed, putting
+  `_enforce_loader_rules` back over the 50-line `FUNCTION_CAP`. Root cause:
+  the "Open or refresh the proposal PR" step's checkout of `tan-cli` `dev` was
+  read at job start and never refreshed, so a run queued (or slow) across a
+  maintainer's merge window regenerated `ours` (`tan/planner/**`, read for
+  the 3-way merge) against the pre-merge tree — a wider, stale
+  `PINNED_SDK_COMMIT` then found real upstream deltas to merge onto that
+  stale base, producing a diff that reads as a revert against the now-current
+  `dev`. **This is the whole cause, not a classifier bug** — with the gate
+  file at the state it actually read right after `#1103` merged, re-syncing
+  to the same target already reported every mirrored file `unchanged` and
+  wrote nothing (proved in `test_planner_resync_no_mirror_no_pr.py`); the
+  range never silently opened a PR for zero mirrored changes, it silently
+  opened one for a REVERT computed against the wrong base. Fixed four ways:
+
+  1. A new "Pin the tan-cli dev tip this run regenerates against" step
+     force-resets the local `dev` checkout to `origin/dev`'s tip
+     immediately before `planner_resync.py --apply` runs, closing the
+     BEFORE-regeneration half of the staleness window.
+  2. The "Open or refresh the proposal PR" step now re-fetches `origin/dev`
+     and diffs it against that captured tip, scoped to exactly the two
+     paths `planner_resync.py` reads as `ours`/writes
+     (`python/tan/planner/`, `python/tests/gates/
+     test_planner_relocation_freshness.py`) — narrow on purpose, so an
+     unrelated commit landing on `dev` in the same window (any other PR,
+     any day) does not turn every ordinary run red. A mismatch ABORTS
+     before any `git push` (`opened=false`, `stale=true`) rather than
+     recomputing inline: a future scheduled/dispatched run regenerates
+     against the fresh tip at no extra cost, with no bound needed on how
+     many times `dev` could move again mid-recompute.
+  3. A new "Close superseded planner-resync proposals" step closes every
+     OTHER open PR whose head branch starts with `auto/planner-resync` once
+     one proposal is opened/refreshed — the branch-clobber guard (`#1002`)
+     already protects a human's foreign commit on `auto/planner-resync` by
+     DIVERTING to `auto/planner-resync-<sdk-short-sha>`, but every diverted
+     run got its own branch and therefore its own PR, which is exactly how
+     three runs protecting the SAME human commit ended up as three
+     simultaneously-open PRs instead of one refreshed proposal.
+  4. The PR body now states how many files the proposal changes relative to
+     `dev` (with the file list), not just the upstream delta — a reviewer
+     reading "`this PR changes 1 file(s) relative to dev`" against a diff
+     that deletes a function extraction would have caught tonight's revert
+     immediately.
+
+  Also corrected a false claim the generated PR body and this workflow's own
+  "Verdict" step both asserted: "the pin(s) covering it did NOT move, so the
+  freshness gate stays RED on purpose." Measured during `#1103`'s review,
+  that is backwards — `planner-resync.yml`'s own "Run the freshness gate
+  against the re-synced tree" step binds `ALP_SDK_ROOT`/friends to worktrees
+  pinned at the SAME unmoved commit the pins still name, so
+  `test_planner_relocation_freshness.py` compares the pin to itself and
+  PASSES by construction; the PR body's own checks table already said so.
+  The true, still-useful mitigating fact is kept: because the pin does not
+  move, `planner-resync.yml` itself keeps re-running and exiting 1 on every
+  scheduled/dispatched run until a human ports the work, so merging a
+  partial proposal does not silence the reminder.
+
+  Review round: the close-superseded step's selector was head-branch prefix
+  only, so it could close a **human's** PR opened from a branch that happens
+  to start with `auto/planner-resync` (the exact `#1002`/`#996` shape --
+  hand-port work parked on that branch name) while its own PR body promised
+  that work "is still there". Now also requires `author.login ==
+  "app/github-actions"` and `isCrossRepository == false`, matched against the
+  real author identity every genuine bot PR this repo has opened actually
+  carries (`gh pr view <n> --json author`). And
+  `test_planner_resync_no_mirror_no_pr.py` used to hard-fail the required
+  `seam1 -- plan-shape parity` context: `parity.yml`'s own alp-sdk checkout is
+  `fetch-depth: 1` at a single pinned commit, so neither historical SHA this
+  proof needs was reachable there. It now fetches each of the three fixed
+  SHAs into the bound checkout on demand (`--depth 1` each, since `classify()`
+  only ever reads a blob at an exact commit and never needs them connected) --
+  proven both in a simulated depth-1 clone locally and confirmed green on
+  `seam1` itself.
+
+  Mutation-tested throughout: neutering the up-to-date stderr log, the
+  corrected headline text (both copies), the staleness-abort `git diff
+  --quiet` check (and its path list, independently, for EACH watched path),
+  the Verdict step's dead `stale` output, the rc=2 false-cause message, the
+  hand-port-base naming, the close-superseded loop, its fail-closed lookup
+  guard, and its author/cross-repo filter (both directions: cannot close a
+  human/cross-repo PR, still closes a bona fide bot one) each reds the
+  matching test on its own assertion, restored from byte copies
+  (`python/tests/gates/test_planner_resync.py`,
+  `python/tests/gates/test_planner_resync_pr_step_executes.py`); the
+  zero-mirror-changes claim is proved against the real historical range in
+  `python/tests/gates/test_planner_resync_no_mirror_no_pr.py`.
+
+- **`contract/issue-codes.json` registered `clean.remove-failed` and
+  `build.toolchain-root-unresolved` at `warning`-only while their real
+  emission sites construct `error` too -- a consumer branching on severity
+  (deciding whether a row is blocking) got the wrong answer for both.**
+  `clean_cmd.py`'s best-effort directory removal warns
+  (`rmtree(ignore_errors=True)` semantics); its state-file removal fails the
+  command outright. `build_cmd.py`'s toolchain-demotion issue is `warning`
+  under `executionPolicy.missingTool=skip` (the default) and `error` under
+  `=fail`. Both codes are now registered `error or warning`, the same
+  deliberate-dual spelling `flash.nothing-matched` and `build.unknown-backend`
+  already used. A new opt-in gate,
+  `python/tests/gates/test_registered_severity_matches_emission_sites.py`,
+  AST-walks the real construction sites for these four codes and reds if a
+  registered severity and its emission ever disagree again.
+
+- **`tan.model.perf` now reads alp-sdk's REAL bench-measured perf-point
+  documents, not a fictional shape that never existed.** Fixes `#1115`.
+  `#1105`/`#1114` fixed the discovery glob and the YAML-vs-JSON parser, but
+  `PerfPoint`/`_identity()`/`read_perf_point()` still expected a top-level
+  `stance` field plus `measured_on`/`measured` blocks that alp-sdk's real
+  `metadata/schemas/model-perf-v1.schema.json` has never published (its one
+  commit, alp-sdk `9b466018`, has always used top-level `sku`/`hw_rev` plus
+  `model`/`target`/`vela`/`perf`/`capture` blocks) — so the newly-unskipped
+  test suite passed *structurally*, without understanding a single real
+  document. Reconciled onto the real field model: `stance` is deleted outright
+  (no counterpart — publication under `metadata/model_perf/` IS the
+  bench-measured signal); `measured.npu_ops`/`cpu_ops` are deleted outright
+  too — alp-sdk's schema has never carried a per-operator NPU/CPU placement
+  split for a bench point (`additionalProperties: false` forecloses it without
+  a new schema version), so `tan.model.perf_apply.apply_perf_point` no longer
+  asks a matched point for one; every other field renames onto its real
+  counterpart (`toolchain.name`/`.version` → the single `target.compiler_version`
+  string; `toolchain.system_config`/`.memory_mode` → `vela.system_config`/
+  `.memory_mode`; `capture.reference` → `capture.bench_id`; `model.slug`/
+  `.sha256` → `model.name`/`.src_sha`; `model.size_bytes`/`.source` are
+  deleted, no wire field ever backed them).
+
+  The search path is reconciled too (found during this PR's own review, not
+  covered by `#1105`'s scope): `find_perf_points` looked in
+  `root/<sku>/<target>/`, three segments deep, while alp-sdk publishes at
+  `root/<SKU>/<hash>.yaml`, exactly **two**. Fixed by globbing directly under
+  `root/<sku>/` with `Path.glob` (never `Path.rglob`), which is what PINS the
+  segment count structurally rather than by a comment that could drift back —
+  a point nested one level too deep, or sitting one level too shallow (the
+  exact shape alp-sdk's own `tests/fixtures/model_perf/
+  e1m_aen801_ethos_u55_hp.yaml` sits at), is invisible to discovery by
+  construction. The fixture-vs-published distinction is likewise adopted
+  verbatim from alp-sdk's own rule (`scripts/validate_metadata.py`'s
+  `_MODEL_PERF_FIXTURE_MARKER`, a PATH check on the SKU-directory segment and
+  the filename) rather than tan's own now-deleted document-key convention,
+  which nothing upstream ever wrote.
+
+  `tan.model.perf_apply` and `tan.model.check` ripple from the field-model
+  change: a matched bench point can no longer independently claim an
+  `npu_coverage` verdict (there is no real data to source one from), so the
+  coverage word is now WITHHELD to `"undetermined"` unless the report it is
+  rebasing already carries a REAL placement from a prior `--exact` compile
+  (`basis == "compiled"`) — an earlier version of this fix instead inherited
+  the static screen's name-level estimate unconditionally, silently stamping
+  it `confidence: "certain"` under `basis: "bench"` (review blocker). Every
+  footprint/latency figure a rebase touches now merges PER FIELD,
+  most-specific-wins (a matched point's own value when it has one, else
+  whatever the report already carried) rather than an unconditional
+  overwrite — the earlier version blanked a real `--exact` compile's own
+  measured `arenaBytes`/`reqSramKib` to `null` whenever a matched point
+  recorded only latency (review blocker). `"fits"` still reaches
+  `basis: "bench"`, but only via DECISION 1's agreement path: a real
+  `--exact` compile independently measures it, and a matching bench point
+  corroborates the SRAM/arena figures. `docs/model-check-static-screen.md`
+  is updated in this same PR to state both rules — the wire-contract doc a
+  behaviour change to a documented envelope key shipped with no doc update
+  would otherwise leave wrong.
+
+  `_PERF_TOOLCHAIN`, the backend → toolchain-name map `find_perf_points`
+  narrows on, is corrected to alp-sdk's REAL producer strings
+  (`drpai` → `drp-ai_tvm`, `deepx_dxm1` → `DX-COM`, compared case-foldedly) —
+  the earlier version used `translator`/`dxcom`, the op-support-table
+  filename vocabulary and an unverified guess respectively, neither of which
+  `target.compiler_version` ever actually carries, so a published `drpai` or
+  `deepx_dxm1` point would have matched by path/SKU/model and then been
+  silently discarded on the toolchain-name check alone (review blocker) —
+  the issue's own failure mode one level down.
+
+  `tests/model/test_perf.py` (33 cases before, 36 after — none silently
+  dropped, every retirement reason recorded in the file's own trailing
+  comment block) and the bench-point half of `tests/model/test_check.py` are
+  migrated onto the real document shape and path; the reader now consumes
+  alp-sdk's real `tests/fixtures/model_perf/e1m_aen801_ethos_u55_hp.yaml` and
+  asserts on its actual field values (`test_alp_sdks_own_synthetic_fixture_
+  point_is_read_by_its_real_fields`), where a pre-reconciliation version of
+  that same test proved only that the reader refused it — and not through
+  alp-sdk's real fixture-refusal mechanism either.
+
+- **`validate --format sarif` declares a base a RELATIVE `artifactLocation
+  .uri` actually resolves against, instead of leaving it implementation-
+  defined.** Fixes `#1117`. Since `#1111`, the default invocation emitted
+  `"uri": "./board.yaml"` with no `originalUriBaseIds`/`uriBaseId` at all --
+  legal SARIF, but a consumer with a different CWD silently resolved it to
+  whatever happened to sit at that relative path, or nothing. `_sarif_document`
+  now declares `originalUriBaseIds: {"%CWD%": {"uri": <cwd_base_uri()>}}` on
+  the `run` and attaches `"uriBaseId": "%CWD%"` to every RELATIVE
+  `artifactLocation` -- an ABSOLUTE `--board-yaml` reference already resolves
+  on its own and gets neither key, since SARIF 2.1.0 SS3.4.4 forbids a
+  `uriBaseId` alongside an absolute `uri`.
+
+  The base-computation logic lives in `tan.core.uri_reference` (`cwd_base_uri`,
+  `is_absolute_path_reference`), not in `validate_cmd.py` -- unit-testable
+  against the resolution requirement directly, and it kept `validate_cmd.py`'s
+  own growth to +17 lines (`1646 -> 1663`) instead of the +42 a round-1 attempt
+  needed inline.
+
+  Fixes the two measured failure modes a round-1 attempt at this (reverted
+  out of `#1111`) introduced:
+
+  1. **A declared-but-wrong base is worse than no base.** Round 1 anchored the
+     base on `root` (`--project`'s own string) while `board_path` is actually
+     relative to the process's CWD, and omitted the base's trailing slash --
+     RFC 3986 SS5.3 drops a slash-less base's own last path segment before
+     merging a reference onto it. `urljoin("file://.../scratchpad", "./board
+     .yaml")` (no trailing slash) named `.../scratchpad/board.yaml`, which did
+     not exist; the real file was `.../scratchpad/sarif/board.yaml`. `--project
+     sub` happened to look correct only because the two defects cancelled --
+     fixing either alone broke the other. `cwd_base_uri()` takes no `root`
+     parameter at all (anchored on `Path.cwd()` only) and always appends the
+     trailing slash, so neither defect has an equivalent input to reintroduce.
+  2. **`Path.resolve(strict=False)` is not safe on caller data.** Round 1 used
+     it to canonicalise `--project`; it does not raise on a *missing* path but
+     does on a symlink LOOP, and `--project` is caller-supplied. Its exact
+     exception is not even uniform across pathlib versions -- measured
+     directly against real 3.12.3/3.13.15/3.14.7 interpreters
+     (`python-build-standalone`): 3.12 raises `RuntimeError` regardless of
+     `strict=False`'s own promise not to; 3.13/3.14 keep that promise for
+     `strict=False` (returns the path unresolved, no raise) but still raise
+     `OSError [Errno 40]` under `strict=True`. The raise re-entered
+     `validate_cmd.py`'s own `except Exception as err:` handler, whose `_emit`
+     -> `_sarif_document` path raised the SAME error again -- exit 1, empty
+     stdout, no envelope. This fix resolves no caller-supplied path at all:
+     `cwd_base_uri()` reads only `Path.cwd()`. `tan validate --offline
+     --project <symlink-loop> --format sarif` still answers the
+     `validate.board-yaml-missing` envelope at exit 2, matching `dev`, now
+     with a resolving base attached too.
+
+  Proved with `urljoin(base, uri)` against the real file (independently, via
+  `os.path`/`Path.samefile`, never by re-deriving the expectation from
+  `cwd_base_uri()` itself) for the default invocation, `--project sub`, and an
+  absolute `--board-yaml`. `test_sarif_shape`'s round-1 predecessor had
+  computed its own expectation by calling the base function under test, which
+  is why a WRONG base could still ship green; the new property tests assert
+  the resolved local path exists and is the real file instead.
+
+  Every branch mutation-tested, byte-copy restore, `__pycache__` cleared
+  before and after: `cwd_base_uri`'s trailing slash and its CWD anchoring (no
+  `root` parameter exists to mutate back in); `is_absolute_path_reference`'s
+  delegation to `path_to_uri_reference` (an earlier version of this function
+  re-derived the Windows/POSIX branch a second time on the theory that
+  sniffing the rendered string for a `file:` prefix was unsound for a
+  driveless Windows path -- measured false: `quote(..., safe="/")` percent-
+  encodes the colon, so `path_to_uri_reference("C:board.yaml")` is
+  `"C%3Aboard.yaml"`, not a spoofable `file:`-prefixed string; delegating
+  avoids a second copy of the same classification drifting out of sync with
+  `path_to_uri_reference` instead); `_sarif_document`'s `uriBaseId` gate
+  (both directions -- always-attached and never-attached); its
+  `originalUriBaseIds` presence gate (both directions); and the base value
+  itself (swapped for a `"file:///nonexistent/"` literal, caught by the
+  urljoin-property tests and deliberately NOT by `test_sarif_shape`, which is
+  shape-only by design).
+
+  No `contract/envelopes/` golden moved -- SARIF is not part of that fixture
+  set (only `--format json` is).
+
+- **A scaffold no longer ships bare `docs/*.md` / `examples/<...>` paths that
+  only resolve inside an alp-sdk checkout.** Planner re-sync to alp-sdk
+  `ff27f179` (alp-sdk#1855) hand-ports the upstream fix into
+  `tan/planner/template.py`. A `board.yaml` or `src/*.c` comment that names a
+  sibling example or a doc in prose — no `[...](...)` around it — matched
+  nothing: the existing rewrite only handled markdown-style links, and only
+  in `README.md`. So `tan init` handed a customer a project whose comments
+  said "see `examples/v2n/v2n-temp-sensor`" about a directory that is not in
+  their project and never will be. Those mentions now become absolute
+  `https://github.com/alplabai/alp-sdk/{blob,tree}/<ref>/...` URLs, the same
+  form a markdown link already got, on `board.yaml` and on every `.c`/`.h`
+  file — and unconditionally, not only when the requested `--sku` differs
+  from the example's own. Deliberately narrow: a `scripts/`/`metadata/`
+  mention is left alone.
+- **The vendored scaffold tree tracks that fix.** `python/tan/templates/
+  vendored/` is a frozen copy of alp-sdk's own `--emit scaffold` output, read
+  by `tan init` without shelling the SDK, so it is re-vendored in the same
+  change (9 files across 6 template/SKU pairs) and the three alp-sdk parity
+  refs move with it. 17 of `scaffold_byte_parity.py`'s 62 `DELIBERATE_EDITS`
+  retire: they existed only to qualify the bare referents the emit now
+  rewrites itself. `multicore-mailbox`'s `peer_build_path` is the neat case
+  — tan's own earlier hand-fix and alp-sdk's produce byte-identical output.
+- **A multi-slice template's README keeps its per-core subpath instead of
+  dropping it.** Same re-sync. The rewrite that turns a template's own
+  example path into `.` (the scaffold IS the project root) could not match
+  when the README named a subpath of it — `west build -b <board>
+  examples/multicore/mproc-mailbox/peer`, the HE-side peer core — because the
+  trailing `/peer` defeated its word boundary. The whole argument survived
+  verbatim, documenting a path that exists only in the alp-sdk tree; it is
+  now `./peer`.
+
+- **`planner-resync.yml`'s "Close superseded planner-resync proposals" step
+  now asks whether a candidate branch is occupied LIVE, at close time,
+  instead of trusting a snapshot computed earlier in the run.** Fixes
+  `#1119`, the residual gap `#1113` left open. `#1113` fixed the severe half
+  of `#1109`'s close-superseded step (it would have auto-closed `#1103` — a
+  PR that took two review rounds, fixed a `FUNCTION_CAP` breach, and merged —
+  in favour of `#1106`, a junk revert) by excluding every branch `occupied_branches`
+  named — the branch-clobber guard's own space-separated list of what ITS
+  candidate walk (`primary`, `primary-<this run's suffix>`, `-2`, ...) found
+  occupied THIS run. That list is necessarily incomplete two ways: a
+  PREVIOUS run's diverted branch name (say `auto/planner-resync-eaa79695`,
+  picked by a run that targeted a different alp-sdk sha) is never one of
+  this run's own candidates, so a human who adopts that older branch is
+  invisible to a close step that only consults it; and `occupied_branches`
+  is a snapshot taken at the guard step, consulted by the close step later,
+  so a branch adopted in the window between those two moments (a TOCTOU
+  race) is also invisible. Measured on `#1113`'s fixed head, real YAML step
+  body, real `jq`: `probe E  prior-run diverted branch   closed=['2300', '1107']`
+  — `2300`, the human-adopted branch, should not have been in that list.
+
+  Neither gap is a blocker on its own: reaching it needs a human to adopt a
+  DIVERTED branch — contrary to the instruction the job's own PR body
+  writes — and the outcome is a reopenable PR with the branch left
+  completely untouched, materially different from the `#1103` case where a
+  merged PR would have been closed in favour of a revert. Both are worth
+  closing anyway, so nobody has to re-litigate them later.
+
+  Fixed by adding a second mode to `planner_resync_branch_guard.py`:
+  `--check-branch BRANCH` re-runs the guard's own `_foreign_commits`
+  authorship test (`branch_currently_occupied`) against an arbitrary,
+  caller-supplied branch name RIGHT NOW, rather than only ever answering for
+  the handful of candidates `decide_branch`'s own cascade generates. The
+  close step's `jq` filter no longer embeds an `occupied` exclusion at all
+  (dropping the `--argjson occupied` invocation `#1109` added); instead it
+  emits `[number, headRefName]` pairs for every candidate that survives the
+  prefix/self/author/cross-repo checks, and calls
+  `planner_resync_branch_guard.py --check-branch "${branch}"` per candidate,
+  immediately before deciding whether to close it — a real argv value, never
+  spliced into shell or `jq` filter text. One change closes both gaps at
+  once, because the question becomes "does this branch carry a foreign
+  commit right now" instead of "was it in the list a run built earlier".
+
+  Every existing probe stays green under the new mechanism: the incident
+  replay (a legitimate bot sibling still closes), an unoccupied-everything
+  run (nothing is falsely protected — a branch that was never pushed at all
+  degrades safely to "not occupied", the live equivalent of `[] | index($h)`
+  returning `null`), and two branches occupied simultaneously (both stay
+  excluded, the cap still closes the third). The TOCTOU window is proven
+  directly: a branch adopted strictly after "the guard step" would have
+  looked and strictly before the close step actually runs is still excluded,
+  because there is no snapshot left to have gone stale.
+
+  Mutation-tested both directions on `branch_currently_occupied`: stripping
+  the check (always answer "not occupied") reds the mixed-fixture,
+  prior-run-diverted, and TOCTOU tests — a human-adopted branch gets closed;
+  making it impossibly broad (always answer "occupied") reds the
+  unoccupied-sibling test and every `--check-branch` unit test — the cap
+  stops closing anything at all. Restored from byte copies (`cp`, never
+  `git checkout <file>`), with `__pycache__` cleared before and after each
+  mutation.
+
+  Review round 2 caught a second defect in the close step's own consumption
+  of `--check-branch`'s exit code: it was read as an ALLOW-list (`-eq 2`
+  refuse, `-eq 1` skip), so any OTHER code — 127 (`python` resolved but
+  could not run the script) or 137 (OOM-killed) being the two most likely
+  real-world subprocess failures — fell straight through to `gh pr close`,
+  closing a protected branch silently (step rc 0, no `::error::`): a
+  fail-**open** in the one step whose entire thesis is fail-closed. Inverted
+  to a DENY-list of the single known-safe answer (`0`); every other code now
+  aborts the whole step before any `gh pr close`. A `command -v python`
+  presence check was added beside the existing `command -v jq` one.
+  Mutation-proved with the reviewer's own stubs (127 and 137 against the
+  reverted allow-list): `2 failed` on exactly those two codes, restored via
+  `cp`. Also from the same round: `AUTOMATION_NAME`/`AUTOMATION_EMAIL`
+  hoisted to the job's `env:` (both steps now read one source, closing a
+  silent-drift path measured to produce `closed=[]` with no warning);
+  `branch_currently_occupied` now returns a `BranchOccupancy(existed,
+  foreign)` so `--check-branch`'s log line distinguishes "branch does not
+  exist" from "branch exists and is clean"; the "cap still works" test now
+  pushes a real automation-identity commit onto a sibling branch instead of
+  leaving it absent, exercising the close path's identity check
+  end-to-end; the TOCTOU test now runs the real guard step first, for real,
+  before the human's push, rather than only commenting that one happened;
+  and the per-branch loop's `python`/`gh` calls now redirect stdin from
+  `/dev/null` so a future stdin-consuming command cannot silently eat the
+  remaining candidates.
+
+- **`kconfig.py::_emit_extra_library_profile` no longer leaks a raw
+  `UnicodeDecodeError` for a non-UTF-8 `extra_libraries[…].profile:` file.**
+  The tan-cli#1116 sweep found this site and deferred it on the claim that
+  `tan/planner/kconfig.py` is a `PINNED_HASHES`-protected verbatim mirror of
+  alp-sdk's `scripts/alp_orchestrate/kconfig.py`, so editing it would move a
+  pin `test_planner_relocation_freshness.py` checks. That claim is false,
+  measured directly rather than by analogy: `PINNED_HASHES`' values are
+  sha256 of files under the BOUND alp-sdk checkout
+  (`python/tests/gates/test_planner_relocation_freshness.py:1644`,
+  `upstream = orchestrate / name`), never anything under `tan/planner/**` —
+  so no edit to this file can move that pin. `except (OSError,
+  yaml.YAMLError)` missed `UnicodeDecodeError`, a `ValueError` subclass, past
+  this function's own "never fails the whole build" quiet-return contract
+  (`python/tan/planner/kconfig.py:68-98`).
+- **The unguarded `.resolve()` this same function ran before its `try` is
+  removed, not just worked around.** It read nothing after computing the
+  path, so it added no behaviour worth keeping, and it was its own
+  version-skew trap: against a self-referential symlink, `Path.resolve()`
+  raises a bare `RuntimeError("Symlink loop …")` on Python 3.12.3 — the same
+  shape `tan/planner/template.py`'s `_safe_join` documents for the identical
+  join — entirely outside any `try` this function had, where `open()`'s own
+  `ELOOP` is a plain `OSError` on every interpreter this repo supports.
+  Reading straight through (`profile_path = REPO / profile_rel`, no
+  `.resolve()`) closes the ELOOP escape by construction instead of adding a
+  `RecursionError`-reraise guard around a widened `except`.
+- **Seeded into the never-raises gate.**
+  `python/tests/gates/test_never_raises_contract_holds.py`'s
+  `_SEEDED_CONTRACTS` gains `kconfig._emit_extra_library_profile`, driven
+  against all seven shapes issue #1116 established: non-UTF-8 bytes, a
+  directory where a file is expected, a parent path that is itself a file,
+  an `ELOOP` symlink loop, `chmod 000`, a malformed document, and an absent
+  path — `TestEmitExtraLibraryProfile`
+  (`test_never_raises_contract_holds.py:2834`). Mutation-proven: re-narrowing
+  the `except` tuple back to `(OSError, yaml.YAMLError)` reds
+  `test_non_utf8` with a real `UnicodeDecodeError` escaping raw; restoring
+  turns it green again.
+- **Both halves have now converged, so the divergence marker is retired.**
+  The two entries above were deliberately `Refs #1122`, not `Closes`: alp-sdk
+  still carried the same defect, tan's documented planner fallback
+  (`PYTHONPATH=<sdk>/scripts python -m alp_orchestrate --emit build-plan`)
+  still executed the raising version, and a `RELOCATED divergence from
+  alp-sdk's own scripts/alp_orchestrate/kconfig.py` marker recorded the split
+  so `planner_resync.py` would surface it as a merge conflict rather than
+  silently revert it. The upstream fix (filed as alp-sdk#1961) landed as
+  alp-sdk PR #2005, and tan-cli#1241's re-sync to alp-sdk `15b2f32c` brought
+  tan's copy in line -- upstream and tan now spell these three lines
+  identically. The marker is replaced by a short note saying the divergence
+  closed and how, because a marker left standing after its subject is gone is
+  worse than none: it told the next re-sync operator to expect a conflict
+  that no longer exists, and described upstream code that no longer exists
+  either.
+
+- **The full test suite is green on every interpreter this package claims to
+  support, and CI now says so on both ends of that claim.** `pyproject.toml`
+  declares `requires-python = ">=3.12"`, but only one job (`parity.yml`'s
+  `seam1 -- plan-shape parity`) ever resolved anything newer than the 3.12
+  floor, and that job's selection is `tests/gates` plus two `tests/parity`
+  seam files and the SDK emit parity steps — not `tests/core`. Two tests in
+  `tests/core/test_uri_reference.py` were therefore red on CPython 3.14.7 and
+  green on 3.12.3 with every required context passing — a check that ran, was
+  required, and could not report the thing it would have caught.
+  - The two tests asserted `ntpath.isabs("/w/proj/board.yaml")` and
+    `ntpath.isabs("\proj\board.yaml")` as flat stdlib facts. They are not:
+    measured on 3.12.3 / 3.13.15 / 3.14.7, `ntpath.isabs` calls a
+    rooted-but-driveless Windows path absolute on **3.12** and stops doing so
+    from **3.13**, where CPython made it agree with
+    `PureWindowsPath(...).is_absolute()`. The boundary is 3.13, not 3.14 —
+    3.14.7 is only where the repo noticed. `tan.core.uri_reference` was correct
+    throughout — it gates on `.is_absolute()`, which is the predicate
+    `.as_uri()` itself enforces and answers `False` for that shape on all three
+    interpreters — though the repo as a whole is not: PR #1137's review found a
+    fourth measured divergence, in `tan.core.bootstrap`'s
+    `resolve_workspace_target`, which is real, user-visible and filed
+    separately. The version-dependent fact now lives in
+    one measured constant, asserted with `is` on both sides of the boundary,
+    and the stale "`ntpath.isabs` is `True`" prose is corrected in
+    `tan/core/uri_reference.py` and `tests/core/test_build_plan.py`.
+  - **The interpreter spread is kept deliberately, and written down.** It has
+    now caught two real defects a uniform `"3.12"` would have shipped — #1116's
+    pre-flight guard that was dead on 3.14 while load-bearing on 3.12, and
+    these two tests — so pinning it away would trade coverage for consistency.
+    `parity.yml`'s `"3.x"` and `ci.yml`'s `"3.12"` are now labelled floor and
+    ceiling where they are written, instead of differing by one character with
+    nothing saying that is load-bearing.
+  - **A new `ci.yml` job, `python · pytest on the newest CPython`, runs the
+    WHOLE suite on the floating `"3.x"`** — the half the spread was missing.
+    It fails the build rather than reporting orange, and it refuses to run at
+    all if `"3.x"` ever resolves to the declared floor, which would make it a
+    duplicate of the pinned job reporting agreement it never tested.
+    It does **not** run on the release path: `release.yml`'s `gates` job calls
+    `ci.yml`, so an unguarded floating interpreter would let a CPython minor
+    shipping between the last PR run and a tag red the gate, skip `build` and
+    spend an immutable tag — the `v0.5.0-rc3` (#319) shape with CPython in
+    place of alp-sdk `dev`. A new `skip_ceiling_interpreter` input carries that
+    opt-out, spelled as a *skip* defaulting false because an input meaning
+    "run it" would read `null` (falsy) on `pull_request`/`push`/`merge_group`,
+    where the `inputs` context does not exist, and would silently delete the
+    job from every run it exists for.
+  - `tests/gates/test_interpreter_policy.py` enforces the whole contract: every
+    `setup-python` declares a version, every value is the floor, the ceiling or
+    an interior version explicitly declared in `INTERIOR_PINS` (empty today —
+    the endpoints-only choice, and its cost, are recorded rather than implied),
+    the floor string tracks `requires-python`, exactly the two named jobs float
+    the ceiling, the ceiling job still selects the whole suite rather than a
+    slice too small to contain a divergence, and the release path stays off the
+    float. What the ceiling job does *not* execute is stated where it is
+    skipped rather than left to the word "whole": with no fixture roots bound,
+    1365 of 7673 collected tests skip there (measured on 3.14.7 — 696 name
+    `ALP_PLANNER_ORACLE_ROOT`, 572 name `ALP_SDK_ROOT`, 97 are ordinary
+    host/toolchain gates every leg skips alike). The bigger half is the oracle
+    root, so binding `ALP_SDK_ROOT` alone would close 7.5%, not 18%. Those
+    planner families run at the floor, `ALP_SDK_ROOT`-bound, on every push.
+
+- **`new_som_cmd._known_board_names`'s permission-denied guard is now
+  deliberate on every supported interpreter, not an accident of 3.12.**
+  `#1127`. PR `#1121` proved by execution that `boards_dir.glob("*.yaml")`
+  wrapped in `except OSError` only caught a permission-denied ancestor
+  directory on Python 3.12.3 -- on 3.13.15 and 3.14.7 `Path.glob` instead
+  returns an empty iterator SILENTLY for the identical shape, so the
+  `except` clause never fired there and the function stayed correct only
+  because `return names or None` happened to treat "found nothing" and
+  "permission denied" as the same outcome. A refactor touching only that
+  return line (`return names` in place of `return names or None`, which
+  reads as a harmless tidy-up) would have silently reintroduced the
+  escaping-`PermissionError` defect on 3.13/3.14 while staying green on
+  3.12. `_known_board_names` now lists via `os.listdir`, which raises for a
+  permission-denied ancestor on all three measured interpreters -- driven
+  directly against real `python-build-standalone` 3.13.15/3.14.7 builds,
+  not inferred -- so the `except OSError` is genuinely load-bearing
+  everywhere. Mutation-proved on each of the three interpreters: removing
+  the `except` clause reds every one, including the new
+  `test_permission_denied_ancestor` seed. The neighbouring
+  `_family_hw_revisions` was re-checked against the same question and needs
+  no such change -- it never called `Path.glob`, only `Path.read_text()`,
+  which already raises identically on all three interpreters. The stale
+  `#408` comment claiming a since-removed `boards_dir.is_dir()` guard still
+  covered the per-file read failure is corrected to describe the current
+  `except OSError` around the listing instead.
+
+  Review round 2 caught two more issues in the fix itself: the
+  `Path.glob`-to-`os.listdir` swap silently narrowed the match on Windows
+  (`Path.glob`'s default `case_sensitive=None` matches case-INSENSITIVELY
+  there, so a `Foo.YAML` board file enumerated before is invisible to a
+  plain `entry.endswith(".yaml")`) -- fixed with `_is_yaml_board_file`, a
+  small platform-aware predicate that case-folds only on `os.name == "nt"`,
+  mutation-proved on all three interpreters and pinned end-to-end with a
+  `monkeypatch`-driven Windows-vs-POSIX test. And the seed rationale for
+  `new_som_cmd._known_board_names` in `_SEEDED_CONTRACTS` still described
+  the removed `boards_dir.is_dir()` guard in the present tense as if it
+  still covered something -- corrected to describe the current
+  `except OSError` around the listing.
+
+- **`module_size_budget.d/README.md` did not explain why a `MODULE_SIZE_BUDGET_LOG.d/`
+  entry's logged `-> Y` can sit above a module's current ceiling.** A later
+  shrink of the same module is absorbed by a plain regen — no `--reason`, no
+  new entry — because `_append_log` fires only on growth
+  (`scripts/regen_module_size_budget.py`), so the ledger's last recorded
+  number for that module can go stale with nothing in the tree explaining it
+  (measured on PR #1125: `validate_cmd.py` raised to 1721, later trimmed to
+  1700, with the `1721` account existing solely in the ledger entry and a
+  commit message). The README now names `_append_log`'s growth-only firing as
+  the reason, and states plainly that the ledger is history, not state — the
+  enforced ceiling is always the `module_size_budget.d/*.json` record, and no
+  gate parses a ledger entry's `X -> Y` numbers.
+
+- **A `try`/`except` around a lazy `Path.glob` cannot catch anything.**
+  `Path.glob` returns a generator and does the filesystem work on ITERATION,
+  so a `try` that wraps only the call guards the construction of a generator —
+  which cannot fail. This is the inverse of the defect tan-cli#1127 fixed:
+  there the exception never existed (`glob` answered an empty iterator for a
+  denied ancestor on 3.13/3.14), here it exists and the handler is not around
+  it. A sweep for one half of the class does not find the other.
+
+  Two functions raised `PermissionError` for a `chmod 000` parent directory on
+  Python 3.12.3 and 3.13.15 against a docstring promising a quiet value, and
+  both open with the same `is_dir()` pre-flight — but for different reasons,
+  and the difference decides what a sweep can find:
+  - `tan build`'s configure-input tracker (`discover_configure_inputs`)
+    promised "the empty set for a missing/unreadable `app_dir`" and returned
+    `frozenset()` only on 3.14.7. This is the lazy-glob site, and it carried
+    both faults at once: an `if not app_dir.is_dir()` pre-flight (which
+    raises for that shape on 3.12/3.13 and answers `False` on 3.14) and an
+    `except OSError` around a lazy `app_dir.glob(pattern)` iterated outside
+    it, dead on all three.
+  - `tan model check`'s static NPU screen (`analyze._resolve_table`) promised
+    `None` when a backend has no support-table directory, and answered it
+    only on 3.14.7 too. It is **not** a second instance of the lazy-glob
+    split: it had **no `try` at all** — the same `is_dir()` pre-flight, then
+    a completely unguarded `sorted(table_dir.glob("*.json"))`
+    whose `sorted()` forces iteration on the spot. A missing guard, not a
+    guard that cannot fire. A raise there aborts the screen instead of
+    reporting `undetermined`, and no sweep for a dead handler can see it,
+    because there is no handler.
+  - Both now list through `os.scandir`/`os.listdir`, the only primitive
+    measured to raise identically on 3.12.3, 3.13.15 and 3.14.7 for both a
+    self-denied and an ancestor-denied directory, so the single `except
+    OSError` each keeps is load-bearing on every supported interpreter rather
+    than on one by accident. Both are seeded into the
+    `test_never_raises_contract_holds` gate and mutation-proved on all three:
+    deleting either handler reds the gate everywhere, which is precisely what
+    the old code could not do.
+  - The Windows casing rule that swap needs — `Path.glob("*.conf")` matches
+    case-INSENSITIVELY on Windows, a plain `name.endswith(".conf")` does not —
+    now lives once, in `shapes.matches_glob_suffix`, shared by all three call
+    sites instead of re-derived per swap.
+  - `scripts/audit_narrow_except_contracts.py` learned the new shape: it now
+    reports a `try` whose body builds a lazy iterator (`glob`, `rglob`,
+    `iterdir`, `scandir`, `walk`) that nothing in that body forces, on its own
+    static tally line separate from the execution one. Its docstring states
+    exactly what that detection does and does not claim — including that
+    `os.scandir` opens eagerly, that a lazy call with no `try` at all (which
+    is what `_resolve_table` had) is outside the walk, and that an unmodelled
+    alias or forcing spelling errs in both directions. The detector now has
+    its own tests, `tests/scripts/test_audit_narrow_except_contracts.py` —
+    including one driven over the two real modules a first draft of it
+    reported as false positives.
+
+- **A broken `metadata/e1m_modules/<sku>.yaml` or `metadata/boards/<board>.yaml`
+  no longer crashes `--emit scaffold` with a traceback.** Both reads in
+  `tan/planner/template.py` — `_load_som_doc` and `_board_route_entries` —
+  went `is_file()` pre-flight → bare `read_text()` → bare `yaml.safe_load()`,
+  with no `try` at any point, so a non-UTF-8 byte, a syntactically invalid
+  document or an unreadable file escaped `emit_scaffold` as a raw
+  `UnicodeDecodeError`, `yaml.parser.ParserError` or `PermissionError` —
+  measured on 3.12.3, 3.13.15 and 3.14.7 alike — past a caller that catches
+  `TemplateError` and nothing else. Over the twelve cells those two sites and
+  the template-example `board.yaml` share, **9 of 12 escaped raw on 3.12.3 and
+  3.13.15, and 7 of 12 raw plus 2 curated-but-false on 3.14.7**. All twelve are
+  now the curated `TemplateError` the contract promises, naming the file and
+  what went wrong, with byte-identical messages on all three interpreters. The
+  missing-file messages (`no metadata/e1m_modules/<sku>.yaml for sku <sku>`,
+  and the board equivalent) are preserved byte for byte.
+- **The `is_file()` pre-flight is deleted, not widened.** It was itself the
+  tan-cli#1127 trap: against an unreadable parent directory `Path.is_file()`
+  raises `PermissionError` on 3.12.3 and 3.13.15 and returns `False` on
+  3.14.7, so the same file produced a raw traceback on two interpreters and,
+  on the third, a curated message claiming a file that is right there does
+  not exist. Classifying on the real exception gives one answer on all three:
+  `FileNotFoundError` keeps the caller's own "no such file" message, and
+  every other failure names the read.
+- **Every file a scaffold renders is read through a guard now, not just the
+  documents.** `_rendered_bytes` copies each of a template's
+  `files.user_owned` entries with a bare `read_bytes()` — and every template
+  in the catalog lists 5–8 of them, so 4–7 files per scaffold came through it.
+  A `chmod 000` source escaped as a raw `PermissionError`, a deleted one as a
+  raw `FileNotFoundError`, a directory in its place as a raw
+  `IsADirectoryError`. That one is reachable from a shipped catalog today.
+- **A latent sibling one line further in, guarded in the same pass.**
+  `_rendered_bytes`' `.decode("utf-8")` in the substitution branch was a raw
+  `UnicodeDecodeError` on bytes that were already curated when no
+  substitution applied. Unlike the read above it is **not reachable from any
+  shipped input**: 0 of the 8 parameters in
+  `metadata/templates/catalog-v1.json` carry `substitute:`, and
+  `$defs/parameter` in `template-catalog-v1.schema.json` is
+  `additionalProperties: false` over `constraints`/`default`/`description`/
+  `name`/`type`, so a catalog declaring one is schema-invalid. It takes a
+  hand-edited catalog to reach — which is the same input class every other
+  guard in this module exists for, and the asymmetry (identical bytes,
+  curated on one branch and a traceback on the other) is the kind that
+  outlives the reason for it.
+- **A malformed template-example `board.yaml` is curated too.** tan-cli#1116
+  hardened `render_to_envelope`'s READ and left the `yaml.safe_load` one line
+  below it bare; `yaml.YAMLError` is neither an `OSError` nor a `ValueError`,
+  so nothing on that path had ever caught it.
+- **A symlink loop under a template's example directory no longer raises
+  `RuntimeError` on 3.12.3.** `_safe_join`'s `Path.resolve()` raises
+  `RuntimeError("Symlink loop from ...")` there and returns the path unchanged
+  on 3.13.15 and 3.14.7 — the same interpreter-divergence family as the
+  `is_file()` trap, one `pathlib` method over, and not even an `OSError`, so
+  no read guard downstream could have caught it. Curated at the resolve.
+- **The malformed-document register gained the YAML half of what it already
+  did for JSON.** `read_catalog_document` was read + parse + shape-check for
+  JSON; `tan/core/document_guards.py` now carries `read_yaml_mapping` and
+  `require_yaml_mapping_doc` as the same composite for YAML, plus
+  `require_readable_bytes`. `import yaml` is function-local, the idiom seven
+  other `tan/core/**` modules already use, so PyYAML stays out of `tan init`'s
+  SDK-free import closure — asserted by a test rather than by convention.
+- **The shape sweep can see this class now.** `scripts/audit_narrow_except_
+  contracts.py` looked only for a `try` narrower than the I/O it wraps, so a
+  site with no `try` was invisible to it — which is why two live sites
+  survived a sweep, a gate and three reviews. It grows a third shape,
+  `absent-try`, and a third tally line. Measured, with the causes separated:
+  65 → 66 candidates is tree growth since tan-cli#1132; 66 → 67 is the new
+  shape selecting a function the other two never saw; 67 → 69 is this change's
+  own new guards joining as ordinary shape-1 candidates. With `--planner` the
+  count falls 87 → 85 and `absent-try` falls 9 → 5, because all four fixed
+  sites drop out of the walk. The five that remain are named individually in
+  the script's docstring with what is known about each, not left as a number.
+
+- **`tan.core.uri_reference.cwd_base_uri_or_none` is seeded in the
+  never-raises gate.** Its entire reason for existing is "returns `None`
+  instead of raising": PR #1125 added it because `cwd_base_uri()`'s
+  `Path.cwd()` raises `FileNotFoundError` when the process's own working
+  directory has been removed, and that raise double-faulted *inside*
+  `validate_cmd.py`'s
+  `except Exception as err:  # never a bare traceback; the envelope is the contract`
+  handler — the handler calls `_emit` →
+  `_sarif_document`, which raised again. A textbook member of the class
+  tan-cli#1116's gate holds, added in the same week the gate landed, and
+  unpinned until now. Nothing about the function changed; the pin is what
+  changed.
+- **Four `os.getcwd()` failure modes are driven, not reasoned about.**
+  `ENOENT`, `EACCES`, `ENOTDIR` and `ENAMETOOLONG` are each exercised
+  separately rather than being taken on trust as "all `OSError`
+  subclasses", together with the happy path (so a guard that returned
+  `None` unconditionally would red) and the unguarded `cwd_base_uri()`
+  call (so a mutation that stopped it raising could not leave the rest
+  vacuously green). Mutating the `except OSError: return None` to re-raise
+  reds the group on 3.12.3, 3.13.15 and 3.14.7 — measured on each, and
+  restored from a byte copy afterwards.
+- **`nturl2path`'s Python 3.19 removal: verified as already recorded, and
+  its citations re-measured.** The migration note asked for by this issue
+  landed with tan-cli#1140 —
+  `tests/core/test_uri_reference.py::test_a_windows_file_uri_path_component_round_trips_through_nturl2path`
+  already carries the deprecation text verbatim, why `urllib.request` is not a
+  replacement (measured: from a
+  POSIX host `urllib.request.url2pathname("/C:/Users/...")` returns the
+  string unchanged where `nturl2path.url2pathname` performs the Windows
+  conversion, on 3.12.3/3.13.15/3.14.7 alike), and what a genuine
+  replacement must do when 3.19 lands. The import stays, unsuppressed. What
+  this change fixes is the `.github/workflows/parity.yml` line numbers that
+  record it: the file grew ~43 lines above the `python-tests-shard` job, so
+  all five were re-read out of `parity.yml` rather than carried forward. They
+  are named by their subject rather than their coordinate here — the
+  `python-tests-shard` job header, its `os:` matrix row, its `runs-on:`, its
+  `python-version:` pin and its `pytest` invocation — because by the time
+  tan-cli#1191 was filed the re-read set had moved another 19 lines and was
+  wrong again.
+- **The "no Windows host" premise stays corrected.** This issue's own body
+  repeats it; it is false as stated (tan-cli#1153), and
+  `test_uri_reference.py`'s header already says so. `parity.yml`'s
+  `python-tests-shard` job runs `os: [ubuntu-latest, windows-latest, macos-latest]`
+  on every `pull_request`. The narrower reading — "no Windows host is available
+  *locally*" — is false as well, and is corrected here rather than shipped:
+  `parity.yml` carries two `Windows host, py -3.14` comments recording
+  pre-landing re-measurement on one,
+  `python/tests/fixtures/oracle_captures/PROVENANCE.txt` records a real win32
+  oracle capture, and `test_monitor_command.py`'s UNC case is measured
+  against a real `serial.Serial(r"\\.\COM38")`. What is actually load-bearing
+  is narrower still and unaffected: the `nturl2path` conversion has to hold
+  *from a POSIX host*, which is what makes it the thing under test on two of
+  the three legs, and why swapping the deprecated import for `urllib.request`
+  would recreate tan-cli#1105's shape: a test that keeps passing while
+  covering nothing.
+
+- **`tan bootstrap --workspace \proj\ws` is refused on CPython 3.12, as it
+  already was on 3.13 and 3.14, instead of relocating a checkout into a literal
+  `\proj\ws` directory.** `resolve_workspace_target` carries a guard against a
+  Windows-spelled path that has a root but no drive — genuinely ambiguous,
+  since it resolves against whichever drive the process happens to be running
+  from. That guard was nested INSIDE the `os.path.isabs`/`ntpath_isabs`
+  branch, so it inherited a CPython behaviour change: `ntpath.isabs(r"\proj\x")`
+  is `True` on 3.12.3 and `False` on 3.13.15/3.14.7, the boundary being **3.13**,
+  where CPython made it agree with `PureWindowsPath.is_absolute()` (which has
+  said `False` throughout). Off Windows on 3.12 the value entered the branch,
+  missed its `os.name == "nt"` sub-test, and fell through to `normpath` —
+  accepted verbatim, with no message at all. On 3.13/3.14 the same input missed
+  the branch entirely and hit the refusal below it. `pyproject.toml` pins
+  `requires-python = ">=3.12"`, so the dead arm was the supported floor, not a
+  legacy branch.
+
+  The refusal now runs ahead of the absoluteness branch as its own predicate,
+  `_is_rooted_no_drive`, decided by a regex over the string rather than by an
+  `isabs` oracle, so no interpreter answers it differently. That regex is not
+  merely sufficient for the shapes anyone thought to probe — it is equivalent
+  to the divergence: over a 40-input corpus, on all three interpreters,
+  `ntpath.isabs` differs across the boundary **iff** the string matches
+  `^[\\/](?![\\/])`, zero mismatches in either direction, so the whole class is
+  covered including the tripled and mixed-separator shapes. It stays host-aware
+  because the two separators are not the same fact: a leading `/` is a genuine
+  absolute path on POSIX and keeps resolving there, while a leading `\` names
+  no drive on any host and neither spelling names one on Windows; two leading
+  separators are a UNC root or a device path and stay absolute. The refusal
+  text is unchanged, byte for byte.
+
+  The shared `ntpath_isabs` helper was deliberately NOT narrowed. Its other
+  caller, `is_plain_relative`, is indifferent to the boundary — measured on all
+  three interpreters, every input on which the helper diverges is already
+  rejected there by its own component scan — while its `^[A-Za-z]:` regex is
+  still the only thing refusing a drive-relative `C:ws` at that call site
+  (tan-cli#495 defect 8). That reasoning, recorded on `_is_drive_relative`
+  since #495, is confirmed against a post-3.13 measurement rather than assumed,
+  and the boundary is now recorded on `ntpath_isabs` itself so a third caller
+  does not read a version-stable answer out of it.
+
+- **`tan validate --format sarif`'s `artifactLocation.uri` no longer rests on a
+  stdlib method CPython has scheduled for removal.** `tan/core/uri_reference.py`
+  built its absolute-case exporter directly on `PurePath.as_uri()`, which 3.14
+  deprecates for removal in **3.19**. That is not a test-side detail: the value
+  it returns IS the SARIF `artifactLocation.uri` a consumer resolves against a
+  base, so the removal would have taken out an envelope surface. The exporter
+  is now `_absolute_path_to_file_uri`, which carries `PurePath.as_uri()`'s own
+  body — `.is_absolute()` guard included, so gate and exporter still cannot
+  drift apart — minus the warning.
+
+  The emitted bytes are unchanged, and that is measured rather than assumed:
+  over a 53-input corpus spanning both branches (drive, UNC, mixed-separator,
+  space/`#`/non-ASCII, a `\\?\` extended-length path, drive-letter casing, a
+  filesystem root, a backslash inside a POSIX filename), the before and after
+  outputs are byte-identical on **3.12.3, 3.13.15 and 3.14.7**, ValueError
+  message text included. `contract/envelopes/` carries no `file:` URI to move:
+  its three `boardYamlPath`-bearing goldens all pin the relative default
+  `"./board.yaml"`, which takes the relative branch and never reaches the
+  exporter at all. A per-input equality against the stdlib is now pinned as a
+  test, so the property is re-checked on whichever interpreter CI resolves
+  rather than living in a PR description.
+
+- **The deprecation's own named replacement, `pathlib.Path.as_uri()`, is
+  recorded as unusable here, with the measurement.** `Path` is concrete and
+  host-bound, so a `PureWindowsPath` cannot become one on a POSIX host; from
+  3.14, `Path.as_uri()` is `return pathname2url(str(self), add_scheme=True)`,
+  and `urllib.request.pathname2url` opens with a literal `if os.name == 'nt':`.
+  The conversion it performs is therefore the RUNNING HOST's, while this
+  module picks its oracle from the path's own SPELLING — so the two agree only
+  where host and spelling coincide, and **the damage does not vanish on a
+  Windows runner, it moves**. Measured on 3.14.7 from a POSIX host, all nine
+  Windows-spelled corpus shapes come out wrong
+  (`C:\w\proj\board.yaml` → `file:C%3A%5Cw%5Cproj%5Cboard.yaml` rather than
+  `file:///C:/w/proj/board.yaml`) and every POSIX-spelled one survives; under a
+  simulated `os.name = "nt"` that inverts, and one of the POSIX shapes it then
+  breaks is `/tmp/proj/we\ird.yaml` → `file:///tmp/proj/we/ird.yaml` — silently
+  naming a different file, which is the round-1 MAJOR 1 regression this module
+  exists to prevent. Below 3.14 there is no divergence on either host, which is
+  what would have made the swap dangerous.
+
+  The test that pins this asserts the **outcome** over a corpus rather than
+  predicting it per input from an interpreter version: `Path.as_uri()` agrees
+  with the exporter on every corpus input **iff** it is not host-dispatched,
+  asserted in both directions so it cannot go vacuous. (Review round 1 killed
+  the first version, which keyed a version-only constant to a
+  version-and-`os.name` outcome and would have redded the Windows shard for a
+  false reason the day that shard moves off its `python-version: "3.12"` pin.)
+
+- **`nturl2path` stays, deliberately, and now says so.** It is deprecated for
+  removal in 3.19 too, but `urllib.request` — the replacement its message names
+  — performs the **POSIX** conversion when called from a POSIX host (on
+  3.12/3.13 the platform is bound at import time; from 3.14 the `os.name`
+  branch moved inside the function; the answer is the same either way). Two of
+  the three platforms this suite runs on are POSIX
+  (`parity.yml:2284` — `[ubuntu-latest, windows-latest, macos-latest]`), so
+  swapping it would leave a test that still passes on all three, still looks
+  like it covers Windows, and covers nothing on two of them. The removal,
+  the reason the deprecated import was chosen, and what a genuine replacement
+  would have to do — the Windows conversion **from a POSIX host**, without
+  consulting `os.name` — are recorded in that test's docstring.
+
+  Neither warning is suppressed. Both are still reported by
+  `python · pytest on the newest CPython`, now from two documented test-side
+  oracles rather than from product code; a `filterwarnings` would recreate the
+  defect class that job was added to catch.
+
+- **A premise this PR inherited and repeated is corrected in the same change.**
+  "This repo has no Windows host" is shorthand that reads as fact in several
+  test-module headers, and it is false: `parity.yml`'s `python-tests-shard`
+  (`:2279`) runs `python/tests` on `[ubuntu-latest, windows-latest,
+  macos-latest]` (`:2284`, `runs-on: ${{ matrix.os }}` at `:2302`) on every
+  `pull_request`, and those legs are what the three required `python — pytest
+  across python/ (<os>)` contexts roll up. The true statement is that no
+  Windows host is available **locally**, so Windows behaviour is developed
+  against `ntpath`/`PureWindowsPath` oracles and the real runner only speaks
+  after a push — which is exactly the PR #1125 story, only possible because CI
+  *has* Windows. Corrected in `tests/core/test_uri_reference.py`'s header (with
+  the three in-file sites of the shorthand named) and in the
+  `python · pytest on the newest CPython` comment in `ci.yml`; the `nturl2path`
+  conclusion is unchanged, and the bare shorthand inherited by sibling modules
+  is left for a sweep of its own rather than fanned out from here.
+
+- **`--full-history` on the ledger gate's `git rev-list` walk is now pinned by
+  a test.** `test_module_size_budget_log_d_entries_are_immutable.py` walks
+  history twice and both walks need `--full-history` for the same reason — the
+  file has said so since PR #1070 — but only the `git log --name-status` walk
+  was guarded. Deleting `--full-history` from `_introducing_commit`'s
+  `git rev-list --full-history --reverse HEAD` call was measured GREEN across
+  the whole gates suite (`1142 passed, 34 skipped` on `1fc18bb1`, Python
+  3.12.3, git 2.43.0; the file alone `25 passed`), while the same deletion on
+  the `--name-status` walk reds immediately (`1 failed, 24 passed`). Anyone tidying or porting that call
+  silently reopened PR #1070's merge-introduction blind spot on an append-only
+  ledger, with nothing red to stop them.
+
+  The new guard,
+  `test_a_merge_introduced_entry_is_caught_even_when_default_simplification_would_prune_the_introducing_merge`,
+  builds the shape the existing sibling test cannot reach:
+  - It composes the same three steps as
+    `test_a_merge_introduced_entry_dropped_by_a_merge_and_re_added_with_different_content_is_caught`
+    — a merge INTRODUCES the entry (no `--name-status` record), a merge DROPS
+    it (no record), an ordinary commit RE-ADDS it with different content — but
+    the dropping merge here merges a branch that forked BEFORE the entry
+    existed. The merge and that parent then agree about the path (neither has
+    it), so the merge is TREESAME to it.
+  - That TREESAME-ness is what default git history simplification acts on: it
+    follows only that one parent, pruning the entire side the introducing
+    merge lives on. The introduction resolves to the re-add, whose blob IS
+    HEAD's, and check 4 reads a rewritten entry clean. The sibling test's
+    dropping merge is TREESAME to NEITHER parent (both sides carry the entry),
+    so default simplification already follows both parents there — which is
+    exactly why it survives the deletion.
+  - The pruning is measured on raw git inside the test rather than argued:
+    the same walk without `--full-history` is asserted to list nothing but the
+    re-add. The test also asserts checks 1–3 are clean by construction (one
+    `A` record, path in HEAD's tree, add-anchor blob equal to HEAD's), so only
+    check 4's introduction anchor can be doing the catching.
+  - `_introducing_commit`'s docstring is corrected rather than extended.
+    Its previous account — that `--full-history` is what keeps the
+    introducing merge in the listing — is not what fails when the flag is
+    deleted, and measurement says the flag buys nothing at all on that half:
+    for the shape `_entry_introduced_by_a_merge_commit` builds, and again for
+    PR #1070's own introduce-then-rewrite shape, `rev-list` lists the same
+    commits with and without it, because default simplification already keeps
+    a merge that is TREESAME to no parent. Reachability is the whole of what
+    the flag does here, and the docstring now says so, with both measured
+    walks quoted.
+
+  Mutation-proved, both walks independently, on Python 3.12.3 / git 2.43.0,
+  restoring from a `cp` byte copy with `__pycache__` cleared before and after
+  and the file's sha256 re-verified each time: `rev-list` unpinned →
+  `1 failed, 25 passed` (the new test, naming the walk); `--name-status`
+  unpinned → `1 failed, 25 passed`
+  (`test_a_merge_commit_that_drops_one_sides_already_added_entry_is_caught`,
+  the new test still green); both unpinned → `2 failed, 24 passed`. Neither
+  guard covers for the other. Two further mutants prove the new test's own
+  scenario pins are live rather than decorative: forking the dropping merge's
+  branch after the entry exists reds it on the two-parent assertion, and the
+  same fork with a diverged `feature` (a real two-parent merge that is
+  TREESAME to neither parent) reds it on the assertion that the merge's second
+  parent never held the entry. Review added a sixth: M5's shape with BOTH of
+  those helper pins deleted still reds, on the test's own raw-git assertion
+  that the unpinned walk lists nothing but the re-add — the scenario is held
+  in two independent places, not one.
+
+- **Two prior-art citations shortened to a bare `#1062`, which sends a reader
+  to the wrong subject (#1145).** PR #1062 retired
+  `tan build --no-auto-bootstrap` and has nothing to do with the
+  gate-that-cannot-fail class; the instance was an incidental finding in its
+  third review round.
+  `test_every_issue_code_is_registered.py:1772` already words it correctly as
+  "round-3 review of tan-cli#1062"; `test_interpreter_policy.py` and
+  `test_registered_severity_matches_emission_sites.py` now match it. `#1059`
+  and `#1070` are cited correctly and are untouched — the shape *is* their own
+  subject matter.
+
+- **The ledger-immutability gate now gets its own cross-OS run instead of
+  hiding behind `tests/gates`' ubuntu-only decision.**
+  `tests/gates/test_module_size_budget_log_d_entries_are_immutable.py` has
+  shelled real `git` subprocesses since tan-cli#907
+  (`rev-list --full-history`, `log --name-status`, merge construction, blob
+  compares), which is genuinely host-dependent in a way the rest of
+  `tests/gates` (pure `ast`/text-scan parsing) is not — `ci.yml`'s own
+  decision comment already carried an escape clause for exactly this shape
+  ("a gate that shells a subprocess needs its own cross-OS run, not a
+  blanket widening"), and this file had quietly outgrown it.
+  `.github/workflows/parity.yml`'s `python-tests-shard` job now runs this
+  file alone (not the rest of `tests/gates`) on `windows-latest` and
+  `macos-latest`, gated to `matrix.os != 'ubuntu-latest' && matrix.shard == 0`
+  so it fires once per platform rather than once per (os, shard) leg. The
+  one leg that needs full history gets it from the "checkout tan-cli" step's
+  own conditional `fetch-depth:`
+  (`.github/workflows/parity.yml:2438`), the tan-cli#970 convention every
+  other job in this repo that needs history already uses, in place of a
+  runtime `git fetch --unshallow` (which would have run unauthenticated,
+  since that checkout sets `persist-credentials: false`).
+  `ci.yml`'s decision comment is qualified in place rather than only
+  contradicted lower down — `tests/gates` is "pure source parsing... with
+  the one exception recorded below" (`.github/workflows/ci.yml:158`).
+
+  The new regression test
+  (`test_this_file_gets_its_own_cross_os_run_in_parity_yml`) pins the step's
+  existence, its exact `if:` condition (compared whole, not searched), and
+  the shard matrix's own membership: it asserts `0` is still a literal
+  member of `job["strategy"]["matrix"]["shard"]`
+  (`python/tests/gates/test_module_size_budget_log_d_entries_are_immutable.py:1800`),
+  not just that the `if:` string is unchanged — a renumbering of that matrix
+  to `[1, 2, 3, 4, parity]` (the exact off-by-one the matrix's own comment
+  warns is "easy to introduce and easy to miss") would otherwise leave
+  `matrix.shard == 0` true on no leg, silently stopping the cross-OS run on
+  every platform while every test still reported green.
+
+  A related CRLF hazard is fixed rather than only documented:
+  `regen_module_size_budget.py`'s `_append_log`, the writer that actually
+  produces the entries committed under `MODULE_SIZE_BUDGET_LOG.d/`, now opens
+  its output with `newline="\n"`
+  (`python/scripts/regen_module_size_budget.py:343`) instead of the platform
+  default, so the on-disk bytes match the LF `.gitattributes` already
+  normalises into the committed blob, on every host, before the file is ever
+  staged.
+
+  Adversarial re-verification of this change's own `fetch-depth:` ternary
+  found a second, independent bug in the fix above: GitHub Actions' `&&`/`||`
+  return an OPERAND rather than a coerced boolean, and its truthiness table
+  treats the number `0` as falsy, so the original
+  `cond && 0 || 1` collapsed to `1` on every leg regardless of `cond` --
+  windows-latest+0 and macos-latest+0 included, the exact two legs this
+  ternary exists to give full history. Confirmed against the official
+  `@actions/expressions` evaluator (the same one GitHub Actions runs) before
+  and after. Fixed by quoting the true branch as the non-empty string `'0'`
+  (truthy, the same trick `release.yml`'s `make_latest` ternary already uses
+  for its `'false'` branch), with a new regression test
+  (`test_the_checkout_fetch_depth_ternary_quotes_its_zero`) pinning the whole
+  expression string so a reintroduced bare `0` fails there instead of going
+  shallow on windows-latest/macos-latest at CI time.
+
+- **"This repo has no Windows host" is gone from the nine places it stood, and
+  the practice it wrongly justified is re-justified on a true premise.** It is
+  false: `.github/workflows/parity.yml`'s `python-tests-shard` job carries
+  `os: [ubuntu-latest, windows-latest, macos-latest]` with `runs-on: ${{ matrix.os }}`
+  and runs `python -m pytest -q --ignore=tests/gates --ignore=tests/parity` on
+  every `pull_request`, which is a real Windows pytest run. Two live proofs:
+  PR #1125 shipped a MERGE verdict from local measurement and then failed four
+  `windows-latest` shards, and PR #1151 was caught by
+  `python -- pytest shard (windows-latest 2/4)` for a CRLF fixture bug while its
+  review was still running. The **aggregation** job below it (`python-tests`)
+  is *not* a Windows run — `runs-on: ubuntu-latest`, no checkout, no pytest, a
+  `matrix.os` that exists only to reproduce the three required
+  `python -- pytest across python/ (<os>)` context strings — so the shard job is
+  what any citation of this evidence must name.
+
+  The advice the sentence carried was right and is unchanged: Windows behaviour
+  is pinned by `ntpath` / `PureWindowsPath` string oracles, never by a real
+  filesystem operation. What changed is *why*. A pure string oracle asks the
+  Windows question on all three shard legs and while the change is being
+  written; a real Windows filesystem operation asks it on one leg only, and only
+  after a push. That is the property the oracles rest on, and it is true whether
+  or not anybody has a Windows box in front of them.
+
+  **"No Windows host is available *locally*" was rejected as the replacement,
+  deliberately** — it is a second overstatement. `parity.yml`'s own pin-bump
+  comments record byte-parity re-measurements taken `(Windows host, py -3.14)`
+  before landing, `python/tests/fixtures/oracle_captures/PROVENANCE.txt` records
+  a real win32 oracle capture, and `python/tests/commands/test_monitor_command.py`'s
+  UNC-port case is measured against a real `serial.Serial(r"\\.\COM38")`. A
+  Windows host is sometimes there and sometimes not; the oracle rule does not
+  depend on which.
+
+  Sites corrected: `python/tan/commands/build/configure_inputs.py`
+  (`relative_key`), `python/tan/core/uri_reference.py` (`_is_windows_spelled`),
+  `python/tests/commands/test_execute_configure_cache.py`,
+  `python/tests/core/test_board_context.py`,
+  `python/tests/core/test_uri_reference.py` (module header, the four-cell
+  measurement note, and the two tests that restated the rule),
+  `python/tests/gates/test_oracle_fixture_capture_platform_convention.py`, and
+  `.github/workflows/ci.yml`'s `python-newest` header. All prose; no assertion
+  changed, so no behaviour did.
+
+- **The canonical statement now records the two coverage holes nobody had
+  written down.** `python/tests/core/test_uri_reference.py`'s
+  "## The Windows-host premise, corrected" is where the siblings point instead
+  of restating: (1) the shards pass `--ignore=tests/gates`, so `tests/gates` is
+  ubuntu-only by the recorded decision in `ci.yml`'s comment above its `python`
+  job — nothing under it ever executes on Windows or macOS; (2) the shard's
+  `actions/setup-python` step pins `python-version: "3.12"`, so a divergence
+  that appears only on 3.13+ cannot be caught by a required context there. PR
+  #1150 found a live instance: `Path.as_uri` is host-dispatched only from 3.14,
+  so "finishing the migration" to it would pass every required context and red
+  only in the advisory ubuntu `python -- pytest on the newest CPython` job.
+
+- **Every `parity.yml` line-number citation in this evidence chain is replaced
+  by a job-and-key citation.** The same three offsets had already rotted twice —
+  `:2279`/`:2284`/`:2302`/`:2382`/`:2555` when tan-cli#1140 wrote them,
+  `:2322`/`:2327`/`:2345`/`:2425`/`:2598` after tan-cli#1162 re-measured them,
+  and both sets were stale again within days (`python-tests-shard` sat at
+  `:2342` when this change started and at `:2361` when it landed, having moved
+  once more inside this very branch). Job names and YAML keys do not rot;
+  `grep -n "python-tests-shard" .github/workflows/parity.yml` re-derives an
+  offset in one command when one is genuinely wanted.
+
+- **The README Quickstart's `activate` and `ZEPHYR_BASE` lines named a
+  directory the Quickstart's own commands never create.** `README.md` told the
+  reader to run `tan bootstrap --sdk-root ./alp-sdk` from an empty directory
+  and then `source alp-workspace/.venv/bin/activate` /
+  `export ZEPHYR_BASE="$PWD/alp-workspace/zephyr"`. Run verbatim, neither path
+  exists: `west init -l ./alp-sdk` forces the west topdir to be the checkout's
+  PARENT, so with no `--workspace` the **current directory** is the topdir and
+  the real paths are `./.venv` and `./zephyr`. A reader who copied the block
+  got `No such file or directory` on the `source` line and a `ZEPHYR_BASE`
+  pointing at nothing.
+
+  The two forms had been crossed: `alp-workspace/` is the layout of
+  `tan bootstrap --sdk-root ./alp-sdk --workspace /path/to/alp-workspace`,
+  documented further down the same file, and of the automatic relocation
+  `bootstrap` performs when the starting directory holds anything besides the
+  checkout (`parent_needs_workspace_guard` returns true only then, so the
+  Quickstart's stated "empty working directory" is precisely the case where it
+  does NOT fire). The Quickstart now carries the paths its own invocation
+  produces, and both `alp-workspace/` cases are named where they belong.
+
+  The prose at `README.md:174` had the same defect — "a workspace venv at
+  `alp-workspace/.venv` (next to the SDK checkout by default)". "Next to the
+  SDK checkout" was right and `alp-workspace/.venv` was wrong; only one of
+  those two can be the default, and it is the former.
+
+- **`tan bootstrap --print-env` is documented for the first time.** The
+  fix does not stop at correcting the literals, because a hardcoded path is
+  what rotted in the first place: `bootstrap` already prints the exact
+  activate and `ZEPHYR_BASE` lines for the workspace it actually created, and
+  `--print-env` reprints them at any time on stdout, specifically so the block
+  can be redirected into a file. The README now points a reader with any other
+  layout at that instead of asking them to hand-adjust a path — the same flag
+  `.github/workflows/getting-started.yml` already exercises as "the documented
+  customer path", which the README had never mentioned.
+
+  Stated with the caveat that matters, because the flag's output is not quite
+  what its name suggests: the **venv-activation line it emits is a comment**.
+  Sourcing that output sets `ZEPHYR_BASE` and `ZEPHYR_TOOLCHAIN_VARIANT` and
+  does *not* activate the venv, so a reader who sourced it and then ran
+  `west sdk install` would get the system `west` or `command not found`. The
+  repo already knew this — `.github/workflows/getting-started.yml:461-462`
+  says so and sources the venv from `venvDir` instead — so the README says it
+  too rather than implying the block is self-sufficient.
+
+- **`HAND_PORT_PINNED_SDK_COMMIT` re-synced to alp-sdk `eff266b6`, closing
+  `#1156`.** Three commits since `ff27f179` touched `HAND_PORT_HASHES`
+  sources; each was measured against a real `eff266b6` checkout rather than
+  taken on the automated proposal's placeholder narrative (`auto/planner-
+  resync`, PR #1210).
+  - `scripts/gen_zephyr_board.py` (two commits: alp-sdk#1924's V2N/V2M
+    pinctrl.dtsi/`_defconfig` emitter, alp-sdk#1964's AEN BRD_I2C RTC +
+    temperature-sensor pinctrl/dts emission) is a genuine hand-port, both
+    halves, into `tan/planner/zephyr_board.py`: `emit_zephyr_board()` gains a
+    `families:`-driven `v2n`/`v2n-m1` branch producing a board's
+    pinctrl.dtsi + `_defconfig` for the first time, and the AEN branch gains
+    the on-module BRD_I2C bus (RTC + temperature sensor) in its pinctrl.dtsi
+    and board `.dts`. Both read their new hand-authored metadata source
+    (`metadata/e1m_modules/v2n/supervisor-links.yaml`,
+    `metadata/e1m_modules/aen/on-module-links.yaml`) out of the bound SDK
+    root at run time (ADR-0017) — nothing needed vendoring. Proven
+    byte-for-byte against the real oracle: the existing
+    `test_tan_generate_writes_a_zephyr_board_tree_byte_for_byte` parity node
+    (AEN) and a hand-run `tan generate --target zephyr-board --core m33_sm`
+    subprocess-vs-in-process comparison (V2N, no prior test node) both come
+    back byte-identical.
+  - `scripts/alp_project_emit/hw_info.py` is a genuine hand-port too:
+    `ALP_HW_BUILD_SOM_HW_REV` now composes the family's `board_datecode`
+    through `sdk_compat.board_designator()` (`"2626-r2"`, not the bare
+    `"r2"`), matching what `scripts/program_eeprom.py` writes into a
+    provisioned module's manifest and what the boot banner compares the live
+    EEPROM read against — closing a real build-vs-EEPROM mismatch on every
+    AEN unit with a declared datecode. `_emit_hw_info_h` gains a required
+    `metadata_root` parameter, threaded the same way `west-libraries`
+    already threads one.
+  - `scripts/alp_template.py`'s `_check_constraints` non-integer
+    `minimum`/`maximum` refusal and `scripts/alp_cli/diagnostic_format.py`'s
+    URI-shaped diagnostic paths (both from the SAME upstream commit,
+    alp-sdk#1932) need **no port**: both are alp-sdk catching up to a fix
+    tan already shipped first (tan-cli#1087's `_check_constraints` guard,
+    tan-cli#1097/#1111's `path_to_uri_reference`) — confirmed by reading the
+    two bodies side by side, not assumed from either docstring's own claim.
+    Hashes re-pinned; no `tan/planner/` code changed for either.
+  - The other eight `HAND_PORT_HASHES` sources are untouched in this range —
+    each diffed byte-for-byte against `eff266b6` directly, not inferred from
+    a commit log.
+- **The AEN BRD_I2C hand-port above carried one of alp-sdk's own bugs
+  byte-for-byte: an E8-only DFP warning was reaching every AEN SKU's
+  `.dts`, not just the E8's.** `metadata/e1m_modules/aen/on-module-links.yaml`
+  scopes itself to "the E1M-AEN family", but its `rtc_alarm.risk` string
+  (the port-15 `LPGPIO_CTRL_n` register-layout caveat) is evidenced against
+  nothing but "The AE822 DFP" -- the E8 part's own datasheet -- with no
+  equivalent citation for the E3/E4/E6 DFPs. `_aen_brd_i2c_dts()` emitted it
+  unconditionally, so `test_a_non_e8_aen_sku_includes_its_own_peripherals_overlay`
+  (already asserting "no E8 fact survives an E3 tree") caught "AE822" landing
+  in an E1M-AEN301 (E3) board `.dts`. `tan/planner/zephyr_board.py` now gates
+  the comment on the SoC JSON's own `part == "E8"`, a documented divergence
+  from `scripts/gen_zephyr_board.py`, which still emits it unconditionally
+  (upstream issue filed against alp-sdk to converge the two generators).
+
+- **`getting-started.yml` described the workspace-parent guard as it behaved
+  before tan-cli#302.** The comment above "clone alp-sdk into a dedicated
+  workspace parent" said that under a CI runner's non-terminal stdio the guard
+  "REFUSES outright rather than offering to relocate". It has not refused since
+  #302: a dirty parent with no `--workspace` now **relocates** the checkout into
+  `<parent>/alp-workspace` automatically, on every run, TTY or not —
+  `workspace_guard_target_occupied_refusal`'s own docstring states the port
+  "takes NO input on this decision on ANY run", and
+  `tests/commands/test_bootstrap_command.py:965-1022` drives exactly that under
+  `--format json`. The one surviving refusal is that same function's: the
+  relocation target already exists *and* already holds content.
+
+  The comment's conclusion — clone into a dedicated parent — is unchanged and
+  still right; only its reason needed correcting.
+
+  A first draft of this fix replaced the stale claim with a **new** false one,
+  which review caught: it said the relocation was "silent" and "the more
+  dangerous of the two". Neither holds. `relocate_checkout`'s caller raises it
+  through `log.warn("workspace-relocated", ...)`; `Log.take_issues` puts it on
+  the envelope at `severity: "warning"`; and the same step in
+  `getting-started.yml` fails on any warning outside its `EXPECTED_WARNINGS`
+  set, which holds only `bootstrap.python-floor-skew`. So the relocation fails
+  the job on the spot, exactly as the pre-#302 refusal would have.
+  `rollback_relocation_after`'s docstring says the warning "already drained
+  into this run's issues".
+
+  A second draft then shipped two bad pointers of its own, which review also
+  caught: it cited the `bootstrap.workspace-relocated` emitter inside
+  `print_env_issues` — the `--print-env` projection, which cannot fire in a
+  `--format json` step — and it cited `EXPECTED_WARNINGS` at a line its own
+  nine added lines had already pushed down, in the same commit. Both are now
+  cited by symbol. A file-accuracy fix that ships a stale coordinate is the
+  defect it was written to remove, and this one managed it twice
+
+  The true reason is plainer and sufficient: tripping the guard fails this job
+  at `bootstrap.workspace-relocated`, a code that reads as unrelated to what
+  the job is testing. Recorded here because a doc-accuracy fix that ships a new
+  false claim is the defect it was written to remove.
+
+  Fixed here rather than in its own PR because it is the same file tan-cli#1163
+  edits, and shipping the two separately would have put two of our own changes
+  in conflict over one comment block. Found while reviewing PR #1157, answering
+  "did the README sweep miss other sites with the same crossed assumption about
+  when `alp-workspace/` exists" — this was the only other site; `docs/` carries
+  no layout text at all.
+
+- **The last four unguarded metadata reads in `tan/planner/**` are curated,
+  and their severity is stated per site rather than pooled.** tan-cli#1133
+  fixed four `absent-try` sites in `tan/planner/template.py` and left four
+  more, listed individually so none could be deferred as "a candidate".
+  All four went `is_file()` pre-flight → bare `read_text()` → bare parse,
+  with no `try` at any point, past a curated-raise contract of their own:
+  `libraries.py`'s `load_manifest` (`OrchestratorError`),
+  `zephyr_board.py`'s `_load_soc_spec` (`ZephyrBoardEmitError`),
+  `kconfig_symbols.py`'s `_load_board_symbols` (`OrchestratorError`) and
+  `topology.py`'s `_core_os_choices` (`OrchestratorError`). Each now
+  reads through `tan/core/document_guards.py` and answers with a message
+  naming the file and what went wrong, byte-identically on 3.12.3, 3.13.15
+  and 3.14.7.
+- **None of the four was a bare traceback, and the entry says so.** Unlike
+  tan-cli#1133's sites, which escaped `emit_scaffold` past an `except
+  TemplateError` and nothing else, all four of these were absorbed by a
+  broad handler two frames up — `build_cmd.py:505` for `load_manifest` and
+  `_core_os_choices` (coded `build.plan-unavailable`),
+  `kconfig_cmd.py:541` for `_load_board_symbols` (coded
+  `kconfig.emit-failed`), `generate_cmd.py:890` for `_load_soc_spec`. What
+  the user got was a coded envelope naming the exception CLASS
+  (`the build-plan emit failed: UnicodeDecodeError: ...`) where they needed
+  the FILE. A poor diagnostic, not a crash.
+- **`_load_soc_spec` is NOT on the `tan build` path, correcting the issue
+  that filed it.** Established by walking its callers rather than assumed:
+  its only caller is `emit_zephyr_board`, reached
+  only through `planner_emit.py:287`, so only from `tan generate --emit
+  zephyr-board`. The two build-path modules that import from
+  `zephyr_board` (`loader.py:385`, `secure.py:102`) take
+  `_aen_role_slot0_map` and two constants and never this function.
+- **Every `is_file()` pre-flight is deleted, not widened — including one
+  that was never a guard at all.** `_core_os_choices` used `is_file()` to
+  SELECT between the project's own `board.schema.json` and the in-tree
+  `BOARD_SCHEMA`, and `is_file()` answers `False` to "denied" and "is a
+  directory" exactly as it does to "not there". So an unreadable project
+  schema fell back silently onto a different document and the caller was
+  told an `os:` enum the project never declared — measured on 3.14.7 as no
+  raise and a wrong answer, and on 3.12.3/3.13.15 as a raw
+  `PermissionError` out of `Path.is_file()` itself (the tan-cli#1127 trap).
+  The new `read_optional_text` classifies on the real exception:
+  `ENOENT`/`ENOTDIR` is the legal no-schema-of-its-own branch, every other
+  failure is a refusal. The same trap made the other three sites produce a
+  curated but FALSE message on 3.14.7 for a `chmod 000` parent — `unknown
+  library ... Available: <none>`, `no SoC spec at <path>`, `completed but
+  never wrote <path>` — each for a file that is right there.
+- **A `<lib>.yaml` DIRECTORY is no longer reported as an unknown library
+  that is also available.** `load_manifest`'s pre-flight answered `False`
+  for a directory, so the user was told the library did not exist while the
+  option list in the same sentence — built from the same `glob("*.yaml")` —
+  named it. Measured on all three interpreters.
+- **`load_manifest`'s option list is built lazily, so the fix does not stop
+  one directory short of the problem.** `Available: ...` is a `glob` of
+  `metadata/libraries/`, and building it eagerly put `available_libraries`'
+  own `is_dir()` — an unguarded pre-flight of exactly the shape this entry
+  removes — AHEAD of the guarded read on every call. With `metadata/` itself
+  denied (the manifest's grandparent, one level out from the `chmod 000`
+  parent the other sites were driven on) that reinstated the tan-cli#1127
+  split inside the change that removes it: raw `PermissionError` on 3.12.3
+  and 3.13.15, curated on 3.14.7. `require_readable_text`'s `absent=` now
+  accepts a zero-argument callable as well as a string, resolved only if the
+  `FileNotFoundError` branch is taken, so the listing stays on the miss path;
+  `available_libraries` drops its pre-flight and answers `[]` rather than
+  raising, because `Path.glob` is not uniform on this shape either (measured:
+  `PermissionError` on 3.12.3, `[]` on 3.13.15 and 3.14.7). The message is
+  preserved byte for byte.
+- **The register grew the JSON half of what it already had for YAML.**
+  `tan/core/document_guards.py` gains `require_json_mapping_doc` and
+  `read_json_mapping` (the twins of `require_yaml_mapping_doc` /
+  `read_yaml_mapping`) plus `read_optional_text`. `read_catalog_document`
+  is now a one-line delegation to `read_json_mapping`, so the `not valid
+  JSON` message has one definition instead of two; its own messages are
+  unchanged byte for byte.
+- **The `$defs` chain one level in from the read is guarded too.**
+  `_core_os_choices` reached `schema["$defs"]["core_entry"]["properties"]
+  ["os"]["enum"]` by bare subscript, so a schema that is legal JSON but
+  missing a link was a raw `KeyError`. Each of the five links, and a
+  non-list `enum`, is now named.
+- **All five contracts are seeded and mutation-proven.**
+  `tests/gates/test_never_raises_contract_holds.py`'s `_SEEDED_CONTRACTS`
+  goes from 20 entries to 25 (this change's four, plus tan-cli#1134's).
+  Every seed was driven green, broken in the product code, confirmed RED,
+  and restored — on 3.12.3, 3.13.15 and 3.14.7 each. The shared shape list
+  gained `test_permission_denied_metadata_root`, the grandparent cell that
+  is one directory further out than `test_permission_denied_parent` and
+  the only one that could see the `available_libraries` defect above.
+  `_load_board_symbols`' own deferral at tan-cli#1116 ("in `PINNED_HASHES`")
+  is reversed and the reason recorded: that gate pins only the UPSTREAM
+  side of the comparison, 16 of the 20 relocated modules already differ
+  from upstream, and this file already carries a documented tan-only
+  divergence (tan-cli#992). The freshness gate is green after the change.
+- **The sweep's own tally, re-measured and decomposed.**
+  `scripts/audit_narrow_except_contracts.py --planner` reports **85
+  candidates / 5 `absent-try` before, 83 / 1 after**; without `--planner`,
+  69 / 1 → 70 / 1. The membership delta was taken by diffing the two
+  candidate listings, not by subtracting totals: four functions drop out
+  (the three fixed planner reads plus `read_catalog_document`, which no
+  longer contains a `try` of its own) and two join (`read_optional_text`,
+  `require_json_mapping_doc` — the honest cost of guarding anything).
+  `kconfig_symbols::_load_board_symbols` stays a candidate on its SHAPE 1
+  narrow-`except` and correctly so; only its `absent-try` line is gone.
+- **The one remaining `absent-try` finding is a confirmed false positive,
+  now recorded so it stops being re-triaged.** `build_cmd.py:1234`'s
+  `json.loads(text)` cannot fail: `_build` gets that string from
+  `_acquire_plan` (`build_cmd.py:1225`), which returns
+  `text, parse_build_plan(text)`
+  (`build_cmd.py:546`), and `parse_build_plan` (`build_plan.py:543-547`)
+  already ran `json.loads` on it inside a `try`. It stays reported rather
+  than suppressed — a name-based detector with a special case for one call
+  site is a detector nobody can reason about — with the chain spelled out
+  once in the script's own limits list.
+
+- **CI ran `tan bootstrap`'s Zephyr SDK download anonymously, in the two jobs
+  whose whole subject is that command.** `tan bootstrap`'s final phase lists the
+  SDK releases through the GitHub API, whose unauthenticated quota is counted
+  **per source IP** and shared across every hosted runner in the region — so it
+  is exhausted by traffic that is not ours and the job dies with
+  `403 API rate limit exceeded` for a reason unrelated to the change under
+  test. Measured three times in one day, on PRs touching neither bootstrap nor
+  the SDK:
+  `first blink` on #1150 (`172.214.44.54`, three attempts) and `first install`
+  twice on #1161 (`172.182.195.32`).
+
+  **Three** steps ran it with no `env:` block at all, and all three now set
+  `TAN_GITHUB_TOKEN`: `getting-started.yml`'s (`first install`),
+  `parity.yml`'s (`first blink`), and `release-combination.yml`'s — the third
+  found in review after this change shipped claiming there were two.
+
+  The third is the sharpest instance of the asymmetry, because there the step
+  *immediately below* already carried `GH_TOKEN` for the manual
+  `west sdk install` **fallback** while the real download stayed anonymous. It
+  is also the worst place to lose: a 403 raises `bootstrap.toolchain-install`,
+  which is `WORKSPACE_BLOCKING` (`bootstrap_cmd.py:245-247`), so `take_issues`
+  escalates it to `severity: "error"` and `ok:false`, and the step's own
+  `if not e.get("ok")` exits 1 — reddening the **pre-release combination gate**
+  on someone else's traffic.
+
+  A fourth anonymous invocation is left deliberately un-fixed and filed
+  instead: `scripts/e2e-full.sh:872`, reached through `e2e-container.sh`, which
+  forwards only `ALP_SDK_REF` / `ZEPHYR_SDK_VERSION` /
+  `ZEPHYR_SDK_INSTALL_TIMEOUT` into the container — so no token can reach it
+  without new plumbing. That is a different change from adding an `env:` block,
+  and bundling it here would have hidden it.
+
+- **The capability existed and was simply unused on the one path that needed
+  it.** tan-cli#1143 taught `tan bootstrap` to authenticate its own
+  `west sdk install` —
+  `SDK_TOKEN_ENV_VARS = ("TAN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")`
+  (`tan/core/toolchain_provision.py:599`), passed to `west` out of band so it
+  reaches no argv, log, `--dry-run` plan or envelope. Two *later* steps in
+  `getting-started.yml` already carried a token, with a comment giving exactly
+  the right reason ("unauthenticated calls are rate-limited PER IP, shared
+  across every hosted runner in the region"): the tan-cli#840 diagnostic probe
+  at `getting-started.yml:575`, and the manual `west sdk install` retry at
+  `getting-started.yml:610`. So the workflow already knew the problem and
+  applied the fix to the diagnostic and the fallback, while leaving the real
+  download — the step whose failure fails the job — as the only anonymous one.
+
+  A side effect worth naming: tan-cli#1143's out-of-band token handling now has
+  CI evidence rather than unit tests alone, since the job most likely to prove
+  it finally exercises the authenticated path.
+
+- **`TAN_GITHUB_TOKEN` rather than the `GH_TOKEN` its neighbours use**, and the
+  reason is written at both sites. Those neighbouring steps invoke `gh` and
+  `west --personal-access-token` directly, so they need the name *those* tools
+  read. These steps invoke `tan`, which reads `TAN_GITHUB_TOKEN` first, and the
+  tan-specific name cannot change `gh`'s ambient behaviour inside the step —
+  the "an **ambient** `$GH_TOKEN` you set for something else will be used here
+  too" case `README.md` already documents. No new permission is needed: both
+  workflows already declare least-privilege `contents: read` (tan-cli#435), and
+  `getting-started.yml:83` already records that listing public releases needs
+  nothing more.
+
+- **`test_build_text_issue_dedup.py`'s `_PATH` fixture is now a raw string, so
+  it stops silently corrupting itself.** The literal `"E:\venv\Scripts;C:\Windows\system32;C:\Program Files\Git\cmd"` compiled every full-suite run
+  with a `SyntaxWarning: invalid escape sequence '\S'` at line 25 -- but that
+  warning names only the FIRST unrecognised escape in the string (`\S`, `\W`,
+  `\s`, `\P`, `\G`, and `\c` are unrecognised too and survive as two literal
+  characters each, unwarned). The one escape that IS recognised, `\v`, is the
+  dangerous one: Python silently turns it into a vertical tab (`\x0b`), so the
+  fixture's first path segment was actually `"E:\x0benv\\Scripts"`, not
+  `"E:\\venv\\Scripts"`. `_PATH` is now `r"E:\venv\Scripts;C:\Windows\system32;C:\Program Files\Git\cmd"`. Every one of the module's eight tests
+  passes identically before and after -- `_PATH` only ever feeds the same
+  `_REASON` string into both sides of each equality check (the mock slice
+  data and the issue message under test), so the corrupted and the correct
+  value cancel out; nothing asserted against the literal segment text. A
+  clean-cache full-suite run went from exactly one `SyntaxWarning` to zero.
+
+- **The container e2e ran `tan bootstrap`'s Zephyr SDK download anonymously,
+  and no token could reach it.** `scripts/e2e-full.sh:872` runs
+  `tan bootstrap --sdk-root ./alp-sdk --non-interactive --format json` inside a
+  container, on a `pull_request`-gated, paths-filtered workflow; its toolchain
+  phase lists the SDK releases through the GitHub API, whose anonymous quota is
+  counted **per source IP** and shared across every hosted runner in the region
+  — so it is exhausted by traffic that is not ours and the job dies with
+  `403 API rate limit exceeded` for a reason unrelated to the change under
+  test. Observed three times in one week. This is the **fourth** site of
+  tan-cli#1163, named in that fix and deliberately left open because closing it
+  is a different change: tan-cli#1163's remedy is an `env:` block on the
+  workflow step, and `scripts/e2e-container.sh:114-116` forwarded only
+  `ALP_SDK_REF`, `ZEPHYR_SDK_VERSION` and `ZEPHYR_SDK_INSTALL_TIMEOUT` into the
+  container, so a variable set on the step never arrived.
+
+  `.github/workflows/e2e-container.yml` now sets `TAN_GITHUB_TOKEN` on the
+  harness step and `scripts/e2e-container.sh` forwards it with
+  `docker run -e TAN_GITHUB_TOKEN` — **by name, with no `=value`**, unlike the
+  three `VAR=${VAR:-default}` forwards beside it. That is the whole security
+  difference: `-e NAME` copies the value out of the calling shell and omits the
+  variable entirely when it is unset, so the token is never an element of the
+  `docker run` argv and never in the runner's process table. `tan` then passes
+  it to `west sdk install` out of band through a private netrc, so it reaches
+  no argv, log, `--dry-run` plan or envelope inside the container either
+  (tan-cli#1143). `TAN_GITHUB_TOKEN` rather than `GH_TOKEN`, matching the three
+  sites tan-cli#1163 fixed: it is what `tan` reads first (`SDK_TOKEN_ENV_VARS`,
+  `python/tan/core/toolchain_provision.py:599`), so nothing the container image
+  carries can shadow it. Listing public releases needs no scopes, and the job's
+  least-privilege `contents: read` is unchanged.
+
+- **The harness now says which quota it spent, because `tan` cannot.** A 403
+  breaks all three of that block's assertions at once — `exit=0`, `ok:true` and
+  a 0-byte stderr — so a rate limit presented as three unrelated-looking
+  assertion failures rather than one cause, which is a large part of why it
+  went unfixed for so long. `tan`'s own
+  `Authenticating the Zephyr SDK download with the token in $<var>` line is a
+  `Log.line`, and `Log.line` prints nothing at all under `--format json`
+  (`bootstrap_cmd.py:265-268`), while the envelope is deliberately
+  byte-identical with and without a token — so the run the fix is FOR is
+  exactly the run that could not report it. The harness now prints the **name**
+  of the variable that was set, never its value, together with any
+  `bootstrap.sdk-credential-*` issue on the envelope: `-unstaged` and
+  `-unverified` are the only two outcomes a present token can have other than
+  being staged and passed (tan-cli#1148, tan-cli#1154), so their absence beside
+  a set variable is the authenticated path and nothing else — **provided the
+  envelope was read at all.** That last qualifier is load-bearing, so it is
+  enforced rather than assumed: the reader emits a distinct `PARSEFAIL:`
+  sentinel (the shape `check_bootstrap_refusal` already uses in the same file)
+  when `$WORK/bsB.out` is absent or unparseable, and the branch tests for it
+  first. A `tan bootstrap` that died before writing an envelope — the case the
+  `ok=NONE` on the line above is the symptom of — now reports
+  `whether it was staged is UNKNOWN` instead of the positive assurance it
+  would otherwise have printed from an absence of evidence. The same sentinel
+  is the `|| echo` fallback for a host with no `python3`, whose empty capture
+  would have reached the `did NOT authenticate` branch with an empty code
+  list.
+
+- **`scripts/e2e-full.sh`'s own direct `west sdk install` stays anonymous, on
+  purpose.** It is not covered by the forward and cannot be:
+  `west sdk install` takes a credential from `--personal-access-token` and from
+  nothing else, reading no environment variable of its own (measured at Zephyr
+  v4.4.1 `scripts/west_commands/sdk.py:473`; `grep environ` over that file
+  finds only `ZEPHYR_BASE` and `ZEPHYR_SDK_INSTALL_DIR`, recorded as
+  `toolchain_provision.WEST_SDK_KNOWN_ENV_READS`). The flag is the one shape
+  tan-cli#1143 forbids — it would put the secret in an argv readable from the
+  process table, and this harness runs on developer machines as well as in an
+  ephemeral container — and hand-rolling `tan`'s netrc route in bash would be a
+  second place a secret touches disk without the `finally` discard, the 0700
+  scratch directory or the stale-file sweep that make that route safe. The step
+  also exists to run the command `tan doctor` PRINTS, verbatim, the way a
+  customer would; a customer on a home IP has their own unauthenticated quota.
+  The reasoning is recorded beside the call rather than left to be re-derived
+  by the next sweep, along with what it leaves standing: that download is
+  reached more often than its `PRE = pass` guard suggests, because the guard
+  reads `tan doctor`'s `zephyrSdk` check, which takes `ZEPHYR_SDK_INSTALL_DIR`
+  first when that names a valid root and otherwise scans the top level — never
+  recursing — of `/opt`, `$HOME`, `%USERPROFILE%` and `Path.home()` for a
+  `zephyr-sdk*` entry (`doctor_cmd.py:2640-2694`). Neither route can see the
+  store `tan bootstrap` just filled at
+  `~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`: it is two levels
+  below `$HOME` rather than at its top level, and it is not what
+  `ZEPHYR_SDK_INSTALL_DIR` points at. Derived from source, not measured in a
+  container run.
+
+- **`assemble_changelog.py`'s irreversible fold is now opt-in behind `--write`
+  (#1172).** A bare invocation used to be the destructive one: it rewrote
+  `CHANGELOG.md` and **deleted every file in `changelog.d/`**, with no prompt,
+  no `--yes`, exit 0, and a summary that reads like success. All three safe
+  modes (`--check`, `--dry-run`, `--require-empty`) were opt-in and the
+  irreversible one was what you got by typing the script's name. It cost **157
+  fragments** during PR #1166 — reached for to *render* a fragment and see how
+  it would read, which is the common interactive reason to run it at all —
+  and was recovered only because the fragments happened to be tracked with a
+  clean index at that moment. A fragment written but not yet `git add`ed is
+  unrecoverable that way, and drafting one is exactly when you would want to
+  render it.
+
+  The failure was silent and shaped like success in both directions: the run
+  exits 0, and the next `--check` then reports `0 fragment(s) pending`, which
+  reads as "nothing to do" rather than "everything is gone".
+
+  A bare run now renders the result to stdout and changes nothing, plus one
+  stderr line naming `--write` as the flag that would have folded — so
+  inspection, the common intent, is the default, and the release path says the
+  word once. `--dry-run` renders without the reminder, since asking for a
+  render explicitly needs no nudge. `--check` and `--require-empty` are
+  unchanged, and `--require-empty`'s failure message now names
+  `assemble_changelog.py --write`: it used to name the bare command, which
+  after this change would leave a release engineer running it, seeing success,
+  and finding the fragments still pending.
+
+  Nothing in CI called the bare fold — `release.yml:828` uses `--require-empty`
+  only, and the fold is run by hand at the release commit — so the change
+  breaks no workflow. Twelve existing test invocations that meant the real
+  fold were migrated to `--write` (eleven in `test_assemble_changelog.py`, one
+  in `test_bump_dev_version.py:325`, which feeds one script's real output into
+  the other's real entry point).
+
+  Making the fold opt-in is not enough on its own, because `--write` also has
+  to be unreachable by ACCIDENT: `--dry-run --write` performed the whole
+  irreversible fold, exit 0, silently — measured on this branch's own tree,
+  `changelog.d/*.md` went 163 → 1 with
+  `folded 162 fragment(s) into CHANGELOG.md` on stdout and nothing on stderr —
+  from a flag documented as "write nothing" and advertised by
+  `changelog.d/README.md` as the safe look-first form. `--check --write` was
+  harmless only by accident of `--check` being handled first, so the precedence
+  was inconsistent in exactly the direction that loses data. `--write` is now
+  REFUSED (exit 2, a usage error distinct from the exit 1 a bad fragment
+  returns) alongside `--check`, `--dry-run`, or `--require-empty`, naming every
+  conflicting flag it saw and both commands to run instead. The safe flags
+  still combine with each other: `--check --dry-run` and
+  `--check --require-empty` are unchanged.
+
+  **The fold now lands on the right inode.** `os.replace` targeting
+  `CHANGELOG.md` CLOBBERS a symlink instead of writing through it, and the
+  `Path.write_text` it replaced followed the link — so making the write atomic
+  had, on its own, introduced a total-loss path. Measured on a copy where
+  `CHANGELOG.md -> real/CHANGELOG.md`: exit **0**, stdout
+  `folded 162 fragment(s) into CHANGELOG.md`, `real/CHANGELOG.md` still md5
+  `4cc00bd3446d5718b8eabb27b50d1744` and still unfolded, the repo-root path
+  replaced by a new 1261455-byte regular file with the symlink gone (both
+  figures measured at `4ac6907`), and **162** fragments deleted — the content on the wrong inode, the real file
+  untouched, the fragments destroyed, and the run reporting success. The write
+  now goes through `tan/core/atomic_write.py`'s `atomic_write_text`, this
+  repo's one durable-atomic-write implementation (#516), rather than a third
+  hand-rolled copy of a sequence that has already drifted between call sites
+  once (#510). Same copy, after: the symlink survives, `real/CHANGELOG.md`
+  holds the fold and is byte-equal to what the same fold produces with no
+  symlink in the path, and no temp is left beside either path. (No absolute
+  md5 for the folded file is quoted here on purpose — this entry is one of the
+  fragments being folded, so any such number would describe a document this
+  sentence had just changed.)
+
+  That helper also closes two smaller holes in the same write. `os.fsync` on
+  the temp makes the BYTES durable, not the RENAME: on a power cut in between,
+  the reachable state was exactly the one the survivor report calls impossible
+  — `CHANGELOG.md` at its old content with the fragments already gone. The
+  parent directory is now fsynced after the `os.replace` as well. And the temp
+  was named `CHANGELOG.md.tmp`, which no `.gitignore` rule matched: killed
+  mid-fsync with SIGKILL, the run left a `?? CHANGELOG.md.tmp` in the repo
+  **root** — the full size of the folded changelog — untracked and
+  committable, which a later successful run then truncated without a word. It is now
+  `tempfile.mkstemp(dir=…, suffix=".tan-tmp")`, matching the two other
+  atomic-write producers `.gitignore:53-69` documents; the same SIGKILL now
+  leaves `tmpXXXXXXXX.tan-tmp`, which `git status` does not see at all.
+
+  **A re-run on a folded-plus-survivors tree is refused rather than
+  double-folding.** That state — `CHANGELOG.md` written, fragments still on
+  disk — is what a fold whose unlinks partly failed leaves behind, and the fold
+  cannot undo it. Re-running `--write` there used to splice every survivor a
+  second time and exit **0**: measured on this branch's corpus, fold 162,
+  restore one fragment, re-run, and the run printed
+  `folded 1 fragment(s) into CHANGELOG.md` while this entry's lead sentence
+  went **1 → 2** — success-shaped output over a non-success state, which is the
+  class #1172 exists to eliminate. The test is exact rather than fuzzy, which
+  is what makes it cheap enough to run unconditionally: `splice()` copies
+  fragment bodies byte-for-byte, so "this body already appears in the
+  Unreleased section" IS "this fragment has already been folded here".
+  Measured against the real corpus: **0** false positives across all 162
+  pending fragments, and the survivor of a forced partial unlink is the only
+  hit. The refusal exits 1, names every already-present fragment, and covers
+  the RENDER too, so a bare run or `--dry-run` on such a tree no longer prints
+  a changelog with the entry twice and calls it the result.
+
+  `--root` also stopped bypassing the validation `repo_root()` performs.
+  `--write --root <dir with changelog.d but no CHANGELOG.md>` died with a raw
+  `FileNotFoundError` traceback; it now gets the script's own
+  `error: …` contract and exit 1.
+
+  Twenty-one controls pin it, and they are data-loss controls rather than
+  behaviour tests: a bare run leaves both the fragment and `CHANGELOG.md`
+  byte-identical; a bare run still renders, and still names `--write`;
+  `--write` still folds and deletes; `--dry-run` stays silent where a bare run
+  nudges; `--require-empty`'s error names a command that actually works; each
+  of the four `--write` combinations is refused without touching either side,
+  and the refusal names a command that works; the safe flags still combine; a
+  failed `CHANGELOG.md` write leaves both sides intact; a failed unlink reports
+  its survivors instead of success; a PARTIAL unlink failure names exactly the
+  set still on disk, each with its errno; a re-run on that tree is refused and
+  changes nothing, as is the render; the guard fires on none of the 162 real
+  pending fragments; a symlinked `CHANGELOG.md` is written through, not
+  clobbered; the rename is fsynced and not only the bytes; the temp file
+  matches a `.gitignore` rule this repo already has; and a `--root` missing its
+  `CHANGELOG.md` gets an `error:` line rather than a traceback.
+
+  Mutation-proven rather than asserted, over byte copies: reverting the
+  `--write` requirement reds exactly four, including the pre-existing
+  `test_dry_run_writes_nothing`; disabling the combination refusal reds exactly
+  five; reverting the atomic write reds exactly one; removing the symlink
+  resolution, the directory fsync, the `.tan-tmp` suffix and the `--root`
+  validation red exactly one each; disabling the idempotence guard reds exactly
+  two; disabling the survivor report reds exactly three. Restoring from the
+  byte copies leaves the worktree md5-identical, with zero mutation traces
+  and `46 passed`.
+
+- **The module-size ratchet's function records now store WHICH functions are over `FUNCTION_CAP`, not just how many.** Each `module_size_budget.d/**` record's `long_functions` used to be a count and a sibling `worst_function` the max span -- both DERIVED, per tan-cli#1057, from a per-module list that was measured but then thrown away. That let one function cross `FUNCTION_CAP` while a different one in the SAME module dropped below it, with the count and the worst span both reading unchanged either side: measured for real in PR #1170, `_sdk_credential` grew `50 -> 63 -> 69` while `_data` fell `51 -> 47` in the same diff, and `bootstrap_cmd.py.json`'s `long_functions` read `19` before and after -- neither `regen_module_size_budget.py --check` nor its `--reason` refusal ever saw it happen.
+
+  `long_functions` is now the sorted `[span, name]` list itself, and `regen_module_size_budget.py`'s `_function_deltas` compares it per `module:name` rather than on the two whole-tree derived scalars alone. A function newly over the cap, or an already-over one growing further, is growth in its own right and forces `--reason` even when nothing else in the tree moved -- this deliberately overturns `tan-cli#1057`'s own `test_a_whole_tree_neutral_function_move_needs_no_reason`, which used to pin the opposite for a move across modules; a `FUNCTION_CAP` crossing is now judged on its own regardless of what else in the tree shrank to offset it. A function dropping below the cap is reported as shrunk (never forces a flag, same as a module shrinking), but -- unlike a module-line shrink -- it IS folded into the `--reason`/`--merge-resync` ledger entry, so an offsetting pair's entry names both the function that grew and the one that dropped instead of only half of what moved.
+
+  This is a schema change to every record under `module_size_budget.d/**`; all of them were regenerated against the unmodified tree and the regen was silent (no `--reason`, no new `MODULE_SIZE_BUDGET_LOG.d/` entry) because nothing about the tree's actual functions changed, only how they are recorded (#1173).
+
+  A function named by a dropped `long_functions` entry is only reported as SHRUNK ("N -> dropped (now under the cap)") when that name still labels some function in that module right now. A rename, a move to a different module, or an outright deletion leaves no such function behind, and is instead reported as "N -> gone (renamed, moved, or deleted -- not a shrink)" -- otherwise the ledger would permanently record a shrink that never happened, only a name that stopped meaning anything in that module.
+
+  A pure rename WITHIN one module -- the same span, just a new name, e.g. `f` -> `g` both at 63 lines -- used to still show up as `grown` ("g: new entry at 63"), refusing the regen without `--reason` for what is not a ceiling raise at all: nothing about that module's size moved. `_function_deltas` now pairs a same-span appearance and disappearance in the SAME module off as a rename before either bucket is built, so it forces neither a flag nor a ledger line. A genuine new over-cap function still counts as growth -- a different span, more appearances than disappearances at that span, or the appearance landing in a DIFFERENT module (a real move, which is still judged as growth: a module that did not have an over-cap function now does).
+
+  `_deltas`, the module-line-ceiling half, had the same false wording `_function_deltas` was fixed for above: a module deleted outright (not shrunk, just gone) was reported as "before -> dropped (now under the cap)", which is not true of a module that no longer exists. It now takes the same still-exists check and reports "before -> gone (renamed, moved, or deleted -- not a shrink)" when the module (or, for the `tests/**` observed side, the test file) isn't in the tree at all any more.
+
+  The same-span rename pairing above fixed the `--reason` refusal but introduced a second bug: pairing a rename off empties BOTH `grown` and `shrunk` for its module, and `main()`'s staleness gate was `if not (grown or shrunk or observed_moved or observed_settled or stale_caps)` -- so a pure rename took the "nothing changed" path and never called `write_records` at all. The committed record still named the OLD function, `--check` read the tree as clean anyway, and `module_size_budget.d/**` silently drifted from the tree it claims to describe. "No `--reason` needed" and "nothing to write" are different statements; `main()` now also compares the raw measurement (`committed.functions != current.functions`) to decide whether to write, so a rename still forces the record to regenerate even though it forces neither a flag nor a ledger line.
+
+- **`tan bootstrap`'s automatic toolchain acquisition could not complete on a
+  host that only has the documented prerequisites.** `west_sdk_install_argv`
+  assembled `west sdk install --version <pin> --gnu-toolchains arm-zephyr-eabi
+  --install-dir <dir>` with no `--no-hosttools`, so the pinned Zephyr SDK's own
+  `setup.sh -t arm-zephyr-eabi -h` ran the bundled host-tools install — which
+  needs `file(1)` on `PATH`. `file` is not among the prerequisites the
+  quickstart documents (`cmake ninja-build python3 python3-pip python3-venv git
+  curl xz-utils wget`), so on a bare `ubuntu:24.04` carrying only those the
+  step died with `ERROR: Host tools installation failed` /
+  `FATAL ERROR: command "<sdk>/setup.sh -t arm-zephyr-eabi -h" failed`,
+  `_acquire_toolchain` retried it three times, and `tan bootstrap` exited 1
+  with "bootstrap: INCOMPLETE -- toolchain-install did not install, so this
+  workspace cannot build yet." The argv now carries `--no-hosttools`, the same
+  flag alp-sdk's `metadata/bootstrap.json` hint
+  (`manualInstallHints.posix.note[0]`) and its `onramp-clean-container.yml`
+  (which builds a real `zephyr.elf` in exactly that container) have always
+  used. *Not* the README's **manual** `west sdk install --version 1.0.1 -t
+  arm-zephyr-eabi`, which carries no `--no-hosttools` on purpose — it mirrors
+  the frozen Rust oracle's `zephyr_sdk_install_command` verbatim, so it does
+  run the host-tools step and does need `file`, exactly as the README says
+  beside it. The automatic path added in tan-cli#990 / ADR 0021 Lane 1 P1
+  post-dates `v0.6.0`, so no tagged release ever shipped the defect. The
+  README's description of the automatic phase, which had said that phase needs
+  `file` too, is corrected in the same change.
+
+  **What it gives up, named rather than glossed:** the whole `hosttools/`
+  bundle. On a real `zephyr-sdk-1.0.1` install that is 39 binaries under
+  `hosttools/sysroots/x86_64-pokysdk-linux/usr/bin/` — including `dtc` (plus
+  `fdtdump`/`fdtget`/`fdtoverlay`/`fdtput`), `openocd`, `bossac` and the
+  `qemu-system-*` family — and 1242632545 of the SDK's 2026739200 bytes.
+  Zephyr treats both `dtc` and `openocd` as optional, and the container job
+  above proves a full real-silicon build needs neither. Both losses have the
+  same **silent** shape, and both are tracked in tan-cli#1179.
+
+  `dtc` drives only the devicetree lint pass, which
+  `zephyr/cmake/modules/dts.cmake:371` wraps in `if(DTC)` under the comment
+  "This is just to generate warnings and errors; we discard the output" — so
+  with no `hosttools/` and no system `dtc` the
+  `-Wunique_unit_address_if_enabled` and `-E unit_address_vs_reg` checks stop
+  running, the build still succeeds, and nothing says so. `tan doctor` will not
+  notice either: `dtc`/`gperf` belong to the Rust oracle's `--build` check
+  vocabulary this port deliberately did not carry.
+
+  **OpenOCD** is the same story one step further on. With no `hosttools/` and
+  no system `openocd`, Zephyr writes neither `config.openocd` nor
+  `config.openocd_search` into `runners.yaml` (both are emitted only inside
+  `if(OPENOCD)`), so `tan debug-config --server openocd` emits a configuration
+  with no `serverpath`/`searchDir` and no warning — still valid, `configFiles`
+  still resolves from `board.cmake`, and cortex-debug falls back to its own
+  `openocd`-on-`PATH` lookup, but a host with no OpenOCD learns that from the
+  debug adapter at session start rather than from `tan`. `tan support-bundle`
+  does probe `openocd` on `PATH` and reports it.
+
+  `--no-hosttools` is passed **unconditionally**, never probed for. A
+  conditional flag would produce two differently-shaped installs that the
+  store cannot tell apart: it is keyed by artifact and version alone
+  (`~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`) and the
+  verification stamp records the pinned version plus the manifest digest,
+  neither of which encodes the flag.
+
+- **`tan debug-config --server openocd` says so when no OpenOCD could be
+  resolved, instead of emitting a profile with no `serverpath`, no `searchDir`,
+  no warning and `ok: true`.** Fixes `#1179`. Since `#1176`/`#1178`
+  `tan bootstrap` acquires the Zephyr SDK with `--no-hosttools`, the SDK ships
+  no `openocd` of its own. Zephyr writes `config.openocd` and `config.openocd_search`
+  into `runners.yaml` only inside `if(OPENOCD)` (`cmake/flash/CMakeLists.txt`),
+  resolved from an optional `find_program(OPENOCD openocd)` whose own comment in
+  `cmake/modules/FindHostTools.cmake` reads `# openocd is an optional dependency`
+  and which normally reaches the SDK's copy through the SDK's own
+  `cmake/zephyr/host-tools.cmake`. CMake's `if()` treats `OPENOCD-NOTFOUND` as
+  false, so on a host with no system OpenOCD either both keys are simply ABSENT
+  rather than present-and-empty; `serverpath` and `searchDir` are both ADDITIVE
+  keys in `apply_launch_resolution` and neither is a `<resolved-...>` placeholder
+  in the OpenOCD draft, so `_has_placeholder` never saw them and the "Placeholder
+  fields" note never fired. (Contrast `svdFile`/`svdPath`, which ARE placeholders
+  and ARE deleted — that is the path that would have warned.) The first thing
+  that told the developer anything was the debug adapter failing to launch a GDB
+  server at session start, with tan nowhere in the loop.
+
+  `_preview_notes_for` now appends a note naming that the SDK was installed
+  without host tools and that OpenOCD has to come from the system on this host.
+  It stays a NOTE, not a failure: the configuration is valid, `configFiles` still
+  resolves (from `board.cmake`, not from `hosttools/`), and the command still
+  exits 0 with `ok: true` and no issue. Only one advisory field is missing.
+
+  **It is silent on every correctly-provisioned host**, which is the point —
+  `doctor_cmd.west_check`'s own docstring records the lesson ("a warning that
+  fires on every correct install trains users to ignore warnings"). All three
+  conditions must hold: the requested server AND the emitted `servertype` are
+  OpenOCD, the resolution produced no `serverpath`, and no `openocd` resolves on
+  `PATH`. A resolved `serverpath` is silent; an `openocd` on `PATH` is silent
+  (cortex-debug falls back to its own PATH lookup when `serverpath` is absent, so
+  there is nothing to tell that developer); and the MIXED host `#1179` measured —
+  system OpenOCD on `PATH`, no `hosttools/`, so the SDK's own
+  `set_ifndef(OPENOCD_DEFAULT_PATH ...)` still writes an `openocd_search`
+  pointing at a directory that does not exist, which upstream is measured
+  benign — is silent twice over. Each of the nine cases is driven through the
+  real `_resolve_from_build` → `apply_launch_resolution` → `_preview_notes_for`
+  path against a real `runners.yaml` (or, for the pre-build cases, against no
+  build at all), with `PATH` seeded to declare the host's inventory, and each is
+  mutation-tested: blinding a condition turns its control red.
+
+  **The note has three spellings, one per state, so each is true where it is
+  emitted.** A build was read and its `runners.yaml` carries no
+  `config.openocd`; no build was read at all (the pre-build state — the
+  command's own primary documented use, "`debug-config` must still emit its
+  draft before the first build"); or the target kind is `baremetal-mcu`, which
+  is built by tan's plain-CMake backend (`os: baremetal` → `baremetal_cmake_flash`)
+  and gets no Zephyr-SDK paragraph, because no Zephyr SDK, no `--no-hosttools`
+  install and no `find_program(OPENOCD openocd)` is in that target kind's story
+  — `_resolve_from_build` only ever reads `<build_dir>/zephyr/runners.yaml`,
+  which that backend does not write. `registered_runners` is the "was a build
+  read" signal: `_resolve_from_build` returns it empty from every branch that
+  opened no readable `runners.yaml`.
+
+  The PATH probe is BORROWED, not rebuilt — `support_bundle_cmd`'s own
+  `_RUNTIME_EXECUTABLES[OPENOCD]` table resolved through `doctor_cmd.on_path`, so
+  the note and the support bundle a customer attaches to a bug report about it
+  can never disagree about what is installed.
+
+  `contract/envelopes/debug-config-preview-baremetal-mcu` — the one golden that
+  passes `--server openocd` — is re-recorded with the note appended to
+  `data.notes`; `data.configuration`, `issues` and `expected.exit` are
+  unchanged. That case runs from an empty scratch directory and asks for
+  `baremetal-mcu`, so the entry it carries is the baremetal spelling, and the
+  re-record was captured through the conformance harness's own `fresh_dir` /
+  `copy_fixture_inputs` / `case_env` / `normalise`.
+  It is also the second case in the set to ship an `env.json`, pinning `PATH` to
+  its own scratch directory: the note reads the HOST, so an unpinned golden would
+  be blessed note-less on any box carrying `/usr/bin/openocd` and then fail
+  everywhere else — the same hole `#253` closed for `model doctor`'s `vela`.
+
+  The `dtc` sibling `#1179` names — with no `hosttools/` and no system `dtc`,
+  `dts.cmake`'s devicetree lint pass silently stops running and `tan doctor` has
+  no check that notices — is deliberately NOT in this change and is filed as
+  `#1192`. It is a `tan doctor` CHECK, so it moves that command's
+  `data.summary` and exit code (and `tan support-bundle`'s folded verdict with
+  them), and its predicate needs its own design: after `#1178` a correct
+  install has no `dtc` anywhere, so a naive PATH check would fire on every
+  correctly-provisioned host — the very anti-pattern this note was built to
+  avoid.
+
+- **The gate that swears `ci.yml`'s `python-newest` job cannot be silenced could
+  be silenced by every `continue-on-error` spelling a workflow author would
+  actually reach for.** `test_interpreter_policy.py`'s
+  `test_the_ceiling_job_cannot_be_neutered_without_being_removed` compared both
+  the job-level and the step-level value with `is not True`. But
+  `continue-on-error` takes an **expression** — GitHub's own documented example
+  is `continue-on-error: ${{ matrix.experimental }}` — and `yaml.safe_load`
+  hands an expression, or any quoted or `!!str`-tagged spelling, back as a
+  `str`, for which `is not True` is `True`. Measured as real
+  `.github/workflows/ci.yml` edits against a `35 passed` baseline before the
+  fix, each one leaving the file FULLY GREEN: `${{ true }}` on the step,
+  `${{ true }}` on the job, `"true"`,
+  `${{ github.event_name == 'pull_request' }}`, `!!str true`, `"true "`, an
+  anchor/alias to a quoted `true`, `${{ matrix.experimental }}` and
+  `${{ env.SOFT }}`. The plain `true` the old spelling did catch measured
+  `1 failed, 34 passed`, which is the only reason the check ever looked like
+  one. Both assertions are now `in (None, False)`, and all nine spellings red.
+  `False` stays allowed: it is the explicit opt-out someone may legitimately
+  write, and the only non-absent value that leaves the job blocking.
+
+  **Two of the nine were landable, not merely expressible.** Measured with
+  `actionlint` 1.7.7 against the real `ci.yml`: `${{ true }}` and
+  `${{ github.event_name == 'pull_request' }}` lint clean at both job and step
+  level, so the exact edit this gate exists to forbid — "only enforce it on the
+  merge queue" — would have passed workflow lint, passed the gate, and gone
+  silent on every pull request. The others are rejected as workflow-syntax
+  errors (`"true"`, `"true "`, `!!str true` and the anchor/alias each as a
+  "plain text node"; `${{ env.SOFT }}` as
+  `type of expression must be bool but found type string`), and
+  `${{ matrix.experimental }}` only because this particular job declares no
+  matrix — a job that has one would take it. Unlandable is not the same as
+  harmless, so all of them are covered.
+
+  **The falsy side is checked too, and it is one-sided the other way.**
+  `false`, `False` and `FALSE` keep the gate green and lint clean. `no`, `off`,
+  `null`, `~`, an empty value and `0` also keep it green — PyYAML reads every
+  one of them as falsy — but `actionlint` rejects all six, so they are
+  unlandable rather than silent.
+
+  **A negative control now exists per spelling.**
+  `test_a_neutering_spelling_reds_this_gate` and
+  `test_a_blocking_spelling_keeps_this_gate_green` drive the real assertion
+  function against a doctored in-memory copy of `ci.yml`, at job and step level,
+  for every entry in the new `NEUTERING_SPELLINGS` and `BLOCKING_SPELLINGS`
+  catalogues. Measured: reverting the comparison to `is not True` now reds
+  `16 failed, 69 passed` instead of leaving the file green, which is exactly how
+  the hole survived from the day the assertion was written.
+
+  **The harness those controls run on had a dead fallback branch, now fixed and
+  itself controlled.** `_patched_ci` swaps `_load` for a lambda that answers
+  `ci.yml` from a doctored deep copy and forwards everything else to the real
+  loader — but it spelled that forward as `_load.__wrapped__(path)` INSIDE the
+  lambda, which resolves the module-global `_load`, which monkeypatch had by
+  then replaced with the lambda itself. Measured: `_load(WORKFLOWS / "release.yml")`
+  after `_patched_ci` raised `AttributeError: 'function' object has no attribute '__wrapped__'`.
+  Dead today, because the assertion function under control reads `ci.yml` and
+  nothing else — but the moment it grows a second `_load(...)`, which is the
+  `parity.yml` `seam1-plan-shape` widening `#1196` tracks, all 32
+  `test_a_neutering_spelling_reds_this_gate` cases would have stopped asserting
+  anything about `continue-on-error` and started dying on that `AttributeError`
+  inside their own `pytest.raises(AssertionError, match="continue-on-error")`,
+  while the blocking cases redded outright: the controls that exist to stop this
+  hole reopening would have been the first thing to break. The undecorated
+  function is now captured BEFORE the patch and closed over, and
+  `test_the_patched_loader_falls_back_to_the_real_file` drives the non-`ci.yml`
+  arm against `release.yml` and `parity.yml`, asserting the loaded document
+  equals a direct `yaml.safe_load` of the real file. Mutation-tested: restoring
+  the in-lambda `_load.__wrapped__` reds that control and nothing else
+  (`2 failed, 85 passed`), and a fallback that answers the doctored copy for
+  every path reds it too.
+
+  **`BLOCKING_SPELLINGS`'s docstring now says exactly what it covers.** It
+  claimed the falsy side was asserted "so a future tightening … cannot red a
+  workflow that means 'blocking'", but only the LITERAL falsy scalars are in
+  the list. `continue-on-error: ${{ false }}` reds this gate — measured,
+  `yaml.safe_load` hands it back as the string `'${{ false }}'`, which is not
+  `in (None, False)`. That is deliberate and fails CLOSED, not a safety hole: a
+  static check cannot evaluate a GitHub expression, which is exactly why
+  `${{ matrix.experimental }}` and `${{ env.SOFT }}` are neutering spellings,
+  so every expression form is treated as neutering and the one-word fix for an
+  author who means blocking is to write the literal `false`. Special-casing the
+  expressions that LOOK false would invite `${{ false || true }}` and put a new
+  hole in this very gate. The docstring records that instead of overclaiming.
+
+- **A second, wider hole in the same test was checked for and found already
+  closed here — recorded because the closure is specific to this file.** A
+  job-level `if:` is a bigger blast radius than any `continue-on-error`: a job
+  whose condition is false renders as **skipped**, never failed, so the gate
+  runs zero times and nothing in the checks list objects. Measured before the
+  fix: replacing `python-newest`'s guard with
+  `if: github.event_name == 'schedule'` already redded this file, because
+  `test_the_ceiling_job_is_kept_off_the_release_path` compares that guard
+  EXACTLY against `${{ !inputs.skip_ceiling_interpreter }}`. The naive closure,
+  `assert "if" not in job`, would have been wrong for this job, which
+  legitimately carries one. What is added instead is a VALUE check inside the
+  neutering test, allowing that one expression and nothing else — deliberately
+  duplicating the release-path test, so the neutering test stays complete if
+  that one is ever narrowed — with four controls behind it.
+
+- **`parity.yml`'s sharding rationale said this repo spawns a fresh interpreter
+  at `~150` call sites; it is 336, and the number now travels with the command
+  that produced it.** Off by 2.2x under any literal reading of the sentence.
+  Re-measured on this branch's base (`a92a0011`) with the comment's own
+  phrasing:
+
+  ```console
+  $ grep -rnE "subprocess[.](run|Popen|check_output|check_call)" python/{tan,tests,scripts} --include=*.py | wc -l
+  336
+  ```
+
+  `subprocess.run` **306**, `subprocess.Popen` **30**,
+  `subprocess.check_output` **0**, `subprocess.check_call` **0** — so the
+  narrower `run|Popen` reading gives the same 336. Per tree: `python/tan` **51**,
+  `python/tests` **274**, `python/scripts` **11**.
+
+  The neighbouring `~4300 tests` in the same sentence had rotted too and is
+  replaced rather than left beside a fresh figure: the scope the job's `0..3`
+  legs shard collects **5919** tests
+  (`(cd python && python -m pytest -q --collect-only --ignore=tests/gates --ignore=tests/parity tests | tail -1)`),
+  with the `parity` leg's unsharded scope a further **780**.
+
+  No behavioural change — neither figure is read by any job, gate or test, and
+  no sharding parameter moved. That is exactly why the command had to be written
+  beside the number: nothing reds when these drift, so the next reader has to be
+  able to re-derive instead of re-estimate.
+
+- **`tan doctor`'s `zephyrSdk` check can now see a Zephyr SDK toolchain
+  `tan bootstrap` installed into its own artifact-keyed store, not only a
+  hand-installed SDK under `$HOME`/`/opt`.** `_zephyr_sdk_scan_roots`
+  (`python/tan/commands/doctor_cmd.py:2798`) globbed only the TOP LEVEL of
+  `/opt`, `$HOME`, `%USERPROFILE%` and `Path.home()`, so a real,
+  fully-installed compiler sitting in the ADR 0021 store two directory
+  levels below `$HOME` (or under `$ALP_TOOLCHAIN_ROOT`) was invisible to it
+  — `_zephyr_sdk_detected()` returned `False` against a genuine, working
+  install, and a host that had run nothing but `tan bootstrap` still saw
+  `tan doctor` report `zephyrSdk: fail` and exit 4 with
+  `zephyr_sdk_install_command()` as the prescribed fix, a ~1.9 GiB
+  re-download of a toolchain already on disk.
+
+  `_zephyr_sdk_scan_roots` now also scans `_toolchain_store_scan_root()`
+  (`python/tan/commands/build/toolchain.py:176`) — the SAME root the
+  `${TOOLCHAIN_ROOT}` build-plan substitution already scans (tan-cli#547),
+  reused rather than re-derived so the two checks cannot independently
+  drift on where tan's own installs live — with the same `.tmp-<pid>`
+  wreckage exclusion (`_is_toolchain_wreckage`) an interrupted acquisition
+  leaves behind.
+
+  `scripts/e2e-full.sh`'s Scenario B guard was widened the same way at
+  first, reading `toolchain` (issue #474, stamp-vs-pin) alongside
+  `zephyrSdk` to decide whether its own `west sdk install` step could be
+  skipped — see the **third follow-up** below for why that half was
+  reverted instead of kept.
+
+  The doctor-side half is covered by a test that actually exercises it:
+  `test_zephyr_sdk_scan_now_sees_a_real_compiler_in_the_bootstrap_artifact_store`
+  reverts red if `doctor_cmd.py`'s scan is reverted — a prior pass at this
+  fix shipped a test that touched neither production file and stayed green
+  either way.
+
+  **Follow-up regression, caught in review before merge:** widening
+  `_zephyr_sdk_scan_roots` made `_host_toolchain_matching_pin`
+  (`python/tan/commands/doctor_cmd.py:1282`) — the `toolchain` check's
+  digest-blind, version-string-only adoption path for a toolchain tan did
+  NOT install — reachable for an entry living INSIDE tan's own store, which
+  the check's stricter, digest-precise `stamp_matches_pin` verdict already
+  governs. A store directory can carry a real compiler and a `sdk_version`
+  marker matching the pin's nominal version while its own stamp names a
+  DIFFERENT digest (the pin moved without the version string changing) —
+  measured, that combination turned the correct stamp-based `fail` into a
+  `pass`, preempting the exact drift `toolchain` exists to detect.
+  `_host_toolchain_matching_pin` now returns `None` for any root inside
+  `_toolchain_store_scan_root()`, deferring to the stamp check for anything
+  tan's own store contains; `test_a_stamp_for_a_moved_pin_is_a_fail_even_with_a_real_compiler_in_the_store`
+  (`python/tests/commands/test_doctor_toolchain_check.py`) reverts red if
+  the guard is reverted.
+
+  Also: `_zephyr_sdk_scan_roots`'s new store root now goes through the same
+  string-level `seen` dedup the other four roots already use, so
+  `ALP_TOOLCHAIN_ROOT` pointed at `$HOME` or `/opt` no longer scans that
+  directory twice.
+
+  **Second follow-up regression, also caught in review before merge:**
+  `resolve_toolchain_root` takes `$ALP_TOOLCHAIN_ROOT` VERBATIM as the store
+  root (no `/toolchains` suffix), so ADR 0021's own documented bench/CI
+  escape hatch — the env var pointed at an ancestor like `$HOME` or `/opt` —
+  made `_toolchain_store_scan_root()` coincide with a directory a
+  hand-installed host toolchain also legitimately lives under.
+  `_host_toolchain_matching_pin`'s tan-own-store guard, keyed on that whole
+  root, then misread the adopted toolchain as "inside tan's own store" and
+  refused to adopt it — turning a previously-passing escape-hatch
+  configuration into a `toolchain` FAIL. The guard is now keyed on
+  `_toolchain_store_dir(manifest)`, tan's own per-pinned-version store LEAF,
+  not the broader root; `test_a_host_toolchain_under_an_alp_toolchain_root_ancestor_still_passes`
+  (`python/tests/commands/test_doctor_toolchain_check.py`) reverts red if the
+  guard is reverted.
+
+  **Third follow-up regression, this one caught by CI on the open PR rather
+  than in review:** the `scripts/e2e-full.sh` half above was itself wrong,
+  and shipping it turned the `e2e-container` job red. `tan doctor` answering
+  "does a verified toolchain exist on this host" is not the same question as
+  "can the `west build`/CMake configure the harness is about to run actually
+  LOCATE it" — and for a toolchain that lives only in tan's own ADR 0021
+  store, those two answers can disagree. Measured on a pristine
+  `ubuntu:24.04` (run 33969119991): right after `tan bootstrap` acquired a
+  toolchain into that store, `tan doctor --build` correctly reported
+  `zephyrSdk=pass toolchain=pass`; the widened guard read that as "no
+  download needed" and skipped this step's own `west sdk install`; the very
+  next `tan build` then failed cmake's configure at a `find_package` call
+  ("Configuring incomplete, errors occurred!") — twice in the same run (the
+  Scenario B build and the dirty-host rebuild that reuses it).
+
+  Closing that gap for real needs `tan build` itself to resolve
+  `ZEPHYR_SDK_INSTALL_DIR` for a toolchain living in tan's own store before
+  spawning `west build` — the same gap `build.toolchain`'s own module
+  docstring already names for `${TOOLCHAIN_ROOT}` build-plan substitution
+  ("a customer who ran nothing but tan bootstrap still could not get it to
+  resolve ... without ALSO hand-exporting ZEPHYR_SDK_INSTALL_DIR"). That is a
+  `tan build`/`bootstrap_cmd` change, out of scope for this fix, so
+  `scripts/e2e-full.sh`'s guard is reverted instead: the step always attempts
+  its own `west sdk install` again, exactly as before tan-cli#1186, and only
+  PRINTS what `tan doctor` found rather than deciding anything from it. The
+  doctor-side fix above is unaffected and stays — it is independently
+  correct and gives an operator running `tan doctor` by hand an accurate
+  answer; it just is not sufficient evidence for THIS harness step to skip
+  its own verification. `test_e2e_full_sh_pre_detail_reports_both_checks_without_deciding_anything`
+  and `test_e2e_full_sh_pre_detail_survives_an_unparseable_envelope`
+  (`python/tests/commands/test_doctor_command.py`) exec the step's actual
+  (now decision-free) heredoc, extracted verbatim, and revert red if a future
+  change reintroduces the skip.
+
+- **`tan doctor` now reports `devicetreeLint` — whether Zephyr's
+  diagnostics-only devicetree pass will actually run on this host.** Since
+  #1178 `tan bootstrap` acquires the Zephyr SDK with `--no-hosttools`, so the
+  install ships no `dtc`; Zephyr guards that pass with `if(DTC)` in
+  `zephyr/cmake/modules/dts.cmake` under the comment *"This is just to generate
+  warnings and errors; we discard the output"*, so with no `hosttools/` and no
+  system `dtc` the whole lint — `-E unit_address_vs_reg` and
+  `-Wunique_unit_address_if_enabled` — stopped running and nothing anywhere said
+  so. Builds still succeed and still produce a real `zephyr.elf`; only a class
+  of devicetree diagnostics silently disappeared. Fixes #1192.
+
+  **The check is silent on a correctly-provisioned host, by construction.** A
+  naive "is `dtc` on PATH" warning would fire on every post-#1178 install, which
+  is the anti-pattern `doctor_cmd.west_check`'s own docstring records ("a
+  warning that fires on every correct install trains users to ignore
+  warnings"). So the no-`dtc` arm is a `pass` that merely *states* the lint is
+  not running: no `issues[]` entry, no `nextSteps` line, `summary.pass`, and no
+  effect on the exit code. A host that has a usable `dtc` — from the SDK's own
+  `hosttools/` or from `PATH` — is likewise a `pass`.
+
+  The one `warn` arm is the host where somebody installed a `dtc` and does not
+  get the lint anyway: `zephyr/cmake/modules/FindDtc.cmake` runs
+  `dtc --version`, and when the answer is below `dts.cmake`'s own
+  `find_package(Dtc 1.4.6)` floor — or does not run, or does not parse — it
+  resets `DTC` to `DTC-NOTFOUND` and prints nothing. `warn`, never `fail`: such a host builds
+  fine, so `doctor_cmd.exit_code_for` must not reach exit 4 for it. The new
+  issue code is `doctor.devicetree-lint`, registered `reserved`/`warning`.
+
+  `tan support-bundle` is unaffected in every state. It harvests only the five
+  names in `support_bundle_cmd._HOST_CHECK_ORDER`, out of
+  `doctor_cmd.host_environment_checks`, and this check is deliberately added to
+  neither — its verdict, its written bundle and its exit code are byte-identical
+  with and without the new `warn`, which the tests assert directly.
+
+  **This partially reverses a decision recorded as deliberate.**
+  `doctor_cmd`'s module docstring names `dtc`/`gperf` as the frozen Rust
+  oracle's `--build` check vocabulary, not ported. That was right when written
+  and its premise is gone: `dtc` used to arrive with the SDK on every install,
+  so a probe could only restate what `zephyrSdk` already said. #1178 removed
+  that premise. Only `dtc` is reopened, and only as the devicetree-lint
+  question; `gperf` stays unported. Refs #1176, #1178, #1179.
+
+  Resolution mirrors CMake's, not tan's convenience: `find_program(DTC dtc)`
+  searches `CMAKE_PREFIX_PATH` — which the SDK's own
+  `cmake/zephyr/host-tools.cmake` appends `${HOST_TOOLS_HOME}/usr` to — before
+  the ambient `PATH`, so `doctor_cmd._resolve_dtc` looks in the SDK's
+  `hosttools/` first and the reported version can never be attributed to a
+  binary CMake would not have picked. On Windows there is no SDK path to look
+  in at all: that branch of `host-tools.cmake` appends only `qemu`, `qemu-arc`
+  and `openocd` prefixes, and the Windows hosttools archive ships no `dtc`.
+  The pure half lives in `tan.core.devicetree_lint`.
+
+- **`tan build`/`tan run` now export `ZEPHYR_SDK_INSTALL_DIR` for the toolchain
+  `tan bootstrap` itself installed, so a customer's very first build no longer
+  fails to configure right after `tan bootstrap` reported success and
+  `tan doctor` reported the toolchain present.** Fixes `#1209`. `tan bootstrap`
+  acquires the pinned `arm-zephyr-eabi` cross toolchain into the ADR 0021
+  artifact-keyed store, `~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`
+  (or `$ALP_TOOLCHAIN_ROOT`) — two directory levels below `$HOME`. CMake's own
+  `FindZephyr-sdk.cmake` prefix scan (`$HOME`, `$HOME/.local`, `/opt`, …, plus
+  the user package registry) only looks at DIRECT children of those roots, so
+  it never sees that store unless something tells it where to look; without
+  `ZEPHYR_SDK_INSTALL_DIR` set, `west build`'s CMake configure step fails to
+  find the SDK it was just told exists.
+
+  The gap-filler lives at the one seam every spawned build slice already
+  passes through — `tan.core.zephyr_env.zephyr_env_overrides`
+  (`python/tan/core/zephyr_env.py:26`), wired from
+  `python/tan/commands/build/execute.py` (`verified_store = verified_store_dir
+  (sdk_root) if not host_scan_has_toolchain(sdk_root) else None`, computed
+  once per run) and passed as `toolchain_store=verified_store` into the
+  per-slice gap-filler call. Precedence, enforced in `zephyr_env_overrides`: a
+  plan slice's own `env.ZEPHYR_SDK_INSTALL_DIR` pin wins outright; an
+  inherited `ZEPHYR_SDK_INSTALL_DIR` naming a path that STILL EXISTS is the
+  user's own deliberate choice and is taken VERBATIM (never normalised) — one
+  naming a path that does not exist, or that is unset/blank, falls through
+  instead (review MINOR: an earlier version of this change skipped that
+  existence probe, diverging from `resolve_toolchain_root`'s own rule for the
+  SAME variable and from `doctor_cmd._zephyr_sdk_detected_root`); only then
+  does tan's own verified store fill the gap, and only when
+  `build.toolchain.host_scan_has_toolchain(sdk_root)` finds no OTHER USABLE
+  `zephyr-sdk*` install already visible to CMake's own prefix scan (review
+  MINOR: tan's store is `-t arm-zephyr-eabi` ONLY, and unconditionally forcing
+  it ahead of a fuller, scan-visible host SDK could fail a non-ARM slice that
+  configured fine unaided, and diverged from `doctor_cmd._zephyr_sdk_scan_roots`,
+  which ranks that same store LAST); otherwise nothing changes from today.
+
+  Two more review passes on `host_scan_has_toolchain` itself, both closed in
+  this same change: **(review BLOCKER)** the store exclusion was keyed on the
+  WHOLE `_toolchain_store_scan_root()`, the exact form
+  `doctor_cmd._host_toolchain_matching_pin`'s own docstring documents as wrong —
+  the same mistake tan-cli#1186 already shipped and fixed once — hiding every
+  OTHER leaf in the store too (e.g. a stamped leaf for a version this
+  checkout no longer pins) and misreading path containment under the ADR
+  0021 `$ALP_TOOLCHAIN_ROOT`-pointed-at-an-ancestor escape hatch; now keyed
+  on `_toolchain_store_dir(manifest)`, the one PER-VERSION leaf, mirroring
+  `doctor_cmd._toolchain_store_dir` exactly (new shared `_read_manifest`
+  helper so `verified_store_dir` and `host_scan_has_toolchain` read the same
+  manifest, never two). **(review MAJOR)** `_candidates` applies no validity
+  probe by design (a non-ARM install is still a real `${TOOLCHAIN_ROOT}`
+  candidate there), so an empty or half-extracted `~/zephyr-sdk-leftover/`
+  made `host_scan_has_toolchain` report `True` on name alone, silently
+  disabling tan's own verified store; a new `_host_toolchain_is_usable`
+  probe (duplicated from `doctor_cmd._zephyr_sdk_root_valid` — import cycle,
+  see `build/toolchain.py`'s module docstring) now requires the actual
+  `arm-zephyr-eabi` cross compiler inside the candidate.
+
+  The store is resolved by **pin + stamp**, never by scanning for
+  `zephyr-sdk*` directories: `python/tan/commands/build/toolchain.py`'s new
+  `verified_store_dir(sdk_root)` reads `<sdk_root>/metadata/toolchains.json`,
+  locates `<_toolchain_store_scan_root()>/<store_dir_name(manifest.version)>`,
+  and returns that path iff `.alp-toolchain-stamp.json` there
+  `stamp_matches_pin`s the checkout's pinned manifest digest — the identical
+  predicate `bootstrap_cmd.toolchain_phase`'s skip-if-already-installed step
+  and `doctor_cmd.toolchain_check` already apply, reused rather than
+  re-derived a third time. `None` on any missing/malformed manifest, missing
+  stamp, or stale-digest stamp (a moved pin under an unchanged version
+  string) — never a directory-exists guess, and (review MAJOR) never a raw
+  `UnicodeDecodeError` either: both of its `read_text` calls used to catch
+  only `OSError`, so a non-UTF-8 byte in either the manifest or the stamp
+  raised straight past this function's own "never raises" contract, before
+  any slice dispatched, with no envelope at all under `--format json`. Fixed
+  by a shared `_read_text_or_none` mirroring `doctor_cmd._read_text` exactly
+  (`errors="replace"`, `except (OSError, ValueError)`), so `tan build` and
+  `tan doctor` can no longer disagree on a corrupt manifest; seeded into
+  `tests/gates/test_never_raises_contract_holds.py`'s `_SEEDED_CONTRACTS`.
+
+  Deliberately NOT `${TOOLCHAIN_ROOT}` build-plan substitution
+  (`build/toolchain.py`'s `resolve_toolchain_root`): that token only rewrites
+  plan strings, puts nothing in the child environment, only runs when a plan
+  names the token (no SDK-emitted plan does), and its own `zephyr-sdk*` scan
+  demotes on "several installs" — exactly the ambiguity a hand-installed SDK
+  next to tan's own store would trigger. And deliberately NOT registering the
+  store in CMake's package registry (`west sdk install`'s own `setup.sh -c`):
+  a registered store is picked by `FindZephyr-sdk.cmake`'s "highest compatible
+  version" rule across EVERY standalone `west build` on that host, silently
+  overriding a user's own hand-installed SDK, and a later `west sdk install
+  --version <other>` finds the registered entry and mutates tan's own
+  digest-verified store in place.
+
+  **Also said plainly (review MAJOR): no CI leg exercises this end to end.**
+  `#1209`'s own stated acceptance is "a genuine end-to-end run: `tan
+  bootstrap` on a host with no pre-existing SDK, then `tan build`, with no
+  manual SDK install and no hand-exported `ZEPHYR_SDK_INSTALL_DIR`, producing
+  a real ELF." `scripts/e2e-full.sh`'s Scenario B still runs its own
+  `west sdk install` unconditionally (kept for its OWN reasons — see that
+  step's comment), so that exact scenario is never exercised by this harness;
+  the gap-filler above is proven only unit-and-integration-style
+  (`tests/core/test_zephyr_env.py`, `tests/commands/test_execute_zephyr_env.py`),
+  never against a real `west build`. Flipping Scenario B's guard unverified
+  against a real clean container would repeat the tan-cli#1186 mistake this
+  same step's comment already records a revert for; left open rather than
+  glossed over.
+
+  **Not fixed by this change: standalone `west build`** (no `tan` in the
+  loop). The child-env export is scoped to what `tan` itself spawns. The
+  follow-up recorded on `#1209`: `tan bootstrap --print-env` gaining an
+  `export ZEPHYR_SDK_INSTALL_DIR=<store>` line when the stamp matches, so a
+  standalone user can opt in by hand.
+
+  Also pre-existing and out of scope here, filed separately: `west sdk
+  install --install-dir <tmp>` treats an already-installed pinned version
+  (via an inherited `ZEPHYR_SDK_INSTALL_DIR` or a registered hand-install) as
+  "nothing to do", so `tan bootstrap` never writes its own stamp and
+  `_finish_toolchain_install` warns "reports SDK version None" —
+  `toolchain_phase`'s stamp check has no visibility into that adoption path.
+
+  `tests/core/test_zephyr_env.py` and `tests/commands/test_execute_zephyr_env.py`
+  cover the full precedence end to end (plan pin, inherited-verbatim,
+  inherited-dead-path-falls-through, blank-inherited-does-not-block, no-store,
+  a scan-visible host SDK outranking tan's own arm-only store, an empty
+  name-only `zephyr-sdk*` leftover NOT suppressing the verified store
+  (`test_an_empty_name_only_leftover_does_not_suppress_the_verified_store`,
+  review MAJOR's own fixture — a real verified store present alongside a
+  compiler-less `zephyr-sdk-leftover/`), the `$ALP_TOOLCHAIN_ROOT` ancestor
+  trap with both an unstamped hand-install and a stamped leaf, and a
+  stale-digest stamp exporting nothing);
+  `tests/commands/test_build_toolchain_root.py` covers `verified_store_dir`
+  and `host_scan_has_toolchain` in isolation, including the per-version-leaf
+  exclusion (a different, no-longer-pinned version's leaf inside the same
+  store still counts as an independent host toolchain) and the name-only
+  validity probe; `tests/gates/test_never_raises_contract_holds.py::
+  TestVerifiedStoreDir` seeds the non-UTF-8-manifest/non-UTF-8-stamp shapes.
+  35 new test functions in total
+  (`git diff origin/dev | grep -cE '^\+(def test_|    def test_)'`,
+  re-measured — a prior count of "17 (not 18)" undercounted by half and was
+  itself wrong). Each reverts red against the unfixed code
+  (`test_fills_zephyr_sdk_install_dir_from_tans_verified_store` fails with a
+  bare `KeyError` — the key is simply absent from the spawned child's
+  environment); of the 11 ZEPHYR_SDK_INSTALL_DIR precedence tests the
+  original change added, 6 fail and 5 pass against the pre-#1209 production
+  code (re-measured) — the 5 that pass assert an ABSENCE that also holds
+  vacuously when the whole feature is missing, or rely on the spawned
+  child's full `os.environ` inheritance rather than on the gap-filler
+  itself; not a defect in those tests, but not proof of the mechanism
+  either.
+
+  **Also fixed (review regression): a new, Windows-only-red test.**
+  `TestVerifiedStoreDir::test_symlink_loop`, added by this change, called
+  `_symlink_loop`'s bare `path.symlink_to(path)` outside any guard and
+  failed on a Windows host with no symlink privilege (`WinError 1314`) —
+  a real regression against the green bar, not one of the ~18 pre-existing
+  `test_symlink_loop` siblings already accepted as baseline-red on `dev`,
+  since this whole test class is new here. Now wrapped in
+  `try/except OSError: pytest.skip(...)`, matching "a host that cannot
+  create the symlink cannot exercise this shape" rather than joining the
+  baseline as a fresh red entry.
+
+- **The published contract now states the one condition under which
+  `monitor`'s `args` do not produce the payload it advertises (tan-cli#1213).**
+  `contract/envelopes/monitor-no-port` (tan-cli#1165) is folded into
+  `envelope-contract.json`, so the released artefact pairs
+  `["monitor", "--format", "json"]` with an envelope carrying
+  `data.availablePorts`. A replayer applying the case's published `env` block
+  is unaffected -- that seam makes the case deterministic whether or not
+  pyserial is installed. What is conditional is the CONSUMER's own bare
+  invocation, which sets no such variable: without the optional `monitor`
+  extra the same argv returns
+  `monitor.pyserial-missing` and a `data` of `{"schemaVersion": "1"}`, with no
+  `availablePorts` key at all. Released binaries are unaffected -- the freeze
+  venv installs `".[monitor]"` -- so this reaches a `pip install tan-cli` and
+  anyone replaying the published args. The caveat is now both PUBLISHED, in
+  `contract/issue-codes.json`'s `monitor.no-port` `consumerEffect` (which
+  `release.yml`'s bundler folds verbatim, unlike a `_comment`, which it drops),
+  and GATED: both pyserial-missing tests in `test_monitor_command.py` asserted
+  the issue code, exit code and message and never looked at `data`, so the
+  absence of that key was prose in a `PROVENANCE.txt` rather than a fact. The
+  same entry now also names the two fields the consumer actually indexes,
+  `device` and `description`, and records that `description`'s `"n/a"` is
+  pyserial's own `ListPortInfo` default copied through, not a value a consumer
+  should invent.
+- **`docs/release-contract.md`'s description of the `envelope-contract.json`
+  asset had gone stale twice over.** It said `model-doctor-no-sdk` was the only
+  case carrying an `env` block; `debug-config-preview-baremetal-mcu`
+  (tan-cli#1194) and `monitor-no-port` (tan-cli#1165) landed since, and it now
+  points at `test_no_case_ships_an_env_json_it_does_not_need`, which asserts
+  that set, rather than restating a count that rots. It also named only
+  `doctor` as carrying a `dataKeys` key-set entry, while the bundler has folded
+  `sdk list`'s (tan-cli#887) since that family was added. Nothing gates this
+  file, which is how both slipped through.
+
+- **`tan`'s planner no longer crashes on a symlink-loop or permission-denied
+  `extra_libraries.<name>.profile:` path.** Fixes `#1217`. `validate.py`'s
+  `_validate_consistency` did its own `(REPO / prof).resolve()` +
+  `prof_path.is_file()` on every `board.yaml` load with no `try` at all --
+  the same defect class alp-sdk#1961 fixed in the sibling
+  `scripts/alp_orchestrate/validate.py`, ported here rather than re-derived.
+  A symlink loop raised a bare `RuntimeError` out of `.resolve()`; a
+  permission-denied ancestor raised `PermissionError` out of `.is_file()`
+  (which swallows `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` but re-raises `EACCES`);
+  and on Windows the real shape differs again -- `.resolve()` returns without
+  raising at all, and `.is_file()` raises a plain `OSError` (`WinError 1920`).
+  Both calls are now wrapped in `except (OSError, RuntimeError)`
+  (`PermissionError` is already an `OSError` subclass), converting every one
+  of those into a clean `OrchestratorError` naming the offending
+  `extra_libraries` entry instead of an unhandled crash out of the loader.
+
+- **`--template edge-ai-starter --som E1M-AEN803` no longer red-flags
+  `test_no_planned_file_names_a_different_skus_exact_token` against a bound
+  alp-sdk carrying the new `E1M-AEN803` SKU.** `E1M-AEN803` is a
+  memory-population variant of `E1M-AEN801`'s Alif Ensemble E8 module, added
+  to the SoM catalogue after this guard's `_ALLOWED_CROSS_SKU_MENTIONS`
+  allowlist was last widened. Its planned `edge-ai-starter` tree renders
+  `README.md` and `board.yaml` byte-identical to `E1M-AEN801`'s for the DEEPX
+  DX-M1 re-scaffold pointer ("Flip `som.sku` ... to `E1M-V2M101`" /
+  "`# DEEPX path is a separate scaffold (--som E1M-V2M101)`") -- the same
+  legitimate cross-reference already declared for every other Ensemble
+  E8-family SKU (`E1M-AEN301`..`E1M-AEN801`, each at count 2: one mention per
+  file), not a substitution gap (the tan-cli#932 class) or a drifted
+  allowlisted count. Declared as
+  `("edge-ai-starter", "E1M-AEN803", "E1M-V2M101"): 2` alongside its siblings.
+  No sibling SKU (the other five Ensemble SKUs, both V2N SKUs, or both V2M
+  SKUs) shares this gap -- the whole parametrised matrix was green apart from
+  this one new case.
+
+- **An IPC carve-out can no longer be placed inside the on-die MRAM aperture
+  just because a `memory_map:` region omits `carveout:` (tan-cli#1232,
+  hand-port of alp-sdk#1365 split B).** `tan/planner/carveout.py` decided
+  eligibility with `if region.get("carveout") is False`, so an ABSENT key read
+  as eligible. On every AEN SKU exactly one region hits that shape --
+  `mram_main` (`metadata/e1m_modules/E1M-AEN801.yaml` and its siblings) lists
+  an `a32_cluster`/`m55_*` endpoint and carries no `carveout` key at all --
+  and the allocator is top-down, seeding `region_top` from `base + size` with
+  no knowledge that `mcuboot`, `he_slot0`, `hp_slot0`, `reserved`, `storage`
+  and `atoc` tile the same window. The only thing keeping an `a32_cluster` IPC
+  entry out of the live ATOC band `0x80578000..0x80580000` was that
+  `mram_main.base` is still the string `"TBD"`; filling that field in -- a
+  separate, later step -- would have opened the hazard with nothing to catch
+  it. Eligibility is now DERIVED: the new `tan/planner/aperture.py` resolves
+  the SoC's declared aperture as `[soc_flash_base, soc_flash_base +
+  variants[].mram_mb * 1 MiB)` (per-variant length, never the family-default
+  `soc_flash_mb` -- an E3 ships a 5.5 MB and a 1.5 MB variant off one base)
+  and classifies each region `flash` / `ram` / `unclassified` / `unresolved`;
+  `carveout.py` and `tan/planner/partition.py` read that class. A region
+  contained in the aperture is refused as flash-class on BOTH sides of
+  `mram_main.base` resolving, and a present `carveout:` that DISAGREES with a
+  resolvable class is now a loud refusal naming both facts -- the derived
+  class with the addresses that produced it AND the authored flag -- instead
+  of `write_authority: customer_runtime` silently outvoting an author's
+  explicit `carveout: false`.
+- **This port is deliberately inert against every published alp-sdk, and says
+  so where a reader will find it.** alp-sdk#1365 splits A and B are not merged
+  upstream: checked 2026-09-06, `origin/dev`
+  (`e296881ff12d50e347eec623cfb31798499f8d7d`) and `origin/main` (`eb96112b`)
+  carry neither `scripts/alp_orchestrate/aperture.py` nor
+  `metadata/socs/alif/ensemble/e8.json`'s `soc_flash_base`. Against a checkout
+  that declares no aperture, `resolve_aperture()` returns `None` and
+  `carveout.py` honours the legacy flag verbatim, so the emit is
+  byte-unchanged and `parity` is unaffected -- the new path starts deciding
+  anything only once split A lands. For the same reason `aperture.py` joins
+  `EXEMPT_FROM_RELOCATION_TRACKING` in
+  `python/tests/gates/test_planner_relocation_freshness.py` rather than
+  `PINNED_HASHES`, which is asserted against the one shared
+  `PINNED_SDK_COMMIT` (`ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2`) that
+  predates split B; the entry carries an expiry note to move it the day that
+  pin advances past split B's merge, so the exemption cannot quietly become
+  permanent.
+- **The ordering guard injects the missing metadata instead of skipping on
+  it.** `tests/planner/test_carveout_aperture_ordering.py` synthetically
+  resolves `mram_main.base` to `0x80000000` in an in-memory preset copy and
+  asserts the entry still blocks -- proving the `"TBD"` placeholder is not
+  load-bearing for safety. Since no published checkout declares
+  `soc_flash_base`, its `split_a_metadata` fixture COPIES the bound
+  checkout's `metadata/` tree and injects the key (and the matching
+  `soc-spec-v1.schema.json` property, without which `loader.py`'s
+  `_refuse_on_schema_errors()` refuses the board outright) into the copy
+  only, never the checkout. A presence-gated skip was the wrong answer here:
+  `unsharded-python-canary.yml` runs `pytest tests/commands tests/planner`
+  with `ALP_SDK_ROOT` bound to a clone of the published tree, so every test
+  in the module would have gone vacuous in exactly the job that binds a real
+  checkout. Once split A lands the fixture ASSERTS the declared value rather
+  than overwriting it, so a base that disagrees surfaces as fixture drift.
+  Mutation-proven at `PINNED_SDK_COMMIT`: forcing `resolve_aperture()` to
+  return `None` (the pre-port behaviour) turns 3 of the 5 tests red.
+
+- **`test_symlink_loop_clean_error` no longer reds on CPython >= 3.13.**
+  Fixes `#1234`. The test asserted `'could not be resolved'`, the message
+  `validate.py`'s `except (OSError, RuntimeError)` guard (#1217/#1221)
+  produces when a `profile:` symlink loop makes `Path.resolve()` raise
+  `RuntimeError` -- true on CPython <= 3.12, but CPython 3.13 changed
+  `resolve()` to return the path unresolved instead of raising (measured:
+  3.12.14 raises, 3.13.15 and 3.14.7 both return silently and let
+  `is_file()` answer `False` without raising either). On those
+  interpreters the profile never reaches the exception handler and the
+  message becomes `'does not resolve'` instead --
+  `test_an_absent_profile_keeps_its_existing_message` deliberately pins
+  that wording as a *different*, unrelated case. `validate.py` is
+  untouched (it is a hash-pinned mirror of alp-sdk's own
+  `scripts/alp_orchestrate/validate.py`, and the guard itself is not
+  wrong); only the test asserted an interpreter-version-specific string
+  without gating on the version that produces it.
+
+  Took the issue's option 2 over accepting either message:
+  `test_symlink_loop_clean_error` gained a `skipif(sys.version_info >=
+  (3, 13), ...)`, and a new `>= 3.13` sibling,
+  `test_symlink_loop_py313_clean_error`, pins that the same symlink-loop
+  profile still comes out as a clean `OrchestratorError` naming `'does not
+  resolve'` on the newer interpreters -- never an unhandled exception,
+  never the <= 3.12 wording -- so neither interpreter's behaviour goes
+  silently untested. The module docstring's Windows note gained a second
+  sentence covering how the version split interacts with this host's own
+  inability to construct a real symlink loop without Developer Mode.
+
+- **A new, informational CI leg finally binds an alp-sdk checkout on the
+  ceiling interpreter, so the planner and parity suites get to run above
+  CPython 3.12 for the first time.** `ci.yml`'s `python-newest` job floats
+  `"3.x"` but binds no alp-sdk, and every other job that binds one pins the
+  `requires-python` floor (`"3.12"`) — so every `tests/planner`/`tests/parity`
+  case that needs a bound root skipped on every job that ran above the floor,
+  on every PR, always. Measured on CPython 3.14.7, unbound:
+  `tests/planner tests/parity` gave `44 passed, 1135 skipped`. #1234 (a real
+  CPython 3.13 behaviour change in `Path.resolve(strict=False)`, invisible to
+  CI for exactly this reason) and its own regression test,
+  `test_symlink_loop_py313_clean_error`, are the concrete cost: gated
+  `skipif(sys.version_info < (3, 13))`, it skips on the version guard on
+  every `"3.12"` job and skips SDK-gated on `python-newest` — it has never
+  actually executed in CI.
+  - Took the issue's option 2: a **separate** bound leg
+    (`.github/workflows/python-newest-bound.yml`), rather than binding
+    `ALP_SDK_ROOT` into `python-newest` itself. That job stays fast and
+    unbound; its meaning — does the newest interpreter agree with the floor,
+    with no alp-sdk variable in the comparison — is unchanged.
+  - **A new file, not a third job in `ci.yml`.**
+    `python/scripts/pin_move_verify.py`'s `extract_ci_sdk_parity_ref` demands
+    exactly one `repository: alplabai/alp-sdk` checkout inside `ci.yml`
+    (proved locally: `test_extract_ci_sdk_parity_ref_against_the_real_file`)
+    and RAISES on a second one — which `moved_pin_sites` then reports as an
+    unverifiable pin move on every future PR that so much as touches
+    `ci.yml`. Landing the bound leg in its own file sidesteps that extractor
+    entirely rather than teaching it to count two checkouts.
+  - **No new pin.** The alp-sdk ref is resolved at runtime from
+    `parity.yml`'s `PINNED_SDK_TAG` — the same `sed`-extraction shape
+    `getting-started.yml` and `unsharded-python-canary.yml` already use for
+    the identical reason — instead of a fourth hardcoded SHA that could drift
+    from the other three (`ci.yml`'s `sdk_parity` checkout, `parity.yml`'s two
+    audit-commit checkouts). A `PINNED_SDK_TAG` bump moves this leg
+    automatically; nothing here needs touching.
+  - **Deliberately NOT a required status check**, the same shape as
+    `pin-move-verify.yml`'s `pin-move-verify · sender`: lighting up ~1100
+    tests that have never run on a modern interpreter is expected to surface
+    a first-run backlog of real, interpreter-specific failures — the whole
+    point of the leg, but more than one PR cycle's worth of triage, and a
+    floating interpreter must never decide whether an unrelated PR can merge.
+    It also stays off the release path entirely (no `workflow_call` trigger),
+    for the same reason `python-newest` does.
+  - `tests/gates/test_interpreter_policy.py`'s `FLOATING_JOBS` now names all
+    three ceiling-floating jobs instead of two, and
+    `test_parity_workflow_concurrency_and_timeouts.py`'s `_MIN_BOUNDED_JOBS`
+    gained the new file's own entry — both were the "several exist and will
+    fail on a malformed addition" gates the issue warned about, and both
+    caught real edits during this change before either reached CI.
+
+- **`tan build` no longer hands out `bitbake alp-image-edge` for an AEN A32
+  MACHINE that cannot build.** Fixes `#1223`, closes the drift `#1239` was
+  tracking. Re-syncs `tan/planner/` with alp-sdk `15b2f32c` (was `eff266b6`):
+  `orchestrator.py` ports `YOCTO_MACHINE_UNBUILDABLE` +
+  `UnbuildableYoctoMachineError` (alp-sdk#1982/#1967) and `buildplan.py`
+  catches it, so all five AEN A32-cluster carriers
+  (`E1M-AEN{501,601,701,801,803}` — AEN803 is the bench module) now carry
+  `command: null` plus a `yocto-machine-unbuildable` warning naming the real
+  blocking issue(s) instead of a `bitbake` target guaranteed to fail. The five
+  are NOT one uniform refusal: `e1m-aen801-a32` cites both `#1968` (an active
+  `require` naming a file absent from public meta-alif-ensemble) and `#1971`
+  (the Scarthgap/`LAYERSERIES_COMPAT` mismatch); the other four cite `#1971`
+  only. `slugs.py` also stops auto-enabling a chip named by a top-level
+  scalar field (e.g. `secure_element:`) when that same chip's
+  `i2c_devices[].assembled` is `false` or `optional` — E1M-AEN801's
+  DNP Optiga (footprint shared with E1M-AEN803) no longer reaches
+  `CONFIG_ALP_SDK_CHIP_OPTIGA_TRUST_M=y`. `loader.py`/`orchestrator.py` also
+  pick up alp-sdk#1961/#1987's clean-crash handling for an unresolvable
+  `app:`/`profile:` path (a symlink loop, or an otherwise-inaccessible one).
+
+  `python/tests/planner/test_yocto_machine_unbuildable.py` is new: ported
+  from alp-sdk's own `test_emit_build_plan_aen_a32_machine_unbuildable_
+  blocks_command`, parametrized per-class (not one shared message across all
+  five, which would contradict the `YOCTO_MACHINE_UNBUILDABLE` dict it
+  mirrors) — verified red against the pre-port `orchestrator.py`/
+  `buildplan.py`, green against the port.
+
+  `python/tests/fixtures/planner_oracle/` (the frozen 100-board planner
+  oracle) is re-captured at the new pin: 87 of 700 emits move, every one
+  explained by the yocto refusal, the Optiga fix, or alp-sdk#1365 split B's
+  IPC carve-out reason-text rewording (already ported ahead of this bump) —
+  none by anything else. `.github/workflows/parity.yml`'s `PINNED_SDK_TAG` /
+  `PINNED_PLANNER_ORACLE_SDK_REF`, `.github/workflows/ci.yml`'s `sdk_parity`
+  checkout `ref:`, and `test_planner_relocation_freshness.py`'s
+  `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT` all move to `15b2f32c`
+  together.
+
+  Moving `HAND_PORT_PINNED_SDK_COMMIT` surfaced two more real, unported
+  `scripts/gen_zephyr_board.py` deltas that `test_planner_emit_parity.py`
+  exercises for every board once `ALP_SDK_ROOT` is bound at the new pin:
+  `on-module-links.yaml`'s `rtc_alarm.risk` reshaping from a plain string
+  into a per-part map (alp-sdk#1988) crashed `--emit zephyr-board` outright
+  for every AEN SKU (`AttributeError: 'dict' object has no attribute
+  'split'` in `_aen_brd_i2c_dts`, since tan's own independent #493 fix still
+  read the old string shape) — re-pointed at `(alarm.get("risk") or
+  {}).get(part)`, matching alp-sdk's own fix exactly. And `#655` slice 2
+  (alp-sdk#1947) turned out to have landed too: `_v2n_dts()` +
+  `_v2n_part_display()` generate the V2N/V2M board `.dts` from the SoM
+  preset + SoC JSON + `supervisor-links.yaml`, closing the one hand-authored
+  file this family's board tree still had — ported into
+  `zephyr_board.py`'s `emit_zephyr_board()`. Both were found and fixed by
+  actually binding the new pin and running `tests/parity -q`, not by
+  reading the diff and guessing: 89 failures (crash-on-emit plus a missing
+  `.dts` in every V2N-family board tree) down to 0, confirmed serially to
+  rule out the known `test_the_breadth_layer_still_covers_every_board`
+  xdist artefact.
+
+- **`scripts/regen_module_size_budget.py` no longer writes CRLF records on
+  Windows.** Fixes `#1243`. `_module_size_budget_core.py`'s `write_records`
+  called `Path.write_text` with no `newline=` argument, which translates
+  `"\n"` to `os.linesep` on write -- CRLF on Windows -- against
+  `.gitattributes`' `* text=auto eol=lf`. Every record a Windows regen
+  touched needed a manual `read_bytes`/`write_bytes` LF normalisation before
+  staging; it took three separate occasions in one session (`#1210`,
+  `#1239`, `#1216`). `write_text` now passes `newline="\n"`.
+
+  The comparison deciding whether to rewrite a record at all carried the
+  matching half of the bug: it read the committed file with `Path.read_text`,
+  whose universal-newlines mode normalises a CRLF already on disk back to
+  `"\n"` before comparing, so an already-corrupted record read as clean and
+  was never repaired. Both call sites -- `write_records`'s own per-record
+  comparison, and `regen_module_size_budget.py`'s `stale_caps` check against
+  `_caps.json` -- now go through a new `core.read_exact`, which reads raw
+  bytes instead.
+
+  That alone was not enough to make repair real for the per-module records,
+  and a review round caught it: `main()`'s own early-exit ("already matches
+  the measured tree") fires from six MEASUREMENT-level flags
+  (`grown`/`shrunk`/`stale_caps`/...), none of which a CRLF-only record ever
+  sets, since its measured content is unchanged -- so `write_records` was
+  never even called and a corrupted record survived a plain regen untouched
+  (reproduced: poison one byte, regen, still CRLF). `write_records` now
+  returns whether it changed anything on disk, and `main()` reads that
+  instead of trying to infer it from the six flags, so a CRLF-only record is
+  repaired on the next plain regen after all. `--check` deliberately does
+  NOT gain this: it stays judged on the six MEASUREMENT flags alone, same as
+  before, so a CRLF-only record is invisible to `--check` and `--check`
+  never writes -- consistent with its own documented, on-purpose disagreement
+  with the pytest gate's tolerance (see this script's module docstring).
+
+  `MODULE_SIZE_BUDGET_LOG.d/`'s writer (`_append_log`) already carried
+  `newline="\n"` from `#1152`'s review round; this closes the same gap on
+  `module_size_budget.d/`'s two writers.
+
+  New gate: `test_no_record_file_contains_a_carriage_return` asserts zero
+  `\r` bytes under both `module_size_budget.d/` and
+  `MODULE_SIZE_BUDGET_LOG.d/`, reading with `read_bytes()` rather than
+  `read_text()` so the check itself cannot fall into the same silent-pass
+  shape it guards against; a negative control scans a deliberately poisoned
+  copy first and must catch it, so the assertion is proven able to fail
+  before it is trusted against the real, committed tree (`#275`'s lesson).
+
+- **`system-manifest.yaml` now carries alp-sdk's `memory[]` pane, and every
+  AEN board tree enables the SoM's own I2C2 bus.** Closes the drift `#1248`
+  was tracking and supersedes the `auto/planner-resync` proposal `#1249`.
+  Re-syncs `tan/planner/` with alp-sdk `20fec7a7` (was `15b2f32c`):
+
+  - `memory.py` (new, alp-sdk#2030) projects the SoM's effective
+    memory-region table into `system-manifest.yaml`'s `memory[]` pane: one
+    row per region with `name`, `source` (`som_preset` / `soc_derived`),
+    `kind` (`flash` / `ram` / `unclassified` / `unresolved`) and `status`
+    (`ok` / `unresolved`), plus `base`, `size_bytes`, `write_authority`,
+    `accessible_from` and `reason` where they apply. The pane is omitted,
+    never emitted empty. The bot proposal merged the callers of `memory.py`
+    without the module itself, so merging it as proposed would have made
+    `import tan.planner` raise `ImportError`.
+  - `memregion.py`'s `_region_size_bytes` now prefers `size_mib` over
+    `size_kib` when a region authors both as integers (alp-sdk#2022). No
+    shipped SoM preset authors both, so no emitted byte changes.
+  - The IPC-blocked message no longer implies that `write_authority:
+    customer_runtime` rescues a region contained in the MRAM aperture
+    (alp-sdk#2018). The text reaches `ipc-contract-h`, `dts-reservations`,
+    `build-plan.json` and `system-manifest.yaml`.
+  - `zephyr_board.py` hand-ports alp-sdk#2036: the AEN board layer now
+    enables SoC I2C2 (`e1m_i2c0`, portable alias `alp-i2c0`) with a
+    `pinctrl_i2c2` group (`P5_6` SCL / `P5_7` SDA, `input-enable` +
+    `bias-pull-down`) and an `&i2c2` node at `I2C_BITRATE_STANDARD`, because
+    the SoM's own 24C128 manifest EEPROM sits on that bus. As upstream,
+    `metadata/e1m_modules/aen/on-module-links.yaml` must now declare
+    `e1m_i2c0`.
+
+  `python/tests/fixtures/planner_oracle/` is re-captured at the new pin: 105
+  of 700 emits move, every changed byte attributed to the `memory[]` pane,
+  the alp-sdk#2018 rewording, or alp-sdk#2036 moving
+  `metadata/boards/e1m-evk.yaml`'s `default_hw_rev` to `r2`.
+  `.github/workflows/parity.yml`'s `PINNED_SDK_TAG` /
+  `PINNED_PLANNER_ORACLE_SDK_REF`, `.github/workflows/ci.yml`'s `sdk_parity`
+  checkout `ref:`, and `test_planner_relocation_freshness.py`'s
+  `PINNED_SDK_COMMIT` / `HAND_PORT_PINNED_SDK_COMMIT` all move to `20fec7a7`
+  together.
+
+- **A confirmed Flow D MRAM write now refuses until the operator acknowledges
+  that it REPLACES the entire ATOC (tan-cli#1252, porting alp-sdk#2025 /
+  alp-sdk#2029).** `plan_alif_mram_jlink` emits `loadbin {atoc} {atoc_address}`,
+  which rewrites the whole table — and Flow D, being J-Link straight over SWD,
+  has no SE-UART channel to enumerate what is resident first. Any boot entry
+  already in MRAM that the new ATOC does not name (an A32 boot chain, an HP
+  app, a diagnostic image) was therefore silently delisted, and the Secure
+  Enclave printed `[SES] ATOC ok` afterwards, so the transcript read clean.
+  Upstream made `scripts/bench/aen/flash-jlink.sh`, `flash-jlink-hp.sh` and
+  `flash-jlink-mramxip.sh` refuse with exit 8 for exactly this; tan now
+  refuses the same write with the new, distinct `flash.atoc-replacement-
+  unacknowledged` code (not the generic `flash.entry-failed` — every flash
+  refusal shares rc 1 and `status: failed`, so the code is the only channel
+  that can say this one is answered by a single documented flag). The
+  acknowledgement has **exactly two spellings**: `--atoc-unqueryable` on
+  `tan flash` (forwarded through `tan run --flash`), or
+  `flash_args.atoc_unqueryable: true` in the manifest. There is deliberately
+  **no environment variable**: an exported one is set once and then
+  acknowledges every later write including the unattended ones, which is the
+  habit alp-sdk#2025's own header warns against when it says the Flow D flag
+  must never be merged or aliased with Flow A's `--replace-atoc`.
+- **`--confirm` is not the acknowledgement, and a preview is still a
+  preview.** The two gates stay separate: `--confirm` means "yes, write",
+  `--atoc-unqueryable` means "yes, I accept that the entire ATOC is replaced",
+  and a run can legitimately be confirmed and still refuse here (an
+  `ALP_FLASH_FORCE=1` bench that never passes the new flag refuses on every
+  run, by design). The refusal fires only where the write would REALLY proceed
+  — the confirm gate armed and not `--dry-run` — so `--dry-run` and an
+  unconfirmed run both still preview; what changed for them is that a Flow D
+  preview message now *states* the whole-ATOC replacement, on both of Flow D's
+  preview paths (the ordinary one and the SETOOLS auto-sign early return that
+  a fresh AEN manifest with no `atoc`/`atoc_address` actually takes), so the
+  operator reads it before arming rather than after. Placement matches
+  tan-cli#512's: the refusal sits ahead of the SETOOLS auto-sign, which is
+  itself a real write into the customer's SETOOLS install, and after the
+  `ALP_FLASH_REQUIRE_DPIDR` wrong-board gate — writing the right table to the
+  wrong board is the worse of the two failures, and delisting is moot if the
+  probe is on someone else's silicon. A present-but-null or non-boolean
+  `flash_args.atoc_unqueryable` is refused at plan time (so it surfaces under
+  `--dry-run`, and before any SETOOLS spawn) rather than read as an absent
+  key. On `tan run --flash` the flag is the only spelling that works: every
+  such run regenerates `build/system-manifest.yaml` from the planner first, so
+  a hand-added `flash_args` key does not survive to flash time.
+- **Scope, stated plainly: this closes the Flow D route to a resident ATOC,
+  not every route.** A slice that stays on `zephyr_west_flash` (no
+  `jlink_flash_device` in its `flash_args`) still reaches the ATOC through
+  Flow A — `west flash` picking the board.cmake `alif_flash` runner over the
+  SE-UART — and that write is still unacknowledged and unwarned. Every
+  published Ensemble variant in alp-sdk metadata carries
+  `debug.jlink_flash_device`, so a planner-emitted AEN manifest dispatches
+  Flow D and is covered; a hand-written or legacy one is not. Widening
+  `--atoc-unqueryable` to cover Flow A is explicitly the wrong fix —
+  alp-sdk#2025's header forbids merging or aliasing the Flow D flag with Flow
+  A's `--replace-atoc` — so Flow A's query-based guard is left as follow-up
+  work.
+
+- **A bare-string `on_module_links.rtc_alarm.risk` is now refused with a curated
+  message instead of raising `AttributeError: 'str' object has no attribute
+  'get'` from deep inside the emitter.** `on-module-links.yaml`'s `risk:` field
+  became a per-part map keyed by the SoC `part` designator (`{"E8": "..."}`) in
+  alp-sdk#1988, so that an E8-only AE822 DFP warning cannot bleed into an
+  E3/E4/E6 board tree. tan's hand-port took the READER half of that change in
+  the #1241 re-sync and left the REFUSAL half behind, so a pre-#1988-shaped
+  `risk:` reached `_aen_brd_i2c_dts`'s `(alarm.get("risk") or {}).get(part)` and
+  died there with an uncurated `AttributeError` naming neither the file nor the
+  field. `_load_aen_on_module_links` now shape-checks it at load time, naming
+  the path and the required shape, exactly as upstream does. The same change
+  adds the sibling check for `on_module_links.e1m_i2c0.bench_validation`
+  (alp-sdk#2046, following #1988's pattern), which had the identical failure
+  mode in `_aen_e1m_i2c0_pinctrl_group`.
+
+  `HAND_PORT_HASHES` hashes only the alp-sdk side of a hand-port, so this
+  divergence was invisible to the freshness gate and had to be carried in prose
+  — it was recorded as "KNOWN, PRE-EXISTING, NOT FIXED HERE" in
+  `test_planner_relocation_freshness.py`'s `15b2f32c -> 20fec7a7` hand-port
+  narrative until now.
+
+- **`scripts/ci/apt-bounded.sh` now passes `-o Acquire::Check-Valid-Until=false`
+  on bullseye, and only on bullseye.** Refs `#1257`. Debian 11 "bullseye" left
+  LTS on 2026-08-31; on 2026-09-07 the `Valid-Until` on bullseye-security's
+  `InRelease` lapsed, and every job that freezes tan inside
+  `python:3.12-slim-bullseye` died at its first `update` with `Release file ...
+  is expired`. apt reports that as rc=100, which the wrapper classes as
+  transient, so all three attempts burned on a condition no retry could change.
+  `release.yml`'s `-gnu` freeze is one of the five call sites — with
+  `needs: build`, a tag would have published zero assets — which is what made
+  this a release blocker.
+
+  **This is hardening against recurrence, not the repair of a live red.**
+  Measured 2026-09-17: Debian has re-signed the suite (`Suite:
+  oldoldstable-security`, `Date: Sat, 12 Sep 2026 09:27:08 UTC`) carrying **no**
+  `Valid-Until:` field at all, so apt has nothing left to expire and the symptom
+  is currently gone on its own. What the flag buys is that a re-added
+  `Valid-Until`, or a mirror serving a stale index, can no longer red the
+  release freeze on a date with nothing in the diff under test to explain it.
+
+  **Which check it drops — verified against `apt.conf(5)` and `sources.list(5)`
+  rather than asserted.** `Acquire::Check-Valid-Until` is the replay-attack /
+  expiry check and only that: "a repository creator can declare a time until
+  which the data provided in the repository should be considered valid". The
+  `InRelease` GPG signature is still verified and package hashes are still
+  checked against that signed index. It is **not** `--allow-unauthenticated` and
+  **not** `[trusted=yes]` — `sources.list(5)` says of `Trusted`: "The value `yes`
+  tells APT always to consider this source as trusted, even if it doesn't pass
+  authentication checks. It disables parts of `apt-secure(8)`". Signature
+  checking is not downgraded.
+
+  **How wide it is, which is a separate question.** This is apt's *global*
+  override, so it applies to every source configured in the container —
+  `bullseye`, `bullseye-updates` and `bullseye-security` alike — not only to the
+  suite that expired. `apt.conf(5)` is explicit that the per-source
+  `Check-Valid-Until` in `sources.list(5)` "should be preferred to disable the
+  check selectively instead of using this global override"; rewriting
+  sources.list per suite is not taken here, because its layout differs across
+  base images (`/etc/apt/sources.list` vs a deb822 `.sources` file) and the
+  wrapper is shared by every call site.
+
+  **The accepted risk, framed honestly.** A stale security index means a
+  known-vulnerable `binutils` could be installed without apt objecting. This is
+  not a scratch container: `release.yml:517-527` is where the published
+  `tan-x86_64-unknown-linux-gnu` / `tan-aarch64-unknown-linux-gnu` assets are
+  frozen, and `objdump` — from `binutils`, the one package installed — is what
+  PyInstaller walks the artifact's shared-library graph with. The container is
+  discarded when the freeze finishes; its **output ships to customers**.
+
+  The scoping is the point. The codename comes from `VERSION_CODENAME` in
+  `/etc/os-release`, sourced in a subshell so the wrapper's own scope keeps its
+  `NAME`/`ID`/`VERSION`, guarded so that an absent, unreadable, codename-less,
+  malformed or CRLF file falls through to "not bullseye" instead of tripping
+  `set -euo pipefail` or silently no-op'ing. Every other call site —
+  `ubuntu-latest`, and `ubuntu:24.04` in `scripts/e2e-container.sh` — keeps the
+  check in full. The test seam is `APT_OS_RELEASE_FILE`, the *path* read,
+  deliberately **not** an override of the derived codename: a codename override
+  would be the one way a non-bullseye host could acquire the waiver from an
+  ambient variable, and it would let the tests bypass the probe rather than
+  exercise it. No call site sets it. A one-line `NOTICE` on stderr names the
+  option, the reason and the container-wide scope when it is applied.
+
+  **No workflow changed.** All five affected sites — `release.yml`,
+  `clean-host.yml`, `getting-started.yml`, `e2e-container.yml` and
+  `python-binaries.yml` — reach apt only through this wrapper, verified rather
+  than assumed; `tests/gates/test_apt_bounded.py` is what keeps that true. The
+  glibc 2.31 floor the bullseye base exists to give the released `-gnu` binaries
+  is untouched, so moving the freeze to bookworm — `#1257`'s option 3, a product
+  decision, not a CI tweak — stays off the table.
+
+  **`#1257` stays open, on purpose.** Its option 2 (`archive.debian.org`) and
+  option 3 (bookworm) are both untouched by this change, so the issue remains
+  the record for them. bullseye is still served from `deb.debian.org` (measured
+  2026-09-17: `dists/bullseye/InRelease` → HTTP 200); once it moves to
+  `archive.debian.org`, `deb.debian.org` stops serving it and this flag will not
+  help — a 404 is not an expiry. That is the trigger to revisit option 2.
+  Deliberately not implemented now: it would be untested speculation against a
+  URL that currently answers 200.
+
+  Mutation-proved in `tests/test_apt_bounded_wrapper.py`, whose `_fake_apt` shim
+  now records the argv it was handed. Deleting the `case` arm reds the bullseye
+  test on the missing option; widening it to `*)` reds the bookworm and trixie
+  tests on the leak; removing the `NOTICE` reds the bullseye test on the
+  announcement alone. Each probe guard reds exactly one test and no other:
+  `exit 99` as the probe branch's first statement reds nine, dropping
+  `|| APT_OS_CODENAME=""` reds only the `exit`-in-os-release test, dropping
+  `${VERSION_CODENAME:-}` reds only the codename-less test, and dropping the
+  CRLF trim reds only the CRLF test. Writing `ACQ=` where `ACQ+=` was meant —
+  which would silently drop the `Acquire::http::Timeout` / `Retries` options
+  that bound tan-cli#860's idle-read case — leaves the bullseye test **green**,
+  and is caught only by `test_the_waiver_is_appended_not_substituted`, which is
+  why that one exists separately.
+
+- **`kconfig_fixture_parity.py` now FAILS on an absent upstream fixture, which
+  is what its docstring always claimed.** Fixes `#1261`. The absent-upstream
+  branch in `run()` was unconditional: at ANY `--sdk` ref -- including a
+  current or released alp-sdk that had REMOVED
+  `tests/fixtures/kconfig-contract/emit-kconfig.golden.json` -- it printed
+  `NOTICE: no fixture at ... pinned ref predates alp-sdk#893/#894/#897` and
+  returned True. `release-sdk-parity` (`.github/workflows/parity.yml`) runs
+  this script against whatever alp-sdk tag `releases/latest` resolves to and
+  fails the job on a non-zero exit, so a future release dropping the fixture
+  would have reported PASS: the one case the gate exists to catch was the one
+  case it could not fail on.
+
+  The code moves to the docstring rather than the other way round, on a
+  measurement rather than the generalisation the first cut of this change
+  shipped: of the 31 distinct values `PINNED_SDK_TAG` has held across
+  `parity.yml`'s history, the fixture is present at 29. The two exceptions are
+  `df312cec` and `f04ea42e`, July-2026 pins predating the fixture upstream --
+  `f04ea42e` was in fact the pin in force when this script was first written
+  (tan-cli `ca34090e`, `#40`), which is what the deleted branch was for. Every
+  pin since carries it, `81a9d515` (the current one), the released `v0.16.0`
+  and alp-sdk `origin/dev` included, so an absent upstream fixture is a
+  removal, not a "not yet applicable" skip. The new FAIL names both exits:
+  follow the fixture (re-vendor from its new upstream path, and update tan's
+  kconfig field contract in `python/tan/commands/kconfig_cmd.py` if the fields
+  moved with it), or fix the ref under test.
+
+  `#1261` offered two repairs; this takes neither verbatim and deletes the
+  branch outright. Ancestry-gating the skip on alp-sdk#897's commit (the
+  issue's option 1) was rejected as machinery for a state CI cannot reach on
+  its own: `PINNED_SDK_TAG` is hand-bumped forward-only, and the other caller
+  resolves `releases/latest`, where every published alp-sdk release from
+  `v0.13.0` on carries the fixture (`v0.12.0` and older do not -- measured).
+  Reaching a pre-#897 ref would take withdrawing four alp-sdk releases, and a
+  FAIL is the right answer there too, since a released `tan` paired with an
+  alp-sdk predating the `--emit kconfig` contract anchor has no field contract
+  to be verified against. Nothing else about the gate's verdict changes -- no
+  reachable alp-sdk checkout at all is still a clean self-skipping no-op, an
+  explicit `--sdk` that does not resolve is still a hard FAIL (tan-cli#172
+  review, tan-cli#175), and a missing vendored copy or a byte MISMATCH still
+  FAIL.
+
+  `tests/parity/test_kconfig_fixture_parity.py` pins all four verdicts, that
+  each verdict reaches the process EXIT CODE, and the two invariants above. It
+  gets its own named step in `parity.yml`, because the top-level `tests/` tree
+  is not collected by the `python` legs: a test nobody names in CI never runs.
+  That step deliberately carries no `!inputs.python_only` condition, unlike
+  the five parity steps beside it -- `release-sdk-parity` runs ONLY under
+  `if: ${{ inputs.python_only }}`, so the gated placement would switch the
+  self-test off on exactly the run where the gate it covers is
+  release-blocking.
+
+  The exit-code layer is not redundant with the return-value layer, and that
+  is measured too: with `main()`'s `return 0 if run(sdk_root) else 1` replaced
+  by a bare `run(sdk_root)` + `return 0`, every return-value case still
+  passes, and only
+  `test_each_verdict_reaches_the_process_exit_code[absent-upstream|
+  byte-mismatch|vendored-copy-missing]` reds -- the #1261 defect itself,
+  recreated one layer up, since CI acts on the exit code and on nothing else.
+  Restoring the old NOTICE branch reds `test_absent_upstream_fixture_fails` on
+  `assert True is False` with the NOTICE in its captured stdout.
+
+  Two comments the fix would have turned false are corrected in the same
+  change: `release-sdk-parity`'s own step block in `parity.yml` -- which since
+  `#1260` describes each script's CODE, and said kconfig "passes (with a
+  NOTICE) whenever its fixture is absent from the `--sdk` tree, at any ref" --
+  and `tests/parity/README.md`'s "Kconfig fixture byte-parity" section, which
+  told a reader that a fixture absent at the pinned ref is not a fail. The
+  sibling claim in `toolchain_lock_parity.py`'s docstring, that
+  `metadata/toolchains.json` "already exists at every ref this repo's
+  `PINNED_SDK_TAG` has ever pointed at", is narrowed on the same measurement
+  rather than re-affirmed: it is present at 27 of those 31 pins, absent at
+  `df312cec`, `f04ea42e`, `v0.13.0` and `8b216a04`. The two CI-wired gates now
+  read, and behave, as siblings; the bootstrap gate keeps its own NOTICE
+  branch and is a manual diagnostic, not a CI gate.
+
+- **`tan validate` no longer reports a hw_rev refusal as a tan crash: validator
+  exits 4 and 5 get their own outcomes, and the raw exit status now rides in the
+  envelope.** Closes `#1262`.
+
+  `validate_cmd._STATUS_OUTCOME` mapped validator exits 0-3. alp-sdk's
+  `scripts/validate_board_yaml.py` returns 0, 1, 3, 4 and 5 — measured at tag
+  `v0.16.0` and at `dev`/`cfeafd148cb16d24a0e6c2feb7749769fec8f992`, identical
+  at both, all three of `EXIT_SDK_REVISION_UNSUPPORTED` (3),
+  `EXIT_SDK_REVISION_UNKNOWN` (4) and `EXIT_SDK_REVISION_NOT_BUILDABLE` (5)
+  returned from its own `main()` — and it never returns 2. So exits 4 and 5
+  fell through `_STATUS_OUTCOME.get(status, OUTCOME_FAILED)` onto
+  `validate.failed`, whose published description is "the validator ran but
+  produced no usable verdict… a crash". A user-actionable refusal was
+  indistinguishable from `tan` having fallen over, and alp-studio — which
+  shells `tan validate` as an optional pre-build gate — could only respond by
+  degrading and letting the build proceed, leaving the refusal to resurface
+  later as an `SdkRevision*` error inside the build container.
+
+  Two new outcomes carry them: `OUTCOME_HARDWARE_REVISION_UNKNOWN`
+  (`validate.hardware-revision-unknown`) and
+  `OUTCOME_HARDWARE_REVISION_NOT_BUILDABLE`
+  (`validate.hardware-revision-not-buildable`), siblings under the existing
+  `validate.hardware-revision` prefix and named after the upstream constants.
+  Separate codes because the remedies are separate, which is why alp-sdk spends
+  a distinct exit code on each: "pick a revision that exists" (4), "pick a
+  revision whose status is buildable" (5), "pin a different SDK, or change
+  hw_rev" (3). The process exit code is unchanged at 2 for all of them — it
+  never was the distinction; the issue code is.
+
+  `diff` gets the same two codes. `diff_cmd._reject_if_sdk_validator_disagrees`
+  raises `ParseFailure(outcome, …)` with whatever `_spawn_validator` returns,
+  and that is the SAME `analyze_validator_output`/`_STATUS_OUTCOME` machinery —
+  so widening the map widened `diff`'s wire too, and registering only the
+  `validate` half would have left `diff` emitting codes nothing registers.
+  `diff` does **not** gain the raw status below, knowingly: its outcome travels
+  as a `ParseFailure.code` through `_emit_failure`, whose `data` is built by
+  `_data()` and has no channel for a number, so threading one through is a
+  second wire change on a second command. A `tan diff` against an unmapped
+  validator exit is therefore still lossy, arriving as `diff.failed` with
+  nothing to re-derive it from. Documented at `_data()` and in both
+  `diff.hardware-revision-*` registry notes; tracked separately.
+
+  **New envelope field: `data.validatorExitStatus`**, the child's returncode
+  verbatim. `.get(…, OUTCOME_FAILED)` stays the right default for an exit no
+  build yet names, but it no longer has to be lossy — a consumer can re-derive
+  what the map dropped, including for an exit this version has never heard of.
+  Verbatim means verbatim: on POSIX a signal-killed child gives a NEGATIVE
+  value (`-9` for SIGKILL) despite the field's name, so a consumer matching it
+  against a table of exit codes must handle that.
+  Present only where a validator actually returned a status; the key is
+  **omitted, not `null`**, on the whole `--offline` path, on all three guards,
+  on a spawn that never launched, and on a timeout (the child was killed, so
+  `TimeoutExpired` carries no returncode). All three committed
+  `contract/envelopes/validate-offline-*` goldens are unchanged byte for byte,
+  though only two of them actually check it — `validate-offline-clean` is in
+  `test_contract_envelopes.DELIBERATE_DIVERGENCE` and so runs as
+  `xfail(strict=True)`, its `data` never compared.
+
+  **Five stale registry notes corrected**, four of them carrying the identical
+  sentence: "today's `scripts/validate_board_yaml.py` only ever exits 0 or 1,
+  so this outcome is unreachable against a current SDK".
+  `validate.hardware-revision` and `diff.hardware-revision` are REACHABLE, and
+  `validate.failed`'s "outside the 0-3 range" is now 0-5. The fifth,
+  `validate.missing-preset`, needed a correction of its own — and the first
+  revision of this change got it wrong in the opposite direction, calling exit
+  2 unreachable. It is not. `_STATUS_OUTCOME` keys off the spawned CHILD
+  PROCESS's exit status, not `main()`'s return value: `main()` never returns 2,
+  but the process still exits 2 when the interpreter cannot open the script
+  (measured live against this worktree: a stub checkout carrying the
+  `scripts/alp_project.py` marker but no `scripts/validate_board_yaml.py`
+  yields `outcome: "missing-preset"`, `validatorExitStatus: 2`) or when
+  argparse rejects a flag. `validate_cmd.py`'s own module docstring had
+  recorded both measurements all along. `diff.missing-preset` is narrower —
+  `_reject_if_sdk_validator_disagrees` pre-checks `os.path.isfile(script)` —
+  but a present-and-unreadable script still exits 2, so it is not provably
+  dead either. Every corrected claim is now pinned to the alp-sdk version it
+  was measured against rather than asserted flatly.
+  `contract/envelope-contract.json` is built from this registry, so the
+  correction reaches the published contract the consumer reads — and shipping
+  "unreachable" would have told alp-studio to drop handling for a code that a
+  broken SDK install really does emit, at `warning` severity, naming the
+  customer's board: the same wrong-verdict class this issue was filed about,
+  inverted.
+
+  Mutation-proved: with `_STATUS_OUTCOME`'s two new rows removed, the exit-4
+  and exit-5 tests fail on the outcome, not merely on the exit code; with the
+  `data.validatorExitStatus` assignment removed, the spawn-path test fails on
+  the missing key while the offline test still passes; with the key emitted
+  unconditionally, the offline test and two goldens fail together; and with
+  the exit-2 row deleted from the map, the new stub-checkout test fails on
+  the outcome rather than silently agreeing.
+
+- **`tan/planner` is re-synced with alp-sdk `81a9d515`.** All six pin sites move
+  together — `PINNED_SDK_COMMIT` and `HAND_PORT_PINNED_SDK_COMMIT`
+  (`test_planner_relocation_freshness.py`), `PINNED_SDK_TAG` and
+  `PINNED_PLANNER_ORACLE_SDK_REF` (`parity.yml`), the `sdk_parity` checkout
+  `ref:` (`ci.yml`), and the frozen oracle's `PROVENANCE.txt`, re-captured at
+  that ref. `STRICT_LOADERS_PINNED_SDK_COMMIT` deliberately does not move. Five
+  upstream changes are carried:
+
+  - **The AEN memory-map overlap check gains the whole-device-alias exception
+    `classify_region()` already had** (alp-sdk#2073). A `memory_map:` row whose
+    resolved extent equals the App MRAM window EXACTLY — `mram_main`, once its
+    `base` stops being the `"TBD"` sentinel — is excluded from the pairwise
+    overlap comparison instead of being reported as overlapping every partition
+    it deliberately spans, and two such rows are refused outright rather than
+    silently going uncompared. The predicate is relocated as
+    `tan/planner/whole_device_alias.py` so `aperture.py` and `zephyr_board.py`
+    share one spelling and cannot drift; upstream keeps it in a flat,
+    package-free module for an import-loop reason that does not apply here,
+    where both callers already live inside `tan.planner`. **tan's own docstring
+    had claimed this exception for as long as the check existed** while the code
+    only skipped a non-integer `base` — the defect was latent, never reached,
+    because `mram_main.base` is still the literal `"TBD"` on both E1M-AEN801 and
+    E1M-AEN803 (alp-sdk#2053 resolved it, hit exactly this collision, and
+    reverted it).
+  - **The OSPI0 NOR + HyperRAM population is read from the SoM preset** instead
+    of hardcoded (alp-sdk#2062, #2065). `on_module.ospi_memories.ospi0` and
+    `on_module.hyperram` now drive both the board-header banner and the
+    MRAM-partition-map comment through one shared clause, so the two can no
+    longer contradict each other; `assembled` is honoured as the TRI-STATE field
+    it is (`true` / `false` / `"optional"`), an absent device block is left out
+    of the prose entirely rather than printed as "not populated", and a `TBD`
+    chip prints no part name. The part identities are corrected to
+    `IS25WX256-JHLE` and `S80KS5122GABHM02`.
+  - **The `e1m_i2c0` pinctrl comment stops claiming an inverted pull-direction
+    encoding, and its bench citation is scoped to the part it was measured on**
+    (alp-sdk#2046). `pinctrl_soc.h` inverts nothing —
+    `ALIF_PINCTRL_BIAS_CFG()` maps `bias-pull-up` to DSC=1 and `bias-pull-down`
+    to DSC=2 unconditionally — so the old "reads inverted vs the Alif pad
+    hardware" explanation is RETRACTED in both I2C groups. The emitted pad value
+    is unchanged: `bias-pull-down` stays, and the E8 bench run is still cited,
+    now qualified as not independently repeated on whichever part the board tree
+    is actually for.
+  - **`config TMP112` / `default n` is emitted into the AEN board's
+    `Kconfig.defconfig`** (alp-sdk#2043), so upstream Zephyr's `tmp112_init()`
+    does not collide at link time with alp-sdk's own `chips/tmp112/tmp112.c` for
+    an app that pulls in both. An app that wants the upstream driver still wins
+    by setting `CONFIG_TMP112=y` in its own `prj.conf`.
+  - **The portable temperature alias is `DT_ALIAS(alp_temp0)`**, not
+    `DT_ALIAS(ambient_temp0)` (alp-sdk#2075).
+
+- **`tan/core` no longer reaches outward into `tan/commands`, and
+  `infer_runtime_for_core_id` has one definition instead of two.** Refs `#408`
+  (does not close it — that issue's remaining half is module size).
+
+  `tan/commands/**` is the outer CLI ring; `tan/core/**` and `tan/envelope.py`
+  sit inside it, and 32 files under `tan/commands/` import from `tan/core` —
+  the healthy direction. Three imports ran the other way, each function-scoped
+  to dodge the circular import the inversion creates. A function-scoped import
+  is what makes that survivable at runtime and also what makes it invisible:
+  a line-anchored grep over the inner tree finds none of the three.
+
+  `tan/core/bootstrap.py` was the worst of them, because it reached past
+  something it already had. `infer_runtime_for_core_id` was defined **twice** —
+  at `tan/core/scaffold.py@8ca9a40adb9c4ee48345e10df58ae5e3516a9316:647` and
+  `tan/commands/presets_cmd.py@8ca9a40adb9c4ee48345e10df58ae5e3516a9316:247`.
+  Both coordinates are at this change's PARENT commit, named in the citation
+  itself because neither definition survives into the worktree (tan-cli#1191);
+  the two were the same word-start `a<digit>` heuristic with the same fallback,
+  and `bootstrap.py` imported the *command's* copy. `presets_cmd`'s own sibling
+  docstring already asked for the opposite: "ONE owner of this mapping … so
+  when `bootstrap` lands in this port it must call THIS, not a copy, or the
+  two can disagree about which host can build the project."
+
+  Both copies are now one function in `tan/core/os_class.py` — a 130-line leaf
+  importing only `__future__` and `collections.abc`, which already answers
+  "what OS class is this core" (`default_os_from_core_type`,
+  `allowed_os_for_core`). `bootstrap.py`'s import is now module-level and
+  points inward, and its `# noqa: PLC0415` is gone. The merged docstring keeps
+  both originals' content, including the alp-sdk-vscode `coreSiliconClass`
+  KEEP-IN-SYNC note. The two test suites that each tested a copy now cover one
+  function between them, and `presets_cmd`'s were the broader set (`A55`,
+  `data55`, `app_core`, `cluster_a32`).
+
+  A new gate, `tests/gates/test_core_does_not_import_commands.py`, holds the
+  line. It walks the **AST**, so a function-scoped import counts exactly as
+  much as a top-level one. The two remaining inversions — `tan/envelope.py`
+  importing `sdk_resolution_issues` from `sdk_cmd` and
+  `sdk_ladder_divergence_issue` from `build_cmd` — need those functions
+  extracted to a shared core module, which touches ~18 call sites and is its
+  own change; they are listed in `_KNOWN_INVERSIONS` so the gate refuses NEW
+  ones today. A second test fails when an allowlist entry stops describing a
+  real import, so the list cannot decay into a permanent exemption.
+
+  Both halves are mutation-proved: a function-scoped `tan.commands` import
+  added to `tan/core/os_class.py` turns the first test red; deleting a real
+  `envelope.py` import while leaving its allowlist entry turns the second red.
+
+- **`tan support-bundle` no longer runs `tan doctor`'s whole build/flash-readiness
+  checklist to keep five host-only checks.** `support_bundle_cmd._host_checks_from_doctor`
+  called `doctor_cmd._collect(...)` -- the full preflight (`sdk`, `boardYaml`,
+  `libraries`, `workspace`, `westResolved`, `venvProvenance`, `zephyrVersion`,
+  `zephyrWorkspace`, `hostPython`, `pythonFloor`, `west`, `zephyrSdk`, `sevenZip`,
+  `setools`, `jlink`, `sdkProvenance`) -- purely to pick `bootstrapManifest`,
+  `hostPrerequisites`, `zephyrSdkAvailableForHost`, `longPaths`, and `homePath`
+  out by name and discard the rest. On a host with `west`/`JLinkExe`/`git` on
+  PATH (the common case) that meant a real spawned `west --version` (twice),
+  a J-Link version-banner probe, and a git provenance shell-out, all thrown
+  away every single run. Measured on the same fixture, 5 runs each: before,
+  mean 1.85 s (median 1.99 s); after, mean 0.79 s (median 0.79 s) -- about
+  2.3x faster, and no longer coupled to `_collect`'s internal shape (the
+  class of regression #357/#374 already hit once).
+
+  A new `doctor_cmd.host_environment_checks(sdk_root, workspace_root=".")`
+  seam owns exactly the five checks, built through a shared
+  `doctor_cmd._resolve_prerequisites_environment` helper that `_collect`
+  itself now calls too for `bootstrapManifest`/`hostPrerequisites` (and reuses
+  for `hostPython`/`pythonFloor`/`west`'s manifest read) -- one implementation,
+  two callers, so `tan doctor` and `tan support-bundle` can never report a
+  diverging verdict for a check both still carry. `support-bundle`'s own
+  `board.yaml`/`--project` inputs are no longer threaded into the host-check
+  path at all: none of the five kept checks ever read either.
+
+  Verified byte-identical: a `support-bundle` JSON envelope + written bundle
+  file captured on the same fixture before and after this change, diffed with
+  only timestamps normalised, come back identical in both a clean host-check
+  pass and a failing (`hostPrerequisites: fail`, missing tool) run. Two new
+  tests pin the regression directly -- one poisons every discarded
+  build/flash-readiness check-builder (`sdk_check` through `sdk_provenance_check`,
+  including `jlink_check`/`jlink_banner`/`setools_check`) and calls the real
+  `host_environment_checks`; the other poisons `doctor_cmd._collect` itself and
+  runs `support-bundle` end to end -- so a regression back to the whole
+  checklist fails immediately rather than quietly returning.
+
+- **The packaging path's Linux leg is now exercised by every pull request, not
+  only by a pushed tag.** `release.yml` triggers on `v*` and nothing else, so
+  two checks ran there and nowhere else on any platform:
+  `tests/conformance/test_packaged_binary.py` and the glibc floor scan. A break
+  in either was discoverable only by pushing a tag, and a tag cannot be
+  un-pushed. That is how `v0.5.0` published nothing — `#349` switched the
+  freeze to `--onedir`, the floor scan kept reading `.build/tan/PKG-00.toc`,
+  `build` failed, `release` (`needs: build`) was skipped, and the tag was left
+  spent with zero assets:
+
+  ```
+  no GitHub Release was published for v0.5.0 (release job: skipped). A pushed tag
+  must always produce a Release with its assets; the tag is now spent with nothing
+  behind it.
+  ```
+
+  No new workflow was added. `clean-host.yml`'s `freeze-and-smoke` job already
+  freezes the same artifact in the same `python:3.12-slim-bullseye` container on
+  every pull request, so it now runs those same two commands on its container
+  leg — the exercise costs three lines rather than a second freeze that could
+  drift from the shipping recipe. The size ceiling needed nothing:
+  `scripts/build_binary.sh` sources `scripts/artifact_ceilings.env` and
+  enforces it itself, so the existing PR freeze already covered it.
+
+  This covers Linux only, matching the issue's own scope call ("One platform
+  is enough to catch this class; the four-way matrix can stay tag-only",
+  `#450`): `release.yml`'s non-container freeze step also runs
+  `test_packaged_binary.py`, on `windows-latest` and both macOS runners, but
+  that step still only runs at tag time. A packaging regression confined to
+  Windows or macOS — as opposed to the glibc-floor class this issue is about —
+  still first surfaces on a pushed tag.
+
+  The scan itself moved out of the workflow into
+  `python/scripts/glibc_floor_scan.py`. That is what makes both halves possible:
+  the two legs call one file instead of keeping two copies in step, and the
+  refusal became unit-testable off a runner. Per the issue's non-vacuity
+  requirement, `tests/scripts/test_glibc_floor_scan.py` drives the pre-fix shape
+  and asserts the message, not merely the exit code:
+
+  ```
+  payload scan found 2 native files / 3 GLIBC_ versions under dist/tan/ -- refusing to guess a floor
+  ```
+
+  against the healthy tree's `payload floor over 63 native files: GLIBC_2.30`.
+
+- **A stray apostrophe in a workflow's single-quoted docker shell argument can
+  no longer reach a runner.** Those bodies are single-quoted shell inside a
+  YAML scalar, so an apostrophe in a comment closes the string: `yaml.safe_load`
+  still parses the file, every linter still passes, and the job dies at
+  runtime — on a tag, for `release.yml`. `tests/gates/test_packaging_path_pr_exercise.py`
+  now slices out every such argument it can bound (`bash -euc '...'`,
+  `sh -c '...'`, `bash -c '...'`, and a few less common shells/flag shapes) in
+  every workflow file — not only `release.yml` and `clean-host.yml`, but
+  `getting-started.yml`, `e2e-container.yml` and `python-binaries.yml` too,
+  which build the same freeze the same way and carried the same latent
+  defect — and shells `bash -n` over just that argument rather than the whole
+  `run:` body. A shape the slicer cannot bound the closing quote of fails the
+  gate outright rather than being silently skipped. Slicing matters:
+  `bash -n` over the whole body cannot tell a genuinely unbalanced apostrophe
+  planted inside the docker string from one that gets accidentally rebalanced
+  by unrelated quoting later in the same step, which is exactly what let a
+  planted defect in `getting-started.yml` go undetected until this fix — its
+  step continues past the docker body into a `cat >... <<'LAUNCHER'` heredoc
+  whose own apostrophes happened to rebalance the whole-body count. This is
+  alongside pinning that both legs invoke the one extracted scan and that
+  neither inlines a copy of it again.
+
+- **A relocated checkout now resolves the right SDK, not just a disclosed
+  wrong one.** tan-cli#464 taught the `globalDefault` tier to warn when the
+  shared, last-writer-wins `~/.alp/sdk-default` pointer was written by a
+  DIFFERENT project's bootstrap -- but project A still built against project
+  B's checkout the moment B relocated, now with a warning attached. `tan
+  bootstrap` now also keys `origin -> sdkPath` into a new, machine-global
+  `~/.alp/sdk-defaults.json` registry, where `origin` is the same absolute
+  project root already recorded as `writtenFor`. At the `globalDefault` tier,
+  `resolve_sdk_tiered` picks the deepest registry key that contains the
+  caller's workspace (using the same containment test the foreign-project
+  warning already used), so A's own subdirectory resolves A's own relocated
+  checkout regardless of which project bootstrapped last -- with no directory
+  WALK, since the candidate set is closed to directories a real `tan
+  bootstrap` explicitly ran in. `sourceTier` still reports `"globalDefault"`
+  for a registry hit -- this is the same tier, keyed, not a new one -- and the
+  `sdk.global-default-foreign-project` warning no longer fires for a workspace
+  a registry entry actually covers. The legacy single pointer is unchanged:
+  `tan bootstrap` keeps writing it unconditionally, so an older tan that has
+  no notion of this registry still resolves the same way it always has
+  (tan-cli#464's disclosed-but-foreign behaviour, never a hard failure), and a
+  workspace no registry entry covers still falls through to it, foreign
+  warning included. A registry entry whose `sdkPath` no longer carries a
+  valid alp-sdk checkout is skipped the same way a stale legacy pointer
+  already degrades, rather than blocking a shallower, still-valid entry from
+  answering. A malformed or truncated `~/.alp/sdk-defaults.json` parses as
+  empty and falls back to the legacy pointer rather than raising; the
+  registry itself is now written via an atomic temp-then-`os.replace` (never
+  a bare truncate-then-write), so a crash or a full disk mid-write can no
+  longer leave a reader observing a half-written file in the first place.
+  `global_default_pointer_fix_hint` now names both files, so deleting either
+  -- or both -- by hand remains the safe recovery it already promised for the
+  legacy pointer alone. The "deepest" registry key is now picked by its
+  RESOLVED path, not its raw string: a registered origin reached through a
+  symlink previously could rank shallower or deeper than its true, resolved
+  depth, so the wrong registered SDK could win the tie-break with no warning
+  at all -- and when two distinct origins resolve to the identical depth (an
+  alias of the same directory, bootstrapped twice), the tie is now broken by
+  which entry is more recent, not by whichever raw origin string happened to
+  sort first, PROVIDED both entries carry a stamp to compare: an entry
+  written by a pre-#466 or pre-this-fix `tan`, or hand-edited, degrades to no
+  stamp at all and never outranks a real one, and the recency clock itself
+  deliberately ignores `SOURCE_DATE_EPOCH`, so a reproducible-build host still
+  gets a real tie-break instead of two identical stamps. A registered or
+  `writtenFor` path naming a symlink LOOP no
+  longer raises a `RuntimeError` out of `tan sdk current`/`tan build` -- it
+  degrades to "not under it", the same safe answer every other unresolvable
+  path already got.
+
+- **`tan presets` and `tan clean` now report *why* no SDK resolved, not only
+  that none did.** `presets_cmd.resolve_sdk` collapsed to a bare `None`
+  whenever nothing usable resolved, dropping `broken_project_pin` on the floor
+  even when `resolve_sdk_tiered` had already computed it -- so a workspace
+  whose `.alp/sdk-path` names a checkout that no longer exists, with no
+  sibling checkout for discovery to fall through to and no `~/.alp/sdk-default`
+  either, reported `presets.sdk-root-unresolved` / `clean.sdk-root-not-found`
+  alone, with no `sdk.project-pin-unresolved` alongside it. `resolve_sdk` now
+  always returns an `ActiveSdk` -- `.path is None` is what "nothing usable
+  resolved" looks like, distinct from "nothing to report" -- and all five
+  callers (`presets`, `clean`, `diff`, `kconfig`, `pinmux`) moved from the old
+  bare-`None` truthiness check to `.path is not None`. `kconfig` had worked
+  around this same gap with a redundant second `resolve_sdk_tiered()` call,
+  now removed; `pinmux`'s guard against a `Path(None)` crash was remapped in
+  place. Two scope notes, both narrower than they may read: `tan clean`
+  reports the pin in its **JSON envelope** -- its default text output is
+  unchanged -- and `tan diff` gains the issue in **both** its text warnings
+  and its JSON envelope, which is a visible envelope change rather than a
+  text-only improvement. `foreign_global_default_for` is NOT part of this fix:
+  `resolve_sdk_tiered` sets it only on the `globalDefault` tier, guarded by
+  the same `_has_loader_script` predicate `resolve_sdk` re-applies, so a
+  non-`None` value implies a non-`None` path and the old bare-`None` branch
+  could never carry it -- which is why no test pins it. Not the #464
+  wrong-checkout harm -- nothing here resolves to a usable SDK at all, so no
+  build or clean ever runs against the wrong one -- only the diagnostic gap
+  its own docstring had left open.
+
+- **`tan debug-config`'s `launch.json` merge now records which `configFiles`/
+  `setupCommands` list entries it wrote, instead of guessing from position.**
+  `_merge_list_by_identity`'s positional fallback (`#489`) had a named,
+  accepted gap: a customer's own hand-added entry that matched nothing in a
+  fresh draft AND happened to sit in the one free slot an unmatched draft item
+  was about to claim could be silently overwritten — indistinguishable from
+  tan's own prior output sitting there. A new `.alp/debug-launch-provenance.json`
+  sidecar closes it: on every write, tan records a content hash (`json.dumps`
+  with sorted keys, so key order and whitespace never matter) of each list
+  entry it actually authored, keyed by launch-configuration name and field. On
+  the next merge, an existing entry whose current content hashes to a recorded
+  value is proven tan's own and safe to update or retract; an entry matching
+  no recorded hash is left exactly where it is, whether that's a value the
+  customer typed, one they edited after tan wrote it, or the SDK-identity path
+  (`sdk_identity_overwrites`, alp-sdk#1026) about to replace a stale value —
+  the disclosed-overwrite message and the on-disk write now agree in that case
+  too, instead of the message claiming a replacement an append actually
+  produced.
+
+  Every desync degrades the same direction, on purpose: a missing sidecar, a
+  corrupt one, a schema version this build does not recognise, or an entry
+  whose hash was never recorded all read as "nothing is ours", never as
+  "everything is ours" — the worst case is a leftover entry the customer can
+  delete in one keystroke, never a deleted customer edit. `launch.json` itself
+  is untouched by this: no marker key, no comment, nothing for VS Code's
+  schema validation to flag, and the sidecar survives `jsonc_splice`'s
+  byte-span-preserving writes because it hashes the parsed value, never raw
+  text. `#524`'s destructive-merge protections are unchanged; this only adds
+  identity on top of them.
+
+- **`tan faultdecode`'s implicit stdin reader is redesigned: bytes in, one
+  decode, three bounds, every bound announced.** Fixes `#537`. Seven prior
+  attempts on `#503` each traded one defect for another in the same function
+  (`_stdin_offers_input`/`_stdin_offers_input_by_reading`): a discard-on-timeout
+  bug, a total budget that silently truncated a legitimate slow dump, a
+  per-chunk text decode that split multi-byte sequences across chunk
+  boundaries, an unbounded read that reopened `#388`'s hang, a
+  `reconfigure(errors="ignore")` that patched only one operand of the `--file`
+  idiom, and a module-global `_PREREAD_STDIN` stash that leaked a stale empty
+  read into a LATER in-process invocation (only reachable when the command
+  runs more than once per process -- pytest, or an embedder).
+
+  The new reader (`_read_implicit_stdin`/`_read_stdin_bounded`) reads
+  `sys.stdin.buffer` as BYTES on a background thread, accumulates, and decodes
+  **exactly once** at the end with `bytes.decode("utf-8", errors="ignore")` --
+  byte-identical to what `--file <path>` already does via
+  `Path.read_text(encoding="utf-8", errors="ignore")`. `--file -`'s own read
+  was changed to match (it previously read the text layer directly and could
+  itself raise `UnicodeDecodeError`, a second way to diverge from `--file`).
+  One decode call, same two operands, on all three paths -- decode parity
+  stops being a property tested for and becomes one that cannot be violated.
+  All per-invocation state now lives in the call; the module-global stash is
+  gone.
+
+  **Three bounds, all three present for the first time:**
+  - **Idle** (`_STDIN_IDLE_TIMEOUT_S = 2.0`) -- resets on every chunk that
+    arrives, so a slow-but-steady producer (a serial capture) is read in
+    full. Measured, not argued: a 26-line dump with a real 0.24s
+    `time.sleep` between each line showed a max observed inter-chunk gap of
+    0.250s under this environment's own scheduling jitter; 2.0s is that
+    measured worst case with roughly 8x headroom. The REVERTED round-6/7
+    constant claimed "20x the idle window... always finishes well inside
+    it" for a fixed TOTAL budget of 5.0s against this exact 6.2s-total dump
+    -- arithmetically false for the shape it named, which is why this
+    design does not repeat a total-only bound.
+  - **Byte cap** (`_STDIN_BYTE_CAP = 1_048_576`, 1 MiB) -- no earlier attempt
+    had one. Unguarded, `yes "CFSR: 0x00008200" | tan faultdecode` reached
+    409.7 MB RSS over 9.59s (measured on `#503`'s round 7). 1 MiB is roughly
+    three orders of magnitude below that and two-plus above any real pasted
+    dump; it bounds the accumulated BUFFER itself, not the read loop.
+  - **Total** (`_STDIN_TOTAL_TIMEOUT_S = 30.0`) -- a backstop for a producer
+    that never idles long enough and never reaches the byte cap. Not the
+    primary defence (the idle bound is), because any fixed total remains
+    capable of truncating a sufficiently slow legitimate producer -- which
+    is exactly why every bound announces rather than silently discards.
+
+  **Every bound that fires is announced**, in every output mode (not only
+  `--format json`'s `issues[]`): a new `faultdecode.stdin-truncated` warning
+  issue plus an unconditional stderr line naming which bound fired and the
+  remedy (`--file -`, the pre-existing explicit unbounded read-to-EOF path).
+  The "no fault registers supplied" refusal also now distinguishes "stdin was
+  open but silent" from "no stdin was ever offered at all" (a TTY, a closed
+  pipe, a detached process) -- previously indistinguishable.
+
+  **One mechanism on every platform**: a single daemon thread doing one
+  single-syscall chunk read per iteration, replacing the previous
+  `select()`-on-POSIX / thread-on-Windows split (`select()` is WinSock-only
+  on Windows; anonymous pipes are not selectable there at all).
+
+  **A second, more severe defect surfaced and was fixed in the same change**:
+  the first cut of the background reader used `sys.stdin.buffer.read1(n)`,
+  and abandoning that thread (the normal outcome when the idle bound fires)
+  left it parked in a `BufferedReader` method holding that stream's internal
+  lock. A subsequent normal process exit then hit CPython's
+  interpreter-shutdown finalizer trying to acquire the same lock to flush
+  `sys.stdin`, aborting with `Fatal Python error:
+  _enter_buffered_busy: could not acquire lock for <_io.BufferedReader
+  name='<stdin>'> at interpreter shutdown, possibly due to daemon threads`
+  (SIGABRT, exit -6) -- reproduced via
+  `test_registers_on_the_command_line_never_wait_for_an_open_stdin_pipe`, a
+  REAL subprocess test, not `CliRunner`. The fix reads via `os.read(fd, n)`
+  on the stream's real file descriptor when one exists (a bare syscall, no
+  Python-level stream object for the finalizer to contend a lock on),
+  falling back to `.read1(n)` only for a fileno-less in-memory stream
+  (`CliRunner`'s captured stdin double, which is always already-complete and
+  therefore never left blocked on a real held-open pipe).
+
+  Never-attempted cases degrade cleanly instead of raising: `sys.stdin is
+  None`, a text-only replacement stream with no `.buffer` at all (both routed
+  through `tan.env.stdin_is_tty`, the repo's existing guarded probe, rather
+  than a second hand-rolled check), `stdin=DEVNULL`, and a closed fd 0.
+
+  **Tests, driven against the real binary** (the in-process `CliRunner` layer
+  hands the command an already-closed buffer and is kept for flag-priority
+  semantics only): decode parity including a stray non-UTF-8 byte through the
+  implicit pipe vs `--file`; a complete dump written then held open past the
+  idle bound (still decodes, announces truncation); the measured 26-line/
+  0.24s-gap slow-but-steady dump (decodes in full, **no** truncation notice --
+  this is the fixture that fails against the reverted round-6/7 constant);
+  an infinite `yes` producer (terminates via the byte cap, announces); a
+  silent held-open pipe (refuses quickly, names it "open but silent"); and
+  detached-stdin variants (`DEVNULL`, closed fd, `None`, no-`.buffer`). Plus
+  unit tests for `_read_stdin_bounded`'s three bounds individually, each
+  mutation-provable against a scripted fake byte source.
+
+- **The flash tests no longer assert an unsourced SW-DP ID for the GD32
+  bridge.** Three docstrings in `python/tests/commands/test_flash_command.py`
+  presented `0x0BE12477` as the GD32 bridge's real, bench-*measured* SW-DP
+  IDR -- one of them calling it "the real pair measured on a bench". That
+  value is the disputed outlier. It comes from tan-cli#589's 2026-08-09 bench
+  table, while alp-sdk records `0x6BA02477` in both
+  `metadata/chips/gd32_swd.yaml:49` and
+  `docs/tutorials/07-recovering-a-bricked-bridge.md:32`, and
+  `grep -rn "idcode\|dpidr" alp-sdk/metadata/` returns exactly one such
+  constant repo-wide. Both are plausible real ARM DPIDR values, so the
+  contradiction cannot be settled by reasoning -- only by a read on the actual
+  probe (tan-cli#610).
+
+  The literal itself is unchanged: as an arbitrary, well-formed 32-bit IDR
+  distinct from the selected-device echo it is exactly as good a fixture as
+  any other value, and churning it would rewrite eighteen assertions for no
+  gain. What changed is that the file stops claiming to know which board it
+  belongs to, and a comment above its first use says so and points at
+  tan-cli#610.
+
+  This matters because `expect_dpidr` is the guard between a cloned probe
+  serial and a write to the wrong board: J-Link serial `603000869` is
+  OEM-cloned across the GD32 bridge probe (USB path `3-4.2`) and the AEN E8
+  probe (`3-4.4.3`), and `JLinkExe` selects only by serial
+  (`-SelectEmuBySN`), with no USB-port selector. An `expect_dpidr` armed from
+  the wrong source has two outcomes, and the second is the dangerous one:
+  either every legitimate write is refused (loud, safe), or the value happens
+  to match the OTHER board and the guard passes on exactly the board it exists
+  to exclude (silent). A test docstring that names the value as measured is
+  the most likely place someone copies it from.
+
+  The AEN row is untouched and is not in dispute: `0x4C013477` agrees across
+  every source and was re-confirmed on silicon 2026-08-10
+  (`Found SW-DP with ID 0x4C013477`).
+
+  This closes only the documentation half of tan-cli#610. The measurement
+  itself needs a read on the real GD32 bridge probe under a held labgrid
+  reservation, so tan-cli#610 stays open and `needs-silicon`; nothing is armed
+  in the meantime (`expect_dpidr` occurs zero times under `alp-sdk/metadata/**`
+  on either `origin/dev` or `origin/main`), which is the correct state until
+  it is settled.
+
+- **`tan init` now warns when a scaffolded SoM's default hardware revision
+  is not buildable, instead of staying silent through a contradiction the
+  next command surfaces.** Measured on `dev` before this fix:
+
+  ```
+  $ tan init --som E1M-NX9101 --template minimal-app --sdk-root <sdk>
+  init: created './nx-probe' from template 'minimal-app'
+  init rc=0
+  $ tan validate --project nx-probe --sdk-root <sdk>
+  sdk-compat: SoM E1M-NX9101 hw_rev 'r1' exists but is not buildable
+  (status: 'tbd').
+  validate rc=2
+  ```
+
+  `validate` was not wrong -- `metadata/e1m_modules/imx93/hw-revisions.yaml`
+  really does mark `r1` (E1M-NX9101's only, default, hw_rev) `status: tbd`.
+  `init` resolved the identical SoM preset and never said a word, even though
+  every OTHER template on this SKU already refuses outright and names
+  `--template minimal-app` as the escape hatch -- this was the sole
+  combination, across an 11-SKU x 7-template sweep, where `init` exits 0 and
+  the very next `tan validate` hard-errors. `--from-example`/`--topology`
+  carried their own, separate instances of the identical contradiction (see
+  below), reached via a copied board.yaml rather than a template's own.
+
+  `init` now reads the same fact `validate` checks -- the scaffolded
+  board.yaml's SKU and (when it sets one) its own explicit `hw_rev:`,
+  falling back to the SoM preset's `default_hw_rev:` only when board.yaml
+  names none -- against the family's `hw-revisions.yaml`, and emits a new
+  `init.hw-rev-not-buildable` warning naming the hw_rev and its status,
+  while still writing every file. A warning, not a refusal: refusing here
+  too would leave a `status: preliminary` SoM with no self-contained
+  scaffolding path at all, since `minimal-app` is the one template every
+  other refusal points to as vendor-neutral and SoM-agnostic.
+
+  Applies to `--template` (any of the seven), and to `--from-example`/
+  `--topology` whether or not `--som` is given -- the SKU/hw_rev judged are
+  always the ones actually written to the scaffolded board.yaml, not
+  `--som` alone, so a not-buildable SKU an example already carries on disk
+  is caught even with no `--som` at all. A retarget onto a DIFFERENT SKU in
+  a DIFFERENT SoM family now drops a copied example's own explicit
+  `hw_rev:` (it was the ORIGINAL family's revision, and had no bearing on
+  the retargeted one -- same reasoning `tan init` already applies to a
+  stale inline SKU comment), so the scaffold falls back to the NEW SoM's
+  own `default_hw_rev:` and this check judges THAT, instead of leaving
+  behind a SKU/hw_rev pair no family table declares (previously a
+  SEPARATE contradiction: `tan init` exit 0, `tan validate` refusing with
+  "not a known hardware revision" -- a different message than this
+  warning names, three commands later). A retarget WITHIN the same family
+  (e.g. `E1M-AEN801` -> `E1M-AEN301`) keeps the explicit `hw_rev:` instead
+  -- it is still a real, declared revision there, and dropping it would
+  silently substitute a DIFFERENT declared revision (possibly with
+  different `pad_route_overrides`) with no warning at all, which would be
+  worse than the bug this fix closes. A customer `--board-yaml` override
+  is left alone, since its content is rendered verbatim and not parsed
+  here.
+
+  **Deliberately still silent:** an explicit `hw_rev:` that is not even a
+  KNOWN revision in its family's table (a value `tan validate`'s separate
+  "not a known hardware revision" check refuses, distinct from the
+  buildability question this warning answers) -- whether because a
+  hand-authored example names one its own family never declared, or
+  because it survived an intra-family retarget onto a SKU whose table
+  happens not to carry that key. This warning does not attempt to
+  duplicate `revision_known()`'s job; it only ever names a revision the
+  SDK metadata KNOWS about and marks not-buildable.
+
+- **`tan model build` no longer corrupts non-path compile options into
+  filesystem paths.** `model_cmd.py`'s `_resolve_compile` resolved every
+  string value in a `models[].compile.<backend>` block relative to
+  `board.yaml`'s directory, even though only `config`/`calibration`/`images`/
+  `spec` name paths. DRP-AI's `input_shape` (`"1,3,224,224"`), `input_name`
+  (`"images"`) and `product` (`"V2N"`) were being mangled into absolute
+  filesystem paths before reaching the adapter, which then made the
+  adapter's own shape check misfire. alp-sdk fixed this as issue #1271; tan's
+  hand-ported copy never received it (tan-cli#776). Only `config`,
+  `calibration`, `images` and `spec` are resolved to paths now; every other
+  compile option passes through unchanged.
+
+- **`test_build_model_..._still_uses_cpu_adapter` no longer fails whenever
+  `vela` is on PATH.** It called `build_model()` with the real default
+  adapter registry and dummy `.tflite` bytes (`b"TFL3-DUMMY"`); with
+  `ethos-u-vela` absent, the `ethos_u` (Vela) adapter is skipped and only the
+  CPU path is ever exercised, but with `vela` present the default registry's
+  `VelaAdapter` also accepts `.tflite` and is invoked for real on the
+  unparseable dummy bytes, which `vela` genuinely fails to compile --
+  `build_model()` does not catch `adapter.compile()` exceptions (a real
+  compile failure is meant to fail the package build loudly, not vanish into
+  a coverage skip), so the whole test errored on any host with the
+  `model-compile` extra installed (tan-cli#784). The test's own claim, per
+  its comment, is narrower than "the default registry works end to end": it
+  guards the `by_backend` grouping against a naive
+  `{a.backend: a for a in registry}` dict silently letting `ExecutorchAdapter`
+  steal the `"cpu"` key from `CpuAdapter` -- unrelated to `ethos_u`/Vela.
+  Renamed to `test_build_model_cpu_backend_adapters_tflite_source_uses_cpu_adapter`
+  and pinned its registry to just the two "cpu"-tier adapters
+  (`[CpuAdapter(), ExecutorchAdapter()]`), the same pattern its neighbours in
+  the file already use, so the outcome is deterministic and host-independent
+  -- measured both ways: `84 passed, 12 skipped` without `vela` on PATH,
+  `90 passed, 6 skipped` with it, zero failures either way. The sibling
+  `.pte`-source test above it keeps exercising the real default registry
+  (its own, different, #1260 purpose), unaffected because
+  `VelaAdapter.accepts()` rejects `.pte` before `compile()` is ever reached.
+
+  This unblocked enabling the Ethos-U real-model proof
+  (`test_vela_yolo_internal.py`, reachable in CI once alp-sdk#1470 lands the
+  public `tests/fixtures/models/person_detect_int8.tflite` fixture -- that PR
+  is still OPEN, so the proof continues to SKIP in CI for want of the fixture;
+  corrected in tan-cli#785, which also fixes the PR number: #1471 is the
+  unrelated bootstrap re-key) in CI:
+  `.github/workflows/parity.yml`'s `python-tests-shard` job -- the one that
+  binds `ALP_SDK_ROOT` and is where `tests/model` actually runs -- now
+  installs `tan-cli[monitor,model-compile]` instead of
+  `[monitor,model-io]` (a superset: `ethos-u-vela`, `tflite`, `flatbuffers`).
+  `ci.yml`'s bare `pip install -e ./python` (load-bearing for
+  `test_declared_dependencies.py`) is untouched. `test_vela_yolo_internal.py`
+  and `test_deepx_yolo_internal.py` are the two real-model proofs. Neither
+  passes in CI today, for two different reasons: the Ethos-U one gets its
+  toolchain from this extra but not its fixture (`person_detect_int8.tflite`
+  is on no merged alp-sdk commit -- alp-sdk#1470 is still OPEN -- and
+  `PINNED_SDK_TAG` carries only the 712-byte `tiny_int8.tflite` toy that test
+  deliberately refuses), while the DEEPX one still needs the license-gated
+  `dx-com` wheel, for which no PyPI extra exists. This paragraph previously
+  claimed the Ethos-U proof "now runs and PASSES in CI (`ethos-u85-256` and
+  `ethos-u55-256`)"; measured against the tree CI actually binds, it does not
+  -- it compiles and passes only against an alp-sdk checkout carrying the
+  fixture, which CI does not bind (corrected in tan-cli#785).
+
+- **`ethos_u` compiler adapter misread vela's KiB summary columns as bytes,
+  silently zeroing `req_sram_kib` and defeating the on-device NPU fit gate
+  (tan-cli#789).** `_parse_vela_summary` treated every `<mem_area>_
+  memory_used` column in vela's own summary CSV as bytes -- they are already
+  KiB (`memory_used[...] / 1024.0`, `ethosu/vela/stats_writer.py`'s
+  `write_summary_metrics_csv_common`) -- and sourced `arena_bytes` from
+  `arena_cache_size` (`arch.arena_cache_size / 1024`, same file), the
+  accelerator config's configured cache capacity, a build-time knob, not the
+  compiled model's actual arena requirement. Measured on a real 44-op
+  `person_detect_int8.tflite` compile (`ethos-u85-256`): the CSV reports
+  `arena_cache_size=384.0`, `sram_memory_used=72.734375` (both already
+  KiB); the adapter reported `arena 384 bytes, SRAM 0 KiB` -- the KiB float
+  truncated by a redundant `// 1024` on top of an already-KiB value, and the
+  arena sourced from the wrong column entirely.
+
+  This is silicon-facing: `Blob.req_sram_kib` flows through
+  `tan.model.build.build_model` into `requires.sram_kib` in every
+  `.alpmodel` package, which alp-sdk's on-device selector gates fit on
+  (`t->req_sram_kib <= e->arena_sram_kib`,
+  `src/backends/inference/alp_model_select.c`) -- with it silently zeroed, a
+  model genuinely needing 72.73 KiB of arena passed the device-side fit
+  check unconditionally. `Blob.arena_bytes` is also load-bearing: it flows
+  into `alp_model_open()`'s `arena`/`arena_bytes` fields
+  (`include/alp/inference.h`), which size the caller-allocated scratch
+  buffer at runtime.
+
+  `_parse_vela_summary` now reads `sram_memory_used` (same tolerant
+  substring match as before) as KiB, converts it to real bytes for
+  `arena_bytes` (`round(sram_kib * 1024)`), and rounds `req_sram_kib` UP
+  (`math.ceil`, never floor/truncate -- the fit gate must never
+  under-report a model's requirement). `arena_cache_size` is no longer read
+  at all. The hand-typed byte-unit CSV fixture in `test_adapters.py` --
+  the reason no test caught this drift from vela's real output shape -- is
+  replaced with a CSV captured verbatim from a real `vela` run over the
+  public `person_detect_int8.tflite` fixture. `test_vela_yolo_internal.py`'s
+  real-model proof now asserts `req_sram_kib > 0` specifically, not just
+  "either figure is nonzero", so a regression back to 0 fails loudly. Real
+  end-to-end verification (`ethos-u85-256`): `arena 74480 bytes, SRAM 73
+  KiB` for `person_detect_int8.tflite`'s 44/44-op NPU-only compile.
+
+  Introduced at `fd7c5a1`, carried forward verbatim through the ADR-0028
+  relocation into `tan.model` -- pre-existing, but this is the release that
+  ships it fixed.
+
+- **A real, successful, NPU-placing vela compile could still report a ZERO
+  footprint -- the same defeat of the on-device fit gate by a second route
+  (tan-cli#789).** The KiB fix above added `if sram_kib <= 0: return 0, 0`,
+  which fires on any compile whose working set vela placed somewhere other
+  than SRAM. Measured, real `ethos-u-vela` 5.1.0,
+  `keyword_scrambled_8bit.tflite` at `ethos-u85-256`: **6 of 15 operators on
+  the NPU**, exit 0, `sram_memory_used = 0.0`, `dram_memory_used =
+  5.359375` -- and a `.alpmodel` carrying `arena=0
+  requires={'sram_kib': 0, ...}`, which alp-sdk's selector reads as *fits
+  any envelope* (`e->arena_sram_kib == 0u || t->req_sram_kib <=
+  e->arena_sram_kib`, `src/backends/inference/alp_model_select.c`) before
+  handing the caller `arena_bytes = 0`. A compile that placed at least one
+  operator on the NPU and reports no SRAM working set is now **refused**
+  (`VelaFootprintRefused`), naming the placement it achieved, where the
+  working set actually went, and the profile it went there under -- a legible
+  refusal beats a zero a customer's board trusts. Zero NPU operators still
+  reports a real 0 (a full CPU fallback genuinely needs no arena -- measured:
+  `float32_fc.tflite` at `ethos-u85-256` reports 0.0 for every memory area),
+  so `tan model check --exact`'s `cpu-only` verdict is unchanged.
+
+  **What this changes for you** -- *superseded, in this same release, by the
+  memory-profile entry below: the four SKUs in the table no longer refuse,
+  because tan now supplies each part's own `--memory-mode`. Read the table as
+  what the refusal caught, not as what you will see.*
+
+  `tan model build` and `tan model check --exact` refuse the `ethos-u85-256`
+  and `ethos-u65-256` targets where they previously emitted a package entry /
+  a report figure. Four SKUs were affected, and only these four -- verified
+  against `metadata/e1m_modules/*.yaml` + `metadata/socs/**`:
+
+  | SKU | SoC | refused accel config | vela's default profile |
+  |---|---|---|---|
+  | `E1M-AEN401` | `alif:ensemble:e4` | `ethos-u85-256` | `Ethos_U85_SYS_DRAM_Mid` |
+  | `E1M-AEN601` | `alif:ensemble:e6` | `ethos-u85-256` | `Ethos_U85_SYS_DRAM_Mid` |
+  | `E1M-AEN801` | `alif:ensemble:e8` | `ethos-u85-256` | `Ethos_U85_SYS_DRAM_Mid` |
+  | `E1M-NX9101` | `nxp:imx9:imx93` | `ethos-u65-256` | `Ethos_U65_Client_Server` |
+
+  The **U55 targets are unaffected**: every `ethos-u55-*` config resolves to
+  the SRAM-backed `Ethos_U55_High_End_Embedded` and reports a real footprint,
+  so `E1M-AEN301`/`E1M-AEN501`/`E1M-AEN701` build exactly as before, as do the
+  U55 targets of the three AEN SKUs above. Nor is this a tiny-fixture artifact:
+  `keyword_scrambled_8bit.tflite` (29 KB, 6/15 partial placement) refuses on
+  `E1M-AEN801` too. Three of the four are Alif Ensemble parts; **`E1M-NX9101`
+  is NXP i.MX 93**, and its refusal names `Ethos_U65_Client_Server` -- the
+  profile that run actually resolved, never a hardcoded Alif one.
+
+- **One refused target no longer destroys the whole `.alpmodel` (tan-cli#789
+  review).** `adapter.compile()` had no per-target guard, so the refusal above
+  propagated out of `build_model`'s loop and aborted the ENTIRE package.
+  Measured with real `ethos-u-vela` 5.1.0 over the committed
+  `tests/fixtures/models/tiny_int8.tflite`: `E1M-AEN401`, `E1M-AEN601`,
+  `E1M-AEN801` and `E1M-NX9101` all reported `BUILD FAILED RuntimeError` and
+  **wrote no package at all** -- taking down `ethos-u55-256`, `ethos-u55-128`
+  (`arena 32, SRAM 1 KiB` each) and `cpu`, which had compiled perfectly. A
+  refusal is now ONE target's `coverage` skip, carrying the refusal text as
+  its reason: legibly absent from the package, never silently present with a
+  zero footprint, and never fatal to its siblings. Every OTHER
+  `adapter.compile()` exception still fails the build loudly -- a toolchain
+  that crashed, timed out or produced no artifact is a broken build, not a
+  coverage line. If EVERY target ends up skipped there is still no package:
+  the zero-blob guard raises with the full coverage detail, each refusal
+  named. An `.alpmodel` with no runnable blob is worse than an error, because
+  nothing fails until the device tries to load it.
+
+- **`tan` no longer prescribes a `--system-config`/`--memory-mode` it cannot
+  pass (tan-cli#789 review).** The refusal used to end *"Compile against a
+  `--system-config`/`--memory-mode` matching this module's memory model
+  instead"* -- an action neither tan nor the user can take:
+  `VelaAdapter.compile()` receives `opts` and never reads it, nothing under
+  `tan/` passes either flag, and alp-sdk's `board.schema.json` declares
+  `models[].compile` as `additionalProperties: false` over `deepx_dxm1` and
+  `drpai`, with no `ethos_u` key to route a profile through. The message now
+  states only what is true: that vela fell back to its own **built-in** default
+  profile (named from the run's own summary block) because no module-specific
+  vela configuration was supplied, that supplying one is **not plumbed through
+  `tan model build`** yet, and that the target is skipped while the SKU's
+  others still build. Adding an `ethos_u` compile block is an alp-sdk schema
+  change (ADR-0028 leaves `metadata/schemas/` with alp-sdk) and is
+  deliberately not attempted here.
+
+- **An `E1M-NX9101` refusal told NXP customers their vela profile lives in an
+  Alif file (tan-cli#789 review).** The refusal's closing sentence named
+  Alif's proprietary `ensemble_vela.ini` unconditionally, for every part.
+  Measured with real `ethos-u-vela` 5.1.0 over
+  `tests/fixtures/models/tiny_int8.tflite`: on `E1M-NX9101` -- **NXP i.MX 93,
+  not an Alif part** -- `ethos-u65-256` correctly derived
+  `Ethos_U65_Client_Server / Dedicated_Sram_384KB` and `dram 0.11 KiB` for
+  that run, then closed by sending the reader after Alif's `.ini`. That
+  pointer is not merely unhelpful there: alp-sdk's own documented i.MX 93 vela
+  invocation involves no proprietary configuration file at all
+  (`vendors/nxp-imx93/README.md`). Naming the *profile* per run (the earlier
+  fix) had closed only the first half of the sentence.
+
+  The clause is now gated on the compile target's **`silicon_ref`** -- the SoM
+  preset's own `silicon:` value (`alif:ensemble:e8` vs `nxp:imx9:imx93`),
+  threaded from `TargetSpec` into `CompilerAdapter.compile()` by both callers
+  (`tan model build` and `tan model check --exact`, which takes it off the
+  same target it takes the accel config off). Deliberately NOT derived from
+  the accel config or from vela's profile name: `Ethos_U85_SYS_DRAM_Mid` is an
+  Arm/vela built-in that any vendor's U85 part resolves to, so keying a vendor
+  claim off it is both semantically wrong and one non-Alif U85 module away
+  from re-breaking. An unresolved `silicon_ref` (`None`) behaves like "not
+  Alif", never like "probably Alif". The two clauses that hold for every part
+  -- no module profile was supplied and tan cannot pass one, and the target is
+  skipped while the SKU's others still build -- are unchanged, so the NXP
+  refusal loses only the sentence that was false for it. `silicon_ref` reaches
+  the adapter's *diagnostics* only; no adapter changes the artifact it emits
+  because of it, and the `vela` command line is byte-identical with and
+  without it. That vendor clause names the **`System_Config`** specifically,
+  not the profile as a whole: since alp-sdk #1470 the load-bearing half of an
+  Alif profile is the `--memory-mode Sram_Only`, an Arm built-in tan passes
+  with no `.ini` anywhere, so only the tuned `System_Config` names actually
+  live in Alif's file. Measured with real `ethos-u-vela` 5.1.0 over
+  `tests/fixtures/models/tiny_int8.tflite`, real refusals now run 618
+  characters on `ethos-u85-256` with `silicon_ref alif:ensemble:e8` (Alif
+  clause present) and 500 on `ethos-u65-256` with `silicon_ref nxp:imx9:imx93`
+  (absent), against the 700-character note budget.
+
+- **An `ethos_u` target that placed ZERO operators on the NPU is no longer
+  shipped as a zero (tan-cli#789 review).** A 0-NPU-op vela compile is a real,
+  legitimate `arena 0 / sram_kib 0` -- and writing it into the package is the
+  same `req_sram_kib == 0` "fits any envelope" hole from the other side.
+  Measured on `float32_fc.tflite` with real vela 5.1.0: `E1M-AEN801` shipped
+  **three** such targets (`ethos-u85-256`, `ethos-u55-256`, `ethos-u55-128`)
+  and `E1M-NX9101` one (`ethos-u65-256`), each of which a board could select
+  in preference to the honest `cpu` target sitting beside it in the same
+  package. An accelerator target with no accelerator placement is now dropped
+  to a `coverage` skip naming the compiler's own verdict; the `cpu` target --
+  which is what actually runs the model -- stays. `npu_op_count is None`
+  (every adapter but vela, and vela itself when its placement summary is
+  unreadable) is untouched: unknown is not zero. `tan model check --exact`'s
+  `cpu-only` verdict is unchanged -- this is a packaging decision, not a
+  compile one. Pre-existing, not introduced by the refusal.
+
+- **vela's summary CSV was read by alphabetical sort order, not by which run
+  wrote it (tan-cli#789).** `sorted(matches)[0]` over `<stem>_summary_*.csv`
+  in a directory `build_model` reuses across every accel config a SoM
+  declares: correct only by accident. The suffix is the *system-config*, which
+  is a silicon-family property, so `ethos-u55-256` and `ethos-u55-128` write
+  the same filename and one silently answers for the other (measured, vela
+  5.1.0: both resolve to `Ethos_U55_High_End_Embedded`). Each run now compiles
+  into its own `vela-<accel_config>/` subdirectory of `out_dir` and resolves
+  the CSV by the system-config that run itself reported; an ambiguous match
+  yields no figure at all rather than another compile's.
+
+- **A default-profile vela compile no longer passes for an authoritative
+  one (tan-cli#789).** `tan` invokes vela with neither `--system-config` nor
+  `--memory-mode`, so vela falls back to its own built-in profile -- verbatim,
+  `ethos-u-vela` 5.1.0: *"Warning: No system configuration specified. Using a
+  default of `Ethos_U85_SYS_DRAM_Mid`. Compilation may be invalid or
+  non-optimal."* plus the same for *"No memory mode specified. Using a default
+  of `Dedicated_Sram_384KB`."* Both are DRAM-backed
+  (`weights_storage_area=DRAM`, `feature_map_storage_area=DRAM`), and an Alif
+  Ensemble module is MRAM + SRAM with no DRAM. No profile is invented to
+  paper over that: the SoM-authoritative one alp-sdk itself uses
+  (`--system-config Ethos_U85_SRAM_Only --memory-mode Sram_Only`,
+  `examples/aen/aen-npu-inference-alp/CMakeLists.txt`) names sections that
+  live only in Alif's proprietary `ensemble_vela.ini`, which alp-sdk does not
+  redistribute. Instead the absence is made loud: vela's own verdict, naming
+  the defaults it resolved, now rides out on `Blob.caveats` into every
+  `tan model check --exact` report and so into the JSON envelope.
+
+- **`--exact`'s vela-failure note kept the one line of a traceback with no
+  diagnostic content in it (tan-cli#789).** Measured real note: *"--exact
+  compile with vela failed (vela failed for ethos-u85-256: Traceback (most
+  recent call last):); reporting the static screen instead."* -- discarding
+  the actual cause, `RuntimeError: Compilation failed: No networks defined
+  via GraphAPI`, one line down. `_short_vela_error` now prefers the **last**
+  non-empty line of a traceback (the exception line), kept behind whatever
+  the message said before the banner so the note still names the accel
+  config, and keeps the one-line/200-character guarantee that stopped a
+  750-character, 9-newline traceback landing in an envelope.
+
+- **`--exact`'s note said the compile failed when it was the FOOTPRINT that
+  was refused, and truncated away the remediation (tan-cli#789 review).** vela
+  exited 0, wrote its output and printed a real placement summary; reading
+  *"--exact compile with vela failed (...)"* sends a customer hunting a vela
+  bug that isn't there. The note now leads with *"vela compiled cleanly for
+  `<accel-config>` ..."*. And the 200-character note budget -- which exists to
+  stop arbitrary vela **stderr** landing in an envelope -- cut the refusal at
+  *"... Refusing to report a zero…"* (measured inner length 197), so the note
+  in both the text report and the JSON envelope carried the diagnosis with
+  none of the fix. tan's own refusal, which is single-line by contract and
+  built from a fixed template, now passes through at its own measured budget
+  of 700 (re-measured off the live template after each reword, never carried
+  forward with a delta: a deliberately maximal refusal is 686 characters, and
+  a real `ethos-u85-256` one on an Alif Ensemble part 618), with the one-line
+  guarantee and word-boundary truncation intact and the foreign-stderr budget
+  left at 200. The refusal's own wording was adjusted in the same breath: it
+  describes alp-sdk's selector as accepting `req_sram_kib == 0` *against ANY
+  arena size*, never with the retired `fits` vocabulary, because this string
+  now reaches a `basis: static-screen` note -- and a static screen must never
+  emit that word. That is enforced by
+  `test_a_refused_footprint_is_not_reported_as_a_failed_compile`
+  (`tests/model/test_check.py`), which renders its note by CALLING
+  `_refuse_zero_sram_footprint`; it used to raise a hand-copied literal of that
+  template, which enforced nothing at all, and the two static-screen guards
+  this entry previously credited never reach the refusal path. Widening the
+  budget without that change would have walked it into the JSON envelope.
+
+- **`vela-<accel_config>/` per-run subdirectories were not really pinned
+  (tan-cli#789 review).** Their only binding was a path-string assertion, so
+  mutating `_run_dir` to `return out_dir` left the whole suite green except
+  that one line -- nothing tested the behaviour the subdirectory exists for.
+  The stale-identical-name case is now covered: two runs sharing one `out_dir`
+  whose system-configs collide on ONE summary filename (`ethos-u55-256` and
+  `ethos-u55-128` both resolve to `Ethos_U55_High_End_Embedded`), where the
+  second run writes no summary at all and must report its own absent footprint
+  rather than silently inheriting the first run's 8 KiB.
+
+- **Two `tan model check` tests red-lined the bare install shape instead of
+  skipping (tan-cli#789).**
+  `test_a_tflite_model_against_a_real_v2n_v2m_sku_reports_onnx_backends_undetermined`
+  (both `E1M-V2N101` and `E1M-V2M101`) and
+  `test_exact_real_vela_compile_of_a_model_it_rejects_never_reports_fits`
+  assert on `rep.ops`, which only the `tflite` reader (the `model-io` extra)
+  produces -- gating one on `ALP_SDK_ROOT` and the other on `shutil.which
+  ("vela")` left both degrading to `assert ([])` on the shape `ci.yml`'s
+  `gates` job actually installs. Both now carry the same
+  `pytest.importorskip("tflite", ...)` guard their siblings already had.
+
+- **`tan model build` dropped the compiler's own caveats on the floor, so a
+  package could ship a blob compiled for a memory model the module does not
+  have with nothing in the package saying so (tan-cli#789 review).**
+  `tan model check --exact` already surfaced `Blob.caveats` into its report
+  and its JSON envelope -- but `check` ships nothing. `build` is the path that
+  writes the bytes a board loads, and it discarded them at the
+  `Blob` -> `Target` hand-off. The caveat that matters is vela's own, verbatim:
+  *"vela used its BUILT-IN default profile (system-config
+  `Ethos_U85_SYS_DRAM_Mid`, memory-mode `Dedicated_Sram_384KB`), not one
+  authored for this module -- vela's own warning for that is "Compilation may
+  be invalid or non-optimal". The arena/SRAM figures and the compiled command
+  stream describe that default memory model, not this module's."* Those
+  arena/SRAM figures are not decoration: they are written into the same
+  manifest entry as `arena` and `requires.sram_kib`, which is exactly what
+  alp-sdk's on-device selector gates on (`return e->arena_sram_kib == 0u ||
+  t->req_sram_kib <= e->arena_sram_kib;`,
+  `src/backends/inference/alp_model_select.c:88`).
+
+  The `.alpmodel` manifest now carries a per-target `caveats` list, written
+  straight from `Blob.caveats`, and `tan model build` reports each one as a
+  `model.target-caveat` **warning** -- read back out of the WRITTEN FILE
+  (`package.read_manifest_file`, which seeks to the manifest region instead of
+  copying every blob), so the line describes the artifact rather than an
+  in-memory object that may not match it. A package that cannot be read back
+  is itself a `model.caveat-readback-failed` warning, never silence: silence
+  would be indistinguishable from "no caveats". Neither warning changes the
+  exit code -- `_run_build` now keys that on ERROR issues, not on `issues`
+  being non-empty, so a caveated build stays `SUCCESS` with the package intact.
+
+  **The container version does NOT move, and alp-sdk is not touched.**
+  `CONTAINER_VERSION` describes the 24-byte binary frame, not which keys the
+  CBOR manifest carries, and the existing on-device reader already tolerates
+  keys it does not know: `alp_model_parse` (`src/common/alp_model.c`) ends
+  every one of its three map-decode loops with `else { ok =
+  zcbor_any_skip(zs, NULL); }`, and `zcbor_any_skip` recurses through a nested
+  list on a LOCAL state copy, drawing nothing from the `zcbor_state_t zs[8]`
+  backup budget that reader sizes for its own nesting. Measured, not assumed:
+  that reader compiled natively against real zcbor and fed a container
+  carrying this exact per-target `caveats` list returns **ALP_OK** with every
+  existing field byte-identical (`backend`, `silicon_ref`, `blob_format`,
+  `accel_config`, `arena`, `req_sram_kib`, blob offsets and lengths); the same
+  reader fed the same container with the version bumped to 2 returns
+  **ALP_ERR_VERSION (-11)**, which is why bumping it would have been a
+  breaking change for every fielded device to announce a field no on-device
+  reader reads. An empty `caveats` is omitted from the wire entirely, so a
+  package with nothing to caveat encodes to exactly the bytes it did before
+  the field existed -- alp-sdk's three committed C-test fixtures
+  (`tests/fixtures/alpmodel/minimal.alpmodel`,
+  `tests/unit/alpmodel_reader/src/fixture.h`, `tests/yocto/onnx_cpu_fixture.h`)
+  are byte-identical and were NOT regenerated. A new cross-repo guard,
+  `test_the_on_device_reader_still_skips_manifest_keys_it_does_not_know`,
+  fails from this side if that skip-unknown-keys fallback is ever removed.
+
+  Pinned end to end against real `ethos-u-vela` 5.1.0: `E1M-AEN801` over the
+  committed `tests/fixtures/models/tiny_int8.tflite` writes a package whose
+  `ethos_u` targets each carry one caveat naming the profile THAT run
+  resolved, beside the real `arena 32 bytes / sram_kib 1` figures it
+  qualifies, while the `cpu` passthrough target carries none and no caveat is
+  invented for it. The caveat's WORDING moved with the memory-profile entry
+  below -- it now names only the `--system-config` vela actually defaulted
+  (`Ethos_U85_SYS_DRAM_Mid` on the u85 config, `Ethos_U55_High_End_Embedded`
+  on the two u55 ones) and credits the `--memory-mode` to the module, since
+  attributing a flag tan supplied to vela would tell the customer to discount
+  a figure that is correct. The both-flags-defaulted wording above is still
+  emitted verbatim, for a SoC spec that carries no `npu_toolchain.vela`.
+
+  What the defaulted system config COST depends on the memory mode beside it,
+  so that is a third wording rather than one sentence for all parts. Under an
+  `Axi0` const mode (`Sram_Only`) it really is bandwidth-only and the caveat
+  says the arena/SRAM figures are unaffected. Under an `Axi1` const mode
+  (`Shared_Sram`, i.e. `E1M-NX9101`; also every `Dedicated_Sram*`) vela's
+  default ALSO chose which memory the const/weights region landed in -- a
+  placement, not an estimate -- and the caveat says so, because that text
+  ships inside the customer's package. Both are measured; the numbers are in
+  the memory-profile entry below.
+
+- **`tan model build` now compiles every Ethos-U target against the memory
+  model the SoM actually has, which removes the refusal above for every
+  shipped SKU (alp-sdk #1470).** `VelaAdapter.compile()` passed neither
+  `--system-config` nor `--memory-mode`, so vela fell back to a DRAM-backed
+  built-in profile on parts that have no DRAM, filed the whole working set
+  where the module has no memory, and reported `sram_memory_used = 0.0` --
+  the zero the entry above had to refuse. alp-sdk now publishes each part's
+  vela memory mode beside the `ethos_u_variant` already in `metadata/socs/**`
+  (`npu_toolchain.vela.memory_mode`: `Sram_Only` on the Alif Ensemble E3-E8,
+  `Shared_Sram` on the NXP i.MX 93), `resolve_targets` carries it onto
+  `TargetSpec.vela_memory_mode`, and both callers -- `tan model build` and
+  `tan model check --exact` -- hand it to vela on the same call that carries
+  the accel config, so a target can never be compiled with one target's
+  accelerator and another's memory model. It is never guessed: a SoC spec
+  carrying no block yields no flag and byte-for-byte the invocation this
+  adapter always issued.
+
+  Measured with real `ethos-u-vela` 5.1.0 over the committed
+  `tests/fixtures/models/tiny_int8.tflite`, before -> after, for the four
+  SKUs the refusal hit:
+
+  | SKU | accel config | before | after |
+  |---|---|---|---|
+  | `E1M-AEN401` | `ethos-u85-256` | `skipped` (coverage) | `arena 32, sram_kib 1` |
+  | `E1M-AEN601` | `ethos-u85-256` | `skipped` (coverage) | `arena 32, sram_kib 1` |
+  | `E1M-AEN801` | `ethos-u85-256` | `skipped` (coverage) | `arena 32, sram_kib 1` |
+  | `E1M-NX9101` | `ethos-u65-256` | `skipped` (coverage) | `arena 32, sram_kib 1` |
+
+  and, in vela's own columns for `E1M-AEN801` / `ethos-u85-256`,
+  `sram 0.0 / dram 0.265625 / on_chip_flash 0.0` becomes
+  `sram 0.03125 / dram 0.0 / on_chip_flash 0.234375`. `E1M-NX9101` was the
+  starkest: its package previously shipped the `cpu` target ALONE, since
+  `ethos-u65-256` is the only NPU that SKU declares. On the real 44-op
+  `person_detect_int8.tflite` the same SKU/config pair moves
+  `arena 74480 / sram_kib 73` -> `arena 73728 / sram_kib 72`, i.e. the figure
+  a board sizes an arena from now describes a placement the module can
+  actually perform. `tan model check --exact` is unchanged in verdict and
+  moves only in figure: `person_detect_int8.tflite` on `E1M-AEN801` stays
+  `fits` at 44/44 (`arena 74480 bytes, SRAM 73 KiB` -> `arena 73728 bytes,
+  SRAM 72 KiB`) and `float32_fc.tflite` stays `cpu-only` at 0/1 with
+  `npuPlacementPctReal 0.0`.
+
+  **The table above lists only the four REFUSED targets; every already-shipping
+  `ethos-u55` target moved too.** A u55 config never refused -- with no flags
+  vela resolved `Ethos_U55_High_End_Embedded` / `Shared_Sram` and reported a
+  real footprint -- but it now compiles against its module's `Sram_Only` like
+  every other target, so its figure changes. Measured on
+  `person_detect_int8.tflite` for `E1M-AEN301` (u55-only, never refused),
+  before -> after: `ethos-u55-256` and `ethos-u55-128` BOTH go
+  `arena 74480 / sram_kib 73` -> `arena 73728 / sram_kib 72`. In vela's own
+  columns the arena drops `sram 72.734375` -> `72.0` on both, and the
+  const/weights region moves out of `off_chip_flash` (228.234375 KiB at
+  `-256`, 228.25 at `-128`) into `on_chip_flash` (228.25 at both). The u55
+  targets of `E1M-AEN401` / `E1M-AEN601` / `E1M-AEN801` shift the same way.
+
+  **Two vela columns nothing reads also move, recorded here so they are not
+  rediscovered as a surprise.** `[Memory_Mode.Sram_Only]` names no
+  `arena_cache_size`, so vela now schedules against an effectively unbounded
+  SRAM budget: measured on `person_detect_int8.tflite` at `ethos-u85-256`,
+  `arena_cache_size` moves `384.0` -> `1073741824.0` and
+  `total_npu_encoded_weights` `205472` -> `212096`. Neither reaches a shipped
+  figure -- `_parse_vela_summary` reads `*_memory_used` columns only, and
+  tan-cli#789 stopped reading `arena_cache_size` altogether.
+
+  **`--system-config` is still not passed, and that is a decision, not a
+  gap.** The two flags compose in two levels, verbatim from vela 5.1.0's own
+  `vela.ini`: a `Memory_Mode` section assigns const/arena/cache to AXI PORTS
+  (`vela.ini:235-269`), and a `System_Config` section maps those ports to
+  memory AREAS (`axi0_port=`/`axi1_port=`, `vela.ini:60-117`). Under
+  `--memory-mode Sram_Only` -- every Alif Ensemble part -- const, arena and
+  cache are all on `Axi0` and all 11 `System_Config` sections vela ships set
+  `axi0_port=Sram`, so no system config can move a byte: measured, adding
+  `--system-config Ethos_U85_SYS_Flash_High` alongside `--memory-mode
+  Sram_Only` changes no memory figure on `tiny_int8.tflite` OR on the 44-op
+  `person_detect_int8.tflite`, both at `ethos-u85-256`.
+
+  **That invariance is scoped to `Sram_Only` and is not the general rule.**
+  `Shared_Sram` -- the mode tan passes for `E1M-NX9101` -- sets
+  `const_mem_area=Axi1`, and there the default system config decides which
+  memory the weights land in. Measured on `person_detect_int8.tflite` at
+  `ethos-u65-256 --memory-mode Shared_Sram`, changing only `--system-config`
+  (KiB, from vela's own summary):
+
+  | `--system-config` | `sram` | `dram` | `off_chip_flash` |
+  |---|---|---|---|
+  | `Ethos_U65_Embedded` | 72.734375 | 0.0 | 228.265625 |
+  | `Ethos_U65_Mid_End` | 72.734375 | 228.3125 | 0.0 |
+  | `Ethos_U65_Client_Server` | 72.734375 | 228.25 | 0.0 |
+
+  228 KiB of weights moves on the system config alone, which is why the caveat
+  shipped in the `.alpmodel` distinguishes the two cases rather than calling a
+  defaulted system config harmless everywhere. The names
+  alp-sdk's own examples use -- `Ethos_U85_SRAM_Only`, `RTSS_HE_SRAM_Only` --
+  live only in Alif's proprietary `ensemble_vela.ini`, which alp-sdk does not
+  redistribute, and handing vela a section it cannot resolve is a hard rc=1,
+  verbatim `Section System_Config.Ethos_U85_SRAM_Only not found in Vela config
+  file`. So the SoC spec flags those as vendor-gated and `resolve_targets`
+  withholds them rather than shipping a build that cannot run.
+
+  **The refusal is kept, not deleted.** A SoC spec with no profile -- a part
+  whose memory mode is still TBD, which the sourcing rule says is left unset
+  rather than invented -- still gets the flagless invocation, still reports
+  the zero, and is still refused with its own measured evidence, costing ONE
+  target and never the package. That path is what the end-to-end guards now
+  drive, against the real presets with only `npu_toolchain` stripped.
+
+  **`requires.sram_kib`'s `Sram_Only` scope: recorded here as an open
+  question, settled by tan-cli#1011.** The figure is `sram_memory_used`
+  alone, i.e. the arena. vela files the const/weights region under
+  `on_chip_flash_memory_used`, a pure bookkeeping rename under `Sram_Only` --
+  verbatim from `ethosu/vela/architecture_features.py`, *"Info: Changing
+  const_mem_area from Sram to OnChipFlash. This will use the same
+  characteristics as Sram."* -- and on an Alif Ensemble module that region
+  really is SRAM0-resident. Measured on `person_detect_int8.tflite` at
+  `ethos-u85-256`: `sram_memory_used = 72.0` and
+  `on_chip_flash_memory_used = 235.265625`, so 307.265625 KiB is really
+  resident against a reported `req_sram_kib = 72`. This shipped without
+  summing the two columns into `req_sram_kib` -- an integration that XIPs
+  weights from flash would have been over-reported by the same amount and
+  refused a target that fits -- and, at the time, without a decision on
+  record for what `req_sram_kib` was contractually supposed to mean, so
+  `arena_bytes == 32` in
+  `test_a_supplied_memory_mode_is_not_reported_as_velas_own_default` was
+  deliberately left unpinned. tan-cli#1011 settled it: `req_sram_kib` means
+  the tensor arena requirement only, under every memory mode including
+  `Sram_Only`, matching the on-device consumer contract
+  (`inference_arena_sram_kib`'s schema scope in
+  `metadata/schemas/soc-spec-v1.schema.json`, and the const/weights region's
+  separate `model_data`/`model_size` path in `alp_model_loader.c`).
+  `arena_bytes == 32` is now pinned rather than left as a tripwire; see
+  tan-cli#1011's own entry in this section for the full decision and its
+  evidence.
+- **The zero-SRAM refusal's evidence is now read out of alp-sdk metadata
+  instead of asserted in tan's prose.** Both part-specific clauses used to be
+  decided by a vendor-prefix match on the SoM preset's `silicon:` ref
+  (`silicon_ref.startswith("alif:ensemble:")`) with the filename
+  `ensemble_vela.ini` hardcoded beside it — correct for the two parts anyone
+  had looked at, and a standing claim about every part nobody had. They come
+  off the part's own SoC spec now, resolved once in
+  `tan.model.targets.resolve_targets` and threaded onto `TargetSpec`, never
+  read from `metadata/` inside a compiler adapter:
+  - WHICH vendor `.ini` (if any) the refusal names is
+    `npu_toolchain.vela.vendor_config_filename`. A part that declares none is
+    told about none, whoever built it — so "a non-Alif refusal never names an
+    Alif file" holds for the stronger reason that no part is ever handed
+    another part's file at all. It is withheld from a spec that declares
+    `system_config_requires_vendor_config: false`, so a contradictory spec
+    cannot get a customer sent after a download nobody has to make.
+  - WHY a DRAM placement is wrong here is `external_memory_interfaces[]`:
+    `metadata/socs/alif/ensemble/e8.json` lists exactly `HexSPI` and
+    `SD/eMMC`, so a working set vela placed in DRAM went to memory the part
+    has no interface to. The refusal marks the `dram` figure itself with
+    `(no DRAM interface on this SoC)` — only that figure, only on an explicit
+    `False`. A spec that declares no `external_memory_interfaces` at all
+    resolves to `None` and the clause stays silent: an unknown rendered as
+    evidence would be a hardware claim nobody made. `LPDDR4/4X`,
+    `LPDDR4X / LPDDR5` and any other DDR spelling read as DRAM; a HyperBus
+    entry in an SPI port's `supports` list does not, because which device is
+    populated on that bus is not what the spec answers.
+
+  `silicon_ref` was that gate's only reader and is gone from
+  `CompilerAdapter.compile()`; a vendor-prefix match was always a proxy for
+  the question metadata now answers per part. The maximal refusal measures
+  691 characters against the unchanged `_VELA_REFUSAL_NOTE_BUDGET` of 700,
+  re-measured rather than estimated, and the declared filename is now the one
+  variable-length input in that template — which is what the budget test says
+  in so many words.
+
+- **The npm shim stopped calling `v0.5.0` "the transition tag, not cut yet."**
+  `npm-shim/README.md`, `postinstall.js` and `test/libc-mapping.test.js` all
+  still described `v0.5.0` as unreleased and claimed every published tag ships
+  a raw `tan-<triple>[.exe]` binary fallback. `v0.5.0` shipped 2026-08-04 and
+  `v0.5.1` 2026-08-05; `gh release view` on both, and on `v0.6.0` since, shows
+  each publishes only the four `--onedir` archive assets — `v0.4.1` is the last
+  tag with a raw binary. Reworded to match the precedent already applied to
+  `install.sh`/`install.ps1`: the raw-binary path is a legacy fallback reachable
+  only on `v0.4.1` and earlier, not the live default. `postinstall.js`'s
+  `selectRelease` still decides the shape from a given tag's own
+  `checksums.txt`, never from the version number, so an old tag requested by
+  `--version` keeps installing correctly either way.
+
+- **The installers no longer orphan `$Dir`, leak a launcher temp file, or lie
+  about a successful install.** Three defects in the two scripts a customer
+  runs first, all reproduced by hand before being fixed:
+
+  `install.ps1` created `$Dir` right after argument parsing -- before the
+  checksums fetch, before any decision to proceed -- so every refusal path
+  (a fetch failure, no asset for this platform, a download failure, a sha256
+  mismatch, a bad archive layout, or the health check itself) left it behind.
+  Creation now happens immediately before the commit section, once the health
+  check has actually passed. The noexec retry, which legitimately needs the
+  directory early, creates it itself and records that in `$dirCreatedForRetry`,
+  which gates the health-check cleanup walk so it can never delete a `$Dir` a
+  previous install already left there; the walk itself removes only EMPTY
+  directories (`[System.IO.Directory]::Delete(path, $false)`), so it stops the
+  moment anything else is in the way.
+
+  `install.sh` leaked the archive-layout launcher's temp file (the
+  `payload="$(mktemp)"` "Generated by tan install.sh" heredoc) on every exit
+  path except the happy one. `$payload` is now declared before the `EXIT` trap
+  and included in it from the start, so the trap always removes whatever it
+  currently holds -- empty, the raw layout's aliased `$tmp`, or the archive
+  layout's own launcher file, once each exists.
+
+  `install.sh` also exited 1 after a good install. Under `set -eu`, the rc-file
+  PATH append (`printf ... >>"$rc"`) and an unset `$HOME` could both abort the
+  script AFTER the install had already committed and printed its success line
+  -- so the customer saw a working `tan` and a failing exit code. Both are now
+  guarded and degrade to a "could not update ..." / "\$HOME is not set ..."
+  notice instead. The `$HOME`-unset path is reachable whenever
+  `TAN_INSTALL_DIR` is set explicitly, which bypasses `INSTALL_DIR`'s own
+  `$HOME` fallback.
+
+  Two follow-up review findings landed alongside the three fixes above:
+  the rc-file append's `2>/dev/null` was inert (`>>"$rc"` is opened before
+  `2>/dev/null` takes effect, so the shell's own open-failure diagnostic still
+  reached the terminal ahead of the friendly message) -- now wrapped in a
+  subshell whose stderr is redirected instead. And `install.ps1`'s
+  `$dirFirstNewAncestor` walk now runs immediately before the `New-Item` it
+  guards, inside the noexec-retry block, rather than being snapshotted minutes
+  earlier at the top of the script -- matching install.sh's own
+  `install_dir_first_new_ancestor` walk, which has always run right beside its
+  `mkdir -p`.
+
+- **The `edge-ai`/`E1M-AEN801` scaffold no longer tells a customer to flip
+  `som.sku` to `E1M-V2M101` in place for the DEEPX DX-M1 path.** That edit is
+  correct on the `E1M-V2N101` sibling (same PCB family, so every other field
+  the flip leaves untouched already matches) but wrong on `E1M-AEN801`:
+  `board.yaml` pins `preset: e1m-evk`, which only hosts the `alif-ensemble`
+  and `nxp-imx9` SoM families, not `E1M-V2M101`'s `renesas-rzv2n-deepx`.
+  Measured end to end with `tan validate`, fixing one refusal forward at a
+  time: `ALP-B007` (board/family mismatch), then unknown `cores:` ids, a
+  `libraries:` entry scoped to a core the flip leaves undeclared, an
+  unresolved `pins:` route, and a pad macro that does not match the resolved
+  pad (`EVK_I2C_BUS_SENSORS` vs. the resolved board's `XEVK_I2C_BUS_SENSORS`)
+  — five refusals, not the three an earlier draft of this fix claimed. No
+  count is pinned in the corrected prose on purpose: how far the cascade runs
+  is a property of how far a customer patches forward, not of the defect.
+  The emitted sentence now tells the customer to re-scaffold instead
+  (`tan init --template edge-ai-starter --som E1M-V2M101`); the `E1M-V2N101`
+  scaffold's identical sentence is untouched, since it is correct there.
+
+- **The `edge-ai-starter` scaffold's `## Model`/`## Tests` sections and
+  `src/main.c` comments pointed a customer at two paths `tan init` never
+  emits.** `models/README.md` and `tests/unit/cold_chain` are real only in
+  the alp-sdk checkout the vendored text was captured from -- the vendored
+  template path never consults an SDK checkout (`tan/core/scaffold.py`'s
+  `_vendored_files` reads nothing outside `vendored/edge-ai/<sku>/`;
+  `tan init --from-example` is the one `tan init` path that genuinely does
+  read one, `scaffold.py:16-18`), so both referents dead-ended in every
+  scaffolded project, on both vendored SKUs (`E1M-AEN801`, `E1M-V2N101`).
+  The two are a bare inline code span and a bare twister argument rather
+  than a markdown link, so the SDK's own doc-link rewriter -- which fixed
+  the other 40 cross-repo references in this tree (tan-cli#384) -- never
+  touched them. Rewritten to a real link (README) and a named alp-sdk path
+  (the C comments, where no markdown rewriter applies), each noting the
+  referent is not part of the scaffolded project.
+  Declared to `tests/parity/scaffold_byte_parity.py`'s `DELIBERATE_EDITS`
+  (the same standing-exception mechanism tan-cli#379's `iot` CMakeLists.txt
+  edit already uses), so the gate stays 9/9 PASS; the entry retires once the
+  matching alp-sdk fix (turn the two bare referents into real markdown links
+  upstream, so the rewriter and `test_template_integrity.py`'s
+  ref-consistency check cover them going forward) lands and this tree is
+  re-vendored. Filed upstream as alp-sdk#1688.
+
+  `iot/E1M-AEN801/board.yaml`'s still-stale `Customer workflow: ... west
+  build` header (alp-sdk#1016 skipped
+  `examples/connectivity/mqtt-telemetry/board.yaml`) is left as-is here --
+  MANIFEST.md already correctly describes the gap (tan-cli#863) and it is
+  the smaller half of a wider `west`-vs-`tan` gap all nine vendored READMEs
+  already share, not a defect isolated enough to book a standing divergence
+  for on its own. Filed upstream as alp-sdk#1689.
+
+  `MANIFEST.md:217`'s stale `- Commit:` identity claim and `MANIFEST.md:238`'s
+  overstated alp-sdk#1016 sweep -- the other two defects this issue tracked --
+  were already fixed on `dev` by tan-cli#863; this closes the remaining part,
+  (a).
+
+- **`README.md` and `docs/ROADMAP.md` corrected against the live tree, not
+  the shipped-months-ago one.** Three independent false statements:
+
+  `README.md`'s debug-config note keyed the `debug-config.target-kind-ambiguous`
+  refusal on "multi-core" and named `--core` as the remedy. `infer_target_kind`
+  (`tan/core/debug_launch.py`) keys it on the number of distinct target
+  CLASSES (`zephyr-mcu`/`baremetal-mcu`/`yocto-userspace`), not core count — a
+  two-core all-Zephyr SoM folds to one class and never refuses. The note now
+  matches: `--target-kind` is the remedy the refusal message itself asks for,
+  `--core` only a parenthetical narrowing aid.
+
+  `README.md` listed `sdk` as a fixed top-level envelope member; `envelope.py`
+  omits it entirely (never null) when no SDK checkout resolved, asserted
+  across 46 `"sdk" not in ...` sites in `python/tests` (e.g.
+  `test_sdk_key_is_absent_when_none_not_null`). Fixed to say "absent, never
+  null" — matching `contract/README.md` and `docs/ROADMAP.md`, which already
+  agreed with the code.
+
+  Three stale `v0.5` version pins on facts that were never version-scoped
+  (the four release archives, `tan sdk list`/`tan sdk current`) were
+  genericized. `docs/ROADMAP.md`'s version table is refreshed to the live
+  release state.
+
+- **`tan generate` and the scaffold templater stopped describing alp-sdk's
+  `cmake/alp.cmake` helper as already shipped.** `generate_cmd.py` and
+  `tan/planner/template.py` both described the planned shared CMake helper
+  (and the `alp_sdk_zephyr_conf()`/`alp_sdk_ipc_contract_header()` functions
+  it would define) in the present tense. Verified against a live alp-sdk
+  checkout at the exact commit `tan-cli`'s own parity pin (`PINNED_SDK_TAG`)
+  names: `cmake/` holds only `alp-sdk-config.cmake.in` and
+  `alp-sdk-warnings.cmake`, no `alp.cmake` on disk, no
+  `alp_sdk_zephyr_conf`/`alp_sdk_ipc_contract_header` anywhere in alp-sdk's
+  `dev` or `main` — 98 of alp-sdk's 167 example `CMakeLists.txt` files still
+  shell `scripts/alp_project.py` directly instead. The eight unhedged mentions
+  the commit message named in `generate_cmd.py` are now marked
+  PLANNED/unmerged, citing this issue; `template.py`'s own two live mentions
+  (`_substitute_cmake_core`'s docstring and `_SDK_ROOT_DEPENDENT_RE`'s
+  comment) are hedged the same way, so the next reader does not scaffold a
+  project around a CMake include that does not exist.
+
+- **An empty upstream Zephyr-SDK release list no longer reds `getting-started`
+  with a message blaming our pin.** `west sdk install --version <v>` resolves
+  `<v>` against `GET /repos/zephyrproject-rtos/sdk-ng/releases`, and when that
+  endpoint answers `[]` it reports the empty list in the same words it uses for
+  a version that genuinely does not exist:
+
+  ```
+  FATAL ERROR: Unavailable SDK version: 1.0.1.Please select from the list below:
+  ```
+
+  The blank line after that colon is the entire diagnosis. Measured 2026-08-17
+  on run `32039026116`: the list endpoint answered `[]` while
+  `releases/latest` still resolved to `v1.0.1`, both release assets served
+  HTTP 200 by direct URL, and `gh api rate_limit` showed 4985 of 5000 core
+  requests remaining — so it was neither the quota the step's own comment
+  predicts nor the pin. (The pin is re-derived from the Zephyr revision by
+  alp-sdk's own `scripts/check_toolchain_lock.py` — a script that lives in the
+  OTHER repository and cannot be verified from here, which is why nothing this
+  change emits leans on it.) Reaching that conclusion cost one full
+  investigation; the step now reports it in a line.
+
+  `getting-started.yml` gained a probe step ahead of the install, and the
+  decision it makes lives in `python/scripts/sdk_release_list_probe.py` rather
+  than in the workflow. That placement is the point: the dangerous direction is
+  a FALSE outage, because the outage path skips the real ARM build this job
+  exists for while the job still reports green. The probe therefore claims an
+  outage only on the exact conjunction measured above — the list empty WHILE
+  `releases/latest` still resolves — and every other row proceeds:
+
+  ```
+  list_len   latest_tag   verdict
+  None       any          proceed   (the gh api call failed; we measured nothing)
+  > 0        any          proceed   (the list answers; west decides)
+  0          None         proceed   (both endpoints down is a broader fault)
+  0          "v1.0.1"     upstream-list-empty
+  ```
+
+  `tests/scripts/test_sdk_release_list_probe.py` drives all four rows off a
+  runner with injected fetchers, and pins what the warning may and may not
+  claim. It may say west's message is *not evidence about the pin* — an empty
+  list produces that message whatever the pin says. It may NOT say the pin is
+  correct: the probe reads two endpoint states and never reads the pin, so an
+  outage coinciding with a genuinely bad pin edit would otherwise have printed
+  a flat falsehood at the exact moment the evidence was being skipped. A test
+  asserts the strings `is correct` and `check_toolchain_lock` stay out of it.
+
+  The real `gh api` half is covered too, by faking `subprocess.run` and pinning
+  the argv rather than reaching the network: `gh api
+  repos/zephyrproject-rtos/sdk-ng/releases?per_page=100 --jq length` and `gh
+  api repos/zephyrproject-rtos/sdk-ng/releases/latest --jq .tag_name`. Without
+  that, a typo in either endpoint string would make every call fail, which this
+  probe correctly refuses to read as a measurement and turns into `proceed` —
+  leaving the fix inert forever with the whole suite green.
+
+- **The case this deliberately does not detect.** A PARTIAL list — non-empty,
+  but stale or truncated so it omits the pin — proceeds, and west prints the
+  same `Unavailable SDK version` message.
+
+  Declining to detect it is a choice, not a limit, and the docstring now argues
+  the choice rather than pleading impossibility. The probe is handed the pin
+  (`--version`), so asking whether the pin's tag is in the list costs a `--jq`
+  change on a call already made. Two things make that a bad trade: `per_page=100`
+  means a pin older than the 100 most recent releases is legitimately absent
+  from page 1, so "not in the list" would false-alarm on exactly the long-lived
+  pin this repo is most likely to carry; and the pagination-proof form of the
+  question — `releases/latest` is definitionally a member of the release set, so
+  a non-empty list omitting ITS tag is provably inconsistent — needs the
+  `latest` call on a path that currently spends nothing. That second check is
+  sound and carries no false-outage risk; it is written down as the shape to
+  reach for if the partial-list case ever appears in the wild.
+
+  Meanwhile the populated-list line claims only that the list answered, hands
+  the membership question to west, and names the truncated-list case as
+  invisible to it. It also carries none of the tokens an operator greps for
+  during an outage (`empty`, the issue number): an intermediate draft did, on
+  every green run, and its guard test had been loosened to permit that.
+
+- **The outage path skips every step that needs the toolchain, not just the
+  install.** Skipping `west sdk install` alone relocates the red one step down
+  into a message about a different bug. `tan build` and the ARM-ELF assertion
+  have nothing to build with; `dirty host 1/3` requires `tan doctor` to exit 0,
+  and `zephyrSdk` is a `"fail"` when the toolchain is absent
+  (`doctor_cmd.py:1201-1204`) while `exit_code_for` returns 4 on ANY failing
+  check, so it would red accusing the tan-cli#299 false-refusal; `dirty host
+  3/3` runs a bare `tan doctor` under `set -euo pipefail` and dies on that same
+  exit 4 before reaching one of its tan-cli#301 leakage assertions. All four
+  are now gated on the probe.
+
+  Because that green run skipped the ARM build, the outage path also writes a
+  `$GITHUB_STEP_SUMMARY` section saying so in as many words — "**This run did
+  NOT perform the ARM build.**" — enumerating all five skipped steps by name
+  and naming `dirty host 2/3` as the coverage that still ran, so a reader does
+  not assume the whole job was hollow. A test asserts all six names are in it.
+  The
+  `::warning::` annotation alone is not enough: the commit-status surface, the
+  one anything downstream reads, cannot tell an outage run from one that built,
+  and `getting-started` also runs `on: push: branches: [main]`, so a merge
+  during an outage would otherwise carry a green first-install signal for a
+  build that never happened. Nothing here reds a PR over somebody else's
+  outage; the summary only makes the gap visible.
+
+  `dirty host 2/3` is deliberately NOT gated, and
+  `tests/gates/test_getting_started_sdk_outage_probe.py` holds that on purpose.
+  It asserts `tan doctor` exits **4** with west absent everywhere, and since
+  `exit_code_for` is binary a missing Zephyr SDK cannot change that verdict —
+  gating it would drop real coverage on exactly the degraded day it is most
+  worth keeping.
+
+  Not done here, and still the larger half: `tan doctor` PRINTS `west sdk
+  install` as its remedy, so a customer hitting the next outage still gets
+  west's pin-blaming message. No doctor check fetches anything: `doctor_cmd.py`
+  imports no HTTP client at all, and the one comment that states the property
+  in words (`doctor_cmd.py:2172-2174`) is scoped to `git_behind_upstream`
+  inside `sdk_provenance_check`, not to the command. Saying anything better
+  from there means giving `tan doctor` a network path it does not have — a
+  design decision rather than a patch. `#474` remains the home for the
+  list-independent, metadata-driven acquisition path that would sidestep the
+  endpoint altogether.
+
+- **`contract/README.md`'s `build --plan` row froze a shape `--plan-from`
+  cannot pin, and hid `planPathMode: tokened`.** The row's field list read
+  like it described `--plan-from`'s output, but `--plan-from`
+  (`_acquire_plan`, `python/tan/commands/build_cmd.py`, called once from
+  `_build`) only reads the caller's own plan FILE and echoes it verbatim once
+  it parses, returning BEFORE `apply_plan_token_substitution` runs
+  (`_MODE_PLAN`'s early return) — it freezes nothing about the emitter
+  `--plan` will use once tan-cli#427 lands, `emit_build_plan`
+  (`python/tan/planner/buildplan.py`). Measured against a real board
+  (`emit('build-plan', ..., board_yaml=examples/multicore/rpmsg-v2n/board.yaml)`):
+  that emitter's plan carries `"planPathMode": "tokened"` and every slice's
+  `env.ALP_SDK_ROOT` / `envAppendPath.{EXTRA_ZEPHYR_MODULES,PYTHONPATH}` as a
+  literal, UNSUBSTITUTED `${SDK_ROOT}` token — `--plan-from` carries no
+  guarantee either way: it passes tokens straight
+  through unchanged, so a golden recorded from it pins whatever fixture it
+  was handed, not this emitter's shape. `planPathMode` and `envAppendPath`
+  are emitter facts, not fields alp-sdk-vscode's `BuildPlanData` /
+  `BuildPlanSlice` bind on this path (`src/ideHub/messages.ts`, alp-sdk-vscode
+  `dev`) — the field-list column stays scoped to what the extension
+  actually reads, and the emitter facts stay in the prose where they
+  already were. `schemaVersion` is dropped from that column for the same
+  reason: the TS interface DOES declare it, but
+  `packages/alp-core/src/tanPayloadShape.ts`'s `BUILD_PLAN_SHAPE` names it
+  explicitly "NOT read on this path" — present on the wire type, not among
+  the fields this consumer actually reads.
+  The row's stated blocker was also wrong: `--plan` plans IN-PROCESS
+  (`_emit_plan`, `build_cmd.py`) and `_MODE_PLAN` returns before token
+  substitution — the one place a Python interpreter gets resolved — ever
+  runs, so there is no Python *interpreter* spawn on this path; but
+  `emit_build_plan` still spawns a short-lived `git -C <sdk_root> rev-parse --short HEAD`
+  (`_sdk_commit`) to stamp `sdkCommit`, whenever `git` resolves on PATH —
+  with none, `resolve_tool` returns `None` first and the plan carries
+  `sdkCommit: null`; the same `null` also follows a resolved `git` whose
+  spawn itself fails, or returns empty stdout. The two real blockers are two
+  of `_emit_plan`'s **seven** `build.plan-unavailable` sites
+  (`build_cmd.py@647480a57d1869e988aa8428c1c60e4e6573b25a:447-510`; an
+  eighth, `_acquire_plan`'s plan-file read failure, sits outside it at
+  `build_cmd.py@647480a57d1869e988aa8428c1c60e4e6573b25a:538`): a resolvable
+  alp-sdk checkout and a `board.yaml`; the other five (an incomplete
+  checkout, two planner-import failures, a `SystemExit`, and the catch-all)
+  also refuse before any `data` exists.
+  `contract/README.md` corrected to name both producers, keep the
+  field-list column scoped to what the extension reads, and record the
+  token fact with the true reasoning. Three stale comments this PR's own
+  measurement disproves are corrected alongside it — a `_MODE_PLAN`
+  comment in `build_cmd.py` and `plan_tokens.py:18` (both read "every plan
+  the SDK emits today", now scoped to an ABSENT `planPathMode`) — and
+  `_emit_plan`'s own docstring ("no process" now names the conditional git
+  spawn) — comments only, no behaviour changed;
+  `build_cmd.py`'s module-size budget entry regenerated with `--reason`
+  for the docstring's three extra lines.
+
+- **The workflow timeout gate no longer only looks at `parity.yml`, and the
+  eleven jobs that grew unbounded in its blind spot are now bounded.**
+  tan-cli#841's timeout half of `test_parity_workflow_concurrency_and_timeouts.py`
+  hardcoded `PARITY = WORKFLOWS / "parity.yml"` and a literal `_PARITY_JOBS`
+  tuple, so it measured exactly one file. #845 added five more bounded jobs
+  elsewhere (`ci.yml`, `version-identity.yml`) that nothing generalised was
+  watching, and a fresh count (tan-cli#855) found **eleven** jobs beyond
+  those, all outside the `pull_request` trigger set entirely, still
+  inheriting GitHub's 360-minute default: `planner-resync.yml`'s `propose`;
+  `python-binaries.yml`'s `windows`/`linux`/`macos`/`checksums`;
+  `release-combination.yml`'s `resolve-refs`; and `release.yml`'s
+  `verify-version`/`build`/`release`/`publish_npm`/`release_gate`. Five of
+  those eleven sit on `release.yml`'s `push: tags` path — the sharpest place
+  in this repo for a wedge, since a pushed tag cannot be re-run the way a PR
+  push can.
+
+  Generalised at two DIFFERENT scopes, a decision recorded explicitly rather
+  than left implied (tan-cli#855 asked for exactly this): **timeouts** now
+  widen to every job in every workflow file under `.github/workflows/`
+  (skipping LOCAL `uses:` reusable-workflow callers, `./.github/workflows/…`,
+  which cannot carry a meaningful `timeout-minutes` of their own — the bound
+  lives on the CALLED workflow's jobs instead), while **concurrency** stays
+  scoped to `on: pull_request` workflows, unchanged — "supersede a
+  superseded run" is a PR-specific concept a `schedule` or `push: tags` job
+  has no analogue for.
+  `parity.yml`'s own named-tuple anti-shrink check (`_PARITY_JOBS` /
+  `test_every_parity_job_is_bounded`) is kept ALONGSIDE the generalised test,
+  per #854's own ask, rather than replaced by it — deleting a job from
+  `parity.yml` must still be visible there as something to remove from the
+  tuple on purpose.
+
+  The shared bounding assertion also handles a wrinkle a plain
+  `isinstance(timeout, int)` check would get wrong: `ci.yml`'s `python` job
+  spells its bound as a GitHub Actions expression
+  (`${{ inputs.sdk_parity && 60 || 30 }}`), which PyYAML parses as a string,
+  not either branch's number — `changelog.d/844.fixed.md` left a note for
+  exactly this generalisation. Every integer literal inside such an
+  expression is bounded individually instead of trying to evaluate it.
+
+  Bounds are set from the closest comparable job already measured in this
+  repo, not a flat number — see each workflow's own comment for the specific
+  reasoning: `planner-resync.yml`'s `propose` at 30 (parity.yml's
+  `seam1-plan-shape` shape: checkout + pip install + a bounded pytest run
+  against pinned commits, plus extra git plumbing); `python-binaries.yml`'s
+  `windows`/`linux`/`macos` at 45 (clean-host.yml's `freeze-and-smoke`, 20,
+  is the identical freeze steps, plus headroom for the extra
+  `verify_binary.sh` proofs and a second alp-sdk checkout) and `checksums` at
+  5 (download + `sha256sum`, no build); `release-combination.yml`'s
+  `resolve-refs` at 5 (one `gh api` call, no checkout at all);
+  `release.yml`'s `verify-version` and `publish_npm` at 10 (checkout + a
+  light tool + one command, matching `version-identity.yml`'s
+  `not-a-released-version`), `build` at 30 (the same freeze shape as
+  clean-host's 20 plus the packaged-binary conformance test and the Linux
+  leg's ELF payload glibc-floor scan, but without `python-binaries.yml`'s
+  extra `verify_binary.sh` proofs), `release` at 15 (I/O-bound: artifact
+  downloads, a build-provenance attestation, a changelog slice, the actual
+  publish), and `release_gate` at 5 (no checkout at all, pure bash reading
+  `needs.*` context).
+
+  Verified in both directions: the widened test fails on the pre-edit tree
+  with exactly those eleven cases (nothing more, nothing less), and passes
+  clean after the five workflow edits. A later review round
+  (tan-cli#854/#855) added `tmp_path` negative self-tests proving the gate
+  can fail, narrowed the `uses:` exemption to local callers only, and
+  floored a minimum bounded-job count per file — run
+  `pytest tests/gates/test_parity_workflow_concurrency_and_timeouts.py` for
+  the current total rather than trusting a number here that will only go
+  stale again.
+
+- **Eleven workflow jobs outside `parity.yml` that inherited GitHub's
+  360-minute default now carry a measured `timeout-minutes`.** Companion
+  fragment to `changelog.d/854.fixed.md`, which carries the full writeup of
+  the generalised gate (`test_every_job_in_every_workflow_is_bounded`,
+  `python/tests/gates/test_parity_workflow_concurrency_and_timeouts.py`) that
+  caught this; this entry exists so a reader grepping for tan-cli#855 finds
+  something -- the eleven jobs it measured are `planner-resync.yml`'s
+  `propose`; `python-binaries.yml`'s `windows`/`linux`/`macos`/`checksums`;
+  `release-combination.yml`'s `resolve-refs`; and `release.yml`'s
+  `verify-version`/`build`/`release`/`publish_npm`/`release_gate`. Five of
+  those eleven sit on `release.yml`'s `push: tags` path, where an unbounded
+  wedge would have held an already-cut, immutable version number for six
+  hours with nothing re-runnable the way a superseded PR push is.
+
+- **A release tag is now measured against alp-sdk's currently *published*
+  release, not only against the same dev-tracking pin every `pull_request`
+  measures against.** Before this change every parity leg `parity.yml` runs —
+  including the one `release.yml`'s `python-gates` job calls on a version-tag
+  push — bound `ALP_SDK_ROOT`/its `alp-sdk` checkout to `PINNED_SDK_TAG`: a
+  pin re-bumped by hand whenever alp-sdk's contract surface moves, not
+  "whatever alp-sdk has most recently published". `PINNED_SDK_TAG` happens to
+  equal alp-sdk v0.16.0 today (tan-cli#888's fix), but nothing keeps it there
+  going forward, so a release cut after alp-sdk publishes a newer tag with no
+  matching pin bump would ship having been measured against an alp-sdk that
+  is no longer the one customers pairing that tag would install. The only
+  run that ever caught this pairing going stale was a `repository_dispatch`
+  alp-sdk's own release fired in — which has no vote on whether the tan tag
+  it fires *after* gets to publish (tan-cli#843, tan-cli#888).
+
+  A new `release-sdk-parity` job in `parity.yml`, gated `if: inputs.
+  python_only` so it runs only from `release.yml`'s `python-gates` call
+  (never on `pull_request`/`push`/`merge_group`/`repository_dispatch`),
+  resolves alp-sdk's `releases/latest` itself, at release time, from the
+  GitHub Releases API, and clones alp-sdk at that resolved tag. It runs the
+  planner byte-parity breadth layer (`tests/parity/test_planner_emit_
+  parity.py`) against that checkout, plus the three vendored-artefact gates
+  (`kconfig_fixture_parity.py`, `toolchain_lock_parity.py`,
+  `scaffold_byte_parity.py`) that `seam1-plan-shape` already ran for the same
+  commit on `push`/`pull_request` but skipped under `python_only` — the same
+  vendored toolchain lock tan-cli#888 actually broke on is now covered on the
+  release path that motivated this job, not just the planner-emit slice of
+  it.
+
+  The job distinguishes a genuine plan-shape divergence (reds directly),
+  from a bound-but-wrong resolution (would silently self-skip via the
+  module's own `pytestmark`; caught by asserting `test_the_breadth_layer_
+  still_covers_every_board` reported `PASSED`, not merely that the step's
+  exit code was 0), from a *legitimate* SKIP — the published alp-sdk having
+  retired `scripts/alp_orchestrate/` (this repo's own v0.7.0 milestone) with
+  the tan-cli#509 frozen-oracle replacement bound and verified live, which
+  this job now accepts rather than failing on, mirroring `seam1-plan-shape`'s
+  existing three-way guard (`test_planner_parity_actually_ran.py::test_a_
+  bound_sdk_root_still_ships_the_planner_oracle`). All three outcomes were
+  measured locally before landing: a real but stale alp-sdk release
+  (v0.15.0) reds the guard and the breadth layer; a checkout with no
+  `scripts/alp_orchestrate/` and the oracle bound reports a legitimate
+  `SKIPPED`, which this job now passes through as a notice rather than an
+  error; an unusable `ALP_SDK_ROOT` (no `scripts/alp_project.py`) reds at a
+  preflight check before pytest even runs. `release.yml`'s `build` job needs
+  no new `needs:` entry for this — a `uses:` job's conclusion is the called
+  workflow run's own conclusion, so a failure here already fails
+  `python-gates`.
+
+  Deliberately does **not** change what a `pull_request`/`push`/
+  `merge_group`/`repository_dispatch` run measures: `PINNED_SDK_TAG` stays
+  exactly the day-to-day dev-tracking pin it always was, and every other job
+  in `parity.yml` is untouched. tan-cli#889, tan-cli#843, tan-cli#888.
+
+- **`tan init --from-example` now says something when `--som` is outside the
+  example's declared support set.** It retargets the copied `board.yaml` onto
+  the requested SKU, and never consulted the SDK scaffold catalog, so the two
+  paths answered the same question opposite ways:
+
+  ```
+  $ alp_project.py --emit scaffold --template multicore-mailbox --sku E1M-AEN301
+  alp_project: multicore-mailbox: sku 'E1M-AEN301' is not supported
+               (supported: ['E1M-AEN801'])                            rc=1
+  $ tan init --from-example multicore/mproc-mailbox --som E1M-AEN301
+  exitCode 0 | ok True | issues 0
+  ```
+
+  Measured worse than the same-family case `#890` reported. `--som
+  E1M-V2N101` retargets that dual-M55 Alif example onto a Renesas part whose
+  topology is `['a55_cluster', 'm33_sm']`, and tan wrote a `board.yaml`
+  declaring `m55_hp` and `m55_he` — neither of which exists there — at
+  `exitCode 0` with no issue at all. `tan validate` does refuse it one command
+  later (`ALP-B007`, preset/family mismatch), but an IDE scaffolding through
+  this path shows the customer green.
+
+  It **warns and still writes every file**, rather than refusing. That is this
+  path's own precedent, not a softening: refusing an example outright once
+  "made `tan init --from-example` unusable for nearly the whole AEN family,
+  which is worse than the original defect", which is why
+  `init.example-missing-board-yaml` warns too. `E1M-AEN301` really does carry
+  both `m55_hp` and `m55_he`, so the scaffold it produces is plausibly fine —
+  what was wrong is that **nothing checked**.
+
+  Every "cannot tell" stays silent, deliberately: no catalog in the checkout
+  (an older SDK — `--from-example` worked there before this and must keep
+  working), an unreadable or unexpected catalog, no record for this example,
+  or a record with no `som_skus`. The no-record case is the common one rather
+  than an edge: the catalog declares 9 templates while `examples/aen/` alone
+  holds 66 directories, so inventing a restriction there would be this defect
+  pointed the other way. A mutation that lets a missing catalog raise instead
+  of degrading fails three tests, one of them pre-existing.
+
+  The lookup lives in a new `python/tan/core/example_catalog.py` rather than in
+  `tan/planner/template.py`, which already has a `load_catalog` and a
+  `SkuNotSupportedError`. That module is a hash-audited mirror of alp-sdk's
+  `scripts/alp_template.py` and must not be edited here — and importing it is
+  not free either: `tan.planner.paths` binds `REPO = sdk_root()` at module
+  scope, so any `tan.planner.*` import before `bind_sdk_root` raises
+  `PlannerRootError` (measured), which would break every SDK-free `tan init`
+  path. Nothing is duplicated: `load_catalog` is one `json.loads`, and the
+  lookup here is by `example` PATH, which the mirror does not do at all.
+
+  Envelope: `init.example-som-unsupported` is a new `warning` code, registered
+  in `contract/issue-codes.json` at `status: reserved`. Additive — no field
+  changed shape, no exit code moved.
+
+- **A new gate fails the local pytest bar, unconditionally, when
+  `PINNED_PLANNER_ORACLE_SDK_REF` drifts from `PINNED_SDK_TAG`.** `#509`'s own
+  postmortem: while `#884` was in review, `dev` moved `PINNED_SDK_TAG`
+  (`#868`/`#888`, the alp-sdk fix for the GD32 bridge's missing
+  `CONFIG_SPI=y`, ported into `tan/planner/`'s live `_CHIP_SUBSYSTEMS` table);
+  the frozen oracle fixture and its `PINNED_PLANNER_ORACLE_SDK_REF` pin stayed
+  put. GitHub tests the merge ref, so CI compared `tan/planner/`'s now-correct
+  output against goldens frozen from the stale ref, and 19 cases across 19
+  boards on all three OSes failed after two review sign-offs. `grep -rn
+  PINNED_PLANNER_ORACLE_SDK_REF` found exactly three hits, all in
+  `parity.yml` (the postmortem comment, the definition, the checkout `ref:`)
+  -- nothing compared it to `PINNED_SDK_TAG`, and `pin-move-verify.yml` never
+  mentioned it.
+
+  `python/tests/gates/test_planner_oracle_ref_tracks_pinned_sdk_tag.py`
+  compares `parity.yml`'s `PINNED_SDK_TAG`, `parity.yml`'s
+  `PINNED_PLANNER_ORACLE_SDK_REF`, and
+  `tests/fixtures/planner_oracle/PROVENANCE.txt`'s recorded `alp-sdk ref`,
+  all three of which must agree while the invariant is live. A hard failure,
+  not the `tests/gates/test_sdk_pin_disagreement_warning.py` warn-only shape
+  that pin pair uses -- `PINNED_PLANNER_ORACLE_SDK_REF`'s own comment says it
+  is "NOT free to sit at an arbitrary pre-`#270` ref while `PINNED_SDK_TAG`
+  moves", unlike `PINNED_SDK_COMMIT`, which may legitimately sit on either
+  side of the parity tag.
+
+  The first cut of this gate (`#895`) guarded the comparison on a bound
+  `ALP_SDK_ROOT` checkout, mirroring `test_planner_parity_actually_ran.py`'s
+  shape -- the right shape for a test that reads FROM a live SDK checkout,
+  which this one does not: all three facts it compares are files already in
+  this repository. That guard meant the gate skipped on every ordinary local
+  `pytest tests -q`, reproducing the exact author-time blind spot `#895` was
+  written to close -- replayed against the actual `#884` incident tree
+  (`6a826434~1`), the unbound run passed clean while the drift sat there in
+  plain text. Fixed in this same PR's follow-up: the comparison now runs
+  unconditionally; only the post-`#270` retirement is still gated, and by an
+  in-repo hand-maintained marker (`POST_270_RETIRED`, the same shape as this
+  repository's other audit pins -- `PINNED_SDK_COMMIT`,
+  `HAND_PORT_PINNED_SDK_COMMIT`, `STRICT_LOADERS_PINNED_SDK_COMMIT`), never a
+  bound checkout.
+
+  Proven to fire, not merely written to: replaying the `#884` incident tree
+  verbatim (`6a826434~1`'s `parity.yml` + `PROVENANCE.txt`, no checkout bound)
+  reds the gate on two independent problem lines naming both SHAs and `#884`;
+  restoring the real files greens it again. Twenty-five tests in this module,
+  twenty-two of them synthetic-fixture cases on the pure `find_problems()`
+  helper covering matching refs, a diverged workflow pin, an isolated
+  single-pin lag, both directions diverging independently, a missing
+  `PROVENANCE.txt`, an absent/malformed/duplicated `alp-sdk ref` line, a
+  prose line that merely mentions "alp-sdk ref" without being one, an absent
+  or duplicated `PINNED_SDK_TAG` / `PINNED_PLANNER_ORACLE_SDK_REF`, and a
+  legitimate tag-name `PINNED_SDK_TAG` (`v0.13.0`/`v0.14.0`/`v0.15.0-rc1` have
+  all shipped this way) handled without being mistaken for absence -- the
+  remaining three read this repository's own real files and the
+  `POST_270_RETIRED` marker directly.
+
+  A second review pass found one more disguise for the same incident: with
+  `PINNED_SDK_TAG` as a tag name, `PINNED_PLANNER_ORACLE_SDK_REF` and
+  `PROVENANCE.txt`'s recorded ref can agree with each other while BOTH are
+  stale relative to the commit the tag actually names --
+  `capture_planner_oracle.py` writes them together, so they always agree
+  after a regeneration, stale or not. Replayed against `6a826434~1` with only
+  `PINNED_SDK_TAG` changed from `eb96112b` to its own tag name `v0.16.0`
+  (oracle pin and `PROVENANCE.txt` both left at the stale `94378a05`): this
+  passed clean before the fix. Now a hard failure, not a silently accepted
+  state -- a gate that goes quiet in the one state it cannot verify is
+  decoration, and this pin has no written-down exemption for drifting.
+
+  A third review pass found the plural refusal itself was shape-blind:
+  `_pinned_sdk_tag_state` and `_sole_match` both counted only HEX-shaped
+  matches, so a SECOND `PINNED_SDK_TAG:` or `PINNED_PLANNER_ORACLE_SDK_REF:`
+  declaration whose value was not 40-hex (a stray tag-name duplicate, a
+  malformed re-pin, the same value re-cased) was invisible whenever the
+  hex-only count already found exactly one match. For `PINNED_SDK_TAG` this
+  mattered most: YAML's own last-key-wins semantics could make the EFFECTIVE
+  pin exactly the tag-name state this gate exists to hard-fail, while the
+  hex-only count still reported one clean match and returned `[]`. Both
+  helpers now count with a shape-agnostic pattern first and refuse the
+  plural on THAT count before ever branching on hex-shape.
+
+- **`.github/zizmor.yml`'s two `artipacked` suppressions moved from
+  `<file>:<line>` pins to inline `# zizmor: ignore[artipacked]` comments, so
+  a rebase can no longer make them rot.** A line pin stops matching the
+  moment anything above it moves. It rotted twice on the #770/#880 branch,
+  pre-merge: net +21 lines (`release.yml:1202:9` → `1223:9`) when `dev`
+  merged in, carrying both #876 (+49 lines above the pin) and #883 (-28
+  lines above the pin) landed the same day, then +2 more from #880's own
+  comment edit (`1223:9` → `1225:9`). Caught locally each time only because
+  the author happened to re-run `zizmor` by hand before pushing — had a
+  drift reached CI unnoticed instead, this gate would have failed *loudly*
+  there too: a moved pin stops matching, the suppressed finding reappears,
+  and the gate goes red on the very next run, never silently green. Proved
+  on this tree:
+  inserting 60 filler lines above the `release.yml` `propose-dev-version-bump`
+  checkout left the suppression matched and the gate at `rc=0`; removing
+  either inline comment by hand reproduced a live `artipacked` finding and
+  `rc=13` at exactly the now-unsuppressed step, then restoring it returned
+  the gate to green. `.github/zizmor.yml`'s header keeps a hand-maintained
+  inventory of both sites so the "one reviewed baseline in one file"
+  property #435 built the file around survives the move — a reviewer still
+  finds both exceptions by reading the header, not by grepping every
+  workflow. Re-measured on zizmor 1.29.0, same invocation
+  (`--min-severity medium --no-online-audits .github/workflows/`): `rc=0,
+  18 ignored, 58 suppressed`, unchanged before and after (re-run for the
+  current count, don't trust this one — it drifts with the tree every time
+  a workflow gains or loses a step, which is not a regression).
+
+- **The guard against a third `artipacked` suppression escaping review
+  silently moved from a `python/tests/gates` regex to a step in `ci.yml`'s
+  `workflow-security` job that asks zizmor itself.** The regex form
+  (`test_zizmor_inventory_count.py`) closed three rounds of evasions and
+  opened five more each time, because it modelled which lines an inline
+  `# zizmor: ignore[...]` comment suppresses by YAML INDENTATION, while
+  zizmor actually associates the comment with the finding's LINE RANGE —
+  the whole step, indentation irrelevant. A comment at column 0, or at the
+  step's own dash indent, sat inside the range zizmor honoured but outside
+  the span the regex built, so it was both truncated out of the span and
+  missed by the count — measured: planting such a comment on a duplicated
+  `release.yml` `dev` checkout left `zizmor` at `rc=0, 19 ignored, 58
+  suppressed` (up from 18, zizmor honoured it — re-run for the current
+  baseline, don't trust this snapshot) while the old gate stayed
+  green. Deleted that gate in favour of a step that runs `zizmor
+  --no-ignores --format json`, counts the real `artipacked` findings it
+  surfaces once every inline suppression is stripped, and compares that
+  count against the numbered rows under `.github/zizmor.yml`'s own
+  `INVENTORY --` heading — it cannot disagree with zizmor's verdict because
+  it is zizmor's verdict. Mutation-proved in both directions: the same
+  indent-6 and column-0 comment placements that escaped the old gate now
+  turn the new step red (`3` real findings vs an INVENTORY of `2`);
+  deleting an inventoried suppression's step entirely also turns it red
+  (`1` real finding vs an INVENTORY of `2`); restoring either returns the
+  step to green. Renaming an inventoried step rather than adding or
+  removing one is a different drift this count still does not catch —
+  closing that needs the inventory rewritten in a machine-parseable form, a
+  bigger lift filed as tan-cli#929 rather than built here (see
+  `.github/zizmor.yml`'s own header for both notes).
+
+- **`tan examples` and `tan generate` now report *why* no SDK resolved, not
+  only that none did.** Each command carried a private `_resolve_sdk`/
+  `_resolve_sdk_root` wrapper around `build_cmd.resolve_sdk_root_wide` that
+  collapsed to a bare `None` whenever nothing usable resolved, discarding
+  `broken_project_pin`/`foreign_global_default_for` on the way -- the same
+  shape tan-cli#468 fixed for `presets_cmd.resolve_sdk`. So a workspace whose
+  `.alp/sdk-path` names a checkout that no longer exists, with no sibling
+  checkout for discovery to fall through to and no `~/.alp/sdk-default`
+  either, reported `examples.sdk-root-unresolved` / `generate.sdk-root-
+  unresolved` alone, with no `sdk.project-pin-unresolved` alongside it. Both
+  wrappers now always return their result object -- `.path is None` is what
+  "nothing usable resolved" looks like, distinct from "nothing to report" --
+  and `generate`'s `GenerateError` gained an `extra_issues` field so the
+  SDK-root-unresolved refusal can carry the pin warning ahead of its own
+  issue, the same `[*resolution_issues, Issue(...)]` shape `clean_cmd._run`
+  already uses. `foreign_global_default_for` is threaded the same way but,
+  as with tan-cli#468, is never actually observed non-`None` on this path:
+  `resolve_sdk_root_wide` only carries it through when a tier resolved.
+- **The signature-level gate this fix added
+  (`test_sdk_resolution_wrapper_is_not_optional.py`) was widened to close
+  three gaps a follow-up review found** (tan-cli#922): it now recognises
+  `Optional[X]`, `Union[X, None]`, a string forward-ref annotation, a
+  `TypeAlias`, `async def`, and an unannotated function with no return
+  annotation at all, not only the literal `X | None`; it scans `python/tan/`
+  recursively and tree-wide instead of one non-recursive directory; and its
+  anti-vacuity self-test now proves the shape-recognition logic itself still
+  works, not only the class discovery. `init_cmd._sdk_block` -- previously
+  excluded from the gate structurally because its `_Sdk` type never declares
+  `broken_project_pin` -- still literally returned `SdkInfo | None`
+  internally; it is now non-Optional, with the "does the envelope carry an
+  `sdk` key" decision moved to a new `_sdk_reportable()` predicate at its two
+  call sites. No observable output changed on any `init` path.
+
+- **A collection-time pre-flight now catches a scrubbed-`HOME` interpreter
+  before it produces hundreds of unrelated-looking test failures.**
+  `python/tests/conftest.py`'s autouse `_scrub_sdk_discovery_env` fixture
+  repoints `HOME`/`USERPROFILE` at a throwaway directory before every test's
+  subprocess spawn, deliberately, so SDK discovery cannot reach a developer's
+  real environment. The side effect: an interpreter whose runtime
+  dependencies (`typer`, ...) live only under a user-site install at the
+  REAL `HOME` (e.g. `~/.local`) loses them for every spawned `tan` child, and
+  the suite reported that as **678**/**679** unrelated-looking failures
+  rather than one diagnostic -- reproduced exactly (678 failed, 3875 passed,
+  17 errors) against an interpreter provisioned that way.
+
+  A new `pytest_configure` hook spawns `sys.executable -m tan --version`
+  under an environment built by hand from `REAL_ENVIRON` (captured at
+  conftest import, before any fixture has touched `HOME`) with
+  `HOME`/`USERPROFILE` repointed at a throwaway directory -- built
+  independently of `_scrub_sdk_discovery_env` rather than reusing its output,
+  so the check cannot inherit the scrub it exists to catch. Deliberately
+  probes the real entry point rather than a hardcoded module name, so
+  whatever `tan.__main__` actually needs today is what gets checked. A
+  nonzero exit under the scrubbed HOME triggers a second, CONTROL probe
+  under the developer's real, unmodified HOME, so a `tan --version` that is
+  simply broken (independent of HOME) is reported as exactly that, rather
+  than printing a venv-repair recipe that would not fix it. On a genuine
+  HOME-caused failure it raises `pytest.UsageError` -- failing collection
+  ONCE, before any test runs, with the cause and the documented venv recipe
+  (`README.md`) -- rather than warning, since a run whose subprocesses
+  cannot import their own dependencies cannot produce a meaningful result.
+  `TAN_TEST_SKIP_HOME_PREFLIGHT=1` bypasses it for a developer who already
+  knows their interpreter is unusual on purpose (accepts `1`/`true`/`yes`/
+  `on`, case-insensitively -- not bare truthiness, so `=0` does not silently
+  disable it); the escape hatch is named in every one of this check's
+  failure messages, including the spawn-failed and timed-out cases.
+  Confirmed silent (no false positive) on a correctly-provisioned venv,
+  including the full suite.
+
+  Also adds a repo-wide `python/conftest.py` (a new rootdir conftest, not the
+  existing `python/tests/conftest.py`) that enables `pytest_plugins =
+  ["pytester"]` for the entire suite -- required so `python/tests/gates/
+  test_home_preflight.py` can drive the `pytest_configure` hook above through
+  real nested `pytester.runpytest_subprocess` sessions, rather than only
+  calling its internals directly.
+
+- **`~/.alp/sdk-defaults.json` no longer grows without bound.** `tan-cli#466`'s
+  origin-keyed registry was append-only: an origin whose project directory was
+  later deleted (a throwaway or CI worktree, most often) stayed in the file
+  forever. `bootstrap_cmd._write_global_sdk_registry` now runs
+  `sdk_default_registry.prune_dead_origins` in the same read-modify-write
+  every relocating `tan bootstrap` already performs, dropping every entry
+  whose origin directory no longer exists on this host. Existence-based, not
+  age-based, and deliberately narrower than "the `sdkPath` no longer
+  resolves" -- an origin whose checkout merely moved or is between bootstraps
+  is left alone (`deepest_covering_entry` already skips it via
+  `has_loader_script` without deleting it, since the next `tan bootstrap`
+  from that same origin repairs it for free); only an origin directory that
+  is itself gone -- provably unmatchable by any future workspace, since no
+  process can run from a path that does not exist -- is pruned. No new
+  command, no new file lock: the prune rides the existing best-effort,
+  last-writer-wins write `_write_global_sdk_registry` already performs.
+
+- **`MODULE_SIZE_BUDGET_LOG.md`'s "append-only" header is now enforced by a
+  gate, not just prose.** Fixes `#906`. Nothing previously read the ledger's
+  own git history: `test_module_size_budget.py` only ever parses the sibling
+  `module_size_budget.generated.json`, so an existing entry could be silently
+  edited or deleted and every local and CI gate stayed green -- exactly what
+  happened on `#902`, where resolving a merge conflict with
+  `git checkout --theirs` took `dev`'s side of the file wholesale and
+  discarded the branch's own reasoned entry, found only by reading the diff
+  by hand.
+
+  The new `test_module_size_budget_log_append_only.py` compares the ledger's
+  content at the PR/merge-queue base ref against its CURRENT (working-tree)
+  content: every line the base had must still be present, in order, by the
+  time HEAD is reached. Nothing in between is consulted -- a line an early
+  commit drops and a later commit in the same range restores, verbatim and
+  in order, is not a violation, because the ledger is intact by the time
+  HEAD is reached, which is what "append-only" actually promises. An
+  earlier design walked every commit since the base ref and flagged a
+  violation the moment any one of them lost a line relative to its own
+  parent, permanently -- measured to false-positive on a PR that legitimately
+  reworded its own just-added, not-yet-merged entries in a follow-up commit,
+  since the damaging commit never left the compared range. Comparing base
+  vs. current instead of every intermediate commit closes that. Content a
+  branch adds and later discards entirely within its own unmerged history is
+  deliberately not this gate's concern -- only what the base branch itself
+  contributed is protected; each anchor is still checked as an ordered
+  subsequence rather than a literal prefix, since `.gitattributes`'
+  `merge=union` on this file (`#939`) legitimately resolves two branches'
+  divergent appends as "ours' new lines, then theirs' new lines", and an
+  edit, deletion, or reorder of the base's own lines still breaks the
+  subsequence check regardless.
+
+  The base ref itself is read from `GITHUB_BASE_REF` (`pull_request` and
+  `pull_request_target`, set automatically by GitHub Actions) or a
+  `TAN_MERGE_GROUP_BASE_REF` the workflow exports from
+  `github.event.merge_group.base_ref` (`merge_group`, which GitHub Actions
+  does not populate `GITHUB_BASE_REF` for); on any other trigger (a direct
+  push, a release run) there is no separate base and the check falls back to
+  each of HEAD's own immediate git parents, individually -- unchanged from
+  before, and still what correctly resolves a real `merge=union` merge of
+  two divergent appends. A `pull_request`/`pull_request_target` or
+  `merge_group` run that cannot resolve its base ref fails the gate outright
+  rather than silently falling back.
+
+  A shallow (`fetch-depth: 1`) checkout previously made the enforcing test
+  read every CI run as "HEAD has no parents (repo root commit)" and skip --
+  which is exactly what every CI job that ran this suite was doing, since
+  none of them fetched more than one commit. `fetch-depth: 0` on those jobs'
+  checkouts and a dedicated `git rev-parse --is-shallow-repository` guard
+  that hard-fails (never skips) close that gap.
+
+  Two known-wrong shapes of the union driver itself -- two branches editing
+  the *same* existing entry landing as a silent duplicate, and a delete
+  racing an adjacent append being silently reverted, both documented in
+  `.gitattributes` -- are deliberately left alone here rather than fought;
+  addressing either is `#907`'s scope, not this gate's.
+
+  Proven with hermetic throwaway git repos, not just reasoned about: one
+  test reproduces the `#902` incident exactly (`git checkout --theirs`
+  after a real conflict) and confirms the dropped entry is flagged; a
+  second configures the same `merge=union` attribute, merges two branches
+  that each append a different entry, and confirms the clean auto-resolved
+  result is *not* flagged; further tests cover a plain single-parent edit, a
+  pure deletion with no replacement, a reorder of two existing entries with
+  nothing deleted, an uncommitted edit, a base entry dropped early in a PR's
+  range and surviving an untouched follow-up commit, and the same loss
+  surviving GitHub's own `refs/pull/N/merge` checkout shape -- all still
+  caught. A final test drops a base entry and restores it, verbatim and in
+  order, within the same PR's range, and confirms that passes clean: if this
+  gate fires on a real PR, the fix is to add the missing entry back in a
+  normal follow-up commit -- the check only looks at the current state, so
+  restoring the line is enough; no history rewrite is needed.
+
+- **`python/tests/gates/MODULE_SIZE_BUDGET_LOG.md` conflicts on `dev` merges
+  no longer block every other open PR.** Refs `#907`. Four demonstrations
+  measured the same day: `#791`, `#922`, and `#914` each conflicted on exactly
+  two files — this log and its sibling
+  `python/tests/gates/module_size_budget.generated.json` — and nothing else;
+  `#791` conflicted a **second** time within the hour when `#914` merged. The
+  log declares itself append-only in its own header, so its conflicts were
+  always mechanical: two branches both append a line, in a non-overlapping
+  region, and a human resolving it by hand keeps both. `.gitattributes` now
+  sets `merge=union` on this one file — git's built-in append-both-sides merge
+  driver — so that resolution happens automatically instead of re-blocking
+  every unrelated PR.
+
+  Deliberately **not** applied to `module_size_budget.generated.json`: that
+  file is a JSON object, and union-merging two divergent JSON documents can
+  leave two sibling keys with no comma between them (verified on a trivial
+  two-key fixture — the unioned result fails `json.load`). It keeps
+  conflicting normally; the correct resolution — take either side, then rerun
+  `python scripts/regen_module_size_budget.py --merge-resync` rather than
+  hand-editing the hunks — is now written at the top of
+  `MODULE_SIZE_BUDGET_LOG.md` itself, where a person resolving that adjacent
+  conflict will see it.
+
+  This is an interim mitigation, not `#907`'s real fix. The real direction is
+  a `changelog.d`-style per-entry directory that makes append-only true by
+  construction — one file per regen instead of one shared file — closing the
+  failure modes a merge driver alone cannot (a `--merge-resync` landing lines
+  in the wrong order, or two entries about the same module colliding in
+  prose). `#907` stays open for that.
+
+- **`module_size_budget.generated.json`'s exact-match `--check` now runs as its own early CI step, not just as a command someone has to remember to run by hand (`ci.yml`'s `python` job, `parity.yml`'s `seam1-plan-shape` job).** `.gitattributes` deliberately does not carry `merge=union` for this JSON sidecar (unioning two JSON documents that both add a trailing key can leave two entries with no comma between them, i.e. invalid JSON), so a real `git merge` on it either conflicts visibly or -- measured directly, a plain `git merge` of two branches editing different keys of a shared JSON object -- stitches both disjoint edits into one syntactically valid, semantically **stale** JSON object with no conflict marker at all. Before this change, `regen_module_size_budget.py --check` ran in no workflow at all (its own module docstring said so), so that stale-merge shape would surface only as a cluster of unrelated-looking failures spread across several of `test_module_size_budget.py`'s own ratchet tests, instead of one targeted diagnostic. It now fails fast, before the alp-sdk clones and the slower `pytest` runs in either job even start, with one message naming exactly what moved and how to fix it. Refs `#907`.
+
+- **The module/function size ratchet's ledger no longer loses a branch's own
+  reasoning to a merge conflict.** `MODULE_SIZE_BUDGET_LOG.md`'s `merge=union`
+  mitigation above only ever fixed the *local* `git merge` case: GitHub
+  computes a pull request's own mergeable status without applying custom
+  merge drivers -- measured on PR #971 (`#907` comment, 2026-08-28: a clean
+  local `git merge origin/dev` at that PR's exact head, while GitHub itself,
+  polled three times over eight minutes, reported `CONFLICTING` every time)
+  -- so a union-attributed file could still show a PR as CONFLICTING in the
+  GitHub UI even though a local merge of the same two branches would resolve
+  clean. This PR is the "real fix" the entry above
+  said `#907` was staying open for: every new ledger entry is now its own
+  file under `python/tests/gates/MODULE_SIZE_BUDGET_LOG.d/`, mirroring
+  `changelog.d/` -- two new, differently-named files need no merge driver at
+  all, local or GitHub-side, which removes the conflict class structurally
+  rather than mitigating it after the fact. `MODULE_SIZE_BUDGET_LOG.md`
+  itself is now frozen and stays enforced append-only for its pre-migration
+  history; a new gate, `test_module_size_budget_log_d_entries_are_immutable.py`,
+  enforces that every entry under the new directory is only ever added,
+  never modified or removed, once committed. Splitting
+  `module_size_budget.generated.json` itself (per top-level package, to
+  shrink its own, separate collision surface) is deliberately deferred to
+  `#1057`.
+
+- **The new `MODULE_SIZE_BUDGET_LOG.d/` immutability gate now also catches a
+  merge commit that REWRITES an already-added entry's content, not just one
+  that drops it.** A merge commit that keeps a path but changes its content
+  emits no `git log --name-status` diff record at all -- with none of
+  `-m`/`-c`/`--cc` given, git's default policy prints nothing for a merge
+  commit, full stop, independent of whether it is TREESAME to a parent -- so
+  the path-membership check above had nothing to flag either. Closed with a
+  direct blob compare (`<add-commit>:<path>` vs `HEAD:<path>`) for every path
+  whose name-status + tree-membership history reads clean. The one gap left
+  open on purpose, and now documented rather than silently missed: a GitHub
+  "Squash and merge" (`dev`'s own real merge strategy) that never stages a
+  branch's added entry into the squash commit leaves no trace anywhere in
+  this branch's reachable history to check against -- squash discards the
+  branch's own per-commit history by design, so there is no commit a
+  git-log walk could ever find. Refs `#907`.
+
+- **`planner-resync.yml` no longer goes silent on the one run where a human
+  is most needed.** On `rc=1` ("a re-sync is owed and part of it needs a
+  human"), the "Open or refresh the proposal PR" step's own gate is `git
+  status --porcelain -- python/` being non-empty; when the mirror half has
+  nothing to commit — the hand-port or strict-loaders half is what's
+  blocking, and nothing merged — that step printed "Nothing to propose" and
+  opened no PR, while `Verdict` still failed the job. The finding then lived
+  only in a job summary attached to a red run. Re-derived against reality
+  before fixing anything (`gh run list --workflow planner-resync.yml --limit
+  100`): an unbroken streak that was already **60+ runs and still growing**
+  as of `32936003033` (2026-08-26T05:56:01Z), starting at run `31621375705`
+  (2026-08-12T17:11:29Z) — the last success before it was `31601765469`
+  (2026-08-12T13:30:32Z) — more than the 40 the issue was filed against,
+  itself already a correction of an earlier "three". This is a monotonically
+  increasing counter on a workflow that was still failing at the time of
+  writing: re-run the `gh run list` command above for the current count
+  rather than trust any digit pinned here.
+
+  Fixed by decoupling "is there a mirror diff to propose" from "does a human
+  need to act": a new "Surface the owed work when there is nothing to
+  propose" step fires on exactly `rc=1` with the PR step's own `opened`
+  output `false`, and opens or refreshes ONE GitHub **issue** — not a second,
+  code-less PR — carrying the same job-summary report `planner_resync.py`
+  already writes. A tracking PR with no diff was rejected as the shape: it is
+  an odd artifact for a reviewer and can confuse merge-queue automation that
+  expects a PR to carry a change, and a fixed match lets repeated cron hits
+  refresh ONE issue instead of opening one per day — the streak above is
+  what daily duplicate-opens would have compounded into, had this been the
+  shape from the start. A companion "Close the tracking issue..." step
+  closes it automatically the next time a run reports `rc=0` (or, since
+  tan-cli#920 below, once a real diff shows up and gets its own PR), so it
+  cannot go stale once the divergence is actually resolved. `permissions:
+  issues: write` is added, job-scoped on `propose` (see "Second-round fixes"
+  below — it moved there from workflow scope during review), alongside the
+  existing `contents`/`pull-requests` — a real widening, not silent: neither
+  existing scope covers `gh issue create`/`edit`/`close`, and
+  `default_workflow_permissions` stays `read` org-wide.
+
+  The `Verdict` step's pass/fail logic is untouched, as the issue asked:
+  `rc=1` still reddens the job.
+
+  One more finding surfaced while re-deriving the run history, reported
+  rather than silently folded into this fix because it is a DIFFERENT
+  failure mode from the one this issue is about — a real diff blocked by
+  policy, not an empty diff nobody surfaced — and a recurrence of it is its
+  own issue, not this one: run `32660981604` (2026-08-23T19:21:33Z, the run
+  that produced the still-unmerged `auto/planner-resync` branch at
+  `fa4be8c0`) had a NON-empty mirror diff and still opened no PR — `gh pr
+  create` itself was refused with `GitHub Actions is not permitted to create
+  or approve pull requests`. That was an org-level policy setting, since
+  flipped: repo-level `can_approve_pull_request_reviews` read `false` on
+  2026-08-23 and reads `true` as of 2026-08-25, but no run since has had a
+  diff to prove the PR path clean again, and this token lacks `admin:org` to
+  check the org-level value directly — so this is stated as what it is (blocked
+  then, probably not now, untested since), not as a still-live block. Choosing
+  an issue over a PR for the empty-diff case does not depend on this: the
+  reasons above (odd review artifact, one issue instead of 60 PRs) stand on
+  their own; that issue creation also isn't gated by this particular policy
+  is a footnote, not the argument.
+
+  `permissions:` moved from its conventional spot near the top of the file to
+  the very end, after every step. `.github/zizmor.yml` (tan-cli#435, under
+  parallel edit for tan-cli#899) pins the "Check out tan-cli dev" checkout
+  step's credential-persistence ignore to an exact
+  `planner-resync.yml:151:9`; adding `issues: write` there the ordinary way
+  shifts every line below it and reddens `zizmor --min-severity medium`.
+  Per this change's own instructions, that file was not edited to
+  re-derive the number — a mapping key's position doesn't change what it
+  grants, so relocating it changes nothing; the new location is commented in
+  place. Verified: `zizmor --min-severity medium .github/workflows/` is
+  clean (rc 0, no findings) with this change, and the checkout step is
+  still byte-identical at line 151, column 9. This placement is not meant
+  to be permanent: tan-cli#899 (PR #919) moves that same ignore to an inline
+  `# zizmor: ignore[artipacked]` comment on the checkout step, which removes
+  the line-number dependency this relocation exists to avoid — once that
+  lands, this block is free to move again on its own merits.
+
+  **Second-round fixes (tan-cli#920, code review of the above):** driving
+  both new steps' extracted `run:` bodies under a stubbed `gh` and GitHub's
+  own wrapper shell (`bash --noprofile --norc -e -o pipefail`) — reading
+  alone had missed all four — surfaced real defects:
+  - The `cat "${RUNNER_TEMP}/resync.md"` inside "Surface the owed work..."
+    had no fallback, unlike the "Propose the re-sync" step's own `cat` two
+    steps earlier. `planner_resync.py` writes markdown on every *handled*
+    path (including its `Refused`/rc=2 branch); rc=1 with no markdown means
+    an *unhandled* traceback — exactly the "red X with no explanation" this
+    issue was filed over, reopened on this one path. Fixed with the same
+    `|| echo "_planner_resync.py wrote no markdown -- see the step log_"`
+    fallback (and, defensively, on the "Open or refresh the proposal PR"
+    step's own `cat` too). `Verdict` also gained `if: always()`, so an
+    upstream step failing for any other reason no longer skips its
+    informative `::error::` annotation.
+  - `gh issue list ... || true` failed OPEN: a transient lookup error looked
+    identical to "no match", so the step fell through to `gh issue create`
+    and opened a DUPLICATE — the exact "must not create 40 issues" guarantee
+    this issue exists for, failing silently. The lookup's exit code is now
+    captured separately (`set +e; existing=$(...); lookup_rc=$?; set -e`,
+    the same shape the freshness-gate step already uses for its pin reads)
+    and checked before deciding "no match"; a nonzero lookup now refuses
+    rather than guessing, in both the surface and the close step.
+  - The de-dup key moved from the (editable) issue **title** to a fixed
+    **body marker** (`RESYNC_ISSUE_MARKER`), matching `parity.yml`'s
+    `notify-planner-drift` job's own prior art and its own stated reason: a
+    maintainer can reword a title without breaking de-dup, but not a marker.
+  - The claim that `RESYNC_ISSUE_TITLE` had "no job-level `env:` to share it
+    from" was false, refuted the same way the `permissions:` relocation
+    above already proves it false: a job-level `env:` appended after
+    `steps:` doesn't move any line above it either. Both
+    `RESYNC_ISSUE_TITLE` and the new `RESYNC_ISSUE_MARKER` now live in one
+    shared `env:` on the `propose` job, so the two steps cannot drift apart.
+  - `permissions:` itself moved from workflow-scoped to **job-scoped**
+    (`jobs.propose.permissions`), matching `parity.yml`'s own
+    `notify-planner-drift` job, which scopes `issues: write` at job level
+    for the same reason its comment gives: it's the one token in the file
+    worth bounding on its own account. Still appended after `steps:` for the
+    same line-151 reason as before.
+  - The "Close the tracking issue..." step's condition was `rc == '0'`
+    alone, so an `rc=1` run with a NON-empty diff (a PR opens) left a prior
+    tracking issue open asserting "nothing to merge" while a proposal PR now
+    existed. Condition broadened to `rc == '0' || steps.pr.outputs.opened
+    == 'true'`, closing the issue either way with a message that names
+    which case applied.
+  - No body-size guard: a real rc=1/empty-diff run's assembled issue body
+    measured 27062 bytes (41% of GitHub's 65536-char issue-body limit) with
+    default `--diff-lines`; `gh issue create`/`edit` fail hard on an
+    overrun rather than truncating. A defensive truncation (60000-byte
+    threshold, noting where the full report still is) now guards both.
+
+  All of the above were driven (not just read) across ten scenarios: markdown
+  present / absent (traceback simulation) / oversized; issue found / not
+  found; `gh issue list` failing in both the surface and close step; `gh
+  issue comment` failing after a successful edit (still fails the step —
+  documented, not fixed, this round); and the close step firing on
+  `rc=0` and on `rc=1` with a PR opened. All ten passed under the stubbed
+  `gh` + GitHub's own wrapper shell.
+
+  Verified versus reasoned about: the two new steps' bash was syntax-checked
+  (`bash -n`) and their `gh issue list --state open --limit 100 --label ci
+  --json number,body --jq ...` lookup was run live, read-only, against
+  `alplabai/tan-cli` (confirms the query syntax and that no matching issue
+  exists yet); `python -m pytest tests -q` (venv, Python 3.12.3, no
+  `ALP_SDK_ROOT`), measured on this PR's own head, is unaffected: **4575
+  passed, 1048 skipped, 1 xfailed, 0 failed**. This branch trails `dev` by
+  two commits as of that measurement, so the post-merge count differs from
+  both this number and from `dev`'s own tip — re-run rather than trust
+  either.
+  Reasoned about, not observed: the actual `gh issue create`/`edit`/`close`
+  side effects and the full scheduled-trigger path, since this workflow
+  cannot be exercised end-to-end without either waiting for the next cron or
+  a `workflow_dispatch` run against a real alp-sdk ref, neither of which this
+  change performs.
+
+  **Third-round fixes (tan-cli#920, round 3 of review):**
+  - `gh issue list` in both new steps had no `--limit`, so it defaulted to a
+    30-item, newest-created-first page (measured live: `gh issue list
+    --state open --json number --jq length` -> 30, `--limit 500` -> 49, with
+    12 open `ci` issues on top of that on an ordinary day). Past 30 open
+    issues the tracking issue this lookup exists to find ages off page 1,
+    `existing` comes back empty with rc=0 -- indistinguishable from "no
+    match" -- and `gh issue create` opens a silent duplicate, which then
+    becomes the new de-dup target and orphans the original open forever:
+    the same fail-open the exit-code check closed for a `gh` error,
+    arriving instead through pagination. Both lookups now pass `--limit
+    100`.
+  - The round-2 gate (`test_planner_resync_issue_tracking.py`) guarded the
+    `cat` fallback and the shared `env:`, but not the lookup's own exit-code
+    check -- round 2's headline fix. Mutation-proved: reverting either
+    lookup to `--jq "..." || true` left the round-2 gate green (`2 passed`)
+    while reproducing the fail-open `gh issue create` duplicate under a
+    stubbed `gh`. A new test asserts all three properties on both lookups:
+    no `|| true`, `lookup_rc` captured AND tested, and `--limit` present --
+    so none of the three can silently regress again. All three mutations
+    (revert to `|| true`; drop the `lookup_rc` check; drop `--limit`) were
+    driven and confirmed RED, then restored and confirmed GREEN.
+  - `gh issue edit --title "${RESYNC_ISSUE_TITLE}"` on every refresh
+    clobbered a maintainer-reworded title -- the exact case de-dup moved off
+    the title (round 2, see above) to stop being sensitive to. The title is
+    now set only on create; refreshes touch only `--body-file`.
+  - `steps.issue.outputs.url` was written by the "Surface..." step but never
+    read: `Verdict`'s rc=1 annotation resolved to `'the job summary'` on
+    exactly the empty-diff path this PR exists to fix, never linking the
+    issue it just opened. Added to the `||` chain, after the PR url and
+    before the job-summary literal.
+  - `if: always()` on `Verdict` also fired on a cancelled run and on a
+    checkout/SDK-clone failure that happened before `planner_resync.py` ever
+    ran -- reddening the job for the right reason (an upstream failure) with
+    the wrong cause named (`::error::planner_resync.py did not report an
+    exit code`, when it never got the chance to run at all). Narrowed to
+    `if: !cancelled()`, which keeps the informative-annotation guarantee
+    `always()` was added for while still skipping on a cancelled run.
+  - The issue body's REFRESHED-not-recreated text said only that -- it did
+    not mention that a new status comment is also posted on every refresh,
+    on top of the body replacement. Documented in the issue body itself
+    rather than changed in behaviour, since one comment per run is the
+    existing, working audit trail.
+  - `head -c 60000` truncation is a byte cut, not a character cut (measured:
+    byte 59999 of a real oversized body lands mid-character, the lead byte
+    of a U+2014 em dash). Cosmetic, not a failure -- `gh` coerces via Go's
+    JSON encoder rather than rejecting it -- but now lands on a line
+    boundary (`| sed '$d'` drops the possibly-partial last line) at
+    effectively no cost.
+  - The run-streak count above and at `planner-resync.yml:408`/`:434` and
+    `CHANGELOG.md` moved off a flat number for the fourth and, this time,
+    last time: it is a monotonically increasing counter on a workflow that
+    was still failing as of this writing, so any literal pinned at review
+    time is stale before merge. All four sites now state the streak's start
+    (`31621375705`), the last success before it (`31601765469`), and point
+    at the `gh run list` command to recompute the current count, instead of
+    asserting a digit.
+
+- **The `board-diagnostics` scaffold's README pointed a customer at
+  `scripts/program_eeprom.py`, and the `sensor` scaffold's at
+  `examples/peripheral-io/i2c-scanner` -- neither ever emitted into any
+  `tan init` project.** Same defect class as tan-cli#821(a): both scripts
+  are real only in the alp-sdk checkout the text was captured from
+  (`_vendored_files` in `tan/core/scaffold.py` reads nothing outside
+  `vendored/<template>/<sku>/`), and each was a bare inline code span rather
+  than a markdown link, so the SDK's own doc-link rewriter -- which fixed the
+  other cross-repo references in this tree (tan-cli#384) -- never touched
+  them. Shipped to every `tan init --template board-diagnostics` and
+  `--template sensor-starter`, both SKUs. Rewritten to real links to the alp-sdk
+  paths, each noting the referent is not part of the scaffolded project;
+  verified the replacement text holds even with no alp-sdk checkout present
+  at all (`alplabai/alp-sdk` is public and both URLs return HTTP 200).
+
+  Declared to `tests/parity/scaffold_byte_parity.py`'s `DELIBERATE_EDITS`
+  (four entries: one `README.md` edit per template x SKU), the same standing
+  exception `tan-cli#821(a)`/`tan-cli#379` already use, so the gate stays
+  9/9 PASS; each entry retires once the matching alp-sdk fix lands and this
+  tree is re-vendored. Filed upstream as alp-sdk#1705.
+
+  The `sensor` instance is fixed in the same change as the (more severe)
+  `diagnostics` one: it is the same defect class, on the same README that
+  already carries two real links to the identical referent elsewhere, so a
+  narrow companion fix keeps the file internally consistent rather than
+  leaving the only bare instance in this README standing next to two real
+  links to the same target. (This README's `i2c-scanner` bullet was the sole
+  bare instance here; a fresh scaffold still carries several more bare
+  `i2c-scanner` referents elsewhere in the project -- `src/main.c`,
+  `board.yaml`, `testcase.yaml` -- tracked separately, not by this fix.)
+
+- **`HAND_PORT_PINNED_SDK_COMMIT` re-synced to alp-sdk `722320a1` (v0.16.0),
+  closing `#913`.** The machine-proposed re-sync (`auto/planner-resync`)
+  flagged seven `HAND_PORT_HASHES` sources as changed since `88318e75`; each
+  was measured against a real `722320a1` checkout rather than taken on the
+  proposal's own placeholder narrative. All six of `scripts/gen_zephyr_
+  board.py`, `alp_project_loader.py`, `alp_project_emit/__init__.py`,
+  `alp_project_emit/west_libs.py`, `alp_cli/diagnostic_format.py`, and
+  `alp_cli/validator.py` are already covered on tan's side — no
+  `tan/planner/` code changed. `alp_cli/validator.py`'s real
+  `additionalProperties` fix is inherited automatically: `tan validate`'s
+  non-`--offline` path spawns `scripts/validate_board_yaml.py` against the
+  user's own bound checkout.
+- **Seven `HAND_PORT_HASHES` entries retired**
+  (`scripts/alp_cli/{faultdecode,validate,new_som,doctor,explain,monitor,
+  model}.py`). alp-sdk `210e9fed` (`#1367`/`#1368`, "finish the alp_cli
+  retirement") deleted all seven outright — each superseded by a released,
+  native tan-cli v0.6.0 port with no in-repo caller left upstream. tan's own
+  commands (`validate_cmd.py`, `new_som_cmd.py`, `doctor_cmd.py`/
+  `doctor_libraries.py`, `error_catalog.py`, `monitor_cmd.py`, `model_cmd.py`,
+  `faultdecode.py`/`faultdecode_cmd.py`) are unaffected; only the alp-sdk
+  side of the audit is gone. The matching `test_hand_port_tan_side.py`
+  entries drop in the same change, and `test_faultdecode.py`'s oracle
+  vintage hash is now frozen locally rather than read from
+  `HAND_PORT_HASHES`.
+
+- **`tan presets`'s `silicon:` path arithmetic is now the single definition
+  `tan.planner.som_metadata` also uses, not a second copy of it.** Fixes
+  `#917`. `presets_cmd.py`'s `_resolve_soc_path` was a verbatim, line-for-line
+  duplicate of `som_metadata.resolve_soc_path`'s `silicon:` -> `metadata/socs/
+  <vendor>/<family>/<part>.json` resolution -- kept out of `tan.planner`
+  deliberately (importing it would reintroduce the `bind_sdk_root` rebinding
+  hazard `#870` moved `presets_cmd.py` off of: `tan.planner` refuses to
+  rebind to a second SDK root within one process, which broke 292 unrelated
+  parity tests when tried) but duplicated rather than shared with it.
+
+  Both now import one definition from the leaf module `tan.soc_ref`, which
+  imports neither `tan.planner` nor anything else that reads real files at
+  import time, so `presets_cmd.py`'s binding-free contract is unaffected.
+  Driven both functions over the same inputs before collapsing them --
+  present file, absent file, absent metadata root, a symlinked root, and
+  relative vs. absolute root paths, plus every `silicon:` shape (`None`,
+  empty, 2-part, 3-part, 4-part, colon-only) -- and found **zero behavioural
+  divergence**: both are pure, existence-blind path arithmetic that neither
+  resolves symlinks nor normalises a relative root, so no caller's observed
+  behaviour changes. A new test asserts `presets_cmd._resolve_soc_path is
+  tan.soc_ref.resolve_soc_path` (identity, not just equal output) so a future
+  verbatim reimplementation -- the exact shape this issue itself was filed
+  against -- fails loudly instead of silently reintroducing a second source
+  of truth.
+
+- **`tan init --cores` no longer scaffolds an RPMsg carve-out that consumes the
+  whole of `ocram_low` on V2N/V2M.** The injected `ipc:` block defaulted
+  `carve_out_kb` to `512`, copied from alp-sdk's commented
+  `metadata/templates/board.yaml` stanza — which contradicted alp-sdk's own
+  `metadata/templates/catalog-v1.json` (`256`), with nothing in either tree
+  deriving either number:
+
+  ```yaml
+  ipc:
+    - kind: rpmsg
+      name: alp_default_rpmsg
+      endpoints: [m55_hp, a32_cluster]
+      carve_out_kb: 512
+  ```
+
+  `alplabai/alp-sdk#1613` measured it. `resolve_carve_outs()` prefers the
+  non-cacheable region smaller-first, and on V2N/V2M the only non-cacheable
+  region reachable from both `a55_cluster` and `m33_sm` is `ocram_low`, which
+  `metadata/socs/renesas/rzv2n/n44.json` gives as exactly `size_kib: 512` — so
+  the default consumed that region entirely and left nothing for a second
+  channel. `alplabai/alp-sdk#1694` settled upstream on **256** from evidence
+  rather than preference: `examples/multicore/rpmsg-aen/board.yaml:68` already
+  used it against `E1M-AEN801`'s `mram_main` (5632 KiB, under 5% of the
+  region), and it is half rather than all of `ocram_low`. tan now writes the
+  same number.
+
+  Three scope notes, so the change is not read as larger than it is. This
+  literal is **tan's own**, not a vendored byte:
+  `tests/parity/scaffold_byte_parity.py` covers
+  `python/tan/templates/vendored/**` against a live `--emit scaffold`, while
+  this block is written by `splice_companion_cores`' post-processing at init
+  time — no vendored tree moves and no parity obligation exists either way.
+  tan's **pinned** SDK still says `512` (`v0.16.0-rc1`'s
+  `metadata/templates/board.yaml:184` predates alp-sdk#1694), so this briefly
+  leads the pin — the right direction here precisely because the value is
+  tan's own default rather than a mirrored one. And the number stays a
+  literal: `catalog-v1.json` declares `rpmsg_carve_out_kb`, but `tan init` is
+  SDK-free by design (`init_cmd.py:708`, `scaffold.py:332`, `:511`) and has no
+  SDK to read it from.
+
+  Nothing pinned `512` anywhere else — no contract envelope, no oracle
+  fixture, no doc. `python/tests/core/test_planner_relocation_fixes.py:274`
+  was already using `256` in its own fixture, so tan's test corpus had been
+  disagreeing with tan's injector.
+
+  One test holds it: it parses the spliced YAML and asserts the value is the
+  integer `256` — a string `"256"` would satisfy a substring match while
+  giving the schema the wrong type — and refuses `512` by name with the
+  region it would have consumed.
+
+  The derivation is recorded in that test's docstring and here, rather than
+  in a comment beside the literal. `python/tan/core/scaffold.py` sits at
+  exactly its recorded ratchet (1512 lines, against a nominal 800 cap) and
+  `#408` is open about that whole module class, so a permanent ceiling raise
+  to hold a comment is the wrong trade when the fix itself is one token and
+  zero lines. Test files are measured but not gated (`#817`), which makes the
+  docstring the cheapest durable home for it.
+
+- **`tan init --template sensor-starter`'s `src/main.c` still shipped four
+  bare `i2c-scanner` cross-references tan-cli#912/#918 didn't cover.** That
+  fix rewrote the `sensor` README's one bare
+  `examples/peripheral-io/i2c-scanner` mention into a real link; it
+  deliberately left `src/main.c` out of scope. A real
+  `tan init --template sensor-starter --som E1M-AEN801` scaffold's
+  `src/main.c` still named the same referent bare four more times (lines
+  10, 18, 103, 114 of the emitted file), including two run-this
+  instructions -- "On a brand-new bring-up you may want to run
+  `examples/peripheral-io/i2c-scanner` first..." and "Use `i2c-scanner` to
+  enumerate what IS on this bus before chasing a TMP112..." -- pointing a
+  customer with no alp-sdk checkout at a path that is not part of their
+  scaffolded project, same defect class and same severity as the README
+  fix addressed.
+
+  A C comment, not markdown, so no link syntax applies (the SDK's own
+  doc-link rewriter only rewrites `](...)` markdown links anyway); rewritten
+  to name the real alp-sdk path in prose instead, each noting the referent
+  is not part of the scaffolded project, matching the phrasing
+  tan-cli#821(a)'s `edge-ai`/`src/main.c` fix already established. Both
+  SKUs share identical bytes here (`sensor`'s `src/main.c` carries no SKU
+  substitution at all), so all four substitutions apply identically on
+  `E1M-AEN801` and `E1M-V2N101`.
+
+  Declared to `tests/parity/scaffold_byte_parity.py`'s `DELIBERATE_EDITS`
+  (eight entries: one per substitution x two SKUs, per tan-cli#908's
+  one-substitution-per-entry discipline), so the gate stays 10/10 PASS;
+  each entry retires once alp-sdk fixes the upstream example and this tree
+  is re-vendored. A comment on alp-sdk#1705 (the issue tan-cli#912's fix
+  cites) had already requested this `src/main.c` scope, but alp-sdk#1792's
+  `Closes #1705` auto-closed that issue after fixing only the `README.md`
+  half (merged 2026-08-28) -- the `src/main.c` request went unaddressed
+  along with it, so it is re-filed fresh as alp-sdk#1795.
+
+  `board.yaml`:6 and `testcase.yaml`:10 carry one more bare mention each,
+  but both are descriptive/contrastive prose ("contrasts with ... which
+  probes...") rather than run-this instructions -- lower severity, and
+  deliberately left untracked here, matching tan-cli#924's own scope note.
+
+- **`tan init --cores` no longer discards a board's own IPC channel.**
+  `splice_companion_cores` appended its default `ipc:` block unconditionally,
+  so splicing a companion into a `board.yaml` that already declared one
+  produced two top-level `ipc:` keys. PyYAML does not reject that — it keeps
+  the last — so the append did not fail loudly, it silently replaced the
+  project's real channel. Measured against alp-sdk's `multicore-mailbox`
+  scaffold for `E1M-AEN801`, emitted at `eb96112b` (the commit
+  `PINNED_SDK_TAG` names):
+
+  ```
+  top-level 'ipc:' BEFORE splice: 1
+  top-level 'ipc:' AFTER  splice: 2
+  yaml.safe_load: OK
+
+  TEMPLATE's own ipc: [{'kind': 'raw_shmem', 'endpoints': ['m55_hp', 'm55_he'],
+                        'carve_out_kb': 4, 'name': 'alp_shmem0'}]
+  AFTER splice, what survives: [{'kind': 'rpmsg', 'name': 'alp_default_rpmsg',
+                        'endpoints': ['m55_hp', 'a32_cluster'], 'carve_out_kb': 256}]
+  ```
+
+  `alp_shmem0` is load-bearing, not incidental: both `src/main.c` and
+  `peer/main.c` in that scaffold carry
+  `#define SHMEM_REGION_NAME "alp_shmem0"`, so the generated application
+  would have compiled against a region its own `board.yaml` no longer
+  declared.
+
+  The companion core the user asked for is still spliced. Only the extra
+  channel is withheld, and only when the board already declares one — the
+  collision is between tan's unrequested addition and the project's own
+  content, not between two things the user asked for, so refusing the whole
+  `--cores` request would have been the wrong shape.
+
+  **Unreachable before this lands, live immediately after.**
+  `grep -rn '^ipc:' python/tan/templates/vendored/` is empty today, so
+  `--cores` can only splice into content with no `ipc:` block. `#864`'s
+  vendoring of `multicore-mailbox` is what would have made it reachable.
+
+  Not done here, deliberately: the withheld channel is not reported in
+  `issues[]`. That would need a new code in `contract/issue-codes.json`,
+  which is a frozen registry and an envelope change — too much to carry into
+  a defect fix. Say the word if the warning is wanted.
+
+  The module ratchet moved for this one, `tan/core/scaffold.py` 1512 → 1519,
+  and the contrast with `#921` is deliberate: there a ratchet was **declined**
+  because the growth was a comment and the fix itself was one token. Here the
+  growth *is* the fix — a guard cannot be written in zero lines — which is
+  what the ratchet's reason field exists for.
+
+  Two mutations hold it, and the second exists because the first round of
+  tests did not catch it: dropping the guard fails the duplicate-key test,
+  and weakening it to a substring match (`"ipc" in board_yaml`) fails a test
+  whose fixture carries the lowercase letters `ipc` in a comment while
+  declaring no `ipc:` key. A substring guard would silently withhold the
+  default channel from ordinary boards — the same silent class as the defect,
+  pointed the other way.
+
+- **`tan bootstrap` and `tan new-som` now report *why* no SDK resolved, not
+  only that none did.** Both were the sixth and seventh instance of the
+  tan-cli#900 class (`presets`/`clean` had this from tan-cli#468;
+  `examples`/`generate` got it in #900): `bootstrap_cmd._run` returned its
+  `bootstrap.sdk-root-unresolved` refusal, and `new_som_cmd.new_som` its
+  `new-som.failed` refusal, the moment nothing usable resolved, BEFORE either
+  computed `pin_issue`/`foreign_issue` a few lines further down -- so a
+  workspace whose `.alp/sdk-path` names a checkout that no longer exists, with
+  no sibling checkout for discovery to fall through to either, reported the
+  command's own refusal alone, with no `sdk.project-pin-unresolved` alongside
+  it. Both now compute `pin_issue`/`foreign_issue` unconditionally right after
+  resolving the SDK root, ahead of the refusal check, and prepend them to that
+  refusal's issues -- the same `[*resolution_issues, Issue(...)]` shape
+  `clean_cmd._run` already uses; `bootstrap_cmd._refusal` already had an
+  `issues` parameter for exactly this, and `new_som_cmd._fail` gained one
+  (`extra_issues`, `None` everywhere else in that file). `ok`/`exitCode` are
+  unchanged on every path; `tan presets`, `tan clean`, and `tan pinmux` (which
+  deliberately never emits this diagnostic, measured against the oracle) are
+  unaffected.
+
+  `tan bootstrap`'s `sdk-root-unresolved` refusal also carried the warning in
+  `--format json`'s `issues[]` only -- `_refusal`'s TEXT output is `list(lines)`
+  alone, with no path from `issues` to stderr, so the default text-mode
+  invocation stayed silent about the broken pin (the tan-cli#677 asymmetry,
+  recurring on this refusal path rather than the success path #677 fixed).
+  Fixed the same way: `pin_issue`/`foreign_issue` are rendered as
+  `f"{severity}: {message}"` lines and prepended onto the refusal's own text.
+
+  Confirmed, not swept: `tan pinmux` and `tan debug-config` both deliberately
+  never emit this diagnostic, and both already document why at their own
+  `--sdk-root` option help (alp-sdk#1026) -- `--sdk-root` there is read only as
+  a best-effort silent enrichment and is never reported as an `sdk` envelope
+  dependency. A further instance was found while reviewing this fix --
+  `tan explain`'s `bind_sdk` discards `resolution.broken_project_pin`
+  undocumented -- tracked separately as tan-cli#950, out of scope here.
+
+- **`.github/zizmor.yml`'s INVENTORY no longer goes stale when an inventoried
+  step is renamed.** tan-cli#919 closed Drift A (a suppression added or
+  removed with no matching INVENTORY edit) by comparing zizmor's own
+  `--no-ignores` finding COUNT to the INVENTORY's row count, but a count
+  cannot see an identity change: renaming `planner-resync.yml`'s inventoried
+  step to `Fetch the resync target` left `.github/zizmor.yml` still naming
+  "the `Check out tan-cli dev` step" and `ci.yml`'s
+  `inline artipacked suppressions match the zizmor.yml INVENTORY` step green
+  at `rc=0` (measured, tan-cli#929). The two inventoried
+  `actions/checkout` steps (`planner-resync.yml`'s and `release.yml`'s) now
+  each carry a stable `id:` (`artipacked-inventory-1` / `artipacked-
+  inventory-2`) that is never part of a step's human-facing `name:`, and
+  `.github/zizmor.yml`'s INVENTORY rows are keyed to a `anchor: job=<job>
+  id=<id>` pair read straight out of zizmor's own JSON rather than to prose
+  — the same "invisible stable key" shape `parity.yml`'s
+  `notify-planner-drift` job already uses against a PR title rename
+  (`parity.yml:2417-2427`). The comparison logic moved out of the inline
+  `run:` heredoc into `python/scripts/check_zizmor_inventory.py`, now
+  covered by `python/tests/gates/test_check_zizmor_inventory.py` (12 cases,
+  including that a `name:`-only rename must stay green and an `id:` rename
+  must not). Renaming a step's DISPLAY name is unaffected and still passes;
+  renaming or dropping its `id:` — or removing/adding an INVENTORY row
+  without it — now fails loud instead of staying silently green.
+
+- **`assemble_changelog.py --check` now reads a fragment's body, not only its
+  filename.** The existing checks already refused an unusable filename and an
+  empty or whitespace-only body (pre-fix: `rc 1`,
+  `unusable fragment filename(s): 779.fixed.md (empty)`) — but nothing
+  inspected a non-empty body's *shape*. A fragment whose entire content was
+  the single line `not a bullet at all` (the case measured on tan-cli#791's
+  review) passed `--check` clean, `rc 0`, same fragment listing as every real
+  entry — and, worse, the fold itself spliced that same garbage verbatim into
+  `CHANGELOG.md` and reported success, because `splice()` never reformats a
+  fragment: it joins bodies verbatim under a `### <Category>` heading, so a
+  body that is not already a valid Markdown bullet list lands in `CHANGELOG.md`
+  as bare prose sitting under a bullet-list heading. New
+  `fragment_shape_errors()` catches that shape, not the prose inside it —
+  whether a claim is true stays a review problem, not a gate problem — and is
+  shared by `load_fragments()`, so `--check` and the fold (`--write`, since
+  tan-cli#1172) now both refuse this content instead of silently accepting it.
+  `--require-empty` already exited 1 whenever any fragment was pending; what it
+  gains here is a message naming the actual defect instead of just a pending
+  count. All 33 fragments pending in `changelog.d/` at the time were re-checked
+  against it and pass unchanged.
+
+- **`tan init --template board-diagnostics` scaffolded a Renesas RZ/V2N
+  project whose documented expected-output block advertised an Alif SoC or a
+  sibling SKU's SoM identity outright.** A customer running the selftest on
+  real hardware saw output that did not match what the scaffold told them to
+  expect -- the natural reading of that mismatch is "my board failed", not
+  "the README is wrong". Two gaps in `diagnostics/E1M-V2N101`'s own vendored
+  tree: `src/main.c` was never SKU-substituted at all (still `E1M-AEN801`,
+  byte-identical to that SKU's own tree); `README.md` was substituted on the
+  SoM SKU line only, leaving the serial beside it and both `SoC identity:`
+  lines at their AEN801/Alif values. A third, wider gap: `E1M-V2N101` is one
+  of four SKUs -- `E1M-V2N101`/`E1M-V2N102`/`E1M-V2M101`/`E1M-V2M102` are the
+  same PCB, variant-populated -- that all render this one tree, and the
+  initial fix hand-substituted only the tree's own representative SKU, so
+  `--som E1M-V2M101` still wrote `board.yaml`'s `sku: E1M-V2M101` beside a
+  selftest transcript claiming `SoM identity: E1M-V2N101`.
+
+  `E1M-V2N101`'s own tree is fixed by naming `E1M-V2N101`,
+  `renesas:rzv2n:n44` (`metadata/socs/renesas/rzv2n/n44.json`'s own `ref`
+  field for this SKU's silicon, not a hand-written string matching the Alif
+  shape), and `<factory-serial>` (the README's own angle-bracket placeholder
+  convention, replacing the AEN-shaped `AEN0000123` -- not a
+  plausible-looking invented serial in the same shape with a different
+  prefix). The other three SKUs are covered by a general fix instead of a
+  fourth hand-substitution -- a per-SKU substitution table is what produced
+  this gap in the first place: `tan.core.scaffold_selftest_identity.
+  retarget_selftest_som_identity` rewrites the SoM-identity documentation
+  onto whichever `--som` was actually requested, for any SKU sharing a
+  vendored tree with another. It reads no SKU list of its own, so every
+  `E1M-AEN301`..`E1M-AEN701` scaffold (sharing `E1M-AEN801`'s tree) gets the
+  identical treatment for its `SoM identity:`/`Real hardware (...)` lines,
+  not just the two families this issue named -- **the SoM-identity half
+  only.** Measured (`tan init --template board-diagnostics --som
+  E1M-AEN301`, `rc=0`): the `SoM identity:` line correctly names
+  `E1M-AEN301`, but the `SoC identity:` line one line below it still names
+  `alif:ensemble:e8` -- `e3.json`'s own `ref` for this SKU's silicon is
+  `alif:ensemble:e3`, and `e8.json`'s `variants[].alp_module_skus` names
+  only `E1M-AEN801`. Deliberately unclaimed here, the same way
+  `retarget_example_build_target_comment`'s `# Example for <SKU>:`
+  neutralisation is unclaimed below: a per-family SoC-ref table this
+  SDK-free module does not carry is a design decision, not a bounded fix,
+  and is tracked separately as tan-cli#952. A companion function,
+  `retarget_example_build_target_comment`, neutralises
+  the `# Example for <SKU>:` build-target comment onto `# Example (this
+  template's own vendored board target -- substitute your SoM's, where one
+  exists):` for the same sibling SKUs -- discovered by the guard's own widening
+  (below), and left unclaimed rather than relabelled: the real vendored
+  `west build -b` target three lines below it does not change (several
+  sibling SKUs, e.g. `E1M-V2N102`, have no Zephyr board of their own at
+  all).
+
+  `E1M-V2N101`'s vendored bytes stay declared to
+  `tests/parity/scaffold_byte_parity.py`'s `DELIBERATE_EDITS` (six entries,
+  one substitution per entry per the tan-cli#908 discipline), the same
+  standing exception `tan-cli#912`/`tan-cli#821(a)` already use -- unchanged
+  by the wider fix, since both new functions are no-ops for a tree's own
+  representative SKU. Measured against the pinned alp-sdk checkout
+  (`eb96112b`): the gate is **10/10 PASS**, not 9/9 -- the tenth pair,
+  `multicore-mailbox/E1M-AEN801`, was landed by tan-cli#931, not by this
+  fix.
+
+  Also adds a companion guard,
+  `python/tests/core/test_template_integrity.py::test_no_planned_file_names_a_different_skus_exact_token`:
+  asserts that no `tan init` output names a sibling SKU's exact token
+  outside a declared allowlist. Against a bound `ALP_SDK_ROOT`, its case
+  list is now every SKU alp-sdk's own `metadata/e1m_modules/` catalogue
+  ships a manifest for (11 SKUs, one file per SKU), not just the two
+  vendored trees' own representative SKUs -- `_FAMILY_TREES` alone left
+  `E1M-V2N102`/`E1M-V2M101`/`E1M-V2M102` and every `E1M-AEN301`..`E1M-AEN701`
+  unchecked as a CASE, so the guard could not have caught this issue's own
+  defect class one SKU over. Mutation-proven per SKU: reverting each of
+  `E1M-V2N101`/`E1M-V2N102`/`E1M-V2M101`/`E1M-V2M102`'s emitted identity to
+  a wrong value reds the guard naming that SKU; restoring it goes green.
+
+  **A second, independent axis was widened in review round on tan-cli#946:
+  the foreign-token list itself.** Widening `CASES` (which `(template_id,
+  sku)` pairs get PLANNED and checked) left `_foreign_sku_hits` (which SKU
+  tokens get LOOKED FOR in the planned output) still iterating the bare
+  `_FAMILY_TREES` -- two SKUs -- so the guard was blind to any foreign SKU
+  token outside `E1M-AEN801`/`E1M-V2N101`. Measured: inserting `Note: on
+  E1M-V2N102 the power rail answers differently.` into
+  `diagnostics/E1M-V2N101/README.md` left the guard at 53 passed under the
+  narrow list. Fixed by iterating `CATALOGUED_SKUS or _FAMILY_TREES` (the
+  same fallback `_skus_for` already used) instead; the same mutation now
+  reds three cases (`board-diagnostics::E1M-V2N101/E1M-V2M101/E1M-V2M102`,
+  all of which render the mutated tree), and restoring the file goes green
+  again. Widening surfaced nine real, previously-invisible cross-SKU
+  mentions, all `edge-ai-starter`'s DEEPX DX-M1 pointer. Eight are
+  deliberate exactly as written: the `E1M-AEN801` tree's "re-scaffold at
+  `E1M-V2M101`" advice (tan-cli#814), on both `README.md` and `board.yaml`,
+  for all six AEN-family SKUs sharing that tree; and the `E1M-V2N101`
+  tree's own "Flip `som.sku` ... to `E1M-V2M101`" sentence, correct advice
+  for a `E1M-V2N101`/`E1M-V2N102` customer (neither carries DEEPX). The
+  ninth was not: that same `E1M-V2N101` tree sentence, planned for
+  `--som E1M-V2M102`, still named `E1M-V2M101` as the thing to flip TO --
+  misleading, since `E1M-V2M102` already carries DEEPX itself
+  (`metadata/socs/deepx/dx/m1.json`'s `alp_module_skus` lists both
+  `E1M-V2M101` and `E1M-V2M102`). Not allowlisted: rewritten SKU-neutral
+  instead ("`E1M-V2M101` and `E1M-V2M102` both carry the DEEPX DX-M1 NPU;
+  pick either via `som.sku` in `board.yaml`"), true regardless of which of
+  the four SKUs the customer actually scaffolded, and declared to
+  `scaffold_byte_parity.py`'s `DELIBERATE_EDITS` pending the matching
+  alp-sdk fix (filed as alp-sdk#1749) -- the same standing-exception
+  pattern tan-cli#814 already uses for the `E1M-AEN801` tree's analogous
+  (but cross-family) defect. Naming both DEEPX-equipped SKUs instead of one
+  changes the mention SHAPE, not just the wording: the `E1M-V2N101` tree's
+  three mentions (`E1M-V2N101`->`E1M-V2M101`, `E1M-V2N102`->`E1M-V2M101`,
+  `E1M-V2M102`->`E1M-V2M101`) become six (adding the `E1M-V2M102` half of
+  each of the first two, plus `E1M-V2M101`->`E1M-V2M102`), all now
+  legitimate -- so `_ALLOWED_CROSS_SKU_MENTIONS` carries twelve new
+  entries (six `E1M-AEN801`-tree, six `E1M-V2N101`-tree), not nine.
+  `MANIFEST.md`'s deliberate-edit count moves from twenty to
+  **twenty-one** accordingly.
+
+  "Catches the next SKU added to the matrix" is now true on both axes it
+  needs to be -- which SKUs get planned, and which SKU tokens get looked
+  for -- not just the first: both the catalogue-derived case list and the
+  catalogue-derived foreign-token list need no per-SKU edit to extend.
+
+- **Two of `test_planner_resync_issue_tracking.py`'s three asserted properties
+  could regress without the gate noticing.** Fixes `#937`. The module's own
+  docstring promises "all three properties are asserted below so none of the
+  three can silently regress again"; two of the three assertions were narrower
+  than the property they stood for.
+
+  **The `--limit` check tested the flag, not the value.** `assert "--limit" in
+  line` is satisfied by `--limit 1`, which reinstates the exact pagination
+  fail-open the assertion exists to prevent — and harder than the unflagged
+  default, since a one-item page ages the tracking issue off immediately.
+  The check now parses `--limit <N>` and asserts `N >= 100`, the value the job
+  carries and the docstring names; `gh issue list` defaults to 30 and the repo
+  measured 49 open issues, so any floor at or below the default would be no
+  fix at all.
+
+  **The step-level redeclaration check looked at two hardcoded step names.**
+  The `propose` job has ten steps. A copy of `RESYNC_ISSUE_TITLE` or
+  `RESYNC_ISSUE_MARKER` added to any of the other eight would drift from the
+  job-level value with nothing to catch it — the two-copies-can-drift defect
+  tan-cli#920 closed, re-openable in eight places the gate never looked at.
+  The sweep now covers every step in the job; the two named steps are still
+  asserted to exist, so a rename fails loudly instead of silently emptying the
+  check.
+
+  The third property (`cat "${RUNNER_TEMP}/resync.md"` has a fallback) already
+  iterated every step and needed no change.
+
+  Both holes are mutation-proved against the real workflow:
+
+  | mutation | gate before | gate after |
+  |---|---|---|
+  | `--limit 100` -> `--limit 1` | 3 passed | **1 failed** |
+  | step-level `RESYNC_ISSUE_TITLE` on `Check out tan-cli dev` | 3 passed | **1 failed** |
+
+  `.github/workflows/planner-resync.yml` itself is unchanged and already
+  correct — it carries `--limit 100` and declares both vars only at job level.
+  This closes the hole in what guards it.
+
+- **The faultdecode oracle-parity checks no longer go permanently red against a
+  current alp-sdk.** Fixes `#940`. alp-sdk `210e9fed` ("finish the alp_cli
+  retirement", alp-sdk#1367/#1368) deleted `scripts/alp_cli/faultdecode.py`
+  outright — 670 lines, alongside twelve sibling modules — once `tan
+  faultdecode` shipped the native port. Thirteen tests across
+  `tests/core/test_faultdecode.py` and
+  `tests/commands/test_faultdecode_command.py` diff tan's port against that
+  file, and their resolver deliberately REFUSED to skip when `ALP_SDK_ROOT`
+  named a tree without it, on the grounds that a named-but-missing oracle
+  would make the check pass vacuously. That refusal was right while the module
+  existed; past `210e9fed` it turns a settled upstream fact into a permanent
+  red on every bound run, which is what `#940` reported.
+
+  The resolver now tells the two cases apart by `SDK_MARKER`
+  (`scripts/alp_project.py`): a root that IS an alp-sdk but has retired the
+  oracle skips, naming the commit that retired it and the fixture that takes
+  over; a root that is not an alp-sdk at all still raises, so a typo'd or
+  stale `ALP_SDK_ROOT` cannot read as "upstream retired it" and pass
+  vacuously.
+
+  **No coverage is dropped.** `tests/fixtures/faultdecode_golden.json` was
+  frozen from that module while it still shipped — every
+  `(register, bit, name, meaning)` quadruple plus 102 swept decode cases — and
+  `test_bit_tables_match_the_frozen_golden` /
+  `test_decode_matches_the_frozen_golden` assert tan's port against it on
+  every run, bound or not. What ends is the *live* re-verification, and that
+  ended upstream, not here.
+
+  Measured in all three directions: bound to `eb96112b` (pre-retirement) the
+  two modules are **77 passed, 0 skipped** — the retirement does not silence
+  them early; bound to `791ba769` (post-retirement) they are **64 passed, 13
+  skipped**, exactly the thirteen that were failing; bound to a directory that
+  is not an alp-sdk they still raise. A three-way regression test pins that,
+  and its anti-vacuous half converts an escaping `Skipped` into an explicit
+  failure — a plain `pytest.raises(RuntimeError)` there reports `1 skipped`
+  under mutation, which CI reads as green.
+
+- **A bound, unsharded run of the suite is green again.** Fixes `#943`.
+  `tests/commands/test_presets_command.py` has to tear `tan.planner*` out of
+  `sys.modules` and re-import it: `tan.planner` freezes its metadata paths at
+  import time (`planner_root.PlannerRootError`), so exercising a second SDK
+  root is not possible any other way. It undid that with
+  `monkeypatch.delitem`, which restores the sys.modules **entries** — and that
+  is not the whole state. `import tan.planner.kconfig` also rebinds the
+  `kconfig` **attribute** on the parent package object, and since CPython 3.7
+  `import x.y as z` reads that attribute rather than `sys.modules["x.y"]`.
+
+  Restoring only the dict therefore left two live `tan.planner.kconfig`
+  objects, exporting two non-identical copies of every class they define.
+  Measured, with the two `OrchestratorError` objects at `0xc258e9410` and
+  `0xc25a8d810`: that is why
+  `tests/planner/test_chip_symbol_declared_guard.py::test_undeclared_chip_symbol_is_refused_by_name`
+  stopped matching an `OrchestratorError` raised three frames below its own
+  `pytest.raises`.
+
+  The tear-out now registers each parent's submodule attribute with
+  `monkeypatch` **before** deleting anything, so monkeypatch's own undo puts
+  it back. A `request.addfinalizer` cannot do this and looks like it can:
+  finalizers run LIFO, `monkeypatch`'s teardown was registered first and so
+  runs last, meaning a finalizer re-pins the attributes to the window's fresh
+  modules and monkeypatch then swaps `sys.modules` back underneath them —
+  measured, still `1 failed`.
+
+  Bound to `eb96112b`, `pytest tests/commands tests/planner` goes from
+  **`1 failed, 2856 passed, 18 skipped`** to **`2857 passed, 18 skipped`**.
+
+  No unit-level regression guard ships with this: the divergence needs the
+  full co-runner set to appear (`tests/planner` alone, and each half of
+  `tests/commands` on its own, are all clean), and a synthetic reproduction
+  of the tear-out does not exhibit it. The property is an integration one, so
+  the guard that would catch a regression is the periodic **unsharded bound
+  run** `#943` itself asks for — CI's four `pytest-shard` legs cannot see this
+  class at all, which is how it survived.
+
+- **`tests/parity/test_planner_emit_parity.py`'s `planners` fixture no longer
+  leaks `<sdk>/scripts` onto `sys.path` for the rest of the process.** Fixes
+  `#948`. The module-scoped fixture did `sys.path.insert(0, str(SDK /
+  "scripts"))` then `import alp_orchestrate` with a plain `return`, never a
+  `yield`, so nothing ever undid either once the fixture had run once --
+  `alp_orchestrate` (and everything else it pulled in transitively, plus
+  `alp_project` from `_oracle_emit`) stayed importable off that checkout's
+  `scripts/` directory for the rest of the whole bound test session, module
+  scope or not. That is exactly the shadowing hazard
+  `tests/core/test_planner_root.py`'s
+  `test_rebinding_before_import_swaps_the_root_and_leaves_no_first_root_route`
+  warns about -- a `scripts/` entry that outlives its own checkout can answer
+  a later import against the wrong SDK.
+
+  The fixture is now a `yield` with a `try`/`finally`: it only removes the
+  `sys.path` entry it itself added (`added_to_path`, matching the `added =
+  ... not in sys.path` discipline `tests/core/test_faultdecode.py`,
+  `tests/commands/test_new_som_command.py` and
+  `tests/commands/test_faultdecode_command.py`'s own oracle loaders already
+  use), and on teardown purges every `sys.modules` entry it itself caused to
+  load off that `scripts/` directory -- not just `alp_orchestrate` by name,
+  since the module also reaches `alp_project` once the path entry is live,
+  and not just modules with a `__file__`, since `<sdk>/scripts` also exposes
+  three implicit namespace packages (`bench`, `ci`, `kconfig`) that carry
+  only `__path__`. The purge is scoped to a `sys.modules` snapshot taken
+  before this fixture imports anything, and runs unconditionally rather than
+  gated on `added_to_path`, so a future caller that already had
+  `<sdk>/scripts` on `sys.path` before this fixture ran still gets its own
+  imports undone instead of the purge silently degrading to a no-op with
+  nothing red. The filter is the same "walk `sys.modules`, keep what
+  resolves under `<sdk>/scripts`" technique
+  `test_the_in_process_path_loads_none_of_the_sdks_python`'s own
+  child-interpreter probe already uses to MEASURE this closure, here reused
+  to UNDO it.
+
+  **Blast radius measured, not assumed: empty today.** A whole-file scan of
+  `tan/`, `tests/` and `scripts/` for every bare top-level name `<sdk>/scripts`
+  exposes (113 names -- `alp_orchestrate`, `alp_project`, `alp_model`, all
+  63 `check_*` + 14 `gen_*` scripts (77), etc.) found five real hits, all in
+  this file or out-of-process: this fixture's own `_oracle_emit` imports of
+  `alp_project` (two call sites), `scripts/capture_planner_oracle.py` (a
+  standalone maintenance tool, never imported by a test), and
+  `tan/commands/model_cmd.py` importing `alp_model.build` -- which only ever
+  happens inside a SPAWNED driver subprocess with its own fresh `PYTHONPATH`,
+  never in-process, so it cannot see this leak either way. One false positive
+  also turned up: `tan/planner/buildplan.py:11` contains the literal string
+  "from kconfig.py" inside its module docstring, not an import. None of the
+  113 names collide with anything already importable in the venv (stdlib or
+  installed packages) before the leak, so nothing gets silently shadowed by
+  it. And `tests/scripts/test_assemble_changelog.py` loads tan-cli's own
+  `scripts/assemble_changelog.py` under the identically-named
+  `sys.modules["assemble_changelog"]` key -- the one real look-alike -- via
+  `importlib.util.spec_from_file_location` against an explicit absolute path,
+  which finds that one file without touching `sys.path`; the immunity holds
+  here specifically because the loaded module's own imports (`argparse`,
+  `re`, `sys`, `pathlib` -- all stdlib) never go looking on `sys.path`
+  either, not because the loader mechanism is immune in general. Pytest's own
+  collection order after this file -- two more files inside `tests/parity/`
+  itself (`test_planner_oracle_regression.py`,
+  `test_planner_parity_actually_ran.py`), then `tests/planner/` (10 files),
+  then `tests/scripts/` (6 files), then the 15 top-level `tests/*.py` modules
+  (`test_apt_bounded_wrapper.py` through `test_wants_json_positions.py`),
+  collected last -- confirmed against `pytest --collect-only`'s actual
+  ordering -- was swept the same way with the same empty result. This was a
+  real, live leak with no live victim yet, not a false alarm.
+
+  The sharpest reason "empty today" is not "harmless": `sentinels` is a real
+  PyPI distribution name, and `<sdk>/scripts/sentinels.py` is one of the
+  modules the sibling oracle loaders (`tests/core/test_faultdecode.py`,
+  `tests/commands/test_new_som_command.py`) pull into `sys.modules` off this
+  same `<sdk>/scripts` path. In a richer venv that actually depends on the
+  `sentinels` package, this leak would have shadowed it at `sys.path[0]` for
+  the rest of the process -- a much sharper hazard than "no collisions found
+  in this venv today".
+
+  Added a mutation-proof regression test,
+  `test_the_planners_fixture_restores_sys_path_and_sys_modules_on_teardown`,
+  that drives the fixture's own generator directly (`planners.__wrapped__()`)
+  from inside a throwaway child interpreter -- the same reason the file's
+  existing import-closure probe runs in a child: this module's OTHER tests
+  keep the fixture's real, pytest-cached instance alive for the whole file,
+  so measuring "what does `sys.path`/`sys.modules` look like once this
+  fixture is done" in-process would either see that instance's leftovers or
+  race whichever test creates it first. The assertion compares the actual
+  `sys.path` list (order included, not a length) and the actual
+  scripts-dir-scoped `sys.modules` diff (filtered the same way the fix
+  itself filters, so a legitimate residual import like `tan.planner` or its
+  real dependency `jsonschema` cannot false-positive the check) -- not "is
+  the one string we remember inserting gone", which would miss
+  `alp_orchestrate.cli` and every other transitively-pulled submodule.
+  Verified red against the pre-fix `return`-based fixture (and, separately,
+  against a `yield` with the `finally` block deleted) before the restore
+  landed, and green after. Against the `return`-based fixture specifically,
+  `__wrapped__()` answers with a plain tuple rather than a generator, so the
+  probe detects that directly and fails with "the planners fixture is not a
+  generator (no `yield`)" instead of a bare "lifecycle probe crashed" that
+  would point a future reader at the probe rather than the fixture.
+
+- **`tan explain --code` now reports *why* no SDK resolved, not only that
+  none did.** `explain_cmd.bind_sdk` called `resolve_sdk_root_ladder`, then
+  raised `explain.sdk-root-unresolved` while discarding
+  `resolution.broken_project_pin` on the way -- the eighth instance of the
+  tan-cli#900 class (`presets`/`clean` had this from tan-cli#468;
+  `examples`/`generate` got it in #900; `bootstrap`/`new-som` in #926/#949).
+  A workspace whose `.alp/sdk-path` names a checkout that no longer exists,
+  with nothing else on the ladder resolving either, reported
+  `explain.sdk-root-unresolved` alone, with no `sdk.project-pin-unresolved`
+  alongside it -- unlike a successful `--code` resolution against a *broken*
+  pin, which already disclosed the pin through the shared
+  `Envelope(..., sdk=...)` advisory machinery once an `SdkInfo` existed to
+  carry it. `bind_sdk`'s raise builds no `SdkInfo` (nothing resolved), so
+  that machinery never ran. `bind_sdk` now computes `pin_issue`/
+  `foreign_issue` from the same `resolution` right before raising and passes
+  them on a new `ExplainError.extra_issues` field, which `_fail` prepends
+  onto the refusal's own issue -- the same `[*resolution_issues,
+  Issue(...)]` shape `clean_cmd._run` / `bootstrap_cmd._refusal` /
+  `new_som_cmd.new_som` already use. `ok`/`exitCode` are unchanged on every
+  path; `tan presets`, `tan clean`, `tan examples`, `tan generate`, and `tan
+  pinmux` (which deliberately never emits this diagnostic, measured against
+  the oracle) are unaffected.
+
+  Text mode disclosed nothing either, on the identical invocation: `_fail`'s
+  text branch printed only `err.text_line`, with no path from `issues` to
+  stderr -- the tan-cli#677 asymmetry, recurring here exactly as it did on
+  `bootstrap`'s refusal path in #949. Fixed the same way: `extra_issues` are
+  rendered as `explain: warning: <message>` lines and printed ahead of the
+  refusal's own text line, so `--format json` and the default text mode
+  disclose the same facts.
+
+- **`tan init --template board-diagnostics --som E1M-AEN301`..`E1M-AEN701`
+  scaffolded a README/`src/main.c` whose corrected `SoM identity:` line sat
+  directly beside an uncorrected `SoC identity:` line still naming
+  `E1M-AEN801`'s own silicon.** tan-cli#946 generalised the `SoM identity:`/
+  `Real hardware (...)` fix to every SKU sharing `E1M-AEN801`'s vendored
+  tree, but deliberately left `SoC identity:` untouched -- correct for the
+  Renesas V2N/V2M family (one shared SoC across all four SKUs) but wrong for
+  the AEN family, whose `E1M-AEN301`..`E1M-AEN701` are different Ensemble
+  variants. A half-corrected identity block is worse than an uncorrected
+  one: the correct SoM line lent authority to the stale SoC line beside it,
+  where the fully-uncorrected block on `dev` before #946 at least let a
+  reader notice the whole block belonged to another SoM. Measured (`tan
+  init --template board-diagnostics --som E1M-AEN301`, `rc=0`): `SoM
+  identity: E1M-AEN301 ...` printed directly above `SoC identity:
+  alif:ensemble:e8 ...`.
+
+  Fixed by `tan.core.scaffold_selftest_identity.retarget_selftest_soc_
+  identity`, a new function wired into the same per-file loop as
+  `retarget_selftest_som_identity`. It NEUTRALIZES the foreign `SoC
+  identity: alif:ensemble:e8` line for every AEN SKU other than
+  `E1M-AEN801` -- disclosing it as "this template's own vendored SoC --
+  substitute your SoM's Ensemble variant" -- rather than substituting a
+  per-SKU replacement value. A retarget (asserting `E1M-AEN301`'s own
+  `alif:ensemble:e3`, etc.) was considered and rejected: it would need a
+  `sku -> soc_ref` fact table, and `tan` carrying a second copy of a fact
+  `metadata/e1m_modules/<SKU>.yaml`'s `silicon:` key already owns is exactly
+  the second-source-of-truth ADR-0017/invariant I-26 forbids (measured
+  directly: a `dict[sku, soc_ref]` version of this fix reds
+  `tests/gates/test_no_new_hardware_facts.py`, one finding per SKU literal).
+  Neutralizing needs no such table: the function anchors on the AEN tree's
+  own literal `alif:ensemble:e8` text -- present nowhere in the V2N/V2M
+  tree, so no `source_sku` branch is needed to keep the rewrite scoped to
+  the AEN family -- and is a no-op for `sku == source_sku`, same convention
+  as every other `retarget_*` function in that module.
+
+  Adds a companion guard,
+  `python/tests/core/test_template_integrity.py::
+  test_no_planned_soc_identity_line_asserts_a_different_soms_value`,
+  parametrized over every `board-diagnostics` case: for the AEN tree's own
+  `E1M-AEN801` the foreign-looking line must be present and untouched; for
+  every sibling AEN SKU it must be both absent AND replaced by the
+  disclosed placeholder (catching a mutant that deletes the line outright,
+  not just one that leaves the wrong value in place); for the V2N/V2M tree
+  the line must never appear at all. The existing cross-SKU guard,
+  `test_no_planned_file_names_a_different_skus_exact_token`, cannot see
+  this defect class: `alif:ensemble:e8` is a SoC ref, not a SKU token, so
+  it never matches that guard's word-bounded SKU-token scan. Mutation-
+  proven: reverting the fix (dropping the new function's call site) reds
+  the new guard on all five `E1M-AEN301`..`E1M-AEN701` cases, naming the
+  foreign line; restoring goes green. Byte-parity unaffected --
+  `tests/parity/scaffold_byte_parity.py --sdk eb96112b`: **10/10 PASS**,
+  rc 0 -- the fix is a runtime rewrite in `tan.core.scaffold_selftest_
+  identity`, not a change to any vendored template byte.
+
+- **The `tan.planner` drift guard now catches the leak one level deeper than
+  its own first draft could see, and stops burying its own report.** Fixes
+  `#954`. `#953` fixed the real tan-cli#943 leak by restoring every torn-out
+  module's parent-package attribute, not just the top-level `tan.planner`
+  pair -- but the `pytest_runtest_teardown` guard drafted for this PR only
+  ever compared `sys.modules["tan.planner"]` against `tan`'s own `.planner`
+  attribute. Proven blind to the child shape:
+  `monkeypatch.delitem(sys.modules, "tan.planner.kconfig")` followed by a
+  re-import, without also restoring `tan.planner`'s `.kconfig` attribute,
+  passed the old guard silently (`2 passed`, no teardown error) -- the exact
+  "two live `OrchestratorError` classes" shape the hook exists to catch, one
+  package level down from where it was looking.
+
+  The guard now walks every `sys.modules` key equal to or under
+  `tan.planner`, `rpartition(".")`s each one, and compares it against its OWN
+  parent's matching attribute -- the same generalisation `#953` already made
+  on the restore side. Mutation-proven on both shapes: the child-level leak
+  above now reds, naming the mismatched pair with `hex(id(...))` for each
+  side (the old message printed two textually-identical `repr()`s and read
+  as nonsense); the original top-level shape still reds; and none of the
+  known-green false-positive cases regress (`monkeypatch.setitem(sys.modules,
+  "tan.planner", None)`, `monkeypatch.delitem(sys.modules, "tan")`,
+  `test_planner_root.py`'s `object()` sentinel, and a full bound run of
+  `tests/commands` + `tests/planner`).
+
+  Also fixed: a single real leak used to fan out into `484` teardown errors
+  (measured on CI's shard-0 command bound to the pinned SDK commit, with
+  `#953` reverted: `1057 passed, 15 skipped, 484 errors`) because every
+  later test's teardown re-observed the same drifted pair. A module-level
+  latch now reports it once, naming the actual polluting test, and stays
+  quiet for the rest of the session.
+
+  `unsharded-python-canary.yml`'s own justification is corrected to match
+  what was actually measured: it is defence-in-depth against a leak surfacing
+  *while the guard is absent*, not detection of the guard's own removal
+  (hook removed, `#953`'s fix intact -> `0 failed`). A new always-on gate,
+  `python/tests/gates/test_planner_drift_guard_present.py`, covers that
+  instead.
+
+  That gate's first draft (a text search of `tests/conftest.py` for the
+  hook's signature and decorator) turned out not to be one either: deleting
+  the hook and leaving only a HISTORY comment that quotes those same lines
+  passes a text search unchanged, and so does neutering the body to a
+  no-op while keeping both lines intact -- both measured, both silent
+  (tan-cli#944 review). The gate now checks two properties of what pytest
+  actually did instead of what the source text says: that pluggy registered
+  a `pytest_runtest_teardown` hookwrapper whose plugin is `tests/conftest.py`
+  (via `get_hookimpls()`, not a grep), and that the registered function's
+  body still raises against a synthetic two-copy drift driven directly
+  through it. Also fixed in the same round: the module-level latch is now
+  keyed per drifted name (a `set`, not a single flag) after a second,
+  independent leak was proven to sail through reported as `passed` while
+  still polluting; and a torn-out parent PACKAGE (as opposed to a torn-out
+  child) is now skipped rather than misreported as a bogus dual-import
+  against `hex(id(None))`.
+
+- **A non-string `cores[].type` in a schema-invalid SoC JSON no longer crashes
+  `tan presets` or leaks a raw non-string onto the wire.** Fixes `#957`.
+  `core_type_lookup` (`presets_cmd.py`, added by `#914`) read `cores[].type`
+  straight off `metadata/socs/<vendor>/<family>/<part>.json` with no
+  `isinstance` guard, even though it validated the sibling `id` key three
+  lines above. `soc-spec-v1.schema.json` requires `type` to be a string and a
+  clean, `scripts/validate_metadata.py`-checked SDK never violates that, but a
+  hand-authored or mid-`porting-a-new-som` tree can: every TRUTHY non-string
+  (an int, a list, a dict, `true`) reached `os_class.py`'s
+  `(core_type or "").lower()` and raised `AttributeError`, aborting the whole
+  command with `exitCode 5` / `ok: false` / `presets.internal-failure` --
+  voiding `presets_cmd.py`'s own module docstring, "no SoM detail here is
+  load-bearing enough to fail `tan presets` over", and `contract/README.md`'s
+  "neither field fails the command over it". Every FALSY non-string (`null`,
+  `0`, `[]`) did not
+  abort, but wrote the raw value onto the wire as `"type": null` etc., where
+  the same doc promises `cores[].type` is always the raw **string**.
+
+  Both classes now normalise to the `""` unresolved sentinel a
+  missing/unreadable SoC file already produced -- never raise, never leak.
+  The guard is at three sites in lockstep: `core_type_lookup` itself, plus
+  `tan.core.os_class`'s `default_os_from_core_type` and `allowed_os_for_core`
+  (the shared entry point `tan presets`' `allowedOs` field and
+  `tan.planner.topology`'s build-time OS-class enforcement both call), so a
+  non-string reaching either module directly -- not just through this one
+  call site -- degrades the same way. `tan.planner.topology.core_os_topology`
+  (`tan build` / `alp_project.py --emit os-topology`) carried the identical
+  unguarded `c.get("type", "")` pre-dating `#914`; fixed in the same change,
+  proven byte-identical against the pinned oracle SDK checkout on both
+  `tests/parity/scaffold_byte_parity.py` and `test_planner_emit_parity.py`
+  (767 passed / 8 skipped, unchanged before and after).
+
+  Unreachable from a clean SDK: `metadata/socs/**` validation already rejects
+  a non-string `type` before `tan` ever sees it. The population this closes
+  is a schema-invalid checkout -- exactly the state a SoM mid-port is most
+  likely to be in, and least equipped to read a raw `AttributeError` out of.
+  The `presets-heterogeneous-som` golden is unaffected: its fixture carries
+  no `metadata/socs/**` at all, so it never reaches the guarded code path
+  (confirmed by running the golden, not just reading it).
+
+  A third instance of the identical unguarded read survived this same sweep,
+  found on review (`#962`): `tan.planner.kconfig._emit_inference`'s
+  CPU-class TFLM kernel selector read `cores[].type` with the same
+  `(c.get("type") or "").lower()`, and it is on the `tan build` path, not
+  `tan presets` -- reachable on any slice `_slice_wants_inference` says yes
+  to (every example under `examples/ai`, `examples/audio`,
+  `examples/camera-vision`), and *not* covered by the `tan.core.os_class`
+  backstop, since `kconfig.py` lowers the value itself rather than calling
+  into `os_class`. A truthy non-string aborted `tan build` outright; guarded
+  the same way, now falling back to the REF kernel like a genuinely
+  unresolved `type` already did. `tan.planner.topology._runtime_class` also
+  picked up the same `isinstance` guard as defense-in-depth (it is not
+  currently reachable with a non-string, given `core_os_topology`'s own
+  `soc_types` normalisation, but a shared helper should not assume every
+  caller, present or future, guarded its input).
+
+  A fourth-round, read-only sweep found a **fifth** live instance, two lines
+  above the one `#962` guarded, in the same loop over the same `cores[]`
+  element: `_emit_inference`'s own `vec = (c.get("vector_extension") or
+  "").lower()`, unguarded by the same missed idiom. Driven directly with a
+  valid `type="cortex-m33"` so only `vector_extension` varies, the identical
+  truthy/falsy split reproduces (`7`, `["neon"]`, `{"a": 1}`, `True` each
+  raise `AttributeError` and abort `tan build`; `None`/`0`/`[]` fall back to
+  REF). Guarded the same way, to the same `""` sentinel, in this change.
+
+  This is **not** the family closing a fourth time. The sweep behind this
+  round established there is no schema validator anywhere on tan-cli's read
+  path for `soc_spec`: `soc-spec-v1.schema.json` is enforced only when
+  `tan new-som` *writes* a metadata file (`new_som_cmd.py`'s `_schema_errors`
+  calls), never when anything reads one back; `planner/loader.py`'s schema
+  gate covers only the customer's `board.yaml`. Every one of these five
+  guards -- three rounds, each believing at the time that it had closed the
+  set -- treats a symptom of that absent validation layer at one more call
+  site, not the layer itself. The root cause is filed separately as `#964`
+  (the missing `soc_spec` read-path schema gate); `#965` covers the sibling
+  `npus[].type` defect at `model/targets.py`, which has no falsy-safe half
+  at all. A sixth, seventh, or Nth unguarded read elsewhere in the tree
+  reading the same unvalidated `cores[]`/`npus[]` shapes should be expected
+  until `#964` closes.
+
+- **`tan lock`, `tan migrate`, and `tan quality` now report a broken
+  `.alp/sdk-path` pin exactly when the user most needs it -- when nothing
+  else on the ladder resolves either.** All three rely solely on `west_forward_
+  cmd.py`'s shared plumbing, whose only source for `sdk.project-pin-unresolved`
+  was `Envelope.__init__`'s central seam (`_with_sdk_resolution_advisories`),
+  which bails the instant `sdk is None` -- exactly the shape a rejected pin
+  produces when no other tier (`--sdk-root`, the global default, workspace
+  discovery) backstops it. `ProjectContext.broken_project_pin` was carried
+  three lines away and never read, the ninth instance of the tan-cli#900 class
+  (`presets`/`clean` had it from #468; `examples`/`generate` in #900;
+  `bootstrap`/`new-som` in #926/#949; `explain` in #950). `_run_forward` and
+  `_refuse_required` now compute the resolution pair off `context` directly
+  (via a new `_sdk_resolution_issues` helper, matching `size`/`image`/`clean`'s
+  own established pattern) and PREPEND it, both fixing the drop and correcting
+  this module's own ordering, which had inverted `clean_cmd.py`'s
+  `[*resolution_issues, Issue(...)]` convention by relying on the seam to
+  *append* the pair after the command's own issue. `ok`/`exitCode` are
+  unchanged on every path; `sdk` stays absent (never `null`) when nothing
+  resolved; `tan pinmux` and `tan debug-config` (documented, deliberate
+  exclusions) are unaffected.
+
+  Text mode disclosed nothing either, on the identical fixture: `_echo_sdk_
+  resolution` was itself gated on `sdk is not None`, so `tan lock` stderr
+  carried only the west launch/exit-code lines while `tan size` on the same
+  directory printed the full warning -- the tan-cli#677 asymmetry, the same
+  asymmetry `explain` still carries as tan-cli#959. Fixed the same
+  way: `_echo_sdk_resolution` now reads the unconditional `context` fields
+  too, so `--format json` and the default text mode disclose the same facts.
+
+  A rejected pin was also silently changing what ran: `west_program`/
+  `_west_workspace_dir` fall back to a bare `west` on PATH and the project
+  root the moment `context.sdk` is `None`, so a broken pin with no working
+  fallback spawned a *different* `west` install out of the *wrong* workspace,
+  with no diagnostic at all -- now the `sdk.project-pin-unresolved` warning
+  names exactly that fallback (`"falling through to the none tier instead"`)
+  before the child is ever launched.
+
+- **`tan explain` text mode now discloses the same SDK-resolution advisories
+  `--format json` already carried, on the success path and on the two
+  SDK-bound refusals.** `_emit`'s text branch never constructed an
+  `Envelope` -- only its json branch does -- so no invocation of `tan
+  explain` in text mode could ever reach `Envelope`'s
+  `_with_sdk_resolution_advisories`, regardless of which code path produced
+  the `SdkInfo`. First flagged during review of tan-cli#950 as affecting
+  only the success path (`--code` resolving against a checkout whose
+  `.alp/sdk-path` is broken but a lower ladder tier -- `globalDefault` or
+  discovery -- catches it): `--format json` disclosed
+  `sdk.project-pin-unresolved` for free there, `--format text` said nothing.
+  Re-measuring showed the gap is wider: `resolve_code`'s two refusals that
+  fire AFTER `bind_sdk` already built an `SdkInfo` -- `explain.catalog-
+  unreadable` and `explain.code-unknown` -- carried the identical silent
+  drop. tan-cli#950 itself fixed a *different*, narrower gap: the ONE raise
+  (`explain.sdk-root-unresolved`) that fires BEFORE any `SdkInfo` is built,
+  where `ExplainError.extra_issues` is the only mechanism able to carry the
+  fact through at all; it left this issue's three sites untouched.
+
+  Fixed with one new helper, `_print_sdk_resolution_warnings`, called from
+  both `explain`'s success branch (ahead of the summary line) and `_fail`'s
+  text branch (ahead of `err.text_line`, alongside the pre-existing
+  `err.extra_issues` loop -- the two are disjoint by construction, since
+  `sdk` is populated only on the paths `extra_issues` is not). Renders
+  `explain: warning: <message>` per advisory, wrapped the same way every
+  other `explain` stderr line already is. `ok`/`exitCode`/JSON output are
+  unchanged on every path.
+
+- **`tan generate` ordered its SDK-resolution advisories two different ways
+  depending on which of its own paths it took.** The unresolved path (no
+  SDK could be resolved at all) already prepended a broken `.alp/sdk-path`
+  pin's `sdk.project-pin-unresolved` warning ahead of its own refusal, per
+  `GenerateError`'s own docstring and the `[*resolution_issues, Issue(...)]`
+  shape `clean_cmd._run` established. The resolvable path (an SDK resolved,
+  and at least one `--target` still failed to emit) did the opposite: it
+  `issues.append()`ed the pin warning *after* the per-target
+  `generate.emit-failed` entries, so a broken pin surfaced last instead of
+  first on that path. Both paths now agree: `sdk.project-pin-unresolved` and
+  the tan-cli#464 `globalDefault` foreign-pointer warning are computed the
+  moment the SDK resolves and seeded into `issues` before any other entry.
+  The deliberately APPENDED `generate.in-process-unavailable` warning (context
+  about how a run executed, not a resolution advisory) is untouched and still
+  reads after the per-target results.
+
+- **`soc-spec-v1.schema.json`/`som-preset-v1.schema.json` are now validated on
+  every READ, not only when `tan new-som` writes one.** Fixes `#964`, the root
+  cause `#957`, `#962`, `#965` and `#969` each treated one crash site of at a
+  time: `new_som_cmd._schema_errors` ran `jsonschema.Draft202012Validator`
+  against a generated SoC/SoM skeleton on the write path only, so
+  `metadata/e1m_modules/**` and `metadata/socs/**` reached every read consumer
+  unvalidated. A schema-invalid `cores[].type` (a number where the schema
+  requires a string, most often) then reached an `isinstance` guard downstream
+  instead of a coded message -- five rounds of guards across the issues above
+  are the measured cost of validating at the point of use instead of the point
+  of read.
+
+  The fix is one shared entry point, `tan.core.metadata_schema` (`schema_errors`
+  -- the validator moved here from `new_som_cmd` verbatim, so there is exactly
+  one `jsonschema.Draft202012Validator(...)` call for SoC/SoM documents left in
+  the package (`planner/loader.py` keeps a separate one for `board.yaml`
+  against `BOARD_SCHEMA` -- a different document, never the gap this closes)
+  -- and `validate_document`, its read-path variant that never raises), wired
+  into every place a SoC/SoM document enters the process: `planner/loader.py`'s
+  `load_board_yaml` walk (`tan build`, `tan generate`'s ten in-process
+  targets), the two route-table targets that deliberately bypass that walk
+  (`--target carrier-netlist`/`composed-route-table`, which resolve the SoM
+  preset directly and still write a file to disk), `presets_cmd`/`size_cmd`'s
+  independent metadata reads (`tan presets`, `tan size`), `tan debug-config`
+  (both its `--core`-vs-manifest guard and its SDK-published debug-probe
+  identity fallback), and `tan bootstrap`'s own SoM-topology read. The decided
+  rule (posted on the issue, not re-derived per call site): **validate on
+  every read, always report, refuse only when the invalid field feeds
+  something the run puts on disk or on silicon.**
+
+  **REFUSE** (`tan build`, `tan generate`'s ten `load_board_yaml`-routed
+  targets plus the two route-table targets, `tan bootstrap`): an
+  `OrchestratorError`/coded refusal at the read point -- `build.plan
+  -unavailable`/`generate.emit-failed`/`bootstrap.metadata-schema-invalid`.
+
+  **WARN** (`tan presets`, `tan size`, `tan debug-config`): the field still
+  degrades to its existing empty sentinel (`type: ""`, `budget: unknown`)
+  exactly as before, but the envelope now carries a new
+  `<command>.metadata-schema-invalid` issue (`reserved`, severity `warning`)
+  naming the file, the JSON pointer, and what was found instead of silently
+  degrading with no trace -- e.g.
+  `metadata/socs/ae822.json: cores/2/type: 7 is not of type 'string'`.
+
+  **A checkout whose bound `metadata/schemas/*.schema.json` is simply ABSENT**
+  (an SDK predating the schema, or a synthetic/partial metadata root) no
+  longer degrades silently either -- review round: the customer this silence
+  protected does not exist in the released fleet (every tagged alp-sdk
+  `v0.6.0`..`v0.16.0` ships both schemas), and `issues: []` was
+  byte-identical on the wire to a validated-clean run. Every command above
+  now discloses the skip instead, at `info`, via a new
+  `<command>.metadata-schema-unchecked` issue --
+  `<file>: not validated -- no schema at <path> in this checkout` -- never a
+  refusal (an absent schema is not a reason to fail a checkout tan cannot
+  check), and deduplicated so several documents sharing one missing schema
+  report it once, not once per document. A schema file that EXISTS but
+  cannot be read or parsed (corrupt, truncated, wrong permissions) is a
+  different, genuinely anomalous case and still produces one
+  `metadata-schema-invalid`-style message rather than silently degrading to
+  "clean".
+
+  The `isinstance` guards `#957`/`#962`/`#965` added all stay -- schema
+  validation and a downstream guard are complementary, not substitutes:
+  `$defs/npu` requires only `type` plus `anyOf(gops, tops)`, so a
+  schema-valid `{"type": "ethos-u55", "gops": 100}` (no `mac_per_cycle`) is
+  invisible to this fix, since the document already passes the schema. That
+  particular read is already guarded (`#965`'s own fix skips the NPU rather
+  than crashing), but the general class it belongs to -- a schema that
+  allows a shape the code effectively requires more of -- is not itself
+  fixed anywhere, and is filed as its own follow-up, `#983`.
+
+  **Windows path separators**: a violation/skip message's file path is now
+  posix-normalised (`\` -> `/`) before it is put on the wire, matching the
+  `build_output.to_posix` convention every other envelope field uses --
+  before this it reproduced verbatim on `windows-latest` as
+  `sdk\metadata\socs\...`.
+
+  **Performance**: `schema_errors` now compiles a `jsonschema.
+  Draft202012Validator` once per DISTINCT `(schema path, mtime, size)`
+  rather than re-reading and re-compiling it on every document validated --
+  revalidating several documents against one schema (the common case: a
+  heterogeneous SoM's cores all share one SoC JSON, `tan presets` walks
+  every SoM in a checkout against `soc-spec-v1.schema.json`) used to scale
+  linearly with the document count (measured, review round: +0.08s at 11
+  real SoMs, +0.46s at 111 -- not "within run-to-run noise" as first
+  claimed).
+
+- **`tan model build`/`tan model check` no longer crash on a schema-invalid
+  SoC/SoM JSON reached through `resolve_targets()` (`model/build.py:120`,
+  `model/check.py:106,541`) -- every site the review of this fix's own PR
+  (#967) measured, not just the one `npus[].type`/`.subtype` line #965
+  originally named.** `model/targets.py`'s `_npu_backend` called
+  `.startswith()`/`in` on `soc.get("npus", [])[i].get("type", "")` with no
+  `isinstance` check; unlike the `cores[].type` family (#957), there was no
+  falsy-safe half here at all -- `.get("type", "")`'s default fires only when
+  the key is ABSENT, never when it is present with the wrong type, so every
+  one of `7`, `["ethos-u55"]`, `{"a": 1}`, `True`, `None`, `0` and `[]` raised
+  `AttributeError`/`TypeError`. `type`/`subtype` are guarded to the same `""`
+  unresolved sentinel: an unrecognised or unresolvable NPU type degrades to
+  the identical "skip this NPU, `cpu` target still resolves" outcome a
+  genuinely-absent `type` (or a string matching none of the three known
+  prefixes) already produced -- no fourth behaviour invented.
+
+  The first round of this fix guarded that return value but stopped one line
+  short of the value it guards: `npu.get("type")`'s **call**, not just its
+  result, still assumed `npu` was a dict. This round closes that gap and its
+  siblings, all in `model/targets.py` and the shared `soc_ref.py` leaf it
+  calls into:
+  - an `npus[]` **element** that is itself a non-dict scalar, and a whole
+    `npus` value that is not a list at all (`_soc_targets`);
+  - the identical element-type gap one function over, in `_discrete_socs`'s
+    `variants[]` sweep;
+  - an `npus[].mac_per_cycle` that is absent or non-int on a document that is
+    otherwise **schema-valid** (`mac_per_cycle` is optional in
+    `soc-spec-v1.schema.json`'s `$defs/npu`) -- this one #964 cannot fix,
+    since the document already passes the schema; an ethos-u NPU missing it
+    is now treated the same as an NPU with an unresolvable `type`: unmappable,
+    skipped, no partial `accel_config` invented;
+  - a parsed SoC JSON that isn't a JSON object at all (a bare array), both for
+    the one host spec `silicon:` names (raises the same clean, named error
+    `resolve_targets` already raises for a malformed ref) and for a file
+    turned up by `_discrete_socs`'s enumeration over `socs/**` (skipped, the
+    same stance `analyze.py`'s `_load_table` already takes for an identical
+    shape on a different metadata population);
+  - a non-string `silicon:` in a SoM preset, fixed once in the shared
+    `tan.soc_ref.resolve_soc_path` leaf (also re-exported by
+    `tan.planner.som_metadata`) rather than at each of its callers, matching
+    the `None` that leaf's own docstring already promised.
+
+  This guard is the last line of defence, not the fix: the real fix for the
+  `npus[].type`/`.subtype`/element/container family is #964
+  (`soc-spec-v1.schema.json` is enforced only when `tan new-som` **writes** a
+  SoC doc, never when anything **reads** one) -- but #964 cannot cover the
+  `mac_per_cycle` case above, which is schema-valid today and reachable from
+  any hand-authored or `tan new-som`-authored spec. Until #964 lands, every
+  call site that reaches into an unvalidated SoC/SoM JSON needs its own
+  `isinstance` guard, one at a time. The sibling `cores[].type` family
+  (#957) landed in #962 (merged 2026-08-28, after this entry first
+  described it as "settled on" while #962 was still open -- corrected here
+  rather than left as the tense that was true only later by coincidence).
+
+- **`tan model analyze` no longer crashes, or silently fabricates a false `cpu-only` verdict, reading a malformed `metadata/npu_ops/**` support table (`model/analyze.py`).** `_resolve_table` called `.get()` on `applies_to` and `.split("-")` on `applies_to.variant` with no `isinstance` check, so `applies_to: 7` raised `AttributeError: 'int' object has no attribute 'get'` and `variant: 7` raised `AttributeError: 'int' object has no attribute 'split'`. A PR review of the initial fix (tan-cli#979) then measured the identical gap one function away: `_score_ops` read `set(doc.get("supported_ops", []))` off the same document unguarded -- `supported_ops: 7`/`null` raised `TypeError`, but `supported_ops: "CONV_2D"` raised nothing, silently building a seven-character `set()` no real operator name ever matches and reporting every op `cpu-only`/`op-not-in-table` -- a fabricated negative manufactured from malformed data, the exact outcome this module's own docstring names as the worst one it exists to prevent. All three fields now route through the same "undetermined, not a fabricated negative" outcome `_resolve_table`'s docstring already promises for "no table covers `@variant`": `applies_to`/`variant` normalise to the `""` sentinel a genuinely-absent field already produced, and a `supported_ops` of the wrong shape makes the whole table resolve to "no usable table" before `_score_ops` ever sees it -- no fourth behaviour invented. Same defect class as the #957 (`cores[].type`) and #965 (`npus[].type`/`.subtype`) families, but a **third** unvalidated metadata population, and different in one respect: `metadata/npu_ops/**` has no schema anywhere to eventually enforce on the read path (27 schemas in alp-sdk `metadata/schemas/`, none of them for it) -- these `isinstance` guards are the only defence this population gets *today*, not a decision that it should stay schema-free; alp-sdk#1801 tracks adding `npu-ops-v1.schema.json`. The review also caught `resolve_ethos_u_variant` (a sibling #964-family read, live on `tan model check`) with the same gap -- `inference: 7` and a scalar top-level preset document both raised the same `AttributeError`, and `ethos_u_variant: 7` returned an int uncaught into `analyze_backend(variant: str | None)` -- guarded the same way. Filed and fixed while still latent: `metadata/npu_ops/**` does not exist on alp-sdk `origin/dev` yet -- it arrives with alp-sdk#1470 (still open) -- so the `npu_ops` half could not fire today, and guarding it now avoids a future bisect that would look like an alp-sdk regression instead of the latent tan-cli gap it actually is.
+
+- **`sensor`'s and `minimal`'s vendored scaffolds named eleven more alp-sdk-only
+  paths bare, with no qualifier that they are not part of what `tan init`
+  writes.** PR #975's review round found these siblings of tan-cli#912/#924's
+  own bare-cross-repo-referent defect class but scoped them out of that PR;
+  this is the follow-up. **Re-derived against tan-cli#996/#1001's re-vendor**
+  (landed on `dev` while this fix was in flight): alp-sdk#1269 swapped
+  `sensor`'s chip from TMP112 to BMP581 and, in the process, retired the
+  predecessor entries this fix builds on as "anchor-gone" -- correct for the
+  exact TMP112 bytes retired, but the underlying bare-referent defect recurred
+  almost one-for-one in the rewritten BMP581 paragraphs, plus two brand-new
+  sites (a `#1269` historical note, in both `src/main.c` and `board.yaml`)
+  the re-vendor introduced outright. Swept the whole of `sensor`'s `src/main.c`
+  and `board.yaml` rather than only re-deriving the two originally-filed
+  lines, and found eleven distinct substitutions, not the original seven:
+  `sensor`'s `src/main.c` (the `Hardware:` paragraph's and the historical
+  note's `metadata/boards/*.yaml`/`examples/v2n/v2n-temp-sensor` mentions,
+  the `BMP581_ADDR_7BIT` doc-comment's `metadata/boards/*.yaml` and
+  `include/alp/chips/bmp581.h` mentions, and the `bmp581_init` failure
+  doc-comment's `i2c-scanner` mention), `sensor`'s `board.yaml` (the same five
+  referents' board.yaml-side siblings plus the chip-renamed
+  `metadata/chips/bmp581.yaml` and unchanged `scripts/alp_project.py`/
+  `scripts/check_example_portability.py` mentions), `sensor`'s `prj.conf`
+  (the same `scripts/alp_project.py` mention, unchanged, a different file),
+  and `minimal`'s `README.md` (a troubleshooting paragraph's bare
+  `gpio-button-led`/`i2c-scanner` mentions, turned into real links --
+  `minimal` had no `DELIBERATE_EDITS` entry at all before this, and was
+  unaffected by the #1001 re-vendor). Each named in prose (a `#`/`/* */`
+  comment, no markdown link syntax applies) or turned into a real,
+  `v0.16.0`-pinned link (`minimal`'s markdown), noting the referent is not
+  part of the scaffolded project -- `board.yaml`/`prj.conf`'s
+  `scripts/alp_project.py` mentions instead say "resolved via
+  `ALP_SDK_ROOT`", since a scaffolded project's own `CMakeLists.txt`
+  genuinely invokes that script through the SDK checkout `ALP_SDK_ROOT`
+  points at, unlike the purely descriptive pointers elsewhere.
+  Twenty-four new `tests/parity/scaffold_byte_parity.py` `DELIBERATE_EDITS`
+  entries (eleven substitutions x two SKUs for `sensor`, one x two for
+  `minimal`), `MANIFEST.md`'s live-entry count and itemised enumeration
+  extended to match (dev's post-re-vendor fourteen -> thirty-eight), and
+  `test_template_integrity.py`'s `_NUMBER_WORDS` extended to cover it. Filed
+  upstream as alp-sdk#1855; all twenty-four entries retire the moment
+  alp-sdk's `examples/peripheral-io/i2c-master` and
+  `examples/peripheral-io/hello-world` heal the underlying prose and this
+  tree is re-vendored.
+
+  **PR #1009's own review round found the identical defect class left
+  un-swept in ten sibling sites, two of them in `minimal` (a template that
+  PR had already edited) and four in `diagnostics` (named in this issue's
+  own title), plus eleven more the review-round sweep found beyond those
+  ten while auditing every vendored template rather than stopping at the
+  first two named.** `minimal`/`diagnostics` `board.yaml`/`prj.conf` carried
+  the byte-identical `scripts/alp_project.py` "Customer workflow" paragraph
+  `sensor`'s own fix qualified; `iot` `board.yaml`/`prj.conf`/`src/main.c`
+  named alp-sdk's `docs/cc3501e-bridge.md`, `scripts/alp_project.py`,
+  `examples/connectivity/iot-fleet-ota/prj.conf` and
+  `examples/peripheral-io/i2c-master` bare; `edge-ai`'s `src/main.c` named
+  `examples/ai/cold-chain-monitor/models/README.md` bare, twice;
+  `multicore-mailbox`'s `board.yaml`/native_sim overlay/`prj.conf` named
+  `metadata/e1m_modules/E1M-AEN801.yaml`/`scripts/alp_orchestrate.py`/
+  `scripts/alp_project.py` bare, and its `src/main.c` labelled its own
+  local `./peer/main.c` with alp-sdk's upstream example path instead of the
+  real local one. Twenty-one more `DELIBERATE_EDITS` entries (fifty-nine
+  total), each mutation-proven this round (reverted alone, RED on the
+  entry's own reason-filtered assertion, restored from a byte copy, GREEN
+  again) -- including the twelve `E1M-V2N101` entries the original #977 fix
+  registered under the generic reason `"same as ... above"`, reworded to
+  each name their own substitution so `self_check`'s reason-string filter
+  can no longer pass vacuously on a sibling's failure. `self_check()` gained
+  mutation-proof coverage for this round's own 21 entries. `MANIFEST.md`'s
+  live-entry count and itemised enumeration extended again (thirty-eight ->
+  fifty-nine, entry 16), and `test_template_integrity.py`'s `_NUMBER_WORDS`
+  extended to cover it, sized to the current count exactly (no dead entries
+  past it).
+
+  **PR #1009's own round-three review found an eleventh sibling site the
+  round-two sweep missed, plus two of that round's scope-outs that did not
+  hold, plus that `self_check()`'s new coverage covered only #1009's own
+  21 entries -- none of #977's original 24, nor three older entries
+  (`blocked_caveat`, `native_sim_conf_link`, `native_sim_conf_copy_comment`)
+  that had never had coverage at all.** `multicore-mailbox`'s `board.yaml`
+  named a bare `src/backends/mproc/zephyr_drv.c`, three lines from the one
+  bare referent already fixed in the same comment block -- worse than that
+  one, since this scaffold has its own `src/`, so it reads as a customer
+  path. `multicore-mailbox`'s `README.md` labelled its own local
+  `./peer/main.c` with alp-sdk's upstream example path as a markdown link's
+  TEXT (byte-for-byte the same mislabel already fixed in `src/main.c`), and
+  named a `west build` command with a path that does not exist in a
+  scaffolded project at all (`examples/multicore/mproc-mailbox/peer` where
+  the scaffold's own path is `./peer`) -- a run-this instruction that
+  fails, not merely a bare referent. `iot`'s `src/main.c` "sensor reading"
+  paragraph also still said `TMP112 over <alp/chips/tmp112.h>`, stale since
+  alp-sdk#1269 swapped `sensor`'s chip to BMP581 (this template's own
+  `README.md:52` already said BMP581); folded into the existing
+  `sensor_template_pointer` entry since both fixes sit in the same matched
+  paragraph. Three new `DELIBERATE_EDITS` entries (sixty-two total, entry
+  17), all mutation-proven the same way. `self_check()` now carries a
+  reason-filtered strict-half proof for EVERY entry in `DELIBERATE_EDITS`
+  -- all 62, dynamically verified (instrumented `DELIBERATE_EDITS.
+  __getitem__` during a `self_check()` run and confirmed every key is
+  accessed, not just grepped for), including `pattern_paragraph`
+  (tan-cli#924), which shares its path with five #977 entries and so was
+  genuinely vacuity-exposed by its old un-filtered assert, not merely
+  under-proven. `alp-sdk#1855` (filed for entry 15, initially scoped to
+  `sensor`/`minimal` only) extended to explicitly cover `diagnostics`,
+  `iot`, `edge-ai` and `multicore-mailbox` too -- the exact alp-sdk#1795
+  orphaning shape it warns against, caught and fixed in the same review
+  round rather than left standing; given the `documentation`/
+  `area:examples` labels matching that precedent's own. The tan-cli#924
+  `sensor`/`board.yaml`/`testcase.yaml` exception (kept intact throughout)
+  is now re-grounded in `MANIFEST.md`: its "descriptive, not run-this"
+  wording no longer distinguishes it from everything else this PR swept
+  under the identical ground, so it now stands on tan-cli#924's own
+  deliberate scope decision rather than on that wording doing any
+  distinguishing work.
+  `MANIFEST.md`'s live-entry count and itemised enumeration extended once
+  more (fifty-nine -> sixty-two, entry 17), and `test_template_integrity.py`'s
+  `_NUMBER_WORDS` extended to `sixty-two`, again sized to the current count
+  exactly.
+
+- **`RunPaths` is frozen; the eleven hidden writes are five visible
+  rebindings.** Fixes `#991`. `tan/commands/bootstrap_cmd.py` threaded a
+  mutable `RunPaths` through `_run` (a 791-line function) and mutated it in
+  eleven field assignments across five phases. The run's *reported* paths
+  therefore depended on which mutations had already executed, and that
+  dependency was visible at no call site.
+
+  The worst of them wrote through a **function parameter**:
+  `_select_workspace` repointed `paths.workspace_dir`/`venv_dir` when it
+  adopted a `$ZEPHYR_BASE` topdir, while its only call site read
+  `plan = _select_workspace(...)` — the repointing appeared nowhere. It now
+  returns the adopted paths on `WorkspacePlan.adopted_paths` and the caller
+  rebinds, which restores command/query separation.
+
+  `RunPaths` is `@dataclass(frozen=True)`; every change is an explicit
+  `replace()`. `grep '^\s*paths = '` in `_run` is now the complete history:
+
+  ```
+  paths = RunPaths(...)                       construction (guessed .venv)
+  paths = replace(paths, venv_dir=...)        venv name, once the manifest is read
+  paths = replace(paths, repo_root=..., ...)  --workspace relocation
+  paths = plan.adopted_paths                  $ZEPHYR_BASE topdir adopted
+  paths = relocation_undo.paths               rollback
+  ```
+
+  `RelocationUndo` carries one `paths: RunPaths` instead of duplicated
+  `workspace_dir`/`venv_dir` fields. The field-by-field snapshot existed only
+  because an unfrozen `RunPaths` would have aliased live state; frozen makes
+  the object snapshot safe and retires the workaround, so a future undo site
+  no longer has to re-avoid that trap on its own.
+
+  The deliberate pre-manifest read is preserved by construction rather than by
+  ordering luck: the manifest-refusal payload still reports the guessed
+  `.venv`, because the venv rebinding happens after it and cannot reach
+  backwards into a value already handed out.
+
+  **The `Workspace` invariant is fixed in the same change, not deferred.**
+  `ws` is built from `paths` before any relocation and snapshots the three
+  values, so after a rollback it names the VACATED paths — the rebinding
+  reaches `_run`'s `paths`, never the copy inside `ws`. Freezing does not
+  help. Both call sites already `return` immediately, so nothing reads the
+  stale `ws` today; that was an invariant held by luck and stated nowhere.
+  `tests/gates/test_rollback_relocation_is_terminal.py` now enforces it from
+  the AST, and a companion test fails if the call sites disappear so the gate
+  cannot pass over an empty set.
+
+  Mutation-proved: inserting one statement between a rollback call and its
+  `return` turns the invariant gate red; renaming the function turns the
+  found-something gate red; and `RunPaths(...).venv_dir = ...` now raises
+  `FrozenInstanceError`.
+
+  No behaviour change — `tests/commands/test_bootstrap_command.py`,
+  `tests/core/test_bootstrap.py` and
+  `tests/commands/test_bootstrap_destructive_paths.py` are 212 passed,
+  1 skipped across the reuse, adopt, relocate, dry-run and rollback flows.
+
+- **A frozen `tan` no longer leaks its bundled `LD_LIBRARY_PATH` into a spawned
+  tool's own dynamic-linker search.** Fixes `#992`. PyInstaller's Linux ONEDIR
+  bootloader points `LD_LIBRARY_PATH` at the frozen app's own bundled
+  `_internal/` lib dir and stashes the caller's original in
+  `LD_LIBRARY_PATH_ORIG`; every child a spawn site did not explicitly restore
+  it for inherited the bundled path first. Measured on real CI (the failure
+  `#990` traced to exactly one such site): `tan bootstrap` spawned `west sdk
+  install`, which shelled `tar --xz`, which loaded tan's own bundled, older
+  `liblzma.so.5` ahead of the system one and failed outright:
+
+  ```
+  xz: /home/runner/.local/bin/tan-cli-lib/_internal/liblzma.so.5:
+  version `XZ_5.4' not found (required by xz)
+  /usr/bin/tar: Child returned status 1
+  ```
+
+  `#990` fixed that one site (`bootstrap_cmd.Runner._env`); this closes the
+  other 25. The restore rule is now ONE shared primitive,
+  `tan.core.subprocess_env.spawn_env` (keyed on `LD_LIBRARY_PATH_ORIG` being
+  present, restoring the exact stashed value, popping the key when the
+  original was unset), and every subprocess spawn under `python/tan/` —
+  `flash_cmd.py`/`core/setools.py` first (the flash path writes to real
+  hardware), then `core/probe.py` (every host-tool verdict `tan doctor`
+  reports), then the rest of `build/execute.py`, `build/token_substitution.py`,
+  `diff_cmd.py`, `doctor_cmd.py`, `faultdecode_cmd.py`, `generate_cmd.py`,
+  `monitor_cmd.py`, `run_cmd.py`, `size_cmd.py`, `validate_cmd.py`,
+  `west_forward_cmd.py`, `core/doctor_git.py`, the DEEPX/DRP-AI/Vela model
+  adapters, and `planner/buildplan.py`/`kconfig_symbols.py`/`template.py` — now
+  routes through it. `bootstrap_cmd.Runner._env` itself now calls the same
+  primitive instead of carrying its own copy of the restore logic, and one
+  more site in `bootstrap_cmd.py` (`_probe_venv_pip`) that had no `env=` at
+  all is fixed alongside it. `core/tool_lookup.py` spawns nothing (a pure PATH
+  resolver) and needed no change.
+
+  A new gate, `tests/gates/test_subprocess_env_routes_through_the_helper.py`,
+  asserts every `subprocess.run`/`.Popen`/`.check_output`/`.call` call site
+  under `python/tan/` passes an explicit `env=` built through `spawn_env` (or
+  one of two hand-verified wrapper functions, each independently checked to
+  still call the primitive) rather than an implicit/bare environment — the
+  exact regression class this closes. Probed for vacuity: a spawn site with
+  its `env=` removed turns the gate red (confirmed); restored, green.
+
+- **`test_the_verified_wrappers_still_call_the_primitive` (the spawn-env gate,
+  `#992`/`#997`) no longer trusts a dead-code call to `spawn_env()` as proof a
+  wrapper restores it.** Fixes `#999`. The check only confirmed a `Call` to
+  the trusted primitive existed SOMEWHERE in a wrapper's AST — not that it sat
+  on the path that actually produces the wrapper's return value. `if False:
+  spawn_env()` followed by `return dict(os.environ)` satisfied it, reopening
+  exactly the unrestored-`LD_LIBRARY_PATH` leak `#992` closed on the one path
+  that matters most: `flash_cmd.py`/`core/setools.py` spawn tools that write
+  to real silicon, so a reintroduced leak there is unpredictable behaviour on
+  the path that programs a customer's board.
+
+  Replaced with `_call_reaches_every_return`, a conservative structural walk
+  that asks, for every non-`None` `return` in a wrapper's own body (not
+  descending into a nested `def`/`lambda`): does the trusted call's result
+  flow into the returned value — directly, through a local variable assigned
+  from it, folded as an argument into another call that produces the return
+  value, or (the in-place-mutation shape `restore_ld_library_path` uses)
+  passed BY NAME into a bare trusted-call statement whose target is later
+  returned? It deliberately refuses to look inside a `Subscript` at all —
+  `return (spawn_env(), dict(os.environ))[1]` visibly contains the call but
+  discards it via `[1]`, and there is no static way to tell a safe index from
+  a discarding one. Four regression tests (`test_reachability_rejects_*`) pin
+  the adversarial shapes this closes for the direct-return wrappers
+  (`flash_cmd.py::_child_env`/`_resolution_env`): a call behind `if False:`,
+  a called-and-discarded result, the subscript throwaway, and a call confined
+  to an untaken `except` branch — reproduced against a live-mutated
+  `flash_cmd.py::_child_env` and going red under the fix, green once restored.
+
+  A review round on this same PR found the first pass left the identical hole
+  open for the OTHER shape this gate trusts: `_locally_flowed_names` added a
+  bare `target_name(some_var)` statement's argument to `trusted` lexically,
+  with no check on WHERE that statement lived, so `if False:
+  restore_ld_library_path(env)` still satisfied the walk for
+  `bootstrap_cmd.py::Runner._env` — the one wrapper using the in-place-
+  mutation shape — even though probe 1's exact analogue for the direct-return
+  shape was already closed. Fixed by requiring a trusted bare-call statement
+  to be a DIRECT top-level statement of the function's own body, not nested
+  inside any `if`/`for`/`while`/`try`/`except`/`with`; `Runner._env`'s real
+  `restore_ld_library_path(env)` call is itself unconditional and top-level,
+  so this is a real dominance proof for the shape it uses, not merely a
+  stricter lexical filter. Four more regression tests
+  (`test_reachability_rejects_*_mutation_*`) mirror the original four for
+  this shape and are reproduced live against `bootstrap_cmd.py::Runner._env`
+  the same way. `test_reachability_accepts_the_real_wrapper_shapes` remains
+  the positive control confirming all three hand-verified wrappers still
+  pass unchanged.
+
+  The same round found (and fixed) two more static-analysis gaps in the
+  reachability check: `ast.AnnAssign` (`env: dict[str, str] = spawn_env()`)
+  was invisible to the walk, making an annotated variant of `_child_env`'s
+  own current body a false-positive VIOLATION — now collected alongside
+  plain `ast.Assign` in both `_call_reaches_every_return`'s own walk and
+  `_locally_trusted_names` (rule 3's file-scan sibling, which has the exact
+  same fix for the exact same reason). `_direct_call_target` used to accept
+  `<anything>.target_name(...)`, letting `return evil.spawn_env()` inside a
+  wrapper's body borrow the real primitive's trust from an unrelated
+  object's same-named method — now refuses anything but a literal
+  unqualified `Name` call. A handful of remaining safe-but-rejected shapes
+  (the walrus operator, tuple-unpacking, `|`/`**`-merge, no-argument
+  delegation, a nested-`def` helper, and aliasing through a container/
+  attribute/subscript INSIDE the reachability check specifically) are
+  deliberately left unhandled — none appears under `python/tan/` today — and
+  are now enumerated in the gate's own module docstring rather than omitted,
+  alongside the one new false positive this change's own dominance fix
+  introduces (a mutation call inside a block that provably always runs but
+  is nested, e.g. a `try`/`except Exception: pass`).
+
+  The gate's own docstring now states its four static-analysis blind-spot
+  classes — reachability without execution, aliasing, dynamic dispatch, and
+  cross-function flow — instead of an enumerated function-name list, since
+  enumeration-by-recall is exactly what missed `check_call`/`getoutput`/
+  `getstatusoutput` in an earlier round of this same gate; the aliasing
+  class is now split to note it is a genuine MISS for rule 3's file-scan
+  sibling but an over-strict false POSITIVE for the reachability check
+  specifically.
+
+### Added
+
+- **`tan model check` now answers from Alp Lab's own bench, for a customer who
+  holds neither the NPU toolchain nor the silicon.** alp-sdk publishes
+  bench-measured perf points under `metadata/model_perf/`
+  (`metadata/schemas/model-perf-v1.schema.json`); `tan.model.perf` reads them,
+  and a matched point produces the `basis: "bench"` / `confidence: "certain"`
+  that `tan/model/analyze.py`'s vocabulary reserved from the beginning and that
+  nothing had ever emitted. The report then carries the MEASURED arena,
+  resident SRAM and inference latency (mean + p95 + run count) as structured
+  fields — `arenaBytes`, `reqSramKib`, `latencyMsMean`, `latencyMsP95`,
+  `latencyRuns` — plus `perfRef`, the point's `capture.reference`, so every
+  number traces back to the run that produced it. Resolution order is
+  **precomputed → exact-if-toolchain → static**.
+  - **A point matches on SIX identity fields compared exactly, plus TWO that
+    narrow only where the SoC spec actually constrains them** — SoM SKU,
+    module `hw_rev`, backend, `accel_config`, the model's `sha256` and the
+    toolchain's name are always exact; `core` and the toolchain's version are
+    not, and calling the whole key "eight fields, all exact" overclaimed what
+    an unstated `core` can do (review-caught: with exactly one point
+    published — the realistic first-campaign shape — an unstated `core` let a
+    point measured on a Cortex-A32 application core match an Ethos-U target,
+    since nothing said it shouldn't). No "closest model" (the slug is a label
+    two byte-sequences can share, never the key), no "same accelerator family"
+    (`ethos-u85-256` is not `ethos-u85-128`), no "same module, other revision",
+    no prefix match on a truncated digest, and no `_fixture`-bannered
+    synthetic: alp-sdk stamps that banner on documents whose figures are
+    placeholders, and reporting one at `confidence: "certain"` is the worst
+    output this tier could produce.
+  - **What tan cannot state, tan does not guess — but what tan CAN source, it
+    narrows on, even indirectly.** `hw_rev` comes from the customer's own
+    `board.yaml` `som.hw_rev` (present-but-unusable now REFUSES the whole run
+    rather than silently falling back), falling back to the SKU preset's
+    `default_hw_rev` exactly as `board.schema.json` says the SDK does — and
+    when neither answers, NOTHING matches, because serving an r2 measurement to
+    an r1 module is the "exactly measured, describes a different machine"
+    failure the identity exists to stop. `core` is checked on TWO INDEPENDENT
+    facts, both DECLARED, never inferred. LEVEL 1, unconditional for every
+    backend and every SKU: a point's core must exist in the SKU's own SoM
+    preset `topology:` map at all, full stop — this is what refuses a point
+    claiming a core the module does not physically have (a review-caught
+    fail-open: E1M-NX9101/imx93's lone `ethos-u65` declares no `paired_core`
+    at all, so a point naming `m55_hp` — an Ensemble core the i.MX 93 does not
+    have — was consumed outright at `basis: "bench", confidence: "certain"`
+    before this level existed). SECOND, where the SoC spec's own
+    `npus[].paired_core` names one for the SPECIFIC accelerator being
+    screened, `core` narrows to THAT accelerator's own pairing (what makes the
+    E8's high-perf Ethos-U55 a different accelerator from its high-efficiency
+    one). Where the specific accelerator declares NO pairing of its own, tan
+    infers NOTHING further — in particular it does not borrow a SIBLING NPU's
+    pairing from the same die. An earlier round of this feature did exactly
+    that (took the union of `paired_core` across every NPU of a backend and
+    applied it even to an unpaired accelerator), and newly-sourced silicon
+    evidence corrected it: the E8's Ethos-U85 shares its die with two paired
+    Ethos-U55s, but the U85 itself is genuinely shared SoC-level silicon — a
+    register alias byte-identical across both M55 cores' generated headers, no
+    `Pname` on its vendor DFP element, clock-gated system-side rather than
+    from either core's own config block — and alp-sdk's own schema says
+    exactly that is legitimate: `paired_core`'s own field description says to
+    "Omit for a shared / non-core-paired NPU". A point naming any core the
+    die's own topology admits (including the A32 application cluster) is therefore
+    accepted for the U85, because nothing sourced says it cannot have driven
+    it. Only where NEITHER fact applies does `core` stay unnarrowed: every
+    drpai/deepx_dxm1 SoM today (no SoC spec of either kind names `paired_core`
+    anywhere), and E1M-NX9101/imx93, whose lone NPU pairs to nothing — and
+    even then, level 1 still refuses any core that is not a real one, so
+    "unnarrowed" never again means "unchecked".
+  - **A point captured under a memory profile the part does not declare is
+    never consumed — not even when it is the only point published.** The
+    toolchain PROFILE is part of a point's file identity but deliberately not
+    part of the match key — a customer with no toolchain cannot state a
+    profile — so a lookup can legitimately leave more than one point standing,
+    measured on machines that differ, and `find_perf_points()` returns all of
+    them and ranks nothing. `tan.model.perf_apply` narrows on a silicon fact —
+    the profile the SoC spec's own `npu_toolchain` block declares for the
+    part, i.e. the profile `tan model build` compiles it under — BEFORE
+    trusting even a single standing point, not only as a tiebreak once two or
+    more survive (review-caught BLOCKER: a lone point captured under the
+    wrong profile used to be handed back unfiltered at `confidence:
+    "certain"`, and the first bench campaign publishes exactly one point per
+    part, so this was the realistic case, not a corner one). If narrowing
+    does not leave exactly one, tier 2 falls through. The collision that
+    forced this design left a DRAM-backed capture as the arbitrary survivor
+    on a part with no DRAM.
+  - **Two bench points that differ only in `core` — both real, both DECLARED,
+    neither contradicted by any sourced fact — fall through together,
+    silently, rather than one winning by construction.** Removing the
+    union-of-siblings inference (the bullet above) makes this reachable for
+    the first time on a real die: the E8's unpaired Ethos-U85 admits a point
+    measured on either `m55_hp` or `a32_cluster`, and where BOTH are
+    published for the same model, module and toolchain, the multi-match rule
+    already governing the profile case above fires here too — `tan model
+    check` now reports `basis: "static-screen"` with no note naming the
+    ambiguity, where the old union inference used to arbitrate by
+    construction (only one of the two cores was ever in the union, so the
+    other was refused outright, with a refusal note). This is the correct
+    outcome, not a regression: two equally-sourced measurements of the same
+    accelerator, with nothing sourced to pick between them, means falling
+    through IS the honest answer — but it is a genuine change of behaviour
+    from the union-inference era, worth naming on its own.
+  - **An absent point is `undetermined`, never a negative,** the same rule
+    `npu-ops-v1` already states for a missing op table. EVERY non-match path
+    hands back the SAME report object, with no exception: a wrong SKU/hw_rev/
+    model/toolchain/topology-nonexistent core, an ambiguity, a fixture banner,
+    a point that recorded no operator placement, or a core a specific
+    accelerator simply does not pair to (as opposed to a core nothing on the
+    die physically has) cannot degrade a report by so much as a note.
+    `metadata/model_perf/` exists in no alp-sdk yet, and a metadata root
+    without it is the ordinary case rather than an error.
+  - **`--exact` still wins when the customer's own compile disagrees, and a
+    customer's `--exact` request is never silently un-answered by a bench
+    point that happens to exist alongside it.** A point is Alp Lab's
+    measurement under Alp Lab's toolchain profile; a customer who really holds
+    `vela` and really compiled gets THEIR number, because their profile may
+    not be ours. "Disagrees" is defined on the three figures both sides
+    actually produce — the placement verdict, the tensor arena and the
+    resident SRAM — and a figure either side did not report is never a
+    disagreement. The bench point is still named in the note, and its own
+    `perfRef`/latency figures ride the report as fields alongside the winning
+    LOCAL compile's numbers, not just inside the note's prose. A `--exact`
+    diagnostic about THIS run's host/toolchain environment (vela missing,
+    license-gated, footprint refused) survives a re-base onto a matched bench
+    point rather than being dropped — it is still true of the run even when a
+    point also answers. When the two agree the point wins, because it adds
+    measured wall-clock latency and a traceable capture no compile can
+    produce.
+  - **A point measured under a different toolchain VERSION than the customer's
+    install is still valid for tier 2** and says so in its note: the customer
+    this tier exists for has no toolchain at all, so there is no local version
+    for a point to differ from, and narrowing on one would leave the tier
+    serving nobody. Two published versions of one identity therefore fall
+    through under the multi-match rule rather than being ranked.
+  - **`basis: "bench"` is the second surface ever permitted to emit `fits`,**
+    and both surfaces now derive it from ONE function
+    (`tan.model.perf.coverage_from_placement`) rather than from two copies of
+    the rule — so the guard on that word is bound to the live rule for the
+    compiled path and the bench path alike. `basis: "static-screen"` still may
+    not emit it, in `npu_coverage` or in any note.
+
+- **`tan init --topology core_id:os[,core_id:os...]`** — select which project
+  to scaffold by hardware topology instead of naming a `--template` id or
+  `--from-example` path, porting alp-sdk#1652's `find_template_by_cores`
+  selector over the SDK's live `metadata/templates/catalog-v1.json`. Distinct
+  from the existing `--cores` (which splices a companion core onto an
+  ALREADY-chosen template); mutually exclusive with `--template`,
+  `--from-example`, and `--cores` (`init.scaffold-input-conflict` on more
+  than one, or on `--topology` + `--cores` together — the latter previously
+  silently discarded `--cores`, fixed in review).
+  Needs a resolved SDK checkout, the same as `--from-example`. An exact
+  topology match resolves like `--from-example <that record's example>`
+  would; zero matches names the topologies the catalog does offer
+  (`init.topology-not-found`); more than one match refuses and names EVERY
+  candidate rather than silently picking one (`init.topology-ambiguous`) —
+  measured against the real alp-sdk v0.16.0 catalog, the single-core
+  `{"m55_hp": "zephyr"}` topology already matches five templates
+  (`diagnostics`, `iot`, `minimal`, `peripheral`, `sensor`) today, not a
+  hypothetical. `tan.planner_cli --emit scaffold` also gains a matching
+  `--cores` argparse flag, mirroring `alp_project.py`'s own
+  `_run_scaffold_emit`/`_parse_cores_arg` 1:1 (that entry point is the
+  developer/parity mirror of the SDK's own CLI, so it legitimately reuses
+  the upstream flag name with no collision).
+
+- **`tan sdk remove` now reports `data.resolvesToAfter` -- what now resolves
+  for the calling workspace, right there in the removal envelope.** Deferred
+  out of #1022/tan-cli#790 for exactly this reason: after a `--force` removal
+  of a load-bearing install (the machine-global default, or a workspace's own
+  project pin), the removal response gave no signal what resolves in its
+  place -- a caller had to make a separate `tan sdk current` call to find
+  out, with no way to tell from the removal response alone whether the
+  workspace falls through to a different tier or has nothing left to resolve
+  at all.
+
+  `resolvesToAfter` is `{sdkPath, readiness, sourceTier}`, mirroring `sdk
+  current`'s own `data` SHAPE rather than a fourth one, computed by
+  re-running the same narrow `resolve_sdk_tiered` ladder `remove`'s own
+  load-bearing-removal check already calls -- not necessarily the same
+  ANSWER `sdk current` would give the same workspace, since `sdk current`
+  additionally falls through to a wider discovery walk and honours an
+  explicit `--sdk-root`, neither of which this field does. It is present on
+  EVERY `sdk remove` response -- idempotent-absent, every refusal, every
+  failure, and a real removal alike -- not only a load-bearing one, so a
+  consumer can code against it unconditionally. When nothing resolves
+  afterward -- the case a caller most needs told about -- it reports exactly
+  what `sdk-current-no-sdk` pins: `sdkPath: null`, `readiness: null`,
+  `sourceTier: "none"`. A force-removed workspace project pin whose
+  `.alp/sdk-path` file is left dangling (not cleared) reports that same
+  `"none"` -- the payload alone still cannot tell it apart from a workspace
+  that was never pinned, which is why `sdk remove` also carries the
+  `sdk.project-pin-unresolved` warning on its `issues[]` for exactly that
+  workspace (tan-cli#1051, this release).
+
+- **`missingPrerequisites[]` now carries the artefact provenance alp-sdk
+  publishes for each tool — `tier`, `licence`, `sourceUrl`, `sizeBytes`.**
+  Closes `#1066`. alp-sdk v0.16.0 (alplabai/alp-sdk#1574) added an
+  `artifactProvenance` block to `metadata/bootstrap.json`, the same file tan
+  already reads to fill `missingPrerequisites[].command` — but the envelope
+  dropped it, so alp-sdk-vscode's dependency-consent screen
+  (alp-sdk-vscode#467) rendered "not reported" for a **licensing** claim. The
+  join is on `tool`, an identity the entry already carried, and it happens in
+  tan because tan is the one process holding both halves: it resolved the
+  checkout, produced the commands from that checkout's manifest, and reports
+  the root it used. A consumer joining its own separately resolved SDK against
+  tan's commands can join across two different checkouts — a real risk, since
+  `tan bootstrap` relocates the alp-sdk checkout to
+  `<parent>/alp-workspace/<name>`.
+
+  Additive: no key was renamed or dropped, and `alp-sdk-vscode`'s boundary
+  check (`isDoctorEnvelopeData`, `src/alpCli/doctor.ts`) deliberately does not
+  inspect `missingPrerequisites` at all, so extra fields pass through
+  untouched. `contract/doctor-data-keys.json` — the published key set, and the
+  one source `test_doctor_contract_key_set.py` derives from — declares all
+  four as REQUIRED item keys, not optional ones.
+
+  Three decisions worth naming, each recorded in the contract file's own
+  `_comment`:
+
+  - **`sourceUrl`, not alp-sdk's `source`.** The consumer's `source` column is
+    already defined as what will actually RUN — the install command, verbatim
+    — while alp-sdk's `source` is the upstream project page, and what a user
+    installs is a brew bottle or an apt package, not the tarball behind it.
+    One name for two meanings would misinform the security reader that screen
+    exists for. `licence` keeps alp-sdk's own British spelling: same fact,
+    same name, no rename.
+  - **Absence is an explicit `null`, never an omitted key and never a
+    default.** `xz` and `7zip` declare no licence upstream, every `sizeBytes`
+    is `null` today, `python3-venv`/`west`/`zephyrSdk`/`setools`/`jlink` have
+    no entry at all, and an SDK predating v0.16.0 has no block — so "not
+    reported" is a fact the consumer renders, not a key it must feature-detect,
+    and the item shape is the same whichever SDK is in front of tan.
+  - **A malformed block degrades, it does not refuse — but it is not
+    silent.** `doctor`'s whole job
+    is to report on a broken environment, and this block is the least
+    load-bearing thing in the file. A block that is not a mapping, an entry
+    that is not a mapping, a missing `tier`/`licence`, a non-string value, a
+    `bool` or float `sizeBytes` — each collapses to the same `null` an absent
+    key yields, per field rather than per block, and none of them downgrades
+    the manifest to tan's built-in fallback tool list. This is the deliberate
+    exception to the curated-error register `planner/template.py` and
+    `core/example_catalog.py` use (`#1073`, `#1082`), which guards documents a
+    command cannot proceed without. Degrading QUIETLY would have been the
+    wrong half of that call, though: a corrupt block and a pre-v0.16.0 SDK
+    produced byte-identical envelopes, so an alp-sdk generator regression
+    would have rendered "not reported" on every consent screen with `tan
+    doctor` saying nothing. A block that is present and unreadable now also
+    raises the `bootstrapManifest` check at `warn` and the existing
+    `doctor.bootstrap-manifest` issue, naming what it could not read
+    (`` `cmake.source` is not readable (7) ``); an SDK with no block at all
+    stays silent, because warning there would fire on every older SDK. Same
+    exit code, same entries, same four nulls either way — what changes is
+    that the producer defect is sayable. `sizeBytes` also refuses a NEGATIVE
+    integer now, for the reason it already refused a float: `-4096` is not a
+    download size.
+
+  `tan bootstrap`'s own `missingPrerequisites[]` carries the same six keys,
+  from the same `MissingPrerequisite.as_dict` — one field name must not mean
+  two shapes depending on which command a consumer read it from. The
+  no-manifest fallback (`fallback_facts`) deliberately publishes NO provenance:
+  every other constant there is a stale-by-default transcription of the
+  manifest, which is safe to be wrong about, whereas a stale provenance row
+  would be tan asserting a licence, from a build-time constant, about an
+  artefact the SDK in front of it never described.
+
+- **A narrow allow-list gate over `python/tests/**`, so a test helper
+  deliberately promoted to a shared module cannot be re-implemented privately
+  in another test module.** `tests/gates/test_shared_helpers_have_one_definition.py`
+  scopes its walk to `python/tan/**` and never looked at `tests/`. That is how
+  an intermediate revision of `#1076` came to add the shared
+  `bind_planner_sdk_root` to `tests/planner/_baremetal_support.py` while
+  leaving the private copy in the module it was extracted from, with both the
+  new module's docstring and the PR body asserting there was now exactly one.
+  Review caught it and `#1076` merged at one definition; nothing automated
+  could have. The new
+  `tests/gates/test_shared_test_helpers_have_one_definition.py` fails when a
+  name in its allow-list has more than one module-level definition anywhere
+  under `python/tests/**`, naming every file that defines it; the
+  leading-underscore spelling counts as the same helper, since a re-introduced
+  private copy is spelled `_bind_planner_sdk_root`, never
+  `bind_planner_sdk_root`.
+
+  Seeded with one name, `bind_planner_sdk_root` -- the binder that keeps
+  `tan/planner/paths.py` from freezing `REPO`/`METADATA_ROOT` at a throwaway
+  stub for the rest of the process. Driving the shared binder with its guard
+  disabled turns `189 passed` into `50 passed, 139 errors`, so a stale copy is
+  a measured failure, not a hypothetical one.
+
+  Deliberately an allow-list and not a walk: widening the same name-based check
+  to every name under `python/tests/**` is red the day it lands. Measured on
+  `dev` at `8b4e3f43` with the new file excluded from the walk, over module-level
+  `def`s only, an exact-name walk finds 120 names with more than one definition
+  (380 definitions) and the underscore-folding walk this gate actually uses
+  finds 121 names and 406 definitions -- `envelope` 16, `sdk_root` 15, `write`
+  15, `bound_sdk` 14, `run_tan` 13. Nearly all are legitimate, and a gate that
+  is red on landing is a gate that gets disabled.
+
+- **A gate now catches a narrowed `except` clause silently breaking a
+  function's own "never raises" / quiet-return contract.** Three PRs
+  (#1096, #1110, #1114) shipped the same defect in one night, each caught
+  only by human-directed review: `document_guards.read_catalog_document`
+  narrowed `except (OSError, ValueError)` to `except OSError`, letting a
+  `UnicodeDecodeError` (a `ValueError` subclass) escape a function whose
+  docstring says "Never raises"; a `Path.exists()` pre-flight swallowed
+  `ENOENT`/`ENOTDIR`/`EBADF`/`ELOOP` but not `EACCES`, so an unreadable
+  directory re-raised `PermissionError`; `perf.read_perf_point`'s sibling
+  reader narrowed to `except (OSError, yaml.YAMLError)`, missing
+  `UnicodeDecodeError` again. `tests/gates/test_never_raises_contract_holds.
+  py` seeds fifteen functions across `tan/core`, `tan/commands` and
+  `tan/model` -- both quiet-return contracts (`None`/`[]`/`set()` on every
+  failure) and curated-raise contracts (exactly one declared exception
+  type, never a raw stdlib one) -- and drives each against seven real
+  broken-filesystem shapes: non-UTF-8 bytes, a directory where a file is
+  expected, a parent path that is itself a file, an `ELOOP` symlink loop,
+  `chmod 000`, a malformed document, and an absent path.
+
+  A first version of two of the fixes (`metadata_schema.validate_document`,
+  `scaffold.read_example_tree`) itself shipped the SAME class of defect one
+  level up: an `is_file()`/`is_dir()` pre-flight guarded with
+  `except OSError`, reasoning that `pathlib` swallows `ENOENT`/`ENOTDIR`/
+  `EBADF`/`ELOOP` but not `EACCES`. That RAISING BEHAVIOUR holds on Python
+  3.12.3 and 3.13.15 alike (`PermissionError`, `errno=13`, measured on
+  both) and stops holding only in 3.14.7, where those calls swallow EVERY
+  `OSError` -- `EACCES` included -- and return `False` instead. The
+  `_IGNORED_ERRNOS` constant the reasoning names is gone from `pathlib` a
+  release earlier than that, in 3.13 -- so the constant and the behaviour
+  it once described parted ways for one full release, which is exactly why
+  three independent readings landed on the wrong version before this was
+  measured directly against all three real interpreters. CI's `seam1` leg
+  (`python-version: "3.x"`, CPython 3.14.7) caught it red -- both functions
+  are rewritten to call no `is_*()`/`exists()` at all, reading straight
+  through and classifying by the real exception the read raises
+  (`FileNotFoundError` means genuinely absent, everything else means
+  present-but-broken), which is correct on every supported interpreter
+  because it depends on nothing `pathlib` might swallow differently.
+  `TestReadExampleTree` asserts the `not_found` VALUE, not merely the
+  exception type, because a type-only assertion could not see this class of
+  regression: the old code still raised the right exception TYPE on 3.14,
+  just with the wrong `not_found`.
+
+  The shape sweep that seeded this gate (an AST walk over every `try` in
+  `python/tan/`) was widened by hand after its first pass: a committed
+  script, `python/scripts/audit_narrow_except_contracts.py`, narrows the
+  tree to a reproducible candidate list and best-effort drives ONE shape
+  (non-UTF-8 bytes) against the minority of candidates whose signature it
+  can safely call -- it scopes the search, it does not perform it. Every
+  live defect below was found by hand-driving a candidate from that list
+  against the shapes that actually matter, `chmod 000` chief among them,
+  which the script itself never touches. That triage found nine more live
+  instances of the same trap beyond the four the tracking issue named, all
+  fixed: `perf_apply._resolve_hw_rev`, `metadata_schema.validate_document`,
+  and `scaffold.read_example_tree` each had an `is_file()`/`is_dir()`
+  pre-flight that itself raised a raw `PermissionError` on a
+  permission-denied ancestor directory; `drpai._compiler_version`,
+  `som_buildability._safe_load_mapping`, `tan/planner/template.py`'s
+  `_docs_ref` and `render_to_envelope`, and `new_som_cmd._known_board_names`
+  / `_family_hw_revisions` were each missing `UnicodeDecodeError`,
+  `yaml.YAMLError`, or (the last two) `OSError` entirely from a per-file
+  except clause. Six more sites across five files were found in
+  `tan/planner/**` modules that mirror alp-sdk verbatim (`kconfig.py`,
+  `sdk_compat.py` twice, `buildplan.py`, `slugs.py`, `kconfig_symbols.py`)
+  and are deliberately NOT fixed here -- editing a hash-pinned mirror
+  without first porting the fix upstream to alp-sdk is exactly the drift
+  `test_planner_relocation_freshness.py` exists to catch; reported instead.
+
+- **`docs/model-check-static-screen.md`'s `(npuCoverage, basis)` table is now
+  gated against a real constant, in both directions.** Adds `#1135`. That page
+  documents which coverage word is legitimate at which `basis`, and it went
+  false at five lines on `#1115` (`:73`, `:76`, `:100`, `:189`, `:257`) —
+  including a claim that both `fits` surfaces "derive it from one function
+  (`tan.model.perf.coverage_from_placement`)", which the bench path no longer
+  does. That was a blocker rather than a nit: the page calls `npuCoverage`
+  "Not a placement claim" at `static-screen` and "A real placement" at `bench`,
+  so a stale row actively misleads about what a number means, and it tells
+  consumers to match exhaustively on the pair.
+
+  A gate was not previously honest, because the legitimate combinations existed
+  nowhere as a constant — they were implied by control flow in
+  `tan.model.perf_apply._perf_point_report` and its neighbours, so any gate
+  would have had to hand-copy them and become a second thing to drift. So the
+  enumeration is introduced first, as something **production reads**:
+
+  - `tan.model.analyze.LEGITIMATE_COVERAGE_BY_BASIS` maps each `basis` to the
+    `npuCoverage` words legitimate at it — `static-screen` →
+    `full-eligible`/`partial`/`cpu-only`/`undetermined`, `compiled` →
+    `fits`/`partial`/`cpu-only`, `bench` → the compiled set **plus**
+    `undetermined`. The `bench` entry is built FROM the `compiled` one rather
+    than written out a second time, because `_perf_point_report` either carries
+    a compiled report's already-measured verdict or withholds to
+    `undetermined`: a word newly reachable at `compiled` is reachable at
+    `bench` for free, exactly as that branch says. Derived by running the real
+    static-screen/`--exact`/bench paths and recording what each construction
+    site actually emits, not by reading the field's own prose comment.
+  - `BackendReport.__post_init__` refuses an illegitimate pair at construction,
+    naming it — `illegitimate (npu_coverage, basis) pair ('fits',
+    'static-screen')`, and `unknown basis 'measured'` for a basis outside the
+    three. All six production construction sites and both test ones already
+    satisfy it unchanged. This is what makes the constant load-bearing rather
+    than a test-only mirror: no report can reach an envelope carrying a pair
+    the doc does not describe.
+  - `tests/gates/test_model_check_doc_coverage_table.py` compares the table's
+    parsed pairs against that constant. A reachable pair missing from the table
+    fails, naming it; a documented pair no longer reachable fails, naming it,
+    so the table cannot accumulate dead rows. A missing table header is a hard
+    failure, never a vacuous pass, and a positive control pins that the locator
+    reads the coverage table and not the per-operator `status` table a dozen
+    lines above it.
+
+  The gate's docstring states exactly what it enforces — the pair SET only —
+  and what it deliberately does not: the `Means` cells, the
+  `corroborated`/`uncorroborated` qualifiers, and the surrounding prose. That
+  `undetermined` means "nothing was screened" at `static-screen` and
+  "placement withheld, figures still measured" at `bench` is meaning, not a
+  mechanically derivable fact, and stays a review problem.
+
+  Two follow-ons from review. `LEGITIMATE_COVERAGE_BY_BASIS["bench"]` being
+  DERIVED is now itself gated, structurally (`ast`, not a substring match): the
+  value assertion alone could not catch the `bench` entry being re-typed as a
+  literal `frozenset({...})` with today's four words — measured, that mutation
+  left `pytest tests/model/test_analyze.py
+  tests/gates/test_model_check_doc_coverage_table.py` at `51 passed, 11
+  skipped`, rc=0 — and re-creating that second hand-written list is exactly
+  what this change removes. And `tan.core.model_check._coverage_line`, the one
+  remaining production site still spelling `"undetermined"` inline, now reads
+  `COVERAGE_WITHHELD` too.
+
+  `docs/model-check-static-screen.md`'s summary sentence under the table said
+  `cpu-only` meant a different thing "two ways"; it is documented at three
+  bases (`compiled`, `bench`, `static-screen`). Corrected here rather than
+  deferred — it is prose the gate deliberately does not cover, which makes it
+  a review problem, and this was the review.
+
+  Mutation-proved in six directions, each restored from a byte copy: the
+  constant gaining `('full-eligible', 'compiled')` (red, naming it); the
+  constant losing `cpu-only` at `compiled` (red, naming both
+  `('cpu-only' @ 'compiled')` and the `('cpu-only' @ 'bench')` it derives);
+  the `undetermined` @ `bench` row deleted from the doc (red, naming it); an
+  invented `full-eligible` @ `bench` row added (red, naming it); the whole
+  table header removed (red on the locator, not a silent pass); and the
+  `bench` entry re-typed as a literal set (red on the derivation check,
+  naming what it was spelled as).
+
+- **`tan bootstrap` can now authenticate its own Zephyr SDK download.** The
+  toolchain phase spawns `west sdk install`, which lists the SDK releases
+  through the GitHub API; that quota is counted per source IP, so anyone
+  behind a shared egress address -- an office NAT, a corporate VPN, a hosted
+  runner pool -- could have it exhausted by traffic that was not theirs and
+  see `403 API rate limit exceeded`. `tan` had no way to pass a credential at
+  all: no flag, no environment variable, no manifest field. It now reads one
+  from `$TAN_GITHUB_TOKEN`, `$GH_TOKEN` or `$GITHUB_TOKEN`, in that order, so
+  an existing `gh auth login` session or a workflow token is picked up with
+  nothing new to set. The token needs no scopes; listing public releases
+  requires none. With none of the three set, the download stays exactly as
+  unauthenticated as before.
+
+  - **The token is never an argv element, by construction.** `tan` stages it
+    in a private `netrc` (mode `0600`, in a fresh temp directory deleted on
+    every exit path including failure) and points the child at it with
+    `$NETRC` -- the route `west sdk install`'s own rate-limit message names
+    ("or use a .netrc file"), and the only one that reaches west without a
+    command line, since west reads its `--personal-access-token` flag and no
+    environment variable of its own. So the value cannot appear in
+    `data.plannedCommands`, in the `--dry-run` plan, in the JSON envelope, in
+    a captured failure tail, or in a progress line; only the NAME of the
+    variable it came from is ever printed. It is accepted from the
+    environment only -- deliberately not as a CLI flag, which would put a
+    secret in shell history, in the host process table for the whole
+    multi-minute run, and in the argv customers paste into bug reports.
+
+- **A rate-limited SDK download now names a remedy `tan` will actually
+  accept.** West's own failure tells the reader to "try executing install
+  script with `--personal-access-token`" -- a flag on a command they never
+  typed and which `tan bootstrap` rejects. The failure now keeps west's text
+  verbatim and appends the tan-side remedy after it (the same shape the
+  low-disk and TLS-interception notes already use), naming
+  `$TAN_GITHUB_TOKEN` when the download was anonymous, and saying so
+  differently when a credential was already in play and the quota hit was
+  therefore the authenticated one.
+
+  - **Offered to `api.github.com` and to nothing else** — *narrower* than the
+    `west sdk install --personal-access-token` path it replaces, which puts an
+    `Authorization` header on the session. A netrc credential is matched per
+    host, so the release CDN that serves the actual archive never sees the
+    token.
+
+  - **Crash residue is reclaimed, not just cleaned up.** The `finally` that
+    deletes the staged `netrc` cannot run on `SIGKILL`, an OOM kill or power
+    loss, so `tan bootstrap` now sweeps a prior run's leftovers before staging
+    a new one — above the already-installed fast path, so a bootstrapped
+    machine reclaims them too. The staging directory lives under the toolchain
+    root rather than `$TMPDIR` because the sweep identifies what to delete by
+    NAME, and a name is only proof of ownership inside a directory `tan` owns.
+
+  - **The sweep never touches a concurrent run's live credential.** The
+    editor extension shells `tan`, so two `tan bootstrap` runs at once are
+    ordinary; deleting the first run's in-use netrc would silently downgrade
+    it to anonymous *after* it had printed that it was authenticating. The
+    sweep skips anything younger than the longest a staged credential can
+    legitimately live — 6.03 hours, doubled from the retry loop's own
+    attempt/timeout/backoff worst case — which is a bound that exists by
+    construction rather than a PID probe that would be racy under reuse. A
+    file dated into the future counts as live too, so a backwards clock step
+    cannot turn a running download's credential into rubbish to collect.
+
+- **A GitHub credential `tan bootstrap` cannot use now says so, in the JSON
+  envelope — and says only what actually happened.** New
+  `bootstrap.sdk-credential-unstaged` warning, raised when one of the three
+  variables is set but the value is not one `tan` will write into a netrc (a
+  quoted `.env` value keeps its quotes), or when the netrc could not be
+  staged. It is raised *after* the credential is resolved and staged, not
+  before, so with an unusable `$TAN_GITHUB_TOKEN` in front of a good
+  `$GH_TOKEN` the warning names the shadowed variable and then states that
+  the download was authenticated on `$GH_TOKEN` — rather than asserting, on a
+  registered wire code, that it went out unauthenticated when it did not. A
+  variable *behind* the one that won is not reported at all: it was never
+  going to be consulted. It is deliberately not workspace-blocking — the download
+  proceeds unauthenticated and usually still succeeds. Previously this was a
+  `Log.line`, which prints nothing in JSON mode, so an extension user got no
+  signal and was then told to set a token they could see was already set; the
+  rate-limit remedy now distinguishes that case too.
+
+- **A gate that reads a GitHub Actions `if:` key must now COMPARE it, never
+  SEARCH it (#1145, first of two).** `test_workflow_if_keys_are_compared_not_searched.py`
+  refuses every shape that stops reading the whole value: a membership test
+  (`in` / `not in`) where the guard is the CONTAINER; a membership test where
+  the guard is the ELEMENT but the container is a `str` literal or an
+  f-string, which is the same substring search with the operands swapped;
+  `is` / `is not` against a `str` literal, an identity test that can be
+  `False` for two equal strings; and any comparison operator outside `==` /
+  `!=` / `is` / `is not`. The guard on the ELEMENT side of a LITERAL
+  COLLECTION (`guard in {EXPR_A, EXPR_B}`) is a whole-value test and is
+  allowed. A bare `Name` container (`guard in ALLOWED_GUARDS`) is allowed too,
+  but as a **disclosed blind spot, not a blessing**: whether that name holds a
+  collection or a `str` needs name resolution this per-file walk does not do,
+  and with `ALLOWED_GUARDS = "steps.sdk_list.outputs.outage != 'true'"` Python
+  answers `True` to `'' in ALLOWED_GUARDS` — so an assertion written that way
+  passes on a step carrying **no `if:` key at all**, which is #1145's own
+  headline class. It is enumerated in the module docstring's
+  does-NOT-do list and pinned by its own control, so closing the gap reds a
+  test rather than arguing with a green one. Measured across every file the
+  scan reads — 267 on this branch, 270 on the merge with `dev`, so read it as
+  "all of them": 0 live sites put a guard on the element side of any
+  container.
+  The scan covers every `.py` file under
+  `python/tests/`, not only `test_*.py` under `python/tests/gates/`, so a
+  workflow-reading helper outside the gates directory is watched too
+  (measured at the widening: 0 additional reads, 0 additional violations).
+  The motivating instance is tan-cli#1137's own review finding: the
+  ceiling-job guard asserted
+  `RELEASE_OPT_OUT_INPUT in guard`, where `guard` is
+  `${{ !inputs.skip_ceiling_interpreter }}` — a substring test, so deleting the
+  `!` still passed (measured `32 passed` before and after the mutation). That
+  one character would have deleted the job from every PR **and** run it on the
+  release path, and the gate written to prevent exactly that was blind to it.
+  Polarity, negation and whitespace all live inside the expression, so a
+  substring test frees every character that matters; an exact comparison forces
+  a semantically-equivalent rewrite (`${{ ! inputs.x }}`,
+  `${{ inputs.x != true }}`) to move the expected constant with it. Two sites
+  already conformed and are what make this a rule rather than a heuristic —
+  `test_getting_started_sdk_outage_probe.py`'s `step.get("if") ==
+  GATE_EXPRESSION`, and #1137's own fix, which converged independently on
+  `guard == RELEASE_GUARD_EXPRESSION`.
+
+  **Assignment tracking is load-bearing, not thoroughness.** The shape that
+  shipped is two statements — `guard = <if-key read>` then `<needle> in guard`
+  — so a detector looking only at `Compare` operands would miss the single
+  instance this gate exists for. That is the punchline #1145 warns about: a
+  meta-gate that cannot catch its own motivating example. `_tainted_names()` is
+  deliberately flow-insensitive and module-wide, and the trade is recorded in
+  place so a later reader does not "fix" it into blindness: under-approximating
+  costs the defect this gate exists for, and what over-approximating actually
+  costs is measured below rather than waved away.
+
+  One binding form is not enough, and the walk is a **fixpoint** for that
+  reason: it follows a guard through a rebind, a `for` target, a comprehension
+  target, a `with ... as`, a walrus and a tuple unpack, so
+  `wrong = {n: _step(n).get("if") for n in STEPS}` followed by
+  `for name, guard in wrong.items()` is caught two hops from the read. That
+  exact shape was measured reporting clean against an assignment-only walk,
+  with #1137's guard polarity fully inverted in the workflow — and the read
+  floor did not save it (reads went 9 to 8, still above 6). What the walk
+  still does not follow is named exactly, in the module docstring and here: a
+  guard passed as a function parameter or returned/yielded out of one, a guard
+  stored on an attribute or subscript and read back through it
+  (`self.guard = ...`, `d["k"] = ...`, `C.guard`), a guard imported from
+  another module, and the bare-`Name` container above. Each was measured, not
+  guessed at. Binding an attribute target would mean tainting the receiver,
+  which taints `self` and reds every unrelated `NEEDLE in self.stdout` in the
+  same module. One more is newly written down: a name in a scanned module
+  rebound **from outside that module** (`import thatfile; thatfile.wrong =
+  {...}`, or an `exec` run elsewhere against its namespace). The in-file half
+  of that is closed — one mention of `exec`, `eval`, `globals`, `locals`,
+  `vars` or `from x import *` now makes every name in the file unresolvable —
+  but a write performed from another file is invisible to a per-file walk by
+  construction. It is the one fail-closed row this gate cannot reach, and it
+  is disclosed rather than papered over. 0 live sites: no file under
+  `python/tests/` writes an attribute onto another file under `python/tests/`.
+
+  Two further gaps are enumerated rather than chased, both with **0 live
+  sites** and both newly written down because the docstring previously implied
+  otherwise. First, a `str` container that is **built** rather than written as
+  one literal. `_string_container` decides an `ast.Constant` holding a `str`
+  and an `ast.JoinedStr`, plus implicit adjacent-literal concatenation
+  (`"aaa" "bbb"`), which the parser folds into a `Constant` before the walk
+  sees it — and nothing else. Measured, with `guard` tainted:
+  `guard in "aaa" + "bbb"`, `guard in "a %s b" % X`,
+  `guard in "a {} b".format(X)`, `guard in "".join([A, B])`,
+  `guard in str(ALLOWED)` and `guard in "abc"[0:2]` are all MISSED, and every
+  one of them is a substring search that `"" in <container>` satisfies.
+  Deciding them means deciding the TYPE of an arbitrary expression, which is
+  the same name resolution the bare-`Name` container is disclosed for. Second,
+  the rule stops at `ast.Compare` nodes: `guard.startswith(NEEDLE)` and
+  `re.search(NEEDLE, guard)` are not refused, while `guard.find(NEEDLE) >= 0`
+  is, purely because `>= 0` makes it a comparison.
+  `assert guard.startswith("${{ inputs.skip_ceiling_interpreter")` is #1137's
+  defect verbatim with the `!` deleted. Closing that one means an allow/deny
+  list of `str` methods and of the `re` surface, which is a different rule from
+  "read the whole value". Both gaps carry a control, so closing either reds a
+  test rather than passing quietly.
+
+  Taint does not escape onto the wrong half of a `.items()` unpack, and which
+  half is wrong is **decided, not assumed**. Tainting the whole tuple spilled
+  onto identifiers as generic as `name`: measured before any narrowing,
+  `test_getting_started_sdk_outage_probe.py`'s taint set was
+  `['found', 'name', 'wrong']`, so an unrelated `assert "tan-cli#840" in name`
+  written later in that 232-line module would have red with a paragraph about
+  workflow `if:` keys. But narrowing to the VALUE element on the reasoning
+  that a mapping key is a step name gets the opposite orientation exactly
+  backwards, and that is a MISS: measured on
+  `wrong = {_step(n).get("if"): n for n in STEPS}` followed by
+  `for guard, name in wrong.items()`, the taint set was `['name', 'wrong']`
+  and the only line reported was the unrelated one on `name` — the substring
+  test against the actual guard went unreported. So `_items_guard_side` reads
+  the receiver's own bindings — **all** of them. The side is kept only when
+  the receiver is a bare `Name` whose EVERY binding in that module is visible
+  and is a `Dict` literal or a `DictComp`, with an `if:` read on exactly one
+  side. **One** binding by any other form refuses it: a `for` or comprehension
+  target, a `with ... as`, an `AugAssign`, a tuple or `Starred` unpack, a
+  function or lambda parameter, an `import ... as`, an `except ... as`, a
+  `match` capture, a `global` / `nonlocal`, a `def` / `class` / `type` name, a
+  PEP 695 type parameter. So does a `Dict` carrying a `**` (its pairs are
+  written somewhere else), a `.items(...)` call that takes arguments (`dict`'s
+  takes none, so it is some other method on some other object), an unpack that
+  is not exactly two elements (`dict.items()` yields pairs), and a module that
+  binds names dynamically. In every one of those **both elements stay
+  tainted** — fail closed, because only one of the two directions can cost the
+  defect, and the other one costs what the `off` paragraph below measures.
+
+  **Failing closed on the forms nobody enumerated is the point.** An earlier
+  revision resolved the receiver by reading `ast.Assign` and nothing else,
+  while the binding walk beside it enumerated seven forms — so a name bound
+  once by a decidable `Assign` and once by a `for` target had the `Assign`
+  treated as its COMPLETE binding set, and a side was picked out of a dict
+  that is not the one at the `.items()` call. Measured on
+  `wrong = {_step(n).get("if"): n for n in STEPS}` followed later by
+  `for wrong in _maps_keyed_by_name():` and
+  `for name, guard in wrong.items(): assert GATE_EXPRESSION in guard`, that
+  revision reported **nothing at all** where the two revisions before it both
+  reported the guard line — and it reproduced on the live tree, in
+  `test_getting_started_sdk_outage_probe.py`, the same file the earlier miss
+  came out of. The resolver now records every binding form in the language and
+  fails closed on all of them, and **28 rebinding forms** carry a control
+  each, so a form dropped from the walk reds a test. Live cost of the change:
+  none — 267 files, 9 `if:`-key reads, 0 violations, and the same three taint
+  sets as before (`['found', 'wrong']`, `['guard']`, `['off']`).
+
+  On the shipped tree that leaves
+  `test_getting_started_sdk_outage_probe.py` at `['found', 'wrong']` — `found`
+  on its own merits, being bound directly from `_step(...).get("if")`. The two
+  remaining taint sets are `['guard']` in `test_interpreter_policy.py` and
+  `['off']` in `test_release_docs_match_the_workflow.py`; `off` holds job names
+  and is the named residual cost of over-approximating, recorded verbatim in
+  `_tainted_names`' docstring.
+
+  Ships with what #1145 requires of any meta-gate, because the hazard is that
+  its own scan silently stops matching and it then reports zero violations
+  forever: **twenty-eight fabricated-input controls** (direct membership; the
+  two-statement shape; subscript reads with `not in`; a `.items()` unpack; a
+  rebind; a binding whose source is tainted only later in the walk; an
+  ordering operator; a `str`-literal container; an f-string container; `is`
+  against a `str` literal; whole-value membership against a set, tuple, list
+  and `frozenset(...)` literal; the bare-`Name` container blind spot, pinned
+  so closing it reds here; BOTH orientations of a `.items()` unpack — the key
+  that is a step name and must NOT be tainted, and the key that IS the guard
+  and must be; an unresolvable `.items()` receiver, which must taint both
+  elements; the six built `str` containers and the three non-`Compare`
+  searches, each a measured gap pinned so closing it reds here; an
+  attribute/subscript store that must NOT taint its receiver; a conforming
+  sample that includes a membership test on something that is *not* an `if:`
+  value; a receiver whose side IS decided, as the baseline the fail-closed
+  rows are measured against; **28 rebinding forms** in one table, each
+  splicing a second binding of that receiver in and each required to report
+  BOTH lines; a star import, which cannot sit inside a function and so needs
+  its own module; both orientations of the `Assign`-plus-`for`-rebind blocker;
+  a `Dict` LITERAL receiver, which no earlier control ever built; a `Dict`
+  carrying a `**`; a `.items(...)` taking a positional and a keyword argument;
+  a three-element unpack; and a tuple unpack whose source IS a `DictComp`,
+  the one shape where refusing to name a value for a target the walk did not
+  bind whole changes the answer), a **candidate
+  floor** — 9 `if:`-key reads measured across `python/tests/` today, floored
+  at 6 — and a **scan-coverage control** naming files the old
+  `gates/test_*.py` glob skipped, so narrowing the scan back reds something
+  even on a day when there is no violation outside `gates/` to catch.
+
+  Every changed predicate is mutation-proven rather than asserted, and the
+  four that were not are the reason this paragraph is re-measured: deleting
+  the `Dict`-literal resolution branch, accepting a `**` expansion, dropping
+  the `.items()` argument check and dropping the two-element unpack check each
+  used to leave the file **fully green**, while two docstrings went on
+  documenting a `Dict` literal as a supported resolution path that no control
+  ever built. Measured now from a green 31, across **twenty-four** mutations,
+  none of which reaches green:
+  blinding `_is_if_key_read` reds 23; blinding `_tainted_names` reds 17;
+  dropping the tainted-name-as-guard-source rule reds 17; sweeping once
+  instead of iterating to a fixpoint reds 1; dropping the `for` binding form
+  reds 12; un-wiring `_ALLOWED_OPS` reds 2; flagging the element side of `in`
+  unconditionally reds 3; restoring the `ast.walk(target)` receiver taint reds
+  1; narrowing the scan reds 1; blinding the string-container predicate reds
+  2; widening it to accept every container reds 3; dropping the
+  `is`-against-a-`str`-literal refusal reds 1; dropping the `.items()`
+  narrowing entirely reds 4; narrowing it to the VALUE element unconditionally
+  reds 7; narrowing it to the KEY element unconditionally reds 10; dropping
+  the `Dict`-literal branch reds 1; accepting a `**` expansion reds 1;
+  dropping the `.items()` argument check reds 1; dropping the two-element
+  unpack check reds 1; reverting the resolver to an `Assign`-only walk reds 4;
+  dropping the dynamic-binder refusal reds 2; resolving a non-`Name` binding
+  target to its source reds 1; dropping the function-parameter row reds 1;
+  dropping the `for` / comprehension row reds 2. Each restored from a byte
+  copy (`cp`, never `git checkout`) and re-verified byte-identical (68229
+  bytes, sha256 `1e7967d7b86f289b...`).
+
+  Scope is deliberately narrow. #1145's audit found 70 substring candidates and
+  read 69: essentially all assert on driven subprocess stdout/stderr, where
+  presence genuinely IS the property. Only the `if:`-key surface is decidable,
+  so only it is gated.
+
+- **A gate for the gate that cannot fail because its loop never runs.** Four
+  gates whose negative half could not fail have been found in this repo, each
+  one by accident during a review of something else. #1145 asks for two
+  mechanical gates against that class; this is the second. The first — an
+  `if:` key must be compared with `==`, never searched with `in` — ships
+  separately in PR #1168, and nothing about it is here. (This fragment carries
+  the `vacuity` infix, the shape `782.docs.added.md` already uses, because
+  #1168's fragment is `1145.added.md`: two PRs on one issue would otherwise
+  both CREATE the same path, each diffing clean against `dev` and reporting
+  `MERGEABLE`, and whichever landed second would take an add/add conflict.
+  `assemble_changelog.py`'s `rsplit(".", 1)` reads the category off the tail,
+  so the infix parses and `1145.added.2.md` would not.)
+
+  `python/scripts/audit_vacuous_gate_shapes.py`, wired into `ci.yml`'s `python`
+  job, re-runs `tests/gates` under `coverage` and reports two things no static
+  walk can see:
+  - **A `for` loop that never iterated** — header line executed, no line of its
+    body ever did, across a whole run. Every assertion inside such a loop is
+    unreachable. Eight exist and are now declared in `ALLOWED_EMPTY_LOOPS`,
+    each with a reason that must first pick one of THREE CLASSES, because they
+    mean different things:
+    - `healthy-empty` — the loop collects violations and its being empty IS the
+      gate passing; an iteration would be the failure. Covers
+      `test_core_does_not_import_commands.py`, `test_module_size_budget.py`'s
+      two membership halves, `test_no_new_hardware_facts.py` and
+      `test_release_docs_match_the_workflow.py`.
+    - `forward-looking` — the population is empty today, so the assertions
+      inside are currently checking nothing and everyone can see it. Covers
+      `test_interpreter_policy.py`'s `INTERIOR_PINS` loop — which already said
+      so in prose — plus `test_oracle_capture_store_is_labelled.py`'s
+      `_PATTERN_LOAD_CALL` half and
+      `test_subprocess_env_routes_through_the_helper.py`'s keyword half,
+      neither of which had ever been declared.
+    - `unmeasurable` — the collection was NOT empty; this run could not see the
+      body. `header covered and body uncovered` does not mean "the collection
+      was empty": a `for` whose ITERABLE RAISES has the identical coverage
+      signature (measured), and so does one whose body only ever runs in a
+      SPAWNED interpreter the parent's coverage never saw — and this repo
+      spawns at 337 measured call sites
+      (`grep -rnE "subprocess[.](run|Popen|check_output|check_call)"
+      python/{tan,tests,scripts} --include=*.py | wc -l`; `tan` 51, `tests`
+      274, `scripts` 12; `subprocess.run` 307 and `subprocess.Popen` 30,
+      with `check_output`/`check_call` at 0). **ZERO rows today**, and the class exists so the
+      first one is declared honestly instead of being filed as one of the two
+      labels that would be false of it. It carries a HIGHER bar than the other
+      two and the bar is CHECKED, not merely asked for: the reason must name
+      which shape defeated the measurement (`"raises"` or `"spawned"`) AND
+      say where the body IS `"exercised by"` — the `pytest.raises` around it,
+      the child command, or plainly that nothing exercises it. Without the
+      shape it is a shrug; without the location the next reader cannot tell
+      whether real coverage exists elsewhere or nowhere. Because zero rows
+      exist, the parametrized row test cannot reach that branch at all, so it
+      is driven on fabricated reasons in both directions instead — the
+      vacuity this gate is about, one level up.
+
+    An undeclared loop reds. A row may cite no `file.py:<line>`: the key is
+    line-free so it cannot rot, and a first draft then let the prose rot inside
+    one commit when an unrelated edit two hundred lines higher moved the
+    constant a reason pointed at. A row must also name EXACTLY one loop, not at
+    least one: `(file, header source)` is not unique within a file — measured,
+    299 sites under `tests/gates/` carry 265 distinct keys, 28 of them shared
+    by 2–4 sites — so `any(...)` would have let one reviewed row exempt up to
+    three unreviewed siblings. And neither allow-list may spell a key twice:
+    both are dict literals, Python drops the earlier row in silence, and the
+    reviewed reason beside it can be replaced by anything with nothing
+    objecting (the shape `_module_size_budget_core.py`'s `_load_json` already
+    refuses for its records, citing #586).
+  - **A gate FILE that executed no `assert` at all**, the coarse skip-guard form
+    and deliberately no finer: "this file asserted nothing today" is decidable,
+    "this file's assertions are load-bearing" is not. Two exemptions, both
+    `ALP_SDK_ROOT`-gated skips. Measured against #1145's own prediction,
+    `test_planner_relocation_freshness.py` is NOT among them — on `dev` at
+    `658f2e37` it executes assertions with no `ALP_SDK_ROOT` bound. The
+    prediction was wrong; the measurement stands and is recorded in the table.
+
+  `python/tests/gates/test_vacuous_gate_shapes.py` holds everything that needs
+  no coverage run, so it runs in every leg including the required
+  `seam1-plan-shape` one: **no tautological assertion** and **no assertion
+  swallowed by its own `try`** — plus allow-list staleness, the floors, and
+  every negative control. The tautology walk covers four decidable spellings
+  (`assert True`, `assert x == x`, an f-string carrying literal text, and
+  `assert (x, "msg")` — the dropped comma), each narrowed to what the code can
+  actually decide rather than to what merely looks always-true: `f""` and
+  `f"{x}"` are `""` for an empty interpolation, `()` is falsy and `(*xs,)` is
+  `()` for an empty `xs`, so all four are declined and each carries its own
+  false-positive control. The f-string rule is exactly "carries a non-empty
+  literal `Constant` segment", which is an UNDER-claim and says so: measured on
+  CPython 3.12.3 with `x = ""`, `bool(f"{x!r}")` and `bool(f"{x:>10}")` are
+  both `True`, and both are declined anyway, because `__repr__` and
+  `__format__` are overridable to return `""` and flagging them would be the
+  over-claim this walk exists to catch. (`f"{x=}"` IS flagged, correctly — the
+  `=` spec emits a real `Constant("x=")`.) Measured across
+  `python/{tan,tests,scripts}` — 13508 `assert` statements — **zero of all
+  four**, and zero `assert <f-string>` of any kind, so the two deliberately
+  declined spellings account for none of the gap either.
+
+  The `==` arm is the one place the walk knowingly OVER-claims, and that is
+  now recorded beside the two declined f-string spellings rather than left
+  implied. `__eq__` is as overridable as `__repr__`/`__format__`, and unlike
+  those it has a BUILT-IN counterexample: on CPython 3.12.3
+  `float("nan") == float("nan")` is `False`, so `assert x == x` is reported
+  as unconditionally true while genuinely failing for a NaN. It stays
+  flagged — useful in every non-NaN case, and an `assert x == x` written to
+  test for NaN wants `math.isnan` — but the claim is now stated accurately
+  and `test_the_eq_arm_flags_the_nan_case_too` pins BOTH the flagging and
+  the live counterexample, so a later narrowing to `ast.Is` reds visibly
+  instead of quietly changing what the docstring means. The `is` arm is
+  sound.
+
+  **The recursive hazard is the reason for the shape.** A meta-gate for this
+  defect class can *become* the thing it detects: if its scan silently stops
+  matching it finds no candidates and reports clean.
+  `scripts/audit_narrow_except_contracts.py` shipped 290 lines of `ast` logic
+  with no test coverage at all. So it ships with **fabricated-input negative
+  controls** (the pattern at `test_every_issue_code_is_registered.py`'s
+  `_stale_forwards(live | {fabricated}) == [fabricated]`) and **candidate
+  floors** (the pattern at `test_inert_option_markers.py`'s
+  `len(ALL_OPTIONS) >= 400`): 299 `for` sites against a floor of 240, 1417
+  `assert` statements against 1100, and — not a typed number — **all 65** gate
+  modules measured, derived as `len(gate_modules()) - 0`. That third floor is
+  zero-slack on measurement, not on principle: with a slack of one, deleting
+  `test_no_new_hardware_facts.py` from a real coverage mapping still PASSED at
+  `64` against a floor of `64` while the never-iterating count silently fell
+  from 8 to 7 — one loop exempted by nothing but absence. It bit the fix for
+  this gate too: the first draft of the duplicate-allow-list-key walk matched
+  only `ast.Assign`, both tables are `ast.AnnAssign`, and it reported a clean
+  zero having reached neither. The walk is now driven on both spellings, its
+  reachability against the real tables is asserted — and the assertion reads
+  the SAME walk the check does. It did not, for two rounds: the guard
+  re-implemented the `Assign`/`AnnAssign` walk in the test file and compared
+  its own count against the imported table, so re-narrowing the real walk left
+  the guard green (`8 == 8`, `2 == 2`) while
+  `core.duplicate_literal_dict_keys` saw `[]` for both tables — a guard for a
+  copy, not for the function. There is now one implementation
+  (`core.literal_dict_keys`), read by both, plus a control that inserts two
+  rows carrying a sentinel key into the real table's own source and asserts
+  the walk reports it. Re-narrowing to `ast.Assign` gives
+  `5 failed, 78 passed`, with both reachability parameters and both control
+  parameters among them by name.
+
+  Mutation-proved, restoring from `cp` byte copies with `__pycache__` cleared
+  before and after and the sha256 re-verified each time. Every number below
+  was re-measured for the SEVENTH round, on `b1f7bce8` with that round's
+  job-level `if:` check applied, against the file's own **83 tests**
+  (`83 passed` clean) — every mutant reproduced, each at the same failure
+  count and one `passed` higher than the sixth round's, which was measured
+  against 82.
+  Environment, because a number stated without one is not reproducible:
+  CPython 3.12.3 on Linux, `pytest 9.1.1`, `pytest-xdist` and `pyserial` both
+  INSTALLED, and none of `ALP_SDK_ROOT` / `ALP_SDK_HAND_PORT_ROOT` /
+  `ALP_SDK_STRICT_LOADERS_ROOT` bound.
+
+  Detector mutants: `never_iterating` → `[]` gives `4 failed, 79 passed`;
+  `body_line_span` reverted to `body[0].lineno` keying — the bug that produced
+  the detector's original two false positives — gives `1 failed, 82 passed`;
+  `iter_for_sites` → `[]` gives `15 failed, 68 passed`; a reworded allow-list
+  row, an unclassified reason, and a reason carrying a line citation each give
+  `1 failed, 82 passed`; a row re-keyed onto a header that occurs four times
+  gives `1 failed, 82 passed`; a duplicate `ALLOWED_EMPTY_LOOPS` key gives
+  `3 failed, 80 passed`.
+
+  The `2 failed, 40 passed` an earlier round attributed to the
+  `body_line_span` mutation reproduces at NO head. Measured, baseline against
+  mutated, at every head this fragment has been written on:
+
+  | head | baseline | `body_line_span` → `body[0].lineno` |
+  | --- | --- | --- |
+  | `d6673fa` | `42 passed` | `1 failed, 41 passed` |
+  | `c6843f8` | `44 passed` | `1 failed, 43 passed` |
+  | `4a9f882` | `44 passed` | `1 failed, 43 passed` |
+  | `c2a083a2` | `65 passed` | `1 failed, 64 passed` |
+  | this head | `83 passed` | `1 failed, 82 passed` |
+
+  A previous round cited `1 failed, 43 passed` as "the same mutation on the
+  pre-fix tree" while naming `d6673fa` as that tree. `1 failed, 43 passed` is
+  `4a9f882`'s number; `d6673fa`'s is `1 failed, 41 passed`. The arithmetic
+  argument built on the mismatch is dropped rather than repaired — the table
+  is the evidence, and the mutant fails at every one of the five heads.
+
+  CI-wiring mutants, all measured on a real `ci.yml` edit. The step is one
+  `pytest tests/gates` child away from somebody else's red, so the motive to
+  silence it arrives before the motive to read it. **Every one of the
+  following reds at `1 failed, 82 passed`**: `continue-on-error` on the JOB
+  and on the STEP, in each of four spellings — a literal `true`,
+  `${{ true }}`, a quoted `"true"`, and
+  `${{ github.event_name == 'pull_request' }}`; a JOB-level `if:` expression;
+  `if: false` and an `if:` expression on the step; `--report`, `--rep` and
+  `--r` (every `argparse` prefix of the never-exit-1 switch); `|| true`,
+  `; true`, `|| exit 0`; and `--coverage-data /tmp/x`, a narrowing rather than
+  a silencing.
+
+  Six of those eight `continue-on-error` rows are this round's finding and
+  were GREEN before it. Both checks compared with `is not True`, and
+  `yaml.safe_load` hands an expression — and a quoted `"true"` — back as a
+  `str`, for which `"…" is not True` is `True`. Measured on `c2a083a2`:
+  `65 passed`, no red at all, for each of `${{ true }}`, `"true"` and
+  `${{ github.event_name == 'pull_request' }}` at both levels, against
+  `1 failed, 64 passed` for the plain `true` the comparison did catch. GitHub
+  Actions documents the key as taking an expression, so the scenario is
+  ordinary: the audit reds on somebody else's undeclared loop, the author
+  writes `${{ github.event_name == 'pull_request' }}` to "only enforce it in
+  the merge queue", the audit goes silent on every PR and the test stays
+  green. Both comparisons are now `in (None, False)`, with
+  `test_the_two_non_softening_continue_on_error_spellings_pass` as the
+  positive half so the widening cannot become a check nobody can satisfy.
+
+  The JOB-level `if:` row is the SIXTH round's finding and was green before
+  it: measured on `b1f7bce8`, `if: github.event_name == 'schedule'` inserted
+  immediately after `  python:` in `ci.yml` gave `82 passed`, no red at all.
+  A skipped job renders as "skipped", not "failed", so the audit runs zero
+  times and nothing objects — the `continue-on-error` motive verbatim ("only
+  enforce it in the merge queue"), one level up and with a LARGER blast
+  radius, since the whole job disappears rather than one step and
+  `if: github.event_name != 'pull_request'` achieves it invisibly.
+  `assert "if" not in job` now sits beside the job-level `continue-on-error`
+  check. `ci.yml`'s `python` job carries no `if:` today — its parsed keys are
+  exactly `runs-on`, `steps` and `timeout-minutes` — and the helper is only
+  ever handed that job or a fabricated stand-in, so `python-newest`'s
+  legitimate `${{ !inputs.skip_ceiling_interpreter }}` is out of scope by
+  construction rather than by exemption.
+
+  `|| :` is carried for completeness and is NOT reachable unquoted: a bare
+  `run: python scripts/… || :` is invalid YAML — the trailing `: ` is a
+  mapping indicator — and PyYAML refuses the whole file with
+  `yaml.scanner.ScannerError: mapping values are not allowed here`, so all
+  three job-parsing callers error on the load (`3 failed, 80 passed`, none of
+  it from a check). GitHub Actions' own parser rejects it identically, which
+  makes the conclusion stronger than "the check catches it". Quoted, it is
+  ordinary YAML and `DISCARDS_EXIT_STATUS` is what catches it
+  (`1 failed, 82 passed`).
+
+  The command is also compared EXACTLY, the shape
+  `test_interpreter_policy.py`'s `FULL_SUITE_COMMAND` uses and the one thing
+  that caught `|| true` there. Dropping the step's `env:` block gives
+  `1 failed, 82 passed`; replacing the step with a no-op gives
+  `3 failed, 80 passed`. The `coverage`-is-installed check no longer scans the
+  audit step's own `run:` — passing it `--coverage-data` while deleting
+  `pip install … coverage` used to satisfy the check with its own subject, and
+  now gives `2 failed, 81 passed`.
+
+  Real-defect mutants, end to end through the script: a newly-added
+  never-iterating loop in `test_no_conflict_markers.py` exits 1 naming
+  `tests/gates/test_no_conflict_markers.py:86: for marker in ():`; dropping
+  both zero-assert exemptions exits 1 naming
+  `test_example_catalog_cores_selector_agrees_with_planner.py` (19 `assert`
+  statements) and `test_jlink_aen_device_freshness.py` (4); holing one module
+  out of the coverage mapping exits 1 on the measured-module floor
+  (`64 of 65 on disk, below the floor of 65`).
+
+  **Not attempted, recorded so it is not re-attempted.** Unreachability that
+  needs a dataflow invariant — seeing that
+  `sorted(_covered - set(_SEEDED_CONTRACTS))` is empty for every input requires
+  knowing `_covers` enforces membership before populating `_covered` — is a
+  refinement-typing problem, not a lint (#1062's round-3 review): review
+  discipline, permanently. And five line-attribution shapes the detector is
+  blind to are named rather than guessed at: comprehensions (header and body
+  usually share a physical line), `while` (a false first condition is the
+  ordinary shape of a retry loop), a single-line body (`for x in y: f(x)`
+  leaves nothing to compare), an uncovered header (a different defect, and
+  folding it in would bury the eight real findings under every
+  `ALP_SDK_ROOT`-gated skip in the directory), and a body measured only by a
+  spawned interpreter (the `unmeasurable` class above).
+
+  **Two costs disclosed rather than implied.** The coverage run is a second
+  full execution of the directory: `1236 passed, 112 skipped in 33.12s` plain
+  against `61.05s` under `coverage`; the audit end to end measures 63.66s in
+  the `pull_request` configuration and 65.17s under `merge_group`, rc=0 both.
+  Those pass/skip counts are environment-bound and are stated with the
+  environment named two paragraphs up rather than as bare truths; a round-5
+  figure of `1197 passed, 59 skipped` did not reproduce for the reviewer
+  (`1210 passed, 60 skipped`) and is replaced rather than defended. The
+  wall-clock ratio the cost argument rests on held either way. 109 of the 112
+  skips are SDK-root-gated; the other three are
+  `test_never_raises_contract_holds.py`'s "has no parse step of its own to
+  malform".
+  It is wired into `ci.yml`'s `python` job only, and the reason is that cost
+  and nothing subtler — a bound `ALP_SDK_ROOT` in `seam1-plan-shape` could only
+  *shrink* the never-iterated set, never produce a false finding, so
+  correctness is not the argument. `python` is not a required status context,
+  so a new never-iterating loop reds VISIBLY on the PR without blocking the
+  merge; the static half does block, through seam1. The step binds
+  `TAN_MERGE_GROUP_BASE_REF` itself, because it spawns its own
+  `pytest tests/gates` child that inherits `GITHUB_EVENT_NAME=merge_group` from
+  the job but not a step-scoped `env:` from a different step — without it every
+  merge-queue run reds on an unresolvable base ref
+  (`1 failed, 1235 passed, 112 skipped`) and measures nothing.
+
+- **`tan bootstrap` no longer claims an authenticated Zephyr SDK download it
+  cannot verify.** The credential added in #1143 reaches `west sdk install`
+  through a private `netrc` and `$NETRC`, which works because of two facts
+  about code `tan` neither owns nor pins: `west sdk install` takes a token from
+  `--personal-access-token` and from no environment variable of its own, and
+  its no-token branch sends an empty header dict. Both were re-measured at
+  Zephyr v4.4.1 (`scripts/west_commands/sdk.py:473`/`:478`) and still hold at
+  v4.4.2 and on `zephyrproject/main`, but nothing keeps them holding. If they
+  stop, the download silently falls back to the anonymous per-IP quota while
+  the user is told they are authenticated -- and **an inert credential is worse
+  than an absent one**, because it removes the symptom that would send them to
+  find a token. `tan bootstrap` now reads the `scripts/west_commands/sdk.py` in
+  the Zephyr it has already resolved, and when it no longer matches that shape
+  the `Authenticating the Zephyr SDK download ...` line is replaced by a
+  `bootstrap.sdk-credential-unverified` warning. The credential is still staged
+  and still passed -- it may well still work, and withholding it would
+  *guarantee* the anonymous quota; what is withdrawn is the assurance. The
+  warning names the two things the reader can do (retry from a different egress
+  address, or run `west sdk install --version <pin> -t arm-zephyr-eabi` by hand
+  with their own `~/.netrc` entry for `api.github.com`) and where to report it,
+  never anything about west's internals, and never the token value.
+
+  - **A runtime check, deliberately not a CI gate.** `requests` is not a `tan`
+    dependency and `ci.yml` checks out alp-sdk but never zephyr, so a CI-time
+    version of this would skip in CI *and* on every developer box -- a gate that
+    cannot fail. This runs only where the artifact exists, which on the path
+    that matters (a `tan bootstrap` about to spend several minutes on an
+    authenticated download) is always. It stays silent when there is nothing to
+    read -- an adopted topdir whose zephyr is not where the manifest declares
+    it, a `west update` that part-failed, a Zephyr that moved
+    `scripts/west_commands`: "could not look" is not evidence the assumption
+    broke, and a warning on all three would train the reader to skip the code
+    on the one run where it means something.
+
+  - **What it does NOT cover, said in the source rather than left to be
+    inferred.** The check watches for the two shapes measured to suppress the
+    netrc (`auth=` and `trust_env=False`), for the flag `west`'s own token
+    arrives on, and for the environment reads. A `west` that stops using
+    `requests` altogether, or that moves off `--personal-access-token` while
+    still mentioning it, satisfies every one of them -- so the absence of the
+    warning is not proof, and `west_sdk_netrc_assumptions_hold`'s docstring
+    says so.
+
+  - **The rate-limit remedy no longer contradicts the warning it follows.** A
+    `west sdk install` that then failed on a GitHub quota used to be told "tan
+    already handed this download the credential in `$TAN_GITHUB_TOKEN`" even on
+    a run that had just printed `sdk-credential-unverified` and said to treat
+    itself as unauthenticated -- two wire surfaces, one download, opposite
+    verdicts. That case now gets its own remedy, which names both quotas
+    instead of inferring one tan cannot see, and points back at the warning's
+    remedies rather than repeating them.
+
+  - **And the authenticated remedy no longer names a shape that suppresses
+    nothing.** It used to close by suggesting a `west` that "sets its own
+    Authorization header would silently bypass" the netrc. Measured on
+    `requests` 2.34.2 a header does not bypass it -- the netrc match overwrites
+    the header -- so that sentence would have sent a customer to file a west
+    bug about the wrong thing. It now names the two shapes that really do leave
+    tan's credential unread.
+
+- **`tan monitor`'s `data.availablePorts[].{device,description}` now has a
+  golden envelope (`contract/envelopes/monitor-no-port`, tan-cli#1165).** The
+  `monitor.no-port` refusal itself was frozen wire vocabulary already, but the
+  payload alp-sdk-vscode actually reads out of it -- `device`/`description`,
+  read by `src/monitor.ts::listSerialPorts` (alp-sdk-vscode#649, still OPEN
+  at the time of writing) -- was pinned by nothing: a rename
+  of either key would make the extension silently report "No serial ports
+  were found" while `tan monitor` itself printed a full list, a confident lie
+  rather than a loud break. The new golden pins two entries: one with a real
+  `description`, and one carrying `"n/a"` -- the literal string pyserial's own
+  `ListPortInfo.__init__` assigns when a port reports none, and therefore what
+  `tan` actually sends, not a value invented for the fixture.
+  `_available_ports()`'s real source enumerates whatever serial hardware is
+  physically attached to the recording machine, which cannot be a
+  deterministic golden, so this adds `TAN_MONITOR_TEST_PORTS_JSON`
+  (`_TEST_PORTS_ENV` in `python/tan/commands/monitor_cmd.py`) -- a
+  contract-harness seam ONLY, never a documented `--help`-visible flag, in the
+  same shape the repo already uses for `ALP_FLASH_FORCE` -- which replaces the
+  enumeration outright, JSON-encoded, and also short-circuits `_run_monitor`'s
+  own "pyserial is importable" precheck so the case does not depend on
+  whether pyserial happens to be installed in whatever environment replays
+  it.
+
+- **A gate resolves every `file:line` citation in `changelog.d/` against the
+  worktree, so a coordinate that rots between being written and being folded
+  is caught before it ships.** `splice()` copies a fragment byte-for-byte into
+  `CHANGELOG.md`, so a stale coordinate becomes permanent at the next release
+  and nothing was looking. Five instances were measured in a single day:
+  `1163.fixed.md`'s `tan/core/toolchain_provision.py:520` (the constant is at
+  `:599`), `1134.fixed.md`'s `parity.yml` set, PR #1168's
+  `test_inert_option_markers.py:110` (the assertion is at `:111`), PR #1166's
+  `parity.yml:2306` and PR #1181's `release.yml:825` — each moved by its own
+  PR's merge or its own PR's edit. The alternative on the table was the
+  convention "name the symbol, not the coordinate", which is what produced the
+  five.
+
+  `python/tests/gates/test_changelog_citations_resolve.py` resolves a cited
+  path against the tracked file list — exactly, then by UNIQUE suffix, because
+  fragments cite `parity.yml` and `tan/core/toolchain_provision.py`, not
+  repo-relative paths — and fails on a line number outside `1..len(file)`. Both
+  endpoints of a range are checked and every item of a comma list.
+
+  **A path it cannot resolve is never a failure**, and that is load-bearing
+  rather than a shortcut: a fragment may cite a file its own PR deletes, and 16
+  of the 76 coordinates in this directory name alp-sdk, alp-sdk-vscode, Zephyr
+  or the frozen `crates/` tree. Two more shapes are skipped as transcripts of
+  some other tree — anything inside a fence, and the grep/compiler shape
+  `<path>:<line>: <the line's own text>`, of which `1145.vacuity.added.md`
+  carries one measured against a deliberately mutated tree.
+
+  A coordinate deliberately at a PARENT commit is written
+  `<path>@<ref>:<line>` and range-checked against `git show <ref>:<path>`
+  instead — a real check, not an exemption, and one a reader can visit.
+  Prose cannot be used to tell those apart, so the marker goes where a machine
+  reads it. `408.fixed.md`'s two past-tense coordinates are re-cited that way,
+  which is what exercises the path on real content.
+
+  Scope is stated in the module docstring and worth repeating: it catches an
+  out-of-range coordinate and **not** an in-range one pointing at the wrong
+  line — which includes its own motivating instance. Two stronger rungs were
+  built and measured against this directory before being rejected as unsound;
+  the docstring records both, with their yields. One of the two found
+  `853.fixed.md`'s coordinate set to have rotted wholesale, which is filed as
+  tan-cli#1198 rather than rewritten here.
+
+- **Three pending fragments' citations corrected, and one false factual claim
+  with them.** `1163.fixed.md` cited `:520` for `SDK_TOKEN_ENV_VARS` (`:599`,
+  and `:520` was already off by one against `:521` on the day it was written)
+  and named the two token-carrying `getting-started.yml` steps at `:525`/`:566`
+  when they are at `:575`/`:610`; its wrapped `SDK_TOKEN_ENV_VARS` span, which
+  CommonMark would have folded to three spaces, is now on one line.
+  `1134.fixed.md`'s re-measured `parity.yml` set was correct at its own landing
+  commit and had moved another 19 lines since, so it names its five subjects
+  instead of their coordinates; its "no Windows host is available *locally*"
+  claim is false and is corrected rather than shipped — `parity.yml` records
+  pre-landing re-measurement on a Windows host, `PROVENANCE.txt` records a real
+  win32 oracle capture, and the UNC monitor case is measured against a real
+  `serial.Serial(r"\\.\COM38")`. The gate reads no prose and would not have
+  found that half; it is named here so the boundary is not mistaken for
+  coverage.
+
+- **`parity.yml`'s `seam1-plan-shape` — a REQUIRED merge-queue context — can no
+  longer be neutered, and the three steps that are *meant* to be soft are named
+  with their reason instead of merely tolerated.** New gate,
+  `python/tests/gates/test_parity_seam1_is_blocking.py`.
+
+  `seam1 -- plan-shape parity` is in `dev`'s required status checks (measured
+  2026-09-04 against `GET /repos/alplabai/tan-cli/branches/dev/protection`,
+  alongside the three `python -- pytest across python/` legs and
+  `zizmor · workflow security`), so the merge queue lands PRs on its say-so —
+  and nothing in the tree asserted it still asserts anything.
+  `grep -rn "continue-on-error" python/tests/` found no test that reads
+  `parity.yml` at all. tan-cli#1182 fixed exactly this defect one workflow
+  over, and that fix is scoped to `ci.yml`'s ceiling job.
+
+  **It could not be a copy of that fix**, which is why it was filed separately.
+  `seam1-plan-shape` legitimately carries three `continue-on-error: true` steps
+  — `planner relocation freshness vs live alp-sdk (alarm, warn only)`,
+  `hand-port freshness vs live alp-sdk (alarm, warn only)` and
+  `strict-loaders freshness vs live alp-sdk (alarm, warn only)` — all three
+  `repository_dispatch`-only, all three alarming on drift in *alp-sdk* that no
+  tan-cli PR author caused or can fix in their own branch. A blanket
+  `continue-on-error in (None, False)` over the job reds the pristine tree three
+  times. So the design is an allowlist keyed on step `name`, with each step's
+  justification stored beside its key rather than in a comment somewhere else,
+  plus `in (None, False)` for every other step and for the job. An allowlisted
+  step may be soft ONLY as the literal `true`: an expression there is not
+  "warn only", it is a value nothing static can evaluate.
+
+  `in (None, False)`, never `is not True` — `continue-on-error` takes an
+  EXPRESSION and `yaml.safe_load` returns a `str` for `${{ … }}` and for every
+  quoted or `!!str`-tagged spelling, so `"…" is not True` is `True`. Measured
+  here with `actionlint` 1.7.7 against the real `parity.yml` at `dev` `b432409`
+  (with `shellcheck` and `pyflakes` disabled, so the unmutated baseline is
+  `rc=0`; with shellcheck on it is already `rc=1` from a pre-existing
+  `SC2016:info`), inserting each spelling on the load-bearing step
+  `seam1 field diff (live emit vs. frozen oracle)` and, separately, at job
+  level: **`${{ true }}`, `${{ github.event_name == 'pull_request' }}` and the
+  plain `true` all lint `rc=0` at both levels** — landable, not merely
+  expressible — while `"true"`,
+  `!!str true`, `"true "`, `${{ env.SOFT }}`, `${{ matrix.experimental }}`,
+  `yes`, `on` and an anchor/alias pair are each rejected `rc=1`. Eight of the
+  eleven load as a `str` and were therefore silent under `is not True`; two of
+  them (`${{ true }}` and `${{ github.event_name == 'pull_request' }}`) are
+  lint-clean AND silent at once, which is the real attack. actionlint is not
+  what the queue requires, so
+  "actionlint would have caught it" is not a defence the gate leans on: all
+  eleven get a negative control at both levels, and reverting the comparison
+  reds sixteen of them.
+
+  A **job-level `if:`** check too, because a skipped job renders as "skipped",
+  not "failed" — a guard on the job silences a required context with no red
+  anywhere, a wider blast radius than any `continue-on-error`. Checked by
+  VALUE, not by `assert "if" not in job`: that naive form failed on a pristine
+  tree in PR #1193 because `ci.yml`'s `python-newest` legitimately carries a
+  release opt-out. Measured on `parity.yml`, `seam1-plan-shape` carries NO
+  job-level `if:` — unlike `seam2`, `first-blink`, `python-tests` and
+  `release-sdk-parity`, which all do — so the pinned value is `None`, and the
+  day the job earns a guard the fix is to pin it with its reason.
+
+  The allowlist cannot decay: an entry naming a step that no longer exists, an
+  entry whose step went blocking, and a newly-softened step the allowlist does
+  not name each red a check of their own. Every rung is mutation-proved —
+  reverting to `is not True` reds 16 cases, disabling the job-`if:` rung reds 4,
+  letting the allowlist accept any value reds 8, and dropping the job-name pin
+  reds 1.
+
+  Two holes are written down rather than left to be discovered. **Step-level
+  `if:` is not covered**: ten of the job's 24 steps legitimately carry one, so a
+  blanket rule reds the pristine tree exactly the way the `continue-on-error`
+  one does, and a second allowlist keyed on step guards is its own design.
+  **Whether the context is still REQUIRED cannot be seen from this tree** —
+  branch protection lives on GitHub; the gate pins the job's `name:`, which is
+  the string protection keys on, and a rename is at least fail-CLOSED (an
+  unreported required context blocks the queue rather than passing it).
+
+- **The one line that decides what `data.availablePorts[].device` actually
+  contains is now executed by a test (tan-cli#1211).** `contract/envelopes/
+  monitor-no-port` (tan-cli#1165) pins the wire KEY NAMES, but the `env.json`
+  seam that makes it deterministic -- `TAN_MONITOR_TEST_PORTS_JSON` -- returns
+  its canned list from the top of `_available_ports()`, before pyserial is
+  imported, so the golden never reaches `_available_ports()`'s own
+  `(p.device, p.description or "")` read of pyserial's `ListPortInfo`. Nothing
+  else reached it either: no test in the tree stubbed or called `comports()`.
+  That mattered because `ListPortInfo` carries BOTH `device` and `name`, so
+  `p.device` -> `p.name` is a rename that raises nothing and reviews clean --
+  measured, it turns `/dev/cu.debug-console` into `cu.debug-console`, a device
+  string the consumer cannot open, while the monitor and contract-envelope
+  suites stayed byte-identically green. The new
+  `tests/conformance/test_monitor_pyserial_mapping.py` plants fake `serial`,
+  `serial.tools` and `serial.tools.list_ports` modules in `sys.modules` and
+  runs the real `_available_ports` and `_ports_data` against them, so that
+  rename is now a RED. It replaces only pyserial, in the shape
+  `test_sdk_list_contract_key_set.py` replaces only the socket, and therefore
+  proves the object-to-wire mapping rather than that pyserial still enumerates
+  correctly -- the latter is driven only by
+  `test_packaged_binary.py::test_the_artifact_carries_pyserial`, whose module
+  is skipped without a `dist/` build. Because `sys.modules` is consulted before
+  any finder, it runs identically where pyserial is installed and where it is
+  absent, which is the extras-less shape `ci.yml` deliberately tests.
+
+- **The rendered-byte parity axis ADR-0026 §D requires is now a standalone,
+  self-deleting gate rather than a mode mixed into the planner axis
+  (tan-cli#1215).** `python/tests/parity/test_planner_emit_parity.py` already
+  compared every hermetic renderer byte for byte against alp-sdk, but it did so
+  under the same file, skip mark, fixture and mode tuple as `--emit build-plan`
+  — the one mode ADR-0026's own Decision makes tan's rather than alp-sdk's
+  canonical render — which made ADR-0026 §G step 6 ("delete the planner axis,
+  keep the render gate") a hand-edit of the render file rather than a plain
+  `rm`. `build-plan`'s byte-identity case, its argv-entry-point case, and
+  `tan build`'s own no-SDK-Python-reach probes now live in the new
+  `test_planner_axis_build_plan_parity.py`, which imports the shared `SDK`,
+  `HAS_UPSTREAM`, `planners` fixture, `_boards` and `_first_diff` from the
+  render file rather than redefining them — the same
+  import-a-fixture-for-its-side-effect idiom `tests/planner/_bound_sdk_fixture.py`
+  already uses — so the dependency runs one way only and deleting the planner
+  file once `tan build` plans with no alp-sdk counterpart left touches zero
+  lines elsewhere.
+
+  Nothing pinned *which* `--emit` modes the render comparison was required to
+  cover, either — a mode quietly dropping out of `GENERATE_MODES` still left
+  every per-board assertion green, and the breadth layer's `>= 2900` artefact
+  floor has enough slack to absorb one mode's worth of loss (~100 artefacts)
+  without noticing. A new `test_the_render_axis_mode_set_is_fully_accounted_for`
+  reads `metadata/emit-registry-v1.json` off the bound alp-sdk checkout and
+  asserts every one of its 20 declared modes is in exactly one of three states:
+  rendered (`RENDER_MODES` union `GENERATE_MODES` union
+  `tan.planner_emit.TREE_MODES` — 17 modes measured at the pinned SDK commit),
+  a named exemption (`build-plan` — the planner axis; `kconfig` — non-hermetic,
+  shells `west build`, covered instead by `tests/core/test_kconfig_symbols.py`
+  and alp-sdk's `check_emit_kconfig_contract.py`; `scaffold` — vendored into
+  `tan init`), or an unmeasured gap, which fails naming the mode. Mutation-
+  proved: removing `("yocto-conf", ("yocto",))` from `GENERATE_MODES` leaves
+  the pre-existing breadth-floor assertion green and reds the new test naming
+  `yocto-conf` by itself; restoring it is green again.
+
+  Both files skip loudly without `ALP_SDK_ROOT`/`ALP_SDK_PARITY_ROOT` bound,
+  naming the missing variable, rather than passing silently — each carries its
+  own `pytestmark`, built from the same `HAS_UPSTREAM` boolean so the two
+  cannot disagree about when there is nothing to compare.
+
+- **`tan new-som` scaffolds `ospi_memories:`/`hyperram:` for `alif:ensemble`
+  parts.** A new Ensemble-family SoM used to generate a preset that omitted
+  both `on_module:` blocks entirely -- `som-preset-v1.schema.json` describes
+  `ospi_memories:` as "(AEN family)" only, but nothing rendered it, so a
+  porter had to hand-author the whole structure from
+  `docs/porting-new-som.md`'s template. `_render_preset` now emits it for
+  `alif:ensemble` `--soc-ref`s: an `ospi0:` entry under `ospi_memories:`
+  (a MAPPING keyed by OSPI controller instance, per the schema's
+  `propertyNames` pattern -- not a flat list) plus a `hyperram:` block, every
+  field an explicit `TBD`/`tbd` placeholder except `chip_select`/`interface`,
+  which carry the real Ensemble-silicon convention (NOR on OSPI0 CS0,
+  HyperRAM on CS1, sharing one octal bus) rather than an invented value --
+  neither field has a schema `"TBD"` escape hatch. Every other vendor/family
+  is unaffected; the render lives in the new `tan/core/new_som_ospi.py`.
+
+- **`tan model build` now has a dedicated test for an absent DEEPX host
+  compiler (`dxcom`) (tan-cli#253).** The issue's triage comment narrowed the
+  deferred scope to two gaps: no byte-for-byte oracle diff, and no
+  `dxcom`-absent test. The first no longer applies to anything -- `crates/`
+  and the whole oracle-parity suite were deleted repo-wide by #601 (closing
+  #269), so there is no `test_oracle_parity.py` `CASES` structure left for
+  `model` to be missing from, and that half stays open. The second is closed
+  here: `test_a_missing_dxcom_toolchain_is_a_coded_issue_not_a_traceback_and_
+  the_batch_continues` (`python/tests/commands/test_model_command.py`)
+  monkeypatches `model_cmd.build_model` to raise
+  `FileNotFoundError("dxcom: command not found")` for one of two declared
+  models and asserts the resulting envelope directly -- `exitCode: 3`,
+  `ok: false`, and a `model.build-failed` issue naming the failed model and
+  the underlying `FileNotFoundError` -- not merely that nothing tracebacked.
+  A missing toolchain turns out to be the SAME case `_run_build`'s existing
+  per-model `except Exception` already covers (`model_cmd.py:404-407`), not a
+  different one: there is no dedicated "toolchain not found" branch, so the
+  batch still continues to the next model exactly like any other per-model
+  `build_model()` failure. Needs no license, no SDK, and no DEEPX toolchain
+  to run.
+
+- **`tan model` now has `contract/envelopes` coverage — six goldens, where it
+  had none.** The three shipped subcommands (`build`, `doctor`, `check`) were
+  the only command surface in the CLI with zero envelope fixture, so nothing
+  diffed their wire shape and a change to it could reach the extension
+  unremarked. `model-doctor-no-sdk` pins that an absent vendor NPU toolchain is
+  a REPORTED row and never a failure (`ok: true`, exit 0), the four
+  `data.backends[]` rows in registry order, the five-key row shape, the
+  separate `data.optional[]` array, and the `model.doctor-sdk-unresolved`
+  WARNING that is `doctor`'s deliberate softening of the
+  `model.sdk-root-unresolved` ERROR the other two raise for the same
+  non-resolution. `model-unknown-subcommand` pins the refusal and, through its
+  message, the shipped subcommand inventory. `model-build-no-sdk` and
+  `model-check-no-sdk` pin the shared refusal with each subcommand's OWN empty
+  `data` payload — `sku`/`built` against `sku`/`exact`/`models` — so a
+  regression collapsing them onto one shape cannot pass. `model-build-no-models`
+  and `model-check-no-models` pin the clean empty success against a synthetic
+  SDK: nothing declared is not an error.
+  - **A case may now pin the host facts its command reads, in an optional
+    `env.json`.** `model doctor` is the first command whose whole payload is a
+    host fact — each backend row is `shutil.which("vela")` /
+    `shutil.which("dxcom")` or an `ALP_DRPAI_TVM_HOME` / `ALP_DEEPX_SDK_HOME` /
+    `ALP_VELA_CONFIG` lookup — so a golden recorded on a toolchain-less box
+    would have gone red on a box that has them, and the repo's own
+    unavailable-reason string tells the reader to install one (`pip install
+    tan-cli[model-compile]`). Measured: on a host carrying `vela`, `dxcom` and
+    both variables, three of the five reported rows flip. The environment is
+    PINNED rather than the rows normalised, because `available`/`reason` are
+    the only fields that case exists to gate. Opt-in: 25 of the 26 cases answer
+    from their own copied inputs and carry no `env.json`. The published
+    `envelope-contract.json` carries the pin alongside the entry's `args`, so a
+    consumer replaying them can reproduce the envelope it advertises.
+
+- **Release binaries now resolve from a locked, hash-verified Python dependency set instead of a live PyPI resolution (#437).** `release.yml`'s `build` job and `clean-host.yml`'s `freeze-and-smoke` job used to run `pip install ".[monitor]" "pyinstaller>=6.10"` against whatever PyPI resolved that day, with no lock, no hashes, and an unbounded `pyinstaller` floor -- so re-running the same immutable tag on a later day could freeze a different typer/click/rich/pyyaml/jsonschema/truststore/certifi/pyinstaller and ship different executable bytes under an identical version string. `python/release-requirements.lock.txt` (a `uv pip compile --universal --generate-hashes` resolution, regenerated by `python/scripts/generate_release_lock.py`) now pins every third-party distribution -- the runtime set plus the `monitor` extra plus the build-time-only `pyinstaller`/`setuptools` -- to an exact version with every published sha256 hash, covering all four release platforms in one file. Both workflows install it with `pip install --require-hashes -r release-requirements.lock.txt`, which **refuses the whole install** on any hash mismatch or unhashed requirement rather than silently falling back to an unpinned resolution; the local `tan-cli` package installs separately with `--no-deps --no-build-isolation`. `tests/gates/test_release_lock_covers_dependencies.py` is the always-on, network-free gate keeping the committed lock honest against `pyproject.toml`'s declared dependencies (mutation-tested: a missing entry, a stripped hash, and an out-of-range pin each independently red the gate on its own assertion). `.github/workflows/release-lock-update.yml` (`workflow_dispatch`) is the reviewed path for moving a pin -- its `upgrade_package` input runs `generate_release_lock.py --upgrade` (every pin) or `--upgrade-package <name>` (one distribution) rather than a plain regenerate, which would keep every already-valid pin exactly as committed and never move anything; it opens a PR against `dev`, which then runs the new lock through `clean-host.yml`'s full four-platform freeze-and-conformance matrix before it ever reaches a tag. `--check` seeds its scratch resolution with a copy of the committed lock so it makes the same preference-vs-upgrade decision a plain regenerate does, keeping its verdict clearable by that exact remediation. The Linux build container is pinned the same way: both workflows now reference `python@sha256:411fa4dcfdce7e7a3057c45662beba9dcd4fa36b2e50a2bfcd6c9333e59bf0db` (the `python:3.12-slim-bullseye` tag kept in a trailing comment) instead of the mutable tag alone. Every release now also ships `dependency-lock.txt` (a copy of the lock at the tagged commit) as a release asset alongside `checksums.txt`, and each `build` leg records its own `pip freeze` output as a `dependency-inventory-<asset>` workflow artifact, so a shipped freeze can be audited later against exactly what went into it. Byte-for-byte reproducibility is not claimed -- PyInstaller embeds build-machine metadata (bootloader timestamps, some `.pyc` absolute paths) that varies run-to-run even from an identical input set -- but the complete build INPUT set (source tree, every third-party dependency version and hash, build container digest) is now deterministic, which `docs/release-contract.md`'s new "Dependency reproducibility (release lock)" section documents explicitly.
+
+- **`tan bootstrap` now acquires the `arm-zephyr-eabi` cross toolchain itself, as its final phase** (ADR 0021 Lane 1 P1). It reads `<sdkRoot>/metadata/toolchains.json` at RUN TIME — no copy of the pin lives in tan, so an alp-sdk pin bump reaches the next `tan bootstrap` with zero tan changes — and runs `west sdk install --version <pin> --gnu-toolchains arm-zephyr-eabi --no-hosttools --install-dir <dir>` into the artifact-keyed store `~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/` (or `$ALP_TOOLCHAIN_ROOT`, shared across every project pinning the same version). The separate manual `west sdk install` step the README documented is no longer required for the happy path; `--no-toolchain` opts out (the rest of `bootstrap` is unaffected, and `native_sim` builds never needed a cross toolchain at all).
+  - **Directory-exists is never the success predicate.** `west sdk install` runs into a `.tmp-<pid>` sibling of the store directory (the atomicity belt this ADR asks for around a tool tan does not control the internals of — west's own downloader already sha256-verifies each archive against the release's published `sha256.sum` before extracting, `scripts/west_commands/sdk.py`), then, only after the installed `sdk_version` file is read back and compared against the pin AND a real `arm-zephyr-eabi-gcc --version` probe succeeds FROM the moved-into-place store, a verification stamp (`.alp-toolchain-stamp.json`: the pinned version plus a sha256 digest of the manifest's own bytes) is written last. A `west sdk install` that reports success but names the wrong version, or whose compiler will not run, is left unstamped and unmoved/unstamped respectively — never silently trusted.
+  - **A second `tan bootstrap` against an unchanged pin is a stamp read, not a reinstall** — `tan.core.toolchain_provision.stamp_matches_pin` is the one verdict function both `tan bootstrap`'s skip check and `tan doctor`'s new `toolchain` check (below) call, so the two cannot independently drift on what "still valid" means. A version bump moves to a NEW store directory by construction (the store is keyed by artifact+version); a manifest whose bytes rotate under an unchanged version string (a corrected pin) still invalidates the stamp via the digest.
+  - **Refuses clearly, before spawning `west`, naming which cause:** a missing or malformed `metadata/toolchains.json`; no artifact published for this host at the pinned version (Intel Mac and `windows-arm64`, the WSL2-redirect case, are a coded, honest `log.line` skip — *never* a failure, per the ADR's own words); insufficient disk (checked against the manifest's own `measuredFootprint.extractedBytes` plus a 15% margin, named in GiB on both sides); and, on native Windows, no 7-Zip on `PATH` (west delegates `.7z` extraction to `patoolib`, which has no pure-Python fallback) — checked before this phase ever runs `west sdk install`, not discovered from its failure.
+  - **A `west sdk install` failure naming a checksum mismatch gets the proxy/CA hint** (`sha256 mismatched: ...` reads exactly like a corrupt upstream archive unless the message also says a TLS-intercepting proxy or corporate CA produces the identical symptom — tan-cli#304's lesson, applied to this download).
+  - **`$ALP_TOOLCHAIN_ROOT`'s adopted directories are never tan's to delete.** A `.tmp-*` sibling from a prior interrupted attempt is always reclaimed (nothing else under a toolchain root produces that suffix, so it is unambiguously tan's own wreckage) — but an unstamped, pre-existing store directory under an ADOPTED root (the env var set, e.g. a bench-machine shared cache) is refused rather than overwritten; only tan's own default `~/.alp/toolchains` gets automatic reclamation of a stale/version-skewed store.
+  - **`west sdk install` is retried up to 3 times on any failure**, the same blind, backed-off retry `.github/workflows/getting-started.yml`'s own manual `west sdk install` step already carries (tan-cli#689) for this exact command's measured CI flakiness — this PR's own first real end-to-end CI run hit a THIRD failure mode in the same family (a `tar --xz` extraction returning exit status 2 on a sha256-verified archive), on top of the two the workflow's comment already documents (a `fetch_releases` rate limit, and a separately-flaky `setup.sh -t` toolchain-component fetch). A prior attempt's leftover `.tmp-*` sibling is cleared before each retry so `west`'s own `shutil.move` cannot land inside a stale partial directory instead of replacing it.
+  - **A `west sdk install` failure on a critically low volume (<512 MiB free) gets a low-disk note appended**, independent of whether the preflight passed: the preflight checks space ONCE, before anything downloads, and a host that barely cleared it can still run out mid-extraction — the shape this PR's own first end-to-end CI run hit (a `tar --xz` extraction error whose message named no cause at all, because `tan.core.bootstrap.capture_tail` keeps only a failed child's last 4 non-empty output lines).
+  - **`--dry-run` reports the real `west sdk install` argv in `data.plannedCommands` and writes nothing** — no store directory, no stamp, no network call, no retry, no sleep.
+- **`tan doctor` gains a `toolchain` check: stamp-vs-pin, never directory-exists.** Distinct from the existing `zephyrSdk` check (an unconditional, host-only "does any toolchain exist" probe): `toolchain` needs a resolved SDK checkout, reads its pinned version, and reports `pass` only when a verified stamp matches that exact pin — a stamped install against a MOVED pin (alp-sdk's `metadata/toolchains.json` changed since the last `tan bootstrap`) is a `fail` naming `tan bootstrap` as the fix, not "a toolchain exists" (ADR 0021's own words). `unknown` (never a guess) when no SDK checkout resolves or its `metadata/toolchains.json` is unreadable.
+  - **Has an adoption path for a toolchain `tan bootstrap` did not install.** A host with a real, working, correctly-pinned Zephyr SDK already on it — `ZEPHYR_SDK_INSTALL_DIR` set, or the SAME scan `zephyrSdk` already trusts, at a `sdk_version` matching this checkout's pin — reports `pass`, never a `fail` whose only prescribed remedy (`tan bootstrap`) would otherwise re-download a second, redundant copy of a toolchain the host already has (or fail outright offline, or on the README's own documented hand-`west sdk install` path). A stamp is tan's own bookkeeping for what it installed, not the only proof a working toolchain exists.
+- **`tan build`'s `${TOOLCHAIN_ROOT}` resolution now also finds a toolchain `tan bootstrap` acquired** — the artifact-keyed store (`~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`, or `$ALP_TOOLCHAIN_ROOT`) is now scanned alongside the existing `/opt`/`$HOME`/`%USERPROFILE%`/`Path.home()` roots, so a customer who ran nothing but `tan bootstrap` gets a build that finds it without also hand-exporting `ZEPHYR_SDK_INSTALL_DIR`. A `.tmp-<pid>` wreckage sibling from an interrupted acquisition is excluded by name so it can never fake a second, ambiguous candidate.
+
+- **`tan examples`' envelope carries per-example facets now, not just
+  `id`/`sourceDir`/`title`/`description`.** Fixes `#484`. Measured against the
+  installed SDK: an IDE consuming `tan examples --format json` could not
+  filter the 100-row catalogue by core count, OS, or SoM -- not even by
+  category, though `examples/` has always been grouped into one. alp-sdk's
+  companion issue answered this: `metadata/catalog.json` (`gen_catalog.py`)
+  now carries `category`, `som`, `board`, and topology-resolved
+  `cores[].{id,os,app}` / `coreCount` / `osSet` / `declares` per example,
+  derived through the SAME `alp_project.py --emit os-topology` path `tan
+  build` itself plans a project against -- not the raw `board.yaml`, which
+  disagrees badly (96 of 99 examples read single-core in the YAML; 23
+  actually are).
+
+  `tan.core.example_facets.load_example_facets` reads that generated JSON
+  (the same "read the generated artefact, not the source" shape
+  `tan.core.error_catalog` already uses for `metadata/error-catalog.json`)
+  and `examples_cmd.py` appends whichever fields it finds, per row, after the
+  original four -- additively, so an existing reader keying on the first four
+  keys is unaffected. Every field beyond `category` is independently optional
+  and OMITTED rather than emitted `null`, exactly as `gen_catalog.py` itself
+  leaves it. A checkout predating `metadata/catalog.json`, or one where it
+  fails to parse, degrades silently to the pre-#484 four-key row -- the
+  catalogue is enrichment, never a second source of truth for which examples
+  exist, and `tan examples` never fails over it.
+
+  `category` is already read by `alp-sdk-vscode`'s `exampleCategory()`
+  helper, which prefers an explicit `ex.category` over its own
+  `sourceDir`-derived fallback the moment one is on the wire -- so this
+  promotes that one field from client-side guess to producer fact with no
+  extension change needed. `som`/`board`/`cores`/`coreCount`/`osSet`/
+  `declares` are new, pre-consumer surface for the same New Project filtering
+  request. Pinned by the new `examples-catalog-facets` contract golden,
+  alongside `examples-catalog` (unchanged, and now the pinned no-catalog
+  fixture).
+
+- **The planner byte-parity gate now survives alp-sdk deleting the planner
+  (`#270`).** It compared two live implementations -- alp-sdk's
+  `scripts/alp_orchestrate/` against tan's relocated `tan/planner/**`. `#270`
+  deletes the alp-sdk side, and the suite does not merely go advisory then: it
+  becomes **unrunnable**, all 775 cases skip together, and
+  `test_planner_parity_actually_ran.py` (`#500`) reds the job rather than
+  letting that read as green. Measured cost of simply losing it: coverage of
+  `tan/planner/**` (3998 statements) falls from 83% to 27%, with
+  `zephyr_board.py` (261 statements), `project_emit/dts.py` (219),
+  `west_libs.py` (95), `native_sim.py` (61) and `hw_info.py` (57) at 0%.
+
+  The alp-sdk planner's **output** is now frozen instead:
+  `python/tests/fixtures/planner_oracle/`, 700 emits over 100 boards captured
+  at alp-sdk `eb96112ba7d1cc3b4084c985962ea31772177d74` by
+  `python/scripts/capture_planner_oracle.py`, read by
+  `tests/parity/test_planner_oracle_regression.py`. 703 passed in 37 s against
+  the frozen checkout -- 11x faster than the live suite's 7 m 08 s, since it
+  renders one side rather than two.
+
+  Freezing the **output** and not a pinned alp-sdk **source** ref is the whole
+  decision. A source-pinned oracle was measured working (768 passed, 8 skipped)
+  and rejected: after `#270` no later alp-sdk ref carries a planner, so it
+  could never move again, and the first deliberate change to tan's emitted
+  output would red the gate permanently. A gate with no repair path gets
+  deleted under pressure. Frozen output has one -- regenerate, and review the
+  diff, which shows the changed bytes as DTS and JSON and C rather than as a
+  pin SHA moving by one line.
+
+  Inputs stay pinned too, through a fourth `clone alp-sdk at the frozen
+  planner-oracle commit` step -- the same shape `parity.yml` already uses for
+  `alp-sdk-planner-audit`, `alp-sdk-hand-port-audit` and
+  `alp-sdk-strict-loaders-audit` -- bound as `ALP_PLANNER_ORACLE_ROOT`, its own
+  variable rather than `ALP_SDK_ROOT`/`ALP_SDK_PARITY_ROOT`, which fifteen other
+  modules read to track live metadata forward. `metadata/**` is **not**
+  vendored: ADR-0017 / I-26 keeps hardware facts in alp-sdk, and a second copy
+  of that data is exactly the late-binding that caused `#485`.
+
+  `test_planner_parity_actually_ran.py` learns one widening, and only one: a
+  missing `scripts/alp_orchestrate/` is acceptable **when the replacement layer
+  is bound and its fixture is present**. Proven in all three states -- planner
+  present passes, planner absent with the oracle bound skips naming the
+  replacement, planner absent with no oracle still fails.
+
+  Two honest limits, both measured and both recorded in
+  `PROVENANCE.txt`. `dts-partitions` is a stub on all 100 boards because no
+  example declares `storage:`, so the partition `reg = <base size>` arithmetic
+  at `headers.py:196-202` is exercised by nothing -- halving `base_kib` at
+  `partition.py:447` changes 0 of 297 emits. The live suite walks the same 100
+  boards and shares the blind spot exactly, so the freeze lost nothing; closing
+  it needs an alp-sdk example with storage.
+
+  **Real cost, surfaced rather than absorbed: this fixture is not free of
+  `PINNED_SDK_TAG` moving, even though its RENDER is fully isolated from
+  `ALP_SDK_ROOT`/`PINNED_SDK_TAG`** (measured -- the render binds only
+  `ALP_PLANNER_ORACLE_ROOT`; confirmed by reproducing the failure below with
+  `ALP_SDK_ROOT` pointed at the stale oracle ref and getting the identical
+  case list). Before this PR's own merge to `dev`, a routine tan/planner re-
+  sync (`#868`, porting alp-sdk's real fix for the GD32 bridge's missing
+  `CONFIG_SPI=y`, among others) moved tan/planner/** to correctly emit bytes
+  the OLD `94378a05`-vintage `alp_orchestrate` never did, and 19 of 703 cases
+  across 19 boards went red the moment this branch merged with `dev`'s newer
+  `tan/planner`.
+
+  The fixture is re-captured here at
+  `eb96112ba7d1cc3b4084c985962ea31772177d74` -- the ref `PINNED_SDK_TAG` and
+  tan/planner both track today -- exactly the documented `PROVENANCE.txt`
+  remedy ("tan/planner/** changed... regenerate"), not a papering-over. This
+  will recur at every future tan/planner re-sync until `#270` actually lands
+  upstream and there is no more live alp-sdk tree to re-sync against; until
+  then, `PINNED_PLANNER_ORACLE_SDK_REF` must move WITH every re-sync PR
+  (`#868`/`#888`-shaped), not just with this one. See `parity.yml`'s
+  `PINNED_PLANNER_ORACLE_SDK_REF` comment for the full postmortem.
+
+- **`tan model list` -- the fourth `model` subcommand, and the smallest
+  landable slice of tan-cli#674.** `tan model` dispatched `build`/`doctor`/
+  `check` only; the VS Code Models panel's refresh path calls `list` first
+  (alongside `doctor`, which already worked), so every panel open landed on
+  an empty list with no working entry point but Build. `list` reports every
+  `board.yaml`-declared model next to what `--out` (default `build/models`)
+  already holds for it: `name`, its resolved `source`, and an `artifact` --
+  `{"exists": false}` for a model never built, or `{"exists": true, "bytes",
+  "stale"}` for one that is, where `stale` is `true` when the package's own
+  recorded `src_sha` no longer matches the current `source` file's hash (the
+  model was edited since the last `tan model build`).
+
+  In-process, read-only, and spawns nothing. Unlike `build`/`check` it never
+  REFUSES on the SDK -- it resolves one and reports the usual discovery
+  warnings (`tan model list --format json` on a foreign project emits
+  `sdk.global-default-foreign-project`), but it needs nothing out of
+  `metadata/**` to do its job, so an absent or foreign checkout downgrades to
+  a warning instead of a refusal: a declared model's `.alpmodel` is only
+  ever `stat()`-ed and its manifest read back, never compiled. A missing or
+  invalid `som.sku` does not refuse it either, unlike `build`/`check`'s
+  `_require_sku` -- naming what is declared and what is built needs no real
+  SoM.
+
+  `model.unknown-subcommand`'s trailing inventory now reads "Available:
+  build, doctor, check, list." -- the `model-unknown-subcommand` contract
+  golden is re-recorded accordingly (`contract/envelopes/
+  model-unknown-subcommand/PROVENANCE.txt`).
+
+- **`release-combination.yml` now also tests the tan version alp-sdk-vscode
+  actually PINS, not only `install.sh`'s "latest".** The gate's original
+  `latest` axis resolves `install.sh`'s own default -- the newest
+  **non-prerelease** tan release -- but alp-sdk-vscode's `SUPPORTED_CLI_VERSION`
+  (`src/alpCli/service.ts`) is a THIRD, independent axis: it has deliberately
+  pinned a prerelease before (`v0.6.0-rc1`, moved there specifically because
+  tan-cli#639's fix landed in a prerelease and no stable tan could build a
+  Renesas SoM), so `install.sh`'s "latest" and the extension's pin can and do
+  diverge by construction. Before this change nothing on any schedule tested
+  the combination alp-sdk-vscode's own users actually run.
+
+  A new `resolve-consumer-pin` job resolves that pin live -- fetching
+  `src/alpCli/service.ts` off alp-sdk-vscode's `dev` branch and grep'ing
+  `SUPPORTED_CLI_VERSION` with the same widened pattern alp-sdk-vscode's own
+  CI uses (keeps a prerelease suffix rather than truncating it) -- and SKIPS
+  the extra leg, with a loud `::notice::`, when it equals `install.sh`'s
+  latest release (most days they agree, and re-running the full journey for
+  an identical tan binary is wasted runner minutes, not extra coverage).
+  Resolution failure (the constant renamed, moved, or the fetch itself
+  failing) is a hard `::error::` and a non-zero exit, never a silent
+  fall-through to "latest" -- that fall-through would silently restore the
+  exact blind spot this closes.
+
+  The SKU x combination matrix (`E1M-AEN801` / `E1M-V2N101` / `E1M-NX9101`,
+  crossed with the `latest` and, when not skipped, `consumer-pin`
+  combinations) is now built once by a new `build-matrix` job and consumed by
+  a single parameter-driven `journey` job, rather than duplicating the
+  journey's ~250 lines of steps per combination -- one definition, not two
+  copies that could drift apart.
+
+  New `workflow_dispatch` input `consumer_tan_version` overrides the
+  consumer-pin combination directly (mirrors the existing `tan_version` /
+  `alp_sdk_ref` overrides for the latest combination), forcing the leg to run
+  regardless of the live pin's value -- the mechanism used to prove this leg
+  can fail: dispatched with `consumer_tan_version: v0.5.1` against alp-sdk's
+  real latest release, the `E1M-V2N101` leg reproduced tan-cli#639's exact
+  `CONFIG_ALP_SDK_CHIP_NONE=y` Kconfig-configure abort through the new leg's
+  own wiring.
+
+  Still not a required PR check, same reasoning as before (tan-cli#639) and
+  more so now that it depends on a pin in a third repo -- `schedule` +
+  `workflow_dispatch` visibility only.
+
+- **`release.yml` now proposes the dev-version bump a published tag owes,
+  instead of leaving `dev` red until a human notices.** `dev`'s tip carries
+  the exact version the just-tagged release-prep commit was tagged at (tags
+  are cut from `main`, and `dev` merges into it), which is the precise state
+  `version_check.py --not-released` exists to refuse -- every PR opened
+  against `dev` then fails `version-identity.yml`'s `not-a-released-version`
+  job on a check unrelated to its own diff. That has happened twice
+  (tan-cli#479 -> `0.5.2-rc1.dev0`, tan-cli#768 -> `0.6.0-rc2.dev0`), both
+  hand-carried, both the same recurrence one release apart.
+
+  New `python/scripts/bump_dev_version.py` computes the `.devN`-tail-on-the-
+  next-pre-release spelling both prior fixes used by hand (an rc bumps its
+  own number; a final release bumps its patch and starts a fresh `-rc1.dev0`)
+  and applies it to the same four files `version_check.py` cross-checks,
+  calling into that module for the SemVer/PEP 440 rendering rather than
+  re-deriving it. A new `propose-dev-version-bump` job in `release.yml`,
+  gated on `verify-version` alone (so it fires immediately rather than
+  waiting on the rest of the release pipeline), runs it and opens a PR
+  against `dev` -- `dev` is protected, so this proposes rather than pushes,
+  the same shape `planner-resync.yml`'s proposal job already uses. The job
+  cannot silently no-op: an explicit guard step compares the script's
+  reported status against the actual working-tree diff and fails loudly on
+  any mismatch, and a final step re-queries that the proposed PR really
+  exists before the job is allowed to report success.
+
+  `python/tests/scripts/test_bump_dev_version.py` unit-tests the arithmetic
+  against the two real, measured precedents above (not invented examples)
+  and round-trips a synthetic bump through `version_check.py`'s own
+  self-check to prove the result satisfies the invariants that module
+  polices.
+
+- **`tan model doctor`.** Under alp-sdk ADR-0028 the `.alpmodel` compiler-adapter
+  engine moved into tan, so tan is now the customer's only diagnostic surface for
+  the NPU compiler toolchains `tan model build` shells out to. `model doctor`
+  reports one row per registered backend (`cpu`/`ethos_u`/`drpai`/`deepx_dxm1`) --
+  `{backend, tool, available, version, reason}` -- never a compiler:
+  `vela not on PATH; pip install tan-cli[model-compile]`,
+  `dxcom not on PATH; license-gated, Linux-only`, or the real env var
+  (`ALP_DRPAI_TVM_HOME`) an absent DRP-AI toolchain is missing. Each row is
+  gated on what `compile()` actually needs, not always the adapter's own
+  `is_available()` verbatim -- `deepx_dxm1` and `drpai` each get a narrower
+  doctor-side probe, since their `is_available()` ORs in a signal (an SDK-home
+  env var) `compile()` never reads/uses, and reporting THAT green meant the
+  next real `model build` failed anyway. An unavailable toolchain is the
+  expected case, not a failure -- `ok` stays `true` and exit code `0` even when
+  every non-`cpu` backend is unavailable; reporting absence is the feature. A
+  missing or rejected `--sdk-root` is a `model.doctor-sdk-unresolved` WARNING,
+  never a crash or a refusal -- the backend rows do not read `metadata/**` and
+  are unaffected either way. `tan model check` (the static NPU-eligibility
+  screen against a board's declared models) is a separate command; see #782.
+
+- **`tan model check` — the CLI surface over the static NPU-eligibility screen
+  (ADR-0028 amendment).** Answers, offline and with no NPU toolchain
+  installed, "how much of this model can target the NPU on this SoM, and
+  what definitely cannot?" for every model `board.yaml` declares, against
+  every NPU backend `som.sku` actually ships (`tan.model.check.
+  resolve_check_backends`, the same resolver `build` uses). `ok`/exit code
+  stay `0` for any completed run, whatever the verdicts read --
+  `partial`/`cpu-only`/`undetermined` are the feature this command exists to
+  report, never a failure; only a run that could not complete at all (an
+  unresolved SKU, an unreadable model source -- `model.check-sku-unresolved`/
+  `model.check-failed`) is non-zero. `--format json` carries every
+  `BackendReport` field (`basis`, `confidence`, `uncostedCpuOpCount`, and
+  every per-op verdict) under `data.models[].backends[]`; text mode states
+  the failure mode in words rather than a bare percentage --
+  ```
+  Ethos-U55 (E1M-AEN501)  partial
+    96% of compute (23/25 ops) is NPU-eligible   [upper bound, static screen]
+    2 ops are certain CPU fallback: NORMALIZE, TOPK
+    ... the model will run either way -- unsupported ops fall back to the
+    CPU silently rather than failing. Only a real compile proves NPU execution.
+    Exact:  pip install tan-cli[model-compile]  &&  tan model check --exact
+  ```
+  A `.tflite` model against a V2N/V2M SKU reports `drpai`/`deepx_dxm1` as
+  `undetermined` + `format-not-accepted`, never `cpu-only` -- a wrong-format
+  pairing is not a verdict on the model.
+
+  **`--exact` (Task 6): the opportunistic real-compile upgrade.** Vela is a
+  free, un-gated `pip install`, so for `ethos_u` the "offline" constraint is
+  soft: with `vela` on PATH, `--exact` runs it for real and reads what vela
+  ACTUALLY placed on the NPU from its own "NPU operators = N (P%)" summary
+  line -- a clean exit code is not proof of that; vela exits 0 on a full CPU
+  fallback by design (a float32 model vela rejects outright still prints
+  "NPU operators = 0 (0.0%)" and returns 0). `basis: "compiled"` -- the ONLY
+  basis allowed to say `"fits"` (the retired vocabulary's word, now
+  legitimate again because a real compile, not a static screen, produced it)
+  -- is returned ONLY at 100% real NPU placement; partial or zero placement
+  reports the real split (`npu_coverage: "partial"`/`"cpu-only"`, a real
+  `npuPlacementPctReal` -- vela's own op-count split, a DIFFERENT field from
+  `computeOnNpuPctMax`'s MAC-weighted upper bound, which stays `null` on a
+  compiled report rather than being overloaded with a differently-shaped
+  number) and keeps the static per-op verdicts rather than discarding them.
+  Degrades cleanly -- and says so, in a
+  note -- to the static screen when `vela` is absent, when no accelerator
+  config resolves for the SKU, when the compile itself fails, or when a
+  successful compile's placement summary could not be read. `drpai`/
+  `deepx_dxm1` stay static-screen-only under `--exact` too: both toolchains
+  (`dxcom`, the DRP-AI TVM checkout) are license-gated, so this release
+  reports that as a reason rather than attempting either.
+
+  A missing `tflite` reader (the `model-io` extra) now reports its own
+  actual cause -- `pip install tan-cli[model-io]` -- rather than reading
+  identically to "this model genuinely has no operators"; and text mode no
+  longer manufactures a "0/N ops are NPU-eligible" figure for either
+  `undetermined` protected path (`format-not-accepted`/`no-table-for-
+  backend`), which used to count their placeholder per-op verdicts against
+  the total and print exactly the `cpu-only` misreading this feature exists
+  to prevent, even though the JSON underneath was already correct.
+
+  `tan.model.tensorio.extract_io`/`extract_ops` now read (or take the
+  caller's already-read bytes) BEFORE *any* format-dependent short-circuit,
+  suffix check included -- not after. An unreadable/missing model source
+  used to be silently swallowed into the same empty result as "the reader
+  just isn't installed" (a bare `pip install tan-cli`, no `model-io` extra)
+  OR as "this source isn't a `.tflite`" (every `.onnx` source, on ANY host,
+  since ONNX operator extraction has no reader at all) -- so `check` never
+  raised for either case and the `model.check-failed` per-model issue this
+  feature promises never fired. Both extractors now raise `OSError`
+  regardless of the source's extension, so an unreadable `.onnx` on a
+  drpai/deepx_dxm1 SKU is caught exactly like an unreadable `.tflite` on an
+  Ethos-U one.
+
+  `--exact` no longer risks spawning `vela` on a source it cannot ingest:
+  the guard gating `_maybe_exact_ethos_u` used to key off
+  `report.ops[0].reason == "format-not-accepted"`, but `extract_ops` never
+  extracts operators from anything but a `.tflite` source, so `report.ops`
+  was always `[]` for exactly the non-`.tflite` case the guard existed to
+  catch -- dead code for the one format (`ethos_u` only ingests `"tflite"`)
+  it was supposed to protect. `--exact` against a `.onnx` source on an
+  Ethos-U SKU could reach `VelaAdapter().compile()` for real, and a `vela`
+  failure on unparseable input can raise with its own raw, multi-line
+  traceback as the message -- measured a 750-character, 9-newline Python
+  traceback landing in a JSON envelope note. The guard now checks
+  `VelaAdapter().accepts(...)` directly, and any vela-failure note is
+  truncated to its first line, word-boundary-capped, with a trailing `…`
+  when it doesn't already fit.
+
+  Text mode's per-op "N ops are certain CPU fallback: ..." line now carries
+  the SAME `basis != "static-screen"` gate `_coverage_line` already had: a
+  `basis: "compiled"` report that keeps its static per-op verdicts
+  (`--exact`'s partial/`cpu-only` path, `ops=report.ops`) used to still
+  print that line built from those STALE static verdicts, self-contradicting
+  the REAL vela placement reported in the very same block -- measured "2 ops
+  are certain CPU fallback: SOFTMAX, TOPK_V2" printed alongside "2/3
+  operators placed on the NPU (67%)", where vela actually measured only 1
+  CPU op. `uncostedCpuOpCount` is now also carried through on that same kept
+  path, rather than defaulting to 0 even when the kept verdicts demonstrably
+  carry some.
+
+  New engine glue lives in `tan.model.check` (`resolve_check_backends`,
+  `check_model_backends`) and `tan.core.model_check` (pure JSON/text
+  rendering, mirroring `tan.core.model_doctor`'s split) -- `model_cmd.py`
+  itself only resolves board.yaml/SDK-root the same way `build` does and
+  shapes the envelope. Two new reserved issue codes:
+  `model.check-sku-unresolved` (board-level: `som.sku`'s NPU backends could
+  not be resolved) and `model.check-failed` (per-model: mirrors
+  `model.build-failed`'s shape, so one bad model does not abort the batch).
+
+- **Customer-facing documentation for `tan model check`'s static-screen
+  vocabulary** -- [`docs/model-check-static-screen.md`](docs/model-check-static-screen.md),
+  linked from the README's command surface and its documentation index. The
+  engine and the CLI wiring shipped without it, so the words the command
+  prints existed only in source docstrings and changelog fragments: a
+  customer reading `npu-eligible` had nothing to read that told them it is
+  not "will run".
+
+  The page states the sound-negative / capped-positive contract in the terms
+  a reader needs: `npu-eligible` | `cpu-certain` | `undetermined` and why it
+  supersedes the retired `fits` | `cpu-fallback` | `no-fit` scheme; where
+  `fits` may and may not appear (the static screen never emits it; a
+  `--exact` compile and a matched bench point both can, via the single
+  `tan.model.perf.coverage_from_placement`, so a consumer matching
+  exhaustively on `npuCoverage` must handle all five values) and why a screen
+  cannot deliver it -- Vela attaches Generic constraints to every operator
+  plus further operator-specific ones, and DRP-AI gates acceptance on
+  enumerated kernel x stride x padding x dilation x groups, so the same
+  operator name is accepted or rejected on tensor shape alone; what
+  `basis: "static-screen"` and `confidence: "screening"` oblige a reader to
+  assume, including that all six footprint/latency fields are `null` meaning
+  "not measured", never zero; why `undetermined` is never `cpu-only` (every
+  backend degrades to silent CPU fallback, so a fabricated negative is the
+  worst outcome the command can produce); and why `computeOnNpuPctMax` is
+  MAC-weighted -- op-count coverage hides a compute-dominant conv backbone
+  behind a wall of cheap elementwise ops -- together with its two structured
+  caveats, `uncostedCpuOpCount` and the separate, differently-shaped
+  `npuPlacementPctReal`.
+
+  It also states the reachability caveat the rest of this release carries:
+  `metadata/npu_ops/` does not exist on alp-sdk `dev`. All three tables
+  (`ethos_u/u85@vela-5.1.0.json`, `ethos_u/u55-u65@vela-5.1.0.json`,
+  `drpai/onnx-i8@translator-1.12.json`) arrive with **alp-sdk#1470, OPEN and
+  `mergeable_state: dirty`**, so against today's alp-sdk no table resolves
+  for any backend and every report comes back `undetermined` -- the correct
+  answer for a missing table, but not the screen working.
+
+  It also documents the known limit, explicitly out of scope on tan-cli#782:
+  `tan.model.tensorio.extract_ops` walks a TFLite flatbuffer and returns `[]`
+  for a `.onnx` source, so an ONNX model passes `drpai`/`deepx_dxm1`'s format
+  gate, finds no operators to score, and screens as `undetermined` rather
+  than as anything stronger. An UNREADABLE source is not folded into that:
+  both extractors read the bytes before any format-dependent short-circuit,
+  so a missing `.onnx` still surfaces as `model.check-failed`.
+
+  The full `--format json` `data` shape is written out key by key
+  (`npuCoverage`, `computeOnNpuPctMax`, `npuPlacementPctReal`,
+  `uncostedCpuOpCount`, `basis`, `confidence`, `arenaBytes`, `reqSramKib`,
+  `latencyMsMean`, `latencyMsP95`, `latencyRuns`, `perfRef`, `notes`,
+  `ops[].status`/`.reason`/`.macs`), so an automation consumer does not have
+  to read `tan.core.model_check`'s serialiser to learn the spellings.
+
+  A topic page rather than a README section: `docs/` here is
+  descriptive-per-topic (`bootstrap-manifest-unreadable.md`,
+  `planner-duplicated-derivations.md`, `release-contract.md`) and the README
+  stays terse, linking out for depth.
+
+- **`tan.model.analyze` — the static NPU-eligibility screen engine (ADR-0028
+  amendment).** Supersedes the retired `fits | cpu-fallback | no-fit`
+  vocabulary: no backend can deliver `fits` statically (Vela attaches Generic
+  constraints to every operator and Specific ones to 30 of 70; DRP-AI gates
+  acceptance on enumerated kernel x stride x padding x dilation x groups), so
+  negatives are sound (`cpu-certain`) but positives are capped at
+  `npu-eligible`, never a guarantee. A format gate runs FIRST, before any
+  table load or op walk -- scoring a `.tflite` model against an ONNX-only
+  backend (`drpai`, `deepx_dxm1`) is a category error, not a low-confidence
+  answer, and reports `undetermined` + `format-not-accepted`, never
+  `cpu-only`. Support tables resolve by `(backend, ethos_u_variant)` from
+  alp-sdk's `metadata/npu_ops/<backend>/<variant>@<toolchain>-<ver>.json`
+  (`E1M-AEN401/601/801` resolve the 70-op u85 table; `E1M-AEN301/501/701` and
+  `E1M-NX9101` resolve the 53-op u55/u65 table, a 17-op subset); `deepx_dxm1`
+  carries no table by decision, and a missing table is `undetermined`, never
+  a fabricated `cpu-only` -- DEEPX is the headline feature of V2M. `tan.model.
+  tensorio.extract_ops` walks a TFLite flatbuffer's operators into `OpDesc`
+  records with a best-effort, per-op MAC estimate (conv/depthwise/dense
+  shapes; 0 elsewhere) so coverage is MAC-weighted rather than op-counted --
+  "23 of 25 ops eligible" can describe a model that is 4% eligible by compute
+  when a conv backbone carries nearly all of it.
+  `compute_on_npu_pct_max` is reported as an explicit upper bound, `None` when
+  not computable. ONNX operator extraction is a follow-on; a `.onnx` source
+  yields no ops today, so the ONNX-ingesting backends report `undetermined`
+  honestly rather than guessing. Pure engine: no `click`/`typer`, no envelope
+  construction, no file writes -- the CLI wiring (`tan model check`) is #782.
+
+- **`tan.model` — the `.alpmodel` compiler-adapter engine now lives inside
+  tan.** Relocated verbatim from alp-sdk's `scripts/alp_model/` (13 modules,
+  1,029 lines, ADR-0028 Task 2): `build_model`, the CPU/Vela/DRP-AI/DeepX/
+  ExecuTorch adapters, the CBOR manifest model, and the `.alpmodel` package
+  reader/writer. The one external import (`alp_project_loader.resolve_soc_path`)
+  is repointed at a new leaf module, `tan.soc_ref` -- pure path math with no
+  import of `tan.planner`, so `tan.model` imports with no alp-sdk checkout
+  bound at all, the same as it did in alp-sdk. `tan.planner.som_metadata`
+  imports and re-exports the same function for its own four call sites; one
+  definition, two importers. `cbor2` joins tan's required dependencies (the
+  manifest's CBOR round-trip needs it unconditionally); a new optional
+  `model-io` extra (`tflite`, `flatbuffers`) carries the lightweight TFLite
+  tensor-I/O reader, installed on the parity job that binds `ALP_SDK_ROOT` so
+  the tflite parse path actually runs in CI. Nothing under `tan/commands/`
+  consumes this package yet -- that in-process wiring is a follow-up.
+
+- **`tan sdk remove <version|path>` — the SDK cache lifecycle finally has a
+  delete verb, so consumers stop hand-deleting the directory themselves.**
+  Every consumer of a `tan`-managed SDK install (`alp-sdk-vscode`, a CI
+  script rotating versions, a clean-host reset) used to reimplement removal
+  by hand — `alp-sdk-vscode`'s own was one line,
+  `fs.rmSync(target, { recursive: true, force: true })`, which reports a raw,
+  unclassified `EPERM`/`EBUSY` with no verdict a consumer can act on. `tan sdk
+  remove` is the one place that now owns this knowledge:
+  - **Refuses to remove a load-bearing install without `--force`** — the
+    ACTIVE resolution for the calling workspace, the machine-global default
+    (`~/.alp/sdk-default`), or another project's registered pin
+    (`~/.alp/sdk-defaults.json`) — naming every reason that applies
+    (`sdk.remove-active`). Silently orphaning any of the three is a worse
+    failure than a refusal that says exactly what would break.
+  - **Refuses a path outside `--destination`'s cache root** unless it is an
+    explicit path confirmed by `--force` (`sdk.remove-outside-root`) — the
+    footgun guard against a mistyped absolute path in a script.
+  - **Refuses the cache root itself** — every install at once, not one of
+    them — unless confirmed by `--force` (`sdk.remove-is-cache-root`): the
+    outside-root guard above deliberately does not catch `target ==
+    destination`, and no single install is individually load-bearing for the
+    root that holds them, so this was the one target that could wipe the
+    whole cache with no `--force` at all before this refusal existed.
+  - **Idempotent**: removing an already-absent install succeeds at
+    `data.removed: false`, so a rotation script never has to pre-check.
+  - **Distinguishes a held file handle from a permission it could not
+    clear** (`sdk.remove-in-use` vs `sdk.remove-permission`), naming the
+    specific locked path when the underlying error carried one — the two
+    verdicts a consumer could not tell apart on its own.
+  - **Reports what was freed**: `data.freedBytes`, sized before the removal
+    (or, on a failed removal, the amount actually freed before the failure —
+    never a false zero on a partial removal, and never a false full amount).
+  - Handles a POSIX read-only DIRECTORY defeating the removal of every file
+    inside it — `unlink`/`rmdir` consult only the containing directory's
+    write bit, not the target's own mode, so the existing Windows-attribute
+    read-only retry (shared with `tan clean`, `tan.core.dir_removal`) alone
+    did nothing for this case; it now also clears the parent directory's
+    write bit before retrying. On Windows, the removal is long-path-prefixed
+    (`\\?\`) so the ~3 GB, deeply-nested trees `tan bootstrap` produces
+    (`modules/`, `.venv`, `zephyr`) do not trip the legacy `MAX_PATH` limit.
+  - `~/.alp/sdk-defaults.json` (the machine-global-default registry) is
+    pruned of every entry naming the removed path in the same operation, so
+    a removed install does not linger as a dead registration for some other
+    project.
+  - Both registry checks — the load-bearing refusal and the prune — compare
+    `sdkPath` with separators folded, not by raw string equality. `tan` writes
+    every `sdkPath` posix-normalised, but a hand-edited registry on Windows
+    spells the same directory `C:\Users\me\sdk`; a raw `==` answered False for
+    two names of ONE directory, which would have skipped the refusal and
+    silently orphaned the project that entry belongs to.
+  - A DANGLING symlink at the target is removed and reported
+    `data.removed: true`, rather than followed, found empty, and called
+    already-absent — the link is on disk, and reporting it gone is exactly the
+    stale-state answer the idempotence guarantee exists to avoid.
+
+- **`tan init --template multicore-mailbox` scaffolds a dual-Zephyr
+  E1M-AEN801 project.** That topology — two Cortex-M55 cores, both Zephyr,
+  both real project cores — is the defining shape of the E1M-AEN line and no
+  `--template`/`--cores` combination could produce it. Measured, on the
+  vendored tree:
+
+  ```
+  exitCode 0 | ok True | templateId multicore-mailbox
+  sku : E1M-AEN801
+    m55_hp: app=./src
+    m55_he: app=./peer
+  ipc : [{'kind': 'raw_shmem', 'endpoints': ['m55_hp','m55_he'],
+          'carve_out_kb': 4, 'name': 'alp_shmem0'}]
+  ```
+
+  The route is the one `#864`'s own thread settled on: **not** new `--cores`
+  syntax, which would have been a fourth copy of a convention alp-sdk already
+  owns, but carrying the SDK catalog's template in tan's `--template` id space
+  and sourcing its tree from `--emit scaffold` (alp-sdk#864 step 2) with the
+  byte-parity gate over it (step 3). `--cores <id>:zephyr` stays refused
+  exactly as before; nothing about that path is relaxed.
+
+  The tree is vendored at `eb96112b`, which is `v0.16.0` and the commit
+  `PINNED_SDK_TAG` already names — 8 emitted files plus `testcase.yaml`,
+  `boards/native_sim_native_64.overlay` and `peer/testcase.yaml`. The overlay
+  is load-bearing: both `src/main.c` and `peer/main.c` carry
+  `#define SHMEM_REGION_NAME "alp_shmem0"` and only that overlay declares the
+  `alp-shmem0` alias the README's own `west build -b native_sim/native/64 .`
+  needs. `peer/testcase.yaml` is the first NESTED `NON_ENVELOPE_EXTRAS` entry;
+  it is a literal path, not a suffix match, because widening that tuple would
+  change what counts as a non-envelope extra for every template in the tree.
+
+- **A per-template supported-SKU table replaces the one-off `iot-starter`
+  check.** Registering an AEN801-only template surfaced two failures the
+  single hard-coded `if` could not cover, both measured:
+
+  ```
+  --som E1M-AEN301  ->  exitCode 0, ok True, a project written claiming
+                        sku: E1M-AEN301   (the SDK REFUSES this sku, rc=1)
+  --som E1M-V2N101  ->  exitCode 5, init.template-unreadable
+                        "tan's vendored template tree ... is empty"
+  ```
+
+  The first is tan generating a project the SDK would not; the second tells a
+  customer their tan installation is broken when their `--som` was simply
+  wrong. Both now refuse up front with `init.invalid-som` and write nothing.
+  `IOT_STARTER_SUPPORTED_SKU` is gone rather than aliased, and
+  `test_template_integrity.py`'s parametrisation is driven off the same table
+  so no test asks a template to plan a SKU the command refuses.
+
+- **The vendored README says the channel is not allocated yet.** Measured
+  against the scaffolded project: `alp_shmem0` resolves `status: blocked`,
+  `reason: memory_map.base is TBD for region 'mram_main' in SoM E1M-AEN801`.
+  The project configures and builds and `--emit ipc-contract-h` still exits 0
+  emitting `ALP_IPC_*_ADDR 0x0u /* stub: blocked */`, so the roundtrip it
+  teaches compiles and does nothing. That is mapping work not yet done
+  upstream, not a limit of the design, and the caveat says so in those terms.
+  It is a declared `DELIBERATE_EDITS` entry, so the parity gate still holds
+  the rest of the file byte-for-byte.
+
+- **`multicore-rpmsg` is deliberately not vendored.** It cannot be, as it
+  stands: its catalog `files.user_owned` omits a root `CMakeLists.txt` and
+  `prj.conf` that its own emitted `README.md:22` diagrams, so the tree is
+  refused with `init.template-unreadable`; `linux/CMakeLists.txt:24` builds a
+  `src/main.c` the envelope never emits; and `linux/CMakeLists.txt:21` points
+  its generated dir at the project's parent. Filed as
+  `alplabai/alp-sdk#1712`. It is byte-parity-GREEN against the emit, which is
+  the point worth remembering: the gate certifies fidelity to what the SDK
+  emits, never that what the SDK emits can be built.
+
+  Envelope note: `data.available.projectTemplates` gains a seventh entry and
+  the `explain` overview's "Project templates:" line grows with it. Additive —
+  no field changed shape, no exit code moved — and
+  `contract/envelopes/explain-overview` is updated to match.
+
+- **`tan explain --template <project-template>` reports its `tan init --som`
+  accept/refuse policy as structured data, not just prose.** Fixes `#866`.
+  Before this, the only place a template's SoM restriction was written down
+  was inside `details[]`, as English -- `iot-starter`'s description read
+  "... (E1M-AEN801 only)" -- so alp-studio, the VS Code extension, or any
+  script filtering a New Project picker had to parse that sentence, and a
+  copy-edit to it could silently disagree with what `tan init` actually
+  enforces.
+
+  `data.som.{initAcceptsSkus,initRefusesSkuPrefixes}` now carries the fact
+  directly, read from `tan.core.scaffold`'s `TEMPLATE_SUPPORTED_SKUS` /
+  `UNSUPPORTED_SOM_FAMILY_PREFIXES` -- the SAME two tables `tan init` already
+  refuses `init.invalid-som` / `init.som-unsupported` against, not a second,
+  hand-typed copy. Named `initAcceptsSkus`/`initRefusesSkuPrefixes`
+  deliberately, not `supportedSkus`/`unsupportedSkuPrefixes`: this is a
+  REFUSAL policy, not a capability statement, and the two provably differ --
+  for every template except `iot-starter`/`multicore-mailbox`,
+  `initRefusesSkuPrefixes` (`["E1M-NX9"]`) is wider than alp-sdk's own
+  scaffold-catalog `supported.som_skus` (`["E1M-AEN801", "E1M-V2N101"]`),
+  because `tan init` deliberately falls an unrecognised SKU prefix onto its
+  default (Alif) tree rather than refusing it. `initAcceptsSkus` is the
+  exact-SKU allowlist (`["E1M-AEN801"]` for `iot-starter`/`multicore-mailbox`,
+  `null` for every other template); `initRefusesSkuPrefixes` is the
+  family-tree exclusion (`["E1M-NX9"]` for the four family-gated templates
+  with no explicit allowlist, `[]` for `minimal-app`, tan's one
+  vendor-neutral template `tan init` accepts every SoM for). Present only on
+  a project-template hit -- absent, not `null`, on a module-template or
+  generation-target hit, matching the absent-vs-null convention `--code`'s
+  `data.diagnostic`/`data.suggestions` already use.
+
+  `iot-starter`'s description no longer hand-repeats "(E1M-AEN801 only)", and
+  neither does its explanation's Wi-Fi-transport sentence: both are now
+  GENERATED from `TEMPLATE_SUPPORTED_SKUS`, so neither can drift from
+  `data.som` by construction. `multicore-mailbox`'s explanation sentence,
+  which also names the SKU, was left hand-written rather than mechanically
+  rewritten -- a new test,
+  `test_every_sku_mentioned_in_template_prose_matches_its_structured_som_data`,
+  extracts every SKU literal mentioned anywhere in a project template's
+  prose (not just one adjacent to the word "only") and gates it against
+  `TEMPLATE_SUPPORTED_SKUS`, so a future change to either the table or any
+  prose sentence that leaves the other stale REDs there regardless of
+  phrasing. Text mode gained a line too: the four family-gated templates now
+  report their SoM-family exclusion in `details[]`, the same fact
+  `data.som.initRefusesSkuPrefixes` already carried in JSON.
+
+  Where the data comes from, stated plainly per the issue's own ask: it is
+  NOT read from an alp-sdk checkout (`--template` stays SDK-free by design,
+  I-32) and it is NOT the free-form `family:` string `tan presets` publishes
+  per SoM (that vocabulary is read from the checkout at runtime and its real
+  spellings, e.g. `alif-ensemble`/`renesas-rzv2n`, are not something
+  `tan explain` can verify without one). It is the SKU-prefix vocabulary
+  `tan init` itself already gates a `--som` on -- the only fact in tan that
+  is both real and already authoritative for this exact refusal, though
+  narrower in scope than alp-sdk's own catalog validation (see above).
+
+  New contract fixture `explain-template-iot-starter` covers the shape on
+  the wire; see `contract/README.md`.
+
+- **`tan presets --format json`'s `data.soms[].cores[]` now carries `type` and
+  `allowedOs`, alongside the existing `id`/`os`.** Previously the payload
+  reported only the DEFAULT `os` a core boots today, forcing a consumer that
+  wants a runtime picker to re-derive which OS values a core may legally take
+  by regexing the core id for a Cortex-A/Cortex-M shape, exactly as
+  `alp-sdk-vscode@dev`'s `packages/alp-webview/src/shared/coreRuntime.ts` does
+  today with its own `/(^|[_-])m\d/` heuristic -- a second, independently
+  maintained copy of a rule this checkout already knows the answer to. `type`
+  is the raw `metadata/socs/<vendor>/<family>/<part>.json` `cores[].type` string
+  (`cortex-a32`, `cortex-m55`, ...); `allowedOs` is that type's excluded
+  cross-class OS subtracted from the checkout's own `board.schema.json` `os:`
+  enum, computed via the new `tan.core.os_class` module -- the SAME
+  cortex-a/cortex-m convention `tan.planner.validate._enforce_os_matches_core_class`
+  gates a real build on, so the wizard's picker and the build-time gate can
+  never disagree on the cross-class exclusion (a Cortex-A never offered or
+  accepted for Zephyr; a Cortex-M never offered or accepted for Yocto). That
+  exclusion is where they cannot drift, not the unresolved-core-type case:
+  there, `allowedOs` degrades all the way to `[]` while the build-time gate
+  still accepts `baremetal`/`off` for it -- deliberately narrower in presets
+  than in the gate. `allowedOs` degrades to `[]` on a schema miss alone;
+  `type` degrades to `""` on any of four SoC-lookup misses (measured): a
+  `silicon:` that is not a `vendor:family:part` triple (this repo's own
+  `presets-heterogeneous-som` fixture hits exactly this, with
+  `silicon: renesas-rzv2n`), a resolvable `silicon:` whose SoC JSON carries
+  no entry for this core's id, an entry for the id whose `type` key is
+  itself empty or absent, or (`#957`) an entry whose `type` key is present
+  but not a string -- neither field fails the command over it, and `type`
+  never carries a raw non-string value onto the wire either. Additive:
+  `data.schemaVersion` stays `"1"`.
+
+  **Side effect on `alp_project.py --emit os-topology`.** `tan.planner
+  .topology._allowed_os_for_core` now delegates to this same new
+  `tan.core.os_class.allowed_os_for_core`, so its `allowed_os` field also
+  degrades to `[]` for an unresolved core type -- a behavioural change from
+  the relocated `scripts/alp_orchestrate/topology.py` upstream source, which
+  still returns `["baremetal", "off"]` there. Deliberate (see the guard's own
+  docstring); latent today, since no shipped board hits an unresolved core
+  type and `test_planner_emit_parity` stays green (tan-cli#938 records the
+  divergence at `python/tests/gates/test_planner_relocation_freshness.py`,
+  next to `PINNED_HASHES`).
+
+- **`ALP_VELA_CONFIG` — the optional vendor vela config `.ini`, for a licensed
+  customer who has one.** The path is environment, not hardware, so it is read
+  from the env var and never from `board.yaml` (alp-sdk's own schema reserves
+  `models[].compile` for a per-model config *"the SDK cannot derive"*, and a
+  vela profile is derivable from the SKU). Absent — the common case — nothing
+  changes: vela uses Arm's built-in system config, which is exactly what the
+  arena/SRAM figures tan reports describe.
+
+  It buys the vendor-tuned profile only as a COMPLETE SET: `--config` plus the
+  part's vendor `System_Config` plus its memory mode, all three or none. That
+  is measured against real `ethos-u-vela` 5.1.0, not reasoned — supplying
+  `--config` REPLACES vela's built-in `vela.ini` rather than merging with it
+  (`architecture_features.py`: `self.vela_config_files = vela_config_files`),
+  and vela then refuses any default left beside it: `--config <ini>` alone is
+  rc=1 `Error: Incorrect argument to CLI option --config=['fake_vendor.ini']:
+  Specifying a configuration file is not allowed when using a default system
+  configuration`, `--config <ini> --system-config <name>` is rc=1 `... not
+  allowed when using a default memory mode`, and the full triple against an
+  `.ini` defining both sections is rc=0.
+
+  **Today that set never completes, and doing nothing is the point.** No SoC
+  spec names a vendor `System_Config`, because an Alif `System_Config`
+  describes one CORE SUBSYSTEM rather than a die — one Ensemble part sources
+  both `Ethos_U85_SRAM_Only` and `RTSS_HE_SRAM_Only`, so a per-SoC scalar
+  would be right for one of its Ethos-U accelerators and wrong for the rest.
+  With `ALP_VELA_CONFIG` set and no vendor name resolved, tan passes neither
+  flag: `--config` alone is a hard failure and a substituted profile name
+  would be an invented hardware fact. The mechanism goes live the day metadata
+  can name one per accelerator, and a test pins the do-nothing state until it
+  does.
+- **`tan model doctor` reports that `.ini` as an OPTIONAL prerequisite.** A new
+  `data.optional[]` list carries it in the same five-key row shape the backend
+  rows use (`{backend, tool, available, version, reason}`), deliberately NOT
+  inside `data.backends[]`: `available: false` there means tan cannot compile
+  for a backend at all, while here it means the backend works and a
+  licensed-only enhancement is not installed. The text line leads with
+  `optional` and never `unavailable`, and the reason opens `OPTIONAL, not a
+  fault:` and says what the customer already has (Arm's built-in system
+  config, and correct figures) before what setting it would buy. A value
+  pointing at no readable file gets its own reason naming the path, rather
+  than the generic not-set one. `data.schemaVersion` stays `"1"`: the key is
+  additive and a consumer that does not know it ignores it, which is the right
+  outcome for an enhancement nobody is required to have.
+
+- **Every option `tan` accepts and does not read now says WHICH KIND of inert
+  it is, in `--help`, in a token a consumer can switch on.** The marker is
+  `(inert:KIND)` or `(inert:KIND:tan-cli#N)`, rendered by the new
+  `python/tan/core/inert.py` and nothing else, over a closed four-value
+  vocabulary: `deferred` (an upstream issue tracks its arrival — the ONLY
+  non-permanent kind), `compatibility`, `parity`, `not-applicable`.
+
+  Before this, the difference lived only in free prose that varied per site:
+  measured on the pinned `0.6.0-rc1` and recorded into `alp-sdk-vscode`'s
+  `test/golden/tan-surface/surface.json`, 17 inert options carried **six
+  distinct spellings for four distinct meanings**, and two of those spellings
+  said nothing at all once the option was read out of its surrounding help
+  block (`faultdecode --sdk-root`'s `(unused; see below)` — there is no
+  "below" in a table of options). Only the twelve `build` deferrals will ever
+  start acting; the rest are permanent by design. That is not cosmetic:
+  telling a customer "not implemented yet, see tan-cli#427" about `doctor
+  --build` invites them to wait for a flag that is never going to act. With
+  nothing structured to read, the extension's only choices were to
+  pattern-match tan's English — a condition pinned to one spelling is blind to
+  the other five — or to hand-maintain its own copy of a table tan already
+  knows, which is what alp-sdk-vscode#577 does today. The consumer side of
+  that collapses to reading `kind`.
+
+  **`deferred` cannot be rendered without a ref.** `inert_help` raises
+  `ValueError` at import time — every call site is a `typer.Option(...)`
+  default — rather than emit a promise with no issue behind it. That is the
+  one property a gate on either side can check, and it is now checked on both.
+
+  **The KIND is what says "this will arrive", never the presence of a ref.**
+  `compatibility` and `parity` both name the issue that explains their
+  history (`tan-cli#290`, `tan-cli#261`); a consumer keying off `ref != null`
+  would get `doctor --build` wrong — the exact defect this entry is about.
+
+  **Parentheses, not `[inert:…]`, and no whitespace inside the token.**
+  Measured: Typer runs this app with `rich_markup_mode="rich"`, so `--help`
+  prose is rich MARKUP and a square-bracketed marker parses as a style tag —
+  `[inert:deferred:tan-cli#427]` renders as *nothing at all*, vanishing from
+  both the customer's terminal and the surface the extension records. `\[`
+  escapes it, but only while the markup mode stays `rich`. Parentheses need
+  no escape, and a token with no internal spaces can never be split by rich's
+  line wrapping.
+
+  **Two of those 17 rows are already gone**, and the census below is 15
+  rather than 17 for that reason: `renode --board-yaml` and `renode
+  --image-bundle` were the two `parity`-kind rows in the issue's table, and
+  tan-cli#848 retired the whole `renode` verb after the measurement was taken.
+  The `parity` kind stays in the vocabulary — the ~110 hidden oracle-parity
+  flags are the same fact — but no VISIBLE option carries it today.
+
+  Sites updated: `build`'s twelve deferred flags (`_DEFERRED_HELP`),
+  `doctor --build`, `faultdecode`'s `--project`/`--sdk-root`, and the ~110
+  hidden oracle-parity flags `tan.core.global_flags` injects.
+  `faultdecode`'s two are also **self-contained now** — `--sdk-root` reads
+  "alp-sdk checkout root. Not read: faultdecode is pure ARMv8-M register
+  arithmetic and drives no alp-sdk checkout." instead of pointing at a
+  "below" that is not there.
+
+  `python/tests/gates/test_inert_option_markers.py` is what keeps it true of
+  the SHIPPING surface rather than of the five call sites someone remembered
+  to update: it walks the built Click tree and fails on an unknown kind, a
+  `deferred` with no ref, a hidden inert option of a non-`parity` kind, an
+  option that reads as inert in prose but carries no marker, and any change at
+  all to the census of **visible** inert options (15 rows today). The marker
+  grammar, the vocabulary table and the extraction regex are published for the
+  extension in `contract/README.md`, which now lists six pinned facts rather
+  than five.
+
+- **`envelope-contract.json` now publishes an `sdk-list` family, so
+  `tan sdk list`'s `data.releases[]` is a promise rather than something that
+  happens to be emitted (tan-cli#887).** The declared key set is
+  `data.subcommand` plus `data.releases[].{tag, publishedAt, tarballUrl,
+  releaseNotesSummary, releaseNotes, draft, prerelease}`, from the new single
+  source `contract/sdk-list-data-keys.json` — the second `dataKeys` family
+  after `doctor`'s (tan-cli#664), and for the same reason: the VALUES are
+  whatever alp-sdk has published on GitHub at the moment of the call, so a
+  byte golden is impossible and the key set is the contract.
+
+  **The fields themselves are not new, and the issue that asked for them was
+  filed on a wrong premise — worth recording rather than quietly fixing
+  something else.** #887 reported that "the envelope carries no `prerelease`
+  or `draft` flag for each entry", measured against the pinned `0.6.0-rc1`.
+  It does: `git show v0.6.0-rc1:python/tan/commands/sdk_cmd.py` shows
+  `parse_remote_sdk_releases` emitting both, and `git log -S` puts them in
+  `f808e8f`, the commit that first added `tan sdk`. `format_release_table`
+  has rendered `[draft, prerelease]` in the text surface just as long. A
+  consumer can write `releases.find((r) => !r.prerelease)` today and could
+  have on 0.6.0-rc1.
+
+  What was really missing is the half that makes that safe to depend on.
+  `contract/README.md` listed `data.releases` as **NOT COVERED** ("Hits the
+  GitHub releases API") — no gate, nothing published — so a rename would have
+  been silent on both sides, and a consumer reading the contract was told the
+  field was uncovered and reasonably built its own tag-text heuristic instead.
+  That row now names the seven keys and points at the gate; the "five NOT
+  COVERED rows" paragraph is four.
+
+  `python/tests/conformance/test_sdk_list_contract_key_set.py` is the lockstep
+  check. It replaces **only the socket** (`urllib.request.OpenerDirector.open`)
+  and runs the real command — real `_fetch_releases` headers and proxy
+  selection, real `parse_remote_sdk_releases`, real `_list_data`, real
+  `emit()` — deriving every key set FROM the published file rather than from a
+  constant of its own, and failing in both directions. It also pins three
+  things a key set alone would not:
+
+  - **the machine type of each field**, because `prerelease` becoming the
+    string `"true"` would keep every key-set assertion green while making a
+    consumer's `!r.prerelease` false for every release, silently;
+  - **that the flags are READ from the payload**, via a fixture whose first
+    entry is a prerelease and whose second is not — a hardcoded `False` would
+    otherwise pass;
+  - **that a payload carrying nothing but `tag_name` still emits all seven
+    keys**, `""` for the strings and real `False` booleans for the flags
+    (tan-cli#122), so a consumer never has to tell absent from false, and a
+    declared-but-never-emitted key cannot hide behind a fully-populated
+    fixture.
+
+  Stated plainly in the test's own docstring and in `contract/README.md`: this
+  does NOT prove GitHub still sends the fields tan reads out of its payload —
+  nothing offline can — only that the payload→wire mapping is the declared
+  one. A gate that dialled `api.github.com` would go red on an airgapped
+  laptop and on GitHub's next outage, which is exactly why the row said NOT
+  COVERED rather than being covered badly.
+
+  One incidental CI fix travels with it: `.github/zizmor.yml`'s `artipacked`
+  ignores are LINE-SCOPED, and the 11 lines this adds to release.yml's
+  `Bundle the envelope contract` step pushed the exempted `dev` checkout in
+  `propose-dev-version-bump` from `release.yml:1225:9` to `1236:9`,
+  un-suppressing a deliberately-accepted finding and reddening the required
+  `zizmor · workflow security` context. Re-derived by running the gate, as
+  that file's own header instructs — not by widening the entry.
+
+  Both mutations were measured: deleting `"prerelease"` from
+  `parse_remote_sdk_releases` reds 10 of the 12 cases, and stringifying it
+  reds 3 including the `[prerelease-bool]` type case specifically.
+
+- **`_core_os_choices`/`_allowed_os_for_core`/`_enforce_loader_rules`'s
+  `--metadata-root` threading now has a dedicated regression test.**
+  `.github/workflows/planner-resync.yml` has failed for **at least 40
+  consecutive runs, unbroken since 2026-08-15** (`gh run list --workflow
+  planner-resync.yml --limit 40`, all `failure`). Run `32660981604`
+  (2026-08-23T19:21:33Z, targeting alp-sdk `eb96112b`, #1485 "resolve every
+  `alp_orchestrate` site against `--metadata-root`") is the one that produced
+  the still-unmerged `auto/planner-resync` branch (`fa4be8c0`). Diffing that
+  commit's two files
+  (`tan/planner/topology.py`, `tan/planner/validate.py`) against `dev` found
+  them byte-identical: the fix already landed via tan-cli#868's earlier
+  resync, independently of the bot. Nothing needed porting, but nothing
+  proved it either -- `tests/core/test_metadata_root_override.py` covers
+  other `--metadata-root` call sites (the storage/memory-map resolvers), not
+  these three. `tests/planner/test_topology_metadata_root_override.py` closes
+  that gap: a synthetic `metadata_root` whose `board.schema.json` declares an
+  `os:` enum value the bound SDK's own schema does not, proving the parameter
+  is read rather than silently falling back to the in-tree default -- the
+  exact defect class #1485 fixed -- plus coverage for the `BOARD_SCHEMA`
+  fallback (no `schemas/` in the given root) and the `OrchestratorError` (not
+  a raw `FileNotFoundError`) raised when neither resolves.
+
+- **`tan debug-config` now says, on the wire and in the file it writes,
+  whether starting a profile programs the attached target.** Previously the
+  written `launch.json` entry carried no `loadFiles` key at all, so a
+  cortex-debug session programmed the device by falling through to
+  `marus25.cortex-debug`'s own schema default -- verbatim, `contributes.
+  debuggers[0].configurationAttributes.launch.properties.loadFiles`: "If this
+  property does not exist, then the executable is used to program the
+  device." Nothing in the file, and nothing in the envelope, told a reader
+  that. alp-sdk-vscode#586 hit this directly: its flash-consent dialog could
+  never trigger, because the write happens inside cortex-debug's own spawned
+  `JLinkGDBServerCL`/`openocd`/`pyocd`, with no `tan` process in the loop to
+  intercept it, so the extension had to re-derive "does this profile
+  program the device" client-side from the adapter's schema -- the same
+  shape of gap tan-cli#870 closed for `tan presets`' core-type inference.
+
+  Two additive fields close it, both stated by the producer instead of left
+  for a consumer to re-derive:
+
+  - Every cortex-debug `data.configuration` (`zephyr-mcu`, `baremetal-mcu`)
+    now carries an explicit `loadFiles` key, naming the SAME artefact
+    `executable` does. `create_launch_draft` never omits it, and
+    `apply_launch_resolution` keeps the two in sync the moment a real build
+    resolves a per-core ELF -- except a `loadFiles` value already on disk
+    that this run cannot prove (via the `.alp/` sidecar) is tan's own prior
+    output, which is left exactly as it was rather than merged or
+    overwritten (a customer's hand-authored artefact list, an explicit `[]`
+    for attach-only included). `loadFiles` and `executable` CAN diverge in
+    that one case -- a sidecar lost or never shared while the key was
+    already present -- but never SILENTLY: every such write also carries
+    `debug-config.load-files-preserved`, in the envelope and (tan-cli#1020
+    round 4) in the default text output too.
+  - Every `data` payload -- preview or write, success or failure -- now
+    carries `data.programsDevice: bool` (`tan.core.debug_launch.
+    programs_device`, keyed on `targetKind` alone): `true` for
+    `zephyr-mcu`/`baremetal-mcu`, `false` for `yocto-userspace` (a `cppdbg`
+    attach to a gdbserver the operator already started after their own
+    manual deploy -- this session issues no write of its own) and
+    `false` for `native-host` (there is no target hardware to program).
+
+  Neither field changes which profiles this command writes, or touches a
+  hand-written cortex-debug entry this command did not author -- a
+  hand-written entry programs exactly the same silicon and is still owed the
+  extension's own existing inference, scoped on the workspace holding a
+  `board.yaml`, not on the `Alp:` name prefix. `data.schemaVersion` stays
+  `"1"`: both fields are additive, the same precedent tan-cli#484/#870 set.
+  The five `debug-config-preview-*` contract goldens are re-recorded
+  accordingly (`contract/README.md`, "Second re-record: `data.programsDevice`
+  + `loadFiles` (tan-cli#945)").
+
+### Changed
+
+- **Every board's generated Zephyr `alp.conf` now carries
+  `CONFIG_ALP_SDK_SOM_HW_REV="<hw_rev>"`, unconditionally.** Planner re-sync
+  to alp-sdk `f1b1c9df` (alp-sdk#1862) ports the upstream change: `alp.conf`
+  used to carry the resolved SoM hardware revision only for boards with an
+  on-module EEPROM wired; it now carries it for every board, including SKUs
+  with no EEPROM today (e.g. E1M-NX9101), so the symbol is not silently
+  dropped if one is added later. This is what lets the (also upstream) boot
+  banner warn when the firmware's build-time `hw_rev` disagrees with the
+  live EEPROM manifest at runtime. Purely additive — no existing Kconfig
+  symbol changed meaning — but it does move emitted bytes: `tan build`'s
+  generated `alp.conf` differs from a pre-#1026 `tan` on every Zephyr slice
+  of every board.
+
+- **PyPI replaces the npm shim as the standalone install channel, published
+  over Trusted Publishing with no token at all (#1054).** `release.yml`'s
+  `publish_npm` job and the whole `npm-shim/` tree are retired in favour of
+  `publish_pypi`, which uploads with
+  `uses: pypa/gh-action-pypi-publish@dc37677b # v1.14.2` under
+  `id-token: write` and carries **no `secrets.*` reference anywhere**. That is
+  the point of the move rather than a side effect: `NPM_TOKEN` was configured
+  for v0.4.1 and the job still failed with `npm error code EOTP`, because a
+  classic/publish token on a 2FA account demands an interactive one-time
+  password no CI run can answer (#233) — a shape a missing-secret refusal
+  cannot catch, since the token is present and the job fails at the registry
+  after signing a provenance statement for a version that never published. And
+  PyPI cannot scope an API token to a project that does not exist, so any token
+  minted before the first publish is necessarily ACCOUNT-scoped: publish and
+  yank rights on every project under that account. The pending-publisher flow
+  binds the identity before the project exists and skips that window entirely.
+  The shim it replaces was a downloader for four platform-specific release
+  assets that 404'd at install time on `win32/arm64` and `linux/arm64` (#436);
+  a `py3-none-any` wheel has no platform hole. The frozen binaries are
+  untouched — they exist for the VS Code extension, which downloads a raw asset
+  and cannot `pip install`.
+
+  `publish_pypi` keeps `publish_npm`'s architecture exactly, because that
+  architecture is what `release_gate` compares against: `outputs.published` is
+  OBSERVED from two mutually-exclusive step ids rather than re-derived from the
+  declaration (re-reading the declaration would make the gate assert that the
+  declaration equals itself), and the channel is armed by a repository
+  VARIABLE, `TAN_PYPI_PUBLISH`. Trusted Publishing needs no variable to
+  authenticate; the variable exists so `release_gate`'s declared-vs-observed
+  comparison and `test_release_docs_match_the_workflow.py`'s
+  `_gating_variables()` loop both keep a subject. Off by default because the
+  pending publisher is a pypi.org web-UI action no workflow can perform, and a
+  permanently-red job on the release board is worse than no job — the disarmed
+  path still BUILDS the sdist and wheel, so a distribution that will not build
+  is reported on every tag.
+
+- **The distribution is renamed `alp-tan` -> `tan-cli` (#1054).** Nothing was
+  ever uploaded under either name, so there is no installed base and no
+  redirect to leave behind. `pyproject.toml` had recorded the original choice
+  and its reasoning -- *"`tan-cli` was also free; `alp-tan` is preferred
+  because the other Alp Lab artefacts are `alp-`prefixed"* -- and that reasoning
+  is reversed here rather than deleted: the package is published from
+  `github.com/alplabai/tan-cli` and authenticated by Trusted Publishing, which
+  binds the PyPI project to that exact repository, so
+  `pypi.org/project/tan-cli` <-> `github.com/alplabai/tan-cli` is one name a
+  reader can follow where `alp-tan` <-> `tan-cli` is two. The IMPORT package and
+  the console script both stay `tan`; only the install line changes.
+
+  67 occurrences across 36 files, including the live hint strings customers
+  actually read (`vela not on PATH; pip install tan-cli[model-compile]` in
+  `model_doctor.py`, `monitor.pyserial-missing`'s
+  `pip install "tan-cli[monitor]"`, `tan model check`'s exact-mode line) and
+  the frozen `contract/envelopes/model-doctor-no-sdk/expected.json` that pins
+  one of them byte-for-byte -- which is what makes this a contract change
+  rather than a rename. `alp-tan-cli`, the stale v0.4-era Rust crate on
+  crates.io, is deliberately untouched: it is a different program under a
+  confusingly similar name, and every mention of it still means that.
+
+  Two places where the mechanical substitution had to be undone by hand,
+  because they are HISTORY rather than description:
+  `test_an_install_command_for_an_unpublished_registry_is_never_offered`'s
+  docstring records what python/README.md said in #385 -- it said
+  `pip install alp-tan`, and a blind rename briefly made this gate claim the
+  README had advertised a name that did not exist yet. Its
+  `_UNUSABLE_MARKERS` comment carried the same sentence. Both now name the old
+  distribution explicitly as the old one. The same docstring also asserted
+  "no PyPI job exists in release.yml", true when written and false as of this
+  change.
+
+- **Three gates that would have gone quiet through this change, found by
+  auditing for that shape rather than by a red test (#1054).**
+
+  - **The version-identity contract had no census of its own sources.** Nothing
+    anywhere asserted how many files `version_check.py` compares, and
+    `_version_authority()` reads only `read_tan_version` — so dropping any
+    OTHER reader plus its call site and its summary line left every gate green
+    and the whole suite passing while `check()` silently compared one fewer
+    file. Measured: with `npm-shim/package.json` unreadable, `tests/gates` +
+    `tests/scripts` gave `1275 passed, 0 failed`.
+    `test_version_check_still_reads_every_source_it_is_supposed_to` now
+    AST-walks the script for two sets — readers DEFINED and readers `check()`
+    CALLS — and asserts both. Mutation-tested: removing
+    `read_pyproject_version` from a parsed copy reds it.
+  - **`_registry_channels()` could not see an action-based publish.** It
+    scanned `run:` bodies only, so `publish_pypi` — which uploads via `uses:` —
+    reported `pypi: absent` with the job sitting right there. Its own needle
+    list already anticipated the action form (`"pypi-publish"` beside
+    `"twine upload"`), so the intent was there and only the scanner was narrow.
+    `_steps_source()` now scans `uses:` refs as well as `run:` bodies.
+  - **`test_no_doc_claims_a_publish_job_the_workflow_does_not_have` only read
+    FORWARD.** Every check asked "does the doc match a job that exists?", so
+    prose describing a RETIRED job was invisible — the loop that would catch it
+    iterates only over existing jobs. The new reverse check found two ghosts on
+    a fully green board, and only one of them was this change's:
+    `docs/release-contract.md` still described `publish_crates`, deleted back
+    in #271.
+
+- **`release.yml`'s bump job proved three files moved where it meant four, and
+  the visible red pointed at the wrong line (#1054).** Its "Refuse to report
+  success on an unexplained no-op" guard reads
+  `git status --porcelain -- <four paths>`; measured, `git status --porcelain`
+  on a missing path returns **empty with rc=0**, so with `npm-shim/package.json`
+  gone the guard would have kept passing over three files. Its sibling
+  `git add <same four paths>` fails loudly (`rc=128`,
+  `fatal: pathspec ... did not match any files`) — so a fixer chasing the red
+  lands on the `git add` line and never reaches the silent one. Both pathspec
+  lists are corrected together.
+
+- **`test_parity_workflow_concurrency_and_timeouts.py`'s `release.yml` floor
+  was below the real count, so it could not catch the shrink it exists for
+  (#1054).** It declared `5` while the file had **6** bounded jobs — its own
+  comment omitted `propose-dev-version-bump` — so removing a job landed exactly
+  ON the floor and passed. Now `6`, matching `ci.yml`'s pattern where the floor
+  equals the real count and any drop reds.
+
+- **The module/function size ratchet's data is now one file per measured
+  module, so two branches touching different modules no longer conflict on
+  it.** Refs `#1057`. `python/tests/gates/module_size_budget.generated.json`
+  is replaced by `python/tests/gates/module_size_budget.d/`, a record per
+  module named after the module itself
+  (`module_size_budget.d/tan/commands/build_cmd.py.json`) — the same
+  structural fix `#907` applied to the ledger, for the same reason: two
+  branches that never write the same path have nothing for git *or* GitHub to
+  call a conflict.
+
+  The issue proposed splitting per top-level package and said a real proposal
+  should measure a larger sample first. Measured over **93** value-changing
+  commits to the old file (4278 commit pairs, `dev` history): 100% of pairs
+  collide under one file, **61.3%** would still collide per-package,
+  **22.4%** per-module with the whole-tree scalars still stored, and
+  **12.9%** per-module with them derived. Per-package loses most of its value
+  to one bucket — 69% of those commits touch `tan/commands/` and 58% touch
+  more than one package — so this ships the per-module split instead.
+
+  `function_count_budget` and `function_worst_budget` are no longer stored
+  anywhere: each record carries its own module's `long_functions` (at this
+  point still a count, with a sibling `worst_function` the max span — `#1173`
+  later replaced both with the actual `[span, name]` list, see its own
+  entry), and the two whole-tree numbers are a **sum** and a **max** over
+  those, which is exactly how `measure_current` always computed them. That is
+  the load-bearing half — 34% of the sampled commits moved a scalar, and
+  storing them costs 22.4% instead of 12.9% — and it changes nothing about
+  what the ratchet means here: it is still whole-tree, so as of this change a
+  module gaining a long function while another loses one still needs no
+  `--reason` (`#1173` overturns that specifically for a `FUNCTION_CAP`
+  crossing).
+
+  The residual **12.9%** is not claimed away: two branches that both change
+  the *same* module still write the same record and still conflict. Its
+  resolution is unchanged — delete either side, rerun
+  `python scripts/regen_module_size_budget.py --merge-resync`, which
+  re-measures the merged tree rather than interpolating between two committed
+  numbers (`#668`'s constraint, preserved verbatim: nothing in the gate or the
+  script ever reads a committed record to derive a new one).
+
+  `observed_tests` (`#817`) got the same per-file treatment, since it collides
+  by the same mechanism and is inside those measurements. It stays a
+  MEASUREMENT and never a ceiling, and that distinction is now
+  machine-checked rather than positional: every record declares
+  `"kind": "budget"` or `"kind": "observed"`, and a record whose kind
+  disagrees with the tree its path sits in is refused rather than coerced.
+  `#586`'s duplicate-key guard survives in both halves — per file via
+  `object_pairs_hook`, and across files by refusing any record whose declared
+  `module` disagrees with its own path (the only way two files could claim one
+  module) or any stray file the loader would otherwise silently skip.
+
+  `--check` and `--merge-resync` both keep working, and `--check` still runs
+  as its own early step in `ci.yml`'s `python` job and `parity.yml`'s
+  `seam1-plan-shape` job — its `run:` line is unchanged, only its step name
+  moved off the retired filename. Its output now names the module whose
+  record moved, where the old file could only report
+  `function_count_budget: 300 -> 301`.
+
+- **The `python/tests/**` allow-list gate (`test_shared_test_helpers_have_one_definition.py`)
+  gains a second seeded name, `bound_sdk`, closing the audit `#1081` recorded
+  as outstanding when the gate itself landed.** An underscore-insensitive,
+  module-level walk for every `bound_sdk*`-shaped name found six: one genuine
+  duplicate and five singletons or an already-documented legitimate pair.
+  The duplicate -- `_bound_sdk`, the plain `bind_sdk_root(SDK); yield`
+  autouse fixture -- was defined in fifteen separate real-SDK-gated test
+  modules under `tests/planner/` and `tests/gates/`: fourteen of those
+  definitions byte-identical, and the fifteenth differing only by an extra
+  three-line docstring on the same decorator, signature, and body.
+  Consolidated onto one definition in the new
+  `tests/planner/_bound_sdk_fixture.py`; every former consumer now imports it
+  for its fixture-registration side effect instead of redefining it, and the
+  gate now reds by name if a straggler copy reappears. The other five names
+  that happen to contain the substring `bound_sdk` -- `bound_sdk_root`
+  (already documented as an unrelated, legitimately distinct pair),
+  `needs_bound_sdk`, `test_a_bound_sdk_root_still_ships_the_planner_oracle`,
+  `test_jlink_aen_device_fallback_matches_the_bound_sdk_metadata`, and
+  `warn_when_the_bound_sdk_disagrees_with_the_pins` -- each have exactly one
+  module-level definition, so nothing about them needed to change; the gate's
+  docstring records why, so a future sweep does not re-litigate them.
+
+- **`tan/planner/template.py`'s curated-error register grows one more shared
+  primitive.** `render_to_envelope`'s template-example `board.yaml` read
+  carried its own hand-written `except (OSError, UnicodeDecodeError)` block,
+  byte-for-byte the same shape `document_guards.DocumentGuards.
+  read_catalog_document` already used for the catalog's own read -- two
+  definitions of "cannot read `<what>` at `<path>`: `<reason>`" that happened
+  to still agree. Both now call a new `DocumentGuards.require_readable_text
+  (path, *, what)`, with the message text unchanged.
+  `_require_mapping_doc`/`_require_field`/`_require_key` (tan-cli#1073/#1082)
+  and the catalog readers themselves (tan-cli#1084) were already run by both
+  `template.py` and `example_catalog.py` before this change -- `require_
+  readable_text` joins them for the same reason: a shape run by more than
+  one consumer module that unifies without changing either one's contract
+  (it was two identically-contracted inline copies the day before this
+  change). `_require_constraints` stays local (no second consumer at all).
+  `_load_som_doc`/`_board_route_entries` stay local too, but their
+  duplication IS real and named rather than denied: `tan/model/
+  targets.py::resolve_targets` (bare `FileNotFoundError`/`ValueError` --
+  only the `ValueError` half's message is test-pinned,
+  `tests/model/test_targets_malformed_preset.py`) and `tan/core/
+  som_buildability.py`'s `_safe_load_mapping`-backed read (quiet
+  `None`-on-any-failure, "Never raises", seeded in
+  `test_never_raises_contract_holds.py`) independently reimplement
+  `_load_som_doc`'s read; `tan/planner/loader.py` and `tan/planner/
+  project_emit/bom_netlist.py` reimplement `_board_route_entries`'s read to
+  a FOURTH contract -- neither raises nor returns `None`, both silently
+  skip the one malformed entry via `isinstance` filters
+  (`bom_netlist.py:76,79,82`, `loader.py:1078`) and keep the rest. Four
+  independently-evolved contracts (curated-raise, a DIFFERENT curated-raise,
+  whole-function `None`, per-entry silent skip) cannot fold into this
+  register's one `self.error`-per-caller shape without changing at least
+  one of them -- a real redesign, out of this extraction's scope. Left
+  local, with the rivals named for a follow-up to weigh. `_docs_ref` stays
+  local for its own, third reason: it degrades to `"main"` rather than
+  curated-raising at all. Separately, `_load_som_doc` and
+  `_board_route_entries` still read+parse fully UNGUARDED after their own
+  `is_file()` pre-flight (no `try` at all) -- a live #1116-class gap this
+  change does not fix; tan-cli#1133 tracks it.
+
+  `template.py` itself is **not** smaller for this history: **1548** lines
+  at tan-cli#1001 (`156582e`, before #1025 opened this family) -> **1658**
+  after #1025/#1034/#1037/#1048 -> `1780` (#1073, +122) -> `2156` (#1082,
+  +376) -> `2020` (#1084, -136) -> `2051 -> 2066` (smaller rounds since) ->
+  `2063` (this change, -3). Net **+515** over the true 1548-line baseline;
+  #1084 is still the only round before this one that ever removed
+  anything. This change closes the one remaining cross-consumer
+  duplication #1085 named, it does not reverse the growth.
+
+- **`test_shared_helpers_have_one_definition.py` can now guard a helper homed
+  anywhere under `python/tan/`, not only `tan/core/shapes.py`.** Its per-helper
+  check used to hard-assert the one live definition it found sat in
+  `tan/core/shapes.py`, so a helper deliberately moved somewhere else could not
+  join the gate at all -- `#1090` hit this directly, moving `validate`'s
+  board.yaml resolver into a new `tan/core/board_context.py` so `scaffold`
+  could share it, with nothing mechanical holding it there afterwards. The
+  allow-list is now `{name: (home module, why one definition matters)}`; the
+  six existing `shapes.py` entries are unchanged in behaviour, and the
+  anti-rot companion that reads `shapes.py`'s own public surface back out of
+  the file (rather than trusting a hand-copied list) still runs, scoped to the
+  entries homed there.
+
+  Seeded with `resolve_board_path` -> `tan/core/board_context.py`, the helper
+  this generalisation was written for. `#1090`'s merge replaced
+  `validate_cmd.py`'s former private copy with an `ImportFrom` alias this
+  gate's AST walk never sees as a definition, so only one lookalike needed a
+  `_NOT_THE_SAME_HELPER` carve-out: `generate_cmd.py`'s genuinely different
+  `_resolve_board_path`, which answers `(board_yaml, workspace_root) -> Path`
+  via pathlib rather than `(project, board_yaml) -> (str, str)` joined as
+  strings to preserve the leading `./` the conformance fixtures pin. A private
+  re-implementation of `resolve_board_path` now reds this gate, naming both
+  files, instead of landing all-green.
+
+  Two carve-out gaps closed in review: a carved-out `(file, spelling)` pair
+  used to exempt EVERY occurrence in that file, so a genuine second private
+  definition landing beside an already-exempted lookalike passed silently --
+  each carve-out now excuses exactly one definition. And the "a legal home
+  must not import from `tan/commands/`" rule the per-helper failure message
+  states is now also checked directly, against every distinct home
+  `_SHARED_HELPERS` declares, instead of being a claim nothing re-verifies.
+
+- **`monitor.no-port` is now `frozen` wire vocabulary, not a `reserved`
+  pre-consumer code.** Its own registry note carried the trigger — "promote to
+  `frozen` (filling in consumer/consumerEffect for real) the moment a consumer
+  binds to it" — and that moment arrived: alp-sdk-vscode#649 binds the spelling
+  at `src/monitor.ts:89` through `packages/alp-core/src/monitor/ports.ts:44`,
+  and registers it in that repo's own gate at `test/tanContract.test.js:256`.
+  `consumer` and `consumerEffect` are filled in for real, the "pre-consumer --
+  nothing in alp-sdk-vscode matches this code yet" sentence is gone, and the
+  code is pinned in `test_frozen_issue_codes.py`'s `FROZEN_LOCATIONS` so
+  `test_the_pin_set_matches_the_registrys_frozen_codes` covers it in both
+  directions. Same operation tan-cli#885 performed for `cli.parse-error`.
+
+- **The `consumerEffect` says something unusual, and says it explicitly: this
+  code is the consumer's SUCCESS path.** The ordinary shape of a renamed code
+  is a feature that degrades — a hint stops firing, a hint goes generic. Not
+  here. `tan monitor` requires `--port` and the extension cannot guess one, so
+  it runs `tan monitor --format json` with no port *on purpose* and reads the
+  port list out of the refusal's `data.availablePorts`. Renamed, the feature is
+  removed outright rather than degraded: the picker has nothing to render and
+  the run surfaces as a generic CLI failure. Nothing about the emit or the
+  payload changes — `data.availablePorts`' `device`/`description` pair is
+  already the shape the picker consumes.
+
+- **Frozen deliberately ahead of the consumer's merge, which the note records
+  rather than glosses.** alp-sdk-vscode#649 was still OPEN when this landed.
+  That is the safe direction and the reason is worth stating: freezing early
+  stops tan renaming the code out from under an in-flight consumer, whereas
+  waiting for the merge leaves a window in which a rename here breaks a
+  consumer silently — the match FAILS OPEN on the extension side, so neither
+  end would report it. The residual risk runs the other way and is much
+  smaller: if #649 is abandoned rather than merged, this is a frozen code with
+  no live consumer, which is debt to demote and not a wire break. The registry
+  note says so in those terms, so a later reader is not left inferring that
+  #649 merged.
+
+- **One consequence is certain rather than merely possible, and it lands on the
+  consumer.** `alp-sdk-vscode`'s `test/tanContract.test.js:261` pins
+  `monitor.no-port` at `"reserved"` and asserts equality against the
+  `envelope-contract.json` release asset tan publishes — which carries the whole
+  issue-code registry, `note` fields included (`release.yml:711`). So the first
+  time that repo's `SUPPORTED_CLI_VERSION` moves to a tan release containing
+  this promotion, the assertion reds with `tan vX declares monitor.no-port
+  "frozen", not "reserved"`. That is loud, one line to fix, and unavoidable in
+  **either** freeze ordering — freezing after the consumer merged would produce
+  exactly the same red. alp-sdk-vscode#423 is the precedent for moving a
+  `GATED_CODES` status in the same change as the pin bump, and it is the shape
+  to follow here.
+
+- **`tan/planner/template.py` is split into three sibling modules, and the
+  false "this module cannot be split" claim it and two other files carried is
+  corrected.** Refs `#1142`. The module was 2206 lines against
+  `MODULE_CAP = 800`, with a comment at its own `_GUARDS` block
+  (`_module_size_budget_core.MIRRORED_PREFIX` "... so it cannot be split in
+  this repo at all") that read the rule backwards: `MIRRORED_PREFIX` bars a
+  `PINNED_HASHES` module's shape from diverging from a *moving* upstream
+  file it is 3-way-merged against on every re-sync — splitting one of those
+  would turn every future upstream hunk into a merge conflict.
+  `tan/planner/template.py` is `HAND_PORT_SOURCES`-tracked instead: FLAGGED
+  against `scripts/alp_template.py`, never merged, so it has no such cost.
+
+  Two new sibling modules carry the split: `tan/planner/template_pins.py`
+  (every read of `metadata/e1m_modules/**` / `metadata/boards/**` and the
+  sku/core/pin rename derivation — `_load_som_doc` through
+  `_derive_pin_doc_renames`, plus `_core_board`) and
+  `tan/planner/template_rewrite.py` (the `board.yaml`/CMakeLists.txt/
+  README.md text rewrites — `_substitute_board_yaml_sku` through
+  `_scaffold_readme`, plus `_tag_resolves`/`_docs_ref`). `template.py` keeps
+  the catalog/parameter half plus `render_to_envelope`/`emit_scaffold`
+  themselves — what `cli.py` imports and where the hand-port audit is
+  densest — landing at 1105 lines. Every moved function's body and docstring
+  is byte-for-byte unchanged; only the file it lives in moved, verified
+  against the pre-split source rather than assumed. The two new modules
+  define 27 functions between them (`template_pins.py` 13,
+  `template_rewrite.py` 14); `template.py` re-exports 26 of them so the
+  test imports that reach them (`import tan.planner.template as m;
+  m._load_som_doc`, and siblings) needed no changes. The one exception,
+  `_rewrite_stale_sdk_root_comment`, is covered in the correction below.
+
+  **Correction (review round 1):** the claim above originally said "every
+  relocated name", full stop — false. 13 module-level regexes/constants
+  private to the `board.yaml`/CMakeLists.txt/README.md rewrite implementation
+  (`_SOM_SKU_RE`, `_PRESET_RE`, `_LIBRARY_CORE_SCOPE_RE`,
+  `_ALP_SDK_ROOT_GUESS_RE`, `_HARDCODED_ALP_PROJECT_PY_RE`,
+  `_SDK_ROOT_DEPENDENT_RE`, `_ALP_SDK_ROOT_REQUIRED_BLOCK`,
+  `_STALE_SDK_ROOT_PROSE_RE`, `_ALP_SDK_ROOT_ACCURATE_COMMENT`,
+  `_rewrite_stale_sdk_root_comment`, `_RELATIVE_LINK_RE`,
+  `_BARE_REPO_PATH_RE`, `_ROUTE_SECTIONS`) moved to `template_rewrite.py`/
+  `template_pins.py` and are NOT re-exported. Several of the 13 are still
+  called or read from inside the module that now owns them — e.g.
+  `_rewrite_stale_sdk_root_comment` from `template_rewrite.py:418`,
+  `_ROUTE_SECTIONS` from `template_pins.py:260,264` — which is expected and
+  beside the point; the question a re-export list answers is whether
+  anything OUTSIDE those two modules ever reached these 13 via the old
+  `tan.planner.template` path, and it did not: every other mention of any of
+  them anywhere under `python/**` (`test_planner_relocation_freshness.py`'s
+  relocation-audit prose, `test_scaffold_bare_repo_paths.py`'s docstrings,
+  a `template.py:1059` comment, `document_guards.py`'s own docstring) is a
+  comment or docstring, never code. So dropping them from the re-export list
+  was a doc-accuracy defect in the commit message and this fragment's
+  original wording, not a break.
+
+  **Blocker found in review round 1, fixed in a follow-up commit:**
+  `template_rewrite.py` called `_pin_pad_and_macro` — which the split moved
+  to `template_pins.py` — without importing it, and used
+  `pathlib.Path`/`typing.Any` in annotations without importing either
+  (masked at import time by `from __future__ import annotations`, so nothing
+  failed until a hint was actually resolved). `render_to_envelope`'s
+  pin-rename path (`template.py:1042-1043`) reached the unimported name
+  directly, so any `--emit scaffold` sku swap that renames a pin raised a
+  raw `NameError` instead of returning the rewritten `board.yaml` — escaping
+  `emit_scaffold` as a traceback, the exact class tan-cli#1133 exists to
+  kill. Fixed by adding the three missing imports to `template_rewrite.py`;
+  regression-tested by `tests/planner/test_template_split_reexports.py`,
+  which also asserts every one of the 26 genuinely-relocated names re-exports
+  to the SAME object (by identity) `template.py` claims to re-export, and
+  runs unconditionally (a synthetic bound SDK root, not `ALP_SDK_ROOT`-gated)
+  so it cannot silently skip the way every existing template test does.
+
+  The two new files import `TemplateError` (and `template_pins.py` also
+  `_require_field`/`_read_yaml_mapping`) back from `.template`, which still
+  owns the `DocumentGuards(TemplateError)` binding — a real import cycle at
+  the module-object level, resolved because `template.py` binds those names
+  before its own `from .template_pins import ...` line runs. All three files
+  are the SAME `HAND_PORT_SOURCES`/`HAND_PORT_TAN_SIDE` entry for
+  `scripts/alp_template.py`, the same many-to-one shape
+  `scripts/alp_project_loader.py` already has for `project_loader.py` +
+  `som_metadata.py`.
+
+  Three more places repeated the same backwards claim and are corrected in
+  the same change: `_module_size_budget_core.MIRRORED_PREFIX`'s comment,
+  `test_module_size_budget.py`'s module docstring and its
+  `test_the_mirrored_planner_is_named_as_out_of_scope` (which asserted on
+  *every* budgeted module under `tan/planner/`, silently demanding at least
+  one stay over cap forever — narrowed to the actual `PINNED_HASHES` subset),
+  and `tan/core/document_guards.py`'s own "cannot be split" paragraph.
+
+  **Round-1 review measured that the narrowing above was not MECHANICALLY
+  required** — restoring the old, wide assertion (every budgeted
+  `tan/planner/**` module, not just `PINNED_HASHES`) against the split tree
+  still gives `14 passed`: `kconfig.py` (2122), `loader.py` (1410) and
+  `zephyr_board.py` (1523) are still over budget for reasons unrelated to
+  this split, so the wide assertion never noticed `template.py` shrinking
+  under it. The narrowing stands anyway, deliberately: it is the same
+  backwards-claim correction as the other three places, made in the same
+  paragraph the commit message already claims to have fixed, and reverting
+  it would leave this one test's own scope inconsistent with the (corrected)
+  `MIRRORED_PREFIX` comment it quotes.
+
+  **Round-1 review also measured that `document_guards.py`'s corrected
+  paragraph still had a second wrong number left standing** ("`template.py`
+  was this repo's most oversized module" at the time this paragraph was
+  first written, and then, in that same round's own fix, "the FOURTH-largest
+  module in the repo") — re-measured over every module under `python/tan/`
+  at that commit, it was SIXTH: `bootstrap_cmd.py` 4450, `doctor_cmd.py`
+  4415, `flash_cmd.py` 3497, `bootstrap.py` 2558, `flash_plan.py` 2273, all
+  bigger than `template.py`'s 2206. Fixed in the same follow-up commit as
+  the `NameError`.
+
+  **Round-1 review measured that "the whole-tree long-function count and
+  worst-function span are unchanged (8 total, worst 264)" — the original
+  wording of this paragraph — was wrong at whole-tree scope; 8/264 is the
+  TEMPLATE FAMILY's own post-split total (`template.py` 3 functions worst
+  264, `template_pins.py` 2 worst 73, `template_rewrite.py` 3 worst 136),
+  not the tree's.** The actual whole-tree figures
+  (`_module_size_budget_core.measure_current()`) are **312 long functions,
+  worst 819** (`tan/commands/bootstrap_cmd.py`, unrelated to this split) —
+  both untouched by this change, which is the true (and unremarkable) claim:
+  a move-only split changes no function's body, so it cannot move the
+  whole-tree SUM or MAX by construction. What DID move is the per-module
+  distribution: `template.py`'s own record drops from 8 long functions
+  (worst 264) to 3 (worst 264, `render_to_envelope` unchanged), with the
+  other 5 now recorded against `template_pins.py` (2) and
+  `template_rewrite.py` (3). Neither new module carries a `lines` ceiling —
+  at 536 and 737 lines both sit under `MODULE_CAP = 800`.
+
+  **Round-1 review also flagged that #1142's own stated primary lever —
+  "the seven long functions, `render_to_envelope` above all" — is
+  unaddressed by this change**, and that is correct, stated explicitly
+  rather than left implicit: `render_to_envelope` is unmoved and unchanged
+  at 264 lines (5.3x `FUNCTION_CAP = 50`), and `template.py` itself is still
+  1105 lines (1.38x `MODULE_CAP = 800`) after the split. This change follows
+  #1142's acceptance item 1 in the FILE-split reading ("a landed split with
+  the measured before/after per file") and deliberately does NOT attempt a
+  function-level split of `render_to_envelope`, because the
+  `2026-09-03-78fd3c20` `MODULE_SIZE_BUDGET_LOG.d` entry (tan-cli#1118)
+  already ruled on exactly that function, for a reason that still holds:
+  "splitting either here would make the diff unreadable against the single
+  upstream patch a hand-port audit exists to be readable against." A
+  function-level split is a different, larger change than this one, and is
+  NOT done here. `#1142` therefore should not be read as closed by this
+  change — it stays open to track `render_to_envelope`'s own length, which
+  this split does not resolve and does not claim to.
+
+  **The tension between #1142's own demand and that ruling, stated
+  explicitly rather than left for a reader to reconcile:** #1142 asked two
+  separate questions and warned that answering only the second one is worse
+  than not answering at all — "say what the module's coherent unit of
+  responsibility is, and whether 2063 lines is one unit or several... a
+  split that only moves lines to a new file to satisfy the ratchet is worse
+  than none" — and separately named `render_to_envelope` as "the remaining
+  lever... above all". This change answers the FIRST question, not the
+  second, and the two are genuinely different questions: the metadata-read
+  and rename-derivation family (`template_pins.py`) and the board.yaml/
+  CMakeLists.txt/README.md rewrite family (`template_rewrite.py`) are two
+  of the "separable families" #1142 itself named as worth measuring, and
+  they moved as coherent units, not as an arbitrary line count cut to clear
+  the ratchet — so the "worse than none" warning does not describe this
+  split. The SECOND question — `render_to_envelope` itself — is not
+  answered here, and that is not an oversight: the 2026-09-03
+  `MODULE_SIZE_BUDGET_LOG.d` ruling this fragment already quotes above priced
+  that function's length as the cost of keeping a hand-port diffable against
+  its single upstream alp-sdk patch, and nothing in this change reopens or
+  overrides that price. A reader should take away that #1142 is
+  half-answered, on purpose, in a stated order: the module-is-several-units
+  question is settled (yes, and here is the split), and the
+  `render_to_envelope` function-length question is left open, pointed at the
+  ruling that is holding it open, for whichever future change decides
+  diffability is a cost worth paying to bring it under `FUNCTION_CAP`.
+
+  **Round-1 review asked which of #1133's gaps acceptance item 3 refers
+  to.** #1133 (`_load_som_doc`/`_board_route_entries` reading+parsing fully
+  unguarded) was already CLOSED, by #1160, before this split started —
+  so acceptance item 3 ("if a split lands, #1133's gap is closed first or
+  in the same change, and which one is stated") is satisfied in substance
+  (the split lands on the fixed code), stated here since neither the
+  original commit message nor this fragment said so.
+
+  No behaviour changed: `--emit scaffold` and `tan init` are unaffected by
+  construction (`tan/core/scaffold.py` imports nothing from `tan.planner`),
+  and the module-size ratchet regenerated cleanly with no `--reason`.
+
+- **`tan generate --target zephyr-conf --core <id>` now renders through
+  `buildplan._slice_config_artefact` -- the same helper `emit_build_plan` calls
+  to fill a slice's `configArtefacts[].contents` -- instead of a second,
+  independent dispatch straight to the leaf renderer (tan-cli#1216, ADR-0026
+  §D, first slice; the axis stays open under #1216).** Measured which of the
+  20 `metadata/emit-registry-v1.json` modes could start this retirement:
+  `storage-mounts-c` has no production front door at all (only
+  `python -m tan.planner_cli`, the parity harness and
+  `scripts/capture_planner_oracle.py` call it) but also carries no
+  plan-embedded bytes to consume -- `build-plan-v1.schema.json`'s
+  `configArtefacts` covers only `alp.conf`/`local.conf` -- so retiring it would
+  gut `RENDER_MODES`/the oracle capture's `MODES` with nothing to replace them,
+  the exact anti-pattern this slice must avoid. `zephyr-conf` is the one mode
+  where the producer half already exists (`configArtefacts[].contents`,
+  documented "byte-identical to what a consumer's own materialise step writes
+  to buildDir") and `tan build`'s own materialise step already reads it
+  verbatim -- the standing gap was that `tan generate`'s standalone render and
+  `tan build`'s plan reached the same bytes through two independent dispatch
+  tables that merely happened to agree, rather than one call site the schema's
+  promise actually pins.
+
+  Mutation-proved the gap was real and is now closed:  with the fix reverted
+  and a one-line marker added to `_slice_config_artefact`'s zephyr branch
+  alone, the pre-existing
+  `test_the_in_process_engine_matches_alp_project_for_every_mode` (which only
+  checks tan against alp-sdk's independent copy) stayed green while `tan
+  generate --target zephyr-conf` silently diverged from `tan build`'s own
+  plan; restoring the fix turns both paths back into one call site and the new
+  `test_zephyr_conf_matches_the_build_plans_own_config_artefact` (added to
+  `tests/parity/test_planner_emit_parity.py`, one case per board in the bound
+  SDK's `examples/`) is what would have caught it. `RENDER_MODES`/
+  `GENERATE_MODES` and the render-axis accounting test are unchanged: bytes on
+  disk are identical to before, and `zephyr-conf` stays a live
+  `GENERATE_MODES` entry until alp-sdk's independent copy is retired on its
+  own schedule (ADR-0026 §G).
+
+- **`build_cmd.py`'s SDK-resolution ladder moved to `tan/core/sdk_discovery.py`
+  (tan-cli#408, step 2 of the design comment's split -- the line-count half and
+  the `RunPaths` half stay open).** `resolve_sdk_root_ladder`,
+  `resolve_sdk_root_wide`, `sdk_ladder_divergence_issue`, `_planner_python`
+  (plus their shared internals -- `discover_sdk_root`, `SdkRootResolution`,
+  `_abs_posix`, `SDK_DISCOVERY_DIVERGENT`, `_planner_python_resolution`) are a
+  pure move: same signatures, same behaviour, verified against
+  `tests/commands/test_sdk_discovery_ladders.py` and every command suite that
+  transitively exercises SDK resolution.
+
+  The concrete payoff: `tan/envelope.py` -- core infrastructure every
+  command's envelope passes through -- used to reach `sdk_ladder_divergence_issue`
+  via a function-scoped import of `tan.commands.build_cmd`, with its own
+  comment naming why ("a top-level import here would be circular"). That was
+  core importing from a command, inverted. `envelope.py` now imports it at
+  module level, from `tan.core.sdk_discovery` -- the concrete proof the
+  inversion is gone. `python/tests/gates/test_core_does_not_import_commands.py`
+  (tan-cli#408's own dependency-rule gate) tracks this: the
+  `envelope.py -> build_cmd` entry is retired from `_KNOWN_INVERSIONS`.
+
+  Nineteen call sites across `tan/commands/*` (and their test-file mirrors)
+  now import from `tan.core.sdk_discovery` instead of `tan.commands.build_cmd`
+  -- no compatibility re-export was left in `build_cmd.py` (house rule: no
+  zero-value re-export surfaces). No `tan/commands/*` module imports
+  `build_cmd` for anything but `build` itself any more.
+
+  **Follow-up (review of the above): the traded-in inversion is closed too,
+  not left as scoped debt.** The first pass left `resolve_sdk_tiered` --
+  `resolve_sdk_root_ladder`/`resolve_sdk_root_wide`'s own single narrow
+  tiered resolver -- behind in `tan.commands.sdk_cmd`, reached through a
+  function-scoped import in each ladder function, on the reasoning that
+  moving it too was "a separately-scoped change of its own." Review found
+  that reasoning did not survive inspection: `resolve_sdk_tiered` and the
+  dozen filesystem-primitive functions under it (`ActiveSdk`, the
+  tier-pointer reads, the `~/.alp/sdk-defaults.json` registry lookup, the
+  two positional-discovery walks) touch none of `typer`, `tan.envelope`,
+  `tan.output_format` or `tan.exit_codes` -- the same shape
+  `tan/core/sdk_discovery.py` already was. That whole cluster moved there
+  too, verbatim, along with the two `Issue` builders `tan/envelope.py` needs
+  through `sdk_resolution_issues` (`project_pin_issue`,
+  `global_default_foreign_project_issue`). Both ladder functions now call
+  `resolve_sdk_tiered` directly -- the function-scoped import inside each is
+  gone, because the cycle it dodged no longer exists -- and `envelope.py`
+  imports `sdk_resolution_issues` at module level alongside
+  `sdk_ladder_divergence_issue`. `_KNOWN_INVERSIONS` in
+  `test_core_does_not_import_commands.py` is now EMPTY: no `tan/core/**` or
+  `tan/envelope.py` module imports `tan.commands.*` at any scope, for the
+  first time since that gate existed. Twenty-four further modules across
+  `tan/commands/*` (plus their test-file mirrors) were repointed at
+  `tan.core.sdk_discovery` for the newly-moved names in the same change.
+
+  Import-time cost: re-measured independently after the first report above
+  turned out to overstate it, and the corrected number changes the
+  conclusion. 25 samples per entry point: a bare `import tan.envelope` is
+  genuinely slower in isolation (10 819us -> 16 030us, +48%), but neither
+  realistic entry point moves at all -- `import tan.cli` (which registers
+  all 32 commands, `build` among them) is unchanged (126 576us -> 125 809us),
+  and `python -m tan --version` wall-clock is unchanged (165ms -> 164ms).
+  The reason: `cli.py` already pulled `tan.core.venv`/`tan.core.bootstrap`
+  into every process via `build_cmd`, before this change existed --
+  confirmed by `'tan.core.bootstrap' in sys.modules` and
+  `'tan.core.venv' in sys.modules` both reading `True` after a bare
+  `import tan.cli` on `dev`. This move does not add work to any invocation;
+  it re-attributes pre-existing cost to an earlier module in the same
+  process's import graph. No real entry point pays anything, so the
+  dependency-inversion fix is the whole justification for this change, not
+  import time either way. A counterfactual was measured and set aside:
+  function-scoping `tan.core.venv`'s `from tan.core.venv import venv_python`
+  inside `_planner_python_resolution` returns the isolated `import
+  tan.envelope` number to 11 864us, recovering ~80% of the isolated delta --
+  but since no real entry point pays the cost this recovers, doing it would
+  trade a small, real readability cost (another function-scoped import to
+  justify) for a benchmark number nobody's build depends on, so it was not
+  taken.
+
+  `tests/parity/test_build_sdk_root_oracle_parity.py`, named in this issue's
+  original design comment as one of the protecting suites, no longer exists
+  in this tree -- it was deleted along with the whole Rust-oracle replay
+  mechanism in tan-cli#269 (`refactor: retire the Rust oracle -- delete
+  crates/ and the oracle-parity suite`, well before this change). Its frozen
+  capture survives, read-only, at
+  `tests/fixtures/oracle_captures/test_build_sdk_root_oracle_parity.json`, but
+  nothing in this repository replays it any more. What actually protects this
+  move today: `tests/commands/test_sdk_discovery_ladders.py` (27 tests,
+  mutation-proven -- flipping `sdk_ladder_divergence_issue`'s equality check
+  reds 23 of them on their own assertions), `tests/commands/test_build_manifest.py`
+  (pins the oracle-measured tier ORDER these ladders still encode), the
+  `tests/conformance/` suite, and every command test module that transitively
+  resolves an SDK (`test_build_command.py`, `test_doctor_command.py`,
+  `test_flash_command.py`, `test_bootstrap_command.py`,
+  `test_generate_command.py`, `test_init_command.py`,
+  `test_examples_command.py`, `test_clean_command.py`, `test_run_command.py`,
+  `test_inspect_command.py`, `test_validate_command.py`,
+  `test_monitor_command.py`, `test_new_som_command.py`, `test_sdk_command.py`,
+  plus the affected gates) -- 2316 passed, 54 skipped, 1 xfailed, 0 failed
+  across that battery (both stages of #408 together); 5542 passed, 1174
+  skipped, 1 xfailed, 0 failed across the full suite, matching the branch's
+  own reference count on the merge base.
+
+- **`tan build`'s eleven declared-but-refused oracle flags are resolved into
+  three buckets, per the maintainer's decision on #427.** All eleven used to
+  refuse with the shared `cli.command-deferred` (exit 1), each pointing at
+  the same #427 -- fine until #260 closed and the same treatment started
+  pointing at a closed issue about unrelated commands; that pointer defect is
+  what tan-cli#426 fixed first (repointing `DEFERRED_ISSUE_URL` from the
+  closed #260 to this issue), and this closes the rest of the flag list
+  itself.
+
+  **Implemented for real:**
+  - `--pristine` now force-wipes a slice's build dir before dispatch,
+    regardless of the recorded SDK-switch stamp -- the manual counterpart to
+    the automatic sdk-switch-pristine wipe (issue #52), for a stale build dir
+    the stamp heuristic doesn't (or can't yet) catch. Same two structural
+    safety guards as the automatic path (an explicit `-d`/`--build-dir` in
+    the slice's own command, or a plan cwd outside `build/`): a wipe the
+    guard declines -- for either guard, or because the dir was never
+    configured -- reports `build.pristine-skipped` on the envelope and in
+    text, so "pristine" never silently means "incremental" (tan-cli#183,
+    tan-cli#163). `tan.core.plan_exec.pristine_suppression` +
+    `PristineSkipped` port the Rust oracle's own decision function 1:1
+    (pre-tan-cli#269 deletion), threaded through
+    `tan.commands.build.execute.execute_slices`'s new `force_pristine`
+    parameter.
+  - `--target`/`--all`/`--verbose`/`--quiet`/`--no-color`/`--non-interactive`/
+    `--ci` now accept-and-drop via `tan.core.global_flags.accept_global_flags`,
+    the same mechanism seventeen other commands already use (tan-cli#261).
+    Measured against the pre-deletion oracle's own `crates/tan-cli/src/
+    cli.rs`: `BuildArgs` declares NONE of these seven fields itself -- only
+    the shared `GlobalArgs` struct does, and `build`'s own Rust handler never
+    read any of them either. This settles the issue's own "does `--target`
+    on `build` collide with `generate`'s emit-backend selection" question:
+    it does not mean anything on either binary for `build`, so there was
+    never a meaning to reconcile -- `generate`'s own handler is the only one
+    that ever reads the global field for real.
+
+  **Retired as superseded, each with its own coded refusal naming its
+  replacement:**
+  - `--plan` and `--manifest`/`--manifest-from` refuse with the new
+    `build.flag-retired` (exit 2, `VALIDATION_FAILURE` -- a permanently-
+    invalid invocation, not a transient "not built yet") because this port
+    already ships an overlapping, newer plan surface
+    (`--plan-from`/`--materialise`/`--native`/`--execute`); carrying both
+    was judged worse than one. Every retirement message names the
+    replacement directly: `tan build --plan` now says to use
+    `--plan-from FILE` (with `--materialise`/`--execute` to act on it);
+    `--manifest` says a native `tan build` already writes
+    `build/system-manifest.yaml` directly; `--manifest-from FILE` says to
+    open FILE directly, since it is plain YAML.
+
+  **Retired because there is nothing for it to switch off:**
+  - `--no-auto-bootstrap` refuses with the same `build.flag-retired` (exit 2)
+    rather than being implemented. Measured first: no call path from
+    `tan build` or `tan run` reaches bootstrap, so this port has no implicit
+    "run `tan bootstrap` on a missing/stale Zephyr workspace" trigger for the
+    flag to disable -- an unbootstrapped workspace surfaces as
+    `build.plan-unavailable` (`_emit_plan`'s `SystemExit` catch), never an
+    automatic `tan bootstrap` invocation. Building that trigger purely so the
+    flag had something to disable would add a heavy implicit side effect (a
+    `west update` and a venv install) to a command whose job is to build, so
+    the maintainer's decision closing #427 is that `tan build` does not
+    bootstrap implicitly and is not going to. Unlike the three above, this
+    one is not superseded by a replacement flag, so its message teaches the
+    explicit command instead: run `tan bootstrap` yourself.
+
+  With that, **`tan build` declares nothing deferred at all**, which retires
+  the shared deferral vocabulary with it: `cli.command-deferred` has no
+  emission site left anywhere in the tree and moves `status: retired` in
+  `contract/issue-codes.json` -- kept, not deleted, per this repo's
+  retire-and-keep convention (`bootstrap.windows-unsupported`,
+  `flash.swd-probe-write-unconfirmed`), so the spelling itself stays
+  reserved even though it was `reserved`/`consumer: none` and no consumer
+  ever matched it (not a wire break either way) -- and
+  `tan/commands/deferred_cmd.py` is deleted -- its verb
+  stubs had already shipped under #260, its two issue constants died with
+  this change, and its last remaining constant
+  (`DEFERRED_CONTEXT_SETTINGS`) was imported by `cli.py` and never used.
+  Four `tan/core/bootstrap.py` docstrings that justified a
+  degrade-don't-refuse decision by citing the propagation path
+  "`tan build` inherits through auto-bootstrap" are corrected in the same
+  change -- the decisions stand, but that path does not exist.
+
+  The visible `--help` surface shrank to match: `--plan`/`--manifest`/
+  `--manifest-from`/`--no-auto-bootstrap` stay listed (still real, parseable
+  flags a reader needs to see), `--pristine` is now an ordinary documented
+  option, and the seven `accept_global_flags`-injected flags are hidden, same
+  as on every other command that decorator covers.
+  `tests/gates/test_inert_option_markers.py`'s `EXPECTED_VISIBLE_INERT`
+  census is updated to match -- `build` now contributes NO deferral rows at
+  all, down from twelve.
+
+- **`scripts/alp_cli/model.py` stays pinned in the planner-relocation
+  freshness gate's `HAND_PORT_HASHES` table, moved out of the hand-port
+  drift ledger.** ADR-0028 relocated the host-side model engine into
+  `tan.model`, but its planned alp-sdk-side deletion (`scripts/alp_model/`
+  and `scripts/alp_cli/model.py`) lives only on an alp-sdk PR that has not
+  merged, so the upstream file is still live and still worth tracking for
+  drift. The tan-cli#777 defect it was pinned against IS fixed
+  (`tan/commands/model_cmd.py` already carries alp-sdk#1271's
+  `_PATH_OPT_KEYS` restriction), so the entry moves from
+  `HAND_PORT_KNOWN_DRIFT` to `HAND_PORT_NO_TAN_FILE_PAIRING` rather than
+  leaving the ledger. The other eighteen `HAND_PORT_HASHES` entries are
+  untouched, each still measured at its own pin; the class-level weakness in
+  how this table is audited is tracked separately as tan-cli#778 and is not
+  closed by this change.
+
+  `python/pyproject.toml` also gains a `model-compile` extra
+  (`ethos-u-vela>=3.9`, `tflite>=2.10`, `flatbuffers>=23.1.21`), mirroring
+  alp-sdk's own extra of the same name pin-for-pin: `tan.model.adapters.
+  ethos_u`'s own docstring already named "the `model-compile` optional
+  dependency", but nothing in `python/pyproject.toml` declared it until now.
+  It is optional, same as `model-io` -- a bare `pip install tan-cli` still
+  installs and runs; only the Vela compile path needs it.
+
+- **The two real-model NPU-compile proofs moved from alp-sdk into tan
+  (ADR-0028 Task 6).** `tests/model/test_deepx_yolo_internal.py` (a real
+  yolo11n compiled through `dxcom`) and `tests/model/test_vela_yolo_internal.py`
+  (a real int8 detector compiled through `vela` for the E8 Ethos-U85/U55
+  accel configs) are the SoM-credibility proof that a production model
+  actually compiles for the SoMs this repo ships to, not just the tiny
+  hermetic adapter fixtures. The customer-facing claim they defend is broken
+  by a change to the model engine, and the engine is `tan.model`'s now, so
+  the proof moved with it instead of staying behind in a different repo on a
+  different release train.
+
+  Both tests skip cleanly (not error) when their fixtures or toolchain are
+  absent -- unchanged behaviour, still a maintainer-box-only pair. The DEEPX
+  proof stays gated on the private `alp-sdk-internal` checkout via
+  `$ALP_SDK_INTERNAL` (a real yolo11n is licensed, not publishable). The
+  Vela proof no longer is: alp-sdk#1470 vendors a public fixture,
+  `tests/fixtures/models/person_detect_int8.tflite` (TFLite-Micro's
+  canonical "person detect" MobileNet, Apache-2.0, the same upstream
+  revision alp-sdk's `tflite-micro` module already pins) -- alp-sdk-internal
+  never carried an Ethos-U sample model at all (only `deepx-dxm1` and
+  `renesas-rzv2n`), so before this the Vela proof had literally never
+  executed, only skipped. `test_vela_yolo_internal.py` now checks the public
+  fixture (via `ALP_SDK_ROOT`) ahead of the private one (via
+  `ALP_SDK_INTERNAL`, kept for any future licensed model), and **now
+  actually PASSES**, both `ethos-u85-256` and `ethos-u55-256`, against an
+  alp-sdk checkout carrying that fixture -- measured this change, not
+  asserted.
+
+  **The `cutting-a-tan-release` companion update is written**, as
+  `alplabai/alp-lab-plugin#65` (the skill lives in the `alp-lab` plugin,
+  outside this repo, so it could not be a hunk of this diff). That PR was OPEN
+  on 2026-09-01 when this entry was written, and the two are meant to merge
+  together -- if you are reading this after a release and #65 is not IN, the
+  gate described below does not exist, and that is a bug to file rather than
+  this paragraph to trust. It adds a "real-model proofs" section plus a
+  pre-tag checklist row: the releaser RUNS all three node IDs
+  (`test_vela_compiles_real_model_for_e8[ethos-u85-256]`,
+  `[ethos-u55-256]`, `test_deepx_compiles_real_yolo11n`) with `-v` and RECORDS
+  the per-node-id result. **A SKIP does not block the tag; an UNRECORDED
+  result does** -- neither proof can pass on an arbitrary release box today
+  (the Vela fixture is on no merged alp-sdk commit, the DeepX one needs a
+  licensed wheel), so a hard PASSED requirement would block every tag on an
+  unmerged PR. The row is written to harden to a blocker once alp-sdk#1470
+  merges, and says so in place.
+
+  Why this was owed twice over: `test_vela_yolo_internal.py`'s docstring had
+  gone past "owed" and begun asserting the gate ALREADY existed, naming a
+  wording (`"The model proofs must have RUN -- a SKIP is not a PASS"`) and a
+  grading recipe the skill did not contain -- measured,
+  `grep -nEi "vela|dxcom|yolo|real-model"` over the whole skill returned
+  nothing. Its DeepX sibling correctly said the opposite, so two files in the
+  same directory disagreed and only one was right. Both now describe the gate
+  that exists.
+
+  The grading recipe that stale docstring proposed is also NOT what shipped:
+  `-rA` plus `grep -c '^SKIPPED'` == 0 does not count tests. `-rA` groups
+  skips by (location, reason), so the two Vela node IDs share a single
+  `SKIPPED [2] ...` line and a fully-skipped run of all three prints **2**,
+  not 3 -- measured on this box. (No line number is quoted here on purpose:
+  that key is the decorator's line, which any edit to the docstring above it
+  moves. This very change moved it once already.) The checklist
+  reads per-node-id `-v` lines, one per test by construction.
+
+  **alp-sdk#1470 (the alp-sdk-side deletion) and this relocation MUST land
+  and merge together**, not merely "are expected to" as this change's own
+  commit message (91a11b4) put it -- alp-sdk deleting its engine without
+  this relocation landed first leaves both proofs, and `tan model build`
+  itself, with no engine to exercise.
+
+  A cross-repo guard hole this migration opened: before ADR-0028, one
+  generator produced alp-sdk's three committed `.alpmodel` C-test fixtures
+  (`tests/fixtures/alpmodel/minimal.alpmodel`,
+  `tests/unit/alpmodel_reader/src/fixture.h`,
+  `tests/yocto/onnx_cpu_fixture.h`) together, so they could not drift from
+  each other. `python/tests/model/test_package.py` is the replacement
+  cross-repo check, but it is only meaningful when `ALP_SDK_ROOT` names the
+  alp-sdk checkout under review -- `.github/workflows/parity.yml` instead
+  binds it to a frozen `PINNED_SDK_TAG` -- which has been three different
+  commits while this entry was being written (`bd8be484...`, then
+  `f1b1c9df...`, then `0914da38...` via tan-cli#1103 on 2026-09-01), so no
+  value is quoted here as current: the argument is about the pin being FROZEN,
+  not about which commit it is frozen at. So an alp-sdk PR that edits
+  those three fixtures passes every alp-sdk gate while this repo's CI keeps
+  silently validating the OLD, pinned bytes. alp-sdk#1470 adds a cheap
+  same-repo mitigation on its side (a self-consistency test that does not
+  reimplement this repo's writer); the residual gap -- two fixtures edited
+  consistently with each other into bytes tan's canonical writer would not
+  itself produce -- has no cheap guard and stays open, mitigated only by
+  bumping `PINNED_SDK_TAG` as a documented release step (see the follow-up
+  below) or, as a future improvement not made here, binding `ALP_SDK_ROOT`
+  to the PR under test in `parity.yml` instead of a frozen tag.
+
+  **Follow-up deliberately NOT made, and its stated blocker was wrong.** This
+  paragraph used to say `PINNED_SDK_COMMIT`
+  (`python/tests/gates/test_planner_relocation_freshness.py`) and
+  `parity.yml`'s `PINNED_SDK_TAG` needed re-pinning "once alp-sdk#1471 [the
+  alp-sdk-side deletion of `scripts/alp_model/`] lands", and that until then
+  "tan CI keeps testing `tan/planner/` against a pre-deletion alp-sdk shape".
+  Both halves are false, measured:
+
+  - **No tan-cli pin or gate reads `scripts/alp_model/` at all.**
+    `tan/planner/` is compared only against `scripts/alp_orchestrate/` (21
+    `PINNED_HASHES` entries) plus twelve `HAND_PORT_HASHES` paths and
+    `scripts/strict_loaders.py`; no pin table holds an `alp_model` key. The
+    one executable reference in the repo, `python/tests/conftest.py:209`, is
+    an INVERSE predicate -- it SKIPS two `tests/model/` tests while
+    `scripts/alp_model/` still EXISTS -- so the deletion is an unblocker, not
+    a blocker. Every workflow mention of that directory is a comment line.
+  - **The pins were not stale in the way this paragraph claimed, and they
+    have since moved anyway.** SIX sites carry the pin, not four:
+    `PINNED_SDK_COMMIT` and `HAND_PORT_PINNED_SDK_COMMIT`
+    (`python/tests/gates/test_planner_relocation_freshness.py`),
+    `PINNED_SDK_TAG` and `PINNED_PLANNER_ORACLE_SDK_REF`
+    (`.github/workflows/parity.yml`),
+    `python/tests/fixtures/planner_oracle/PROVENANCE.txt`, and `ci.yml`'s
+    `sdk_parity` checkout `ref:`. Cited by CONSTANT NAME rather than by
+    file:line on purpose -- an earlier draft of this entry gave all six with
+    line numbers and five of the six went stale inside a day. A constant name
+    is greppable and cannot drift silently; the same argument this change
+    makes for pytest node IDs.
+
+  **Superseded by tan-cli#1103** (`0d6f1361`, merged 2026-09-01T23:53:44Z),
+  which re-pinned all six sites onto alp-sdk
+  `0914da38ebbecac3c1546064dd506f7fafe0bfa7`. An earlier draft of this
+  paragraph argued the move was "cost against zero gain" because no file under
+  `scripts/alp_orchestrate/` had changed. **Measured over the span that was
+  actually re-pinned onto, that is false:**
+  `f1b1c9df..0914da38` is 24 commits / 108 files and DOES touch three of the
+  21 `PINNED_HASHES` files -- `scripts/alp_orchestrate/kconfig.py`,
+  `topology.py` and `validate.py` -- so #1103 had to port a real behavioural
+  delta (`validate.py`'s `os: baremetal` stock-token refusal) rather than move
+  SHA constants. The oracle re-capture that paragraph priced as the blocking
+  cost was run and came back a zero-file diff, only `PROVENANCE.txt`'s ref line
+  moving. And its closing instruction -- "re-pin when alp-sdk#1470 merges, not
+  before" -- was overtaken by events: `dev` re-pinned while #1470 is still
+  OPEN, because the two are independent. What remains true is the part that
+  motivated #1069: the four ADR-0028 artefacts (`npu_toolchain.vela`,
+  `metadata/npu_ops/**`, the `scripts/alp_model/` deletion,
+  `person_detect_int8.tflite`) still need a POST-#1470 move, and
+  `test_planner_oracle_ref_tracks_pinned_sdk_tag` still hard-fails unless
+  `PINNED_PLANNER_ORACLE_SDK_REF` and `PROVENANCE.txt` move with
+  `PINNED_SDK_TAG`. (`STRICT_LOADERS_HASH` stays out of scope either way: it
+  hangs off `STRICT_LOADERS_PINNED_SDK_COMMIT`, a pin that deliberately never
+  moves because it names the commit that INTRODUCED alp-sdk#1127's read-escape
+  gap rather than an audit point.)
+
+- **`tan model build` no longer spawns a subprocess.** The 30-line `python -c`
+  driver, the SDK-Python-interpreter resolution around it, and the
+  unversioned stdin/stdout JSON contract between them are gone (ADR-0028 Task
+  4): `model_cmd.py` now calls the relocated `tan.model.build.build_model`
+  directly, in-process, per model. A per-model build failure still resolves
+  to a coded `model.build-failed` issue and the batch continues to the next
+  model (unchanged). The driver-only guard against a driver that exited 0
+  having silently reported fewer results than models requested is retired
+  along with the driver that could produce that failure mode -- there is no
+  longer a subprocess boundary across which a result can go missing, so
+  there is nothing left to guard against. `tan model build` also no longer
+  needs a resolvable SDK *Python interpreter*; it still resolves the SDK
+  *root*, because `build_model` reads alp-sdk's `metadata/**` at call time
+  (ADR-0017). `model_cmd.py` drops from 617 to 460 lines.
+
+- **`cli.parse-error` is `status: frozen`.** It sat at `reserved` under a note
+  that said "pre-consumer — nothing in alp-sdk-vscode matches this code, so
+  renaming or dropping it is not a breaking wire change. Promote to `frozen`
+  … the moment a consumer binds to it." `alp-sdk-vscode#575` is that moment:
+  `cliUsageErrorDump` matches the exact spelling, `classifyOutcome` raises the
+  outcome to error severity on it — exit 2 alone cannot separate a rejected
+  argv from a real `validate` failure — and `planCliOutcome` routes the whole
+  notification on it: the customer sentence, the Update CLI / Run Doctor
+  actions, and whether the usage dump goes to the output channel or the toast.
+
+  The match **fails open**, so a rename would be silent on both sides with CI
+  green; that is exactly what `frozen` exists to stop. `consumer` and
+  `consumerEffect` are filled in the way `bootstrap.yocto-host` fills them,
+  and the entry is pinned in `test_frozen_issue_codes.py`'s
+  `FROZEN_LOCATIONS` at its real Python site, `cli.py`.
+
+  Frozen with the narrow meaning it now carries: **"the command line was not
+  accepted"**, not "a generic failure with no better code". The registry's own
+  history records `new-som` and `faultdecode` refusals reaching consumers
+  under this code before `#399`, and interrupted runs falling into it before
+  `cli.interrupted` existed. All three have their own codes now, which is what
+  makes binding to this one defensible.
+
+  `emittedBy` still names the deleted `crates/tan-cli/src/main.rs`, as every
+  other frozen entry still names a `crates/` path. That is deliberate here:
+  `test_frozen_issue_codes.py`'s own docstring records that `#269` left **70**
+  `crates/`-owned entries gated by nothing, that each needs its `emittedBy`
+  repointed at the real Python site, and that this is "follow-up work, not
+  silently absorbed here". Repointing one entry alone would make it the only
+  one of 70 that disagrees with its siblings, for no gate benefit —
+  `FROZEN_LOCATIONS` is what actually enforces the emission, and it now
+  carries the real site.
+
+  Mutation-proven in both directions: renaming the spelling at **both** emit
+  sites in `cli.py` fails `test_frozen_and_retired_issue_codes_stay_pinned`,
+  and reverting the status to `reserved` while keeping the pin fails
+  `test_the_pin_set_matches_the_registrys_frozen_codes`. (The first mutation
+  had to touch both sites — `cli.py` carries the literal twice, at `:488` and
+  `:763`, and a single-site mutation leaves the gate green. Noting it because
+  it is the shape a future mutation check here will trip on too.)
+
+  Not done here: `sdk.network-required` and `model.unknown-subcommand` are in
+  the same position — `reserved` with `consumer: "none"` while alp-sdk-vscode
+  already matches them (alp-sdk-vscode#542). They want the same promotion, and
+  the 70-entry `emittedBy` repoint wants its own change.
+
+- **The `HAND_PORT_HASHES` staleness audit is current again, and a stale
+  docstring it caught is fixed.** `docs/planner-duplicated-derivations.md`
+  recorded 17 of 19 `HAND_PORT_HASHES` entries matching at alp-sdk
+  `94378a056549c7377d714a7f2b68878aca8fea01`. Re-hashing all 19 against
+  `eb96112ba7d1cc3b4084c985962ea31772177d74` (`v0.16.0`, the commit
+  `PINNED_SDK_COMMIT` now names) gives 13 of 19: four more sources moved
+  upstream since that measurement. `scripts/gen_zephyr_board.py`
+  (alp-sdk#1482/#1554, `522ea3204`) is docstring-only -- "No behaviour
+  change; comments only" per the commit's own message -- and tan's
+  `zephyr_board.py` carried the pre-fix wording until this change
+  re-synced it (comment-only; no emitted byte changes). The other three --
+  `scripts/alp_project_loader.py`, `scripts/alp_project_emit/__init__.py`,
+  `scripts/alp_project_emit/west_libs.py` (alp-sdk#1485/#1487,
+  `85b6b905a`/`95eb64ab8`) -- carry a real behavioural delta upstream
+  (threading `--metadata-root` through every resolver instead of a
+  module-global fallback, plus ten missing `_CHIP_SUBSYSTEMS` entries),
+  but that delta was already ported into `tan/planner/{som_metadata,slugs,
+  project_emit/west_libs}.py` by tan-cli#868's earlier resync -- confirmed
+  by reading the current source, not the resync's commit message. No
+  planner behaviour changed as a result of this audit.
+
+  `HAND_PORT_PINNED_SDK_COMMIT` stays at `88318e759958529fbbd8fe9d481373681c0fa78d`,
+  unmoved: `scripts/alp_template.py` and `scripts/alp_cli/doctor.py` --
+  the two sources this pin was already known to lag on -- are unchanged
+  between `94378a05` and `eb96112b`, so moving the pin would either red
+  this gate for gaps this change does not close, or force their table
+  entries to an unaudited value just to stay green. Both the gate's own
+  comments (`test_planner_relocation_freshness.py`, directly above
+  `HAND_PORT_PINNED_SDK_COMMIT`'s assignment) and
+  `docs/planner-duplicated-derivations.md` now record this re-audit and
+  its 13/19 count.
+
+- **Swept `model/targets.py`/`build.py`/`check.py` (and neighbours) for #983's
+  defect class -- a `soc-spec-v1.schema.json` field the code effectively
+  requires while the schema leaves optional -- and closed the loop the two
+  ways `#964`/`#965` left open.** `#964` landed read-path schema validation;
+  `#965` closed the one LIVE crash that class produced (`mac_per_cycle`
+  reaching an unguarded f-string when a schema-valid `{"type": "ethos-u55",
+  "gops": 100}` NPU entry omits it). `#983` asked whether that was the only
+  instance in `model/targets.py`, `model/build.py`, `model/check.py` and their
+  neighbours (`analyze.py`, `perf.py`, `perf_apply.py`, `soc_ref.py`,
+  `commands/size_cmd.py`) -- the sweep found none currently live: every other
+  schema-optional field those readers touch (`subtype`, `paired_core`,
+  `npu_toolchain.vela.*`, `external_memory_interfaces[].kind`,
+  `variants[].alp_module_skus`, `cores[].tcm_kb`, ...) is already read through
+  `.get()` + `isinstance` and degrades cleanly on absence, per the existing
+  `#957`/`#962`/`#965`/`#967`/`#969`/`#979` guard families.
+
+  Two follow-ups land from the sweep, one on each side of the seam:
+  - **Tan-side**: `tests/model/test_targets_983_minimal_schema_valid_docs.py`
+    builds the actual minimal-required-fields-only NPU shape for all three
+    backend families (`ethos_u`/`drpai`/`deepx_dxm1`) and proves the public
+    `resolve_targets()` entry point survives every one of them -- making the
+    sweep's conclusion an executable regression instead of only a PR
+    description, so a future field read added without a guard fails against
+    this same minimal-document shape.
+  - **alp-sdk-side (not fixed here)**: filed
+    [alp-sdk#1849](https://github.com/alplabai/alp-sdk/issues/1849) proposing
+    the durable fix -- an `if/then` on `soc-spec-v1.schema.json`'s
+    `$defs/npu` requiring `mac_per_cycle` when `type` matches `ethos-u*`,
+    mirroring the sibling `vela_profile` block's own
+    `system_config_requires_vendor_config` -> `vendor_config_filename`
+    if/then. Schema validation and the `#965` consumer-side guard stay
+    complementary, not substitutes, per `#964`/`#965`'s own decided rule --
+    tightening the schema does not retire the guard, it only moves the
+    equivalent authoring mistake from "silently skipped at read" to "refused
+    at `new-som` write".
+
+### Removed
+
+- **The `swd_probe` flash backend is removed -- GD32 bridge programming is
+  separating out of `tan` entirely.** `flash_method: swd_probe` was the local
+  SWD write path for the E1M-X V2N/V2M SoMs' GD32G553 supervisor bridge
+  (`plan_swd_probe`, J-Link/OpenOCD/pyOCD arms, its own read-only DPIDR
+  preflight, and the `#540`/`#590` write-verification qualification built on
+  top of it). alp-sdk#1439 already stopped emitting `flash_method: swd_probe`
+  on every shipped `gd32_bridge` `helper_firmware:` entry
+  (`E1M-V2N101`/`E1M-V2N102`/`E1M-V2M101`/`E1M-V2M102`), which is what makes
+  this side safe to land now (decision recorded closing #540, superseded).
+
+  **Not touched:** the GD32's field-update path, `update_channel:
+  alp_ota_spi_bridge` (protocol v0.6 Path A, slot-A/B application bootloader
+  with commit and rollback, over the bridge link rather than SWD) -- already
+  validated end to end on silicon, and `tan`'s manifest projection of it is
+  unchanged.
+
+  **A manifest that still declares `flash_method: swd_probe`** -- an
+  unbound alp-sdk checkout older than alp-sdk#1439, or a hand-authored
+  manifest -- now gets a refusal that NAMES the removal and the replacement
+  path (`flash.entry-failed`, exit 1), not the generic "no registered
+  backend" listing every other unrecognised method gets, and not a silent
+  no-op or a `KeyError`.
+
+  **Generic machinery this did NOT remove**, because Flow D
+  (`alif_mram_jlink`) still uses it: the DPIDR read-only preflight
+  (`flash_args.expect_dpidr`/`flash_args.jlink_device`,
+  `validate_flow_d_preflight_args`, `flow_d_preflight_script`,
+  `FlashPlan.preflight_device`), the `flash.dpidr-preflight-unarmed`
+  advisory and `ALP_FLASH_REQUIRE_DPIDR=1` strict switch
+  (`DPIDR_GUARD_COVERAGE`, now Flow D alone on the covered side), `_Tee` and
+  the text-mode transcript capture, and the `--recover` /
+  `flash_policy: recovery_only` helper-flash gate.
+
+  **Contract:** `flash.swd-probe-write-unconfirmed` moves from `reserved` to
+  `retired` in `contract/issue-codes.json` -- pre-consumer (nothing in
+  alp-sdk-vscode ever matched it), so this is not a breaking wire change; the
+  spelling is reserved against reuse for a different verdict, per the
+  frozen/retired convention. `flash.dpidr-preflight-unarmed` is unchanged
+  (still `reserved`, still emitted, now for Flow D alone).
+
+  **Open follow-up, left documented rather than closed over:** #610
+  (`needs-silicon`) tracked settling the GD32 bridge's own contested SW-DP ID
+  before arming `expect_dpidr` for a `tan`-side write; that premise no longer
+  applies now that `tan` has no such write, but the issue stays open -- the
+  underlying SW-DP ID contradiction is a real, unresolved bench fact
+  whatever tool ends up programming the GD32 will still need.
 ## [0.6.0] — 2026-08-24
 
 *`v0.6.0-rc1` (2026-08-14) was published as a GitHub **pre-release**, so
