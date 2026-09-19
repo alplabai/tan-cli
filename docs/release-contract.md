@@ -568,17 +568,34 @@ because it never reaches the zephyr-board emitter. The failure a customer would
 see is `tan generate --target zephyr-board`, which is the tan-cli#591 class this
 section exists for.
 
+**Addendum (2026-09-15, tan-cli#1268).** The planner mirror moved past
+`20fec7a7` to alp-sdk `81a9d515` (21 commits later; `20fec7a7` is an ancestor
+of `81a9d515`) when tan-cli#1268 re-synced `tan/planner/`. `81a9d515` is now
+the actual floor the next tag needs, superseding `20fec7a7` below. The
+specific facts named in the table above (`aen/on-module-links.yaml`,
+`v2n/supervisor-links.yaml`) are unchanged, since both predate even
+`20fec7a7`. alp-sdk#2047 already tracks this: its title reads "Cut a stable
+release containing 81a9d515."
+
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
-tan-cli#591: tan `0.7.0` waits for a stable alp-sdk release whose tag contains
-`20fec7a7` (alp-sdk#2047, milestone `v0.17.0`). No SDK-capability gate is added
-around `memory[]` or any other row. Done when:
+tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag contains
+`81a9d515` (superseding the `20fec7a7` floor this decision originally named --
+see the addendum above, tan-cli#1268; alp-sdk#2047, milestone `v0.17.0`). No
+SDK-capability gate is added around `memory[]` or any other row. Done when:
 
 - every row above reads **YES** and names that tag;
 - the **whole** `release-sdk-parity` job is green on the tag push, in the sense
   defined under "The check.": all three `--sdk` scripts exit 0, the guard and
   the breadth node PASSED, and the pytest log shows no parity failures (the
   planner step does not act on them);
-- the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s did for `v0.16.0`.
+- the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s did for `v0.16.0`, naming the real tag in place of `CHANGELOG.md`'s current `## [0.7.0]` draft marker (tan-cli#1258).
+
+**Addendum (renumbered 0.6.1 -> 0.7.0, maintainer, 2026-09-19).** Pre-1.0
+SemVer puts a break in the minor, not the patch: the alp-sdk-floor bump this
+section describes breaks a v0.6.0 consumer's `tan generate --target
+zephyr-board` on AEN and V2N/V2M boards, so the release renumbers from the
+`0.6.1` named above to `0.7.0`. See `CHANGELOG.md`'s `## [0.7.0]` header and
+its `### Changed` **BREAKING** entry.
 
 ## Decisions
 

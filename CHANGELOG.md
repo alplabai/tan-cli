@@ -7,12 +7,26 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [0.7.0] — Unreleased
 
-*This release requires an alp-sdk release that contains commit
-`81a9d515a90403cce30588704e31faf9dc893838` — tan's planner mirror is pinned
-there (tan-cli#1268). As of this writing the newest stable alp-sdk release is
-`v0.16.0`, which predates that commit: against it, `tan generate --target
-zephyr-board` exits 3 (`generate.emit-failed`) for AEN and V2N/V2M boards,
-because `v0.16.0` carries neither `metadata/e1m_modules/aen/
+**BREAKING: this release raises tan's effective alp-sdk floor.** `tan
+generate --target zephyr-board` for AEN and V2N/V2M boards now needs an
+alp-sdk release that contains commit
+`81a9d515a90403cce30588704e31faf9dc893838` (tan's planner mirror is pinned
+there, tan-cli#1268); against any alp-sdk release that predates it, the
+command exits 3 (`generate.emit-failed`) for those boards. This is the
+break that moves the release from the planned patch (`0.6.1`) to a minor
+(`0.7.0`) — see the `### Changed` entry below for the exact before/after and
+who must act.
+
+*DRAFT — replace this paragraph before tagging.* The tag itself is blocked
+on this: no alp-sdk release contains `81a9d515` yet (tan-cli#1258, still
+OPEN; `git tag --contains 81a9d515` is empty), so this note cannot yet name
+a real floor version. Once one ships, replace this whole paragraph with one
+line: "Requires alp-sdk `vX.Y.Z` or newer" (the `v0.6.0` precedent,
+tan-cli#1258's "Done when" list) — see `docs/release-contract.md`'s own
+tag-day checklist. Measured 2026-09-19, for reference only — re-check both
+facts before the tag, they move independently of this note: the newest
+stable alp-sdk release is `v0.16.0` (`gh release list --repo
+alplabai/alp-sdk`), which carries neither `metadata/e1m_modules/aen/
 on-module-links.yaml` nor `metadata/e1m_modules/v2n/supervisor-links.yaml`,
 both of which the pinned planner now requires. See `docs/release-contract.md`
 and tan-cli#1258 for the full gate measurement.*
@@ -9463,7 +9477,7 @@ and tan-cli#1258 for the full gate measurement.*
   - **`--dry-run` reports the real `west sdk install` argv in `data.plannedCommands` and writes nothing** — no store directory, no stamp, no network call, no retry, no sleep.
 - **`tan doctor` gains a `toolchain` check: stamp-vs-pin, never directory-exists.** Distinct from the existing `zephyrSdk` check (an unconditional, host-only "does any toolchain exist" probe): `toolchain` needs a resolved SDK checkout, reads its pinned version, and reports `pass` only when a verified stamp matches that exact pin — a stamped install against a MOVED pin (alp-sdk's `metadata/toolchains.json` changed since the last `tan bootstrap`) is a `fail` naming `tan bootstrap` as the fix, not "a toolchain exists" (ADR 0021's own words). `unknown` (never a guess) when no SDK checkout resolves or its `metadata/toolchains.json` is unreadable.
   - **Has an adoption path for a toolchain `tan bootstrap` did not install.** A host with a real, working, correctly-pinned Zephyr SDK already on it — `ZEPHYR_SDK_INSTALL_DIR` set, or the SAME scan `zephyrSdk` already trusts, at a `sdk_version` matching this checkout's pin — reports `pass`, never a `fail` whose only prescribed remedy (`tan bootstrap`) would otherwise re-download a second, redundant copy of a toolchain the host already has (or fail outright offline, or on the README's own documented hand-`west sdk install` path). A stamp is tan's own bookkeeping for what it installed, not the only proof a working toolchain exists.
-  - **On a host the pinned Zephyr SDK publishes no toolchain artifact for — Intel Mac (`macos-x86_64`), arm64 Linux (`linux-aarch64`), `windows-arm64`** — `tan bootstrap`'s toolchain phase skips honestly rather than failing (above), so no stamp is ever written there. `toolchain` therefore reports `fail` (exit 4) on exactly those hosts, unless the adoption path immediately above finds a pre-existing, hand- or otherwise-installed toolchain whose own `sdk_version` already matches this checkout's pin.
+  - **On a host that the bound alp-sdk checkout's `metadata/toolchains.json` has no artifact row for (at alp-sdk `81a9d515`: every host except `linux-x86_64`, `windows-x86_64` and `macos-aarch64` — so Intel Mac (`macos-x86_64`), arm64 Linux (`linux-aarch64`) and `windows-arm64`)** — `tan bootstrap`'s toolchain phase skips honestly rather than failing (above), so no stamp is ever written there. (The Zephyr SDK itself does publish a `linux-aarch64` host build — see `zephyrSdkAvailableForHost` above; it is alp-sdk's own `metadata/toolchains.json` manifest that carries no row for it, which `artifacts_missing_for_host` reads.) `toolchain` therefore reports `fail` (exit 4) on exactly those hosts, unless the adoption path immediately above finds a pre-existing, hand- or otherwise-installed toolchain whose own `sdk_version` already matches this checkout's pin.
 - **`tan build`'s `${TOOLCHAIN_ROOT}` resolution now also finds a toolchain `tan bootstrap` acquired** — the artifact-keyed store (`~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`, or `$ALP_TOOLCHAIN_ROOT`) is now scanned alongside the existing `/opt`/`$HOME`/`%USERPROFILE%`/`Path.home()` roots, so a customer who ran nothing but `tan bootstrap` gets a build that finds it without also hand-exporting `ZEPHYR_SDK_INSTALL_DIR`. A `.tmp-<pid>` wreckage sibling from an interrupted acquisition is excluded by name so it can never fake a second, ambiguous candidate.
 
 - **`tan examples`' envelope carries per-example facets now, not just
@@ -10388,14 +10402,28 @@ and tan-cli#1258 for the full gate measurement.*
   foreign `launch.json` entry; when it cannot confirm an existing list entry
   is its own, the SDK-resolved value is now APPENDED beside the old one
   rather than silently replacing it (`sdk_identity_stranded_appends`,
-  tan-cli#982 review finding #2) -- and this code is what will let a
-  consumer surface that append instead of it going unnoticed. A `launch.json`
-  written by v0.6.0 carries no such sidecar (the provenance mechanism postdates
-  it), so a v0.6.0 workspace's first `tan debug-config` write under this
-  release hits exactly this append path.
+  tan-cli#982 review finding #2). `debug_config_cmd.py` already emits this
+  code into `issues[]` today (`_sdk_identity_appended_issue`) -- only the
+  broader alp-sdk-vscode consumer handling is reserved (registry `status:
+  "reserved"`, `consumer: "none"`). A `launch.json` written by v0.6.0 carries
+  no such sidecar (the provenance mechanism postdates it), so the first write
+  under this release, on a v0.6.0 workspace whose existing `configFiles`
+  value differs from the one the SDK now resolves, takes this append path --
+  an existing value already equal to the resolved one hits `existing_val ==
+  incoming_val` and is left untouched, with no append and no issue.
 
 ### Changed
 
+- **BREAKING: tan's effective alp-sdk floor rises to the first alp-sdk
+  release that contains commit `81a9d515a90403cce30588704e31faf9dc893838`.**
+  The planner re-sync (tan-cli#1268) now requires
+  `metadata/e1m_modules/aen/on-module-links.yaml` and
+  `metadata/e1m_modules/v2n/supervisor-links.yaml`; an alp-sdk checkout that
+  predates `81a9d515` — every stable release through `v0.16.0` — carries
+  neither. **Who must act:** anyone building AEN or V2N/V2M boards —
+  `tan generate --target zephyr-board` exits 3 (`generate.emit-failed`)
+  against an older alp-sdk; other targets and boards are unaffected. See
+  `docs/release-contract.md` and tan-cli#1258.
 - **Every board's generated Zephyr `alp.conf` now carries
   `CONFIG_ALP_SDK_SOM_HW_REV="<hw_rev>"`, unconditionally.** Planner re-sync
   to alp-sdk `f1b1c9df` (alp-sdk#1862) ports the upstream change: `alp.conf`
