@@ -32,13 +32,14 @@ exact before/after:
   `validate.failed` / `diff.failed` onto
   `validate.hardware-revision-unknown` / `-not-buildable` (and the `diff.`
   equivalents) (#1262)
-- `tan lock` / `tan migrate` / `tan quality` / `tan examples` / `tan
-  generate` / `tan bootstrap` / `tan new-som` / `tan explain --code` now
-  prepend (or, for `tan generate`'s resolvable path, reorder to prepend)
-  `sdk.project-pin-unresolved` ahead of the command's own refusal in
-  `issues[]`, so a consumer keyed on `issues[0]` sees a different code
-  (`generate`'s is what alp-sdk-vscode's toast reads,
-  `src/alpCli/service.ts:1310`)
+- `tan presets` / `tan clean` / `tan diff` / `tan lock` / `tan migrate` /
+  `tan quality` / `tan examples` / `tan generate` / `tan bootstrap` / `tan
+  new-som` / `tan explain --code` now prepend (or, for `tan generate`'s
+  resolvable path, reorder to prepend; or, for `tan diff`'s previously-silent
+  nothing-resolved case, newly emit at all) `sdk.project-pin-unresolved`
+  ahead of the command's own refusal in `issues[]`, so a consumer keyed on
+  `issues[0]` sees a different code (`generate`'s is what alp-sdk-vscode's
+  toast reads, `src/alpCli/service.ts:1310`)
 - `tan validate --format sarif` / `--format diagnostic-v1` now emit a
   `file:` URI, or a percent-encoded relative reference, instead of a raw
   host path for `uri` / `artifactLocation.uri` (#1097)
@@ -4830,10 +4831,11 @@ the full gate measurement.
   degrades to "not under it", the same safe answer every other unresolvable
   path already got.
 
-- **`tan presets` and `tan clean` now report *why* no SDK resolved, not only
-  that none did.** `presets_cmd.resolve_sdk` collapsed to a bare `None`
-  whenever nothing usable resolved, dropping `broken_project_pin` on the floor
-  even when `resolve_sdk_tiered` had already computed it -- so a workspace
+- **BREAKING (wire): `tan presets`, `tan clean`, and `tan diff` now report
+  *why* no SDK resolved, not only that none did.** `presets_cmd.resolve_sdk`
+  collapsed to a bare `None` whenever nothing usable resolved, dropping
+  `broken_project_pin` on the floor even when `resolve_sdk_tiered` had
+  already computed it -- so a workspace
   whose `.alp/sdk-path` names a checkout that no longer exists, with no
   sibling checkout for discovery to fall through to and no `~/.alp/sdk-default`
   either, reported `presets.sdk-root-unresolved` / `clean.sdk-root-not-found`
@@ -10487,10 +10489,15 @@ the full gate measurement.
   with no EEPROM today (e.g. E1M-NX9101), so the symbol is not silently
   dropped if one is added later. This is what lets the (also upstream) boot
   banner warn when the firmware's build-time `hw_rev` disagrees with the
-  live EEPROM manifest at runtime. Purely additive — no existing Kconfig
-  symbol changed meaning — but it does move emitted bytes: `tan build`'s
-  generated `alp.conf` differs from a pre-#1026 `tan` on every Zephyr slice
-  of every board.
+  live EEPROM manifest at runtime. Additive only against an alp-sdk checkout
+  at or after the floor set by the BREAKING entry above
+  (`81a9d515`/`b3775381`, which defines the `ALP_SDK_SOM_HW_REV` Kconfig
+  symbol) — no existing Kconfig symbol changed meaning there, but it does
+  move emitted bytes: `tan build`'s generated `alp.conf` differs from a
+  pre-#1026 `tan` on every Zephyr slice of every board. Against a pre-floor
+  alp-sdk it is not additive at all: see the BREAKING entry above for the
+  `west build` Kconfig abort this unconditional assignment causes on every
+  Zephyr board.
 
 - **PyPI replaces the npm shim as the standalone install channel, published
   over Trusted Publishing with no token at all (#1054).** `release.yml`'s

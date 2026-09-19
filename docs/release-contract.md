@@ -556,7 +556,7 @@ Tracked in tan-cli#1258, with the full measurement.
 | Change | Kind | alp-sdk commit | On `dev` since | Effect against `v0.16.0` | In a tag? |
 |---|---|---|---|---|---|
 | Vendored scaffold point — alp-sdk#1914 | scaffold point | `ff27f179` | before #1251 | `scaffold_byte_parity.py` exit 1, 8 of 10 pairs FAIL (10 of 10 PASS against `20fec7a7`). This alone reds the job | **NO** |
-| `CONFIG_ALP_SDK_SOM_HW_REV` in per-core `alp.conf` — alp-sdk#1862 | emit | `b3775381` | before #1251 | zephyr-conf render differs; boards drop out of the breadth count | **NO** |
+| `CONFIG_ALP_SDK_SOM_HW_REV` in per-core `alp.conf` — alp-sdk#1862 | emit | `b3775381` | before #1251 | zephyr-conf render differs; boards drop out of the breadth count. Against an alp-sdk that predates this commit (no `ALP_SDK_SOM_HW_REV` Kconfig symbol — true of every stable release through `v0.16.0`), the emitted `alp.conf` assignment is undefined, and `west build`'s own Kconfig configure step aborts on it (`error: Aborting due to Kconfig warnings`) for *every* Zephyr board, not only AEN/V2N/V2M — see the renumber addendum below and `CHANGELOG.md`'s floor entry | **NO** |
 | Boot-banner block in `alp.conf`, and a **requirement** on `metadata/e1m_modules/aen/on-module-links.yaml` — alp-sdk#1964 | emit + requirement | `eff266b6` | before #1251 | The Boot-banner block is the first diff on all 98 failing `--emit zephyr-conf` renders, which is what drops those boards out of the breadth count. AEN `tan generate --target zephyr-board` also exits 3: `ZephyrBoardEmitError: no <sdk>/metadata/e1m_modules/aen/on-module-links.yaml` | **NO** |
 | **Requirement** on `metadata/e1m_modules/v2n/supervisor-links.yaml` — alp-sdk#1924 | requirement | `dbfa06bd` | before #1251 | V2N/V2M `tan generate --target zephyr-board` exits 3: `ZephyrBoardEmitError: no <sdk>/metadata/e1m_modules/v2n/supervisor-links.yaml` | **NO** |
 | `memory[]` pane in `system-manifest.yaml` — alp-sdk#1365 / #2030 | emit | `96a382929b` | #1251 | `--emit system-manifest` differs on 99 of 100 boards. `system-manifest` is in `RENDER_MODES` only, so on its own this does **not** red the job (see "The check.") | **NO** |
@@ -564,9 +564,14 @@ Tracked in tan-cli#1258, with the full measurement.
 
 Released `tan` `0.6.0` is unaffected; this binds the next tag cut from `dev`.
 Against `v0.16.0`, `tan build --materialise` on an AEN example still exits 0,
-because it never reaches the zephyr-board emitter. The failure a customer would
-see is `tan generate --target zephyr-board`, which is the tan-cli#591 class this
-section exists for.
+because `--materialise` never runs `west build` and so never reaches the
+zephyr-board emitter either. That narrow scope is `--materialise`'s alone: a
+full (non-`--materialise`) `tan build` on *any* Zephyr board against a
+pre-floor alp-sdk does reach `west build`'s Kconfig configure step and aborts
+there on the `b3775381` row's undefined symbol — see the renumber addendum
+below. The failure a customer running `tan generate --target zephyr-board`
+would see is the tan-cli#591 class this section exists for; AEN/V2N/V2M hit
+that exit-3 refusal earlier still, before Kconfig is ever reached.
 
 **Addendum (2026-09-15, tan-cli#1268).** The planner mirror moved past
 `20fec7a7` to alp-sdk `81a9d515` (21 commits later; `20fec7a7` is an ancestor
