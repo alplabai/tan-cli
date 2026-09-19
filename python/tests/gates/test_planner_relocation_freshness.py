@@ -1025,15 +1025,67 @@ from tests.conftest import sdk_root
 #:     whole_device_alias.py`, byte-identical between `81a9d515` and
 #:     `c81cb5db` -- re-hashed, not assumed).
 #:
-#: Not re-measured against the 100-board planner oracle: no oracle capture
-#: ran as part of this pin move (`python/scripts/capture_planner_oracle.py`
-#: is `parity.yml`/`PINNED_SDK_TAG`-scoped, a pin this change deliberately
-#: does not touch -- see that pin's own comment in `.github/workflows/
-#: parity.yml`). The four ported hunks are docstring-only (#2053) or add an
-#: explicit `encoding=`/`errors=` to an already-`text=True` subprocess
-#: call (#2197) -- neither changes what bytes any `--emit` mode writes, so
-#: `test_planner_emit_parity.py` is not expected to move and was not run
-#: against this ref as part of this change.
+#: RE-MEASURED against the 100-board planner oracle, not assumed inert:
+#: `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF` (`.github/workflows/
+#: parity.yml`) and `ci.yml`'s `sdk_parity` checkout `ref:` move to this
+#: SAME commit, in lockstep, per this repo's own precedent (tan-cli#1268/
+#: `3344475e`'s identical six-site move) -- an earlier draft of this PR
+#: left them behind, reasoning that neither #2053 nor #2197 changes
+#: `--emit` bytes; that reasoning covered only 2 of the 4 commits and
+#: missed that #2088 (`ad9ce6bd`) is ALSO in this range. It IS
+#: behavioural, and it DOES move bytes once `mram_main` resolves (#2053
+#: is what makes `classify_region` call it `"flash"` instead of leaving
+#: it `"unresolved"`, which is what actually exercises the composite-alias
+#: verification -- the two commits interact, not two independent no-ops).
+#: `python scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+#: c81cb5db9945c8f448a7bb952d374f874e2f42c0` re-captured the fixture: 100
+#: boards, 700 emits (7 error-contract) -- unchanged counts -- but a REAL
+#: 80-of-700-file diff, 1,343,563 -> 1,323,853 B. Every changed byte
+#: attributes to #2053 alone: `mram_main`'s `memory[]` pane entry flips
+#: `kind: unresolved`/`status: unresolved`+`reason:` to `kind: flash`/
+#: `status: ok`/`base: 2147483648` on all 74 AEN-preset
+#: `system-manifest.yaml` goldens, and the `mram_main` clause of the
+#: IPC-blocked message rewords (still blocked, clearer reason) in the 6
+#: goldens across `multicore/mproc-mailbox` and `multicore/rpmsg-aen`
+#: that also carry copies of that string in `build-plan.json` /
+#: `dts-reservations.dtsi` / `ipc-contract-h.h` (74 + 6 = 80). #2088 fires
+#: on `mram_main` on every one of those boards -- it is what lets
+#: `classify_region` call the now-resolved region `"flash"` at all -- but
+#: contributes NO byte delta of its own: `connectivity/production-
+#: deployment` is the only one of the 100 boards whose `board.yaml`
+#: targets a `storage[].flash_device:` at a `composite` alias
+#: (`flash_device: mram_main`, five entries), and its `storage-mounts-
+#: c.c` / `build-plan.json` bytes are IDENTICAL either side of this pin
+#: move -- the coverage-gap verification passes cleanly against that
+#: board's `memory_map:` both before and after, so the accepted case does
+#: not move; only the newly-resolved classification's own prose does.
+#: Re-measured, not assumed: bound to `c81cb5db`,
+#: `tests/parity/test_planner_emit_parity.py` +
+#: `tests/parity/test_planner_axis_build_plan_parity.py` +
+#: `python/tests/planner/test_storage_region_bounds.py` +
+#: `python/tests/planner/test_storage_dt_label_verification.py` together
+#: report 977 passed, 10 skipped, 0 failed (measured twice: once citing
+#: the reviewing pass's own number, once independently re-run for this
+#: change -- both agree). `python/tests/planner/test_storage_write_
+#: authority.py` (new, this change) hand-ports alp-sdk's
+#: `tests/scripts/test_orchestrate_storage_write_authority.py` (`ad9ce6bd`)
+#: directly against `_resolve_flash_device()` / `_composite_alias_
+#: coverage_gap()`: 15 passed. alp-sdk's own edits to `tests/scripts/
+#: test_orchestrate_storage_region_bounds.py` and `test_orchestrate_
+#: storage_dt_label_unverified.py` in the same commit touch test
+#: functions (`test_a_named_alternative_with_a_real_dt_label_round_trips`,
+#: `test_mram_main_isolated_repro`,
+#: `test_remedy_names_a_verified_alternative_when_one_exists`) that have
+#: NO tan-side counterpart to edit -- `test_storage_region_bounds.py`'s
+#: own module docstring already scopes it to exactly two P1/P4 gaps
+#: (alp-sdk#2010) and defers the rest of that upstream file "a separate
+#: unit of work"; `test_storage_dt_label_verification.py` hand-ports a
+#: DIFFERENT pair of defects (alp-sdk#1484/#1556) -- its similarly-spelled
+#: upstream source, `test_orchestrate_storage_dt_label_UNVERIFIED.py`, is
+#: a distinct file this test does NOT mirror -- and is hermetic by
+#: design, never reading a bound checkout's `memory_map:` at all. A
+#: no-op port with evidence, the same shape as `alp_template.py::
+#: validate()` above.
 PINNED_SDK_COMMIT = "c81cb5db9945c8f448a7bb952d374f874e2f42c0"  # alp-sdk, past 81a9d515 -- see above (tan-cli#1269, hand-finished)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,

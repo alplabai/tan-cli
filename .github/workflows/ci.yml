@@ -595,6 +595,19 @@ jobs:
       # board tree now carries), and this job's `sdk_parity` leg compares
       # tan's hand-port against that exact file for every board.
       #
+      # `81a9d515` -> `c81cb5db` (tan-cli#1269 hand-finish, tan-cli#1275),
+      # moved in the SAME change as `parity.yml`'s `PINNED_SDK_TAG` /
+      # `PINNED_PLANNER_ORACLE_SDK_REF` and both of
+      # `test_planner_relocation_freshness.py`'s pins -- see `parity.yml`'s
+      # `PINNED_SDK_TAG` comment for the full re-measurement (planner
+      # oracle: a REAL 80-of-700-file diff, entirely attributed to
+      # alp-sdk#2053's `mram_main.base` resolution; alp-sdk#2088's
+      # composite-alias verification fires on every one of those same
+      # boards but moves no byte of its own). `HAND_PORT_PINNED_SDK_COMMIT`
+      # moves too: `scripts/gen_zephyr_board.py` changed in range
+      # (#2053, docstring only) and this job's `sdk_parity` leg compares
+      # tan's hand-port against that exact file for every board.
+      #
       # KEEP THE `ref:` LINE DIRECTLY UNDER `repository:` -- no comment
       # between them. `python/scripts/pin_move_verify.py`'s
       # `_CI_SDK_PARITY_REF` matches the two lines as an adjacent pair and
@@ -608,7 +621,7 @@ jobs:
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: 81a9d515a90403cce30588704e31faf9dc893838
+          ref: c81cb5db9945c8f448a7bb952d374f874e2f42c0
           fetch-tags: true
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`

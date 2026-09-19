@@ -784,7 +784,38 @@ env:
   #     in the 12-commit diff. `west.yml` does change, but only by one
   #     `name-allowlist` entry (`fatfs`) plus comments -- no `revision:` line
   #     moves, so the Zephyr pin `tan/core/bootstrap.py` reads is unchanged.
-  PINNED_SDK_TAG: 81a9d515a90403cce30588704e31faf9dc893838
+  #
+  # `81a9d515` -> `c81cb5db` (tan-cli#1269 hand-finish, tan-cli#1275): moved
+  # together with `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT`
+  # AND `HAND_PORT_PINNED_SDK_COMMIT`, `ci.yml`'s `sdk_parity` `ref:`, and
+  # `PINNED_PLANNER_ORACLE_SDK_REF` below -- all six sites in lockstep, per
+  # the repo's own precedent (this pin's `15b2f32c -> 20fec7a7` paragraph
+  # above; tan-cli#1268/3344475e's identical six-site move). Four upstream
+  # commits touch this table's files (fe4c3563/f6b93a65's IMPLICIT-ENCODING
+  # drain, ad9ce6bd's #2088 composite-alias verification, 6e5101c0's #2053
+  # `mram_main.base -> 0x80000000` resolution) -- see
+  # `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT` /
+  # `HAND_PORT_PINNED_SDK_COMMIT` paragraphs for the per-commit audit.
+  # Re-measured against `c81cb5db`:
+  #   - planner oracle: a REAL 80-of-700-file diff (see
+  #     `PINNED_PLANNER_ORACLE_SDK_REF` below), every changed byte attributed
+  #     to #2053 alone -- #2088 is present in the range but inert against
+  #     every one of the 100 captured boards (none targets a `storage[].
+  #     flash_device:` at a `write_authority: composite` alias with an
+  #     unverifiable coverage gap; `connectivity/production-deployment`'s
+  #     five `flash_device: mram_main` entries are the one board that DOES
+  #     exercise the composite-alias path, and its `storage-mounts-c.c` /
+  #     `build-plan.json` bytes are unchanged either side of this pin move).
+  #   - `tests/parity/test_planner_emit_parity.py` +
+  #     `tests/parity/test_planner_axis_build_plan_parity.py` +
+  #     `python/tests/planner/test_storage_region_bounds.py` +
+  #     `python/tests/planner/test_storage_dt_label_verification.py`, bound to
+  #     `c81cb5db`: 977 passed, 10 skipped, 0 failed.
+  #   - scaffold / toolchain-lock / bootstrap: no `templates/`, `README.md`,
+  #     `metadata/toolchains.json` or `metadata/bootstrap.json` path appears
+  #     in the range's `scripts/alp_orchestrate/`+hand-port diff; `west.yml`
+  #     unchanged.
+  PINNED_SDK_TAG: c81cb5db9945c8f448a7bb952d374f874e2f42c0
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -946,7 +977,42 @@ env:
   # tfm-sysbuild-conf. The board-tree side is covered instead by
   # `tests/parity/test_planner_emit_parity.py`'s byte-for-byte comparison
   # against the bound checkout, which is green at this pin.
-  PINNED_PLANNER_ORACLE_SDK_REF: 81a9d515a90403cce30588704e31faf9dc893838
+  # `81a9d515` -> `c81cb5db` (tan-cli#1269 hand-finish, tan-cli#1275): moved
+  # in lockstep with `PINNED_SDK_TAG` above per this pin's own rule. `python
+  # scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+  # c81cb5db9945c8f448a7bb952d374f874e2f42c0` re-captured the fixture: 100
+  # boards, 700 emits (7 error-contract) -- unchanged counts -- but a REAL
+  # byte move this time, 1,343,563 -> 1,323,853 B, 80 of 700 emit files
+  # touched. A script attributed every changed byte to ONE upstream cause
+  # with none left over: alp-sdk#2053 resolves `mram_main.base` from the
+  # `"TBD"` placeholder to `0x80000000` on every AEN preset, which flips its
+  # `memory[]` pane entry from `kind: unresolved` / `status: unresolved`
+  # (plus a `reason:` prose paragraph) to `kind: flash` / `status: ok` /
+  # `base: 2147483648` on all 74 AEN-preset `system-manifest.yaml` goldens,
+  # and rewords the `mram_main` clause of the IPC-blocked message (still
+  # blocked, clearer reason) in the 6 goldens across `multicore/mproc-
+  # mailbox` and `multicore/rpmsg-aen` that also carry `build-plan.json` /
+  # `dts-reservations.dtsi` / `ipc-contract-h.h` copies of that same string
+  # (74 + 6 = 80). alp-sdk#2088 (the composite-alias write_authority
+  # verification, `ad9ce6bd`) is IN this range and DOES fire on
+  # `mram_main` on every one of those same boards -- it is what makes
+  # `classify_region` call the now-resolved `mram_main` `"flash"` instead of
+  # leaving it `"unresolved"` -- but produces no additional byte delta of
+  # its own: `connectivity/production-deployment` is the only one of the
+  # 100 captured boards whose `board.yaml` targets a `storage[].
+  # flash_device:` at a `write_authority: composite` region (`flash_device:
+  # mram_main`, five entries), and its `storage-mounts-c.c` /
+  # `build-plan.json` bytes are IDENTICAL either side of this pin move --
+  # the coverage-gap verification #2088 adds passes cleanly against that
+  # board's `memory_map:` both before and after, so the accepted case does
+  # not move; only the newly-resolved `mram_main` classification's own
+  # prose does. Re-measured, not assumed: bound to `c81cb5db`,
+  # `tests/parity/test_planner_emit_parity.py` +
+  # `tests/parity/test_planner_axis_build_plan_parity.py` +
+  # `python/tests/planner/test_storage_region_bounds.py` +
+  # `python/tests/planner/test_storage_dt_label_verification.py` together
+  # report 977 passed, 10 skipped, 0 failed.
+  PINNED_PLANNER_ORACLE_SDK_REF: c81cb5db9945c8f448a7bb952d374f874e2f42c0
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this
