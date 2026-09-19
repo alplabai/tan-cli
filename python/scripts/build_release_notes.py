@@ -9,14 +9,17 @@ CHANGELOG's `## [X.Y.Z]` section, verbatim, then the `## Release assets` block
 caveat, the attestation line) appended after it.
 
 `softprops/action-gh-release@efb35369` (v3.0.3) silently truncates any body to
-125000 characters before publishing (`truncateReleaseNotes`,
-`src/github.ts:254-256`) -- and that count is JavaScript string length, i.e.
-UTF-16 CODE UNITS, not Python's `len()` (which counts code points; an astral
-character such as most emoji is one Python code point but a surrogate PAIR,
-two UTF-16 units). Once the CHANGELOG section alone passes that limit, the
-assets block -- appended after it -- is cut away completely and the job still
-goes green. 0.7.0's section measured 770642 characters; its page would have
-shipped with no install section, no glibc floor, no attestation instructions.
+at most 124999 characters before publishing (`truncateReleaseNotes`,
+`src/github.ts:254-257`: `input.substring(0, githubNotesMaxCharLength - 1)`
+where `githubNotesMaxCharLength = 125000` -- the `- 1` means the action's own
+ceiling is 124999, not 125000) -- and that count is JavaScript string length,
+i.e. UTF-16 CODE UNITS, not Python's `len()` (which counts code points; an
+astral character such as most emoji is one Python code point but a surrogate
+PAIR, two UTF-16 units). Once the CHANGELOG section alone passes that limit,
+the assets block -- appended after it -- is cut away completely and the job
+still goes green. 0.7.0's section measured 770642 characters; its page would
+have shipped with no install section, no glibc floor, no attestation
+instructions.
 
 This module fixes that by budgeting for the assets block FIRST: if the slice
 plus block would land too close to the limit, the slice is replaced with a
@@ -39,8 +42,14 @@ import sys
 from pathlib import Path
 
 #: `softprops/action-gh-release`'s own hard ceiling on a release body
-#: (`truncateReleaseNotes`, v3.0.3 `src/github.ts:254-256`). Measured in
-#: UTF-16 code units -- see `utf16_len`.
+#: (`truncateReleaseNotes`, v3.0.3 `src/github.ts:254-257`):
+#: `return input.substring(0, githubNotesMaxCharLength - 1)` where
+#: `githubNotesMaxCharLength = 125000` -- i.e. the action keeps at most
+#: `125000 - 1 = 124999` UTF-16 code units, not 125000. A body of EXACTLY
+#: 125000 units is not caught by `length > RELEASE_BODY_UTF16_HARD_LIMIT`
+#: below and would silently lose its last character to the action's own
+#: truncation -- the exact hazard this module exists to never rely on. The
+#: refusal in `assemble_body` therefore compares with `>=`, not `>`.
 RELEASE_BODY_UTF16_HARD_LIMIT = 125_000
 
 #: The budget the CHANGELOG slice must fit under, ALONGSIDE the assets block
@@ -185,8 +194,8 @@ def too_long_notice(version: str, repo: str = REPO) -> str:
     return (
         f"This release's `CHANGELOG.md` section is too long to include in "
         f"full in a release body (GitHub release bodies are capped at "
-        f"{RELEASE_BODY_UTF16_HARD_LIMIT} UTF-16 code units; see tan-cli#1276). "
-        f"Read the complete, unabridged entry here:\n\n"
+        f"{RELEASE_BODY_UTF16_HARD_LIMIT - 1} UTF-16 code units; see "
+        f"tan-cli#1276). Read the complete, unabridged entry here:\n\n"
         f"https://github.com/{repo}/blob/v{version}/CHANGELOG.md\n\n"
         f"A human-written summary of the highlights may follow as an edit to "
         f"this release page."
@@ -208,20 +217,24 @@ def assemble_body(
         if the slice is replaced.
     :param repo: `owner/name`, for the notice URL.
     :return: the final release body.
-    :raises SystemExit: if the body still exceeds
+    :raises SystemExit: if the body is still at or over
         `RELEASE_BODY_UTF16_HARD_LIMIT` even after replacing the slice with
         the notice -- this module never relies on the action's own silent
-        truncation to make a body fit.
+        truncation to make a body fit. The comparison is `>=`, not `>`: the
+        action keeps only `RELEASE_BODY_UTF16_HARD_LIMIT - 1` units
+        (`truncateReleaseNotes`'s own `- 1`, see that constant's docstring),
+        so a body of exactly the limit still loses its last character if
+        this let it through.
     """
     body = f"{slice_body}\n\n{block}"
     if utf16_len(body) > SLICE_BUDGET_UTF16:
         body = f"{too_long_notice(version, repo)}\n\n{block}"
 
     length = utf16_len(body)
-    if length > RELEASE_BODY_UTF16_HARD_LIMIT:
+    if length >= RELEASE_BODY_UTF16_HARD_LIMIT:
         raise SystemExit(
             f"::error::release notes body is {length} UTF-16 code units, "
-            f"over action-gh-release's {RELEASE_BODY_UTF16_HARD_LIMIT}-unit "
+            f"at or over action-gh-release's {RELEASE_BODY_UTF16_HARD_LIMIT}-unit "
             f"hard limit, even after replacing the CHANGELOG slice with a "
             f"pointer notice -- the `## Release assets` block itself must "
             f"fit under the limit with room to spare. Shrink the block "

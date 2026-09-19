@@ -2,37 +2,69 @@
 """The Release assets block must survive a CHANGELOG section over 125000 chars.
 
 tan-cli#1276. `softprops/action-gh-release@efb35369` (v3.0.3) silently
-truncates any release body to 125000 UTF-16 code units
-(`truncateReleaseNotes`, `src/github.ts:254-256`) before publishing. The old
-`release.yml` step wrote the CHANGELOG slice, then unconditionally appended
-the `## Release assets` block after it -- so once the slice alone passed that
-limit (0.7.0's section measures 770642 characters), the block was silently cut
-away and the job still went green.
+truncates any release body to at most 124999 UTF-16 code units
+(`truncateReleaseNotes`, `src/github.ts:254-257`:
+`input.substring(0, githubNotesMaxCharLength - 1)`) before publishing. The
+old `release.yml` step wrote the CHANGELOG slice, then unconditionally
+appended the `## Release assets` block after it -- so once the slice alone
+passed that limit (0.7.0's section measures 770642 characters), the block
+was silently cut away and the job still went green.
 
 The load-bearing assertion in every "oversized" test below is not "the job
 exits 0" -- it is that `## Release assets` (and the glibc floor inside it)
 literally appears, unmangled, in the final body, AND that the body's own
 UTF-16 length is under the action's hard limit so the action's truncation is
-never reached at all. `test_a_naive_concatenation_is_what_broke_0_7_0` pins
-the OLD, unfixed shape (slice-then-append, no budget) directly against the
-measured 0.7.0 numbers from the issue, so it documents the actual failure
-mode this module exists to prevent, not a hypothetical one.
+never reached at all. `test_a_naive_concatenation_is_what_broke_0_7_0`
+actually RUNS the OLD "Slice CHANGELOG section for the release notes" step
+(the real `run:` bash, extracted verbatim out of `release.yml` as it read at
+`_OLD_RELEASE_YML_COMMIT`, the commit immediately before this fix), against
+the measured 0.7.0 numbers from the issue, so it documents the actual
+failure mode this module exists to prevent, not a hypothetical one -- and no
+change to `build_release_notes.py` or `release.yml` can make it pass for the
+wrong reason, since it re-implements neither.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "build_release_notes.py"
 _spec = importlib.util.spec_from_file_location("build_release_notes", _SCRIPT)
 assert _spec and _spec.loader
 brn = importlib.util.module_from_spec(_spec)
 sys.modules["build_release_notes"] = brn
 _spec.loader.exec_module(brn)
+
+#: `origin/dev`'s tip immediately before tan-cli#1276 landed -- the commit
+#: right before `## Release assets` was moved to `build_release_notes.py`.
+#: Pinned to this exact SHA, never to `origin/dev` itself (that ref keeps
+#: moving; a later re-sync would silently repoint what this test proves
+#: against): `git -C tan-cli log --oneline -1 <this SHA>` ->
+#: "chore(release): fold 204 changelog fragments and bump to 0.6.1 (#1274)".
+_OLD_RELEASE_YML_COMMIT = "03dbd38a50b06f5e3529477f3d1ce45d8b91c20c"
+
+
+def _has_gnu_sed() -> bool:
+    """The old step's own `sed -i "s/.../.../" release_notes.md` is GNU
+    syntax (no backup-suffix argument) -- it only ever ran on `ubuntu-latest`
+    (GNU coreutils `sed`). BSD/macOS `sed -i` requires an explicit suffix
+    argument and misparses this exact invocation, unrelated to anything this
+    fix touches. `sed --version` exits 0 and prints "GNU sed" only under GNU
+    sed; BSD `sed` doesn't recognise the flag at all and exits non-zero."""
+    try:
+        proc = subprocess.run(["sed", "--version"], capture_output=True)
+    except OSError:
+        return False
+    return proc.returncode == 0 and b"GNU sed" in proc.stdout
 
 
 def _changelog(version: str, section_body: str) -> str:
@@ -48,16 +80,19 @@ def _changelog(version: str, section_body: str) -> str:
 def _gh_action_truncate(body: str, limit: int = brn.RELEASE_BODY_UTF16_HARD_LIMIT) -> str:
     """Reproduce `truncateReleaseNotes`'s own slicing, in UTF-16 units.
 
-    Node's `String.prototype.slice` operates on UTF-16 code units, so the
-    equivalent Python operation is: encode UTF-16LE, slice by 2-byte units,
-    decode back. `errors="ignore"` matches a slice landing inside a surrogate
-    pair being dropped rather than raising, which is what a raw JS slice does
-    too (it would produce a lone surrogate; decoding drops it here instead of
-    round-tripping it, close enough for this test's purpose of proving
-    presence/absence of ASCII markers like `## Release assets`).
+    `truncateReleaseNotes` is `input.substring(0, githubNotesMaxCharLength -
+    1)` (v3.0.3 `src/github.ts:254-257`) -- it keeps `limit - 1` units, not
+    `limit`. Node's `String.prototype.substring` operates on UTF-16 code
+    units, so the equivalent Python operation is: encode UTF-16LE, slice by
+    2-byte units up to `(limit - 1) * 2` bytes, decode back. `errors="ignore"`
+    matches a slice landing inside a surrogate pair being dropped rather than
+    raising, which is what a raw JS slice does too (it would produce a lone
+    surrogate; decoding drops it here instead of round-tripping it, close
+    enough for this test's purpose of proving presence/absence of ASCII
+    markers like `## Release assets`).
     """
     encoded = body.encode("utf-16-le")
-    return encoded[: limit * 2].decode("utf-16-le", errors="ignore")
+    return encoded[: (limit - 1) * 2].decode("utf-16-le", errors="ignore")
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +219,29 @@ def test_astral_characters_alone_can_push_a_slice_into_the_notice_path():
     assert brn.utf16_len(body) <= brn.RELEASE_BODY_UTF16_HARD_LIMIT
 
 
-def test_a_body_still_over_the_hard_limit_after_the_notice_is_refused(monkeypatch):
+def test_a_body_of_exactly_the_hard_limit_is_refused_not_accepted():
+    """tan-cli#1276 review (low): the action's own ceiling is
+    `RELEASE_BODY_UTF16_HARD_LIMIT - 1` units (`truncateReleaseNotes`'s own
+    `- 1`, see that constant's docstring), so a body landing at EXACTLY the
+    limit must still refuse -- accepting it would let `action-gh-release`
+    silently drop its last character, the exact hazard this module exists
+    to never rely on. Crafted directly with `assemble_body`, per the
+    review's own repro: a block sized to make the notice-plus-block total
+    come out to precisely `RELEASE_BODY_UTF16_HARD_LIMIT`.
+    """
+    version = "0.7.0"
+    notice = brn.too_long_notice(version)
+    separator = "\n\n"
+    prefix_len = brn.utf16_len(notice) + brn.utf16_len(separator)
+    pad_len = brn.RELEASE_BODY_UTF16_HARD_LIMIT - prefix_len
+    block = "x" * pad_len
+    assert brn.utf16_len(f"{notice}{separator}{block}") == brn.RELEASE_BODY_UTF16_HARD_LIMIT
+
+    with pytest.raises(SystemExit, match="at or over action-gh-release's"):
+        brn.assemble_body("- did a thing", block, version)
+
+
+def test_a_body_still_over_the_hard_limit_after_the_notice_is_refused():
     # Arrange -- force the "always present" block itself to be enormous, so
     # even the notice-plus-block assembly cannot fit. This is the last-resort
     # guard: never rely on the action's own silent truncation.
@@ -194,18 +251,76 @@ def test_a_body_still_over_the_hard_limit_after_the_notice_is_refused(monkeypatc
         brn.assemble_body("- did a thing", huge_block, "0.7.0")
 
 
-def test_a_naive_concatenation_is_what_broke_0_7_0():
-    """Pins the OLD, unfixed behaviour this module replaces.
+@pytest.mark.skipif(shutil.which("bash") is None, reason="no bash to parse with")
+@pytest.mark.skipif(
+    not _has_gnu_sed(),
+    reason="the old step's `sed -i` invocation assumes GNU sed (it only ever ran on "
+    "ubuntu-latest); no GNU-compatible sed on this host",
+)
+def test_a_naive_concatenation_is_what_broke_0_7_0(tmp_path):
+    """Pins the OLD, unfixed behaviour this module replaces -- by actually
+    RUNNING the old step's own shell text, not by re-implementing its
+    concatenation here.
 
-    This is not a test of `build_release_notes`; it is a fixed record of the
-    defect from the issue, measured: a bare slice-then-append with no budget
-    check publishes a body whose `## Release assets` block does not survive
-    the action's own 125000-unit truncation. If this test ever starts
-    failing, the *issue*, not the fix, has changed shape.
+    tan-cli#1276 review (low): an earlier version of this test rebuilt the
+    old logic inline (`f"{oversized.strip()}\\n\\n{block}"`, checked only
+    against this file's own `_gh_action_truncate`) and called neither
+    `build_release_notes.py` nor `release.yml` -- no change to either could
+    ever make it fail. This version extracts the OLD "Slice CHANGELOG
+    section for the release notes" step's `run:` text verbatim out of
+    `release.yml` AS IT READ at `_OLD_RELEASE_YML_COMMIT` (the commit
+    immediately before this fix), via `git show <sha>:<path>` (never
+    `origin/dev`, which keeps moving -- see that constant), and runs it for
+    real under `bash -eo pipefail` against an oversized CHANGELOG section.
+    The resulting `release_notes.md` is the step's REAL output; only the
+    truncation simulating `action-gh-release` itself is a stand-in, since
+    reaching the actual GitHub API is out of scope for a hermetic test.
     """
-    oversized = "- an entry\n" * 70_000  # mirrors 0.7.0's 770642 chars
-    block = brn.assets_block("GLIBC_2.30")
-    naive_body = f"{oversized.strip()}\n\n{block}"
+    workflow_text = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "show", f"{_OLD_RELEASE_YML_COMMIT}:.github/workflows/release.yml"],
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout
+    steps = yaml.safe_load(workflow_text)["jobs"]["release"]["steps"]
+    step = next(
+        s for s in steps if s.get("name") == "Slice CHANGELOG section for the release notes"
+    )
+    run = step["run"]
+    assert isinstance(run, str) and run.strip()
+
+    version = "0.7.0"
+    oversized = "- an entry\n" * 70_000  # mirrors 0.7.0's measured 770642 chars
+    changelog = (
+        f"# Changelog\n\n"
+        f"## [{version}] -- 2026-09-19\n\n"
+        f"{oversized}\n\n"
+        f"## [0.6.0] -- 2026-08-04\n\n"
+        f"- an older entry\n"
+    )
+    (tmp_path / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+    (tmp_path / "meta").mkdir()
+    (tmp_path / "meta" / "glibc-floor.txt").write_text("GLIBC_2.30\n", encoding="utf-8")
+
+    env = dict(os.environ)
+    env["GITHUB_REF_NAME"] = f"v{version}"
+    proc = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", run],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+    )
+    assert proc.returncode == 0, (
+        f"STEP EXIT={proc.returncode}\n--- stdout ---\n"
+        f"{proc.stdout.decode('utf-8', 'replace')}\n--- stderr ---\n"
+        f"{proc.stderr.decode('utf-8', 'replace')}"
+    )
+
+    naive_body = (tmp_path / "release_notes.md").read_text(encoding="utf-8")
+    # The old step DID write the block into the file -- the defect is not in
+    # what it wrote, it is in what survives `action-gh-release`'s own
+    # truncation on publish.
+    assert "## Release assets" in naive_body
     assert brn.utf16_len(naive_body) > brn.RELEASE_BODY_UTF16_HARD_LIMIT
     truncated = _gh_action_truncate(naive_body)
     assert "## Release assets" not in truncated
