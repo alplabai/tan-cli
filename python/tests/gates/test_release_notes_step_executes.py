@@ -172,4 +172,4 @@ def test_slice_step_keeps_the_assets_block_when_the_section_is_oversized(
     assert f"https://github.com/alplabai/tan-cli/blob/v{version}/CHANGELOG.md" in body
 
     utf16_len = len(body.encode("utf-16-le")) // 2
-    assert utf16_len <= _RELEASE_BODY_UTF16_HARD_LIMIT
+    assert utf16_len < _RELEASE_BODY_UTF16_HARD_LIMIT

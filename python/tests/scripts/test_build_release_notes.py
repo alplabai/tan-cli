@@ -178,7 +178,7 @@ def test_a_normal_sized_slice_is_kept_verbatim_and_the_block_follows():
     assert body.startswith("- did a thing")
     assert "## Release assets" in body
     assert "GLIBC_2.30" in body
-    assert brn.utf16_len(body) <= brn.RELEASE_BODY_UTF16_HARD_LIMIT
+    assert brn.utf16_len(body) < brn.RELEASE_BODY_UTF16_HARD_LIMIT
 
 
 def test_an_oversized_slice_is_replaced_by_a_pointer_notice_and_the_block_survives():
@@ -199,7 +199,7 @@ def test_an_oversized_slice_is_replaced_by_a_pointer_notice_and_the_block_surviv
     # Assert: honest about why.
     assert "too long" in body
     # Assert: fits comfortably, so the action's own truncation never fires.
-    assert brn.utf16_len(body) <= brn.RELEASE_BODY_UTF16_HARD_LIMIT
+    assert brn.utf16_len(body) < brn.RELEASE_BODY_UTF16_HARD_LIMIT
     assert _gh_action_truncate(body) == body
 
 
@@ -216,7 +216,7 @@ def test_astral_characters_alone_can_push_a_slice_into_the_notice_path():
     # Assert: the notice path was taken, not the verbatim one.
     assert "too long" in body
     assert "## Release assets" in body
-    assert brn.utf16_len(body) <= brn.RELEASE_BODY_UTF16_HARD_LIMIT
+    assert brn.utf16_len(body) < brn.RELEASE_BODY_UTF16_HARD_LIMIT
 
 
 def test_a_body_of_exactly_the_hard_limit_is_refused_not_accepted():
@@ -276,6 +276,18 @@ def test_a_naive_concatenation_is_what_broke_0_7_0(tmp_path):
     truncation simulating `action-gh-release` itself is a stand-in, since
     reaching the actual GitHub API is out of scope for a hermetic test.
     """
+    probe = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "cat-file", "-e", f"{_OLD_RELEASE_YML_COMMIT}^{{commit}}"],
+        capture_output=True,
+    )
+    if probe.returncode != 0:
+        pytest.skip(
+            f"{_OLD_RELEASE_YML_COMMIT} is unreachable from this checkout -- "
+            f"likely a shallow clone (e.g. CI's `fetch-depth: 1` python-tests "
+            f"shard), which has no history before its own fetched tip to `git "
+            f"show` a pre-#1276 commit out of"
+        )
+
     workflow_text = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "show", f"{_OLD_RELEASE_YML_COMMIT}:.github/workflows/release.yml"],
         capture_output=True,
