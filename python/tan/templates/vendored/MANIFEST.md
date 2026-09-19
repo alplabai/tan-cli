@@ -95,14 +95,104 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`ff27f179`**
-  (`ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2`, alp-sdk `dev`) —
-  tan-cli#1151's re-pin (the #1118 planner re-sync), the same change that
+- **Current vendor point (all templates):** **`c81cb5db`**
+  (`c81cb5db9945c8f448a7bb952d374f874e2f42c0`, alp-sdk `dev`) — tan-cli#1275's
+  re-pin (the #1269 planner re-sync's hand-finish), the same change that
   moves `parity.yml`'s `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`,
   `ci.yml`'s `sdk_parity` `ref:` and
   `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT`/
   `HAND_PORT_PINNED_SDK_COMMIT`. Still untagged (alp-sdk's newest tag is
   `v0.16.0`), so `- Ref:` below stays `v0.16.0` for the same
+  `_tag_resolves()` reason as the `722320a1` bullet.
+
+  **Six files moved / one file removed / two files added, across two
+  (template, sku) pairs** — `iot`/E1M-AEN801 (`CMakeLists.txt`, `README.md`,
+  `board.yaml`, `prj.conf`, `src/main.c`, `testcase.yaml`; `native_sim.conf`
+  REMOVED, not moved; `src/cc3501e_bridge.c` + `src/cc3501e_bridge.h` ADDED
+  -- see the KNOWN UPSTREAM GAP note below for why an addition was needed
+  at all) and `multicore-mailbox`/E1M-AEN801 (`board.yaml` only). Every
+  other (template, sku) pair is untouched — `scaffold_byte_parity.py`
+  reported 0 diffs for all eight before this re-vendor and still does
+  after.
+
+  **Two upstream causes, both AEN-only:**
+  - **alp-sdk#2112/#2172** (`4e68133b3`) attaches the CC3501E bridge
+    (`cc3501e_bridge_bringup()`) before `alp_wifi_open()` on
+    `examples/connectivity/mqtt-telemetry` (the `iot` template's canonical
+    example) — the app never called it, so `alp_wifi_open()` returned
+    `NULL` on real E1M-AEN801 silicon and never reached
+    `alp_wifi_connect()`. `CMakeLists.txt` gains
+    `target_sources(app PRIVATE src/cc3501e_bridge.c)`.
+  - **alp-sdk#2173** (`c81cb5db9`, this pin's own tip commit) fixes the
+    mbedtls `ssl_misc.h`/PSA-crypto break at its root
+    (`ALP_SDK_MBEDTLS_PSA_CRYPTO` in `zephyr/Kconfig.alp-libraries`), so
+    `mqtt-telemetry` no longer needs a `native_sim.conf` to force mbedtls
+    off for the native_sim scenario — every target now builds the same
+    TLS-enabled configuration the SoM does. This is also what flips
+    `CMakeLists.txt`'s `EXTRA_CONF_FILE` ordering from `list(PREPEND ...)`
+    back to a plain `list(APPEND ...)` with no preceding rationale
+    comment: the caller-override problem `PREPEND` (tan-cli#379) existed
+    to solve was specific to the now-deleted `native_sim.conf` overlay.
+  - `multicore-mailbox`'s `board.yaml` change is unrelated to either: it is
+    alp-sdk#2053's `mram_main.base` resolution (`0x80000000`, not `"TBD"`)
+    reaching this template's own carve-out-blocked explanation, the exact
+    downstream effect `test_planner_relocation_freshness.py`'s
+    `PINNED_SDK_COMMIT` paragraph documents for the planner side.
+
+  **Four of `DELIBERATE_EDITS`' prior forty-five entries retired**, taking
+  0 `un_edit_*` functions with them (each retired transform's mechanics-only
+  round-trip proof is kept, matching the `un_edit_doc_link_ref` precedent
+  this file's `scaffold_byte_parity.py` companion already set) and 41
+  entries remain: `iot`/E1M-AEN801's `extra_conf_order` (`CMakeLists.txt`),
+  `native_sim_conf_link` and `native_sim_conf_copy_comment` (`README.md`,
+  both `native_sim.conf`-referencing), and `fleet_ota_pointer` (`prj.conf`
+  — the whole migration-note paragraph it qualified was replaced by
+  alp-sdk#2173's new PSA-crypto paragraph). All four existed only to
+  qualify or reorder `native_sim.conf`-related content that alp-sdk#2173
+  deleted outright, so — like the alp-sdk#1855 retirement above — upstream
+  did not merely reword around them, it removed the mechanism entirely.
+  `iot`/E1M-AEN801's `workflow_pointer` (`prj.conf`) and
+  `multicore-mailbox`/E1M-AEN801's `e1m_modules_pointer` /
+  `zephyr_drv_pointer` (`board.yaml`) all survive unchanged, re-applied on
+  top of the new emit exactly as written.
+
+  **KNOWN UPSTREAM GAP, worked around here, not fixed at its source:**
+  alp-sdk's own `metadata/templates/catalog-v1.json` `iot` entry's
+  `files.user_owned` list was never updated for alp-sdk#2112 — it still
+  names only `board.yaml`/`prj.conf`/`CMakeLists.txt`/`src/main.c`/
+  `README.md`, so `alp_project.py --emit scaffold --template iot --sku
+  E1M-AEN801` never returns `src/cc3501e_bridge.{c,h}` even though the
+  live `CMakeLists.txt` now references `src/cc3501e_bridge.c`. Confirmed
+  by inspection: `rg cc3501e_bridge metadata/templates/catalog-v1.json
+  scripts/alp_template.py` returns zero hits in the bound `c81cb5db`
+  checkout. Measured, not theoretical: without this workaround,
+  `tan/core/scaffold.py`'s own `TemplateDataError` cross-check (every
+  `target_sources()` token in a vendored `CMakeLists.txt` must name a file
+  the tree actually carries) refuses this exact scaffold outright rather
+  than shipping one that fails to link. Both files are declared in
+  `scaffold_byte_parity.py`'s `NON_ENVELOPE_EXTRAS` (the same mechanism
+  `native_sim.conf`/tan-cli#379 uses) and vendored from the catalog
+  example's real, on-disk copy — real upstream bytes, not invented
+  content, so byte-parity holds. This is an alp-sdk CATALOG defect, not a
+  tan-side one; `scaffold_byte_parity.py`'s job is byte-parity with what
+  the live emit + declared extras produce, not correctness of alp-sdk's
+  own `user_owned` list. Filed as **alplabai/alp-sdk#2241** (this repo has
+  no standing to edit `metadata/templates/catalog-v1.json` itself); treat
+  this workaround as temporary, not the permanent shape, and drop it once
+  #2241 lands and re-vendoring picks the files up from the envelope
+  directly.
+
+  Verified at `c81cb5db`, against a checkout with tags fetched:
+  `scaffold_byte_parity.py` **10/10 PASS** (rc 0).
+
+- **Prior vendor point (all templates):** **`ff27f179`**
+  (`ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2`, alp-sdk `dev`) —
+  tan-cli#1151's re-pin (the #1118 planner re-sync), the same change that
+  moves `parity.yml`'s `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`,
+  `ci.yml`'s `sdk_parity` `ref:` and
+  `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT`/
+  `HAND_PORT_PINNED_SDK_COMMIT`. Still untagged at the time (alp-sdk's
+  newest tag was `v0.16.0`), so `- Ref:` below stays `v0.16.0` for the same
   `_tag_resolves()` reason as the `722320a1` bullet.
 
   **Nine files moved across six (template, sku) pairs** —
@@ -388,15 +478,16 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`ff27f179`** (alp-sdk `dev`, full sha
-  `ff27f179c3baa9e04e8b6a536a4e0b8cee7be7b2`) — the checkout the emit was RUN
+- Commit: **`c81cb5db`** (alp-sdk `dev`, full sha
+  `c81cb5db9945c8f448a7bb952d374f874e2f42c0`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::
   test_the_manifest_states_one_vendor_point_not_two`.
 
-  This line used to say `eb96112b` (tan-cli#996/#1001, this pin's own prior
-  value), and before that `94378a05` (tan-cli#846) and, before that, `f30f4d4b`
+  This line used to say `ff27f179` (tan-cli#1275, this pin's own prior
+  value), and before that `eb96112b` (tan-cli#996/#1001), and before that
+  `94378a05` (tan-cli#846) and, before that, `f30f4d4b`
   and assert it was "the same commit `parity.yml`'s `PINNED_SDK_TAG` now
   names". Both halves went stale, and in that order. tan-cli#582 wrote it on
   2026-08-09, setting the vendor point, this line and the pin all to
@@ -490,7 +581,7 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **forty-five** live entries
+The `DELIBERATE_EDITS` table below currently carries **forty-one** live entries
 (counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS`
 dict, not by hand): one `multicore-mailbox`/`E1M-AEN801` entry for the
 leading "blocked ahead" caveat (tan-cli#864 Q5, see entry 9 below), the
@@ -541,6 +632,24 @@ tag (see "Current vendor point" above); listed here only as history, not as
 a current exception. tan-cli#501's four `sensor`/`diagnostics` CMakeLists
 edits were REVERTED (see entry 3 below) — the theory behind them measured
 false, so those four files carry no deliberate edit at all now.
+
+**tan-cli#1275 (the `c81cb5db` re-vendor) retired four more entries**,
+forty-five down to forty-one, taking 0 `un_edit_*` functions with it (each
+retired transform's mechanics-only round-trip proof is kept in
+`scaffold_byte_parity.py`'s `self_check()`, the same treatment
+`un_edit_doc_link_ref` already got when ITS own registration retired).
+Retired: `iot`/`E1M-AEN801`'s `extra_conf_order` (`CMakeLists.txt`, entry 2
+above) and its `README.md` `native_sim_conf_link`/`native_sim_conf_copy_
+comment` pair (entries 13/14 above) — all three qualified or reordered
+`native_sim.conf`-referencing content that alp-sdk#2173 deleted outright
+when it fixed the mbedtls PSA-crypto break at its root, so `mqtt-telemetry`
+no longer ships (or needs) a `native_sim.conf` at all; and `iot`/
+`E1M-AEN801`'s `prj.conf` `fleet_ota_pointer` (the migration-note paragraph
+it qualified was replaced wholesale by alp-sdk#2173's new paragraph). See
+the "Current vendor point" bullet above for the full re-vendor accounting,
+including a KNOWN UPSTREAM GAP flagged there (not fixed by this change):
+alp-sdk's own `metadata/templates/catalog-v1.json` `iot` entry was never
+updated for the `cc3501e_bridge.{c,h}` dependency alp-sdk#2112 added.
 
 **tan-cli#1151 (the `ff27f179` re-vendor) retired seventeen entries in one
 change**, sixty-two down to forty-five, taking 11 `un_edit_*` functions and
