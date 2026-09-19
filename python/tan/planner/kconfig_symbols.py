@@ -368,8 +368,10 @@ def _load_board_symbols(zephyr_base: Path, board_triple: str) -> list[dict[str, 
         # below is a tan-only addition (tan-cli#992) -- alp-sdk's own copy
         # has no such restore because it never ships as a frozen PyInstaller
         # bundle whose LD_LIBRARY_PATH would otherwise leak into the child.
-        proc = subprocess.run(configure_cmd, cwd=zephyr_base.parent,
-                              capture_output=True, text=True, env=spawn_env())
+        proc = subprocess.run(
+            configure_cmd, cwd=zephyr_base.parent,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=spawn_env({"PYTHONIOENCODING": "utf-8"}))
         if proc.returncode != 0:
             raise OrchestratorError(
                 f"--emit kconfig: `west build --cmake-only -b "
@@ -378,8 +380,10 @@ def _load_board_symbols(zephyr_base: Path, board_triple: str) -> list[dict[str, 
         # `add_custom_target` never runs at configure time -- `-t` builds
         # it explicitly (a second, separate `west build`).
         build_cmd = [west, "build", "-d", str(build_dir), "-t", _KCONFIG_TARGET]
-        proc = subprocess.run(build_cmd, cwd=zephyr_base.parent,
-                              capture_output=True, text=True, env=spawn_env())
+        proc = subprocess.run(
+            build_cmd, cwd=zephyr_base.parent,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=spawn_env({"PYTHONIOENCODING": "utf-8"}))
         if proc.returncode != 0:
             raise OrchestratorError(
                 f"--emit kconfig: `west build -t {_KCONFIG_TARGET}` failed "

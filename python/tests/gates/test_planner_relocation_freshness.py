@@ -972,7 +972,69 @@ from tests.conftest import sdk_root
 #:       E1M-AEN801 carries "256 Mbit HyperRAM only, NOR left DNI/optional" and
 #:       says it populates neither. No emitted byte moves; carried verbatim by
 #:       `auto/planner-resync`'s own 3-way merge (tan-cli#1265).
-PINNED_SDK_COMMIT = "81a9d515a90403cce30588704e31faf9dc893838"  # alp-sdk, past 20fec7a7 -- see above (tan-cli#1265)
+#:
+#: `81a9d515` -> `c81cb5db` (tan-cli#1269 proposed the mechanical half at
+#: `0fe9958d`; this pin move + the four conflicts below are the human half,
+#: tan-cli#1269's own successor PR). FOUR upstream commits touch this
+#: table's files; `auto/planner-resync` merged one cleanly and flagged four
+#: hunks (across three files) as conflicts because they land inside a
+#: paragraph tan had already reworded on relocation -- read one by one:
+#:
+#:   - `6e5101c0` (#2053, resolve `mram_main.base` to `0x80000000` on all
+#:     seven AEN presets) -- DOCSTRING ONLY on the tan side, in every file
+#:     it touches. `aperture.py`'s `is_partition_inside_aperture` and
+#:     `carveout.py`'s `_region_ipc_eligibility` both stop describing
+#:     `mram_main`'s `base` as presently `"TBD"` and instead say #2053
+#:     resolved it, `carveout.py` additionally naming the closed-both-sides
+#:     reasoning (flash-class once resolved; already disqualified via
+#:     `write_authority: composite` before). No emitted byte moves: neither
+#:     function's CODE changed upstream, only the prose describing a branch
+#:     `is_whole_device_alias()`/`classify_region()` already took correctly
+#:     on both sides of the resolution. `partition.py` already carries the
+#:     equivalent update (`#2053 resolved its base to 0x80000000`,
+#:     `partition.py:189`), landed by the bot's clean merge alongside #2088
+#:     below -- confirmed present, not re-added.
+#:   - `f6b93a65` + `fe4c3563` (#2197, the IMPLICIT-ENCODING drain) --
+#:     BEHAVIOURAL, `buildplan.py` and `kconfig_symbols.py`.
+#:     `buildplan.py::_sdk_commit` adds `encoding="utf-8"` to the `git
+#:     rev-parse --short HEAD` spawn that already had `text=True` (tan's own
+#:     `env=spawn_env()` divergence, tan-cli#797, is unaffected and kept).
+#:     `kconfig_symbols.py::_load_board_symbols` adds `encoding="utf-8",
+#:     errors="replace"` plus `PYTHONIOENCODING=utf-8` (folded into tan's
+#:     own `spawn_env()` overrides rather than `os.environ.copy()`, since
+#:     tan already restores `LD_LIBRARY_PATH` there) to BOTH `west build`
+#:     spawns. Real fix, not cosmetic: without an explicit encoding,
+#:     `text=True` decodes the child's stdout/stderr with
+#:     `locale.getpreferredencoding()`, which is not UTF-8 on every
+#:     supported host (e.g. Windows' legacy code pages); a `west build`
+#:     failure whose Kconfig/CMake diagnostic contains a non-ASCII path or
+#:     quote character could raise `UnicodeDecodeError` INSIDE
+#:     `subprocess.run` itself before `_load_board_symbols` ever sees a
+#:     `returncode`, turning a normal build failure into an unhandled crash
+#:     instead of the `OrchestratorError` this function means to raise.
+#:     `errors="replace"` keeps that decode from ever raising again.
+#:   - `ad9ce6bd` (#2088, composite alias) -- BEHAVIOURAL, `partition.py`
+#:     only, already landed by the bot's clean 3-way merge and RE-VERIFIED
+#:     here, not re-applied: `_RUNTIME_WRITABLE_AUTHORITY` /
+#:     `_DEFERRING_ALIAS_AUTHORITY` / `_composite_alias_coverage_gap` are
+#:     present verbatim (`partition.py:45,62,273`), and `_resolve_flash_device`
+#:     refuses a runtime mount on a region whose `write_authority` is
+#:     neither `customer_runtime` nor a `composite` alias that verifiably
+#:     tiles its own window. Confirms `HAND_PORT_HASHES`'s `whole_device_alias.py`
+#:     hash below is unaffected (it is a SEPARATE upstream source, `scripts/
+#:     whole_device_alias.py`, byte-identical between `81a9d515` and
+#:     `c81cb5db` -- re-hashed, not assumed).
+#:
+#: Not re-measured against the 100-board planner oracle: no oracle capture
+#: ran as part of this pin move (`python/scripts/capture_planner_oracle.py`
+#: is `parity.yml`/`PINNED_SDK_TAG`-scoped, a pin this change deliberately
+#: does not touch -- see that pin's own comment in `.github/workflows/
+#: parity.yml`). The four ported hunks are docstring-only (#2053) or add an
+#: explicit `encoding=`/`errors=` to an already-`text=True` subprocess
+#: call (#2197) -- neither changes what bytes any `--emit` mode writes, so
+#: `test_planner_emit_parity.py` is not expected to move and was not run
+#: against this ref as part of this change.
+PINNED_SDK_COMMIT = "c81cb5db9945c8f448a7bb952d374f874e2f42c0"  # alp-sdk, past 81a9d515 -- see above (tan-cli#1269, hand-finished)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1010,13 +1072,13 @@ PINNED_SDK_COMMIT = "81a9d515a90403cce30588704e31faf9dc893838"  # alp-sdk, past 
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
     "__init__.py": "bc8a414122a59e04dcd37087328d692c15b8574bf6d470d6881d8f2866735aff",
-    "aperture.py": "1b4875df7f5a7269cf84300fd1fc547d855c7f69bd127069f3735ad6bf3e6267",
-    "buildplan.py": "8954a83db046cc46b57f8c2e09a5fee3607da0e3caf2fac176c106a7643789dd",
-    "carveout.py": "4be729ee1f996f83de6594f7fa2e087bd757e95228ed21b9f91f1b480d048eab",
+    "aperture.py": "717ddd2e178e0b530bee01ac77ccf9ee67ed388c9ec21f4debdc1d3bffe07365",
+    "buildplan.py": "f5b5caaf6be840e8889b01fd488f0246a3c733c9aeb4d3171a013035a0c6748a",
+    "carveout.py": "d4ebb956e336a8ad428988d5edb5716dc47f7ae01b3f97b09de806ef0a177126",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
     "kconfig.py": "7e6ec33eb5ff2eb823a33c1cfe54078012b13f1f54cc40d244b333e3c801c489",
-    "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
+    "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
     "loader.py": "36b75774b3ff4dd2005613bd1b024d7438f025b5ac586b2516eb830b669f2a30",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
@@ -1024,7 +1086,7 @@ PINNED_HASHES: dict[str, str] = {
     "memregion.py": "45d10e7ac94b0febbcf66df70324eb7b9a6fcc0dd09617d3de5aefc65b7c4879",
     "models.py": "3ba426ab5477bedc446bee7ab63eeb9cf56fc1b677397fdc892ba3826567a45c",
     "orchestrator.py": "b7a2044fa062335f539d456a1da01f20b11f1b780f41b4bbc346c34ad56d2a6b",
-    "partition.py": "070b43d2a76b119c418d0e7d4f8f1d7157a9081af501a09ea200562048eec002",
+    "partition.py": "4c8ee8f3b9c5f3f8e5ec87ff4c6f0b0bbd15313b51842de0a8d6e0846d7f7add",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "ef9adb68a4cc9f18fe25bba7c0a4c2e9eabd2955166e2c5a8f6f92db0993e805",
     "secure.py": "44743b887ab8d29293469f2574b6d88e0d433c9b9ba1f1001709f51104716c0c",
@@ -1794,7 +1856,34 @@ PINNED_HASHES: dict[str, str] = {
 #:       since the #1241 re-sync ported only the reader half, lands here too --
 #:       that is tan-cli#1253, folded into this re-sync because it edits the
 #:       same function.
-HAND_PORT_PINNED_SDK_COMMIT = "81a9d515a90403cce30588704e31faf9dc893838"  # alp-sdk, past 20fec7a7 -- see above (tan-cli#1265)
+#:
+#: `81a9d515` -> `c81cb5db` (tan-cli#1269 flagged both sources at `0fe9958d`;
+#: this pin move is the human half). TWO of the thirteen `HAND_PORT_HASHES`
+#: sources changed in range, both ported:
+#:
+#:   - `scripts/gen_zephyr_board.py` (#2053, the same `mram_main.base ->
+#:     0x80000000` commit as the mirror pin above): DOCSTRING ONLY.
+#:     `_aen_check_map_overlaps` stops describing the whole-device-alias
+#:     `TBD`-base skip and the App-MRAM-window exact-match exclusion as
+#:     hypothetical ("once its `base` stops being `"TBD"`") and instead says
+#:     #2053 already resolved it on every shipped AEN preset, while noting
+#:     the skip itself stays live for any future preset that authors a
+#:     `TBD` base. Ported verbatim into `zephyr_board.py::
+#:     _aen_check_map_overlaps`. No emitted byte moves -- the code this
+#:     docstring describes did not change upstream either.
+#:   - `scripts/alp_template.py::validate()` (#2197, IMPLICIT-ENCODING
+#:     drain): NO-OP PORT. `validate()` / `ValidateResult` / `_count_passed`
+#:     -- the in-tree twister self-test this hunk's `env=`/`encoding=`
+#:     change lives in -- explicitly did NOT relocate to `tan/planner/`
+#:     (`template.py`'s own module docstring: "An SDK CI gate, not a
+#:     customer path"). Confirmed by search, not assumed: no
+#:     `subprocess.run` invoking `twister` exists anywhere under
+#:     `tan/planner/`, `tan/core/`, or `tan/commands/` in this tree. The
+#:     hash below still re-pins against the new upstream blob -- the point
+#:     of a HAND_PORT_HASHES entry with no matching tan code is exactly to
+#:     keep catching a FUTURE change to this source that isn't similarly
+#:     inert, not to claim today's is.
+HAND_PORT_PINNED_SDK_COMMIT = "c81cb5db9945c8f448a7bb952d374f874e2f42c0"  # alp-sdk, past 81a9d515 -- see above (tan-cli#1269, hand-finished)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -1858,11 +1947,11 @@ HAND_PORT_PINNED_SDK_COMMIT = "81a9d515a90403cce30588704e31faf9dc893838"  # alp-
 #: `sentinels.py` set the precedent for. Neither lives under `tan/planner/`
 #: itself, so neither is in `HAND_PORT_SOURCES` below.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "e98def04ba299d8f8c8d8ed826d0c8ecfaa9e98414f6ae6550ed10f461a25540",
+    "scripts/gen_zephyr_board.py": "0565d07c49035b7728f89f3ba0c1cf2ffbb18a933b3de264fc216d6ef3a25621",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/whole_device_alias.py": "a38abb18da876dfcb95edf7332a2a057bcf16da524f2fa9b7b367a00222756f5",
     "scripts/alp_project_loader.py": "0812e23eb161250d2a0fc87ce73a53f63f0463ead5e5a1f705974a6a5827cf40",
-    "scripts/alp_template.py": "292b40e908179a3bd3c82ec5664bb2dddc49f1f769987a00a5cd899182172edb",
+    "scripts/alp_template.py": "544d5bf3208724272baa6114d5a67edafb62be78decf1edb4b3a805c5d5da667",
     "scripts/alp_project_emit/__init__.py": "9213c745751e23a36b3f582846a147fb9060386992ff7b8244a0c1d44d5987cf",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
     "scripts/alp_project_emit/dts.py": "cb6d4278e2fc886a23c28f2ef30b4ae9714738071219f7c29cbccbbeb1bc1782",
