@@ -1480,13 +1480,20 @@ def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
     `vendored_tree!` macro lists them in, so `data.fileChanges[]` matches the
     shipped binary's without a hand-kept list here to drift out of step with
     it. `iot` is the one tree where the two LISTS differ, not just their order:
-    it carries a `native_sim.conf` the frozen Rust tree never got (tan-cli#379,
-    declared in `test_scaffold_content_oracle_parity.py`'s
-    `FILE_SET_DIVERGENCE` until tan-cli#269 deleted it with the oracle axis;
-    `tests/core/test_template_integrity.py` pins the FILE now, not the diff),
-    so `tan init --template iot-starter --format json` returns one
-    `fileChanges[]` entry more than the oracle did. Sorting is what keeps
-    every file the two trees DO share in the same relative order. Sorted on
+    the frozen Rust tree never got `src/cc3501e_bridge.{c,h}` (tan-cli#1275,
+    alp-sdk#2112 -- vendored as `NON_ENVELOPE_EXTRAS` in
+    `tests/parity/scaffold_byte_parity.py` because alp-sdk's own scaffold
+    catalog omits them from the envelope, alplabai/alp-sdk#2241;
+    `test_scaffold_content_oracle_parity.py`'s `FILE_SET_DIVERGENCE` records
+    the count divergence until tan-cli#269 deleted the oracle axis;
+    `tests/core/test_template_integrity.py` pins the FILE SET now, not the
+    diff), so `tan init --template iot-starter --format json` returns two
+    `fileChanges[]` entries more than the oracle did. (`native_sim.conf`,
+    this tree's earlier and now-retired divergence source, was removed
+    entirely at tan-cli#1275 -- alp-sdk#2173 fixed the mbedtls PSA-crypto
+    break it existed to work around, so `mqtt-telemetry` no longer ships
+    one.) Sorting is what keeps every file the two trees DO share in the
+    same relative order. Sorted on
     that STRING, never on the `Path`: `PurePath.__lt__` compares a
     case-FOLDED key on Windows, so sorting paths ordered `board.yaml` before
     `CMakeLists.txt` there and after it on Linux -- the same command emitting a

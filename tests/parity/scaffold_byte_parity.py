@@ -106,9 +106,10 @@ VENDORED_ROOT = Path(__file__).resolve().parent.parent.parent / (
 # (alp-sdk#2112/#2172), but alp-sdk's own `metadata/templates/
 # catalog-v1.json` `iot` entry's `files.user_owned` was never updated to
 # match, so `--emit scaffold` never returns either file -- a genuine
-# upstream catalog gap (see `python/tan/templates/vendored/MANIFEST.md`'s
-# "Current vendor point" bullet), not something this tuple can route
-# around by omission: `tan/core/scaffold.py`'s own `TemplateDataError`
+# upstream catalog gap, filed as **alplabai/alp-sdk#2241** (see
+# `python/tan/templates/vendored/MANIFEST.md`'s "Current vendor point"
+# bullet), not something this tuple can route around by omission:
+# `tan/core/scaffold.py`'s own `TemplateDataError`
 # cross-checks every `target_sources()` token in a vendored `CMakeLists.txt`
 # against the files actually present, and refuses a scaffold that would
 # fail to link. Declaring these two here (compared against the catalog
@@ -133,14 +134,6 @@ NON_ENVELOPE_EXTRAS = (
 #: were hand-changed, so a re-vendor MUST come here and restate it.
 _SDK_DOC_LINK_REF = re.compile(r"(github\.com/alplabai/alp-sdk/(?:blob|tree))/v0\.15\.0-rc1/")
 
-#: `list(PREPEND EXTRA_CONF_FILE ${_alp_generated})` plus the comment block
-#: immediately above it. The comment is matched by SHAPE, not by its wording --
-#: rewording the rationale is not drift from the SDK, and pinning the prose
-#: here would red the gate for an edit that changes no behaviour.
-_IOT_EXTRA_CONF_PREPEND = re.compile(
-    r"(?:^#.*\n)*^list\(PREPEND (EXTRA_CONF_FILE \$\{_alp_generated\})\)$", re.M
-)
-
 
 def un_edit_doc_link_ref(text: str) -> str:
     """tan-cli#384, historical (healed at tan-cli#543/#545 -- see the
@@ -155,15 +148,6 @@ def un_edit_doc_link_ref(text: str) -> str:
     exercised by `self_check()`'s literal `v0.15.0-rc1`/`v0.15.0` fixture,
     which tests the transform's own mechanics, not the current vendor pin."""
     return _SDK_DOC_LINK_REF.sub(r"\1/v0.15.0/", text)
-
-
-def un_edit_iot_extra_conf_order(text: str) -> str:
-    """tan-cli#379: the emit APPENDS the generated `alp.conf` to
-    `EXTRA_CONF_FILE`, and Zephyr's last-assignment-wins merge then lets it
-    override a caller's own `-DEXTRA_CONF_FILE=native_sim.conf` -- the exact
-    overlay this template documents. The vendored tree prepends. Undo that
-    (comment block included) to recover the emit's own bytes."""
-    return _IOT_EXTRA_CONF_PREPEND.sub(r"list(APPEND \1)", text)
 
 
 #: tan-cli#1001 review (major), first half: alp-sdk's own `examples/

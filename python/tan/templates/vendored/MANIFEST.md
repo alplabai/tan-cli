@@ -176,9 +176,11 @@ from an un-revendored SDK change.
   content, so byte-parity holds. This is an alp-sdk CATALOG defect, not a
   tan-side one; `scaffold_byte_parity.py`'s job is byte-parity with what
   the live emit + declared extras produce, not correctness of alp-sdk's
-  own `user_owned` list. Left for a separate alp-sdk fix (this repo has no
-  standing to edit `metadata/templates/catalog-v1.json`); flag it there
-  rather than treat this workaround as the permanent shape.
+  own `user_owned` list. Filed as **alplabai/alp-sdk#2241** (this repo has
+  no standing to edit `metadata/templates/catalog-v1.json` itself); treat
+  this workaround as temporary, not the permanent shape, and drop it once
+  #2241 lands and re-vendoring picks the files up from the envelope
+  directly.
 
   Verified at `c81cb5db`, against a checkout with tags fetched:
   `scaffold_byte_parity.py` **10/10 PASS** (rc 0).

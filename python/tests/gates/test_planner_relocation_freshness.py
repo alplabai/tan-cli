@@ -1033,10 +1033,9 @@ from tests.conftest import sdk_root
 #: left them behind, reasoning that neither #2053 nor #2197 changes
 #: `--emit` bytes; that reasoning covered only 2 of the 4 commits and
 #: missed that #2088 (`ad9ce6bd`) is ALSO in this range. It IS
-#: behavioural, and it DOES move bytes once `mram_main` resolves (#2053
-#: is what makes `classify_region` call it `"flash"` instead of leaving
-#: it `"unresolved"`, which is what actually exercises the composite-alias
-#: verification -- the two commits interact, not two independent no-ops).
+#: behavioural (see `partition.py`'s own docstring/`_composite_alias_
+#: coverage_gap` above), so its inertness on THIS oracle capture had to be
+#: measured, not assumed, before either pin could move.
 #: `python scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
 #: c81cb5db9945c8f448a7bb952d374f874e2f42c0` re-captured the fixture: 100
 #: boards, 700 emits (7 error-contract) -- unchanged counts -- but a REAL
@@ -1048,10 +1047,11 @@ from tests.conftest import sdk_root
 #: IPC-blocked message rewords (still blocked, clearer reason) in the 6
 #: goldens across `multicore/mproc-mailbox` and `multicore/rpmsg-aen`
 #: that also carry copies of that string in `build-plan.json` /
-#: `dts-reservations.dtsi` / `ipc-contract-h.h` (74 + 6 = 80). #2088 fires
-#: on `mram_main` on every one of those boards -- it is what lets
-#: `classify_region` call the now-resolved region `"flash"` at all -- but
-#: contributes NO byte delta of its own: `connectivity/production-
+#: `dts-reservations.dtsi` / `ipc-contract-h.h` (74 + 6 = 80). #2053 alone
+#: flips `classify_region`'s verdict on `mram_main` (its extent now equals
+#: the aperture exactly, the whole-device alias, once resolved); #2088's
+#: composite-alias verification runs against every one of those same
+#: boards but contributes NO byte delta of its own: `connectivity/production-
 #: deployment` is the only one of the 100 boards whose `board.yaml`
 #: targets a `storage[].flash_device:` at a `composite` alias
 #: (`flash_device: mram_main`, five entries), and its `storage-mounts-
