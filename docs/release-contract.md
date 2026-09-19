@@ -569,7 +569,7 @@ see is `tan generate --target zephyr-board`, which is the tan-cli#591 class this
 section exists for.
 
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
-tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag contains
+tan-cli#591: tan `0.7.0` waits for a stable alp-sdk release whose tag contains
 `20fec7a7` (alp-sdk#2047, milestone `v0.17.0`). No SDK-capability gate is added
 around `memory[]` or any other row. Done when:
 

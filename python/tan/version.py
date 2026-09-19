@@ -73,4 +73,14 @@
 # `python-gates`, never reach `build`, and publish ZERO assets under an
 # immutable tag -- the exact shape `release.yml:300`'s own comment warns about.
 # tan-cli#1258 tracks the alp-sdk release that clears it; tag after that lands.
-TAN_VERSION = "0.6.1"
+#
+# RENUMBERED 0.6.1 -> 0.7.0 (maintainer decision). Everything above this line
+# is left as written -- it is the accurate record of how this tree came to
+# carry a plain, non-`.dev0` release number -- but the number itself was
+# wrong: this tree's content breaks v0.6.0 consumers, and pre-1.0 SemVer puts
+# a break in the MINOR, not the patch. `## [0.6.1]` becomes `## [0.7.0]` in
+# CHANGELOG.md (same section, same 204 folded fragments, just renamed), and
+# `python/pyproject.toml` moves with it. Nothing else about the readiness
+# picture above changes: the alp-sdk-floor blocker this file already
+# documented (tan-cli#1258) still gates the tag push, under the new number.
+TAN_VERSION = "0.7.0"
