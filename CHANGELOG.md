@@ -7,15 +7,43 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [0.7.0] — Unreleased
 
-**BREAKING: this release raises tan's effective alp-sdk floor.** `tan
-generate --target zephyr-board` for AEN and V2N/V2M boards now needs an
-alp-sdk release that contains commit
-`81a9d515a90403cce30588704e31faf9dc893838` (tan's planner mirror is pinned
-there, tan-cli#1268); against any alp-sdk release that predates it, the
-command exits 3 (`generate.emit-failed`) for those boards. This is the
-break that moves the release from the planned patch (`0.6.1`) to a minor
-(`0.7.0`) — see the `### Changed` entry below for the exact before/after and
-who must act.
+**BREAKING: this release ships eleven changes that break a v0.6.0
+consumer**, which is why it is a minor (`0.7.0`), not the originally-planned
+patch (`0.6.1`) — see the linked entry below for each one's exact
+before/after and who must act:
+
+- tan's effective alp-sdk floor rises to the first alp-sdk release
+  containing commit `81a9d515a90403cce30588704e31faf9dc893838`; `tan
+  generate --target zephyr-board` for AEN and V2N/V2M boards exits 3
+  (`generate.emit-failed`) against an older alp-sdk (tan-cli#1268)
+- a confirmed Flow D (`alif_mram_jlink`) MRAM write now refuses until
+  `--atoc-unqueryable` / `flash_args.atoc_unqueryable: true` acknowledges
+  that it replaces the whole ATOC (tan-cli#1252)
+- `tan bootstrap` installs the `arm-zephyr-eabi` toolchain by default as a
+  blocking phase; `--no-toolchain` opts out (#474)
+- `tan doctor` gains a `toolchain` check that can `fail` (exit 4,
+  `doctor.toolchain`) on a host that passed before (#474)
+- `tan build --plan` / `--manifest` / `--manifest-from` now refuse with
+  `build.flag-retired` (exit 2) instead of `cli.command-deferred` (exit 1)
+  (#427)
+- `tan validate` / `tan diff` hw_rev refusals move off the generic
+  `validate.failed` / `diff.failed` onto
+  `validate.hardware-revision-unknown` / `-not-buildable` (and the `diff.`
+  equivalents) (#1262)
+- `tan lock` / `tan migrate` / `tan quality` now prepend
+  `sdk.project-pin-unresolved` ahead of the command's own refusal in
+  `issues[]`, so a consumer keyed on `issues[0]` sees a different code
+- `tan validate --format sarif` / `--format diagnostic-v1` now emit a
+  `file:` URI, or a percent-encoded relative reference, instead of a raw
+  host path for `uri` / `artifactLocation.uri` (#1097)
+- the `swd_probe` flash backend is removed; a manifest declaring it now
+  refuses with `flash.entry-failed` (alp-sdk#1439)
+- generated firmware config composes `ALP_HW_BUILD_SOM_HW_REV` as
+  `"2626-r2"` rather than the bare `"r2"` for families that declare a
+  `board_datecode` (#1156)
+- `tan init` refuses several `--som` / SoM inputs that used to silently
+  succeed: `init.som-flow-style-unsupported` (#1035) and
+  `init.som-block-unsupported` (#1041)
 
 *DRAFT — replace this paragraph before tagging.* The tag itself is blocked
 on this: no alp-sdk release contains `81a9d515` yet (tan-cli#1258, still
@@ -356,8 +384,9 @@ and tan-cli#1258 for the full gate measurement.*
   type-checks `default_board` directly, and a new shared `_topology_for_sku`
   type-checks `topology:` and every one of its entries for both callers.
 
-- **`tan init` now refuses a `--som` retarget onto a flow-style `som:` block
-  instead of silently discarding it.** `som: {sku: ..., hw_rev: ...}` (valid
+- **BREAKING: `tan init` now refuses a `--som` retarget onto a flow-style
+  `som:` block instead of silently discarding it (#1035).**
+  `som: {sku: ..., hw_rev: ...}` (valid
   YAML, but on one physical line) is a shape `tan.core.scaffold`'s
   line-oriented `som:` reader/writer never parsed. Measured before this fix:
 
@@ -550,9 +579,9 @@ and tan-cli#1258 for the full gate measurement.*
   so a corrupted offset/length silently returns wrong or truncated bytes
   instead of raising.
 
-- **`tan init --som` no longer silently discards itself on a quoted `som:`
-  key, a merge key, an alias, or a `som:` block written across more than one
-  line.** Fixes `#1041`. `tan.core.scaffold`'s line-oriented `som:` scanner
+- **BREAKING: `tan init --som` no longer silently discards itself on a
+  quoted `som:` key, a merge key, an alias, or a `som:` block written across
+  more than one line.** Fixes `#1041`. `tan.core.scaffold`'s line-oriented `som:` scanner
   read a bare `som:` line and its literal `sku:`/`hw_rev:` children, but
   `yaml.safe_load` accepts several more spellings without complaint:
   `"som":` (a quoted key), `<<:` (a merge key, inside the `som:` block or at
@@ -1551,9 +1580,9 @@ and tan-cli#1258 for the full gate measurement.*
   commit per PR). The catch itself is unchanged: a branch-side delete is
   still a violation.
 
-- **`tan validate`'s `--format diagnostic-v1` (LSP) and `--format sarif` now
-  emit a valid URI reference for `uri`/`artifactLocation.uri`, not a raw
-  filesystem path.** Fixes `#1097`. SARIF 2.1.0 defines `artifactLocation.uri`
+- **BREAKING (wire): `tan validate`'s `--format diagnostic-v1` (LSP) and
+  `--format sarif` now emit a valid URI reference for
+  `uri`/`artifactLocation.uri`, not a raw filesystem path.** Fixes `#1097`. SARIF 2.1.0 defines `artifactLocation.uri`
   as a URI reference, and LSP diagnostics are keyed by document URI, which an
   editor compares against the URI of an open buffer. Both sites emitted
   `board_path` bare, so an absolute, Windows-spelled root rendered
@@ -2788,8 +2817,8 @@ and tan-cli#1258 for the full gate measurement.*
     (AEN) and a hand-run `tan generate --target zephyr-board --core m33_sm`
     subprocess-vs-in-process comparison (V2N, no prior test node) both come
     back byte-identical.
-  - `scripts/alp_project_emit/hw_info.py` is a genuine hand-port too:
-    `ALP_HW_BUILD_SOM_HW_REV` now composes the family's `board_datecode`
+  - **BREAKING:** `scripts/alp_project_emit/hw_info.py` is a genuine
+    hand-port too (#1156): `ALP_HW_BUILD_SOM_HW_REV` now composes the family's `board_datecode`
     through `sdk_compat.board_designator()` (`"2626-r2"`, not the bare
     `"r2"`), matching what `scripts/program_eeprom.py` writes into a
     provisioned module's manifest and what the boot banner compares the live
@@ -4209,9 +4238,9 @@ and tan-cli#1258 for the full gate measurement.*
   `PINNED_SDK_COMMIT` / `HAND_PORT_PINNED_SDK_COMMIT` all move to `20fec7a7`
   together.
 
-- **A confirmed Flow D MRAM write now refuses until the operator acknowledges
-  that it REPLACES the entire ATOC (tan-cli#1252, porting alp-sdk#2025 /
-  alp-sdk#2029).** `plan_alif_mram_jlink` emits `loadbin {atoc} {atoc_address}`,
+- **BREAKING: a confirmed Flow D MRAM write now refuses until the operator
+  acknowledges that it REPLACES the entire ATOC (tan-cli#1252, porting
+  alp-sdk#2025 / alp-sdk#2029).** `plan_alif_mram_jlink` emits `loadbin {atoc} {atoc_address}`,
   which rewrites the whole table — and Flow D, being J-Link straight over SWD,
   has no SE-UART channel to enumerate what is resident first. Any boot entry
   already in MRAM that the new ATOC does not name (an A32 boot chain, an HP
@@ -4453,9 +4482,9 @@ and tan-cli#1258 for the full gate measurement.*
   read, and behave, as siblings; the bootstrap gate keeps its own NOTICE
   branch and is a manual diagnostic, not a CI gate.
 
-- **`tan validate` no longer reports a hw_rev refusal as a tan crash: validator
-  exits 4 and 5 get their own outcomes, and the raw exit status now rides in the
-  envelope.** Closes `#1262`.
+- **BREAKING (wire): `tan validate` no longer reports a hw_rev refusal as a
+  tan crash: validator exits 4 and 5 get their own outcomes, and the raw exit
+  status now rides in the envelope.** Closes `#1262`.
 
   `validate_cmd._STATUS_OUTCOME` mapped validator exits 0-3. alp-sdk's
   `scripts/validate_board_yaml.py` returns 0, 1, 3, 4 and 5 — measured at tag
@@ -7580,9 +7609,11 @@ and tan-cli#1258 for the full gate measurement.*
   reading the same unvalidated `cores[]`/`npus[]` shapes should be expected
   until `#964` closes.
 
-- **`tan lock`, `tan migrate`, and `tan quality` now report a broken
-  `.alp/sdk-path` pin exactly when the user most needs it -- when nothing
-  else on the ladder resolves either.** All three rely solely on `west_forward_
+- **BREAKING (wire): `tan lock`, `tan migrate`, and `tan quality` now report
+  a broken `.alp/sdk-path` pin exactly when the user most needs it -- when
+  nothing else on the ladder resolves either, prepending
+  `sdk.project-pin-unresolved` ahead of the command's own refusal in
+  `issues[]`.** All three rely solely on `west_forward_
   cmd.py`'s shared plumbing, whose only source for `sdk.project-pin-unresolved`
   was `Envelope.__init__`'s central seam (`_with_sdk_resolution_advisories`),
   which bails the instant `sdk is None` -- exactly the shape a rejected pin
@@ -9466,7 +9497,7 @@ and tan-cli#1258 for the full gate measurement.*
 
 - **Release binaries now resolve from a locked, hash-verified Python dependency set instead of a live PyPI resolution (#437).** `release.yml`'s `build` job and `clean-host.yml`'s `freeze-and-smoke` job used to run `pip install ".[monitor]" "pyinstaller>=6.10"` against whatever PyPI resolved that day, with no lock, no hashes, and an unbounded `pyinstaller` floor -- so re-running the same immutable tag on a later day could freeze a different typer/click/rich/pyyaml/jsonschema/truststore/certifi/pyinstaller and ship different executable bytes under an identical version string. `python/release-requirements.lock.txt` (a `uv pip compile --universal --generate-hashes` resolution, regenerated by `python/scripts/generate_release_lock.py`) now pins every third-party distribution -- the runtime set plus the `monitor` extra plus the build-time-only `pyinstaller`/`setuptools` -- to an exact version with every published sha256 hash, covering all four release platforms in one file. Both workflows install it with `pip install --require-hashes -r release-requirements.lock.txt`, which **refuses the whole install** on any hash mismatch or unhashed requirement rather than silently falling back to an unpinned resolution; the local `tan-cli` package installs separately with `--no-deps --no-build-isolation`. `tests/gates/test_release_lock_covers_dependencies.py` is the always-on, network-free gate keeping the committed lock honest against `pyproject.toml`'s declared dependencies (mutation-tested: a missing entry, a stripped hash, and an out-of-range pin each independently red the gate on its own assertion). `.github/workflows/release-lock-update.yml` (`workflow_dispatch`) is the reviewed path for moving a pin -- its `upgrade_package` input runs `generate_release_lock.py --upgrade` (every pin) or `--upgrade-package <name>` (one distribution) rather than a plain regenerate, which would keep every already-valid pin exactly as committed and never move anything; it opens a PR against `dev`, which then runs the new lock through `clean-host.yml`'s full four-platform freeze-and-conformance matrix before it ever reaches a tag. `--check` seeds its scratch resolution with a copy of the committed lock so it makes the same preference-vs-upgrade decision a plain regenerate does, keeping its verdict clearable by that exact remediation. The Linux build container is pinned the same way: both workflows now reference `python@sha256:411fa4dcfdce7e7a3057c45662beba9dcd4fa36b2e50a2bfcd6c9333e59bf0db` (the `python:3.12-slim-bullseye` tag kept in a trailing comment) instead of the mutable tag alone. Every release now also ships `dependency-lock.txt` (a copy of the lock at the tagged commit) as a release asset alongside `checksums.txt`, and each `build` leg records its own `pip freeze` output as a `dependency-inventory-<asset>` workflow artifact, so a shipped freeze can be audited later against exactly what went into it. Byte-for-byte reproducibility is not claimed -- PyInstaller embeds build-machine metadata (bootloader timestamps, some `.pyc` absolute paths) that varies run-to-run even from an identical input set -- but the complete build INPUT set (source tree, every third-party dependency version and hash, build container digest) is now deterministic, which `docs/release-contract.md`'s new "Dependency reproducibility (release lock)" section documents explicitly.
 
-- **`tan bootstrap` now acquires the `arm-zephyr-eabi` cross toolchain itself, as its final phase** (ADR 0021 Lane 1 P1). It reads `<sdkRoot>/metadata/toolchains.json` at RUN TIME — no copy of the pin lives in tan, so an alp-sdk pin bump reaches the next `tan bootstrap` with zero tan changes — and runs `west sdk install --version <pin> --gnu-toolchains arm-zephyr-eabi --no-hosttools --install-dir <dir>` into the artifact-keyed store `~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/` (or `$ALP_TOOLCHAIN_ROOT`, shared across every project pinning the same version). The separate manual `west sdk install` step the README documented is no longer required for the happy path; `--no-toolchain` opts out (the rest of `bootstrap` is unaffected, and `native_sim` builds never needed a cross toolchain at all).
+- **BREAKING: `tan bootstrap` now acquires the `arm-zephyr-eabi` cross toolchain itself, as a blocking final phase** (ADR 0021 Lane 1 P1, #474). It reads `<sdkRoot>/metadata/toolchains.json` at RUN TIME — no copy of the pin lives in tan, so an alp-sdk pin bump reaches the next `tan bootstrap` with zero tan changes — and runs `west sdk install --version <pin> --gnu-toolchains arm-zephyr-eabi --no-hosttools --install-dir <dir>` into the artifact-keyed store `~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/` (or `$ALP_TOOLCHAIN_ROOT`, shared across every project pinning the same version). The separate manual `west sdk install` step the README documented is no longer required for the happy path; `--no-toolchain` opts out (the rest of `bootstrap` is unaffected, and `native_sim` builds never needed a cross toolchain at all).
   - **Directory-exists is never the success predicate.** `west sdk install` runs into a `.tmp-<pid>` sibling of the store directory (the atomicity belt this ADR asks for around a tool tan does not control the internals of — west's own downloader already sha256-verifies each archive against the release's published `sha256.sum` before extracting, `scripts/west_commands/sdk.py`), then, only after the installed `sdk_version` file is read back and compared against the pin AND a real `arm-zephyr-eabi-gcc --version` probe succeeds FROM the moved-into-place store, a verification stamp (`.alp-toolchain-stamp.json`: the pinned version plus a sha256 digest of the manifest's own bytes) is written last. A `west sdk install` that reports success but names the wrong version, or whose compiler will not run, is left unstamped and unmoved/unstamped respectively — never silently trusted.
   - **A second `tan bootstrap` against an unchanged pin is a stamp read, not a reinstall** — `tan.core.toolchain_provision.stamp_matches_pin` is the one verdict function both `tan bootstrap`'s skip check and `tan doctor`'s new `toolchain` check (below) call, so the two cannot independently drift on what "still valid" means. A version bump moves to a NEW store directory by construction (the store is keyed by artifact+version); a manifest whose bytes rotate under an unchanged version string (a corrected pin) still invalidates the stamp via the digest.
   - **Refuses clearly, before spawning `west`, naming which cause:** a missing or malformed `metadata/toolchains.json`; no artifact published for this host at the pinned version (Intel Mac and `windows-arm64`, the WSL2-redirect case, are a coded, honest `log.line` skip — *never* a failure, per the ADR's own words); insufficient disk (checked against the manifest's own `measuredFootprint.extractedBytes` plus a 15% margin, named in GiB on both sides); and, on native Windows, no 7-Zip on `PATH` (west delegates `.7z` extraction to `patoolib`, which has no pure-Python fallback) — checked before this phase ever runs `west sdk install`, not discovered from its failure.
@@ -9475,7 +9506,7 @@ and tan-cli#1258 for the full gate measurement.*
   - **`west sdk install` is retried up to 3 times on any failure**, the same blind, backed-off retry `.github/workflows/getting-started.yml`'s own manual `west sdk install` step already carries (tan-cli#689) for this exact command's measured CI flakiness — this PR's own first real end-to-end CI run hit a THIRD failure mode in the same family (a `tar --xz` extraction returning exit status 2 on a sha256-verified archive), on top of the two the workflow's comment already documents (a `fetch_releases` rate limit, and a separately-flaky `setup.sh -t` toolchain-component fetch). A prior attempt's leftover `.tmp-*` sibling is cleared before each retry so `west`'s own `shutil.move` cannot land inside a stale partial directory instead of replacing it.
   - **A `west sdk install` failure on a critically low volume (<512 MiB free) gets a low-disk note appended**, independent of whether the preflight passed: the preflight checks space ONCE, before anything downloads, and a host that barely cleared it can still run out mid-extraction — the shape this PR's own first end-to-end CI run hit (a `tar --xz` extraction error whose message named no cause at all, because `tan.core.bootstrap.capture_tail` keeps only a failed child's last 4 non-empty output lines).
   - **`--dry-run` reports the real `west sdk install` argv in `data.plannedCommands` and writes nothing** — no store directory, no stamp, no network call, no retry, no sleep.
-- **`tan doctor` gains a `toolchain` check: stamp-vs-pin, never directory-exists.** Distinct from the existing `zephyrSdk` check (an unconditional, host-only "does any toolchain exist" probe): `toolchain` needs a resolved SDK checkout, reads its pinned version, and reports `pass` only when a verified stamp matches that exact pin — a stamped install against a MOVED pin (alp-sdk's `metadata/toolchains.json` changed since the last `tan bootstrap`) is a `fail` naming `tan bootstrap` as the fix, not "a toolchain exists" (ADR 0021's own words). `unknown` (never a guess) when no SDK checkout resolves or its `metadata/toolchains.json` is unreadable.
+- **BREAKING: `tan doctor` gains a `toolchain` check (#474): stamp-vs-pin, never directory-exists.** Distinct from the existing `zephyrSdk` check (an unconditional, host-only "does any toolchain exist" probe): `toolchain` needs a resolved SDK checkout, reads its pinned version, and reports `pass` only when a verified stamp matches that exact pin — a stamped install against a MOVED pin (alp-sdk's `metadata/toolchains.json` changed since the last `tan bootstrap`) is a `fail` naming `tan bootstrap` as the fix, not "a toolchain exists" (ADR 0021's own words). `unknown` (never a guess) when no SDK checkout resolves or its `metadata/toolchains.json` is unreadable.
   - **Has an adoption path for a toolchain `tan bootstrap` did not install.** A host with a real, working, correctly-pinned Zephyr SDK already on it — `ZEPHYR_SDK_INSTALL_DIR` set, or the SAME scan `zephyrSdk` already trusts, at a `sdk_version` matching this checkout's pin — reports `pass`, never a `fail` whose only prescribed remedy (`tan bootstrap`) would otherwise re-download a second, redundant copy of a toolchain the host already has (or fail outright offline, or on the README's own documented hand-`west sdk install` path). A stamp is tan's own bookkeeping for what it installed, not the only proof a working toolchain exists.
   - **On a host that the bound alp-sdk checkout's `metadata/toolchains.json` has no artifact row for (at alp-sdk `81a9d515`: every host except `linux-x86_64`, `windows-x86_64` and `macos-aarch64` — so Intel Mac (`macos-x86_64`), arm64 Linux (`linux-aarch64`) and `windows-arm64`)** — `tan bootstrap`'s toolchain phase skips honestly rather than failing (above), so no stamp is ever written there. (The Zephyr SDK itself does publish a `linux-aarch64` host build — see `zephyrSdkAvailableForHost` above; it is alp-sdk's own `metadata/toolchains.json` manifest that carries no row for it, which `artifacts_missing_for_host` reads.) `toolchain` therefore reports `fail` (exit 4) on exactly those hosts, unless the adoption path immediately above finds a pre-existing, hand- or otherwise-installed toolchain whose own `sdk_version` already matches this checkout's pin.
 - **`tan build`'s `${TOOLCHAIN_ROOT}` resolution now also finds a toolchain `tan bootstrap` acquired** — the artifact-keyed store (`~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`, or `$ALP_TOOLCHAIN_ROOT`) is now scanned alongside the existing `/opt`/`$HOME`/`%USERPROFILE%`/`Path.home()` roots, so a customer who ran nothing but `tan bootstrap` gets a build that finds it without also hand-exporting `ZEPHYR_SDK_INSTALL_DIR`. A `.tmp-<pid>` wreckage sibling from an interrupted acquisition is excluded by name so it can never fake a second, ambiguous candidate.
@@ -11078,8 +11109,8 @@ and tan-cli#1258 for the full gate measurement.*
   skipped, 1 xfailed, 0 failed across the full suite, matching the branch's
   own reference count on the merge base.
 
-- **`tan build`'s eleven declared-but-refused oracle flags are resolved into
-  three buckets, per the maintainer's decision on #427.** All eleven used to
+- **BREAKING: `tan build`'s eleven declared-but-refused oracle flags are
+  resolved into three buckets, per the maintainer's decision on #427.** All eleven used to
   refuse with the shared `cli.command-deferred` (exit 1), each pointing at
   the same #427 -- fine until #260 closed and the same treatment started
   pointing at a closed issue about unrelated commands; that pointer defect is
@@ -11469,8 +11500,8 @@ and tan-cli#1258 for the full gate measurement.*
 
 ### Removed
 
-- **The `swd_probe` flash backend is removed -- GD32 bridge programming is
-  separating out of `tan` entirely.** `flash_method: swd_probe` was the local
+- **BREAKING: the `swd_probe` flash backend is removed -- GD32 bridge
+  programming is separating out of `tan` entirely.** `flash_method: swd_probe` was the local
   SWD write path for the E1M-X V2N/V2M SoMs' GD32G553 supervisor bridge
   (`plan_swd_probe`, J-Link/OpenOCD/pyOCD arms, its own read-only DPIDR
   preflight, and the `#540`/`#590` write-verification qualification built on
@@ -11526,6 +11557,7 @@ and tan-cli#1258 for the full gate measurement.*
   called in-process (ADR-0028 Task 2), there is no subprocess to time out and
   no separate SDK-Python-interpreter floor to check, so both codes have
   nothing left to name.
+
 ## [0.6.0] — 2026-08-24
 
 *`v0.6.0-rc1` (2026-08-14) was published as a GitHub **pre-release**, so
