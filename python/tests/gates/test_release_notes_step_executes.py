@@ -37,6 +37,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -48,8 +49,14 @@ SCRIPT = REPO_ROOT / "python" / "scripts" / "build_release_notes.py"
 
 #: tan-cli#1015's rationale applies verbatim here: every test in this module
 #: drives a real `bash` subprocess, so skip the whole module (loudly) rather
-#: than fail obscurely on a host with no `bash`.
-pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="no bash to parse with")
+#: than fail obscurely on a host with no `bash`. Windows is skipped too: there
+#: `bash` on PATH can be System32's WSL launcher with no distribution installed,
+#: which exits 1 before running a line, and the step it drives only ever runs
+#: on the release job's `ubuntu-latest` (tan-cli#1276's parity windows shard).
+pytestmark = [
+    pytest.mark.skipif(shutil.which("bash") is None, reason="no bash to parse with"),
+    pytest.mark.skipif(sys.platform == "win32", reason="the release step only runs on ubuntu-latest"),
+]
 
 _SLICE_STEP = "Slice CHANGELOG section for the release notes"
 _PUBLISH_STEP = "publish release"

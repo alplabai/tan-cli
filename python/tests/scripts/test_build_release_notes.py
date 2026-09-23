@@ -252,6 +252,12 @@ def test_a_body_still_over_the_hard_limit_after_the_notice_is_refused():
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="no bash to parse with")
+# On windows-latest, `bash` on PATH can resolve to System32's WSL launcher,
+# which has no distribution installed and exits 1 before running a line (tan-cli#1276's
+# parity windows 0/4 shard). The step only ever runs on the
+# release job's `ubuntu-latest`, and the ubuntu/macos legs still exercise it
+# -- the same restriction `tests/test_e2e_linux_freeze_script.py` makes.
+@pytest.mark.skipif(sys.platform == "win32", reason="the release step only runs on ubuntu-latest")
 @pytest.mark.skipif(
     not _has_gnu_sed(),
     reason="the old step's `sed -i` invocation assumes GNU sed (it only ever ran on "
