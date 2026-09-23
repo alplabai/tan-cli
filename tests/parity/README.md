@@ -207,7 +207,7 @@ rather than a generalisation: of the 31 distinct values `PINNED_SDK_TAG` has
 held across `parity.yml`'s history, the fixture is present at 29. The two
 exceptions, `df312cec` and `f04ea42e`, are July-2026 pins predating the
 fixture upstream — `f04ea42e` was the pin in force when this script was first
-written (tan-cli `ca34090e`, #40). Every pin since carries it, `81a9d515`
+written (tan-cli `ca34090e`, #40). Every pin since carries it, `c81cb5db`
 (the current one), the released `v0.16.0` and alp-sdk `origin/dev` included,
 so an absent upstream fixture is a removal, not a legitimate skip.
 

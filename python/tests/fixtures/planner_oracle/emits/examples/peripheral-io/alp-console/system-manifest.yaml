@@ -99,18 +99,15 @@ memory:
   - m55_hp
 - name: mram_main
   source: som_preset
-  kind: unresolved
-  status: unresolved
+  kind: flash
+  status: ok
+  base: 2147483648
   size_bytes: 5767168
   write_authority: composite
   accessible_from:
   - a32_cluster
   - m55_he
   - m55_hp
-  reason: 'Region ''mram_main'' declares `base: TBD`, a placeholder, not an address,
-    so no extent can be resolved and no class derived. Its size resolves, so only
-    the address is missing. Declare `base:` in this SoM preset''s `memory_map:` to
-    resolve it.'
 
 # boot_order is empty -- add a `boot_order:` list to metadata/e1m_modules/E1M-AEN801.yaml when the
 # bring-up order is finalised.
