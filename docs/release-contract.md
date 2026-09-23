@@ -564,11 +564,13 @@ Tracked in tan-cli#1258, with the full measurement.
 
 Released `tan` `0.6.0` is unaffected; this binds the next tag cut from `dev`.
 Against `v0.16.0`, `tan build --materialise` on an AEN example still exits 0,
-because `--materialise` never runs `west build` and so never reaches the
-zephyr-board emitter either. That narrow scope is `--materialise`'s alone: a
-full (non-`--materialise`) `tan build` on *any* Zephyr board against a
-pre-floor alp-sdk does reach `west build`'s Kconfig configure step and aborts
-there on the `b3775381` row's undefined symbol — see the renumber addendum
+because `--materialise` never runs `west build`, so Kconfig configure never
+sees the undefined symbol. (No `tan build` path invokes the zephyr-board
+emitter at all; only `tan generate --target zephyr-board` does.) A full
+(non-`--materialise`) `tan build` on *any* Zephyr board against an alp-sdk
+that predates `b3775381` (every stable release through `v0.16.0`) does reach
+`west build`'s Kconfig configure step and aborts there on the `b3775381`
+row's undefined symbol — see the renumber addendum
 below. The failure a customer running `tan generate --target zephyr-board`
 would see is the tan-cli#591 class this section exists for; AEN/V2N/V2M hit
 that exit-3 refusal earlier still, before Kconfig is ever reached.

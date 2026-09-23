@@ -10479,7 +10479,9 @@ the full gate measurement.
   pinned Zephyr `v4.4.1` `kconfig.py` + `kconfiglib`. AEN and V2N/V2M boards
   additionally fail earlier, at `tan generate --target zephyr-board` (exit 3,
   `generate.emit-failed`), for the on-module-links/supervisor-links gate
-  above; every other Zephyr board fails later, at `west build` configure.
+  above; every other Zephyr board fails later, at `west build` configure,
+  against any alp-sdk that predates `b3775381` (every stable release through
+  `v0.16.0`).
   See `docs/release-contract.md` and tan-cli#1258.
 - **Every board's generated Zephyr `alp.conf` now carries
   `CONFIG_ALP_SDK_SOM_HW_REV="<hw_rev>"`, unconditionally.** Planner re-sync
@@ -10490,12 +10492,13 @@ the full gate measurement.
   dropped if one is added later. This is what lets the (also upstream) boot
   banner warn when the firmware's build-time `hw_rev` disagrees with the
   live EEPROM manifest at runtime. Additive only against an alp-sdk checkout
-  at or after the floor set by the BREAKING entry above
-  (`81a9d515`/`b3775381`, which defines the `ALP_SDK_SOM_HW_REV` Kconfig
-  symbol) — no existing Kconfig symbol changed meaning there, but it does
+  at or after `b3775381` (alp-sdk#1862, which defines the
+  `ALP_SDK_SOM_HW_REV` Kconfig symbol and is an ancestor of the `81a9d515`
+  floor set by the BREAKING entry above) — no existing Kconfig symbol changed meaning there, but it does
   move emitted bytes: `tan build`'s generated `alp.conf` differs from a
-  pre-#1026 `tan` on every Zephyr slice of every board. Against a pre-floor
-  alp-sdk it is not additive at all: see the BREAKING entry above for the
+  pre-#1026 `tan` on every Zephyr slice of every board. Against an alp-sdk
+  that predates `b3775381` (every stable release through `v0.16.0`) it is not
+  additive at all: see the BREAKING entry above for the
   `west build` Kconfig abort this unconditional assignment causes on every
   Zephyr board.
 
