@@ -581,14 +581,32 @@ of `81a9d515`) when tan-cli#1268 re-synced `tan/planner/`. `81a9d515` is now
 the actual floor the next tag needs, superseding `20fec7a7` below. The
 specific facts named in the table above (`aen/on-module-links.yaml`,
 `v2n/supervisor-links.yaml`) are unchanged, since both predate even
-`20fec7a7`. alp-sdk#2047 already tracks this, titled around cutting a stable
-release containing `81a9d515` (see the issue for its exact current title).
+`20fec7a7`.
+
+**Addendum (2026-09-23, tan-cli#1275).** The planner mirror moved past
+`81a9d515` to alp-sdk `c81cb5db9945c8f448a7bb952d374f874e2f42c0` (69
+first-parent commits later; `81a9d515` is an ancestor of `c81cb5db`) when
+tan-cli#1275 re-synced `tan/planner/` further, along all six pin sites
+(`test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT` and
+`HAND_PORT_PINNED_SDK_COMMIT`, `parity.yml`'s `PINNED_SDK_TAG` and
+`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity` checkout `ref:`,
+and the frozen oracle's `PROVENANCE.txt`). `c81cb5db` is now the actual
+floor the next tag needs, superseding `81a9d515` above. The specific facts
+named in the table above are unchanged again, for the same reason: both
+predate `81a9d515`, hence predate `c81cb5db` too. No alp-sdk tag contains
+`c81cb5db` yet, as of 2026-09-23. alp-sdk#2047 already tracks this,
+retitled since to ask for a stable release containing `c81cb5db` (see the
+issue for its exact current title).
 
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
-tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag contains
-`81a9d515` (superseding the `20fec7a7` floor this decision originally named --
-see the addendum above, tan-cli#1268; alp-sdk#2047, milestone `v0.17.0`). No
-SDK-capability gate is added around `memory[]` or any other row. Done when:
+tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag
+contains `c81cb5db` (superseding the `81a9d515` floor this decision
+originally named, itself superseding the `20fec7a7` floor before that --
+see the addenda above, tan-cli#1268 then tan-cli#1275; alp-sdk#2047,
+milestone `v0.17.0`). No SDK-capability gate is added around `memory[]` or
+any other row. (The renumbering addendum below moves this release's name
+from `0.6.1` to `0.7.0`; the floor itself is unaffected by that rename.)
+Done when:
 
 - every row above reads **YES** and names that tag;
 - the **whole** `release-sdk-parity` job is green on the tag push, in the sense
@@ -602,8 +620,9 @@ SemVer puts a break in the minor, not the patch: the alp-sdk-floor bump this
 section describes breaks a v0.6.0 consumer's `tan build` on *any* Zephyr
 board (Kconfig configure aborts on the undefined `ALP_SDK_SOM_HW_REV`
 symbol — commit `b3775381`/alp-sdk#1862 is an ancestor of the named floor
-commit `81a9d515` — measured against `v0.16.0`, see `CHANGELOG.md`'s floor
-entry), not just AEN/V2N/V2M's `tan generate --target zephyr-board`, so the
+commit `c81cb5db` (and was already an ancestor of the `81a9d515` floor this
+section originally named) — measured against `v0.16.0`, see `CHANGELOG.md`'s
+floor entry), not just AEN/V2N/V2M's `tan generate --target zephyr-board`, so the
 release renumbers from the `0.6.1` named above to `0.7.0`. That is one of
 several `BREAKING`-marked entries in this release, not the only one — see
 `CHANGELOG.md`'s `## [0.7.0]` preamble list of breaks, which names every one

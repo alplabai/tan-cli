@@ -13,11 +13,14 @@ patch (`0.6.1`) — see the matching `BREAKING` entry below for each one's
 exact before/after:
 
 - tan's effective alp-sdk floor rises to the first alp-sdk release
-  containing commit `81a9d515a90403cce30588704e31faf9dc893838`; `tan build`
+  containing commit `c81cb5db9945c8f448a7bb952d374f874e2f42c0` (moved from
+  `81a9d515a90403cce30588704e31faf9dc893838` by the further planner re-sync
+  tan-cli#1275; `81a9d515` is an ancestor of `c81cb5db`); `tan build`
   on *any* Zephyr board against an older alp-sdk fails Kconfig configure
   (`Aborting due to Kconfig warnings`, an undefined `ALP_SDK_SOM_HW_REV`),
   and AEN and V2N/V2M boards additionally fail earlier, at `tan generate
-  --target zephyr-board` (exit 3, `generate.emit-failed`) (tan-cli#1268)
+  --target zephyr-board` (exit 3, `generate.emit-failed`) (tan-cli#1268,
+  tan-cli#1275)
 - a confirmed Flow D (`alif_mram_jlink`) MRAM write now refuses until
   `--atoc-unqueryable` / `flash_args.atoc_unqueryable: true` acknowledges
   that it replaces the whole ATOC (tan-cli#1252)
@@ -54,18 +57,21 @@ exact before/after:
   `init.som-block-unsupported` (#1041)
 
 *DRAFT — replace this paragraph before tagging.* The tag itself is blocked
-on this: no alp-sdk release contains `81a9d515` yet (tan-cli#1258, still
-OPEN; `git tag --contains 81a9d515` is empty), so this note cannot yet name
+on this: no alp-sdk release contains `c81cb5db` yet (tan-cli#1258, still
+OPEN; `git tag --contains c81cb5db` is empty), so this note cannot yet name
 a real floor version. Once one ships, replace this whole paragraph with one
 line: "Requires alp-sdk `vX.Y.Z` or newer" (the `v0.6.0` precedent,
 tan-cli#1258's "Done when" list) — see `docs/release-contract.md`'s own
-tag-day checklist. Measured 2026-09-19, for reference only — re-check both
+tag-day checklist. Measured 2026-09-23, for reference only — re-check both
 facts before the tag, they move independently of this note: the newest
 stable alp-sdk release is `v0.16.0` (`gh release list --repo
 alplabai/alp-sdk`), which carries neither
 `metadata/e1m_modules/aen/on-module-links.yaml` nor
 `metadata/e1m_modules/v2n/supervisor-links.yaml`, both of which the pinned
-planner now requires. See `docs/release-contract.md` and tan-cli#1258 for
+planner now requires. The floor itself moved again since this paragraph was
+first written: `81a9d515` (tan-cli#1258/#1268) was superseded by `c81cb5db`
+when tan-cli#1275 re-synced `tan/planner/` further; `81a9d515` is an
+ancestor of `c81cb5db`. See `docs/release-contract.md` and tan-cli#1258 for
 the full gate measurement.
 
 ### Fixed
@@ -4435,8 +4441,10 @@ the full gate measurement.
   `df312cec` and `f04ea42e`, July-2026 pins predating the fixture upstream --
   `f04ea42e` was in fact the pin in force when this script was first written
   (tan-cli `ca34090e`, `#40`), which is what the deleted branch was for. Every
-  pin since carries it, `81a9d515` (the current one), the released `v0.16.0`
-  and alp-sdk `origin/dev` included, so an absent upstream fixture is a
+  pin since carries it, `81a9d515` (current when this entry was written;
+  superseded as the pin by `c81cb5db`, tan-cli#1275), the released
+  `v0.16.0` and alp-sdk `origin/dev` included, so an absent upstream
+  fixture is a
   removal, not a "not yet applicable" skip. The new FAIL names both exits:
   follow the fixture (re-vendor from its new upstream path, and update tan's
   kconfig field contract in `python/tan/commands/kconfig_cmd.py` if the fields
@@ -8138,6 +8146,48 @@ the full gate measurement.
   sibling but an over-strict false POSITIVE for the reachability check
   specifically.
 
+- **`tan/planner` is re-synced with alp-sdk `c81cb5db`.** All six pin sites move
+  together — `PINNED_SDK_COMMIT` and `HAND_PORT_PINNED_SDK_COMMIT`
+  (`test_planner_relocation_freshness.py`), `PINNED_SDK_TAG` and
+  `PINNED_PLANNER_ORACLE_SDK_REF` (`parity.yml`), the `sdk_parity` checkout
+  `ref:` (`ci.yml`), and the frozen oracle's `PROVENANCE.txt`, re-captured at
+  that ref. `STRICT_LOADERS_PINNED_SDK_COMMIT` deliberately does not move.
+  Four upstream commits are carried:
+
+  - **`tan build` now refuses a `storage[].flash_device:` on a `memory_map`
+    region whose `write_authority` forbids a runtime mount** (alp-sdk#2088). A
+    region must declare `write_authority: customer_runtime` directly, or
+    `write_authority: composite` (the whole-device-alias tag `mram_main`
+    carries on every AEN preset) AND have every one of its contained
+    `memory_map` rows independently verified — each with a resolved
+    `[base, base+size)` extent and its own `write_authority`, together tiling
+    the alias's capacity with no gap and no overlap — before the alias is
+    accepted. Any other authored value (`vendor_image` / `secure_enclave` /
+    `none`) is refused outright, and an ABSENT value is refused too wherever
+    the SoC's on-die MRAM aperture resolves (ADR-0034 clause 4: absent means
+    unresolved, never a permissive default) — a no-op everywhere else
+    (V2N/V2M/NX9101 today, and every non-Alif SoM). Closes a real hazard: an
+    unverified `composite` alias could previously land a customer's
+    `storage[]` mount inside the Secure-Enclave-owned `atoc` band or at
+    MCUboot's own address.
+  - **`mram_main.base` resolves to `0x80000000` on all seven AEN presets**
+    (alp-sdk#2053), closing the last `"TBD"` placeholder split B's classifier
+    was written to shrug at. `mram_main` now classifies as `flash` (the
+    whole-device alias, exact aperture match) instead of `unresolved`, and the
+    `system-manifest.yaml` `memory[]` pane reports its real `base` and
+    `status: ok` instead of an `unresolved`/reason pair.
+  - **`tan build`'s `--emit kconfig` no longer crashes on a non-UTF-8 `west
+    build` diagnostic.** Both `west build` spawns inside `_load_board_symbols`
+    now decode stdout/stderr as UTF-8 with `errors="replace"` (plus
+    `PYTHONIOENCODING=utf-8` for the child), so a Kconfig/CMake failure
+    message containing a non-ASCII path or quote character on a host whose
+    default locale encoding isn't UTF-8 (e.g. a legacy Windows code page)
+    raises the intended `OrchestratorError` instead of an unhandled
+    `UnicodeDecodeError` escaping from inside `subprocess.run` itself.
+  - **The `git rev-parse --short HEAD` build-plan provenance lookup also
+    decodes as UTF-8 explicitly**, closing the same class of hazard for
+    `buildplan.py`'s `_sdk_commit()` (alp-sdk#2197's IMPLICIT-ENCODING drain).
+
 ### Added
 
 - **`tan model check` now answers from Alp Lab's own bench, for a customer who
@@ -10458,12 +10508,14 @@ the full gate measurement.
 ### Changed
 
 - **BREAKING: tan's effective alp-sdk floor rises to the first alp-sdk
-  release that contains commit `81a9d515a90403cce30588704e31faf9dc893838`.**
-  The planner re-sync (tan-cli#1268) now requires
-  `metadata/e1m_modules/aen/on-module-links.yaml` and
+  release that contains commit `c81cb5db9945c8f448a7bb952d374f874e2f42c0`**
+  (moved from `81a9d515a90403cce30588704e31faf9dc893838` by the further
+  planner re-sync tan-cli#1275; `81a9d515` is an ancestor of `c81cb5db`).
+  The planner re-sync (tan-cli#1268, carried forward by tan-cli#1275) now
+  requires `metadata/e1m_modules/aen/on-module-links.yaml` and
   `metadata/e1m_modules/v2n/supervisor-links.yaml`; an alp-sdk checkout that
-  predates `81a9d515` — every stable release through `v0.16.0` — carries
-  neither. `81a9d515` also has commit `b3775381` (alp-sdk#1862, the
+  predates `c81cb5db` — every stable release through `v0.16.0` — carries
+  neither. `c81cb5db` also has commit `b3775381` (alp-sdk#1862, the
   `CONFIG_ALP_SDK_SOM_HW_REV` symbol below) as an ancestor, and
   `python/tan/planner/kconfig.py:777` writes that symbol into every Zephyr
   slice's `alp.conf` unconditionally, not just AEN/V2N's — so the floor is
@@ -10493,7 +10545,7 @@ the full gate measurement.
   banner warn when the firmware's build-time `hw_rev` disagrees with the
   live EEPROM manifest at runtime. Additive only against an alp-sdk checkout
   at or after `b3775381` (alp-sdk#1862, which defines the
-  `ALP_SDK_SOM_HW_REV` Kconfig symbol and is an ancestor of the `81a9d515`
+  `ALP_SDK_SOM_HW_REV` Kconfig symbol and is an ancestor of the `c81cb5db`
   floor set by the BREAKING entry above) — no existing Kconfig symbol changed meaning there, but it does
   move emitted bytes: `tan build`'s generated `alp.conf` differs from a
   pre-#1026 `tan` on every Zephyr slice of every board. Against an alp-sdk
