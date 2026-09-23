@@ -19,8 +19,7 @@ exact before/after:
   on *any* Zephyr board against an older alp-sdk fails Kconfig configure
   (`Aborting due to Kconfig warnings`, an undefined `ALP_SDK_SOM_HW_REV`),
   and AEN and V2N/V2M boards additionally fail earlier, at `tan generate
-  --target zephyr-board` (exit 3, `generate.emit-failed`) (tan-cli#1268,
-  tan-cli#1275)
+  --target zephyr-board` (exit 3, `generate.emit-failed`) (tan-cli#1268)
 - a confirmed Flow D (`alif_mram_jlink`) MRAM write now refuses until
   `--atoc-unqueryable` / `flash_args.atoc_unqueryable: true` acknowledges
   that it replaces the whole ATOC (tan-cli#1252)
@@ -4436,16 +4435,17 @@ the full gate measurement.
 
   The code moves to the docstring rather than the other way round, on a
   measurement rather than the generalisation the first cut of this change
-  shipped: of the 31 distinct values `PINNED_SDK_TAG` has held across
-  `parity.yml`'s history, the fixture is present at 29. The two exceptions are
-  `df312cec` and `f04ea42e`, July-2026 pins predating the fixture upstream --
+  shipped: of the 31 distinct values `PINNED_SDK_TAG` had held across
+  `parity.yml`'s history as of tan-cli#1271, the fixture is present at 29
+  (`c81cb5db`, added by tan-cli#1275, carries it too: 30 of 32 at that
+  pin). The two exceptions are `df312cec` and `f04ea42e`, July-2026 pins
+  predating the fixture upstream --
   `f04ea42e` was in fact the pin in force when this script was first written
   (tan-cli `ca34090e`, `#40`), which is what the deleted branch was for. Every
   pin since carries it, `81a9d515` (current when this entry was written;
   superseded as the pin by `c81cb5db`, tan-cli#1275), the released
-  `v0.16.0` and alp-sdk `origin/dev` included, so an absent upstream
-  fixture is a
-  removal, not a "not yet applicable" skip. The new FAIL names both exits:
+  `v0.16.0` and alp-sdk `origin/dev` included, so an absent upstream fixture
+  is a removal, not a "not yet applicable" skip. The new FAIL names both exits:
   follow the fixture (re-vendor from its new upstream path, and update tan's
   kconfig field contract in `python/tan/commands/kconfig_cmd.py` if the fields
   moved with it), or fix the ref under test.
@@ -4494,8 +4494,9 @@ the full gate measurement.
   sibling claim in `toolchain_lock_parity.py`'s docstring, that
   `metadata/toolchains.json` "already exists at every ref this repo's
   `PINNED_SDK_TAG` has ever pointed at", is narrowed on the same measurement
-  rather than re-affirmed: it is present at 27 of those 31 pins, absent at
-  `df312cec`, `f04ea42e`, `v0.13.0` and `8b216a04`. The two CI-wired gates now
+  rather than re-affirmed: it is present at 27 of those 31 pins (28 of 32
+  once tan-cli#1275 added `c81cb5db`), absent at `df312cec`, `f04ea42e`,
+  `v0.13.0` and `8b216a04`. The two CI-wired gates now
   read, and behave, as siblings; the bootstrap gate keeps its own NOTICE
   branch and is a manual diagnostic, not a CI gate.
 
@@ -4612,8 +4613,9 @@ the full gate measurement.
     where both callers already live inside `tan.planner`. **tan's own docstring
     had claimed this exception for as long as the check existed** while the code
     only skipped a non-integer `base` — the defect was latent, never reached,
-    because `mram_main.base` is still the literal `"TBD"` on both E1M-AEN801 and
-    E1M-AEN803 (alp-sdk#2053 resolved it, hit exactly this collision, and
+    because `mram_main.base` was still the literal `"TBD"` at `81a9d515` on
+    both E1M-AEN801 and E1M-AEN803 (alp-sdk#2053 resolved it, hit exactly
+    this collision, and
     reverted it).
   - **The OSPI0 NOR + HyperRAM population is read from the SoM preset** instead
     of hardcoded (alp-sdk#2062, #2065). `on_module.ospi_memories.ospi0` and
@@ -8146,8 +8148,9 @@ the full gate measurement.
   sibling but an over-strict false POSITIVE for the reachability check
   specifically.
 
-- **`tan/planner` is re-synced with alp-sdk `c81cb5db`.** All six pin sites move
-  together — `PINNED_SDK_COMMIT` and `HAND_PORT_PINNED_SDK_COMMIT`
+- **`tan/planner` is re-synced with alp-sdk `c81cb5db` (tan-cli#1275,
+  superseding #1269).** All six pin sites move together — `PINNED_SDK_COMMIT`
+  and `HAND_PORT_PINNED_SDK_COMMIT`
   (`test_planner_relocation_freshness.py`), `PINNED_SDK_TAG` and
   `PINNED_PLANNER_ORACLE_SDK_REF` (`parity.yml`), the `sdk_parity` checkout
   `ref:` (`ci.yml`), and the frozen oracle's `PROVENANCE.txt`, re-captured at
@@ -10514,13 +10517,17 @@ the full gate measurement.
   The planner re-sync (tan-cli#1268, carried forward by tan-cli#1275) now
   requires `metadata/e1m_modules/aen/on-module-links.yaml` and
   `metadata/e1m_modules/v2n/supervisor-links.yaml`; an alp-sdk checkout that
-  predates `c81cb5db` — every stable release through `v0.16.0` — carries
+  predates them (`dbfa06bd` / `eff266b6`, both ancestors of `20fec7a7`,
+  hence of `c81cb5db`) — every stable release through `v0.16.0` — carries
   neither. `c81cb5db` also has commit `b3775381` (alp-sdk#1862, the
   `CONFIG_ALP_SDK_SOM_HW_REV` symbol below) as an ancestor, and
   `python/tan/planner/kconfig.py:777` writes that symbol into every Zephyr
   slice's `alp.conf` unconditionally, not just AEN/V2N's — so the floor is
   universal, not narrow. **Who must act:** anyone running `tan build` on
-  *any* Zephyr board against a pre-floor alp-sdk. Measured against `v0.16.0`
+  *any* Zephyr board against a pre-floor alp-sdk release (every stable
+  release through `v0.16.0`); the tan-cli#1275 step from `81a9d515` to
+  `c81cb5db` moves the floor by the pinned-planner rule, not by a newly
+  measured failure. Measured against `v0.16.0`
   (which defines no `ALP_SDK_SOM_HW_REV` Kconfig symbol at all —
   `git grep ALP_SDK_SOM_HW_REV v0.16.0` finds nothing): Zephyr's own
   `scripts/kconfig/kconfig.py --handwritten-input-configs`, the exact script

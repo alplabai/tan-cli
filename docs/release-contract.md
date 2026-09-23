@@ -577,11 +577,11 @@ that exit-3 refusal earlier still, before Kconfig is ever reached.
 
 **Addendum (2026-09-15, tan-cli#1268).** The planner mirror moved past
 `20fec7a7` to alp-sdk `81a9d515` (21 commits later; `20fec7a7` is an ancestor
-of `81a9d515`) when tan-cli#1268 re-synced `tan/planner/`. `81a9d515` is now
-the actual floor the next tag needs, superseding `20fec7a7` below. The
-specific facts named in the table above (`aen/on-module-links.yaml`,
-`v2n/supervisor-links.yaml`) are unchanged, since both predate even
-`20fec7a7`.
+of `81a9d515`) when tan-cli#1268 re-synced `tan/planner/`. `81a9d515` became
+the actual floor the next tag needs (itself superseded by the next
+addendum), superseding `20fec7a7` below. The specific facts named in the
+table above (`aen/on-module-links.yaml`, `v2n/supervisor-links.yaml`) are
+unchanged, since both predate even `20fec7a7`.
 
 **Addendum (2026-09-23, tan-cli#1275).** The planner mirror moved past
 `81a9d515` to alp-sdk `c81cb5db9945c8f448a7bb952d374f874e2f42c0` (69
@@ -592,17 +592,18 @@ tan-cli#1275 re-synced `tan/planner/` further, along all six pin sites
 `PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity` checkout `ref:`,
 and the frozen oracle's `PROVENANCE.txt`). `c81cb5db` is now the actual
 floor the next tag needs, superseding `81a9d515` above. The specific facts
-named in the table above are unchanged again, for the same reason: both
-predate `81a9d515`, hence predate `c81cb5db` too. No alp-sdk tag contains
-`c81cb5db` yet, as of 2026-09-23. alp-sdk#2047 already tracks this,
-retitled since to ask for a stable release containing `c81cb5db` (see the
-issue for its exact current title).
+named in the table above (`aen/on-module-links.yaml`,
+`v2n/supervisor-links.yaml`) are unchanged again, for the same reason: both
+predate `20fec7a7`, hence `81a9d515` and `c81cb5db` too. No alp-sdk tag
+contains `c81cb5db` yet, as of 2026-09-23. alp-sdk#2047 already tracks
+this, retitled since to ask for a stable release containing `c81cb5db`
+(see the issue for its exact current title).
 
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
 tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag
-contains `c81cb5db` (superseding the `81a9d515` floor this decision
-originally named, itself superseding the `20fec7a7` floor before that --
-see the addenda above, tan-cli#1268 then tan-cli#1275; alp-sdk#2047,
+contains `c81cb5db` (superseding the `20fec7a7` floor this decision
+originally named, via the interim `81a9d515` floor -- see the addenda
+above, tan-cli#1268 then tan-cli#1275; alp-sdk#2047,
 milestone `v0.17.0`). No SDK-capability gate is added around `memory[]` or
 any other row. (The renumbering addendum below moves this release's name
 from `0.6.1` to `0.7.0`; the floor itself is unaffected by that rename.)
