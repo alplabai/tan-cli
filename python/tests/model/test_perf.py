@@ -689,7 +689,12 @@ def test_alp_sdks_own_synthetic_fixture_point_is_read_by_its_real_fields():
     assert point.latency_runs == 200
     assert point.capture_date == "2026-08-20"
     assert point.capture_operator == "alpCaner"
-    assert point.capture_bench_id == "e1m-aen-evk-01"
+    # alp-sdk#2224/bf94be764 (unrelated to this file's own reader logic --
+    # a LABGRID_PLACE hygiene sweep that widened check_public_private.py's
+    # bare-bench-place-identifier match and scrubbed every hit): the
+    # fixture's `capture.bench_id` moved from a bare farm-slot name to the
+    # module-SKU+serial form this test now pins.
+    assert point.capture_bench_id == "E1M-AEN801/2026W36-0003"
     assert point.capture_notes == "illustrative fixture body -- not a real bench capture"
 
     # This SAME fixture sits ONE segment below `tests/fixtures/model_perf/`

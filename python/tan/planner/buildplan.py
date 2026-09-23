@@ -367,7 +367,8 @@ def _sdk_commit() -> Optional[str]:
         result = subprocess.run(
             ["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
             executable=git_exe,
-            capture_output=True, text=True, env=spawn_env(), check=True)
+            capture_output=True, text=True, encoding="utf-8",
+            env=spawn_env(), check=True)
     except (subprocess.CalledProcessError, OSError):
         return None
     commit = result.stdout.strip()

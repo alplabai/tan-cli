@@ -614,25 +614,17 @@ def test_overlapping_memory_map_regions_raise():
 # alp-sdk#2073: the whole-device-alias exception in _aen_check_map_overlaps
 # ======================================================================
 
-#: The real E1M-AEN801 `mram_main` row, whose `base` ships as the `"TBD"`
-#: sentinel precisely BECAUSE resolving it used to trip the overlap check
-#: (the preset's own comment says so, and says not to resolve it again
-#: until the exception lands). Every test below resolves it on a copy.
-_MRAM_MAIN_TBD = 'name: mram_main, base: "TBD",      size_kib: 5632'
-_MRAM_MAIN_RESOLVED = "name: mram_main, base: 0x80000000, size_kib: 5632"
-
 
 def test_whole_device_alias_does_not_overlap_its_own_partitions():
     """`mram_main` deliberately spans the same 5632 KiB window that
     `mcuboot`/`he_slot0`/`hp_slot0`/`reserved`/`storage`/`atoc` subdivide
-    (alp-sdk#2073) -- once its `base` resolves to a real address it must
-    NOT be reported as overlapping every region inside it.
+    (alp-sdk#2073) -- its `base` resolves to a real address (alp-sdk#2053)
+    and must NOT be reported as overlapping every region inside it.
     `tan.planner.aperture.classify_region()` already carries this exact
     "extent == aperture exactly" exception; this pins that
-    `_aen_check_map_overlaps()` now agrees with it instead of refusing the
+    `_aen_check_map_overlaps()` agrees with it instead of refusing the
     very shape the SoM presets declare on purpose."""
     with _MutatedMetadata() as mm:
-        mm.sub(AEN801_PRESET, _MRAM_MAIN_TBD, _MRAM_MAIN_RESOLVED)
         files = _emit("E1M-AEN801", "m55_hp", mm.root)
     assert "alp_e1m_aen801_m55_hp/board.yml" in files
 
@@ -640,10 +632,9 @@ def test_whole_device_alias_does_not_overlap_its_own_partitions():
 def test_whole_device_alias_exception_does_not_swallow_a_real_overlap():
     """The whole-device-alias exception must be narrow: a genuine overlap
     between two ordinary partitions is still refused even while
-    `mram_main` (also spanning the whole window) sits in the same
-    `memory_map:`."""
+    `mram_main` (also spanning the whole window, resolved since
+    alp-sdk#2053) sits in the same `memory_map:`."""
     with _MutatedMetadata() as mm:
-        mm.sub(AEN801_PRESET, _MRAM_MAIN_TBD, _MRAM_MAIN_RESOLVED)
         mm.sub(AEN801_PRESET, "name: hp_slot0,  base: 0x802b0000",
                "name: hp_slot0,  base: 0x802a0000")
         with pytest.raises(_emit_error()) as excinfo:
@@ -660,7 +651,6 @@ def test_two_whole_device_aliases_raise_instead_of_going_uncompared():
     way, but a duplicate whole-device alias is still a bad input and must
     be refused, not passed through quietly (review of alp-sdk#2073)."""
     with _MutatedMetadata() as mm:
-        mm.sub(AEN801_PRESET, _MRAM_MAIN_TBD, _MRAM_MAIN_RESOLVED)
         mm.sub(
             AEN801_PRESET,
             "- { name: mram_main, base: 0x80000000, size_kib: 5632, "
@@ -692,7 +682,8 @@ def test_same_base_smaller_size_is_not_a_whole_device_alias():
     too; this test is what still fails on the loosening alone (review of
     alp-sdk#2073)."""
     with _MutatedMetadata() as mm:
-        mm.sub(AEN801_PRESET, _MRAM_MAIN_TBD,
+        mm.sub(AEN801_PRESET,
+               "name: mram_main, base: 0x80000000, size_kib: 5632",
                "name: mram_main, base: 0x80000000, size_kib: 5631")
         with pytest.raises(_emit_error()) as excinfo:
             _emit("E1M-AEN801", "m55_hp", mm.root)
