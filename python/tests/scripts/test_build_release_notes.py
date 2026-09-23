@@ -281,11 +281,24 @@ def test_a_naive_concatenation_is_what_broke_0_7_0(tmp_path):
         capture_output=True,
     )
     if probe.returncode != 0:
-        pytest.skip(
-            f"{_OLD_RELEASE_YML_COMMIT} is unreachable from this checkout -- "
-            f"likely a shallow clone (e.g. CI's `fetch-depth: 1` python-tests "
-            f"shard), which has no history before its own fetched tip to `git "
-            f"show` a pre-#1276 commit out of"
+        # Skip ONLY on a genuinely shallow checkout. On a full-history
+        # checkout (ci.yml's `fetch-depth: 0` `python` job) an unreachable pin
+        # means the pin itself is wrong, and a skip there would pass silently
+        # -- the tan-cli#970 shape.
+        shallow = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "--is-shallow-repository"],
+            capture_output=True,
+            text=True,
+        )
+        if shallow.stdout.strip() == "true":
+            pytest.skip(
+                f"{_OLD_RELEASE_YML_COMMIT} is unreachable from this shallow "
+                f"checkout (e.g. a `fetch-depth: 1` python-tests-shard leg), "
+                f"which has no history to `git show` a pre-#1276 commit out of"
+            )
+        pytest.fail(
+            f"{_OLD_RELEASE_YML_COMMIT} is unreachable from a full-history "
+            f"checkout -- the pinned pre-#1276 commit is wrong or was rewritten"
         )
 
     workflow_text = subprocess.run(
