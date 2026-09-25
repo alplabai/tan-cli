@@ -166,13 +166,19 @@ ACQ=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retr
 # SCOPED TO THE CODENAME so no other call site loses the check: the others run
 # on `ubuntu-latest` or inside `ubuntu:24.04`, and keep it in full.
 #
-# WHEN THIS STOPS WORKING: bullseye is still served from `deb.debian.org`
-# (measured 2026-09-17: `dists/bullseye/InRelease` -> HTTP 200). Once it moves
-# to `archive.debian.org`, `deb.debian.org` stops serving it and this flag will
-# NOT help -- a 404 is not an expiry. THAT is the point to revisit repointing
-# sources.list at `archive.debian.org`, tracked on the still-open #1257.
-# Deliberately not implemented now: it would be untested speculation against a
-# URL that currently answers 200.
+# WHEN THIS STOPS WORKING: this flag only ever waives an EXPIRY. MEASURED
+# 2026-09-25: deb.debian.org still serves all three bullseye suites (200 on
+# bullseye/bullseye-security/bullseye-updates) -- but archive.debian.org NOW
+# ALSO answers 200 for bullseye and bullseye-updates (it did not on
+# 2026-09-17, when this note used to say "untested speculation against a URL
+# that currently answers 200"; that is no longer true for those two suites).
+# archive.debian.org/debian-security/dists/bullseye-security/InRelease is
+# still 404. If deb.debian.org ever stops serving bullseye entirely, THIS flag
+# will not help -- a 404 is not an expiry -- but the separate, REACTIVE
+# archive.debian.org fallback further down this file now handles exactly that
+# case: it detects the 404-shaped failure and repoints sources itself, rather
+# than needing this comment revisited again. See that section for what it
+# does and does not cover (bullseye-security on the archive, specifically).
 #
 # THE TEST SEAM IS THE FILE PATH, NOT THE CODENAME, deliberately. An
 # `APT_OS_CODENAME` override would also be the one way a NON-bullseye host
@@ -217,6 +223,143 @@ case "$APT_OS_CODENAME" in
     ;;
 esac
 
+# --------------------------------------------------------------------------
+# BULLSEYE ONLY, REACTIVE: fall back to archive.debian.org once deb.debian.org
+# has actually stopped serving a suite, rather than merely being expired.
+#
+# tan-cli#1257 option 2. Distinct from the Check-Valid-Until waiver just
+# above, which only ever waives an EXPIRY -- a 404 is not an expiry, and no
+# `Acquire::*` flag makes apt tolerate a repository that plainly does not
+# answer. This section does nothing on every run where deb.debian.org still
+# serves bullseye (every run as of this writing) and engages only once an
+# update attempt reports the "gone" signature for real.
+#
+# MEASURED 2026-09-25 (supersedes the WHEN THIS STOPS WORKING note above):
+#
+#   http://deb.debian.org/debian/dists/bullseye/InRelease                       200
+#   http://deb.debian.org/debian-security/dists/bullseye-security/InRelease     200
+#   http://deb.debian.org/debian/dists/bullseye-updates/InRelease               200
+#   http://archive.debian.org/debian/dists/bullseye/InRelease                   200 (new: archive now carries bullseye main)
+#   http://archive.debian.org/debian/dists/bullseye-updates/InRelease           200
+#   http://archive.debian.org/debian-security/dists/bullseye-security/InRelease 404
+#
+# So the archive now carries bullseye's MAIN and UPDATES suites, but not yet
+# SECURITY. Both of those facts are decisions this section encodes, not just
+# measurements: bullseye-updates does NOT need dropping on the archive path
+# (it's there), and bullseye-security's continued absence is handled by
+# failing loudly, not by silently dropping that one suite -- see below.
+#
+# THE TRIGGER, precisely: an update attempt's own output naming
+# `deb.debian.org` AND showing either apt's own "does not have a Release
+# file" -- what a 404 on the Release/InRelease fetch actually renders as,
+# confirmed against a live `apt-get update` in `python:3.12-slim-bullseye`
+# with deb.debian.org's http proxied to a 404-only stub -- or a literal
+# "404  Not Found" line. Deliberately NOT rc alone: apt reports both this and
+# a plain timeout/transient failure as rc=100, and retrying a 404 forever is
+# exactly the anonymous-exhaustion failure mode this wrapper exists to avoid
+# attributing correctly. An expiry ("is expired") matches neither string, so
+# it keeps going through the Check-Valid-Until waiver above untouched, and a
+# real transient/DNS/timeout failure -- which names neither string either --
+# keeps today's plain retry.
+#
+# THE REWRITE IS A BLANKET ONE, once triggered: every `deb.debian.org/debian`
+# and `deb.debian.org/debian-security` occurrence in every sources file the
+# image uses is repointed at its `archive.debian.org` equivalent, not just
+# whichever suite's fetch happened to be the one reported. Same shape of call
+# as the Check-Valid-Until override above (global, not per-source) and for the
+# same underlying reason: `python:3.12-slim-bullseye` carries exactly one flat
+# `/etc/apt/sources.list` (measured -- `sources.list.d/` is empty, no deb822
+# `.sources` file), listing bullseye / bullseye-security / bullseye-updates as
+# three `deb` lines under those same two hosts, and Debian's own history is to
+# retire an entire EOL release from deb.debian.org at once, not one suite at a
+# time.
+#
+# BULLSEYE-SECURITY, THE DECISION: fail loudly rather than silently drop it.
+# This wrapper does not special-case the security line out of the rewrite
+# (that would be "drop the suite with a warning" -- the option this declines)
+# or invent a third mirror to try. Instead, after the rewrite, if a retry's
+# own output shows the SAME class of "gone" signature but now naming
+# `archive.debian.org` instead of `deb.debian.org`, the wrapper refuses to
+# keep retrying a deterministically-dead mirror and exits immediately with a
+# named, unambiguous error. A CI failure that says outright "the security
+# index is unavailable on both hosts" is the loud failure the guiding
+# principle (never silently lose the security index) asks for; quietly
+# continuing with main and updates while security silently stopped being
+# checked is exactly the outcome this refuses.
+#
+# THE REWRITE TARGET IS AN OVERRIDABLE ROOT, `APT_SOURCES_ROOT` (default
+# `/etc/apt`), not a caller knob -- no call site sets it, same footing as
+# `APT_OS_RELEASE_FILE` above. It lets tests point the rewrite at a throwaway
+# tree instead of mutating a real `/etc/apt`, and -- like `APT_OS_RELEASE_FILE`
+# -- it is a file-path seam, not a behaviour flag: it changes WHERE the
+# rewrite looks, never WHETHER it engages, so it gives a non-bullseye host no
+# way to acquire the archive path from an ambient variable.
+#
+# IDEMPOTENT BY CONSTRUCTION: the rewrite is a literal substring replace of
+# `deb.debian.org` for `archive.debian.org`. `archive.debian.org` does not
+# itself contain the substring `deb.debian.org`, so once every occurrence has
+# already been rewritten -- whether by an earlier attempt in this same
+# invocation, or by a PRIOR invocation of this wrapper in the same container
+# (a step typically calls this script twice: `update` then `install`, and the
+# rewrite lands on the real, persistent `/etc/apt` those share) -- there is
+# nothing left for a second pass to match. A later `install` invocation reads
+# the same already-rewritten file and never needs to detect or rewrite
+# anything itself.
+: "${APT_SOURCES_ROOT:=/etc/apt}"
+
+_bullseye_output_names_a_gone_release() {
+  # $1: the host substring to look for ("deb.debian.org" pre-rewrite, or
+  # "archive.debian.org" to notice the rewrite itself didn't help). $2: the
+  # captured apt-get output for one attempt.
+  case "$2" in
+    *"$1"*)
+      case "$2" in
+        *"does not have a Release file"*) return 0 ;;
+        *"404  Not Found"*) return 0 ;;
+        *"404 Not Found"*) return 0 ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+_bullseye_rewrite_sources_to_archive() {
+  # Idempotent (see above). Reports what it actually touched via the global
+  # `_bullseye_rewritten_files` array, for the announcement in the caller.
+  _bullseye_rewritten_files=()
+  local candidates=() f tmp
+  [ -f "${APT_SOURCES_ROOT}/sources.list" ] && candidates+=("${APT_SOURCES_ROOT}/sources.list")
+  if [ -d "${APT_SOURCES_ROOT}/sources.list.d" ]; then
+    for f in "${APT_SOURCES_ROOT}/sources.list.d"/*.list "${APT_SOURCES_ROOT}/sources.list.d"/*.sources; do
+      [ -f "$f" ] && candidates+=("$f")
+    done
+  fi
+  for f in "${candidates[@]}"; do
+    if grep -q 'deb\.debian\.org' "$f" 2>/dev/null; then
+      # `-security` first: once those lines read
+      # `archive.debian.org/debian-security` they no longer match the plain
+      # `/debian` pattern that runs second, so ordering alone keeps the two
+      # substitutions from colliding -- no negative-lookahead regex needed.
+      #
+      # A tmp-file-and-copy, deliberately NOT `sed -i`: GNU sed accepts
+      # `-i -e '...'` with the suffix argument omitted; BSD/macOS sed (this
+      # repo's own test host) requires `-i` to take one, so the identical
+      # invocation there reads the following `-e` as the backup suffix and
+      # mangles the script instead of editing in place. `sed` only needs to
+      # READ `$f` here, so the transform itself needs no root; `$SUDO` is
+      # reserved for the one step that actually does, the write-back.
+      tmp="$(mktemp)"
+      sed \
+        -e 's|deb\.debian\.org/debian-security|archive.debian.org/debian-security|g' \
+        -e 's|deb\.debian\.org/debian|archive.debian.org/debian|g' \
+        "$f" > "$tmp"
+      $SUDO cp "$tmp" "$f"
+      rm -f "$tmp"
+      _bullseye_rewritten_files+=("$f")
+    fi
+  done
+}
+
 rc=0
 for attempt in $(seq 1 "$APT_ATTEMPTS"); do
   remaining=$(( DEADLINE - $(_now) ))
@@ -255,11 +398,55 @@ for attempt in $(seq 1 "$APT_ATTEMPTS"); do
   slice="$APT_ATTEMPT_TIMEOUT"
   [ "$slice" -gt "$remaining" ] && slice="$remaining"
 
-  set +e
-  $SUDO timeout --signal=TERM --kill-after=30 "$slice" apt-get "${ACQ[@]}" "$@"
-  rc=$?
-  set -e
+  # On bullseye, apt-get's own output has to be inspected for the archive
+  # fallback's trigger (see above), so it is captured instead of being left to
+  # inherit this script's stdout/stderr directly, then printed verbatim
+  # afterward so nothing is lost from the CI log -- just batched instead of
+  # streamed live. Every other codename keeps the original direct passthrough,
+  # unchanged.
+  attempt_output=""
+  if [ "$APT_OS_CODENAME" = "bullseye" ]; then
+    set +e
+    attempt_output=$($SUDO timeout --signal=TERM --kill-after=30 "$slice" apt-get "${ACQ[@]}" "$@" 2>&1)
+    rc=$?
+    set -e
+    printf '%s\n' "$attempt_output"
+  else
+    set +e
+    $SUDO timeout --signal=TERM --kill-after=30 "$slice" apt-get "${ACQ[@]}" "$@"
+    rc=$?
+    set -e
+  fi
   [ "$rc" -eq 0 ] && exit 0
+
+  if [ "$APT_OS_CODENAME" = "bullseye" ] && [ "$rc" -eq 100 ]; then
+    if _bullseye_output_names_a_gone_release "archive.debian.org" "$attempt_output"; then
+      # Already rewritten (this attempt's or an earlier invocation's) and
+      # archive.debian.org ALSO has no Release file for what apt just asked
+      # for -- deterministic, not transient. Retrying changes nothing here;
+      # continuing to loop would either burn the rest of the step budget on a
+      # mirror that is not going to answer, or worse, present as ordinary
+      # retry exhaustion instead of naming the real cause. Fail loudly and
+      # immediately instead: never silently drop a suite, security least of
+      # all.
+      echo "apt-bounded: FATAL tan-cli#1257 -- archive.debian.org has no Release file for this suite either, after the deb.debian.org -> archive.debian.org fallback rewrite. Not retrying a dead mirror. bullseye-security was still 404 on archive.debian.org as of 2026-09-25; if that is what just failed, this is the expected, loud outcome until Debian archives it too -- the fix is upstream (or an explicit, reviewed change to this script), not another retry. Last apt-get output:
+${attempt_output}" >&2
+      exit "$rc"
+    fi
+    if _bullseye_output_names_a_gone_release "deb.debian.org" "$attempt_output"; then
+      _bullseye_rewrite_sources_to_archive
+      if [ "${#_bullseye_rewritten_files[@]}" -gt 0 ]; then
+        _msg="tan-cli#1257: deb.debian.org no longer serves this bullseye suite -- repointed ${_bullseye_rewritten_files[*]} from deb.debian.org to archive.debian.org (both the debian and debian-security paths) and retrying. bullseye-updates stays on archive too (measured 2026-09-25: archive.debian.org/debian/dists/bullseye-updates/InRelease -> 200). If bullseye-security is what actually 404'd, archive.debian.org does not carry it yet (measured 2026-09-25: 404) and the next attempt will fail loudly rather than silently drop it."
+        echo "apt-bounded: NOTICE ${_msg}" >&2
+        echo "::warning::apt-bounded ${_msg}"
+      fi
+      # Fall through to the retry classification below with sources now
+      # rewritten -- rc is already 100, already in the retryable set, so the
+      # loop's existing accounting (attempt count, dpkg recovery, shared
+      # deadline) needs no special case to pick this up on the next pass.
+    fi
+  fi
+
   if [ "$rc" -ne 124 ] && [ "$rc" -ne 100 ]; then
     echo "apt-bounded: apt-get exited $rc (not a timeout/transient) -- not retrying" >&2
     exit "$rc"
