@@ -560,3 +560,90 @@ def test_apt_own_output_reaches_stdout_on_both_success_and_failure(tmp_path: Pat
     )
     assert proc_ok.returncode == 0
     assert "Fetched 1 kB" in proc_ok.stdout, f"stdout:\n{proc_ok.stdout}"
+
+
+@needs_the_wrappers_own_tools
+def test_an_empty_sources_root_does_not_crash_on_bash_3_2(tmp_path: Path) -> None:
+    """Regression for a follow-up review finding: `local candidates=()`
+    followed by a bare `for f in "${candidates[@]}"` raises a raw
+    `unbound variable` under `set -u` on bash < 4.4 (this repo's own macOS
+    test host ships 3.2.57) whenever the array stays empty -- no
+    `sources.list`, no `sources.list.d` entry at all. Reproduced directly on
+    this host before the fix (`bash: candidates[@]: unbound variable`, rc
+    127); must now fall through to the L2 "nothing was rewritten" NOTICE
+    instead of crashing the wrapper.
+    """
+    empty_root = tmp_path / "apt-root-empty"
+    empty_root.mkdir()
+    # Unconditional, unlike `_ALL_THREE_GONE_ON_DEB`: this fixture has no
+    # `FAKE_APT_SOURCES_FILE` for a gate to read at all (there is nothing
+    # under `empty_root` to grep), so the shim just always reports gone --
+    # the point here is the WRAPPER's own search over an empty candidate
+    # list, not apt's output shape.
+    body = """
+cat <<'EOF'
+Err:4 http://deb.debian.org/debian bullseye Release
+  404  Not Found [IP: 127.0.0.1 8081]
+E: The repository 'http://deb.debian.org/debian bullseye Release' does not have a Release file.
+EOF
+exit 100
+"""
+    bindir = _write_apt_shim(tmp_path, body)
+    osr = _bullseye_os_release(tmp_path)
+    env = _archive_env(tmp_path, step="empty-root-step", sources_root=empty_root, os_release=osr, bindir=bindir)
+    env["APT_ATTEMPTS"] = "2"
+
+    proc = subprocess.run(
+        ["bash", str(_WRAPPER), "update", "-qq"],
+        env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert "unbound variable" not in proc.stderr, (
+        f"the bash 3.2 empty-array crash is back. stderr:\n{proc.stderr}"
+    )
+    assert proc.returncode == 100, (
+        f"an empty sources root should exhaust normally (nothing to rewrite), "
+        f"not crash. stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "nothing was rewritten" in proc.stderr, f"stderr:\n{proc.stderr}"
+
+
+@needs_the_wrappers_own_tools
+def test_a_trailing_slash_in_sources_list_still_matches_apts_unslashed_uri(tmp_path: Path) -> None:
+    """apt's own error line never carries a trailing slash (measured), but a
+    sources-file field authored with one names the same repository. The
+    comparison must tolerate exactly that one-character difference, and the
+    rewritten field must keep its OWN trailing slash rather than adopt
+    whatever the (unslashed) apt-reported URI happened to look like.
+    """
+    root = tmp_path / "apt-root-trailing-slash"
+    root.mkdir()
+    (root / "sources.list").write_text(
+        "deb http://deb.debian.org/debian/ bullseye main\n", encoding="utf-8"
+    )
+    body = """
+src="$FAKE_APT_SOURCES_FILE"
+if grep -qF -- 'deb.debian.org/debian' "$src" 2>/dev/null; then
+  cat <<'EOF'
+Err:4 http://deb.debian.org/debian bullseye Release
+  404  Not Found [IP: 127.0.0.1 8081]
+E: The repository 'http://deb.debian.org/debian bullseye Release' does not have a Release file.
+EOF
+  exit 100
+fi
+echo "Fetched ok"
+exit 0
+"""
+    bindir = _write_apt_shim(tmp_path, body)
+    osr = _bullseye_os_release(tmp_path)
+    env = _archive_env(tmp_path, step="trailing-slash-step", sources_root=root, os_release=osr, bindir=bindir)
+
+    proc = subprocess.run(
+        ["bash", str(_WRAPPER), "update", "-qq"],
+        env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    rewritten = (root / "sources.list").read_text(encoding="utf-8")
+    assert rewritten == "deb http://archive.debian.org/debian/ bullseye main\n", (
+        f"expected the host swapped and the field's OWN trailing slash kept. "
+        f"got:\n{rewritten!r}"
+    )

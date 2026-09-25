@@ -315,6 +315,23 @@ esac
 # something this wrapper measured happening again), all three move in one
 # attempt rather than needing one attempt per suite.
 #
+# ONE trailing "/" IS tolerated on either side of the comparison (tan-cli#1257
+# review): a sources-file field authored as `.../debian/` and apt's own
+# un-slashed `.../debian` in its error line name the same repository, and the
+# reverse is just as possible. No OTHER normalisation is attempted --
+# scheme/host case, a doubled slash, and so on all still require a byte-exact
+# match, deliberately: this fix is for a repository that moved host, not a
+# general fuzzy-URI matcher. The field being rewritten keeps ITS OWN trailing
+# slash (or lack of one) in the result; only the host changes.
+#
+# A deb822 `URIs:` value FOLDED onto an indented continuation line (RFC 5322
+# folding, which deb822 permits) is NOT joined back before matching -- an
+# accepted, measured gap, not an oversight: `python:3.12-slim-bullseye`'s own
+# sources are a flat one-line `sources.list` (measured, see below), so no real
+# call site is affected today. A folded file that this fallback cannot
+# resolve a URI in simply matches nothing, and the L2 "nothing was rewritten"
+# NOTICE further down fires rather than a silent, incorrect edit.
+#
 # BULLSEYE-SECURITY, THE DECISION: fail loudly rather than silently drop it.
 # After a rewrite, if a retry's own "does not have a Release file" line names
 # a URI whose host is ALREADY `archive.debian.org`, the wrapper refuses to
@@ -374,8 +391,14 @@ _bullseye_rewrite_one_source() {
   # actually changed to the global `_bullseye_rewritten_files` array; the
   # caller resets that array once before calling this per gone URI, not here,
   # so a multi-URI event reports every touched file together.
-  local target="$1" repl f tmp line line_no_cr changed_line
+  local target="$1" repl f tmp line line_no_cr changed_line field target_stripped repl_stripped
   repl="${target/deb.debian.org/archive.debian.org}"
+  # tan-cli#1257 review: strip a single trailing "/" for the COMPARISON only
+  # (see THE REWRITE IS PER-SOURCE above) -- `repl` above still carries
+  # whatever slash `target` had, so `repl_stripped` needs its own strip, not
+  # a copy of `target_stripped`'s.
+  target_stripped="${target%/}"
+  repl_stripped="${repl%/}"
   local candidates=()
   [ -f "${APT_SOURCES_ROOT}/sources.list" ] && candidates+=("${APT_SOURCES_ROOT}/sources.list")
   if [ -d "${APT_SOURCES_ROOT}/sources.list.d" ]; then
@@ -383,12 +406,23 @@ _bullseye_rewrite_one_source() {
       [ -f "$f" ] && candidates+=("$f")
     done
   fi
-  for f in "${candidates[@]}"; do
+  # `${candidates[@]+"${candidates[@]}"}`, NOT a bare `"${candidates[@]}"`:
+  # bash <4.4 (this repo's own macOS test host ships 3.2.57, and CI's Ubuntu
+  # runners have shipped far newer bash for years, but this script does not
+  # get to assume that) raises `unbound variable` under `set -u` when
+  # expanding an EMPTY array's `[@]` VALUES -- measured. `${#candidates[@]}`
+  # and `${!candidates[@]}` (length/keys) are NOT affected, only this form.
+  # An empty `candidates` here (no `sources.list`, no `sources.list.d` entry)
+  # must fall through to the loop simply never running -- the L2 "nothing was
+  # rewritten" NOTICE downstream, not a raw shell crash.
+  for f in ${candidates[@]+"${candidates[@]}"}; do
     # Cheap pre-filter: skip a file that does not contain the target URI as a
     # substring anywhere at all, so a file wholly unrelated to this URI is
     # never opened, CRLF-normalised, or counted as touched. `-F`: the target
     # is a literal URI (its `.` and `/` must match literally), not a pattern.
-    grep -qF -- "$target" "$f" 2>/dev/null || continue
+    # The STRIPPED target, so a file spelling the URI with a trailing slash
+    # this fallback would otherwise treat as equal is not skipped here either.
+    grep -qF -- "$target_stripped" "$f" 2>/dev/null || continue
 
     tmp="$(mktemp)" || {
       echo "apt-bounded: FATAL tan-cli#1257 -- mktemp failed while preparing to rewrite $f from $target to $repl" >&2
@@ -421,23 +455,39 @@ _bullseye_rewrite_one_source() {
         # `[opts]` token puts it -- not assumed to be a fixed position.
         for i in "${!fields[@]}"; do
           [ "$i" -eq 0 ] && continue
-          if [ "${fields[$i]}" = "$target" ]; then
-            fields[i]="$repl"
+          field="${fields[$i]}"
+          if [ "${field%/}" = "$target_stripped" ]; then
+            # Keep THIS FIELD's own trailing slash (or lack of one); only the
+            # host changes. `target`'s own slash-ness plays no part here.
+            case "$field" in
+              */) fields[i]="${repl_stripped}/" ;;
+              *) fields[i]="$repl_stripped" ;;
+            esac
             rewrote_this_line=1
           fi
         done
       elif [ "${fields[0]:-}" = "URIs:" ]; then
         # deb822 syntax: `URIs: uri1 uri2 ...` -- rewrite only the field(s)
-        # that match; a stanza naming more than one URI keeps the others.
+        # that match; a stanza naming more than one URI keeps the others. A
+        # value FOLDED onto its own indented continuation line is not joined
+        # back before this match runs -- see the accepted-gap note above.
         for i in "${!fields[@]}"; do
           [ "$i" -eq 0 ] && continue
-          if [ "${fields[$i]}" = "$target" ]; then
-            fields[i]="$repl"
+          field="${fields[$i]}"
+          if [ "${field%/}" = "$target_stripped" ]; then
+            case "$field" in
+              */) fields[i]="${repl_stripped}/" ;;
+              *) fields[i]="$repl_stripped" ;;
+            esac
             rewrote_this_line=1
           fi
         done
       fi
       if [ "$rewrote_this_line" -eq 1 ]; then
+        # Rejoined with single spaces, cosmetic only: any original tabs or
+        # multi-space alignment on a REWRITTEN line are lost, but apt parses
+        # `sources.list`/deb822 fields on plain whitespace and treats every
+        # run of it identically, so this changes nothing apt-visible.
         printf '%s\n' "${fields[*]}" >> "$tmp"
         changed_line=1
       else
