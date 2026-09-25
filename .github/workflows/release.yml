@@ -831,103 +831,32 @@ jobs:
         shell: bash
         run: python3 python/scripts/assemble_changelog.py --require-empty
 
+      # tan-cli#1276: this used to build release_notes.md as two unconditional
+      # parts -- the CHANGELOG slice, then the `## Release assets` block
+      # appended after it -- and softprops/action-gh-release silently
+      # truncates any body over 125000 UTF-16 code units (`truncateReleaseNotes`,
+      # v3.0.3 `src/github.ts:254-256`) before publishing. Once the slice alone
+      # passed that limit (0.7.0's section measures 770642 characters), the
+      # assets block -- the archive names, the measured glibc floor, the
+      # attestation line -- was silently cut away and the job still went
+      # green. `build_release_notes.py` fixes this by deciding, BEFORE
+      # assembly, whether the slice fits alongside the block; if not, the
+      # slice is replaced with a short pointer to the full entry on GitHub,
+      # and the block is always present in the result. It also refuses
+      # (non-zero exit) rather than ever relying on the action's own
+      # truncation to make an oversized body fit. See that script's own
+      # docstring, and `python/tests/scripts/test_build_release_notes.py`.
       - name: Slice CHANGELOG section for the release notes
         shell: bash
         run: |
-          # Measured by the build leg, inside the image that produced the
-          # binary, over the appended payload -- see that step. It cannot be
-          # measured HERE: `readelf -V` on a onefile reads only the vendored
-          # bootloader (a container-invariant GLIBC_2.14), and the payload is
-          # inside the archive where the outer ELF's .gnu.version_r cannot see
-          # it. `|| true` because this step runs under `bash -eo pipefail`,
-          # where a failing substitution would abort before the guard below
-          # could ever print its reason.
-          GLIBC_FLOOR="$(cat meta/glibc-floor.txt 2>/dev/null || true)"
-          if [ -z "$GLIBC_FLOOR" ]; then
-            echo "::error::meta/glibc-floor.txt is missing or empty -- the Linux build leg did not report a measured floor, and the notes must not state one nothing measured."
-            exit 1
-          fi
-          echo "measured glibc floor of the published Linux asset: ${GLIBC_FLOOR}"
-
-          # The tag is vX.Y.Z; the CHANGELOG header is `## [X.Y.Z]` (no v-prefix,
-          # em-dash date). Extract that one section as the GitHub Release body.
+          # The tag is vX.Y.Z; the CHANGELOG header is `## [X.Y.Z]` (no
+          # v-prefix, em-dash date).
           VERSION="${GITHUB_REF_NAME#v}"
-          python3 - "$VERSION" <<'PY' > release_notes.md
-          import sys, re
-          version = sys.argv[1]
-          out, capturing, found = [], False, False
-          for line in open("CHANGELOG.md", encoding="utf-8"):
-              if re.match(rf"^## \[{re.escape(version)}\]", line):
-                  capturing = found = True
-                  continue
-              if capturing and line.startswith("## ["):
-                  break
-              if capturing:
-                  out.append(line)
-          body = "".join(out).strip()
-          # #212: this used to `print(body if body else f"See CHANGELOG.md for
-          # {version}.")` and exit 0, so a tag whose section was never written
-          # published a release whose entire body was that one sentence -- and
-          # nothing anywhere said so. The failure mode is not hypothetical: the
-          # version bump renames `## [Unreleased]` to `## [X.Y.Z]`, and a bump
-          # that edits the version files but forgets the CHANGELOG header leaves
-          # exactly this state. Checked against dev before this change: a v0.4.1
-          # tag would have found no section and shipped the stub.
-          #
-          # A release with no notes is not a degraded release, it is a broken
-          # one -- the notes are the only human-readable record of what changed,
-          # and the tag is immutable once pushed. Fail before publishing, not
-          # after. `shell: bash` runs with `-eo pipefail`, so a non-zero exit
-          # here stops the job.
-          if not found:
-              sys.exit(
-                  f"::error::CHANGELOG.md has no `## [{version}]` section, so this "
-                  f"release would publish with an empty body. The version bump "
-                  f"renames `## [Unreleased]` to `## [{version}] -- <date>`; that "
-                  f"edit is missing. Fix CHANGELOG.md on the release branch, then "
-                  f"re-tag."
-              )
-          if not body:
-              sys.exit(
-                  f"::error::CHANGELOG.md's `## [{version}]` section is empty. A "
-                  f"release body has to say what changed; write the section, then "
-                  f"re-tag."
-              )
-          print(body)
-          PY
-          cat >> release_notes.md <<'NOTES'
-
-          ## Release assets
-
-          Four archives, each a PyInstaller --onedir freeze of the Python
-          `tan` (tan-cli#349 -- was a single-file --onefile freeze; --onedir
-          fixes a 13-19s macOS startup regression caused by --onefile
-          re-extracting its runtime on every invocation). Unpack the archive
-          and run the `tan`/`tan.exe` inside; `install.sh`/`install.ps1` do
-          this for you.
-
-          - `tan-x86_64-pc-windows-msvc.zip` -- Windows x64
-          - `tan-x86_64-apple-darwin.tar.gz` / `tan-aarch64-apple-darwin.tar.gz` -- macOS
-          - `tan-x86_64-unknown-linux-gnu.tar.gz` -- Linux x64, frozen on Debian 11.
-            It requires **__GLIBC_FLOOR__** or newer -- measured from the
-            binary's own bundled payload at build time, not assumed from the
-            build image. Debian 11+ / Ubuntu 20.04+ / RHEL 9+ are comfortably
-            above it.
-
-          There is no arm64 Windows and no arm64 Linux asset in this release,
-          and no `-musl` asset. A frozen binary has to be built on the
-          architecture it runs on, and this release builds on four runners; if
-          you need an arm64 Linux or arm64 Windows `tan`, install from source
-          (`pip install ./python`) and say so on the issue tracker.
-
-          - Every archive + `checksums.txt` carries a GitHub build-provenance
-            attestation. Verify with:
-            `gh attestation verify <downloaded-file> --repo alplabai/tan-cli`
-          NOTES
-          # The heredoc above is quoted (no expansion -- it is full of backticks
-          # that would otherwise be command substitution), so the measured floor
-          # is substituted here instead.
-          sed -i "s/__GLIBC_FLOOR__/${GLIBC_FLOOR}/" release_notes.md
+          python3 python/scripts/build_release_notes.py \
+            --changelog CHANGELOG.md \
+            --version "$VERSION" \
+            --glibc-floor-file meta/glibc-floor.txt \
+            --out release_notes.md
           echo "----- release_notes.md -----"; cat release_notes.md
       # A SemVer pre-release tag carries a hyphen in its version (`v0.4.0-rc1`);
       # a real release never does. Both flags are derived from that one fact so
