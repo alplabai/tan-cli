@@ -95,6 +95,7 @@ import pytest
 
 from tan import planner_emit
 from tests.conftest import sdk_root
+from tests.parity import _xdist_breadth_floor
 
 # The project-SCOPED (not per-core) emit modes `tan.planner` owns, compared as
 # libraries below. `kconfig` is excluded (see the module docstring); `build-plan`
@@ -1098,6 +1099,13 @@ def test_the_render_axis_mode_set_is_fully_accounted_for():
 #: `test_the_breadth_layer_still_covers_every_board`.
 _ARTEFACTS_COMPARED: dict[str, int] = {}
 
+#: The breadth floors, read by both the in-test assertion and
+#: `tests/parity/_xdist_breadth_floor.py`'s merged xdist check (tan-cli#1256),
+#: so the two can never disagree. See the breadth test for how they were
+#: measured.
+_BREADTH_MIN_BOARDS = 90
+_BREADTH_MIN_ARTEFACTS = 2900
+
 
 def _first_rejected_core(project, allowed: tuple[str, ...]) -> str | None:
     """The first core an OS-scoped mode must REFUSE, or `None`.
@@ -1362,7 +1370,7 @@ def test_the_in_process_engine_matches_alp_project_for_every_board_tree(
             _ARTEFACTS_COMPARED.get(board.parent.name, 0) + compared)
 
 
-def test_the_breadth_layer_still_covers_every_board():
+def test_the_breadth_layer_still_covers_every_board(pytestconfig):
     """The layer's own size, so it cannot quietly stop measuring.
 
     Every board that LOADS must have contributed at least the two `--core`-less
@@ -1374,32 +1382,46 @@ def test_the_breadth_layer_still_covers_every_board():
     floor covers both. Selecting only one of them with `-k` trips the floor; that
     is what a size check is for, and `-k` that excludes this test skips it.
 
-    Under `pytest-xdist` this assertion is skipped instead of judged: each
-    worker is its own process with its own `_ARTEFACTS_COMPARED`, so whichever
-    worker draws this test item only ever sees the boards *that worker*
-    happened to run -- a partial share with nothing to do with the SDK's real
-    breadth (tan-cli#1256). `tests/parity/conftest.py` merges every worker's
-    share and enforces this exact floor against the total from the
-    controller's own `pytest_sessionfinish`, once every worker is down.
+    Under `pytest-xdist` each worker is its own process with its own
+    `_ARTEFACTS_COMPARED`, so whichever worker collects this test item only
+    ever sees the boards *that worker* happened to run -- a partial share
+    with nothing to do with the SDK's real breadth (tan-cli#1256).
+    `tests.parity._xdist_breadth_floor` (registered from `python/conftest.py`
+    so the CONTROLLER always loads it, unlike a `tests/parity/conftest.py`
+    would -- see that module's docstring) merges every worker's share and
+    enforces this exact floor against the total, from the controller's own
+    `pytest_sessionfinish`, once every worker is down.
+
+    This assertion trusts that merge enough to skip ONLY when a HANDSHAKE
+    proves it is actually active for this session -- `pytestconfig.
+    workerinput[HANDSHAKE_KEY]`, stamped by that module's
+    `pytest_configure_node` before this worker ever started. Any session
+    where that stamp is missing (the module not registered, somehow) falls
+    straight through to asserting on this worker's own possibly-partial
+    share -- loud and potentially wrong about WHY, but never silently
+    skipped with nothing enforcing the floor anywhere.
     """
+    workerinput = getattr(pytestconfig, "workerinput", None)
+    if workerinput is not None and workerinput.get(_xdist_breadth_floor.HANDSHAKE_KEY):
+        pytest.skip(
+            "pytest-xdist worker: tests.parity._xdist_breadth_floor merges "
+            "every worker's share and enforces this floor itself, against "
+            "the total -- this worker only ever sees its own partial share, "
+            "so it does not judge it (tan-cli#1256)")
     if not _ARTEFACTS_COMPARED:
         pytest.skip("the breadth test did not run in this session (-k selection)")
-    if os.environ.get("PYTEST_XDIST_WORKER"):
-        pytest.skip(
-            "under pytest-xdist each worker only sees its own partial share; "
-            "tests/parity/conftest.py enforces the merged floor across every "
-            "worker instead (tan-cli#1256)")
     thin = {name: n for name, n in _ARTEFACTS_COMPARED.items() if n < 2}
     assert not thin, f"boards that compared almost nothing: {thin}"
     total = sum(_ARTEFACTS_COMPARED.values())
-    assert len(_ARTEFACTS_COMPARED) >= 90, (
+    assert len(_ARTEFACTS_COMPARED) >= _BREADTH_MIN_BOARDS, (
         f"only {len(_ARTEFACTS_COMPARED)} boards were measured")
     # 100 boards / 3245 artefacts as measured with `composed-route-table`
     # counted in `GENERATE_MODES` (3109 before it was added). The floor keeps
     # room for boards coming and going while still tripping if a whole mode
     # leaves `GENERATE_MODES` -- the cheapest mode there is worth ~100
     # artefacts, and the board-tree layer ~450.
-    assert total >= 2900, f"only {total} artefacts were compared byte for byte"
+    assert total >= _BREADTH_MIN_ARTEFACTS, (
+        f"only {total} artefacts were compared byte for byte")
 
 
 # ==========================================================================
