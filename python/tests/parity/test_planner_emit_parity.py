@@ -1373,9 +1373,22 @@ def test_the_breadth_layer_still_covers_every_board():
     Two tests feed this counter -- the stream modes and the board trees -- so the
     floor covers both. Selecting only one of them with `-k` trips the floor; that
     is what a size check is for, and `-k` that excludes this test skips it.
+
+    Under `pytest-xdist` this assertion is skipped instead of judged: each
+    worker is its own process with its own `_ARTEFACTS_COMPARED`, so whichever
+    worker draws this test item only ever sees the boards *that worker*
+    happened to run -- a partial share with nothing to do with the SDK's real
+    breadth (tan-cli#1256). `tests/parity/conftest.py` merges every worker's
+    share and enforces this exact floor against the total from the
+    controller's own `pytest_sessionfinish`, once every worker is down.
     """
     if not _ARTEFACTS_COMPARED:
         pytest.skip("the breadth test did not run in this session (-k selection)")
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        pytest.skip(
+            "under pytest-xdist each worker only sees its own partial share; "
+            "tests/parity/conftest.py enforces the merged floor across every "
+            "worker instead (tan-cli#1256)")
     thin = {name: n for name, n in _ARTEFACTS_COMPARED.items() if n < 2}
     assert not thin, f"boards that compared almost nothing: {thin}"
     total = sum(_ARTEFACTS_COMPARED.values())
