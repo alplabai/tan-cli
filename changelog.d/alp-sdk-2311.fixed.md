@@ -15,3 +15,12 @@
   `assembled: optional` and an absent key (schema default: `true`) are
   unaffected. Ported line-for-line from alp-sdk's
   `scripts/alp_orchestrate/partition.py`.
+
+  The same bug class hit the loader's own cross-field checks
+  (`tan/planner/loader.py`): `storage[].flash_device` accepted an
+  `on_module.ospi_memories:` key without checking `assembled`, and so did
+  `security.psa.{its,ps}_storage`, so both could name `ospi0` on
+  `E1M-AEN801` and pass. The loader now shares
+  `_is_ospi_key_unassembled()` for all three checks and raises the
+  specific "not assembled" reason instead of the generic "does not
+  resolve" message.

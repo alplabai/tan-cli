@@ -71,6 +71,7 @@ def _is_ospi_key_unassembled(som_preset: dict[str, Any], key: str) -> bool:
     than treat its `capacity_mbit` (a property of the shared PCB footprint,
     not evidence of assembly) as usable: `_known_flash_devices()` and
     `_resolve_flash_device()` below, and `loader.py`'s
+    `storage[].flash_device` cross-field check and its
     `security.psa.{its,ps}_storage` cross-check. Line-for-line port of
     alp-sdk's `scripts/alp_orchestrate/partition.py::_is_ospi_key_unassembled`;
     both sides move together (#2311).
