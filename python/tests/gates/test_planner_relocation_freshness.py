@@ -1086,7 +1086,56 @@ from tests.conftest import sdk_root
 #: design, never reading a bound checkout's `memory_map:` at all. A
 #: no-op port with evidence, the same shape as `alp_template.py::
 #: validate()` above.
-PINNED_SDK_COMMIT = "c81cb5db9945c8f448a7bb952d374f874e2f42c0"  # alp-sdk, past 81a9d515 -- see above (tan-cli#1269, hand-finished)
+#:
+#: `c81cb5db` -> `79c834e65` (this change, auditing alp-sdk#2322/#2321 --
+#: mirrors alp-sdk#2311/#2312 respectively). Three upstream commits touch
+#: `scripts/alp_orchestrate/` in the range:
+#:
+#:   - `79c834e65` (#2311/#2322) BEHAVIOURAL, and already ported ahead of this
+#:     pin bump: `loader.py`'s `storage[].flash_device` cross-field check and
+#:     `security.psa.{its,ps}_storage` cross-check, plus `partition.py`'s
+#:     `_is_ospi_key_unassembled` + its `_known_flash_devices()`/
+#:     `_resolve_flash_device()` call sites, all landed on
+#:     `fix/alp-sdk-2311-partition-unassembled-flash` ahead of this bump
+#:     (commits `4c9d4650`, `08f59a82`, `36e71bc4`). Re-diffed line-for-line
+#:     against the upstream blob at this pin: identical bodies, same call
+#:     sites, same docstrings cross-referencing "#2311" on both sides.
+#:   - `bf602754a` (#2312/#2321) NO TAN-SIDE DELTA NEEDED: touches
+#:     `scripts/alp_project_loader.py`'s `TargetSpec` (a HAND_PORT_HASHES
+#:     file, not in this table), adding `vela_memory_mode`/
+#:     `vela_system_config`/`vela_vendor_system_config`/
+#:     `vela_vendor_config_filename` plus the `_soc_targets` split by
+#:     `system_config_requires_vendor_config`. tan's `tan.model.targets.
+#:     TargetSpec`/`_soc_targets` already carry the identical fields and the
+#:     identical fail-closed split (`_vela_profile`) -- alp-sdk's own new
+#:     docstring says so verbatim ("mirrors tan-cli's `TargetSpec.
+#:     vela_memory_mode`" / "... `vela_system_config` / `vela_vendor_system_
+#:     config` split, alp-sdk#2312"): this is alp-sdk catching up to tan, not
+#:     the reverse. HAND_PORT_PINNED_SDK_COMMIT is deliberately NOT moved by
+#:     this change (see that pin's own comment) -- nothing there needs a
+#:     port, but the pin's job is to gate an audit, not to follow every
+#:     commit that touches its file with nothing to do.
+#:   - `0767baacb` (#1470) NOT in `scripts/alp_orchestrate/` or any tracked
+#:     hand-port source at all (`metadata/npu_ops/**`,
+#:     `metadata/socs/**/*.json` only) -- confirmed via
+#:     `git diff --stat c81cb5db..79c834e65` scoped to both tracked trees:
+#:     no hit.
+#:
+#: `kconfig.py`'s one changed line (`_emit_inference`'s docstring: "the E8 U85
+#: on the shared HG subsystem" -> "the E8 U85, a shared SoC-level NPU -- Alif
+#: block name NPU_HG") is COSMETIC -- `tan/planner/kconfig.py` already carries
+#: this exact wording (verified: an earlier port already matched it), so this
+#: bump re-freezes no unaudited behavioural delta on that file either.
+#:
+#: Verified via `python/scripts/planner_resync.py --sdk-root <79c834e65
+#: checkout> --to 79c834e65`: reports `kconfig.py` merges cleanly (cosmetic,
+#: confirmed already present verbatim in tan's copy) and `loader.py`/
+#: `partition.py` as 3-way-merge "conflicts" -- which is the tool's
+#: "upstream's hunk already landed on tan's copy, so there is no clean
+#: context to merge onto" signal, not unported drift: read line-for-line
+#: above, both files' bodies match upstream byte-for-byte at the changed
+#: regions.
+PINNED_SDK_COMMIT = "79c834e654f150816d09c7c92832a2104e76e309"  # alp-sdk origin/dev -- alp-sdk#2311/#2312 resync (tan-cli, this change)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1129,16 +1178,16 @@ PINNED_HASHES: dict[str, str] = {
     "carveout.py": "d4ebb956e336a8ad428988d5edb5716dc47f7ae01b3f97b09de806ef0a177126",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "7e6ec33eb5ff2eb823a33c1cfe54078012b13f1f54cc40d244b333e3c801c489",
+    "kconfig.py": "3f39c64a552992c29c4839475fa13033894b2ee6c554e5b534c568bd09a57e8d",
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
-    "loader.py": "36b75774b3ff4dd2005613bd1b024d7438f025b5ac586b2516eb830b669f2a30",
+    "loader.py": "61908670a38c83daf557eb61b1a47103c1c989bc8ef3345d6ffcdf288d2649aa",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
     "memory.py": "7b3ef1f064d5fa3c3240ca269565a059c2a65bcb889a88aef534bc560954a66b",
     "memregion.py": "45d10e7ac94b0febbcf66df70324eb7b9a6fcc0dd09617d3de5aefc65b7c4879",
     "models.py": "3ba426ab5477bedc446bee7ab63eeb9cf56fc1b677397fdc892ba3826567a45c",
     "orchestrator.py": "b7a2044fa062335f539d456a1da01f20b11f1b780f41b4bbc346c34ad56d2a6b",
-    "partition.py": "4c8ee8f3b9c5f3f8e5ec87ff4c6f0b0bbd15313b51842de0a8d6e0846d7f7add",
+    "partition.py": "9ef943ce8f2c9651067b4e58c2e878e4f87eac2ff495de7342a57cd276b9b711",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
     "sdk_compat.py": "ef9adb68a4cc9f18fe25bba7c0a4c2e9eabd2955166e2c5a8f6f92db0993e805",
     "secure.py": "44743b887ab8d29293469f2574b6d88e0d433c9b9ba1f1001709f51104716c0c",
@@ -1935,7 +1984,38 @@ PINNED_HASHES: dict[str, str] = {
 #:     of a HAND_PORT_HASHES entry with no matching tan code is exactly to
 #:     keep catching a FUTURE change to this source that isn't similarly
 #:     inert, not to claim today's is.
-HAND_PORT_PINNED_SDK_COMMIT = "c81cb5db9945c8f448a7bb952d374f874e2f42c0"  # alp-sdk, past 81a9d515 -- see above (tan-cli#1269, hand-finished)
+#:
+#: `c81cb5db` -> `79c834e65` (this change, alongside the mirror-table bump for
+#: alp-sdk#2311/#2312 above). Of the ten HAND_PORT_HASHES sources, exactly two
+#: changed in this range (`git diff --stat` per file, not assumed):
+#:
+#:   - `scripts/alp_project_loader.py` (alp-sdk#2312, `bf602754a`) -- NO PORT
+#:     NEEDED: adds `vela_memory_mode`/`vela_system_config`/
+#:     `vela_vendor_system_config`/`vela_vendor_config_filename` to
+#:     `TargetSpec` and the matching `_soc_targets` split by
+#:     `system_config_requires_vendor_config`. `tan.model.targets.TargetSpec`/
+#:     `_soc_targets` (NOT a `tan/planner/` file -- this hand-port's tan
+#:     counterpart lives in `tan/model/`, a wholly different subsystem from
+#:     `project_loader.py`/`som_metadata.py`) already carry the identical
+#:     fields and the identical fail-closed split (`_vela_profile`) -- alp-sdk's
+#:     own new docstring says so verbatim ("mirrors tan-cli's `TargetSpec.
+#:     vela_memory_mode`" / "vela_system_config` / `vela_vendor_system_config`
+#:     split, alp-sdk#2312"): alp-sdk is catching up to tan here, not the
+#:     reverse.
+#:   - `scripts/gen_zephyr_board.py` (alp-sdk#2288, `b1b89a659`) -- BEHAVIOURAL,
+#:     and PORTED into `tan/planner/zephyr_board.py` in this change: BRD_I2C
+#:     (RIIC8) on the V2N/V2M `m33_sm` board moves to the Cortex-A55/Linux
+#:     side, so the CM33's `_v2n_dts`/`_v2n_defconfig` templates now leave
+#:     `&i2c8` `status = "disabled"` with no alias and no pinctrl/clock-
+#:     frequency/status lines (`_v2n_dts`), and `_v2n_defconfig` asserts
+#:     `brd_i2c.get("status") != "disabled"` (inverted from the old
+#:     `!= "enabled"`) and drops `CONFIG_I2C=y` -- SPI-only supervisor bridge
+#:     now. Applied line-for-line (only the relocation's own `is_tbd` ->
+#:     `_is_tbd` rename differs). MEASURED: `tests/parity/
+#:     test_planner_emit_parity.py` was 25 failed before this port (every V2N/
+#:     V2M board tree + the byte-for-byte scaffold check) and 0 failed/865
+#:     passed after, bound to this same `79c834e65` checkout.
+HAND_PORT_PINNED_SDK_COMMIT = "79c834e654f150816d09c7c92832a2104e76e309"  # alp-sdk origin/dev -- alp-sdk#2288/#2312 audit (tan-cli, this change)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -1999,10 +2079,10 @@ HAND_PORT_PINNED_SDK_COMMIT = "c81cb5db9945c8f448a7bb952d374f874e2f42c0"  # alp-
 #: `sentinels.py` set the precedent for. Neither lives under `tan/planner/`
 #: itself, so neither is in `HAND_PORT_SOURCES` below.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "0565d07c49035b7728f89f3ba0c1cf2ffbb18a933b3de264fc216d6ef3a25621",
+    "scripts/gen_zephyr_board.py": "934984cf53bfad16fd6e3e572010e7d3dbb5b001a869f88a39e0a5ad7812d0f6",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/whole_device_alias.py": "a38abb18da876dfcb95edf7332a2a057bcf16da524f2fa9b7b367a00222756f5",
-    "scripts/alp_project_loader.py": "0812e23eb161250d2a0fc87ce73a53f63f0463ead5e5a1f705974a6a5827cf40",
+    "scripts/alp_project_loader.py": "b041cbb7bfb464550157a048419c1bc36e769b266301c5bea638c0bf63db4846",
     "scripts/alp_template.py": "544d5bf3208724272baa6114d5a67edafb62be78decf1edb4b3a805c5d5da667",
     "scripts/alp_project_emit/__init__.py": "9213c745751e23a36b3f582846a147fb9060386992ff7b8244a0c1d44d5987cf",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
