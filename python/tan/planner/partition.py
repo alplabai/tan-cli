@@ -156,9 +156,16 @@ def _known_flash_devices(
     om = som_preset.get("on_module") or {}
     ospi = om.get("ospi_memories") or {}
     if isinstance(ospi, dict):
-        for k in ospi.keys():
-            if isinstance(k, str):
-                names.add(k)
+        for k, v in ospi.items():
+            if not isinstance(k, str):
+                continue
+            entry = v or {}
+            if isinstance(entry, dict) and entry.get("assembled") is False:
+                # Not fitted on this SKU (e.g. E1M-AEN801's ospi0/ospi1) --
+                # don't advertise a device `_resolve_flash_device()` below
+                # will refuse anyway (alp-sdk#2311).
+                continue
+            names.add(k)
     return sorted(names)
 
 
@@ -616,10 +623,33 @@ def _resolve_flash_device(
         }, None
 
     # on_module.ospi_memories: key match.
+    #
+    # alp-sdk#2311: refuse a device this SKU's preset declares
+    # `assembled: false` (e.g. `E1M-AEN801`'s `ospi0`/`ospi1`) BEFORE
+    # looking at `capacity_mbit` -- `capacity_mbit` is the DESIGNED-IN
+    # part's capacity (present on the shared PCB footprint), not evidence
+    # the module actually carries the part. `_known_flash_devices()` above
+    # already keeps an unassembled device out of the advertised set; this
+    # is the same guard applied where a hand-built project (or a stale
+    # caller) skips that check and calls this resolver directly (defense
+    # in depth). `optional` and an absent key (schema default: true) both
+    # still resolve -- `assembled` must be the literal `False` the schema
+    # uses for "not fitted".
+    #
+    # Ported line-for-line from alp-sdk's
+    # scripts/alp_orchestrate/partition.py::_resolve_flash_device; both
+    # sides move together (alp-sdk#2311).
     om = som_preset.get("on_module") or {}
     ospi = om.get("ospi_memories") or {}
     if isinstance(ospi, dict) and flash_device in ospi:
         entry = ospi[flash_device] or {}
+        if isinstance(entry, dict) and entry.get("assembled") is False:
+            return None, (
+                f"flash device '{flash_device}' is not assembled on SoM "
+                f"{som_preset.get('sku', '<unknown>')} (assembled: false in "
+                f"metadata/e1m_modules/{som_preset.get('sku', '<unknown>')}"
+                f".yaml); it cannot take a runtime storage mount "
+                f"(alp-sdk#2311)")
         cap = entry.get("capacity_mbit")
         if isinstance(cap, str) and cap.strip().upper() == "TBD":
             return None, (
