@@ -1088,44 +1088,55 @@ from tests.conftest import sdk_root
 #: validate()` above.
 #:
 #: `c81cb5db` -> `79c834e65` (this change, auditing alp-sdk#2322/#2321 --
-#: mirrors alp-sdk#2311/#2312 respectively). Three upstream commits touch
-#: `scripts/alp_orchestrate/` in the range:
+#: mirrors alp-sdk#2311/#2312 respectively; CORRECTED per review, replacing an
+#: earlier revision of this paragraph that misattributed the kconfig.py
+#: docstring move and wrongly claimed `0767baacb` touches nothing tracked --
+#: both claims below are re-derived from `git log`/`git show` output actually
+#: run against the bound checkout, not assumed from commit subjects). TWO
+#: upstream commits touch `scripts/alp_orchestrate/` in the range
+#: (`git log c81cb5db..79c834e65 -- scripts/alp_orchestrate/`: exactly these
+#: two hits):
 #:
+#:   - `0767baacb` (#1470, ADR-0028 proposed) BEHAVIOURAL ON NEITHER FILE IT
+#:     TOUCHES, confirmed by reading its actual diff rather than its subject
+#:     line (a `feat(metadata)` squash-merge that also happens to touch this
+#:     tree): `kconfig.py` gets the `_emit_inference` docstring reword
+#:     ("the E8 U85 on the shared HG subsystem" -> "the E8 U85, a shared
+#:     SoC-level NPU -- Alif block name NPU_HG") -- THIS is the commit that
+#:     introduces that line, not `79c834e65` as an earlier revision of this
+#:     paragraph said. `partition.py` gets a "KNOWN HAZARD, deliberately not
+#:     fixed here (#915 follow-up)" COMMENT ONLY, inserted ahead of
+#:     `_resolve_flash_device`'s `on_module.ospi_memories` branch, documenting
+#:     the exact gap #2311 later closes with real code -- no code changed by
+#:     this commit, and the comment itself is gone (superseded, not merely
+#:     edited) once `79c834e65` lands the actual guard.
 #:   - `79c834e65` (#2311/#2322) BEHAVIOURAL, and already ported ahead of this
 #:     pin bump: `loader.py`'s `storage[].flash_device` cross-field check and
 #:     `security.psa.{its,ps}_storage` cross-check, plus `partition.py`'s
 #:     `_is_ospi_key_unassembled` + its `_known_flash_devices()`/
-#:     `_resolve_flash_device()` call sites, all landed on
+#:     `_resolve_flash_device()` call sites (replacing `0767baacb`'s hazard
+#:     comment above with the real fix), all landed on
 #:     `fix/alp-sdk-2311-partition-unassembled-flash` ahead of this bump
 #:     (commits `4c9d4650`, `08f59a82`, `36e71bc4`). Re-diffed line-for-line
 #:     against the upstream blob at this pin: identical bodies, same call
 #:     sites, same docstrings cross-referencing "#2311" on both sides.
-#:   - `bf602754a` (#2312/#2321) NO TAN-SIDE DELTA NEEDED: touches
-#:     `scripts/alp_project_loader.py`'s `TargetSpec` (a HAND_PORT_HASHES
-#:     file, not in this table), adding `vela_memory_mode`/
-#:     `vela_system_config`/`vela_vendor_system_config`/
-#:     `vela_vendor_config_filename` plus the `_soc_targets` split by
-#:     `system_config_requires_vendor_config`. tan's `tan.model.targets.
-#:     TargetSpec`/`_soc_targets` already carry the identical fields and the
-#:     identical fail-closed split (`_vela_profile`) -- alp-sdk's own new
-#:     docstring says so verbatim ("mirrors tan-cli's `TargetSpec.
-#:     vela_memory_mode`" / "... `vela_system_config` / `vela_vendor_system_
-#:     config` split, alp-sdk#2312"): this is alp-sdk catching up to tan, not
-#:     the reverse. HAND_PORT_PINNED_SDK_COMMIT is deliberately NOT moved by
-#:     this change (see that pin's own comment) -- nothing there needs a
-#:     port, but the pin's job is to gate an audit, not to follow every
-#:     commit that touches its file with nothing to do.
-#:   - `0767baacb` (#1470) NOT in `scripts/alp_orchestrate/` or any tracked
-#:     hand-port source at all (`metadata/npu_ops/**`,
-#:     `metadata/socs/**/*.json` only) -- confirmed via
-#:     `git diff --stat c81cb5db..79c834e65` scoped to both tracked trees:
-#:     no hit.
 #:
-#: `kconfig.py`'s one changed line (`_emit_inference`'s docstring: "the E8 U85
-#: on the shared HG subsystem" -> "the E8 U85, a shared SoC-level NPU -- Alif
-#: block name NPU_HG") is COSMETIC -- `tan/planner/kconfig.py` already carries
-#: this exact wording (verified: an earlier port already matched it), so this
-#: bump re-freezes no unaudited behavioural delta on that file either.
+#: `kconfig.py`'s one changed line is COSMETIC (docstring wording only, no
+#: emitted byte moves -- the emitting code already used this vocabulary) --
+#: `tan/planner/kconfig.py` already carried this exact wording before this
+#: audit (verified: an earlier port already matched it), so this bump
+#: re-freezes no unaudited behavioural delta on that file either.
+#:
+#: TWO further upstream commits in the same range touch HAND_PORT_HASHES
+#: sources, not this table -- see `HAND_PORT_PINNED_SDK_COMMIT`'s own
+#: paragraph below for both:
+#:
+#:   - `bf602754a` (#2312/#2321) touches ONLY `scripts/alp_project_loader.py`
+#:     (confirmed: `git show --stat bf602754a -- scripts/alp_orchestrate/
+#:     scripts/gen_zephyr_board.py scripts/alp_project_loader.py` shows one
+#:     file, `+45/-2`). NO TAN-SIDE PORT NEEDED -- see below.
+#:   - `b1b89a659` (#2288) touches ONLY `scripts/gen_zephyr_board.py`
+#:     (confirmed the same way: one file, `+24/-13`). PORTED -- see below.
 #:
 #: Verified via `python/scripts/planner_resync.py --sdk-root <79c834e65
 #: checkout> --to 79c834e65`: reports `kconfig.py` merges cleanly (cosmetic,
@@ -1135,6 +1146,26 @@ from tests.conftest import sdk_root
 #: context to merge onto" signal, not unported drift: read line-for-line
 #: above, both files' bodies match upstream byte-for-byte at the changed
 #: regions.
+#:
+#: The frozen planner-oracle fixture (`python/tests/fixtures/planner_oracle/`)
+#: and `.github/workflows/parity.yml`'s `PINNED_SDK_TAG` /
+#: `PINNED_PLANNER_ORACLE_SDK_REF`, plus `ci.yml`'s `sdk_parity` checkout
+#: `ref:`, all move to `79c834e65` in the SAME change as this pin -- per this
+#: repo's own precedent (tan-cli#1275/#1239: a behavioural planner port moves
+#: every lockstep site together, never a subset). Re-captured: 100 boards,
+#: 700 emits (692 unchanged + 1 new `connectivity/camera-mjpeg-stream` board +
+#: 7 error-contract; `v2n/v2n-rtc-multi-alarm` retired upstream in this same
+#: range), a REAL diff attributable to three things and nothing else: (1)
+#: `production-deployment`'s `ps_storage: ospi0` -> `mram_main` -- alp-sdk's
+#: OWN example board.yaml was fixed to stop tripping the #2311 guard it now
+#: enforces; (2) `v2n-brd-i2c-bringup`/`v2n-secure-element-sign`/
+#: `v2n-temp-sensor`'s `a55_cluster`/`m33_sm` slice shapes, from #2288's
+#: BRD_I2C-to-CA55 move (the A55 core gains a real app, `m33_sm` becomes
+#: `alp-stock-shim`); (3) `audio-noise-suppression`/
+#: `ai-object-detection-realtime`'s dropped `CONFIG_ALP_TFLM_DRP_AI` library
+#: line -- metadata-driven (`metadata/npu_ops/**`/#1470), not a `tan/planner/`
+#: code change, since `kconfig.py`'s only code-adjacent delta in this range is
+#: the docstring reword audited above.
 PINNED_SDK_COMMIT = "79c834e654f150816d09c7c92832a2104e76e309"  # alp-sdk origin/dev -- alp-sdk#2311/#2312 resync (tan-cli, this change)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,

@@ -608,6 +608,18 @@ jobs:
       # (#2053, docstring only) and this job's `sdk_parity` leg compares
       # tan's hand-port against that exact file for every board.
       #
+      # `c81cb5db` -> `79c834e65` (review of tan-cli#1291), moved in the SAME
+      # change as `parity.yml`'s `PINNED_SDK_TAG` / `PINNED_PLANNER_ORACLE_
+      # SDK_REF` and both of `test_planner_relocation_freshness.py`'s pins --
+      # see `parity.yml`'s `PINNED_SDK_TAG` comment for the full
+      # commit-by-commit audit (alp-sdk#2311/#2312/#2288, plus #1470/#2281
+      # inert-for-tan metadata additions). `HAND_PORT_PINNED_SDK_COMMIT`
+      # moves too: `scripts/gen_zephyr_board.py` changed in range (#2288,
+      # BEHAVIOURAL -- the BRD_I2C-to-CA55 move, ported into
+      # `tan/planner/zephyr_board.py` in this same change) and this job's
+      # `sdk_parity` leg compares tan's hand-port against that exact file for
+      # every board.
+      #
       # KEEP THE `ref:` LINE DIRECTLY UNDER `repository:` -- no comment
       # between them. `python/scripts/pin_move_verify.py`'s
       # `_CI_SDK_PARITY_REF` matches the two lines as an adjacent pair and
@@ -621,7 +633,7 @@ jobs:
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: c81cb5db9945c8f448a7bb952d374f874e2f42c0
+          ref: 79c834e654f150816d09c7c92832a2104e76e309
           fetch-tags: true
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`

@@ -623,6 +623,22 @@ _ALLOWED_CROSS_SKU_MENTIONS: dict[tuple[str, str, str], int] = {
     ("edge-ai-starter", "E1M-V2N102", "E1M-V2M102"): 1,
     ("edge-ai-starter", "E1M-V2M101", "E1M-V2M102"): 1,
     ("edge-ai-starter", "E1M-V2M102", "E1M-V2M101"): 1,
+    # tan-cli#1292 (alp-sdk#2281 adds E1M-V2M103/E1M-V2N103 to the SKU
+    # catalogue): both new SKUs render the same SKU-neutral DEEPX sentence
+    # as E1M-V2M101/E1M-V2M102/E1M-V2N101/E1M-V2N102 above -- a real
+    # cross-reference (which V2N/V2M family members carry the DEEPX DX-M1
+    # NPU), not a substitution gap; verified by dumping both SKUs' planned
+    # `README.md` and confirming all four occurrences sit inside that one
+    # sentence, count 1 each. Same precedent as tan-cli#1218's E1M-AEN803
+    # entries above.
+    ("edge-ai-starter", "E1M-V2M103", "E1M-V2M101"): 1,
+    ("edge-ai-starter", "E1M-V2M103", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-V2M103", "E1M-V2N101"): 1,
+    ("edge-ai-starter", "E1M-V2M103", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-V2N103", "E1M-V2M101"): 1,
+    ("edge-ai-starter", "E1M-V2N103", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-V2N103", "E1M-V2N101"): 1,
+    ("edge-ai-starter", "E1M-V2N103", "E1M-V2N102"): 1,
 }
 
 
