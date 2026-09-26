@@ -530,15 +530,11 @@ class TestUnresolvedLegOrdering:
         refuse -- never guess. This is the function's terminal fallback,
         reached by nothing else in the existing suite.
 
-        Deviation from upstream: the reason string this repo's
-        `_region_ipc_eligibility()` returns on this leg does not carry
-        the literal `"(ADR-0034 clause 4)"` citation upstream's does --
-        a pre-existing divergence in `tan/planner/carveout.py` unrelated
-        to this alp-sdk#2010 port (confirmed: `git diff 15b2f32c 20fec7a7
-        -- scripts/alp_orchestrate/carveout.py` touches neither this
-        message nor the ADR-0034 citation), so this test pins the
-        BEHAVIOUR (never-guess refusal, "neither" named) rather than that
-        substring."""
+        The reason is emitted text (it reaches `ipc[].reason`,
+        `ipc-contract-h` and `dts-reservations`), so it stays
+        byte-identical to upstream's, citation included (tan-cli#1254).
+        The tail is pinned whole, not just the `"ADR-0034"` substring
+        upstream's copy of this test asserts."""
         from tan.planner.carveout import _region_ipc_eligibility
 
         eligible, reason = _region_ipc_eligibility(
@@ -550,7 +546,7 @@ class TestUnresolvedLegOrdering:
             "`write_authority` authored became IPC-eligible -- ADR-0034 "
             "clause 4 (never guess) is broken")
         assert "neither" in reason
-        assert "never guessed" in reason
+        assert reason.endswith("never guessed (ADR-0034 clause 4)"), reason
 
 
 class TestMaxExcludedDetailCap:

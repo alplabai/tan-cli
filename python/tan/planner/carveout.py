@@ -227,7 +227,7 @@ def _region_ipc_eligibility(
         f"region {name!r} has an unresolved base "
         f"({region.get('base')!r}) and carries neither "
         f"`write_authority` nor a legacy `carveout` flag -- class "
-        f"unresolved, never guessed")
+        f"unresolved, never guessed (ADR-0034 clause 4)")
 
 
 def _blocked_carve_out(entry: IpcEntry, reason: str) -> ResolvedCarveOut:
