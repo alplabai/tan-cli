@@ -46,10 +46,10 @@ a fall-through to the other two (tan-cli#172 review; see
 A byte MISMATCH (vendored copy differs from the pinned upstream file) always
 fails -- that is the actual drift this gate exists to catch -- and so does an
 absent upstream file. There is no "predates the feature" branch the way the
-bootstrap gate has. Measured, not generalised (tan-cli#1261): of the 31
+bootstrap gate has. Measured, not generalised (tan-cli#1261): of the 32
 distinct values `PINNED_SDK_TAG` has held across
 `.github/workflows/parity.yml`'s history, `metadata/toolchains.json` is
-present at 27. The four exceptions -- `df312cec`, `f04ea42e`, `v0.13.0` and
+present at 28. The four exceptions -- `df312cec`, `f04ea42e`, `v0.13.0` and
 `8b216a04` -- are July-2026 pins predating the file upstream, and this pin is
 hand-bumped forward-only, so an upstream file missing at the ref under test
 is a real regression, not a legitimate skip. `kconfig_fixture_parity.py` was
