@@ -48,8 +48,9 @@ west build -b alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33 .
 west flash --host <board-ip>
 ```
 
-The DEEPX DX-M1 NPU is populated on `E1M-V2M101`/`E1M-V2M102` -- not on
-`E1M-V2N101`/`E1M-V2N102`, the same PCB without it. Pick either via
+The DEEPX DX-M1 NPU is populated on `E1M-V2M101`/`E1M-V2M102`/`E1M-V2M103`
+-- not on `E1M-V2N101`/`E1M-V2N102`/`E1M-V2N103`, the same PCB without
+it. Pick either via
 `som.sku` in `board.yaml`.
 
 ## Model

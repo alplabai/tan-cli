@@ -7,7 +7,7 @@
 #ifndef ALP_SYSTEM_IPC_H
 #define ALP_SYSTEM_IPC_H
 
-#define ALP_IPC_SKU "E1M-V2N101"
+#define ALP_IPC_SKU "E1M-AEN803"
 
 /* No ipc[] entries declared in board.yaml; nothing to emit. */
 

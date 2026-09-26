@@ -95,7 +95,41 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`c81cb5db`**
+- **Current vendor point (all templates):** **`79c834e65`**
+  (`79c834e654f150816d09c7c92832a2104e76e309`, alp-sdk `dev`) — review of
+  tan-cli#1291 (the alp-sdk#2311/#2312/#2288 planner resync), the same
+  change that moves `parity.yml`'s `PINNED_SDK_TAG`/
+  `PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity` `ref:` and
+  `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT`/
+  `HAND_PORT_PINNED_SDK_COMMIT`. Still untagged (alp-sdk's newest tag is
+  `v0.16.0`), so `- Ref:` below stays `v0.16.0` for the same
+  `_tag_resolves()` reason as the `722320a1` bullet.
+
+  **Two files changed, one (template, sku) pair each** —
+  `edge-ai`/E1M-AEN801's `README.md` and `edge-ai`/E1M-V2N101's
+  `README.md`. Every other (template, sku) pair is untouched —
+  `scaffold_byte_parity.py` reported 0 diffs for the other eight before
+  this re-vendor and still does after.
+
+  **One upstream cause:** alp-sdk#2281 adds `E1M-V2M103`/`E1M-V2N103` to
+  the SKU catalogue, and `edge-ai`'s SKU-neutral DEEPX-population sentence
+  now names all three SKUs per family ("...`E1M-V2M101`/`E1M-V2M102`/
+  `E1M-V2M103` -- not on `E1M-V2N101`/`E1M-V2N102`/`E1M-V2N103`..."), where
+  it previously named two. `E1M-V2N101`'s `README.md` is a straight
+  re-vendor of the new sentence (no `DELIBERATE_EDITS` entry covers it —
+  that transform retired at the `722320a1` re-vendor, see
+  `scaffold_byte_parity.py`'s own `un_edit_edge_ai_v2n101_readme_deepx_note`
+  docstring). `E1M-AEN801`'s active `deepx_v2m_note` `DELIBERATE_EDITS`
+  entry needed its `_EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED` anchor moved
+  to the new three-SKU sentence — the DELIBERATE correction text itself
+  (the re-scaffold-not-edit advice) is unchanged, since `E1M-AEN801` still
+  cannot flip `som.sku` to any DEEPX SKU without re-scaffolding, three
+  siblings or two.
+
+  Verified at `79c834e65`, against a checkout with tags fetched:
+  `scaffold_byte_parity.py` **10/10 PASS** (rc 0).
+
+- **Prior vendor point (all templates):** **`c81cb5db`**
   (`c81cb5db9945c8f448a7bb952d374f874e2f42c0`, alp-sdk `dev`) — tan-cli#1275's
   re-pin (the #1269 planner re-sync's hand-finish), the same change that
   moves `parity.yml`'s `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`,
@@ -478,15 +512,16 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`c81cb5db`** (alp-sdk `dev`, full sha
-  `c81cb5db9945c8f448a7bb952d374f874e2f42c0`) — the checkout the emit was RUN
+- Commit: **`79c834e65`** (alp-sdk `dev`, full sha
+  `79c834e654f150816d09c7c92832a2104e76e309`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::
   test_the_manifest_states_one_vendor_point_not_two`.
 
-  This line used to say `ff27f179` (tan-cli#1275, this pin's own prior
-  value), and before that `eb96112b` (tan-cli#996/#1001), and before that
+  This line used to say `c81cb5db` (review of tan-cli#1291, this pin's own
+  prior value), and before that `ff27f179` (tan-cli#1275), and before that
+  `eb96112b` (tan-cli#996/#1001), and before that
   `94378a05` (tan-cli#846) and, before that, `f30f4d4b`
   and assert it was "the same commit `parity.yml`'s `PINNED_SDK_TAG` now
   names". Both halves went stale, and in that order. tan-cli#582 wrote it on

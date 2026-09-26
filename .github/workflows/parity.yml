@@ -815,7 +815,47 @@ env:
   #     `metadata/toolchains.json` or `metadata/bootstrap.json` path appears
   #     in the range's `scripts/alp_orchestrate/`+hand-port diff; `west.yml`
   #     unchanged.
-  PINNED_SDK_TAG: c81cb5db9945c8f448a7bb952d374f874e2f42c0
+  #
+  # `c81cb5db` -> `79c834e65` (review of tan-cli#1291, correcting that PR's
+  # partial pin move): moved together with `test_planner_relocation_
+  # freshness.py`'s `PINNED_SDK_COMMIT` AND `HAND_PORT_PINNED_SDK_COMMIT`,
+  # `ci.yml`'s `sdk_parity` `ref:`, and `PINNED_PLANNER_ORACLE_SDK_REF` below
+  # -- all in lockstep, per this pin's own repeated precedent above (most
+  # recently tan-cli#1268/#1275's six-site move) and tan-cli#1239's worked
+  # example of the SAME failure mode this review caught: landing a
+  # behavioural planner port while leaving this tag behind reds every
+  # `python -- pytest across python/` required context, because this job's
+  # own `test_planner_emit_parity.py` binds `ALP_SDK_ROOT` to THIS tag and
+  # exercises the ported code against it directly. Two upstream commits touch
+  # `scripts/alp_orchestrate/` in the range (`0767baacb`'s docstring-only
+  # `kconfig.py` reword plus its inert `partition.py` hazard-comment insert,
+  # `79c834e65`'s real #2311 fix that supersedes that comment) and two touch
+  # hand-port sources (`bf602754a`'s `alp_project_loader.py` TargetSpec
+  # fields, needing no tan-side port since `tan.model.targets` already carries
+  # them; `b1b89a659`'s `gen_zephyr_board.py` BRD_I2C-to-CA55 move, ported) --
+  # see `test_planner_relocation_freshness.py`'s own `PINNED_SDK_COMMIT`/
+  # `HAND_PORT_PINNED_SDK_COMMIT` paragraphs for the full per-commit audit,
+  # corrected from tan-cli#1291's first cut to match `git log`/`git show`
+  # output actually run, not the commit subjects. Re-measured against
+  # `79c834e65`:
+  #   - planner oracle: a REAL 18-of-700-file diff (100 boards; 1 new board
+  #     `connectivity/camera-mjpeg-stream`, 1 retired
+  #     `v2n/v2n-rtc-multi-alarm`, both alp-sdk-side additions/deletions in
+  #     range, unrelated to this port) -- see `PINNED_PLANNER_ORACLE_SDK_REF`
+  #     below for the full attribution (three causes: alp-sdk's own
+  #     `production-deployment` example fixed to stop tripping the #2311
+  #     guard it added; #2288's BRD_I2C-to-CA55 slice-shape changes on three
+  #     V2N boards; #1470's metadata-driven DRP-AI dispatcher-line drop on two
+  #     audio/vision boards).
+  #   - `tests/parity/test_planner_emit_parity.py`, bound to `79c834e65`: 865
+  #     passed, 10 skipped, 0 failed (was 25 failed before the
+  #     `zephyr_board.py` port this same pin-move PR carries).
+  #   - scaffold / toolchain-lock / bootstrap: no `templates/`, `README.md`,
+  #     `metadata/toolchains.json` or `metadata/bootstrap.json` path appears
+  #     in `git diff --stat c81cb5db..79c834e65` for any of
+  #     `scripts/alp_orchestrate/`, `scripts/gen_zephyr_board.py`,
+  #     `scripts/alp_project_loader.py`; no re-vendor needed.
+  PINNED_SDK_TAG: 79c834e654f150816d09c7c92832a2104e76e309
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -1012,7 +1052,52 @@ env:
   # `python/tests/planner/test_storage_region_bounds.py` +
   # `python/tests/planner/test_storage_dt_label_verification.py` together
   # report 977 passed, 10 skipped, 0 failed.
-  PINNED_PLANNER_ORACLE_SDK_REF: c81cb5db9945c8f448a7bb952d374f874e2f42c0
+  #
+  # `c81cb5db` -> `79c834e65` (review of tan-cli#1291; see `PINNED_SDK_TAG`'s
+  # matching paragraph above for the full commit-level audit -- both pins
+  # move in this same change, per this repo's lockstep rule). Re-captured
+  # with `python scripts/capture_planner_oracle.py --sdk <checkout> --sdk-ref
+  # 79c834e654f150816d09c7c92832a2104e76e309`: **100 boards, 700 emits**
+  # (unchanged counts by coincidence, not by an unchanged corpus -- alp-sdk
+  # retired `examples/v2n/v2n-rtc-multi-alarm` and added
+  # `examples/connectivity/camera-mjpeg-stream` in this same range, each
+  # contributing the SoM's usual per-board emit count). An **18-of-700-file**
+  # diff (`git status --porcelain` count of modified+deleted paths under
+  # `emits/`, plus `PROVENANCE.txt`; the new `camera-mjpeg-stream` board's 7
+  # files are ADDITIONS, not part of this count), attributed to exactly four
+  # upstream causes, each verified against the actual boards it touches
+  # rather than assumed from the commit list:
+  #   - `v2n/v2n-rtc-multi-alarm/*` (7 files, ALL DELETED): alp-sdk retired
+  #     this example in the range (unrelated to #2311/#2312/#2288) -- its
+  #     emit disappears with it.
+  #   - `connectivity/production-deployment/build-plan.json` +
+  #     `tfm-sysbuild-conf.conf` (2 files): alp-sdk's OWN example `board.yaml`
+  #     changes `security.psa.ps_storage` from `ospi0` to `mram_main` in this
+  #     range -- fixing the example to stop tripping the #2311 guard
+  #     `79c834e65` itself adds (`ospi0` on `E1M-AEN801` is
+  #     `assembled: false`).
+  #   - `v2n/v2n-brd-i2c-bringup`, `v2n/v2n-secure-element-sign`,
+  #     `v2n/v2n-temp-sensor` (`build-plan.json` + `system-manifest.yaml`
+  #     each, 6 files): #2288's BRD_I2C-to-CA55 move changes these boards'
+  #     `a55_cluster` slice from `os: 'off'` to a real `os: yocto`/`app:
+  #     ./src` (Linux now owns the bus) and `m33_sm`'s `app:` from `./src` to
+  #     `alp-stock-shim` (the CM33 no longer does I2C work on these boards) --
+  #     this is alp-sdk's OWN example metadata reflecting the same #2288
+  #     move `tan/planner/zephyr_board.py` was ported for in this change, not
+  #     a second, independent delta.
+  #   - `audio/audio-noise-suppression`, `camera-vision/
+  #     ai-object-detection-realtime` (`build-plan.json` each, 2 files): drop
+  #     one `CONFIG_ALP_TFLM_DRP_AI=y  # tflite_micro / ml_npu_primary`
+  #     library line -- METADATA-driven (#1470's `metadata/npu_ops/**`
+  #     op-support tables), not a `tan/planner/kconfig.py` code change (that
+  #     file's only delta in this range is the docstring reword audited
+  #     above, which touches no emitted byte).
+  #   - `python/tests/fixtures/planner_oracle/PROVENANCE.txt`: the `alp-sdk
+  #     ref` line moves to `79c834e65` (18th file).
+  # `test_planner_emit_parity.py` + `test_planner_axis_build_plan_parity.py`
+  # + `test_storage_region_bounds.py` + `test_storage_dt_label_verification.py`
+  # together, bound to `79c834e65`: 865 passed, 10 skipped, 0 failed.
+  PINNED_PLANNER_ORACLE_SDK_REF: 79c834e654f150816d09c7c92832a2104e76e309
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this
