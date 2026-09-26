@@ -585,12 +585,6 @@ _ALLOWED_CROSS_SKU_MENTIONS: dict[tuple[str, str, str], int] = {
     ("edge-ai-starter", "E1M-AEN701", "E1M-V2N102"): 1,
     ("edge-ai-starter", "E1M-AEN801", "E1M-V2N101"): 1,
     ("edge-ai-starter", "E1M-AEN801", "E1M-V2N102"): 1,
-    ("edge-ai-starter", "E1M-V2M101", "E1M-V2N101"): 1,
-    ("edge-ai-starter", "E1M-V2M101", "E1M-V2N102"): 1,
-    ("edge-ai-starter", "E1M-V2M102", "E1M-V2N101"): 1,
-    ("edge-ai-starter", "E1M-V2M102", "E1M-V2N102"): 1,
-    ("edge-ai-starter", "E1M-V2N101", "E1M-V2N102"): 1,
-    ("edge-ai-starter", "E1M-V2N102", "E1M-V2N101"): 1,
     # Same rewrite, the other new mention: the AEN trees' `board.yaml`
     # comment still carries the OLD `deepx_v2m_note` DELIBERATE_EDITS text
     # ("Flip som.sku ... to E1M-V2M101"), which is why E1M-V2M101's count
@@ -617,26 +611,49 @@ _ALLOWED_CROSS_SKU_MENTIONS: dict[tuple[str, str, str], int] = {
     # legitimate pointer, not a substitution gap; verified by diffing the
     # planned content, not assumed from the naming.
     ("edge-ai-starter", "E1M-AEN803", "E1M-V2M101"): 2,
-    ("edge-ai-starter", "E1M-V2N101", "E1M-V2M101"): 1,
-    ("edge-ai-starter", "E1M-V2N101", "E1M-V2M102"): 1,
-    ("edge-ai-starter", "E1M-V2N102", "E1M-V2M101"): 1,
-    ("edge-ai-starter", "E1M-V2N102", "E1M-V2M102"): 1,
+    # tan-cli#1292 (review of tan-cli#1291; alp-sdk#2281 adds
+    # E1M-V2M103/E1M-V2N103 to the SKU catalogue, and the re-vendor at
+    # `79c834e65` widens the SKU-neutral DEEPX sentence to name all THREE
+    # SKUs per family instead of two -- "...E1M-V2M101/E1M-V2M102/
+    # E1M-V2M103 -- not on E1M-V2N101/E1M-V2N102/E1M-V2N103..."). Every one
+    # of the six V2M/V2N-family SKUs now sees its five siblings as foreign,
+    # 1 mention each (from the one shared sentence, verified by dumping
+    # every SKU's planned `README.md` and confirming each occurrence sits
+    # inside it) -- 6*5 = 30 entries, replacing the prior 4-SKU (12-entry)
+    # block. The AEN family is UNAFFECTED: `E1M-AEN801`'s `deepx_v2m_note`
+    # `DELIBERATE_EDITS` correction is a fixed re-scaffold-command sentence
+    # naming only `E1M-V2M101` (see `scaffold_byte_parity.py`), not the
+    # SKU-neutral one, so it does not grow a third/sixth mention when the
+    # SKU-neutral sentence does -- measured, not assumed: every
+    # `E1M-AEN*`/`E1M-V2M101` hit above is unchanged at count 2.
     ("edge-ai-starter", "E1M-V2M101", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-V2M101", "E1M-V2M103"): 1,
+    ("edge-ai-starter", "E1M-V2M101", "E1M-V2N101"): 1,
+    ("edge-ai-starter", "E1M-V2M101", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-V2M101", "E1M-V2N103"): 1,
     ("edge-ai-starter", "E1M-V2M102", "E1M-V2M101"): 1,
-    # tan-cli#1292 (alp-sdk#2281 adds E1M-V2M103/E1M-V2N103 to the SKU
-    # catalogue): both new SKUs render the same SKU-neutral DEEPX sentence
-    # as E1M-V2M101/E1M-V2M102/E1M-V2N101/E1M-V2N102 above -- a real
-    # cross-reference (which V2N/V2M family members carry the DEEPX DX-M1
-    # NPU), not a substitution gap; verified by dumping both SKUs' planned
-    # `README.md` and confirming all four occurrences sit inside that one
-    # sentence, count 1 each. Same precedent as tan-cli#1218's E1M-AEN803
-    # entries above.
+    ("edge-ai-starter", "E1M-V2M102", "E1M-V2M103"): 1,
+    ("edge-ai-starter", "E1M-V2M102", "E1M-V2N101"): 1,
+    ("edge-ai-starter", "E1M-V2M102", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-V2M102", "E1M-V2N103"): 1,
     ("edge-ai-starter", "E1M-V2M103", "E1M-V2M101"): 1,
     ("edge-ai-starter", "E1M-V2M103", "E1M-V2M102"): 1,
     ("edge-ai-starter", "E1M-V2M103", "E1M-V2N101"): 1,
     ("edge-ai-starter", "E1M-V2M103", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-V2M103", "E1M-V2N103"): 1,
+    ("edge-ai-starter", "E1M-V2N101", "E1M-V2M101"): 1,
+    ("edge-ai-starter", "E1M-V2N101", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-V2N101", "E1M-V2M103"): 1,
+    ("edge-ai-starter", "E1M-V2N101", "E1M-V2N102"): 1,
+    ("edge-ai-starter", "E1M-V2N101", "E1M-V2N103"): 1,
+    ("edge-ai-starter", "E1M-V2N102", "E1M-V2M101"): 1,
+    ("edge-ai-starter", "E1M-V2N102", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-V2N102", "E1M-V2M103"): 1,
+    ("edge-ai-starter", "E1M-V2N102", "E1M-V2N101"): 1,
+    ("edge-ai-starter", "E1M-V2N102", "E1M-V2N103"): 1,
     ("edge-ai-starter", "E1M-V2N103", "E1M-V2M101"): 1,
     ("edge-ai-starter", "E1M-V2N103", "E1M-V2M102"): 1,
+    ("edge-ai-starter", "E1M-V2N103", "E1M-V2M103"): 1,
     ("edge-ai-starter", "E1M-V2N103", "E1M-V2N101"): 1,
     ("edge-ai-starter", "E1M-V2N103", "E1M-V2N102"): 1,
 }

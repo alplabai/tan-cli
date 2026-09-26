@@ -327,6 +327,16 @@ def un_edit_edge_ai_main_c_model_comment_2(text: str) -> str:
 #: AEN801 defect in new words -- the anchor below matches the NEW wording, not
 #: the tan-cli#814-era one it replaces. Matches the literal sentence, not a
 #: paraphrase, so an unrelated README edit still fails this gate.
+#:
+#: `_EMITTED` re-anchored again for the `79c834e65` re-vendor (review of
+#: tan-cli#1291): alp-sdk#2281 adds `E1M-V2M103`/`E1M-V2N103` to the SKU
+#: catalogue, and the emit's own sentence lists all three SKUs per family now
+#: ("...`E1M-V2M101`/`E1M-V2M102`/`E1M-V2M103` -- not on
+#: `E1M-V2N101`/`E1M-V2N102`/`E1M-V2N103`..."). The DELIBERATE correction text
+#: (`_EDGE_AI_AEN801_README_DEEPX_NOTE`, unchanged) is still valid advice --
+#: E1M-AEN801 still cannot flip `som.sku` to any DEEPX SKU without
+#: re-scaffolding, three siblings or two -- so only the `_EMITTED` anchor
+#: (what the un-edit reconstructs) needed to move.
 _EDGE_AI_AEN801_README_DEEPX_NOTE = (
     "For the DEEPX DX-M1 path, re-scaffold rather than edit: `tan init --template\n"
     "edge-ai-starter --som E1M-V2M101`. Flipping `som.sku` alone leaves `preset:`,\n"
@@ -334,8 +344,9 @@ _EDGE_AI_AEN801_README_DEEPX_NOTE = (
     "the `renesas-rzv2n-deepx` family) and `tan validate` refuses it."
 )
 _EDGE_AI_AEN801_README_DEEPX_NOTE_EMITTED = (
-    "The DEEPX DX-M1 NPU is populated on `E1M-V2M101`/`E1M-V2M102` -- not on\n"
-    "`E1M-V2N101`/`E1M-V2N102`, the same PCB without it. Pick either via\n"
+    "The DEEPX DX-M1 NPU is populated on `E1M-V2M101`/`E1M-V2M102`/`E1M-V2M103`\n"
+    "-- not on `E1M-V2N101`/`E1M-V2N102`/`E1M-V2N103`, the same PCB without\n"
+    "it. Pick either via\n"
     "`som.sku` in `board.yaml`."
 )
 
