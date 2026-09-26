@@ -5,7 +5,73 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [0.6.1] — Unreleased
+## [0.7.0] — Unreleased
+
+**BREAKING: this release ships changes that break a v0.6.0
+consumer**, which is why it is a minor (`0.7.0`), not the originally-planned
+patch (`0.6.1`) — see the matching `BREAKING` entry below for each one's
+exact before/after:
+
+- tan's effective alp-sdk floor rises to the first alp-sdk release
+  containing commit `c81cb5db9945c8f448a7bb952d374f874e2f42c0` (moved from
+  `81a9d515a90403cce30588704e31faf9dc893838` by the further planner re-sync
+  tan-cli#1275; `81a9d515` is an ancestor of `c81cb5db`); `tan build`
+  on *any* Zephyr board against an older alp-sdk fails Kconfig configure
+  (`Aborting due to Kconfig warnings`, an undefined `ALP_SDK_SOM_HW_REV`),
+  and AEN and V2N/V2M boards additionally fail earlier, at `tan generate
+  --target zephyr-board` (exit 3, `generate.emit-failed`) (tan-cli#1268)
+- a confirmed Flow D (`alif_mram_jlink`) MRAM write now refuses until
+  `--atoc-unqueryable` / `flash_args.atoc_unqueryable: true` acknowledges
+  that it replaces the whole ATOC (tan-cli#1252)
+- `tan bootstrap` installs the `arm-zephyr-eabi` toolchain by default as a
+  blocking phase; `--no-toolchain` opts out (#474)
+- `tan doctor` gains a `toolchain` check that can `fail` (exit 4,
+  `doctor.toolchain`) on a host that passed before (#474)
+- `tan build --plan` / `--manifest` / `--manifest-from` /
+  `--no-auto-bootstrap` now refuse with `build.flag-retired` (exit 2)
+  instead of `cli.command-deferred` (exit 1) (#427)
+- `tan validate` / `tan diff` hw_rev refusals move off the generic
+  `validate.failed` / `diff.failed` onto
+  `validate.hardware-revision-unknown` / `-not-buildable` (and the `diff.`
+  equivalents) (#1262)
+- `tan presets` / `tan clean` / `tan diff` / `tan lock` / `tan migrate` /
+  `tan quality` / `tan examples` / `tan generate` / `tan bootstrap` / `tan
+  new-som` / `tan explain --code` now prepend (or, for `tan generate`'s
+  resolvable path, reorder to prepend; or, for `tan diff`'s previously-silent
+  nothing-resolved case, newly emit at all) `sdk.project-pin-unresolved`
+  ahead of the command's own refusal in `issues[]`, so a consumer keyed on
+  `issues[0]` sees a different code (`generate`'s is what alp-sdk-vscode's
+  toast reads, `src/alpCli/service.ts:1310`)
+- `tan validate --format sarif` / `--format diagnostic-v1` now emit a
+  `file:` URI, or a percent-encoded relative reference, instead of a raw
+  host path for `uri` / `artifactLocation.uri` (#1097)
+- the `swd_probe` flash backend is removed; a manifest declaring it now
+  refuses with `flash.entry-failed` (tan-cli#732; safe to land now that
+  alp-sdk#1439 stopped emitting `flash_method: swd_probe`)
+- generated firmware config composes `ALP_HW_BUILD_SOM_HW_REV` as
+  `"2626-r2"` rather than the bare `"r2"` for families that declare a
+  `board_datecode` (#1156)
+- `tan init` refuses several `--som` / SoM inputs that used to silently
+  succeed: `init.som-flow-style-unsupported` (#1035) and
+  `init.som-block-unsupported` (#1041)
+
+*DRAFT — replace this paragraph before tagging.* The tag itself is blocked
+on this: no alp-sdk release contains `c81cb5db` yet (tan-cli#1258, still
+OPEN; `git tag --contains c81cb5db` is empty), so this note cannot yet name
+a real floor version. Once one ships, replace this whole paragraph with one
+line: "Requires alp-sdk `vX.Y.Z` or newer" (the `v0.6.0` precedent,
+tan-cli#1258's "Done when" list) — see `docs/release-contract.md`'s own
+tag-day checklist. Measured 2026-09-23, for reference only — re-check both
+facts before the tag, they move independently of this note: the newest
+stable alp-sdk release is `v0.16.0` (`gh release list --repo
+alplabai/alp-sdk`), which carries neither
+`metadata/e1m_modules/aen/on-module-links.yaml` nor
+`metadata/e1m_modules/v2n/supervisor-links.yaml`, both of which the pinned
+planner now requires. The floor itself moved again since this paragraph was
+first written: `81a9d515` (tan-cli#1258/#1268) was superseded by `c81cb5db`
+when tan-cli#1275 re-synced `tan/planner/` further; `81a9d515` is an
+ancestor of `c81cb5db`. See `docs/release-contract.md` and tan-cli#1258 for
+the full gate measurement.
 
 ### Fixed
 
@@ -332,8 +398,9 @@ All notable changes to `tan` are documented here. Format follows
   type-checks `default_board` directly, and a new shared `_topology_for_sku`
   type-checks `topology:` and every one of its entries for both callers.
 
-- **`tan init` now refuses a `--som` retarget onto a flow-style `som:` block
-  instead of silently discarding it.** `som: {sku: ..., hw_rev: ...}` (valid
+- **BREAKING: `tan init` now refuses a `--som` retarget onto a flow-style
+  `som:` block instead of silently discarding it (#1035).**
+  `som: {sku: ..., hw_rev: ...}` (valid
   YAML, but on one physical line) is a shape `tan.core.scaffold`'s
   line-oriented `som:` reader/writer never parsed. Measured before this fix:
 
@@ -526,9 +593,9 @@ All notable changes to `tan` are documented here. Format follows
   so a corrupted offset/length silently returns wrong or truncated bytes
   instead of raising.
 
-- **`tan init --som` no longer silently discards itself on a quoted `som:`
-  key, a merge key, an alias, or a `som:` block written across more than one
-  line.** Fixes `#1041`. `tan.core.scaffold`'s line-oriented `som:` scanner
+- **BREAKING: `tan init --som` no longer silently discards itself on a
+  quoted `som:` key, a merge key, an alias, or a `som:` block written across
+  more than one line.** Fixes `#1041`. `tan.core.scaffold`'s line-oriented `som:` scanner
   read a bare `som:` line and its literal `sku:`/`hw_rev:` children, but
   `yaml.safe_load` accepts several more spellings without complaint:
   `"som":` (a quoted key), `<<:` (a merge key, inside the `som:` block or at
@@ -1527,9 +1594,9 @@ All notable changes to `tan` are documented here. Format follows
   commit per PR). The catch itself is unchanged: a branch-side delete is
   still a violation.
 
-- **`tan validate`'s `--format diagnostic-v1` (LSP) and `--format sarif` now
-  emit a valid URI reference for `uri`/`artifactLocation.uri`, not a raw
-  filesystem path.** Fixes `#1097`. SARIF 2.1.0 defines `artifactLocation.uri`
+- **BREAKING (wire): `tan validate`'s `--format diagnostic-v1` (LSP) and
+  `--format sarif` now emit a valid URI reference for
+  `uri`/`artifactLocation.uri`, not a raw filesystem path.** Fixes `#1097`. SARIF 2.1.0 defines `artifactLocation.uri`
   as a URI reference, and LSP diagnostics are keyed by document URI, which an
   editor compares against the URI of an open buffer. Both sites emitted
   `board_path` bare, so an absolute, Windows-spelled root rendered
@@ -2764,8 +2831,8 @@ All notable changes to `tan` are documented here. Format follows
     (AEN) and a hand-run `tan generate --target zephyr-board --core m33_sm`
     subprocess-vs-in-process comparison (V2N, no prior test node) both come
     back byte-identical.
-  - `scripts/alp_project_emit/hw_info.py` is a genuine hand-port too:
-    `ALP_HW_BUILD_SOM_HW_REV` now composes the family's `board_datecode`
+  - **BREAKING:** `scripts/alp_project_emit/hw_info.py` is a genuine
+    hand-port too (#1156): `ALP_HW_BUILD_SOM_HW_REV` now composes the family's `board_datecode`
     through `sdk_compat.board_designator()` (`"2626-r2"`, not the bare
     `"r2"`), matching what `scripts/program_eeprom.py` writes into a
     provisioned module's manifest and what the boot banner compares the live
@@ -4185,9 +4252,9 @@ All notable changes to `tan` are documented here. Format follows
   `PINNED_SDK_COMMIT` / `HAND_PORT_PINNED_SDK_COMMIT` all move to `20fec7a7`
   together.
 
-- **A confirmed Flow D MRAM write now refuses until the operator acknowledges
-  that it REPLACES the entire ATOC (tan-cli#1252, porting alp-sdk#2025 /
-  alp-sdk#2029).** `plan_alif_mram_jlink` emits `loadbin {atoc} {atoc_address}`,
+- **BREAKING: a confirmed Flow D MRAM write now refuses until the operator
+  acknowledges that it REPLACES the entire ATOC (tan-cli#1252, porting
+  alp-sdk#2025 / alp-sdk#2029).** `plan_alif_mram_jlink` emits `loadbin {atoc} {atoc_address}`,
   which rewrites the whole table — and Flow D, being J-Link straight over SWD,
   has no SE-UART channel to enumerate what is resident first. Any boot entry
   already in MRAM that the new ATOC does not name (an A32 boot chain, an HP
@@ -4368,14 +4435,17 @@ All notable changes to `tan` are documented here. Format follows
 
   The code moves to the docstring rather than the other way round, on a
   measurement rather than the generalisation the first cut of this change
-  shipped: of the 31 distinct values `PINNED_SDK_TAG` has held across
-  `parity.yml`'s history, the fixture is present at 29. The two exceptions are
-  `df312cec` and `f04ea42e`, July-2026 pins predating the fixture upstream --
+  shipped: of the 31 distinct values `PINNED_SDK_TAG` had held across
+  `parity.yml`'s history as of tan-cli#1271, the fixture is present at 29
+  (`c81cb5db`, added by tan-cli#1275, carries it too: 30 of 32 at that
+  pin). The two exceptions are `df312cec` and `f04ea42e`, July-2026 pins
+  predating the fixture upstream --
   `f04ea42e` was in fact the pin in force when this script was first written
   (tan-cli `ca34090e`, `#40`), which is what the deleted branch was for. Every
-  pin since carries it, `81a9d515` (the current one), the released `v0.16.0`
-  and alp-sdk `origin/dev` included, so an absent upstream fixture is a
-  removal, not a "not yet applicable" skip. The new FAIL names both exits:
+  pin since carries it, `81a9d515` (current when this entry was written;
+  superseded as the pin by `c81cb5db`, tan-cli#1275), the released
+  `v0.16.0` and alp-sdk `origin/dev` included, so an absent upstream fixture
+  is a removal, not a "not yet applicable" skip. The new FAIL names both exits:
   follow the fixture (re-vendor from its new upstream path, and update tan's
   kconfig field contract in `python/tan/commands/kconfig_cmd.py` if the fields
   moved with it), or fix the ref under test.
@@ -4424,14 +4494,15 @@ All notable changes to `tan` are documented here. Format follows
   sibling claim in `toolchain_lock_parity.py`'s docstring, that
   `metadata/toolchains.json` "already exists at every ref this repo's
   `PINNED_SDK_TAG` has ever pointed at", is narrowed on the same measurement
-  rather than re-affirmed: it is present at 27 of those 31 pins, absent at
-  `df312cec`, `f04ea42e`, `v0.13.0` and `8b216a04`. The two CI-wired gates now
+  rather than re-affirmed: it is present at 27 of those 31 pins (28 of 32
+  once tan-cli#1275 added `c81cb5db`), absent at `df312cec`, `f04ea42e`,
+  `v0.13.0` and `8b216a04`. The two CI-wired gates now
   read, and behave, as siblings; the bootstrap gate keeps its own NOTICE
   branch and is a manual diagnostic, not a CI gate.
 
-- **`tan validate` no longer reports a hw_rev refusal as a tan crash: validator
-  exits 4 and 5 get their own outcomes, and the raw exit status now rides in the
-  envelope.** Closes `#1262`.
+- **BREAKING (wire): `tan validate` no longer reports a hw_rev refusal as a
+  tan crash: validator exits 4 and 5 get their own outcomes, and the raw exit
+  status now rides in the envelope.** Closes `#1262`.
 
   `validate_cmd._STATUS_OUTCOME` mapped validator exits 0-3. alp-sdk's
   `scripts/validate_board_yaml.py` returns 0, 1, 3, 4 and 5 — measured at tag
@@ -4542,8 +4613,9 @@ All notable changes to `tan` are documented here. Format follows
     where both callers already live inside `tan.planner`. **tan's own docstring
     had claimed this exception for as long as the check existed** while the code
     only skipped a non-integer `base` — the defect was latent, never reached,
-    because `mram_main.base` is still the literal `"TBD"` on both E1M-AEN801 and
-    E1M-AEN803 (alp-sdk#2053 resolved it, hit exactly this collision, and
+    because `mram_main.base` was still the literal `"TBD"` at `81a9d515` on
+    both E1M-AEN801 and E1M-AEN803 (alp-sdk#2053 resolved it, hit exactly
+    this collision, and
     reverted it).
   - **The OSPI0 NOR + HyperRAM population is read from the SoM preset** instead
     of hardcoded (alp-sdk#2062, #2065). `on_module.ospi_memories.ospi0` and
@@ -4769,10 +4841,11 @@ All notable changes to `tan` are documented here. Format follows
   degrades to "not under it", the same safe answer every other unresolvable
   path already got.
 
-- **`tan presets` and `tan clean` now report *why* no SDK resolved, not only
-  that none did.** `presets_cmd.resolve_sdk` collapsed to a bare `None`
-  whenever nothing usable resolved, dropping `broken_project_pin` on the floor
-  even when `resolve_sdk_tiered` had already computed it -- so a workspace
+- **BREAKING (wire): `tan presets`, `tan clean`, and `tan diff` now report
+  *why* no SDK resolved, not only that none did.** `presets_cmd.resolve_sdk`
+  collapsed to a bare `None` whenever nothing usable resolved, dropping
+  `broken_project_pin` on the floor even when `resolve_sdk_tiered` had
+  already computed it -- so a workspace
   whose `.alp/sdk-path` names a checkout that no longer exists, with no
   sibling checkout for discovery to fall through to and no `~/.alp/sdk-default`
   either, reported `presets.sdk-root-unresolved` / `clean.sdk-root-not-found`
@@ -6245,9 +6318,10 @@ All notable changes to `tan` are documented here. Format follows
   bigger lift filed as tan-cli#929 rather than built here (see
   `.github/zizmor.yml`'s own header for both notes).
 
-- **`tan examples` and `tan generate` now report *why* no SDK resolved, not
-  only that none did.** Each command carried a private `_resolve_sdk`/
-  `_resolve_sdk_root` wrapper around `build_cmd.resolve_sdk_root_wide` that
+- **BREAKING (wire): `tan examples` and `tan generate` now report *why* no
+  SDK resolved, not only that none did.** Each command carried a private
+  `_resolve_sdk`/`_resolve_sdk_root` wrapper around
+  `build_cmd.resolve_sdk_root_wide` that
   collapsed to a bare `None` whenever nothing usable resolved, discarding
   `broken_project_pin`/`foreign_global_default_for` on the way -- the same
   shape tan-cli#468 fixed for `presets_cmd.resolve_sdk`. So a workspace whose
@@ -6926,9 +7000,10 @@ All notable changes to `tan` are documented here. Format follows
   default channel from ordinary boards — the same silent class as the defect,
   pointed the other way.
 
-- **`tan bootstrap` and `tan new-som` now report *why* no SDK resolved, not
-  only that none did.** Both were the sixth and seventh instance of the
-  tan-cli#900 class (`presets`/`clean` had this from tan-cli#468;
+- **BREAKING (wire): `tan bootstrap` and `tan new-som` now report *why* no
+  SDK resolved, not only that none did.** Both were the sixth and seventh
+  instance of the tan-cli#900 class (`presets`/`clean` had this from
+  tan-cli#468;
   `examples`/`generate` got it in #900): `bootstrap_cmd._run` returned its
   `bootstrap.sdk-root-unresolved` refusal, and `new_som_cmd.new_som` its
   `new-som.failed` refusal, the moment nothing usable resolved, BEFORE either
@@ -7335,7 +7410,7 @@ All notable changes to `tan` are documented here. Format follows
   generator (no `yield`)" instead of a bare "lifecycle probe crashed" that
   would point a future reader at the probe rather than the fixture.
 
-- **`tan explain --code` now reports *why* no SDK resolved, not only that
+- **BREAKING (wire): `tan explain --code` now reports *why* no SDK resolved, not only that
   none did.** `explain_cmd.bind_sdk` called `resolve_sdk_root_ladder`, then
   raised `explain.sdk-root-unresolved` while discarding
   `resolution.broken_project_pin` on the way -- the eighth instance of the
@@ -7556,9 +7631,11 @@ All notable changes to `tan` are documented here. Format follows
   reading the same unvalidated `cores[]`/`npus[]` shapes should be expected
   until `#964` closes.
 
-- **`tan lock`, `tan migrate`, and `tan quality` now report a broken
-  `.alp/sdk-path` pin exactly when the user most needs it -- when nothing
-  else on the ladder resolves either.** All three rely solely on `west_forward_
+- **BREAKING (wire): `tan lock`, `tan migrate`, and `tan quality` now report
+  a broken `.alp/sdk-path` pin exactly when the user most needs it -- when
+  nothing else on the ladder resolves either, prepending
+  `sdk.project-pin-unresolved` ahead of the command's own refusal in
+  `issues[]`.** All three rely solely on `west_forward_
   cmd.py`'s shared plumbing, whose only source for `sdk.project-pin-unresolved`
   was `Envelope.__init__`'s central seam (`_with_sdk_resolution_advisories`),
   which bails the instant `sdk is None` -- exactly the shape a rejected pin
@@ -7621,7 +7698,7 @@ All notable changes to `tan` are documented here. Format follows
   other `explain` stderr line already is. `ok`/`exitCode`/JSON output are
   unchanged on every path.
 
-- **`tan generate` ordered its SDK-resolution advisories two different ways
+- **BREAKING (wire): `tan generate` ordered its SDK-resolution advisories two different ways
   depending on which of its own paths it took.** The unresolved path (no
   SDK could be resolved at all) already prepended a broken `.alp/sdk-path`
   pin's `sdk.project-pin-unresolved` warning ahead of its own refusal, per
@@ -8070,6 +8147,116 @@ All notable changes to `tan` are documented here. Format follows
   class is now split to note it is a genuine MISS for rule 3's file-scan
   sibling but an over-strict false POSITIVE for the reachability check
   specifically.
+
+- **`tan/planner` is re-synced with alp-sdk `c81cb5db` (tan-cli#1275,
+  superseding #1269).** All six pin sites move together — `PINNED_SDK_COMMIT`
+  and `HAND_PORT_PINNED_SDK_COMMIT`
+  (`test_planner_relocation_freshness.py`), `PINNED_SDK_TAG` and
+  `PINNED_PLANNER_ORACLE_SDK_REF` (`parity.yml`), the `sdk_parity` checkout
+  `ref:` (`ci.yml`), and the frozen oracle's `PROVENANCE.txt`, re-captured at
+  that ref. `STRICT_LOADERS_PINNED_SDK_COMMIT` deliberately does not move.
+  Four upstream commits are carried:
+
+  - **`tan build` now refuses a `storage[].flash_device:` on a `memory_map`
+    region whose `write_authority` forbids a runtime mount** (alp-sdk#2088). A
+    region must declare `write_authority: customer_runtime` directly, or
+    `write_authority: composite` (the whole-device-alias tag `mram_main`
+    carries on every AEN preset) AND have every one of its contained
+    `memory_map` rows independently verified — each with a resolved
+    `[base, base+size)` extent and its own `write_authority`, together tiling
+    the alias's capacity with no gap and no overlap — before the alias is
+    accepted. Any other authored value (`vendor_image` / `secure_enclave` /
+    `none`) is refused outright, and an ABSENT value is refused too wherever
+    the SoC's on-die MRAM aperture resolves (ADR-0034 clause 4: absent means
+    unresolved, never a permissive default) — a no-op everywhere else
+    (V2N/V2M/NX9101 today, and every non-Alif SoM). Closes a real hazard: an
+    unverified `composite` alias could previously land a customer's
+    `storage[]` mount inside the Secure-Enclave-owned `atoc` band or at
+    MCUboot's own address.
+  - **`mram_main.base` resolves to `0x80000000` on all seven AEN presets**
+    (alp-sdk#2053), closing the last `"TBD"` placeholder split B's classifier
+    was written to shrug at. `mram_main` now classifies as `flash` (the
+    whole-device alias, exact aperture match) instead of `unresolved`, and the
+    `system-manifest.yaml` `memory[]` pane reports its real `base` and
+    `status: ok` instead of an `unresolved`/reason pair.
+  - **`tan build`'s `--emit kconfig` no longer crashes on a non-UTF-8 `west
+    build` diagnostic.** Both `west build` spawns inside `_load_board_symbols`
+    now decode stdout/stderr as UTF-8 with `errors="replace"` (plus
+    `PYTHONIOENCODING=utf-8` for the child), so a Kconfig/CMake failure
+    message containing a non-ASCII path or quote character on a host whose
+    default locale encoding isn't UTF-8 (e.g. a legacy Windows code page)
+    raises the intended `OrchestratorError` instead of an unhandled
+    `UnicodeDecodeError` escaping from inside `subprocess.run` itself.
+  - **The `git rev-parse --short HEAD` build-plan provenance lookup also
+    decodes as UTF-8 explicitly**, closing the same class of hazard for
+    `buildplan.py`'s `_sdk_commit()` (alp-sdk#2197's IMPLICIT-ENCODING drain).
+
+- **The release notes step no longer loses the `## Release assets` block to
+  `action-gh-release`'s silent 125000-character truncation.** The step used to
+  write the CHANGELOG's `## [X.Y.Z]` slice, then unconditionally append the
+  assets block (archive names, measured glibc floor, no-arm64/no-`-musl`
+  caveat, attestation line) after it. `softprops/action-gh-release@efb35369`
+  (v3.0.3) truncates any body over 125000 UTF-16 code units before publishing
+  (`truncateReleaseNotes`), so once a CHANGELOG section alone passed that
+  limit -- 0.7.0's measures 770642 characters -- the assets block was cut away
+  silently and the job still went green. The logic is now
+  `python/scripts/build_release_notes.py`: it decides, before assembly,
+  whether the slice fits alongside the assets block; if not, the slice is
+  replaced with a short, honest pointer to the full entry at an absolute
+  `https://github.com/alplabai/tan-cli/blob/vX.Y.Z/CHANGELOG.md` URL (a
+  relative link in a release body resolves under `/blob/` and 404s), and the
+  assets block is always present in the result. As a last resort the step now
+  fails loudly (`::error::`, non-zero exit) if the assembled body still
+  exceeds the action's limit, rather than ever relying on its silent
+  truncation. The existing #212 refusals (a missing or empty CHANGELOG
+  section) and the glibc-floor-missing refusal are unchanged.
+
+- **`scripts/ci/apt-bounded.sh` falls back to `archive.debian.org`, per
+  repository URI, when `deb.debian.org` has actually stopped serving it —
+  not merely expired it** (tan-cli#1257, option 2 — option 1, the
+  bullseye-only `Acquire::Check-Valid-Until=false` waiver, landed separately
+  in #1273 and stays unchanged). The waiver only ever waives an *expiry*; a
+  404 is not an expiry, and once Debian actually retires a suite from
+  `deb.debian.org` the waiver alone would not help. This is reactive,
+  bullseye-only, `update`-only, and stays inside the wrapper's existing
+  shared step budget and retry accounting: when an `update` attempt's own
+  output contains apt's own, line-scoped
+  `E: The repository '<URI> <suite> Release' does not have a Release file.`
+  — never a bare `404 Not Found` (also seen for a by-hash index fetch or a
+  pool `.deb` during `install`, neither of which means the repository is
+  gone), a plain expiry, a timeout, or a transient failure, all of which keep
+  today's retry unchanged — the wrapper rewrites ONLY the sources-file
+  field(s) that EXACTLY equal that URI (in `/etc/apt/sources.list`, any
+  `sources.list.d/*.list`, or a deb822 `*.sources`' `URIs:` field) to the
+  `archive.debian.org` equivalent, announces the rewrite loudly (a stderr
+  `NOTICE` and a GitHub `::warning::`, both naming #1257), and retries. A
+  suite that was never reported as gone — e.g. `bullseye-security` still
+  serving while only `bullseye` 404s — is left completely alone, never swept
+  onto the archive alongside the one that actually failed. The rewrite is
+  idempotent, so a step's second `apt-bounded.sh` invocation (`install` after
+  `update`) sees the already-rewritten sources and never re-triggers it.
+  Measured 2026-09-25: `archive.debian.org` now carries bullseye's `main` and
+  `updates` suites (200), so both stay on the archive path once rewritten —
+  but not yet `bullseye-security` (still 404). Rather than silently dropping
+  the security suite, if a retry after the rewrite shows the identical
+  "gone" line but now naming an `archive.debian.org` URI, the wrapper refuses
+  to keep retrying a deterministically dead mirror and fails immediately with
+  a `FATAL` error naming that exact URI, so a CI failure says outright which
+  suite is unavailable on both hosts instead of presenting as ordinary retry
+  exhaustion. **Option 3 (moving the `-gnu` freeze off bullseye to bookworm)
+  is declined by the maintainer as of 2026-09-25: the bullseye base is what
+  gives the released `-gnu` binaries their glibc 2.31 floor, and raising that
+  floor for every customer host remains a product decision, not something
+  this CI hardening should force.** Verified live against
+  `python@sha256:411fa4dcfdce7e7a3057c45662beba9dcd4fa36b2e50a2bfcd6c9333e59bf0db`
+  (the exact digest `release.yml`/`clean-host.yml` pin): with only
+  `deb.debian.org/debian` proxied to a 404 stub and `/debian-security` still
+  real, `update` and `install binutils` both succeed end-to-end — `main`/
+  `updates` from `archive.debian.org`, `security` untouched on
+  `deb.debian.org`; with the whole host 404ing, the wrapper still fails
+  loudly on `archive.debian.org/debian-security` after rewriting main and
+  updates; and a genuinely hanging (not 404ing) mirror leaves `sources.list`
+  completely untouched and exhausts via the pre-existing timeout path.
 
 ### Added
 
@@ -9442,7 +9629,7 @@ All notable changes to `tan` are documented here. Format follows
 
 - **Release binaries now resolve from a locked, hash-verified Python dependency set instead of a live PyPI resolution (#437).** `release.yml`'s `build` job and `clean-host.yml`'s `freeze-and-smoke` job used to run `pip install ".[monitor]" "pyinstaller>=6.10"` against whatever PyPI resolved that day, with no lock, no hashes, and an unbounded `pyinstaller` floor -- so re-running the same immutable tag on a later day could freeze a different typer/click/rich/pyyaml/jsonschema/truststore/certifi/pyinstaller and ship different executable bytes under an identical version string. `python/release-requirements.lock.txt` (a `uv pip compile --universal --generate-hashes` resolution, regenerated by `python/scripts/generate_release_lock.py`) now pins every third-party distribution -- the runtime set plus the `monitor` extra plus the build-time-only `pyinstaller`/`setuptools` -- to an exact version with every published sha256 hash, covering all four release platforms in one file. Both workflows install it with `pip install --require-hashes -r release-requirements.lock.txt`, which **refuses the whole install** on any hash mismatch or unhashed requirement rather than silently falling back to an unpinned resolution; the local `tan-cli` package installs separately with `--no-deps --no-build-isolation`. `tests/gates/test_release_lock_covers_dependencies.py` is the always-on, network-free gate keeping the committed lock honest against `pyproject.toml`'s declared dependencies (mutation-tested: a missing entry, a stripped hash, and an out-of-range pin each independently red the gate on its own assertion). `.github/workflows/release-lock-update.yml` (`workflow_dispatch`) is the reviewed path for moving a pin -- its `upgrade_package` input runs `generate_release_lock.py --upgrade` (every pin) or `--upgrade-package <name>` (one distribution) rather than a plain regenerate, which would keep every already-valid pin exactly as committed and never move anything; it opens a PR against `dev`, which then runs the new lock through `clean-host.yml`'s full four-platform freeze-and-conformance matrix before it ever reaches a tag. `--check` seeds its scratch resolution with a copy of the committed lock so it makes the same preference-vs-upgrade decision a plain regenerate does, keeping its verdict clearable by that exact remediation. The Linux build container is pinned the same way: both workflows now reference `python@sha256:411fa4dcfdce7e7a3057c45662beba9dcd4fa36b2e50a2bfcd6c9333e59bf0db` (the `python:3.12-slim-bullseye` tag kept in a trailing comment) instead of the mutable tag alone. Every release now also ships `dependency-lock.txt` (a copy of the lock at the tagged commit) as a release asset alongside `checksums.txt`, and each `build` leg records its own `pip freeze` output as a `dependency-inventory-<asset>` workflow artifact, so a shipped freeze can be audited later against exactly what went into it. Byte-for-byte reproducibility is not claimed -- PyInstaller embeds build-machine metadata (bootloader timestamps, some `.pyc` absolute paths) that varies run-to-run even from an identical input set -- but the complete build INPUT set (source tree, every third-party dependency version and hash, build container digest) is now deterministic, which `docs/release-contract.md`'s new "Dependency reproducibility (release lock)" section documents explicitly.
 
-- **`tan bootstrap` now acquires the `arm-zephyr-eabi` cross toolchain itself, as its final phase** (ADR 0021 Lane 1 P1). It reads `<sdkRoot>/metadata/toolchains.json` at RUN TIME — no copy of the pin lives in tan, so an alp-sdk pin bump reaches the next `tan bootstrap` with zero tan changes — and runs `west sdk install --version <pin> --gnu-toolchains arm-zephyr-eabi --no-hosttools --install-dir <dir>` into the artifact-keyed store `~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/` (or `$ALP_TOOLCHAIN_ROOT`, shared across every project pinning the same version). The separate manual `west sdk install` step the README documented is no longer required for the happy path; `--no-toolchain` opts out (the rest of `bootstrap` is unaffected, and `native_sim` builds never needed a cross toolchain at all).
+- **BREAKING: `tan bootstrap` now acquires the `arm-zephyr-eabi` cross toolchain itself, as a blocking final phase** (ADR 0021 Lane 1 P1, #474). It reads `<sdkRoot>/metadata/toolchains.json` at RUN TIME — no copy of the pin lives in tan, so an alp-sdk pin bump reaches the next `tan bootstrap` with zero tan changes — and runs `west sdk install --version <pin> --gnu-toolchains arm-zephyr-eabi --no-hosttools --install-dir <dir>` into the artifact-keyed store `~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/` (or `$ALP_TOOLCHAIN_ROOT`, shared across every project pinning the same version). The separate manual `west sdk install` step the README documented is no longer required for the happy path; `--no-toolchain` opts out (the rest of `bootstrap` is unaffected, and `native_sim` builds never needed a cross toolchain at all).
   - **Directory-exists is never the success predicate.** `west sdk install` runs into a `.tmp-<pid>` sibling of the store directory (the atomicity belt this ADR asks for around a tool tan does not control the internals of — west's own downloader already sha256-verifies each archive against the release's published `sha256.sum` before extracting, `scripts/west_commands/sdk.py`), then, only after the installed `sdk_version` file is read back and compared against the pin AND a real `arm-zephyr-eabi-gcc --version` probe succeeds FROM the moved-into-place store, a verification stamp (`.alp-toolchain-stamp.json`: the pinned version plus a sha256 digest of the manifest's own bytes) is written last. A `west sdk install` that reports success but names the wrong version, or whose compiler will not run, is left unstamped and unmoved/unstamped respectively — never silently trusted.
   - **A second `tan bootstrap` against an unchanged pin is a stamp read, not a reinstall** — `tan.core.toolchain_provision.stamp_matches_pin` is the one verdict function both `tan bootstrap`'s skip check and `tan doctor`'s new `toolchain` check (below) call, so the two cannot independently drift on what "still valid" means. A version bump moves to a NEW store directory by construction (the store is keyed by artifact+version); a manifest whose bytes rotate under an unchanged version string (a corrected pin) still invalidates the stamp via the digest.
   - **Refuses clearly, before spawning `west`, naming which cause:** a missing or malformed `metadata/toolchains.json`; no artifact published for this host at the pinned version (Intel Mac and `windows-arm64`, the WSL2-redirect case, are a coded, honest `log.line` skip — *never* a failure, per the ADR's own words); insufficient disk (checked against the manifest's own `measuredFootprint.extractedBytes` plus a 15% margin, named in GiB on both sides); and, on native Windows, no 7-Zip on `PATH` (west delegates `.7z` extraction to `patoolib`, which has no pure-Python fallback) — checked before this phase ever runs `west sdk install`, not discovered from its failure.
@@ -9451,8 +9638,9 @@ All notable changes to `tan` are documented here. Format follows
   - **`west sdk install` is retried up to 3 times on any failure**, the same blind, backed-off retry `.github/workflows/getting-started.yml`'s own manual `west sdk install` step already carries (tan-cli#689) for this exact command's measured CI flakiness — this PR's own first real end-to-end CI run hit a THIRD failure mode in the same family (a `tar --xz` extraction returning exit status 2 on a sha256-verified archive), on top of the two the workflow's comment already documents (a `fetch_releases` rate limit, and a separately-flaky `setup.sh -t` toolchain-component fetch). A prior attempt's leftover `.tmp-*` sibling is cleared before each retry so `west`'s own `shutil.move` cannot land inside a stale partial directory instead of replacing it.
   - **A `west sdk install` failure on a critically low volume (<512 MiB free) gets a low-disk note appended**, independent of whether the preflight passed: the preflight checks space ONCE, before anything downloads, and a host that barely cleared it can still run out mid-extraction — the shape this PR's own first end-to-end CI run hit (a `tar --xz` extraction error whose message named no cause at all, because `tan.core.bootstrap.capture_tail` keeps only a failed child's last 4 non-empty output lines).
   - **`--dry-run` reports the real `west sdk install` argv in `data.plannedCommands` and writes nothing** — no store directory, no stamp, no network call, no retry, no sleep.
-- **`tan doctor` gains a `toolchain` check: stamp-vs-pin, never directory-exists.** Distinct from the existing `zephyrSdk` check (an unconditional, host-only "does any toolchain exist" probe): `toolchain` needs a resolved SDK checkout, reads its pinned version, and reports `pass` only when a verified stamp matches that exact pin — a stamped install against a MOVED pin (alp-sdk's `metadata/toolchains.json` changed since the last `tan bootstrap`) is a `fail` naming `tan bootstrap` as the fix, not "a toolchain exists" (ADR 0021's own words). `unknown` (never a guess) when no SDK checkout resolves or its `metadata/toolchains.json` is unreadable.
+- **BREAKING: `tan doctor` gains a `toolchain` check (#474): stamp-vs-pin, never directory-exists.** Distinct from the existing `zephyrSdk` check (an unconditional, host-only "does any toolchain exist" probe): `toolchain` needs a resolved SDK checkout, reads its pinned version, and reports `pass` only when a verified stamp matches that exact pin — a stamped install against a MOVED pin (alp-sdk's `metadata/toolchains.json` changed since the last `tan bootstrap`) is a `fail` naming `tan bootstrap` as the fix, not "a toolchain exists" (ADR 0021's own words). `unknown` (never a guess) when no SDK checkout resolves or its `metadata/toolchains.json` is unreadable.
   - **Has an adoption path for a toolchain `tan bootstrap` did not install.** A host with a real, working, correctly-pinned Zephyr SDK already on it — `ZEPHYR_SDK_INSTALL_DIR` set, or the SAME scan `zephyrSdk` already trusts, at a `sdk_version` matching this checkout's pin — reports `pass`, never a `fail` whose only prescribed remedy (`tan bootstrap`) would otherwise re-download a second, redundant copy of a toolchain the host already has (or fail outright offline, or on the README's own documented hand-`west sdk install` path). A stamp is tan's own bookkeeping for what it installed, not the only proof a working toolchain exists.
+  - **On a host that the bound alp-sdk checkout's `metadata/toolchains.json` has no artifact row for (at alp-sdk `81a9d515`: every host except `linux-x86_64`, `windows-x86_64` and `macos-aarch64` — so Intel Mac (`macos-x86_64`), arm64 Linux (`linux-aarch64`) and `windows-arm64`)** — `tan bootstrap`'s toolchain phase skips honestly rather than failing (above), so no stamp is ever written there. (The Zephyr SDK itself does publish a `linux-aarch64` host build — see `doctor_cmd.ZEPHYR_SDK_HOSTS`, which lists it; it is alp-sdk's own `metadata/toolchains.json` manifest that carries no row for it, which `artifacts_missing_for_host` reads.) `toolchain` therefore reports `fail` (exit 4) on exactly those hosts, unless the adoption path immediately above finds a pre-existing, hand- or otherwise-installed toolchain whose own `sdk_version` already matches this checkout's pin.
 - **`tan build`'s `${TOOLCHAIN_ROOT}` resolution now also finds a toolchain `tan bootstrap` acquired** — the artifact-keyed store (`~/.alp/toolchains/zephyr-sdk-<version>-arm-zephyr-eabi/`, or `$ALP_TOOLCHAIN_ROOT`) is now scanned alongside the existing `/opt`/`$HOME`/`%USERPROFILE%`/`Path.home()` roots, so a customer who ran nothing but `tan bootstrap` gets a build that finds it without also hand-exporting `ZEPHYR_SDK_INSTALL_DIR`. A `.tmp-<pid>` wreckage sibling from an interrupted acquisition is excluded by name so it can never fake a second, ambiguous candidate.
 
 - **`tan examples`' envelope carries per-example facets now, not just
@@ -10371,8 +10559,56 @@ All notable changes to `tan` are documented here. Format follows
   accordingly (`contract/README.md`, "Second re-record: `data.programsDevice`
   + `loadFiles` (tan-cli#945)").
 
+- **`debug-config.sdk-identity-appended` (info, reserved) registered.** The
+  `.alp/` content-hash provenance sidecar (tan-cli#518) lets `tan
+  debug-config` tell its own prior writes apart from a hand-authored or
+  foreign `launch.json` entry; when it cannot confirm an existing list entry
+  is its own, the SDK-resolved value is now APPENDED beside the old one
+  rather than silently replacing it (`sdk_identity_stranded_appends`,
+  tan-cli#982 review finding #2). `debug_config_cmd.py` already emits this
+  code into `issues[]` today (`_sdk_identity_appended_issue`) -- only the
+  broader alp-sdk-vscode consumer handling is reserved (registry `status:
+  "reserved"`, `consumer: "none"`). A `launch.json` written by v0.6.0 carries
+  no such sidecar (the provenance mechanism postdates it), so the first write
+  under this release, on a v0.6.0 workspace whose existing `configFiles`
+  value differs from the one the SDK now resolves, takes this append path --
+  an existing value already equal to the resolved one hits `existing_val ==
+  incoming_val` and is left untouched, with no append and no issue.
+
 ### Changed
 
+- **BREAKING: tan's effective alp-sdk floor rises to the first alp-sdk
+  release that contains commit `c81cb5db9945c8f448a7bb952d374f874e2f42c0`**
+  (moved from `81a9d515a90403cce30588704e31faf9dc893838` by the further
+  planner re-sync tan-cli#1275; `81a9d515` is an ancestor of `c81cb5db`).
+  The planner re-sync (tan-cli#1268, carried forward by tan-cli#1275) now
+  requires `metadata/e1m_modules/aen/on-module-links.yaml` and
+  `metadata/e1m_modules/v2n/supervisor-links.yaml`; an alp-sdk checkout that
+  predates them (`dbfa06bd` / `eff266b6`, both ancestors of `20fec7a7`,
+  hence of `c81cb5db`) — every stable release through `v0.16.0` — carries
+  neither. `c81cb5db` also has commit `b3775381` (alp-sdk#1862, the
+  `CONFIG_ALP_SDK_SOM_HW_REV` symbol below) as an ancestor, and
+  `python/tan/planner/kconfig.py:777` writes that symbol into every Zephyr
+  slice's `alp.conf` unconditionally, not just AEN/V2N's — so the floor is
+  universal, not narrow. **Who must act:** anyone running `tan build` on
+  *any* Zephyr board against a pre-floor alp-sdk release (every stable
+  release through `v0.16.0`); the tan-cli#1275 step from `81a9d515` to
+  `c81cb5db` moves the floor by the pinned-planner rule, not by a newly
+  measured failure. Measured against `v0.16.0`
+  (which defines no `ALP_SDK_SOM_HW_REV` Kconfig symbol at all —
+  `git grep ALP_SDK_SOM_HW_REV v0.16.0` finds nothing): Zephyr's own
+  `scripts/kconfig/kconfig.py --handwritten-input-configs`, the exact script
+  and flag `west build`'s CMake configure step invokes for `EXTRA_CONF_FILE`
+  fragments, aborts with `error: Aborting due to Kconfig warnings` on the
+  resulting `alp.conf:N: warning: attempt to assign the value ... to the
+  undefined symbol ALP_SDK_SOM_HW_REV` — reproduced directly against the
+  pinned Zephyr `v4.4.1` `kconfig.py` + `kconfiglib`. AEN and V2N/V2M boards
+  additionally fail earlier, at `tan generate --target zephyr-board` (exit 3,
+  `generate.emit-failed`), for the on-module-links/supervisor-links gate
+  above; every other Zephyr board fails later, at `west build` configure,
+  against any alp-sdk that predates `b3775381` (every stable release through
+  `v0.16.0`).
+  See `docs/release-contract.md` and tan-cli#1258.
 - **Every board's generated Zephyr `alp.conf` now carries
   `CONFIG_ALP_SDK_SOM_HW_REV="<hw_rev>"`, unconditionally.** Planner re-sync
   to alp-sdk `f1b1c9df` (alp-sdk#1862) ports the upstream change: `alp.conf`
@@ -10381,10 +10617,16 @@ All notable changes to `tan` are documented here. Format follows
   with no EEPROM today (e.g. E1M-NX9101), so the symbol is not silently
   dropped if one is added later. This is what lets the (also upstream) boot
   banner warn when the firmware's build-time `hw_rev` disagrees with the
-  live EEPROM manifest at runtime. Purely additive — no existing Kconfig
-  symbol changed meaning — but it does move emitted bytes: `tan build`'s
-  generated `alp.conf` differs from a pre-#1026 `tan` on every Zephyr slice
-  of every board.
+  live EEPROM manifest at runtime. Additive only against an alp-sdk checkout
+  at or after `b3775381` (alp-sdk#1862, which defines the
+  `ALP_SDK_SOM_HW_REV` Kconfig symbol and is an ancestor of the `c81cb5db`
+  floor set by the BREAKING entry above) — no existing Kconfig symbol changed meaning there, but it does
+  move emitted bytes: `tan build`'s generated `alp.conf` differs from a
+  pre-#1026 `tan` on every Zephyr slice of every board. Against an alp-sdk
+  that predates `b3775381` (every stable release through `v0.16.0`) it is not
+  additive at all: see the BREAKING entry above for the
+  `west build` Kconfig abort this unconditional assignment causes on every
+  Zephyr board.
 
 - **PyPI replaces the npm shim as the standalone install channel, published
   over Trusted Publishing with no token at all (#1054).** `release.yml`'s
@@ -11027,8 +11269,9 @@ All notable changes to `tan` are documented here. Format follows
   skipped, 1 xfailed, 0 failed across the full suite, matching the branch's
   own reference count on the merge base.
 
-- **`tan build`'s eleven declared-but-refused oracle flags are resolved into
-  three buckets, per the maintainer's decision on #427.** All eleven used to
+- **BREAKING (wire): `tan build`'s eleven declared-but-refused oracle flags
+  are resolved into three buckets, per the maintainer's decision on #427.**
+  All eleven used to
   refuse with the shared `cli.command-deferred` (exit 1), each pointing at
   the same #427 -- fine until #260 closed and the same treatment started
   pointing at a closed issue about unrelated commands; that pointer defect is
@@ -11418,8 +11661,9 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Removed
 
-- **The `swd_probe` flash backend is removed -- GD32 bridge programming is
-  separating out of `tan` entirely.** `flash_method: swd_probe` was the local
+- **BREAKING: the `swd_probe` flash backend is removed (tan-cli#732) -- GD32
+  bridge programming is separating out of `tan` entirely.**
+  `flash_method: swd_probe` was the local
   SWD write path for the E1M-X V2N/V2M SoMs' GD32G553 supervisor bridge
   (`plan_swd_probe`, J-Link/OpenOCD/pyOCD arms, its own read-only DPIDR
   preflight, and the `#540`/`#590` write-verification qualification built on
@@ -11464,6 +11708,18 @@ All notable changes to `tan` are documented here. Format follows
   applies now that `tan` has no such write, but the issue stays open -- the
   underlying SW-DP ID contradiction is a real, unresolved bench fact
   whatever tool ends up programming the GD32 will still need.
+
+- **`model.build-timeout` and `model.python-too-old` are dropped from
+  `contract/issue-codes.json`.** Both were `reserved`, never `frozen` (no
+  consumer ever matched either), so removing them is not a breaking wire
+  change. Their only emission sites were the retired subprocess driver
+  (`_run_driver`, `_python_too_old` in `model_cmd.py`) that spawned
+  `tan model build` as a `python -c` payload under the alp-sdk checkout's own
+  interpreter: now that the relocated model engine (`tan.model.build`) is
+  called in-process (ADR-0028 Task 2), there is no subprocess to time out and
+  no separate SDK-Python-interpreter floor to check, so both codes have
+  nothing left to name.
+
 ## [0.6.0] — 2026-08-24
 
 *`v0.6.0-rc1` (2026-08-14) was published as a GitHub **pre-release**, so

@@ -556,7 +556,7 @@ Tracked in tan-cli#1258, with the full measurement.
 | Change | Kind | alp-sdk commit | On `dev` since | Effect against `v0.16.0` | In a tag? |
 |---|---|---|---|---|---|
 | Vendored scaffold point — alp-sdk#1914 | scaffold point | `ff27f179` | before #1251 | `scaffold_byte_parity.py` exit 1, 8 of 10 pairs FAIL (10 of 10 PASS against `20fec7a7`). This alone reds the job | **NO** |
-| `CONFIG_ALP_SDK_SOM_HW_REV` in per-core `alp.conf` — alp-sdk#1862 | emit | `b3775381` | before #1251 | zephyr-conf render differs; boards drop out of the breadth count | **NO** |
+| `CONFIG_ALP_SDK_SOM_HW_REV` in per-core `alp.conf` — alp-sdk#1862 | emit | `b3775381` | before #1251 | zephyr-conf render differs; boards drop out of the breadth count. Against an alp-sdk that predates this commit (no `ALP_SDK_SOM_HW_REV` Kconfig symbol — true of every stable release through `v0.16.0`), the emitted `alp.conf` assignment is undefined, and `west build`'s own Kconfig configure step aborts on it (`error: Aborting due to Kconfig warnings`) for *every* Zephyr board, not only AEN/V2N/V2M — see the renumber addendum below and `CHANGELOG.md`'s floor entry | **NO** |
 | Boot-banner block in `alp.conf`, and a **requirement** on `metadata/e1m_modules/aen/on-module-links.yaml` — alp-sdk#1964 | emit + requirement | `eff266b6` | before #1251 | The Boot-banner block is the first diff on all 98 failing `--emit zephyr-conf` renders, which is what drops those boards out of the breadth count. AEN `tan generate --target zephyr-board` also exits 3: `ZephyrBoardEmitError: no <sdk>/metadata/e1m_modules/aen/on-module-links.yaml` | **NO** |
 | **Requirement** on `metadata/e1m_modules/v2n/supervisor-links.yaml` — alp-sdk#1924 | requirement | `dbfa06bd` | before #1251 | V2N/V2M `tan generate --target zephyr-board` exits 3: `ZephyrBoardEmitError: no <sdk>/metadata/e1m_modules/v2n/supervisor-links.yaml` | **NO** |
 | `memory[]` pane in `system-manifest.yaml` — alp-sdk#1365 / #2030 | emit | `96a382929b` | #1251 | `--emit system-manifest` differs on 99 of 100 boards. `system-manifest` is in `RENDER_MODES` only, so on its own this does **not** red the job (see "The check.") | **NO** |
@@ -564,21 +564,70 @@ Tracked in tan-cli#1258, with the full measurement.
 
 Released `tan` `0.6.0` is unaffected; this binds the next tag cut from `dev`.
 Against `v0.16.0`, `tan build --materialise` on an AEN example still exits 0,
-because it never reaches the zephyr-board emitter. The failure a customer would
-see is `tan generate --target zephyr-board`, which is the tan-cli#591 class this
-section exists for.
+because `--materialise` never runs `west build`, so Kconfig configure never
+sees the undefined symbol. (No `tan build` path invokes the zephyr-board
+emitter at all; only `tan generate --target zephyr-board` does.) A full
+(non-`--materialise`) `tan build` on *any* Zephyr board against an alp-sdk
+that predates `b3775381` (every stable release through `v0.16.0`) does reach
+`west build`'s Kconfig configure step and aborts there on the `b3775381`
+row's undefined symbol — see the renumber addendum
+below. The failure a customer running `tan generate --target zephyr-board`
+would see is the tan-cli#591 class this section exists for; AEN/V2N/V2M hit
+that exit-3 refusal earlier still, before Kconfig is ever reached.
+
+**Addendum (2026-09-15, tan-cli#1268).** The planner mirror moved past
+`20fec7a7` to alp-sdk `81a9d515` (21 commits later; `20fec7a7` is an ancestor
+of `81a9d515`) when tan-cli#1268 re-synced `tan/planner/`. `81a9d515` became
+the actual floor the next tag needs (itself superseded by the next
+addendum), superseding `20fec7a7` below. The specific facts named in the
+table above (`aen/on-module-links.yaml`, `v2n/supervisor-links.yaml`) are
+unchanged, since both predate even `20fec7a7`.
+
+**Addendum (2026-09-23, tan-cli#1275).** The planner mirror moved past
+`81a9d515` to alp-sdk `c81cb5db9945c8f448a7bb952d374f874e2f42c0` (69
+first-parent commits later; `81a9d515` is an ancestor of `c81cb5db`) when
+tan-cli#1275 re-synced `tan/planner/` further, along all six pin sites
+(`test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT` and
+`HAND_PORT_PINNED_SDK_COMMIT`, `parity.yml`'s `PINNED_SDK_TAG` and
+`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity` checkout `ref:`,
+and the frozen oracle's `PROVENANCE.txt`). `c81cb5db` is now the actual
+floor the next tag needs, superseding `81a9d515` above. The specific facts
+named in the table above (`aen/on-module-links.yaml`,
+`v2n/supervisor-links.yaml`) are unchanged again, for the same reason: both
+predate `20fec7a7`, hence `81a9d515` and `c81cb5db` too. No alp-sdk tag
+contains `c81cb5db` yet, as of 2026-09-23. alp-sdk#2047 already tracks
+this, retitled since to ask for a stable release containing `c81cb5db`
+(see the issue for its exact current title).
 
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
-tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag contains
-`20fec7a7` (alp-sdk#2047, milestone `v0.17.0`). No SDK-capability gate is added
-around `memory[]` or any other row. Done when:
+tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag
+contains `c81cb5db` (superseding the `20fec7a7` floor this decision
+originally named, via the interim `81a9d515` floor -- see the addenda
+above, tan-cli#1268 then tan-cli#1275; alp-sdk#2047,
+milestone `v0.17.0`). No SDK-capability gate is added around `memory[]` or
+any other row. (The renumbering addendum below moves this release's name
+from `0.6.1` to `0.7.0`; the floor itself is unaffected by that rename.)
+Done when:
 
 - every row above reads **YES** and names that tag;
 - the **whole** `release-sdk-parity` job is green on the tag push, in the sense
   defined under "The check.": all three `--sdk` scripts exit 0, the guard and
   the breadth node PASSED, and the pytest log shows no parity failures (the
   planner step does not act on them);
-- the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s did for `v0.16.0`.
+- the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s did for `v0.16.0`, naming the real tag in place of `CHANGELOG.md`'s current `## [0.7.0]` draft marker (tan-cli#1258).
+
+**Addendum (renumbered 0.6.1 -> 0.7.0, maintainer, 2026-09-19).** Pre-1.0
+SemVer puts a break in the minor, not the patch: the alp-sdk-floor bump this
+section describes breaks a v0.6.0 consumer's `tan build` on *any* Zephyr
+board (Kconfig configure aborts on the undefined `ALP_SDK_SOM_HW_REV`
+symbol — commit `b3775381`/alp-sdk#1862 is an ancestor of the named floor
+commit `c81cb5db` (and was already an ancestor of the `81a9d515` floor this
+section originally named) — measured against `v0.16.0`, see `CHANGELOG.md`'s
+floor entry), not just AEN/V2N/V2M's `tan generate --target zephyr-board`, so the
+release renumbers from the `0.6.1` named above to `0.7.0`. That is one of
+several `BREAKING`-marked entries in this release, not the only one — see
+`CHANGELOG.md`'s `## [0.7.0]` preamble list of breaks, which names every one
+of them, rather than this section's single floor entry.
 
 ## Decisions
 
