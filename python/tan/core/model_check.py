@@ -165,7 +165,13 @@ def _sram_fit_lines(report: dict) -> list[str]:
     static screen, or a `compiled` report `check.py` never reached --
     `basis` gates it, `model_check.backend_report_as_dict` already made it
     `null` there). Never renders a bare "fits" -- only `fits-unverified` /
-    `no-fit` / `skipped`, the same three words the JSON carries."""
+    `no-fit` / `skipped`, the same three words the JSON carries.
+
+    tan-cli#1288 review round 2, finding 4 checked THIS renderer too for the
+    same "borrows the wrong axis's `limitKib`" defect `build.py`'s own
+    `_sram_no_fit_message` had -- it does not have it: each axis line reads
+    ONLY its own `axis[...]` dict below, never the sibling axis's, so there
+    is no `arena`/`sram0` figure to cross up."""
     fit = report.get("sramFit")
     if not fit:
         return []

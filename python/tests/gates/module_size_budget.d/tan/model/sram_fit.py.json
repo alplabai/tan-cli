@@ -5,7 +5,11 @@
   "lines": null,
   "long_functions": [
     [
-      51,
+      54,
+      "_core_uses_inference"
+    ],
+    [
+      57,
       "resolve_arena_budget"
     ]
   ]

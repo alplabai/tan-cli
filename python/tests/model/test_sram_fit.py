@@ -103,12 +103,47 @@ def test_a_declared_paired_core_is_single_and_certain_even_with_no_override():
     assert budget.cores == ("m55_hp",)
 
 
-def test_a_declared_paired_core_with_no_inference_block_defaults_but_stays_certain():
-    board_doc = {"cores": {"m55_hp": {}}}
+def test_a_declared_paired_core_with_an_empty_inference_block_defaults_but_stays_certain():
+    # An `inference: {}` block is present (rule 1: "runs inference at all")
+    # but tunes no override -- still CERTAIN, default 128.
+    board_doc = {"cores": {"m55_hp": {"inference": {}}}}
     budget = resolve_arena_budget(board_doc, "m55_hp")
     assert budget.kind == "single"
     assert budget.single_kib == DEFAULT_ARENA_KIB == 128  # board.schema.json's own default
     assert budget.cores == ("m55_hp",)
+
+
+def test_a_declared_paired_core_with_no_inference_signal_at_all_is_unresolved():
+    """tan-cli#1288 review round 2, finding 1: the core key existing under
+    `cores:` is NOT enough on its own -- a core `board.yaml` declares for an
+    unrelated reason (a peripheral, an app) but that runs no inference
+    workload (no `inference:` block, no `tflite-micro` library) is
+    `"unresolved"`, never a `128`-based certain figure."""
+    board_doc = {"cores": {"m55_hp": {"app": "./src", "peripherals": ["i2c"]}}}
+    budget = resolve_arena_budget(board_doc, "m55_hp")
+    assert budget.kind == "unresolved"
+    assert "m55_hp" in budget.reason and "runs no inference workload" in budget.reason
+
+
+def test_a_libraries_only_inference_core_is_single_and_certain():
+    """The library signal (`tflite-micro` in `libraries:`) is INDEPENDENT of
+    `inference:` -- `inference:` is app-level TUNING, so an app that never
+    overrides the arena default has no reason to write the block at all
+    (mirrors `tan.planner.kconfig._slice_wants_inference`'s own reasoning)."""
+    board_doc = {"cores": {"m55_hp": {"app": "./src"}},
+                 "libraries": [{"name": "tflite-micro", "cores": ["m55_hp"]}]}
+    budget = resolve_arena_budget(board_doc, "m55_hp")
+    assert budget.kind == "single"
+    assert budget.single_kib == DEFAULT_ARENA_KIB
+    assert budget.cores == ("m55_hp",)
+
+
+def test_a_project_wide_tflite_micro_library_counts_as_inference_use_too():
+    # No `cores:` scoping on the library entry -- project-wide.
+    board_doc = {"cores": {"m55_hp": {"app": "./src"}},
+                 "libraries": ["tflite-micro"]}
+    budget = resolve_arena_budget(board_doc, "m55_hp")
+    assert budget.kind == "single"
 
 
 def test_a_paired_core_absent_from_board_yaml_is_unresolved_not_a_128_guess():
@@ -155,6 +190,25 @@ def test_an_unpaired_npu_with_no_inference_core_at_all_is_unresolved():
     assert "declares no core running an inference workload" in budget.reason
 
 
+def test_the_reviews_own_libraries_only_probe_resolves_single_not_unresolved():
+    """The exact literal probe tan-cli#1288 review round 2 gave for finding 2
+    (`{"cores": {"m55_hp": {"app": "./src", "libraries": ["tflite-micro"]}}}`)
+    -- a per-core `libraries:` list, which `_core_uses_inference` reads as a
+    second, defensive home for the same signal alongside the schema's own
+    top-level scoped `libraries:` (finding 1's library signal). Confirmed
+    HERE, once, as its own test: with finding 1 applied this board is
+    `"single"`/CERTAIN, not `"unresolved"` -- the SRAM0 probe this exact board
+    doc feeds (`test_the_reviews_own_libraries_only_probe_is_a_certain_
+    sram0_no_fit` in the evaluate_sram_fit section below) is therefore a
+    `"single"`-shape certain no-fit, not an unresolved-lower-bound one; a
+    genuinely unresolved probe is pinned separately."""
+    board_doc = {"cores": {"m55_hp": {"app": "./src", "libraries": ["tflite-micro"]}}}
+    budget = resolve_arena_budget(board_doc, None)  # the U85 shape: paired_core is None
+    assert budget.kind == "single"
+    assert budget.single_kib == DEFAULT_ARENA_KIB
+    assert budget.cores == ("m55_hp",)
+
+
 def test_resolve_arena_budget_is_unresolved_when_board_doc_is_absent():
     budget = resolve_arena_budget(None, "m55_hp")
     assert budget.kind == "unresolved"
@@ -189,6 +243,134 @@ def test_the_e8_shaped_u85_yields_a_certain_no_fit_at_arena_72_vs_m55_hp_64():
     assert fit.arena.verdict == NO_FIT
     assert fit.arena.needed_kib == 72 and fit.arena.limit_kib == 64
     assert fit.no_fit is True
+
+
+def test_the_reviews_own_libraries_only_probe_is_a_certain_sram0_no_fit(tmp_path):
+    """tan-cli#1288 review round 2, finding 2's own probe, run through
+    `evaluate_sram_fit` end to end: the board declares `m55_hp` via a
+    `tflite-micro` LIBRARY only (no `inference:` block) -- with finding 1
+    applied this resolves `"single"`/CERTAIN (128 KiB default), so
+    `blob_kib(5000) + arena(128) = 5128 > SRAM0(4096)` is a real, single-shape
+    `NO_FIT` -- not the unresolved-lower-bound shape (which needs a genuinely
+    unresolved board; see the next test)."""
+    _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
+    _write_soc_with_variant(tmp_path, "fake:soc:e8", [], sku="E1M-FAKE",
+                            sram_banks_kb={"SRAM0": 4096})
+    board_doc = {"cores": {"m55_hp": {"app": "./src", "libraries": ["tflite-micro"]}}}
+    fit = evaluate_sram_fit(
+        memory_mode="Sram_Only", req_sram_kib=1, blob_len_bytes=5000 * 1024,
+        board_doc=board_doc, paired_core=None,  # the E8's own Ethos-U85 shape
+        sku="E1M-FAKE", metadata_root=tmp_path,
+    )
+    assert fit.arena.verdict == FIT_UNVERIFIED  # req_sram_kib=1 fits the 128 default easily
+    assert fit.sram0.verdict == NO_FIT
+    assert fit.sram0.needed_kib == 5128 and fit.sram0.limit_kib == 4096
+    assert fit.no_fit is True
+
+
+def test_an_unresolved_arena_still_catches_a_certain_sram0_no_fit_via_the_schema_minimum(
+        tmp_path):
+    """tan-cli#1288 review round 2, finding 2: a GENUINELY unresolved board
+    (no inference signal anywhere -- unlike the libraries-only probe above,
+    which resolves `"single"`) still proves a certain SRAM0 `NO_FIT` off
+    `MIN_ARENA_KIB` (16, `board.schema.json`'s own `default_arena_kib`
+    minimum) as a lower bound: whatever the REAL arena turns out to be, it
+    can never be smaller than 16 KiB, so `blob_kib(5000) + 16 = 5016 >
+    SRAM0(4096)` fails regardless."""
+    _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
+    _write_soc_with_variant(tmp_path, "fake:soc:e8", [], sku="E1M-FAKE",
+                            sram_banks_kb={"SRAM0": 4096})
+    board_doc = {"cores": {"m55_hp": {"app": "./src", "peripherals": ["i2c"]}}}
+    fit = evaluate_sram_fit(
+        memory_mode="Sram_Only", req_sram_kib=1, blob_len_bytes=5000 * 1024,
+        board_doc=board_doc, paired_core=None, sku="E1M-FAKE", metadata_root=tmp_path,
+    )
+    assert fit.arena.verdict == SKIPPED           # genuinely unresolved
+    assert fit.sram0.verdict == NO_FIT
+    assert fit.sram0.needed_kib == 5016 and fit.sram0.limit_kib == 4096
+    assert "16 KiB" in fit.sram0.reason and "board.schema.json" in fit.sram0.reason
+    assert fit.no_fit is True
+
+
+def test_an_unresolved_arena_with_a_small_blob_stays_skipped_never_fits_unverified(tmp_path):
+    """The other half of finding 2: when even the schema-minimum lower bound
+    fits, `sram0` must NOT assert `FIT_UNVERIFIED` -- the real arena is
+    unknown and could be far larger than 16 KiB -- it stays `SKIPPED`."""
+    _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
+    _write_soc_with_variant(tmp_path, "fake:soc:e8", [], sku="E1M-FAKE",
+                            sram_banks_kb={"SRAM0": 4096})
+    board_doc = {"cores": {"m55_hp": {"app": "./src", "peripherals": ["i2c"]}}}
+    fit = evaluate_sram_fit(
+        memory_mode="Sram_Only", req_sram_kib=1, blob_len_bytes=1024,
+        board_doc=board_doc, paired_core=None, sku="E1M-FAKE", metadata_root=tmp_path,
+    )
+    assert fit.sram0.verdict == SKIPPED
+    assert fit.sram0.verdict != FIT_UNVERIFIED
+    assert fit.no_fit is False
+
+
+def test_a_range_sram0_over_claim_is_now_skipped_not_fits_unverified(tmp_path):
+    """tan-cli#1288 review round 2, finding 3: budgets 64 & 1024 KiB across
+    two ambiguous cores, blob 3500 KiB against a 4096 KiB SRAM0 -- the OLD
+    code summed against the MIN (64) alone and reported `FIT_UNVERIFIED`
+    (`3500 + 64 = 3564 <= 4096`), silently passing a blob that could genuinely
+    fail if the real core turns out to be the one budgeting 1024
+    (`3500 + 1024 = 4524 > 4096`). The corrected three-way split reports
+    `SKIPPED` for exactly this straddling case."""
+    _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
+    _write_soc_with_variant(tmp_path, "fake:soc:e8", [], sku="E1M-FAKE",
+                            sram_banks_kb={"SRAM0": 4096})
+    board_doc = {"cores": {
+        "m55_hp": {"inference": {"default_arena_kib": 1024}},
+        "m55_he": {"inference": {"default_arena_kib": 64}},
+    }}
+    fit = evaluate_sram_fit(
+        memory_mode="Sram_Only", req_sram_kib=1, blob_len_bytes=3500 * 1024,
+        board_doc=board_doc, paired_core=None, sku="E1M-FAKE", metadata_root=tmp_path,
+    )
+    assert fit.sram0.verdict == SKIPPED
+    assert fit.sram0.verdict != FIT_UNVERIFIED
+    assert "64" in fit.sram0.reason and "1024" in fit.sram0.reason
+    assert fit.no_fit is False
+
+
+def test_a_range_sram0_no_fit_below_even_the_min_arena(tmp_path):
+    # blob(5000) + min(64) = 5064 > 4096 -- fails even at the SMALLEST
+    # candidate, so every other (needing MORE SRAM0) fails too: certain.
+    _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
+    _write_soc_with_variant(tmp_path, "fake:soc:e8", [], sku="E1M-FAKE",
+                            sram_banks_kb={"SRAM0": 4096})
+    board_doc = {"cores": {
+        "m55_hp": {"inference": {"default_arena_kib": 1024}},
+        "m55_he": {"inference": {"default_arena_kib": 64}},
+    }}
+    fit = evaluate_sram_fit(
+        memory_mode="Sram_Only", req_sram_kib=1, blob_len_bytes=5000 * 1024,
+        board_doc=board_doc, paired_core=None, sku="E1M-FAKE", metadata_root=tmp_path,
+    )
+    assert fit.sram0.verdict == NO_FIT
+    assert fit.sram0.needed_kib == 5064
+    assert fit.no_fit is True
+
+
+def test_a_range_sram0_fits_unverified_above_even_the_max_arena(tmp_path):
+    # blob(100) + max(1024) = 1124 <= 4096 -- fits even at the LARGEST
+    # candidate, so every candidate fits: as certain a pass as any
+    # fits-unverified gets.
+    _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
+    _write_soc_with_variant(tmp_path, "fake:soc:e8", [], sku="E1M-FAKE",
+                            sram_banks_kb={"SRAM0": 4096})
+    board_doc = {"cores": {
+        "m55_hp": {"inference": {"default_arena_kib": 1024}},
+        "m55_he": {"inference": {"default_arena_kib": 64}},
+    }}
+    fit = evaluate_sram_fit(
+        memory_mode="Sram_Only", req_sram_kib=1, blob_len_bytes=100 * 1024,
+        board_doc=board_doc, paired_core=None, sku="E1M-FAKE", metadata_root=tmp_path,
+    )
+    assert fit.sram0.verdict == FIT_UNVERIFIED
+    assert fit.sram0.needed_kib == 1124
+    assert fit.no_fit is False
 
 
 # ---------------------------------------------------------------------------
@@ -257,13 +439,17 @@ def test_arena_72_vs_128_default_passes_unverified(tmp_path):
     _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
     _write_soc_with_variant(tmp_path, "fake:soc:e8", [], sku="E1M-FAKE",
                             sram_banks_kb={"SRAM0": 4096})
-    # `m55_hp` is DECLARED (rule 1) but tunes no override -- 128 default,
-    # still CERTAIN (unlike a bare board_doc=None, which is unresolved/
-    # skipped -- see test_resolve_arena_budget_is_unresolved_when_board_doc_
-    # is_absent above).
+    # `m55_hp` is DECLARED and RUNS INFERENCE (rule 1: an `inference: {}`
+    # block, even empty, is the signal) but tunes no override -- 128
+    # default, still CERTAIN (unlike a bare board_doc=None, which is
+    # unresolved/skipped -- see
+    # test_resolve_arena_budget_is_unresolved_when_board_doc_is_absent above,
+    # or a declared core with NO inference signal at all, which is likewise
+    # unresolved -- see
+    # test_a_declared_paired_core_with_no_inference_signal_at_all_is_unresolved).
     fit = evaluate_sram_fit(
         memory_mode="Sram_Only", req_sram_kib=72, blob_len_bytes=0,
-        board_doc={"cores": {"m55_hp": {}}}, paired_core="m55_hp",
+        board_doc={"cores": {"m55_hp": {"inference": {}}}}, paired_core="m55_hp",
         sku="E1M-FAKE", metadata_root=tmp_path,
     )
     assert fit.arena.verdict == FIT_UNVERIFIED
@@ -378,9 +564,16 @@ def test_an_ambiguous_multi_core_range_gives_the_three_documented_outcomes(
     )
     assert fit.arena.verdict == expected_verdict
     assert fit.arena.verdict != "fits"
-    # The SRAM0 axis always uses the MIN (32) regardless of the arena verdict
-    # -- an independent certain-lower-bound proof (see `_evaluate_sram0`).
-    assert fit.sram0.needed_kib == 32  # blob_kib=0 + min arena 32
+    # The SRAM0 axis is evaluated INDEPENDENTLY of the arena verdict above
+    # (`_evaluate_sram0_range`'s own three-way split, tan-cli#1288 review
+    # round 2 finding 3) -- with a zero-length blob in every parametrization
+    # here, even the LARGEST candidate (64) fits comfortably, so it is always
+    # `FIT_UNVERIFIED` off the max, regardless of what `req_sram_kib` did to
+    # the arena axis. The three-way split itself (no-fit / skipped / unverified
+    # depending on where the blob's own needs land relative to both bounds) is
+    # pinned by its own dedicated tests below.
+    assert fit.sram0.verdict == FIT_UNVERIFIED
+    assert fit.sram0.needed_kib == 64  # blob_kib=0 + max arena 64
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +614,72 @@ def test_build_model_refuses_the_whole_model_on_a_certain_no_fit(tmp_path, monke
     assert not list(tmp_path.glob("*.alpmodel"))          # no partial package
 
 
+def test_build_model_no_fit_message_shows_a_real_number_when_arena_is_unresolved(
+        tmp_path, monkeypatch):
+    """tan-cli#1288 review round 2, finding 4: the refusal message used to
+    read `fit.arena.limit_kib` for the "arena N KiB" clause of the SRAM0
+    breakdown -- `None` here (arena is genuinely UNRESOLVED, an unpaired NPU
+    with no inference-declaring core in board.yaml at all), which printed the
+    literal string "arena None KiB". The fix derives the figure `sram0`
+    actually summed (`MIN_ARENA_KIB`, 16) from `sram0.needed_kib - blob_kib`
+    instead."""
+    _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
+    _write_soc_with_variant(
+        tmp_path, "fake:soc:e8",
+        [{"type": "ethos-u85", "subtype": "generative", "mac_per_cycle": 256}],  # no paired_core
+        sku="E1M-FAKE", sram_banks_kb={"SRAM0": 4096})
+    from tan.model.adapters.ethos_u import VelaAdapter as _RealVelaAdapter
+    monkeypatch.setattr(_RealVelaAdapter, "compile",
+                        _fake_compile_factory(arena_bytes=1024, req_sram_kib=1,
+                                               blob_len=5000 * 1024))
+    monkeypatch.setattr(_RealVelaAdapter, "is_available", lambda self: True)
+
+    # No `inference:` block, no `tflite-micro` library -- genuinely unresolved.
+    board_doc = {"cores": {"m55_hp": {"app": "./src", "peripherals": ["i2c"]}}}
+    src = tmp_path / "tiny.tflite"
+    shutil.copy(_FIXTURE, src)
+    with pytest.raises(SramNoFitRefused) as exc:
+        build_model(sku="E1M-FAKE", name="tiny", source=src, out_dir=tmp_path,
+                   metadata_root=tmp_path, adapters=[_RealVelaAdapter()],
+                   board_doc=board_doc)
+    message = str(exc.value)
+    assert "None" not in message
+    assert "arena 16 KiB" in message
+    assert "SRAM0 needs 5016 KiB" in message
+
+
+def test_build_model_no_fit_message_shows_the_min_arena_in_a_range(tmp_path, monkeypatch):
+    """The same finding 4 defect, the `"range"` shape: the OLD message would
+    have read `fit.arena.limit_kib` -- the LARGEST candidate (1024) when
+    arena itself is a `NO_FIT` there -- even though `sram0` actually summed
+    against the SMALLEST (64), a different number."""
+    _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
+    _write_soc_with_variant(
+        tmp_path, "fake:soc:e8",
+        [{"type": "ethos-u85", "subtype": "generative", "mac_per_cycle": 256}],  # no paired_core
+        sku="E1M-FAKE", sram_banks_kb={"SRAM0": 4096})
+    from tan.model.adapters.ethos_u import VelaAdapter as _RealVelaAdapter
+    monkeypatch.setattr(_RealVelaAdapter, "compile",
+                        _fake_compile_factory(arena_bytes=1024, req_sram_kib=2000,
+                                               blob_len=5000 * 1024))
+    monkeypatch.setattr(_RealVelaAdapter, "is_available", lambda self: True)
+
+    board_doc = {"cores": {
+        "m55_hp": {"inference": {"default_arena_kib": 1024}},
+        "m55_he": {"inference": {"default_arena_kib": 64}},
+    }}
+    src = tmp_path / "tiny.tflite"
+    shutil.copy(_FIXTURE, src)
+    with pytest.raises(SramNoFitRefused) as exc:
+        build_model(sku="E1M-FAKE", name="tiny", source=src, out_dir=tmp_path,
+                   metadata_root=tmp_path, adapters=[_RealVelaAdapter()],
+                   board_doc=board_doc)
+    message = str(exc.value)
+    assert "None" not in message
+    assert "arena 64 KiB" in message           # the MIN, not the arena axis's own max (1024)
+    assert "SRAM0 needs 5064 KiB" in message
+
+
 def test_build_model_ships_when_the_blob_fits(tmp_path, monkeypatch):
     _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
     _write_soc_with_variant(
@@ -446,7 +705,11 @@ def test_build_model_keeps_a_target_whose_paired_core_is_undeclared(tmp_path, mo
     """tan-cli#1288 review MEDIUM: an undeclared-paired-core SKIPPED verdict
     must never refuse the whole model -- even a wildly over-budget
     `req_sram_kib` (72 KiB against a board that never declares `m55_he` at
-    all) ships fine, exactly like a non-`Sram_Only` target would."""
+    all) ships fine, exactly like a non-`Sram_Only` target would. Blob kept
+    small deliberately -- review round 2's own finding 2 means an
+    unresolved arena STILL catches a certain SRAM0 no-fit off
+    `MIN_ARENA_KIB` (a large blob here would be a real, correct refusal, not
+    proof this guard misfired; that shape has its own dedicated tests)."""
     _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
     _write_soc_with_variant(
         tmp_path, "fake:soc:e8",
@@ -455,7 +718,7 @@ def test_build_model_keeps_a_target_whose_paired_core_is_undeclared(tmp_path, mo
     from tan.model.adapters.ethos_u import VelaAdapter as _RealVelaAdapter
     monkeypatch.setattr(_RealVelaAdapter, "compile",
                         _fake_compile_factory(arena_bytes=73728, req_sram_kib=72,
-                                               blob_len=5000 * 1024))
+                                               blob_len=1024))
     monkeypatch.setattr(_RealVelaAdapter, "is_available", lambda self: True)
 
     # The board declares `m55_hp` only -- `m55_he` (this target's own

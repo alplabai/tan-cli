@@ -333,30 +333,49 @@ report `verdict: "skipped"` there, with a `reason`.
 `paired_core` (e.g. an AEN SoM's high-perf/high-efficiency Ethos-U55 pairs to
 `m55_hp`/`m55_he`), or it may pair to no core at all — real metadata, not a
 gap: the E4/E6/E8's own Ethos-U85 declares none, and that NPU is exactly the
-one `--exact`/`build` compile for by default on those SKUs.
+one `--exact`/`build` compile for by default on those SKUs. A core only
+counts at all when it **runs an inference workload** — an `inference:` block
+declared on it (even empty), OR `tflite-micro` named in `libraries:`
+(project-wide, or scoped to include it): `inference:` is app-level TUNING,
+not a declaration of intent, so an app that never overrides the arena
+default has no reason to write the block at all, and the library is the
+signal that catches that case (mirrors `tan.planner.kconfig`'s own
+`_slice_wants_inference`). A core `board.yaml` declares for an unrelated
+reason (a peripheral, an app) but that runs no inference workload at all is
+NOT a certain core, even if it happens to be the target's own `paired_core`.
 
-- **A declared, paired core** — `board.yaml` actually declares that core
-  under `cores:` — is CERTAIN: its own `inference.default_arena_kib` (`128`
-  KiB, the schema default, when its `inference:` block omits one) is the
-  arena budget, and a `no-fit` against it may refuse.
-- **No paired core, and `board.yaml` declares exactly one core with an
-  `inference:` block at all** — that ONE core is used, CERTAIN, the same as
-  above. (This is the AEN801-template case: the U85 pairs to nothing, but
-  `m55_hp` is the board's only inference core, so ITS `default_arena_kib: 64`
-  decides the U85's own arena fit — not the bare `128` default.)
-- **No paired core, and `board.yaml` declares an `inference:` block on
-  MORE THAN ONE core** — nothing sourced picks between them: `arena` is a
-  certain `no-fit` only if the model needs more than the LARGEST of their
-  budgets, `fits-unverified` only if it needs no more than the SMALLEST, and
-  otherwise `skipped` (ambiguous, naming the cores) — `sram0`'s own sum
-  always uses the SMALLEST of them, since that is the only certain LOWER
-  BOUND a no-fit there can be proven against.
-- **A paired core `board.yaml` never declares at all, `board.yaml` declares
-  no inference core at all, or no `board.yaml` in hand** — `skipped`, with a
-  reason. NEVER a `128`-based guess, and never certain enough to refuse:
-  E1M-AEN801's own template never declares `m55_he`, so its
-  high-efficiency Ethos-U55 target skips this check rather than comparing
-  against an invented number.
+- **A paired core that runs inference, declared under `cores:`** — is
+  CERTAIN: its own `inference.default_arena_kib` (`128` KiB, the schema
+  default, when its `inference:` block omits one) is the arena budget, and a
+  `no-fit` against it may refuse.
+- **No paired core, and `board.yaml` runs inference on exactly one core** —
+  that ONE core is used, CERTAIN, the same as above. (This is the
+  AEN801-template case: the U85 pairs to nothing, but `m55_hp` is the
+  board's only inference core, so ITS `default_arena_kib: 64` decides the
+  U85's own arena fit — not the bare `128` default.)
+- **No paired core, and `board.yaml` runs inference on MORE THAN ONE core**
+  — nothing sourced picks between them: `arena` is a certain `no-fit` only if
+  the model needs more than the LARGEST of their budgets, `fits-unverified`
+  only if it needs no more than the SMALLEST, and otherwise `skipped`
+  (ambiguous, naming the cores). `sram0` gets its OWN three-way split here,
+  independent of what `arena` itself decided: `no-fit` only if the blob
+  needs more than the SMALLEST budget can hold (a certain lower bound —
+  every OTHER candidate needs even more), `fits-unverified` only if it fits
+  even the LARGEST (every candidate fits), and otherwise `skipped` — a blob
+  that would fit some candidates and not others is not a number `sram0` may
+  assert either word about.
+- **A paired core `board.yaml` never declares at all, a paired core
+  `board.yaml` declares but that runs no inference workload, `board.yaml`
+  runs inference on no core at all, or no `board.yaml` in hand** — `arena` is
+  `skipped`, with a reason, NEVER a `128`-based guess (E1M-AEN801's own
+  template never declares `m55_he`, so its high-efficiency Ethos-U55 target
+  skips the arena check rather than comparing against an invented number).
+  `sram0`, though, still catches a certain `no-fit` here when the blob alone
+  is too big even for the SMALLEST arena `board.schema.json`'s own schema
+  allows (`MIN_ARENA_KIB`, 16 KiB) — a real arena, whichever core eventually
+  owns it, can never be smaller, so that failure holds regardless. Otherwise
+  `sram0` is `skipped` too: it can prove a lower-bound failure, never a pass,
+  with no core resolved at all.
 
 `sram0` sums `ceil(len(compiled blob)/1024)` plus whichever arena figure the
 rules above resolved (never `reqSramKib`) against the resolved SoC variant's
@@ -365,15 +384,15 @@ rules above resolved (never `reqSramKib`) against the resolved SoC variant's
 **Never a bare `"fits"`.** Every SoC ships `inference_arena_sram_kib: 0`
 today, so there is no VERIFIED inference-arena SRAM budget anywhere in
 metadata — a pass reads `"fits-unverified"`, never `"fits"`. Only a `no-fit`
-reached through one of the CERTAIN paths above is real: it is plain
-ceil'd-KiB arithmetic against a real, sourced number, so a failure is a hard
-physical fact, not a screen. `tan model build` refuses the WHOLE per-model
-build on a certain no-fit (no `.alpmodel` written); `tan model check --exact`
-reports the SAME certain no-fit as the `model.sram-no-fit` issue at
-`ExitCode.VALIDATION_FAILURE`, alongside the model's own report (nothing
-about `sramFit` is hidden even when the run refuses). This never offers or
-implies an MRAM placement — the NPU reading weights in place from MRAM is
-unproven on the bench.
+reached through one of the CERTAIN paths above (or a certain LOWER BOUND, per
+the unresolved case above) is real: it is plain ceil'd-KiB arithmetic against
+a real, sourced number, so a failure is a hard physical fact, not a screen.
+`tan model build` refuses the WHOLE per-model build on a certain no-fit (no
+`.alpmodel` written); `tan model check --exact` reports the SAME certain
+no-fit as the `model.sram-no-fit` issue at `ExitCode.VALIDATION_FAILURE`,
+alongside the model's own report (nothing about `sramFit` is hidden even
+when the run refuses). This never offers or implies an MRAM placement — the
+NPU reading weights in place from MRAM is unproven on the bench.
 
 `data.schemaVersion` is versioned independently of `tan model build`'s and
 `tan model doctor`'s — all three are different `data` shapes.

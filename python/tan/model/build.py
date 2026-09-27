@@ -112,8 +112,21 @@ def _sram_no_fit_message(spec: TargetSpec, fit: SramFit) -> str:
                      f"{fit.arena.limit_kib} KiB available "
                      f"(cores.<id>.inference.default_arena_kib)")
     if fit.sram0.verdict == "no-fit":
+        # NOT `fit.arena.limit_kib` (tan-cli#1288 review round 2, finding 4):
+        # the arena figure `sram0` actually summed against is whichever
+        # `resolve_arena_budget` shape decided it -- the SAME core's budget
+        # only when `arena.kind == "single"`; `sram0` uses the SMALLEST of a
+        # `"range"`'s several candidates (`arena.limit_kib` there is the
+        # LARGEST, a different number), and a `MIN_ARENA_KIB` lower bound
+        # when arena itself is unresolved (`arena.limit_kib` is `None`
+        # there -- this would have literally printed "arena None KiB").
+        # `sram0.needed_kib` is ALWAYS `blob_kib + <that figure>` by
+        # construction (`tan.model.sram_fit._evaluate_sram0_*`), so deriving
+        # it back out this way is correct regardless of which shape produced
+        # the verdict -- reading `fit.arena.limit_kib` instead is not.
+        arena_used = fit.sram0.needed_kib - fit.blob_kib
         parts.append(f"SRAM0 needs {fit.sram0.needed_kib} KiB (blob "
-                     f"{fit.blob_kib} KiB + arena {fit.arena.limit_kib} KiB), "
+                     f"{fit.blob_kib} KiB + arena {arena_used} KiB), "
                      f"only {fit.sram0.limit_kib} KiB available")
     detail = "; ".join(parts)
     return (f"{spec.accel_config or spec.backend}: {detail} -- refusing to ship a "

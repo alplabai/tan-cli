@@ -25,14 +25,12 @@ off SRAM0, so both checks report `"skipped"`, with a reason, everywhere else.
 **Never "fits", only "fits-unverified".** Every SoC ships
 `inference_arena_sram_kib: 0` today, so there is no VERIFIED inference-arena
 SRAM budget in metadata to compare against -- a pass here means "the
-declared/default budget is not exceeded", never "measured to run". Only a
-`no-fit` is certain: it is plain ceil'd-KiB arithmetic against a real,
-sourced number, so a failure is a hard physical fact, not a screen -- BUT see
-`resolve_arena_budget`'s own docstring for exactly which arena resolutions
-are sourced enough to certify one (tan-cli#1288 review: the E8/E6/E4 SoC
-specs declare NO `paired_core` for their own Ethos-U85, so treating the
-schema default as certain there would have refused a build the board's own
-`cores.m55_hp.inference.default_arena_kib` override should have decided).
+declared/default budget is not exceeded", never "measured to run". A
+`no-fit` is certain whenever it is proven against a real, sourced number OR a
+valid LOWER BOUND on one (see `resolve_arena_budget`'s own docstring for
+exactly which arena resolutions are sourced enough to certify one, and
+`MIN_ARENA_KIB` below for the lower-bound case an unresolved arena still
+allows).
 
 Pure logic (`evaluate_sram_fit`, `resolve_arena_budget`, `FitVerdict`,
 `SramFit`, `ArenaBudget`) is IO-free; the two resolvers that do real
@@ -51,11 +49,18 @@ from tan.core.size import resolve_variant, sram_banks
 
 #: `metadata/schemas/board.schema.json` (alp-sdk, verified against the pinned
 #: checkout at commit 79c834e6): `cores.<id>.inference.default_arena_kib` is
-#: `{"type": "integer", "minimum": 16, "default": 128}`. Applied only to a
-#: core `board.yaml` actually declares, when THAT core's own `inference:`
+#: `{"type": "integer", "minimum": 16, "default": 128}`. `DEFAULT_ARENA_KIB`
+#: is applied only to a core that RUNS INFERENCE (`_core_uses_inference`) and
+#: that `board.yaml` actually declares, when that core's own `inference:`
 #: block omits an override -- never invented for a core the board never
-#: declares at all (`resolve_arena_budget` below).
+#: declares, or never runs inference on, at all (`resolve_arena_budget`
+#: below). `MIN_ARENA_KIB` is the schema's own floor: even when NO core can
+#: be resolved at all, the real arena -- whichever core ends up owning it --
+#: can never be smaller than this, so `blob_kib + MIN_ARENA_KIB` is a valid
+#: certain LOWER BOUND for a SRAM0 `NO_FIT` proof (tan-cli#1288 review round
+#: 2, finding 2).
 DEFAULT_ARENA_KIB = 128
+MIN_ARENA_KIB = 16
 
 #: The one vela memory mode that pins BOTH the tensor arena and the compiled
 #: blob (weights) to the same SRAM AXI port
@@ -80,12 +85,13 @@ _ARENA_UNVERIFIED_REASON = "board arena budget not verified against firmware"
 @dataclass(frozen=True)
 class FitVerdict:
     """One axis's verdict (arena, or SRAM0 residency): a KiB comparison plus
-    an optional human note. `reason` carries the SKIP explanation
-    (`SKIPPED`), the "not verified" caveat (`FIT_UNVERIFIED`), or -- ONLY for
-    the ambiguous multi-core `NO_FIT` shape `resolve_arena_budget`'s
-    `"range"` kind can produce -- which bound the certain failure was proven
-    against. Every OTHER `NO_FIT` carries no `reason`: a single sourced
-    number already says everything there is to say."""
+    an optional human note. `reason` is populated for `SKIPPED` (why),
+    `FIT_UNVERIFIED` (the "not verified" caveat), and for a `NO_FIT` proven
+    only as a LOWER BOUND rather than off one exact sourced number --
+    `resolve_arena_budget`'s `"range"` kind's largest-budget bound, or an
+    `"unresolved"` budget's `MIN_ARENA_KIB` bound (both name which bound
+    proved it). A `NO_FIT` proven off one single exact figure carries no
+    `reason`: the number already says everything there is to say."""
 
     verdict: str
     needed_kib: int | None = None
@@ -140,14 +146,16 @@ class ArenaBudget:
       CERTAIN enough for `NO_FIT` (`single_kib`, `cores` names it).
     * `"range"` -- the target's own NPU pairs to no core
       (`TargetSpec.paired_core is None`, a real answer for a shared NPU, e.g.
-      the E8/E6/E4's own Ethos-U85 -- not a gap), and board.yaml declares an
-      `inference:` block on MORE THAN ONE core, so nothing sourced picks
-      between them (`min_kib`/`max_kib`/`cores`, the declared budgets and the
-      core names that produced them).
+      the E8/E6/E4's own Ethos-U85 -- not a gap), and board.yaml declares
+      MORE THAN ONE core that runs inference (`_core_uses_inference`), so
+      nothing sourced picks between them (`min_kib`/`max_kib`/`cores`, the
+      declared budgets and the core names that produced them).
     * `"unresolved"` -- no board.yaml in hand, the target's paired core is
-      not declared in board.yaml AT ALL, or (paired_core is `None` too)
-      board.yaml declares no core running an inference workload at all
-      (`reason` says which). Never treated as a `NO_FIT` input."""
+      not declared in board.yaml at all, the target's paired core IS
+      declared but runs no inference workload at all, or (paired_core is
+      `None` too) board.yaml declares no core running an inference workload
+      at all (`reason` says which). Never a `NO_FIT` off one exact figure --
+      but see `MIN_ARENA_KIB` for the lower-bound proof it still allows."""
 
     kind: str
     single_kib: int | None = None
@@ -173,26 +181,83 @@ def _core_arena_kib_or_default(core_slice: dict) -> int:
     return DEFAULT_ARENA_KIB
 
 
+def _core_uses_inference(board_doc: dict, core_id: str, core_slice: dict) -> bool:
+    """Does this board.yaml core genuinely run an inference workload?
+    Mirrors `tan.planner.kconfig._slice_wants_inference`'s two independent
+    signals (tan-cli#1288 review round 2, finding 1) -- MIRRORED rather than
+    imported: that function takes a fully parsed `BoardProject`/`Slice`
+    (`tan.core.system_manifest`), a heavier object this module has no other
+    reason to construct, and editing `tan/planner/` itself is forbidden (it
+    is a hash-audited upstream mirror).
+
+    1. `cores.<core_id>.inference:` declared at all -- app-level tuning
+       (`default_arena_kib:`), the signal every inference example declares.
+    2. `libraries:` names `tflite-micro` -- either the board.schema.json
+       shape (a TOP-LEVEL list, project-wide unless an entry's own `cores:`
+       scopes it to include this core) or a `cores.<core_id>.libraries:`
+       list nested directly under the core itself (not part of the current
+       published schema, but accepted here too: a reviewer-supplied board
+       doc used exactly this nesting, and a core-scoped list is an
+       unambiguous signal either way this module reads it). The library
+       signal exists because `inference:` is TUNING, not a declaration of
+       intent: an app that never overrides the arena default has no reason
+       to write the block at all (`_slice_wants_inference`'s own docstring,
+       alp-sdk #874). Matched on the LITERAL name only -- this module does
+       not resolve the planner's own library alias table, since every
+       committed board.yaml/template spells `tflite-micro` out directly.
+
+    A core failing BOTH is exactly the AEN801-template shape a `paired_core`
+    could still name without this guard: `board.yaml` declaring the core key
+    (e.g. for an unrelated peripheral) is not the same fact as the core
+    running THIS NPU's model."""
+    if isinstance(core_slice.get("inference"), dict):
+        return True
+    core_libraries = core_slice.get("libraries")
+    if isinstance(core_libraries, list) and any(
+        (lib if isinstance(lib, str) else lib.get("name") if isinstance(lib, dict) else None)
+        == "tflite-micro"
+        for lib in core_libraries
+    ):
+        return True
+    raw_libraries = board_doc.get("libraries")
+    libraries = raw_libraries if isinstance(raw_libraries, list) else []
+    for entry in libraries:
+        if isinstance(entry, str):
+            name, scoped_cores = entry, None
+        elif isinstance(entry, dict):
+            name, scoped_cores = entry.get("name"), entry.get("cores")
+        else:
+            continue
+        if name != "tflite-micro":
+            continue
+        if scoped_cores is None:
+            return True  # project-wide: every core running any OS at all
+        if isinstance(scoped_cores, list) and core_id in scoped_cores:
+            return True
+    return False
+
+
 def resolve_arena_budget(board_doc: dict | None, core_id: str | None) -> ArenaBudget:
     """The arena budget for one ethos_u target, scoped to exactly what
-    board.yaml actually says (tan-cli#1288 review, HIGH/MEDIUM findings):
+    board.yaml actually says (tan-cli#1288 review, rounds 1 and 2):
 
     1. @core_id resolved (`TargetSpec.paired_core`) AND that core is declared
-       under board.yaml's `cores:` at all (whether or not it tunes
-       `inference.default_arena_kib` itself) -- `"single"`, CERTAIN: THIS
-       core is what runs this NPU, full stop.
-    2. @core_id resolved but NOT declared under `cores:` -- `"unresolved"`:
-       nothing in this project runs on that core, so a board arena figure has
-       no core to attach to. Never a `DEFAULT_ARENA_KIB`-based guess.
+       under board.yaml's `cores:` AND runs an inference workload
+       (`_core_uses_inference`) -- `"single"`, CERTAIN: THIS core is what
+       runs this NPU, full stop.
+    2. @core_id resolved but NOT declared under `cores:`, or declared but not
+       running inference at all -- `"unresolved"`: nothing in this project
+       runs THIS model on that core, so a board arena figure has no core to
+       attach to. Never a `DEFAULT_ARENA_KIB`-based guess.
     3. @core_id is `None` (a shared NPU with no pairing of its own, e.g. the
-       E8/E6/E4's own Ethos-U85) -- collect every board.yaml core that
-       declares an `inference:` block at all (the only honest way to guess
-       "which core(s) might run this", absent a real pairing): exactly one
-       -- `"single"`, CERTAIN, use it; two or more -- `"range"` (the caller
+       E8/E6/E4's own Ethos-U85) -- collect every board.yaml core that runs
+       an inference workload at all (the only honest way to guess "which
+       core(s) might run this", absent a real pairing): exactly one --
+       `"single"`, CERTAIN, use it; two or more -- `"range"` (the caller
        decides what a `NO_FIT`/`FIT_UNVERIFIED` bound can honestly claim
        across them); none at all -- `"unresolved"` (a bare
        `DEFAULT_ARENA_KIB` here would be a number about nothing declared,
-       never certain enough to refuse a build on).
+       never certain enough to refuse a build on off one exact figure).
     4. @board_doc itself absent -- `"unresolved"`, same reasoning as 3's
        empty case: nothing to inspect at all."""
     if not isinstance(board_doc, dict):
@@ -207,12 +272,17 @@ def resolve_arena_budget(board_doc: dict | None, core_id: str | None) -> ArenaBu
             return ArenaBudget(kind="unresolved", reason=(
                 f"core {core_id!r} not declared in board.yaml; nothing in "
                 f"this project runs on it"))
+        if not _core_uses_inference(board_doc, core_id, slice_):
+            return ArenaBudget(kind="unresolved", reason=(
+                f"core {core_id!r} is declared in board.yaml but runs no "
+                f"inference workload (no inference: block, no tflite-micro "
+                f"library); nothing in this project runs THIS model on it"))
         return ArenaBudget(kind="single", single_kib=_core_arena_kib_or_default(slice_),
                            cores=(core_id,))
 
     inference_cores = sorted(
         name for name, slice_ in cores.items()
-        if isinstance(slice_, dict) and isinstance(slice_.get("inference"), dict)
+        if isinstance(slice_, dict) and _core_uses_inference(board_doc, name, slice_)
     )
     if not inference_cores:
         return ArenaBudget(kind="unresolved", reason=(
@@ -250,14 +320,10 @@ def resolve_sram0_kib(sku: str, metadata_root: Path) -> tuple[float | None, str 
                   f"SRAM0 residency not checked")
 
 
-def _evaluate_sram0(blob_kib: int, arena_kib: int, sram0_total: float | None,
-                    sram0_reason: str | None, *, note_suffix: str = "") -> FitVerdict:
-    """`blob_kib + arena_kib` against @sram0_total -- @arena_kib is whatever
-    the caller decided is the right SINGLE number for this comparison (the
-    resolved core's own budget, or -- in the `"range"` shape -- the smallest
-    of several equally-plausible ones, which is what makes a `NO_FIT` there a
-    certain LOWER BOUND: every other candidate core only needs MORE SRAM0,
-    never less)."""
+def _evaluate_sram0_single(blob_kib: int, arena_kib: int, sram0_total: float | None,
+                          sram0_reason: str | None) -> FitVerdict:
+    """`blob_kib + arena_kib` against @sram0_total, for a `"single"` (CERTAIN)
+    arena resolution -- both sides of the sum are exact, sourced numbers."""
     if sram0_total is None:
         return FitVerdict(verdict=SKIPPED, reason=sram0_reason)
     needed = blob_kib + arena_kib
@@ -267,8 +333,75 @@ def _evaluate_sram0(blob_kib: int, arena_kib: int, sram0_total: float | None,
     return FitVerdict(
         verdict=FIT_UNVERIFIED, needed_kib=needed, limit_kib=limit_kib,
         reason=(f"blob {blob_kib} + arena {arena_kib} = {needed} KiB of SRAM0; "
-                f"firmware's own SRAM0 use not checked{note_suffix}"),
+                f"firmware's own SRAM0 use not checked"),
     )
+
+
+def _evaluate_sram0_range(blob_kib: int, budget: ArenaBudget, sram0_total: float | None,
+                         sram0_reason: str | None) -> FitVerdict:
+    """The `"range"` shape's own SRAM0 three-way split (tan-cli#1288 review
+    round 2, finding 3) -- NOT the same two-way split `_evaluate_sram0_single`
+    uses, because neither bound alone may assert BOTH directions here:
+
+    * `NO_FIT` iff `blob_kib + min > total` -- fails even at the SMALLEST
+      declared core's budget, so every other candidate (which only needs
+      MORE SRAM0) fails too: a certain lower bound.
+    * `FIT_UNVERIFIED` iff `blob_kib + max <= total` -- fits even at the
+      LARGEST declared core's budget, so every candidate fits: as certain a
+      pass as any `FIT_UNVERIFIED` gets.
+    * Otherwise `SKIPPED`: some candidates would fit, others would not, and
+      nothing sourced picks between them -- asserting either word here would
+      overclaim (the exact defect round 2 found: the old code asserted
+      `FIT_UNVERIFIED` off the MIN alone, silently passing a blob that could
+      genuinely fail under a different, equally-plausible core)."""
+    if sram0_total is None:
+        return FitVerdict(verdict=SKIPPED, reason=sram0_reason)
+    limit_kib = int(sram0_total)
+    names = ", ".join(budget.cores)
+    needed_lo = blob_kib + budget.min_kib
+    needed_hi = blob_kib + budget.max_kib
+    if needed_lo > sram0_total:
+        return FitVerdict(
+            verdict=NO_FIT, needed_kib=needed_lo, limit_kib=limit_kib,
+            reason=(f"needs at least {needed_lo} KiB of SRAM0 even at the smallest "
+                    f"declared core budget ({budget.min_kib} KiB across cores {names})"),
+        )
+    if needed_hi <= sram0_total:
+        return FitVerdict(
+            verdict=FIT_UNVERIFIED, needed_kib=needed_hi, limit_kib=limit_kib,
+            reason=(f"blob {blob_kib} + arena {budget.max_kib} KiB (the LARGEST declared "
+                    f"core budget across cores {names}) = {needed_hi} KiB of SRAM0; "
+                    f"firmware's own SRAM0 use not checked"),
+        )
+    return FitVerdict(verdict=SKIPPED, reason=(
+        f"ambiguous across cores {names} (declared budgets {budget.min_kib}-"
+        f"{budget.max_kib} KiB, needing {needed_lo}-{needed_hi} of {limit_kib} KiB "
+        f"SRAM0) with no paired_core to narrow which one actually runs this NPU"
+    ))
+
+
+def _evaluate_sram0_lower_bound(blob_kib: int, reason: str,
+                                sram0_total: float | None,
+                                sram0_reason: str | None) -> FitVerdict:
+    """The `"unresolved"` shape's own SRAM0 check (tan-cli#1288 review round
+    2, finding 2): with NO board.yaml core resolved at all, the real arena is
+    still bounded below by `MIN_ARENA_KIB` (`board.schema.json`'s own
+    `minimum`) -- so `blob_kib + MIN_ARENA_KIB` is a valid certain LOWER
+    BOUND a `NO_FIT` can be proven against, even though nothing here can
+    assert a PASS: the real arena could be arbitrarily larger. Only ever
+    `NO_FIT` or `SKIPPED`, NEVER `FIT_UNVERIFIED`."""
+    if sram0_total is None:
+        return FitVerdict(verdict=SKIPPED, reason=sram0_reason)
+    needed = blob_kib + MIN_ARENA_KIB
+    limit_kib = int(sram0_total)
+    if needed > sram0_total:
+        return FitVerdict(
+            verdict=NO_FIT, needed_kib=needed, limit_kib=limit_kib,
+            reason=(f"needs at least {needed} KiB of SRAM0 even at the smallest "
+                    f"possible arena ({MIN_ARENA_KIB} KiB, board.schema.json's own "
+                    f"default_arena_kib minimum) -- {reason}"),
+        )
+    return FitVerdict(verdict=SKIPPED, reason=reason)
 
 
 def _evaluate_arena_single(req_sram_kib: int, arena_kib: int) -> FitVerdict:
@@ -322,23 +455,18 @@ def evaluate_sram_fit(*, memory_mode: str | None, req_sram_kib: int, blob_len_by
     sram0_total, sram0_reason = resolve_sram0_kib(sku, metadata_root)
 
     if budget.kind == "unresolved":
-        skip = FitVerdict(verdict=SKIPPED, reason=budget.reason)
-        return SramFit(arena=skip, sram0=skip, blob_kib=blob_kib)
+        arena = FitVerdict(verdict=SKIPPED, reason=budget.reason)
+        sram0 = _evaluate_sram0_lower_bound(blob_kib, budget.reason, sram0_total, sram0_reason)
+        return SramFit(arena=arena, sram0=sram0, blob_kib=blob_kib)
 
     if budget.kind == "single":
         arena = _evaluate_arena_single(req_sram_kib, budget.single_kib)
-        sram0 = _evaluate_sram0(blob_kib, budget.single_kib, sram0_total, sram0_reason)
+        sram0 = _evaluate_sram0_single(blob_kib, budget.single_kib, sram0_total, sram0_reason)
         return SramFit(arena=arena, sram0=sram0, blob_kib=blob_kib)
 
     # budget.kind == "range": paired_core is None and MORE THAN ONE board core
-    # declares an inference: block -- see `_evaluate_sram0`'s own docstring
-    # for why the SRAM0 axis uses the MIN of them unconditionally, whatever
-    # the arena axis itself concludes.
+    # runs inference -- see `_evaluate_sram0_range`'s own docstring for the
+    # three-way split it uses instead of `_evaluate_sram0_single`'s two-way one.
     arena = _evaluate_arena_range(req_sram_kib, budget)
-    sram0 = _evaluate_sram0(
-        blob_kib, budget.min_kib, sram0_total, sram0_reason,
-        note_suffix=(f" (using the smallest of cores {', '.join(budget.cores)}'s "
-                     f"declared budgets, {budget.min_kib} KiB, as a lower bound -- no "
-                     f"paired_core narrows which one actually runs this NPU)"),
-    )
+    sram0 = _evaluate_sram0_range(blob_kib, budget, sram0_total, sram0_reason)
     return SramFit(arena=arena, sram0=sram0, blob_kib=blob_kib)
