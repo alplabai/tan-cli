@@ -262,6 +262,47 @@ def test_build_failure_is_a_coded_issue_not_a_traceback(tmp_path, monkeypatch):
     assert doc["data"]["built"] == []
 
 
+def test_a_certain_sram_no_fit_refuses_with_its_own_code_and_exit_code(tmp_path, monkeypatch):
+    """tan-cli#1288's binding decision: a certain arena/SRAM0 no-fit under
+    `Sram_Only` gets its OWN issue code (`model.sram-no-fit`, never the
+    generic `model.build-failed`) and its OWN exit code
+    (`ExitCode.VALIDATION_FAILURE` == 2, never `WRITE_FAILURE` == 3) -- and,
+    like every `build_model()` failure, no `.alpmodel` is written.
+    `model_cmd.build_model` is monkeypatched wholesale (this file's own
+    established pattern, `test_build_failure_is_a_coded_issue_not_a_
+    traceback` above), so this proves the model_cmd.py PLUMBING that catches
+    `SramNoFitRefused` ahead of the generic except-clause -- the fit
+    arithmetic itself is `tests/model/test_sram_fit.py`'s job."""
+    from tan.model.build import SramNoFitRefused
+
+    def _refuse(**kw):
+        raise SramNoFitRefused("ethos-u85-256: SRAM0 needs 5072 KiB, only 4096 KiB available")
+
+    monkeypatch.setattr(model_cmd, "build_model", _refuse)
+
+    sdk = make_sdk(tmp_path / "sdk")
+    write(tmp_path / "one.tflite", "x")
+    board_yaml(tmp_path, "models:\n  - name: one\n    source: one.tflite\n")
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            "--project", str(tmp_path),
+            "--sdk-root", str(sdk),
+            "--format", "json",
+        ],
+    )
+    assert result.exit_code == 2  # ValidationFailure, not WriteFailure
+    doc = envelope(result)
+    assert doc["ok"] is False
+    assert doc["issues"][0]["code"] == "model.sram-no-fit"
+    assert doc["issues"][0]["severity"] == "error"
+    assert "'one'" in doc["issues"][0]["message"]
+    assert "SRAM0 needs 5072 KiB" in doc["issues"][0]["message"]
+    assert doc["data"]["built"] == []
+    assert not list((tmp_path / "build").rglob("*.alpmodel"))
+
+
 def test_a_built_model_reports_its_output_path(tmp_path, monkeypatch):
     sdk = make_sdk(tmp_path / "sdk")
     write(tmp_path / "source.tflite", "fake-tflite-bytes")

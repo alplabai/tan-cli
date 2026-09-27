@@ -24,6 +24,7 @@ from typer.testing import CliRunner
 from tan.commands import model_cmd
 from tan.commands.model_cmd import model
 from tan.model.analyze import BackendReport, OpVerdict
+from tan.model.sram_fit import FitVerdict, SramFit
 
 app = typer.Typer(add_completion=False)
 app.command("model")(model)
@@ -317,8 +318,12 @@ def test_the_full_envelope_shape_carries_every_backendreport_field(tmp_path, mon
         "backend", "variant", "table", "npuCoverage", "computeOnNpuPctMax",
         "npuPlacementPctReal", "uncostedCpuOpCount", "basis", "confidence",
         "arenaBytes", "reqSramKib", "latencyMsMean", "latencyMsP95",
-        "latencyRuns", "perfRef", "notes", "ops",
+        "latencyRuns", "perfRef", "notes", "ops", "sramFit",
     }
+    # tan-cli#1288: `null` at `basis: "static-screen"` -- no compiled blob
+    # exists to check a fit against, same "not measured" reading the other
+    # six measured fields already get.
+    assert backend["sramFit"] is None
     assert backend["npuCoverage"] == "partial"
     assert backend["computeOnNpuPctMax"] == 96.0
     assert backend["npuPlacementPctReal"] is None       # set only at a MEASURED basis
@@ -594,3 +599,72 @@ def test_the_retired_word_never_leaks_into_the_clis_rendered_static_screen_outpu
         app, ["check", "--project", str(tmp_path), "--sdk-root", str(sdk)], catch_exceptions=False,
     )
     assert "fits" not in text_result.stderr.lower()
+
+
+# --------------------------------------------------------------------------
+# tan-cli#1288: the `sramFit` envelope block + `model.sram-no-fit`
+# --------------------------------------------------------------------------
+
+
+def _no_fit_report() -> BackendReport:
+    skip = FitVerdict(verdict="no-fit", needed_kib=5072, limit_kib=4096)
+    fit = SramFit(arena=FitVerdict(verdict="fits-unverified", needed_kib=72, limit_kib=128),
+                 sram0=skip, blob_kib=5000)
+    return _fake_report(basis="compiled", confidence="certain", npu_coverage="fits",
+                        compute_on_npu_pct_max=None, ops=[], sram_fit=fit,
+                        notes=["vela 5.1.0 compiled for ethos-u55-256: 1/1 operators "
+                               "placed on the NPU (100%); arena 73728 bytes, SRAM 72 KiB."])
+
+
+def test_a_no_fit_sram_fit_is_a_coded_issue_at_validation_failure(tmp_path, monkeypatch):
+    """tan-cli#1288's binding decision, at the command layer: the model's
+    report STILL carries the `sramFit` numbers (nothing hides them), but the
+    run ALSO gets a `model.sram-no-fit` issue and refuses at
+    `ExitCode.VALIDATION_FAILURE` (2) -- never the generic
+    `ExitCode.RUNTIME_FAILURE` (1) `model.check-failed` uses."""
+    result = _run_with_fake_backends(tmp_path, monkeypatch, [_no_fit_report()])
+    assert result.exit_code == 2
+    doc = envelope(result)
+    assert doc["ok"] is False
+    backend = doc["data"]["models"][0]["backends"][0]
+    assert backend["sramFit"]["sram0"]["verdict"] == "no-fit"
+    assert backend["sramFit"]["sram0"]["neededKib"] == 5072
+    codes = [i["code"] for i in doc["issues"]]
+    assert "model.sram-no-fit" in codes
+    no_fit_issue = next(i for i in doc["issues"] if i["code"] == "model.sram-no-fit")
+    assert no_fit_issue["severity"] == "error"
+    assert "5072" in no_fit_issue["message"]
+
+
+def test_a_passing_sram_fit_is_exit_0_with_fits_unverified(tmp_path, monkeypatch):
+    passing = SramFit(
+        arena=FitVerdict(verdict="fits-unverified", needed_kib=72, limit_kib=128),
+        sram0=FitVerdict(verdict="fits-unverified", needed_kib=335, limit_kib=4096,
+                         reason="needs 335 KiB of SRAM0 for the model blob; firmware's "
+                                "own SRAM0 use not checked"),
+        blob_kib=263,
+    )
+    report = _fake_report(basis="compiled", confidence="certain", npu_coverage="fits",
+                          compute_on_npu_pct_max=None, ops=[], sram_fit=passing,
+                          notes=["vela 5.1.0 compiled for ethos-u55-256: 1/1 operators "
+                                 "placed on the NPU (100%); arena 73728 bytes, SRAM 72 KiB."])
+    result = _run_with_fake_backends(tmp_path, monkeypatch, [report])
+    assert result.exit_code == 0
+    doc = envelope(result)
+    assert doc["ok"] is True
+    backend = doc["data"]["models"][0]["backends"][0]
+    assert backend["sramFit"]["arena"]["verdict"] == "fits-unverified"
+    assert backend["sramFit"]["sram0"]["verdict"] == "fits-unverified"
+    assert doc["issues"] == []
+
+    # Text mode: the SAME two SRAM-fit lines render, and neither ever prints
+    # a bare "fits" -- only the qualified "fits-unverified".
+    text_result = runner.invoke(
+        app, ["check", "--project", str(tmp_path),
+             "--sdk-root", str(tmp_path / "sdk")],
+        catch_exceptions=False,
+    )
+    # (`npuCoverage: "fits"` itself is legitimate here -- basis "compiled" is
+    # the one basis allowed to say it; this only pins the SRAM-fit LINES.)
+    assert "SRAM fit (arena): fits-unverified" in text_result.stderr
+    assert "SRAM fit (SRAM0): fits-unverified" in text_result.stderr

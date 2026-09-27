@@ -45,6 +45,7 @@ from .adapters.deepx import DeepxAdapter
 from .adapters.drpai import DrpaiAdapter
 from .adapters.ethos_u import VelaAdapter
 from .adapters.executorch import ExecutorchAdapter
+from .sram_fit import SramFit
 from .tensorio import OpDesc
 
 # One adapter instance per source format a backend can ingest -- mirrors
@@ -254,6 +255,18 @@ class BackendReport:
     latency_runs: int | None = None
     perf_ref: str | None = None
     notes: list[str] = field(default_factory=list)
+    # `Sram_Only` residency + arena fit against `board.yaml` (tan-cli#1288) --
+    # set by `tan.model.check._report_from_vela_compile` at `basis:
+    # "compiled"` (a real vela compile actually produced a blob to measure),
+    # and CARRIED FORWARD by `tan.model.perf_apply._perf_point_report`'s own
+    # `real_placement` rebase -- exactly the same gate that carries `ops`/
+    # `npu_placement_pct_real` -- when a matched bench point corroborates an
+    # already-`"compiled"` report. `None` at every construction site in THIS
+    # module (`basis: "static-screen"` -- no compiled blob exists to check)
+    # and at an UNCORROBORATED bench rebase (no alp-sdk has published a
+    # `model_perf/` tree yet, so this path is dormant today). See
+    # `tan.model.sram_fit` for the whole check.
+    sram_fit: SramFit | None = None
 
     def __post_init__(self) -> None:
         """Refuse an illegitimate `(npu_coverage, basis)` pair at construction.

@@ -5,11 +5,11 @@
   "lines": null,
   "long_functions": [
     [
-      58,
+      64,
       "check_model_backends"
     ],
     [
-      88,
+      98,
       "_maybe_exact_ethos_u"
     ]
   ]

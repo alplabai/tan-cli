@@ -2156,6 +2156,14 @@
       "note": "tan-cli#789 review (f): `model build` wrote a package but could not decode its manifest to report the compiler caveats it ships with (`package.read_manifest_file` raised). Reported rather than swallowed because silence here is indistinguishable from `model.target-caveat`'s absence, i.e. from \"this package has no caveats\" -- the exact ambiguity the caveat field exists to end. A WARNING, not an error: the artifact IS on disk, and downgrading a successful build to a failure over a diagnostic read would be the wrong trade. A plain `Issue(\"model.caveat-readback-failed\", ...)` construction in `_shipped_caveat_issues`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.sram-no-fit",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "note": "tan-cli#1288: a certain arena or SRAM0-residency NO-FIT under the ethos_u `Sram_Only` vela memory mode (`tan.model.sram_fit`) -- `req_sram_kib` (the arena, already ceil'd) exceeds `board.yaml`'s `cores.<id>.inference.default_arena_kib` (or the schema default, 128, when absent), or `ceil(len(blob.payload)/1024) + arena_kib` exceeds the resolved SoC variant's `sram_banks_kb.SRAM0`. `tan model build` refuses the WHOLE per-model build (no `.alpmodel` written, via `tan.model.build.SramNoFitRefused`) and `tan model check --exact` reports it alongside the model's `sramFit` envelope block; both raise this at `error` severity and `ExitCode.VALIDATION_FAILURE`. A plain `Issue(\"model.sram-no-fit\", ...)` construction at two call sites in `model_cmd.py` (`_run_build`'s `except SramNoFitRefused` clause, and `check`'s `_sram_no_fit_issues`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "model.artifact-stale-unknown",
       "status": "reserved",
       "severity": "warning",

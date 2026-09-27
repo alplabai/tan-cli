@@ -2193,3 +2193,58 @@ def test_real_imx93_through_tan_model_check_refuses_a_core_it_does_not_have(tmp_
                       perf={"arena_bytes": 999999, "req_sram_kib": 777},
                       filename="tiny-int8-aaaa@vela-5.1.0+r1+m55_hp+aaaaaaaaaaaa.json")
     assert _screen() == baseline                  # refused, not the bogus 999999/777
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1288 review MEDIUM: a matched perf point must carry `sram_fit`
+# forward when it corroborates an already-`"compiled"` report, the same
+# `real_placement` gate `ops`/`npu_placement_pct_real` already ride.
+# ---------------------------------------------------------------------------
+
+def test_a_matched_perf_point_carries_sram_fit_forward_when_it_corroborates_a_real_compile(
+        tmp_path, monkeypatch):
+    """`_perf_point_report` used to drop `sram_fit` unconditionally on every
+    rebase, even when the report it rebases from was ALREADY `basis:
+    "compiled"` off a real `--exact` run -- the one case a bench point is
+    meant to corroborate rather than override every other compiled figure."""
+    _u55_tree(tmp_path, memory_mode="Sram_Only")
+    # `perf:` matches the fake compile's own arena/SRAM figures below --
+    # `apply_perf_point` Decision 1 has the customer's real `basis: "compiled"`
+    # compile WIN over a DISAGREEING point (staying "compiled", never rebased),
+    # so a mismatch here would prove nothing about the carry-forward rule.
+    _write_perf_point(tmp_path, perf={
+        "arena_bytes": 73728, "req_sram_kib": 72,
+        "latency_ms": {"mean": 0.4, "p50": 0.4, "p95": 0.5, "runs": 100},
+    })
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/vela" if name == "vela" else None)
+
+    def _fake_compile(self, source, *, accel_config, out_dir, opts=None,
+                      vela_memory_mode=None, vela_system_config=None,
+                      vela_vendor_system_config=None,
+                      vela_vendor_config_filename=None, soc_declares_dram=None):
+        return Blob(format="vela_tflite", payload=b"x" * (72 * 1024), arena_bytes=73728,
+                    compiler_version="vela 5.1.0", req_sram_kib=72,
+                    cpu_op_count=0, npu_op_count=1)
+
+    monkeypatch.setattr(check_mod.VelaAdapter, "compile", _fake_compile)
+    board_doc = {"cores": {"m55_hp": {"inference": {"default_arena_kib": 128}}}}
+    reports = check_model_backends(backends=["ethos_u"], sku="E1M-FAKE", source=_FIXTURE,
+                                    metadata_root=tmp_path, exact=True, hw_rev="r2",
+                                    board_doc=board_doc)
+    rep = reports[0]
+    assert rep.basis == "bench"                    # a matched, corroborated rebase
+    assert rep.sram_fit is not None
+    assert rep.sram_fit.no_fit is False
+
+
+def test_an_uncorroborated_perf_point_withholds_sram_fit_too(tmp_path):
+    """The other half: an ordinary (`exact=False`) run has no compiled
+    `sram_fit` to carry forward in the first place, so an uncorroborated
+    bench point (the ordinary case today -- no `--exact` toolchain
+    requirement is published alongside a point) stays `None`, exactly like
+    `ops`/`npu_placement_pct_real` already do."""
+    _u55_tree(tmp_path, memory_mode="Sram_Only")
+    _write_perf_point(tmp_path)
+    rep = _check(tmp_path, hw_rev="r2")
+    assert rep.basis == "bench"
+    assert rep.sram_fit is None
