@@ -150,7 +150,7 @@ from tan.exit_codes import ExitCode
 from tan.model.adapters.drpai import _compiler_version as _drpai_compiler_version
 from tan.model.adapters.drpai import _tvm_home as _drpai_tvm_home
 from tan.model.adapters.ethos_u import _VELA_CONFIG_ENV, _vela_version, _vendor_config_path
-from tan.model.build import _ADAPTERS, build_model
+from tan.model.build import SramNoFitRefused, _ADAPTERS, build_model
 from tan.model.check import check_model_backends, resolve_check_backends
 from tan.model.package import read_manifest_file
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -452,7 +452,13 @@ def _run_build(
                 out_dir=out_dir,
                 metadata_root=metadata_dir,
                 compile_opts=compile_opts,
+                board_doc=board_doc,
             )
+        except SramNoFitRefused as err:
+            # tan-cli#1288: a certain arena/SRAM0 no-fit under `Sram_Only` --
+            # ahead of the generic `except Exception` below so it reports its
+            # OWN code/exit, not `model.build-failed`/`WRITE_FAILURE`.
+            issues.append(Issue("model.sram-no-fit", "error", f"model '{name}': {err}"))
         except Exception as err:  # noqa: BLE001 -- a per-model failure is a coded issue, not a traceback
             issues.append(
                 Issue(
@@ -470,8 +476,16 @@ def _run_build(
     # that was written must not report it as a write failure -- the same
     # separation `finish()`'s renderer already makes between `warnings` and
     # `errors`, and the same one the caller's `sdk_issues` rely on.
-    exit_code = (ExitCode.SUCCESS if not any(i.severity == "error" for i in issues)
-                 else ExitCode.WRITE_FAILURE)
+    #
+    # `model.sram-no-fit` gets its OWN exit code (tan-cli#1288's binding
+    # decision) -- checked first so it is never masked by the generic
+    # WRITE_FAILURE a `model.build-failed` alongside it would otherwise pick.
+    if any(i.code == "model.sram-no-fit" for i in issues):
+        exit_code = ExitCode.VALIDATION_FAILURE
+    elif any(i.severity == "error" for i in issues):
+        exit_code = ExitCode.WRITE_FAILURE
+    else:
+        exit_code = ExitCode.SUCCESS
     return reported_project, sdk_info, data, issues, exit_code
 
 
@@ -517,7 +531,8 @@ def _declared_hw_rev(board_doc: dict, board_path: Path) -> str | None:
 
 def _check_one_model(name: str, source: Path, backends: list[str], sku: str,
                       metadata_dir: Path, exact: bool,
-                      hw_rev: str | None = None) -> dict | Issue:
+                      hw_rev: str | None = None,
+                      board_doc: dict | None = None) -> dict | Issue:
     """One declared model's `check` result: the serialised `{name, source,
     backends}` block on success, or a coded `model.check-failed` Issue on any
     failure (an unreadable/unparseable source, most commonly) -- never a
@@ -526,11 +541,38 @@ def _check_one_model(name: str, source: Path, backends: list[str], sku: str,
     try:
         reports = check_model_backends(backends=backends, sku=sku, source=source,
                                         metadata_root=metadata_dir, exact=exact,
-                                        hw_rev=hw_rev)
+                                        hw_rev=hw_rev, board_doc=board_doc)
     except Exception as err:  # noqa: BLE001 -- a per-model failure is a coded issue, not a traceback
         return Issue("model.check-failed", "error", f"model '{name}': {type(err).__name__}: {err}")
     return {"name": name, "source": str(source),
             "backends": [backend_report_as_dict(r) for r in reports]}
+
+
+def _sram_no_fit_issues(name: str, backends: list[dict]) -> list[Issue]:
+    """One `model.sram-no-fit` Issue per backend whose `sramFit` block (tan-
+    cli#1288) reports a certain NO-FIT on either axis -- `check --exact`'s own
+    half of the binding decision: the model's serialised report still carries
+    the `sramFit` numbers (nothing here hides the report), but the run also
+    gets a coded, `error`-severity issue so `--exact` over a `Sram_Only` SKU
+    cannot exit 0 on a placement that cannot execute."""
+    issues: list[Issue] = []
+    for backend in backends:
+        fit = backend.get("sramFit")
+        if not fit:
+            continue
+        bad = [axis for axis in ("arena", "sram0") if fit[axis]["verdict"] == "no-fit"]
+        if not bad:
+            continue
+        detail = "; ".join(
+            f"{axis} needs {fit[axis]['neededKib']} KiB, only "
+            f"{fit[axis]['limitKib']} KiB available"
+            for axis in bad
+        )
+        variant = backend.get("variant")
+        label = f"{backend['backend']}" + (f" ({variant})" if variant else "")
+        issues.append(Issue("model.sram-no-fit", "error",
+                            f"model '{name}' {label}: {detail}"))
+    return issues
 
 
 def _require_check_backends(sku: str, metadata_dir: Path, board_path: Path) -> list[str]:
@@ -592,10 +634,23 @@ def _run_check(
         _require_model_entry(m, board_path)
         source = (base / m["source"]).resolve()
         result = _check_one_model(m["name"], source, backends, sku, metadata_dir, exact,
-                                   declared_hw_rev)
-        (issues if isinstance(result, Issue) else model_reports).append(result)
+                                   declared_hw_rev, board_doc)
+        if isinstance(result, Issue):
+            issues.append(result)
+        else:
+            model_reports.append(result)
+            issues.extend(_sram_no_fit_issues(m["name"], result["backends"]))
     data["models"] = model_reports
-    exit_code = ExitCode.SUCCESS if not issues else ExitCode.RUNTIME_FAILURE
+    # `model.sram-no-fit` gets its OWN exit code (tan-cli#1288's binding
+    # decision), same precedence `_run_build` gives it -- checked first so it
+    # is never masked by the generic RUNTIME_FAILURE a `model.check-failed`
+    # alongside it would otherwise pick.
+    if any(i.code == "model.sram-no-fit" for i in issues):
+        exit_code = ExitCode.VALIDATION_FAILURE
+    elif issues:
+        exit_code = ExitCode.RUNTIME_FAILURE
+    else:
+        exit_code = ExitCode.SUCCESS
     return reported_project, sdk_info, data, issues, exit_code
 
 

@@ -42,6 +42,7 @@ from .adapters.deepx import DeepxAdapter
 from .adapters.executorch import ExecutorchAdapter
 from .manifest import Manifest, Target, Coverage
 from .package import write_package
+from .sram_fit import SramFit, evaluate_sram_fit
 from .targets import TargetSpec, resolve_targets
 from .tensorio import extract_io
 
@@ -92,6 +93,35 @@ def _placed_nothing_on_accelerator(backend: str, blob: Blob) -> bool:
     return backend != "cpu" and blob.npu_op_count == 0
 
 
+class SramNoFitRefused(Exception):
+    """A certain arena or SRAM0-residency NO-FIT under `Sram_Only`
+    (tan-cli#1288, `tan.model.sram_fit`) -- refuses the WHOLE per-model
+    build, unlike `VelaFootprintRefused`'s per-target coverage skip: every
+    ethos_u variant this SKU would ship describes a placement that cannot
+    execute on it (`src/backends/inference/ethos_u_aen.cpp` pins every NPU
+    access to the SRAM AXI port under `Sram_Only`), so no partial package is
+    written -- `_run_build` (`tan.commands.model_cmd`) catches this ahead of
+    the generic per-model except-clause and reports `model.sram-no-fit` at
+    `ExitCode.VALIDATION_FAILURE`, not the generic `model.build-failed`."""
+
+
+def _sram_no_fit_message(spec: TargetSpec, fit: SramFit) -> str:
+    parts = []
+    if fit.arena.verdict == "no-fit":
+        parts.append(f"arena needs {fit.arena.needed_kib} KiB, only "
+                     f"{fit.arena.limit_kib} KiB available "
+                     f"(cores.<id>.inference.default_arena_kib)")
+    if fit.sram0.verdict == "no-fit":
+        parts.append(f"SRAM0 needs {fit.sram0.needed_kib} KiB (blob "
+                     f"{fit.blob_kib} KiB + arena {fit.arena.limit_kib} KiB), "
+                     f"only {fit.sram0.limit_kib} KiB available")
+    detail = "; ".join(parts)
+    return (f"{spec.accel_config or spec.backend}: {detail} -- refusing to ship a "
+            f"Sram_Only target whose weights/arena cannot be SRAM0-resident "
+            f"(src/backends/inference/ethos_u_aen.cpp pins every NPU access "
+            f"to the SRAM AXI port). No package written for this model.")
+
+
 def _no_placement_reason(spec: TargetSpec, blob: Blob) -> str:
     """The coverage reason for a dropped zero-placement accelerator target --
     the compiler's own verdict, the target it applies to, and what the package
@@ -110,7 +140,8 @@ def _no_placement_reason(spec: TargetSpec, blob: Blob) -> str:
 def build_model(*, sku: str, name: str, source: Path, out_dir: Path,
                 metadata_root: Path,
                 adapters: list[CompilerAdapter] | None = None,
-                compile_opts: dict[str, dict] | None = None) -> Path:
+                compile_opts: dict[str, dict] | None = None,
+                board_doc: dict | None = None) -> Path:
     if not _NAME_RE.fullmatch(name):
         raise ValueError(f"invalid model name {name!r}: must match {_NAME_RE.pattern!r}")
     registry = list(_ADAPTERS if adapters is None else adapters)
@@ -191,6 +222,19 @@ def build_model(*, sku: str, name: str, source: Path, out_dir: Path,
             # ONE target's refusal, not the package's. See the module docstring.
             coverage.append(Coverage(spec.backend, spec.accel_config, "skipped", str(err)))
             continue
+        if spec.backend == "ethos_u":
+            # tan-cli#1288: a certain arena/SRAM0 no-fit under `Sram_Only`
+            # refuses the WHOLE model build (see `SramNoFitRefused`), unlike
+            # every OTHER per-target refusal above/below this line -- a
+            # no-op for every other memory mode (`evaluate_sram_fit` itself
+            # gates on it).
+            fit = evaluate_sram_fit(
+                memory_mode=spec.vela_memory_mode, req_sram_kib=blob.req_sram_kib,
+                blob_len_bytes=len(blob.payload), board_doc=board_doc,
+                paired_core=spec.paired_core, sku=sku, metadata_root=metadata_root,
+            )
+            if fit.no_fit:
+                raise SramNoFitRefused(_sram_no_fit_message(spec, fit))
         if _placed_nothing_on_accelerator(spec.backend, blob):
             coverage.append(Coverage(spec.backend, spec.accel_config, "skipped",
                                      _no_placement_reason(spec, blob)))

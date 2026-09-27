@@ -79,6 +79,7 @@ from .perf_apply import (
     _resolve_hw_rev,
     apply_perf_point,
 )
+from .sram_fit import SramFit, evaluate_sram_fit
 from .targets import TargetSpec, resolve_targets
 from .tensorio import extract_ops, tflite_reader_available
 
@@ -122,7 +123,8 @@ def resolve_check_backends(sku: str, *, metadata_root: Path) -> list[str]:
 # is pinned to the module revision it ran on, and nothing else in `check` is.
 def check_model_backends(*, backends: list[str], sku: str, source: Path,
                           metadata_root: Path, exact: bool,
-                          hw_rev: str | None = None) -> list[BackendReport]:
+                          hw_rev: str | None = None,
+                          board_doc: dict | None = None) -> list[BackendReport]:
     """One `BackendReport` per @backends entry for @source -- the ops are
     walked ONCE (`extract_ops`, best-effort: `[]` for a non-.tflite source,
     same contract every ONNX-ingesting backend already treats as
@@ -142,7 +144,12 @@ def check_model_backends(*, backends: list[str], sku: str, source: Path,
     (MAJOR 2 review).
 
     See the block comment above for the perf-point step's two properties: the
-    lazy digest behind `has_perf_points`, and what @hw_rev is."""
+    lazy digest behind `has_perf_points`, and what @hw_rev is.
+
+    @board_doc (tan-cli#1288) is `board.yaml` itself, or `None` -- threaded
+    down to `_maybe_exact_ethos_u`'s SRAM-fit check, which reads
+    `cores.<id>.inference.default_arena_kib` off it. `None` (the default) is
+    not a refusal: `resolve_arena_kib` falls back to the schema default."""
     ops = extract_ops(source)
     src_format = source.suffix.lstrip(".").lower()
     reader_missing = src_format == "tflite" and not ops and not tflite_reader_available()
@@ -159,7 +166,7 @@ def check_model_backends(*, backends: list[str], sku: str, source: Path,
         if reader_missing and report.table is not None and not report.ops:
             report = _reader_missing_report(report)
         if exact:
-            report = _apply_exact(report, backend, source, sku, metadata_root)
+            report = _apply_exact(report, backend, source, sku, metadata_root, board_doc)
         if perf_published:
             if model_sha256 is None:
                 model_sha256 = _model_sha256(source)
@@ -198,10 +205,10 @@ def _reader_missing_report(report: BackendReport) -> BackendReport:
 
 
 def _apply_exact(report: BackendReport, backend: str, source: Path, sku: str,
-                  metadata_root: Path) -> BackendReport:
+                  metadata_root: Path, board_doc: dict | None = None) -> BackendReport:
     if backend != "ethos_u":
         return _license_gated_exact_note(report, backend)
-    return _maybe_exact_ethos_u(report, source, sku, metadata_root)
+    return _maybe_exact_ethos_u(report, source, sku, metadata_root, board_doc)
 
 
 def _license_gated_exact_note(report: BackendReport, backend: str) -> BackendReport:
@@ -342,7 +349,7 @@ def _footprint_refused_note(report: BackendReport, err: Exception) -> BackendRep
 
 
 def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
-                          metadata_root: Path) -> BackendReport:
+                          metadata_root: Path, board_doc: dict | None = None) -> BackendReport:
     """Runs the real `vela` compile when it is on PATH; degrades cleanly --
     and SAYS SO, in a note -- back to @report (the static screen) for every
     other case: no vela, no resolvable accelerator config, a vela failure, or
@@ -428,7 +435,17 @@ def _maybe_exact_ethos_u(report: BackendReport, source: Path, sku: str,
             f"--exact compile with vela failed ({_short_vela_error(err)}).",
             "Reporting the static screen instead.",
         ])
-    return _report_from_vela_compile(report, blob, accel_config)
+    # tan-cli#1288: the SRAM0 residency + arena fit check, off the SAME
+    # resolved target/blob a real compile just produced -- `target.paired_core`
+    # (which `cores.<id>.inference.default_arena_kib` applies) and
+    # `target.vela_memory_mode` (whether the check applies at all) both come
+    # from `_headline_ethos_u_target` above, never re-resolved.
+    sram_fit = evaluate_sram_fit(
+        memory_mode=target.vela_memory_mode, req_sram_kib=blob.req_sram_kib,
+        blob_len_bytes=len(blob.payload), board_doc=board_doc,
+        paired_core=target.paired_core, sku=sku, metadata_root=metadata_root,
+    )
+    return _report_from_vela_compile(report, blob, accel_config, sram_fit=sram_fit)
 
 
 def _vela_placement_note(blob: Blob, accel_config: str, total: int, pct: float,
@@ -447,7 +464,8 @@ def _vela_placement_note(blob: Blob, accel_config: str, total: int, pct: float,
 # `sizing`'s prose below: `_perf_disagreements` compares a bench point against
 # a compiled report figure-by-figure, and parsing tan's own sentence back to do
 # that would be a second, silently-drifting spelling of the same two numbers.
-def _report_from_vela_compile(report: BackendReport, blob: Blob, accel_config: str) -> BackendReport:
+def _report_from_vela_compile(report: BackendReport, blob: Blob, accel_config: str,
+                              sram_fit: SramFit | None = None) -> BackendReport:
     """Turn a REAL, successful vela compile into a `BackendReport` driven by
     what vela actually placed on the NPU -- never by the fact that compile()
     didn't raise. **Vela exits 0 on a full CPU fallback by design** (measured:
@@ -494,6 +512,7 @@ def _report_from_vela_compile(report: BackendReport, blob: Blob, accel_config: s
         basis="compiled", confidence="certain",
         arena_bytes=blob.arena_bytes, req_sram_kib=blob.req_sram_kib,
         notes=[note, *blob.caveats],
+        sram_fit=sram_fit,
     )
 
 

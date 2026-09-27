@@ -35,11 +35,14 @@ tan model check --exact         # attempt a real vela compile (Ethos-U only)
 
 `ok` and the exit code stay `0` for any run that completed, whatever the
 verdicts read — reporting `partial`, `cpu-only` or `undetermined` **is** the
-feature, never a failure. A run that could not complete is non-zero. The two
+feature, never a failure. A run that could not complete is non-zero. The
 codes specific to `check` are `model.check-sku-unresolved` (board-level:
-`som.sku`'s NPU backends could not be resolved, so the whole run refuses) and
+`som.sku`'s NPU backends could not be resolved, so the whole run refuses),
 `model.check-failed` (per-model: an unreadable or unparseable source, so one
-bad model does not abort the batch). The codes `model` shares across its
+bad model does not abort the batch), and `model.sram-no-fit` (a certain
+arena/SRAM0-residency no-fit under `Sram_Only`, `--exact` only — see
+"`sramFit`: the SRAM0 residency + arena check" below) at
+`ExitCode.VALIDATION_FAILURE`. The codes `model` shares across its
 subcommands can also fire — `model.board-yaml-missing`,
 `model.board-yaml-invalid`, `model.sdk-root-unresolved`,
 `model.unknown-subcommand`, `model.internal-failure`.
@@ -282,6 +285,15 @@ than reading as "this model genuinely has no operators".
           "latencyMsP95": <float> | null,
           "latencyRuns": <int> | null,
           "perfRef": "<bench/rig id, e.g. e1m-aen-evk-01>" | null,
+          "sramFit": {
+            "arena": {"verdict": "fits-unverified" | "no-fit" | "skipped",
+                      "neededKib": <int> | null, "limitKib": <int> | null,
+                      "reason": "<string>" | null},
+            "sram0": {"verdict": "fits-unverified" | "no-fit" | "skipped",
+                      "neededKib": <int> | null, "limitKib": <int> | null,
+                      "reason": "<string>" | null},
+            "blobKib": <int> | null
+          } | null,
           "notes": ["..."],
           "ops": [
             {"op": "CONV_2D", "status": "npu-eligible",
@@ -297,6 +309,42 @@ than reading as "this model genuinely has no operators".
 `variant` is `null` for every backend but `ethos_u`. `table` is `null`
 whenever no table resolved — including on every run against an alp-sdk that
 does not yet carry `metadata/npu_ops/` (see the note at the top).
+
+## `sramFit`: the SRAM0 residency + arena check (#1288, `--exact` only)
+
+`sramFit` is `null` at `basis: "static-screen"` — no compiled blob exists yet
+to measure a fit against, and this block is never a guess. It appears only on
+an ethos_u report at `basis: "compiled"` (a real `--exact` compile ran), and
+only its `ethos_u` backend ever carries a non-null value — `drpai`/
+`deepx_dxm1` never compile under `--exact` in this release (see above), so
+their `sramFit` stays `null` too.
+
+Both `arena` and `sram0` apply ONLY when the target's SoC spec resolves the
+`Sram_Only` vela memory mode — `src/backends/inference/ethos_u_aen.cpp` pins
+every NPU access to the SRAM AXI port there, so both the tensor arena and the
+compiled blob's weights must be SRAM0-resident. Every other memory mode
+(`Shared_Sram`, `Dedicated_Sram*`) may place the blob off SRAM0, so both axes
+report `verdict: "skipped"` there, with a `reason`.
+
+- **`arena`** — `reqSramKib` (the SAME arena figure carried at the report's
+  own top level) against `board.yaml`'s `cores.<id>.inference.
+  default_arena_kib` for the core the target pairs to (`128` KiB, the schema
+  default, when the board declares none — `metadata/schemas/board.schema.json`).
+- **`sram0`** — `ceil(len(compiled blob)/1024) + arena_kib` (the SAME
+  board-resolved arena budget `arena` compared against, NOT `reqSramKib`)
+  against the resolved SoC variant's `sram_banks_kb.SRAM0`.
+
+**Never a bare `"fits"`.** Every SoC ships `inference_arena_sram_kib: 0`
+today, so there is no VERIFIED inference-arena SRAM budget anywhere in
+metadata — a pass reads `"fits-unverified"`, never `"fits"`. Only
+`"no-fit"` is certain: both axes are plain ceil'd-KiB arithmetic against a
+real, sourced number, so a failure is a hard physical fact, not a screen.
+`tan model build` refuses the WHOLE per-model build on a certain no-fit (no
+`.alpmodel` written); `tan model check --exact` reports the SAME certain
+no-fit as the `model.sram-no-fit` issue at `ExitCode.VALIDATION_FAILURE`,
+alongside the model's own report (nothing about `sramFit` is hidden even
+when the run refuses). This never offers or implies an MRAM placement — the
+NPU reading weights in place from MRAM is unproven on the bench.
 
 `data.schemaVersion` is versioned independently of `tan model build`'s and
 `tan model doctor`'s — all three are different `data` shapes.

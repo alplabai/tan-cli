@@ -67,6 +67,11 @@ def backend_report_as_dict(report: BackendReport) -> dict:
         "perfRef": report.perf_ref,
         "notes": list(report.notes),
         "ops": [op_verdict_as_dict(o) for o in report.ops],
+        # tan-cli#1288: `Sram_Only` arena + SRAM0-residency fit. `null` at
+        # every `basis` but `"compiled"` (`analyze.BackendReport.sram_fit`'s
+        # own field comment) -- a static screen has no compiled blob to
+        # measure a fit against, so it reports no verdict rather than a guess.
+        "sramFit": None if report.sram_fit is None else report.sram_fit.as_dict(),
     }
 
 
@@ -149,10 +154,41 @@ def _exact_hint_line(report: dict) -> str | None:
     return "  Exact:  pip install tan-cli[model-compile]  &&  tan model check --exact"
 
 
+#: tan-cli#1288 -- text-mode label per `sramFit` axis, matching the JSON
+#: key order (`arena` then `sram0`).
+_SRAM_FIT_AXIS_LABELS = (("arena", "arena"), ("sram0", "SRAM0"))
+
+
+def _sram_fit_lines(report: dict) -> list[str]:
+    """One line per `sramFit` axis, or `[]` when the report carries none (a
+    static screen, or a `compiled` report `check.py` never reached --
+    `basis` gates it, `model_check.backend_report_as_dict` already made it
+    `null` there). Never renders a bare "fits" -- only `fits-unverified` /
+    `no-fit` / `skipped`, the same three words the JSON carries."""
+    fit = report.get("sramFit")
+    if not fit:
+        return []
+    lines = []
+    for key, label in _SRAM_FIT_AXIS_LABELS:
+        axis = fit[key]
+        verdict = axis["verdict"]
+        if verdict == "skipped":
+            lines.append(f"  SRAM fit ({label}): skipped -- {axis['reason']}")
+        elif verdict == "no-fit":
+            lines.append(f"  SRAM fit ({label}): NO-FIT -- needs {axis['neededKib']} KiB, "
+                         f"only {axis['limitKib']} KiB available")
+        else:
+            caveat = f" ({axis['reason']})" if axis.get("reason") else ""
+            lines.append(f"  SRAM fit ({label}): fits-unverified -- "
+                         f"{axis['neededKib']} KiB <= {axis['limitKib']} KiB{caveat}")
+    return lines
+
+
 def render_backend_report(report: dict, *, sku: str | None, prefix: str = "") -> list[str]:
     """One backend's block of text-mode lines: the header (`{label} ({sku})
-    {coverage}`), the coverage + CPU-fallback summary lines, every note
-    (this is where the engine's own silent-CPU-fallback sentence and the
+    {coverage}`), the coverage + CPU-fallback summary lines, the SRAM-fit
+    lines (tan-cli#1288, absent when `sramFit` is `null`), every note (this
+    is where the engine's own silent-CPU-fallback sentence and the
     uncosted-MAC caveat surface), and the exact-upgrade hint."""
     label = backend_label(report["backend"], report["variant"])
     lines = [f"{prefix}{label} ({sku})  {report['npuCoverage']}"]
@@ -160,6 +196,7 @@ def render_backend_report(report: dict, *, sku: str | None, prefix: str = "") ->
         line = build_line(report)
         if line:
             lines.append(line)
+    lines.extend(_sram_fit_lines(report))
     lines.extend(f"  {note}" for note in report["notes"])
     hint = _exact_hint_line(report)
     if hint:
