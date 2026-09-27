@@ -334,15 +334,22 @@ report `verdict: "skipped"` there, with a `reason`.
 `m55_hp`/`m55_he`), or it may pair to no core at all — real metadata, not a
 gap: the E4/E6/E8's own Ethos-U85 declares none, and that NPU is exactly the
 one `--exact`/`build` compile for by default on those SKUs. A core only
-counts at all when it **runs an inference workload** — an `inference:` block
-declared on it (even empty), OR `tflite-micro` named in `libraries:`
-(project-wide, or scoped to include it): `inference:` is app-level TUNING,
-not a declaration of intent, so an app that never overrides the arena
-default has no reason to write the block at all, and the library is the
-signal that catches that case (mirrors `tan.planner.kconfig`'s own
-`_slice_wants_inference`). A core `board.yaml` declares for an unrelated
-reason (a peripheral, an app) but that runs no inference workload at all is
-NOT a certain core, even if it happens to be the target's own `paired_core`.
+counts at all when it **PARTICIPATES** — not parked `os: "off"`, the same
+one exclusion `tan.planner.orchestrator.iter_buildable_slices` uses to decide
+which cores the planner builds a slice for at all — **and runs an inference
+workload** — an `inference:` block declared on it (even empty), OR
+`tflite-micro` named in `libraries:` (project-wide, or scoped to include
+it): `inference:` is app-level TUNING, not a declaration of intent, so an
+app that never overrides the arena default has no reason to write the block
+at all, and the library is the signal that catches that case (mirrors
+`tan.planner.kconfig`'s own `_slice_wants_inference`). A core `board.yaml`
+declares for an unrelated reason (a peripheral, an app) but that runs no
+inference workload at all is NOT a certain core, even if it happens to be
+the target's own `paired_core` — and a PARKED core never counts even when a
+project-wide `libraries:` entry (no `cores:` scoping) would otherwise seem
+to include it: the E1M-AEN801 template's own `a32_cluster: {os: "off"}`
+would wrongly count without this exclusion, turning a real `m55_hp`-only
+certain no-fit into a merely `skipped` ambiguous range.
 
 - **A paired core that runs inference, declared under `cores:`** — is
   CERTAIN: its own `inference.default_arena_kib` (`128` KiB, the schema

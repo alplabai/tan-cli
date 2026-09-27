@@ -152,10 +152,11 @@ class ArenaBudget:
       declared budgets and the core names that produced them).
     * `"unresolved"` -- no board.yaml in hand, the target's paired core is
       not declared in board.yaml at all, the target's paired core IS
-      declared but runs no inference workload at all, or (paired_core is
-      `None` too) board.yaml declares no core running an inference workload
-      at all (`reason` says which). Never a `NO_FIT` off one exact figure --
-      but see `MIN_ARENA_KIB` for the lower-bound proof it still allows."""
+      declared but parked (`os: "off"`, `_core_participates`) or runs no
+      inference workload at all, or (paired_core is `None` too) board.yaml
+      PARTICIPATES no core running an inference workload at all (`reason`
+      says which). Never a `NO_FIT` off one exact figure -- but see
+      `MIN_ARENA_KIB` for the lower-bound proof it still allows."""
 
     kind: str
     single_kib: int | None = None
@@ -181,43 +182,58 @@ def _core_arena_kib_or_default(core_slice: dict) -> int:
     return DEFAULT_ARENA_KIB
 
 
+def _core_participates(core_slice: dict) -> bool:
+    """Mirrors `tan.planner.orchestrator.iter_buildable_slices`'s own filter
+    (tan-cli#1288 review round 3, finding 1) -- that function's own
+    docstring calls it "the SINGLE source of WHICH cores build ... so
+    `emit_build_plan()` ... always enumerates slices the same way": `os:
+    "off"` is the one exclusion, no other. MIRRORED, not imported/edited --
+    `tan/planner/` is a hash-audited upstream mirror, and that function reads
+    a parsed `Slice.os`, not a raw board.yaml dict.
+
+    A core the planner never builds a slice for cannot run this model's
+    inference regardless of what `libraries:`/`inference:` says about it --
+    a project-wide `libraries: [tflite-micro]` entry (no `cores:` scoping)
+    must not mark a parked `os: "off"` core as "running inference" just
+    because nothing narrows it away."""
+    return core_slice.get("os") != "off"
+
+
 def _core_uses_inference(board_doc: dict, core_id: str, core_slice: dict) -> bool:
-    """Does this board.yaml core genuinely run an inference workload?
-    Mirrors `tan.planner.kconfig._slice_wants_inference`'s two independent
-    signals (tan-cli#1288 review round 2, finding 1) -- MIRRORED rather than
-    imported: that function takes a fully parsed `BoardProject`/`Slice`
-    (`tan.core.system_manifest`), a heavier object this module has no other
-    reason to construct, and editing `tan/planner/` itself is forbidden (it
-    is a hash-audited upstream mirror).
+    """Does this PARTICIPATING (`_core_participates`) board.yaml core
+    genuinely run an inference workload? Mirrors `tan.planner.kconfig.
+    _slice_wants_inference`'s two independent signals (tan-cli#1288 review
+    round 2, finding 1) -- MIRRORED rather than imported: that function takes
+    a fully parsed `BoardProject`/`Slice` (`tan.core.system_manifest`), a
+    heavier object this module has no other reason to construct, and editing
+    `tan/planner/` itself is forbidden (it is a hash-audited upstream
+    mirror).
 
     1. `cores.<core_id>.inference:` declared at all -- app-level tuning
        (`default_arena_kib:`), the signal every inference example declares.
-    2. `libraries:` names `tflite-micro` -- either the board.schema.json
-       shape (a TOP-LEVEL list, project-wide unless an entry's own `cores:`
-       scopes it to include this core) or a `cores.<core_id>.libraries:`
-       list nested directly under the core itself (not part of the current
-       published schema, but accepted here too: a reviewer-supplied board
-       doc used exactly this nesting, and a core-scoped list is an
-       unambiguous signal either way this module reads it). The library
-       signal exists because `inference:` is TUNING, not a declaration of
-       intent: an app that never overrides the arena default has no reason
-       to write the block at all (`_slice_wants_inference`'s own docstring,
-       alp-sdk #874). Matched on the LITERAL name only -- this module does
-       not resolve the planner's own library alias table, since every
-       committed board.yaml/template spells `tflite-micro` out directly.
+    2. `libraries:` names `tflite-micro` -- the board.schema.json shape: a
+       TOP-LEVEL list, project-wide unless an entry's own `cores:` scopes it
+       to include this core (`core_entry`'s schema is `additionalProperties:
+       false` with no per-core `libraries:` property of its own -- tan-cli
+       #1288 review round 3, finding 2 -- so this is the ONLY shape to read).
+       The library signal exists because `inference:` is TUNING, not a
+       declaration of intent: an app that never overrides the arena default
+       has no reason to write the block at all (`_slice_wants_inference`'s
+       own docstring, alp-sdk #874). Matched on the LITERAL name only, never
+       the planner's own library-alias table (`library-aliases-v1.json`) --
+       and provably safe to: the schema's own library-name pattern
+       (`^[a-z][a-z0-9-]*$`, board.schema.json's `libraries[].name`) forbids
+       underscores, so the alias table's ONLY `tflite-micro` alias
+       (`"tflite_micro": "tflite-micro"`) can never appear as a `libraries:`
+       entry in any schema-valid board.yaml in the first place -- the
+       canonical spelling is the only one reachable here, not merely the
+       only one observed.
 
     A core failing BOTH is exactly the AEN801-template shape a `paired_core`
     could still name without this guard: `board.yaml` declaring the core key
     (e.g. for an unrelated peripheral) is not the same fact as the core
     running THIS NPU's model."""
     if isinstance(core_slice.get("inference"), dict):
-        return True
-    core_libraries = core_slice.get("libraries")
-    if isinstance(core_libraries, list) and any(
-        (lib if isinstance(lib, str) else lib.get("name") if isinstance(lib, dict) else None)
-        == "tflite-micro"
-        for lib in core_libraries
-    ):
         return True
     raw_libraries = board_doc.get("libraries")
     libraries = raw_libraries if isinstance(raw_libraries, list) else []
@@ -231,7 +247,7 @@ def _core_uses_inference(board_doc: dict, core_id: str, core_slice: dict) -> boo
         if name != "tflite-micro":
             continue
         if scoped_cores is None:
-            return True  # project-wide: every core running any OS at all
+            return True  # project-wide: every PARTICIPATING core (caller filters `os: "off"`)
         if isinstance(scoped_cores, list) and core_id in scoped_cores:
             return True
     return False
@@ -242,22 +258,30 @@ def resolve_arena_budget(board_doc: dict | None, core_id: str | None) -> ArenaBu
     board.yaml actually says (tan-cli#1288 review, rounds 1 and 2):
 
     1. @core_id resolved (`TargetSpec.paired_core`) AND that core is declared
-       under board.yaml's `cores:` AND runs an inference workload
+       under board.yaml's `cores:`, PARTICIPATES (`_core_participates`: not
+       parked `os: "off"`), AND runs an inference workload
        (`_core_uses_inference`) -- `"single"`, CERTAIN: THIS core is what
        runs this NPU, full stop.
-    2. @core_id resolved but NOT declared under `cores:`, or declared but not
-       running inference at all -- `"unresolved"`: nothing in this project
-       runs THIS model on that core, so a board arena figure has no core to
-       attach to. Never a `DEFAULT_ARENA_KIB`-based guess.
+    2. @core_id resolved but NOT declared under `cores:`, declared but parked
+       (`os: "off"`), or declared-and-participating but running no inference
+       at all -- `"unresolved"`: nothing in this project runs THIS model on
+       that core, so a board arena figure has no core to attach to. Never a
+       `DEFAULT_ARENA_KIB`-based guess.
     3. @core_id is `None` (a shared NPU with no pairing of its own, e.g. the
-       E8/E6/E4's own Ethos-U85) -- collect every board.yaml core that runs
-       an inference workload at all (the only honest way to guess "which
-       core(s) might run this", absent a real pairing): exactly one --
-       `"single"`, CERTAIN, use it; two or more -- `"range"` (the caller
-       decides what a `NO_FIT`/`FIT_UNVERIFIED` bound can honestly claim
-       across them); none at all -- `"unresolved"` (a bare
+       E8/E6/E4's own Ethos-U85) -- collect every board.yaml core that
+       PARTICIPATES and runs an inference workload (the only honest way to
+       guess "which core(s) might run this", absent a real pairing): exactly
+       one -- `"single"`, CERTAIN, use it; two or more -- `"range"` (the
+       caller decides what a `NO_FIT`/`FIT_UNVERIFIED` bound can honestly
+       claim across them); none at all -- `"unresolved"` (a bare
        `DEFAULT_ARENA_KIB` here would be a number about nothing declared,
-       never certain enough to refuse a build on off one exact figure).
+       never certain enough to refuse a build on off one exact figure). A
+       parked `os: "off"` core is excluded here EVEN when a project-wide
+       `libraries:` entry (no `cores:` scoping) would otherwise mark it --
+       the planner never builds it a slice at all, so it cannot be the core
+       that runs this model regardless of what the library list says
+       (tan-cli#1288 review round 3, finding 1: the AEN801 template's own
+       `a32_cluster: {os: "off"}` used to count).
     4. @board_doc itself absent -- `"unresolved"`, same reasoning as 3's
        empty case: nothing to inspect at all."""
     if not isinstance(board_doc, dict):
@@ -272,6 +296,10 @@ def resolve_arena_budget(board_doc: dict | None, core_id: str | None) -> ArenaBu
             return ArenaBudget(kind="unresolved", reason=(
                 f"core {core_id!r} not declared in board.yaml; nothing in "
                 f"this project runs on it"))
+        if not _core_participates(slice_):
+            return ArenaBudget(kind="unresolved", reason=(
+                f"core {core_id!r} is parked (os: \"off\"); nothing in this "
+                f"project runs on it"))
         if not _core_uses_inference(board_doc, core_id, slice_):
             return ArenaBudget(kind="unresolved", reason=(
                 f"core {core_id!r} is declared in board.yaml but runs no "
@@ -282,7 +310,8 @@ def resolve_arena_budget(board_doc: dict | None, core_id: str | None) -> ArenaBu
 
     inference_cores = sorted(
         name for name, slice_ in cores.items()
-        if isinstance(slice_, dict) and _core_uses_inference(board_doc, name, slice_)
+        if isinstance(slice_, dict) and _core_participates(slice_)
+        and _core_uses_inference(board_doc, name, slice_)
     )
     if not inference_cores:
         return ArenaBudget(kind="unresolved", reason=(

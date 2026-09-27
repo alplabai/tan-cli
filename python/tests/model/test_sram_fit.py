@@ -191,21 +191,43 @@ def test_an_unpaired_npu_with_no_inference_core_at_all_is_unresolved():
 
 
 def test_the_reviews_own_libraries_only_probe_resolves_single_not_unresolved():
-    """The exact literal probe tan-cli#1288 review round 2 gave for finding 2
-    (`{"cores": {"m55_hp": {"app": "./src", "libraries": ["tflite-micro"]}}}`)
-    -- a per-core `libraries:` list, which `_core_uses_inference` reads as a
-    second, defensive home for the same signal alongside the schema's own
-    top-level scoped `libraries:` (finding 1's library signal). Confirmed
-    HERE, once, as its own test: with finding 1 applied this board is
-    `"single"`/CERTAIN, not `"unresolved"` -- the SRAM0 probe this exact board
-    doc feeds (`test_the_reviews_own_libraries_only_probe_is_a_certain_
-    sram0_no_fit` in the evaluate_sram_fit section below) is therefore a
-    `"single"`-shape certain no-fit, not an unresolved-lower-bound one; a
-    genuinely unresolved probe is pinned separately."""
-    board_doc = {"cores": {"m55_hp": {"app": "./src", "libraries": ["tflite-micro"]}}}
+    """tan-cli#1288 review round 2, finding 2's own scenario, re-expressed in
+    the schema-VALID shape after round 3, finding 2 (`core_entry` has no
+    per-core `libraries:` property at all -- `additionalProperties: false`
+    -- so the original probe's `{"cores": {"m55_hp": {"libraries": [...]}}}`
+    nesting could never appear in a real board.yaml; the top-level, `cores:`
+    -scoped list is the ONLY valid way to say this). Confirmed HERE, once, as
+    its own test: this board is `"single"`/CERTAIN, not `"unresolved"` -- the
+    SRAM0 probe this exact board doc feeds
+    (`test_the_reviews_own_libraries_only_probe_is_a_certain_sram0_no_fit` in
+    the evaluate_sram_fit section below) is therefore a `"single"`-shape
+    certain no-fit, not an unresolved-lower-bound one; a genuinely unresolved
+    probe is pinned separately."""
+    board_doc = {"cores": {"m55_hp": {"app": "./src"}},
+                 "libraries": [{"name": "tflite-micro", "cores": ["m55_hp"]}]}
     budget = resolve_arena_budget(board_doc, None)  # the U85 shape: paired_core is None
     assert budget.kind == "single"
     assert budget.single_kib == DEFAULT_ARENA_KIB
+    assert budget.cores == ("m55_hp",)
+
+
+def test_a_project_wide_library_never_counts_a_parked_core(tmp_path):
+    """tan-cli#1288 review round 3, finding 1's own probe: the E1M-AEN801
+    template's OWN shape (`a32_cluster: {os: "off"}`, `m55_hp` with
+    `default_arena_kib: 64`) plus a project-wide `libraries: [tflite-micro]`
+    (no `cores:` scoping) -- before this fix, the project-wide signal marked
+    `a32_cluster` too (nothing narrows a project-wide entry away), making
+    `m55_hp`/`a32_cluster` a `"range"` (64-128) and a 72 KiB arena `SKIPPED`
+    rather than a certain `NO_FIT`. `a32_cluster` is parked
+    (`_core_participates`): the planner never builds it a slice, so it
+    cannot be the core running this model regardless of the library list --
+    `m55_hp` is the SOLE participating, inference-running core, CERTAIN."""
+    board_doc = {"cores": {"a32_cluster": {"os": "off"},
+                           "m55_hp": {"inference": {"default_arena_kib": 64}}},
+                 "libraries": ["tflite-micro"]}
+    budget = resolve_arena_budget(board_doc, None)
+    assert budget.kind == "single"
+    assert budget.single_kib == 64
     assert budget.cores == ("m55_hp",)
 
 
@@ -246,17 +268,19 @@ def test_the_e8_shaped_u85_yields_a_certain_no_fit_at_arena_72_vs_m55_hp_64():
 
 
 def test_the_reviews_own_libraries_only_probe_is_a_certain_sram0_no_fit(tmp_path):
-    """tan-cli#1288 review round 2, finding 2's own probe, run through
-    `evaluate_sram_fit` end to end: the board declares `m55_hp` via a
-    `tflite-micro` LIBRARY only (no `inference:` block) -- with finding 1
-    applied this resolves `"single"`/CERTAIN (128 KiB default), so
-    `blob_kib(5000) + arena(128) = 5128 > SRAM0(4096)` is a real, single-shape
-    `NO_FIT` -- not the unresolved-lower-bound shape (which needs a genuinely
-    unresolved board; see the next test)."""
+    """tan-cli#1288 review round 2, finding 2's own scenario, run through
+    `evaluate_sram_fit` end to end and re-expressed in the schema-VALID
+    top-level-scoped shape (round 3, finding 2): the board declares `m55_hp`
+    via a `tflite-micro` LIBRARY only (no `inference:` block) -- this
+    resolves `"single"`/CERTAIN (128 KiB default), so `blob_kib(5000) +
+    arena(128) = 5128 > SRAM0(4096)` is a real, single-shape `NO_FIT` -- not
+    the unresolved-lower-bound shape (which needs a genuinely unresolved
+    board; see the next test)."""
     _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
     _write_soc_with_variant(tmp_path, "fake:soc:e8", [], sku="E1M-FAKE",
                             sram_banks_kb={"SRAM0": 4096})
-    board_doc = {"cores": {"m55_hp": {"app": "./src", "libraries": ["tflite-micro"]}}}
+    board_doc = {"cores": {"m55_hp": {"app": "./src"}},
+                 "libraries": [{"name": "tflite-micro", "cores": ["m55_hp"]}]}
     fit = evaluate_sram_fit(
         memory_mode="Sram_Only", req_sram_kib=1, blob_len_bytes=5000 * 1024,
         board_doc=board_doc, paired_core=None,  # the E8's own Ethos-U85 shape
@@ -265,6 +289,29 @@ def test_the_reviews_own_libraries_only_probe_is_a_certain_sram0_no_fit(tmp_path
     assert fit.arena.verdict == FIT_UNVERIFIED  # req_sram_kib=1 fits the 128 default easily
     assert fit.sram0.verdict == NO_FIT
     assert fit.sram0.needed_kib == 5128 and fit.sram0.limit_kib == 4096
+    assert fit.no_fit is True
+
+
+def test_the_reviews_own_parked_core_probe_is_a_certain_no_fit(tmp_path):
+    """tan-cli#1288 review round 3, finding 1's own end-to-end probe: the
+    AEN801-template board (`a32_cluster: {os: "off"}`, `m55_hp` at 64 KiB)
+    plus a project-wide `libraries: [tflite-micro]` -- 72 KiB needed must be
+    a certain `NO_FIT` against `m55_hp`'s 64 KiB, NOT `SKIPPED` (which is
+    what a `range` spanning `a32_cluster`'s wrongly-counted 128 KiB default
+    would have produced)."""
+    _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
+    _write_soc_with_variant(tmp_path, "fake:soc:e8", [], sku="E1M-FAKE",
+                            sram_banks_kb={"SRAM0": 4096})
+    board_doc = {"cores": {"a32_cluster": {"os": "off"},
+                           "m55_hp": {"inference": {"default_arena_kib": 64}}},
+                 "libraries": ["tflite-micro"]}
+    fit = evaluate_sram_fit(
+        memory_mode="Sram_Only", req_sram_kib=72, blob_len_bytes=0,
+        board_doc=board_doc, paired_core=None,  # the E8's own Ethos-U85 shape
+        sku="E1M-FAKE", metadata_root=tmp_path,
+    )
+    assert fit.arena.verdict == NO_FIT
+    assert fit.arena.needed_kib == 72 and fit.arena.limit_kib == 64
     assert fit.no_fit is True
 
 
