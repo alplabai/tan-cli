@@ -544,7 +544,16 @@ def _perf_point_report(report: BackendReport, point: PerfPoint) -> BackendReport
     is withheld to `"undetermined"` (PR review blocker 1). `compute_on_npu_
     pct_max` is FORCED to `None` regardless -- `analyze.BackendReport`'s own
     field comment: that MAC-weighted figure is "ONLY at basis: static-screen",
-    same reason it is already `None` at `basis: "compiled"`."""
+    same reason it is already `None` at `basis: "compiled"`.
+
+    `sram_fit` (tan-cli#1288) rides the SAME `real_placement` gate as
+    `ops`/`npu_placement_pct_real`: it is a verdict about the COMPILED blob a
+    real `--exact` run just produced, not something a bare bench point can
+    independently corroborate (alp-sdk's `model_perf/` schema carries no
+    SRAM0-residency figure of its own, tan-cli#1115's "DEAD FIELDS"), so it
+    only survives the rebase when this report was ALREADY `basis: "compiled"`
+    -- otherwise it is dropped to `None`, exactly like `ops`'s own
+    withhold-when-not-corroborated shape."""
     host_notes = [n for n in report.notes if n.startswith(_EXACT_HOST_NOTE_PREFIX)]
     real_placement = report.basis == "compiled"
     return BackendReport(
@@ -562,6 +571,7 @@ def _perf_point_report(report: BackendReport, point: PerfPoint) -> BackendReport
         latency_runs=_merge_figure(point.latency_runs, report.latency_runs),
         perf_ref=point.capture_bench_id,
         notes=[_perf_point_note(point, corroborated=report.basis == "compiled"), *host_notes],
+        sram_fit=report.sram_fit if real_placement else None,
     )
 
 

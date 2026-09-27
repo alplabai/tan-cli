@@ -256,13 +256,15 @@ class BackendReport:
     perf_ref: str | None = None
     notes: list[str] = field(default_factory=list)
     # `Sram_Only` residency + arena fit against `board.yaml` (tan-cli#1288) --
-    # set ONLY by `tan.model.check._report_from_vela_compile` at
-    # `basis: "compiled"` (a real vela compile actually produced a blob to
-    # measure). Stays `None` at every construction site in THIS module
-    # (`basis: "static-screen"` -- no compiled blob exists to check) and at
-    # `tan.model.perf_apply._perf_point_report` (`basis: "bench"` -- a rebase
-    # onto a published perf point is a different concern from this host's own
-    # compile, and no alp-sdk has published a `model_perf/` tree yet). See
+    # set by `tan.model.check._report_from_vela_compile` at `basis:
+    # "compiled"` (a real vela compile actually produced a blob to measure),
+    # and CARRIED FORWARD by `tan.model.perf_apply._perf_point_report`'s own
+    # `real_placement` rebase -- exactly the same gate that carries `ops`/
+    # `npu_placement_pct_real` -- when a matched bench point corroborates an
+    # already-`"compiled"` report. `None` at every construction site in THIS
+    # module (`basis: "static-screen"` -- no compiled blob exists to check)
+    # and at an UNCORROBORATED bench rebase (no alp-sdk has published a
+    # `model_perf/` tree yet, so this path is dormant today). See
     # `tan.model.sram_fit` for the whole check.
     sram_fit: SramFit | None = None
 

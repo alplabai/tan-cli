@@ -29,7 +29,7 @@ from tan.model.sram_fit import (
     NO_FIT,
     SKIPPED,
     evaluate_sram_fit,
-    resolve_arena_kib,
+    resolve_arena_budget,
     resolve_sram0_kib,
 )
 
@@ -85,37 +85,110 @@ def _write_table(meta: Path, backend: str, filename: str, *, variant: str, suppo
 
 
 # ---------------------------------------------------------------------------
-# resolve_arena_kib -- pure
+# resolve_arena_budget -- pure. tan-cli#1288 review (HIGH/MEDIUM): the E8/E6/
+# E4 SoC specs declare NO `paired_core` for their own Ethos-U85 -- the
+# flagship SKU's own headline `--exact`/build target -- so a resolver that
+# defaulted straight to 128 on `paired_core is None` silently ignored the
+# board's real `cores.m55_hp.inference.default_arena_kib` override on every
+# real AEN SoM. These tests pin the CORRECTED scoping rules instead.
 # ---------------------------------------------------------------------------
 
-def test_resolve_arena_kib_uses_the_boards_own_override():
+def test_a_declared_paired_core_is_single_and_certain_even_with_no_override():
+    # Rule 1: the core key EXISTS under `cores:` -- that alone is what makes
+    # it certain, whether or not it bothers to tune `default_arena_kib`.
     board_doc = {"cores": {"m55_hp": {"inference": {"default_arena_kib": 64}}}}
-    assert resolve_arena_kib(board_doc, "m55_hp") == 64
+    budget = resolve_arena_budget(board_doc, "m55_hp")
+    assert budget.kind == "single"
+    assert budget.single_kib == 64
+    assert budget.cores == ("m55_hp",)
 
 
-def test_resolve_arena_kib_defaults_when_the_board_declares_none():
+def test_a_declared_paired_core_with_no_inference_block_defaults_but_stays_certain():
     board_doc = {"cores": {"m55_hp": {}}}
-    assert resolve_arena_kib(board_doc, "m55_hp") == DEFAULT_ARENA_KIB
-    assert DEFAULT_ARENA_KIB == 128  # metadata/schemas/board.schema.json's own default
+    budget = resolve_arena_budget(board_doc, "m55_hp")
+    assert budget.kind == "single"
+    assert budget.single_kib == DEFAULT_ARENA_KIB == 128  # board.schema.json's own default
+    assert budget.cores == ("m55_hp",)
 
 
-def test_resolve_arena_kib_defaults_when_the_core_is_unresolved():
-    # `paired_core is None` is a REAL answer (a shared NPU, e.g. the E8's own
-    # Ethos-U85) -- not a gap to fill with a board.yaml lookup nothing can
-    # narrow, so this falls back to the schema default too.
+def test_a_paired_core_absent_from_board_yaml_is_unresolved_not_a_128_guess():
+    """Rule 2/review MEDIUM: a paired core the board never declares at all
+    (E1M-AEN801's own `m55_he`, undeclared in its board.yaml template) must
+    never default to 128 and must never be treated as certain enough to
+    refuse a build."""
     board_doc = {"cores": {"m55_hp": {"inference": {"default_arena_kib": 64}}}}
-    assert resolve_arena_kib(board_doc, None) == DEFAULT_ARENA_KIB
+    budget = resolve_arena_budget(board_doc, "m55_he")
+    assert budget.kind == "unresolved"
+    assert "m55_he" in budget.reason and "not declared" in budget.reason
 
 
-def test_resolve_arena_kib_defaults_when_board_doc_is_absent():
-    assert resolve_arena_kib(None, "m55_hp") == DEFAULT_ARENA_KIB
+def test_an_unpaired_npu_with_exactly_one_inference_core_is_single_and_certain():
+    """Rule 1's `paired_core is None` branch, the ordinary AEN801 shape: the
+    Ethos-U85 pairs to no core of its own, but exactly one board core
+    (`m55_hp`) declares an `inference:` block at all -- that one core is used,
+    CERTAIN, not the bare schema default. THIS is the exact bug tan-cli#1288
+    review found: before the fix, `paired_core is None` fell straight to 128
+    and silently ignored `m55_hp`'s own 64 KiB override."""
+    board_doc = {"cores": {"m55_hp": {"inference": {"default_arena_kib": 64}},
+                            "a32_cluster": {"os": "off"}}}
+    budget = resolve_arena_budget(board_doc, None)
+    assert budget.kind == "single"
+    assert budget.single_kib == 64
+    assert budget.cores == ("m55_hp",)
 
 
-def test_resolve_arena_kib_ignores_a_malformed_bool_value():
+def test_an_unpaired_npu_with_several_inference_cores_is_a_range():
+    board_doc = {"cores": {
+        "m55_hp": {"inference": {"default_arena_kib": 64}},
+        "m55_he": {"inference": {"default_arena_kib": 32}},
+    }}
+    budget = resolve_arena_budget(board_doc, None)
+    assert budget.kind == "range"
+    assert budget.min_kib == 32 and budget.max_kib == 64
+    assert budget.cores == ("m55_he", "m55_hp")
+
+
+def test_an_unpaired_npu_with_no_inference_core_at_all_is_unresolved():
+    board_doc = {"cores": {"a32_cluster": {"os": "off"}}}
+    budget = resolve_arena_budget(board_doc, None)
+    assert budget.kind == "unresolved"
+    assert "declares no core running an inference workload" in budget.reason
+
+
+def test_resolve_arena_budget_is_unresolved_when_board_doc_is_absent():
+    budget = resolve_arena_budget(None, "m55_hp")
+    assert budget.kind == "unresolved"
+    assert "no board.yaml" in budget.reason
+    budget_unpaired = resolve_arena_budget(None, None)
+    assert budget_unpaired.kind == "unresolved"
+
+
+def test_resolve_arena_budget_ignores_a_malformed_bool_value():
     # bool is an int subclass in Python -- `default_arena_kib: true` is not a
-    # KiB count.
+    # KiB count, so the declared core still defaults, but stays CERTAIN.
     board_doc = {"cores": {"m55_hp": {"inference": {"default_arena_kib": True}}}}
-    assert resolve_arena_kib(board_doc, "m55_hp") == DEFAULT_ARENA_KIB
+    budget = resolve_arena_budget(board_doc, "m55_hp")
+    assert budget.kind == "single"
+    assert budget.single_kib == DEFAULT_ARENA_KIB
+
+
+def test_the_e8_shaped_u85_yields_a_certain_no_fit_at_arena_72_vs_m55_hp_64():
+    """The exact scenario tan-cli#1288 review asked to be pinned: the E8's
+    own Ethos-U85 (`paired_core: None`, real metadata shape) on the AEN801
+    board.yaml template (`cores.m55_hp.inference.default_arena_kib: 64`,
+    the ONLY inference-declaring core) -- `m55_hp` is used as the sole
+    inference core, CERTAIN, and 72 KiB needed against a 64 KiB budget is a
+    real `NO_FIT`, not a false pass against the bare schema default."""
+    board_doc = {"cores": {"a32_cluster": {"os": "off"},
+                           "m55_hp": {"app": "./src", "inference": {"default_arena_kib": 64}}}}
+    fit = evaluate_sram_fit(
+        memory_mode="Sram_Only", req_sram_kib=72, blob_len_bytes=0,
+        board_doc=board_doc, paired_core=None,  # the E8's own Ethos-U85 shape
+        sku="E1M-FAKE", metadata_root=Path("/nonexistent"),
+    )
+    assert fit.arena.verdict == NO_FIT
+    assert fit.arena.needed_kib == 72 and fit.arena.limit_kib == 64
+    assert fit.no_fit is True
 
 
 # ---------------------------------------------------------------------------
@@ -184,12 +257,18 @@ def test_arena_72_vs_128_default_passes_unverified(tmp_path):
     _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
     _write_soc_with_variant(tmp_path, "fake:soc:e8", [], sku="E1M-FAKE",
                             sram_banks_kb={"SRAM0": 4096})
+    # `m55_hp` is DECLARED (rule 1) but tunes no override -- 128 default,
+    # still CERTAIN (unlike a bare board_doc=None, which is unresolved/
+    # skipped -- see test_resolve_arena_budget_is_unresolved_when_board_doc_
+    # is_absent above).
     fit = evaluate_sram_fit(
         memory_mode="Sram_Only", req_sram_kib=72, blob_len_bytes=0,
-        board_doc=None, paired_core="m55_hp", sku="E1M-FAKE", metadata_root=tmp_path,
+        board_doc={"cores": {"m55_hp": {}}}, paired_core="m55_hp",
+        sku="E1M-FAKE", metadata_root=tmp_path,
     )
     assert fit.arena.verdict == FIT_UNVERIFIED
     assert fit.arena.limit_kib == 128
+    assert fit.arena.reason == "board arena budget not verified against firmware"
     assert fit.no_fit is False
 
 
@@ -248,11 +327,60 @@ def test_no_axis_ever_reports_a_bare_fits(tmp_path):
                             sram_banks_kb={"SRAM0": 4096})
     fit = evaluate_sram_fit(
         memory_mode="Sram_Only", req_sram_kib=1, blob_len_bytes=1024,
-        board_doc=None, paired_core="m55_hp", sku="E1M-FAKE", metadata_root=tmp_path,
+        board_doc=_BOARD_ARENA_72, paired_core="m55_hp", sku="E1M-FAKE", metadata_root=tmp_path,
     )
     assert fit.arena.verdict != "fits"
     assert fit.sram0.verdict != "fits"
     assert {fit.arena.verdict, fit.sram0.verdict} <= {FIT_UNVERIFIED, NO_FIT, SKIPPED}
+
+
+def test_an_undeclared_paired_core_is_skipped_never_a_certain_no_fit(tmp_path):
+    """tan-cli#1288 review MEDIUM: a target whose paired core the board never
+    declares (E1M-AEN801's own `m55_he`, undeclared in its template) must
+    never refuse -- even a wildly over-budget `req_sram_kib` skips, with a
+    reason, rather than comparing against an invented number."""
+    _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
+    _write_soc_with_variant(tmp_path, "fake:soc:e8", [], sku="E1M-FAKE",
+                            sram_banks_kb={"SRAM0": 4096})
+    fit = evaluate_sram_fit(
+        memory_mode="Sram_Only", req_sram_kib=999999, blob_len_bytes=0,
+        board_doc={"cores": {"m55_hp": {"inference": {"default_arena_kib": 64}}}},
+        paired_core="m55_he", sku="E1M-FAKE", metadata_root=tmp_path,
+    )
+    assert fit.arena.verdict == SKIPPED
+    assert "m55_he" in fit.arena.reason and "not declared" in fit.arena.reason
+    assert fit.sram0.verdict == SKIPPED
+    assert fit.no_fit is False
+
+
+@pytest.mark.parametrize(
+    "req_sram_kib, expected_verdict",
+    [(20, FIT_UNVERIFIED),   # <= min (32) -- fits every declared core's budget
+     (48, SKIPPED),          # strictly between min (32) and max (64) -- ambiguous
+     (65, NO_FIT)],          # > max (64) -- fails even the most generous candidate
+)
+def test_an_ambiguous_multi_core_range_gives_the_three_documented_outcomes(
+        tmp_path, req_sram_kib, expected_verdict):
+    """Rule 1's `"range"` shape: paired_core is None and MORE THAN ONE board
+    core declares an `inference:` block (32 and 64 KiB here) -- nothing
+    sourced picks between them, so only the two bounds themselves ever earn
+    an assertive word."""
+    _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
+    _write_soc_with_variant(tmp_path, "fake:soc:e8", [], sku="E1M-FAKE",
+                            sram_banks_kb={"SRAM0": 4096})
+    board_doc = {"cores": {
+        "m55_hp": {"inference": {"default_arena_kib": 64}},
+        "m55_he": {"inference": {"default_arena_kib": 32}},
+    }}
+    fit = evaluate_sram_fit(
+        memory_mode="Sram_Only", req_sram_kib=req_sram_kib, blob_len_bytes=0,
+        board_doc=board_doc, paired_core=None, sku="E1M-FAKE", metadata_root=tmp_path,
+    )
+    assert fit.arena.verdict == expected_verdict
+    assert fit.arena.verdict != "fits"
+    # The SRAM0 axis always uses the MIN (32) regardless of the arena verdict
+    # -- an independent certain-lower-bound proof (see `_evaluate_sram0`).
+    assert fit.sram0.needed_kib == 32  # blob_kib=0 + min arena 32
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +434,33 @@ def test_build_model_ships_when_the_blob_fits(tmp_path, monkeypatch):
     monkeypatch.setattr(_RealVelaAdapter, "is_available", lambda self: True)
 
     board_doc = {"cores": {"m55_hp": {"inference": {"default_arena_kib": 128}}}}
+    src = tmp_path / "tiny.tflite"
+    shutil.copy(_FIXTURE, src)
+    out = build_model(sku="E1M-FAKE", name="tiny", source=src, out_dir=tmp_path,
+                      metadata_root=tmp_path, adapters=[_RealVelaAdapter()],
+                      board_doc=board_doc)
+    assert out.is_file()
+
+
+def test_build_model_keeps_a_target_whose_paired_core_is_undeclared(tmp_path, monkeypatch):
+    """tan-cli#1288 review MEDIUM: an undeclared-paired-core SKIPPED verdict
+    must never refuse the whole model -- even a wildly over-budget
+    `req_sram_kib` (72 KiB against a board that never declares `m55_he` at
+    all) ships fine, exactly like a non-`Sram_Only` target would."""
+    _write_som_preset(tmp_path, "E1M-FAKE", "fake:soc:e8")
+    _write_soc_with_variant(
+        tmp_path, "fake:soc:e8",
+        [{"type": "ethos-u55", "subtype": "x", "mac_per_cycle": 256, "paired_core": "m55_he"}],
+        sku="E1M-FAKE", sram_banks_kb={"SRAM0": 4096})
+    from tan.model.adapters.ethos_u import VelaAdapter as _RealVelaAdapter
+    monkeypatch.setattr(_RealVelaAdapter, "compile",
+                        _fake_compile_factory(arena_bytes=73728, req_sram_kib=72,
+                                               blob_len=5000 * 1024))
+    monkeypatch.setattr(_RealVelaAdapter, "is_available", lambda self: True)
+
+    # The board declares `m55_hp` only -- `m55_he` (this target's own
+    # `paired_core`) is undeclared, exactly the AEN801-template shape.
+    board_doc = {"cores": {"m55_hp": {"inference": {"default_arena_kib": 64}}}}
     src = tmp_path / "tiny.tflite"
     shutil.copy(_FIXTURE, src)
     out = build_model(sku="E1M-FAKE", name="tiny", source=src, out_dir=tmp_path,

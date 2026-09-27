@@ -68,9 +68,10 @@ def backend_report_as_dict(report: BackendReport) -> dict:
         "notes": list(report.notes),
         "ops": [op_verdict_as_dict(o) for o in report.ops],
         # tan-cli#1288: `Sram_Only` arena + SRAM0-residency fit. `null` at
-        # every `basis` but `"compiled"` (`analyze.BackendReport.sram_fit`'s
-        # own field comment) -- a static screen has no compiled blob to
-        # measure a fit against, so it reports no verdict rather than a guess.
+        # `basis: "static-screen"` always (no compiled blob to measure a fit
+        # against), and at `basis: "bench"` unless the rebase corroborates an
+        # already-`"compiled"` report (`analyze.BackendReport.sram_fit`'s own
+        # field comment) -- never a guess.
         "sramFit": None if report.sram_fit is None else report.sram_fit.as_dict(),
     }
 
