@@ -154,7 +154,7 @@ class ArenaBudget:
       not declared in board.yaml at all, the target's paired core IS
       declared but parked (`os: "off"`, `_core_participates`) or runs no
       inference workload at all, or (paired_core is `None` too) board.yaml
-      PARTICIPATES no core running an inference workload at all (`reason`
+      has no participating core running an inference workload (`reason`
       says which). Never a `NO_FIT` off one exact figure -- but see
       `MIN_ARENA_KIB` for the lower-bound proof it still allows."""
 
