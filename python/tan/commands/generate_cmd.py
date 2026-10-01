@@ -67,8 +67,8 @@ forever; ours is content-aware) -- but SUCCESS (0), dropped with a warning
 instead, when it only rides along in the bare/`--all` default set (tan-cli#501).
 
 **`--output` exists because CMake, not tan, decides where a Zephyr build reads
-from.** Today, 98 of alp-sdk's example `CMakeLists.txt` files (of 167 total)
-shell `${ALP_SDK_ROOT}/scripts/alp_project.py --input <board.yaml> --emit
+from.** Until alp-sdk#866 retired the bridge, 98 of alp-sdk's example
+`CMakeLists.txt` files (of 167 total) shelled `${ALP_SDK_ROOT}/scripts/alp_project.py --input <board.yaml> --emit
 zephyr-conf` directly at configure time, and 86 of those 98 read the result
 from `${CMAKE_BINARY_DIR}/generated/alp.conf` (the other 12 read it from a
 `CMAKE_CURRENT_BINARY_DIR`-relative path instead); `CMAKE_BINARY_DIR` is NOT the
@@ -469,7 +469,7 @@ def _ensure_writable(output: Path, target: str) -> bool:
     Done HERE rather than discovered when the spawned emitter trips over it, for
     two reasons: a `PermissionError` traceback on the SDK's stderr is a terrible
     issue message, and the parent directory has to be created either way --
-    real example `CMakeLists.txt` today ask for
+    the example `CMakeLists.txt` bridge (retired in alp-sdk#866) asked for
     `${CMAKE_BINARY_DIR}/generated/alp.conf` (and the PLANNED
     `alp_sdk_zephyr_conf()`, unmerged, tan-cli#825, would do the same) in
     a build tree where `generated/` does not exist yet.
@@ -536,8 +536,8 @@ def _discard_probe_file(output: Path) -> None:
     The envelope was always honest about this -- exit 3, `data.written == []`,
     `generate.emit-failed` -- so what is fixed here is the DISK, not the
     report. The file that survives a refused run is a zero-byte
-    `build/generated/alp.conf`, and the real example `CMakeLists.txt` hands
-    exactly that path to Zephyr as `EXTRA_CONF_FILE` (the PLANNED
+    `build/generated/alp.conf`, and the (now retired, alp-sdk#866) example
+    `CMakeLists.txt` bridge handed exactly that path to Zephyr as `EXTRA_CONF_FILE` (the PLANNED
     `cmake/alp.cmake`, unmerged, tan-cli#825, would do the same once it
     ships). Zephyr does not treat an empty conf file
     as an error: it applies no configuration and says nothing. So the stray
