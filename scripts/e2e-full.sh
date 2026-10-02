@@ -328,6 +328,17 @@ excerpt() {
   else
     tail -c 400 "$f" 2>/dev/null
   fi
+  # tan-cli#1296: the last 400 bytes of a failed `tan build` are ninja's
+  # trailer (`ninja: build stopped: subcommand failed.`); the cause -- the
+  # `FAILED:` block and the compiler's `error:` line -- sits far above it, so
+  # the tail alone made a compile failure undiagnosable from the CI log (the
+  # workflow uploads no artifact). Print those lines too, under their own
+  # header. Bounded twice: at most 20 lines, each cut to 300 chars, because a
+  # `FAILED:` line carries the whole gcc command line.
+  if grep -qE '^FAILED:|error:' "$f" 2>/dev/null; then
+    printf '\nLINES MATCHING ^FAILED:|error: (first 20, each cut to 300 chars):\n'
+    grep -E '^FAILED:|error:' "$f" 2>/dev/null | head -n 20 | cut -c 1-300
+  fi
 }
 
 # Every `issues[]` entry of a JSON envelope -- code, severity and the WHOLE

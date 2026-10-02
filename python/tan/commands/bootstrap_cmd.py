@@ -156,6 +156,7 @@ from tan.core.bootstrap import (
     yocto_only_refusal,
     zephyr_requirements_hint,
 )
+from tan.commands.bootstrap_patches import patches_phase
 from tan.core.fs_confine import resolve_confined
 from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import sdk_pointer_json, top_level_key_name
@@ -248,6 +249,7 @@ def _global_default_fix_hint() -> str:
 #: phase exists to move up front.
 WORKSPACE_BLOCKING: tuple[str, ...] = (
     "zephyr-requirements", "sdk-extras", "editable-install", "toolchain-install",
+    "west-patches-failed",
 )
 
 
@@ -733,6 +735,36 @@ class Runner:
         except (OSError, ValueError, subprocess.SubprocessError):
             return ""
         return out.stdout.decode("utf-8", "replace") + out.stderr.decode("utf-8", "replace")
+
+    def run_status(self, argv: list[str], cwd: Path | None = None) -> tuple[int | None, str, str]:
+        """Run capturing `(returncode, stdout, stderr)` -- for a caller that
+        must tell exit codes APART (`verify_west_patches.py`: 0/1/2/3 are four
+        different verdicts), which `run` collapses to success/failure and
+        `capture` drops. `returncode` is `None` when nothing ran: a dry run
+        (still recorded in `planned`) or a launch failure/timeout (the reason
+        is then `stderr`)."""
+        self.planned.append(list(argv))
+        if self.dry_run:
+            return None, "", ""
+        try:
+            out = subprocess.run(
+                argv,
+                cwd=str(cwd) if cwd else None,
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=PROBE_TIMEOUT_S,
+                # The verifier prints non-ASCII; the SDK's own scripts pin this
+                # for their west child for the same reason.
+                env=self._env({"PYTHONIOENCODING": "utf-8"}),
+                check=False,
+            )
+        except (OSError, ValueError, subprocess.SubprocessError) as err:
+            return None, "", f"failed to run {argv[0]}: {err}"
+        return (
+            out.returncode,
+            out.stdout.decode("utf-8", "replace"),
+            out.stderr.decode("utf-8", "replace"),
+        )
 
 
 @dataclass(frozen=True)
@@ -2709,6 +2741,7 @@ def _data(
         "noPip": args["no_pip"],
         "noWest": args["no_west"],
         "noToolchain": args["no_toolchain"],
+        "noPatches": args["no_patches"],
         "printEnv": args["print_env"],
         "missingPrerequisites": missing,
     }
@@ -3130,6 +3163,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     no_pip: bool,
     no_west: bool,
     no_toolchain: bool,
+    no_patches: bool,
     print_env: bool,
     allow_partial: bool,
     workspace: str | None,
@@ -3148,6 +3182,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     log = Log(json_mode)
     flags = {
         "no_pip": no_pip, "no_west": no_west, "no_toolchain": no_toolchain,
+        "no_patches": no_patches,
         "print_env": print_env,
     }
 
@@ -3877,9 +3912,17 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             log.warn(*ceiling)
         pip_phase(ws, venv, log, runner, host)
 
+    # tan-cli#1296: AFTER pip (`west patch` imports pykwalify, which the pip
+    # phase installs) and independent of the toolchain phase below -- neither
+    # one's failure skips the other.
+    if no_patches:
+        log.line("Skipping zephyr/patches.yml (--no-patches) -- it is NOT applied")
+    elif venv is not None and not no_west:
+        patches_phase(ws, venv, log, runner, sdk_root)
+
     # ADR 0021 Lane 1 P1 (issue #474): the FINAL phase, deliberately -- it
     # reads `<sdkRoot>/metadata/toolchains.json` at runtime and needs the west
-    # workspace the phase above just resolved (or reused).
+    # workspace the west phase (further up) resolved (or reused).
     if no_toolchain:
         log.line("Skipping cross-toolchain acquisition (--no-toolchain)")
     elif no_west:
@@ -4429,6 +4472,15 @@ def bootstrap(
             "not need the cross toolchain at all."
         ),
     ),
+    no_patches: bool = typer.Option(
+        False,
+        "--no-patches",
+        help=(
+            "Skip applying the SDK's zephyr/patches.yml to the Zephyr and module "
+            "trees (tan-cli#1296). Builds that need those patches will not compile; "
+            "use it only to leave an adopted workspace's module trees untouched."
+        ),
+    ),
     print_env: bool = typer.Option(
         False, "--print-env", help="Print the environment-variable lines and exit."
     ),
@@ -4488,6 +4540,7 @@ def bootstrap(
             no_pip=no_pip,
             no_west=no_west,
             no_toolchain=no_toolchain,
+            no_patches=no_patches,
             print_env=print_env,
             allow_partial=allow_partial,
             workspace=workspace,

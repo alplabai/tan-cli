@@ -479,7 +479,7 @@ def test_the_envelope_key_set_and_sdk_omission(tmp_path):
     assert env["ok"] is (env["exitCode"] == 0)
     assert set(env["data"]) == {
         "schemaVersion", "sdkRoot", "workspaceDir", "venvDir", "zephyrBase",
-        "factsFromManifest", "zephyrPin", "noPip", "noWest", "noToolchain", "printEnv",
+        "factsFromManifest", "zephyrPin", "noPip", "noWest", "noToolchain", "noPatches", "printEnv",
         "missingPrerequisites",
     }
     assert env["data"]["schemaVersion"] == "2"  # the STRING, not the number
@@ -4136,6 +4136,7 @@ def _run_with_a_blocked_zephyr_requirements_install(
         no_pip=False,
         no_west=True,
         no_toolchain=True,
+        no_patches=True,
         print_env=False,
         allow_partial=allow_partial,
         workspace=None,
