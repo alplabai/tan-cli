@@ -796,6 +796,11 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # Registered as `bootstrap.sdk-credential-unverified` in
         # contract/issue-codes.json before bumping.
         expected_calls=34,
+        # tan-cli#1296: `bootstrap_patches.py` also calls `log.warn` -- twice,
+        # with the `FAILED`/`UNCHECKED` constants (declared below in
+        # `_FORWARDER_SUFFIXES`). Without this the new file's emits were
+        # invisible to the gate, which scans only the template's own file.
+        also_scan={"tan/commands/bootstrap_patches.py": 2},
         sites=1,
     ),
     ("tan/commands/bootstrap_cmd.py", "_refusal"): dict(
@@ -1276,6 +1281,14 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
     ("tan/commands/bootstrap_cmd.py", "warn(*ceiling)"): dict(
         suffixes=frozenset({"python-newer-than-verified"}), sites=1
     ),
+    # tan-cli#1296: `log.warn(FAILED, ...)` / `log.warn(UNCHECKED, ...)` in
+    # bootstrap_patches.py, whose module constants hold these two suffixes.
+    ("tan/commands/bootstrap_patches.py", "FAILED"): dict(
+        suffixes=frozenset({"west-patches-failed"}), sites=1
+    ),
+    ("tan/commands/bootstrap_patches.py", "UNCHECKED"): dict(
+        suffixes=frozenset({"west-patches-unchecked"}), sites=1
+    ),
 }
 
 #: `(file, enclosing qualname)` -- the same stable identity
@@ -1580,24 +1593,29 @@ def _classify_and_resolve(
             )
 
     for key, spec in _RESOLVABLE_HELPERS.items():
-        rel = key[0]
-        site_codes, site_unresolved, site_forwarder_hits = _resolve_helper(
-            TAN.parent / rel,
-            kind=spec.get("kind", "prefix"),
-            prefix=spec.get("prefix"),
-            suffix=spec.get("suffix"),
-            attr=spec.get("attr"),
-            name=spec.get("name"),
-            arg_index=spec.get("arg_index"),
-            arg_keyword=spec.get("arg_keyword"),
-            skip_if_keyword=spec.get("skip_if_keyword"),
-            kebab=spec.get("kebab", False),
-            expected_calls=spec["expected_calls"],
-        )
-        codes |= site_codes
-        unresolved.extend(site_unresolved)
-        for fwd_key, lines in site_forwarder_hits.items():
-            seen_forwarder_lines.setdefault(fwd_key, []).extend(lines)
+        # The helper's own file, plus any `also_scan` file that CALLS it
+        # (tan-cli#1296: `bootstrap_patches.py` calls `Log.warn` but the
+        # f-string that turns the code into an issue lives in bootstrap_cmd.py,
+        # so scanning only the template's file left those call sites unseen).
+        scans = {key[0]: spec["expected_calls"], **spec.get("also_scan", {})}
+        for rel, expected_calls in scans.items():
+            site_codes, site_unresolved, site_forwarder_hits = _resolve_helper(
+                TAN.parent / rel,
+                kind=spec.get("kind", "prefix"),
+                prefix=spec.get("prefix"),
+                suffix=spec.get("suffix"),
+                attr=spec.get("attr"),
+                name=spec.get("name"),
+                arg_index=spec.get("arg_index"),
+                arg_keyword=spec.get("arg_keyword"),
+                skip_if_keyword=spec.get("skip_if_keyword"),
+                kebab=spec.get("kebab", False),
+                expected_calls=expected_calls,
+            )
+            codes |= site_codes
+            unresolved.extend(site_unresolved)
+            for fwd_key, lines in site_forwarder_hits.items():
+                seen_forwarder_lines.setdefault(fwd_key, []).extend(lines)
 
     unclassified.extend(_check_site_counts(_RESOLVABLE_HELPERS, seen_helper_lines, "_RESOLVABLE_HELPERS"))
     unclassified.extend(_check_site_counts(_ACKNOWLEDGED_CEILINGS, seen_ceiling_lines, "_ACKNOWLEDGED_CEILINGS"))

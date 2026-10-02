@@ -368,6 +368,22 @@
       "note": "issue #474 (ADR 0021 Lane 1 P1): recorded via `Log.warn` in `toolchain_phase`/`_acquire_toolchain`/`_finish_toolchain_install`, the acquisition of the `arm-zephyr-eabi` cross toolchain via `west sdk install --install-dir`. A DELIBERATE 4th `WORKSPACE_BLOCKING` member alongside `zephyr-requirements`/`sdk-extras`/`editable-install` -- the frozen v0.4.1 Rust oracle never acquired a cross toolchain at all, so this is a Python-only addition with no oracle sibling, not a parity gap. Covers every non-fatal failure mode the phase can hit: an unreadable/malformed `metadata/toolchains.json`, missing 7-Zip on native Windows, insufficient disk (a preflight against the manifest's own measured footprint), a `west sdk install` failure, a post-install version mismatch, a compiler that will not run, a failed stamp write, and an adopted `$ALP_TOOLCHAIN_ROOT` directory tan will not delete on the caller's behalf. Never fired for an unsupported host (Intel Mac, windows-arm64) or a manifest publishing no artifact for this host -- ADR 0021's own words, \"a coded, honest skip, never a failure\" -- those are `log.line`, not `log.warn`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "bootstrap.west-patches-failed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_patches.py",
+      "note": "tan-cli#1296: recorded via `Log.warn` in `patches_phase`. alp-sdk's `zephyr/patches.yml` could not be applied to the workspace: `west patch --dst-module <m> apply` failed (the message names `west patch --dst-module <m> clean` as the recovery), the verifier named no module to patch, the verifier could not run or inspect (exit 2 or never launched), or the post-apply `scripts/verify_west_patches.py` still reports patches ABSENT/DRIFTED (exit 1). A `WORKSPACE_BLOCKING` member: bootstrap.sh documents these patches as required to build, and on an unpatched tree the `peripheral-io/hello-world` example for E1M-AEN801 (m55_hp slice) fails to compile (`'struct ipm_driver_api' has no member named 'poll_out'`), so the run is not `complete.` unless `--allow-partial`; `--no-patches` opts out of the step. The message carries the tail of the failing west/verifier output. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
+    },
+    {
+      "code": "bootstrap.west-patches-unchecked",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_patches.py",
+      "note": "tan-cli#1296: recorded via `Log.warn` in `patches_phase`. The post-apply verifier exited 3: everything inspectable is patched, but a module `zephyr/patches.yml` names is not checked out in this workspace, so its patches could not be checked. Normal for a narrow workspace, hence deliberately NOT a `WORKSPACE_BLOCKING` member. Pre-consumer."
+    },
+    {
       "code": "bootstrap.sdk-credential-unstaged",
       "status": "reserved",
       "severity": "warning",

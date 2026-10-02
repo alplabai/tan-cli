@@ -635,6 +635,7 @@ def test_relocation_rollback_move_back_refused_never_recommends_a_refused_subcom
         no_pip=False,
         no_west=True,
         no_toolchain=True,
+        no_patches=True,
         print_env=False,
         allow_partial=False,
         workspace=str(workspace),

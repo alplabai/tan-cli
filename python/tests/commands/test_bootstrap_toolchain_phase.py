@@ -709,7 +709,7 @@ def _rendered_envelope(log, runner, sdk_root: str) -> str:
     """
     data = bootstrap_cmd._data(
         args={
-            "no_pip": False, "no_west": False, "no_toolchain": False, "print_env": False,
+            "no_pip": False, "no_west": False, "no_toolchain": False, "no_patches": False, "print_env": False,
         },
         sdk_root=sdk_root,
         paths=None,

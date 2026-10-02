@@ -2467,6 +2467,18 @@ def next_steps_block(
     return lines
 
 
+#: Blocking codes that are not an install, with the clause that fits them.
+#: Every other member reads "<code> did not install".
+_NOT_AN_INSTALL = {"west-patches-failed": "zephyr/patches.yml was not applied"}
+
+
+def _blocking_clause(blocking: list[str]) -> str:
+    installs = [code for code in blocking if code not in _NOT_AN_INSTALL]
+    clauses = [f"{', '.join(installs)} did not install"] if installs else []
+    clauses += [_NOT_AN_INSTALL[code] for code in blocking if code in _NOT_AN_INSTALL]
+    return "; ".join(clauses)
+
+
 def completion_verdict(blocking: list[str], allow_partial: bool) -> tuple[list[str], bool]:
     """The closing text line(s), and whether the run counts as a SUCCESS,
     given which install phases left the workspace unable to do what it was
@@ -2497,19 +2509,18 @@ def completion_verdict(blocking: list[str], allow_partial: bool) -> tuple[list[s
     """
     if not blocking:
         return ["bootstrap: complete."], True
-    named = ", ".join(blocking)
+    named = _blocking_clause(blocking)
     if allow_partial:
         return (
             [
                 "bootstrap: complete.",
-                f"  (--allow-partial: {named} did not install; commands that need "
-                f"them will fail.)",
+                f"  (--allow-partial: {named}; commands that need them will fail.)",
             ],
             True,
         )
     return (
         [
-            f"bootstrap: INCOMPLETE -- {named} did not install, so this workspace "
+            f"bootstrap: INCOMPLETE -- {named}, so this workspace "
             f"cannot build yet.",
             "  The messages above name the remedy for each. Fix them and re-run `tan "
             "bootstrap`, or pass --allow-partial to accept this workspace as-is (the "
