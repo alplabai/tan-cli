@@ -62,6 +62,13 @@ def som_preset_schema_path(metadata_root: Path | str) -> Path:
     return Path(metadata_root) / "schemas" / "som-preset-v1.schema.json"
 
 
+def npu_ops_schema_path(metadata_root: Path | str) -> Path:
+    """`<sdk_root>/metadata/schemas/npu-ops-v1.schema.json` (tan-cli#1298).
+    See `soc_spec_schema_path` for the `metadata_root` convention. Present on
+    alp-sdk `dev`; absent from SDK releases that predate it."""
+    return Path(metadata_root) / "schemas" / "npu-ops-v1.schema.json"
+
+
 def _posix(value: object) -> str:
     """`to_posix`: backslashes to forward slashes, nothing else.
 
@@ -256,6 +263,38 @@ def validate_document(doc: object, schema_path: Path, source: Path | str) -> lis
         return []
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         return [f"{_posix(source)}: could not validate against {_posix(schema_path)}: {exc}"]
+
+
+def schema_unusable_reason(schema_path: Path | str) -> str | None:
+    """Why the schema at *schema_path* cannot be used to validate anything, or
+    `None` when it can -- or when it is simply ABSENT (`FileNotFoundError`;
+    `missing_schema_note` is the disclosure for that, and absence is not
+    "broken").
+
+    `validate_document` only turns an unreadable/unparseable schema FILE into
+    its one synthetic message. A file that is valid JSON but not a valid JSON
+    Schema (`{"type": 5}`) escapes it as a raw `TypeError` out of
+    `iter_errors` (measured), and an `OSError` other than `FileNotFoundError`
+    (a permission-denied ancestor) is indistinguishable from a document
+    violation by message alone. A caller that wants "schema unusable" kept
+    apart from "document violates schema" -- so a broken schema is never
+    blamed on the document -- asks this first (tan-cli#1298). `validate_document`
+    and its other callers are unchanged.
+
+    The bare `except Exception` is deliberate: this probes a third-party
+    library with an untrusted schema, whose failure types (`SchemaError`,
+    `TypeError`, unresolvable `$ref`) are not a closed set.
+    """
+    try:
+        import jsonschema  # noqa: PLC0415
+
+        validator = _cached_validator(Path(schema_path))
+        jsonschema.Draft202012Validator.check_schema(validator.schema)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:  # noqa: BLE001 -- see docstring
+        return f"{type(exc).__name__}: {exc}".splitlines()[0]
+    return None
 
 
 def missing_schema_note(schema_path: Path | str, *, source: Path | str) -> str | None:

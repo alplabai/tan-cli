@@ -1950,6 +1950,26 @@ class TestResolveTable:
         with _permission_denied(self._table_dir(metadata_root).parent):
             assert self._resolve(metadata_root) is None
 
+    @_skip_as_root
+    def test_permission_denied_schemas_directory(self, tmp_path):
+        # tan-cli#1298: the npu-ops schema check must not add a raise. The
+        # table directory stays listable but `<metadata>/schemas` is denied,
+        # so `Path.is_file()` on the schema raises PermissionError on
+        # 3.12/3.13. That is "cannot tell", not "absent": the table is still
+        # resolved (isinstance guards only) and the findings say the schema
+        # could not be inspected/loaded.
+        metadata_root = self._seeded(tmp_path)
+        schemas = metadata_root / "schemas"
+        schemas.mkdir()
+        (schemas / "npu-ops-v1.schema.json").write_text("{}", encoding="utf-8")
+        findings: list[str] = []
+        with _permission_denied(schemas):
+            resolved = analyze._resolve_table(
+                metadata_root, self._BACKEND, self._VARIANT, findings)
+        assert resolved is not None
+        assert len(findings) == 1 and "not validated" in findings[0]
+        assert "could not be" in findings[0]
+
     def test_uppercase_json_suffix_matches_only_on_windows(self, tmp_path, monkeypatch):
         # `table_dir.glob("*.json")` enumerated a `U55.JSON` on Windows
         # before the `os.listdir` swap; the swap must not have narrowed it.
