@@ -1969,6 +1969,8 @@ class TestResolveTable:
         assert resolved is not None
         assert len(findings) == 1 and "not validated" in findings[0]
         assert "could not be" in findings[0]
+        assert str(metadata_root) not in findings[0]
+        assert metadata_root.as_posix() not in findings[0]
 
     def test_uppercase_json_suffix_matches_only_on_windows(self, tmp_path, monkeypatch):
         # `table_dir.glob("*.json")` enumerated a `U55.JSON` on Windows

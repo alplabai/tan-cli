@@ -404,16 +404,13 @@ def test_the_word_fits_never_appears_in_a_static_screen_report(tmp_path):
         # spuriously contain "fits" here purely because THIS test's own name
         # does (pytest derives the tmp dir name from the test id). The table
         # FILENAME (real ones come from scripts/gen_npu_ops.py) is still
-        # checked, just not its ancestor directories. The same goes for the
-        # schema-absent note (tan-cli#1298), which names tmp_path twice.
-        notes = [n.replace(str(metadata_root), "<root>").replace(
-            metadata_root.as_posix(), "<root>") for n in rep.notes]
+        # checked, just not its ancestor directories.
         blob = json.dumps({
             "backend": rep.backend, "variant": rep.variant,
             "table": Path(rep.table).name if rep.table else None,
             "npu_coverage": rep.npu_coverage,
             "compute_on_npu_pct_max": rep.compute_on_npu_pct_max,
-            "basis": rep.basis, "confidence": rep.confidence, "notes": notes,
+            "basis": rep.basis, "confidence": rep.confidence, "notes": rep.notes,
             "ops": [{"op": o.op, "status": o.status, "reason": o.reason, "macs": o.macs}
                     for o in rep.ops],
         }).lower()

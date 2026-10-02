@@ -292,6 +292,11 @@ def schema_unusable_reason(schema_path: Path | str) -> str | None:
         jsonschema.Draft202012Validator.check_schema(validator.schema)
     except FileNotFoundError:
         return None
+    except OSError as exc:
+        # `str(exc)` embeds the offending path (`[Errno 13] Permission denied:
+        # '/abs/...'`); the OS's own wording alone is the part worth showing,
+        # and keeps absolute host paths out of anything built from this.
+        return f"{type(exc).__name__}: {exc.strerror or 'OS error'}"
     except Exception as exc:  # noqa: BLE001 -- see docstring
         return f"{type(exc).__name__}: {exc}".splitlines()[0]
     return None

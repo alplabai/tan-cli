@@ -90,6 +90,11 @@ def _schema_notes(rep) -> list[str]:
     return [n for n in rep.notes if _SCHEMA_NOTE in n or "not validated" in n or "skipped" in n]
 
 
+def _assert_no_absolute_path(rep, root: Path) -> None:
+    for note in rep.notes:
+        assert str(root) not in note and root.as_posix() not in note, note
+
+
 def test_npu_ops_schema_path_joins_the_metadata_root(tmp_path):
     assert npu_ops_schema_path(tmp_path) == tmp_path / "schemas" / "npu-ops-v1.schema.json"
 
@@ -114,6 +119,9 @@ def test_a_schema_invalid_table_is_skipped_and_the_violation_is_reported(tmp_pat
     assert "stance" in note
     assert "'certifying' is not one of ['screening']" in note
     assert note.endswith("This table is not used.")
+    assert note.startswith(
+        "npu-ops table skipped, it fails npu-ops-v1.schema.json: npu_ops/ethos_u/u85@vela-5.2.0.json: stance:")
+    _assert_no_absolute_path(rep, tmp_path)
 
 
 def test_a_wrong_typed_supported_ops_is_reported_by_the_schema(tmp_path):
@@ -181,7 +189,9 @@ def test_an_sdk_without_the_schema_scores_as_before_and_discloses_it_once(tmp_pa
     rep = _analyze(_single(tmp_path, _table(), schema=None))
     assert rep.table is not None and rep.npu_coverage == "full-eligible"
     (note,) = _schema_notes(rep)
-    assert "not validated" in note and _SCHEMA_NOTE in note
+    assert note == ("npu_ops/ethos_u: not validated -- no schema at "
+                    "schemas/npu-ops-v1.schema.json in this checkout")
+    _assert_no_absolute_path(rep, tmp_path)
 
 
 def test_an_sdk_without_the_schema_keeps_the_isinstance_guards(tmp_path):
@@ -194,8 +204,23 @@ def test_a_corrupt_schema_file_is_not_blamed_on_the_table(tmp_path):
     rep = _analyze(_single(tmp_path, _table(), schema="{ not json"))
     assert rep.table is not None and rep.npu_coverage == "full-eligible"
     (note,) = _schema_notes(rep)
-    assert "could not be loaded" in note and "not validated" in note
+    assert note.startswith("npu_ops/ethos_u: not validated -- the schema at "
+                           "schemas/npu-ops-v1.schema.json could not be loaded (")
+    assert note.endswith("); the tables are used under the built-in shape checks only")
     assert "skipped" not in note
+    _assert_no_absolute_path(rep, tmp_path)
+
+
+def test_an_oserror_reason_does_not_carry_the_schemas_absolute_path(tmp_path):
+    # A directory where the schema file belongs: the OSError's own text names
+    # the path, the note must keep only the OS wording.
+    root = _single(tmp_path, _table(), schema=None)
+    npu_ops_schema_path(root).mkdir(parents=True)
+    rep = _analyze(root)
+    assert rep.table is not None
+    (note,) = _schema_notes(rep)
+    assert "could not be loaded (" in note
+    _assert_no_absolute_path(rep, tmp_path)
 
 
 def test_a_schema_that_is_json_but_not_a_json_schema_degrades_without_raising(tmp_path):
@@ -203,6 +228,7 @@ def test_a_schema_that_is_json_but_not_a_json_schema_degrades_without_raising(tm
     assert rep.table is not None and rep.npu_coverage == "full-eligible"
     (note,) = _schema_notes(rep)
     assert "could not be loaded" in note and "skipped" not in note
+    _assert_no_absolute_path(rep, tmp_path)
 
 
 def test_a_broken_schema_is_disclosed_once_even_with_several_matching_candidates(tmp_path):

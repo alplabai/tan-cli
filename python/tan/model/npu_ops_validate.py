@@ -56,33 +56,58 @@ class TableValidator:
     """Validates the tables of ONE backend directory against the npu-ops
     schema, working out whether the schema is usable lazily -- on the first
     table that is actually about to be used -- and disclosing "not validated"
-    at most once."""
+    at most once.
+
+    Every path in a note is written relative to the metadata root, with
+    forward slashes (`npu_ops/ethos_u/u85@vela-5.2.0.json`,
+    `schemas/npu-ops-v1.schema.json`): the note rides the envelope, and an
+    absolute host path in it is both noise and a leak. (It also made a test
+    whose tmp dir name contained a word the note-scanning tests forbid fail
+    on CI, tan-cli#1298.)"""
 
     def __init__(self, metadata_root: Path | str, table_dir: Path) -> None:
+        self._root = Path(metadata_root)
         self._schema_path = npu_ops_schema_path(metadata_root)
         self._table_dir = table_dir
         self._probed = False
         self._usable = False
 
+    def _rel(self, path: Path | str) -> str:
+        try:
+            return Path(path).relative_to(self._root).as_posix()
+        except ValueError:
+            return Path(path).name
+
+    def _scrub(self, text: str) -> str:
+        """@text with the metadata root's absolute spellings replaced -- a
+        defence for a reason string that carries a path despite
+        `schema_unusable_reason` already dropping the OS filename."""
+        for spelling in {str(self._root), self._root.as_posix(), _posix(self._root)}:
+            text = text.replace(spelling, "<metadata>")
+        return text
+
     def _probe(self, notes: list[str]) -> None:
         self._probed = True
+        where = f"{self._rel(self._table_dir)}: not validated -- "
+        schema = self._rel(self._schema_path)
         reason = schema_unusable_reason(self._schema_path)
         if reason is not None:
-            notes.append(
-                f"{_posix(self._table_dir)}: not validated -- the schema at "
-                f"{_posix(self._schema_path)} could not be loaded ({reason}); "
-                "the tables are used under the built-in shape checks only")
+            notes.append(f"{where}the schema at {schema} could not be loaded "
+                         f"({self._scrub(reason)}); the tables are used under "
+                         "the built-in shape checks only")
             return
         try:
-            absent = missing_schema_note(self._schema_path, source=self._table_dir)
+            absent = missing_schema_note(self._schema_path, source=self._table_dir) is not None
         except OSError as exc:
             # `Path.is_file()` raises on a permission-denied ancestor on
             # Python 3.12/3.13 (see the comment above `_is_table_file` in
             # analyze.py): "cannot tell" is not "absent".
-            absent = (f"{_posix(self._table_dir)}: not validated -- the schema at "
-                      f"{_posix(self._schema_path)} could not be inspected ({exc})")
-        if absent is not None:
-            notes.append(absent)
+            notes.append(f"{where}the schema at {schema} could not be inspected "
+                         f"({exc.strerror or 'OS error'}); the tables are used "
+                         "under the built-in shape checks only")
+            return
+        if absent:
+            notes.append(f"{where}no schema at {schema} in this checkout")
             return
         self._usable = True
 
@@ -94,7 +119,7 @@ class TableValidator:
             self._probe(notes)
         if not self._usable:
             return True
-        errors = validate_document(doc, self._schema_path, table_path)
+        errors = validate_document(doc, self._schema_path, self._rel(table_path))
         if not errors:
             return True
         shown = "; ".join(errors[:_MAX_VIOLATIONS_SHOWN])
