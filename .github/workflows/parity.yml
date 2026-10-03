@@ -2158,6 +2158,52 @@ jobs:
           west update --narrow -o=--depth=1
           west zephyr-export
 
+      # The other half of what `tan bootstrap` does to that tree since
+      # tan-cli#1299: apply alp-sdk's `zephyr/patches.yml`. From alp-sdk
+      # 34a128d09 on, every AEN build compiles `ipm_arm_mhuv2.c` and
+      # `alif_se_boot.c`, which need those patches -- without this step the
+      # real build below fails on `'struct ipm_driver_api' has no member
+      # named 'poll_out'`, a failure no customer running `tan bootstrap` sees.
+      # Same algorithm as `tan/commands/bootstrap_patches.py`: verify first,
+      # apply per unapplied module (`west patch apply` is not idempotent on a
+      # partially patched tree), re-verify (it exits 0 when it applied
+      # nothing). Exit 3 = a module absent from this narrow workspace could
+      # not be checked, which is not a failure. An alp-sdk ref that predates
+      # the verifier has nothing to apply this way, so it is skipped.
+      - name: apply alp-sdk zephyr/patches.yml (as tan bootstrap does)
+        run: |
+          set -uo pipefail
+          verifier=alp-sdk/scripts/verify_west_patches.py
+          if [ ! -f "$verifier" ] || [ ! -f alp-sdk/zephyr/patches.yml ]; then
+            echo "alp-sdk ref has no patch verifier -- nothing to apply"
+            exit 0
+          fi
+          top="$PWD"
+          if python3 "$verifier" --topdir "$top" --west west >/dev/null 2>&1; then
+            echo "zephyr/patches.yml already applied"
+            exit 0
+          fi
+          modules=$(python3 "$verifier" --topdir "$top" --west west --list-unapplied)
+          if [ -z "$modules" ]; then
+            python3 "$verifier" --topdir "$top" --west west
+            rc=$?
+            [ "$rc" -eq 3 ] && exit 0
+            echo "::error::patch verifier failed (exit $rc) but named no unapplied module"
+            exit 1
+          fi
+          for m in $modules; do
+            west patch --dst-module "$m" apply || {
+              echo "::error::west patch --dst-module $m apply failed"
+              exit 1
+            }
+          done
+          python3 "$verifier" --topdir "$top" --west west
+          rc=$?
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
+            echo "::error::zephyr/patches.yml is still not applied (verifier exit $rc)"
+            exit 1
+          fi
+
       # Single source for the SDK pin: alp-sdk's own metadata/toolchains.json,
       # gated on the alp-sdk side by check_toolchain_lock.py.
       - name: read Zephyr SDK pin
