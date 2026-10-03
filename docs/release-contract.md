@@ -599,17 +599,32 @@ contains `c81cb5db` yet, as of 2026-09-23. alp-sdk#2047 already tracks
 this, retitled since to ask for a stable release containing `c81cb5db`
 (see the issue for its exact current title).
 
+**Addendum (2026-10-03, tan-cli#1278).** The planner mirror moved past
+`c81cb5db` to alp-sdk `34c11c9de04e264fdcab2bc0d58b328d9d117ca8`
+(`c81cb5db` is an ancestor) along all seven pin sites -- the six above plus
+the vendored scaffold's vendor point in
+`python/tan/templates/vendored/MANIFEST.md` -- and, for the first time,
+`STRICT_LOADERS_PINNED_SDK_COMMIT`. `34c11c9de` is now the floor the next
+tag needs, superseding `c81cb5db`. It adds a second hard requirement on
+top of the table above: tan-cli#1297 reads som-preset schema v2 only
+(alp-sdk#2024), which no released alp-sdk ships -- `v0.16.0`'s presets are
+all `schema_version: 1`. No alp-sdk tag contains `34c11c9de` yet, as of
+2026-10-03 (`git tag --contains 34c11c9de` is empty; the newest release is
+`v0.16.0`).
+
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
 tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag
-contains `c81cb5db` (superseding the `20fec7a7` floor this decision
-originally named, via the interim `81a9d515` floor -- see the addenda
-above, tan-cli#1268 then tan-cli#1275; alp-sdk#2047,
-milestone `v0.17.0`). No SDK-capability gate is added around `memory[]` or
+contains `34c11c9de` (superseding the `20fec7a7` floor this decision
+originally named, via the interim `81a9d515` and `c81cb5db` floors -- see
+the addenda above, tan-cli#1268, tan-cli#1275 then tan-cli#1278;
+alp-sdk#2047, milestone `v0.17.0`). No SDK-capability gate is added around `memory[]` or
 any other row. (The renumbering addendum below moves this release's name
 from `0.6.1` to `0.7.0`; the floor itself is unaffected by that rename.)
 Done when:
 
-- every row above reads **YES** and names that tag;
+- every row above reads **YES** and names that tag, and that tag contains
+  `34c11c9de` (so its `metadata/e1m_modules/*.yaml` presets are
+  `schema_version: 2`);
 - the **whole** `release-sdk-parity` job is green on the tag push, in the sense
   defined under "The check.": all three `--sdk` scripts exit 0, the guard and
   the breadth node PASSED, and the pytest log shows no parity failures (the

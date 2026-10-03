@@ -1760,7 +1760,7 @@ def _run(
             generated_at, str(err), cwd_launch_path, target, server
         )
 
-    # tan-cli#964 review (major 5): collects every `som-preset-v1`/
+    # tan-cli#964 review (major 5): collects every `som-preset-v2`/
     # `soc-spec-v1` schema violation found while EITHER SDK-metadata walk
     # below reads this project's SoM preset/SoC JSON -- `_sdk_published_cores`
     # (the --core guard, just below) and `_fill_debug_probe_identity_from_sdk`

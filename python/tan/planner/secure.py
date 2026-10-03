@@ -72,7 +72,7 @@ def _boot_target_is_single_slot(project: BoardProject) -> bool:
     board-DT generator and `loader._resolve_slot0_load_address` already
     call to answer this exact question -- instead of re-deriving the
     answer from `memory_map:` region NAMES. The two disagree in general:
-    `som-preset-v1.schema.json` documents `memory_map:` as a build-policy
+    `som-preset-v2.schema.json` documents `memory_map:` as a build-policy
     override "ONLY for non-stock partitioning", not something only a
     disjoint-slot0 SoM sets. A `memory_map:` present for an unrelated
     reason (an rpmsg carve-out, say) that declares no `<role>_slot0`

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """`tan.core.metadata_schema` -- the ONE shared entry point tan-cli#964 adds
-for `soc-spec-v1.schema.json`/`som-preset-v1.schema.json` validation on the
+for `soc-spec-v1.schema.json`/`som-preset-v2.schema.json` validation on the
 READ path. Unit-level coverage of the module itself, independent of any one
 caller (`planner/loader.py`, `presets_cmd.py`, `size_cmd.py` each have their
 own behavioural tests for how THEY use it).
@@ -44,7 +44,7 @@ def _posix(path) -> str:
 
 def test_soc_spec_and_som_preset_schema_path_join_metadata_root(tmp_path):
     assert soc_spec_schema_path(tmp_path) == tmp_path / "schemas" / "soc-spec-v1.schema.json"
-    assert som_preset_schema_path(tmp_path) == tmp_path / "schemas" / "som-preset-v1.schema.json"
+    assert som_preset_schema_path(tmp_path) == tmp_path / "schemas" / "som-preset-v2.schema.json"
 
 
 def test_schema_errors_with_no_source_matches_new_som_cmds_original_shape(tmp_path):

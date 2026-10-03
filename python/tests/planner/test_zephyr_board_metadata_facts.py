@@ -928,21 +928,21 @@ def test_ospi0_storage_banner_reflects_a_populated_preset():
     # not exist") does not prove XIP is impossible here -- Alif's own
     # ospi_psram_xip.c still calls aes_enable_xip() under that same guard.
     # The real, non-overreaching reason: hal_alif's OWN XIP enable path
-    # targets that absent register, and flash_ospi_alif.c ships no
-    # flash_driver_api at all (#915) -- true regardless of silicon
+    # targets that absent register, and flash_ospi_alif.c's
+    # flash_driver_api (#915) never calls it -- true regardless of silicon
     # capability.
     assert (
         "OSPI0 NOR (TEST-NOR-PART) + HyperRAM (TEST-RAM-PART) are "
         "populated; neither is used for XIP boot here (hal_alif's "
         "alif_hal_ospi_xip_enable() targets the XIP_SER register, "
-        "absent on this die, and flash_ospi_alif.c ships no "
-        "flash_driver_api -- #915)" in flat)
+        "absent on this die, and flash_ospi_alif.c's flash_driver_api "
+        "never calls it -- #915)" in flat)
     assert (
         "MRAM-only regardless: OSPI0 NOR (TEST-NOR-PART) + HyperRAM "
         "(TEST-RAM-PART) are populated; hal_alif's "
         "alif_hal_ospi_xip_enable() targets the XIP_SER register, "
-        "absent on this die, and flash_ospi_alif.c ships no "
-        "flash_driver_api -- #915" in flat)
+        "absent on this die, and flash_ospi_alif.c's flash_driver_api "
+        "never calls it -- #915" in flat)
     assert "not populated" not in flat
     # The die-level fact must never stand alone as the "why" -- if a future
     # edit reintroduces "so" right after it, this is the wrong conclusion

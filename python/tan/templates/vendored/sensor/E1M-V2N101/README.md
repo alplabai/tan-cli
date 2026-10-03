@@ -53,13 +53,15 @@ BMP581 datasheet BST-BMP581-DS004 s5.6, or
 
 ```bash
 # Standalone, native_sim (emul I2C; bmp581_init NACKs cleanly):
+# writes ./generated/alp.conf, which west reads below (#866)
+tan generate --target zephyr-conf --core m33_sm --sdk-root "$ALP_SDK_ROOT" --output generated/alp.conf
 west build -b native_sim/native/64 . \
-    -- -DEXTRA_ZEPHYR_MODULES=$ALP_SDK_ROOT
+    -- -DEXTRA_CONF_FILE=generated/alp.conf -DEXTRA_ZEPHYR_MODULES=$ALP_SDK_ROOT
 west build -t run
 
 # On real silicon, point -b at the SoM's Zephyr board target.
 # Example for E1M-V2N101:
-west build -b alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33 .
+west build -b alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33 . -- -DEXTRA_CONF_FILE=generated/alp.conf
 west flash --host <board-ip>
 ```
 

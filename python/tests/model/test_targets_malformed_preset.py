@@ -37,7 +37,7 @@ def _metadata_root_with_raw_preset(tmp_path, preset_yaml_text: str) -> object:
 
 def test_a_bare_list_preset_yaml_raises_a_clean_valueerror_not_a_typeerror(tmp_path):
     """`targets.py:311` -- a preset YAML that parses to a bare list (legal
-    YAML, illegal `som-preset-v1.schema.json`) must raise the same kind of
+    YAML, illegal `som-preset-v2.schema.json`) must raise the same kind of
     clean, named error `resolve_targets` already raises for a malformed
     silicon ref or a malformed host SoC spec, not an uncaught
     `TypeError: list indices must be integers or slices, not str` from the

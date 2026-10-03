@@ -71,7 +71,7 @@ What changed in the golden (second re-record)
 -----------------------------------------------
 `issues` gained one entry: `presets.metadata-schema-unchecked` at severity
 `info`. This fixture's `sdk/` tree has never carried a
-`metadata/schemas/som-preset-v1.schema.json` (it predates the schema
+`metadata/schemas/som-preset-v2.schema.json` (it predates the schema
 entirely -- see the FIRST re-record above, which already noted the missing
 `board.schema.json` degrades `allowedOs` to `[]`). tan-cli#964's review
 found the "must not fire on a checkout missing this schema" rule (correct)
@@ -88,9 +88,22 @@ preset was read without a schema to check it against.
     + "issues":[{"code":"presets.metadata-schema-unchecked","severity":"info",
     +            "message":"sdk/metadata/e1m_modules/E1M-V2N101/som.yaml: not
     +            validated -- no schema at
-    +            sdk/metadata/schemas/som-preset-v1.schema.json in this
+    +            sdk/metadata/schemas/som-preset-v2.schema.json in this
     +            checkout"}]
 
 `data` is byte-identical to the first re-record -- this change is additive
 to `issues` only, at `info` severity, and does not alter `exitCode`/`ok`/any
 resolved field.
+
+Re-recorded on : 2026-10-03
+Recorded from  : the SHIPPING Python CLI (python/tan/version.py::TAN_VERSION).
+Issue          : tan-cli#1297
+
+What changed in the golden (re-record)
+---------------------------------------
+alp-sdk#2024 hard-cut the SoM preset schema to som-preset-v2 (schema_version
+const 2). This fixture's sdk/ preset now declares `schema_version: 2` (tan reads
+v2 only, no v1 fallback) and every message that named
+`som-preset-v1.schema.json` now names `som-preset-v2.schema.json`. Nothing else
+in the golden changed. Verified by running the case under
+`python/tests/conformance/test_contract_envelopes.py`.

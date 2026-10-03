@@ -2,7 +2,7 @@ schema_version: 1
 generated_by: scripts/alp_orchestrate.py
 hw_info:
   sku: E1M-V2N101
-  som_hw_rev: r1
+  som_hw_rev: r2
   board_name: E1M-X-EVK
   board_hw_rev: r1
   silicon: renesas:rzv2n:n44
@@ -37,6 +37,7 @@ memory:
   status: ok
   base: 1207959552
   size_bytes: 4294967296
+  write_authority: customer_runtime
   accessible_from:
   - a55_cluster
   - m33_sm
@@ -46,6 +47,7 @@ memory:
   status: ok
   base: 65536
   size_bytes: 524288
+  write_authority: customer_runtime
   accessible_from:
   - a55_cluster
   - m33_sm
@@ -55,6 +57,7 @@ memory:
   status: ok
   base: 2147483648
   size_bytes: 131072
+  write_authority: customer_runtime
   accessible_from:
   - m33_sm
 

@@ -44,7 +44,9 @@ CC,768.0,CONDENSATION_RISK,5.0,95.0,4.3,5.0,0.0
 ## Build
 
 ```
-west build -b alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33 .
+# writes ./generated/alp.conf, which west reads below (#866)
+tan generate --target zephyr-conf --core m33_sm --sdk-root "$ALP_SDK_ROOT" --output generated/alp.conf
+west build -b alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33 . -- -DEXTRA_CONF_FILE=generated/alp.conf
 west flash --host <board-ip>
 ```
 

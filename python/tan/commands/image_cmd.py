@@ -29,7 +29,7 @@ Rust and re-verified against the binary:
 
 A relative `firmware_path` resolves against **build_root, then sdk_root**
 (`tan.core.image_bundle.helper_firmware_candidates`) -- alp-sdk#330: the SDK's
-`som-preset-v1.schema.json` defines it repository-relative, i.e. relative to the
+`som-preset-v2.schema.json` defines it repository-relative, i.e. relative to the
 SDK checkout, not to this project's `build/`, so build-root-only resolution
 (the pre-#330 behaviour) rejected every helper an SDK actually ships. build_root
 still goes first, matching the precedence `flash_plan.resolve_artefact_path`

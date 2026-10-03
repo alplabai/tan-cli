@@ -32,6 +32,7 @@ from tan.core.plan_tokens import (
     substitute_plan_tokens,
 )
 from tan.core.subprocess_env import spawn_env
+from tan.core.sysbuild_image import rescope_sysbuild_extra_conf
 from tan.core.tool_lookup import resolve_tool
 
 
@@ -264,6 +265,12 @@ def apply_plan_token_substitution(
         ) from e
     except UnknownPlanPathMode as e:
         raise TokenSubstitutionError("build.plan-invalid", str(e)) from e
+
+    # alp-sdk#866: a sysbuild slice's `-D<image>_EXTRA_CONF_FILE` prefix was
+    # derived from the project root the plan was EMITTED in; re-derive it from
+    # the substituted app dir so a relocated plan still configures its image
+    # (see `tan.core.sysbuild_image` for why this rewrites rather than refuses).
+    out = rescope_sysbuild_extra_conf(out)
 
     slice_demotions = [
         SliceDemotion(

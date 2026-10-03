@@ -54,6 +54,7 @@ from typing import Any, Optional
 import yaml
 
 from .models import OrchestratorError
+from .strict_loaders import fast_safe_load
 
 # A revision may bound one side, both, or neither.  `max_sdk_version: ~`
 # (YAML null) is the common case in tree today and means "no upper bound
@@ -261,7 +262,9 @@ def load_family_table(metadata_root: Path, family_dir: str) -> Any:
     except OSError as exc:
         raise _table_unreadable(path, f"cannot be read: {exc}") from exc
     try:
-        table = yaml.safe_load(text)
+        # libyaml-backed yaml.safe_load; this runs once per hw-rev check
+        # and was the third-hottest YAML read in tests/scripts (#2328).
+        table = fast_safe_load(text)
     except yaml.YAMLError as exc:
         detail = str(exc)
         first = detail.splitlines()[0] if detail else type(exc).__name__

@@ -13,13 +13,20 @@ patch (`0.6.1`) — see the matching `BREAKING` entry below for each one's
 exact before/after:
 
 - tan's effective alp-sdk floor rises to the first alp-sdk release
-  containing commit `c81cb5db9945c8f448a7bb952d374f874e2f42c0` (moved from
-  `81a9d515a90403cce30588704e31faf9dc893838` by the further planner re-sync
-  tan-cli#1275; `81a9d515` is an ancestor of `c81cb5db`); `tan build`
+  containing commit `34c11c9de04e264fdcab2bc0d58b328d9d117ca8` (moved from
+  `c81cb5db9945c8f448a7bb952d374f874e2f42c0` by the planner re-sync
+  tan-cli#1278, which had itself moved it from
+  `81a9d515a90403cce30588704e31faf9dc893838` at tan-cli#1275; each is an
+  ancestor of the next); `tan build`
   on *any* Zephyr board against an older alp-sdk fails Kconfig configure
   (`Aborting due to Kconfig warnings`, an undefined `ALP_SDK_SOM_HW_REV`),
   and AEN and V2N/V2M boards additionally fail earlier, at `tan generate
   --target zephyr-board` (exit 3, `generate.emit-failed`) (tan-cli#1268)
+- tan reads and scaffolds som-preset schema v2 only (alp-sdk#2024): against
+  an alp-sdk older than the floor above, `tan presets` lists no SoMs (now
+  with a `presets.som-schema-version-skipped` warning), `tan size` reports
+  every budget unknown, and `tan new-som` cannot find
+  `som-preset-v2.schema.json` (tan-cli#1297)
 - a confirmed Flow D (`alif_mram_jlink`) MRAM write now refuses until
   `--atoc-unqueryable` / `flash_args.atoc_unqueryable: true` acknowledges
   that it replaces the whole ATOC (tan-cli#1252)
@@ -56,8 +63,8 @@ exact before/after:
   `init.som-block-unsupported` (#1041)
 
 *DRAFT — replace this paragraph before tagging.* The tag itself is blocked
-on this: no alp-sdk release contains `c81cb5db` yet (tan-cli#1258, still
-OPEN; `git tag --contains c81cb5db` is empty), so this note cannot yet name
+on this: no alp-sdk release contains `34c11c9de` yet (tan-cli#1258, still
+OPEN; `git tag --contains 34c11c9de` is empty), so this note cannot yet name
 a real floor version. Once one ships, replace this whole paragraph with one
 line: "Requires alp-sdk `vX.Y.Z` or newer" (the `v0.6.0` precedent,
 tan-cli#1258's "Done when" list) — see `docs/release-contract.md`'s own
@@ -67,11 +74,12 @@ stable alp-sdk release is `v0.16.0` (`gh release list --repo
 alplabai/alp-sdk`), which carries neither
 `metadata/e1m_modules/aen/on-module-links.yaml` nor
 `metadata/e1m_modules/v2n/supervisor-links.yaml`, both of which the pinned
-planner now requires. The floor itself moved again since this paragraph was
-first written: `81a9d515` (tan-cli#1258/#1268) was superseded by `c81cb5db`
-when tan-cli#1275 re-synced `tan/planner/` further; `81a9d515` is an
-ancestor of `c81cb5db`. See `docs/release-contract.md` and tan-cli#1258 for
-the full gate measurement.
+planner now requires, nor the som-preset v2 presets (alp-sdk#2024) tan now
+reads. The floor itself moved twice since this paragraph was first written:
+`81a9d515` (tan-cli#1258/#1268) was superseded by `c81cb5db` when
+tan-cli#1275 re-synced `tan/planner/` further, and `c81cb5db` by
+`34c11c9de` at tan-cli#1278; each is an ancestor of the next. See
+`docs/release-contract.md` and tan-cli#1258 for the full gate measurement.
 
 ### Fixed
 

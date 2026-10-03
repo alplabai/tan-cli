@@ -51,6 +51,7 @@ EXACT-ref endpoint and no other -- see `_tag_exists`, where the whole trap
 lives.
 """
 import os
+import posixpath
 import re
 import urllib.error
 import urllib.request
@@ -87,6 +88,48 @@ _EXTRA_CONF = re.compile(r"(?<![\w])EXTRA_CONF_FILE=(\S+)")
 #: prose ellipsis in a comment. Requiring a real Kconfig-fragment extension
 #: skips exactly those and nothing else.
 _RESOLVABLE_CONF = re.compile(r"^[\w./-]+\.(?:conf|overlay)$")
+
+#: `generated/<...>.conf` names a file written ahead of the build, not one a
+#: scaffold ships: alp-sdk#866 (the 34c11c9de re-vendor) retired the
+#: CMakeLists bridge that wrote `alp.conf` at configure time, and the twister
+#: scenarios and README `west build` lines now read `generated/alp.conf` from
+#: the app dir. A scaffold cannot commit that generated file -- but nor may
+#: this check wave through a path nothing in the scaffold can produce: the
+#: emit's own pointer (`scripts/gen_example_alp_conf.py`) does not exist in a
+#: scaffold and writes nothing for a project outside alp-sdk's examples/. So
+#: a `generated/` name passes ONLY when a planned file names the
+#: `tan generate --target zephyr-conf ... --output <that path>` command that
+#: writes it (the vendored READMEs do, via `alp_conf_pregeneration` in
+#: `tests/parity/scaffold_byte_parity.py`). The path is resolved relative to
+#: the referencing file's directory, so `peer/testcase.yaml`'s
+#: `generated/alp.conf` needs a `--output peer/generated/alp.conf`.
+_GENERATED_CONF = re.compile(r"^generated/")
+_TAN_GENERATE_OUTPUT = re.compile(r"\btan generate --target zephyr-conf\b[^\n]*?--output (\S+)")
+
+
+def _unplanned_extra_conf(planned: dict[str, str]) -> list[str]:
+    """`<file> -> <value>` for every resolvable EXTRA_CONF_FILE name that is
+    neither a planned file nor a `generated/` file a planned file's
+    `tan generate` command writes."""
+    paths = set(planned)
+    produced = {
+        posixpath.normpath(out)
+        for content in planned.values()
+        for out in _TAN_GENERATE_OUTPUT.findall(content)
+    }
+    missing = []
+    for name, content in planned.items():
+        for raw in _EXTRA_CONF.findall(content):
+            # `EXTRA_CONF_FILE` takes a `;`-separated list; strip the quoting a
+            # YAML scalar or a shell line puts around it before splitting.
+            for value in raw.strip("\"'`,").split(";"):
+                if not _RESOLVABLE_CONF.match(value) or value in paths:
+                    continue
+                resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), value))
+                if _GENERATED_CONF.match(value) and resolved in produced:
+                    continue
+                missing.append(f"{name} -> {value}")
+    return missing
 
 #: The `<ref>` of an absolute alp-sdk link, `blob/` (file) or `tree/` (dir).
 _SDK_LINK_REF = re.compile(r"https://github\.com/alplabai/alp-sdk/(?:blob|tree)/([^/]+)/")
@@ -490,19 +533,39 @@ def test_every_extra_conf_file_named_by_a_template_is_a_planned_file(template_id
     out on a missing overlay, so this shipped a documented `west build` and a
     committed twister scenario that could not run at all."""
     planned = _planned(template_id, sku)
-    paths = set(planned)
-    missing = []
-    for name, content in planned.items():
-        for raw in _EXTRA_CONF.findall(content):
-            # `EXTRA_CONF_FILE` takes a `;`-separated list; strip the quoting a
-            # YAML scalar or a shell line puts around it before splitting.
-            for value in raw.strip("\"'`,").split(";"):
-                if _RESOLVABLE_CONF.match(value) and value not in paths:
-                    missing.append(f"{name} -> {value}")
+    missing = _unplanned_extra_conf(planned)
     assert not missing, (
         f"--template {template_id} --som {sku}: EXTRA_CONF_FILE names(s) with no planned "
-        f"file behind them: {missing}; planned files: {sorted(paths)}"
+        f"file behind them: {missing}; planned files: {sorted(planned)}"
     )
+
+
+def test_a_generated_conf_with_no_tan_generate_step_is_still_flagged():
+    """The `generated/` exemption is not a blanket pass: the emit's own
+    `python3 scripts/gen_example_alp_conf.py .` step produces nothing in a
+    scaffold, so a scaffold carrying only that must still fail."""
+    planned = {
+        "testcase.yaml": "    extra_args: EXTRA_CONF_FILE=generated/alp.conf\n",
+        "README.md": "python3 scripts/gen_example_alp_conf.py .\n",
+    }
+    assert _unplanned_extra_conf(planned) == ["testcase.yaml -> generated/alp.conf"]
+
+
+def test_a_generated_conf_is_accepted_only_at_the_path_tan_generate_writes():
+    readme = (
+        'tan generate --target zephyr-conf --core m55_hp --sdk-root "$ALP_SDK_ROOT" '
+        "--output generated/alp.conf\n"
+    )
+    planned = {
+        "README.md": readme,
+        "testcase.yaml": "extra_args: EXTRA_CONF_FILE=generated/alp.conf\n",
+        "peer/testcase.yaml": "extra_args: EXTRA_CONF_FILE=generated/alp.conf\n",
+    }
+    # The root scenario is covered; the peer one needs peer/generated/alp.conf.
+    assert _unplanned_extra_conf(planned) == ["peer/testcase.yaml -> generated/alp.conf"]
+    planned["README.md"] = readme + readme.replace(
+        "m55_hp", "m55_he").replace("--output generated", "--output peer/generated")
+    assert _unplanned_extra_conf(planned) == []
 
 
 #: `(template_id, sku, foreign_sku) -> expected occurrence count` for a

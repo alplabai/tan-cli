@@ -356,3 +356,73 @@ def test_git_short_head_does_not_attribute_an_enclosing_repos_commit(tmp_path):
         toolchain_root=None,
     )
     assert demoted == []
+
+
+# ---------------------------------------------------------------------------
+# alp-sdk#866: the sysbuild image prefix follows a relocated project root
+# ---------------------------------------------------------------------------
+
+#: The `connectivity/iot-fleet-ota` shape from the planner oracle at alp-sdk
+#: 34c11c9de, emitted from a project root named `foo`: an app slice whose app
+#: dir IS the project root, an SDK-side shim slice, and an unrelated
+#: `mcuboot_` image arg that must never be touched.
+_SYSBUILD_PLAN = """{
+  "schemaVersion": 1, "generatedBy": "g", "planPathMode": "tokened",
+  "boardYaml": "${PROJECT_ROOT}/board.yaml", "sku": "S", "buildRoot": "build",
+  "slices": [
+    { "coreId": "m55_hp", "backend": "zephyr", "buildDir": "build/m55_hp-zephyr",
+      "appDir": "${PROJECT_ROOT}/src", "configArtefacts": [], "toolchain": null,
+      "artifacts": {}, "debug": {},
+      "command": { "tool": "west", "cwd": "build/m55_hp-zephyr", "args": [
+        "build", "-b", "alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp", "${PROJECT_ROOT}",
+        "--sysbuild", "--", "-DPython3_EXECUTABLE=${PYTHON}",
+        "-Dmcuboot_EXTRA_CONF_FILE=${PROJECT_ROOT}/mcuboot.conf",
+        "-Dfoo_EXTRA_CONF_FILE=${PROJECT_ROOT}/build/m55_hp-zephyr/alp.conf"] },
+      "env": {}, "envAppendPath": {} },
+    { "coreId": "m55_he", "backend": "zephyr", "buildDir": "build/m55_he-zephyr",
+      "appDir": "${SDK_ROOT}/firmware/alp-stock-shim", "configArtefacts": [],
+      "toolchain": null, "artifacts": {}, "debug": {},
+      "command": { "tool": "west", "cwd": "build/m55_he-zephyr", "args": [
+        "build", "-b", "alp_e1m_aen801_m55_he/ae822fa0e5597ls0/rtss_he",
+        "${SDK_ROOT}/firmware/alp-stock-shim", "--sysbuild", "--",
+        "-Dalp-stock-shim_EXTRA_CONF_FILE=${PROJECT_ROOT}/build/m55_he-zephyr/alp.conf"] },
+      "env": {}, "envAppendPath": {} }
+  ],
+  "sharedArtefacts": [], "warnings": []
+}"""
+
+
+def _substitute_sysbuild(root: str, sdk_root) -> list[list[str]]:
+    out, _ = apply_plan_token_substitution(
+        parse_build_plan(_SYSBUILD_PLAN),
+        board_yaml_path=f"{root}/board.yaml",
+        exec_base=root,
+        sdk_root=str(sdk_root),
+        python="python3",
+        toolchain_root=None,
+    )
+    return [s.command.args for s in out.slices]
+
+
+def test_sysbuild_image_prefix_is_kept_when_the_root_name_matches(sdk_root):
+    hp, he = _substitute_sysbuild("/a/foo", sdk_root)
+    assert hp[-2:] == [
+        "-Dmcuboot_EXTRA_CONF_FILE=/a/foo/mcuboot.conf",
+        "-Dfoo_EXTRA_CONF_FILE=/a/foo/build/m55_hp-zephyr/alp.conf",
+    ]
+    assert he[-1] == "-Dalp-stock-shim_EXTRA_CONF_FILE=/a/foo/build/m55_he-zephyr/alp.conf"
+
+
+def test_sysbuild_image_prefix_follows_a_relocated_project_root(sdk_root):
+    """Emitted in `/a/foo`, run from `/b/bar`: sysbuild names the app image
+    `bar`, so `-Dfoo_EXTRA_CONF_FILE` would be ignored and the image would
+    build without its per-core alp.conf. Only this slice's own alp.conf arg
+    is renamed; `mcuboot_` and the SDK-side shim's image are untouched."""
+    hp, he = _substitute_sysbuild("/b/bar", sdk_root)
+    assert hp == [
+        "build", "-b", "alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp", "/b/bar",
+        "--sysbuild", "--", "-DPython3_EXECUTABLE=python3",
+        "-Dmcuboot_EXTRA_CONF_FILE=/b/bar/mcuboot.conf",
+        "-Dbar_EXTRA_CONF_FILE=/b/bar/build/m55_hp-zephyr/alp.conf",
+    ]
+    assert he[-1] == "-Dalp-stock-shim_EXTRA_CONF_FILE=/b/bar/build/m55_he-zephyr/alp.conf"

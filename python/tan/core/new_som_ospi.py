@@ -17,7 +17,7 @@ than adding a second vendor/family discrimination mechanism (tan-cli#1220's
 own instruction: reuse how `new_som_cmd.py` already tells vendors/families
 apart, don't invent a new one). The scope itself is not arbitrary: the
 schema's own `on_module.ospi_memories` description reads "(AEN family)"
-(`metadata/schemas/som-preset-v1.schema.json`), and every shipped
+(`metadata/schemas/som-preset-v2.schema.json`), and every shipped
 `E1M-AEN*.yaml` preset that populates these fields (301/401/501/601/701/801)
 uses the identical CS0=NOR/CS1=HyperRAM split on one shared octal OSPI0
 controller.
@@ -33,7 +33,7 @@ which an uppercase `TBD` fails). The convention value fills `chip_select`/
 `inference.preferred_backend`'s own `tbd` placeholder convention next door in
 `_render_preset`.
 
-`chip_select`'s only bound in `metadata/schemas/som-preset-v1.schema.json` is
+`chip_select`'s only bound in `metadata/schemas/som-preset-v2.schema.json` is
 `"minimum": 0` -- there is no schema maximum, and no `scripts/check_*.py`
 gate in the pinned alp-sdk checkout mentions `chip_select` at all (measured:
 `grep -rn chip_select scripts/` finds nothing). "Bounded to 0 or 1" is a

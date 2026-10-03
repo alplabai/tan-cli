@@ -2517,7 +2517,7 @@ def read_board_runtimes(
     """The runtimes this project puts in play. `[]` for every way that can fail,
     which the Yocto gate treats as "unresolvable, proceed".
 
-    *warnings* (tan-cli#964), when given, collects every `som-preset-v1`
+    *warnings* (tan-cli#964), when given, collects every `som-preset-v2`
     schema violation found while reading `sku`'s SoM preset -- threaded
     through to `_read_som_topology` -> `parse_som_preset`, the same
     `metadata_root`/`source`/`warnings` convention `tan presets` uses. The
@@ -3542,7 +3542,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 ExitCode.VALIDATION_FAILURE,
                 "metadata-schema-invalid",
                 [
-                    "SoM preset does not validate against som-preset-v1:\n"
+                    "SoM preset does not validate against som-preset-v2:\n"
                     + "\n".join(f"  - {w}" for w in schema_warnings)
                 ],
                 payload(),

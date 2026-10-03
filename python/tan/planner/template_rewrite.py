@@ -13,10 +13,7 @@ hardening, and the README.md link/board/pin rewrites -- plus the two small
 metadata-adjacent lookups those rewrites need (`_tag_resolves`, `_docs_ref`).
 What is NOT here: anything that reads `metadata/e1m_modules/**` or
 `metadata/boards/**` to DERIVE a rename in the first place -- that's
-`template_pins.py` -- and `_cmake_core_map`, which stayed in `template.py`
-itself (it needs `_safe_join`/`_require_field`/`_require_key` and
-`orchestrator._zephyr_app_dir`, none of which this module or `template_pins.py`
-otherwise touches).
+`template_pins.py`.
 
 Every docstring below is UNCHANGED from `template.py` -- issue numbers,
 tan-cli numbers and worked examples all still refer to that module's own
@@ -217,26 +214,6 @@ def _substitute_board_yaml_pin_docs(text: str, renames: dict[str, str | None]) -
                 f"re-derive")
         text = new_text
     return text
-
-
-def _substitute_cmake_core(text: str, old: str, new: str) -> str:
-    """Rewrite CMakeLists.txt's `alp_sdk_zephyr_conf(<old> ...)` core
-    argument to the re-derived core id. Still accepts the pre-helper
-    `alp_project.py --emit zephyr-conf --core <old>` spelling -- the
-    only one any real example carries today, since the shared
-    `cmake/alp.cmake` helper that would define `alp_sdk_zephyr_conf()`
-    is itself PLANNED and unmerged (tan-cli#825) -- so an example
-    re-derives on that spelling rather than scaffolding the wrong
-    core."""
-    pattern = re.compile(
-        rf"(alp_sdk_zephyr_conf\(\s*|--core\s+){re.escape(old)}\b")
-    new_text, n = pattern.subn(lambda m: f"{m.group(1)}{new}", text)
-    if n != 1:
-        raise TemplateError(
-            f"CMakeLists.txt must name core {old!r} exactly once (as "
-            f"`alp_sdk_zephyr_conf({old} ...)` or `--core {old}`) to "
-            f"re-derive to {new!r} (found {n})")
-    return new_text
 
 
 # ---------------------------------------------------------------------

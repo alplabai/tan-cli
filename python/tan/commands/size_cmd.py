@@ -73,6 +73,10 @@ from tan.core.metadata_schema import (
     validate_document,
 )
 from tan.core.pending import is_pending_placeholder
+from tan.core.som_schema_version import (
+    is_supported_som_schema_version,
+    skipped_presets_message,
+)
 from tan.core.sdk_discovery import sdk_resolution_issues
 from tan.core.subprocess_env import spawn_env
 from tan.core.size import (
@@ -241,14 +245,14 @@ def _read_som_preset(
     """`(silicon, silicon_variant)` from a SoM preset, or `None` when it cannot
     be used.
 
-    Only the two fields the budget needs, plus the SAME `schema_version == 1`
+    Only the two fields the budget needs, plus the SAME `schema_version == 2`
     guard `parse_som_preset` applies -- a preset the oracle refuses must be
     `unreadable SoM preset for <sku>` here too, not silently half-read. `TBD` is
     dropped to absent exactly as `str_clean` does, which is what variant
     resolution wants.
 
     *metadata_root*/*warnings* (tan-cli#964): when both are given, `root` --
-    the raw parsed document, already the shape `som-preset-v1.schema.json`
+    the raw parsed document, already the shape `som-preset-v2.schema.json`
     describes, unlike `presets_cmd.parse_som_preset`'s reshaped return value
     -- is checked against it and every violation is appended to *warnings*.
     `tan size`'s existing degrade-to-`unknown-budget` behaviour on a bad
@@ -266,8 +270,7 @@ def _read_som_preset(
         return None
     if not isinstance(root, dict):
         return None
-    version = root.get("schema_version")
-    if isinstance(version, bool) or version != 1:
+    if not is_supported_som_schema_version(root.get("schema_version")):
         return None
     if metadata_root is not None:
         schema_path = som_preset_schema_path(metadata_root)
@@ -279,6 +282,38 @@ def _read_som_preset(
             warnings.extend(validate_document(root, schema_path, path))
     silicon = _clean_str(root.get("silicon")) or ""
     return silicon, _clean_str(root.get("silicon_variant"))
+
+
+def _som_schema_version_issue(metadata_root: str | None, sku: str | None) -> Issue | None:
+    """tan-cli#1278: a `size.som-schema-version-skipped` warning when *sku*'s
+    preset parses but declares a `schema_version` this tan does not read.
+
+    `_read_som_preset` refuses it, and the row says only `unreadable SoM
+    preset for <sku>` -- the oracle's own words, kept for byte parity -- which
+    against a pre-v2 SDK is every SKU and names the wrong cause. This adds the
+    real one to `issues[]` without touching the row."""
+    if metadata_root is None or sku is None:
+        return None
+    path = os.path.join(metadata_root, "e1m_modules", f"{sku}.yaml")
+    text = _read_text(path)
+    if text is None:
+        return None
+    try:
+        root = load_yaml_document(text)
+    except Exception:  # noqa: BLE001 -- unparseable is `unreadable`, not this
+        return None
+    if not isinstance(root, dict):
+        return None
+    version = root.get("schema_version")
+    if is_supported_som_schema_version(version):
+        return None
+    # Forward slashes, the path as the SDK root was resolved -- the same form
+    # `presets.som-schema-version-skipped` names its directory in.
+    shown = path.replace("\\", "/")
+    subject = f"the SoM preset for {sku} ({shown}) was not read, so its FLASH/RAM budget is unknown"
+    return Issue(
+        "size.som-schema-version-skipped", "warning", skipped_presets_message(subject, [version])
+    )
 
 
 def _read_som_memory_map(path: str) -> list[dict]:
@@ -771,6 +806,9 @@ def _run(
     issues.extend(
         Issue("size.metadata-schema-unchecked", "info", w) for w in schema_skipped
     )
+    version_issue = _som_schema_version_issue(metadata_root, sku)
+    if version_issue is not None:
+        issues.append(version_issue)
     exit_code = ExitCode.SUCCESS
 
     if not json_mode:

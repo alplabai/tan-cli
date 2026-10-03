@@ -8,7 +8,7 @@ issue code a backstop elsewhere would have produced.
 
 A separate file from `test_new_som_command.py` on purpose: that whole module
 is `pytestmark`-skipped without a real `ALP_SDK_ROOT` checkout (it cross-
-validates against the REAL `som-preset-v1`/`soc-spec-v1` schemas), which would
+validates against the REAL `som-preset-v2`/`soc-spec-v1` schemas), which would
 make a decode-guard regression here silently never run in the default
 `pytest tests -q` gate. These tests build the minimal synthetic SDK root each
 guarded path actually needs -- no real alp-sdk checkout required.
@@ -52,7 +52,7 @@ def _minimal_sdk(tmp_path: Path) -> Path:
 def test_non_utf8_som_schema_is_a_coded_envelope_not_a_traceback(tmp_path: Path) -> None:
     """`_current_sku_pattern` (new_som_cmd.py) had no try/except at all."""
     sdk = _minimal_sdk(tmp_path)
-    schema_path = sdk / "metadata" / "schemas" / "som-preset-v1.schema.json"
+    schema_path = sdk / "metadata" / "schemas" / "som-preset-v2.schema.json"
     schema_path.parent.mkdir(parents=True)
     schema_path.write_bytes(b'{"properties": {"sku": {"pattern": "^E1M-\xff"}}}')
 

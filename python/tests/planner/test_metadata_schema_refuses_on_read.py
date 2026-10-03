@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """tan-cli#964, REFUSE half: `load_board_yaml` (the `tan build`/`tan
 generate` front door) refuses a `board.yaml`-bound run whose SoM preset or
-SoC JSON does not validate against `som-preset-v1.schema.json` /
+SoC JSON does not validate against `som-preset-v2.schema.json` /
 `soc-spec-v1.schema.json` -- the read-path gate `_refuse_on_schema_errors`
 (`tan/planner/loader.py`) adds, backed by the one shared validator in
 `tan.core.metadata_schema`.
@@ -61,7 +61,7 @@ def loader():
 #: does), so nothing here should refuse on it.
 _BOARD_SCHEMA = {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"}
 
-#: Deliberately narrower than the real `som-preset-v1.schema.json`: enough to
+#: Deliberately narrower than the real `som-preset-v2.schema.json`: enough to
 #: exercise the gate (`schema_version`/`sku`/`silicon` required, `topology`
 #: typed), not a byte-for-byte mirror of the real file, which would make this
 #: file's coverage depend on the real schema never changing shape.
@@ -70,7 +70,7 @@ _SOM_SCHEMA = {
     "type": "object",
     "required": ["schema_version", "sku", "silicon"],
     "properties": {
-        "schema_version": {"const": 1},
+        "schema_version": {"const": 2},
         "sku": {"type": "string"},
         "silicon": {"type": "string"},
         "topology": {"type": "object"},
@@ -112,7 +112,7 @@ def _posix(path: Path) -> str:
 
 def _som_preset_yaml(sku: str = _SKU, silicon: str = _SILICON) -> str:
     return (
-        f"schema_version: 1\nsku: {sku}\nsilicon: \"{silicon}\"\n"
+        f"schema_version: 2\nsku: {sku}\nsilicon: \"{silicon}\"\n"
         "topology:\n  a:\n    board: something\n"
     )
 
@@ -123,7 +123,7 @@ def _build_tree(tmp_path: Path, *, soc_core_type) -> tuple[Path, Path]:
     schema-valid, anything else (a number, a list, ...) is not."""
     metadata_root = tmp_path / "metadata"
     _write(metadata_root / "schemas" / "board.schema.json", _BOARD_SCHEMA)
-    _write(metadata_root / "schemas" / "som-preset-v1.schema.json", _SOM_SCHEMA)
+    _write(metadata_root / "schemas" / "som-preset-v2.schema.json", _SOM_SCHEMA)
     _write(metadata_root / "schemas" / "soc-spec-v1.schema.json", _SOC_SCHEMA)
     (metadata_root / "e1m_modules" / f"{_SKU}.yaml").parent.mkdir(parents=True, exist_ok=True)
     (metadata_root / "e1m_modules" / f"{_SKU}.yaml").write_text(
@@ -176,7 +176,7 @@ def test_a_schema_invalid_som_preset_refuses_before_the_soc_spec_is_even_read(lo
     board_yaml, metadata_root = _build_tree(tmp_path, soc_core_type="cortex-m33")
     preset_path = metadata_root / "e1m_modules" / f"{_SKU}.yaml"
     preset_path.write_text(
-        "schema_version: 1\nsku: E1M-TEST\nsilicon: 7\ntopology:\n  a:\n    board: something\n",
+        "schema_version: 2\nsku: E1M-TEST\nsilicon: 7\ntopology:\n  a:\n    board: something\n",
         encoding="utf-8",
     )
 
@@ -184,7 +184,7 @@ def test_a_schema_invalid_som_preset_refuses_before_the_soc_spec_is_even_read(lo
         loader.load_board_yaml(board_yaml, metadata_root=metadata_root)
 
     message = str(excinfo.value)
-    assert message.startswith(f"SoM preset {_SKU} does not validate against som-preset-v1:")
+    assert message.startswith(f"SoM preset {_SKU} does not validate against som-preset-v2:")
     assert f"  - {_posix(preset_path)}: silicon: 7 is not of type 'string'" in message.splitlines()
 
 

@@ -138,6 +138,11 @@ from tan.core.sdk_discovery import (
     resolve_sdk_tiered,
 )
 from tan.core.shapes import SDK_MARKER, rejected_sdk_root_message
+from tan.core.som_schema_version import (
+    SOM_SCHEMA_VERSION,
+    is_supported_som_schema_version,
+    skipped_presets_message,
+)
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -147,11 +152,18 @@ from tan.soc_ref import resolve_soc_path as _resolve_soc_path
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
 
-#: The one `schema_version:` a SoM preset may declare. `som-preset-v1.schema.json`
-#: pins it `const: 1`, and `parse_som_preset` refuses anything else rather than
-#: guessing at a shape it does not know -- so a v2 SoM is SKIPPED here, silently,
-#: exactly as the oracle skips it (`parse_som_preset(..).ok()?`).
-SOM_SCHEMA_VERSION = 1
+#: `SOM_SCHEMA_VERSION` (imported above, `tan.core.som_schema_version`) is the
+#: one `schema_version:` a SoM preset may declare. `parse_som_preset` refuses
+#: anything else rather than guessing at a shape it does not know, so such a
+#: preset is SKIPPED here, as the oracle skips an unknown version
+#: (`parse_som_preset(..).ok()?`) -- but no longer silently: `read_soms`
+#: collects every skipped version and `presets()` reports them as ONE
+#: `SOM_SCHEMA_SKIPPED_CODE` warning (tan-cli#1278: against a pre-v2 SDK every
+#: preset is skipped, and `skus: []` with no issue read as "this SDK has no
+#: SoMs").
+
+#: `warning`: SoMs the SDK ships are missing from the listing.
+SOM_SCHEMA_SKIPPED_CODE = "presets.som-schema-version-skipped"
 
 #: The FROZEN issue code for "no checkout resolved" (`contract/issue-codes.json`,
 #: severity `warning`). Spelled once; the extension matches it with `===`.
@@ -234,9 +246,20 @@ class Som:
 
 
 class SomShapeError(Exception):
-    """The text is not a v1 SoM preset. Caller SKIPS the entry, as the oracle's
+    """The text is not a v2 SoM preset. Caller SKIPS the entry, as the oracle's
     `parse_som_preset(..).ok()?` does -- one malformed SoM must not empty the
     catalogue or fail the command."""
+
+
+class SomSchemaVersionError(SomShapeError):
+    """The preset declares a `schema_version` this tan does not read. Still a
+    skip, but one `read_soms` can report: `.version` is what the file said."""
+
+    def __init__(self, version: object) -> None:
+        super().__init__(
+            f"unsupported schema_version {version!r} (this CLI consumes v{SOM_SCHEMA_VERSION})"
+        )
+        self.version = version
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +330,7 @@ def parse_som_preset(
     *metadata_root*/*source*/*warnings* (tan-cli#964): when *metadata_root* is
     given, the RAW parsed YAML mapping (not this function's own reshaped
     return value -- see `_load_som_yaml`'s `raw_out`) is checked against
-    `som-preset-v1.schema.json` and every violation is appended to *warnings*
+    `som-preset-v2.schema.json` and every violation is appended to *warnings*
     (a caller-owned list, so several presets read in one `tan presets` run
     share one collector rather than each returning its own list a caller has
     to flatten). This is the WARN half of #964's decided rule -- `tan presets`
@@ -336,8 +359,8 @@ def parse_som_preset(
     # `bool` is excluded explicitly: Python's `True == 1` is true and `isinstance(
     # True, int)` is too, so `schema_version: true` would pass the guard, where
     # serde's `as_i64()` on a bool is `None` and the oracle rejects the file.
-    if not isinstance(version, int) or isinstance(version, bool) or version != SOM_SCHEMA_VERSION:
-        raise SomShapeError(f"unsupported schema_version {version!r} (this CLI consumes v1)")
+    if not is_supported_som_schema_version(version):
+        raise SomSchemaVersionError(version)
     if metadata_root is not None and raw_holder:
         schema_path = som_preset_schema_path(metadata_root)
         resolved_source = source if source is not None else "<som preset>"
@@ -390,7 +413,7 @@ def _load_som_yaml(text: str, *, raw_out: list[dict[str, object]] | None = None)
     lines) and the runtime derivation must happen once, in `runtime_for_core`.
 
     *raw_out* (tan-cli#964), when given, gets the RAW `yaml.safe_load` mapping
-    appended (before any reshaping) -- the shape `som-preset-v1.schema.json`
+    appended (before any reshaping) -- the shape `som-preset-v2.schema.json`
     actually describes (a `topology:` object, not this function's own `cores:
     list[SomCore]` return value, which the schema has never seen and would
     reject on sight). Left empty on the no-PyYAML fallback: `scan_som_preset`
@@ -691,17 +714,25 @@ def _soc_lookups(
 
 
 def read_soms(
-    sdk_root: str, *, warnings: list[str] | None = None, skipped: list[str] | None = None
+    sdk_root: str,
+    *,
+    warnings: list[str] | None = None,
+    skipped: list[str] | None = None,
+    version_skipped: list[object] | None = None,
 ) -> list[Som]:
     """SoM presets under `<sdk>/metadata/e1m_modules`, sorted by SKU.
 
     Both layouts the SDK has used are supported, as in the oracle: a flat
     `E1M-X.yaml`, or an `E1M-X/som.yaml` directory. An entry that is not
-    `E1M-*`, carries no yaml, will not read, is not UTF-8, or is not a v1 preset
+    `E1M-*`, carries no yaml, will not read, is not UTF-8, or is not a v2 preset
     is skipped -- never an error.
 
+    *version_skipped* (tan-cli#1278), when given, collects the declared
+    `schema_version` of every preset skipped for declaring the wrong one, so
+    the caller can say so instead of returning a silently shorter list.
+
     *warnings* (tan-cli#964), when given, collects every `soc-spec-v1` /
-    `som-preset-v1` violation found while reading -- see `_soc_lookups` and
+    `som-preset-v2` violation found while reading -- see `_soc_lookups` and
     `parse_som_preset`'s own docstrings for what feeds it. *skipped*
     (tan-cli#964 review, major 6) does the same for the "skip-but-disclose"
     half: a note per schema file this walk found simply absent.
@@ -742,6 +773,10 @@ def read_soms(
                     skipped=skipped,
                 )
             )
+        except SomSchemaVersionError as err:
+            if version_skipped is not None:
+                version_skipped.append(err.version)
+            continue
         except SomShapeError:
             continue
     found.sort(key=lambda s: s.sku)
@@ -863,6 +898,20 @@ def resolve_sdk(sdk_root: str | None, workspace_root: str) -> ActiveSdk:
     )
 
 
+def _version_skipped_issue(sdk_path: str, versions: list[object]) -> Issue:
+    """ONE warning for every preset `read_soms` skipped on `schema_version`
+    (tan-cli#1278), not one per preset: against a pre-v2 SDK that is every
+    preset it ships, and twenty identical lines bury the remedy."""
+    count = len(versions)
+    noun = "SoM preset" if count == 1 else "SoM presets"
+    where = _posix(str(Path(sdk_path) / "metadata" / "e1m_modules"))
+    return Issue(
+        SOM_SCHEMA_SKIPPED_CODE,
+        "warning",
+        skipped_presets_message(f"skipped {count} {noun} under {where}", versions),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Text rendering
 # ---------------------------------------------------------------------------
@@ -938,7 +987,11 @@ def presets(
         if sdk.path is not None:
             schema_warnings: list[str] = []
             schema_skipped: list[str] = []
-            soms = read_soms(sdk.path, warnings=schema_warnings, skipped=schema_skipped)
+            version_skipped: list[object] = []
+            soms = read_soms(
+                sdk.path, warnings=schema_warnings, skipped=schema_skipped,
+                version_skipped=version_skipped,
+            )
             board_libraries = read_board_libraries(sdk.path)
             # tan-cli#964: warn-and-continue, never refuse -- `tan presets`
             # already tolerates a missing/malformed SoM detail (see the
@@ -962,6 +1015,8 @@ def presets(
                 Issue("presets.metadata-schema-unchecked", "info", w)
                 for w in dict.fromkeys(schema_skipped)
             )
+            if version_skipped:
+                issues.append(_version_skipped_issue(sdk.path, version_skipped))
         else:
             # tan-cli#497 defect 7 (the sibling of `examples_cmd`'s): a
             # rejected `--sdk-root` is named, so the reader can see WHICH path

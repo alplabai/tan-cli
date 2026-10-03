@@ -95,7 +95,94 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`79c834e65`**
+- **Current vendor point (all templates):** **`34c11c9de`**
+  (`34c11c9de04e264fdcab2bc0d58b328d9d117ca8`, alp-sdk `dev`) — the
+  `79c834e65` -> `34c11c9de` planner re-sync (alp-sdk#866/#2469/#2024/#2316),
+  the same change that moves `parity.yml`'s `PINNED_SDK_TAG`/
+  `PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity` `ref:` and
+  `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT`/
+  `HAND_PORT_PINNED_SDK_COMMIT`. Still untagged (alp-sdk's newest tag is
+  `v0.16.0`), so `- Ref:` below stays `v0.16.0` for the same
+  `_tag_resolves()` reason as the `722320a1` bullet.
+
+  **All ten (template, sku) pairs moved, 49 files.** Re-vendored by running
+  `scaffold_byte_parity.py`'s own `emit_live_scaffold`/
+  `augment_with_example_extras`, then re-applying each file's surviving
+  `DELIBERATE_EDITS` with a three-way merge (base = the old emit recovered
+  by `undo_declared_edits`, ours = the old vendored file, theirs = the new
+  emit), so the bytes are by construction what the gate compares. Causes,
+  each read off the emit diff and matched to the upstream commit that
+  changed the catalog example:
+
+  - alp-sdk#866 (`423e0100d`), every pair: the `--emit zephyr-conf --core
+    <id>` CMakeLists bridge is GONE from all eleven vendored
+    `CMakeLists.txt` files (both `edge-ai` variants and `multicore-mailbox`'s
+    `peer/` included) — checked by search, no `zephyr-conf`/`alp_project.py`
+    string survives anywhere under this tree outside this file. This is the
+    change that has to land with the planner port: `tan build` now passes
+    `-D<image>_EXTRA_CONF_FILE` on a sysbuild slice and `-DEXTRA_CONF_FILE`
+    otherwise, so a scaffold still carrying the bridge would get the
+    per-core `alp.conf` twice. The same commit rewrites the `board.yaml`/
+    `prj.conf` "CMakeLists.txt invokes scripts/alp_project.py" comments,
+    adds `extra_args: EXTRA_CONF_FILE=generated/alp.conf` to every
+    `testcase.yaml` scenario, and adds a `gen_example_alp_conf.py` step plus
+    `-DEXTRA_CONF_FILE=generated/alp.conf` to every README `west build`
+    line.
+  - alp-sdk#2556 (`42b837a2a`/`31ae71570`), `multicore-mailbox` only:
+    `src/main.c`/`peer/main.c` drop the `.cacheable = false` field and the
+    README/comment prose says the carve-out is non-cacheable by design.
+  - alp-sdk#2192 (`34a128d09`), `iot` only: the README entropy paragraph and
+    `testcase.yaml` drop `CONFIG_ALP_SDK_ALLOW_TEST_ENTROPY=y` from the AEN
+    scenario (the SE TRNG now seeds every AEN board).
+  - alp-sdk#2173 (`01c347539`), `iot` only: `src/cc3501e_bridge.c`'s LP-pad
+    mux also runs on M55-HP, and `testcase.yaml` gains the
+    `alp_e1m_aen803_m55_hp` platform.
+
+  **Fourteen `DELIBERATE_EDITS` entries retired, forty-one down to
+  twenty-seven** — every `workflow_pointer` entry: `sensor` `board.yaml` x2
+  and `prj.conf` x2 (tan-cli#977), `minimal`/`diagnostics` `board.yaml` x4
+  and `prj.conf` x4, `iot` `prj.conf` and `multicore-mailbox` `prj.conf`
+  (tan-cli#1009). Each qualified the bare `scripts/alp_project.py` in the
+  bridge prose #866 deleted, so the three-way merge conflicted on exactly
+  those hunks (resolved to the new emit) and the gate's strict half then
+  named all fourteen "no longer there". Their `un_edit_*` functions and
+  constants are deleted with them (nothing reuses them); `self_check()`'s
+  mechanism demo moved to `multicore-mailbox`'s native_sim overlay
+  `orchestrator_pointer`, the one remaining entry that is alone on its path.
+
+  **Twenty-four `alp_conf_pregeneration` entries added, twenty-seven up to
+  fifty-one** — the new prose's replacement for the bridge. The emit tells
+  the reader to write `generated/alp.conf` with `python3
+  scripts/gen_example_alp_conf.py <dir>` (every README, ten files) and
+  points at that script from `board.yaml` (six) and `prj.conf` (eight). In a
+  scaffolded project that step does not work, measured on a fresh
+  `tan init --template zephyr-app --som E1M-AEN801` against `34c11c9de`: the
+  bare form fails (a scaffold has no `scripts/`), and
+  `$ALP_SDK_ROOT/scripts/gen_example_alp_conf.py .` exits 0 having written
+  nothing ("matches no Zephyr example core") because it only walks alp-sdk's
+  own `examples/`. Without `generated/alp.conf`, every vendored
+  `testcase.yaml` scenario (`EXTRA_CONF_FILE=generated/alp.conf`) and every
+  documented bare `west build` line names a missing overlay, which Zephyr
+  refuses. The README line is therefore re-anchored on
+  `tan generate --target zephyr-conf --core <id> --sdk-root "$ALP_SDK_ROOT"
+  --output [<dir>/]generated/alp.conf` (`m55_hp`/`m33_sm` for the project
+  root, `m55_he` for `multicore-mailbox`'s `./peer`), and the `board.yaml`/
+  `prj.conf` pointers name that README step. Measured on fresh scaffolds of
+  all ten (template, sku) pairs, each README command run as written: it
+  writes `generated/alp.conf` (and `peer/generated/alp.conf` for the
+  mailbox), byte-identical to the `build/<core>-zephyr/alp.conf` that
+  `tan build --materialise` writes from the plan. `--sdk-root` is spelled
+  out because `tan` has no `ALP_SDK_ROOT` env tier. `tan build` itself never
+  needed the file. `tests/core/test_template_integrity.py` accepts a
+  `generated/` `EXTRA_CONF_FILE` name only where a planned file carries the
+  `tan generate ... --output` command for that exact path. The upstream
+  prose stays wrong for anyone copying an example out of alp-sdk without
+  `tan`; that is alp-sdk's to fix, and these entries retire the moment it is.
+
+  Verified at `34c11c9de`, against a checkout with tags fetched:
+  `scaffold_byte_parity.py` **10/10 PASS** (rc 0).
+
+- **Prior vendor point (all templates):** **`79c834e65`**
   (`79c834e654f150816d09c7c92832a2104e76e309`, alp-sdk `dev`) — review of
   tan-cli#1291 (the alp-sdk#2311/#2312/#2288 planner resync), the same
   change that moves `parity.yml`'s `PINNED_SDK_TAG`/
@@ -512,14 +599,15 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`79c834e65`** (alp-sdk `dev`, full sha
-  `79c834e654f150816d09c7c92832a2104e76e309`) — the checkout the emit was RUN
+- Commit: **`34c11c9de`** (alp-sdk `dev`, full sha
+  `34c11c9de04e264fdcab2bc0d58b328d9d117ca8`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::
   test_the_manifest_states_one_vendor_point_not_two`.
 
-  This line used to say `c81cb5db` (review of tan-cli#1291, this pin's own
+  This line used to say `79c834e65` (the alp-sdk#2311/#2312 re-sync), and
+  before that `c81cb5db` (review of tan-cli#1291, this pin's own
   prior value), and before that `ff27f179` (tan-cli#1275), and before that
   `eb96112b` (tan-cli#996/#1001), and before that
   `94378a05` (tan-cli#846) and, before that, `f30f4d4b`
@@ -616,9 +704,14 @@ for a customer and the fix lives in alp-sdk, not here. Each is a real diff
 disappears on its own the moment alp-sdk fixes it and this tree is
 re-vendored — nothing here needs unwinding by hand.
 
-The `DELIBERATE_EDITS` table below currently carries **forty-one** live entries
+The `DELIBERATE_EDITS` table below currently carries **fifty-one** live entries
 (counted from `scaffold_byte_parity.py`'s own `DELIBERATE_EDITS`
-dict, not by hand): one `multicore-mailbox`/`E1M-AEN801` entry for the
+dict, not by hand). The `34c11c9de` re-vendor retired fourteen of the
+forty-one below — every `workflow_pointer` entry — and added twenty-four
+`alp_conf_pregeneration` entries (see the "Current vendor point" bullet
+above), so the itemised walk that follows is the HISTORY of how the table
+reached sixty-two and then forty-one, not today's contents:
+one `multicore-mailbox`/`E1M-AEN801` entry for the
 leading "blocked ahead" caveat (tan-cli#864 Q5, see entry 9 below), the
 `iot` CMakeLists edit (entry 2), two `iot`/`E1M-AEN801` `README.md` entries
 for the `native_sim.conf` link and "copy it in first" comment (tan-cli#1001

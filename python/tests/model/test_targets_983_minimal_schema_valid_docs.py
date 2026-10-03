@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """tan-cli#983: does `resolve_targets()` survive a document that carries
-*only* what `soc-spec-v1.schema.json`/`som-preset-v1.schema.json` actually
+*only* what `soc-spec-v1.schema.json`/`som-preset-v2.schema.json` actually
 REQUIRE?
 
 tan-cli#964 landed read-path schema validation; the natural (wrong) reading
@@ -62,7 +62,7 @@ import yaml
 
 from tan.model.targets import resolve_targets
 
-_SKU = "E1M-V2M999"  # pattern-legal fake SKU (som-preset-v1.schema.json ^E1M-(...|V2M[0-9]{3}|...)$), not a real catalogued MPN
+_SKU = "E1M-V2M999"  # pattern-legal fake SKU (som-preset-v2.schema.json ^E1M-(...|V2M[0-9]{3}|...)$), not a real catalogued MPN
 _SILICON = "fakevendor:fakefamily:fakepart"
 # The on-module discrete accelerator's own SoC ref -- distinct from the host,
 # found only through `variants[].alp_module_skus`, mirroring the real
@@ -97,7 +97,7 @@ def _minimal_soc(npus: list[dict]) -> dict:
 
 
 def _minimal_som_preset() -> dict:
-    """The smallest `som-preset-v1.schema.json`-valid document naming
+    """The smallest `som-preset-v2.schema.json`-valid document naming
     `_SKU`/`_SILICON` -- every required top-level key (`schema_version`/
     `sku`/`family`/`silicon`/`display_name`/`on_module`/`memory`/
     `inference`/`topology`/`default_hw_rev`/`default_board`/`status`), each
@@ -117,7 +117,7 @@ def _minimal_som_preset() -> dict:
     the same reason: that value conditionally requires `ethos_u_variant`
     too."""
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "sku": _SKU,
         "family": "fakefamily",
         "silicon": _SILICON,

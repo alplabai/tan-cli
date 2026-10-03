@@ -2840,3 +2840,69 @@ def test_topology_resolved_example_still_gets_the_som_support_check(tmp_path):
     assert proc.returncode == 0, env
     codes = [i["code"] for i in env["issues"]]
     assert "init.example-som-unsupported" in codes, env["issues"]
+
+
+# ---------------------------------------------------------------------------
+# alp-sdk#866: a copied example that reads generated/alp.conf
+# ---------------------------------------------------------------------------
+
+
+def _example_reading_generated_alp_conf(tmp_path, *, testcase=True):
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    example = sdk / "examples" / "connectivity" / "fleet"
+    (example / "src").mkdir(parents=True)
+    (example / "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
+        "  a32_cluster:\n    os: 'off'\n",
+        encoding="utf-8",
+    )
+    (example / "CMakeLists.txt").write_text("project(fleet)\n", encoding="utf-8")
+    if testcase:
+        (example / "testcase.yaml").write_text(
+            "tests:\n  fleet.build:\n    extra_args: EXTRA_CONF_FILE=generated/alp.conf\n",
+            encoding="utf-8",
+        )
+    return sdk
+
+
+def test_from_example_names_the_command_that_writes_generated_alp_conf(tmp_path):
+    sdk = _example_reading_generated_alp_conf(tmp_path)
+
+    proc = run_tan(
+        "init", "--from-example", "connectivity/fleet", "--sdk-root", "./sdk",
+        "--destination", "proj", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env["issues"]
+    pregen = [i for i in env["issues"] if i["code"] == "init.alp-conf-pregeneration"]
+    assert pregen == [
+        {
+            "code": "init.alp-conf-pregeneration",
+            "severity": "info",
+            "message": (
+                "example 'connectivity/fleet' reads generated/alp.conf (testcase.yaml): "
+                "`tan build` writes its own and does not need it, but a bare `west build` "
+                "or twister run in this project does. Write it with: `tan generate "
+                "--target zephyr-conf --core m55_hp --sdk-root "
+                f"{sdk.resolve().as_posix()} --output generated/alp.conf`. The example's "
+                "own pointer, alp-sdk's scripts/gen_example_alp_conf.py, only writes "
+                "inside alp-sdk's examples/ (alp-sdk#866)."
+            ),
+        }
+    ]
+
+
+def test_from_example_without_a_generated_alp_conf_reader_says_nothing(tmp_path):
+    _example_reading_generated_alp_conf(tmp_path, testcase=False)
+
+    proc = run_tan(
+        "init", "--from-example", "connectivity/fleet", "--sdk-root", "./sdk",
+        "--destination", "proj", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env["issues"]
+    assert not [i for i in env["issues"] if i["code"] == "init.alp-conf-pregeneration"]

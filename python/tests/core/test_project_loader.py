@@ -182,7 +182,7 @@ def test_a_schema_invalid_som_preset_refuses_through_the_route_table_emit(
     from tan import planner_emit
 
     def _fake_validate_document(doc, schema_path, source):
-        if str(schema_path).endswith("som-preset-v1.schema.json"):
+        if str(schema_path).endswith("som-preset-v2.schema.json"):
             return [f"{source}: silicon: 7 is not of type 'string'"]
         return []
 
@@ -193,5 +193,5 @@ def test_a_schema_invalid_som_preset_refuses_through_the_route_table_emit(
         planner_emit.render(mode, sdk_root=SDK, board_yaml=board)
 
     message = str(excinfo.value)
-    assert "does not validate against som-preset-v1" in message
+    assert "does not validate against som-preset-v2" in message
     assert "silicon: 7 is not of type 'string'" in message

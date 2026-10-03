@@ -251,7 +251,7 @@ def test_re_running_a_read_only_helper_copy_still_succeeds(tmp_path):
 
 def test_sdk_relative_helper_firmware_resolves_against_sdk_root(tmp_path):
     # The real fixture shape from alp-sdk#330: cc3501e_otp's firmware_path is
-    # repository-relative per som-preset-v1.schema.json, and the SDK genuinely
+    # repository-relative per som-preset-v2.schema.json, and the SDK genuinely
     # ships the file -- but not under this project's build/.
     sdk = make_sdk_root(tmp_path)
     wbytes(

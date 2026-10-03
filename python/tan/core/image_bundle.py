@@ -165,7 +165,7 @@ def helper_firmware_candidates(
     """Labeled `(root, absolute_candidate)` pairs for a helper's declared
     `firmware_path`, in resolution order (alp-sdk#330).
 
-    alp-sdk's `som-preset-v1.schema.json` defines a relative `firmware_path` as
+    alp-sdk's `som-preset-v2.schema.json` defines a relative `firmware_path` as
     repository-relative -- relative to the SDK checkout, not to this project's
     build tree. `build_root` is still tried FIRST, ahead of `sdk_root`,
     mirroring the precedence `flash_plan.resolve_artefact_path` already
