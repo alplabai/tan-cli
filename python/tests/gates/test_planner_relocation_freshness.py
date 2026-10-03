@@ -96,8 +96,9 @@ three tables below are NOT one thing:
     does not move HAND_PORT_PINNED_SDK_COMMIT, so this test stays red until a
     human ports it. That is the intended state, not a bug in the automation.
   * STRICT_LOADERS_PINNED_SDK_COMMIT is checked and NEVER moved automatically
-    -- see that block below for why (it names the introducing commit, and it is
-    where a known open gap is written down).
+    -- it pins a hand-port, so a human ports `scripts/strict_loaders.py` and
+    moves it with STRICT_LOADERS_HASH (see that block below; the open gap it
+    once recorded was closed by tan-cli#582).
 
 The automation does not weaken any of this. It proposes; it never merges, and
 a re-sync it could only partly apply opens a PR that says so and fails its own
@@ -1166,7 +1167,75 @@ from tests.conftest import sdk_root
 #: line -- metadata-driven (`metadata/npu_ops/**`/#1470), not a `tan/planner/`
 #: code change, since `kconfig.py`'s only code-adjacent delta in this range is
 #: the docstring reword audited above.
-PINNED_SDK_COMMIT = "79c834e654f150816d09c7c92832a2104e76e309"  # alp-sdk origin/dev -- alp-sdk#2311/#2312 resync (tan-cli, this change)
+#:
+#: `79c834e65` -> `34c11c9de` (tan-cli#1278 re-sync, carrying tan-cli#1295 and
+#: #1297). EIGHT of the 23 tracked modules changed (`git diff --stat
+#: 79c834e6..34c11c9d -- scripts/alp_orchestrate/`; the other fifteen hashes
+#: re-measured unchanged, and the module SET is unchanged -- no new or deleted
+#: `scripts/alp_orchestrate/*.py`). SEVEN upstream commits touch this tree;
+#: classified by reading each diff, not its subject line:
+#:
+#:   - `da6c08db4` (#2469) BEHAVIOURAL, `kconfig.py::_soc_cpu_complement`:
+#:     every core entry in `CONFIG_ALP_SDK_SOC_CPUS` gains a `|<cluster>`
+#:     suffix from the SoC JSON's `zephyr_cpucluster`, so `alp_banner.c` can
+#:     mark the core the image is BUILT for rather than the board.yaml
+#:     slice's. Ported verbatim. Changes every Zephyr slice's `alp.conf`.
+#:   - `423e0100d` (#866) BEHAVIOURAL, `orchestrator.py::_slice_command`: a
+#:     `--sysbuild` slice now gets `-D<image>_EXTRA_CONF_FILE=<alp.conf>`
+#:     (image = basename of `_zephyr_app_dir(slice.app)`, sysbuild's own
+#:     naming rule) instead of NO conf at all -- the plan-native half of #866
+#:     that retires every example's `--emit zephyr-conf --core` CMakeLists
+#:     bridge, which is why `python/tan/templates/vendored/` is re-vendored in
+#:     this same change (a scaffold keeping the bridge would get `alp.conf`
+#:     twice). Ported verbatim. `kconfig.py` gets a one-line comment reword in
+#:     the same commit (cosmetic).
+#:   - `ed430e271` (#2316) BEHAVIOURAL, `loader.py::_validate_cross_fields`
+#:     + new `_is_i2c_chip_unassembled`: `security.psa.attestation_root:
+#:     optiga_trust_m` is REFUSED on a SKU whose preset names the part but
+#:     marks every `on_module.i2c_devices` entry for it `assembled: false`
+#:     (E1M-AEN801/803) -- #2311's OSPI-guard shape applied to OPTIGA.
+#:     tan-cli#1295. Ported verbatim; `python/tests/planner/
+#:     test_security_psa_optiga_population.py` pins it.
+#:   - `7bde5112d` (#2597) BEHAVIOURAL, `loader.py::load_board_yaml`: new
+#:     `sku=` keyword overriding `som.sku` after schema validation, for
+#:     examples built per sibling SKU. Ported verbatim (tan's own
+#:     `skip_advisories=` keyword kept after it); no tan caller passes it yet,
+#:     so no emitted byte moves. `test_load_board_yaml_sku_override.py`.
+#:   - `169a9be38` (#2328) PERFORMANCE, same semantics, `sdk_compat.py::
+#:     load_family_table`: `yaml.safe_load` -> `strict_loaders.fast_safe_load`
+#:     (libyaml when PyYAML has it). Ported, importing tan's own
+#:     `.strict_loaders` -- the same commit's `strict_loaders.py` half is the
+#:     STRICT_LOADERS_* pin below, moved with this one.
+#:   - `29df99f9e` (#2024, som-preset schema v2) COSMETIC on this tree:
+#:     `som-preset-v1.schema.json` -> `-v2` in four docstrings (`carveout.py`,
+#:     `memory.py`, `secure.py`, `topology.py`) and one `kconfig.py` comment
+#:     drops the deprecated `npu_population` mention. The behavioural half
+#:     of #2024 is in a HAND_PORT source (`alp_project_loader.py`'s
+#:     `write_authority` on derived rows -- see HAND_PORT_PINNED_SDK_COMMIT)
+#:     and in tan-native code (tan-cli#1297, `SOM_SCHEMA_VERSION` 1 -> 2).
+#:   - `42b837a2a` (#2556) COSMETIC: `kconfig.py::_emit_cross_core_shmem_
+#:     cache`'s docstring re-explains why `cacheable: true` rpmsg is refused
+#:     (no per-channel cache field any more); no code change.
+#:
+#: RE-MEASURED against the planner oracle, not assumed: re-captured at
+#: `34c11c9de` -- 102 boards, 714 emits (7 error-contract), 1,355,493 B (was
+#: 100/700/1,334,485). Every changed byte attributed by a YAML/JSON-level
+#: compare (long strings diffed line by line), nothing left over:
+#: `da6c08db4` -- the `CONFIG_ALP_SDK_SOC_CPUS` line in 97 changed
+#: `build-plan.json` goldens (169 lines); `29df99f9e` -- `write_authority` on
+#: derived memory rows in 24 `system-manifest.yaml` goldens (72 leaves);
+#: `423e0100d` -- 3 sysbuild slice commands in 2 `build-plan.json`s
+#: (`connectivity/iot-fleet-ota`, `connectivity/production-deployment`).
+#: The rest is alp-sdk DATA in the same range, read by unchanged planner code:
+#: `2b01e86e8` + `b8a45ed41` (V2N/V2M `default_hw_rev: r2` and the composed
+#: `board_datecode` `2625-<rev>`) -- `som_hw_rev` / `CONFIG_ALP_SDK_SOM_HW_REV`
+#: on 24 V2N-family boards; `ed430e271`'s own `production-deployment`
+#: board.yaml move to `attestation_root: tfm_internal`; `7e54afd34` (#2421,
+#: shared MCUboot dev key path) on the two sysbuild boards; `01c347539`
+#: (`iot-dashboard` drops `st7789`); `ce8f3573e` (`v2n-m1-ros-perception`
+#: E1M-X EVK parts); and two new boards, `v2n/v2n-pmic-inspect`
+#: (`905b210a0`) and `v2n/v2n-drpai-inference` (`f958b6083`).
+PINNED_SDK_COMMIT = "34c11c9de04e264fdcab2bc0d58b328d9d117ca8"  # alp-sdk origin/dev -- #866/#2469/#2316/#2597 resync (tan-cli#1278, this change)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1176,7 +1245,10 @@ PINNED_SDK_COMMIT = "79c834e654f150816d09c7c92832a2104e76e309"  # alp-sdk origin
 #:
 #: KNOWN DELIBERATE DIVERGENCE (tan-cli#938, found reviewing #914): upstream's
 #: `topology.py` still hashes to the pinned value above at PINNED_SDK_COMMIT
-#: (`eb96112ba7d1cc3b4084c985962ea31772177d74`, unchanged there since), so this
+#: (`eb96112ba7d1cc3b4084c985962ea31772177d74`, unchanged there since -- until
+#: `29df99f9e`'s docstring-only `som-preset-v2` citation moved the hash at the
+#: `34c11c9de` bump; `_allowed_os_for_core`'s upstream body did not change, so
+#: everything below still holds), so this
 #: gate stays green -- but this gate only ever hashes the UPSTREAM side
 #: (`upstream = root / rel_path`, never `tan/planner/topology.py`), so it
 #: cannot see that tan's own `topology.py` no longer matches upstream
@@ -1206,24 +1278,24 @@ PINNED_HASHES: dict[str, str] = {
     "__init__.py": "bc8a414122a59e04dcd37087328d692c15b8574bf6d470d6881d8f2866735aff",
     "aperture.py": "717ddd2e178e0b530bee01ac77ccf9ee67ed388c9ec21f4debdc1d3bffe07365",
     "buildplan.py": "f5b5caaf6be840e8889b01fd488f0246a3c733c9aeb4d3171a013035a0c6748a",
-    "carveout.py": "d4ebb956e336a8ad428988d5edb5716dc47f7ae01b3f97b09de806ef0a177126",
+    "carveout.py": "ea0e7e0ca361a84b85111e0a45e822ed99bcbfd85476c0295cea8db00d20cb91",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "3f39c64a552992c29c4839475fa13033894b2ee6c554e5b534c568bd09a57e8d",
+    "kconfig.py": "d3d35a4875c9a30bf5aa732258fcbc0063bbc2f63e952e749e076fa5b9b16913",
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
-    "loader.py": "61908670a38c83daf557eb61b1a47103c1c989bc8ef3345d6ffcdf288d2649aa",
+    "loader.py": "829b41bdf316114098c7001f588d57e650124b09530645cd9d084a59ca890bfd",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
-    "memory.py": "7b3ef1f064d5fa3c3240ca269565a059c2a65bcb889a88aef534bc560954a66b",
+    "memory.py": "2705af8925dff0ace7e82b0948a4dda424c3a6e9d9d8f5f948e4349dc62cdfc1",
     "memregion.py": "45d10e7ac94b0febbcf66df70324eb7b9a6fcc0dd09617d3de5aefc65b7c4879",
     "models.py": "3ba426ab5477bedc446bee7ab63eeb9cf56fc1b677397fdc892ba3826567a45c",
-    "orchestrator.py": "b7a2044fa062335f539d456a1da01f20b11f1b780f41b4bbc346c34ad56d2a6b",
+    "orchestrator.py": "a322bba505b4f3c35b30f4988343dd061460d48e901665e05cdfa60780b1fcaa",
     "partition.py": "9ef943ce8f2c9651067b4e58c2e878e4f87eac2ff495de7342a57cd276b9b711",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
-    "sdk_compat.py": "ef9adb68a4cc9f18fe25bba7c0a4c2e9eabd2955166e2c5a8f6f92db0993e805",
-    "secure.py": "44743b887ab8d29293469f2574b6d88e0d433c9b9ba1f1001709f51104716c0c",
+    "sdk_compat.py": "ba22c0fc1885f510edec051f934e16654ba3d7a627ba741383d8e2c0a3e4c4b8",
+    "secure.py": "c250782df6bca7b8b6b25e82375044eb87302f1b7cf656931658fe8ef3c37212",
     "slugs.py": "7db83e2dd4ea8b47edb81ad657bfc30d62ca283d51e99cd275ce2578de0dd3ed",
-    "topology.py": "fcd81eaaaeeb116151229ca118c2991f0befa13b4e1039d11a0ee65056eb9015",
+    "topology.py": "3cf04e3d3be3c924b25defc1be16a2a5074cd94352dc1b7c0bf7c3709a401e5a",
     "validate.py": "9d66cc7cebfe4bbb355b8d424f784f62ad652a9fa6560280942198c16079a5f2",
 }
 
@@ -1299,7 +1371,11 @@ PINNED_HASHES: dict[str, str] = {
 #:     `_scaffold_readme`'s qualified-then-short board-target rewrite plus the
 #:     `_m33_sm` `west flash --host <board-ip>` rule. Both change
 #:     `--emit scaffold` bytes, which is why `python/tan/templates/vendored/`
-#:     is re-vendored in this same change.
+#:     is re-vendored in this same change. (`_cmake_core_map` is GONE since
+#:     the `34c11c9de` bump: alp-sdk#866 retired the CMakeLists `--core`
+#:     bridge it rewrote, and the port deleted it -- see this table's
+#:     `79c834e65` -> `34c11c9de` paragraph below. The `_scaffold_readme`
+#:     half stands.)
 #:
 #: `ccd34f06` -> `7d58ef32` (tan-cli#493/#591). ONE file in this table moved:
 #: `scripts/gen_zephyr_board.py`, by alp-sdk#1352 -- the upstream fix for both
@@ -2046,7 +2122,52 @@ PINNED_HASHES: dict[str, str] = {
 #:     test_planner_emit_parity.py` was 25 failed before this port (every V2N/
 #:     V2M board tree + the byte-for-byte scaffold check) and 0 failed/865
 #:     passed after, bound to this same `79c834e65` checkout.
-HAND_PORT_PINNED_SDK_COMMIT = "79c834e654f150816d09c7c92832a2104e76e309"  # alp-sdk origin/dev -- alp-sdk#2288/#2312 audit (tan-cli, this change)
+#:
+#: `79c834e65` -> `34c11c9de` (tan-cli#1278, alongside the mirror-table bump
+#: above). Of the thirteen HAND_PORT_HASHES sources, exactly five changed in
+#: range (`git diff --stat` per file, not assumed; `sentinels.py`,
+#: `whole_device_alias.py`, `diagnostic_format.py` and the other four
+#: `alp_project_emit/` files re-hashed byte-identical). No source was added or
+#: retired, so HAND_PORT_SOURCES and `test_hand_port_tan_side.py`'s three
+#: tables are unchanged -- every key above is still in exactly one of them:
+#:
+#:   - `scripts/alp_project_loader.py` (#2024, `29df99f9e`) -- BEHAVIOURAL,
+#:     PORTED into `som_metadata.py::resolve_memory_map`: every DERIVED
+#:     memory row now states `write_authority` (`customer_runtime` for SoC
+#:     `memory_regions` and SRAM/TCM banks, `composite` for the whole-MRAM
+#:     alias), because som-preset v2 makes the field required rather than
+#:     defaulted (ADR-0034 clause 4). Reaches `system-manifest.yaml`'s memory
+#:     pane -- 24 oracle goldens, see PINNED_SDK_COMMIT above.
+#:     `test_derived_memory_write_authority.py`.
+#:   - `scripts/gen_zephyr_board.py` -- three commits, PORTED into
+#:     `zephyr_board.py`: `cc839f464` (#915) BEHAVIOURAL for emitted text --
+#:     `_AEN_OSPI_XIP_GAP`, which `_aen_ospi_device_state` interpolates into
+#:     the generated AEN board tree's OSPI/MRAM comments, now says
+#:     `flash_ospi_alif.c`'s `flash_driver_api` exists but never calls the
+#:     XIP enable, instead of "ships no flash_driver_api" (zephyr-board bytes
+#:     only; the planner oracle captures no `zephyr-board` mode).
+#:     `a2228e2e8` (#1948) and `29df99f9e` (#2024) are DOCSTRING ONLY: V2M101
+#:     now sets `topology.m33_sm.openamp_ipc` too (the flag reader is
+#:     unchanged; the board-tree delta is metadata-driven), and the schema
+#:     citation moves to `som-preset-v2`. `test_zephyr_board_openamp_ipc.py`.
+#:   - `scripts/alp_template.py` (#866, `423e0100d`) -- BEHAVIOURAL, PORTED:
+#:     `_cmake_core_map`/`_substitute_cmake_core` and their call in
+#:     `render_to_envelope` are DELETED (the CMakeLists `--core` literal they
+#:     rewrote no longer exists in any example), from `template.py`/
+#:     `template_rewrite.py`, plus the matching docstring edits in
+#:     `template_pins.py`. `validate()`'s new `gen_example_alp_conf`
+#:     pre-generation is NOT ported: `validate()` is alp-sdk's twister
+#:     self-test and never relocated (same no-op reasoning as `#2197` above).
+#:   - `scripts/alp_project_emit/hw_info.py` (#866) -- COMMENT ONLY, ported
+#:     verbatim (no longer cites the retired zephyr-conf CMakeLists pattern).
+#:   - `scripts/alp_cli/validator.py` -- `169a9be38` (#2328) switches
+#:     `_load_metadata_yaml` to `fast_safe_load` and `35879bf0b` (#2615) adds
+#:     camera-connector checks. NO TAN PORT: the only part of this file tan
+#:     carries is `load_board_schema`/`iter_schema_errors` in `loader.py`
+#:     (HAND_PORT_NO_TAN_FILE_PAIRING), which neither commit touches, and
+#:     `tan validate` spawns the bound SDK's own `scripts/validate_board_yaml.py`
+#:     (`validate_cmd.VALIDATOR_SCRIPT`), so it picks up #2615 from the SDK.
+HAND_PORT_PINNED_SDK_COMMIT = "34c11c9de04e264fdcab2bc0d58b328d9d117ca8"  # alp-sdk origin/dev -- #866/#2024/#915 audit (tan-cli#1278, this change)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -2110,19 +2231,19 @@ HAND_PORT_PINNED_SDK_COMMIT = "79c834e654f150816d09c7c92832a2104e76e309"  # alp-
 #: `sentinels.py` set the precedent for. Neither lives under `tan/planner/`
 #: itself, so neither is in `HAND_PORT_SOURCES` below.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "934984cf53bfad16fd6e3e572010e7d3dbb5b001a869f88a39e0a5ad7812d0f6",
+    "scripts/gen_zephyr_board.py": "c958d0b62f87c390dde1907e055bac0ed66dec1483242b6a314f9d259ed462cf",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/whole_device_alias.py": "a38abb18da876dfcb95edf7332a2a057bcf16da524f2fa9b7b367a00222756f5",
-    "scripts/alp_project_loader.py": "b041cbb7bfb464550157a048419c1bc36e769b266301c5bea638c0bf63db4846",
-    "scripts/alp_template.py": "544d5bf3208724272baa6114d5a67edafb62be78decf1edb4b3a805c5d5da667",
+    "scripts/alp_project_loader.py": "cc8a218d1ae16f5d99ab13bb87d2a377e92be0c4da706d3cec7cbeb863a4f0b0",
+    "scripts/alp_template.py": "5394e12b2cce92fac79507603147ed8c7ce18abc2fc76e0d210bb1bc1ca7a728",
     "scripts/alp_project_emit/__init__.py": "9213c745751e23a36b3f582846a147fb9060386992ff7b8244a0c1d44d5987cf",
     "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
     "scripts/alp_project_emit/dts.py": "cb6d4278e2fc886a23c28f2ef30b4ae9714738071219f7c29cbccbbeb1bc1782",
-    "scripts/alp_project_emit/hw_info.py": "529376975b1f684ea1d88a743add46214b934428f92311612d15812f070a316e",
+    "scripts/alp_project_emit/hw_info.py": "1a9ccd2180f58ee38748ec261da11ea7389ac3f26593c002c73f0fa5cdb53f35",
     "scripts/alp_project_emit/native_sim.py": "24943e7099d745b254b853135ff0b4ae8415be7946d93170d479b637105f18c0",
     "scripts/alp_project_emit/west_libs.py": "bfd9735519d120d2a32bd054a69838c32e339a04cd977521fc5a53c950055392",
     "scripts/alp_cli/diagnostic_format.py": "9fd45d268b12527b8e93720a380dab57d4bd67e00c0066505e7d587eea19eb18",
-    "scripts/alp_cli/validator.py": "5968691c316370a6369ff3096f89e9b77bc2e359ac200184a9accffe9455e3ac",
+    "scripts/alp_cli/validator.py": "cd97160c7cbef25994d9b03a6a0a4f5e5c18f6525c8f5ba3c6366c7a419f3eec",
 }
 
 #: `tan/planner/`-relative path -> the alp-sdk-relative source path it was
@@ -2187,51 +2308,51 @@ def test_hand_port_sources_declares_its_one_strict_loaders_exception():
 #: tan-cli#485: `tan/planner/strict_loaders.py` (the alp-sdk #1127
 #: duplicate-key-rejecting YAML/JSON loaders, wired into `loader.py`'s
 #: `_load_yaml`/`_load_json` to close the silent-sku-retarget hazard) was
-#: hand-ported from `scripts/strict_loaders.py` -- a file that did not exist
-#: at all at HAND_PORT_PINNED_SDK_COMMIT when this split was written (then
-#: `996937ac`, which predates alp-sdk #1127). It gets its OWN pin/root/test
-#: rather than joining HAND_PORT_HASHES/HAND_PORT_PINNED_SDK_COMMIT,
-#: deliberately: auditing the rest of that bundle between 996937ac and the
-#: pin current at the time turned up a REAL, narrower gap this fix does not
-#: close. (`scripts/strict_loaders.py` DOES exist at the current
-#: HAND_PORT_PINNED_SDK_COMMIT, `d00dbdc1` -- blob
-#: `d4b6ce64850acb7893ecb894a96988636cc32324` -- so "does not exist" is no
-#: longer why it stays split; the gap below is.) `scripts/alp_template.py`
-#: gained `_safe_join`/
-#: `PathEscapeError` (alp-sdk #1125/#1126); `tan/planner/template.py` has its
-#: own parallel `tan.core.fs_confine.PathEscapeError`/`resolve_confined`,
-#: wired into every catalog-driven WRITE (`scaffold.py:1049`,
-#: `init_cmd.py:804`, `generate_cmd.py:488`, `pinmux_cmd.py:347`) -- so no
-#: write can escape its destination root. What it is NOT wired into is
-#: `template.py`'s catalog-driven READS: `_rendered_bytes` (`:210` joins
-#: `base_dir / record["example"]`, `:214` joins that onto each `rel` and
-#: calls `.read_bytes()`) and `render_to_envelope` (`:1091`, the same join
-#: onto `board.yaml`). Measured with a traversal `rel` against a shared
-#: catalog fixture: `tan`'s `_rendered_bytes` returns the escaped file's
-#: bytes; alp-sdk's raises `PathEscapeError`. Those bytes reach the caller
-#: through `emit_scaffold`'s `[{path, contents}]` envelope, so a malicious or
-#: compromised `--metadata-root`/catalog entry can read an arbitrary file
-#: readable by the `tan` process and hand it back as scaffold content.
-#: Threat model, scoped honestly: this requires a hostile SDK/catalog
-#: checkout, which is already trusted to run arbitrary CMake/west during a
-#: normal build -- meaningfully narrower than #1126's write-bug severity (a
-#: write escape corrupts files outside any project the caller chose; this
-#: read escape discloses them), but real, and not closed by this change.
-#: Folding strict_loaders.py into HAND_PORT_HASHES would force a choice
-#: between silently re-freezing the whole bundle past this gap unaudited
-#: (the exact "bare bump" tan-cli#485 exists to name) or fixing it as a
-#: drive-by inside an unrelated change -- filed separately instead (see
-#: tan-cli#485's own report). (alp-sdk #1069's disjoint per-core slot0
-#: memory layout, the OTHER large delta in this bundle's window, is NOT a
-#: gap: tan-cli#432 already ported it into `zephyr_board.py` byte-for-byte,
-#: confirmed by re-reading the whole file, not just the diff.) Same
-#: tan-cli#296 rationale that split PINNED_SDK_COMMIT from
-#: HAND_PORT_PINNED_SDK_COMMIT in the first place: two audits that drifted
-#: at different rates need two pins, not one shared one.
-STRICT_LOADERS_PINNED_SDK_COMMIT = "26b0040e9a762c16aff5c7c53b2e19cc7583b2a4"  # alp-sdk origin/dev, introduces #1127
+#: hand-ported from `scripts/strict_loaders.py`. It has its OWN pin/root/test
+#: rather than a HAND_PORT_HASHES row, and that split is HISTORY now, kept
+#: because `parity.yml` clones a third checkout for it and
+#: `test_hand_port_sources_declares_its_one_strict_loaders_exception` pins
+#: the shape -- not because any audit gap still needs it.
+#:
+#: WHY IT WAS SPLIT. When this block was written, auditing the rest of the
+#: hand-port bundle turned up a REAL gap the strict-loaders port did not
+#: close: alp-sdk #1125/#1126 had given `scripts/alp_template.py` a
+#: `_safe_join`/`PathEscapeError` guard on its catalog-driven READS
+#: (`_rendered_bytes`, `render_to_envelope`), and `tan/planner/template.py`
+#: had no equivalent -- a traversal `rel` in a hostile catalog returned the
+#: escaped file's bytes through `emit_scaffold`'s envelope instead of raising.
+#: Folding `strict_loaders.py` into HAND_PORT_HASHES then would have meant
+#: re-freezing that bundle past an unaudited gap, so it got its own pin at
+#: the commit that introduced the file (`26b0040e`, #1127), and the pin was
+#: documented as never moving.
+#:
+#: THAT GAP IS CLOSED, re-verified against the code at the `34c11c9de` bump
+#: rather than taken from a commit message: `707927ff` (tan-cli#582) ported
+#: `_safe_join` + `PathEscapeError` into `tan/planner/template.py`
+#: (resolve-then-contain, so traversal, absolute `rel` and symlink escape all
+#: fail closed) and applied it at all three catalog-driven read joins --
+#: `_rendered_bytes`'s example dir and per-file join, and
+#: `render_to_envelope`'s example dir. MEASURED: `_rendered_bytes` with
+#: `rel = "../../../../secret.txt"` and with an absolute `rel` both raise
+#: `PathEscapeError` ("template source file ... escapes root ...") instead of
+#: returning bytes.
+#:
+#: `26b0040e` -> `34c11c9de` (tan-cli#1278): so the pin moves with the other
+#: two, and it has to -- the file DID change. Exactly one upstream commit
+#: touches `scripts/strict_loaders.py` in that range (`git log 26b0040e..
+#: 34c11c9d -- scripts/strict_loaders.py`), `169a9be38` (#2328):
+#: `_StrictLoader` now subclasses `CSafeLoader` when PyYAML has libyaml
+#: (`_SAFE_LOADER`), the constructor annotation widens to
+#: `yaml.constructor.SafeConstructor`, and a new lenient `fast_safe_load()`
+#: is added for hot readers. Same values, same duplicate-key rejection,
+#: ~10x faster parse. PORTED verbatim, and `tan/planner/sdk_compat.py::
+#: load_family_table` now calls `fast_safe_load` exactly as upstream's does.
+#: `python/tests/planner/test_strict_loaders_libyaml.py` pins both the
+#: libyaml selection and the unchanged duplicate-key rejection.
+STRICT_LOADERS_PINNED_SDK_COMMIT = "34c11c9de04e264fdcab2bc0d58b328d9d117ca8"  # alp-sdk origin/dev -- #2328 audit (tan-cli#1278, this change)
 
 #: sha256 of `scripts/strict_loaders.py` at STRICT_LOADERS_PINNED_SDK_COMMIT.
-STRICT_LOADERS_HASH = "29cd2c62836e70abf2fa3f4e8c0939b406bd8cb6b976d9e97bc75d4180e38eef"
+STRICT_LOADERS_HASH = "6c33ab4c16c0b7321f7dd4cfd6bbec3f8e35312e72cffcd43be6a90f60511fc1"
 
 #: The env var carrying a checkout pinned at STRICT_LOADERS_PINNED_SDK_COMMIT.
 #: Its own name for the same tan-cli#296 reason HAND_PORT_SDK_ROOT_ENV is not

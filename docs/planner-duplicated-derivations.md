@@ -150,10 +150,13 @@ runtime will say so.
 
 Verified against both trees.
 
-**The data side is already in the SDK.** At `94378a05`,
-`metadata/schemas/som-preset-v1.schema.json:89` declares
-`nor_flash_driver_status` and `:94` declares `emmc_driver_status`, and
-four presets carry them:
+**The data side is already in the SDK.**
+`metadata/schemas/som-preset-v2.schema.json:143` declares
+`nor_flash_driver_status` and `:151` declares `emmc_driver_status` (alp-sdk
+`34c11c9de`; alp-sdk#2024 replaced the v1 schema, which declared them at
+`som-preset-v1.schema.json:89`/`:94` when this was first measured at
+`94378a05`). At `94378a05` four presets carried them (six at `34c11c9de`,
+adding `E1M-V2N103`/`E1M-V2M103`):
 
 ```
 metadata/e1m_modules/E1M-V2N101.yaml:36   nor_flash_driver_status: none
@@ -704,8 +707,10 @@ Where the net does not reach, measured rather than assumed:
    the time this document was written, `PINNED_SDK_COMMIT` was `94378a05`
    and `HAND_PORT_PINNED_SDK_COMMIT` was held at `88318e75`; the two later
    moved together for the first time since `1a9f753c`). The third,
-   `STRICT_LOADERS_PINNED_SDK_COMMIT`
-   (`26b0040e9a762c16aff5c7c53b2e19cc7583b2a4`), remains behind. All three
+   `STRICT_LOADERS_PINNED_SDK_COMMIT`, then
+   (`26b0040e9a762c16aff5c7c53b2e19cc7583b2a4`), remained behind; it moved
+   for the first time at tan-cli#1278 (`34c11c9de`, alp-sdk#2328), when all
+   three landed on the same commit. All three
    are deliberately independent tables -- `test_planner_relocation_freshness.py:57-69`
    explains why a shared pin would certify unaudited drift away -- so the
    consequence still holds even while two read the same value: a change

@@ -120,6 +120,8 @@ from pathlib import Path
 import typer
 
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.alp_conf_pregen import pregeneration_message
+from tan.core.system_manifest import load_yaml_document
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
 from tan.core.example_catalog import (
@@ -915,6 +917,20 @@ def _apply_board_yaml_override(
     ]
 
 
+def _copied_board_cores(files: list[PlannedFile]) -> object:
+    """The copied board.yaml's `cores:` mapping, or `None` when there is no
+    board.yaml or it does not parse -- `pregeneration_message` then names a
+    `<core-id>` placeholder instead of guessing."""
+    board = next((f.content for f in files if f.relative_path == "board.yaml"), None)
+    if board is None:
+        return None
+    try:
+        doc = load_yaml_document(board)
+    except Exception:  # noqa: BLE001 -- unparseable degrades to the placeholder
+        return None
+    return doc.get("cores") if isinstance(doc, dict) else None
+
+
 def _plan_from_example(
     src: str, som: str | None, sdk: _Sdk | None
 ) -> tuple[str, list[PlannedFile]]:
@@ -1525,6 +1541,18 @@ def init(
                 f"find a board to build here; pass --board-yaml to add one.",
             )
 
+        # alp-sdk#866: the copied example may read a pre-generated
+        # `generated/alp.conf` its own prose cannot produce outside alp-sdk.
+        # `--from-example` copies verbatim, so say which command does -- see
+        # `tan.core.alp_conf_pregen`.
+        pregen_issue = None
+        if is_example_shaped and resolved_sdk is not None:
+            pregen_text = pregeneration_message(
+                files, _copied_board_cores(files), resolved_sdk.display, subject_label
+            )
+            if pregen_text is not None:
+                pregen_issue = Issue("init.alp-conf-pregeneration", "info", pregen_text)
+
         # tan-cli#743: a scaffolded board.yaml with no explicit `hw_rev:`
         # resolves, at validate/build time, to its SoM preset's own
         # `default_hw_rev:` -- so a SoM whose default revision the SDK
@@ -1627,6 +1655,8 @@ def init(
             outcome.issues.append(foreign_issue)
         if sdk_root_invalid_issue is not None:
             outcome.issues.append(sdk_root_invalid_issue)
+        if pregen_issue is not None:
+            outcome.issues.append(pregen_issue)
     except InitError as err:
         _emit_error(json_mode, err, resolved_sdk)
         return

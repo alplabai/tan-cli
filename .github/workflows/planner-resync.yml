@@ -176,9 +176,9 @@ jobs:
           ref: dev
           fetch-depth: 0
 
-      # fetch-depth 0: the script reads blobs at THREE different pinned
-      # commits, the oldest of which (STRICT_LOADERS_PINNED_SDK_COMMIT,
-      # 26b0040e) is far older than the other two. A shallow clone makes
+      # fetch-depth 0: the script reads blobs at THREE pinned commits, which
+      # need not be the same (each moves only when its own audit does). A
+      # shallow clone makes
       # `git show <pin>:<path>` fail, which the script reports as "the bound
       # checkout cannot be the one this gate was pinned against" -- a correct
       # refusal, but for the wrong reason.

@@ -40,13 +40,15 @@ on-module EEPROM identity manifest lives on. Rebind it in
 
 ```bash
 # Standalone, native_sim (emul I2C; identity/power checks SKIP):
+# writes ./generated/alp.conf, which west reads below (#866)
+tan generate --target zephyr-conf --core m55_hp --sdk-root "$ALP_SDK_ROOT" --output generated/alp.conf
 west build -b native_sim/native/64 . \
-    -- -DEXTRA_ZEPHYR_MODULES=$ALP_SDK_ROOT
+    -- -DEXTRA_CONF_FILE=generated/alp.conf -DEXTRA_ZEPHYR_MODULES=$ALP_SDK_ROOT
 west build -t run
 
 # On real silicon, point -b at the SoM's Zephyr board target.
 # Example for E1M-AEN801:
-west build -b alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp .
+west build -b alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp . -- -DEXTRA_CONF_FILE=generated/alp.conf
 west flash
 ```
 

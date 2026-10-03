@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The ONE place `soc-spec-v1.schema.json` / `som-preset-v1.schema.json`
+"""The ONE place `soc-spec-v1.schema.json` / `som-preset-v2.schema.json`
 validation runs -- tan-cli#964.
 
 Before this module, `_schema_errors` (`tan.commands.new_som_cmd`) ran
@@ -57,9 +57,9 @@ def soc_spec_schema_path(metadata_root: Path | str) -> Path:
 
 
 def som_preset_schema_path(metadata_root: Path | str) -> Path:
-    """`<sdk_root>/metadata/schemas/som-preset-v1.schema.json`. See
+    """`<sdk_root>/metadata/schemas/som-preset-v2.schema.json`. See
     `soc_spec_schema_path` for the `metadata_root` convention."""
-    return Path(metadata_root) / "schemas" / "som-preset-v1.schema.json"
+    return Path(metadata_root) / "schemas" / "som-preset-v2.schema.json"
 
 
 def npu_ops_schema_path(metadata_root: Path | str) -> Path:

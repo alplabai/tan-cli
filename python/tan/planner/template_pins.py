@@ -38,7 +38,7 @@ because this split moved code, not its provenance.
 Imports `TemplateError` / `_require_field` / `_read_yaml_mapping` back FROM
 `.template` rather than the reverse: `template.py` still owns the
 `DocumentGuards(TemplateError)` binding (`_GUARDS` and friends), since
-`_cmake_core_map`/`_rendered_bytes`/`render_to_envelope` stayed there and need
+`_rendered_bytes`/`render_to_envelope` stayed there and need
 it too, and `cli.py`'s `from .template import (TemplateError, emit_scaffold,
 find_template_by_cores, load_catalog)` must keep resolving unchanged. That
 makes the import direction CIRCULAR at the module-object level (`template.py`
@@ -155,7 +155,7 @@ def _derive_core_renames(
     the shallow "byte-copy the example + swap som.sku" `render_to_
     envelope()` #864 shipped hard-coded the CANONICAL example's own
     core id -- e.g. `m55_hp`, an Alif-only Zephyr cluster -- into every
-    substituted board.yaml/CMakeLists.txt, emitting a non-buildable
+    substituted board.yaml, emitting a non-buildable
     scaffold for any cross-SoM-family sku: `alp_project.py --emit
     zephyr-conf --core m55_hp` against an E1M-V2N101 board.yaml fails
     with rc=1, "unknown core id ... did you mean ['a55_cluster',
@@ -177,8 +177,7 @@ def _derive_core_renames(
     replacement is `sku`'s own topology core sharing the same leading
     core-class letter (`m`/`a`), additionally requiring a Zephyr
     `board:` target for an `m`-class replacement (only that core is
-    ever `--core`-buildable, which is why CMakeLists.txt needs it too
-    -- see `_substitute_cmake_core`); an `a`-class utility core carries
+    ever `--core`-buildable); an `a`-class utility core carries
     no such requirement (it's only ever `os: off` in every template
     that declares one today).
 

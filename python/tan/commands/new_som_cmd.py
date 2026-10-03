@@ -122,8 +122,8 @@ _SKU_RE = re.compile(r"^E1M-[A-Z0-9-]+$")
 _SOC_REF_RE = re.compile(r"^[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+$")
 _FAMILY_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _CORE_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$")
-#: `som-preset-v1.schema.json`'s own `default_hw_rev` pattern, verbatim
-#: (`metadata/schemas/som-preset-v1.schema.json` `properties.default_hw_rev
+#: `som-preset-v2.schema.json`'s own `default_hw_rev` pattern, verbatim
+#: (`metadata/schemas/som-preset-v2.schema.json` `properties.default_hw_rev
 #: .pattern`). tan-cli#496 defect 5: this used to be checked ONLY by the
 #: post-render schema self-check, which -- for a brand-new family, where the
 #: `_family_hw_revisions` cross-check below is skipped -- reported a bad
@@ -336,7 +336,7 @@ def _yaml_scalar(value: str) -> str:
 
 
 def _som_schema_path(sdk_root: Path) -> Path:
-    return sdk_root / "metadata" / "schemas" / "som-preset-v1.schema.json"
+    return sdk_root / "metadata" / "schemas" / "som-preset-v2.schema.json"
 
 
 def _soc_schema_path(sdk_root: Path) -> Path:
@@ -673,11 +673,11 @@ def _render_preset(
     a("# primary source named next to each field -- NEVER guess (see")
     a("# docs/porting-new-som.md).")
     a("")
-    a("schema_version: 1")
+    a("schema_version: 2")
     a("")
     a("# SKU is assigned by Alp Lab product planning.  A brand-new family")
     a("# also needs one alternation added to the `sku:` pattern in")
-    a("# metadata/schemas/som-preset-v1.schema.json (porting guide step 3).")
+    a("# metadata/schemas/som-preset-v2.schema.json (porting guide step 3).")
     a(f"sku: {sku}")
     a("")
     a("# Human-readable family slug (NOT the directory name; the SKU-prefix")
@@ -698,7 +698,7 @@ def _render_preset(
     a("# Populated on-module chips -- the module BOM / schematic is")
     a("# authoritative.  Chip values are slugs matching a")
     a("# metadata/chips/<chip>.yaml manifest.  The legal role keys are the")
-    a("# CLOSED set in som-preset-v1.schema.json `on_module:` (pmic_main,")
+    a("# CLOSED set in som-preset-v2.schema.json `on_module:` (pmic_main,")
     a("# pmic_secondary, clock_generator, rtc_external, temperature_sensor,")
     a("# eeprom, secure_element, wifi_ble, supervisor_mcu, ethernet_phy,")
     a("# nor_flash, emmc, npu, pcie_mux, ospi_memories, hyperram,")
@@ -737,7 +737,7 @@ def _render_preset(
         # Primary variant only.  Which Ethos-U instances the part carries is
         # silicon-determined -- the SDK derives it from the SoC JSON npus[] /
         # capabilities.ethos_uNN_count -- so the preset does NOT enumerate them
-        # (the deprecated `npu_population` field is intentionally not scaffolded).
+        # (the removed `npu_population` field is never scaffolded).
         a(f"  ethos_u_variant:      {ethos_u_variant}")
     a("")
     a("# capabilities: -- OPTIONAL, omitted in the skeleton.  Declare ONLY")
@@ -758,7 +758,17 @@ def _render_preset(
     a("# Memory layout (SRAM banks + on-die flash) is derived from the SoC")
     a("# variant resolved via `silicon_variant:` -- see the SoC JSON")
     a("# `variants[].sram_banks_kb`.  Declare a memory_map: block here ONLY")
-    a("# for non-stock partitioning.")
+    a("# for non-stock partitioning.  Every row you author MUST carry")
+    a("# `write_authority:` (REQUIRED since som-preset v2; the schema")
+    a("# rejects a row without it).  It records WHO may write the region,")
+    a("# and when: customer_image (written only by the flash tool),")
+    a("# vendor_image (factory-provisioned), customer_runtime (writable by")
+    a("# the application; the ONLY value an IPC carve-out or runtime mount")
+    a("# may land on), secure_enclave (written by the Secure Enclave at")
+    a("# provisioning), none (an explicit no-writer, not a \"not sure yet\"")
+    a("# catch-all), composite (a whole-device alias spanning rows of")
+    a("# different authority).  Absent means unresolved, never")
+    a("# customer_runtime.  See docs/porting-new-som.md.")
     a("")
     a("# Vendor mailbox / IPC controller -- the vendor reference manual /")
     a("# hand-written HW config is authoritative.  The channel reservations")
@@ -1318,7 +1328,7 @@ def new_som(
     try:
         sku_needs_pattern = re.match(_current_sku_pattern(som_schema_path), sku) is None
     except (OSError, UnicodeDecodeError) as exc:
-        # tan-cli#415: `som-preset-v1.schema.json` is SDK-supplied rather than
+        # tan-cli#415: `som-preset-v2.schema.json` is SDK-supplied rather than
         # user-supplied, but an unreadable or non-UTF-8 copy must still reach a
         # coded envelope -- never a bare traceback with zero bytes on stdout.
         # `UnicodeDecodeError` is a `ValueError`, not an `OSError`, so it has to
@@ -1350,9 +1360,9 @@ def new_som(
         if sku_needs_pattern:
             errors = [e for e in errors if not e.startswith("sku:")]
         if errors:
-            _internal_error("preset", "som-preset-v1", errors, json_mode)
+            _internal_error("preset", "som-preset-v2", errors, json_mode)
         say(
-            "Preset skeleton validates against som-preset-v1"
+            "Preset skeleton validates against som-preset-v2"
             + (" (except the sku pattern -- see step below)" if sku_needs_pattern else "")
         )
     if soc_doc is not None:
@@ -1454,7 +1464,7 @@ def new_som(
     if sku_needs_pattern:
         steps.append(
             f"Extend the `sku:` pattern in "
-            f"metadata/schemas/som-preset-v1.schema.json to accept {sku} "
+            f"metadata/schemas/som-preset-v2.schema.json to accept {sku} "
             f"(docs/porting-new-som.md, schema-pattern step)."
         )
     steps.append(

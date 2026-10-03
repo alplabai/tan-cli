@@ -855,7 +855,7 @@ def _resolve_board_impl(
     som_preset = _load_yaml(sku_preset_path)
     _refuse_on_schema_errors(
         som_preset, som_preset_schema_path(metadata_root), sku_preset_path,
-        "som-preset-v1", f"SoM preset {sku}", skip_advisories=skip_advisories)
+        "som-preset-v2", f"SoM preset {sku}", skip_advisories=skip_advisories)
 
     # Resolve SoC spec via the preset's `silicon:` ref.
     silicon = som_preset.get("silicon")
@@ -1275,6 +1275,25 @@ def _validate_cross_fields(
 
         att_root = psa.get("attestation_root")
         if att_root == "optiga_trust_m":
+            if _is_i2c_chip_unassembled(som_preset, "optiga_trust_m"):
+                # alp-sdk#2316 (tan-cli#1295), same class as alp-sdk#2311's
+                # OSPI guard: E1M-AEN801/803 carry
+                # `capabilities.optiga_trust_m: true` and name the part
+                # under `on_module:`, but the part itself is DNP
+                # (`assembled: false` on its i2c_devices entry).  The
+                # population fact wins -- an attestation root on a part
+                # this SKU does not carry would build and then fail on
+                # silicon.
+                where = f"SoM {sku}" if sku else "this SoM"
+                yaml_ref = (f"metadata/e1m_modules/{sku}.yaml" if sku
+                            else "its SoM preset YAML")
+                raise OrchestratorError(
+                    f"board.yaml `security.psa.attestation_root: "
+                    f"optiga_trust_m` names on-module part "
+                    f"'optiga_trust_m', which is not assembled on "
+                    f"{where} (assembled: false in {yaml_ref}); pick "
+                    f"`tfm_internal` or `none`, or switch to a SKU that "
+                    f"carries OPTIGA Trust M")
             on_module = som_preset.get("on_module") or {}
             chip_set: set[str] = set()
             for key, val in on_module.items():
@@ -1298,6 +1317,22 @@ def _validate_cross_fields(
                     f"(AEN family).")
 
     return security_block
+
+
+def _is_i2c_chip_unassembled(som_preset: dict, chip: str) -> bool:
+    """True when the preset declares @p chip under `on_module.i2c_devices`
+    and every such entry is `assembled: false` (alp-sdk#2316).
+
+    A chip the preset never lists there is not "unassembled" -- the other
+    presence checks (on_module:/capabilities:) decide that case -- so this
+    only refuses what the preset explicitly marks DNP.
+    """
+    buses = ((som_preset.get("on_module") or {}).get("i2c_devices")) or {}
+    entries = [dev for bus in buses.values() if isinstance(bus, dict)
+               for dev in (bus.get("devices") or [])
+               if isinstance(dev, dict) and dev.get("chip") == chip]
+    return bool(entries) and all(dev.get("assembled") is False
+                                 for dev in entries)
 
 
 def _library_alias_table(metadata_root: Path) -> dict[str, str]:
@@ -1367,6 +1402,7 @@ def _normalize_libraries(project: dict[str, Any],
 
 def load_board_yaml(path: Path, *,
                     metadata_root: Path = METADATA_ROOT,
+                    sku: Optional[str] = None,
                     skip_advisories: list[str] | None = None) -> BoardProject:
     """Load + validate a board.yaml.
 
@@ -1391,6 +1427,15 @@ def load_board_yaml(path: Path, *,
     for the two commands that do.
     """
     project = _load_and_validate_yaml(path, metadata_root)
+    if sku:
+        # Per-target SKU (alp-sdk#2597): the SoM facts follow the board
+        # being built, not the single static `som.sku` an example declares.
+        # Safe after schema validation: the override only changes the SKU
+        # string, and every SKU-derived value (_resolve_board's preset + SoC
+        # variant lookup, hw_rev checks, topology, storage) is computed
+        # below from it.  Callers pass a SKU taken from
+        # metadata/e1m_modules/.
+        project["som"]["sku"] = sku
 
     # Fold the unified top-level `libraries:` list into the per-core /
     # project-wide channels the downstream resolution expects, so topology +

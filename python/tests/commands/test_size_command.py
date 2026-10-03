@@ -71,11 +71,11 @@ def fake_sdk(root: Path, sku: str, soc: str) -> None:
     write(root / "scripts" / "alp_project.py", "")
     write(
         root / "metadata" / "e1m_modules" / f"{sku}.yaml",
-        f"schema_version: 1\nsku: {sku}\nsilicon: test:fam:part\n",
+        f"schema_version: 2\nsku: {sku}\nsilicon: test:fam:part\n",
     )
     write(root / "metadata" / "socs" / "test" / "fam" / "part.json", soc)
     write(
-        root / "metadata" / "schemas" / "som-preset-v1.schema.json",
+        root / "metadata" / "schemas" / "som-preset-v2.schema.json",
         _PERMISSIVE_SOM_PRESET_SCHEMA,
     )
     write(
@@ -197,7 +197,7 @@ def test_a_schema_valid_soc_json_carries_no_metadata_schema_issue(tmp_path):
     assert "metadata-schema-invalid" not in text_result.stderr
 
 
-#: `som-preset-v1.schema.json`, narrowed to `silicon:` -- the field
+#: `som-preset-v2.schema.json`, narrowed to `silicon:` -- the field
 #: `_resolve_slice_budget`/`read_sdk_som_and_soc` immediately splits on
 #: (`silicon.split(":")`), same narrowing rationale as `_SOC_SPEC_SCHEMA`.
 _SOM_PRESET_SCHEMA = json.dumps({
@@ -205,7 +205,7 @@ _SOM_PRESET_SCHEMA = json.dumps({
     "type": "object",
     "required": ["schema_version", "sku", "silicon"],
     "properties": {
-        "schema_version": {"const": 1},
+        "schema_version": {"const": 2},
         "sku": {"type": "string"},
         "silicon": {"type": "string"},
     },
@@ -217,7 +217,7 @@ def test_a_schema_invalid_som_preset_warns_but_still_measures(tmp_path):
     OTHER document `_resolve_slice_budget` reads, alongside the SoC JSON
     `test_a_schema_invalid_soc_json_warns_but_still_measures` above already
     covers) had no CLI-level test. A schema-invalid `silicon:` (a number,
-    which `som-preset-v1.schema.json` forbids) does not change the measured
+    which `som-preset-v2.schema.json` forbids) does not change the measured
     row -- `read_sdk_som_and_soc` degrades to `budget: unknown` exactly as it
     already did -- but the envelope now names the file and what was found.
 
@@ -227,12 +227,12 @@ def test_a_schema_invalid_som_preset_warns_but_still_measures(tmp_path):
     """
     footprint_project(tmp_path, "E1M-TEST", 4096, 2048, SOC_5M5)
     write(
-        tmp_path / "sdk" / "metadata" / "schemas" / "som-preset-v1.schema.json",
+        tmp_path / "sdk" / "metadata" / "schemas" / "som-preset-v2.schema.json",
         _SOM_PRESET_SCHEMA,
     )
     write(
         tmp_path / "sdk" / "metadata" / "e1m_modules" / "E1M-TEST.yaml",
-        "schema_version: 1\nsku: E1M-TEST\nsilicon: 7\n",
+        "schema_version: 2\nsku: E1M-TEST\nsilicon: 7\n",
     )
 
     result = run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
@@ -957,3 +957,41 @@ def test_a_crash_before_the_ladder_runs_reports_no_resolution_facts(
     doc = json.loads(result.stdout)
     assert [i["code"] for i in doc["issues"]] == ["size.internal-failure"]
     assert "sdk" not in doc
+
+
+# ------------------------------------------- tan-cli#1278: pre-v2 SoM preset
+
+
+def test_a_pre_v2_som_preset_keeps_the_row_but_says_why_the_budget_is_unknown(tmp_path):
+    """Against an SDK that predates som-preset v2 (alp-sdk#2024) the preset is
+    refused and the row says `unreadable SoM preset` -- the oracle's words,
+    unchanged -- while `issues[]` now names the real cause instead of
+    nothing."""
+    footprint_project(tmp_path, "E1M-TEST", 4096, 2048, SOC_5M5)
+    write(
+        tmp_path / "sdk" / "metadata" / "e1m_modules" / "E1M-TEST.yaml",
+        "schema_version: 1\nsku: E1M-TEST\nsilicon: test:fam:part\n",
+    )
+
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", "sdk")
+
+    assert result.returncode == 0
+    doc = envelope(result)
+    row = doc["data"]["slices"][0]
+    assert row["budget_note"] == "unreadable SoM preset for E1M-TEST"
+    # Forward slashes on every host, like `presets.som-schema-version-skipped`.
+    preset = "sdk/metadata/e1m_modules/E1M-TEST.yaml"
+    assert doc["issues"] == [
+        {
+            "code": "size.som-schema-version-skipped",
+            "severity": "warning",
+            "message": (
+                f"the SoM preset for E1M-TEST ({preset}) was not read, so its "
+                "FLASH/RAM budget is unknown: schema_version 1 (this tan reads "
+                "som-preset schema_version 2) -- the bound alp-sdk predates "
+                "som-preset v2 (alp-sdk#2024); point --sdk-root at an alp-sdk "
+                "whose metadata/schemas/ ships som-preset-v2.schema.json, or use "
+                "a tan release that matches this SDK."
+            ),
+        }
+    ]

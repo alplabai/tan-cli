@@ -158,7 +158,7 @@ def test_hw_info_and_boot_order_are_carried_verbatim():
 
 # ------------------------------------------------ helper_firmware_candidates
 # alp-sdk#330: a helper's `firmware_path` is SDK-repository-relative
-# (`som-preset-v1.schema.json`), not build-tree-relative, so `build_root` alone
+# (`som-preset-v2.schema.json`), not build-tree-relative, so `build_root` alone
 # rejected a genuinely SDK-shipped firmware.
 
 

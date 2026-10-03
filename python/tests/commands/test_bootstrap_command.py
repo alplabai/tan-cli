@@ -2536,7 +2536,7 @@ def test_a_broken_som_preset_never_fails_the_run(layout, tmp_path):
     elif layout == "garbage":
         preset.write_text("::: not yaml [\n", encoding="utf-8")
     else:
-        preset.write_bytes(b"schema_version: 1\nsku: \xff\n")
+        preset.write_bytes(b"schema_version: 2\nsku: \xff\n")
     project = sdk / "examples" / "p"
     project.mkdir(parents=True)
     (project / "board.yaml").write_text(
@@ -2549,7 +2549,7 @@ def test_a_broken_som_preset_never_fails_the_run(layout, tmp_path):
     assert envelope(proc)["exitCode"] == 0
 
 
-#: Deliberately narrower than the real `som-preset-v1.schema.json` -- the same
+#: Deliberately narrower than the real `som-preset-v2.schema.json` -- the same
 #: narrowing rationale as `test_presets_command.py`'s own `_SOM_SCHEMA` and
 #: `test_metadata_schema_refuses_on_read.py`'s: enough to exercise the gate
 #: (`silicon:` typed), not a byte-for-byte mirror of a schema this file's
@@ -2559,7 +2559,7 @@ _BOOTSTRAP_SOM_SCHEMA = json.dumps({
     "type": "object",
     "required": ["schema_version", "sku", "silicon"],
     "properties": {
-        "schema_version": {"const": 1},
+        "schema_version": {"const": 2},
         "sku": {"type": "string"},
         "silicon": {"type": "string"},
     },
@@ -2583,14 +2583,14 @@ def test_a_schema_invalid_som_preset_refuses_bootstrap(tmp_path):
     sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
     schemas = sdk / "metadata" / "schemas"
     schemas.mkdir(parents=True, exist_ok=True)
-    (schemas / "som-preset-v1.schema.json").write_text(
+    (schemas / "som-preset-v2.schema.json").write_text(
         _BOOTSTRAP_SOM_SCHEMA, encoding="utf-8"
     )
     modules = sdk / "metadata" / "e1m_modules"
     modules.mkdir(parents=True, exist_ok=True)
     preset = modules / "E1M-X1.yaml"
     preset.write_text(
-        "schema_version: 1\nsku: E1M-X1\nsilicon: 7\ntopology:\n  a55_cluster: {}\n",
+        "schema_version: 2\nsku: E1M-X1\nsilicon: 7\ntopology:\n  a55_cluster: {}\n",
         encoding="utf-8",
     )
     project = sdk / "examples" / "p"
@@ -2607,7 +2607,7 @@ def test_a_schema_invalid_som_preset_refuses_bootstrap(tmp_path):
     assert env["exitCode"] == 2
     assert codes(env) == ["bootstrap.metadata-schema-invalid"]
     message = env["issues"][0]["message"]
-    assert "does not validate against som-preset-v1" in message
+    assert "does not validate against som-preset-v2" in message
     assert "silicon: 7 is not of type 'string'" in message
 
 
@@ -2617,14 +2617,14 @@ def test_a_schema_valid_som_preset_does_not_refuse_bootstrap(tmp_path):
     sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
     schemas = sdk / "metadata" / "schemas"
     schemas.mkdir(parents=True, exist_ok=True)
-    (schemas / "som-preset-v1.schema.json").write_text(
+    (schemas / "som-preset-v2.schema.json").write_text(
         _BOOTSTRAP_SOM_SCHEMA, encoding="utf-8"
     )
     modules = sdk / "metadata" / "e1m_modules"
     modules.mkdir(parents=True, exist_ok=True)
     preset = modules / "E1M-X1.yaml"
     preset.write_text(
-        "schema_version: 1\nsku: E1M-X1\nsilicon: vendor:family:part\n"
+        "schema_version: 2\nsku: E1M-X1\nsilicon: vendor:family:part\n"
         "topology:\n  a55_cluster: {}\n",
         encoding="utf-8",
     )

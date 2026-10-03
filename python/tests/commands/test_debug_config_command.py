@@ -1009,7 +1009,7 @@ def write_sdk_fixture(root):
     som_dir = sdk / "metadata" / "e1m_modules"
     som_dir.mkdir(parents=True)
     (som_dir / "E1M-AEN801.yaml").write_text(
-        "schema_version: 1\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n"
+        "schema_version: 2\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n"
         "silicon_variant: AE822FA0E5597LS0\n",
         encoding="utf-8",
     )
@@ -1037,7 +1037,7 @@ def write_sdk_fixture(root):
     )
 
 
-#: Deliberately narrower than the real `som-preset-v1.schema.json` -- the same
+#: Deliberately narrower than the real `som-preset-v2.schema.json` -- the same
 #: narrowing rationale `test_presets_command.py`'s own `_SOM_SCHEMA` states:
 #: enough to exercise the gate (`silicon:` typed), not a byte-for-byte mirror
 #: of a schema this file's coverage must not depend on never changing shape.
@@ -1046,7 +1046,7 @@ _DEBUG_CONFIG_SOM_SCHEMA = json.dumps({
     "type": "object",
     "required": ["schema_version", "sku", "silicon"],
     "properties": {
-        "schema_version": {"const": 1},
+        "schema_version": {"const": 2},
         "sku": {"type": "string"},
         "silicon": {"type": "string"},
     },
@@ -1054,7 +1054,7 @@ _DEBUG_CONFIG_SOM_SCHEMA = json.dumps({
 
 
 def write_sdk_fixture_with_schema_invalid_som_preset(root):
-    """Same shape as `write_sdk_fixture`, plus `metadata/schemas/som-preset-v1
+    """Same shape as `write_sdk_fixture`, plus `metadata/schemas/som-preset-v2
     .schema.json` and a `silicon:` field the schema forbids (a number, not a
     string) -- tan-cli#964 review (major 5): `debug-config` reads this exact
     SoM preset through TWO walks (`_sdk_published_cores`,
@@ -1066,13 +1066,13 @@ def write_sdk_fixture_with_schema_invalid_som_preset(root):
     (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
     schema_dir = sdk / "metadata" / "schemas"
     schema_dir.mkdir(parents=True)
-    (schema_dir / "som-preset-v1.schema.json").write_text(
+    (schema_dir / "som-preset-v2.schema.json").write_text(
         _DEBUG_CONFIG_SOM_SCHEMA, encoding="utf-8"
     )
     som_dir = sdk / "metadata" / "e1m_modules"
     som_dir.mkdir(parents=True)
     (som_dir / "E1M-AEN801.yaml").write_text(
-        "schema_version: 1\nsku: E1M-AEN801\nsilicon: 7\n"
+        "schema_version: 2\nsku: E1M-AEN801\nsilicon: 7\n"
         "silicon_variant: AE822FA0E5597LS0\n",
         encoding="utf-8",
     )
@@ -1225,7 +1225,7 @@ def write_sdk_fixture_with_no_jlink_device(root):
     som_dir = sdk / "metadata" / "e1m_modules"
     som_dir.mkdir(parents=True)
     (som_dir / "E1M-AEN801.yaml").write_text(
-        "schema_version: 1\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n"
+        "schema_version: 2\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n"
         "silicon_variant: AE822FA0E5597LS0\n",
         encoding="utf-8",
     )

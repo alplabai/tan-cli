@@ -38,7 +38,7 @@ _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "models" / "tiny_i
 
 def _write_som_preset(meta: Path, sku: str, silicon: str, *,
                       ethos_u_variant: str | None = None) -> None:
-    """A `schema_version: 1` SoM preset -- required by
+    """A `schema_version: 2` SoM preset -- required by
     `tan.commands.build_output.read_sdk_som_and_soc` (via `_read_som_preset`),
     which `resolve_sram0_kib` reuses. Deliberately NOT `test_check.py`'s own
     `_write_som` helper: that one never writes `schema_version`, which is
@@ -53,7 +53,7 @@ def _write_som_preset(meta: Path, sku: str, silicon: str, *,
     calling `VelaAdapter.compile`)."""
     d = meta / "e1m_modules"
     d.mkdir(parents=True, exist_ok=True)
-    body = f"schema_version: 1\nsilicon: {silicon}\n"
+    body = f"schema_version: 2\nsilicon: {silicon}\n"
     if ethos_u_variant:
         body += f"inference:\n  ethos_u_variant: {ethos_u_variant}\n"
     (d / f"{sku}.yaml").write_text(body, encoding="utf-8")
@@ -434,7 +434,7 @@ def test_resolve_sram0_kib_reads_the_resolved_variant(tmp_path):
 
 
 def test_resolve_sram0_kib_skips_on_an_unreadable_som_preset(tmp_path):
-    # No `schema_version: 1` at all -- exactly what `test_check.py`'s own
+    # No `schema_version: 2` at all -- exactly what `test_check.py`'s own
     # `_write_som` writes, and exactly what `read_sdk_som_and_soc` refuses.
     d = tmp_path / "e1m_modules"
     d.mkdir(parents=True)

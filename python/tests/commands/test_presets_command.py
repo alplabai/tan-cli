@@ -59,7 +59,7 @@ SDK = sdk_root()
 #: core-id heuristic has to decide.
 HETEROGENEOUS = """\
 # A comment before anything.
-schema_version: 1
+schema_version: 2
 
 sku: E1M-V2N101
 family: renesas-rzv2n
@@ -88,7 +88,7 @@ def write(path, text):
 
 
 def som_yaml(sku, *, topology="  m33: {}\n", extra=""):
-    return f"schema_version: 1\nsku: {sku}\n{extra}topology:\n{topology}"
+    return f"schema_version: 2\nsku: {sku}\n{extra}topology:\n{topology}"
 
 
 # --------------------------------------------------------------------------
@@ -139,7 +139,7 @@ def test_the_no_pyyaml_reader_agrees_with_pyyaml_on_the_real_shape():
     heterogeneous SoM scaffolds single-core with no IPC for every customer who
     installed the release artifact rather than the wheel."""
     scanned = scan_som_preset(HETEROGENEOUS)
-    assert scanned["schema_version"] == 1
+    assert scanned["schema_version"] == 2
     assert scanned["sku"] == "E1M-V2N101"
     assert scanned["display_name"] == "E1M-V2N101 (Renesas RZ/V2N)"
     assert scanned["family"] == "renesas-rzv2n"
@@ -153,7 +153,7 @@ def test_the_no_pyyaml_reader_agrees_with_pyyaml_on_the_real_shape():
 def test_the_no_pyyaml_reader_handles_the_flow_topology_form():
     # The form the oracle's own parse tests use.
     scanned = scan_som_preset(
-        "schema_version: 1\nsku: E1M-X\ntopology:\n"
+        "schema_version: 2\nsku: E1M-X\ntopology:\n"
         "  a55: { app: ./src, machine: m }\n"
         "  m33: { board: b }\n"
         "  m55: { app: ./src }\n"
@@ -172,12 +172,12 @@ def test_the_no_pyyaml_reader_handles_the_flow_topology_form():
     "text",
     [
         "sku: E1M-X\n",  # no schema_version at all
-        "schema_version: 2\nsku: E1M-X\n",  # a version this CLI does not consume
-        'schema_version: "1"\nsku: E1M-X\n',  # a string is not an integer
+        "schema_version: 1\nsku: E1M-X\n",  # a version this CLI does not consume
+        'schema_version: "2"\nsku: E1M-X\n',  # a string is not an integer
         "schema_version: true\nsku: E1M-X\n",  # nor is a bool, despite True == 1
         "- not a mapping\n",
         "just a scalar\n",
-        "schema_version: 1\n  bad: [indent\n",  # not YAML at all
+        "schema_version: 2\n  bad: [indent\n",  # not YAML at all
     ],
 )
 def test_a_preset_this_cli_cannot_consume_raises_for_the_caller_to_skip(text):
@@ -235,7 +235,7 @@ def test_parse_som_preset_enriches_cores_via_the_injected_lookups():
     GREEN -- verified by hand while writing this test.
     """
     text = (
-        "schema_version: 1\nsku: E1M-X\nsilicon: vendor:family:part\n"
+        "schema_version: 2\nsku: E1M-X\nsilicon: vendor:family:part\n"
         "topology:\n  a32: { machine: m }\n  m55: { board: b }\n"
     )
     seen_silicon = []
@@ -273,7 +273,7 @@ def test_parse_som_preset_defaults_when_no_lookups_are_given():
 def test_parse_som_preset_defaults_type_when_the_core_id_is_unknown_to_the_lookup():
     # A core the SoC JSON does not name (a typo, a topology-only accessory
     # core) gets `type=""`, not a KeyError -- `.get(c.id, "")`, not `[c.id]`.
-    text = "schema_version: 1\nsku: E1M-X\nsilicon: v:f:p\ntopology:\n  m33: {}\n"
+    text = "schema_version: 2\nsku: E1M-X\nsilicon: v:f:p\ntopology:\n  m33: {}\n"
     som = parse_som_preset(
         text, core_type_lookup=lambda silicon: {}, allowed_os_lookup=lambda t: ["off"]
     )
@@ -295,7 +295,7 @@ def test_read_soms_supports_both_layouts_skips_the_rest_and_sorts(tmp_path):
     write(modules / "OTHER.yaml", som_yaml("OTHER"))
     (modules / "E1M-EMPTY").mkdir()
     write(modules / "E1M-NOTES.txt", "not yaml")
-    write(modules / "E1M-V2.yaml", "schema_version: 2\nsku: E1M-V2\n")
+    write(modules / "E1M-V2.yaml", "schema_version: 1\nsku: E1M-V2\n")
 
     assert [s.sku for s in read_soms(str(tmp_path))] == ["E1M-AEN801", "E1M-V2N101"]
 
@@ -303,7 +303,7 @@ def test_read_soms_supports_both_layouts_skips_the_rest_and_sorts(tmp_path):
 def test_read_soms_skips_a_preset_that_is_not_utf8(tmp_path):
     modules = tmp_path / "metadata" / "e1m_modules"
     write(modules / "E1M-GOOD.yaml", som_yaml("E1M-GOOD"))
-    (modules / "E1M-BAD.yaml").write_bytes(b"schema_version: 1\nsku: \xff\xfe\n")
+    (modules / "E1M-BAD.yaml").write_bytes(b"schema_version: 2\nsku: \xff\xfe\n")
     # An undecodable byte is a skipped entry, never a traceback.
     assert [s.sku for s in read_soms(str(tmp_path))] == ["E1M-GOOD"]
 
@@ -789,7 +789,7 @@ def test_json_reports_the_som_and_stdout_carries_nothing_else(tmp_path, monkeypa
     assert doc["ok"] is True
     assert doc["sdk"] == {"root": "./sdk", "sourceTier": "sdkRootFlag"}
     # tan-cli#964 review (major 6): this fixture carries no
-    # `metadata/schemas/som-preset-v1.schema.json` at all -- "skip-but-
+    # `metadata/schemas/som-preset-v2.schema.json` at all -- "skip-but-
     # disclose", not the silent skip a missing schema used to be.
     assert doc["issues"] == [
         {
@@ -798,7 +798,7 @@ def test_json_reports_the_som_and_stdout_carries_nothing_else(tmp_path, monkeypa
             "message": (
                 "sdk/metadata/e1m_modules/E1M-V2N101/som.yaml: not "
                 "validated -- no schema at "
-                "sdk/metadata/schemas/som-preset-v1.schema.json in this "
+                "sdk/metadata/schemas/som-preset-v2.schema.json in this "
                 "checkout"
             ),
         }
@@ -858,7 +858,7 @@ def test_a_nonstring_core_type_in_a_schema_invalid_soc_json_never_fails_the_comm
     )
     write(
         sdk / "metadata" / "e1m_modules" / "E1M-TEST" / "som.yaml",
-        "schema_version: 1\n"
+        "schema_version: 2\n"
         "sku: E1M-TEST\n"
         "family: test\n"
         "silicon: vendor:family:part\n"
@@ -873,7 +873,7 @@ def test_a_nonstring_core_type_in_a_schema_invalid_soc_json_never_fails_the_comm
     doc = json.loads(result.stdout)
     assert doc["ok"] is True
     # tan-cli#964 review (major 6): this fixture carries neither
-    # `som-preset-v1.schema.json` nor `soc-spec-v1.schema.json` -- both
+    # `som-preset-v2.schema.json` nor `soc-spec-v1.schema.json` -- both
     # reads disclose the skip rather than staying silent.
     assert doc["issues"] == [
         {
@@ -881,7 +881,7 @@ def test_a_nonstring_core_type_in_a_schema_invalid_soc_json_never_fails_the_comm
             "severity": "info",
             "message": (
                 "sdk/metadata/e1m_modules/E1M-TEST/som.yaml: not validated "
-                "-- no schema at sdk/metadata/schemas/som-preset-v1.schema.json "
+                "-- no schema at sdk/metadata/schemas/som-preset-v2.schema.json "
                 "in this checkout"
             ),
         },
@@ -932,7 +932,7 @@ def _write_soc_lookup_fixture(sdk, *, core_a55_type):
     established #957 regression test already proves resolves end to end.
     Returns the SoC JSON's path, for asserting it by name in a message.
 
-    Also writes a fully-permissive `som-preset-v1.schema.json` (tan-cli#964
+    Also writes a fully-permissive `som-preset-v2.schema.json` (tan-cli#964
     review, major 6): without it, every test using this fixture would ALSO
     carry a `presets.metadata-schema-unchecked` info issue for the SoM
     preset's own missing schema -- real, correct behaviour, but not what
@@ -947,7 +947,7 @@ def _write_soc_lookup_fixture(sdk, *, core_a55_type):
     )
     write(sdk / "metadata" / "schemas" / "soc-spec-v1.schema.json", _SOC_SCHEMA)
     write(
-        sdk / "metadata" / "schemas" / "som-preset-v1.schema.json",
+        sdk / "metadata" / "schemas" / "som-preset-v2.schema.json",
         json.dumps({"$schema": "https://json-schema.org/draft/2020-12/schema",
                     "type": "object"}),
     )
@@ -958,7 +958,7 @@ def _write_soc_lookup_fixture(sdk, *, core_a55_type):
     ]}))
     write(
         sdk / "metadata" / "e1m_modules" / "E1M-TEST" / "som.yaml",
-        "schema_version: 1\n"
+        "schema_version: 2\n"
         "sku: E1M-TEST\n"
         "family: test\n"
         "silicon: vendor:family:part\n"
@@ -1251,3 +1251,88 @@ def test_presets_text_verbose_adds_family_and_cores():
     assert any("alif-ensemble" in line for line in lines)
     assert any("m55_hp" in line and "zephyr" in line for line in lines)
 
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#1278: a pre-v2 SDK skips every preset -- say so, once
+# ---------------------------------------------------------------------------
+
+
+def _pre_v2_sdk(tmp_path, skus=("E1M-A", "E1M-B", "E1M-C")):
+    """A checkout shaped like released alp-sdk `v0.16.0`: every SoM preset is
+    `schema_version: 1`, the shape tan-cli#1297 stopped reading."""
+    sdk = tmp_path / "sdk"
+    write(sdk / "scripts" / "alp_project.py", "x")
+    for sku in skus:
+        write(
+            sdk / "metadata" / "e1m_modules" / f"{sku}.yaml",
+            f"schema_version: 1\nsku: {sku}\ntopology:\n  m33: {{}}\n",
+        )
+    return sdk
+
+
+def test_a_pre_v2_sdk_warns_once_naming_the_count_the_version_and_the_remedy(
+    tmp_path, monkeypatch
+):
+    _pre_v2_sdk(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["presets", "--sdk-root", "./sdk", "--format", "json"])
+
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is True
+    assert doc["data"]["skus"] == []
+    skipped = [i for i in doc["issues"] if i["code"] == "presets.som-schema-version-skipped"]
+    assert skipped == [
+        {
+            "code": "presets.som-schema-version-skipped",
+            "severity": "warning",
+            "message": (
+                "skipped 3 SoM presets under sdk/metadata/e1m_modules: "
+                "schema_version 1 (this tan reads som-preset schema_version 2) "
+                "-- the bound alp-sdk predates som-preset v2 (alp-sdk#2024); "
+                "point --sdk-root at an alp-sdk whose metadata/schemas/ ships "
+                "som-preset-v2.schema.json, or use a tan release that matches "
+                "this SDK."
+            ),
+        }
+    ]
+
+
+def test_the_version_skip_warning_reaches_the_text_output_too(tmp_path, monkeypatch):
+    _pre_v2_sdk(tmp_path, skus=("E1M-A",))
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["presets", "--sdk-root", "./sdk"])
+
+    assert result.exit_code == 0
+    assert "skipped 1 SoM preset under sdk/metadata/e1m_modules: schema_version 1" in result.output
+
+
+def test_a_v2_sdk_carries_no_version_skip_warning(tmp_path, monkeypatch):
+    sdk = tmp_path / "sdk"
+    write(sdk / "scripts" / "alp_project.py", "x")
+    write(sdk / "metadata" / "e1m_modules" / "E1M-A.yaml", som_yaml("E1M-A"))
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["presets", "--sdk-root", "./sdk", "--format", "json"])
+
+    doc = json.loads(result.stdout)
+    assert doc["data"]["skus"] == ["E1M-A"]
+    assert not [i for i in doc["issues"] if i["code"] == "presets.som-schema-version-skipped"]
+
+
+def test_read_soms_collects_each_skipped_version_and_only_version_skips(tmp_path):
+    modules = tmp_path / "metadata" / "e1m_modules"
+    write(modules / "E1M-OLD.yaml", "schema_version: 1\nsku: E1M-OLD\n")
+    write(modules / "E1M-NEW.yaml", "schema_version: 3\nsku: E1M-NEW\n")
+    write(modules / "E1M-OK.yaml", som_yaml("E1M-OK"))
+    write(modules / "E1M-BAD.yaml", "schema_version: 2\n  bad: [indent\n")
+
+    versions: list[object] = []
+    soms = read_soms(str(tmp_path), version_skipped=versions)
+
+    assert [s.sku for s in soms] == ["E1M-OK"]
+    # Sorted for a stable assertion: `os.scandir` order is filesystem order.
+    assert sorted(versions) == [1, 3]

@@ -620,6 +620,16 @@ jobs:
       # `sdk_parity` leg compares tan's hand-port against that exact file for
       # every board.
       #
+      # `79c834e65` -> `34c11c9de` (tan-cli#1278), moved in the SAME change as
+      # `parity.yml`'s `PINNED_SDK_TAG` / `PINNED_PLANNER_ORACLE_SDK_REF`, all
+      # three of `test_planner_relocation_freshness.py`'s pins (STRICT_LOADERS
+      # included this time, alp-sdk#2328), `planner_oracle/PROVENANCE.txt` and
+      # the vendored scaffold -- see `parity.yml`'s `PINNED_SDK_TAG` comment
+      # for the audit (#866/#2469/#2316/#2597/#2024/#915). The hand-port pin
+      # moves because `gen_zephyr_board.py`, `alp_project_loader.py`,
+      # `alp_template.py`, `alp_project_emit/hw_info.py` and
+      # `alp_cli/validator.py` all changed in range.
+      #
       # KEEP THE `ref:` LINE DIRECTLY UNDER `repository:` -- no comment
       # between them. `python/scripts/pin_move_verify.py`'s
       # `_CI_SDK_PARITY_REF` matches the two lines as an adjacent pair and
@@ -633,7 +643,7 @@ jobs:
         with:
           persist-credentials: false
           repository: alplabai/alp-sdk
-          ref: 79c834e654f150816d09c7c92832a2104e76e309
+          ref: 34c11c9de04e264fdcab2bc0d58b328d9d117ca8
           fetch-tags: true
           path: alp-sdk
       # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`

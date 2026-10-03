@@ -50,16 +50,19 @@ WHAT IT REFUSES TO DO
   of their sources moves, this script attaches the upstream diff and stops. It
   does not move `HAND_PORT_PINNED_SDK_COMMIT`, so the gate stays RED until a
   human ports it -- which is the honest state.
-* **`STRICT_LOADERS_PINNED_SDK_COMMIT` is checked but never moved.** It is not
-  an "audited against the latest SDK" pin like the other two: it names the
-  commit that INTRODUCED `scripts/strict_loaders.py` (`26b0040e`, older than
-  both other pins), and the gate file's own block at that constant records a
-  KNOWN OPEN GAP measured against it -- `template.py`'s `_rendered_bytes` /
-  `render_to_envelope` catalog-driven READS are not confined, so a hostile
-  catalog can read an arbitrary file and hand it back as scaffold content.
-  Advancing that pin automatically would re-freeze that recorded gap under a
-  newer commit and erase the only place it is written down. So: detected,
-  reported, never moved.
+* **`STRICT_LOADERS_PINNED_SDK_COMMIT` is checked but never moved.** It
+  pins one hand-port, `scripts/strict_loaders.py`, with a checkout of its own
+  in `parity.yml`, and a hand-port is never merged here (see above) -- so
+  when the file moves upstream this tool attaches the diff and stops, and a
+  human ports it and moves the pin together with `STRICT_LOADERS_HASH`. That
+  last happened at the `34c11c9de` re-sync (tan-cli#1278, alp-sdk#2328's
+  libyaml loaders). The pin used to be frozen for a different reason: it
+  named the commit that introduced the file (`26b0040e`), and the gate
+  file's block at that constant recorded an OPEN GAP -- `template.py`'s
+  catalog-driven reads were not confined. `707927ff` (tan-cli#582) closed
+  that gap (`_safe_join`/`PathEscapeError` at every catalog read join), so
+  the pin now tracks the last audit like the other two; it is still a
+  human's move, not this tool's.
 * **A lying pin aborts the whole run.** If the base blob's sha256 does not
   match the hash the gate pins for it, the pin and the table disagree about
   what was audited -- someone edited one without the other. Merging from a
@@ -605,9 +608,10 @@ def classify(
             FileVerdict(
                 rel, f"{PLANNER_REL}/strict_loaders.py", "hand-port-changed",
                 "hand-ported AND carrying its own pin, which this tool never "
-                "advances (see the module docstring: that pin names the "
-                "introducing commit and its block records a known open gap). "
-                "Port by hand and move STRICT_LOADERS_HASH deliberately.",
+                "advances (see the module docstring: a hand-port is ported "
+                "by a human, never merged here). Port by hand and move "
+                "STRICT_LOADERS_PINNED_SDK_COMMIT/STRICT_LOADERS_HASH "
+                "together, deliberately.",
                 new_hash=_sha(head_blob),
                 diff=git_diff(sdk, st_base, head, rel, diff_lines),
             )

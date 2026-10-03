@@ -203,11 +203,11 @@ consistency).
 A byte MISMATCH (fixture present upstream, content differs) fails, and so
 does an ABSENT upstream fixture. There is no "predates the feature" branch,
 close to the rule `toolchain_lock_parity.py` states, and on a measurement
-rather than a generalisation: of the 32 distinct values `PINNED_SDK_TAG` has
-held across `parity.yml`'s history, the fixture is present at 30. The two
+rather than a generalisation: of the 34 distinct values `PINNED_SDK_TAG` has
+held across `parity.yml`'s history, the fixture is present at 32. The two
 exceptions, `df312cec` and `f04ea42e`, are July-2026 pins predating the
 fixture upstream — `f04ea42e` was the pin in force when this script was first
-written (tan-cli `ca34090e`, #40). Every pin since carries it, `c81cb5db`
+written (tan-cli `ca34090e`, #40). Every pin since carries it, `34c11c9de`
 (the current one), the released `v0.16.0` and alp-sdk `origin/dev` included,
 so an absent upstream fixture is a removal, not a legitimate skip.
 
@@ -313,8 +313,8 @@ tan-cli#269.)
 Self-skips with no reachable alp-sdk checkout, like the gates above. Unlike
 the bootstrap gate (and unlike the kconfig gate before tan-cli#1261 removed
 its own copy of that branch), there is no "predates the feature" branch. Same
-measurement as the kconfig section above: of the 32 distinct values
-`PINNED_SDK_TAG` has held, `metadata/toolchains.json` is present at 28, the
+measurement as the kconfig section above: of the 34 distinct values
+`PINNED_SDK_TAG` has held, `metadata/toolchains.json` is present at 30, the
 four exceptions (`df312cec`, `f04ea42e`, `v0.13.0`, `8b216a04`) all being
 July-2026 pins predating the file upstream. The pin is hand-bumped
 forward-only, so an upstream file missing at the ref under test is a real

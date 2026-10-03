@@ -350,7 +350,7 @@ class TestUnclassifiedWriteAuthorityLegCoverage:
     def test_outside_aperture_authored_row_with_no_write_authority_blocks(self):
         """Same hazard, absent `write_authority:` rather than a wrong
         value -- `ABSENT MEANS UNRESOLVED, NEVER customer_runtime`
-        (`som-preset-v1.schema.json`'s `write_authority` description)."""
+        (`som-preset-v2.schema.json`'s `write_authority` description)."""
         from tan.planner.carveout import _region_ipc_eligibility
 
         eligible, reason = _region_ipc_eligibility(

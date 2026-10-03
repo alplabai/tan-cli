@@ -78,7 +78,6 @@ _REWRITE_NAMES = (
     "_substitute_board_yaml_pin_macros",
     "_substitute_board_yaml_pins",
     "_substitute_board_yaml_sku",
-    "_substitute_cmake_core",
     "_substitute_readme_pins",
     "_tag_resolves",
 )

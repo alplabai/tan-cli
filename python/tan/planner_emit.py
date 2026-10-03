@@ -342,7 +342,7 @@ def _render_route_table(
     )
     if som_schema_errors:
         raise PlannerEmitError(
-            f"SoM preset {sku} does not validate against som-preset-v1:\n"
+            f"SoM preset {sku} does not validate against som-preset-v2:\n"
             + "\n".join(f"  - {e}" for e in som_schema_errors))
     board_preset = _resolve_inline_or_preset_board(project, METADATA_ROOT)
     from tan.planner.project_emit import bom_netlist  # noqa: PLC0415
