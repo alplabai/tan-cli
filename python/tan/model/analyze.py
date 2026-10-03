@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from tan.core.shapes import matches_glob_suffix
@@ -45,6 +45,7 @@ from .adapters.deepx import DeepxAdapter
 from .adapters.drpai import DrpaiAdapter
 from .adapters.ethos_u import VelaAdapter
 from .adapters.executorch import ExecutorchAdapter
+from .npu_ops_validate import TableValidator
 from .sram_fit import SramFit
 from .tensorio import OpDesc
 
@@ -376,23 +377,24 @@ def _table_variant(doc: dict) -> str:
     """@doc's `applies_to.variant`, normalised to `""` for any shape that
     isn't a plain string reachable through a dict `applies_to`.
 
-    `metadata/npu_ops/**` has NO schema at all (tan-cli#969) -- unlike the
-    `soc-spec-v1.schema.json`/`som-preset-v1.schema.json` family #964 covers,
-    there is nothing to eventually enforce on the read path here today, so
-    this isinstance guard is the only defence this population gets FOR NOW,
-    pending an `npu-ops-v1.schema.json` (tracked: alp-sdk#1801) -- not a
-    permanent substitute for one; do not read this comment as a decision
-    that `npu_ops/**` should stay schema-free. `.get()` off a non-dict
-    `applies_to` (e.g.
-    `applies_to: 7`) raises `AttributeError: 'int' object has no attribute
-    'get'`, and `.split()` on the caller's side off a non-string `variant`
-    (e.g. `variant: 7`) raises `AttributeError: 'int' object has no
-    attribute 'split'` -- same defect class as the #957/#965 family, same
-    `_load_table` precedent immediately above (`analyze.py:204-214`) for why
-    a malformed table is skipped rather than crashing the whole resolve.
-    `or {}` alone (the pre-#969 guard) only covered an explicit-but-null
-    `applies_to:`; it did not cover a non-dict scalar, which still reached
-    `.get()`.
+    `metadata/npu_ops/**` has a schema, `npu-ops-v1.schema.json` (alp-sdk
+    `dev`, alp-sdk#1470), and `_resolve_table` enforces it on read when the
+    bound SDK ships a usable one (tan-cli#1298). This isinstance guard stays
+    as defence in depth, for three reasons: it is what protects a bound SDK
+    whose schema is absent or cannot be loaded (tan-cli#969 added it before
+    any schema existed); `_resolve_table` reads the variant through it BEFORE
+    schema-validating the matching table; and tan-cli#965 showed a
+    schema-valid document can still be narrower than a consumer assumes.
+
+    `.get()` off a non-dict `applies_to` (e.g. `applies_to: 7`) raises
+    `AttributeError: 'int' object has no attribute 'get'`, and `.split()` on
+    the caller's side off a non-string `variant` (e.g. `variant: 7`) raises
+    `AttributeError: 'int' object has no attribute 'split'` -- same defect
+    class as the #957/#965 family, same `_load_table` precedent immediately
+    above (`analyze.py:204-214`) for why a malformed table is skipped rather
+    than crashing the whole resolve. `or {}` alone (the pre-#969 guard) only
+    covered an explicit-but-null `applies_to:`; it did not cover a non-dict
+    scalar, which still reached `.get()`.
 
     `""` is the identical sentinel a genuinely-absent field already
     produces: the caller's `variant in _table_variant(doc).split("-")`
@@ -414,9 +416,11 @@ def _table_supported_ops(doc: dict) -> list[str] | None:
     `variant` guards above).
 
     `_score_ops` used to read `set(doc.get("supported_ops", []))` straight
-    off the same schema-free `metadata/npu_ops/**` document `_table_variant`
-    sanitises above, a few lines below on the same `analyze_backend` call
-    path. `supported_ops: 7` raised `TypeError: 'int' object is not
+    off the same `metadata/npu_ops/**` document `_table_variant` sanitises
+    above, a few lines below on the same `analyze_backend` call path (a bound
+    SDK whose schema is absent or unusable still reaches this guard
+    unvalidated, and the schema does not replace it either, #965).
+    `supported_ops: 7` raised `TypeError: 'int' object is not
     iterable`; `supported_ops: null` raised the same as `'NoneType' object
     is not iterable` -- but `supported_ops: "CONV_2D"` raised NOTHING:
     `set("CONV_2D")` silently built a set of seven characters no real
@@ -472,14 +476,23 @@ def _is_table_file(name: str) -> bool:
     return matches_glob_suffix(name, ".json")
 
 
-def _resolve_table(metadata_root: Path, backend: str, variant: str | None) -> tuple[Path, dict] | None:
+def _resolve_table(metadata_root: Path, backend: str, variant: str | None,
+                   findings: list[str] | None = None) -> tuple[Path, dict] | None:
     """Pick the `metadata/npu_ops/<backend>/<variant>@<toolchain>-<ver>.json`
     whose `applies_to.variant` covers @variant. None when the backend's table
     directory is missing, unreadable, or not a directory at all (e.g.
     `deepx_dxm1`, by decision), or when no table in it covers @variant -- all
     of these are the caller's `undetermined`, never a negative verdict
     manufactured from absent data, and none of them is an error this static
-    screen should raise at its caller."""
+    screen should raise at its caller.
+
+    @findings, when given, collects user-facing notes for the report
+    (tan-cli#1298): one per MATCHING table that failed `npu-ops-v1.schema.json`
+    (skipped like a malformed file; the search continues), or one disclosing
+    that the schema is absent or unusable so the table about to be used was
+    NOT validated. See `npu_ops_validate` for the order and why. It is an
+    out-parameter rather than a return value so the `(path, doc) | None`
+    shape every caller already unpacks does not change."""
     table_dir = Path(metadata_root) / "npu_ops" / backend
     try:
         entries = os.listdir(table_dir)
@@ -488,20 +501,36 @@ def _resolve_table(metadata_root: Path, backend: str, variant: str | None) -> tu
     candidates = sorted(table_dir / entry for entry in entries if _is_table_file(entry))
     if not candidates:
         return None
+    notes = findings if findings is not None else []
+    validator = TableValidator(metadata_root, table_dir)
+
     if variant is None:
         # No per-instance variant to resolve (e.g. drpai, which ships exactly
         # one table today): unambiguous only when there is exactly one table.
         if len(candidates) == 1:
             doc = _load_table(candidates[0])
-            return (candidates[0], doc) if doc is not None else None
+            if doc is not None and validator.accepts(doc, candidates[0], notes):
+                return candidates[0], doc
         return None
     for path in candidates:
         doc = _load_table(path)
         if doc is None:
             continue
-        if variant in _table_variant(doc).split("-"):
+        # The variant is read off a not-yet-validated document -- safe, since
+        # `_table_variant` returns "" for any wrong shape, so such a table can
+        # only fail to match. Only a MATCHING table is schema-validated; a
+        # schema-invalid one is skipped (and noted) and the search goes on.
+        if variant in _table_variant(doc).split("-") and validator.accepts(doc, path, notes):
             return path, doc
     return None
+
+
+def _with_table_notes(report: BackendReport, table_notes: list[str]) -> BackendReport:
+    """@report with the resolver's schema findings appended to `notes`. Only
+    the static-screen reports built here carry them: the `--exact` compiled
+    report (`check._report_from_vela_compile`) and the bench-point report
+    (`perf_apply._perf_point_report`) build their own `notes` and drop them."""
+    return replace(report, notes=[*report.notes, *table_notes]) if table_notes else report
 
 
 def _format_not_accepted_report(backend: str, src_format: str, ops: Sequence[OpDesc],
@@ -611,7 +640,8 @@ def analyze_backend(*, backend: str, src_format: str, ops: Sequence[OpDesc],
     if not _accepts(backend, src_format):
         return _format_not_accepted_report(backend, src_format, ops, variant)
 
-    resolved = _resolve_table(metadata_root, backend, variant)
+    table_notes: list[str] = []
+    resolved = _resolve_table(metadata_root, backend, variant, table_notes)
     if resolved is not None:
         # The table must speak the SAME operator vocabulary as what will be
         # compared against it -- @ops' own op_namespace when there are ops to
@@ -638,11 +668,11 @@ def analyze_backend(*, backend: str, src_format: str, ops: Sequence[OpDesc],
             resolved = None
 
     if resolved is None:
-        return _no_table_report(backend, ops, variant)
+        return _with_table_notes(_no_table_report(backend, ops, variant), table_notes)
 
     table_path, doc = resolved
     if not ops:
-        return _empty_ops_report(backend, table_path, variant)
+        return _with_table_notes(_empty_ops_report(backend, table_path, variant), table_notes)
 
     verdicts, total_macs, eligible_macs = _score_ops(ops, doc)
     pct = (100.0 * eligible_macs / total_macs) if total_macs > 0 else None
@@ -660,5 +690,5 @@ def analyze_backend(*, backend: str, src_format: str, ops: Sequence[OpDesc],
     return BackendReport(
         backend=backend, variant=variant, table=str(table_path),
         npu_coverage=_coverage_label(verdicts), compute_on_npu_pct_max=pct,
-        uncosted_cpu_op_count=uncosted, ops=verdicts, notes=notes,
+        uncosted_cpu_op_count=uncosted, ops=verdicts, notes=[*notes, *table_notes],
     )
