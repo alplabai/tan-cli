@@ -72,9 +72,9 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 #: POSIX-only, and the ONE reason this file has a conditional import
 #: (tan-cli#541). `pty`/`termios`/`fcntl` do not exist on Windows at all --
@@ -147,6 +147,22 @@ from tan.core.flash_plan import (
     validate_flow_d_preflight_args,
     validate_flow_d_shape,
 )
+from tan.commands.flash_atoc_guard import (
+    WEST_FLASH,
+    absolutise_build_dir,
+    clear_stale_verdict,
+    entries_taking_the_flag,
+    guarded_failure_message,
+    guarded_success,
+    plan_atoc_guard,
+)
+from tan.core.atoc_guard import (
+    NOT_APPLICABLE,
+    REPLACE_ATOC_FLAG,
+    UNGUARDED,
+    ReplaceAtocDecision,
+)
+from tan.core.atoc_guard_messages import ambiguous_replace_message
 from tan.core.global_flags import accept_global_flags
 from tan.core.subprocess_env import spawn_env
 from tan.core.setools import (
@@ -257,6 +273,19 @@ class _Entry:
     #: distinguishes them. NOT part of the envelope contract -- `as_dict()`
     #: never emits it, like the two above.
     atoc_unacknowledged: bool = False
+    #: tan-cli#1267: set when `west flash` failed and the `alif_flash`
+    #: runner's own verdict says its pre-burn ATOC guard refused the write, so
+    #: `_run` reports `flash.atoc-guard-refused` rather than
+    #: `flash.entry-failed`. NOT part of the envelope contract, like the above.
+    atoc_guard_refused: bool = False
+    #: tan-cli#1267: a `--replace-atoc` / unguarded-runner disclosure and its
+    #: `tan.core.atoc_guard` kind, which `_run` maps to an issue code.
+    atoc_warning: str | None = None
+    atoc_warning_kind: str | None = None
+    #: tan-cli#1267: the ATOC sections a successful guarded write put there
+    #: (the verdict's `allowed`), so `_run` can tell a LATER entry's refusal
+    #: that the entry it would delist was written earlier in the same run.
+    atoc_sections_written: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"kind": self.kind, "id": self.id}
@@ -1997,6 +2026,36 @@ class _Context:
     #: environment-variable half, unlike `force_confirm`/`require_dpidr` --
     #: see `flash_plan.atoc_replacement_acknowledged` for why.
     atoc_unqueryable: bool = False
+    #: `--replace-atoc` (tan-cli#1267) -- Flow A's override of the `alif_flash`
+    #: runner's own pre-burn ATOC guard. Never OR-ed with, aliased to or
+    #: implied by `atoc_unqueryable` above, and CLI-only: no manifest key and
+    #: no env var (see `tan.core.atoc_guard`'s module docstring).
+    replace_atoc: bool = False
+
+
+def _west_cwd(ctx: _Context) -> str:
+    """The cwd every flasher is spawned in: the west topdir when one
+    resolved, else this process's own (`_spawn`'s `cwd=None`)."""
+    return ctx.workspace if ctx.workspace is not None else os.getcwd()
+
+
+def _west_candidates(targets: list[FlashTarget], ctx: _Context):
+    """`(method, id, flash_args, artefact_path)` for every target that
+    `_flash_entry` would dispatch to `zephyr_west_flash` -- resolved the same
+    way it does, so the `--replace-atoc` count matches what would run."""
+    for target in targets:
+        if helper_flash_gate(target, recovery_armed=ctx.recover, helper_filter=ctx.helper_filter):
+            continue
+        method = select_flash_method(target) if target.flash_method else None
+        artefact = target.output_artefact or target.firmware_path or ""
+        if method != WEST_FLASH or not artefact or is_pending(artefact):
+            continue
+        yield (
+            method,
+            target.id,
+            absolutise_build_dir(target.flash_args, _west_cwd(ctx)),
+            resolve_artefact_path(artefact, ctx.build_root, ctx.sdk_root, _is_file),
+        )
 
 
 def _recovery_armed_for(target: FlashTarget, ctx: _Context) -> bool:
@@ -2236,6 +2295,7 @@ def _flash_entry(
     ctx: _Context,
     *,
     yocto_wic_stat: Callable[[str], os.stat_result] = os.stat,
+    earlier_sections: Mapping[str, str] | None = None,
 ) -> tuple[int, _Entry, list[str]]:
     """Dispatch + run one target. Returns `(rc, entry, text-lines)`.
 
@@ -2271,12 +2331,21 @@ def _flash_entry(
         *,
         preflight_unarmed: bool = False,
         atoc_unacknowledged: bool = False,
+        atoc_guard_refused: bool = False,
+        atoc_sections_written: tuple[str, ...] = (),
     ) -> _Entry:
         return _Entry(
             kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message,
             preflight_unarmed=preflight_unarmed, recovery_armed=recovery,
-            atoc_unacknowledged=atoc_unacknowledged,
+            atoc_unacknowledged=atoc_unacknowledged, atoc_guard_refused=atoc_guard_refused,
+            atoc_warning=guard.warning, atoc_warning_kind=guard.warning_kind,
+            atoc_sections_written=atoc_sections_written,
         )
+
+    # tan-cli#1267: decided once the method and artefact are known (below);
+    # every entry returned before that carries no guard disclosure.
+    guard = ReplaceAtocDecision()
+    guard_build_dir = ""
 
     # tan-cli#611, THE HOIST. WHO may flash this entry is decided BEFORE
     # anything about HOW, so a helper the SoM preset declares non-customer is
@@ -2407,6 +2476,21 @@ def _flash_entry(
             return 1, entry(method, "failed", 1, msg), lines
         artefact = f"<missing-artefact-for-{entry_id}>"
     artefact_path = resolve_artefact_path(artefact, ctx.build_root, ctx.sdk_root, _is_file)
+    # tan-cli#1267: Flow A's whole-ATOC guard lives in alp-sdk's `alif_flash`
+    # runner; tan decides here whether `--replace-atoc` reaches it, and
+    # whether this entry's failure is checked against the runner's verdict.
+    # Decided before the tool gate and the Flow D block, so a `--replace-atoc`
+    # that does not apply is disclosed on every path either can return from.
+    # A relative `flash_args.build_dir` is anchored on the cwd `west flash`
+    # runs in (`_west_cwd`), so the argv and every guard file name one tree.
+    entry_flash_args = (
+        absolutise_build_dir(target.flash_args, _west_cwd(ctx))
+        if method == WEST_FLASH
+        else target.flash_args
+    )
+    guard, guard_build_dir = plan_atoc_guard(
+        method, entry_id, entry_flash_args, artefact_path, ctx.sdk_root, ctx.replace_atoc
+    )
 
     # tan-cli#289/#59: widen the required-tool gate (and every plan-builder's
     # own tool probe, below) with the resolved workspace venv -- a tool
@@ -2434,7 +2518,7 @@ def _flash_entry(
         lines.append(gate.message)
         return 1, entry(method, "failed", 1, gate.message), lines
 
-    flash_args = target.flash_args
+    flash_args = entry_flash_args
     # Set only on the Flow D SETOOLS-auto-sign path below, and only when THIS
     # run's own sign actually ran -- carried past the `if` block so the
     # eventual success message (tan-cli#373) can name which SETOOLS install
@@ -2625,6 +2709,9 @@ def _flash_entry(
         lines.append(f"  FAIL: {msg}")
         return 1, entry(method, "failed", 1, msg), lines
 
+    if guard.append:
+        # After `meta.build`, before the preview below, so `--dry-run` shows it.
+        plan = replace(plan, argv=(*plan.argv, REPLACE_ATOC_FLAG))
     lines.append(f"flash: {kind} '{entry_id}' -> {method}")
 
     if plan.planning_only or ctx.dry_run:
@@ -2717,6 +2804,7 @@ def _flash_entry(
             lines.append(f"  FAIL: {refusal}")
             return 1, entry(method, "failed", 1, refusal), lines
 
+    stale = clear_stale_verdict(guard_build_dir) if guard.guarded else None
     outcome = _execute(plan, ctx.capture, ctx.venv_bin, ctx.workspace)
     if outcome.success:
         # tan-cli#373: `setools_note` is set here only when THIS run's own
@@ -2728,15 +2816,31 @@ def _flash_entry(
         ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
         if method == FLOW_D_METHOD:
             ok_message = _flow_d_reset_qualified_message(ok_message, outcome)
+        sections: tuple[str, ...] = ()
+        if guard.guarded:
+            ok_message, unguarded, sections = guarded_success(
+                ok_message, entry_id, guard_build_dir, stale, guard.source
+            )
+            if unguarded is not None:
+                # The guard did not run for this write after all: say so.
+                guard = replace(guard, warning=unguarded, warning_kind=UNGUARDED)
         lines.append(f"  ok: {ok_message}")
         return (
             0,
-            entry(method, "ok", 0, ok_message, preflight_unarmed=preflight_unarmed),
+            entry(
+                method, "ok", 0, ok_message, preflight_unarmed=preflight_unarmed,
+                atoc_sections_written=sections,
+            ),
             lines,
         )
     msg = _execute_message(outcome, method, entry_id)
+    refused = False
+    if guard.guarded:
+        msg, refused = guarded_failure_message(
+            msg, entry_id, guard_build_dir, stale, earlier_sections or {}
+        )
     lines.append(f"  FAIL: {msg}")
-    return 1, entry(method, "failed", 1, msg), lines
+    return 1, entry(method, "failed", 1, msg, atoc_guard_refused=refused), lines
 
 
 def _flow_d_preflight(
@@ -3036,6 +3140,7 @@ def _run(
     recover: bool = False,
     confirm_flag: bool = False,
     atoc_unqueryable: bool = False,
+    replace_atoc: bool = False,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -3216,9 +3321,24 @@ def _run(
         # whether or not `--helper` was given (tan-cli#611).
         helper_filter=helper,
         atoc_unqueryable=atoc_unqueryable,
+        replace_atoc=replace_atoc,
     )
+    if replace_atoc:
+        # tan-cli#1267: one `--replace-atoc` must never override more than one
+        # alif_flash write -- see `ambiguous_replace_message`. Refused before
+        # anything is flashed, previews included.
+        taking = entries_taking_the_flag(_west_candidates(plan.targets, ctx), ctx.sdk_root)
+        if len(taking) > 1:
+            message = ambiguous_replace_message(taking)
+            text_lines.append(message)
+            issues.append(Issue("flash.replace-atoc-ambiguous", "error", message))
+            text_lines.append(f"flash: {failed + 1} failure(s).")
+            return ExitCode.RUNTIME_FAILURE, _data(build_root, entries), issues, text_lines, sdk
+    # ATOC section -> the entry of this run that wrote it (tan-cli#1267).
+    written_by: dict[str, str] = {}
     for target in plan.targets:
-        rc, entry, lines = _flash_entry(target, ctx)
+        rc, entry, lines = _flash_entry(target, ctx, earlier_sections=dict(written_by))
+        written_by.update({section: entry.id for section in entry.atoc_sections_written})
         text_lines.extend(lines)
         if entry.recovery_armed:
             # tan-cli#611. Emitted BEFORE the entry's own outcome lines are
@@ -3253,6 +3373,9 @@ def _run(
                 issues.append(
                     Issue("flash.atoc-replacement-unacknowledged", "error", entry.message)
                 )
+            elif entry.atoc_guard_refused:
+                # tan-cli#1267: the runner's own guard refused, before burning.
+                issues.append(Issue("flash.atoc-guard-refused", "error", entry.message))
             else:
                 issues.append(Issue("flash.entry-failed", "error", entry.message))
         if entry.status == "planned":
@@ -3286,6 +3409,16 @@ def _run(
             message = _dpidr_unarmed_advisory(entry.id, entry.method)
             text_lines.append(message)
             issues.append(Issue("flash.dpidr-preflight-unarmed", "warning", message))
+        if entry.atoc_warning is not None:
+            # tan-cli#1267. Both channels, like the DPIDR advisory above. Two
+            # literal codes so the registry gate sees both.
+            text_lines.append(entry.atoc_warning)
+            if entry.atoc_warning_kind == NOT_APPLICABLE:
+                issues.append(
+                    Issue("flash.replace-atoc-not-applicable", "warning", entry.atoc_warning)
+                )
+            else:
+                issues.append(Issue("flash.atoc-guard-unavailable", "warning", entry.atoc_warning))
         entries.append(entry.as_dict())
         if rc < 0:
             continue  # silently skipped -- not counted, does not set flashed_anything
@@ -3514,7 +3647,28 @@ def flash(
         "SES still reports \"[SES] ATOC ok\". Without this (or "
         "flash_args.atoc_unqueryable: true) a confirmed Flow D write refuses; a "
         "preview still previews. Separate from --confirm, which only arms the write "
-        "itself, and it has no effect on any other backend.",
+        "itself, and it has no effect on any other backend. Not the same as "
+        "--replace-atoc, and never accepted in its place.",
+    ),
+    replace_atoc: bool = typer.Option(
+        False,
+        "--replace-atoc",
+        # tan-cli#1267 / alp-sdk#2262. Flow A's half: an OVERRIDE of a check
+        # the alif_flash runner really runs, where --atoc-unqueryable
+        # acknowledges a write nothing can check. Never merged or aliased with
+        # it, and CLI-only -- see `tan.core.atoc_guard`'s module docstring.
+        help="Override the alif_flash west runner's pre-burn ATOC guard on a "
+        "zephyr_west_flash slice (Flow A, over the SE-UART). Before burning, that "
+        "runner reads the resident ATOC and refuses -- flash.atoc-guard-refused -- "
+        "when the write would silently delist an entry it does not name (an A32 "
+        "boot chain, the other core's app, a factory MCUboot) or when the read "
+        "could not be verified. Pass this only once the named entries can be "
+        "restored or losing them is intended. Appended to west flash only for a "
+        "slice whose runner is alif_flash, from an alp-sdk module whose runner has "
+        "the guard; anywhere else tan warns instead of passing it. It reaches at "
+        "most ONE write per run: if it would reach more, the run is refused "
+        "(flash.replace-atoc-ambiguous) -- narrow it with --core. Not the same as "
+        "--atoc-unqueryable (Flow D), and never accepted in its place.",
     ),
     skip_missing_tools: bool = typer.Option(
         False,
@@ -3584,6 +3738,7 @@ def flash(
             setools_dir_arg=setools_dir,
             confirm_flag=confirm,
             atoc_unqueryable=atoc_unqueryable,
+            replace_atoc=replace_atoc,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an

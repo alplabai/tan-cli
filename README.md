@@ -304,7 +304,10 @@ What those commands do:
    This is deliberate, not a bug: a fresh checkout must not silently
    reprogram an attached module. On an Alif Flow D slice (`alif_mram_jlink`,
    the AEN MRAM path) the write also needs `--atoc-unqueryable`, a separate
-   acknowledgement that it replaces the board's entire ATOC -- see
+   acknowledgement that it replaces the board's entire ATOC. A Flow A slice
+   (`zephyr_west_flash` on the `alif_flash` runner, over the SE-UART) is
+   checked by the runner itself, which refuses to delist a resident entry;
+   `--replace-atoc` overrides that check, and is never the same flag -- see
    [SETOOLS setup](docs/setools.md).
 
 Run `tan doctor` if setup or toolchain discovery fails; its `toolchain` check
@@ -342,7 +345,7 @@ move.
 | Check a project | `tan validate` |
 | Build firmware | `tan build` |
 | Build and run or flash | `tan run --flash --confirm` (`--confirm` arms the write on a hardware target; see the quickstart) |
-| Flash an existing build | `tan flash --confirm` (an Alif Flow D slice also needs `--atoc-unqueryable`, which acknowledges the whole-ATOC replacement rather than arming the write — see [SETOOLS setup](docs/setools.md)) |
+| Flash an existing build | `tan flash --confirm` (an Alif Flow D slice also needs `--atoc-unqueryable`, which acknowledges the whole-ATOC replacement rather than arming the write; a Flow A slice refused by the `alif_flash` runner's ATOC guard takes `--replace-atoc` instead — see [SETOOLS setup](docs/setools.md)) |
 | Inspect firmware size | `tan size` |
 | Create an image | `tan image` |
 | Remove build output | `tan clean` |

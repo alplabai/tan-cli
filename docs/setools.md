@@ -224,23 +224,118 @@ that did not prevent the mutation), and after the `ALP_FLASH_REQUIRE_DPIDR`
 gate — writing the right table to the wrong board is the worse of the two
 failures.
 
-### What this guard does *not* cover: Flow A
+### Flow A: the `alif_flash` runner checks first — `--replace-atoc`
 
 This is a **Flow D** guard, and only a Flow D guard. A slice that stays on
 `zephyr_west_flash` — no `jlink_flash_device` on its `flash_args`, so `west
 flash` picks the board.cmake default `alif_flash` runner and burns the ATOC
-over the SE-UART (Flow A) — writes with no acknowledgement and no warning
-today. Every published Ensemble variant in alp-sdk metadata carries
-`debug.jlink_flash_device`, so a planner-emitted AEN manifest dispatches Flow D
-and *is* guarded; a hand-written or legacy manifest without that key is not.
+over the SE-UART (Flow A) — replaces the whole ATOC too, but it is guarded
+differently, because that runner *can* ask the part what is resident first.
+Every published Ensemble variant in alp-sdk metadata carries
+`debug.jlink_flash_device`, so a planner-emitted AEN manifest dispatches Flow
+D; Flow A is what a hand-written or legacy manifest reaches.
 
-That gap is deliberately left open rather than closed by widening this flag:
-alp-sdk#2025's own header says the Flow D flag must never be merged or aliased
-with Flow A's `--replace-atoc`, precisely because an operator on a no-SE-UART
-slot passes the Flow D one on every run — and a flag that answered both gates
-would silence the one that *can* query the part first. Flow A's answer is a
-query-based check (upstream's `bench_atoc_replace_guard`), which is its own
-piece of work.
+Since alp-sdk#2262, the `alif_flash` runner reads the resident ATOC back over
+the SE-UART (`maintenance -opt getbanner`, then `-opt gettoc`) before it
+burns, and refuses when a resident entry outside this build's own
+`ALP-HE`/`ALP-HP` section would be silently delisted, or when that read could
+not be verified. It records its verdict in
+`<build_dir>/alif_flash/atoc-guard.json` (schema
+`alp-sdk.alif-flash-atoc-guard.v1`, alp-sdk `docs/aen-provisioning.md`
+section 0.6). `tan flash` and `tan run --flash` read it after `west flash`:
+
+- **`refused-foreign`** → `flash.atoc-guard-refused`, naming every resident
+  entry the write would have delisted. Capture or restore them first, then
+  re-run with **`--replace-atoc`** — or pass it only if losing them is
+  intended. Two exceptions, where the message does *not* offer the flag:
+  - the entry is the factory `MCUBOOT-` bootloader → the message points at
+    alp-sdk's J-Link slot0 path (section 0.5, Option B): overriding deletes
+    the bootloader and the module will not boot;
+  - the entry is one **an earlier slice of the same run just wrote**
+    (`ALP-HE` from `m55_he`, say) → the manifest cannot be Flow A-flashed one
+    core after another, because each `alif_flash` write replaces the whole
+    ATOC with only its own entry. The message points at alp-sdk's
+    `scripts/bench/aen/flash-run-dualcore.sh <hp-build-dir> <he-build-dir>`,
+    which burns one ATOC carrying both cores (HP-master shape; an HE-master
+    ATOC is not scripted — see alp-sdk `docs/aen-bench-bringup.md`, "Flow A —
+    Dual-core deferred-TOC boot").
+- **`refused-unverified`** → `flash.atoc-guard-refused`, saying the read
+  could not be verified. Check the SE-UART wiring and `SE_UART`, read the
+  transcript the verdict names, confirm by hand what is resident, and only
+  then reach for `--replace-atoc`. If the runner says the read succeeded but
+  the table format was not recognised, file the transcript instead.
+- **No verdict, or one tan cannot read** (missing, malformed, an unknown
+  schema or status, or a status/`query_status`/`foreign` combination the
+  runner does not produce) after a failure → the ordinary
+  `flash.entry-failed`, with a note that the verdict could not be read. tan
+  never reports a refusal the runner did not state.
+- **No usable verdict after a *successful* write** →
+  `flash.atoc-guard-unavailable`: the guard did not run for that write
+  (most likely west loaded a different runner than the one tan checked), so
+  the write is reported as unguarded, never silently as checked.
+
+tan removes any verdict an earlier run left behind *before* it spawns `west
+flash`: the runner clears it too, but only once west has loaded it, and a
+`west flash` that fails before that would otherwise leave an old verdict
+looking like this attempt's. A successful write says what the guard did
+(`ATOC guard: clear`, or what `--replace-atoc` overrode); after a *failed*
+write an override is reported as an override whose outcome is unknown, not
+as a done deletion.
+
+**`--replace-atoc` is not `--atoc-unqueryable`, and neither is ever accepted
+in place of the other.** The Flow D flag acknowledges a write nothing can
+check; this one overrides a check that ran. An operator on a no-SE-UART bench
+passes the Flow D flag on every run, so a flag that answered both would
+silence the one guard that can look first (alp-sdk#2025's header says the
+same).
+
+**One `--replace-atoc` reaches at most one write.** If it would be appended
+to more than one entry of the run (two Flow A cores, say), the whole run is
+refused before anything is written — previews included — with
+`flash.replace-atoc-ambiguous`: the override given to accept losing what is
+on the board now would otherwise also override the second core's guard into
+delisting what the first core had just written. Narrow the run with `--core
+CORE_ID` (or `--helper NAME`) and pass the flag there.
+
+Where it applies, and what tan says when it does not:
+
+- tan passes `--replace-atoc` to `west flash` only for a `zephyr_west_flash`
+  slice whose runner is `alif_flash` — `flash_args.runner`, else the
+  `flash-runner:` in the build's `zephyr/runners.yaml` — **and** whose
+  runner has the guard. The runner checked is the one `west flash` will
+  load: `scripts/west_commands/runners/alif_flash.py` under the alp-sdk
+  module the build was configured with, as listed in the build's
+  `zephyr_modules.txt`. Only when the build has no readable module list does
+  tan fall back to the SDK it is bound to; every message names the file it
+  read and why. `tan flash --dry-run` shows the flag in the planned argv.
+- A relative `flash_args.build_dir` is anchored on the directory `west
+  flash` runs in (the west workspace topdir when tan finds one), and the
+  absolute path is what goes on the argv — so the argv, `runners.yaml`, the
+  stale-verdict removal and the verdict read all name the tree west writes.
+- A sysbuild `--build-dir` (one holding `domains.yaml`) with **one** domain
+  is followed into that domain's build dir, where the runner runs and writes
+  its verdict. With **more than one** domain the runner refuses the whole
+  sysbuild before its guard runs (alp-sdk#2274) and writes no verdict; tan
+  does not guess a domain, and says so if `--replace-atoc` was passed.
+- Passed anywhere else — a Flow D slice, another backend, another runner, a
+  multi-domain sysbuild, or a slice whose runner tan cannot learn (not built
+  yet, no `flash_args.runner`) — it is not passed, and tan warns
+  `flash.replace-atoc-not-applicable` rather than ignoring it.
+- An `alif_flash` slice whose runner predates the guard (or whose build lists
+  no alp-sdk module) warns `flash.atoc-guard-unavailable` on every run, flag
+  or not: that write replaces the whole ATOC with nothing checking first. tan
+  never passes the flag there — west would reject an argument the runner does
+  not register.
+- `tan run` without a flash (no `--flash`, a failed build, a host target)
+  warns `run.flash-flags-ignored` when given `--replace-atoc` or
+  `--atoc-unqueryable`: both only act on a write.
+
+There is **no manifest spelling and no environment variable**, unlike Flow
+D's `flash_args.atoc_unqueryable`. That key exists because Flow D can never
+query, so a manifest can record the acknowledgement once. Flow A's guard does
+query, and a persisted override would switch a working check off for every
+later run, including the one where the board carries something new. (`tan
+run --flash` regenerates the manifest before flashing anyway.)
 
 ## GD32 bridge programming: not this backend, not `tan` any more
 
@@ -276,3 +371,5 @@ programming the GD32 will still need.
   and cannot enumerate what is resident first, so the replacement must be
   acknowledged. Ports alp-sdk#2025 (PR alp-sdk#2029), which put the same
   refusal on the AEN bench scripts.
+- tan-cli#1267 — `--replace-atoc`: Flow A's half, reading the `alif_flash`
+  runner's own pre-burn verdict (alp-sdk#2262, PR alp-sdk#2275).
