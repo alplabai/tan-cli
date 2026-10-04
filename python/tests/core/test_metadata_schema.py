@@ -151,6 +151,40 @@ def test_validate_document_reports_one_message_for_a_corrupt_schema_file(tmp_pat
     )
 
 
+def test_validate_document_reports_one_message_for_valid_json_that_is_not_a_schema(tmp_path):
+    """tan-cli#1303: a schema file that parses as JSON but is not a valid
+    JSON Schema (`{"type": 5}` -- `type` must name a JSON type) used to escape
+    as a raw `TypeError` out of `iter_errors`, breaking this function's
+    never-raises contract for every read-path caller. It is the same
+    "exists but cannot be used" anomaly as the corrupt file above, so it gets
+    the same single message, naming what is wrong with the schema.
+    """
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text('{"type": 5}', encoding="utf-8")
+    doc_path = tmp_path / "d.json"
+
+    errors = validate_document({"type": 7}, schema_path, doc_path)
+
+    assert len(errors) == 1
+    assert errors[0].startswith(
+        f"{_posix(doc_path)}: could not validate against {_posix(schema_path)}: "
+        "not a valid JSON Schema: "
+    )
+    assert "5 is not valid under any of the given schemas" in errors[0]
+
+
+def test_validate_document_still_reports_violations_against_a_valid_schema_after_the_probe(tmp_path):
+    """The schema probe must not swallow a real document violation: a valid
+    schema still yields the per-violation messages, unchanged."""
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text('{"type": "object", "required": ["sku"]}', encoding="utf-8")
+    doc_path = tmp_path / "d.json"
+
+    errors = validate_document({}, schema_path, doc_path)
+
+    assert errors == [f"{_posix(doc_path)}: <root>: 'sku' is a required property"]
+
+
 # ---------------------------------------------------------------------------
 # Caching (tan-cli#964 review, minor 8)
 # ---------------------------------------------------------------------------
