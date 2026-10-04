@@ -1096,6 +1096,14 @@ class TestValidateDocument:
         result = metadata_schema.validate_document({}, schema_path, source="src")
         assert len(result) == 1
 
+    def test_valid_json_that_is_not_a_json_schema(self, tmp_path):
+        # tan-cli#1303: readable, parseable, and still unusable -- `iter_errors`
+        # raised a raw `TypeError` on `{"type": 5}` before the schema probe.
+        schema_path = tmp_path / "schema.json"
+        schema_path.write_text('{"type": 5}', encoding="utf-8")
+        result = metadata_schema.validate_document({}, schema_path, source="src")
+        assert len(result) == 1
+
     @_skip_as_root
     def test_permission_denied(self, tmp_path):
         # tan-cli#1116 review round 2 BLOCKER, re-derived: the first version
