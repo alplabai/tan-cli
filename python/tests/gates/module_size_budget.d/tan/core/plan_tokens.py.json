@@ -5,11 +5,11 @@
   "lines": null,
   "long_functions": [
     [
-      57,
+      65,
       "substitute_plan_tokens"
     ],
     [
-      88,
+      90,
       "_substitute_slice"
     ]
   ]

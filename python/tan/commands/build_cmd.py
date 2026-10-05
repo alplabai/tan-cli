@@ -101,6 +101,7 @@ from tan.commands.build.materialise import MaterialiseError, materialise_plan
 from tan.commands.build.token_substitution import (
     TokenSubstitutionError,
     apply_plan_token_substitution,
+    deferred_placeholder_issues,
 )
 from tan.commands.build.toolchain import ToolchainResolution, resolve_toolchain_root
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
@@ -112,7 +113,7 @@ from tan.core.plan_exec import (
     normalize_path,
     resolve_action,
 )
-from tan.core.plan_tokens import TOKEN_TOOLCHAIN_ROOT
+from tan.core.plan_tokens import TOKEN_TOOLCHAIN_ROOT, DeferredPlaceholder
 from tan.core.sdk_discovery import (
     _abs_posix,
     _planner_python,
@@ -1238,6 +1239,7 @@ def _build(
     # can never reach disk or an argv. A no-op on an untokened plan -- e.g. an
     # old `--plan-from` file (the planner itself now tags every plan tokened).
     toolchain = _toolchain_for_plan(text)
+    deferred: list[DeferredPlaceholder] = []
     try:
         plan, demotions = apply_plan_token_substitution(
             plan,
@@ -1247,6 +1249,7 @@ def _build(
             python=_planner_python(build_root, sdk_root),
             toolchain_root=toolchain.root,
             toolchain_advice=toolchain.advice,
+            deferred_out=deferred,
         )
     except TokenSubstitutionError as err:
         # RuntimeFailure for every code this pass raises, `build.plan-invalid`
@@ -1298,6 +1301,10 @@ def _build(
         if mode == _MODE_MATERIALISE and demotions
         else []
     )
+    # tan-cli#1302: placeholders deliberately left in a config artefact, and a
+    # malformed `deferredPlaceholders`. Reported on EVERY path that
+    # materialises, so the native build says it too, not just `--materialise`.
+    deferred_issues = deferred_placeholder_issues(plan, deferred)
 
     # I-20. ALL of them, then dispatch -- never interleaved.
     try:
@@ -1321,7 +1328,7 @@ def _build(
         return (
             ExitCode.SUCCESS,
             {"schemaVersion": "1", "baseDir": build_root, "written": written},
-            demotion_issues,
+            demotion_issues + deferred_issues,
         )
 
     # Cleared before dispatch, mirroring `run_cmd.py`'s own pattern, so a
@@ -1383,6 +1390,7 @@ def _build(
     # are the only place the planner explains a `command: null` slice, and
     # they reached `data.warnings` alone until now.
     issues.extend(_plan_warning_issues(plan.warnings))
+    issues.extend(deferred_issues)
     # The sdk-switch-pristine wipe (issue #52) must not be stderr-only in
     # JSON mode -- the VS Code extension only ever sees the envelope, not
     # `_stream`'s output. Verbatim oracle codes/severity
