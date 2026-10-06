@@ -463,8 +463,8 @@ def monitor(
         "until the U-Boot prompt appears or --break-timeout passes, then continue "
         "in the interactive console on the same open port. With --non-interactive "
         "it stops after the break-in instead (exit 0 if caught); the console "
-        "itself needs a terminal. --non-interactive is a global flag (also "
-        "accepted by every command). Power-cycle the board yourself; works over "
+        "itself needs a terminal. --non-interactive is a shared flag (see "
+        "its own help line). Power-cycle the board yourself; works over "
         "rfc2217:// and socket:// URLs (note: socket:// to a telnet/RFC2217 "
         "ser2net port delivers the IAC negotiation bytes as data; use rfc2217://).",
     ),
@@ -520,7 +520,7 @@ def monitor(
     quiet: bool = typer.Option(False, "--quiet", hidden=True),
     no_color: bool = typer.Option(False, "--no-color", hidden=True),
     non_interactive: bool = typer.Option(
-        False, "--non-interactive", help="With --break-uboot: stop after the break-in (global flag)."
+        False, "--non-interactive", help="With --break-uboot: stop after the break-in."
     ),
     ci: bool = typer.Option(False, "--ci", hidden=True),
 ) -> None:
