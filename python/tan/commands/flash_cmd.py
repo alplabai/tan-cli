@@ -148,6 +148,13 @@ from tan.core.flash_plan import (
     validate_flow_d_shape,
 )
 from tan.core.global_flags import accept_global_flags
+from tan.core.jlink_probe import (
+    ProbeSelection,
+    enumerate_jlinks,
+    is_valid_usb_path,
+    isolation_asserted,
+    resolve_probe_selection,
+)
 from tan.core.subprocess_env import spawn_env
 from tan.core.setools import (
     find_app_gen_toc,
@@ -257,6 +264,15 @@ class _Entry:
     #: distinguishes them. NOT part of the envelope contract -- `as_dict()`
     #: never emits it, like the two above.
     atoc_unacknowledged: bool = False
+    #: tan-cli#1312: the J-Link selection this entry ran (or would run) under,
+    #: echoed in the envelope as `probe` -- present only when a probe selector
+    #: was given or at least one J-Link was visible, so a run with neither
+    #: keeps the pre-#1312 entry shape byte for byte.
+    probe: dict[str, Any] | None = None
+    #: tan-cli#1312: the `flash.probe-*` suffix (`ambiguous` / `not-found` /
+    #: `selector-conflict`) when this entry refused on probe selection. Read by
+    #: `_run`, never emitted by `as_dict()`.
+    probe_refusal: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"kind": self.kind, "id": self.id}
@@ -268,6 +284,8 @@ class _Entry:
         out["status"] = self.status
         out["rc"] = self.rc
         out["message"] = self.message
+        if self.probe is not None:
+            out["probe"] = self.probe
         return out
 
 
@@ -1997,6 +2015,55 @@ class _Context:
     #: environment-variable half, unlike `force_confirm`/`require_dpidr` --
     #: see `flash_plan.atoc_replacement_acknowledged` for why.
     atoc_unqueryable: bool = False
+    #: `--probe-serial` / `--probe-usb-path` (tan-cli#1312): override
+    #: `flash_args.jlink_serial` for this run; see `tan.core.jlink_probe`.
+    probe_serial: str | None = None
+    probe_usb_path: str | None = None
+    #: `TAN_PROBE_ISOLATED=1` -- the caller's assertion that a probe-masking
+    #: wrapper isolates the target. Unverifiable by tan; see `jlink_probe`.
+    probe_isolated: bool = False
+    #: Read-only J-Link enumeration, injectable so tests never touch real USB.
+    #: `None` resolves to the module's `enumerate_jlinks` at call time.
+    enumerate_probes: Callable[[], Any] | None = None
+
+
+def _flow_d_probe_selection(
+    flash_args: Any, ctx: _Context
+) -> tuple[Any, ProbeSelection | None]:
+    """tan-cli#1312: resolve which J-Link a Flow D entry will use, BEFORE
+    anything (SETOOLS sign, preflight, write) happens. Returns the `flash_args`
+    to carry on with (the selected serial substituted for `jlink_serial`) and
+    the selection, or `(flash_args, None)` when `flash_args` is not a mapping
+    (shape validation reports that)."""
+    if not isinstance(flash_args, dict):
+        return flash_args, None
+    try:
+        manifest_serial = fa_str_checked(flash_args, "jlink_serial", False)
+    except FlashPlanError:
+        return flash_args, None  # the shape check reports the malformed key
+    probes = (ctx.enumerate_probes or enumerate_jlinks)()
+    selection = resolve_probe_selection(
+        probes,
+        cli_serial=ctx.probe_serial,
+        cli_usb_path=ctx.probe_usb_path,
+        manifest_serial=manifest_serial,
+        isolated=ctx.probe_isolated,
+    )
+    if selection.refusal_code is None and selection.serial is not None:
+        if selection.serial != manifest_serial:
+            flash_args = {**flash_args, "jlink_serial": selection.serial}
+    return flash_args, selection
+
+
+def _probe_echo(selection: ProbeSelection | None, ctx: _Context) -> dict[str, Any] | None:
+    """The envelope's `probe` echo -- `None` (key absent) when no selector was
+    given and no J-Link was visible, preserving the pre-#1312 shape."""
+    if selection is None:
+        return None
+    given = ctx.probe_serial is not None or ctx.probe_usb_path is not None
+    if not given and not selection.visible and selection.refusal_code is None:
+        return None
+    return selection.as_dict()
 
 
 def _recovery_armed_for(target: FlashTarget, ctx: _Context) -> bool:
@@ -2262,6 +2329,10 @@ def _flash_entry(
     # the fact worth reporting is that a recovery write was AUTHORISED, not that
     # one completed. False on every policy-declined path by construction.
     recovery = _recovery_armed_for(target, ctx)
+    # tan-cli#1312: set by the Flow D selection below, read by `entry` so every
+    # `_Entry` built after it carries the `probe` echo.
+    probe_echo: dict[str, Any] | None = None
+    probe_note = ""
 
     def entry(
         method: str | None,
@@ -2271,11 +2342,13 @@ def _flash_entry(
         *,
         preflight_unarmed: bool = False,
         atoc_unacknowledged: bool = False,
+        probe_refusal: str | None = None,
     ) -> _Entry:
         return _Entry(
             kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message,
             preflight_unarmed=preflight_unarmed, recovery_armed=recovery,
             atoc_unacknowledged=atoc_unacknowledged,
+            probe=probe_echo, probe_refusal=probe_refusal,
         )
 
     # tan-cli#611, THE HOIST. WHO may flash this entry is decided BEFORE
@@ -2442,6 +2515,23 @@ def _flash_entry(
     # `--dry-run` early return just below.
     setools_note: str | None = None
     if method == FLOW_D_METHOD:
+        # tan-cli#1312: probe selection is the FIRST decision about a Flow D
+        # entry -- ahead of the SETOOLS sign, the preflight and the write, and
+        # it applies under `--dry-run` too (a preview that would refuse is not
+        # reported ok). Enumeration is read-only.
+        flash_args, selection = _flow_d_probe_selection(flash_args, ctx)
+        probe_echo = _probe_echo(selection, ctx)
+        if probe_echo is not None and selection is not None:
+            probe_note = f" ({selection.describe()})"
+        if selection is not None and selection.refusal_code is not None:
+            lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+            lines.append(f"  FAIL: {selection.refusal}")
+            return (
+                1,
+                entry(method, "failed", 1, selection.refusal or "",
+                      probe_refusal=selection.refusal_code),
+                lines,
+            )
         # FOUR things happen to `flash_args`/its shape before dispatch, in an
         # order tan-cli#366/#367's review fixed: the ATOC address may need
         # resolving from a build artefact rather than arriving on the
@@ -2603,7 +2693,7 @@ def _flash_entry(
             # only at the shared preview block below. This is the most common
             # AEN preview of the two, and omitting it here would leave exactly
             # the operator who has not signed yet uninformed.
-            previewed = f"{setools_note} {ATOC_REPLACEMENT_PREVIEW_NOTE}"
+            previewed = f"{setools_note} {ATOC_REPLACEMENT_PREVIEW_NOTE}{probe_note}"
             lines.append(f"flash: {kind} '{entry_id}' -> {method}")
             lines.append(f"  {previewed}")
             status = "ok" if ctx.dry_run else "planned"
@@ -2639,7 +2729,7 @@ def _flash_entry(
         if ctx.dry_run:
             # The user explicitly asked for a preview -- nothing was ever going
             # to run. rc 0 / status "ok" (alp_flash's "clean-dry-run").
-            msg = f"would run {shown}{atoc_note}"
+            msg = f"would run {shown}{atoc_note}{probe_note}"
             lines.append(f"  {msg}")
             return 0, entry(method, "ok", 0, msg), lines
         # The BACKEND declined a real write because the confirm gate is not
@@ -3036,6 +3126,9 @@ def _run(
     recover: bool = False,
     confirm_flag: bool = False,
     atoc_unqueryable: bool = False,
+    probe_serial: str | None = None,
+    probe_usb_path: str | None = None,
+    enumerate_probes: Callable[[], Any] | None = None,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -3216,6 +3309,10 @@ def _run(
         # whether or not `--helper` was given (tan-cli#611).
         helper_filter=helper,
         atoc_unqueryable=atoc_unqueryable,
+        probe_serial=probe_serial,
+        probe_usb_path=probe_usb_path,
+        probe_isolated=isolation_asserted(os.environ),
+        **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
     )
     for target in plan.targets:
         rc, entry, lines = _flash_entry(target, ctx)
@@ -3241,7 +3338,15 @@ def _run(
         # is the channel `--format json` consumers key error rendering off, so
         # `ok:false` must never ship with an empty issues list.
         if rc > 0:
-            if entry.atoc_unacknowledged:
+            # tan-cli#1312: probe-selection refusals, literal `Issue` calls for
+            # the same static-gate reason as the ATOC one below.
+            if entry.probe_refusal == "ambiguous":
+                issues.append(Issue("flash.probe-ambiguous", "error", entry.message))
+            elif entry.probe_refusal == "not-found":
+                issues.append(Issue("flash.probe-not-found", "error", entry.message))
+            elif entry.probe_refusal == "selector-conflict":
+                issues.append(Issue("flash.probe-selector-conflict", "error", entry.message))
+            elif entry.atoc_unacknowledged:
                 # tan-cli#1252: the ONE failed entry that does not report the
                 # generic code. Every flash refusal returns rc 1 / `status:
                 # failed`, so `flash.entry-failed` cannot tell a consumer that
@@ -3516,6 +3621,26 @@ def flash(
         "preview still previews. Separate from --confirm, which only arms the write "
         "itself, and it has no effect on any other backend.",
     ),
+    probe_serial: str = typer.Option(
+        None,
+        "--probe-serial",
+        metavar="SN",
+        help="J-Link serial to use for THIS run, overriding flash_args.jlink_serial "
+        "(tan-cli#1312). Refuses (flash.probe-ambiguous) when several visible probes "
+        "share that serial -- on a bench of cloned serials use --probe-usb-path. "
+        "Applies to alif_mram_jlink; echoed as `probe` on the entry.",
+    ),
+    probe_usb_path: str = typer.Option(
+        None,
+        "--probe-usb-path",
+        metavar="BUS-PORT",
+        help="Select the J-Link at this USB port path (e.g. 3-4.2). tan resolves it to "
+        "the probe's serial from sysfs; J-Link selects by serial only, so when other "
+        "visible probes share that serial tan REFUSES (flash.probe-ambiguous) instead "
+        "of guessing -- run it where only the target probe is visible (a masking "
+        "wrapper; set TAN_PROBE_ISOLATED=1 if the wrapper stands in for JLinkExe). "
+        "Linux only.",
+    ),
     skip_missing_tools: bool = typer.Option(
         False,
         "--skip-missing-tools",
@@ -3552,6 +3677,15 @@ def flash(
     # with an empty stdout) would be indistinguishable from a broken device.
     resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
+    # A direct call (a test, an in-process caller) leaves an unpassed option as
+    # typer's `OptionInfo` default object, not `None`.
+    probe_serial = probe_serial if isinstance(probe_serial, str) else None
+    probe_usb_path = probe_usb_path if isinstance(probe_usb_path, str) else None
+    if probe_usb_path is not None and not is_valid_usb_path(probe_usb_path):
+        raise typer.BadParameter(
+            f"{probe_usb_path!r} is not a USB port path like 3-4.2 (<bus>-<port>[.<port>...])",
+            param_hint="--probe-usb-path",
+        )
 
     # Resolved OUTSIDE the guard: `project_obj` is reported on every path
     # including the internal-failure one, and `_resolve_project` is pure string
@@ -3584,6 +3718,8 @@ def flash(
             setools_dir_arg=setools_dir,
             confirm_flag=confirm,
             atoc_unqueryable=atoc_unqueryable,
+            probe_serial=probe_serial,
+            probe_usb_path=probe_usb_path,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an

@@ -1124,6 +1124,30 @@
       "note": "Added closing tan-cli#1252, porting alp-sdk#2025 (PR alp-sdk#2029, which made scripts/bench/aen/flash-jlink.sh, flash-jlink-hp.sh and flash-jlink-mramxip.sh refuse with exit 8 for the same reason). EMISSION CONDITION: a Flow D (alif_mram_jlink) write that would REALLY proceed -- the confirm gate armed AND not --dry-run -- where neither the --atoc-unqueryable flag nor flash_args.atoc_unqueryable: true acknowledged that the write REPLACES the entire ATOC. Flow D burns the ATOC over SWD with no SE-UART channel to enumerate what is resident first, so every boot entry already in MRAM that the new ATOC does not name (an A32 boot chain, an HP app, a diagnostic image) is silently delisted -- and the Secure Enclave still prints \"[SES] ATOC ok\" afterwards, so the transcript looks clean. Deliberately DISTINCT from flash.entry-failed: every flash refusal shares rc 1 and status failed, so the code is the only channel that can tell a consumer this particular one is answered by a single documented acknowledgement rather than by fixing a manifest, a probe or a path. Deliberately an error, not a warning: unlike flash.dpidr-preflight-unarmed the write does not proceed. The acknowledgement has EXACTLY two spellings and no environment variable, on purpose -- an exported env var acknowledges every later write including the unattended ones, which is the habit alp-sdk#2025's own header warns against when it says the Flow D flag must never be merged or aliased with Flow A's --replace-atoc. A preview (--dry-run, or an unconfirmed run) never emits this: it still previews, and carries the replacement warning in its own message instead. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "flash.probe-ambiguous",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "EMISSION CONDITION: more than one visible J-Link could be the one a write goes to and nothing disambiguates -- (a) several probes visible and no --probe-usb-path, --probe-serial or flash_args.jlink_serial; (b) several visible probes share the selected serial (J-Link Commander selects by serial ONLY, so it would open whichever enumerates first -- possibly the wrong board); or (c) --probe-usb-path names a probe whose serial is shared, which tan cannot address uniquely. The remedy is a USB path (a), or isolation outside tan (b, c): a wrapper masking the other probes in a private mount namespace, optionally asserted with TAN_PROBE_ISOLATED=1. Added by tan-cli#1312 (`tan flash --probe-serial` / `--probe-usb-path`). Applies to Flow D (alif_mram_jlink), the only J-Link-using backend left after tan-cli#732. Enumeration is read-only sysfs; the refusal fires before the SETOOLS sign, the preflight and the write, and under --dry-run too. Deliberately distinct from flash.entry-failed: every flash refusal shares rc 1 / status failed, so the code is the only channel that tells a consumer THIS one is answered by naming a probe. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.probe-not-found",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "EMISSION CONDITION: an explicit CLI selector names a probe tan cannot find -- --probe-usb-path with no J-Link at that path (or a host that cannot enumerate USB, or a probe whose serial sysfs will not give), or --probe-serial matching no visible J-Link. Added by tan-cli#1312 (`tan flash --probe-serial` / `--probe-usb-path`). Applies to Flow D (alif_mram_jlink), the only J-Link-using backend left after tan-cli#732. Enumeration is read-only sysfs; the refusal fires before the SETOOLS sign, the preflight and the write, and under --dry-run too. Deliberately distinct from flash.entry-failed: every flash refusal shares rc 1 / status failed, so the code is the only channel that tells a consumer THIS one is answered by naming a probe. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.probe-selector-conflict",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "EMISSION CONDITION: --probe-usb-path and --probe-serial were both given and name different probes (the probe at that USB path carries another serial). Added by tan-cli#1312 (`tan flash --probe-serial` / `--probe-usb-path`). Applies to Flow D (alif_mram_jlink), the only J-Link-using backend left after tan-cli#732. Enumeration is read-only sysfs; the refusal fires before the SETOOLS sign, the preflight and the write, and under --dry-run too. Deliberately distinct from flash.entry-failed: every flash refusal shares rc 1 / status failed, so the code is the only channel that tells a consumer THIS one is answered by naming a probe. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "flash.entries-skipped",
       "status": "reserved",
       "severity": "warning",
