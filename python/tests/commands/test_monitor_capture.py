@@ -98,7 +98,7 @@ def test_duration_only_succeeds_with_matched_null(monkeypatch):
     r = run(["--capture", "--duration", "0.2"])
     assert r.exit_code == 0
     cap = envelope(r)["data"]["capture"]
-    assert cap["matched"] is None and cap["bytesSeen"] == 3
+    assert cap["matched"] is False and cap["untilGiven"] is False and cap["bytesSeen"] == 3
 
 
 def test_capture_composes_with_break_uboot(monkeypatch):
@@ -156,9 +156,94 @@ def test_io_error_while_reading_is_reported_and_closes(monkeypatch):
     assert made[0].closed
 
 
-def test_log_stores_raw_bytes_regardless_of_console_filter(monkeypatch, tmp_path):
+def test_log_is_0600_raw_bytes_and_path_is_reported_absolute(monkeypatch, tmp_path):
     _fake_serial(monkeypatch, [b"\x1b[1;32mok\x1b[0m\r\n"])
-    log = tmp_path / "raw.log"
-    r = run(["--capture", "--duration", "0.2", "--filter", "printable", "--log", str(log)])
+    monkeypatch.chdir(tmp_path)
+    r = run(["--capture", "--duration", "0.2", "--log", "raw.log"])
     assert r.exit_code == 0
+    log = tmp_path / "raw.log"
     assert log.read_bytes() == b"\x1b[1;32mok\x1b[0m\r\n"
+    assert (log.stat().st_mode & 0o777) == 0o600
+    assert envelope(r)["data"]["capture"]["logFile"] == str(log)
+
+
+def test_log_refuses_a_symlink(monkeypatch, tmp_path):
+    _fake_serial(monkeypatch, [])
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    link = tmp_path / "x.log"
+    link.symlink_to(victim)
+    r = run(["--capture", "--duration", "0.2", "--log", str(link)])
+    assert r.exit_code == 3
+    assert envelope(r)["issues"][0]["code"] == "monitor.capture-log-failed"
+    assert victim.read_text() == "keep"
+
+
+def test_filter_is_refused_under_capture(monkeypatch):
+    _fake_serial(monkeypatch, [])
+    r = run(["--capture", "--duration", "1", "--filter", "printable"])
+    assert r.exit_code == 2
+    assert envelope(r)["issues"][0]["code"] == "monitor.capture-bad-option"
+
+
+def test_non_interactive_is_accepted_under_capture(monkeypatch):
+    _fake_serial(monkeypatch, [b"x"])
+    assert run(["--capture", "--duration", "0.2", "--non-interactive"]).exit_code == 0
+
+
+def test_port_is_closed_after_a_capture_timeout(monkeypatch):
+    made = _fake_serial(monkeypatch, [b"nothing\n"])
+    r = run(["--capture", "--until", "zzz", "--duration", "0.2"])
+    assert r.exit_code == 1 and made[0].closed
+
+
+def test_log_is_not_created_when_the_break_in_fails(monkeypatch, tmp_path):
+    _fake_serial(monkeypatch, [b"noise"])
+    log = tmp_path / "never.log"
+    r = run(["--capture", "--break-uboot", "--break-timeout", "0.2", "--duration", "1", "--log", str(log)])
+    assert r.exit_code == 1
+    assert not log.exists()
+
+
+def test_log_is_not_created_when_the_port_cannot_open(monkeypatch, tmp_path):
+    _fake_serial(monkeypatch, [])
+    log = tmp_path / "never.log"
+    r = runner.invoke(
+        app,
+        ["--port", "socket://refused:1", "--format", "json", "--capture", "--duration", "1",
+         "--log", str(log)],
+    )
+    assert r.exit_code == 1 and not log.exists()
+
+
+def test_break_in_output_reaches_the_log_and_until(monkeypatch, tmp_path):
+    _fake_serial(monkeypatch, [], prompt_on_write=True)
+    log = tmp_path / "b.log"
+    r = run(["--capture", "--break-uboot", "--until", r"=> $", "--duration", "2", "--log", str(log)])
+    assert r.exit_code == 0, r.stdout
+    cap = envelope(r)["data"]["capture"]
+    assert cap["matched"] is True and cap["matchedLine"] == "=> "
+    assert log.read_bytes().endswith(b"=> ")
+
+
+def test_sink_failure_closes_port_and_sink_and_is_not_a_serial_error(monkeypatch, tmp_path):
+    from tan.commands import monitor_session
+
+    made = _fake_serial(monkeypatch, [b"data"])
+    state = {}
+
+    class Full:
+        def write(self, b):
+            raise OSError(28, "No space left on device")
+
+        def flush(self):
+            pass
+
+        def close(self):
+            state["closed"] = True
+
+    monkeypatch.setattr(monitor_session, "_open_log", lambda path, data: Full())
+    r = run(["--capture", "--duration", "1", "--log", str(tmp_path / "f.log")])
+    assert r.exit_code == 3
+    assert envelope(r)["issues"][0]["code"] == "monitor.capture-log-failed"
+    assert made[0].closed and state["closed"]

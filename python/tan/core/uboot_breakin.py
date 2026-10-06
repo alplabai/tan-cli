@@ -45,6 +45,9 @@ class BreakInResult:
     elapsed_s: float
     bytes_seen: int
     tail: str
+    #: The last (up to 4 KiB of) raw bytes received, so a caller can carry them
+    #: into the next phase (`--capture` after `--break-uboot`).
+    window: bytes = b""
 
 
 _SIMPLE_ESCAPES = {"r": b"\r", "n": b"\n", "t": b"\t", "\\": b"\\"}
@@ -122,7 +125,7 @@ def break_into_uboot(
         return prompt in window
 
     def result(caught: bool) -> BreakInResult:
-        return BreakInResult(caught, clock() - start, seen, _tail_text(window))
+        return BreakInResult(caught, clock() - start, seen, _tail_text(window), window)
 
     while True:
         # Drain everything already received BEFORE deciding to send another

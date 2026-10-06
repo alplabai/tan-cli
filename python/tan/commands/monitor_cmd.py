@@ -69,6 +69,7 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 from enum import Enum
 from pathlib import Path
 
@@ -304,6 +305,20 @@ def _refuse_listing_ports(reason: str) -> MonitorError:
     )
 
 
+def _monitor_env() -> dict:
+    """`spawn_env()` minus any relative / empty `PYTHONPATH` entry (those mean
+    "the cwd" and would defeat the empty-cwd spawn)."""
+    env = spawn_env()
+    entries = env.get("PYTHONPATH")
+    if entries:
+        keep = [e for e in entries.split(os.pathsep) if e and os.path.isabs(e)]
+        if keep:
+            env["PYTHONPATH"] = os.pathsep.join(keep)
+        else:
+            del env["PYTHONPATH"]
+    return env
+
+
 def _child_stdout(json_mode: bool):
     """What miniterm's stdout is wired to (tan-cli#491 defect 6).
 
@@ -339,6 +354,37 @@ def _child_stdout(json_mode: bool):
     except (AttributeError, OSError, ValueError):
         pass
     return subprocess.DEVNULL
+
+
+def _spawn_console(python: str, port: str, baud: int, console_filter: str, json_mode: bool) -> int:
+    """Run the plain console child (`python -c <bootstrap>`), returning its exit code."""
+    try:
+        # Empty cwd: `-c` puts the cwd on sys.path, so a `serial/` planted in the
+        # project dir would be imported instead of pyserial (tan-cli#1317).
+        with tempfile.TemporaryDirectory(prefix="tan-monitor-") as empty:
+            return subprocess.run(
+                [
+                    python,
+                    "-c",
+                    console_filter_mod.BOOTSTRAP,
+                    "--filter",
+                    console_filter,
+                    # The spawn runs from an empty cwd, so a relative device path
+                    # must be made absolute first.
+                    os.path.abspath(port) if os.path.exists(port) else port,
+                    str(baud),
+                ],
+                stdout=_child_stdout(json_mode),
+                env=_monitor_env(),
+                cwd=empty,
+            ).returncode
+    except OSError as err:
+        raise MonitorError(
+            "monitor.launch-failed",
+            f"failed to launch `{python} -c <miniterm bootstrap>`: {err}",
+            ExitCode.RUNTIME_FAILURE,
+            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
+        ) from err
 
 
 def _run_monitor(
@@ -395,19 +441,7 @@ def _run_monitor(
         )
 
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
-    try:
-        rc = subprocess.run(
-            [python, "-c", console_filter_mod.BOOTSTRAP, "--filter", console_filter, port, str(baud)],
-            stdout=_child_stdout(json_mode),
-            env=spawn_env(),
-        ).returncode
-    except OSError as err:
-        raise MonitorError(
-            "monitor.launch-failed",
-            f"failed to launch `{python} -m serial.tools.miniterm`: {err}",
-            ExitCode.RUNTIME_FAILURE,
-            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
-        ) from err
+    rc = _spawn_console(python, port, baud, console_filter, json_mode)
 
     data = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud}
     if rc != 0:
@@ -463,7 +497,8 @@ def monitor(
         "--capture",
         help="Headless capture instead of an interactive console: no TTY needed, "
         "works over pyserial URLs, stores raw bytes. Needs --duration and/or "
-        "--until; combine with --break-uboot to break in first.",
+        "--until; combine with --break-uboot to break in first. Never prompts "
+        "(--non-interactive is accepted and has no further effect).",
     ),
     duration: float = typer.Option(
         None, "--duration", help="With --capture: seconds to read (default 30 with --until)."
@@ -471,14 +506,15 @@ def monitor(
     until: str = typer.Option(
         None,
         "--until",
-        help="With --capture: stop at the first line matching this regex; the "
-        "envelope carries the line. No match in time is an error.",
+        help="With --capture: stop at the first line (or unterminated partial line, "
+        "e.g. a prompt) matching this regex; the envelope carries it. No match "
+        "in time is an error.",
     ),
     log: str = typer.Option(None, "--log", help="With --capture: write the raw bytes to this file."),
     console_filter: ConsoleFilter = typer.Option(
-        ConsoleFilter.COLORS,
+        None,
         "--filter",
-        help="Console output filter: colors (colours render, every other escape "
+        help="Console output filter (default: colors): colors (colours render, every other escape "
         "is neutralised), default/nocontrol/printable (strip control codes), "
         "direct (raw bytes to the terminal: unsafe for untrusted targets).",
     ),
@@ -529,9 +565,12 @@ def monitor(
         from tan.commands import monitor_session  # noqa: PLC0415 (validation only)
 
         opts = monitor_session.break_opts(break_uboot, break_key, prompt, break_timeout)
-        cap = monitor_session.capture_opts(capture, duration, until, log)
+        cap = monitor_session.capture_opts(
+            capture, duration, until, log, console_filter is not None
+        )
         data, issues, exit_code = _run_monitor(
-            port, baud, json_mode, opts, non_interactive, console_filter.value, cap
+            port, baud, json_mode, opts, non_interactive,
+            console_filter.value if console_filter else "colors", cap
         )
     except MonitorError as err:
         finish(err.data, [Issue(err.code, "error", err.message)], err.exit_code)

@@ -14,6 +14,7 @@ there), so the plain `tan monitor` path never loads it.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 
@@ -106,9 +107,10 @@ def open_port(port: str, baud: int, capture: bool = False):
         ) from err
 
 
-def break_in(ser, port: str, baud: int, opts: BreakOpts) -> dict:
+def break_in(ser, port: str, baud: int, opts: BreakOpts) -> tuple[dict, bytes]:
     """Run the loop on the open `ser`; the port stays OPEN either way (the
-    caller owns closing it). Returns the envelope's `breakIn` block."""
+    caller owns closing it). Returns the envelope's `breakIn` block and the
+    raw tail of what was received (4 KiB at most)."""
     key, prompt, timeout_s = opts
     try:
         result = uboot_breakin.break_into_uboot(ser, key=key, prompt=prompt, timeout_s=timeout_s)
@@ -119,13 +121,14 @@ def break_in(ser, port: str, baud: int, opts: BreakOpts) -> dict:
             ExitCode.RUNTIME_FAILURE,
             {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
         ) from err
-    return {
+    block = {
         "caught": result.caught,
         "elapsedSeconds": round(result.elapsed_s, 3),
         "timeoutSeconds": timeout_s,
         "bytesSeen": result.bytes_seen,
         "bytesSeenTail": result.tail,
     }
+    return block, result.window
 
 
 def attach_miniterm(ser, json_mode: bool, console_filter: str = "colors") -> int:
@@ -135,7 +138,10 @@ def attach_miniterm(ser, json_mode: bool, console_filter: str = "colors") -> int
     options tan does not expose: exit Ctrl+], menu Ctrl+T, UTF-8, CRLF. The
     output filter is `console_filter` (`--filter`, default tan's `colors`:
     SGR colours render, every other escape is neutralised; see
-    `tan.core.console_filter`). Under `--format json` the
+    `tan.core.console_filter`). Assumes tan is not running as `python -m tan`
+    from an untrusted project directory (that puts the cwd on `sys.path`
+    ahead of pyserial); the released `tan` is frozen, and the spawned plain
+    console runs from an empty cwd. Under `--format json` the
     `Console` is built with `sys.stdout` pointed at stderr, the same rule
     `monitor_cmd._child_stdout` states for the spawned path.
 
@@ -143,6 +149,7 @@ def attach_miniterm(ser, json_mode: bool, console_filter: str = "colors") -> int
     (it reads termios attributes off stdin).
     """
     term = None
+    started = False
     real_stdout = sys.stdout
     try:
         try:
@@ -169,6 +176,7 @@ def attach_miniterm(ser, json_mode: bool, console_filter: str = "colors") -> int
             term.set_rx_encoding("UTF-8")
             term.set_tx_encoding("UTF-8")
             term.start()
+            started = True
             try:
                 term.join(True)
             except KeyboardInterrupt:
@@ -183,6 +191,8 @@ def attach_miniterm(ser, json_mode: bool, console_filter: str = "colors") -> int
             ) from err
     finally:
         if term is not None:
+            if started:
+                term.stop()  # reader/writer threads must not outlive a failed run
             term.close()
         ser.close()
     return 0
@@ -210,8 +220,9 @@ def run(
         )
     ser = open_port(port, baud)
     handed_over = False
+    data = base
     try:
-        block = break_in(ser, port, baud, opts)
+        block, _raw = break_in(ser, port, baud, opts)
         data = {**base, "breakIn": block}
         if not block["caught"]:
             return (
@@ -229,7 +240,7 @@ def run(
             return data, [], ExitCode.SUCCESS
         handed_over = True
     except MonitorError as err:
-        err.data = {**err.data, **(data if "data" in locals() else {})}
+        err.data = {**err.data, **data}
         raise
     finally:
         if not handed_over:
@@ -249,15 +260,24 @@ CaptureOpts = tuple["re.Pattern[str] | None", float, "str | None"]
 
 
 def capture_opts(
-    capture: bool, duration: float | None, until: str | None, log: str | None
+    capture: bool,
+    duration: float | None,
+    until: str | None,
+    log: str | None,
+    filter_given: bool = False,
 ) -> CaptureOpts | None:
     """Validate `--capture`/`--duration`/`--until`/`--log` (tan-cli#1324).
-    The companions are refused without `--capture` rather than ignored."""
+    The companions are refused without `--capture` rather than ignored, and
+    `--filter` is refused WITH it (it shapes the interactive console; the log
+    always holds raw bytes). `--non-interactive` is accepted: capture never
+    prompts."""
     try:
         if not capture:
             if duration is not None or until is not None or log is not None:
                 raise ValueError("--duration/--until/--log require --capture")
             return None
+        if filter_given:
+            raise ValueError("--filter applies to the interactive console, not --capture")
         pattern = serial_capture.compile_until(until) if until is not None else None
         if duration is None:
             if pattern is None:
@@ -275,30 +295,42 @@ def capture_opts(
     return pattern, duration, log
 
 
+def _open_log(log: str, data: dict):
+    """Create the `--log` file: 0600, never through a symlink, truncating.
+    (The mode only applies when the file is created; an existing file keeps
+    its own.)"""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        return os.fdopen(os.open(log, flags, 0o600), "wb")
+    except OSError as err:
+        raise _log_failed(log, err, data) from err
+
+
+def _log_failed(log: str, err: BaseException, data: dict) -> MonitorError:
+    return MonitorError(
+        "monitor.capture-log-failed",
+        f"cannot write --log '{log}': {err}",
+        ExitCode.WRITE_FAILURE,
+        data,
+    )
+
+
 def run_capture(
     port: str, baud: int, cap: CaptureOpts, opts: BreakOpts | None
 ) -> tuple[dict, list[Issue], ExitCode]:
     """Headless capture on one in-process port: optional break-in first, then
-    read for the duration / until the regex matches. No TTY is needed, and
-    the log (`--log`) always receives the RAW bytes (no console filter)."""
+    read for the duration / until the regex matches. No TTY is needed. The
+    log (`--log`) is opened only after the port is open and any break-in has
+    succeeded, and always receives RAW bytes (no console filter), starting
+    with the tail of the break-in output when there was one."""
     pattern, duration, log = cap
     data: dict = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud}
+    ser = open_port(port, baud, capture=True)
     sink = None
-    if log is not None:
-        try:
-            sink = open(log, "wb")  # noqa: SIM115 (closed in the finally below)
-        except OSError as err:
-            raise MonitorError(
-                "monitor.capture-log-failed",
-                f"cannot write --log '{log}': {err}",
-                ExitCode.WRITE_FAILURE,
-                data,
-            ) from err
-    ser = None
     try:
-        ser = open_port(port, baud, capture=True)
+        initial = b""
         if opts is not None:
-            data["breakIn"] = break_in(ser, port, baud, opts)
+            data["breakIn"], initial = break_in(ser, port, baud, opts)
             if not data["breakIn"]["caught"]:
                 return (
                     data,
@@ -306,8 +338,16 @@ def run_capture(
                            f"no U-Boot prompt within {opts[2]}s on {port}.")],
                     ExitCode.RUNTIME_FAILURE,
                 )
+        log_path = None
+        if log is not None:
+            log_path = os.path.abspath(log)
+            sink = _open_log(log_path, data)
         try:
-            res = serial_capture.capture(ser, duration_s=duration, until=pattern, sink=sink)
+            res = serial_capture.capture(
+                ser, duration_s=duration, until=pattern, sink=sink, initial=initial
+            )
+        except serial_capture.SinkError as err:
+            raise _log_failed(log_path, err, data) from err
         except OSError as err:
             raise MonitorError(
                 "monitor.capture-io-failed",
@@ -316,18 +356,25 @@ def run_capture(
                 data,
             ) from err
     finally:
-        if ser is not None:
-            ser.close()
+        ser.close()
         if sink is not None:
-            sink.close()
+            try:
+                sink.close()
+            except OSError as err:
+                # Raising from `finally` would mask an in-flight error; the data
+                # was flushed per chunk, so a close failure is reported only
+                # when nothing else is.
+                if sys.exc_info()[0] is None:
+                    raise _log_failed(log_path, err, data) from err
     data["capture"] = {
-        "matched": res.matched if pattern is not None else None,
+        "untilGiven": pattern is not None,
+        "matched": res.matched,
         "matchedLine": res.matched_line,
         "elapsedSeconds": round(res.elapsed_s, 3),
         "durationSeconds": duration,
         "bytesSeen": res.bytes_seen,
         "bytesSeenTail": res.tail,
-        "logFile": log,
+        "logFile": log_path,
     }
     if pattern is not None and not res.matched:
         return (

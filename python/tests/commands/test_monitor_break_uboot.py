@@ -202,6 +202,9 @@ class _Term:
     def close(self):
         type(self).seen["closed"] = True
 
+    def stop(self):
+        type(self).seen["stopped"] = True
+
     def set_rx_encoding(self, e):
         pass
 
@@ -276,3 +279,47 @@ def test_subprocess_path_passes_the_same_filter(monkeypatch, args, want):
     r = runner.invoke(app, ["--port", "COM7", "--format", "json", *args])
     assert r.exit_code == 0, r.stdout
     assert argv[argv.index("--filter") + 1] == want
+
+
+def test_session_is_stopped_when_it_fails_after_start(monkeypatch):
+    class Failing(_Term):
+        def join(self, *a):
+            raise OSError("tty went away")
+
+    _miniterm(monkeypatch, Failing)
+    ser = FakePort(b"")
+    with pytest.raises(monitor_cmd.MonitorError):
+        monitor_session.attach_miniterm(ser, False)
+    assert Failing.seen["stopped"] and Failing.seen["closed"] and ser.closed
+
+
+def test_plain_spawn_runs_from_an_empty_cwd_and_ignores_a_planted_serial_package(
+    monkeypatch, tmp_path
+):
+    """A `serial/` in the project dir must not be imported by the console
+    child: it runs from an empty temp dir, and relative PYTHONPATH entries
+    are dropped."""
+    import os
+    import subprocess
+
+    pytest.importorskip("serial")
+    planted = tmp_path / "serial"
+    planted.mkdir()
+    marker = tmp_path / "PLANTED_IMPORTED"
+    (planted / "__init__.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["", ".", "rel/dir"]))
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
+    real_run = subprocess.run
+    seen = {}
+
+    def run_help(argv, **kw):
+        seen["cwd"], seen["env"] = kw["cwd"], kw["env"]
+        assert os.listdir(kw["cwd"]) == [] and os.path.abspath(kw["cwd"]) != str(tmp_path)
+        return real_run([*argv[:3], "--help"], **{**kw, "stdout": subprocess.DEVNULL})
+
+    monkeypatch.setattr(monitor_cmd.subprocess, "run", run_help)
+    r = runner.invoke(app, ["--port", "COM7", "--format", "json"])
+    assert r.exit_code == 0, r.stdout
+    assert not marker.exists()
+    assert "PYTHONPATH" not in seen["env"]

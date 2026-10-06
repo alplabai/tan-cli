@@ -85,9 +85,10 @@ def test_byte_by_byte_stream_matches_one_shot():
 
 
 def test_unterminated_osc_cannot_swallow_the_stream_forever():
+    # The string is abandoned once it exceeds the cap (4097th payload char, 2 of which are "0;"),
+    # one placeholder marks it, and later output flows again.
     out = feed("\x1b]0;" + "x" * 10000, "visible")
-    assert out.endswith("visible") or "visible" in out or out.count(P) >= 1
-    assert "\x1b" not in out
+    assert out == P + "x" * (10000 - 4095) + "visible"
 
 
 def test_unterminated_csi_is_bounded():
@@ -109,3 +110,50 @@ def test_bootstrap_runs_miniterm_main_with_the_filter_registered():
     )
     assert r.returncode == 0, r.stderr
     assert "usage" in r.stdout.lower()
+
+
+def test_a_stray_esc_does_not_eat_the_following_newline():
+    assert feed("a\x1b\nb") == "a" + P + "\nb"
+    assert feed("a\x1b\r\nb") == "a" + P + "\r\nb"
+    assert feed("a\x1b\tb") == "a" + P + "\tb"
+
+
+@pytest.mark.parametrize(
+    ("sgr", "want"),
+    [
+        ("\x1b[8m", ""),  # conceal
+        ("\x1b[5m", ""),  # slow blink
+        ("\x1b[6m", ""),  # rapid blink
+        ("\x1b[1;8;31m", "\x1b[1;31m"),  # rest of the sequence kept
+        ("\x1b[5;1m", "\x1b[1m"),
+        ("\x1b[38;5;5m", "\x1b[38;5;5m"),  # 5 is an operand here, not blink
+        ("\x1b[48;5;8m", "\x1b[48;5;8m"),
+        ("\x1b[38;2;8;5;6m", "\x1b[38;2;8;5;6m"),
+        ("\x1b[m", "\x1b[m"),
+        ("\x1b[0m", "\x1b[0m"),
+        ("\x1b[;1m", "\x1b[;1m"),
+    ],
+)
+def test_sgr_conceal_and_blink_are_removed_but_the_rest_survives(sgr, want):
+    assert feed(sgr) == want
+
+
+def test_colon_form_sgr_is_dropped():
+    out = feed("\x1b[38:2::1:2:3mX")
+    assert out == P + "X"
+
+
+@pytest.mark.parametrize(
+    "ch", ["\u202a", "\u202e", "\u2066", "\u2069", "\u2028", "\u2029", "\u200b", "\u200f", "\ufeff"]
+)
+def test_bidi_and_format_controls_are_neutralised(ch):
+    assert feed("a" + ch + "b") == "a" + P + "b"
+
+
+def test_placeholder_falls_back_to_ascii_when_the_stream_cannot_encode_it(monkeypatch):
+    import io
+
+    ascii_out = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+    monkeypatch.setattr(sys, "stdout", ascii_out)
+    f = cf.ColorsFilter()
+    assert f.rx("a\x07b") == "a?b"
