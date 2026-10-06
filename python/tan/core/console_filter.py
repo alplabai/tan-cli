@@ -29,6 +29,14 @@ bad sequences loses to the next terminal quirk):
   an over-long or unterminated sequence emits a placeholder and resyncs to
   ground state without printing the buffered payload.
 
+Accepted residuals (not filterable without breaking colour output): text drawn
+with foreground equal to background is invisible; `\\b` and `\\r` let a device
+overwrite text already on the line; some printable-category characters
+(unassigned-looking Lo/Mn combining marks, zero-width letters) render as
+nothing. A character the output stream's encoding cannot represent (e.g. `世`
+on cp437) is replaced by the placeholder too, so it cannot raise in miniterm's
+reader thread.
+
 Because the only escape that can reach the terminal is one the filter
 generated, the terminal is always in ground state when it sees it, which
 removes the filter-vs-terminal parser differential.
@@ -69,6 +77,8 @@ class ColorsFilter:
 
     def __init__(self):
         self.PLACEHOLDER = _placeholder()
+        self._enc = getattr(_sys.stdout, "encoding", None) or "ascii"
+        self._enc_ok = {}
         self._state = "ground"  # ground|esc|inter|csi|str|stresc
         self._buf = ""
 
@@ -92,8 +102,22 @@ class ColorsFilter:
         out.append(self.PLACEHOLDER)
         self._reset()
 
+    def _encodable(self, ch):
+        ok = self._enc_ok.get(ch)
+        if ok is None:
+            try:
+                ch.encode(self._enc)
+                ok = True
+            except (UnicodeError, LookupError):
+                ok = False
+            if len(self._enc_ok) < 4096:
+                self._enc_ok[ch] = ok
+        return ok
+
     def _printable(self, ch):
-        return ch in self._KEEP or _ud.category(ch) not in self._BAD_CATEGORIES
+        if ch in self._KEEP:
+            return True
+        return _ud.category(ch) not in self._BAD_CATEGORIES and self._encodable(ch)
 
     def _sgr(self, params):
         # `params` is already known to match ^[0-9;]{0,32}$

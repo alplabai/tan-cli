@@ -322,3 +322,97 @@ def test_plain_spawn_runs_from_an_empty_cwd_and_ignores_a_planted_serial_package
     r = runner.invoke(app, ["--port", "COM7", "--format", "json"])
     assert r.exit_code == 0, r.stdout
     assert not marker.exists()
+
+
+def test_a_relative_device_path_is_made_absolute_for_the_empty_cwd_spawn(monkeypatch, tmp_path):
+    import os
+
+    (tmp_path / "ttyV0").write_text("")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(sys.modules, "serial", types.ModuleType("serial"))
+    monkeypatch.setattr(monitor_cmd, "_port_is_usable", lambda port, enumerated: True)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [])
+    argv = []
+    monkeypatch.setattr(
+        monitor_cmd.subprocess, "run", lambda a, **k: argv.extend(a) or types.SimpleNamespace(returncode=0)
+    )
+    assert runner.invoke(app, ["--port", "ttyV0", "--format", "json"]).exit_code == 0
+    assert argv[-2] == os.path.join(str(tmp_path), "ttyV0")
+    # A URL (or a name that is not a file) is passed through untouched.
+    argv.clear()
+    assert runner.invoke(app, ["--port", "socket://gw:1", "--format", "json"]).exit_code == 0
+    assert argv[-2] == "socket://gw:1"
+
+
+@pytest.mark.parametrize("exc", [NotImplementedError("nope"), ValueError("bad"), RuntimeError("odd")])
+def test_any_open_exception_maps_to_open_failed_never_internal_failure(monkeypatch, exc):
+    mod = types.ModuleType("serial")
+    mod.SerialException = IOError
+
+    def boom(*a, **k):
+        raise exc
+
+    mod.serial_for_url = boom
+    monkeypatch.setitem(sys.modules, "serial", mod)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [])
+    monkeypatch.setattr(
+        monitor_cmd, "_url_handler_prefixes", lambda: frozenset({"rfc2217://"})
+    )
+    r = run(["--non-interactive"], url="rfc2217://gw:1")
+    assert r.exit_code == 1
+    assert envelope(r)["issues"][0]["code"] == "monitor.break-open-failed"
+
+
+def test_write_timeout_is_retried_without_it_and_writes_are_guarded(monkeypatch):
+    mod = types.ModuleType("serial")
+    mod.SerialException = IOError
+    calls = []
+    ports = []
+
+    def serial_for_url(url, baud, timeout=None, write_timeout=None):
+        calls.append(write_timeout)
+        if write_timeout is not None:
+            raise NotImplementedError("write_timeout is currently not supported")
+        ports.append(FakePort(b"=> "))
+        return ports[-1]
+
+    mod.serial_for_url = serial_for_url
+    monkeypatch.setitem(sys.modules, "serial", mod)
+    ser = monitor_session.open_port("rfc2217://gw:1", 115200)
+    assert calls == [monitor_session.WRITE_TIMEOUT_S, None] and ser is ports[0]
+    assert ser._tan_guard_writes is True
+
+
+def test_a_stalled_write_is_abandoned_after_the_write_timeout(monkeypatch):
+    import threading
+
+    monkeypatch.setattr(monitor_session, "WRITE_TIMEOUT_S", 0.2)
+    release = threading.Event()
+
+    class Stuck(FakePort):
+        def write(self, data):
+            release.wait(5)
+
+    guarded = monitor_session._GuardedWrites(Stuck(b""))
+    with pytest.raises(OSError, match="stalled"):
+        guarded.write(b" ")
+    release.set()
+
+
+def test_the_first_key_goes_out_before_any_wait_and_timings_are_reported(monkeypatch):
+    from tan.core import uboot_breakin as ub
+
+    t = {"now": 0.0}
+    writes = []
+
+    class P:
+        def write(self, d):
+            writes.append(t["now"])
+
+        def read(self, n=1):
+            t["now"] += 0.1
+            return b"=> " if t["now"] >= 0.35 else b""
+
+    res = ub.break_into_uboot(P(), timeout_s=5, clock=lambda: t["now"])
+    assert writes[0] == 0.0 and res.caught
+    assert res.keys_sent >= 1 and res.first_byte_s == pytest.approx(0.4)

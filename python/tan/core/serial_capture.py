@@ -11,7 +11,8 @@ testable without sleeping.
 `--until` semantics: the regex is searched in every COMPLETE line (CR/LF
 stripped) exactly once, and in the current UNTERMINATED line (so a prompt such
 as `=> ` matches before any newline arrives), at most the last
-`MAX_SEARCH_CHARS` of it per read. The deadline is checked between lines, so a
+`MAX_SEARCH_CHARS` of it per read. Long complete lines are searched on their
+LAST `MAX_SEARCH_CHARS` too, the same window as the partial line. The deadline is checked between lines, so a
 read that delivers thousands of lines cannot overrun `--duration`. Python's
 `re` cannot be interrupted, so a pathological (catastrophic-backtracking)
 pattern can still stall inside ONE search; the cap on the searched text and
@@ -119,7 +120,7 @@ def capture(
                 *lines, pending = (pending + chunk).split(b"\n")
                 pending = pending[-_MAX_PENDING:]
                 for raw in lines:  # each complete line is new data: search it once
-                    line = _text(raw).rstrip("\r")[:MAX_SEARCH_CHARS]
+                    line = _text(raw).rstrip("\r")[-MAX_SEARCH_CHARS:]
                     if until.search(line):
                         return CaptureResult(True, line, clock() - start, seen, _tail_text(tail))
                     if clock() >= deadline:

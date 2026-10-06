@@ -247,3 +247,14 @@ def test_sink_failure_closes_port_and_sink_and_is_not_a_serial_error(monkeypatch
     assert r.exit_code == 3
     assert envelope(r)["issues"][0]["code"] == "monitor.capture-log-failed"
     assert made[0].closed and state["closed"]
+
+
+def test_log_refuses_a_fifo_without_blocking(monkeypatch, tmp_path):
+    import os
+
+    _fake_serial(monkeypatch, [b"x"])
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    r = run(["--capture", "--duration", "0.2", "--log", str(fifo)])
+    assert r.exit_code == 3
+    assert envelope(r)["issues"][0]["code"] == "monitor.capture-log-failed"

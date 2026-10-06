@@ -243,3 +243,18 @@ def test_property_random_input_never_leaks_an_escape_or_a_bad_character():
         cuts = sorted(rng.sample(range(len(data) + 1), min(3, len(data) + 1)))
         pieces = [data[a:b] for a, b in zip([0, *cuts], [*cuts, len(data)])]
         assert feed(*pieces) == out_whole
+
+
+@pytest.mark.parametrize("encoding", ["ascii", "cp437"])
+def test_characters_the_output_encoding_cannot_represent_become_placeholders(monkeypatch, encoding):
+    import io
+
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(io.BytesIO(), encoding=encoding))
+    f = cf.ColorsFilter()
+    out = f.rx("ok \u4e16\u754c \u00e9 \x1b[1mX\x1b[0m\r\n")
+    out.encode(encoding)  # must not raise: miniterm's reader thread would die
+    assert "\u4e16" not in out and "\x1b[1mX" in out and out.endswith("\r\n")
+    if encoding == "cp437":
+        assert "\u00e9" in out  # representable in cp437: kept
+    else:
+        assert "\u00e9" not in out

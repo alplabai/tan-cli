@@ -160,3 +160,15 @@ def test_each_complete_line_is_searched_once_and_partial_rechecked_per_read():
 
     sc.capture(Port(clk, [b"one\ntw", b"o\n"]), duration_s=0.25, until=P(), clock=clk)
     assert seen == ["one", "tw", "two"]  # no line is searched twice as complete
+
+
+def test_long_complete_lines_are_searched_on_their_tail_like_the_partial_line():
+    clk = Clock()
+    seen = []
+
+    class P:
+        def search(self, s):
+            seen.append(s)
+
+    sc.capture(Port(clk, [b"a" * 5000 + b"END\n"]), duration_s=0.15, until=P(), clock=clk)
+    assert seen[0].endswith("END") and len(seen[0]) == sc.MAX_SEARCH_CHARS
