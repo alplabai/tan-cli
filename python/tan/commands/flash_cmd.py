@@ -2443,7 +2443,9 @@ def _resolve_flow_d_atoc_via_setools(
 
     setools = resolve_setools_dir(flash_args, os.environ, ctx.setools_dir)
     if setools is None:
-        raise FlashPlanError(unresolved_message())
+        raise FlashPlanError(
+            unresolved_message(ctx.sku, fa_str(flash_args, "jlink_flash_device"))
+        )
     app_gen_toc = find_app_gen_toc(setools.path)
     if app_gen_toc is None:
         raise FlashPlanError(missing_tool_message(setools))

@@ -192,16 +192,22 @@ def find_app_gen_toc(setools_dir: str) -> str | None:
         return None
 
 
-def unresolved_message() -> str:
+def unresolved_message(sku: str | None = None, flash_device: str | None = None) -> str:
     """The guidance for `resolve_setools_dir` answering `None` -- names EVERY
     accepted source, in PRECEDENCE ORDER, flag first (tan-cli#368): the flag
     is the one source visible in `tan flash --help` and pinnable per
     invocation, so it leads; the manifest field is named last and flagged as
     build-owned, since `tan build` silently overwrites a hand-edit there on
     the customer's next build. Modeled on `sdk_cmd.NO_SDK_NEXT_STEPS`/
-    `doctor_cmd.setools_check`'s own tone: remedy first, blame never."""
+    `doctor_cmd.setools_check`'s own tone: remedy first, blame never.
+
+    tan-cli#1319: the subject is NAMED from the manifest -- `sku` (its
+    `hw_info.sku`) and `flash_device` (`flash_args.jlink_flash_device`, the
+    SoC variant's J-Link part profile) -- never a hardcoded SKU. Both absent
+    (a hand-written manifest) falls back to a SKU-free noun."""
+    subject = _slot0_subject(sku, flash_device)
     return (
-        f"{FLOW_D_METHOD}: an AEN801 slot0 image needs a SIGNED ATOC, which only "
+        f"{FLOW_D_METHOD}: {subject} needs a SIGNED ATOC, which only "
         f"Alif's SETOOLS `{APP_GEN_TOC}` step can produce. SETOOLS is license-gated "
         "and alp-sdk does not redistribute it -- install it from Alif, then point "
         "tan at it, most-specific first: --setools-dir <path> on the command line, "
@@ -209,6 +215,17 @@ def unresolved_message() -> str:
         "manifest (lowest precedence, and OVERWRITTEN by the next `tan build` -- "
         "prefer the flag or the environment variable for a durable setting)."
     )
+
+
+def _slot0_subject(sku: str | None, flash_device: str | None) -> str:
+    """`the E1M-AEN803 slot0 image (AE822FA0E5597LS0_M55_HE)` -- whatever of
+    the manifest's SKU / J-Link device profile is known, never invented."""
+    parts = [p.strip() for p in (sku, flash_device) if isinstance(p, str) and p.strip()]
+    if not parts:
+        return "an Alif Ensemble MRAM slot0 image"
+    if len(parts) == 1:
+        return f"the {parts[0]} slot0 image"
+    return f"the {parts[0]} slot0 image ({parts[1]})"
 
 
 def missing_tool_message(setools: SetoolsSource) -> str:

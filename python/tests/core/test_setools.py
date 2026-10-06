@@ -138,6 +138,19 @@ def test_unresolved_message_names_the_remedy():
     assert "you " not in msg.lower()
 
 
+def test_unresolved_message_names_the_sku_and_device_from_the_manifest():
+    """tan-cli#1319: the subject is the manifest's own SKU / J-Link part
+    profile, never a hardcoded AEN801."""
+    msg = unresolved_message("E1M-AEN803", "AE822FA0E5597LS0_M55_HE")
+    assert "the E1M-AEN803 slot0 image (AE822FA0E5597LS0_M55_HE) needs a SIGNED ATOC" in msg
+    assert "AEN801" not in msg
+    assert "the E1M-V2N101 slot0 image needs" in unresolved_message("E1M-V2N101", None)
+    # Nothing known: a SKU-free noun, still no invented SKU.
+    bare = unresolved_message(None, "  ")
+    assert "an Alif Ensemble MRAM slot0 image needs" in bare
+    assert "AEN801" not in bare
+
+
 def test_missing_tool_message_names_the_source():
     source = SetoolsSource("/opt/bad-install", "flash_args.setools_dir")
     msg = missing_tool_message(source)
