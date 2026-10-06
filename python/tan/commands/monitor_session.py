@@ -351,9 +351,23 @@ def _open_log(log: str, data: dict):
     flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     fd = None
     try:
+        # O_NOFOLLOW is a no-op on Windows, so check the last component
+        # explicitly everywhere (and again after the open, to catch a swap).
+        try:
+            if os.path.islink(log):
+                raise OSError("refusing to write through a symlink")
+        except ValueError as err:  # embedded NUL
+            raise OSError(str(err)) from err
         fd = os.open(log, flags, 0o600)
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
             raise OSError("not a regular file")
+        try:
+            now = os.lstat(log)
+        except OSError:
+            now = None
+        if now is None or stat.S_ISLNK(now.st_mode) or not os.path.samestat(opened, now):
+            raise OSError("the log path changed while it was being opened")
         os.ftruncate(fd, 0)
         f = os.fdopen(fd, "wb")
         fd = None

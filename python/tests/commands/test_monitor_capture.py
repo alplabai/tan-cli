@@ -163,7 +163,8 @@ def test_log_is_0600_raw_bytes_and_path_is_reported_absolute(monkeypatch, tmp_pa
     assert r.exit_code == 0
     log = tmp_path / "raw.log"
     assert log.read_bytes() == b"\x1b[1;32mok\x1b[0m\r\n"
-    assert (log.stat().st_mode & 0o777) == 0o600
+    if sys.platform != "win32":  # Windows has no POSIX file modes
+        assert (log.stat().st_mode & 0o777) == 0o600
     assert envelope(r)["data"]["capture"]["logFile"] == str(log)
 
 
@@ -172,7 +173,10 @@ def test_log_refuses_a_symlink(monkeypatch, tmp_path):
     victim = tmp_path / "victim"
     victim.write_text("keep")
     link = tmp_path / "x.log"
-    link.symlink_to(victim)
+    try:
+        link.symlink_to(victim)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this host")
     r = run(["--capture", "--duration", "0.2", "--log", str(link)])
     assert r.exit_code == 3
     assert envelope(r)["issues"][0]["code"] == "monitor.capture-log-failed"
@@ -249,6 +253,7 @@ def test_sink_failure_closes_port_and_sink_and_is_not_a_serial_error(monkeypatch
     assert made[0].closed and state["closed"]
 
 
+@pytest.mark.skipif(not hasattr(__import__("os"), "mkfifo"), reason="no FIFOs on this platform")
 def test_log_refuses_a_fifo_without_blocking(monkeypatch, tmp_path):
     import os
 
