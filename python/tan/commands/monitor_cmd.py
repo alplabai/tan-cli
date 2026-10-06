@@ -365,8 +365,10 @@ def _run_monitor(
     try:
         # Empty cwd: `-m` puts the cwd on sys.path, so a `serial/` planted in the
         # project dir would run instead of pyserial (tan-cli#1317 review).
-        # miniterm's upload/filter prompts take no relative paths from the
-        # user's cwd, so the empty directory costs nothing here.
+        # Known limitation: miniterm's own upload command (Ctrl+T Ctrl+U) opens
+        # whatever path the user types, and miniterm has no cwd hook, so a
+        # RELATIVE upload path now resolves against this empty directory --
+        # type an absolute path.
         with tempfile.TemporaryDirectory(prefix="tan-monitor-") as empty:
             rc = subprocess.run(
                 [python, "-m", "serial.tools.miniterm", port, str(baud)],

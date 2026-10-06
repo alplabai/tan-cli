@@ -8,7 +8,7 @@ import pytest
 from tan.commands import doctor_cmd
 from tan.core import host_python as hp
 
-pytestmark = pytest.mark.skipif(os.name == "nt", reason="shell-script fake interpreters")
+posix_only = pytest.mark.skipif(os.name == "nt", reason="shell-script fake interpreters")
 
 
 def _fake(bindir, name, version, west=True):
@@ -37,6 +37,7 @@ def _dirs(tmp_path, *names):
     return out
 
 
+@posix_only
 def test_first_qualifying_absolute_path(tmp_path, path_of):
     old, new = _dirs(tmp_path, "old", "new")
     _fake(old, "python3", "3.10")
@@ -46,6 +47,7 @@ def test_first_qualifying_absolute_path(tmp_path, path_of):
     assert refusal is None and py == good and os.path.isabs(py)
 
 
+@posix_only
 def test_venv_python_without_west_first_on_path_is_skipped(tmp_path, path_of):
     venv, usr = _dirs(tmp_path, "venv", "usr")
     _fake(venv, "python3", "3.13", west=False)
@@ -54,6 +56,7 @@ def test_venv_python_without_west_first_on_path_is_skipped(tmp_path, path_of):
     assert hp.build_interpreter(None, "python3", True, (3, 12)) == (good, None)
 
 
+@posix_only
 def test_refuses_naming_each_candidate_and_why(tmp_path, path_of):
     a, b = _dirs(tmp_path, "a", "b")
     _fake(a, "python3.10", "3.10")
@@ -64,18 +67,21 @@ def test_refuses_naming_each_candidate_and_why(tmp_path, path_of):
     assert "3.14" in refusal and "no `west` module" in refusal
 
 
+@posix_only
 def test_refuses_when_nothing_runs(tmp_path, path_of):
     path_of(tmp_path)
     _, refusal = hp.build_interpreter(None, "python3", True, (3, 12))
     assert refusal and "no runnable" in refusal
 
 
+@posix_only
 def test_venv_and_tokenless_plans_are_untouched(tmp_path, path_of):
     path_of(tmp_path)
     assert hp.build_interpreter("/v/bin/python", "python3", True, (3, 12)) == ("/v/bin/python", None)
     assert hp.build_interpreter(None, "python3", False, (3, 12)) == ("python3", None)
 
 
+@posix_only
 def test_doctor_picks_the_same_interpreter_as_build(tmp_path, path_of):
     venv, usr = _dirs(tmp_path, "venv", "usr")
     _fake(venv, "python3", "3.13", west=False)
@@ -85,6 +91,7 @@ def test_doctor_picks_the_same_interpreter_as_build(tmp_path, path_of):
     assert hp.build_interpreter(None, "python3", True, (3, 12))[0] == good
 
 
+@posix_only
 def test_doctor_warns_when_no_candidate_is_floor_and_west(tmp_path, path_of):
     (d,) = _dirs(tmp_path, "d")
     _fake(d, "python3", "3.14", west=False)
@@ -94,6 +101,7 @@ def test_doctor_warns_when_no_candidate_is_floor_and_west(tmp_path, path_of):
     assert "no `west` module" in c.detail and "tan bootstrap" in c.fix
 
 
+@posix_only
 def test_doctor_passes_with_west_capable_candidate_or_workspace_venv(tmp_path, path_of):
     (d,) = _dirs(tmp_path, "d")
     _fake(d, "python3", "3.14", west=True)
@@ -105,6 +113,7 @@ def test_doctor_passes_with_west_capable_candidate_or_workspace_venv(tmp_path, p
     assert doctor_cmd.host_python_check(("python3", (3, 14)), (3, 12), "x", True).status == "pass"
 
 
+@posix_only
 def test_a_planted_west_py_in_the_cwd_is_never_executed(tmp_path, path_of, monkeypatch):
     """Module-hijack regression: `python -c` puts the cwd on sys.path, so a
     `west.py` in the project dir must not run during the probe."""
@@ -150,19 +159,19 @@ def test_floor_is_the_callers_not_a_constant():
     assert hp.build_interpreter(None, "p", True, (3, 13), probe_all=lambda: found)[1] is None
 
 
-def test_unreadable_path_dir_is_skipped(tmp_path, monkeypatch):
-    missing = tmp_path / "nope"
-    ok = tmp_path / "ok"
-    ok.mkdir()
-    real_listdir = os.listdir
-
-    def listdir(d):
-        if str(d) == str(ok):
-            raise PermissionError(d)
-        return real_listdir(d)
-
-    monkeypatch.setattr(hp.os, "listdir", listdir)
-    assert hp._posix_path_pythons({"PATH": os.pathsep.join([str(missing), str(ok)])}) == []
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="chmod 000 does not deny root / Windows",
+)
+def test_unreadable_path_dir_is_skipped(tmp_path):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        got = hp._posix_path_pythons({"PATH": os.pathsep.join([str(tmp_path / "nope"), str(locked)])})
+    finally:
+        locked.chmod(0o700)
+    assert got == []
 
 
 def test_python_dash_c_detection_handles_bundles_and_free_threaded_names():
@@ -192,10 +201,10 @@ def test_materialise_refusal_is_a_warning_and_native_is_per_slice():
 
     bp = BuildPython("python3", "no python", frozenset({"m55", "m33"}))
     # --materialise never runs CMake: warning only, no per-slice refusal
-    assert [i.severity for i in b._host_python_issues(bp, [], b._MODE_MATERIALISE)] == ["warning"]
+    assert [i.severity for i in b._host_python_issues(bp, b._MODE_MATERIALISE)] == ["warning"]
     assert b._python_refusals(bp, [], b._MODE_MATERIALISE) == {}
     # native: no global issue; refusals only for non-demoted users
-    assert b._host_python_issues(bp, [], b._MODE_NATIVE) == []
+    assert b._host_python_issues(bp, b._MODE_NATIVE) == []
     assert set(b._python_refusals(bp, [NS(core_id="m55")], b._MODE_NATIVE)) == {"m33"}
     ok = BuildPython("p", None, frozenset({"m55"}))
     assert b._python_refusals(ok, [], b._MODE_NATIVE) == {}
@@ -239,6 +248,7 @@ def test_native_python_refusal_skips_when_the_tool_is_missing_and_fails_otherwis
     assert out.status == "failed" and out.message == "no usable python"
 
 
+@posix_only
 def test_usrmerge_alias_dirs_fold_but_venv_stays_separate(tmp_path):
     real = tmp_path / "usr_bin"
     real.mkdir()

@@ -3,7 +3,7 @@
 
 Split out of `build_cmd._build`. The resolver itself is `tan.core.host_python`,
 shared with `tan doctor`'s `hostPython`; the FLOOR is doctor's own EFFECTIVE
-floor (`_resolve_prerequisites_environment`), never a second constant.
+floor (`tan.core.python_floor.effective_python_floor`), never a second constant.
 """
 from __future__ import annotations
 

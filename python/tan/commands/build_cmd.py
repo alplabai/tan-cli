@@ -1031,7 +1031,7 @@ def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[
     return issues
 
 
-def _host_python_issues(build_python, demotions, mode) -> list[Issue]:
+def _host_python_issues(build_python, mode) -> list[Issue]:
     """tan-cli#1317. Where CMake will NOT run (`--materialise`) the refusal is a
     plain warning and the bare fallback stays. On the native dispatch it is a
     PER-SLICE outcome instead (`_python_refusals` -> `execute_slices`), applied
@@ -1045,7 +1045,10 @@ def _python_refusals(build_python, demotions, mode) -> dict[str, str]:
     if build_python.refusal is None or mode != _MODE_NATIVE:
         return {}
     message = refusal_message(build_python.refusal)
-    return {c: message for c in build_python.users - {d.core_id for d in demotions}}
+    return {
+        c: f"core `{c}`: {message}"
+        for c in build_python.users - {d.core_id for d in demotions}
+    }
 
 
 def _cross_drive_issues(outcomes: list[SliceOutcome]) -> list[Issue]:
@@ -1281,7 +1284,7 @@ def _build(
         # mean two different exits depending on which module raised it.
         raise BuildError(err.code, err.message, ExitCode.RUNTIME_FAILURE) from err
 
-    python_issues = _host_python_issues(build_python, demotions, mode)
+    python_issues = _host_python_issues(build_python, mode)
 
     # tan-cli#566, and tan-cli#565's `fail` arm: BOTH sit here, between
     # substitution and `materialise_plan` below, because both must leave a
