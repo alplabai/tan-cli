@@ -297,8 +297,8 @@ def test_plain_spawn_runs_from_an_empty_cwd_and_ignores_a_planted_serial_package
     monkeypatch, tmp_path
 ):
     """A `serial/` in the project dir must not be imported by the console
-    child: it runs from an empty temp dir, and relative PYTHONPATH entries
-    are dropped."""
+    child: it runs from an empty temp dir, which also neutralises the empty
+    and relative PYTHONPATH entries set below (they resolve against it)."""
     import os
     import subprocess
 
@@ -322,4 +322,3 @@ def test_plain_spawn_runs_from_an_empty_cwd_and_ignores_a_planted_serial_package
     r = runner.invoke(app, ["--port", "COM7", "--format", "json"])
     assert r.exit_code == 0, r.stdout
     assert not marker.exists()
-    assert "PYTHONPATH" not in seen["env"]
