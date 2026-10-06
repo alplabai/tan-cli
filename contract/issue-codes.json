@@ -1340,6 +1340,46 @@
       "note": "`tan monitor --break-uboot` sent the interrupt key until `--break-timeout` expired without seeing `--prompt`; `data.breakIn.caught` is false and no interactive session is started. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
     },
     {
+      "code": "monitor.capture-bad-option",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture` was given an unusable option: neither --duration nor --until, --duration <= 0, an empty or invalid --until regex, or --duration/--until/--log without --capture. Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-io-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture` hit a serial I/O error while reading the port. Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-log-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture --log` could not create the log file (exit 3). Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-open-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture` could not open the port in-process (pyserial `serial_for_url` raised). Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-timeout",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture --until` read for the whole duration without any line matching the regex; `data.capture.matched` is false. Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
       "code": "monitor.failed",
       "status": "reserved",
       "severity": "error",

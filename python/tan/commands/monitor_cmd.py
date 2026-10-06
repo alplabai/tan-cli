@@ -348,6 +348,7 @@ def _run_monitor(
     break_opts: tuple[bytes, bytes, float] | None = None,
     non_interactive: bool = False,
     console_filter: str = "colors",
+    capture_opts: tuple | None = None,
 ) -> tuple[dict, list[Issue], ExitCode]:
     # Frozen (PyInstaller) or an embedded interpreter with no reportable
     # `sys.executable`: fall back to a PATH name, mirroring
@@ -380,6 +381,11 @@ def _run_monitor(
         raise _refuse_listing_ports("no --port given")
     if not _port_is_usable(port, {device for device, _ in _available_ports()}):
         raise _refuse_listing_ports(f"port '{port}' not found")
+
+    if capture_opts is not None:
+        from tan.commands import monitor_session  # noqa: PLC0415 (only on --capture)
+
+        return monitor_session.run_capture(port, baud, capture_opts, break_opts)
 
     if break_opts is not None:
         from tan.commands import monitor_session  # noqa: PLC0415 (only on --break-uboot)
@@ -452,6 +458,23 @@ def monitor(
         "--break-timeout",
         help="With --break-uboot: seconds to keep sending the key (default: 30).",
     ),
+    capture: bool = typer.Option(
+        False,
+        "--capture",
+        help="Headless capture instead of an interactive console: no TTY needed, "
+        "works over pyserial URLs, stores raw bytes. Needs --duration and/or "
+        "--until; combine with --break-uboot to break in first.",
+    ),
+    duration: float = typer.Option(
+        None, "--duration", help="With --capture: seconds to read (default 30 with --until)."
+    ),
+    until: str = typer.Option(
+        None,
+        "--until",
+        help="With --capture: stop at the first line matching this regex; the "
+        "envelope carries the line. No match in time is an error.",
+    ),
+    log: str = typer.Option(None, "--log", help="With --capture: write the raw bytes to this file."),
     console_filter: ConsoleFilter = typer.Option(
         ConsoleFilter.COLORS,
         "--filter",
@@ -506,8 +529,9 @@ def monitor(
         from tan.commands import monitor_session  # noqa: PLC0415 (validation only)
 
         opts = monitor_session.break_opts(break_uboot, break_key, prompt, break_timeout)
+        cap = monitor_session.capture_opts(capture, duration, until, log)
         data, issues, exit_code = _run_monitor(
-            port, baud, json_mode, opts, non_interactive, console_filter.value
+            port, baud, json_mode, opts, non_interactive, console_filter.value, cap
         )
     except MonitorError as err:
         finish(err.data, [Issue(err.code, "error", err.message)], err.exit_code)

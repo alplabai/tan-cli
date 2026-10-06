@@ -14,11 +14,12 @@ there), so the plain `tan monitor` path never loads it.
 
 from __future__ import annotations
 
+import re
 import sys
 
 from tan.commands.monitor_cmd import DATA_SCHEMA_VERSION, MonitorError, _pyserial_missing
 from tan.core import console_filter as console_filter_mod
-from tan.core import uboot_breakin
+from tan.core import serial_capture, uboot_breakin
 from tan.envelope import Issue
 from tan.exit_codes import ExitCode
 
@@ -74,7 +75,9 @@ def _stdin_is_tty() -> bool:
         return False
 
 
-def open_port(port: str, baud: int):
+def open_port(
+    port: str, baud: int, code: str = "monitor.break-open-failed", flag: str = "--break-uboot"
+):
     """Open `port` in-process (local tty, by-id path or any pyserial URL) the
     way miniterm does: no explicit DTR/RTS, pyserial's open-time defaults."""
     try:
@@ -90,8 +93,8 @@ def open_port(port: str, baud: int):
         )
     except (OSError, ValueError, serial.SerialException) as err:
         raise MonitorError(
-            "monitor.break-open-failed",
-            f"could not open '{port}' for --break-uboot: {err}",
+            code,
+            f"could not open '{port}' for {flag}: {err}",
             ExitCode.RUNTIME_FAILURE,
             {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
         ) from err
@@ -232,4 +235,99 @@ def run(
     except MonitorError as err:
         err.data = {**err.data, **data}
         raise
+    return data, [], ExitCode.SUCCESS
+
+
+#: (compiled --until or None, duration seconds, --log path or None)
+CaptureOpts = tuple["re.Pattern[str] | None", float, "str | None"]
+
+
+def capture_opts(
+    capture: bool, duration: float | None, until: str | None, log: str | None
+) -> CaptureOpts | None:
+    """Validate `--capture`/`--duration`/`--until`/`--log` (tan-cli#1324).
+    The companions are refused without `--capture` rather than ignored."""
+    try:
+        if not capture:
+            if duration is not None or until is not None or log is not None:
+                raise ValueError("--duration/--until/--log require --capture")
+            return None
+        pattern = serial_capture.compile_until(until) if until is not None else None
+        if duration is None:
+            if pattern is None:
+                raise ValueError("--capture needs --duration and/or --until")
+            duration = serial_capture.DEFAULT_UNTIL_DURATION_S
+        if not duration > 0:
+            raise ValueError("--duration must be greater than 0")
+    except ValueError as err:
+        raise MonitorError(
+            "monitor.capture-bad-option",
+            str(err),
+            ExitCode.VALIDATION_FAILURE,
+            {"schemaVersion": DATA_SCHEMA_VERSION},
+        ) from err
+    return pattern, duration, log
+
+
+def run_capture(
+    port: str, baud: int, cap: CaptureOpts, opts: BreakOpts | None
+) -> tuple[dict, list[Issue], ExitCode]:
+    """Headless capture on one in-process port: optional break-in first, then
+    read for the duration / until the regex matches. No TTY is needed, and
+    the log (`--log`) always receives the RAW bytes (no console filter)."""
+    pattern, duration, log = cap
+    data: dict = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud}
+    sink = None
+    if log is not None:
+        try:
+            sink = open(log, "wb")  # noqa: SIM115 (closed in the finally below)
+        except OSError as err:
+            raise MonitorError(
+                "monitor.capture-log-failed",
+                f"cannot write --log '{log}': {err}",
+                ExitCode.WRITE_FAILURE,
+                data,
+            ) from err
+    ser = None
+    try:
+        ser = open_port(port, baud, "monitor.capture-open-failed", "--capture")
+        if opts is not None:
+            data["breakIn"] = break_in(ser, port, baud, opts)
+            if not data["breakIn"]["caught"]:
+                return (
+                    data,
+                    [Issue("monitor.break-timeout", "error",
+                           f"no U-Boot prompt within {opts[2]}s on {port}.")],
+                    ExitCode.RUNTIME_FAILURE,
+                )
+        try:
+            res = serial_capture.capture(ser, duration_s=duration, until=pattern, sink=sink)
+        except OSError as err:
+            raise MonitorError(
+                "monitor.capture-io-failed",
+                f"serial I/O failed on '{port}' during --capture: {err}",
+                ExitCode.RUNTIME_FAILURE,
+                data,
+            ) from err
+    finally:
+        if ser is not None:
+            ser.close()
+        if sink is not None:
+            sink.close()
+    data["capture"] = {
+        "matched": res.matched if pattern is not None else None,
+        "matchedLine": res.matched_line,
+        "elapsedSeconds": round(res.elapsed_s, 3),
+        "durationSeconds": duration,
+        "bytesSeen": res.bytes_seen,
+        "bytesSeenTail": res.tail,
+        "logFile": log,
+    }
+    if pattern is not None and not res.matched:
+        return (
+            data,
+            [Issue("monitor.capture-timeout", "error",
+                   f"no line matched --until within {duration}s on {port}.")],
+            ExitCode.RUNTIME_FAILURE,
+        )
     return data, [], ExitCode.SUCCESS
