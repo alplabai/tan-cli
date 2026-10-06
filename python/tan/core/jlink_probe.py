@@ -23,10 +23,16 @@ THE DESIGN (the honest one), in three layers:
    OUTSIDE tan can (a wrapper masking every other probe's `/dev/bus/usb` node
    AND sysfs directory in a private mount namespace). So immediately before
    EACH `JLinkExe` spawn tan runs the same binary read-only (`ShowEmuList`) and
-   requires exactly one emulator whose canonical serial matches the selection.
-   A masking wrapper on PATH passes; plain `JLinkExe` with cloned serials
-   refuses. `TAN_PROBE_USB_PATH=<resolved path>` is exported in that spawn's
-   environment so a wrapper can cross-check its own mask against it.
+   requires exactly one emulator whose canonical serial matches the selection
+   (and that the listing run itself succeeded: rc 0, no timeout). When the
+   serial is SHARED, one emulator in the list still proves nothing about WHICH
+   port it is -- a wrapper masking the wrong place passes that -- so the
+   wrapper must also print `TAN_PROBE_ISOLATED_USB_PATH=<its target port>`
+   (`HANDSHAKE_PREFIX`) and tan requires it to equal the selected path; the
+   envelope then says `wrapper-attested:<path>`, never "verified". A masking
+   wrapper on PATH passes; plain `JLinkExe` with cloned serials refuses.
+   `TAN_PROBE_USB_PATH=<resolved path>` is exported in that spawn's environment
+   so a wrapper can cross-check its own mask against it.
 3. TOCTOU (`snapshot_drift`). The enumeration is repeated before each spawn
    and the run refuses if the set of (path, canonical serial) changed since
    selection.
@@ -55,9 +61,17 @@ USB_PATH_ENV = "TAN_PROBE_USB_PATH"
 
 ISOLATION_VERIFIED = "verified-single-emulator"
 
+#: A line a wrapper prints (from its actual target port) into `ShowEmuList`
+#: output; the only way tan can bind a single listed emulator to a USB path.
+HANDSHAKE_PREFIX = "TAN_PROBE_ISOLATED_USB_PATH="
+_HANDSHAKE_RE = re.compile(r"^" + HANDSHAKE_PREFIX + r"(\S+)\s*$", re.MULTILINE)
+
 CODE_AMBIGUOUS = "ambiguous"
 CODE_NOT_FOUND = "not-found"
 CODE_CONFLICT = "selector-conflict"
+#: A spawn-time guard failure that is NOT an ambiguity: the check itself could
+#: not be completed or found nothing (`flash.probe-verify-failed`).
+CODE_VERIFY_FAILED = "verify-failed"
 
 #: One `ShowEmuList` line: `J-Link[0]: Connection: USB, Serial number: 000603000869, ...`.
 _EMU_SERIAL_RE = re.compile(r"Serial number:\s*([0-9A-Za-z]+)")
@@ -126,7 +140,7 @@ def canon_serial(text: str) -> str:
     """The comparison form of a J-Link serial: stripped, and when all digits,
     without leading zeros (`000603000869` == `603000869`)."""
     text = text.strip()
-    return str(int(text)) if text.isdigit() else text
+    return str(int(text)) if text.isascii() and text.isdigit() else text
 
 
 def is_valid_usb_path(text: str) -> bool:
@@ -143,8 +157,10 @@ def enumerate_jlinks(root: str | None = None) -> list[JLinkProbe] | None:
     root = root or SYSFS_USB_DEVICES
     try:
         names = sorted(os.listdir(root))
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return None
+    except OSError as err:
+        raise ProbeEnumerationError(f"{root}: {err.strerror or err}") from err
     probes: list[JLinkProbe] = []
     for name in names:
         # Interfaces (`3-4.2:1.0`) and root hubs (`usb3`) are not devices on a
@@ -160,8 +176,10 @@ def enumerate_jlinks(root: str | None = None) -> list[JLinkProbe] | None:
 def _read_device(base: str, name: str) -> JLinkProbe | None:
     try:
         populated = bool(os.listdir(base))
-    except OSError:
-        populated = False
+    except FileNotFoundError:
+        populated = False  # unplugged between the two listings
+    except OSError as err:
+        raise ProbeEnumerationError(f"{name}: {err.strerror or err}") from err
     if not populated:
         return None  # an empty directory is what a namespace mask leaves
     vendor = _read_attr(os.path.join(base, "idVendor"))
@@ -217,27 +235,71 @@ def parse_show_emu_list(text: str) -> list[str]:
     return _EMU_SERIAL_RE.findall(text)
 
 
-def verify_emulator_list(serial: str, emu_serials: list[str]) -> str | None:
-    """Spawn-time verification: exactly one listed emulator carries `serial`
-    (canonically). `None` when so, else the refusal message."""
-    want = canon_serial(serial)
-    n = sum(1 for s in emu_serials if canon_serial(s) == want)
-    if n == 1:
-        return None
-    if n == 0:
-        return (
-            f"J-Link's own ShowEmuList shows no emulator with serial {serial} "
-            f"(saw: {', '.join(emu_serials) or 'none'}); refusing to write."
-        )
+def parse_handshakes(text: str) -> list[str]:
+    """The distinct `TAN_PROBE_ISOLATED_USB_PATH=` values a listing carries."""
+    return sorted(set(_HANDSHAKE_RE.findall(text)))
+
+
+def verify_listing(
+    serial: str | None,
+    usb_path: str | None,
+    candidates: tuple[str, ...],
+    listing: str,
+) -> tuple[str | None, str | None, str | None]:
+    """Spawn-time verification of a `ShowEmuList` listing. Returns
+    `(code, message, isolation)`: `code is None` means proceed and `isolation`
+    is what the envelope reports; else `code` is `CODE_AMBIGUOUS` or
+    `CODE_VERIFY_FAILED`.
+
+    `serial=None` is the unpinned run on a host that cannot enumerate: exactly
+    one emulator in total is required."""
+    emus = parse_show_emu_list(listing)
+    want = canon_serial(serial) if serial is not None else None
+    matching = [e for e in emus if want is None or canon_serial(e) == want]
+    if not matching:
+        return (CODE_VERIFY_FAILED,
+                f"J-Link's own ShowEmuList shows no emulator"
+                f"{' with serial ' + serial if serial else ''} "
+                f"(saw: {', '.join(emus) or 'none'}); refusing to write.", None)
+    if len(matching) > 1:
+        return (CODE_AMBIGUOUS, _several_emulators(len(matching), serial), None)
+    return _bind_to_path(usb_path, candidates, parse_handshakes(listing))
+
+
+def _several_emulators(n: int, serial: str | None) -> str:
     return (
-        f"J-Link's own ShowEmuList shows {n} emulators with serial {serial}, so "
-        "SelectEmuBySN would open whichever enumerates first -- possibly the wrong "
-        "board. J-Link selects by serial only; run it where only the target probe is "
-        "visible (a wrapper masking the other probes' /dev/bus/usb nodes AND sysfs "
-        "directories in a private mount namespace) or give the probes distinct serials. "
-        "flash_args.expect_dpidr stays mandatory on a shared-serial bench: it is the "
-        "only check that the board answering is the one intended."
+        f"J-Link's own ShowEmuList shows {n} emulators"
+        f"{' with serial ' + serial if serial else ''}, so SelectEmuBySN would open "
+        "whichever enumerates first -- possibly the wrong board. J-Link selects by "
+        "serial only; run it where only the target probe is visible (a wrapper masking "
+        "the other probes' /dev/bus/usb nodes AND sysfs directories in a private mount "
+        "namespace) or give the probes distinct serials. flash_args.expect_dpidr stays "
+        "mandatory on a shared-serial bench: it is the only check that the board "
+        "answering is the one intended."
     )
+
+
+def _bind_to_path(
+    usb_path: str | None, candidates: tuple[str, ...], handshakes: list[str]
+) -> tuple[str | None, str | None, str | None]:
+    if len(handshakes) > 1:
+        return (CODE_AMBIGUOUS,
+                f"ShowEmuList carries conflicting {HANDSHAKE_PREFIX} lines "
+                f"({', '.join(handshakes)}); refusing.", None)
+    if handshakes and usb_path is not None and handshakes[0] != usb_path:
+        return (CODE_AMBIGUOUS,
+                f"the J-Link wrapper is isolated to USB path {handshakes[0]} but "
+                f"{usb_path} was selected; refusing -- this is the wrong place.", None)
+    if handshakes:
+        return None, None, f"wrapper-attested:{handshakes[0]}"
+    if len(candidates) > 1:
+        return (CODE_AMBIGUOUS,
+                f"serial is shared by {', '.join(candidates)}: one emulator in "
+                "ShowEmuList cannot be bound to the selected USB path by itself (a "
+                "wrapper masking the WRONG place would look identical). The J-Link on "
+                f"PATH must print {HANDSHAKE_PREFIX}<its target port> and it must equal "
+                f"{usb_path}.", None)
+    return None, None, ISOLATION_VERIFIED
 
 
 def _paths(probes: list[JLinkProbe]) -> tuple[str, ...]:

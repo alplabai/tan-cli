@@ -8,6 +8,8 @@ select, that the selection is verified against the JLinkExe that will write,
 and that it is echoed."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from typer.testing import CliRunner
 
@@ -42,8 +44,10 @@ class _Jlink:
     emulators IT can see (a masking wrapper shows one; plain JLinkExe shows
     all), and records every other script as a write."""
 
-    def __init__(self, monkeypatch, emulators):
+    def __init__(self, monkeypatch, emulators, *, handshake=None, outcome=None):
         self.emulators = emulators
+        self.handshake = handshake
+        self.outcome = outcome  # a canned _Outcome for the listing, if any
         self.writes: list[str] = []
         self.listings = 0
         self.envs: list[dict | None] = []
@@ -53,13 +57,17 @@ class _Jlink:
         self.envs.append(kwargs.get("extra_env"))
         if "ShowEmuList" in script:
             self.listings += 1
-            out = "\n".join(
+            if self.outcome is not None:
+                return self.outcome
+            lines = [
                 f"J-Link[{i}]: Connection: USB, Serial number: {sn}, ProductName: J-Link"
                 for i, sn in enumerate(self.emulators)
-            )
-            return flash_cmd._Outcome(success=True, stdout=out)
+            ]
+            if self.handshake:
+                lines.insert(0, f"TAN_PROBE_ISOLATED_USB_PATH={self.handshake}")
+            return flash_cmd._Outcome(success=True, stdout="\n".join(lines), returncode=0)
         self.writes.append(script)
-        return flash_cmd._Outcome(success=True)
+        return flash_cmd._Outcome(success=True, returncode=0)
 
 
 def _codes(issues):
@@ -141,7 +149,7 @@ def test_zero_stripped_serial_and_usb_path_name_the_same_probe(tmp_path, monkeyp
         tmp_path, monkeypatch, probe_kwargs={**_probes(A, B, D), **kwargs},
     )
     assert rc == 1 and _codes(issues) == ["flash.probe-ambiguous"]
-    jl = _Jlink(monkeypatch, ["603000869"])
+    jl = _Jlink(monkeypatch, ["603000869"], handshake="3-4.2")
     rc, _d, _i, _l, _s = _flow_d_run(
         tmp_path, monkeypatch, probe_kwargs={**_probes(A, B, D), **kwargs},
     )
@@ -176,7 +184,7 @@ def test_zero_stripped_probe_serial_on_the_cli_is_ambiguous_not_not_found(
 def test_usb_path_on_a_shared_serial_runs_under_a_masking_wrapper(tmp_path, monkeypatch):
     """The JLinkExe on PATH is a wrapper that masks the other probes, so its
     ShowEmuList shows exactly one: verification passes and the run proceeds."""
-    jl = _Jlink(monkeypatch, [SHARED])
+    jl = _Jlink(monkeypatch, [SHARED], handshake="3-4.2")
     rc, data, _i, _l, _s = _flow_d_run(
         tmp_path, monkeypatch,
         probe_kwargs={**_probes(A, B, D), "probe_usb_path": "3-4.2"},
@@ -185,7 +193,7 @@ def test_usb_path_on_a_shared_serial_runs_under_a_masking_wrapper(tmp_path, monk
     assert jl.writes[0].startswith(f"SelectEmuBySN {SHARED}\n")
     probe = data["entries"][0]["probe"]
     assert probe["candidates"] == ["3-4.1", "3-4.2", "3-4.4.3"]
-    assert probe["isolation"] == "verified-single-emulator"
+    assert probe["isolation"] == "wrapper-attested:3-4.2"
 
 
 def test_usb_path_on_a_shared_serial_refuses_under_plain_jlinkexe(tmp_path, monkeypatch):
@@ -210,7 +218,7 @@ def test_verification_refuses_when_jlinkexe_does_not_list_the_selected_serial(
     rc, _d, issues, _l, _s = _flow_d_run(
         tmp_path, monkeypatch, probe_kwargs={**_probes(A, C), "probe_usb_path": "3-4.3"},
     )
-    assert rc == 1 and jl.writes == [] and _codes(issues) == ["flash.probe-ambiguous"]
+    assert rc == 1 and jl.writes == [] and _codes(issues) == ["flash.probe-verify-failed"]
 
 
 def test_a_probe_set_that_changes_between_selection_and_spawn_refuses(tmp_path, monkeypatch):
@@ -225,7 +233,7 @@ def test_a_probe_set_that_changes_between_selection_and_spawn_refuses(tmp_path, 
         probe_kwargs={"enumerate_probes": enumerate_probes, "probe_usb_path": "3-4.3"},
     )
     assert rc == 1 and jl.writes == []
-    assert _codes(issues) == ["flash.probe-ambiguous"]
+    assert _codes(issues) == ["flash.probe-verify-failed"]
     assert "changed between probe selection and the spawn" in data["entries"][0]["message"]
 
 
@@ -412,3 +420,166 @@ def test_a_hostile_serial_is_refused_by_validation_not_matched(tmp_path, monkeyp
     )
     assert rc == 1 and jl.writes == [] and jl.listings == 0
     assert _codes(issues) == ["flash.probe-not-found"]
+
+
+# ── the listing run itself, and binding a shared serial to the path ─────────
+
+
+def _usb_path_run(tmp_path, monkeypatch, *probes, path="3-4.2"):
+    return _flow_d_run(
+        tmp_path, monkeypatch,
+        probe_kwargs={**_probes(*probes), "probe_usb_path": path},
+    )
+
+
+def test_a_wrapper_masking_the_wrong_place_is_refused(tmp_path, monkeypatch):
+    """One emulator listed, shared serial, but the wrapper attests 3-4.1 while
+    3-4.2 was selected: the envelope must never claim 3-4.2 was verified."""
+    jl = _Jlink(monkeypatch, [SHARED], handshake="3-4.1")
+    rc, data, issues, _l, _s = _usb_path_run(tmp_path, monkeypatch, A, B, D)
+    assert rc == 1 and jl.writes == []
+    assert _codes(issues) == ["flash.probe-ambiguous"]
+    assert "wrong place" in data["entries"][0]["message"]
+    assert "isolation" not in data["entries"][0]["probe"]
+
+
+def test_one_emulator_on_a_shared_serial_without_a_handshake_is_refused(tmp_path, monkeypatch):
+    jl = _Jlink(monkeypatch, [SHARED])
+    rc, data, issues, _l, _s = _usb_path_run(tmp_path, monkeypatch, A, B, D)
+    assert rc == 1 and jl.writes == [] and _codes(issues) == ["flash.probe-ambiguous"]
+    assert "TAN_PROBE_ISOLATED_USB_PATH" in data["entries"][0]["message"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        # A hang: the timeout report folds the partial output in.
+        flash_cmd._Outcome(
+            success=False, returncode=-1, captured=True,
+            stderr="J-Link[0]: Connection: USB, Serial number: 000999000001\n"
+                   "flash command timed out after 60s",
+        ),
+        # A crash after printing one serial line.
+        flash_cmd._Outcome(
+            success=False, returncode=139, captured=True,
+            stdout="J-Link[0]: Connection: USB, Serial number: 000999000001, ProductName: J",
+        ),
+        # rc != 0 although `success` was somehow reported.
+        flash_cmd._Outcome(
+            success=True, returncode=3, captured=True,
+            stdout="J-Link[0]: Connection: USB, Serial number: 000999000001, ProductName: J",
+        ),
+        # Nothing at all.
+        flash_cmd._Outcome(success=True, returncode=0, captured=True, stdout=""),
+    ],
+    ids=["timeout", "crash", "nonzero-rc", "empty"],
+)
+def test_an_incomplete_listing_run_refuses_with_verify_failed(tmp_path, monkeypatch, outcome):
+    jl = _Jlink(monkeypatch, [], outcome=outcome)
+    rc, _d, issues, _l, _s = _usb_path_run(tmp_path, monkeypatch, A, C, path="3-4.3")
+    assert rc == 1 and jl.writes == []
+    assert _codes(issues) == ["flash.probe-verify-failed"]
+
+
+def test_an_unpinned_run_on_a_host_that_cannot_enumerate_wants_one_emulator(
+    tmp_path, monkeypatch
+):
+    jl = _Jlink(monkeypatch, [SHARED, "000999000001"])
+    rc, _d, issues, _l, _s = _flow_d_run(
+        tmp_path, monkeypatch, probe_kwargs={"enumerate_probes": lambda: None},
+    )
+    assert rc == 1 and jl.writes == [] and "flash.probe-ambiguous" in _codes(issues)
+    jl = _Jlink(monkeypatch, [SHARED])
+    rc, data, _i, _l, _s = _flow_d_run(
+        tmp_path, monkeypatch, probe_kwargs={"enumerate_probes": lambda: None},
+    )
+    assert rc == 0 and len(jl.writes) == 1
+    assert data["entries"][0]["probe"]["isolation"] == "verified-single-emulator"
+
+
+def test_every_jlink_script_disables_the_firmware_updater_and_listing_closes_stdin(
+    tmp_path, monkeypatch
+):
+    seen: list[tuple[str, dict]] = []
+
+    def fake_spawn(argv, *args, **kwargs):
+        seen.append((Path(argv[-1]).read_text(encoding="utf-8"), kwargs))
+        return flash_cmd._Outcome(success=True, returncode=0)
+
+    monkeypatch.setattr(flash_cmd, "_spawn", fake_spawn)
+    flash_cmd._spawn_jlink(["JLinkExe"], "ShowEmuList\nexit\n", True, 5, no_stdin=True)
+    flash_cmd._spawn_jlink(["JLinkExe"], "SelectEmuBySN 1\nexit\n", True, 5)
+    assert all(text.startswith("exec DisableAutoUpdateFW\n") for text, _ in seen)
+    assert seen[0][1] == {"no_stdin": True} and seen[1][1] == {}
+
+
+def test_the_stdin_of_the_listing_spawn_is_devnull(monkeypatch):
+    import subprocess
+
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    flash_cmd._spawn(["x"], True, 5, no_stdin=True)
+    assert captured["stdin"] is subprocess.DEVNULL
+    captured.clear()
+    flash_cmd._spawn(["x"], True, 5)
+    assert captured["stdin"] is None
+
+
+def test_dry_run_on_a_shared_serial_warns_that_a_real_run_needs_isolation(
+    tmp_path, monkeypatch
+):
+    jl = _Jlink(monkeypatch, [])
+    rc, data, issues, lines, _s = _flow_d_run(
+        tmp_path, monkeypatch, dry_run=True,
+        probe_kwargs={**_probes(A, B, D), "probe_usb_path": "3-4.2"},
+    )
+    assert rc == 0 and jl.listings == 0 and jl.writes == []  # a preview spawns nothing
+    assert _codes(issues) == ["flash.probe-isolation-required"]
+    assert issues[0].severity == "warning"
+    assert "TAN_PROBE_ISOLATED_USB_PATH=3-4.2" in issues[0].message
+    assert any("does not run that check" in line for line in lines)
+    # A unique serial has nothing to warn about.
+    rc, _d, issues, _l, _s = _flow_d_run(
+        tmp_path, monkeypatch, dry_run=True,
+        probe_kwargs={**_probes(A, C), "probe_usb_path": "3-4.3"},
+    )
+    assert rc == 0 and issues == []
+
+
+def test_the_preflight_reuses_a_verification_nothing_ran_since():
+    listings = []
+
+    def fake(argv, script, *a, **k):
+        listings.append(script)
+        return flash_cmd._Outcome(
+            success=True, returncode=0,
+            stdout=f"J-Link[0]: Connection: USB, Serial number: {C.serial}",
+        )
+
+    import pytest as _pytest
+
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(flash_cmd, "_spawn_jlink", fake)
+    mp.setattr(flash_cmd, "resolve_program_positions", lambda spawned, env, *a: (spawned, None))
+    try:
+        sel = jlink_probe.resolve_probe_selection(
+            [A, C], cli_serial=None, cli_usb_path="3-4.3", manifest_serial=None
+        )
+        guard = flash_cmd._ProbeGuard(sel, jlink_probe.probe_set([A, C]), lambda: [A, C], {})
+        assert flash_cmd._probe_guard_refusal(guard, "JLinkExe", None, None) is None
+        assert len(listings) == 1
+        guard.fresh = True  # what the pre-sign gate leaves behind
+        assert flash_cmd._probe_guard_refusal(
+            guard, "JLinkExe", None, None, reuse_fresh=True) is None
+        assert len(listings) == 1 and guard.fresh is False  # skipped, and consumed
+        # The write guard never reuses.
+        guard.fresh = True
+        assert flash_cmd._probe_guard_refusal(guard, "JLinkExe", None, None) is None
+        assert len(listings) == 2
+    finally:
+        mp.undo()

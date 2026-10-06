@@ -15,7 +15,8 @@ from tan.core.jlink_probe import (
     probe_set,
     resolve_probe_selection,
     snapshot_drift,
-    verify_emulator_list,
+    parse_handshakes,
+    verify_listing,
 )
 
 SHARED = "000603000869"
@@ -156,13 +157,51 @@ def test_show_emu_list_parsing():
     assert parse_show_emu_list("No emulators connected via USB") == []
 
 
+def _listing(*serials, handshake=None):
+    lines = [f"J-Link[{i}]: Connection: USB, Serial number: {sn}, ProductName: J-Link"
+             for i, sn in enumerate(serials)]
+    if handshake:
+        lines.insert(0, f"TAN_PROBE_ISOLATED_USB_PATH={handshake}")
+    return "\n".join(lines)
+
+
 def test_verification_wants_exactly_one_canonical_match():
-    assert verify_emulator_list(SHARED, ["603000869"]) is None
-    assert verify_emulator_list(SHARED, [SHARED, "000999000001"]) is None
-    assert "no emulator" in verify_emulator_list(SHARED, ["000999000001"])
-    assert "no emulator" in verify_emulator_list(SHARED, [])
-    msg = verify_emulator_list(SHARED, [SHARED, SHARED, SHARED])
-    assert "3 emulators" in msg and "expect_dpidr" in msg
+    ok = verify_listing(SHARED, "3-4.3", (), _listing("603000869"))
+    assert ok == (None, None, "verified-single-emulator")
+    assert verify_listing(SHARED, None, (), _listing(SHARED, "000999000001"))[0] is None
+    code, msg, _ = verify_listing(SHARED, None, (), _listing("000999000001"))
+    assert code == "verify-failed" and "no emulator" in msg
+    assert verify_listing(SHARED, None, (), "")[0] == "verify-failed"
+    code, msg, _ = verify_listing(SHARED, None, (), _listing(SHARED, SHARED, SHARED))
+    assert code == "ambiguous" and "3 emulators" in msg and "expect_dpidr" in msg
+
+
+def test_a_shared_serial_needs_the_wrapper_handshake_for_the_selected_path():
+    shared = ("3-4.1", "3-4.2", "3-4.4.3")
+    # One emulator listed, but nothing binds it to 3-4.2 (a wrapper masking the
+    # WRONG place would look exactly like this).
+    code, msg, _ = verify_listing(SHARED, "3-4.2", shared, _listing(SHARED))
+    assert code == "ambiguous" and "TAN_PROBE_ISOLATED_USB_PATH" in msg
+    # The wrong place attests itself.
+    code, msg, _ = verify_listing(SHARED, "3-4.2", shared, _listing(SHARED, handshake="3-4.1"))
+    assert code == "ambiguous" and "wrong place" in msg
+    # The right place.
+    assert verify_listing(SHARED, "3-4.2", shared, _listing(SHARED, handshake="3-4.2")) == (
+        None, None, "wrapper-attested:3-4.2")
+    # Conflicting handshakes.
+    two = _listing(SHARED, handshake="3-4.1") + "\nTAN_PROBE_ISOLATED_USB_PATH=3-4.2"
+    assert verify_listing(SHARED, "3-4.2", shared, two)[0] == "ambiguous"
+    assert parse_handshakes(two) == ["3-4.1", "3-4.2"]
+
+
+def test_an_unpinned_run_wants_exactly_one_emulator_in_total():
+    assert verify_listing(None, None, (), _listing("1"))[0] is None
+    assert verify_listing(None, None, (), _listing("1", "2"))[0] == "ambiguous"
+    assert verify_listing(None, None, (), "")[0] == "verify-failed"
+
+
+def test_non_ascii_digits_are_not_canonicalised():
+    assert canon_serial("\u0663\u0664") == "\u0663\u0664"
 
 
 def test_snapshot_drift_is_a_set_comparison_on_canonical_serials():
@@ -237,3 +276,20 @@ def test_zero_stripped_serial_with_a_usb_path_is_the_same_probe_not_a_conflict()
     assert sel.refusal_code is None
     assert sel.serial == SHARED  # J-Link is given the sysfs spelling
     assert sel.candidates == ("3-4.1", "3-4.2", "3-4.4.3")
+
+
+def test_an_unreadable_directory_listing_is_an_error_not_a_mask(tmp_path, monkeypatch):
+    import os
+
+    real = os.listdir
+
+    def denied(path):
+        if str(path).endswith("sysfs"):
+            raise PermissionError(13, "Permission denied")
+        return real(path)
+
+    monkeypatch.setattr(os, "listdir", denied)
+    with pytest.raises(ProbeEnumerationError, match="Permission denied"):
+        enumerate_jlinks(str(tmp_path / "sysfs"))
+    # ENOENT stays "cannot enumerate".
+    assert enumerate_jlinks(str(tmp_path / "absent")) is None
