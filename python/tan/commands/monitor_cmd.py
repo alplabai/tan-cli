@@ -305,20 +305,6 @@ def _refuse_listing_ports(reason: str) -> MonitorError:
     )
 
 
-def _monitor_env() -> dict:
-    """`spawn_env()` minus any relative / empty `PYTHONPATH` entry (those mean
-    "the cwd" and would defeat the empty-cwd spawn)."""
-    env = spawn_env()
-    entries = env.get("PYTHONPATH")
-    if entries:
-        keep = [e for e in entries.split(os.pathsep) if e and os.path.isabs(e)]
-        if keep:
-            env["PYTHONPATH"] = os.pathsep.join(keep)
-        else:
-            del env["PYTHONPATH"]
-    return env
-
-
 def _child_stdout(json_mode: bool):
     """What miniterm's stdout is wired to (tan-cli#491 defect 6).
 
@@ -360,7 +346,9 @@ def _spawn_console(python: str, port: str, baud: int, console_filter: str, json_
     """Run the plain console child (`python -c <bootstrap>`), returning its exit code."""
     try:
         # Empty cwd: `-c` puts the cwd on sys.path, so a `serial/` planted in the
-        # project dir would be imported instead of pyserial (tan-cli#1317).
+        # project dir would be imported instead of pyserial (tan-cli#1317). It
+        # also neutralises empty/relative PYTHONPATH entries (they resolve
+        # against this empty directory).
         with tempfile.TemporaryDirectory(prefix="tan-monitor-") as empty:
             return subprocess.run(
                 [
@@ -375,7 +363,7 @@ def _spawn_console(python: str, port: str, baud: int, console_filter: str, json_
                     str(baud),
                 ],
                 stdout=_child_stdout(json_mode),
-                env=_monitor_env(),
+                env=spawn_env(),
                 cwd=empty,
             ).returncode
     except OSError as err:
