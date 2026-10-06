@@ -90,7 +90,12 @@ def run_flash(work: Path, *argv, env=None, manifest=OK_SLICE, write_manifest=Tru
         "HOME": str(work),
         "USERPROFILE": str(work),
         "PYTHONPATH": os.pathsep.join(
-            [str(PACKAGE_ROOT), *([inherited] if inherited else [])]
+            [
+                # tan-cli#1312: hides the host's real J-Links from the child.
+                str(Path(__file__).parent / "_no_usb"),
+                str(PACKAGE_ROOT),
+                *([inherited] if inherited else []),
+            ]
         ),
     }
     child_env.pop("ALP_FLASH_FORCE", None)

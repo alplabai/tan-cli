@@ -146,14 +146,24 @@ from tan.core.flash_plan import (
     tool_gate,
     validate_flow_d_preflight_args,
     validate_flow_d_shape,
+    validate_identifier,
+    _JLINK_SERIAL_DESTINATION,
 )
 from tan.core.global_flags import accept_global_flags
 from tan.core.jlink_probe import (
+    CODE_NOT_FOUND,
+    ISOLATION_VERIFIED,
+    SYSFS_USB_DEVICES,
+    USB_PATH_ENV,
+    ProbeEnumerationError,
     ProbeSelection,
     enumerate_jlinks,
     is_valid_usb_path,
-    isolation_asserted,
+    parse_show_emu_list,
+    probe_set,
     resolve_probe_selection,
+    snapshot_drift,
+    verify_emulator_list,
 )
 from tan.core.subprocess_env import spawn_env
 from tan.core.setools import (
@@ -615,6 +625,7 @@ def _spawn(
     venv_bin: Path | None = None,
     workspace: str | None = None,
     executable: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> _Outcome:
     """One process. Captured in JSON mode (the output is kept for the failure
     message and never re-spawned), TEED to stderr in text mode -- streamed live
@@ -675,7 +686,7 @@ def _spawn(
     `workspace` (tan-cli#289/#61), when given, becomes the child's cwd, so
     `west flash` can see alp-sdk's out-of-tree runners.
     """
-    env = _child_env(venv_bin)
+    env = {**_child_env(venv_bin), **(extra_env or {})}
     try:
         if capture:
             proc = subprocess.run(
@@ -1292,6 +1303,7 @@ def _spawn_jlink(
     venv_bin: Path | None = None,
     workspace: str | None = None,
     executable: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> _Outcome:
     """Materialise the Commander script to a temp file, append its path as the
     final `-CommanderScript` argument, spawn, and remove the temp file.
@@ -1317,7 +1329,10 @@ def _spawn_jlink(
             captured=capture,
         )
     try:
-        return _spawn([*argv, path], capture, timeout, venv_bin, workspace, executable)
+        # `extra_env` only when given: every pre-#1312 call (and the test
+        # doubles that stand in for `_spawn`) keeps the exact old call shape.
+        extra = {"extra_env": extra_env} if extra_env else {}
+        return _spawn([*argv, path], capture, timeout, venv_bin, workspace, executable, **extra)
     finally:
         _unlink(path)
 
@@ -1445,7 +1460,11 @@ def _unresolved_program_outcome(program: str, venv_bin: Path | None, capture: bo
 
 
 def _execute(
-    plan: FlashPlan, capture: bool, venv_bin: Path | None = None, workspace: str | None = None
+    plan: FlashPlan,
+    capture: bool,
+    venv_bin: Path | None = None,
+    workspace: str | None = None,
+    probe_guard: "_ProbeGuard | None" = None,
 ) -> _Outcome:
     """Spawn the plan: a pipeline (a `"|"` token), a J-Link plan (temp Commander
     script), or a plain single process.
@@ -1527,9 +1546,18 @@ def _execute(
             resolved[cut + 1],
         )
     if plan.jlink_script is not None:
+        extra_env = None
+        if probe_guard is not None:
+            # tan-cli#1312: verify the selection against what this very
+            # JLinkExe sees, immediately before it writes.
+            refusal = _probe_guard_refusal(probe_guard, argv[0], venv_bin, workspace)
+            if refusal is not None:
+                return _Outcome(success=False, stderr=refusal, captured=capture)
+            extra_env = probe_guard.env()
+        extra = {"extra_env": extra_env} if extra_env else {}
         return _spawn_jlink(
             spawned, plan.jlink_script, capture, _FLASH_TIMEOUT_S, on_path_bin, workspace,
-            resolved[0],
+            resolved[0], **extra,
         )
     return _spawn(spawned, capture, _FLASH_TIMEOUT_S, on_path_bin, workspace, resolved[0])
 
@@ -2019,9 +2047,6 @@ class _Context:
     #: `flash_args.jlink_serial` for this run; see `tan.core.jlink_probe`.
     probe_serial: str | None = None
     probe_usb_path: str | None = None
-    #: `TAN_PROBE_ISOLATED=1` -- the caller's assertion that a probe-masking
-    #: wrapper isolates the target. Unverifiable by tan; see `jlink_probe`.
-    probe_isolated: bool = False
     #: Read-only J-Link enumeration, injectable so tests never touch real USB.
     #: `None` resolves to the module's `enumerate_jlinks` at call time.
     enumerate_probes: Callable[[], Any] | None = None
@@ -2029,41 +2054,164 @@ class _Context:
 
 def _flow_d_probe_selection(
     flash_args: Any, ctx: _Context
-) -> tuple[Any, ProbeSelection | None]:
+) -> tuple[Any, ProbeSelection | None, Any]:
     """tan-cli#1312: resolve which J-Link a Flow D entry will use, BEFORE
     anything (SETOOLS sign, preflight, write) happens. Returns the `flash_args`
-    to carry on with (the selected serial substituted for `jlink_serial`) and
-    the selection, or `(flash_args, None)` when `flash_args` is not a mapping
+    to carry on with (the selected serial substituted for `jlink_serial`), the
+    selection, and the enumeration snapshot the spawn-time TOCTOU check compares
+    against. `(flash_args, None, None)` when `flash_args` is not a mapping
     (shape validation reports that)."""
     if not isinstance(flash_args, dict):
-        return flash_args, None
+        return flash_args, None, None
     try:
         manifest_serial = fa_str_checked(flash_args, "jlink_serial", False)
+        if manifest_serial is not None:
+            validate_identifier(
+                manifest_serial, "jlink_serial", destination=_JLINK_SERIAL_DESTINATION
+            )
     except FlashPlanError:
-        return flash_args, None  # the shape check reports the malformed key
-    probes = (ctx.enumerate_probes or enumerate_jlinks)()
+        return flash_args, None, None  # the shape check reports the malformed key
+    if ctx.probe_serial is not None:
+        try:
+            validate_identifier(
+                ctx.probe_serial, "--probe-serial", destination=_JLINK_SERIAL_DESTINATION
+            )
+        except FlashPlanError as err:
+            return flash_args, ProbeSelection(
+                None, None, "cli-serial", None,
+                refusal_code=CODE_NOT_FOUND, refusal=str(err),
+            ), None
+    try:
+        probes = (ctx.enumerate_probes or enumerate_jlinks)()
+    except ProbeEnumerationError as err:
+        return flash_args, ProbeSelection(
+            None, ctx.probe_usb_path, "unpinned", None,
+            refusal_code=CODE_NOT_FOUND,
+            refusal=(
+                f"cannot read the USB device tree reliably ({err}); refusing rather than "
+                "guessing which J-Link is attached."
+            ),
+        ), None
     selection = resolve_probe_selection(
         probes,
         cli_serial=ctx.probe_serial,
         cli_usb_path=ctx.probe_usb_path,
         manifest_serial=manifest_serial,
-        isolated=ctx.probe_isolated,
     )
     if selection.refusal_code is None and selection.serial is not None:
         if selection.serial != manifest_serial:
             flash_args = {**flash_args, "jlink_serial": selection.serial}
-    return flash_args, selection
+    return flash_args, selection, probe_set(probes)
 
 
 def _probe_echo(selection: ProbeSelection | None, ctx: _Context) -> dict[str, Any] | None:
-    """The envelope's `probe` echo -- `None` (key absent) when no selector was
-    given and no J-Link was visible, preserving the pre-#1312 shape."""
+    """The envelope's `probe` echo -- `None` (key absent) only when no selector
+    was given and an enumerable host showed no J-Link, preserving the pre-#1312
+    shape there."""
     if selection is None:
         return None
     given = ctx.probe_serial is not None or ctx.probe_usb_path is not None
-    if not given and not selection.visible and selection.refusal_code is None:
+    if not given and selection.visible == 0 and selection.refusal_code is None:
         return None
-    return selection.as_dict()
+    out = selection.as_dict()
+    out["sysfsRoot"] = SYSFS_USB_DEVICES if ctx.enumerate_probes is None else "injected"
+    return out
+
+
+@dataclass
+class _ProbeGuard:
+    """What the spawn-time probe verification needs (tan-cli#1312). Mutable on
+    purpose: `tripped` carries the refusal text back to the call site that must
+    report it as `flash.probe-ambiguous`, and `echo` is the entry's `probe`
+    dict, annotated once a verification passes."""
+
+    selection: ProbeSelection
+    snapshot: Any
+    enumerate_probes: Callable[[], Any] | None
+    echo: dict[str, Any] | None
+    tripped: str | None = None
+
+    def env(self) -> dict[str, str] | None:
+        """`TAN_PROBE_USB_PATH`, for a wrapper to cross-check its mask."""
+        usb_path = self.selection.usb_path
+        return {USB_PATH_ENV: usb_path} if usb_path else None
+
+
+def _probe_guard_refusal(
+    guard: _ProbeGuard, program: str, venv_bin: Path | None, workspace: str | None
+) -> str | None:
+    """Immediately before a JLinkExe spawn: re-enumerate (TOCTOU) and run the
+    SAME JLinkExe read-only (`ShowEmuList`, same env) -- exactly one emulator
+    must carry the selected serial, else refuse. `None` to proceed."""
+    guard.tripped = None
+    msg: str | None
+    try:
+        msg = snapshot_drift(guard.snapshot, (guard.enumerate_probes or enumerate_jlinks)())
+    except ProbeEnumerationError as err:
+        msg = f"cannot read the USB device tree reliably ({err}); refusing to write."
+    if msg is None:
+        msg = _show_emu_list_refusal(guard, program, venv_bin, workspace)
+    if msg is None:
+        if guard.echo is not None:
+            guard.echo["isolation"] = ISOLATION_VERIFIED
+        return None
+    guard.tripped = msg
+    return msg
+
+
+def _show_emu_list_refusal(
+    guard: _ProbeGuard, program: str, venv_bin: Path | None, workspace: str | None
+) -> str | None:
+    spawned = _programs_resolved_in_venv([program], venv_bin)
+    on_path_bin = venv_bin if spawned != [program] else None
+    resolved, unresolved = resolve_program_positions(spawned, _resolution_env(on_path_bin))
+    if unresolved is not None:
+        return (
+            f"the J-Link binary `{unresolved}` could not be resolved to verify the "
+            "selected probe; refusing to write."
+        )
+    extra = {"extra_env": guard.env()} if guard.env() else {}
+    outcome = _spawn_jlink(
+        [spawned[0], "-NoGui", "1", "-CommanderScript"], "ShowEmuList\nexit\n", True,
+        _PREFLIGHT_TIMEOUT_S, on_path_bin, workspace, resolved[0], **extra,
+    )
+    serial = guard.selection.serial
+    if serial is None:
+        return None
+    return verify_emulator_list(
+        serial, parse_show_emu_list(f"{outcome.stdout}\n{outcome.stderr}")
+    )
+
+
+def _jlink_program(venv_bin: Path | None) -> str:
+    return next((n for n in ("JLinkExe", "JLink") if _tool_available(n, venv_bin)), "JLinkExe")
+
+
+def _probe_selector_unsupported(
+    targets: list[FlashTarget], ctx: _Context
+) -> list[tuple[_Entry, str]]:
+    """tan-cli#1312: `--probe-serial` / `--probe-usb-path` only mean something to
+    Flow D. An entry that would flash through any other method (`west flash`
+    picks its own probe) is refused, for the WHOLE run and before any write,
+    rather than silently ignoring a selector the operator relied on."""
+    if ctx.probe_serial is None and ctx.probe_usb_path is None:
+        return []
+    out: list[tuple[_Entry, str]] = []
+    for t in targets:
+        if not t.flash_method or flash_args_has_tbd(t.flash_args):
+            continue
+        if helper_flash_gate(t, recovery_armed=ctx.recover, helper_filter=ctx.helper_filter):
+            continue
+        method = select_flash_method(t) or t.flash_method
+        if method == FLOW_D_METHOD:
+            continue
+        msg = (
+            f"{t.kind} '{t.id}' flashes via {method}, which does not honour "
+            "--probe-serial / --probe-usb-path (only alif_mram_jlink does); refusing "
+            "the whole run before any write rather than ignoring the selector."
+        )
+        out.append((_Entry(t.kind, t.id, method, "failed", 1, msg), msg))
+    return out
 
 
 def _recovery_armed_for(target: FlashTarget, ctx: _Context) -> bool:
@@ -2333,6 +2481,7 @@ def _flash_entry(
     # `_Entry` built after it carries the `probe` echo.
     probe_echo: dict[str, Any] | None = None
     probe_note = ""
+    probe_guard: _ProbeGuard | None = None
 
     def entry(
         method: str | None,
@@ -2519,10 +2668,13 @@ def _flash_entry(
         # entry -- ahead of the SETOOLS sign, the preflight and the write, and
         # it applies under `--dry-run` too (a preview that would refuse is not
         # reported ok). Enumeration is read-only.
-        flash_args, selection = _flow_d_probe_selection(flash_args, ctx)
+        flash_args, selection, snapshot = _flow_d_probe_selection(flash_args, ctx)
         probe_echo = _probe_echo(selection, ctx)
         if probe_echo is not None and selection is not None:
             probe_note = f" ({selection.describe()})"
+        if selection is not None and selection.refusal_code is None:
+            if selection.serial is not None:
+                probe_guard = _ProbeGuard(selection, snapshot, ctx.enumerate_probes, probe_echo)
         if selection is not None and selection.refusal_code is not None:
             lines.append(f"flash: {kind} '{entry_id}' -> {method}")
             lines.append(f"  FAIL: {selection.refusal}")
@@ -2597,6 +2749,23 @@ def _flash_entry(
             # it stands here, before the sign, is behaviourally identical to
             # running it after for every case except the one this fixes.
             if not ctx.dry_run and confirm:
+                # tan-cli#1312: the spawn-time probe verification runs here
+                # FIRST (and again before the preflight and the write) so a
+                # shared-serial refusal lands before the SETOOLS sign mutates
+                # anything either.
+                if probe_guard is not None:
+                    guard_refusal = _probe_guard_refusal(
+                        probe_guard, _jlink_program(ctx.venv_bin), ctx.venv_bin, ctx.workspace
+                    )
+                    if guard_refusal is not None:
+                        lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+                        lines.append(f"  FAIL: {guard_refusal}")
+                        return (
+                            1,
+                            entry(method, "failed", 1, guard_refusal,
+                                  probe_refusal="ambiguous"),
+                            lines,
+                        )
                 # tan-cli#609: the strict switch's Flow D site. It has to be
                 # HERE, not at the shared one further down, for exactly the
                 # reason #512 hoisted the preflight to this point: the
@@ -2655,11 +2824,19 @@ def _flash_entry(
                     dry_run=ctx.dry_run,
                     force_confirm=ctx.force_confirm,
                 )
-                refusal = _flow_d_preflight(preflight_inputs, ctx.venv_bin, ctx.workspace)
+                refusal = _flow_d_preflight(
+                    preflight_inputs, ctx.venv_bin, ctx.workspace, probe_guard=probe_guard
+                )
                 if refusal is not None:
                     lines.append(f"flash: {kind} '{entry_id}' -> {method}")
                     lines.append(f"  FAIL: {refusal}")
-                    return 1, entry(method, "failed", 1, refusal), lines
+                    tripped = probe_guard is not None and probe_guard.tripped == refusal
+                    return (
+                        1,
+                        entry(method, "failed", 1, refusal,
+                              probe_refusal="ambiguous" if tripped else None),
+                        lines,
+                    )
             flash_args, setools_note = _resolve_flow_d_atoc_via_setools(
                 flash_args, shape, ctx, entry_id, confirm
             )
@@ -2807,7 +2984,14 @@ def _flash_entry(
             lines.append(f"  FAIL: {refusal}")
             return 1, entry(method, "failed", 1, refusal), lines
 
-    outcome = _execute(plan, ctx.capture, ctx.venv_bin, ctx.workspace)
+    outcome = _execute(plan, ctx.capture, ctx.venv_bin, ctx.workspace, probe_guard)
+    if not outcome.success and probe_guard is not None and probe_guard.tripped:
+        lines.append(f"  FAIL: {probe_guard.tripped}")
+        return (
+            1,
+            entry(method, "failed", 1, probe_guard.tripped, probe_refusal="ambiguous"),
+            lines,
+        )
     if outcome.success:
         # tan-cli#373: `setools_note` is set here only when THIS run's own
         # SETOOLS auto-sign actually ran (the dry-run preview above always
@@ -2836,6 +3020,7 @@ def _flow_d_preflight(
     method: str = FLOW_D_METHOD,
     *,
     read_device: str | None = None,
+    probe_guard: "_ProbeGuard | None" = None,
 ) -> str | None:
     """Connect read-only with the manifest's ATTACH device profile and confirm
     the SW-DP IDR before any write. Returns a refusal message, or `None`
@@ -2930,8 +3115,16 @@ def _flow_d_preflight(
         )
     # No `-ExitOnError`: a failed connect is the SIGNAL being read here, not an
     # error to abort the probe on.
+    extra_env = None
+    if probe_guard is not None:
+        # tan-cli#1312: the preflight is a JLinkExe spawn too -- verified first.
+        guard_refusal = _probe_guard_refusal(probe_guard, binary, venv_bin, workspace)
+        if guard_refusal is not None:
+            return guard_refusal
+        extra_env = probe_guard.env()
+    extra = {"extra_env": extra_env} if extra_env else {}
     outcome = _spawn_jlink([spawned[0], "-NoGui", "1", "-CommanderScript"], script, True,
-                           _PREFLIGHT_TIMEOUT_S, on_path_bin, workspace, resolved[0])
+                           _PREFLIGHT_TIMEOUT_S, on_path_bin, workspace, resolved[0], **extra)
     banner = f"{outcome.stdout}\n{outcome.stderr}"
     if _dp_id_matches(expected, banner):
         return None
@@ -3311,12 +3504,34 @@ def _run(
         atoc_unqueryable=atoc_unqueryable,
         probe_serial=probe_serial,
         probe_usb_path=probe_usb_path,
-        probe_isolated=isolation_asserted(os.environ),
         **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
     )
+    unsupported = _probe_selector_unsupported(plan.targets, ctx)
+    if unsupported:
+        return (
+            ExitCode.RUNTIME_FAILURE,
+            _data(build_root, [e.as_dict() for e, _ in unsupported]),
+            [Issue("flash.probe-selector-unsupported", "error", m) for _, m in unsupported],
+            [f"flash: {m}" for _, m in unsupported],
+            sdk,
+        )
     for target in plan.targets:
         rc, entry, lines = _flash_entry(target, ctx)
         text_lines.extend(lines)
+        if (
+            entry.probe is not None
+            and entry.probe.get("visibleProbes") is None
+            and entry.probe_refusal is None
+        ):
+            # tan-cli#1312: this host cannot enumerate USB (no sysfs), so the
+            # selection above rests on J-Link's own ShowEmuList alone.
+            unverified = (
+                f"{entry.id}: this host cannot enumerate USB devices, so the J-Link "
+                "selection was not cross-checked against sysfs; only the spawn-time "
+                "ShowEmuList verification stands between this run and a wrong probe."
+            )
+            text_lines.append(unverified)
+            issues.append(Issue("flash.probe-unverified", "warning", unverified))
         if entry.recovery_armed:
             # tan-cli#611. Emitted BEFORE the entry's own outcome lines are
             # counted, and to both channels for the same reason `flash.dpidr-
@@ -3627,7 +3842,9 @@ def flash(
         metavar="SN",
         help="J-Link serial to use for THIS run, overriding flash_args.jlink_serial "
         "(tan-cli#1312). Refuses (flash.probe-ambiguous) when several visible probes "
-        "share that serial -- on a bench of cloned serials use --probe-usb-path. "
+        "share that serial (serials compare canonically: 603000869 == 000603000869) "
+        "-- on a bench of cloned serials use --probe-usb-path. Refused for any method "
+        "other than alif_mram_jlink (flash.probe-selector-unsupported). "
         "Applies to alif_mram_jlink; echoed as `probe` on the entry.",
     ),
     probe_usb_path: str = typer.Option(
@@ -3635,11 +3852,12 @@ def flash(
         "--probe-usb-path",
         metavar="BUS-PORT",
         help="Select the J-Link at this USB port path (e.g. 3-4.2). tan resolves it to "
-        "the probe's serial from sysfs; J-Link selects by serial only, so when other "
-        "visible probes share that serial tan REFUSES (flash.probe-ambiguous) instead "
-        "of guessing -- run it where only the target probe is visible (a masking "
-        "wrapper; set TAN_PROBE_ISOLATED=1 if the wrapper stands in for JLinkExe). "
-        "Linux only.",
+        "the probe's serial from sysfs; J-Link selects by serial only, so before each "
+        "JLinkExe spawn tan runs the same JLinkExe read-only (ShowEmuList) and REFUSES "
+        "(flash.probe-ambiguous) unless exactly one emulator carries that serial -- "
+        "i.e. run it where only the target probe is visible (a masking wrapper on "
+        "PATH). TAN_PROBE_USB_PATH=<path> is exported to that JLinkExe so a wrapper "
+        "can cross-check its mask. Linux only.",
     ),
     skip_missing_tools: bool = typer.Option(
         False,

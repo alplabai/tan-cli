@@ -9,20 +9,27 @@ issued with a shared serial lands on whichever probe the J-Link DLL opens
 first. What DOES identify a probe on Linux is its USB port path (`3-4.2`, the
 sysfs device name), and that path is not something J-Link can be told.
 
-THE DESIGN (the honest one). tan resolves a `--probe-usb-path` to the serial
-sysfs reports for that port and feeds THAT to J-Link -- but only when the
-serial is unique among the visible J-Links. When other visible probes share
-the serial, tan cannot address the one at the named path, and it REFUSES
-(`flash.probe-ambiguous`) naming the collision, rather than pretending the
-path was honoured. The way out is isolation OUTSIDE tan: a wrapper that masks
-every other probe (their `/dev/bus/usb` node AND their sysfs directory) in a
-private mount namespace, so exactly one probe is visible. Run tan inside such a
-namespace and enumeration sees one probe: the shared serial is then
-unambiguous. If instead the wrapper stands in for the `JLinkExe` binary, tan
-itself still sees every probe, so the caller may assert the isolation with
-`TAN_PROBE_ISOLATED=1`; that assertion is unverifiable by tan, is the only
-thing it relaxes (the shared-serial refusal for an explicitly named USB path,
-which must still exist), and is echoed in the envelope.
+THE DESIGN (the honest one), in three layers:
+
+1. SELECTION (`resolve_probe_selection`, from a sysfs enumeration). A
+   `--probe-usb-path` is resolved to the serial sysfs reports for that port. A
+   serial (CLI or `flash_args.jlink_serial`) is matched against the visible
+   probes by its CANONICAL form (`canon_serial`: `603000869` and
+   `000603000869` are the same serial -- YAML turns the unquoted one into an
+   int). A serial no visible probe carries is refused; one that several visible
+   probes carry is refused unless a USB path names the target.
+2. VERIFICATION at spawn time (`verify_emulator_list`). Selection alone cannot
+   make J-Link open the right probe when serials collide -- only isolation
+   OUTSIDE tan can (a wrapper masking every other probe's `/dev/bus/usb` node
+   AND sysfs directory in a private mount namespace). So immediately before
+   EACH `JLinkExe` spawn tan runs the same binary read-only (`ShowEmuList`) and
+   requires exactly one emulator whose canonical serial matches the selection.
+   A masking wrapper on PATH passes; plain `JLinkExe` with cloned serials
+   refuses. `TAN_PROBE_USB_PATH=<resolved path>` is exported in that spawn's
+   environment so a wrapper can cross-check its own mask against it.
+3. TOCTOU (`snapshot_drift`). The enumeration is repeated before each spawn
+   and the run refuses if the set of (path, canonical serial) changed since
+   selection.
 
 Enumeration is strictly read-only (directory listing + reading two sysfs
 attributes). It never opens a probe.
@@ -42,27 +49,32 @@ SYSFS_USB_DEVICES = "/sys/bus/usb/devices"
 #: A sysfs USB device name for a device on a hub port: `<bus>-<port>[.<port>...]`.
 _USB_PATH_RE = re.compile(r"^[0-9]+-[0-9]+(\.[0-9]+)*$")
 
-#: The env var a caller sets to assert it runs tan against a probe-masking
-#: wrapper that tan cannot see from here. See the module docstring.
-ISOLATED_ENV = "TAN_PROBE_ISOLATED"
+#: Exported into every `JLinkExe` spawn of a selected probe: the resolved USB
+#: path, for a wrapper to cross-check its mask against.
+USB_PATH_ENV = "TAN_PROBE_USB_PATH"
 
-#: Test seam: read the USB device tree from this directory instead of
-#: `/sys/bus/usb/devices`, so a suite that spawns real `tan` subprocesses never
-#: depends on which J-Links the host happens to have plugged in.
-SYSFS_ROOT_ENV = "TAN_USB_SYSFS_ROOT"
+ISOLATION_VERIFIED = "verified-single-emulator"
 
 CODE_AMBIGUOUS = "ambiguous"
 CODE_NOT_FOUND = "not-found"
 CODE_CONFLICT = "selector-conflict"
 
+#: One `ShowEmuList` line: `J-Link[0]: Connection: USB, Serial number: 000603000869, ...`.
+_EMU_SERIAL_RE = re.compile(r"Serial number:\s*([0-9A-Za-z]+)")
+
+
+class ProbeEnumerationError(Exception):
+    """A device directory that is populated but cannot be read (unreadable
+    `idVendor`, or a SEGGER device with no readable `serial`). NOT the same as
+    an empty directory, which is what a mount-namespace mask leaves behind."""
+
 
 @dataclass(frozen=True)
 class JLinkProbe:
-    """One visible J-Link: its USB port path and the serial sysfs reports
-    (`None` when the attribute is missing/unreadable)."""
+    """One visible J-Link: its USB port path and the serial sysfs reports."""
 
     usb_path: str
-    serial: str | None
+    serial: str
 
 
 @dataclass(frozen=True)
@@ -72,6 +84,8 @@ class ProbeSelection:
     `refusal_code` is one of the `CODE_*` suffixes (the issue code is
     `flash.probe-<suffix>`) and is set iff the run must refuse before any write.
     `serial` is what Flow D must put in `SelectEmuBySN` (`None`: pin nothing).
+    `candidates` lists every visible probe sharing `serial` when more than one
+    does -- the case only spawn-time verification can settle.
     """
 
     serial: str | None
@@ -79,7 +93,6 @@ class ProbeSelection:
     source: str
     visible: int | None
     candidates: tuple[str, ...] = ()
-    isolation_asserted: bool = False
     overrides_manifest_serial: str | None = None
     refusal_code: str | None = None
     refusal: str | None = None
@@ -91,8 +104,6 @@ class ProbeSelection:
             "usbPath": self.usb_path,
             "visibleProbes": self.visible,
         }
-        if self.isolation_asserted:
-            out["isolationAsserted"] = True
         if self.overrides_manifest_serial is not None:
             out["overridesFlashArgsSerial"] = self.overrides_manifest_serial
         if self.candidates:
@@ -102,15 +113,24 @@ class ProbeSelection:
     def describe(self) -> str:
         who = self.serial if self.serial is not None else "(none pinned)"
         where = f" at USB path {self.usb_path}" if self.usb_path else ""
-        return f"probe selection: serial {who}{where} via {self.source}"
+        shared = ""
+        if len(self.candidates) > 1 and self.usb_path:
+            shared = (
+                f"; serial shared by {', '.join(self.candidates)} -- a real run needs the "
+                "J-Link on PATH to show exactly one emulator with it (masking wrapper)"
+            )
+        return f"probe selection: serial {who}{where} via {self.source}{shared}"
+
+
+def canon_serial(text: str) -> str:
+    """The comparison form of a J-Link serial: stripped, and when all digits,
+    without leading zeros (`000603000869` == `603000869`)."""
+    text = text.strip()
+    return str(int(text)) if text.isdigit() else text
 
 
 def is_valid_usb_path(text: str) -> bool:
     return bool(_USB_PATH_RE.match(text))
-
-
-def isolation_asserted(environ: dict[str, str] | os._Environ) -> bool:
-    return environ.get(ISOLATED_ENV, "") == "1"
 
 
 def enumerate_jlinks(root: str | None = None) -> list[JLinkProbe] | None:
@@ -118,9 +138,9 @@ def enumerate_jlinks(root: str | None = None) -> list[JLinkProbe] | None:
 
     `None` means "this host cannot enumerate" (no sysfs USB tree: macOS,
     Windows, a container without sysfs) -- distinct from `[]`, "enumerated and
-    found none", because the caller must not read an unverifiable host as an
-    empty bench."""
-    root = root or os.environ.get(SYSFS_ROOT_ENV) or SYSFS_USB_DEVICES
+    found none". Raises `ProbeEnumerationError` for a populated device
+    directory it cannot read -- never read as "no probe there"."""
+    root = root or SYSFS_USB_DEVICES
     try:
         names = sorted(os.listdir(root))
     except OSError:
@@ -131,12 +151,28 @@ def enumerate_jlinks(root: str | None = None) -> list[JLinkProbe] | None:
         # port; only `<bus>-<port>` names are.
         if ":" in name or not _USB_PATH_RE.match(name):
             continue
-        base = os.path.join(root, name)
-        if _read_attr(os.path.join(base, "idVendor")) != SEGGER_VENDOR_ID:
-            continue
-        serial = _read_attr(os.path.join(base, "serial"))
-        probes.append(JLinkProbe(usb_path=name, serial=serial or None))
+        probe = _read_device(os.path.join(root, name), name)
+        if probe is not None:
+            probes.append(probe)
     return probes
+
+
+def _read_device(base: str, name: str) -> JLinkProbe | None:
+    try:
+        populated = bool(os.listdir(base))
+    except OSError:
+        populated = False
+    if not populated:
+        return None  # an empty directory is what a namespace mask leaves
+    vendor = _read_attr(os.path.join(base, "idVendor"))
+    if vendor is None:
+        raise ProbeEnumerationError(f"{name}: idVendor is unreadable")
+    if vendor != SEGGER_VENDOR_ID:
+        return None
+    serial = _read_attr(os.path.join(base, "serial"))
+    if not serial:
+        raise ProbeEnumerationError(f"{name}: a SEGGER device whose serial is unreadable")
+    return JLinkProbe(usb_path=name, serial=serial)
 
 
 def _read_attr(path: str) -> str | None:
@@ -145,6 +181,63 @@ def _read_attr(path: str) -> str | None:
             return handle.read().strip()
     except OSError:
         return None
+
+
+def probe_set(probes: list[JLinkProbe] | None) -> frozenset[tuple[str, str]] | None:
+    """The identity of an enumeration for the TOCTOU comparison."""
+    if probes is None:
+        return None
+    return frozenset((p.usb_path, canon_serial(p.serial)) for p in probes)
+
+
+def snapshot_drift(
+    snapshot: frozenset[tuple[str, str]] | None, now: list[JLinkProbe] | None
+) -> str | None:
+    """A refusal when the visible probes changed between selection and spawn."""
+    if snapshot is None:
+        return None
+    current = probe_set(now)
+    if current == snapshot:
+        return None
+    return (
+        "the visible J-Links changed between probe selection and the spawn "
+        f"(was {_fmt_set(snapshot)}, now {_fmt_set(current)}); refusing rather than "
+        "writing through a probe set that was not the one selected."
+    )
+
+
+def _fmt_set(items: frozenset[tuple[str, str]] | None) -> str:
+    if items is None:
+        return "unenumerable"
+    return ", ".join(f"{p} ({s})" for p, s in sorted(items)) or "none"
+
+
+def parse_show_emu_list(text: str) -> list[str]:
+    """The serials a `ShowEmuList` output names, in order."""
+    return _EMU_SERIAL_RE.findall(text)
+
+
+def verify_emulator_list(serial: str, emu_serials: list[str]) -> str | None:
+    """Spawn-time verification: exactly one listed emulator carries `serial`
+    (canonically). `None` when so, else the refusal message."""
+    want = canon_serial(serial)
+    n = sum(1 for s in emu_serials if canon_serial(s) == want)
+    if n == 1:
+        return None
+    if n == 0:
+        return (
+            f"J-Link's own ShowEmuList shows no emulator with serial {serial} "
+            f"(saw: {', '.join(emu_serials) or 'none'}); refusing to write."
+        )
+    return (
+        f"J-Link's own ShowEmuList shows {n} emulators with serial {serial}, so "
+        "SelectEmuBySN would open whichever enumerates first -- possibly the wrong "
+        "board. J-Link selects by serial only; run it where only the target probe is "
+        "visible (a wrapper masking the other probes' /dev/bus/usb nodes AND sysfs "
+        "directories in a private mount namespace) or give the probes distinct serials. "
+        "flash_args.expect_dpidr stays mandatory on a shared-serial bench: it is the "
+        "only check that the board answering is the one intended."
+    )
 
 
 def _paths(probes: list[JLinkProbe]) -> tuple[str, ...]:
@@ -172,11 +265,11 @@ def _refuse(
     )
 
 
-_ISOLATION_HINT = (
-    "J-Link Commander selects by serial only, so tan cannot address one of several "
-    "same-serial probes by USB path. Run tan where only the target probe is visible "
-    "(a wrapper that masks the other probes' /dev/bus/usb nodes AND their sysfs "
-    "directories in a private mount namespace), or give the probes distinct serials."
+_HINT = (
+    "Pass --probe-usb-path <bus-port> to name one probe. Note J-Link Commander selects "
+    "by serial only, so with shared serials the write is additionally refused unless "
+    "the J-Link on PATH is isolated to that one probe (a masking wrapper). "
+    "flash_args.expect_dpidr stays mandatory on a shared-serial bench."
 )
 
 
@@ -186,7 +279,6 @@ def resolve_probe_selection(
     cli_serial: str | None,
     cli_usb_path: str | None,
     manifest_serial: str | None,
-    isolated: bool = False,
 ) -> ProbeSelection:
     """Decide which J-Link a Flow D run will use, or that it must refuse.
 
@@ -195,7 +287,7 @@ def resolve_probe_selection(
     `flash_args.jlink_serial`; the CLI selectors override the manifest for this
     run. Pure."""
     if cli_usb_path is not None:
-        return _by_usb_path(probes, cli_usb_path, cli_serial, manifest_serial, isolated)
+        return _by_usb_path(probes, cli_usb_path, cli_serial, manifest_serial)
     serial = cli_serial if cli_serial is not None else manifest_serial
     if serial is not None:
         return _by_serial(probes, serial, cli_serial, manifest_serial)
@@ -205,7 +297,6 @@ def resolve_probe_selection(
 def _usb_path_refusal(
     probes: list[JLinkProbe] | None, path: str, cli_serial: str | None
 ) -> ProbeSelection | None:
-    """The refusals that do not depend on the shared-serial question."""
     visible = None if probes is None else len(probes)
     if probes is None:
         return _refuse(
@@ -224,20 +315,16 @@ def _usb_path_refusal(
             serial=None, usb_path=path, source="cli-usb-path",
             visible=visible, candidates=_paths(probes),
         )
-    if hit.serial is None:
-        return _refuse(
-            CODE_NOT_FOUND,
-            f"--probe-usb-path {path}: the probe's serial is unreadable from sysfs, so "
-            "J-Link has nothing to select it by.",
-            serial=None, usb_path=path, source="cli-usb-path", visible=visible,
-        )
-    if cli_serial is not None and cli_serial != hit.serial:
+    if cli_serial is not None and canon_serial(cli_serial) != canon_serial(hit.serial):
         return _refuse(
             CODE_CONFLICT,
             f"--probe-usb-path {path} is a probe with serial {hit.serial}, but "
             f"--probe-serial {cli_serial} was also given. The two selectors name "
             "different probes; refusing.",
             serial=hit.serial, usb_path=path, source="cli-usb-path", visible=visible,
+            candidates=_paths(
+                [p for p in probes if canon_serial(p.serial) == canon_serial(hit.serial)]
+            ),
         )
     return None
 
@@ -247,33 +334,26 @@ def _by_usb_path(
     path: str,
     cli_serial: str | None,
     manifest_serial: str | None,
-    isolated: bool,
 ) -> ProbeSelection:
     refusal = _usb_path_refusal(probes, path, cli_serial)
     if refusal is not None:
         return refusal
     assert probes is not None  # `_usb_path_refusal` refused the None case
     hit = next(p for p in probes if p.usb_path == path)
-    sharing = [p for p in probes if p.serial == hit.serial]
-    if len(sharing) > 1 and not isolated:
-        return _refuse(
-            CODE_AMBIGUOUS,
-            f"--probe-usb-path {path}: serial {hit.serial} is shared by "
-            f"{len(sharing)} visible probes ({', '.join(_paths(sharing))}). "
-            + _ISOLATION_HINT,
-            serial=hit.serial, usb_path=path, source="cli-usb-path",
-            visible=len(probes), candidates=_paths(sharing),
-        )
+    sharing = [p for p in probes if canon_serial(p.serial) == canon_serial(hit.serial)]
+    overrides = (
+        manifest_serial
+        if manifest_serial is not None
+        and canon_serial(manifest_serial) != canon_serial(hit.serial)
+        else None
+    )
     return ProbeSelection(
         serial=hit.serial,
         usb_path=path,
         source="cli-usb-path",
         visible=len(probes),
         candidates=_paths(sharing) if len(sharing) > 1 else (),
-        isolation_asserted=isolated and len(sharing) > 1,
-        overrides_manifest_serial=(
-            manifest_serial if manifest_serial not in (None, hit.serial) else None
-        ),
+        overrides_manifest_serial=overrides,
     )
 
 
@@ -286,22 +366,23 @@ def _by_serial(
     source = "cli-serial" if cli_serial is not None else "flash_args.jlink_serial"
     overrides = (
         manifest_serial
-        if cli_serial is not None and manifest_serial not in (None, cli_serial)
+        if cli_serial is not None
+        and manifest_serial is not None
+        and canon_serial(manifest_serial) != canon_serial(cli_serial)
         else None
     )
     if probes is None:
-        # Unverifiable host: J-Link itself selects by the serial, as before.
+        # Unverifiable host: the spawn-time ShowEmuList check is the only guard.
         return ProbeSelection(serial, None, source, None, overrides_manifest_serial=overrides)
-    visible = len(probes)
-    matches = [p for p in probes if p.serial == serial]
-    if not matches and cli_serial is not None:
+    matches = [p for p in probes if canon_serial(p.serial) == canon_serial(serial)]
+    if not matches:
         return _refuse(
             CODE_NOT_FOUND,
-            f"--probe-serial {cli_serial}: no visible J-Link carries that serial. "
+            f"serial {serial} ({source}): no visible J-Link carries that serial. "
             "Visible J-Links: "
             + (", ".join(f"{p.usb_path} ({p.serial})" for p in probes) or "none")
             + ".",
-            serial=serial, usb_path=None, source=source, visible=visible,
+            serial=serial, usb_path=None, source=source, visible=len(probes),
             candidates=_paths(probes),
         )
     if len(matches) > 1:
@@ -309,13 +390,12 @@ def _by_serial(
             CODE_AMBIGUOUS,
             f"serial {serial} ({source}) is shared by {len(matches)} visible probes "
             f"({', '.join(_paths(matches))}), so J-Link would open whichever "
-            "enumerates first -- possibly the wrong board. Pass --probe-usb-path "
-            "<bus-port> to name one. " + _ISOLATION_HINT,
-            serial=serial, usb_path=None, source=source, visible=visible,
+            "enumerates first -- possibly the wrong board. " + _HINT,
+            serial=serial, usb_path=None, source=source, visible=len(probes),
             candidates=_paths(matches),
         )
     return ProbeSelection(
-        serial, matches[0].usb_path if matches else None, source, visible,
+        matches[0].serial, matches[0].usb_path, source, len(probes),
         overrides_manifest_serial=overrides,
     )
 
@@ -328,9 +408,9 @@ def _unselected(probes: list[JLinkProbe] | None) -> ProbeSelection:
             CODE_AMBIGUOUS,
             f"{len(probes)} J-Links are visible ({', '.join(_paths(probes))}) and nothing "
             "selects one: no --probe-usb-path, no --probe-serial, no "
-            "flash_args.jlink_serial. Refusing before any write. Pass --probe-usb-path "
-            "<bus-port>.",
+            "flash_args.jlink_serial. Refusing before any write. " + _HINT,
             serial=None, usb_path=None, source="unpinned", visible=len(probes),
             candidates=_paths(probes),
         )
-    return ProbeSelection(None, probes[0].usb_path, "sole-visible", 1)
+    only = probes[0]
+    return ProbeSelection(only.serial, only.usb_path, "sole-visible", 1)
