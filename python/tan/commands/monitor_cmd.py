@@ -74,7 +74,6 @@ from pathlib import Path
 import typer
 
 from tan.core.sdk_discovery import _planner_python
-from tan.core import uboot_breakin
 from tan.core.subprocess_env import spawn_env
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -326,107 +325,6 @@ def _child_stdout(json_mode: bool):
     return subprocess.DEVNULL
 
 
-def _break_opts(
-    key: str, prompt: str, timeout_s: float
-) -> tuple[bytes, bytes, float]:
-    """Validate the `--break-*`/`--prompt` options (tan-cli#1315)."""
-    try:
-        if not timeout_s > 0:
-            raise ValueError("--break-timeout must be greater than 0")
-        return (
-            uboot_breakin.parse_escaped(key, "--break-key"),
-            uboot_breakin.parse_escaped(prompt, "--prompt"),
-            timeout_s,
-        )
-    except ValueError as err:
-        raise MonitorError(
-            "monitor.break-bad-option",
-            str(err),
-            ExitCode.VALIDATION_FAILURE,
-            {"schemaVersion": DATA_SCHEMA_VERSION},
-        ) from err
-
-
-def _do_break_in(
-    port: str, baud: int, opts: tuple[bytes, bytes, float]
-) -> tuple[dict, object | None]:
-    """Open `port` in-process (local tty, by-id path, or any pyserial URL such
-    as `rfc2217://`/`socket://`), run the break-in loop, and return the
-    envelope's `breakIn` block plus the STILL-OPEN port when the prompt was
-    caught (None otherwise; a missed prompt closes it). The caller hands the
-    open port to the interactive session rather than reopening it: a reopen
-    can toggle DTR/RTS on a USB-UART adapter and reset the board, losing the
-    prompt just caught. The port is opened the way miniterm opens it (no
-    explicit DTR/RTS, so pyserial's own open-time defaults apply).
-    No power control: the operator or labgrid power-cycles the board.
-    """
-    key, prompt, timeout_s = opts
-    try:
-        import serial  # noqa: PLC0415 (optional at runtime)
-    except ImportError as err:
-        raise _pyserial_missing() from err
-    try:
-        ser = serial.serial_for_url(port, baud, timeout=uboot_breakin.DEFAULT_INTERVAL_S)
-    except (OSError, ValueError, serial.SerialException) as err:
-        raise MonitorError(
-            "monitor.break-open-failed",
-            f"could not open '{port}' for --break-uboot: {err}",
-            ExitCode.RUNTIME_FAILURE,
-            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
-        ) from err
-    try:
-        result = uboot_breakin.break_into_uboot(
-            ser, key=key, prompt=prompt, timeout_s=timeout_s
-        )
-    except BaseException:
-        ser.close()
-        raise
-    if not result.caught:
-        ser.close()
-    block = {
-        "caught": result.caught,
-        "elapsedSeconds": round(result.elapsed_s, 3),
-        "timeoutSeconds": timeout_s,
-        "bytesSeen": result.bytes_seen,
-        "bytesSeenTail": result.tail,
-    }
-    return block, (ser if result.caught else None)
-
-
-def _attach_miniterm(ser, json_mode: bool) -> int:
-    """Run the interactive console on the ALREADY-OPEN `ser` (no reopen).
-
-    Mirrors `serial.tools.miniterm.main`'s session setup (exit Ctrl+], menu
-    Ctrl+T, UTF-8, CRLF). Under `--format json` miniterm's `Console` is built
-    with `sys.stdout` pointed at stderr, the same rule `_child_stdout` states
-    for the spawned path: nothing but the envelope may reach stdout.
-    """
-    from serial.tools import miniterm  # noqa: PLC0415 (optional at runtime)
-
-    real_stdout = sys.stdout
-    if json_mode:
-        sys.stdout = sys.__stderr__ if sys.__stderr__ is not None else sys.stderr
-    try:
-        term = miniterm.Miniterm(ser, echo=False, eol="crlf", filters=[])
-    finally:
-        sys.stdout = real_stdout
-    term.exit_character = chr(0x1D)
-    term.menu_character = chr(0x14)
-    term.raw = False
-    term.set_rx_encoding("UTF-8")
-    term.set_tx_encoding("UTF-8")
-    term.start()
-    try:
-        try:
-            term.join(True)
-        except KeyboardInterrupt:
-            pass
-        term.join()
-    finally:
-        term.close()
-    return 0
-
-
 def _run_monitor(
     port: str | None,
     baud: int,
@@ -466,58 +364,27 @@ def _run_monitor(
     if not _port_is_usable(port, {device for device, _ in _available_ports()}):
         raise _refuse_listing_ports(f"port '{port}' not found")
 
-    extra: dict = {}
-    held = None
-    rc = 0
     if break_opts is not None:
-        extra["breakIn"], held = _do_break_in(port, baud, break_opts)
-        base = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud, **extra}
-        if held is None:
-            return (
-                base,
-                [Issue(
-                    "monitor.break-timeout",
-                    "error",
-                    f"no U-Boot prompt within {break_opts[2]}s on {port}; "
-                    "power-cycle the board and retry, or raise --break-timeout.",
-                )],
-                ExitCode.RUNTIME_FAILURE,
-            )
-        print(
-            f"monitor: caught U-Boot prompt after {extra['breakIn']['elapsedSeconds']}s",
-            file=sys.stderr,
-        )
-        if non_interactive:
-            held.close()
-            return base, [], ExitCode.SUCCESS
+        from tan.commands import monitor_session  # noqa: PLC0415 (only on --break-uboot)
+
+        return monitor_session.run(port, baud, json_mode, break_opts, non_interactive)
 
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
-    if held is not None:
-        try:
-            rc = _attach_miniterm(held, json_mode)
-        except OSError as err:
-            raise MonitorError(
-                "monitor.launch-failed",
-                f"failed to run the console on the open port: {err}",
-                ExitCode.RUNTIME_FAILURE,
-                {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
-            ) from err
-    else:
-        try:
-            rc = subprocess.run(
-                [python, "-m", "serial.tools.miniterm", port, str(baud)],
-                stdout=_child_stdout(json_mode),
-                env=spawn_env(),
-            ).returncode
-        except OSError as err:
-            raise MonitorError(
-                "monitor.launch-failed",
-                f"failed to launch `{python} -m serial.tools.miniterm`: {err}",
-                ExitCode.RUNTIME_FAILURE,
-                {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
-            ) from err
+    try:
+        rc = subprocess.run(
+            [python, "-m", "serial.tools.miniterm", port, str(baud)],
+            stdout=_child_stdout(json_mode),
+            env=spawn_env(),
+        ).returncode
+    except OSError as err:
+        raise MonitorError(
+            "monitor.launch-failed",
+            f"failed to launch `{python} -m serial.tools.miniterm`: {err}",
+            ExitCode.RUNTIME_FAILURE,
+            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
+        ) from err
 
-    data = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud, **extra}
+    data = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud}
     if rc != 0:
         return (
             data,
@@ -546,21 +413,25 @@ def monitor(
         False,
         "--break-uboot",
         help="After opening the port, send the autoboot interrupt key repeatedly "
-        "until the U-Boot prompt appears or --break-timeout passes, then hand "
-        "over to the console (or exit under --non-interactive). Power-cycle "
-        "the board yourself; works over rfc2217:// and socket:// URLs.",
+        "until the U-Boot prompt appears or --break-timeout passes, then continue "
+        "in the interactive console on the same open port. With --non-interactive "
+        "it stops after the break-in instead (exit 0 if caught); the console "
+        "itself needs a terminal. Power-cycle the board yourself; works over "
+        "rfc2217:// and socket:// URLs.",
     ),
     break_key: str = typer.Option(
-        " ", "--break-key", help="Key sent to interrupt autoboot (escapes allowed, e.g. '\\r')."
+        None,
+        "--break-key",
+        help="With --break-uboot: key that interrupts autoboot (default: a space; "
+        "escapes \\xNN \\r \\n \\t \\\\ allowed).",
     ),
     prompt: str = typer.Option(
-        "=> ", "--prompt", help="U-Boot prompt that ends --break-uboot (escapes allowed)."
+        None, "--prompt", help="With --break-uboot: prompt that ends it (default: '=> ')."
     ),
     break_timeout: float = typer.Option(
-        uboot_breakin.DEFAULT_TIMEOUT_S,
+        None,
         "--break-timeout",
-        show_default=True,
-        help="Seconds to keep sending the key before giving up.",
+        help="With --break-uboot: seconds to keep sending the key (default: 30).",
     ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     project: str = typer.Option(None, "--project", hidden=True),
@@ -606,7 +477,9 @@ def monitor(
         raise typer.Exit(int(exit_code))
 
     try:
-        opts = _break_opts(break_key, prompt, break_timeout) if break_uboot else None
+        from tan.commands import monitor_session  # noqa: PLC0415 (validation only)
+
+        opts = monitor_session.break_opts(break_uboot, break_key, prompt, break_timeout)
         data, issues, exit_code = _run_monitor(port, baud, json_mode, opts, non_interactive)
     except MonitorError as err:
         finish(err.data, [Issue(err.code, "error", err.message)], err.exit_code)

@@ -82,11 +82,33 @@ def test_custom_key_and_prompt():
     assert res.caught and port.writes[0] == b"\x03"
 
 
-def test_tail_is_bounded():
+def test_tail_is_bounded_and_never_splits_a_multibyte_character():
     clk = FakeClock()
-    port = FakePort(clk, script=[b"x" * 10000])
+    port = FakePort(clk, script=[("\u00e9" * 1000).encode()])  # 2 bytes each
     res = ub.break_into_uboot(port, timeout_s=0.05, clock=clk)
-    assert len(res.tail) == ub.TAIL_BYTES
+    assert len(res.tail.encode()) <= ub.TAIL_BYTES
+    assert res.tail == "\u00e9" * len(res.tail) and len(res.tail) > 100
+
+
+class WaitingPort:
+    """Prompt is already waiting (in_waiting) before the first key."""
+
+    in_waiting = 3
+
+    def __init__(self):
+        self.writes = []
+
+    def write(self, data):
+        self.writes.append(data)
+
+    def read(self, size=1):
+        return b"=> "
+
+
+def test_no_key_is_sent_when_the_prompt_is_already_waiting():
+    port = WaitingPort()
+    res = ub.break_into_uboot(port, timeout_s=5)
+    assert res.caught and port.writes == []
 
 
 def test_works_against_pyserial_loop_url():
@@ -99,13 +121,22 @@ def test_works_against_pyserial_loop_url():
 
 
 @pytest.mark.parametrize(
-    ("text", "want"), [(" ", b" "), ("\\r", b"\r"), ("\\x03", b"\x03"), ("=> ", b"=> ")]
+    ("text", "want"),
+    [(" ", b" "), ("\\r", b"\r"), ("\\n", b"\n"), ("\\t", b"\t"), ("\\\\", b"\\"),
+     ("\\x03", b"\x03"), ("\\xFF", b"\xff"), ("=> ", b"=> "), ("\u00e9", "\u00e9".encode())],
 )
 def test_parse_escaped(text, want):
     assert ub.parse_escaped(text, "--x") == want
 
 
-@pytest.mark.parametrize("text", ["", "\\x0"])
+@pytest.mark.parametrize("text", ["", "\\x0", "\\xZZ", "\\x", "\\q", "\\u0041", "\\", "\\0"])
 def test_parse_escaped_rejects(text):
     with pytest.raises(ValueError, match="--x"):
         ub.parse_escaped(text, "--x")
+
+
+@pytest.mark.filterwarnings("error")
+def test_parse_escaped_emits_no_deprecation_warning():
+    assert ub.parse_escaped("\\x03\\q"[:4], "--x") == b"\x03"
+    with pytest.raises(ValueError):
+        ub.parse_escaped("\\q", "--x")
