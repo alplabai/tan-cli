@@ -69,6 +69,7 @@ import os
 import stat
 import subprocess
 import sys
+from enum import Enum
 from pathlib import Path
 
 import typer
@@ -84,6 +85,16 @@ DEFAULT_BAUD = 115200
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
+
+
+class ConsoleFilter(str, Enum):
+    """miniterm's own filter names. `direct` passes bytes through so ANSI
+    colours render; miniterm's `default` would print them as literal text."""
+
+    DIRECT = "direct"
+    DEFAULT = "default"
+    NOCONTROL = "nocontrol"
+    PRINTABLE = "printable"
 
 
 class MonitorError(Exception):
@@ -326,7 +337,12 @@ def _child_stdout(json_mode: bool):
 
 
 def _run_monitor(
-    port: str | None, baud: int, json_mode: bool
+    port: str | None,
+    baud: int,
+    json_mode: bool,
+    break_opts: tuple[bytes, bytes, float] | None = None,
+    non_interactive: bool = False,
+    console_filter: str = "direct",
 ) -> tuple[dict, list[Issue], ExitCode]:
     # Frozen (PyInstaller) or an embedded interpreter with no reportable
     # `sys.executable`: fall back to a PATH name, mirroring
@@ -360,10 +376,17 @@ def _run_monitor(
     if not _port_is_usable(port, {device for device, _ in _available_ports()}):
         raise _refuse_listing_ports(f"port '{port}' not found")
 
+    if break_opts is not None:
+        from tan.commands import monitor_session  # noqa: PLC0415 (only on --break-uboot)
+
+        return monitor_session.run(
+            port, baud, json_mode, break_opts, non_interactive, console_filter
+        )
+
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
     try:
         rc = subprocess.run(
-            [python, "-m", "serial.tools.miniterm", port, str(baud)],
+            [python, "-m", "serial.tools.miniterm", "--filter", console_filter, port, str(baud)],
             stdout=_child_stdout(json_mode),
             env=spawn_env(),
         ).returncode
@@ -400,6 +423,36 @@ def monitor(
     baud: int = typer.Option(
         DEFAULT_BAUD, "--baud", show_default=True, help="Baud rate."
     ),
+    break_uboot: bool = typer.Option(
+        False,
+        "--break-uboot",
+        help="After opening the port, send the autoboot interrupt key repeatedly "
+        "until the U-Boot prompt appears or --break-timeout passes, then continue "
+        "in the interactive console on the same open port. With --non-interactive "
+        "it stops after the break-in instead (exit 0 if caught); the console "
+        "itself needs a terminal. Power-cycle the board yourself; works over "
+        "rfc2217:// and socket:// URLs.",
+    ),
+    break_key: str = typer.Option(
+        None,
+        "--break-key",
+        help="With --break-uboot: key that interrupts autoboot (default: a space; "
+        "escapes \\xNN \\r \\n \\t \\\\ allowed).",
+    ),
+    prompt: str = typer.Option(
+        None, "--prompt", help="With --break-uboot: prompt that ends it (default: '=> ')."
+    ),
+    break_timeout: float = typer.Option(
+        None,
+        "--break-timeout",
+        help="With --break-uboot: seconds to keep sending the key (default: 30).",
+    ),
+    console_filter: ConsoleFilter = typer.Option(
+        ConsoleFilter.DIRECT,
+        "--filter",
+        help="Console output filter: direct (pass-through, colours render), "
+        "default/nocontrol/printable (strip control codes).",
+    ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     project: str = typer.Option(None, "--project", hidden=True),
     board_yaml: str = typer.Option(None, "--board-yaml", hidden=True),
@@ -428,7 +481,7 @@ def monitor(
     # from `--help` because they do nothing. Same port-wide gap as
     # `clean_cmd.clean`/`new_som_cmd.new_som`.
     del project, board_yaml, sdk_root, target, all_targets
-    del verbose, quiet, no_color, non_interactive, ci
+    del verbose, quiet, no_color, ci
     json_mode = output_format == "json"
 
     def finish(data: dict, issues: list[Issue], exit_code: ExitCode) -> None:
@@ -444,7 +497,12 @@ def monitor(
         raise typer.Exit(int(exit_code))
 
     try:
-        data, issues, exit_code = _run_monitor(port, baud, json_mode)
+        from tan.commands import monitor_session  # noqa: PLC0415 (validation only)
+
+        opts = monitor_session.break_opts(break_uboot, break_key, prompt, break_timeout)
+        data, issues, exit_code = _run_monitor(
+            port, baud, json_mode, opts, non_interactive, console_filter.value
+        )
     except MonitorError as err:
         finish(err.data, [Issue(err.code, "error", err.message)], err.exit_code)
         return
