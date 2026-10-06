@@ -1724,7 +1724,7 @@ def setools_check(
             "which does not use SETOOLS -- nothing to check here.",
             scope="host",
         )
-    if not flow_d and not is_linux and not setools_dir and not se_uart:
+    if flow_a and not flow_d and not is_linux and not setools_dir and not se_uart:
         return Check(
             "setools",
             "unknown",
@@ -1750,6 +1750,7 @@ def setools_check(
         jlink_found,
         SETOOLS_BUNDLE,
         SETOOLS_EXECUTABLES,
+        is_linux,
     )
     return Check("setools", status, detail, fix, scope="host")
 

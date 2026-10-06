@@ -1999,9 +1999,31 @@ def test_a_fully_provisioned_setools_host_passes(tmp_path):
 def test_setools_is_unknown_not_warn_off_linux():
     """`alif_flash.py` hard-codes `app-release-exec-linux`; there is no verdict
     to give a Windows/macOS host, and `unknown` counts in no summary bucket."""
-    check = doctor_cmd.setools_check(setools_dir=None, se_uart=None, is_linux=False)
+    check = doctor_cmd.setools_check(
+        setools_dir=None, se_uart=None, is_linux=False, flash_methods=frozenset({"zephyr_west_flash"})
+    )
     assert check.status == "unknown"
     assert "app-release-exec-linux" in check.detail
+
+
+def test_off_linux_with_no_project_is_method_aware_not_an_early_return():
+    """tan-cli#1323: Flow D is not SE-UART and SETOOLS ships for Windows too."""
+    check = doctor_cmd.setools_check(setools_dir=None, se_uart=None, is_linux=False)
+    assert check.status == "warn"
+    assert "Flow D" in check.detail and "Linux-only" in check.detail
+
+
+def test_off_linux_flow_d_is_checked_like_linux(tmp_path):
+    """`is_linux=False` (simulated; the lookup is `find_app_gen_toc`, which also
+    tries `app-gen-toc.exe` on a real Windows host) must not short-circuit."""
+    toolkit = tmp_path / "app-gen-toc"
+    toolkit.write_text("", encoding="utf-8")
+    toolkit.chmod(0o755)
+    check = doctor_cmd.setools_check(
+        str(tmp_path), None, False, flash_methods=frozenset({"alif_mram_jlink"}), jlink_found=True
+    )
+    assert check.status == "pass", check.detail
+    assert "SE_UART" not in check.detail.replace("no SE-UART", "")
 
 
 _D = frozenset({"alif_mram_jlink"})

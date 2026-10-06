@@ -166,11 +166,20 @@ def verdict(
     jlink_found: bool | None,
     bundle: str,
     executables: tuple[str, ...],
+    is_linux: bool = True,
 ) -> tuple[str, str, str | None]:
     """`(status, detail, fix)` for the `setools` check, per flash method."""
     flow_d = flash_methods is not None and FLOW_D_METHOD in flash_methods
     flow_a = flash_methods is not None and FLOW_A_METHOD in flash_methods
     only_gen_toc = not flow_a
+    # Flow A's `alif_flash` runner hard-codes `app-release-exec-linux`; Flow D
+    # (J-Link + SETOOLS signing, `app-gen-toc.exe` on Windows) is not Linux-only.
+    linux_note = (
+        ""
+        if is_linux or not (flow_a or flash_methods is None)
+        else " Flow A (`west flash`, alif_flash) is Linux-only in this tree -- run it "
+        "from WSL2/Linux."
+    )
     signing = signing_problems(
         setools_dir,
         ("app-gen-toc",) if only_gen_toc else executables,
@@ -214,7 +223,7 @@ def verdict(
             ready += f", $SE_UART=`{se_uart}`."
         else:
             ready += " and a J-Link is available (Flow D needs no SE-UART)."
-        return "pass", ready + " (" + FLAG_NOTE + ".)", None
+        return "pass", ready + linux_note + " (" + FLAG_NOTE + ".)", None
     fix = (
         f"Download the Alif Security Toolkit (`{bundle}`) from the Alif "
         "developer portal -- it is license-gated and alp-sdk does not "
@@ -225,4 +234,4 @@ def verdict(
         + FLAG_NOTE[1:]
         + "."
     )
-    return "warn", lead + joined + ".", fix
+    return "warn", lead + joined + "." + linux_note, fix
