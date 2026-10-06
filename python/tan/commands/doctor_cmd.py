@@ -137,6 +137,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -181,6 +182,17 @@ from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.global_flags import accept_global_flags
 from tan.core.inert import COMPATIBILITY, inert_help
+from tan.core.python_floor import (
+    FALLBACK_PYTHON_FLOOR,
+    ZEPHYR_PYTHON_FLOOR,
+    effective_python_floor,
+    zephyr_python_floor,
+)
+from tan.core.host_python import (
+    describe_unsuitable,
+    probe_all_host_pythons,
+    select_host_python,
+)
 from tan.core.probe import PROBE_TIMEOUT_S, probe, probe_status
 from tan.core.subprocess_env import spawn_env
 from tan.core.sdk_default_registry import registry_path
@@ -205,33 +217,6 @@ from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, terminal_w
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
-
-#: Zephyr's own floor, from `<zephyr>/cmake/modules/python.cmake`'s
-#: `set(PYTHON_MINIMUM_REQUIRED 3.12)`. The LAST-resort fallback --
-#: `zephyr_python_floor` reads the real file when a workspace resolves, and
-#: (tan-cli#606) prefers alp-sdk's own manifest-declared
-#: `zephyr.pythonMinVersion` over this constant when no workspace resolves but
-#: a manifest does; this is what is left once BOTH are unavailable, so a
-#: Zephyr bump raises the floor on the customer's machine without waiting for
-#: a tan release only via one of those two live reads, never this one.
-ZEPHYR_PYTHON_FLOOR = (3, 12)
-
-#: The floor `metadata/bootstrap.json` is assumed to declare when no manifest
-#: resolves at all -- used ONLY as the `manifest_floor` input to `max()` below,
-#: never as a verdict by itself. It mirrors `crate::util::MIN_PYTHON`
-#: (`crates/tan-cli/src/util.rs`), which is frozen at 3.10 and does NOT track
-#: `metadata/bootstrap.json` -- that Rust constant and the manifest's declared
-#: `pythonMinVersion` are two independently-edited numbers, not one fact, and
-#: they can and do drift apart (the manifest is mid-raise to 3.12 as of this
-#: writing; the oracle constant is not). The manifest is the authority: when it
-#: resolves AND declares `pythonMinVersion`, that number is read live and this
-#: constant is not consulted for the verdict -- but a manifest that resolves
-#: while omitting the key still falls back to this same constant (see
-#: `resolve_manifest_python_floor`/`_collect` below), so this is not a
-#: no-manifest-only fallback. `ZEPHYR_PYTHON_FLOOR` above still composes with
-#: it via `max()` either way, so a resolvable SDK checkout with the key present
-#: never depends on this value being current.
-FALLBACK_PYTHON_FLOOR = (3, 10)
 
 #: The SETOOLS executables `alif_flash.py` looks for inside `$SETOOLS_DIR`
 #: (its `--app-gen-toc` / `--app-write-mram` defaults).
@@ -465,84 +450,6 @@ def _parse_two(raw: str) -> tuple[int, int] | None:
     return (int(match.group(1)), int(match.group(2)))
 
 
-def zephyr_python_floor(
-    zephyr_base: str | None, *, manifest_zephyr_floor: tuple[int, int] | None = None
-) -> tuple[tuple[int, int], str]:
-    """The floor Zephyr's CMake will actually enforce, and where it came from.
-
-    Read from `<zephyr_base>/cmake/modules/python.cmake` when that resolves,
-    because THAT is the file whose `PYTHON_MINIMUM_REQUIRED` aborts the build --
-    a constant compiled into tan goes stale the moment Zephyr bumps it, and a
-    stale floor here reintroduces exactly the silent gap this command exists to
-    close.
-
-    When it does NOT resolve, `manifest_zephyr_floor` -- alp-sdk's OWN declared
-    `zephyr.pythonMinVersion` (tan-cli#606), when the caller's manifest read
-    found one -- is now preferred over `ZEPHYR_PYTHON_FLOOR`: a fact alp-sdk
-    already publishes beats a constant compiled into tan, the same reasoning
-    that prefers `python.cmake` itself one level up. `ZEPHYR_PYTHON_FLOOR`
-    remains the LAST resort, for an SDK whose manifest predates that key (or
-    when no manifest resolves at all) -- every host at `tan bootstrap` time
-    used to land here unconditionally; now only a manifest-less one does.
-
-    `zephyr_base` is a plain path in, not necessarily `$ZEPHYR_BASE` itself --
-    THIS function has no opinion on where it came from, only `_collect` (this
-    module's `hostPython`/`pythonFloor` caller) does. As of tan-cli#301,
-    `_collect` passes the resolved workspace's `zephyr/` subtree -- the SAME
-    `tan.core.venv.west_workspace_dir` result `zephyrWorkspace` reports -- when
-    one resolved, a literal `$ZEPHYR_BASE` read only when no workspace resolved
-    at all, and `None` (landing on `ZEPHYR_PYTHON_FLOOR` below) when neither
-    does; that is the three-way split the resulting `source` string names. The
-    OTHER caller, `tan.commands.bootstrap_cmd.resolve_python_floor`, still
-    passes a literal `$ZEPHYR_BASE` read directly -- `tan bootstrap` runs before
-    any workspace can have resolved, so there is nothing else for it to prefer.
-
-    **The fallback names WHICH of three causes fired (tan-cli#488 defect 7).**
-    It used to be one hardcoded string -- "no $ZEPHYR_BASE workspace on this
-    host to read `cmake/modules/python.cmake` from" -- for every way the read
-    could fail, but only ONE of the three causes below makes that true. A
-    `.west` workspace mid-`west update` (`zephyr_workspace_check`'s own
-    "legitimate, working-in-progress host state") resolves a real
-    `zephyr_base` whose `cmake/modules/python.cmake` simply is not there yet
-    -- reported by `_collect` as `workspace`/`zephyrWorkspace` BOTH passing,
-    in the same envelope that then blamed a `$ZEPHYR_BASE` env var never
-    consulted for this call (`_collect` feeds this function the RESOLVED
-    workspace's own `zephyr/` subtree, never `$ZEPHYR_BASE` itself, once a
-    workspace resolves -- see above). `jlink_flash_device` fixed the identical
-    shape for its own three-cause fallback in tan-cli#310; this mirrors it.
-    """
-    if manifest_zephyr_floor is not None:
-        fallback_floor = manifest_zephyr_floor
-        fallback_label = (
-            f"alp-sdk metadata/bootstrap.json zephyr.pythonMinVersion "
-            f"{fallback_floor[0]}.{fallback_floor[1]}"
-        )
-    else:
-        fallback_floor = ZEPHYR_PYTHON_FLOOR
-        fallback_label = f"tan's built-in pin {fallback_floor[0]}.{fallback_floor[1]}"
-
-    if zephyr_base:
-        path = Path(zephyr_base) / "cmake" / "modules" / "python.cmake"
-        text = _read_text(path)
-        if text is not None:
-            match = re.search(r"PYTHON_MINIMUM_REQUIRED\s+(\d+)\.(\d+)", text)
-            if match is not None:
-                return (int(match.group(1)), int(match.group(2))), str(path)
-            return fallback_floor, (
-                f"Zephyr's PYTHON_MINIMUM_REQUIRED, from {fallback_label} -- {path} was "
-                f"read but did not declare a parseable PYTHON_MINIMUM_REQUIRED"
-            )
-        return fallback_floor, (
-            f"Zephyr's PYTHON_MINIMUM_REQUIRED, from {fallback_label} -- {path} could not "
-            f"be read (a `.west` workspace mid-`west update` is a legitimate, "
-            f"working-in-progress host state, not a broken one)"
-        )
-    return fallback_floor, (
-        f"Zephyr's PYTHON_MINIMUM_REQUIRED, from {fallback_label} -- no $ZEPHYR_BASE "
-        f"workspace on this host to read `cmake/modules/python.cmake` from"
-    )
-
-
 def jlink_flash_device(sdk_root: str | None) -> tuple[str, str]:
     """The Flow-D part-number J-Link device profile, and where it came from.
 
@@ -696,6 +603,35 @@ def python_check(
         "pass",
         f"Python {_fmt(version)} (`{binary}`) meets the effective floor "
         f"{_fmt(floor)} ({floor_source}).",
+        scope="host",
+    )
+
+
+def host_python_check(
+    found: tuple[str, tuple[int, int]] | None,
+    floor: tuple[int, int],
+    floor_source: str,
+    has_workspace_venv: bool,
+    candidates: list | None = None,
+) -> Check:
+    """`hostPython` as `python_check` judges it, downgraded to `warn` (same id,
+    no code) when it would pass but `tan build` would have no usable
+    interpreter: no workspace venv, and no PATH Python that is >= `floor` AND
+    imports `west` (tan-cli#1317, same resolver as the build)."""
+    check = python_check(found, floor, floor_source)
+    if check.status != "pass" or has_workspace_venv:
+        return check
+    if candidates is None:
+        candidates = probe_all_host_pythons()
+    candidates = list(candidates)
+    best = select_host_python(candidates, floor, need_west=True)
+    if best is not None and best.version >= floor and best.has_west:
+        return check
+    return Check(
+        "hostPython",
+        "warn",
+        f"{check.detail} But {describe_unsuitable(candidates, floor)}",
+        "Run `tan bootstrap` (or activate the Zephyr workspace venv).",
         scope="host",
     )
 
@@ -935,18 +871,21 @@ def _posix_venv_capable(argv: list[str], executable: str | None = None) -> bool:
     always comes from a candidate `_probe_host_python` already ran once.
     """
     try:
-        result = subprocess.run(
-            [*argv, "-c", "import ensurepip"],
-            executable=executable,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.DEVNULL,
-            timeout=PROBE_TIMEOUT_S,
-            env=spawn_env(),
-            check=False,
-        )
+        # Empty cwd: `-c` puts the cwd on sys.path (module-hijack, tan-cli#1317).
+        with tempfile.TemporaryDirectory(prefix="tan-probe-") as empty:
+            result = subprocess.run(
+                [*argv, "-c", "import ensurepip"],
+                cwd=empty,
+                executable=executable,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
+                timeout=PROBE_TIMEOUT_S,
+                env=spawn_env(),
+                check=False,
+            )
     except (OSError, ValueError, subprocess.SubprocessError):
         return True
     return result.returncode == 0
@@ -2628,16 +2567,6 @@ def exit_code_for(checks: list[Check]) -> ExitCode:
 # ---------------------------------------------------------------------------
 
 
-def _python_candidates() -> list[list[str]]:
-    """Verbatim `tan_core::bootstrap::python_candidates`. Windows leads with the
-    `py` launcher because a machine can have a perfectly good 3.12 with no bare
-    `python` on PATH, and the bare `python.exe` there is very often the Store
-    alias."""
-    if os.name == "nt":
-        return [["py", "-3"], ["python"], ["python3"]]
-    return [["python3"], ["python"]]
-
-
 #: `platform.machine()` -> the Zephyr-SDK-release arch token
 #: (`tan_core::host_env::ZEPHYR_SDK_HOSTS`'s spelling). Values seen in
 #: practice: Windows `AMD64`/`ARM64`, macOS `x86_64`/`arm64`, Linux
@@ -2963,7 +2892,7 @@ def _resolve_dtc() -> devicetree_lint.DtcResolution:
 
 
 def _probe_host_python(
-    floor: tuple[int, int],
+    floor: tuple[int, int], candidates: list | None = None
 ) -> tuple[str, tuple[int, int], str] | None:
     """First candidate that RUNS and clears `floor`; else the first that merely
     ran, so the too-old message can name a real version instead of "did not
@@ -2985,26 +2914,10 @@ def _probe_host_python(
     tan-cli#797 exists to close. `python_check` only reads the first two
     elements; a caller wanting just those may slice `found[:2]`.
     """
-    first_that_ran: tuple[str, tuple[int, int], str] | None = None
-    for candidate in _python_candidates():
-        resolved = resolve_tool(candidate[0], os.environ).resolved
-        if resolved is None:
-            continue
-        out = probe(
-            [*candidate, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
-            executable=resolved,
-        )
-        if out is None:
-            continue
-        version = _parse_two(out)
-        if version is None:
-            continue
-        entry = (" ".join(candidate), version, resolved)
-        if version >= floor:
-            return entry
-        if first_that_ran is None:
-            first_that_ran = entry
-    return first_that_ran
+    if candidates is None:
+        candidates = probe_all_host_pythons()
+    found = select_host_python(candidates, floor)
+    return None if found is None else (found.display, found.version, found.resolved)
 
 
 @dataclass(frozen=True)
@@ -3680,6 +3593,9 @@ class _PrerequisitesEnvironment:
     effective_source: str
     python_found: tuple[str, tuple[int, int], str] | None
     manifest_is_real: bool
+    #: Every interpreter the ONE probe saw (tan-cli#1317) -- `hostPython`'s
+    #: build-readiness verdict reads this instead of probing a second time.
+    host_pythons: tuple = ()
 
 
 def _resolve_prerequisites_environment(
@@ -3759,19 +3675,14 @@ def _resolve_prerequisites_environment(
     # dict `manifest_floor` above already reads, so this is not a second
     # manifest parse.
     zephyr_manifest_floor = _zephyr_manifest_floor_from_facts(facts)
-    zephyr_floor, zephyr_source = zephyr_python_floor(
-        zephyr_source_base, manifest_zephyr_floor=zephyr_manifest_floor
-    )
-    # The EFFECTIVE floor: the highest anything in the build chain enforces. The
-    # manifest is not the authority here -- it is one of two claimants.
-    effective_floor = max(manifest_floor, zephyr_floor)
-    effective_source = (
-        zephyr_source
-        if zephyr_floor >= manifest_floor
-        else "alp-sdk metadata/bootstrap.json pythonMinVersion"
+    # tan tan-cli#1317: the ONE composition (`tan.core.python_floor`), shared
+    # with `tan build`'s interpreter pick.
+    effective_floor, effective_source = effective_python_floor(
+        manifest_floor, zephyr_source_base, zephyr_manifest_floor
     )
 
-    python_found = _probe_host_python(effective_floor)
+    host_pythons = probe_all_host_pythons()
+    python_found = _probe_host_python(effective_floor, host_pythons)
 
     # tan-cli#488 defect 2: keyed on the HOST, not a `windows`/`posix` bool.
     # `facts.get(...)` used to read straight off `"windows" if os.name == "nt"
@@ -3856,6 +3767,7 @@ def _resolve_prerequisites_environment(
         effective_source=effective_source,
         python_found=python_found,
         manifest_is_real=loaded.is_real,
+        host_pythons=tuple(host_pythons),
     )
 
 
@@ -4177,8 +4089,12 @@ def _collect(
     python_found = prereq_env.python_found
 
     _add(
-        python_check(
-            python_found[:2] if python_found else None, effective_floor, effective_source
+        host_python_check(
+            python_found[:2] if python_found else None,
+            effective_floor,
+            effective_source,
+            find_workspace_venv(workspace_root, sdk_root) is not None,
+            list(prereq_env.host_pythons),
         )
     )
     skew = python_floor_skew_check(

@@ -69,6 +69,7 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import typer
@@ -362,11 +363,17 @@ def _run_monitor(
 
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
     try:
-        rc = subprocess.run(
-            [python, "-m", "serial.tools.miniterm", port, str(baud)],
-            stdout=_child_stdout(json_mode),
-            env=spawn_env(),
-        ).returncode
+        # Empty cwd: `-m` puts the cwd on sys.path, so a `serial/` planted in the
+        # project dir would run instead of pyserial (tan-cli#1317 review).
+        # miniterm's upload/filter prompts take no relative paths from the
+        # user's cwd, so the empty directory costs nothing here.
+        with tempfile.TemporaryDirectory(prefix="tan-monitor-") as empty:
+            rc = subprocess.run(
+                [python, "-m", "serial.tools.miniterm", port, str(baud)],
+                stdout=_child_stdout(json_mode),
+                env=spawn_env(),
+                cwd=empty,
+            ).returncode
     except OSError as err:
         raise MonitorError(
             "monitor.launch-failed",
