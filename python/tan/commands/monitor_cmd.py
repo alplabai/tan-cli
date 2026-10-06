@@ -356,6 +356,37 @@ def _child_stdout(json_mode: bool):
     return subprocess.DEVNULL
 
 
+def _spawn_console(python: str, port: str, baud: int, console_filter: str, json_mode: bool) -> int:
+    """Run the plain console child (`python -c <bootstrap>`), returning its exit code."""
+    try:
+        # Empty cwd: `-c` puts the cwd on sys.path, so a `serial/` planted in the
+        # project dir would be imported instead of pyserial (tan-cli#1317).
+        with tempfile.TemporaryDirectory(prefix="tan-monitor-") as empty:
+            return subprocess.run(
+                [
+                    python,
+                    "-c",
+                    console_filter_mod.BOOTSTRAP,
+                    "--filter",
+                    console_filter,
+                    # The spawn runs from an empty cwd, so a relative device path
+                    # must be made absolute first.
+                    os.path.abspath(port) if os.path.exists(port) else port,
+                    str(baud),
+                ],
+                stdout=_child_stdout(json_mode),
+                env=_monitor_env(),
+                cwd=empty,
+            ).returncode
+    except OSError as err:
+        raise MonitorError(
+            "monitor.launch-failed",
+            f"failed to launch `{python} -c <miniterm bootstrap>`: {err}",
+            ExitCode.RUNTIME_FAILURE,
+            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
+        ) from err
+
+
 def _run_monitor(
     port: str | None,
     baud: int,
@@ -404,33 +435,7 @@ def _run_monitor(
         )
 
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
-    try:
-        # Empty cwd: `-c` puts the cwd on sys.path, so a `serial/` planted in the
-        # project dir would be imported instead of pyserial (tan-cli#1317).
-        with tempfile.TemporaryDirectory(prefix="tan-monitor-") as empty:
-            rc = subprocess.run(
-                [
-                    python,
-                    "-c",
-                    console_filter_mod.BOOTSTRAP,
-                    "--filter",
-                    console_filter,
-                    # The spawn runs from an empty cwd, so a relative device path
-                    # must be made absolute first.
-                    os.path.abspath(port) if os.path.exists(port) else port,
-                    str(baud),
-                ],
-                stdout=_child_stdout(json_mode),
-                env=_monitor_env(),
-                cwd=empty,
-            ).returncode
-    except OSError as err:
-        raise MonitorError(
-            "monitor.launch-failed",
-            f"failed to launch `{python} -m serial.tools.miniterm`: {err}",
-            ExitCode.RUNTIME_FAILURE,
-            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
-        ) from err
+    rc = _spawn_console(python, port, baud, console_filter, json_mode)
 
     data = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud}
     if rc != 0:
