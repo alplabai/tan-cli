@@ -75,9 +75,7 @@ def _stdin_is_tty() -> bool:
         return False
 
 
-def open_port(
-    port: str, baud: int, code: str = "monitor.break-open-failed", flag: str = "--break-uboot"
-):
+def open_port(port: str, baud: int, capture: bool = False):
     """Open `port` in-process (local tty, by-id path or any pyserial URL) the
     way miniterm does: no explicit DTR/RTS, pyserial's open-time defaults."""
     try:
@@ -92,11 +90,19 @@ def open_port(
             write_timeout=WRITE_TIMEOUT_S,
         )
     except (OSError, ValueError, serial.SerialException) as err:
+        data = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud}
+        if capture:
+            raise MonitorError(
+                "monitor.capture-open-failed",
+                f"could not open '{port}' for --capture: {err}",
+                ExitCode.RUNTIME_FAILURE,
+                data,
+            ) from err
         raise MonitorError(
-            code,
-            f"could not open '{port}' for {flag}: {err}",
+            "monitor.break-open-failed",
+            f"could not open '{port}' for --break-uboot: {err}",
             ExitCode.RUNTIME_FAILURE,
-            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
+            data,
         ) from err
 
 
@@ -290,7 +296,7 @@ def run_capture(
             ) from err
     ser = None
     try:
-        ser = open_port(port, baud, "monitor.capture-open-failed", "--capture")
+        ser = open_port(port, baud, capture=True)
         if opts is not None:
             data["breakIn"] = break_in(ser, port, baud, opts)
             if not data["breakIn"]["caught"]:
