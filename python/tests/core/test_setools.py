@@ -191,9 +191,9 @@ def test_missing_tool_message_names_what_was_checked_not_a_conclusion(tmp_path):
 
 
 def test_slot0_config_matches_the_measured_bench_shape():
-    """The exact shape the AEN801 bench flow signs by hand (tan-cli#353) --
-    no top-level "DEVICE" key (see the module docstring: an app-only ATOC
-    must not overwrite the on-module factory device config)."""
+    """The app-only shape the AEN801 bench flow first signed by hand
+    (tan-cli#353) -- what `--no-device-config` still produces. The default,
+    with a leading DEVICE entry, is the next test (tan-cli#1322)."""
     config = slot0_config("m55_he", "m55_he.bin", "0x80010000", "M55_HE")
     assert config == {
         "m55_he": {
@@ -206,6 +206,23 @@ def test_slot0_config_matches_the_measured_bench_shape():
         }
     }
     assert "DEVICE" not in config
+
+
+def test_slot0_config_with_a_device_entry_mirrors_the_bench_recipe():
+    """tan-cli#1322: alp-sdk `scripts/bench/aen/flash-run.sh` signs
+    `"DEVICE": {"disabled": false, "binary": "app-device-config.json",
+    "version": "0.5.00", "signed": true}` ahead of the app entry."""
+    config = slot0_config(
+        "m55_he", "m55_he.bin", "0x80010000", "M55_HE", device_binary="app-device-config.json"
+    )
+    assert list(config) == ["DEVICE", "m55_he"]  # DEVICE leads the table
+    assert config["DEVICE"] == {
+        "disabled": False,
+        "binary": "app-device-config.json",
+        "version": "0.5.00",
+        "signed": True,
+    }
+    assert config["m55_he"] == slot0_config("m55_he", "m55_he.bin", "0x80010000", "M55_HE")["m55_he"]
 
 
 # ── read_atoc_address ────────────────────────────────────────────────────────
@@ -686,3 +703,84 @@ def test_parse_atoc_report_reads_the_entry_list_and_size():
     assert report.entries == (("DEVICE", "0x8057f450"), ("m55_he", "0x8057ea50"))
     assert report.package_size == 5552
     assert setools_scratch.parse_atoc_report("nothing here") == setools_scratch.AtocReport()
+
+
+# ── tan-cli#1322: the DEVICE entry ──────────────────────────────────────────
+
+
+def _stock(setools_dir: Path) -> Path:
+    stock = setools_dir / "build" / "config" / "app-device-config.json"
+    stock.parent.mkdir(parents=True, exist_ok=True)
+    stock.write_text('{"metadata": {"device": "STOCK"}}', encoding="utf-8")
+    return stock
+
+
+def test_the_device_config_defaults_to_the_stock_setools_file(tmp_path):
+    stock = _stock(tmp_path)
+    config = setools_scratch.resolve_device_config(None, str(tmp_path), entry_id="m55_he")
+    assert config.path == str(stock)
+    assert config.name == "app-device-config.json"
+    assert "stock SETOOLS" in config.source
+
+
+def test_an_explicit_device_config_outranks_the_stock_file(tmp_path):
+    _stock(tmp_path)
+    mine = tmp_path / "my-device.json"
+    mine.write_text("{}", encoding="utf-8")
+    config = setools_scratch.resolve_device_config(str(mine), str(tmp_path), entry_id="m55_he")
+    assert config.path == str(mine)
+    assert config.source == "flash_args.setools_device_config"
+
+
+def test_no_device_config_anywhere_refuses_with_the_registered_code(tmp_path):
+    with pytest.raises(setools_scratch.DeviceConfigMissingError) as raised:
+        setools_scratch.resolve_device_config(None, str(tmp_path), entry_id="m55_he")
+    assert raised.value.code == "flash.device-config-missing" == (
+        setools_scratch.DEVICE_CONFIG_MISSING_CODE
+    )
+    assert "--no-device-config" in str(raised.value)
+    assert "setools_device_config" in str(raised.value)
+
+
+def test_an_explicit_device_config_that_does_not_exist_is_never_swapped_for_the_stock_one(tmp_path):
+    _stock(tmp_path)
+    with pytest.raises(setools_scratch.DeviceConfigMissingError) as raised:
+        setools_scratch.resolve_device_config(
+            str(tmp_path / "nope.json"), str(tmp_path), entry_id="m55_he"
+        )
+    assert "nope.json" in str(raised.value)
+
+
+def test_a_device_config_with_a_hostile_file_name_is_refused(tmp_path):
+    hostile = tmp_path / "a b;c.json"
+    hostile.write_text("{}", encoding="utf-8")
+    with pytest.raises(setools_scratch.DeviceConfigMissingError):
+        setools_scratch.resolve_device_config(str(hostile), str(tmp_path), entry_id="m55_he")
+
+
+def test_sign_slot0_signs_a_device_entry_into_the_scratch_config(tmp_path):
+    """The DEVICE entry reaches the scratch config, its file is copied beside it,
+    and the shared install (stock file included) is untouched."""
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    _stock(setools_dir)
+    script = setools_dir / _script_name()
+    _write_fake_app_gen_toc(script)
+    artefact = _artefact_bin(tmp_path)
+    before = _tree_digest(setools_dir)
+    device = setools_scratch.resolve_device_config(None, str(setools_dir), entry_id="m55_he")
+
+    signed = _sign(setools_dir, script, artefact, tmp_path / "scratch", device_config=device)
+    try:
+        scratch = Path(signed.scratch_dir)
+        config = json.loads((scratch / "build" / "config" / "m55_he-slot0.json").read_text())
+        assert list(config) == ["DEVICE", "m55_he"]
+        assert config["DEVICE"]["binary"] == "app-device-config.json"
+        assert config["DEVICE"]["version"] == "0.5.00"
+        assert (scratch / "build" / "config" / "app-device-config.json").read_bytes() == (
+            Path(device.path).read_bytes()
+        )
+        assert signed.device_config == device
+        assert _tree_digest(setools_dir) == before
+    finally:
+        setools_scratch.cleanup_scratch(signed.scratch_dir)

@@ -174,7 +174,12 @@ from tan.core.setools import (
     sign_slot0,
     unresolved_message,
 )
-from tan.core.setools_scratch import cleanup_scratch
+from tan.core.atoc_replacement import (
+    replacement_detail,
+    resident_entries,
+    written_entries,
+)
+from tan.core.setools_scratch import cleanup_scratch, resolve_device_config
 from tan.core.tool_lookup import resolve_program_positions, resolve_tool
 from tan.core.venv import prepend_path, tool_in_venv, venv_bin_dir, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -293,6 +298,10 @@ class _Entry:
     #: differs from the resolved `method` this entry ran under (Flow D upgrade
     #: of a `zephyr_west_flash` slice). Emitted as `methodDeclared`.
     method_declared: str | None = None
+    #: tan-cli#1322: the full REGISTERED issue code a refusal carries when it must
+    #: not report the generic `flash.entry-failed` (`flash.device-config-missing`).
+    #: Read by `_run`, never emitted by `as_dict()`.
+    issue_code: str | None = None
     #: Additive envelope blocks (`setools`, ...) -- ONE dict shared with the
     #: run, because some of it (`setools.scratchRemoved`) is only known after
     #: the entry has been built, when its scratch tree is torn down.
@@ -2075,6 +2084,9 @@ class _Context:
     #: `flash_args.jlink_serial` for this run; see `tan.core.jlink_probe`.
     probe_serial: str | None = None
     probe_usb_path: str | None = None
+    #: `--no-device-config` (tan-cli#1322): sign an app-only ATOC with no `DEVICE`
+    #: entry. Default `False` -- the DEVICE entry is part of every auto-signed ATOC.
+    no_device_config: bool = False
     #: Read-only J-Link enumeration, injectable so tests never touch real USB.
     #: `None` resolves to the module's `enumerate_jlinks` at call time.
     enumerate_probes: Callable[[], Any] | None = None
@@ -2464,13 +2476,37 @@ def _resolve_flow_d_atoc_via_setools(
             "flash_args.atoc_address yourself."
         )
 
-    signed = sign_slot0(setools.path, app_gen_toc, shape.artefact, entry_id, shape.app_address)
+    # tan-cli#1322: the DEVICE entry is part of the ATOC unless the operator opted
+    # out. Resolved BEFORE the sign so a missing config refuses without spawning.
+    device = None
+    if not ctx.no_device_config:
+        explicit = fa_str_checked(flash_args, "setools_device_config", False)
+        if explicit is not None:
+            explicit = resolve_artefact_path(explicit, ctx.build_root, ctx.sdk_root, _is_file)
+        device = resolve_device_config(explicit, setools.path, entry_id=entry_id)
+
+    signed = sign_slot0(
+        setools.path, app_gen_toc, shape.artefact, entry_id, shape.app_address,
+        device_config=device,
+    )
     if report is not None:
         report["setools"] = {
             "dir": setools.path,
             "source": setools.source,
             "scratch": signed.scratch_dir,
             "scratchRemoved": False,
+            "deviceConfig": (
+                {"included": True, "path": device.path, "source": device.source}
+                if device is not None
+                else {"included": False, "optOut": "--no-device-config"}
+            ),
+        }
+        report["atoc"] = {
+            "address": signed.atoc_address,
+            "size": signed.atoc_size,
+            "entries": [
+                {"name": n, "objAddress": a} for n, a in signed.report.entries
+            ],
         }
     if stack is not None:
         _register_scratch(stack, report if report is not None else {}, signed.scratch_dir)
@@ -2578,6 +2614,7 @@ def _flash_entry_body(
         preflight_unarmed: bool = False,
         atoc_unacknowledged: bool = False,
         probe_refusal: str | None = None,
+        issue_code: str | None = None,
     ) -> _Entry:
         return _Entry(
             kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message,
@@ -2590,6 +2627,7 @@ def _flash_entry_body(
                 else None
             ),
             extra=report,
+            issue_code=issue_code,
         )
 
     # tan-cli#611, THE HOIST. WHO may flash this entry is decided BEFORE
@@ -2812,6 +2850,7 @@ def _flash_entry_body(
             flash_args = _resolve_flow_d_atoc_path(flash_args, ctx.build_root, ctx.sdk_root)
             shape = validate_flow_d_shape(flash_args, artefact_path, _is_file)
             validate_flow_d_preflight_args(flash_args)
+            resident_entries(flash_args)  # tan-cli#1322: a malformed list refuses now
             # tan-cli#487, defect 5: the SAME confirm gate `plan_alif_mram_
             # jlink` itself applies to the real MRAM write must ALSO cover
             # the SETOOLS auto-sign below -- see `_resolve_flow_d_atoc_via_
@@ -2904,7 +2943,14 @@ def _flash_entry_body(
                 # carries `ATOC_REPLACEMENT_PREVIEW_NOTE`, so the operator
                 # reads what arming means before they arm it.
                 if not atoc_replacement_acknowledged(flash_args, ctx.atoc_unqueryable):
-                    refusal = atoc_replacement_refusal(method, entry_id)
+                    refusal = (
+                        f"{atoc_replacement_refusal(method, entry_id)} "
+                        + replacement_detail(
+                            written_entries(entry_id, device_config=not ctx.no_device_config),
+                            resident_entries(flash_args),
+                            device_config=not ctx.no_device_config,
+                        )
+                    )
                     lines.append(_entry_head(kind, entry_id, method, target.flash_method))
                     lines.append(f"  FAIL: {refusal}")
                     return (
@@ -2941,7 +2987,13 @@ def _flash_entry_body(
             msg = str(err)
             lines.append(_entry_head(kind, entry_id, method, target.flash_method))
             lines.append(f"  FAIL: {msg}")
-            return 1, entry(method, "failed", 1, msg), lines
+            # `code`: a registered refusal code the error carries
+            # (tan-cli#1322's `flash.device-config-missing`), else the generic one.
+            return (
+                1,
+                entry(method, "failed", 1, msg, issue_code=getattr(err, "code", None)),
+                lines,
+            )
 
     inputs = FlashInputs(
         artefact=artefact_path,
@@ -2969,7 +3021,18 @@ def _flash_entry_body(
         # being rewritten. Appended to BOTH arms: the `--dry-run` arm carries
         # no gate note at all today, and a preview that says nothing about the
         # replacement is exactly the silence this issue is about.
-        atoc_note = f" {ATOC_REPLACEMENT_PREVIEW_NOTE}" if method == FLOW_D_METHOD else ""
+        atoc_note = ""
+        if method == FLOW_D_METHOD:
+            signed_names = tuple(e["name"] for e in report.get("atoc", {}).get("entries", ()))
+            atoc_note = (
+                f" {ATOC_REPLACEMENT_PREVIEW_NOTE} "
+                + replacement_detail(
+                    signed_names
+                    or written_entries(entry_id, device_config=not ctx.no_device_config),
+                    resident_entries(flash_args),
+                    device_config=not ctx.no_device_config,
+                )
+            )
         signed = f"{setools_note}; " if setools_note else ""
         if ctx.dry_run:
             # The user explicitly asked for a preview -- nothing was ever going
@@ -3393,6 +3456,7 @@ def _run(
     probe_serial: str | None = None,
     probe_usb_path: str | None = None,
     enumerate_probes: Callable[[], Any] | None = None,
+    no_device_config: bool = False,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -3575,6 +3639,7 @@ def _run(
         atoc_unqueryable=atoc_unqueryable,
         probe_serial=probe_serial,
         probe_usb_path=probe_usb_path,
+        no_device_config=no_device_config,
         **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
     )
     unsupported = _probe_selector_unsupported(plan.targets, ctx)
@@ -3655,6 +3720,9 @@ def _run(
                 issues.append(Issue("flash.probe-verify-failed", "error", entry.message))
             elif entry.probe_refusal == "selector-conflict":
                 issues.append(Issue("flash.probe-selector-conflict", "error", entry.message))
+            elif entry.issue_code == "flash.device-config-missing":
+                # tan-cli#1322: a literal `Issue(...)` for the static code gate.
+                issues.append(Issue("flash.device-config-missing", "error", entry.message))
             elif entry.atoc_unacknowledged:
                 # tan-cli#1252: the ONE failed entry that does not report the
                 # generic code. Every flash refusal returns rc 1 / `status:
@@ -3930,6 +3998,17 @@ def flash(
         "preview still previews. Separate from --confirm, which only arms the write "
         "itself, and it has no effect on any other backend.",
     ),
+    no_device_config: bool = typer.Option(
+        False,
+        "--no-device-config",
+        help="Sign the Flow D slot0 ATOC WITHOUT a DEVICE entry (tan-cli#1322). By "
+        "default the auto-signed ATOC leads with a DEVICE entry (binary, version "
+        "0.5.00, signed) sourced from flash_args.setools_device_config, else SETOOLS' "
+        "own build/config/app-device-config.json, and the run refuses "
+        "(flash.device-config-missing) when neither exists. The write REPLACES the "
+        "whole ATOC, so without a DEVICE entry the resident one (firewall regions, "
+        "HFXO trims, SE_BOOT_INFO) is deleted. Only affects an ATOC tan signs itself.",
+    ),
     probe_serial: str = typer.Option(
         None,
         "--probe-serial",
@@ -4032,6 +4111,7 @@ def flash(
             atoc_unqueryable=atoc_unqueryable,
             probe_serial=probe_serial,
             probe_usb_path=probe_usb_path,
+            no_device_config=bool(no_device_config) if isinstance(no_device_config, bool) else False,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an

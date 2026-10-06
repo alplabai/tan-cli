@@ -88,6 +88,36 @@ Because the sign is side-effect-free, `--dry-run` (and an unconfirmed run) run
 `app-gen-toc` too, in the scratch tree, so the preview reports the real ATOC
 placement. They still never spawn `JLinkExe`.
 
+### The `DEVICE` entry (tan-cli#1322)
+
+The device configuration is an entry *inside* the ATOC package, and a Flow D
+write replaces the whole table, so an ATOC signed without it **deletes** the
+resident one rather than preserving it (measured on an evk-02: the resident
+package `0x15C40` carried `DEVICE` `0x138` + the app; the app-only replacement
+was `0xA50`). `tan flash` therefore signs a `DEVICE` entry by default, in the
+exact shape alp-sdk's bench recipe uses (`binary`, `version "0.5.00"`,
+`signed: true`), ahead of the app entry. Its source is, in order:
+
+1. `flash_args.setools_device_config` — a path (relative paths resolve against
+   the build root like every other manifest path); a path that does not exist is
+   refused, never swapped for the stock file;
+2. SETOOLS' own `<SETOOLS_DIR>/build/config/app-device-config.json`.
+
+With neither, the run refuses with `flash.device-config-missing` (also under
+`--dry-run`, before `app-gen-toc` is spawned). `--no-device-config` opts out and
+signs an app-only ATOC; the envelope then says
+`setools.deviceConfig.included: false` and the replacement note states that the
+resident `DEVICE` entry is deleted. The stock file carries firewall regions
+opened to `any_master`, HFXO trims and `SE_BOOT_INFO`; a CPU-only Zephyr app
+boots without it (proven), bus masters writing to SRAM0 are not.
+
+The whole-ATOC acknowledgement (`--atoc-unqueryable`) names the entries the new
+ATOC carries (`This ATOC names: DEVICE, m55_he.`). Flow D cannot enumerate what
+is resident, so the resident entries that will not be rewritten are listed only
+when you supply them as `flash_args.resident_atoc_entries: [DEVICE, ALP-HE, ...]`
+(read them off the SE-UART first with `maintenance -opt gettoc`); otherwise the
+text says the resident table is unknown.
+
 If you already resolved a signature yourself — an explicit `flash_args.atoc`
 + `flash_args.atoc_address`, or `flash_args.atoc_map` pointing at your own
 `app-package-map.txt` — none of the above runs; `tan` uses what you gave it

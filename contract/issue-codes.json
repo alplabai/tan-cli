@@ -1900,6 +1900,14 @@
       "note": "Constructed as the whole literal at a `_error` call site in `flash_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "flash.device-config-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1322. EMISSION CONDITION: a Flow D (alif_mram_jlink) slot0 sign that tan performs itself found no device configuration for the DEVICE ATOC entry -- flash_args.setools_device_config is unset and the SETOOLS install ships no build/config/app-device-config.json, or flash_args.setools_device_config names a file that does not exist (it is never silently swapped for the stock one). The DEVICE entry carries the firewall regions, HFXO trims and SE_BOOT_INFO configuration; a Flow D write REPLACES the whole ATOC, so signing without one deletes the resident DEVICE entry. Fires under --dry-run too, before app-gen-toc is spawned. Answered by pointing flash_args.setools_device_config at an Alif device-config JSON, or by --no-device-config, which signs an app-only ATOC knowingly. Deliberately DISTINCT from flash.entry-failed: every flash refusal shares rc 1 and status failed, so the code is the only channel that tells a consumer this one is answered by supplying a device config. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "generate.board-sku-unresolved",
       "status": "reserved",
       "severity": "error",
