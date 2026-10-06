@@ -1908,6 +1908,30 @@
       "note": "Added closing tan-cli#1322. EMISSION CONDITION: a Flow D (alif_mram_jlink) slot0 sign that tan performs itself found no device configuration for the DEVICE ATOC entry -- flash_args.setools_device_config is unset and the SETOOLS install ships no build/config/app-device-config.json, or flash_args.setools_device_config names a file that does not exist (it is never silently swapped for the stock one). The DEVICE entry carries the firewall regions, HFXO trims and SE_BOOT_INFO configuration; a Flow D write REPLACES the whole ATOC, so signing without one deletes the resident DEVICE entry. Fires under --dry-run too, before app-gen-toc is spawned. Answered by pointing flash_args.setools_device_config at an Alif device-config JSON, or by --no-device-config, which signs an app-only ATOC knowingly. Deliberately DISTINCT from flash.entry-failed: every flash refusal shares rc 1 and status failed, so the code is the only channel that tells a consumer this one is answered by supplying a device config. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
+      "code": "flash.jlink-reset-unconfirmed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1321 / #522. EMISSION CONDITION: a Flow D (alif_mram_jlink) write whose J-Link transcript carries a reset-failure marker -- \"Failed to halt CPU\", \"CPU is not halted\", \"Reset: Failed\" or \"CPU may have not been reset\" -- after the write and its verifybin succeeded. JLinkExe still exits 0 in that case, so the exit code cannot tell it from a clean PIN reset; the entry stays ok with its message downgraded to \"cache-verified; PIN-reset NOT confirmed\" and this warning names the markers found (also data.entries[].jlink.resetFailures). Deliberately a warning: the image was written. The consumer-visible meaning is that the freshly written image was not necessarily started -- power-cycle and check the console. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.readback-mismatch",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1321. EMISSION CONDITION: `tan flash --readback` on a Flow D (alif_mram_jlink) write whose fresh-session J-Link read-back (savebin of every written region) hashed differently from the source file (sha256), or returned fewer bytes than were written. The write's own verifybin passed against J-Link's flash cache, so the chip does not hold the image: slot0 must not be trusted and the board should be re-flashed. Deliberately an error and distinct from flash.entry-failed: the write itself reported success, so this is the only channel that says the board was left in a suspect state. The read-back goes through the same probe-selection guard as the write. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.readback-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1321. EMISSION CONDITION: `tan flash --readback` on a Flow D (alif_mram_jlink) write that landed and cache-verified but whose fresh read-back session could not be run to completion -- the J-Link process failed or timed out, the read-back script could not be built, or there was no readable written region. Nothing was compared, so the write is neither confirmed nor refuted; data.entries[].jlink.readback.reason says why. An error, because a requested confirmation did not happen. A probe-guard refusal before the read-back is reported as its own flash.probe-* code instead. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "generate.board-sku-unresolved",
       "status": "reserved",
       "severity": "error",

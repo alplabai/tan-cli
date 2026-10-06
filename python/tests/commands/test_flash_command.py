@@ -2813,7 +2813,7 @@ def test_flow_d_script_writes_both_blobs_verifies_and_pin_resets():
     # loader -- the three values a bench log needs to reproduce the burn.
     assert plan.ok_message == (
         "alif_mram_jlink[m55_he]: app -> 0x80010000, signed ATOC -> 0x8057F5B0 "
-        "via J-Link (PART_PROFILE); verified and PIN-reset"
+        "via J-Link (PART_PROFILE); cache-verified and PIN-reset"
     )
 
 
@@ -2898,7 +2898,7 @@ def test_flow_d_default_shape_omits_the_app_blob_when_slot0_load_address_is_abse
     assert not any("zephyr.bin" in line for line in lines)
     assert plan.ok_message == (
         "alif_mram_jlink[m55_he]: signed ATOC (app embedded) -> 0x8057F5B0 "
-        "via J-Link (PART_PROFILE); verified and PIN-reset"
+        "via J-Link (PART_PROFILE); cache-verified and PIN-reset"
     )
 
 
@@ -5400,7 +5400,7 @@ def test_flow_d_ok_message_qualifies_a_reset_the_transcript_says_failed(tmp_path
     actually proves); it is the `PIN-reset` HALF of the static `ok_message`
     that overstates -- the identical string used to report both cases alike.
     Fails against the pre-fix source (measured: the entry message ends
-    `verified and PIN-reset` here too, indistinguishable from a run whose
+    `cache-verified and PIN-reset` here too, indistinguishable from a run whose
     reset actually landed)."""
     work = _flow_d_reset_report_setup(tmp_path, monkeypatch)
     transcript = (
@@ -5428,7 +5428,7 @@ def test_flow_d_ok_message_qualifies_a_reset_the_transcript_says_failed(tmp_path
     assert data["entries"][0]["status"] == "ok", data
     message = data["entries"][0]["message"]
     assert "verified" in message, message
-    assert "verified and PIN-reset" not in message, message
+    assert "cache-verified and PIN-reset" not in message, message
     assert "did not halt" in message, message
 
 
@@ -5455,7 +5455,7 @@ def test_flow_d_ok_message_keeps_pin_reset_when_the_transcript_says_nothing_of_t
 
     assert exit_code == 0, data
     assert data["entries"][0]["status"] == "ok", data
-    assert "verified and PIN-reset" in data["entries"][0]["message"], data
+    assert "cache-verified and PIN-reset" in data["entries"][0]["message"], data
 
 
 @pytest.mark.skipif(
@@ -5477,7 +5477,7 @@ def test_flow_d_ok_message_qualifies_a_reset_in_text_mode_too(tmp_path, monkeypa
     directly, so this test spawns a REAL fake `JLinkExe` -- a tiny POSIX
     shell script that prints the same busy-resident transcript -- instead.
     Fails against the pre-fix source (measured: the entry message ends
-    `verified and PIN-reset` here too, in text mode, same as JSON mode
+    `cache-verified and PIN-reset` here too, in text mode, same as JSON mode
     before that fix landed)."""
     work = _flow_d_reset_report_setup(tmp_path, monkeypatch)
     jlink_path = _jlink_stub_path(work / "faketools")
@@ -5504,7 +5504,7 @@ def test_flow_d_ok_message_qualifies_a_reset_in_text_mode_too(tmp_path, monkeypa
     assert data["entries"][0]["status"] == "ok", data
     message = data["entries"][0]["message"]
     assert "verified" in message, message
-    assert "verified and PIN-reset" not in message, message
+    assert "cache-verified and PIN-reset" not in message, message
     assert "did not halt" in message, message
 
 
@@ -5512,31 +5512,31 @@ def test_flow_d_reset_qualified_message_is_a_pure_substring_swap():
     """The helper itself, in isolation: the one tail `plan_alif_mram_jlink`
     always appends is swapped for the honest one, and nothing else about the
     message moves."""
-    base = "alif_mram_jlink[m55_he]: signed ATOC (app embedded) -> 0x8057F5B0 via J-Link (PART_PROFILE); verified and PIN-reset"
+    base = "alif_mram_jlink[m55_he]: signed ATOC (app embedded) -> 0x8057F5B0 via J-Link (PART_PROFILE); cache-verified and PIN-reset"
     outcome = flash_cmd._Outcome(
         success=True, stdout="****** Error: Failed to halt CPU\n", captured=True
     )
     qualified = flash_cmd._flow_d_reset_qualified_message(base, outcome)
     assert qualified == (
         "alif_mram_jlink[m55_he]: signed ATOC (app embedded) -> 0x8057F5B0 via "
-        "J-Link (PART_PROFILE); verified; reset requested, core was busy and did "
-        "not halt"
+        "J-Link (PART_PROFILE); cache-verified; PIN-reset NOT confirmed (reset "
+        "requested, core was busy and did not halt)"
     )
 
 
 def test_flow_d_reset_qualified_message_matches_cpu_is_not_halted_too():
     """The second marker: JLinkExe's OWN post-reset `g`/status line, not only
     the mid-transcript error banner -- either one alone is enough."""
-    base = "alif_mram_jlink[m55_he]: app -> 0x80010000, signed ATOC -> 0x8057F5B0 via J-Link (PART_PROFILE); verified and PIN-reset"
+    base = "alif_mram_jlink[m55_he]: app -> 0x80010000, signed ATOC -> 0x8057F5B0 via J-Link (PART_PROFILE); cache-verified and PIN-reset"
     outcome = flash_cmd._Outcome(success=True, stdout="", stderr="CPU is not halted\n", captured=True)
     qualified = flash_cmd._flow_d_reset_qualified_message(base, outcome)
     assert "CPU is not halted" not in qualified
     assert "reset requested, core was busy and did not halt" in qualified
-    assert "PIN-reset" not in qualified
+    assert "and PIN-reset" not in qualified
 
 
 def test_flow_d_reset_qualified_message_untouched_without_the_reset_tail():
-    """A message that never carried `verified and PIN-reset` in the first
+    """A message that never carried `cache-verified and PIN-reset` in the first
     place (any other backend's `ok_message`) passes through unchanged,
     regardless of what the transcript says -- the substring guard, not a
     method check, is what scopes this."""
@@ -5828,10 +5828,10 @@ def test_the_pty_transcript_still_feeds_the_flow_d_qualification(tmp_path):
     from tan.commands.flash_cmd import _Outcome, _flow_d_reset_qualified_message
 
     qualified = _flow_d_reset_qualified_message(
-        "alif_mram_jlink[m55-he]: written; verified and PIN-reset",
+        "alif_mram_jlink[m55-he]: written; cache-verified and PIN-reset",
         _Outcome(success=True, stdout=transcript),
     )
-    assert qualified.endswith("core was busy and did not halt"), qualified
+    assert qualified.endswith("core was busy and did not halt)"), qualified
 
 
 def test_a_non_terminal_sink_gets_no_pty(tmp_path):
@@ -6017,9 +6017,9 @@ def test_flow_d_still_reads_its_markers_positionlessly(tmp_path):
         success=True, stdout=_LOAD_THEN_RESET_FAILURE_TRANSCRIPT, captured=True
     )
     qualified = _flow_d_reset_qualified_message(
-        "alif_mram_jlink[m55-he]: AE822 MRAM written; verified and PIN-reset", outcome
+        "alif_mram_jlink[m55-he]: AE822 MRAM written; cache-verified and PIN-reset", outcome
     )
-    assert qualified.endswith("; verified; reset requested, core was busy and did not halt")
+    assert qualified.endswith("; cache-verified; PIN-reset NOT confirmed (reset requested, core was busy and did not halt)")
 
 
 # ── tan-cli#541 review, MAJOR 2: the pty must not degrade the diagnostic ─────

@@ -63,10 +63,12 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import dataclasses
 import functools
 import os
 import posixpath
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -178,6 +180,17 @@ from tan.core.atoc_replacement import (
     replacement_detail,
     resident_entries,
     written_entries,
+)
+from tan.core.flow_d_report import (
+    VERIFICATION_CACHE,
+    VERIFICATION_NOTE,
+    VERIFICATION_READBACK,
+    dpidr_in,
+    planned_write,
+    readback_script,
+    reset_failures,
+    sha256_of,
+    transcript_tail,
 )
 from tan.core.setools_scratch import cleanup_scratch, resolve_device_config
 from tan.core.tool_lookup import resolve_program_positions, resolve_tool
@@ -302,6 +315,10 @@ class _Entry:
     #: not report the generic `flash.entry-failed` (`flash.device-config-missing`).
     #: Read by `_run`, never emitted by `as_dict()`.
     issue_code: str | None = None
+    #: tan-cli#1321: the write itself landed and `verifybin` passed, but J-Link's
+    #: own transcript says the PIN reset did not. `_run` appends a
+    #: `flash.jlink-reset-unconfirmed` warning. Never emitted by `as_dict()`.
+    reset_unconfirmed: bool = False
     #: Additive envelope blocks (`setools`, ...) -- ONE dict shared with the
     #: run, because some of it (`setools.scratchRemoved`) is only known after
     #: the entry has been built, when its scratch tree is torn down.
@@ -1775,22 +1792,17 @@ def _execute_message(outcome: _Outcome, method: str, entry_id: str) -> str:
     return f"{method}[{entry_id}]: flash command failed"
 
 
-#: The two J-Link Commander phrases that mean the post-write PIN-reset
-#: (`RSetType 2` / `r` / `g`, `plan_alif_mram_jlink`'s own script) asked the
-#: core to halt and it refused -- the documented busy-resident case: an image
-#: that never idles keeps the core running, so `VC_CORERESET` cannot halt it
-#: (tan-cli#522). Matched against whatever JLinkExe printed, not derived from
-#: the exit code -- JLinkExe still exits 0 here (`outcome.success` is `True`;
-#: the WRITE and its `verifybin` genuinely succeeded), so the exit code alone
-#: cannot tell this run apart from one whose reset actually landed.
-_FLOW_D_HALT_FAILURE_MARKERS = ("Failed to halt CPU", "CPU is not halted")
-
-#: The exact tail `plan_alif_mram_jlink` always appends to `ok_message` --
-#: see its own `f"...; verified and PIN-reset"` lines. Matched verbatim so the
-#: qualification below is a targeted substring swap, not a re-derivation of
-#: the message shape.
-_FLOW_D_VERIFIED_AND_RESET = "; verified and PIN-reset"
-_FLOW_D_VERIFIED_ONLY = "; verified; reset requested, core was busy and did not halt"
+#: The exact tail `plan_alif_mram_jlink` always appends to `ok_message` -- see its
+#: own `f"...; cache-verified and PIN-reset"` lines (tan-cli#1321: "verified" was
+#: `verifybin` against J-Link's flash CACHE, not a chip readback). Matched
+#: verbatim so the qualification below is a targeted substring swap, not a
+#: re-derivation of the message shape. The markers that trigger it are
+#: `flow_d_report.RESET_FAILURE_MARKERS` (tan-cli#522, #1321).
+_FLOW_D_VERIFIED_AND_RESET = "; cache-verified and PIN-reset"
+_FLOW_D_VERIFIED_ONLY = (
+    "; cache-verified; PIN-reset NOT confirmed (reset requested, core was busy and "
+    "did not halt)"
+)
 
 
 def _flow_d_reset_qualified_message(ok_message: str, outcome: _Outcome) -> str:
@@ -1838,8 +1850,7 @@ def _flow_d_reset_qualified_message(ok_message: str, outcome: _Outcome) -> str:
     2s/4s bound), so this is documented risk, not a reproduced defect."""
     if _FLOW_D_VERIFIED_AND_RESET not in ok_message:
         return ok_message
-    transcript = outcome.stdout + outcome.stderr
-    if not any(marker in transcript for marker in _FLOW_D_HALT_FAILURE_MARKERS):
+    if not reset_failures(outcome.stdout + outcome.stderr):
         return ok_message
     return ok_message.replace(_FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_ONLY)
 
@@ -2087,6 +2098,9 @@ class _Context:
     #: `--no-device-config` (tan-cli#1322): sign an app-only ATOC with no `DEVICE`
     #: entry. Default `False` -- the DEVICE entry is part of every auto-signed ATOC.
     no_device_config: bool = False
+    #: `--readback` (tan-cli#1321): after a Flow D write, re-read every written
+    #: region in a FRESH J-Link session and compare sha256.
+    readback: bool = False
     #: Read-only J-Link enumeration, injectable so tests never touch real USB.
     #: `None` resolves to the module's `enumerate_jlinks` at call time.
     enumerate_probes: Callable[[], Any] | None = None
@@ -2604,6 +2618,9 @@ def _flash_entry_body(
     probe_echo: dict[str, Any] | None = None
     probe_note = ""
     probe_guard: _ProbeGuard | None = None
+    # tan-cli#1321: what the read-only DPIDR preflight read, for the `jlink` block.
+    preflight_facts: dict[str, Any] = {}
+    flow_d_writes: list[dict[str, Any]] = []
 
     def entry(
         method: str | None,
@@ -2615,6 +2632,7 @@ def _flash_entry_body(
         atoc_unacknowledged: bool = False,
         probe_refusal: str | None = None,
         issue_code: str | None = None,
+        reset_unconfirmed: bool = False,
     ) -> _Entry:
         return _Entry(
             kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message,
@@ -2628,6 +2646,7 @@ def _flash_entry_body(
             ),
             extra=report,
             issue_code=issue_code,
+            reset_unconfirmed=reset_unconfirmed,
         )
 
     # tan-cli#611, THE HOIST. WHO may flash this entry is decided BEFORE
@@ -2967,7 +2986,8 @@ def _flash_entry_body(
                     force_confirm=ctx.force_confirm,
                 )
                 refusal = _flow_d_preflight(
-                    preflight_inputs, ctx.venv_bin, ctx.workspace, probe_guard=probe_guard
+                    preflight_inputs, ctx.venv_bin, ctx.workspace, probe_guard=probe_guard,
+                    facts=preflight_facts,
                 )
                 if refusal is not None:
                     lines.append(_entry_head(kind, entry_id, method, target.flash_method))
@@ -2983,6 +3003,7 @@ def _flash_entry_body(
                 flash_args, shape, ctx, entry_id, confirm,
                 stack=scratch_stack, report=report,
             )
+            flow_d_writes = _flow_d_writes(flash_args, shape)
         except FlashPlanError as err:
             msg = str(err)
             lines.append(_entry_head(kind, entry_id, method, target.flash_method))
@@ -3124,6 +3145,27 @@ def _flash_entry_body(
                   probe_refusal=probe_guard.tripped_code),
             lines,
         )
+    reset_unconfirmed = False
+    readback_failure: tuple[str, str] | None = None
+    if method == FLOW_D_METHOD:
+        reset_unconfirmed = _flow_d_record(plan, outcome, ctx, entry_id, report, preflight_facts)
+        if outcome.success and ctx.readback:
+            readback_failure = _flow_d_readback(
+                plan, outcome, ctx, flow_d_writes, report, probe_guard
+            )
+    if readback_failure is not None:
+        code, text = readback_failure
+        msg = f"{method}[{entry_id}]: {text}"
+        lines.append(f"  FAIL: {msg}")
+        return (
+            1,
+            entry(
+                method, "failed", 1, msg,
+                issue_code=code if code.startswith("flash.readback") else None,
+                probe_refusal=code[len("flash.probe-"):] if code.startswith("flash.probe-") else None,
+            ),
+            lines,
+        )
     if outcome.success:
         # tan-cli#373: `setools_note` is set here only when THIS run's own
         # SETOOLS auto-sign actually ran (the dry-run preview above always
@@ -3134,15 +3176,171 @@ def _flash_entry_body(
         ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
         if method == FLOW_D_METHOD:
             ok_message = _flow_d_reset_qualified_message(ok_message, outcome)
+            if report.get("jlink", {}).get("verification") == VERIFICATION_READBACK:
+                ok_message += "; read back in a fresh J-Link session (sha256 match)"
         lines.append(f"  ok: {ok_message}")
         return (
             0,
-            entry(method, "ok", 0, ok_message, preflight_unarmed=preflight_unarmed),
+            entry(
+                method, "ok", 0, ok_message, preflight_unarmed=preflight_unarmed,
+                reset_unconfirmed=reset_unconfirmed,
+            ),
             lines,
         )
     msg = _execute_message(outcome, method, entry_id)
     lines.append(f"  FAIL: {msg}")
     return 1, entry(method, "failed", 1, msg), lines
+
+
+def _flow_d_writes(flash_args: Any, shape: FlowDShape) -> list[dict[str, Any]]:
+    """Every write a Flow D entry makes, as `{name, address, size, path,
+    sectorSpan}` (tan-cli#1318, and the regions `--readback` re-reads): the app
+    blob at `slot0_load_address` in the two-blob mramxip shape, then the ATOC at
+    `atoc_address`. `size` is the file's size, `None` if it cannot be read yet."""
+    writes: list[dict[str, Any]] = []
+
+    def _size(path: str | None) -> int | None:
+        try:
+            return os.path.getsize(path) if path else None
+        except OSError:
+            return None
+
+    if shape.app_address is not None:
+        writes.append(planned_write("app", shape.app_address, _size(shape.artefact), shape.artefact))
+    atoc = fa_str(flash_args, "atoc")
+    try:
+        atoc_address = fa_str_checked(flash_args, "atoc_address", True)
+    except FlashPlanError:
+        atoc_address = None
+    if atoc is not None and atoc_address is not None:
+        writes.append(planned_write("atoc", atoc_address, _size(atoc), atoc))
+    return writes
+
+
+def _flow_d_log_path(build_root: str, entry_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", entry_id) or "entry"
+    return os.path.join(build_root, "flash-logs", f"{FLOW_D_METHOD}-{safe}.log")
+
+
+def _flow_d_record(
+    plan: FlashPlan,
+    outcome: _Outcome,
+    ctx: _Context,
+    entry_id: str,
+    report: dict[str, Any],
+    preflight_facts: dict[str, Any],
+) -> bool:
+    """tan-cli#1321: put what the J-Link write ACTUALLY said into the envelope's
+    `jlink` block -- the SW-DP ID read, the transcript (a file under the build
+    root plus its tail inline), `verification: "cache-verified"` (what
+    `verifybin` proves) and any reset-failure markers. Returns whether the PIN
+    reset is unconfirmed. Never raises: a transcript that cannot be written is
+    reported in the block, not allowed to turn a landed write into a crash."""
+    transcript = f"{outcome.stdout}\n{outcome.stderr}"
+    dpidr, source = dpidr_in(transcript), "write-transcript"
+    if dpidr is None:
+        dpidr = preflight_facts.get("dpidr")
+        source = "preflight" if dpidr else "none"
+    failures = reset_failures(transcript)
+    block: dict[str, Any] = {
+        "dpidr": dpidr,
+        "dpidrSource": source,
+        "verification": VERIFICATION_CACHE,
+        "verificationNote": VERIFICATION_NOTE,
+        "reset": "unconfirmed" if failures else ("pin-reset" if outcome.success else "not-reached"),
+        "resetFailures": list(failures),
+        "transcriptTail": transcript_tail(transcript),
+    }
+    path = _flow_d_log_path(ctx.build_root, entry_id)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(f"# tan flash {FLOW_D_METHOD}[{entry_id}] rc={outcome.returncode}\n")
+            fh.write("## J-Link Commander script\n")
+            fh.write(f"{_DISABLE_FW_UPDATE}{plan.jlink_script or ''}\n")
+            fh.write("## stdout\n" + outcome.stdout + "\n## stderr\n" + outcome.stderr + "\n")
+        block["transcriptPath"] = path
+    except OSError as err:
+        block["transcriptPath"] = None
+        block["transcriptError"] = str(err)
+    report["jlink"] = block
+    return bool(failures) and outcome.success
+
+
+def _flow_d_readback(
+    plan: FlashPlan,
+    outcome: _Outcome,
+    ctx: _Context,
+    writes: list[dict[str, Any]],
+    report: dict[str, Any],
+    probe_guard: "_ProbeGuard | None",
+) -> tuple[str, str] | None:
+    """`--readback` (tan-cli#1321): re-read every written region in a FRESH
+    J-Link session (`savebin`) and compare sha256 with the source file. `None`
+    when every region matches (the `jlink` block is upgraded to
+    `readback-verified`); else `(issue_code, message)`.
+
+    It spawns through `_execute` with the SAME `probe_guard` the write used, so
+    the probe-selection verification (ShowEmuList, TOCTOU re-check, shared-serial
+    isolation) runs again immediately before this spawn -- a read-back that went
+    to a different probe than the write would be a green light for the wrong
+    board. A guard refusal comes back as its own `flash.probe-*` code."""
+    regions = [(w["address"], w["size"], w["path"]) for w in writes if w.get("size")]
+    block = report.setdefault("jlink", {})
+    if not regions or plan.jlink_script is None:
+        block["readback"] = {"performed": False, "reason": "no readable written region"}
+        return "flash.readback-failed", "no written region to read back"
+    tmp = tempfile.mkdtemp(prefix="tan-readback-")
+    try:
+        dests = [os.path.join(tmp, f"region{i}.bin") for i in range(len(regions))]
+        try:
+            script = readback_script(
+                plan.jlink_script, [(a, n, d) for (a, n, _p), d in zip(regions, dests)]
+            )
+        except (ValueError, FlashPlanError) as err:
+            block["readback"] = {"performed": False, "reason": str(err)}
+            return "flash.readback-failed", f"could not build the read-back session: {err}"
+        read = _execute(
+            dataclasses.replace(plan, jlink_script=script),
+            True, ctx.venv_bin, ctx.workspace, probe_guard,
+        )
+        if probe_guard is not None and probe_guard.tripped:
+            block["readback"] = {"performed": False, "reason": probe_guard.tripped}
+            return f"flash.probe-{probe_guard.tripped_code}", probe_guard.tripped
+        if not read.success:
+            block["readback"] = {"performed": False, "reason": _capture_tail(read) or "session failed"}
+            return (
+                "flash.readback-failed",
+                "the write landed and cache-verified, but the fresh read-back session "
+                f"failed: {_capture_tail(read) or 'no output'}",
+            )
+        results = []
+        for (address, size, path), dest in zip(regions, dests):
+            expected = sha256_of(path)
+            try:
+                actual = sha256_of(dest)[:] if os.path.getsize(dest) == size else None
+                if actual is None:
+                    actual = f"short-read:{os.path.getsize(dest)}"
+            except OSError:
+                actual = "missing"
+            results.append(
+                {"address": address, "size": size, "sha256Expected": expected,
+                 "sha256Actual": actual, "match": actual == expected}
+            )
+        ok = all(r["match"] for r in results)
+        block["readback"] = {"performed": True, "ok": ok, "regions": results}
+        if not ok:
+            bad = [r["address"] for r in results if not r["match"]]
+            return (
+                "flash.readback-mismatch",
+                "the write cache-verified but a fresh J-Link session read DIFFERENT bytes "
+                f"back at {', '.join(bad)} -- the chip does not hold the image. Do not "
+                "trust this board's slot0; re-flash.",
+            )
+        block["verification"] = VERIFICATION_READBACK
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _flow_d_preflight(
@@ -3153,6 +3351,7 @@ def _flow_d_preflight(
     *,
     read_device: str | None = None,
     probe_guard: "_ProbeGuard | None" = None,
+    facts: dict[str, Any] | None = None,
 ) -> str | None:
     """Connect read-only with the manifest's ATTACH device profile and confirm
     the SW-DP IDR before any write. Returns a refusal message, or `None`
@@ -3261,6 +3460,10 @@ def _flow_d_preflight(
                            _PREFLIGHT_TIMEOUT_S, on_path_bin, workspace, resolved[0], **extra)
     banner = f"{outcome.stdout}\n{outcome.stderr}"
     if _dp_id_matches(expected, banner):
+        if facts is not None:
+            # tan-cli#1321: the SW-DP ID this run ACTUALLY read, for the envelope.
+            facts["dpidr"] = _dp_id_value(banner)
+            facts["expectedDpidr"] = expected
         return None
     if not banner.strip():
         return (
@@ -3457,6 +3660,7 @@ def _run(
     probe_usb_path: str | None = None,
     enumerate_probes: Callable[[], Any] | None = None,
     no_device_config: bool = False,
+    readback: bool = False,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -3640,6 +3844,7 @@ def _run(
         probe_serial=probe_serial,
         probe_usb_path=probe_usb_path,
         no_device_config=no_device_config,
+        readback=readback,
         **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
     )
     unsupported = _probe_selector_unsupported(plan.targets, ctx)
@@ -3720,6 +3925,10 @@ def _run(
                 issues.append(Issue("flash.probe-verify-failed", "error", entry.message))
             elif entry.probe_refusal == "selector-conflict":
                 issues.append(Issue("flash.probe-selector-conflict", "error", entry.message))
+            elif entry.issue_code == "flash.readback-mismatch":
+                issues.append(Issue("flash.readback-mismatch", "error", entry.message))
+            elif entry.issue_code == "flash.readback-failed":
+                issues.append(Issue("flash.readback-failed", "error", entry.message))
             elif entry.issue_code == "flash.device-config-missing":
                 # tan-cli#1322: a literal `Issue(...)` for the static code gate.
                 issues.append(Issue("flash.device-config-missing", "error", entry.message))
@@ -3737,6 +3946,18 @@ def _run(
                 )
             else:
                 issues.append(Issue("flash.entry-failed", "error", entry.message))
+        if entry.reset_unconfirmed:
+            # tan-cli#1321 / #522: J-Link's own transcript says the PIN reset did
+            # not land, so the freshly written image was not necessarily started.
+            # A warning, not an error: the write and its cache verify succeeded.
+            message = (
+                f"{entry.id}: J-Link reported a failed reset ("
+                + ", ".join(entry.extra.get("jlink", {}).get("resetFailures", ()))
+                + "); the PIN reset that starts the new image is NOT confirmed -- "
+                "power-cycle the board and check it booted."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.jlink-reset-unconfirmed", "warning", message))
         if entry.status == "planned":
             # `status` alone is prose no automated consumer parses.
             issues.append(Issue("flash.confirm-required", "warning", entry.message))
@@ -3998,6 +4219,18 @@ def flash(
         "preview still previews. Separate from --confirm, which only arms the write "
         "itself, and it has no effect on any other backend.",
     ),
+    readback: bool = typer.Option(
+        False,
+        "--readback",
+        help="After a Flow D (alif_mram_jlink) write, re-read every written region "
+        "in a FRESH J-Link session and compare its sha256 (tan-cli#1321). The "
+        "write's own `verifybin` compares against J-Link's flash cache, not the "
+        "chip, so the envelope reports it as `cache-verified`; a matching read-back "
+        "upgrades that to `readback-verified`, a differing one fails the entry "
+        "(flash.readback-mismatch). Goes through the same probe-selection guard as "
+        "the write. A fresh session is stronger than the cache but still weaker than "
+        "reading after a cold power cycle.",
+    ),
     no_device_config: bool = typer.Option(
         False,
         "--no-device-config",
@@ -4112,6 +4345,7 @@ def flash(
             probe_serial=probe_serial,
             probe_usb_path=probe_usb_path,
             no_device_config=bool(no_device_config) if isinstance(no_device_config, bool) else False,
+            readback=readback if isinstance(readback, bool) else False,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an

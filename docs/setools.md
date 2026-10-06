@@ -123,6 +123,25 @@ If you already resolved a signature yourself — an explicit `flash_args.atoc`
 `app-package-map.txt` — none of the above runs; `tan` uses what you gave it
 verbatim.
 
+## What a Flow D write reports, and what it proves (tan-cli#1321)
+
+`verifybin` compares the image against J-Link's flash **cache**, not the chip, so
+tan says `cache-verified`, never a bare "verified". The entry's `jlink` block
+carries the evidence: `dpidr` (the SW-DP ID the write transcript read, else the
+read-only preflight's, with `dpidrSource`), `transcriptPath` (a file under
+`<build>/flash-logs/` with the Commander script and both streams) and
+`transcriptTail`, `verification`, and `reset` / `resetFailures`. A transcript
+containing `Failed to halt CPU`, `CPU is not halted`, `Reset: Failed` or `CPU may
+have not been reset` downgrades the message to `PIN-reset NOT confirmed` and
+raises `flash.jlink-reset-unconfirmed` (warning).
+
+`--readback` re-reads every written region in a **fresh** J-Link session
+(`savebin`), through the same probe-selection guard as the write, and compares
+sha256: `readback-verified` on a match, `flash.readback-mismatch` on a
+difference. A fresh session is stronger than the cache but still weaker than
+reading after a cold power cycle, which is what alp-sdk#2233 says proves a write
+on the bench.
+
 ## Two probes, one cloned serial: why `jlink_serial` is not always enough
 
 On a bench carrying more than one J-Link, `flash_args.jlink_serial` picks a
