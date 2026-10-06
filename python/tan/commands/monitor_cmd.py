@@ -75,6 +75,7 @@ from pathlib import Path
 import typer
 
 from tan.core.sdk_discovery import _planner_python
+from tan.core import console_filter as console_filter_mod
 from tan.core.subprocess_env import spawn_env
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -88,9 +89,13 @@ DATA_SCHEMA_VERSION = "1"
 
 
 class ConsoleFilter(str, Enum):
-    """miniterm's own filter names. `direct` passes bytes through so ANSI
-    colours render; miniterm's `default` would print them as literal text."""
+    """Console output filters. `colors` (tan's own, default) keeps SGR colour
+    sequences and neutralises every other escape/control byte; `default`,
+    `nocontrol`, `printable` are miniterm's own stripping filters. `direct`
+    passes the device's bytes to the terminal unmodified and is UNSAFE for an
+    untrusted target (OSC 52 clipboard writes, title changes, screen games)."""
 
+    COLORS = "colors"
     DIRECT = "direct"
     DEFAULT = "default"
     NOCONTROL = "nocontrol"
@@ -342,7 +347,7 @@ def _run_monitor(
     json_mode: bool,
     break_opts: tuple[bytes, bytes, float] | None = None,
     non_interactive: bool = False,
-    console_filter: str = "direct",
+    console_filter: str = "colors",
 ) -> tuple[dict, list[Issue], ExitCode]:
     # Frozen (PyInstaller) or an embedded interpreter with no reportable
     # `sys.executable`: fall back to a PATH name, mirroring
@@ -386,7 +391,7 @@ def _run_monitor(
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
     try:
         rc = subprocess.run(
-            [python, "-m", "serial.tools.miniterm", "--filter", console_filter, port, str(baud)],
+            [python, "-c", console_filter_mod.BOOTSTRAP, "--filter", console_filter, port, str(baud)],
             stdout=_child_stdout(json_mode),
             env=spawn_env(),
         ).returncode
@@ -448,10 +453,11 @@ def monitor(
         help="With --break-uboot: seconds to keep sending the key (default: 30).",
     ),
     console_filter: ConsoleFilter = typer.Option(
-        ConsoleFilter.DIRECT,
+        ConsoleFilter.COLORS,
         "--filter",
-        help="Console output filter: direct (pass-through, colours render), "
-        "default/nocontrol/printable (strip control codes).",
+        help="Console output filter: colors (colours render, every other escape "
+        "is neutralised), default/nocontrol/printable (strip control codes), "
+        "direct (raw bytes to the terminal: unsafe for untrusted targets).",
     ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     project: str = typer.Option(None, "--project", hidden=True),

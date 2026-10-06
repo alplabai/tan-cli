@@ -17,6 +17,7 @@ from __future__ import annotations
 import sys
 
 from tan.commands.monitor_cmd import DATA_SCHEMA_VERSION, MonitorError, _pyserial_missing
+from tan.core import console_filter as console_filter_mod
 from tan.core import uboot_breakin
 from tan.envelope import Issue
 from tan.exit_codes import ExitCode
@@ -118,14 +119,14 @@ def break_in(ser, port: str, baud: int, opts: BreakOpts) -> dict:
     }
 
 
-def attach_miniterm(ser, json_mode: bool, console_filter: str = "direct") -> int:
+def attach_miniterm(ser, json_mode: bool, console_filter: str = "colors") -> int:
     """Run the interactive console on the ALREADY-OPEN `ser` (no reopen).
 
     Same session settings as `serial.tools.miniterm.main` except for the
     options tan does not expose: exit Ctrl+], menu Ctrl+T, UTF-8, CRLF. The
-    output filter is `console_filter` (`--filter`, default `direct`: bytes
-    pass through, so ANSI colours from Zephyr render; miniterm's own
-    `default` would print them as literal escape text). Under `--format json` the
+    output filter is `console_filter` (`--filter`, default tan's `colors`:
+    SGR colours render, every other escape is neutralised; see
+    `tan.core.console_filter`). Under `--format json` the
     `Console` is built with `sys.stdout` pointed at stderr, the same rule
     `monitor_cmd._child_stdout` states for the spawned path.
 
@@ -146,6 +147,7 @@ def attach_miniterm(ser, json_mode: bool, console_filter: str = "direct") -> int
         except ImportError:
             console_errors = (OSError, ValueError)
         try:
+            miniterm.TRANSFORMATIONS["colors"] = console_filter_mod.ColorsFilter
             if json_mode:
                 sys.stdout = sys.__stderr__ if sys.__stderr__ is not None else sys.stderr
             try:
@@ -183,7 +185,7 @@ def run(
     json_mode: bool,
     opts: BreakOpts,
     non_interactive: bool,
-    console_filter: str = "direct",
+    console_filter: str = "colors",
 ) -> tuple[dict, list[Issue], ExitCode]:
     """`--break-uboot` end to end. `--non-interactive` stops after the
     break-in (exit 0 if caught); otherwise the console takes over the

@@ -104,7 +104,7 @@ def test_interactive_hands_the_same_open_port_to_the_session(monkeypatch):
     monkeypatch.setattr(
         monitor_session,
         "attach_miniterm",
-        lambda ser, json_mode, f="direct": sessions.append((ser, ser.closed, json_mode)) or 0,
+        lambda ser, json_mode, f="colors": sessions.append((ser, ser.closed, json_mode)) or 0,
     )
     r = run([])
     assert r.exit_code == 0
@@ -179,9 +179,11 @@ def _miniterm(monkeypatch, term_cls):
     pkg = types.ModuleType("serial.tools")
     mt = types.ModuleType("serial.tools.miniterm")
     mt.Miniterm = term_cls
+    mt.TRANSFORMATIONS = {}
     pkg.miniterm = mt
     monkeypatch.setitem(sys.modules, "serial.tools", pkg)
     monkeypatch.setitem(sys.modules, "serial.tools.miniterm", mt)
+    return mt
 
 
 class _Term:
@@ -207,11 +209,14 @@ class _Term:
 
 
 def test_attach_uses_the_given_instance_default_filter_and_json_stderr(monkeypatch):
-    _miniterm(monkeypatch, _Term)
+    mt = _miniterm(monkeypatch, _Term)
     ser = FakePort(b"")
     assert monitor_session.attach_miniterm(ser, True) == 0
+    from tan.core import console_filter
+
+    assert mt.TRANSFORMATIONS["colors"] is console_filter.ColorsFilter
     seen = _Term.seen
-    assert seen["ser"] is ser and seen["kw"]["filters"] == ["direct"]  # colours pass through
+    assert seen["ser"] is ser and seen["kw"]["filters"] == ["colors"]  # tan's safe colour filter
     assert seen["stdout"] is sys.__stderr__ and sys.stdout is not sys.__stderr__
     assert seen["closed"] and ser.closed
 
@@ -249,14 +254,14 @@ def test_filter_option_reaches_the_in_process_console(monkeypatch):
     monkeypatch.setattr(monitor_session, "_stdin_is_tty", lambda: True)
     got = []
     monkeypatch.setattr(
-        monitor_session, "attach_miniterm", lambda ser, jm, f="direct": got.append(f) or 0
+        monitor_session, "attach_miniterm", lambda ser, jm, f="colors": got.append(f) or 0
     )
     assert run(["--filter", "nocontrol"]).exit_code == 0
     assert run([]).exit_code == 0
-    assert got == ["nocontrol", "direct"]
+    assert got == ["nocontrol", "colors"]
 
 
-@pytest.mark.parametrize(("args", "want"), [([], "direct"), (["--filter", "printable"], "printable")])
+@pytest.mark.parametrize(("args", "want"), [([], "colors"), (["--filter", "printable"], "printable"), (["--filter", "direct"], "direct")])
 def test_subprocess_path_passes_the_same_filter(monkeypatch, args, want):
     # The existing (non --break-uboot) path hands miniterm the same filter.
     mod = types.ModuleType("serial")
