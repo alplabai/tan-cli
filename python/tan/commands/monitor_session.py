@@ -126,7 +126,10 @@ def attach_miniterm(ser, json_mode: bool, console_filter: str = "colors") -> int
     options tan does not expose: exit Ctrl+], menu Ctrl+T, UTF-8, CRLF. The
     output filter is `console_filter` (`--filter`, default tan's `colors`:
     SGR colours render, every other escape is neutralised; see
-    `tan.core.console_filter`). Under `--format json` the
+    `tan.core.console_filter`). Assumes tan is not running as `python -m tan`
+    from an untrusted project directory (that puts the cwd on `sys.path`
+    ahead of pyserial); the released `tan` is frozen, and the spawned plain
+    console runs from an empty cwd. Under `--format json` the
     `Console` is built with `sys.stdout` pointed at stderr, the same rule
     `monitor_cmd._child_stdout` states for the spawned path.
 
@@ -134,6 +137,7 @@ def attach_miniterm(ser, json_mode: bool, console_filter: str = "colors") -> int
     (it reads termios attributes off stdin).
     """
     term = None
+    started = False
     real_stdout = sys.stdout
     try:
         try:
@@ -160,6 +164,7 @@ def attach_miniterm(ser, json_mode: bool, console_filter: str = "colors") -> int
             term.set_rx_encoding("UTF-8")
             term.set_tx_encoding("UTF-8")
             term.start()
+            started = True
             try:
                 term.join(True)
             except KeyboardInterrupt:
@@ -174,6 +179,8 @@ def attach_miniterm(ser, json_mode: bool, console_filter: str = "colors") -> int
             ) from err
     finally:
         if term is not None:
+            if started:
+                term.stop()  # reader/writer threads must not outlive a failed run
             term.close()
         ser.close()
     return 0
@@ -201,6 +208,7 @@ def run(
         )
     ser = open_port(port, baud)
     handed_over = False
+    data = base
     try:
         block = break_in(ser, port, baud, opts)
         data = {**base, "breakIn": block}
@@ -220,7 +228,7 @@ def run(
             return data, [], ExitCode.SUCCESS
         handed_over = True
     except MonitorError as err:
-        err.data = {**err.data, **(data if "data" in locals() else {})}
+        err.data = {**err.data, **data}
         raise
     finally:
         if not handed_over:

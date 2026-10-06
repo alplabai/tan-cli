@@ -69,6 +69,7 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 from enum import Enum
 from pathlib import Path
 
@@ -304,6 +305,20 @@ def _refuse_listing_ports(reason: str) -> MonitorError:
     )
 
 
+def _monitor_env() -> dict:
+    """`spawn_env()` minus any relative / empty `PYTHONPATH` entry (those mean
+    "the cwd" and would defeat the empty-cwd spawn)."""
+    env = spawn_env()
+    entries = env.get("PYTHONPATH")
+    if entries:
+        keep = [e for e in entries.split(os.pathsep) if e and os.path.isabs(e)]
+        if keep:
+            env["PYTHONPATH"] = os.pathsep.join(keep)
+        else:
+            del env["PYTHONPATH"]
+    return env
+
+
 def _child_stdout(json_mode: bool):
     """What miniterm's stdout is wired to (tan-cli#491 defect 6).
 
@@ -390,11 +405,25 @@ def _run_monitor(
 
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
     try:
-        rc = subprocess.run(
-            [python, "-c", console_filter_mod.BOOTSTRAP, "--filter", console_filter, port, str(baud)],
-            stdout=_child_stdout(json_mode),
-            env=spawn_env(),
-        ).returncode
+        # Empty cwd: `-c` puts the cwd on sys.path, so a `serial/` planted in the
+        # project dir would be imported instead of pyserial (tan-cli#1317).
+        with tempfile.TemporaryDirectory(prefix="tan-monitor-") as empty:
+            rc = subprocess.run(
+                [
+                    python,
+                    "-c",
+                    console_filter_mod.BOOTSTRAP,
+                    "--filter",
+                    console_filter,
+                    # The spawn runs from an empty cwd, so a relative device path
+                    # must be made absolute first.
+                    os.path.abspath(port) if os.path.exists(port) else port,
+                    str(baud),
+                ],
+                stdout=_child_stdout(json_mode),
+                env=_monitor_env(),
+                cwd=empty,
+            ).returncode
     except OSError as err:
         raise MonitorError(
             "monitor.launch-failed",
