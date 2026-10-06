@@ -349,11 +349,16 @@ def _break_opts(
 
 def _do_break_in(
     port: str, baud: int, opts: tuple[bytes, bytes, float]
-) -> dict:
+) -> tuple[dict, object | None]:
     """Open `port` in-process (local tty, by-id path, or any pyserial URL such
-    as `rfc2217://`/`socket://`), run the break-in loop, close it again so
-    miniterm can take the port over, and return the envelope's `breakIn`
-    block. No power control: the operator or labgrid power-cycles the board.
+    as `rfc2217://`/`socket://`), run the break-in loop, and return the
+    envelope's `breakIn` block plus the STILL-OPEN port when the prompt was
+    caught (None otherwise; a missed prompt closes it). The caller hands the
+    open port to the interactive session rather than reopening it: a reopen
+    can toggle DTR/RTS on a USB-UART adapter and reset the board, losing the
+    prompt just caught. The port is opened the way miniterm opens it (no
+    explicit DTR/RTS, so pyserial's own open-time defaults apply).
+    No power control: the operator or labgrid power-cycles the board.
     """
     key, prompt, timeout_s = opts
     try:
@@ -373,15 +378,53 @@ def _do_break_in(
         result = uboot_breakin.break_into_uboot(
             ser, key=key, prompt=prompt, timeout_s=timeout_s
         )
-    finally:
+    except BaseException:
         ser.close()
-    return {
+        raise
+    if not result.caught:
+        ser.close()
+    block = {
         "caught": result.caught,
         "elapsedSeconds": round(result.elapsed_s, 3),
         "timeoutSeconds": timeout_s,
         "bytesSeen": result.bytes_seen,
         "bytesSeenTail": result.tail,
     }
+    return block, (ser if result.caught else None)
+
+
+def _attach_miniterm(ser, json_mode: bool) -> int:
+    """Run the interactive console on the ALREADY-OPEN `ser` (no reopen).
+
+    Mirrors `serial.tools.miniterm.main`'s session setup (exit Ctrl+], menu
+    Ctrl+T, UTF-8, CRLF). Under `--format json` miniterm's `Console` is built
+    with `sys.stdout` pointed at stderr, the same rule `_child_stdout` states
+    for the spawned path: nothing but the envelope may reach stdout.
+    """
+    from serial.tools import miniterm  # noqa: PLC0415 (optional at runtime)
+
+    real_stdout = sys.stdout
+    if json_mode:
+        sys.stdout = sys.__stderr__ if sys.__stderr__ is not None else sys.stderr
+    try:
+        term = miniterm.Miniterm(ser, echo=False, eol="crlf", filters=[])
+    finally:
+        sys.stdout = real_stdout
+    term.exit_character = chr(0x1D)
+    term.menu_character = chr(0x14)
+    term.raw = False
+    term.set_rx_encoding("UTF-8")
+    term.set_tx_encoding("UTF-8")
+    term.start()
+    try:
+        try:
+            term.join(True)
+        except KeyboardInterrupt:
+            pass
+        term.join()
+    finally:
+        term.close()
+    return 0
 
 
 def _run_monitor(
@@ -424,11 +467,14 @@ def _run_monitor(
         raise _refuse_listing_ports(f"port '{port}' not found")
 
     extra: dict = {}
+    held = None
+    rc = 0
     if break_opts is not None:
-        extra["breakIn"] = _do_break_in(port, baud, break_opts)
-        if not extra["breakIn"]["caught"]:
+        extra["breakIn"], held = _do_break_in(port, baud, break_opts)
+        base = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud, **extra}
+        if held is None:
             return (
-                {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud, **extra},
+                base,
                 [Issue(
                     "monitor.break-timeout",
                     "error",
@@ -442,26 +488,34 @@ def _run_monitor(
             file=sys.stderr,
         )
         if non_interactive:
-            return (
-                {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud, **extra},
-                [],
-                ExitCode.SUCCESS,
-            )
+            held.close()
+            return base, [], ExitCode.SUCCESS
 
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
-    try:
-        rc = subprocess.run(
-            [python, "-m", "serial.tools.miniterm", port, str(baud)],
-            stdout=_child_stdout(json_mode),
-            env=spawn_env(),
-        ).returncode
-    except OSError as err:
-        raise MonitorError(
-            "monitor.launch-failed",
-            f"failed to launch `{python} -m serial.tools.miniterm`: {err}",
-            ExitCode.RUNTIME_FAILURE,
-            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
-        ) from err
+    if held is not None:
+        try:
+            rc = _attach_miniterm(held, json_mode)
+        except OSError as err:
+            raise MonitorError(
+                "monitor.launch-failed",
+                f"failed to run the console on the open port: {err}",
+                ExitCode.RUNTIME_FAILURE,
+                {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
+            ) from err
+    else:
+        try:
+            rc = subprocess.run(
+                [python, "-m", "serial.tools.miniterm", port, str(baud)],
+                stdout=_child_stdout(json_mode),
+                env=spawn_env(),
+            ).returncode
+        except OSError as err:
+            raise MonitorError(
+                "monitor.launch-failed",
+                f"failed to launch `{python} -m serial.tools.miniterm`: {err}",
+                ExitCode.RUNTIME_FAILURE,
+                {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
+            ) from err
 
     data = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud, **extra}
     if rc != 0:

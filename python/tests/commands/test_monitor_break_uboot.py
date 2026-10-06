@@ -37,10 +37,13 @@ def _fake_serial_module(monkeypatch, *, caught: bool, opened=None):
     class SerialException(IOError):
         pass
 
+    made = []
+
     class Port:
         def __init__(self):
             self.writes = []
             self.closed = False
+            made.append(self)
 
         def write(self, data):
             self.writes.append(data)
@@ -59,6 +62,7 @@ def _fake_serial_module(monkeypatch, *, caught: bool, opened=None):
         return Port()
 
     mod.serial_for_url = serial_for_url
+    mod.made = made
     mod.SerialException = SerialException
     monkeypatch.setitem(sys.modules, "serial", mod)
     monkeypatch.setattr(
@@ -95,16 +99,66 @@ def test_break_uboot_caught_non_interactive_skips_miniterm(monkeypatch):
     assert spawns == []
 
 
-def test_break_uboot_caught_then_hands_over_to_miniterm(monkeypatch):
-    _fake_serial_module(monkeypatch, caught=True)
+def test_break_uboot_caught_hands_the_same_open_port_to_the_session(monkeypatch):
+    opened = []
+    _fake_serial_module(monkeypatch, caught=True, opened=opened)
     spawns = _spawn_recorder(monkeypatch)
     monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [])
+    sessions = []
+
+    def fake_attach(ser, json_mode):
+        sessions.append((ser, ser.closed, json_mode))
+        return 0
+
+    monkeypatch.setattr(monitor_cmd, "_attach_miniterm", fake_attach)
     result = runner.invoke(
         app, ["--port", "socket://gw:4000", "--break-uboot", "--format", "json"]
     )
     assert result.exit_code == 0
-    assert len(spawns) == 1
+    made = sys.modules["serial"].made
+    # One open only; the session got that very object, still open (no reopen,
+    # so no DTR/RTS toggle between the break-in and the console).
+    assert len(opened) == 1 and len(made) == 1
+    assert len(sessions) == 1
+    assert sessions[0][0] is made[0] and sessions[0][1] is False
+    assert spawns == []
     assert envelope(result)["data"]["breakIn"]["caught"] is True
+
+
+def test_attach_miniterm_runs_miniterm_on_the_given_instance(monkeypatch):
+    seen = {}
+
+    class Term:
+        def __init__(self, ser, **kw):
+            seen["ser"], seen["kw"] = ser, kw
+            seen["stdout_during_init"] = sys.stdout
+
+        def start(self):
+            seen["started"] = True
+
+        def join(self, *a):
+            pass
+
+        def close(self):
+            seen["closed"] = True
+
+        def set_rx_encoding(self, e):
+            pass
+
+        set_tx_encoding = set_rx_encoding
+
+    pkg = types.ModuleType("serial.tools")
+    mt = types.ModuleType("serial.tools.miniterm")
+    mt.Miniterm = Term
+    monkeypatch.setitem(sys.modules, "serial", sys.modules.get("serial") or types.ModuleType("serial"))
+    monkeypatch.setitem(sys.modules, "serial.tools", pkg)
+    monkeypatch.setitem(sys.modules, "serial.tools.miniterm", mt)
+    pkg.miniterm = mt
+    sentinel = object()
+    assert monitor_cmd._attach_miniterm(sentinel, True) == 0
+    assert seen["ser"] is sentinel and seen["started"] and seen["closed"]
+    assert seen["stdout_during_init"] is sys.__stderr__
+    assert sys.stdout is not sys.__stderr__
 
 
 def test_break_uboot_timeout_is_a_failure_and_never_spawns(monkeypatch):
