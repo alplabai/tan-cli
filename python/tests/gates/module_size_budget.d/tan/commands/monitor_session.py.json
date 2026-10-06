@@ -5,7 +5,11 @@
   "lines": null,
   "long_functions": [
     [
-      55,
+      54,
+      "run"
+    ],
+    [
+      57,
       "attach_miniterm"
     ]
   ]

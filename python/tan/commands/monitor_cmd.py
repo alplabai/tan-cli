@@ -69,6 +69,7 @@ import os
 import stat
 import subprocess
 import sys
+from enum import Enum
 from pathlib import Path
 
 import typer
@@ -84,6 +85,16 @@ DEFAULT_BAUD = 115200
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
+
+
+class ConsoleFilter(str, Enum):
+    """miniterm's own filter names. `direct` passes bytes through so ANSI
+    colours render; miniterm's `default` would print them as literal text."""
+
+    DIRECT = "direct"
+    DEFAULT = "default"
+    NOCONTROL = "nocontrol"
+    PRINTABLE = "printable"
 
 
 class MonitorError(Exception):
@@ -331,6 +342,7 @@ def _run_monitor(
     json_mode: bool,
     break_opts: tuple[bytes, bytes, float] | None = None,
     non_interactive: bool = False,
+    console_filter: str = "direct",
 ) -> tuple[dict, list[Issue], ExitCode]:
     # Frozen (PyInstaller) or an embedded interpreter with no reportable
     # `sys.executable`: fall back to a PATH name, mirroring
@@ -367,12 +379,14 @@ def _run_monitor(
     if break_opts is not None:
         from tan.commands import monitor_session  # noqa: PLC0415 (only on --break-uboot)
 
-        return monitor_session.run(port, baud, json_mode, break_opts, non_interactive)
+        return monitor_session.run(
+            port, baud, json_mode, break_opts, non_interactive, console_filter
+        )
 
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
     try:
         rc = subprocess.run(
-            [python, "-m", "serial.tools.miniterm", port, str(baud)],
+            [python, "-m", "serial.tools.miniterm", "--filter", console_filter, port, str(baud)],
             stdout=_child_stdout(json_mode),
             env=spawn_env(),
         ).returncode
@@ -433,6 +447,12 @@ def monitor(
         "--break-timeout",
         help="With --break-uboot: seconds to keep sending the key (default: 30).",
     ),
+    console_filter: ConsoleFilter = typer.Option(
+        ConsoleFilter.DIRECT,
+        "--filter",
+        help="Console output filter: direct (pass-through, colours render), "
+        "default/nocontrol/printable (strip control codes).",
+    ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     project: str = typer.Option(None, "--project", hidden=True),
     board_yaml: str = typer.Option(None, "--board-yaml", hidden=True),
@@ -480,7 +500,9 @@ def monitor(
         from tan.commands import monitor_session  # noqa: PLC0415 (validation only)
 
         opts = monitor_session.break_opts(break_uboot, break_key, prompt, break_timeout)
-        data, issues, exit_code = _run_monitor(port, baud, json_mode, opts, non_interactive)
+        data, issues, exit_code = _run_monitor(
+            port, baud, json_mode, opts, non_interactive, console_filter.value
+        )
     except MonitorError as err:
         finish(err.data, [Issue(err.code, "error", err.message)], err.exit_code)
         return

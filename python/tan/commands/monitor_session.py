@@ -118,12 +118,14 @@ def break_in(ser, port: str, baud: int, opts: BreakOpts) -> dict:
     }
 
 
-def attach_miniterm(ser, json_mode: bool) -> int:
+def attach_miniterm(ser, json_mode: bool, console_filter: str = "direct") -> int:
     """Run the interactive console on the ALREADY-OPEN `ser` (no reopen).
 
     Same session settings as `serial.tools.miniterm.main` except for the
-    options tan does not expose: exit Ctrl+], menu Ctrl+T, UTF-8, CRLF, and
-    the `default` filter (control codes stripped). Under `--format json` the
+    options tan does not expose: exit Ctrl+], menu Ctrl+T, UTF-8, CRLF. The
+    output filter is `console_filter` (`--filter`, default `direct`: bytes
+    pass through, so ANSI colours from Zephyr render; miniterm's own
+    `default` would print them as literal escape text). Under `--format json` the
     `Console` is built with `sys.stdout` pointed at stderr, the same rule
     `monitor_cmd._child_stdout` states for the spawned path.
 
@@ -147,7 +149,7 @@ def attach_miniterm(ser, json_mode: bool) -> int:
             if json_mode:
                 sys.stdout = sys.__stderr__ if sys.__stderr__ is not None else sys.stderr
             try:
-                term = miniterm.Miniterm(ser, echo=False, eol="crlf", filters=["default"])
+                term = miniterm.Miniterm(ser, echo=False, eol="crlf", filters=[console_filter])
             finally:
                 sys.stdout = real_stdout
             term.exit_character = chr(0x1D)
@@ -176,7 +178,12 @@ def attach_miniterm(ser, json_mode: bool) -> int:
 
 
 def run(
-    port: str, baud: int, json_mode: bool, opts: BreakOpts, non_interactive: bool
+    port: str,
+    baud: int,
+    json_mode: bool,
+    opts: BreakOpts,
+    non_interactive: bool,
+    console_filter: str = "direct",
 ) -> tuple[dict, list[Issue], ExitCode]:
     """`--break-uboot` end to end. `--non-interactive` stops after the
     break-in (exit 0 if caught); otherwise the console takes over the
@@ -219,7 +226,7 @@ def run(
     # attach_miniterm owns (and always closes) `ser` from here.
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
     try:
-        attach_miniterm(ser, json_mode)
+        attach_miniterm(ser, json_mode, console_filter)
     except MonitorError as err:
         err.data = {**err.data, **data}
         raise

@@ -104,7 +104,7 @@ def test_interactive_hands_the_same_open_port_to_the_session(monkeypatch):
     monkeypatch.setattr(
         monitor_session,
         "attach_miniterm",
-        lambda ser, json_mode: sessions.append((ser, ser.closed, json_mode)) or 0,
+        lambda ser, json_mode, f="direct": sessions.append((ser, ser.closed, json_mode)) or 0,
     )
     r = run([])
     assert r.exit_code == 0
@@ -211,7 +211,7 @@ def test_attach_uses_the_given_instance_default_filter_and_json_stderr(monkeypat
     ser = FakePort(b"")
     assert monitor_session.attach_miniterm(ser, True) == 0
     seen = _Term.seen
-    assert seen["ser"] is ser and seen["kw"]["filters"] == ["default"]
+    assert seen["ser"] is ser and seen["kw"]["filters"] == ["direct"]  # colours pass through
     assert seen["stdout"] is sys.__stderr__ and sys.stdout is not sys.__stderr__
     assert seen["closed"] and ser.closed
 
@@ -242,3 +242,32 @@ def test_other_console_failures_are_mapped_too(monkeypatch, exc):
     with pytest.raises(monitor_cmd.MonitorError):
         monitor_session.attach_miniterm(ser, False)
     assert ser.closed
+
+
+def test_filter_option_reaches_the_in_process_console(monkeypatch):
+    _serial(monkeypatch)
+    monkeypatch.setattr(monitor_session, "_stdin_is_tty", lambda: True)
+    got = []
+    monkeypatch.setattr(
+        monitor_session, "attach_miniterm", lambda ser, jm, f="direct": got.append(f) or 0
+    )
+    assert run(["--filter", "nocontrol"]).exit_code == 0
+    assert run([]).exit_code == 0
+    assert got == ["nocontrol", "direct"]
+
+
+@pytest.mark.parametrize(("args", "want"), [([], "direct"), (["--filter", "printable"], "printable")])
+def test_subprocess_path_passes_the_same_filter(monkeypatch, args, want):
+    # The existing (non --break-uboot) path hands miniterm the same filter.
+    mod = types.ModuleType("serial")
+    monkeypatch.setitem(sys.modules, "serial", mod)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
+    argv = []
+    monkeypatch.setattr(
+        monitor_cmd.subprocess,
+        "run",
+        lambda a, **k: argv.extend(a) or types.SimpleNamespace(returncode=0),
+    )
+    r = runner.invoke(app, ["--port", "COM7", "--format", "json", *args])
+    assert r.exit_code == 0, r.stdout
+    assert argv[argv.index("--filter") + 1] == want
