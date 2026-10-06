@@ -179,6 +179,12 @@ from tan.core.doctor_git import (
 from tan.core.doctor_libraries import LibraryReport, inspect_selection
 from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.doctor_scope import CHECK_SCOPES
+from tan.core.doctor_setools import (
+    FLOW_A_METHOD,
+    FLOW_D_METHOD,
+    project_flash_methods,
+    signing_problems,
+)
 from tan.core.global_flags import accept_global_flags
 from tan.core.inert import COMPATIBILITY, inert_help
 from tan.core.probe import PROBE_TIMEOUT_S, probe, probe_status
@@ -196,6 +202,7 @@ from tan.core.sdk_discovery import (
     resolve_sdk_root_ladder,
     resolve_sdk_root_wide,
 )
+from tan.core.setools import find_app_gen_toc
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.timestamp import generated_at_iso
 from tan.core import toolchain_provision
@@ -1653,7 +1660,13 @@ def zephyr_workspace_check(workspace_dir: str, version_text: str | None) -> Chec
     )
 
 
-def setools_check(setools_dir: str | None, se_uart: str | None, is_linux: bool) -> Check:
+def setools_check(
+    setools_dir: str | None,
+    se_uart: str | None,
+    is_linux: bool,
+    flash_methods: frozenset[str] | None = None,
+    jlink_found: bool | None = None,
+) -> Check:
     """`setools` -- can this host flash an Alif AEN part's MRAM at all?
 
     Nothing else in either doctor asks. `scripts/west_commands/runners/
@@ -1678,8 +1691,29 @@ def setools_check(setools_dir: str | None, se_uart: str | None, is_linux: bool) 
     license-gated binary will succeed, and the false alarm it produced here
     trains an operator to stop trusting doctor on the one question they ask it
     before a write.
+
+    **Method-aware (tan-cli#1323).** `$SE_UART` belongs to Flow A
+    (`zephyr_west_flash` -> the `alif_flash` runner) ONLY. A planner-emitted
+    AEN manifest dispatches Flow D (`alif_mram_jlink`): SETOOLS signs the ATOC
+    (`app-gen-toc`) and J-Link writes it over SWD, no SE-UART. `flash_methods`
+    is the set `tan flash` would dispatch for the project's built manifest
+    (`tan.core.doctor_setools.project_flash_methods`, which calls
+    `select_flash_method` itself); `None` means no project/manifest is in
+    scope, and the verdict is then phrased per method rather than asserting
+    one. `jlink_found` is whether a J-Link tool is on PATH (Flow D only).
     """
-    if not is_linux and not setools_dir and not se_uart:
+    flow_d = flash_methods is not None and FLOW_D_METHOD in flash_methods
+    flow_a = flash_methods is not None and FLOW_A_METHOD in flash_methods
+    if flash_methods is not None and not (flow_a or flow_d):
+        return Check(
+            "setools",
+            "unknown",
+            "this project's slices flash via "
+            f"{', '.join(f'`{m}`' for m in sorted(flash_methods)) or 'no method'}, "
+            "which does not use SETOOLS -- nothing to check here.",
+            scope="host",
+        )
+    if not flow_d and not is_linux and not setools_dir and not se_uart:
         return Check(
             "setools",
             "unknown",
@@ -1697,51 +1731,62 @@ def setools_check(setools_dir: str | None, se_uart: str | None, is_linux: bool) 
             scope="host",
         )
 
-    problems: list[str] = []
-    if not setools_dir:
-        problems.append(
-            "$SETOOLS_DIR is unset (the Alif Security Toolkit is license-gated and "
-            "NOT redistributed by alp-sdk)"
-        )
-    else:
-        root = Path(setools_dir)
-        absent = []
-        for exe in SETOOLS_EXECUTABLES:
-            try:
-                if not (root / exe).is_file():
-                    absent.append(exe)
-            except OSError:
-                absent.append(exe)
-        if absent:
-            problems.append(
-                f"$SETOOLS_DIR=`{setools_dir}` does not look like an "
-                f"app-release-exec-linux directory (no {', '.join(absent)})"
-            )
-    if not se_uart:
-        problems.append(
+    # No project: SETOOLS signing is the one need BOTH flows share, so it is
+    # what gates the verdict; the rest is named per flow, never asserted.
+    only_gen_toc = not flow_a
+    signing = signing_problems(
+        setools_dir,
+        ("app-gen-toc",) if only_gen_toc else SETOOLS_EXECUTABLES,
+        find_app_gen_toc,
+        require_exec=flow_d,
+    )
+    d_problems = list(signing)
+    if flow_d and jlink_found is False:
+        d_problems.append("no J-Link tool (JLinkExe/JLink) on PATH")
+    a_problems = list(signing)
+    if flow_a and not se_uart:
+        a_problems.append(
             "$SE_UART is unset (the SE-UART device: Linux /dev/ttyUSB*, macOS "
             "/dev/cu.usbserial-*, a passed-through COM under WSL)"
         )
-
-    if not problems:
-        return Check(
-            "setools",
-            "pass",
-            f"SETOOLS ready: $SETOOLS_DIR=`{setools_dir}` has "
-            f"{'/'.join(SETOOLS_EXECUTABLES)}, $SE_UART=`{se_uart}`.",
-            scope="host",
+    if flash_methods is None:
+        problems = signing
+        lead = (
+            "AEN MRAM flashing (Flow D `alif_mram_jlink`, the planner default, and "
+            "Flow A `west flash`) cannot sign an ATOC: "
         )
+        joined = "; ".join(problems)
+    else:
+        problems = []
+        if flow_d and d_problems:
+            problems.append("Flow D (`alif_mram_jlink`): " + "; ".join(d_problems))
+        if flow_a and a_problems:
+            problems.append("Flow A (`west flash`, the alif_flash runner): " + "; ".join(a_problems))
+        lead = "AEN MRAM flashing will fail: "
+        joined = " | ".join(problems)
+    if not problems:
+        tools = "app-gen-toc" if only_gen_toc else "/".join(SETOOLS_EXECUTABLES)
+        ready = f"SETOOLS ready: $SETOOLS_DIR=`{setools_dir}` has {tools}"
+        if flash_methods is None:
+            ready += (
+                ". Flow D (`alif_mram_jlink`) needs only this plus a J-Link (see the "
+                "`jlink` check); Flow A (`west flash`) also needs $SE_UART "
+                + (f"(`{se_uart}`, set)." if se_uart else "(currently unset).")
+            )
+        elif flow_a:
+            ready += f", $SE_UART=`{se_uart}`."
+        else:
+            ready += " and a J-Link is on PATH (Flow D needs no SE-UART)."
+        return Check("setools", "pass", ready, scope="host")
     return Check(
         "setools",
         "warn",
-        "AEN MRAM flashing (`west flash`, the alif_flash runner) will fail: "
-        + "; ".join(problems)
-        + ".",
+        lead + joined + ".",
         f"Download the Alif Security Toolkit (`{SETOOLS_BUNDLE}`) from the Alif "
         f"developer portal -- it is license-gated and alp-sdk does not "
-        f"redistribute it -- then `export SETOOLS_DIR=<...>/app-release-exec-linux` "
-        f"and `export SE_UART=/dev/ttyUSB0` (your SE-UART device). "
-        f"See docs/aen-bench-bringup.md.",
+        f"redistribute it -- then `export SETOOLS_DIR=<...>/app-release-exec-linux`. "
+        f"Flow A (`west flash`) additionally needs `export SE_UART=/dev/ttyUSB0` "
+        f"(your SE-UART device); Flow D does not. See docs/aen-bench-bringup.md.",
         scope="host",
     )
 
@@ -4259,6 +4304,8 @@ def _collect(
             os.environ.get("SETOOLS_DIR"),
             os.environ.get("SE_UART"),
             sys.platform.startswith("linux"),
+            project_flash_methods(board_yaml),
+            any(on_path(n) for n in ("JLinkExe", "JLink")),
         )
     )
 

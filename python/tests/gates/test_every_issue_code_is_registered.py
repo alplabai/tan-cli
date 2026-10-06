@@ -1014,13 +1014,16 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # `libraries_check` and `toolchain_check` bumps above. Only the middle
         # site can ever emit it: the other two are `pass`, and
         # `checks_to_issues` raises an issue for `warn`/`fail` only.
+        # 75 as of tan-cli#1323: `setools_check` gains one `unknown` `Check(...)`
+        # site (a project whose methods do not use SETOOLS), literally named
+        # `"setools"` -- no new code, `unknown` raises no issue.
         prefix="doctor.",
         expr="kebab_check_name(check.name)",
         name="Check",
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=74,
+        expected_calls=75,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(

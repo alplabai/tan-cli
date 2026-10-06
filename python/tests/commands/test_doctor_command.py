@@ -2004,6 +2004,76 @@ def test_setools_is_unknown_not_warn_off_linux():
     assert "app-release-exec-linux" in check.detail
 
 
+_D = frozenset({"alif_mram_jlink"})
+_A = frozenset({"zephyr_west_flash"})
+
+
+def _toolkit(tmp_path, *, executable=True):
+    for name in ("app-gen-toc", "app-write-mram"):
+        f = tmp_path / name
+        f.write_text("", encoding="utf-8")
+        f.chmod(0o755 if executable else 0o644)
+    return str(tmp_path)
+
+
+def test_flow_d_without_se_uart_passes_tan_cli_1323(tmp_path):
+    """The planner-default Flow D path never touches the SE-UART."""
+    check = doctor_cmd.setools_check(
+        _toolkit(tmp_path), None, True, flash_methods=_D, jlink_found=True
+    )
+    assert check.status == "pass"
+    assert "$SE_UART" not in check.detail
+
+
+def test_flow_d_warns_on_missing_jlink_or_unexecutable_app_gen_toc(tmp_path):
+    no_jlink = doctor_cmd.setools_check(
+        _toolkit(tmp_path), None, True, flash_methods=_D, jlink_found=False
+    )
+    assert no_jlink.status == "warn"
+    assert "J-Link" in no_jlink.detail and "SE_UART is unset" not in no_jlink.detail
+    other = tmp_path / "x"
+    other.mkdir()
+    not_exec = doctor_cmd.setools_check(
+        _toolkit(other, executable=False), None, True, flash_methods=_D, jlink_found=True
+    )
+    assert not_exec.status == "warn"
+    assert "app-gen-toc" in not_exec.detail
+
+
+def test_flow_a_still_warns_about_se_uart(tmp_path):
+    check = doctor_cmd.setools_check(_toolkit(tmp_path), None, True, flash_methods=_A)
+    assert check.status == "warn"
+    assert "Flow A" in check.detail and "$SE_UART is unset" in check.detail
+
+
+def test_no_project_does_not_assert_flow_a_when_se_uart_unset(tmp_path):
+    check = doctor_cmd.setools_check(_toolkit(tmp_path), None, True)
+    assert check.status == "pass"
+    assert "Flow D" in check.detail and "Flow A" in check.detail
+
+
+def test_non_setools_project_methods_are_unknown():
+    check = doctor_cmd.setools_check(None, None, True, flash_methods=frozenset({"openocd"}))
+    assert check.status == "unknown"
+
+
+def test_project_methods_resolve_through_select_flash_method(tmp_path):
+    from tan.core.doctor_setools import flash_methods_for_manifest_text, project_flash_methods
+
+    base = "schema_version: 1\nsku: X\nslices:\n"
+    plain = base + "  - core_id: a\n    os: zephyr\n    flash_method: zephyr_west_flash\n"
+    armed = plain + "    flash_args:\n      jlink_flash_device: AE822FA0E5597LS0_M55_HE\n"
+    assert flash_methods_for_manifest_text(plain) == _A
+    assert flash_methods_for_manifest_text(armed) == _D
+    assert flash_methods_for_manifest_text("not: [valid") is None
+    proj = tmp_path / "proj"
+    (proj / "build").mkdir(parents=True)
+    (proj / "build" / "system-manifest.yaml").write_text(armed, encoding="utf-8")
+    assert project_flash_methods(str(proj / "board.yaml")) == _D
+    assert project_flash_methods(str(tmp_path / "none" / "board.yaml")) is None
+    assert project_flash_methods(None) is None
+
+
 def test_module_importable_and_has_module_no_longer_exist():
     """tan-cli#641 removed both -- `_module_importable`/`_has_module` existed
     only to feed `setools_check`'s now-deleted `fdt` probe (tan-cli#488
