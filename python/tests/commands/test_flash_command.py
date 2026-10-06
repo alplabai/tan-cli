@@ -4351,6 +4351,67 @@ def _flow_d_sign_setup(tmp_path, *, stock=True):
     return setools_dir, scratch_parent
 
 
+def test_the_dry_run_envelope_shows_the_script_the_writes_and_the_atoc(tmp_path):
+    """tan-cli#1318: a `--dry-run` reports the planned J-Link command script, every
+    write as {address, size, sectorSpan} (16 KiB sectors) and the ATOC placement
+    and entries -- and spawns NO J-Link tool (a stub on PATH records any spawn)."""
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    marker = tmp_path / "jlink-was-spawned"
+    tools = tmp_path / "faketools"
+    tools.mkdir()
+    stub = tools / ("JLinkExe.exe" if os.name == "nt" else "JLinkExe")
+    stub.write_text(f'#!/bin/sh\ntouch "{marker}"\n', encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(stub, 0o755)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=_FLOW_D_SIGN_MANIFEST % "",
+        env={
+            "SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent),
+            "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+        },
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    assert not marker.exists(), "--dry-run spawned the J-Link tool"
+    plan = payload["data"]["entries"][0]["plan"]
+    script = plan["jlinkScript"]
+    assert script[0] == "exec DisableAutoUpdateFW"
+    assert any(line.startswith("loadbin ") and line.endswith(" 0x80010000") for line in script)
+    assert any(line.startswith("loadbin ") and line.endswith(" 0x8057ea50") for line in script)
+    assert script[-1] == "exit"
+    app, atoc_write = plan["writes"]
+    assert (app["name"], app["address"], app["size"]) == ("app", "0x80010000", 68)
+    assert app["sectorSpan"] == {
+        "first": "0x80010000", "end": "0x80014000", "count": 1, "bytes": 16384,
+        "sectorBytes": 16384,
+    }
+    assert atoc_write["address"] == "0x8057ea50" and atoc_write["sectorSpan"]["count"] == 1
+    assert plan["atoc"]["address"] == "0x8057ea50"
+    assert plan["atoc"]["signedByTan"] is True
+    assert plan["atoc"]["size"] == atoc_write["size"]
+    assert plan["argv"][0] == "JLinkExe"
+    assert "scratch overlay" in plan["scratchNote"]
+
+
+def test_a_hand_supplied_atoc_is_planned_with_unknown_entries(tmp_path):
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00" * 20000)
+    manifest = _FLOW_D_SIGN_MANIFEST % ', atoc: atoc.bin, atoc_address: "0x8057F5B0"'
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": ""},
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    plan = payload["data"]["entries"][0]["plan"]
+    assert plan["atoc"]["entries"] is None and plan["atoc"]["signedByTan"] is False
+    atoc = plan["writes"][1]
+    assert atoc["size"] == 20000
+    # 0x8057F5B0 + 20000 B reaches 0x805843D0: three 16 KiB sectors.
+    assert atoc["sectorSpan"]["count"] == 3
+    assert plan["scratchNote"] is None
+
+
 def test_flow_d_signs_a_device_entry_by_default_and_reports_it(tmp_path):
     """tan-cli#1322: the auto-signed ATOC leads with DEVICE, sourced from the
     stock SETOOLS config, and the envelope says where it came from."""

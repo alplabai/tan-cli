@@ -123,6 +123,18 @@ If you already resolved a signature yourself — an explicit `flash_args.atoc`
 `app-package-map.txt` — none of the above runs; `tan` uses what you gave it
 verbatim.
 
+## Reviewing a Flow D write before arming it (tan-cli#1318)
+
+`tan flash --dry-run --format json` puts a `plan` block on every Flow D entry:
+`jlinkScript` (the exact Commander script, `exec DisableAutoUpdateFW` first),
+`argv`, `writes[]` as `{name, address, size, path, sectorSpan}`, and `atoc`
+`{address, size, entries, signedByTan}`. `sectorSpan` counts 16 KiB sectors
+(`first`, `end` exclusive, `count`, `bytes`) because the loader rewrites whole
+sectors and fills the remainder with 0xFF -- an ATOC of 2640 B at `0x8057F5B0`
+still rewrites the sector `0x8057C000`-`0x80580000`. For an ATOC tan signs, the
+placement and entry list come from `app-gen-toc` run in the scratch overlay, so
+they are what a real run will write; a dry run still never spawns the J-Link tool.
+
 ## What a Flow D write reports, and what it proves (tan-cli#1321)
 
 `verifybin` compares the image against J-Link's flash **cache**, not the chip, so

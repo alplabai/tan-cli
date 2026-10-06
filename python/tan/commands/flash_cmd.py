@@ -3034,6 +3034,9 @@ def _flash_entry_body(
 
     lines.append(_entry_head(kind, entry_id, method, target.flash_method))
 
+    if method == FLOW_D_METHOD:
+        report["plan"] = _flow_d_plan_block(plan, flow_d_writes, report)
+
     if plan.planning_only or ctx.dry_run:
         shown = display_argv(plan)
         # tan-cli#1252: Flow D ONLY. This block is shared with `yocto_wic` and
@@ -3215,6 +3218,44 @@ def _flow_d_writes(flash_args: Any, shape: FlowDShape) -> list[dict[str, Any]]:
     if atoc is not None and atoc_address is not None:
         writes.append(planned_write("atoc", atoc_address, _size(atoc), atoc))
     return writes
+
+
+def _flow_d_plan_block(
+    plan: FlashPlan, writes: list[dict[str, Any]], report: dict[str, Any]
+) -> dict[str, Any]:
+    """tan-cli#1318: what this Flow D entry will do, reviewable BEFORE it is
+    armed -- the J-Link Commander script (line 1 is the `exec
+    DisableAutoUpdateFW` tan prepends to every script), the J-Link argv, every
+    write as `{name, address, size, path, sectorSpan}` (16 KiB sectors: the loader
+    rewrites whole sectors and fills the rest with 0xFF, so the footprint is wider
+    than the size), and the ATOC placement and entry list.
+
+    The ATOC placement is exact when tan signed it (the report comes from
+    `app-gen-toc` run in the scratch overlay, tan-cli#1325 -- which is why a dry
+    run can show it without touching the SETOOLS install); for a blob the manifest
+    supplied, `entries` is `None` because tan cannot see inside it. Pure over its
+    arguments; spawns nothing."""
+    signed = report.get("atoc")
+    atoc_write = next((w for w in writes if w["name"] == "atoc"), None)
+    atoc: dict[str, Any] | None = None
+    if atoc_write is not None:
+        atoc = {
+            "address": atoc_write["address"],
+            "size": atoc_write["size"],
+            "entries": signed["entries"] if signed else None,
+            "signedByTan": bool(signed),
+        }
+    return {
+        "argv": list(plan.argv),
+        "jlinkScript": (_DISABLE_FW_UPDATE + (plan.jlink_script or "")).splitlines(),
+        "writes": writes,
+        "atoc": atoc,
+        "scratchNote": (
+            "the ATOC path above lives in a scratch overlay removed when this entry ends"
+            if signed
+            else None
+        ),
+    }
 
 
 def _flow_d_log_path(build_root: str, entry_id: str) -> str:
