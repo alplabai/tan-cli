@@ -19,8 +19,9 @@ def feed(*chunks: str) -> str:
 
 
 def test_sgr_colours_pass_through_unchanged():
-    s = "\x1b[1;32mok\x1b[0m \x1b[m\x1b[38;5;196mred\x1b[0m\r\n"
+    s = "\x1b[1;32mok\x1b[0m \x1b[38;5;196mred\x1b[0m\x1b[48;2;1;2;3mx\x1b[0m\r\n"
     assert feed(s) == s
+    assert feed("\x1b[m") == "\x1b[0m"  # canonical re-emit of the empty form
 
 
 def test_plain_text_and_allowed_controls_pass():
@@ -129,9 +130,14 @@ def test_a_stray_esc_does_not_eat_the_following_newline():
         ("\x1b[38;5;5m", "\x1b[38;5;5m"),  # 5 is an operand here, not blink
         ("\x1b[48;5;8m", "\x1b[48;5;8m"),
         ("\x1b[38;2;8;5;6m", "\x1b[38;2;8;5;6m"),
-        ("\x1b[m", "\x1b[m"),
+        ("\x1b[m", "\x1b[0m"),
         ("\x1b[0m", "\x1b[0m"),
-        ("\x1b[;1m", "\x1b[;1m"),
+        ("\x1b[;1m", "\x1b[0;1m"),
+        ("\x1b[7m", ""),  # reverse video is not on the allowlist
+        ("\x1b[001;031m", "\x1b[1;31m"),  # canonical numbers, not the raw bytes
+        ("\x1b[38;5;300m", ""),  # out-of-range operand: remainder dropped
+        ("\x1b[1;38;9;1m", "\x1b[1m"),  # malformed extended colour
+        ("\x1b[31;1;999m", "\x1b[31;1m"),
     ],
 )
 def test_sgr_conceal_and_blink_are_removed_but_the_rest_survives(sgr, want):
@@ -157,3 +163,83 @@ def test_placeholder_falls_back_to_ascii_when_the_stream_cannot_encode_it(monkey
     monkeypatch.setattr(sys, "stdout", ascii_out)
     f = cf.ColorsFilter()
     assert f.rx("a\x07b") == "a?b"
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [
+        "\x1b]52;c;ZXZpbA==\x07",  # BEL
+        "\x1b]52;c;ZXZpbA==\x1b\\",  # 7-bit ST
+        "\x9d52;c;ZXZpbA==\x9c",  # C1 OSC .. C1 ST
+        "\x9d52;c;ZXZpbA==\x07",
+        "\x1b]52;c;ZXZpbA==\x18",  # CAN aborts it
+        "\x1b]52;c;ZXZpbA==\x1a",  # SUB aborts it
+    ],
+)
+def test_osc_52_never_reaches_the_terminal_whichever_way_it_ends(stream):
+    out = feed(stream, "after")
+    assert "ZXZpbA" not in out or out.endswith("after")  # payload swallowed unless aborted
+    assert "\x1b" not in out and "\x9d" not in out
+
+
+@pytest.mark.parametrize("abort", ["\x18", "\x1a"])
+@pytest.mark.parametrize("prefix", ["\x1b[1;3", "\x1b]0;ti", "\x1bP1;2", "\x1b(", "\x1b", "\x9b1;", "\x9d0;t"])
+def test_can_and_sub_abort_a_sequence_like_a_terminal(prefix, abort):
+    out = feed(prefix, abort, "ok")
+    assert out == P + "ok"  # sequence dropped, the text after it is plain
+
+
+def test_eight_bit_csi_non_sgr_is_neutralised_and_8bit_sgr_is_canonicalised():
+    assert feed("a\x9b2Jb") == "a" + P + "b"
+    assert feed("\x9b1;32mX") == "\x1b[1;32mX"  # re-emitted as 7-bit canonical
+
+
+def test_overlong_params_are_neutralised():
+    assert feed("\x1b[" + "1;" * 20 + "m").count("\x1b") == 0  # > 32 chars of params
+    assert feed("\x1b[" + "1;" * 15 + "1m").startswith("\x1b[")  # 31 chars: fine
+
+
+def test_del_and_c1_are_placeholders():
+    assert feed("\x7f\x80\x85\x9c") == P * 4  # 0x9c (ST) outside a string is just a C1
+
+
+def test_private_use_unassigned_and_surrogates_are_neutralised():
+    assert feed("\ue000\U000e0000\ud800") == P * 3
+
+
+ALLOWED_CTRL = set("\r\n\t\b")
+_SGR_RE = __import__("re").compile(r"\x1b\[[0-9;]*m")
+
+
+def _assert_safe(out: str) -> None:
+    import unicodedata
+
+    rest = _SGR_RE.sub("", out)  # canonical SGR sequences the filter generated
+    assert "\x1b" not in rest
+    for m in _SGR_RE.finditer(out):  # ... and they use only allowlisted codes
+        for code in m.group()[2:-1].split(";"):
+            assert code.isdigit() and int(code) <= 255
+    for ch in rest:
+        assert ch in ALLOWED_CTRL or unicodedata.category(ch) not in {
+            "Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"
+        }, hex(ord(ch))
+
+
+def test_property_random_input_never_leaks_an_escape_or_a_bad_character():
+    import random
+
+    rng = random.Random(1330)
+    alphabet = (
+        ["\x1b", "[", "]", "P", "_", "^", "X", "\\", "m", "H", "J", ";", ":", "?", "0", "1", "5", "8",
+         "38", "48", "2", " ", "\x07", "\x18", "\x1a", "\x7f", "\x9b", "\x9d", "\x9c", "\x90",
+         "\n", "\r", "\u202e", "\u200b", "\ue000", "\ud800", "\U000e0001", "a", "z", "\u00e9", "\u4e16"]
+        + [chr(c) for c in range(0, 0xA0)]
+    )
+    for _ in range(3000):
+        data = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 60)))
+        out_whole = feed(data)
+        _assert_safe(out_whole)
+        # chunking must not change the result
+        cuts = sorted(rng.sample(range(len(data) + 1), min(3, len(data) + 1)))
+        pieces = [data[a:b] for a, b in zip([0, *cuts], [*cuts, len(data)])]
+        assert feed(*pieces) == out_whole
