@@ -2025,12 +2025,16 @@ def test_flow_d_without_se_uart_passes_tan_cli_1323(tmp_path):
     assert "$SE_UART" not in check.detail
 
 
-def test_flow_d_warns_on_missing_jlink_or_unexecutable_app_gen_toc(tmp_path):
+def test_flow_d_warns_on_missing_jlink(tmp_path):
     no_jlink = doctor_cmd.setools_check(
         _toolkit(tmp_path), None, True, flash_methods=_D, jlink_found=False
     )
     assert no_jlink.status == "warn"
     assert "J-Link" in no_jlink.detail and "SE_UART is unset" not in no_jlink.detail
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX execute bit")
+def test_flow_d_warns_on_unexecutable_app_gen_toc(tmp_path):
     other = tmp_path / "x"
     other.mkdir()
     not_exec = doctor_cmd.setools_check(
@@ -2072,6 +2076,53 @@ def test_project_methods_resolve_through_select_flash_method(tmp_path):
     assert project_flash_methods(str(proj / "board.yaml")) == _D
     assert project_flash_methods(str(tmp_path / "none" / "board.yaml")) is None
     assert project_flash_methods(None) is None
+
+
+_ARMED = (
+    "schema_version: 1\nsku: X\nslices:\n  - core_id: a\n    os: zephyr\n"
+    "    flash_method: zephyr_west_flash\n    flash_args:\n"
+    "      jlink_flash_device: AE822FA0E5597LS0_M55_HE\n"
+)
+
+
+def _setools_check_from_collect(tmp_path, monkeypatch, board_yaml, manifest, toolkit=None):
+    monkeypatch.delenv("SETOOLS_DIR", raising=False)
+    monkeypatch.delenv("SE_UART", raising=False)
+    monkeypatch.setattr(doctor_cmd, "jlink_available", lambda *a: True)
+    if manifest is not None:
+        (tmp_path / "build").mkdir()
+        (tmp_path / "build" / "system-manifest.yaml").write_text(
+            manifest + (f"      setools_dir: {toolkit}\n" if toolkit else ""), encoding="utf-8"
+        )
+    checks = doctor_cmd._collect(str(tmp_path), board_yaml=board_yaml)
+    return next(c for c in checks if c.name == "setools")
+
+
+def test_collect_wires_setools_with_no_project(tmp_path, monkeypatch):
+    check = _setools_check_from_collect(tmp_path, monkeypatch, None, None)
+    assert "Flow D" in check.detail and "Flow A" in check.detail
+
+
+def test_collect_wires_setools_with_no_manifest(tmp_path, monkeypatch):
+    board = tmp_path / "board.yaml"
+    board.write_text("", encoding="utf-8")
+    check = _setools_check_from_collect(tmp_path, monkeypatch, str(board), None)
+    assert "Flow D" in check.detail and "Flow A" in check.detail
+
+
+def test_collect_wires_setools_dir_from_the_manifest_and_flow_d(tmp_path, monkeypatch):
+    """A manifest `flash_args.setools_dir` counts (as for `tan flash`), and a
+    Flow D manifest needs no $SE_UART."""
+    toolkit = tmp_path / "tk"
+    toolkit.mkdir()
+    (toolkit / "app-gen-toc").write_text("", encoding="utf-8")
+    (toolkit / "app-gen-toc").chmod(0o755)
+    board = tmp_path / "board.yaml"
+    board.write_text("", encoding="utf-8")
+    check = _setools_check_from_collect(tmp_path, monkeypatch, str(board), _ARMED, str(toolkit))
+    assert check.status == "pass", check.detail
+    assert "flash_args.setools_dir" in check.detail
+    assert "--setools-dir" in check.detail
 
 
 def test_module_importable_and_has_module_no_longer_exist():

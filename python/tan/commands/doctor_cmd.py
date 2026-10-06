@@ -144,6 +144,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.build.toolchain import _is_toolchain_wreckage, _toolchain_store_scan_root
+from tan.commands.flash_cmd import _tool_available
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
     global_default_pointer_fix_hint,
@@ -182,9 +183,9 @@ from tan.core.doctor_scope import CHECK_SCOPES
 from tan.core.doctor_setools import (
     FLOW_A_METHOD,
     FLOW_D_METHOD,
-    project_flash_methods,
-    signing_problems,
+    project_flash,
 )
+from tan.core.doctor_setools import verdict as setools_verdict
 from tan.core.global_flags import accept_global_flags
 from tan.core.inert import COMPATIBILITY, inert_help
 from tan.core.probe import PROBE_TIMEOUT_S, probe, probe_status
@@ -202,12 +203,11 @@ from tan.core.sdk_discovery import (
     resolve_sdk_root_ladder,
     resolve_sdk_root_wide,
 )
-from tan.core.setools import find_app_gen_toc
 from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.timestamp import generated_at_iso
 from tan.core import toolchain_provision
 from tan.core.tool_lookup import resolve_tool
-from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
+from tan.core.venv import find_workspace_venv, venv_bin_dir, west_program, west_workspace_dir
 from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, terminal_width, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -1660,12 +1660,23 @@ def zephyr_workspace_check(workspace_dir: str, version_text: str | None) -> Chec
     )
 
 
+def jlink_available(app_dir: str, sdk_root: str | None) -> bool:
+    """Whether `tan flash` would find a J-Link tool: the SAME test it applies
+    (`flash_cmd._tool_available` -- PATH or the workspace venv)."""
+    try:
+        venv_bin = venv_bin_dir(app_dir, sdk_root)
+        return any(_tool_available(n, venv_bin) for n in ("JLinkExe", "JLink"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def setools_check(
     setools_dir: str | None,
     se_uart: str | None,
     is_linux: bool,
     flash_methods: frozenset[str] | None = None,
     jlink_found: bool | None = None,
+    setools_source: str = "$SETOOLS_DIR",
 ) -> Check:
     """`setools` -- can this host flash an Alif AEN part's MRAM at all?
 
@@ -1731,64 +1742,16 @@ def setools_check(
             scope="host",
         )
 
-    # No project: SETOOLS signing is the one need BOTH flows share, so it is
-    # what gates the verdict; the rest is named per flow, never asserted.
-    only_gen_toc = not flow_a
-    signing = signing_problems(
+    status, detail, fix = setools_verdict(
         setools_dir,
-        ("app-gen-toc",) if only_gen_toc else SETOOLS_EXECUTABLES,
-        find_app_gen_toc,
-        require_exec=flow_d,
+        setools_source,
+        se_uart,
+        flash_methods,
+        jlink_found,
+        SETOOLS_BUNDLE,
+        SETOOLS_EXECUTABLES,
     )
-    d_problems = list(signing)
-    if flow_d and jlink_found is False:
-        d_problems.append("no J-Link tool (JLinkExe/JLink) on PATH")
-    a_problems = list(signing)
-    if flow_a and not se_uart:
-        a_problems.append(
-            "$SE_UART is unset (the SE-UART device: Linux /dev/ttyUSB*, macOS "
-            "/dev/cu.usbserial-*, a passed-through COM under WSL)"
-        )
-    if flash_methods is None:
-        problems = signing
-        lead = (
-            "AEN MRAM flashing (Flow D `alif_mram_jlink`, the planner default, and "
-            "Flow A `west flash`) cannot sign an ATOC: "
-        )
-        joined = "; ".join(problems)
-    else:
-        problems = []
-        if flow_d and d_problems:
-            problems.append("Flow D (`alif_mram_jlink`): " + "; ".join(d_problems))
-        if flow_a and a_problems:
-            problems.append("Flow A (`west flash`, the alif_flash runner): " + "; ".join(a_problems))
-        lead = "AEN MRAM flashing will fail: "
-        joined = " | ".join(problems)
-    if not problems:
-        tools = "app-gen-toc" if only_gen_toc else "/".join(SETOOLS_EXECUTABLES)
-        ready = f"SETOOLS ready: $SETOOLS_DIR=`{setools_dir}` has {tools}"
-        if flash_methods is None:
-            ready += (
-                ". Flow D (`alif_mram_jlink`) needs only this plus a J-Link (see the "
-                "`jlink` check); Flow A (`west flash`) also needs $SE_UART "
-                + (f"(`{se_uart}`, set)." if se_uart else "(currently unset).")
-            )
-        elif flow_a:
-            ready += f", $SE_UART=`{se_uart}`."
-        else:
-            ready += " and a J-Link is on PATH (Flow D needs no SE-UART)."
-        return Check("setools", "pass", ready, scope="host")
-    return Check(
-        "setools",
-        "warn",
-        lead + joined + ".",
-        f"Download the Alif Security Toolkit (`{SETOOLS_BUNDLE}`) from the Alif "
-        f"developer portal -- it is license-gated and alp-sdk does not "
-        f"redistribute it -- then `export SETOOLS_DIR=<...>/app-release-exec-linux`. "
-        f"Flow A (`west flash`) additionally needs `export SE_UART=/dev/ttyUSB0` "
-        f"(your SE-UART device); Flow D does not. See docs/aen-bench-bringup.md.",
-        scope="host",
-    )
+    return Check("setools", status, detail, fix, scope="host")
 
 
 def jlink_banner(jlink_exe: str, timeout: int = PROBE_TIMEOUT_S) -> str | None:
@@ -4299,13 +4262,27 @@ def _collect(
     if os.name == "nt":
         _add(seven_zip_check(any(on_path(p) for p in SEVEN_ZIP_PROGRAMS)))
 
+    # tan-cli#1323: the precedence `tan flash` applies (`resolve_setools_dir`),
+    # minus the per-run `--setools-dir` flag doctor cannot see: $SETOOLS_DIR,
+    # then the built manifest's flash_args.setools_dir.
+    flash_info = project_flash(board_yaml)
+    setools_dir = os.environ.get("SETOOLS_DIR") or (
+        flash_info.setools_dir if flash_info is not None else None
+    )
+    setools_source = (
+        "$SETOOLS_DIR" if os.environ.get("SETOOLS_DIR") else "the manifest's flash_args.setools_dir"
+    )
     _add(
         setools_check(
-            os.environ.get("SETOOLS_DIR"),
+            setools_dir,
             os.environ.get("SE_UART"),
             sys.platform.startswith("linux"),
-            project_flash_methods(board_yaml),
-            any(on_path(n) for n in ("JLinkExe", "JLink")),
+            flash_info.methods if flash_info is not None else None,
+            jlink_available(
+                str(Path(board_yaml).parent) if board_yaml is not None else workspace_root,
+                sdk_root,
+            ),
+            setools_source,
         )
     )
 
