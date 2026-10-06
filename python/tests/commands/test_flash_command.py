@@ -4232,6 +4232,36 @@ boot_order: []
     assert codes(payload) == ["flash.entry-failed"]
 
 
+def test_flow_d_entry_reports_the_resolved_method_and_the_declared_one(tmp_path):
+    """tan-cli#1320: a `zephyr_west_flash` slice carrying `jlink_flash_device`
+    runs as Flow D; the envelope's `method` says so and `methodDeclared` keeps
+    what the manifest said. An entry that was not upgraded carries no
+    `methodDeclared`."""
+    manifest = """schema_version: 1
+hw_info: {sku: E1M-AEN803}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash, flash_method_resolved: alif_mram_jlink,
+   flash_args: {jlink_flash_device: AE822FA0E5597LS0_M55_HE}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, err = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": ""},
+    )
+    entry = envelope(out)["data"]["entries"][0]
+    assert entry["method"] == "alif_mram_jlink"
+    assert entry["methodDeclared"] == "zephyr_west_flash"
+    plain = manifest.replace(
+        "flash_args: {jlink_flash_device: AE822FA0E5597LS0_M55_HE}", "flash_args: {}"
+    ).replace("flash_method_resolved: alif_mram_jlink,", "")
+    _, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=plain)
+    entry = envelope(out)["data"]["entries"][0]
+    assert entry["method"] == "zephyr_west_flash"
+    assert "methodDeclared" not in entry
+
+
 def test_flow_d_setools_refusal_names_the_manifest_sku_not_aen801(tmp_path):
     """tan-cli#1319: an E1M-AEN803 build must not be told it has an AEN801
     image."""

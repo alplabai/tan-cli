@@ -465,6 +465,34 @@ def test_write_post_build_manifest_writes_a_real_overlaid_file_hermetically(tmp_
     assert he["status"] == "pending"
 
 
+_FLOW_D_FIXTURE_MANIFEST = _FIXTURE_MANIFEST.replace(
+    "- core_id: m55_he\n  os: zephyr\n  status: pending\n",
+    "- core_id: m55_he\n  os: zephyr\n  status: pending\n"
+    "  flash_method: zephyr_west_flash\n"
+    "  flash_args:\n    jlink_flash_device: AE822FA0E5597LS0_M55_HE\n",
+)
+
+
+def test_the_written_manifest_records_the_resolved_flash_method(tmp_path, monkeypatch):
+    """tan-cli#1320: declared `flash_method` untouched, `flash_method_resolved`
+    names the Flow D transport `tan flash` will actually use."""
+    import tan.planner_root as planner_root
+
+    monkeypatch.setattr(planner_root, "emit", lambda *a, **k: _FLOW_D_FIXTURE_MANIFEST)
+    outcome = write_post_build_manifest(
+        sdk_root=_sdk_shaped(tmp_path),
+        board_yaml=str(tmp_path / "board.yaml"),
+        base=str(tmp_path),
+        plan_build_root="build",
+        results=[],
+    )
+    assert outcome.write_failed_reason is None
+    written = (tmp_path / "build" / "system-manifest.yaml").read_text(encoding="utf-8")
+    he = next(s for s in parse_system_manifest(written).slices if s["core_id"] == "m55_he")
+    assert he["flash_method"] == "zephyr_west_flash"
+    assert he["flash_method_resolved"] == "alif_mram_jlink"
+
+
 def test_serialize_failure_is_reported_not_raised(tmp_path, monkeypatch):
     """`serialize_system_manifest_raw` (`yaml.safe_dump`) is called OUTSIDE
     any `try` in the oracle's own terms too -- `rewrite_manifest_yaml` returns

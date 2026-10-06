@@ -287,6 +287,10 @@ class _Entry:
     #: `selector-conflict`) when this entry refused on probe selection. Read by
     #: `_run`, never emitted by `as_dict()`.
     probe_refusal: str | None = None
+    #: tan-cli#1320: the `flash_method` the manifest DECLARES, set only when it
+    #: differs from the resolved `method` this entry ran under (Flow D upgrade
+    #: of a `zephyr_west_flash` slice). Emitted as `methodDeclared`.
+    method_declared: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"kind": self.kind, "id": self.id}
@@ -298,6 +302,8 @@ class _Entry:
         out["status"] = self.status
         out["rc"] = self.rc
         out["message"] = self.message
+        if self.method_declared is not None:
+            out["methodDeclared"] = self.method_declared
         if self.probe is not None:
             out["probe"] = self.probe
         return out
@@ -2490,6 +2496,16 @@ def _resolve_flow_d_atoc_via_setools(
     )
 
 
+def _entry_head(kind: str, entry_id: str, method: str, declared: str | None) -> str:
+    """`flash: slice 'm55_he' -> alif_mram_jlink (manifest declares
+    zephyr_west_flash)` -- the resolved transport, plus the declared one when
+    tan-cli#1320's Flow D selection upgraded it."""
+    head = f"flash: {kind} '{entry_id}' -> {method}"
+    if declared and declared != method:
+        head += f" (manifest declares {declared})"
+    return head
+
+
 def _flash_entry(
     target: FlashTarget,
     ctx: _Context,
@@ -2542,6 +2558,11 @@ def _flash_entry(
             preflight_unarmed=preflight_unarmed, recovery_armed=recovery,
             atoc_unacknowledged=atoc_unacknowledged,
             probe=probe_echo, probe_refusal=probe_refusal,
+            method_declared=(
+                target.flash_method
+                if method and target.flash_method and target.flash_method != method
+                else None
+            ),
         )
 
     # tan-cli#611, THE HOIST. WHO may flash this entry is decided BEFORE
@@ -2722,7 +2743,7 @@ def _flash_entry(
             if selection.serial is not None or selection.visible is None:
                 probe_guard = _ProbeGuard(selection, snapshot, ctx.enumerate_probes, probe_echo)
         if selection is not None and selection.refusal_code is not None:
-            lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+            lines.append(_entry_head(kind, entry_id, method, target.flash_method))
             lines.append(f"  FAIL: {selection.refusal}")
             return (
                 1,
@@ -2806,7 +2827,7 @@ def _flash_entry(
                     if guard_refusal is None:
                         probe_guard.fresh = True
                     if guard_refusal is not None:
-                        lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+                        lines.append(_entry_head(kind, entry_id, method, target.flash_method))
                         lines.append(f"  FAIL: {guard_refusal}")
                         return (
                             1,
@@ -2827,7 +2848,7 @@ def _flash_entry(
                 if ctx.require_dpidr:
                     refusal = _require_dpidr_gate(method, entry_id, flash_args, None)
                     if refusal is not None:
-                        lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+                        lines.append(_entry_head(kind, entry_id, method, target.flash_method))
                         lines.append(f"  FAIL: {refusal}")
                         return 1, entry(method, "failed", 1, refusal), lines
                 # tan-cli#1252 (porting alp-sdk#2025). A Flow D `loadbin` of
@@ -2857,7 +2878,7 @@ def _flash_entry(
                 # reads what arming means before they arm it.
                 if not atoc_replacement_acknowledged(flash_args, ctx.atoc_unqueryable):
                     refusal = atoc_replacement_refusal(method, entry_id)
-                    lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+                    lines.append(_entry_head(kind, entry_id, method, target.flash_method))
                     lines.append(f"  FAIL: {refusal}")
                     return (
                         1,
@@ -2876,7 +2897,7 @@ def _flash_entry(
                     preflight_inputs, ctx.venv_bin, ctx.workspace, probe_guard=probe_guard
                 )
                 if refusal is not None:
-                    lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+                    lines.append(_entry_head(kind, entry_id, method, target.flash_method))
                     lines.append(f"  FAIL: {refusal}")
                     tripped = probe_guard is not None and probe_guard.tripped == refusal
                     return (
@@ -2890,7 +2911,7 @@ def _flash_entry(
             )
         except FlashPlanError as err:
             msg = str(err)
-            lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+            lines.append(_entry_head(kind, entry_id, method, target.flash_method))
             lines.append(f"  FAIL: {msg}")
             return 1, entry(method, "failed", 1, msg), lines
         if setools_note is not None and (ctx.dry_run or not confirm):
@@ -2919,7 +2940,7 @@ def _flash_entry(
             # AEN preview of the two, and omitting it here would leave exactly
             # the operator who has not signed yet uninformed.
             previewed = f"{setools_note} {ATOC_REPLACEMENT_PREVIEW_NOTE}{probe_note}"
-            lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+            lines.append(_entry_head(kind, entry_id, method, target.flash_method))
             lines.append(f"  {previewed}")
             status = "ok" if ctx.dry_run else "planned"
             return 0, entry(method, status, 0, previewed), lines
@@ -2936,11 +2957,11 @@ def _flash_entry(
         plan = meta.build(inputs, available)
     except FlashPlanError as err:
         msg = str(err)
-        lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+        lines.append(_entry_head(kind, entry_id, method, target.flash_method))
         lines.append(f"  FAIL: {msg}")
         return 1, entry(method, "failed", 1, msg), lines
 
-    lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+    lines.append(_entry_head(kind, entry_id, method, target.flash_method))
 
     if plan.planning_only or ctx.dry_run:
         shown = display_argv(plan)
