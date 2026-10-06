@@ -74,6 +74,7 @@ from pathlib import Path
 import typer
 
 from tan.core.sdk_discovery import _planner_python
+from tan.core import uboot_breakin
 from tan.core.subprocess_env import spawn_env
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -325,8 +326,70 @@ def _child_stdout(json_mode: bool):
     return subprocess.DEVNULL
 
 
+def _break_opts(
+    key: str, prompt: str, timeout_s: float
+) -> tuple[bytes, bytes, float]:
+    """Validate the `--break-*`/`--prompt` options (tan-cli#1315)."""
+    try:
+        if not timeout_s > 0:
+            raise ValueError("--break-timeout must be greater than 0")
+        return (
+            uboot_breakin.parse_escaped(key, "--break-key"),
+            uboot_breakin.parse_escaped(prompt, "--prompt"),
+            timeout_s,
+        )
+    except ValueError as err:
+        raise MonitorError(
+            "monitor.break-bad-option",
+            str(err),
+            ExitCode.VALIDATION_FAILURE,
+            {"schemaVersion": DATA_SCHEMA_VERSION},
+        ) from err
+
+
+def _do_break_in(
+    port: str, baud: int, opts: tuple[bytes, bytes, float]
+) -> dict:
+    """Open `port` in-process (local tty, by-id path, or any pyserial URL such
+    as `rfc2217://`/`socket://`), run the break-in loop, close it again so
+    miniterm can take the port over, and return the envelope's `breakIn`
+    block. No power control: the operator or labgrid power-cycles the board.
+    """
+    key, prompt, timeout_s = opts
+    try:
+        import serial  # noqa: PLC0415 (optional at runtime)
+    except ImportError as err:
+        raise _pyserial_missing() from err
+    try:
+        ser = serial.serial_for_url(port, baud, timeout=uboot_breakin.DEFAULT_INTERVAL_S)
+    except (OSError, ValueError, serial.SerialException) as err:
+        raise MonitorError(
+            "monitor.break-open-failed",
+            f"could not open '{port}' for --break-uboot: {err}",
+            ExitCode.RUNTIME_FAILURE,
+            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
+        ) from err
+    try:
+        result = uboot_breakin.break_into_uboot(
+            ser, key=key, prompt=prompt, timeout_s=timeout_s
+        )
+    finally:
+        ser.close()
+    return {
+        "caught": result.caught,
+        "elapsedSeconds": round(result.elapsed_s, 3),
+        "timeoutSeconds": timeout_s,
+        "bytesSeen": result.bytes_seen,
+        "bytesSeenTail": result.tail,
+    }
+
+
 def _run_monitor(
-    port: str | None, baud: int, json_mode: bool
+    port: str | None,
+    baud: int,
+    json_mode: bool,
+    break_opts: tuple[bytes, bytes, float] | None = None,
+    non_interactive: bool = False,
 ) -> tuple[dict, list[Issue], ExitCode]:
     # Frozen (PyInstaller) or an embedded interpreter with no reportable
     # `sys.executable`: fall back to a PATH name, mirroring
@@ -360,6 +423,31 @@ def _run_monitor(
     if not _port_is_usable(port, {device for device, _ in _available_ports()}):
         raise _refuse_listing_ports(f"port '{port}' not found")
 
+    extra: dict = {}
+    if break_opts is not None:
+        extra["breakIn"] = _do_break_in(port, baud, break_opts)
+        if not extra["breakIn"]["caught"]:
+            return (
+                {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud, **extra},
+                [Issue(
+                    "monitor.break-timeout",
+                    "error",
+                    f"no U-Boot prompt within {break_opts[2]}s on {port}; "
+                    "power-cycle the board and retry, or raise --break-timeout.",
+                )],
+                ExitCode.RUNTIME_FAILURE,
+            )
+        print(
+            f"monitor: caught U-Boot prompt after {extra['breakIn']['elapsedSeconds']}s",
+            file=sys.stderr,
+        )
+        if non_interactive:
+            return (
+                {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud, **extra},
+                [],
+                ExitCode.SUCCESS,
+            )
+
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
     try:
         rc = subprocess.run(
@@ -375,7 +463,7 @@ def _run_monitor(
             {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
         ) from err
 
-    data = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud}
+    data = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud, **extra}
     if rc != 0:
         return (
             data,
@@ -399,6 +487,26 @@ def monitor(
     ),
     baud: int = typer.Option(
         DEFAULT_BAUD, "--baud", show_default=True, help="Baud rate."
+    ),
+    break_uboot: bool = typer.Option(
+        False,
+        "--break-uboot",
+        help="After opening the port, send the autoboot interrupt key repeatedly "
+        "until the U-Boot prompt appears or --break-timeout passes, then hand "
+        "over to the console (or exit under --non-interactive). Power-cycle "
+        "the board yourself; works over rfc2217:// and socket:// URLs.",
+    ),
+    break_key: str = typer.Option(
+        " ", "--break-key", help="Key sent to interrupt autoboot (escapes allowed, e.g. '\\r')."
+    ),
+    prompt: str = typer.Option(
+        "=> ", "--prompt", help="U-Boot prompt that ends --break-uboot (escapes allowed)."
+    ),
+    break_timeout: float = typer.Option(
+        uboot_breakin.DEFAULT_TIMEOUT_S,
+        "--break-timeout",
+        show_default=True,
+        help="Seconds to keep sending the key before giving up.",
     ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     project: str = typer.Option(None, "--project", hidden=True),
@@ -428,7 +536,7 @@ def monitor(
     # from `--help` because they do nothing. Same port-wide gap as
     # `clean_cmd.clean`/`new_som_cmd.new_som`.
     del project, board_yaml, sdk_root, target, all_targets
-    del verbose, quiet, no_color, non_interactive, ci
+    del verbose, quiet, no_color, ci
     json_mode = output_format == "json"
 
     def finish(data: dict, issues: list[Issue], exit_code: ExitCode) -> None:
@@ -444,7 +552,8 @@ def monitor(
         raise typer.Exit(int(exit_code))
 
     try:
-        data, issues, exit_code = _run_monitor(port, baud, json_mode)
+        opts = _break_opts(break_key, prompt, break_timeout) if break_uboot else None
+        data, issues, exit_code = _run_monitor(port, baud, json_mode, opts, non_interactive)
     except MonitorError as err:
         finish(err.data, [Issue(err.code, "error", err.message)], err.exit_code)
         return

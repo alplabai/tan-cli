@@ -1308,6 +1308,30 @@
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "monitor.break-bad-option",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_cmd.py",
+      "note": "`tan monitor --break-uboot` was given an unusable `--break-timeout` (not > 0), an empty `--prompt`/`--break-key`, or a malformed escape in either. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.break-open-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_cmd.py",
+      "note": "`tan monitor --break-uboot` could not open the port in-process (pyserial `serial_for_url` raised), e.g. a refused rfc2217:// or socket:// endpoint. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.break-timeout",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_cmd.py",
+      "note": "`tan monitor --break-uboot` sent the interrupt key until `--break-timeout` expired without seeing `--prompt`; `data.breakIn.caught` is false and no interactive session is started. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
       "code": "monitor.failed",
       "status": "reserved",
       "severity": "error",
