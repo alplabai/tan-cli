@@ -62,6 +62,7 @@ write is about to go to.
 from __future__ import annotations
 
 import codecs
+import contextlib
 import functools
 import os
 import posixpath
@@ -72,7 +73,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -173,6 +174,7 @@ from tan.core.setools import (
     sign_slot0,
     unresolved_message,
 )
+from tan.core.setools_scratch import cleanup_scratch
 from tan.core.tool_lookup import resolve_program_positions, resolve_tool
 from tan.core.venv import prepend_path, tool_in_venv, venv_bin_dir, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -291,6 +293,10 @@ class _Entry:
     #: differs from the resolved `method` this entry ran under (Flow D upgrade
     #: of a `zephyr_west_flash` slice). Emitted as `methodDeclared`.
     method_declared: str | None = None
+    #: Additive envelope blocks (`setools`, ...) -- ONE dict shared with the
+    #: run, because some of it (`setools.scratchRemoved`) is only known after
+    #: the entry has been built, when its scratch tree is torn down.
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"kind": self.kind, "id": self.id}
@@ -306,6 +312,7 @@ class _Entry:
             out["methodDeclared"] = self.method_declared
         if self.probe is not None:
             out["probe"] = self.probe
+        out.update(self.extra)
         return out
 
 
@@ -2375,7 +2382,14 @@ def _resolve_flow_d_atoc_path(flash_args: Any, build_root: str, sdk_root: str) -
 
 
 def _resolve_flow_d_atoc_via_setools(
-    flash_args: Any, shape: FlowDShape, ctx: _Context, entry_id: str, confirm: bool
+    flash_args: Any,
+    shape: FlowDShape,
+    ctx: _Context,
+    entry_id: str,
+    confirm: bool,
+    *,
+    stack: contextlib.ExitStack | None = None,
+    report: dict[str, Any] | None = None,
 ) -> tuple[Any, str | None]:
     """tan-cli#353's remaining half: when Flow D still has no `atoc`/
     `atoc_address` after the explicit-value and `atoc_map` resolutions above
@@ -2388,59 +2402,38 @@ def _resolve_flow_d_atoc_via_setools(
 
     `shape` is `validate_flow_d_shape`'s result -- the caller (`_flash_entry`,
     tan-cli#366/#367) validates + resolves it BEFORE this function ever runs,
-    so `shape.artefact` is ALREADY the raw `.bin` to hand `app-gen-toc` (the
-    same ELF-only sibling resolution `plan_alif_mram_jlink` uses for the
-    eventual `loadbin`, from the ONE shared definition,
-    `flash_plan.resolve_slot0_binary`) and a manifest that would fail that
-    check has already failed BEFORE reaching this function, real run or
-    `--dry-run` alike -- this function no longer re-derives or re-checks
-    either.
+    so `shape.artefact` is ALREADY the raw `.bin` to hand `app-gen-toc`.
 
-    `confirm` -- the SAME confirm gate `plan_alif_mram_jlink` itself applies
-    to the real MRAM write (`ctx.force_confirm` OR `flash_args.confirm`),
-    computed by the caller BEFORE this function runs. tan-cli#487, defect 5:
-    this function's own real-sign branch used to be gated on `ctx.dry_run`
-    ALONE, so a plain `tan flash` on a fresh manifest -- confirm gate not
-    armed, but also not `--dry-run` -- spawned `app-gen-toc` for REAL: wrote
-    `build/images/<id>.bin` / `build/config/<id>-slot0.json` into the
-    customer's SETOOLS install, APPENDED to the install-wide, hand-run-
-    inclusive `build/app-package-map.txt`, and overwrote the shared `build/
-    AppTocPackage.bin` -- on a run that goes on to hit the confirm gate and
-    refuse the MRAM write it was signing FOR. The SETOOLS auto-sign is
-    itself a real write and must not run just because the run is not ALSO a
-    preview.
+    **tan-cli#1325: the sign runs in a private scratch overlay of the SETOOLS
+    install** (`tan.core.setools_scratch`), so it is side-effect-free on the
+    customer's shared install and is now done under `--dry-run` and an
+    unconfirmed run too -- which is what lets the preview show the real ATOC
+    placement (tan-cli#1318). It used to be skipped there (tan-cli#487, defect 5)
+    precisely because it wrote `build/` in the shared install; that hazard no
+    longer exists, so `confirm` is accepted for call-site stability and unused.
+    The scratch tree is registered on `stack` for removal when the entry ends
+    (J-Link reads the ATOC out of it), and described in `report["setools"]`
+    (`dir`, `source`, `scratch`, `scratchRemoved`). `stack=None` -- a direct
+    call -- leaves the scratch tree for the caller.
 
-    Returns `(flash_args, note)`. `note` is `None` on the one path that never
+    Returns `(flash_args, note)`. `note` is `None` only on the path that never
     touched SETOOLS at all -- an already-resolved no-op (an explicit `atoc`/
-    `atoc_map`, or `atoc_address` already present). Every path that DOES touch
-    SETOOLS returns a non-`None` `note` naming `setools.path`/`setools.source`
-    (tan-cli#373): under `--dry-run` OR an unconfirmed real run it describes
-    what WOULD be signed and `flash_args` is left with `atoc`/`atoc_address`
-    still absent (signing writes real files into the customer's SETOOLS
-    install and spawns a real tool, which neither a preview nor an unarmed
-    confirm gate may do); a CONFIRMED real run instead describes what WAS
-    just signed, with `flash_args` fully resolved for `plan_alif_mram_jlink`
-    to consume. The caller (`_flash_entry`) tells the two apart by `ctx.
-    dry_run or not confirm`, which it already has: the preview note is the
-    entry's own terminal message, the real-sign note is an EXTRA line ahead
-    of the real write's own ok/fail message -- previously `setools.source`
-    reached a customer only via a FAILURE (`missing_tool_message`/
-    `unresolved_message`), never on a run that succeeded.
+    `atoc_map`, or `atoc_address` already present). Otherwise `flash_args`
+    carries the scratch `atoc`/`atoc_address` and `note` names the SETOOLS
+    install and scratch path.
 
     Raises `FlashPlanError` for: SETOOLS unresolved, resolved but not a real
     install, no `flash_args.slot0_load_address` to give `app-gen-toc` as its
     `mramAddress`, or the sign step itself failing -- the caller's existing
-    `except FlashPlanError` arm (mirroring `_resolve_flow_d_atoc_address`/
-    `_resolve_flow_d_atoc_path` above) reports it as the entry's
-    `flash.entry-failed` message.
+    `except FlashPlanError` arm reports it as the entry's `flash.entry-failed`
+    message.
 
     **Only when the manifest points at NOTHING signing-related at all.** A
     customer who already supplied an explicit `atoc` (a blob they signed
     themselves) or `atoc_map` (pointing at their own `app-gen-toc` run) gets
-    NONE of this -- even if that path did not fully resolve (e.g. the map has
-    not materialised yet) `plan_alif_mram_jlink`'s own precise refusal is the
-    right one, not a fresh SETOOLS sign silently overriding what they already
-    pointed tan at.
+    NONE of this -- `plan_alif_mram_jlink`'s own precise refusal is the right
+    one for a path that did not fully resolve, not a fresh sign silently
+    overriding what they already pointed tan at.
     """
     if fa_str(flash_args, "atoc") is not None or fa_str(flash_args, "atoc_map") is not None:
         return flash_args, None
@@ -2471,28 +2464,23 @@ def _resolve_flow_d_atoc_via_setools(
             "flash_args.atoc_address yourself."
         )
 
-    if ctx.dry_run or not confirm:
-        # Planning only -- report what WOULD be signed without touching the
-        # customer's SETOOLS install or spawning a real tool. tan-cli#487:
-        # `not confirm` closes defect 5 -- a real (non-`--dry-run`) run whose
-        # confirm gate is not armed previews exactly like a dry run instead
-        # of signing for real and then refusing the write it signed for.
-        why = "dry-run" if ctx.dry_run else "flash_args.confirm is false"
-        return flash_args, (
-            f"would sign {shape.artefact} with SETOOLS at {setools.path} (via "
-            f"{setools.source}) -> build/config/{entry_id}-slot0.json, then run "
-            f"app-gen-toc -- not run ({confirm_gate_note(why)})"
-        )
-
-    atoc_path, address = sign_slot0(
-        setools.path, app_gen_toc, shape.artefact, entry_id, shape.app_address
-    )
+    signed = sign_slot0(setools.path, app_gen_toc, shape.artefact, entry_id, shape.app_address)
+    if report is not None:
+        report["setools"] = {
+            "dir": setools.path,
+            "source": setools.source,
+            "scratch": signed.scratch_dir,
+            "scratchRemoved": False,
+        }
+    if stack is not None:
+        _register_scratch(stack, report if report is not None else {}, signed.scratch_dir)
     merged = dict(flash_args)
-    merged["atoc"] = atoc_path
-    merged["atoc_address"] = address
+    merged["atoc"] = signed.atoc_path
+    merged["atoc_address"] = signed.atoc_address
     return merged, (
         f"signed {shape.artefact} with SETOOLS at {setools.path} (via "
-        f"{setools.source}) -> {atoc_path} @ {address}"
+        f"{setools.source}) in scratch copy {signed.scratch_dir} -> "
+        f"{signed.atoc_path} @ {signed.atoc_address}"
     )
 
 
@@ -2513,6 +2501,44 @@ def _flash_entry(
     yocto_wic_stat: Callable[[str], os.stat_result] = os.stat,
 ) -> tuple[int, _Entry, list[str]]:
     """Dispatch + run one target. Returns `(rc, entry, text-lines)`.
+
+    tan-cli#1325: a Flow D SETOOLS sign runs in a private scratch overlay that
+    must outlive the sign (J-Link reads the ATOC from it) and not outlive the
+    entry. This wrapper owns that lifetime -- every return path of the body
+    below, a raise included, removes the scratch tree -- and stamps the
+    envelope's `setools.scratchRemoved` once it is gone.
+    """
+    report: dict[str, Any] = {}
+    with contextlib.ExitStack() as scratch_stack:
+        return _flash_entry_body(
+            target, ctx, scratch_stack, report, yocto_wic_stat=yocto_wic_stat
+        )
+
+
+def _register_scratch(
+    stack: contextlib.ExitStack, report: dict[str, Any], scratch_dir: str
+) -> None:
+    """Tie `scratch_dir`'s removal to `stack` and record the outcome in the
+    envelope's `setools` block when it happens."""
+
+    def _remove() -> None:
+        removed = cleanup_scratch(scratch_dir)
+        block = report.get("setools")
+        if isinstance(block, dict):
+            block["scratchRemoved"] = removed
+
+    stack.callback(_remove)
+
+
+def _flash_entry_body(
+    target: FlashTarget,
+    ctx: _Context,
+    scratch_stack: contextlib.ExitStack,
+    report: dict[str, Any],
+    *,
+    yocto_wic_stat: Callable[[str], os.stat_result] = os.stat,
+) -> tuple[int, _Entry, list[str]]:
+    """The body of [`_flash_entry`].
 
     `yocto_wic_stat` is the write-time block-device gate's `stat_fn`
     (`_yocto_wic_block_device_refusal`'s own parameter), threaded through
@@ -2563,6 +2589,7 @@ def _flash_entry(
                 if method and target.flash_method and target.flash_method != method
                 else None
             ),
+            extra=report,
         )
 
     # tan-cli#611, THE HOIST. WHO may flash this entry is decided BEFORE
@@ -2907,43 +2934,14 @@ def _flash_entry(
                         lines,
                     )
             flash_args, setools_note = _resolve_flow_d_atoc_via_setools(
-                flash_args, shape, ctx, entry_id, confirm
+                flash_args, shape, ctx, entry_id, confirm,
+                stack=scratch_stack, report=report,
             )
         except FlashPlanError as err:
             msg = str(err)
             lines.append(_entry_head(kind, entry_id, method, target.flash_method))
             lines.append(f"  FAIL: {msg}")
             return 1, entry(method, "failed", 1, msg), lines
-        if setools_note is not None and (ctx.dry_run or not confirm):
-            # Preview only (see the helper's own docstring): nothing was
-            # signed, so there is no `atoc`/`atoc_address` to hand
-            # `plan_alif_mram_jlink` -- report the preview directly rather
-            # than reaching its "both required" refusal over a field this
-            # entry was never asked to fill in by hand. A REAL, CONFIRMED
-            # sign (the `else` this condition now excludes -- tan-cli#373)
-            # leaves `setools_note` set too, but must NOT return here: it
-            # falls through to `meta.build` like every other Flow D entry,
-            # carrying the note to the eventual ok message below instead.
-            #
-            # `status`: a clean `--dry-run` preview reports "ok" like every
-            # other preview in this file; an unconfirmed REAL run reports
-            # "planned" (tan-cli#487) so `flash.confirm-required` fires --
-            # I-30's contract that a JSON consumer must be able to tell
-            # "nothing was written" from "programmed the device" applies to
-            # the SETOOLS half of Flow D exactly as it does to the MRAM
-            # write it feeds.
-            # tan-cli#1252: Flow D's OTHER preview return. It fires before
-            # `meta.build` is ever called -- a fresh AEN manifest with no
-            # `atoc`/`atoc_address` never reaches `plan_alif_mram_jlink` at
-            # all -- so the whole-ATOC note has to be appended here too, not
-            # only at the shared preview block below. This is the most common
-            # AEN preview of the two, and omitting it here would leave exactly
-            # the operator who has not signed yet uninformed.
-            previewed = f"{setools_note} {ATOC_REPLACEMENT_PREVIEW_NOTE}{probe_note}"
-            lines.append(_entry_head(kind, entry_id, method, target.flash_method))
-            lines.append(f"  {previewed}")
-            status = "ok" if ctx.dry_run else "planned"
-            return 0, entry(method, status, 0, previewed), lines
 
     inputs = FlashInputs(
         artefact=artefact_path,
@@ -2972,10 +2970,11 @@ def _flash_entry(
         # no gate note at all today, and a preview that says nothing about the
         # replacement is exactly the silence this issue is about.
         atoc_note = f" {ATOC_REPLACEMENT_PREVIEW_NOTE}" if method == FLOW_D_METHOD else ""
+        signed = f"{setools_note}; " if setools_note else ""
         if ctx.dry_run:
             # The user explicitly asked for a preview -- nothing was ever going
             # to run. rc 0 / status "ok" (alp_flash's "clean-dry-run").
-            msg = f"would run {shown}{atoc_note}{probe_note}"
+            msg = f"{signed}would run {shown}{atoc_note}{probe_note}"
             lines.append(f"  {msg}")
             return 0, entry(method, "ok", 0, msg), lines
         # The BACKEND declined a real write because the confirm gate is not
@@ -2984,7 +2983,7 @@ def _flash_entry(
         # it back into "ok" is I-30's exact regression: a JSON consumer then
         # cannot tell "nothing was written" from "programmed the device".
         msg = (
-            f"would run {shown} -- NOT written: "
+            f"{signed}would run {shown} -- NOT written: "
             f"{confirm_gate_note('flash_args.confirm is false')}{atoc_note}"
         )
         lines.append(f"  {msg}")

@@ -58,29 +58,35 @@ manifest today typically carries only `jlink_flash_device` and
 `slot0_load_address` — alp-sdk's emit does not sign anything itself),
 `tan flash` drives one `app-gen-toc` sign step for you:
 
-1. copies the build's raw `.bin` into `<SETOOLS_DIR>/build/images/`;
-2. writes an app-only ATOC config to `<SETOOLS_DIR>/build/config/` — no
-   `"DEVICE"` key: the on-module factory device config is already correct for
-   your part, and this step must not overwrite it;
-3. runs `app-gen-toc`, inside `SETOOLS_DIR`, against that config;
-4. reads the resulting ATOC's MRAM placement back out of
-   `<SETOOLS_DIR>/build/app-package-map.txt`. This file is **APPEND-mode** —
-   the accumulated sign record for the whole install, including hand-runs
-   you did outside `tan` — so `tan` never truncates or deletes it
-   (tan-cli#373): it records the file's size and mtime beforehand and
-   refuses if either is unchanged after a zero exit (a soft failure that
-   would otherwise read back a stale, unrelated address as if it were
-   fresh), and separately confirms `<SETOOLS_DIR>/build/AppTocPackage.bin`
-   (which — unlike the map — IS overwritten whole every run, so there is no
-   history in it to protect) was actually rewritten before trusting either.
+1. makes a **private scratch overlay** of your SETOOLS install in the system
+   temp directory (tan-cli#1325) — small directories copied, the large `alif/`
+   firmware directory and the top-level tools symlinked, a fresh `build/` —
+   and never writes into the install itself;
+2. copies the build's raw `.bin` into the scratch `build/images/` and writes
+   the ATOC config to the scratch `build/config/` (the `DEVICE` entry: see
+   below);
+3. runs the scratch copy of `app-gen-toc` inside the scratch tree against that
+   config;
+4. reads the resulting ATOC's MRAM placement, size and entry list back out of
+   the scratch `build/app-package-map.txt`, and hands J-Link the scratch
+   `build/AppTocPackage.bin`.
+
+Your SETOOLS install is **byte-identical** afterwards: `build/AppTocPackage.bin`,
+`build/app-package-map.txt` (which is APPEND-mode, the accumulated sign record
+including your hand-runs), `build/images/`, `build/config/` and the SETOOLS logs
+are all left exactly as they were, and no lock file or copy-out directory is
+created in it. Because nothing shared is written, two `tan flash` runs against
+one install can no longer cross-pair (tan-cli#380) without any lock. The scratch
+tree is removed when the entry finishes; the entry reports it as
+`setools: {dir, source, scratch, scratchRemoved}`.
 
 A successful sign names which SETOOLS install did it (`--setools-dir`,
 `SETOOLS_DIR`, or `flash_args.setools_dir` — see `setools.source` in `tan
 flash`'s own output), not only a failed one.
 
-Under `--dry-run` none of this touches your SETOOLS install or spawns
-`app-gen-toc` at all — `tan flash --dry-run` prints what it *would* sign and
-stops there.
+Because the sign is side-effect-free, `--dry-run` (and an unconfirmed run) run
+`app-gen-toc` too, in the scratch tree, so the preview reports the real ATOC
+placement. They still never spawn `JLinkExe`.
 
 If you already resolved a signature yourself — an explicit `flash_args.atoc`
 + `flash_args.atoc_address`, or `flash_args.atoc_map` pointing at your own
@@ -147,11 +153,10 @@ Its scope is the same table as the advisory (tan-cli#609): Flow D today. It was
 tan-cli#732), which left the AEN MRAM path — the genuine *customer* flash path
 of the two, the GD32 bridge being factory-programmed by Alp Lab — outside both
 halves of the guard. On Flow D the refusal fires ahead of the SETOOLS
-auto-sign, not merely ahead of the write:
-`app-gen-toc` appends a block to `build/app-package-map.txt` and rewrites
-`build/AppTocPackage.bin` whole, and tan-cli#512 measured a wrong-board abort
-that correctly left slot0 byte-identical and still left the SETOOLS install
-mutated.
+auto-sign, not merely ahead of the write (tan-cli#512 measured a wrong-board
+abort that correctly left slot0 byte-identical but had already mutated the
+SETOOLS install; since tan-cli#1325 the sign no longer touches the install at
+all, and the ordering is kept as defence in depth).
 
 The policy belongs to the host, not to the manifest. Export it on a factory or
 bench machine, where a wrong-board write is expensive and nobody is watching;

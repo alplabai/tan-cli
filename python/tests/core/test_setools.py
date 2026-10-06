@@ -29,8 +29,10 @@ import pytest
 import tan
 from tan.core.flash_plan import FlashPlanError
 from tan.core import setools as setools_module
+from tan.core import setools_scratch
 from tan.core.setools import (
     SetoolsSource,
+    SignedSlot0,
     find_app_gen_toc,
     missing_tool_message,
     read_atoc_address,
@@ -304,35 +306,61 @@ def _artefact_bin(tmp_path: Path) -> Path:
     return artefact
 
 
+def _tree_digest(root: Path) -> str:
+    """sha256 over every path, file content and symlink target under `root`."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            digest.update(f"L {rel} {os.readlink(path)}\n".encode())
+        elif path.is_dir():
+            digest.update(f"D {rel}\n".encode())
+        else:
+            digest.update(f"F {rel}\n".encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _sign(setools_dir, script, artefact, scratch_parent, **kwargs) -> SignedSlot0:
+    scratch_parent.mkdir(exist_ok=True)
+    return sign_slot0(
+        str(setools_dir), str(script), str(artefact), "m55_he", "0x80010000",
+        scratch_parent=str(scratch_parent), **kwargs,
+    )
+
+
 def test_sign_slot0_copies_writes_and_derives_the_address(tmp_path):
-    """The end-to-end happy path: copy the raw `.bin` into
-    `build/images/<id>.bin`, write `build/config/<id>-slot0.json`, run
-    `app-gen-toc`, and return the derived `(atoc_path, atoc_address)` --
-    tan-cli#353's requirement (a)."""
+    """The end-to-end happy path, in a SCRATCH tree (tan-cli#1325): the raw
+    `.bin` is copied into the scratch `build/images/<id>.bin`, the config is
+    written to the scratch `build/config/<id>-slot0.json`, `app-gen-toc` runs
+    there, and the derived address and the blob's scratch path come back --
+    tan-cli#353's requirement (a). The shared install is byte-identical."""
     setools_dir = tmp_path / "setools"
     setools_dir.mkdir()
     script = setools_dir / _script_name()
     _write_fake_app_gen_toc(script)
     artefact = _artefact_bin(tmp_path)
+    before = _tree_digest(setools_dir)
 
-    atoc_path, address = sign_slot0(
-        str(setools_dir), str(script), str(artefact), "m55_he", "0x80010000"
-    )
-
-    assert address == _REAL_ATOC_ADDRESS
-    # tan-cli#380: the returned path is an IMMUTABLE per-run COPY, never the
-    # shared `build/AppTocPackage.bin` the next sign in this install
-    # overwrites -- same bytes, different file.
-    shared = setools_dir / "build" / "AppTocPackage.bin"
-    assert not Path(atoc_path).samefile(shared)
-    assert Path(atoc_path).read_bytes() == shared.read_bytes()
-    assert Path(atoc_path).parent == setools_dir / "build" / "tan-atoc"
-
-    copied = setools_dir / "build" / "images" / "m55_he.bin"
-    assert copied.read_bytes() == artefact.read_bytes()
-
-    config = json.loads((setools_dir / "build" / "config" / "m55_he-slot0.json").read_text())
-    assert config == slot0_config("m55_he", "m55_he.bin", "0x80010000", "M55_HE")
+    signed = _sign(setools_dir, script, artefact, tmp_path / "scratch")
+    try:
+        assert signed.atoc_address == _REAL_ATOC_ADDRESS
+        scratch = Path(signed.scratch_dir)
+        assert scratch.parent == tmp_path / "scratch"
+        assert Path(signed.atoc_path) == scratch / "build" / "AppTocPackage.bin"
+        assert signed.atoc_size == Path(signed.atoc_path).stat().st_size > 0
+        assert (scratch / "build" / "images" / "m55_he.bin").read_bytes() == artefact.read_bytes()
+        config = json.loads((scratch / "build" / "config" / "m55_he-slot0.json").read_text())
+        assert config == slot0_config("m55_he", "m55_he.bin", "0x80010000", "M55_HE")
+        # The shared install: untouched, no `build/`, no lock file, no copy-out.
+        assert _tree_digest(setools_dir) == before
+        assert not (setools_dir / "build").exists()
+    finally:
+        assert setools_scratch.cleanup_scratch(signed.scratch_dir)
+    assert not Path(signed.scratch_dir).exists()
+    assert _tree_digest(setools_dir) == before
 
 
 def test_sign_slot0_surfaces_a_nonzero_exit(tmp_path):
@@ -343,8 +371,11 @@ def test_sign_slot0_surfaces_a_nonzero_exit(tmp_path):
     artefact = _artefact_bin(tmp_path)
 
     with pytest.raises(FlashPlanError) as raised:
-        sign_slot0(str(setools_dir), str(script), str(artefact), "m55_he", "0x80010000")
+        _sign(setools_dir, script, artefact, tmp_path / "scratch")
     msg = str(raised.value)
+    assert (tmp_path / "scratch").is_dir() and not list((tmp_path / "scratch").iterdir()), (
+        "a failed sign must remove its scratch tree"
+    )
     assert "app-gen-toc" in msg
     assert "7" in msg
     assert "DEVICE mismatch" in msg
@@ -358,7 +389,7 @@ def test_sign_slot0_raises_when_the_report_has_no_marker(tmp_path):
     artefact = _artefact_bin(tmp_path)
 
     with pytest.raises(FlashPlanError) as raised:
-        sign_slot0(str(setools_dir), str(script), str(artefact), "m55_he", "0x80010000")
+        _sign(setools_dir, script, artefact, tmp_path / "scratch")
     assert "APP Package Start Address" in str(raised.value)
 
 
@@ -370,32 +401,18 @@ def test_sign_slot0_raises_when_the_blob_was_not_produced(tmp_path):
     artefact = _artefact_bin(tmp_path)
 
     with pytest.raises(FlashPlanError) as raised:
-        sign_slot0(str(setools_dir), str(script), str(artefact), "m55_he", "0x80010000")
+        _sign(setools_dir, script, artefact, tmp_path / "scratch")
     assert "AppTocPackage.bin" in str(raised.value)
 
 
 def test_sign_slot0_does_not_report_a_stale_atoc_from_a_soft_failing_respawn(tmp_path):
-    """tan-cli#365 (BLOCKER, hardware-destructive) / tan-cli#373 (BLOCKER
-    regression in #365's own fix). `build/app-package-map.txt` and
-    `build/AppTocPackage.bin` are FIXED, SETOOLS-wide paths (not
-    per-`entry_id`) that a PREVIOUS run may have already left well-formed --
-    parsing/`isfile`-checking them after THIS spawn proves nothing about THIS
-    spawn unless a soft failure (app-gen-toc exits 0 without actually
-    writing) can be told apart from a real one. Seed both with a
-    stale-but-well-formed report/blob, then drive a fake `app-gen-toc` that
-    exits 0 WITHOUT touching either: `sign_slot0` must refuse rather than
-    silently hand back the stale pair -- `plan_alif_mram_jlink` would burn it
-    into on-die MRAM alongside a fresh app image, and recovery from that is
-    re-provisioning over SE-UART.
-
-    **#373: the map must survive the refusal untouched.** #365's own first
-    fix told the soft failure apart by DELETING the map first -- which meant
-    a soft-failing re-sign destroyed every PRIOR entry too (a real defect,
-    not just this stale one): a second Flow D entry pointing its own
-    `flash_args.atoc_map` at this same file would lose its true address the
-    moment this deletion ran. This is the positive proof of the fix: the
-    seeded stale line is still readable, byte for byte, AFTER the raise --
-    `sign_slot0` refuses without deleting anything."""
+    """tan-cli#365 / #373 (hardware-destructive), re-proved for tan-cli#1325.
+    The shared install already holds a well-formed `app-package-map.txt` and
+    `AppTocPackage.bin` from an EARLIER run; a fake `app-gen-toc` then exits 0
+    without writing anything. Pre-#1325 that needed a snapshot-compare guard
+    (and deleting the append-mode map was a bug of its own, #373). The scratch
+    tree starts EMPTY, so the stale pair is simply not visible: the sign
+    refuses, and the shared stale files are still there byte for byte."""
     setools_dir = tmp_path / "setools"
     (setools_dir / "build").mkdir(parents=True)
     stale_report = f"APP Package Start Address: {_REAL_ATOC_ADDRESS}\n"
@@ -405,27 +422,22 @@ def test_sign_slot0_does_not_report_a_stale_atoc_from_a_soft_failing_respawn(tmp
     script = setools_dir / _script_name()
     _write_noop_app_gen_toc(script)
     artefact = _artefact_bin(tmp_path)
+    before = _tree_digest(setools_dir)
 
     with pytest.raises(FlashPlanError) as raised:
-        sign_slot0(str(setools_dir), str(script), str(artefact), "m55_he", "0x80010000")
-    assert "was not updated" in str(raised.value)
-
-    # The stale map is NEVER deleted -- it is APPEND-mode, the accumulated
-    # sign record for the whole install, not per-run scratch (tan-cli#373).
+        _sign(setools_dir, script, artefact, tmp_path / "scratch")
+    assert "carries no 'APP Package Start Address:'" in str(raised.value)
+    assert _tree_digest(setools_dir) == before
     assert (setools_dir / "build" / "app-package-map.txt").read_text(
         encoding="utf-8"
     ) == stale_report
 
 
-def test_sign_slot0_never_deletes_the_append_mode_map_on_a_real_sign(tmp_path):
-    """tan-cli#373 (BLOCKER regression in #365's own fix): the positive half
-    of the guard above. `app-package-map.txt` is APPEND-mode -- a real
-    `app-gen-toc` run adds a new block, it never truncates the file (per
-    `flash_plan.parse_atoc_start_address`'s own docstring, citing the
-    measured bench scripts) -- so a prior entry (this entry's own earlier
-    run, another entry's, or a hand-run done outside tan) must survive a
-    fresh, SUCCESSFUL sign untouched, and `sign_slot0` must return the LAST
-    (this run's) address, not the first."""
+def test_sign_slot0_never_touches_the_shared_append_mode_map(tmp_path):
+    """tan-cli#373 / #1325: `app-package-map.txt` is APPEND-mode, the
+    accumulated sign record of the whole install including hand-runs. A real
+    sign must neither delete it nor add to it -- the new block lands in the
+    scratch report -- and the address handed back is THIS run's."""
     setools_dir = tmp_path / "setools"
     (setools_dir / "build").mkdir(parents=True)
     stale_line = "APP Package Start Address: 0x8000F000"
@@ -436,15 +448,16 @@ def test_sign_slot0_never_deletes_the_append_mode_map_on_a_real_sign(tmp_path):
     script = setools_dir / _script_name()
     _write_fake_app_gen_toc(script, append=True)
     artefact = _artefact_bin(tmp_path)
+    before = _tree_digest(setools_dir)
 
-    _atoc_path, address = sign_slot0(
-        str(setools_dir), str(script), str(artefact), "m55_he", "0x80010000"
-    )
-
-    assert address == _REAL_ATOC_ADDRESS
-    map_text = (setools_dir / "build" / "app-package-map.txt").read_text(encoding="utf-8")
-    assert stale_line in map_text, "a prior entry is not per-run scratch -- it must survive"
-    assert map_text.count("APP Package Start Address:") == 2
+    signed = _sign(setools_dir, script, artefact, tmp_path / "scratch")
+    try:
+        assert signed.atoc_address == _REAL_ATOC_ADDRESS
+        assert _tree_digest(setools_dir) == before
+        scratch_map = Path(signed.scratch_dir) / "build" / "app-package-map.txt"
+        assert scratch_map.read_text(encoding="utf-8").count("APP Package Start Address:") == 1
+    finally:
+        setools_scratch.cleanup_scratch(signed.scratch_dir)
 
 
 def test_sign_slot0_guards_the_entry_id_charset(tmp_path):
@@ -459,6 +472,7 @@ def test_sign_slot0_guards_the_entry_id_charset(tmp_path):
 
     with pytest.raises(FlashPlanError):
         sign_slot0(str(setools_dir), str(script), str(artefact), "a;b", "0x80010000")
+    assert not list(tmp_path.glob("tan-setools-*"))
 
 
 # ── the full resolve -> find -> sign path, via find_app_gen_toc itself ──────
@@ -482,53 +496,44 @@ def test_find_app_gen_toc_then_sign_slot0_end_to_end(tmp_path, monkeypatch):
     found = find_app_gen_toc(str(setools_dir))
     assert found == str(script_path)
 
-    atoc_path, address = sign_slot0(
-        str(setools_dir), found, str(artefact), "m55_he", "0x80010000"
-    )
-    assert address == _REAL_ATOC_ADDRESS
-    assert os.path.isfile(atoc_path)
+    signed = _sign(setools_dir, found, artefact, tmp_path / "scratch")
+    try:
+        assert signed.atoc_address == _REAL_ATOC_ADDRESS
+        assert os.path.isfile(signed.atoc_path)
+    finally:
+        setools_scratch.cleanup_scratch(signed.scratch_dir)
 
 
-# ── tan-cli#380: two real processes, one SETOOLS install ────────────────────
+# ── tan-cli#380 -> tan-cli#1325: two real processes, one SETOOLS install ────
 #
-# The fake `app-gen-toc` above is a shell/batch script; these two tests need
-# one that can also RENDEZVOUS with a concurrent copy of itself, so it is
-# written in Python and reached through a one-line wrapper the host can
-# actually spawn. One implementation, both hosts.
+# tan-cli#380 serialised two signs with a cross-process lock because they
+# shared `build/AppTocPackage.bin`. tan-cli#1325 removes the shared output: each
+# run signs in its own scratch overlay, so there is nothing to lock. The fake
+# `app-gen-toc` below is Python (it must RENDEZVOUS with its sibling) behind a
+# one-line wrapper the host can spawn.
 
-#: A fake `app-gen-toc` that stamps its own MARKER into the shared blob and
-#: its own ADDRESS into the shared map -- the distinct markers tan-cli#380's
-#: acceptance criteria ask for, so a cross-paired result is visible rather
-#: than inferred. Reads no `-f` config: the wrapper hard-codes which run it is.
+#: A fake `app-gen-toc` that stamps its own MARKER into the blob and its own
+#: ADDRESS into the map under ITS cwd. The rendezvous directory is OUTSIDE the
+#: install, so the two runs provably overlap in time without sharing a byte.
 _FAKE_GEN_TOC_PY = '''\
-"""Fake `app-gen-toc` for tan-cli#380's overlap test. argv: MARKER ADDRESS
-RENDEZVOUS_S (the real tool's own `-f <config>` is passed too and ignored --
-this fake's identity comes from its wrapper, not from the config)."""
+"""Fake `app-gen-toc` for tan-cli#1325's overlap test. argv: MARKER ADDRESS
+RENDEZVOUS_S RENDEZVOUS_DIR."""
 import os
 import sys
 import time
 
-MARKER, ADDRESS, RENDEZVOUS_S = sys.argv[1], sys.argv[2], float(sys.argv[3])
+MARKER, ADDRESS, RENDEZVOUS_S, RDV = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4]
 
-os.makedirs("build", exist_ok=True)
-with open(os.path.join("build", "ready-" + MARKER), "wb"):
+os.makedirs(RDV, exist_ok=True)
+with open(os.path.join(RDV, "ready-" + MARKER), "wb"):
     pass
-
-# BOUNDED rendezvous: wait for another copy of this fake to announce itself.
-# This is what makes the UNSERIALIZED failure deterministic instead of a
-# timing coincidence -- when two runs are not locked apart, both are provably
-# inside their signing window at the same instant. When they ARE locked apart
-# no partner can ever appear, so this costs the first holder RENDEZVOUS_S
-# once and nothing after that.
 deadline = time.monotonic() + RENDEZVOUS_S
 while time.monotonic() < deadline:
-    if any(n.startswith("ready-") and n != "ready-" + MARKER for n in os.listdir("build")):
+    if any(n.startswith("ready-") and n != "ready-" + MARKER for n in os.listdir(RDV)):
         break
     time.sleep(0.01)
 
-# Blob first, map second, with a gap between them: that gap is exactly where
-# an unserialized sibling overwrites the shared blob, leaving the address
-# appended below paired with bytes that are no longer the ones this run made.
+os.makedirs("build", exist_ok=True)
 with open(os.path.join("build", "AppTocPackage.bin"), "wb") as fh:
     fh.write(MARKER.encode("ascii"))
 time.sleep(0.3)
@@ -536,56 +541,30 @@ with open(os.path.join("build", "app-package-map.txt"), "a", encoding="utf-8") a
     fh.write("APP Package Start Address: " + ADDRESS + "\\n")
 '''
 
-#: What each child process runs: one real `sign_slot0` in its own OS process
-#: (two real processes is the acceptance criterion -- threads would share the
-#: lock's own file descriptor and prove nothing about the cross-process case),
-#: reporting the (path, address) pair it was handed.
 _CHILD_SIGN = '''\
 import json, sys
 from tan.core.setools import sign_slot0
-path, address = sign_slot0(sys.argv[1], sys.argv[2], sys.argv[3], "m55_he", "0x80010000")
-sys.stdout.write(json.dumps({"path": path, "address": address}))
+signed = sign_slot0(sys.argv[1], sys.argv[2], sys.argv[3], "m55_he", "0x80010000",
+                    scratch_parent=sys.argv[4])
+sys.stdout.write(json.dumps({"path": signed.atoc_path, "address": signed.atoc_address,
+                             "scratch": signed.scratch_dir}))
 '''
 
-#: A child that must REFUSE rather than wait out the full `_LOCK_WAIT_S`
-#: (180s) -- it shortens its own copy of the constant first.
-_CHILD_SIGN_IMPATIENT = '''\
-import sys
-from tan.core import setools
-from tan.core.flash_plan import FlashPlanError
-setools._LOCK_WAIT_S = 0.3
-try:
-    setools.sign_slot0(sys.argv[1], sys.argv[2], sys.argv[3], "m55_he", "0x80010000")
-except FlashPlanError as err:
-    sys.stdout.write(str(err))
-    sys.exit(3)
-'''
-
-#: Long enough to absorb a cold interpreter start on the slower of the two
-#: children (measured worst case here is well under a second) -- the margin is
-#: what the rendezvous above spends to be deterministic, and the whole test
-#: pays it exactly once because the lock is what keeps the partner away.
 _RENDEZVOUS_S = 2.0
 
 
 def _child_env() -> dict[str, str]:
     """`PYTHONPATH` pinned to the package root of the `tan` this test itself
-    imported -- an editable install elsewhere on the machine would otherwise
-    decide which `setools.py` the children get, and they must be testing THIS
-    one."""
+    imported, so the children test THIS `setools.py`."""
     root = str(Path(tan.__file__).resolve().parent.parent)
     return {**os.environ, "PYTHONPATH": root}
 
 
-def _write_marker_app_gen_toc(setools_dir: Path, marker: str, address: str) -> str:
-    """A spawnable `app-gen-toc-<marker>` wrapper around `_FAKE_GEN_TOC_PY`,
-    bound to one marker/address pair. `sign_slot0` takes the tool path
-    explicitly, so two wrappers in one install is how each concurrent run gets
-    a distinguishable identity without the fake having to parse a config."""
+def _write_marker_app_gen_toc(setools_dir: Path, marker: str, address: str, rdv: Path) -> str:
     fake = setools_dir / "fake_gen_toc.py"
     if not fake.exists():
         fake.write_text(_FAKE_GEN_TOC_PY, encoding="utf-8", newline="\n")
-    args = f'"{fake}" {marker} {address} {_RENDEZVOUS_S}'
+    args = f'"{fake}" {marker} {address} {_RENDEZVOUS_S} "{rdv}"'
     if os.name == "nt":
         wrapper = setools_dir / f"app-gen-toc-{marker}.bat"
         wrapper.write_text(
@@ -602,49 +581,29 @@ def _write_marker_app_gen_toc(setools_dir: Path, marker: str, address: str) -> s
 
 
 def test_two_processes_signing_one_setools_dir_never_cross_pair(tmp_path):
-    """tan-cli#380 (BLOCKER, HARDWARE SAFETY). `build/AppTocPackage.bin` and
-    `build/app-package-map.txt` are FIXED, install-wide paths. Two `tan flash`
-    processes sharing one `$SETOOLS_DIR` used to interleave on them freely:
-    one could unlink or overwrite the blob while the other signed, or after
-    the other had already paired an address with that path -- and the path was
-    handed back MUTABLE, so even a perfectly-signed run could be corrupted
-    between `sign_slot0` returning and J-Link reading it. What lands in on-die
-    MRAM is then another run's ATOC at this run's address; recovery is
-    re-provisioning over SE-UART.
-
-    Two REAL processes, both signing into one install with the SAME `entry_id`
-    (`m55_he` -- the realistic case: two boards, same core, one SETOOLS
-    install), each with its own marker blob and its own address. Every run
-    must get back its OWN bytes at its OWN address, from a path that still
-    exists and still holds them after both runs are finished.
-
-    The overlap is FORCED, not hoped for: each fake `app-gen-toc` announces
-    itself and waits (bounded, `_RENDEZVOUS_S`) for its sibling before writing
-    anything, so if the two are not serialized they are provably mid-sign at
-    the same instant. Serialized, the handshake simply times out for the first
-    holder and the second finds a flag already there. The pass is
-    deterministic (mutual exclusion is); the pre-fix failure is deterministic
-    down to the sub-millisecond interleaving of two writes that are, without
-    the lock, aimed at the same file.
-    """
+    """tan-cli#380 (HARDWARE SAFETY), now solved by isolation (tan-cli#1325)
+    instead of a lock: two REAL processes sign into one install with the SAME
+    `entry_id`, forced to overlap by a rendezvous OUTSIDE the install. Each must
+    get back its OWN bytes at its OWN address from its OWN scratch path -- and
+    the shared install is byte-identical afterwards, with no lock file in it."""
     setools_dir = tmp_path / "setools"
     setools_dir.mkdir()
+    rdv = tmp_path / "rdv"
+    scratch_parent = tmp_path / "scratch"
+    scratch_parent.mkdir()
     runs = [("ALPHA", "0x8001a000"), ("BETA", "0x8001b000")]
 
+    tools = {m: _write_marker_app_gen_toc(setools_dir, m, a, rdv) for m, a in runs}
+    before = _tree_digest(setools_dir)
+
     procs = []
-    for marker, address in runs:
+    for marker, _address in runs:
         artefact = tmp_path / f"zephyr-{marker}.bin"
         artefact.write_bytes(f"app-image-{marker}".encode("ascii"))
         procs.append(
             subprocess.Popen(
-                [
-                    sys.executable,
-                    "-c",
-                    _CHILD_SIGN,
-                    str(setools_dir),
-                    _write_marker_app_gen_toc(setools_dir, marker, address),
-                    str(artefact),
-                ],
+                [sys.executable, "-c", _CHILD_SIGN, str(setools_dir), tools[marker],
+                 str(artefact), str(scratch_parent)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -658,42 +617,72 @@ def test_two_processes_signing_one_setools_dir_never_cross_pair(tmp_path):
         assert proc.returncode == 0, f"{marker} run failed ({proc.returncode}): {err or out}"
         results.append((marker, address, json.loads(out)))
 
+    # Both really overlapped (each saw the other's rendezvous flag).
+    assert sorted(p.name for p in rdv.iterdir()) == ["ready-ALPHA", "ready-BETA"]
     for marker, address, got in results:
         assert got["address"] == address, f"{marker} was handed another run's address: {got}"
         blob = Path(got["path"])
-        assert blob.is_file(), f"{marker}'s ATOC was deleted by the other run: {got['path']}"
         assert blob.read_bytes() == marker.encode("ascii"), (
             f"{marker}'s returned ATOC holds another run's bytes: {blob.read_bytes()!r}"
         )
-    assert results[0][2]["path"] != results[1][2]["path"], "both runs got the same mutable path"
+    assert results[0][2]["scratch"] != results[1][2]["scratch"]
+    assert results[0][2]["path"] != results[1][2]["path"]
+    for _m, _a, got in results:
+        assert setools_scratch.cleanup_scratch(got["scratch"])
+    assert _tree_digest(setools_dir) == before
+    assert not (setools_dir / ".tan-setools-sign.lock").exists()
 
-    # The append-mode map keeps BOTH runs' records -- #373's guarantee has to
-    # survive #380's fix, so the serialization must not have eaten either.
-    map_text = (setools_dir / "build" / "app-package-map.txt").read_text(encoding="utf-8")
-    assert map_text.count("APP Package Start Address:") == 2, map_text
+
+# ── the scratch overlay itself ──────────────────────────────────────────────
 
 
-def test_a_second_process_cannot_enter_the_sign_step_while_the_lock_is_held(tmp_path):
-    """The deterministic half of the proof above: with the lock held here, a
-    real second process must not touch the install AT ALL -- not prepare it,
-    not spawn `app-gen-toc`, not read an address. It refuses with the sign
-    lock named (its own `_LOCK_WAIT_S` shortened so the test does not sit out
-    the real 180s), and `build/` -- everything `sign_slot0` creates -- is
-    still absent afterwards."""
-    setools_dir = tmp_path / "setools"
-    setools_dir.mkdir()
-    script = _write_fake_app_gen_toc(setools_dir / _script_name())
-    artefact = _artefact_bin(tmp_path)
+def test_scratch_overlay_copies_small_dirs_symlinks_big_ones_and_never_the_build_dir(
+    tmp_path, monkeypatch
+):
+    """The measured SETOOLS shape: the tool `chdir`s into a subdirectory and
+    addresses `../build`, so a SYMLINKED small directory would write through to
+    the shared install. Small directories are copied, a large one is linked, the
+    top-level files are linked, and `build/` is a fresh real directory that does
+    NOT inherit the shared one's contents."""
+    if os.name == "nt":
+        pytest.skip("symlink semantics are POSIX; Windows copies instead")
+    shared = tmp_path / "setools"
+    (shared / "utils").mkdir(parents=True)
+    (shared / "utils" / "cfg").write_text("cfg", encoding="utf-8")
+    (shared / "alif").mkdir()
+    (shared / "alif" / "SP.bin").write_bytes(b"x" * 4096)
+    (shared / "app-gen-toc").write_text("#!/bin/sh\n", encoding="utf-8")
+    (shared / "build" / "config").mkdir(parents=True)
+    (shared / "build" / "config" / "stock.json").write_text("{}", encoding="utf-8")
+    (shared / "build" / "AppTocPackage.bin").write_bytes(b"shared-atoc")
+    monkeypatch.setattr(setools_scratch, "_COPY_DIR_LIMIT_BYTES", 1024)
+    before = _tree_digest(shared)
 
-    with setools_module._setools_lock(str(setools_dir)):
-        proc = subprocess.run(
-            [sys.executable, "-c", _CHILD_SIGN_IMPATIENT, str(setools_dir), script, str(artefact)],
-            capture_output=True,
-            text=True,
-            env=_child_env(),
-            timeout=120,
-        )
+    (tmp_path / "parent").mkdir()
+    root = Path(setools_scratch.make_scratch(str(shared), str(tmp_path / "parent")))
+    try:
+        assert not (root / "utils").is_symlink()  # small: copied
+        assert (root / "utils" / "cfg").read_text(encoding="utf-8") == "cfg"
+        assert (root / "alif").is_symlink()  # large: linked
+        assert (root / "app-gen-toc").is_symlink()  # top-level file: linked
+        assert not (root / "build").is_symlink()
+        assert sorted(p.name for p in (root / "build").iterdir()) == ["config", "images", "logs"]
+        assert not (root / "build" / "AppTocPackage.bin").exists()
+        assert not (root / "build" / "config" / "stock.json").exists()
+    finally:
+        assert setools_scratch.cleanup_scratch(str(root))
+    # Removing the overlay unlinked the symlinks and never followed them.
+    assert _tree_digest(shared) == before
 
-    assert proc.returncode == 3, f"the second process was not held off: {proc.stdout}{proc.stderr}"
-    assert "sign lock" in proc.stdout, proc.stdout
-    assert not (setools_dir / "build").exists(), "the blocked run still touched the install"
+
+def test_parse_atoc_report_reads_the_entry_list_and_size():
+    text = (
+        "APP TOC entry for DEVICE   obj_address 0x8057f450\n"
+        "APP TOC entry for m55_he        obj_address 0x8057ea50\n"
+        " - APP Package total size: 5552 bytes\n"
+        " - APP Package Start Address: 0x8057ea50\n"
+    )
+    report = setools_scratch.parse_atoc_report(text)
+    assert report.entries == (("DEVICE", "0x8057f450"), ("m55_he", "0x8057ea50"))
+    assert report.package_size == 5552
+    assert setools_scratch.parse_atoc_report("nothing here") == setools_scratch.AtocReport()

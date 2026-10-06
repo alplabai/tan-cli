@@ -3885,6 +3885,30 @@ def _write_working_app_gen_toc(dest: Path, address: str = "0x8057ea50") -> str:
     return str(dest)
 
 
+def _tree_digest(root: Path) -> str:
+    """sha256 over every path (relative), file content and symlink target under
+    `root` -- the byte-identical proof tan-cli#1325 asks of the shared SETOOLS
+    install."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            digest.update(f"L {rel} {os.readlink(path)}\n".encode())
+        elif path.is_dir():
+            digest.update(f"D {rel}\n".encode())
+        else:
+            digest.update(f"F {rel}\n".encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _scratch_remnants(parent: Path) -> list[str]:
+    return sorted(p.name for p in parent.iterdir()) if parent.exists() else []
+
+
+
 def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related(
     tmp_path, monkeypatch
 ):
@@ -3931,53 +3955,61 @@ def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related
         capture=True,
     )
     shape = validate_flow_d_shape(flash_args, str(artefact), _is_file)
-    merged, note = _resolve_flow_d_atoc_via_setools(flash_args, shape, ctx, "m55_he", True)
+    import contextlib
+    import tempfile
 
-    # tan-cli#373: a real (non-dry-run) sign now returns an informational
-    # NOTE (not `None`) naming which SETOOLS install actually signed --
-    # `setools.source` used to reach a customer only via a FAILURE message.
-    # `flash_args.setools_dir` is what resolved it here, so its OWN value
-    # names the source, matching `resolve_setools_dir`'s own precedence text.
-    assert note is not None
-    assert str(setools_dir) in note
-    assert "flash_args.setools_dir" in note
-    assert merged["atoc_address"] == "0x8057ea50"
-    assert Path(merged["atoc"]).is_file()
-    assert Path(script).is_file()  # the fake tool itself was never deleted/moved
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
+    (tmp_path / "tmp").mkdir()
+    with contextlib.ExitStack() as stack:
+        merged, note = _resolve_flow_d_atoc_via_setools(
+            flash_args, shape, ctx, "m55_he", True, stack=stack
+        )
 
-    plan = plan_alif_mram_jlink(
-        FlashInputs(artefact=str(artefact), flash_args=merged, core_id="m55_he", sku="S"),
-        lambda _t: True,
-    )
-    script_text = plan.jlink_script or ""
-    assert f"loadbin {merged['atoc']} 0x8057ea50" in script_text, script_text
-    assert f"verifybin {merged['atoc']} 0x8057ea50" in script_text, script_text
+        # tan-cli#373: a real (non-dry-run) sign returns an informational NOTE
+        # (not `None`) naming which SETOOLS install actually signed --
+        # `setools.source` used to reach a customer only via a FAILURE message.
+        # `flash_args.setools_dir` is what resolved it here, so its OWN value
+        # names the source, matching `resolve_setools_dir`'s own precedence text.
+        assert note is not None
+        assert str(setools_dir) in note
+        assert "flash_args.setools_dir" in note
+        assert merged["atoc_address"] == "0x8057ea50"
+        assert Path(merged["atoc"]).is_file()
+        assert Path(script).is_file()  # the fake tool itself was never deleted/moved
+
+        plan = plan_alif_mram_jlink(
+            FlashInputs(artefact=str(artefact), flash_args=merged, core_id="m55_he", sku="S"),
+            lambda _t: True,
+        )
+        script_text = plan.jlink_script or ""
+        assert f"loadbin {merged['atoc']} 0x8057ea50" in script_text, script_text
+        assert f"verifybin {merged['atoc']} 0x8057ea50" in script_text, script_text
 
 
-def test_flow_d_setools_does_not_sign_when_the_run_is_not_confirmed(tmp_path, monkeypatch):
-    """tan-cli#487, defect 5. Identical setup to (a) above -- a working fake
-    `app-gen-toc`, a manifest with only `jlink_flash_device` + `slot0_load_
-    address` -- but `confirm=False` on a non-dry-run `ctx` (a plain `tan
-    flash`: not `--dry-run`, no `flash_args.confirm`, no `ALP_FLASH_FORCE`).
+def test_flow_d_setools_signs_in_scratch_when_the_run_is_not_confirmed(tmp_path, monkeypatch):
+    """tan-cli#1325 supersedes tan-cli#487's defect-5 guard. That guard skipped
+    the sign on an unconfirmed run because the sign wrote `build/` into the
+    customer's SETOOLS install; the sign now runs in a private scratch overlay,
+    so an unconfirmed run (and `--dry-run`) signs too -- which is what lets the
+    preview show the real ATOC placement. What stays pinned: the shared install
+    is byte-identical afterwards, and the package lives in the scratch tree."""
+    import contextlib
+    import tempfile
 
-    Before this fix `_resolve_flow_d_atoc_via_setools` gated its real sign on
-    `ctx.dry_run` ALONE, so this exact call still spawned `app-gen-toc` for
-    real -- into the customer's SETOOLS install, on a run that goes on to
-    refuse the MRAM write it was signing for. Proven two ways, mirroring (a)'s
-    own structure: the returned `note` PREVIEWS rather than reports a
-    completed sign, and none of the real sign's side effects
-    (`build/AppTocPackage.bin`, `build/config/`, the appended `build/app-
-    package-map.txt`) exist afterwards."""
     from tan.commands.flash_cmd import _Context, _is_file, _resolve_flow_d_atoc_via_setools
     from tan.core import setools as setools_module
     from tan.core.flash_plan import validate_flow_d_shape
 
+    scratch_parent = tmp_path / "tmp"
+    scratch_parent.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch_parent))
     setools_dir = tmp_path / "setools"
     setools_dir.mkdir()
     name = _setools_script_name()
     if name != setools_module.APP_GEN_TOC:
         monkeypatch.setattr(setools_module, "APP_GEN_TOC", name)
     _write_working_app_gen_toc(setools_dir / name)
+    before = _tree_digest(setools_dir)
 
     build_root = tmp_path / "build"
     build_root.mkdir()
@@ -3999,40 +4031,49 @@ def test_flow_d_setools_does_not_sign_when_the_run_is_not_confirmed(tmp_path, mo
         capture=True,
     )
     shape = validate_flow_d_shape(flash_args, str(artefact), _is_file)
-    merged, note = _resolve_flow_d_atoc_via_setools(flash_args, shape, ctx, "m55_he", False)
+    report: dict = {}
+    with contextlib.ExitStack() as stack:
+        merged, note = _resolve_flow_d_atoc_via_setools(
+            flash_args, shape, ctx, "m55_he", False, stack=stack, report=report
+        )
+        assert note is not None and "signed" in note
+        assert merged["atoc_address"] == "0x8057ea50"
+        scratch = Path(report["setools"]["scratch"])
+        assert Path(merged["atoc"]).parent == scratch / "build"
+        assert Path(merged["atoc"]).is_file()
+        assert scratch.parent == scratch_parent
+        assert report["setools"]["dir"] == str(setools_dir)
+    # Torn down with the stack, and the envelope block says so.
+    assert report["setools"]["scratchRemoved"] is True
+    assert not scratch.exists()
+    assert _tree_digest(setools_dir) == before
+    assert not (setools_dir / "build").exists()
 
-    assert note is not None
-    assert "would sign" in note
-    assert "flash_args.confirm is false" in note
-    assert "atoc" not in merged
-    assert "atoc_address" not in merged
-    assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
-    assert not (setools_dir / "build" / "config").exists()
-    assert not (setools_dir / "build" / "app-package-map.txt").exists()
 
+def test_flow_d_end_to_end_unconfirmed_signs_in_scratch_and_touches_nothing_shared(
+    tmp_path, monkeypatch
+):
+    """tan-cli#1325 (replacing tan-cli#487 defect 5's "never spawn"), driven
+    through `_run`. A fresh AEN801-shaped manifest with a resolving
+    `--setools-dir`, NO `--dry-run`, no `flash_args.confirm`: the entry is
+    `planned` (nothing written to the device, exit non-zero since #719), the ATOC
+    was signed in a scratch overlay that is gone afterwards, no JLinkExe was
+    spawned, and the shared SETOOLS install is byte-identical."""
+    import tempfile
 
-def test_flow_d_end_to_end_does_not_sign_via_setools_when_unconfirmed(tmp_path, monkeypatch):
-    """tan-cli#487, defect 5, driven through `_run` (the real CLI entry point
-    below argument parsing, the same seam
-    `test_flow_d_atoc_is_resolved_against_build_root_not_the_spawn_cwd` uses
-    for a confirmed Flow D write). A fresh AEN801-shaped manifest -- the
-    exact real-silicon shape the ticket measures, `jlink_flash_device` +
-    `slot0_load_address` only -- with a resolving `--setools-dir`, NO
-    `--dry-run`, no `flash_args.confirm`, no `ALP_FLASH_FORCE` must NOT spawn
-    `app-gen-toc`: `tan.core.setools.subprocess.run` (the ACTUAL spawn site
-    `sign_slot0` uses, a different module than `flash_cmd`'s own) is
-    monkeypatched to raise if called at all, so a regression back to the
-    pre-fix `ctx.dry_run`-only gate fails LOUDLY here rather than merely
-    leaving a stray file somewhere this assertion forgot to check."""
     from tan.commands import flash_cmd
     from tan.core import setools as setools_module
 
+    scratch_parent = tmp_path / "tmp"
+    scratch_parent.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch_parent))
     setools_dir = tmp_path / "setools"
     setools_dir.mkdir()
     name = _setools_script_name()
     if name != setools_module.APP_GEN_TOC:
         monkeypatch.setattr(setools_module, "APP_GEN_TOC", name)
     _write_working_app_gen_toc(setools_dir / name)
+    before = _tree_digest(setools_dir)
 
     (tmp_path / "sdk" / "scripts").mkdir(parents=True)
     (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
@@ -4057,34 +4098,33 @@ boot_order: []
     jlink_path.write_text("", encoding="utf-8")
     if os.name != "nt":
         os.chmod(jlink_path, 0o755)
-    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.setenv("PATH", str(fake_tools) + os.pathsep + os.environ.get("PATH", ""))
     monkeypatch.setenv("SETOOLS_DIR", str(setools_dir))
     monkeypatch.delenv("ALP_FLASH_FORCE", raising=False)
     monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
 
-    def _fail_if_spawned(*_a, **_k):
-        raise AssertionError("app-gen-toc was spawned on an unconfirmed run")
+    def _fail_if_jlink_spawned(*_a, **_k):
+        raise AssertionError("JLinkExe was spawned on an unconfirmed run")
 
-    monkeypatch.setattr(setools_module.subprocess, "run", _fail_if_spawned)
+    monkeypatch.setattr(flash_cmd, "_execute", _fail_if_jlink_spawned)
 
     exit_code, data, issues, _lines, _sdk = flash_cmd._run(
         app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
         board_yaml=None, core=None, helper=None, dry_run=False,
         skip_missing_tools=False, capture=True, cwd=str(tmp_path),
     )
-    # Non-zero since tan-cli#719: this run signed nothing and wrote nothing, so
-    # it must not exit 0. What this test pins is that SETOOLS was never
-    # spawned and nothing was signed -- see `_fail_if_spawned` and the two
-    # `.exists()` assertions below.
     assert exit_code != 0
     entry = data["entries"][0]
     assert entry["status"] == "planned"
-    assert "would sign" in entry["message"]
+    assert "signed" in entry["message"] and "0x8057ea50" in entry["message"]
     assert "flash_args.confirm is false" in entry["message"]
     assert any(i.code == "flash.confirm-required" for i in issues)
     assert any(i.code == "flash.nothing-flashed" for i in issues)
-    assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
-    assert not (setools_dir / "build" / "config").exists()
+    block = entry["setools"]
+    assert block["dir"] == str(setools_dir) and block["scratchRemoved"] is True
+    assert not Path(block["scratch"]).exists()
+    assert _scratch_remnants(scratch_parent) == []
+    assert _tree_digest(setools_dir) == before
 
 
 def test_flow_d_wrong_board_refuses_before_any_setools_write(tmp_path, monkeypatch):
@@ -4334,21 +4374,17 @@ boot_order: []
     assert str(manifest_dir) not in entry["message"]
 
 
-def test_flow_d_dry_run_signs_nothing_via_setools(tmp_path):
-    """(c) `--dry-run` must NOT invoke `app-gen-toc`, even though SETOOLS
-    fully resolves here -- planning only. Proven two ways: the entry reports
-    a WOULD-sign preview (`status: ok`, not `planned`/`failed`), and nothing
-    a real sign would produce (`build/AppTocPackage.bin`, `build/config/`)
-    exists afterwards -- if `--dry-run` ever DID invoke the fake tool below,
-    it would either fail loudly (the file has no execute bit on POSIX) or, on
-    a host where it somehow ran, leave exactly the files these assertions
-    check for."""
+def test_flow_d_dry_run_signs_in_scratch_and_leaves_the_install_untouched(tmp_path):
+    """tan-cli#1325 / #1318: `--dry-run` runs `app-gen-toc` -- in a scratch
+    overlay, so it is side-effect-free -- and previews the REAL ATOC placement.
+    The shared SETOOLS install is byte-identical afterwards, the scratch tree is
+    gone, and the entry still reports `status: ok` with no issues."""
     setools_dir = tmp_path / "setools"
     setools_dir.mkdir()
-    # Present, but NEVER executed under --dry-run -- a real script would prove
-    # nothing extra here (see (a) above for that), so the placeholder is
-    # deliberately not spawnable at all (posix: no execute bit).
-    (setools_dir / "app-gen-toc").write_text("", encoding="utf-8")
+    _write_working_app_gen_toc(setools_dir / _setools_script_name())
+    before = _tree_digest(setools_dir)
+    scratch_parent = tmp_path / "tmp"
+    scratch_parent.mkdir()
 
     manifest = """schema_version: 1
 hw_info: {sku: S}
@@ -4363,18 +4399,18 @@ boot_order: []
     (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
     exit_code, out, _ = run_flash(
         tmp_path, "--format", "json", "--dry-run", manifest=manifest,
-        env={"SETOOLS_DIR": str(setools_dir)},
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
     )
     payload = envelope(out)
     assert exit_code == 0
     entry = payload["data"]["entries"][0]
     assert entry["status"] == "ok"
-    assert "would sign" in entry["message"]
-    assert "app-gen-toc" in entry["message"]
+    assert "signed" in entry["message"] and "0x8057ea50" in entry["message"]
     assert not payload["issues"], payload["issues"]
-    # The real signing side effects a live run would produce -- absent.
-    assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
-    assert not (setools_dir / "build" / "config").exists()
+    assert entry["setools"]["scratchRemoved"] is True
+    assert _scratch_remnants(scratch_parent) == []
+    assert _tree_digest(setools_dir) == before
+    assert not (setools_dir / "build").exists()
 
 
 def test_flow_d_dry_run_with_setools_still_surfaces_a_half_armed_preflight(tmp_path):
@@ -6382,16 +6418,11 @@ boot_order: []
 
 
 def test_the_setools_preview_also_names_the_atoc_replacement(tmp_path):
-    """Flow D has TWO preview returns, and this is the one a FRESH AEN
-    manifest actually takes: with no `atoc`/`atoc_address` yet, the SETOOLS
-    auto-sign preview returns before `meta.build` is ever called, so the entry
-    never reaches `plan_alif_mram_jlink` at all. A note added only to the
-    shared preview block below would be missing from exactly the most common
-    AEN preview."""
+    """The SETOOLS-signing preview -- the one a FRESH AEN manifest actually
+    takes -- must state what arming the write would do to the ATOC."""
     setools_dir = tmp_path / "setools"
     setools_dir.mkdir()
-    # Present but never spawnable (no execute bit): --dry-run must not run it.
-    (setools_dir / "app-gen-toc").write_text("", encoding="utf-8")
+    _write_working_app_gen_toc(setools_dir / _setools_script_name())
 
     manifest = """schema_version: 1
 hw_info: {sku: S}
@@ -6412,9 +6443,7 @@ boot_order: []
     assert exit_code == 0
     entry = payload["data"]["entries"][0]
     assert entry["status"] == "ok", entry
-    # Still the SETOOLS preview it always was...
-    assert "would sign" in entry["message"], entry
-    # ...now also stating what arming the write would do to the ATOC.
+    assert "signed" in entry["message"], entry
     assert "REPLACES the ENTIRE ATOC" in entry["message"], entry
     assert "--atoc-unqueryable" in entry["message"], entry
 
