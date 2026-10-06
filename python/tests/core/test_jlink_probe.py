@@ -3,6 +3,8 @@
 helpers and the read-only enumerator. No hardware, no real sysfs."""
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from tan.core.jlink_probe import (
@@ -229,7 +231,8 @@ def test_enumerate_reads_only_segger_devices_on_ports(tmp_path):
     _dev(tmp_path, "3-4.1", "1366", SHARED)
     _dev(tmp_path, "3-4.4.3", "1366", SHARED)
     _dev(tmp_path, "3-1", "0bda", "X")  # not a J-Link
-    _dev(tmp_path, "3-4.2:1.0", "1366", SHARED)  # an interface, not a device
+    if os.name != "nt":  # ':' is not a legal Windows file name character
+        _dev(tmp_path, "3-4.2:1.0", "1366", SHARED)  # an interface, not a device
     (tmp_path / "usb3").mkdir()  # a root hub
     assert enumerate_jlinks(str(tmp_path)) == [
         JLinkProbe("3-4.1", SHARED),

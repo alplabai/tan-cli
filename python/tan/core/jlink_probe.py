@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -154,6 +155,8 @@ def enumerate_jlinks(root: str | None = None) -> list[JLinkProbe] | None:
     Windows, a container without sysfs) -- distinct from `[]`, "enumerated and
     found none". Raises `ProbeEnumerationError` for a populated device
     directory it cannot read -- never read as "no probe there"."""
+    if root is None and not sys.platform.startswith("linux"):
+        return None  # no sysfs USB tree to read: cannot enumerate
     root = root or SYSFS_USB_DEVICES
     try:
         names = sorted(os.listdir(root))
@@ -176,8 +179,8 @@ def enumerate_jlinks(root: str | None = None) -> list[JLinkProbe] | None:
 def _read_device(base: str, name: str) -> JLinkProbe | None:
     try:
         populated = bool(os.listdir(base))
-    except FileNotFoundError:
-        populated = False  # unplugged between the two listings
+    except (FileNotFoundError, NotADirectoryError):
+        populated = False  # unplugged between the two listings, or not a device dir
     except OSError as err:
         raise ProbeEnumerationError(f"{name}: {err.strerror or err}") from err
     if not populated:
