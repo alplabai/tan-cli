@@ -15,6 +15,7 @@ there), so the plain `tan monitor` path never loads it.
 from __future__ import annotations
 
 import sys
+import threading
 
 from tan.commands.monitor_cmd import DATA_SCHEMA_VERSION, MonitorError, _pyserial_missing
 from tan.core import console_filter as console_filter_mod
@@ -74,21 +75,61 @@ def _stdin_is_tty() -> bool:
         return False
 
 
+class _GuardedWrites:
+    """A view of `ser` whose `write` gives up after `WRITE_TIMEOUT_S`, for
+    ports whose pyserial backend rejects `write_timeout` (rfc2217://). The
+    stuck write is abandoned on a daemon thread and unblocks when the caller
+    closes the port."""
+
+    def __init__(self, ser) -> None:
+        self._ser = ser
+
+    @property
+    def in_waiting(self) -> int:
+        return self._ser.in_waiting
+
+    def read(self, size: int = 1) -> bytes:
+        return self._ser.read(size)
+
+    def write(self, data: bytes) -> None:
+        failure: list[BaseException] = []
+
+        def go() -> None:
+            try:
+                self._ser.write(data)
+            except BaseException as err:  # noqa: BLE001 (re-raised in the caller)
+                failure.append(err)
+
+        worker = threading.Thread(target=go, daemon=True)
+        worker.start()
+        worker.join(WRITE_TIMEOUT_S)
+        if worker.is_alive():
+            raise OSError(f"write stalled for more than {WRITE_TIMEOUT_S}s")
+        if failure:
+            raise failure[0]
+
+
 def open_port(port: str, baud: int):
     """Open `port` in-process (local tty, by-id path or any pyserial URL) the
-    way miniterm does: no explicit DTR/RTS, pyserial's open-time defaults."""
+    way miniterm does: no explicit DTR/RTS, pyserial's open-time defaults.
+
+    pyserial's `rfc2217://` rejects `write_timeout` (NotImplementedError), so
+    that case reopens without it and marks the port so the break-in loop
+    guards its writes itself (`_GuardedWrites`). Any other open failure is
+    reported as `monitor.break-open-failed`, never as an internal failure."""
     try:
         import serial  # noqa: PLC0415 (optional at runtime)
     except ImportError as err:
         raise _pyserial_missing() from err
+    interval = uboot_breakin.DEFAULT_INTERVAL_S
     try:
-        return serial.serial_for_url(
-            port,
-            baud,
-            timeout=uboot_breakin.DEFAULT_INTERVAL_S,
-            write_timeout=WRITE_TIMEOUT_S,
-        )
-    except (OSError, ValueError, serial.SerialException) as err:
+        try:
+            return serial.serial_for_url(port, baud, timeout=interval, write_timeout=WRITE_TIMEOUT_S)
+        except NotImplementedError:
+            ser = serial.serial_for_url(port, baud, timeout=interval)
+            ser._tan_guard_writes = True
+            return ser
+    except Exception as err:  # noqa: BLE001 -- anything an open can raise maps to one issue
         raise MonitorError(
             "monitor.break-open-failed",
             f"could not open '{port}' for --break-uboot: {err}",
@@ -102,7 +143,8 @@ def break_in(ser, port: str, baud: int, opts: BreakOpts) -> dict:
     caller owns closing it). Returns the envelope's `breakIn` block."""
     key, prompt, timeout_s = opts
     try:
-        result = uboot_breakin.break_into_uboot(ser, key=key, prompt=prompt, timeout_s=timeout_s)
+        target = _GuardedWrites(ser) if getattr(ser, "_tan_guard_writes", False) else ser
+        result = uboot_breakin.break_into_uboot(target, key=key, prompt=prompt, timeout_s=timeout_s)
     except OSError as err:  # includes pyserial's write/read timeouts
         raise MonitorError(
             "monitor.break-io-failed",
@@ -116,6 +158,8 @@ def break_in(ser, port: str, baud: int, opts: BreakOpts) -> dict:
         "timeoutSeconds": timeout_s,
         "bytesSeen": result.bytes_seen,
         "bytesSeenTail": result.tail,
+        "keysSent": result.keys_sent,
+        "firstByteSeconds": None if result.first_byte_s is None else round(result.first_byte_s, 3),
     }
 
 
@@ -223,7 +267,8 @@ def run(
                 )],
                 ExitCode.RUNTIME_FAILURE,
             )
-        print(f"monitor: caught U-Boot prompt after {block['elapsedSeconds']}s", file=sys.stderr)
+        shown = opts[1].decode("utf-8", errors="replace")
+        print(f"monitor: caught prompt `{shown}` after {block['elapsedSeconds']}s", file=sys.stderr)
         if non_interactive:
             return data, [], ExitCode.SUCCESS
         handed_over = True

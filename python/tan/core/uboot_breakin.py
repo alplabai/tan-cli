@@ -45,6 +45,9 @@ class BreakInResult:
     elapsed_s: float
     bytes_seen: int
     tail: str
+    keys_sent: int = 0
+    #: Seconds from the first key until the first byte came back (None if none did).
+    first_byte_s: float | None = None
 
 
 _SIMPLE_ESCAPES = {"r": b"\r", "n": b"\n", "t": b"\t", "\\": b"\\"}
@@ -113,16 +116,20 @@ def break_into_uboot(
     deadline = start + timeout_s
     window = b""
     seen = 0
+    keys = 0
+    first_byte = None
     last_write = None
 
     def absorb(chunk: bytes) -> bool:
-        nonlocal window, seen
+        nonlocal window, seen, first_byte
+        if first_byte is None:
+            first_byte = clock() - start
         seen += len(chunk)
         window = (window + chunk)[-_MATCH_WINDOW:]
         return prompt in window
 
     def result(caught: bool) -> BreakInResult:
-        return BreakInResult(caught, clock() - start, seen, _tail_text(window))
+        return BreakInResult(caught, clock() - start, seen, _tail_text(window), keys, first_byte)
 
     while True:
         # Drain everything already received BEFORE deciding to send another
@@ -133,6 +140,7 @@ def break_into_uboot(
         now = clock()
         if last_write is None or now - last_write >= interval_s:
             port.write(key)
+            keys += 1
             last_write = now
         chunk = port.read(max(1, int(getattr(port, "in_waiting", 0) or 0))) or b""
         if chunk and absorb(chunk):
