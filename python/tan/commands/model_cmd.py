@@ -960,6 +960,23 @@ def _run_doctor(
     return reported_project, sdk_info, data, issues, ExitCode.SUCCESS
 
 
+def _refuse_stray_arguments(subcommand: str, model_id: str | None, sku: str | None) -> None:
+    """A positional ID belongs to `add` alone and `--sku` to `zoo`: accepting
+    either elsewhere would silently ignore what the caller typed."""
+    if model_id is not None and subcommand != "add":
+        raise ModelError(
+            "model.unexpected-argument",
+            f"`tan model {subcommand}` takes no ID argument (got {model_id}); only `add` does.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+    if sku and subcommand == "add":
+        raise ModelError(
+            "model.unexpected-argument",
+            "`tan model add` takes no --sku; the board's own som.sku is what it checks.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+
+
 def _empty_data(subcommand: str | None) -> dict[str, Any]:
     """The `data` shape for a refusal that never reached `_run_build`/
     `_run_doctor`/`_run_check`/`_run_list` -- each subcommand's OWN empty
@@ -1184,6 +1201,7 @@ def model(
             context.sdk_source_tier,
             context.foreign_global_default_for,
         )
+        _refuse_stray_arguments(subcommand, model_id, sku)
         if subcommand == "doctor":
             project_, sdk, data, issues, exit_code = _run_doctor(
                 context=context,

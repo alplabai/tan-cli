@@ -103,11 +103,9 @@ def test_render_entry_indent():
         "models: [{name: a, source: b}]\n",
         "models: &m\n  - name: a\n    source: b\n",
         "models: *m\n",
-        "models: ~\n",
         '"models":\n  - name: a\n    source: b\n',
         "models:\n  - name: a\n    source: b\nmodels:\n  - name: c\n    source: d\n",
         "a: 1\n---\nmodels: []\n",
-        "a: 1\n...\n",
         "models:\n\t- name: a\n",
         "models:\n  key: value\n",
         "- just\n- a list\n",
@@ -127,3 +125,64 @@ def test_models_prefix_keys_are_not_the_models_key():
 def test_unrenderable_values_refuse():
     with pytest.raises(BoardEditRefused):
         append_models_entry("a: 1\n", {"name": "x", "source": "a\nb"})
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "﻿models: []\nfoo: 1\n" + "models: []\n",  # real duplicate
+        "? models\n: []\n",
+        "? models\nfoo: 1\n",
+        "a: 1\na: 2\n",
+    ],
+)
+def test_duplicate_or_complex_key_shapes_are_refused(text):
+    with pytest.raises(BoardEditRefused):
+        append_models_entry(text, ENTRY)
+
+
+def test_bom_before_models_key_is_matched_not_duplicated():
+    before = "﻿models: []\nfoo: 1\n"
+    after = append_models_entry(before, ENTRY)
+    assert after == "﻿models:\n" + NEW + "foo: 1\n"
+    assert yaml.safe_load(after)["models"] == [ENTRY]
+    before = "﻿models:\nfoo: 1\n"
+    assert append_models_entry(before, ENTRY) == "﻿models:\n" + NEW + "foo: 1\n"
+
+
+def test_bom_with_absent_models_appends_once():
+    after = append_models_entry("﻿a: 1\n", ENTRY)
+    assert after == "﻿a: 1\nmodels:\n" + NEW
+
+
+@pytest.mark.parametrize("value", ["~", "null", "Null"])
+def test_null_models_is_treated_as_empty(value):
+    after = append_models_entry(f"models: {value}\nb: 2\n", ENTRY)
+    assert after == "models:\n" + NEW + "b: 2\n"
+
+
+def test_directive_start_and_trailing_end_marker_are_single_document():
+    before = "%YAML 1.2\n---\na: 1\n...\n"
+    after = append_models_entry(before, ENTRY)
+    assert after == "%YAML 1.2\n---\na: 1\nmodels:\n" + NEW + "...\n"
+
+
+def test_second_document_is_refused():
+    with pytest.raises(BoardEditRefused):
+        append_models_entry("a: 1\n---\nb: 2\n", ENTRY)
+
+
+def test_content_after_document_end_is_refused():
+    with pytest.raises(BoardEditRefused):
+        append_models_entry("a: 1\n...\nb: 2\n", ENTRY)
+
+
+def test_nan_in_the_board_does_not_trip_the_equality_guard():
+    before = "x: .nan\nmodels: []\n"
+    after = append_models_entry(before, ENTRY)
+    assert after == "x: .nan\nmodels:\n" + NEW
+
+
+def test_recursive_alias_is_refused_not_crashed():
+    with pytest.raises(BoardEditRefused):
+        append_models_entry("a: &a [*a]\n", ENTRY)
