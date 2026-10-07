@@ -254,7 +254,7 @@ def _run_ram_entry(
     if ctx.dry_run:
         msg = f"{METHOD}[{entry_id}]: would run -- {summary}; no MRAM write; nothing spawned"
         lines.append(f"  {msg}")
-        return 0, entry("ok", 0, msg, **warn_missing), lines
+        return 0, entry("ok", 0, msg, trcena_note=True, **warn_missing), lines
 
     # ── the confirm gate (bench round 7) ──
     # `loadbin` resets the core through AIRCR.SYSRESETREQ, a full-device reset that also
@@ -350,7 +350,9 @@ def _run_ram_entry(
             )
             message += f"; read {len(data)} B of {CONSOLE_SYMBOL} ({len(text)} chars)"
     lines.append(f"  ok: {message}")
-    return 0, entry("ok", 0, message, preflight_unarmed=unarmed, **warn_missing), lines
+    return 0, entry(
+        "ok", 0, message, preflight_unarmed=unarmed, trcena_note=True, **warn_missing
+    ), lines
 
 
 def _load_apertures(ctx: Any, core_id: str) -> Any:

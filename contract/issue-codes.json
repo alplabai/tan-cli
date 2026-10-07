@@ -1964,6 +1964,14 @@
       "note": "Added closing tan-cli#1344 (the trusted-tools PR). EMISSION CONDITION: a Flow D (alif_mram_jlink) entry that must run SETOOLS app-gen-toc to sign the slot0 ATOC but (a) on a CONFIRMED write, the SETOOLS install is named only by flash_args.setools_dir in the manifest -- not by --setools-dir or $SETOOLS_DIR -- or (b) flash_args.setools_device_config resolves (symlinks followed) outside both the operator-named SETOOLS install and the project directory, so an arbitrary file would be signed into MRAM. The manifest is controlled by the project checkout, so tan will not execute a binary it picked for a write to a board. Previews (--dry-run, unconfirmed) with a manifest-only install do not refuse; they skip the sign and report flash.preview-sign-skipped. Answered by naming the SETOOLS install with --setools-dir or SETOOLS_DIR, or by moving the device config into the project. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
+      "code": "flash.ram-debugger-detach-clears-trcena",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1372 (ask 1). EMISSION CONDITION: every `tan flash --ram` (AEN Flow C) entry that loaded the image, and every --dry-run of one (status ok); not on a refusal and not on an unconfirmed preview (status planned). The Commander script ends with `exit`, and closing the J-Link session rewrites DEMCR and clears TRCENA (bit 24), which stops the DWT cycle counter (CYCCNT) in the running app about 10 ms after `go` -- while the envelope still says ok: true. Bench 2026-10-07, e1m-aen-evk-02 (E1M-AEN803, M55-HE): DEMCR 00100000 (TRCENA=0), DWT_CTRL 80000001, DHCSR 05110000 (C_DEBUGEN=0); firmware re-writing TRCENA restarted the counter. A false `RESULT PASS 215 cycles/inference` was printed; the real figure was about 5052. Informational: the run itself succeeded. Answered by firmware setting DEMCR.TRCENA again after start. The J-Link script is unchanged (no DEMCR/DWT writes, no halt); whether tan can avoid the clear is waiting on a bench A/B (tan-cli#1372 ask 2). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "flash.ram-image-not-ram-linked",
       "status": "reserved",
       "severity": "error",
