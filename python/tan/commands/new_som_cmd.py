@@ -477,7 +477,7 @@ def _resolve_sku_family(sku: str, sdk_root: Path) -> str | None:
             "import sys; sys.path.insert(0, sys.argv[1]); "
             "from alp_project_loader import _sku_family; "
             "print(_sku_family(sys.argv[2]))",
-            str(sdk_root / "scripts"),
+            os.path.abspath(sdk_root / "scripts"),  # probe runs from an empty cwd
             sku,
         ]
     )

@@ -93,7 +93,7 @@ import queue
 import shutil
 import subprocess
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1110,6 +1110,7 @@ def execute_slices(
     sdk_root_for_stamp: str | None = None,
     held_outcomes: Sequence[SliceOutcome] = (),
     force_pristine: bool = False,
+    slice_refusals: Mapping[str, str] | None = None,
 ) -> list[SliceOutcome]:
     """Dispatch every slice of `plan` and return one [`SliceOutcome`] per
     slice, in plan order.
@@ -1132,6 +1133,9 @@ def execute_slices(
     sdk switch` already pinned for the identical checkout (tan-cli#163),
     but must NOT change what `${SDK_ROOT}` substitutes to or what the
     manifest emit resolves.
+
+    `slice_refusals` -- `core_id -> message` for slices that must FAIL once
+    they are otherwise about to run (tan-cli#1317); see the use site.
 
     `held_outcomes` -- outcomes for slices the CALLER already decided not to
     dispatch (`tan.commands.build_cmd._dispatch` holds back a
@@ -1374,6 +1378,15 @@ def execute_slices(
             )
             continue
         resolved_tool = resolution.resolved
+        # tan-cli#1317: a per-slice refusal the CALLER decided (no usable host
+        # Python for a `${PYTHON}` slice), applied only HERE -- after the
+        # `null_command` and `missing_tool` skips above, so a slice that would
+        # never have run is still skipped per `executionPolicy` -- and before
+        # the destructive pristine wipe below.
+        refusal = (slice_refusals or {}).get(sl.core_id)
+        if refusal is not None:
+            outcomes.append(SliceOutcome(sl.core_id, "failed", None, refusal))
+            continue
         # MAJOR 1 of the tan-cli#510 review: `None` (never surfaced) whenever
         # resolution landed on the exact string the plan already named --
         # see [`SliceOutcome.resolved_tool`]'s own docstring.
