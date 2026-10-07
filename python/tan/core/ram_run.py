@@ -547,26 +547,50 @@ def combine_verdicts(ap: str, itcm: str) -> str:
 # ── which core did the generic attach land on? (tan-cli#1354) ───────────────
 #
 # J-Link's "Found Cortex-M55 r1p0" is the same line for the HE and the HP core, and a
-# generic `Cortex-M55` attach takes whichever M55 access port it finds. Each core's
-# LOCAL ITCM at 0x0 is the same memory as its own GLOBAL window -- HE 0x58000000, HP
-# 0x50000000 (alp-sdk metadata/socs/alif/ensemble/e8.json: `itcm_global_base` 1476395008
-# at line 106 for m55_he, 1342177280 at line 91 for m55_hp; docs/aen-bench-bringup.md:20
-# "`loadAddress=0x50000000` = HP ITCM global, vs HE's `0x58000000`"). So reading 4 words
-# at the local 0x0 and at both globals identifies the attached core by which window the
-# local view equals -- three READS, no writes, no halt.
+# generic `Cortex-M55` attach takes whichever M55 access port it finds. The DECISION
+# rests on the access port: the AP that reports `AP[n]: Core found`, whose APAddr is
+# 0x00300000 for the HE and 0x00200000 for the HP.
+#
+# CORROBORATION is a single read-only `mem32` pair: a core's LOCAL ITCM at 0x0 is its own
+# global window, HE 0x58000000 (alp-sdk metadata/socs/alif/ensemble/e8.json
+# `itcm_global_base` 1476395008 at line 106; docs/aen-bench-bringup.md:20 "loadAddress=
+# 0x50000000 = HP ITCM global, vs HE's 0x58000000"). The HP window 0x50000000 is NEVER
+# read, and this is MEASURED, not cautious: bench round 8 (2026-10-07, evk-02, AEN803
+# 2026W36-0001, read-only A/B -- A2/A3 with the read vs A4/A5 without) showed that
+# `mem32 0x50000000` from the HE attach returns words with no error yet leaves the M55-HE
+# UNHALTABLE (`WARNING: CPU could not be halted`, DHCSR 00110003) until a PIN reset, and the
+# following load only worked through the fallback chain ending in `SYSRESETREQ has confused
+# core` -> VECTRESET. The check therefore reads ONLY the local ITCM 0x0 and the HE window.
 
 HE_ALIAS = _ITCM_GLOBAL["M55_HE"]
-HP_ALIAS = _ITCM_GLOBAL["M55_HP"]
 CORE_CHECK_WORDS = 4
+
+#: Halt/reset trouble J-Link reports in a load transcript. The Flow D reset markers plus
+#: the ones a RAM-run's halt-then-loadbin hits first: a core that would not halt, a core
+#: J-Link could not find, and the SYSRESETREQ-confused fallback (bench round 8).
+RAM_RUN_TROUBLE_MARKERS = (
+    "CPU could not be halted",
+    "Could not find core",
+    "SYSRESETREQ has confused core",
+    "Failed to halt CPU",
+    "CPU is not halted",
+    "Reset: Failed",
+    "CPU may have not been reset",
+)
+
+
+def trouble_markers(transcript: str) -> tuple[str, ...]:
+    """Every halt/reset-trouble marker present in `transcript`, in marker order."""
+    return tuple(m for m in RAM_RUN_TROUBLE_MARKERS if m in transcript)
 
 _MEM32_LINE = re.compile(r"^([0-9A-Fa-f]{8}) = ((?:[0-9A-Fa-f]{8}(?:\s+|$))+)$")
 
 
 def core_check_script(pre: Sequence[str]) -> str:
     """The read-only identification session: `connect` (no halt, no loadbin), then
-    `mem32` of the local ITCM and of each core's global alias. Addresses and the word
+    `mem32` of the local ITCM and of the HE global alias ONLY. Addresses and the word
     count are ints rendered with `0x%X`."""
-    reads = [f"mem32 0x{a:X}, 0x{CORE_CHECK_WORDS:X}" for a in (0x0, HE_ALIAS, HP_ALIAS)]
+    reads = [f"mem32 0x{a:X}, 0x{CORE_CHECK_WORDS:X}" for a in (0x0, HE_ALIAS)]
     return "\n".join([*pre, *reads, "exit"]) + "\n"
 
 
@@ -589,49 +613,54 @@ def parse_mem32(transcript: str, address: int, count: int = CORE_CHECK_WORDS) ->
     return tuple(words[a] for a in wanted)
 
 
-def core_verdict(
-    local: tuple[int, ...] | None,
-    he: tuple[int, ...] | None,
-    hp: tuple[int, ...] | None,
-) -> str:
-    """`he` / `hp` when the local ITCM view equals EXACTLY one core's global window;
-    `ambiguous` when it equals both (identical or erased content proves nothing);
-    `no-match` when it equals neither; `unreadable` when the local view could not be
-    read."""
-    if local is None:
+def core_verdict(local: tuple[int, ...] | None, he: tuple[int, ...] | None) -> str:
+    """The ITCM corroboration alone: `match` when the local view equals the HE window,
+    `disagree` when both read and differ, `unreadable` when either could not be read."""
+    if local is None or he is None:
         return "unreadable"
-    is_he = he is not None and local == he
-    is_hp = hp is not None and local == hp
-    if is_he and is_hp:
-        return "ambiguous"
-    if is_he:
-        return "he"
-    if is_hp:
-        return "hp"
-    return "no-match"
+    return "match" if local == he else "disagree"
+
+
+def combine_verdicts(ap: str, itcm: str) -> str:
+    """The decision. ONLY the access port can say HE: `he` needs `ap == he` and an ITCM
+    that matches or is silent. The ITCM never confirms on its own.
+
+    * `ap == he`, ITCM `disagree` -> `conflict` (a local view that is NOT the HE window
+      on an HE-looking attach is suspicious, and not overridable);
+    * `ap == hp` -> `hp` (an ITCM that matches the HE window against an HP access port is
+      reported as `conflict-hp`: still HP evidence, still never overridable);
+    * no AP evidence (`unidentified` / `multiple`) -> `unidentified`."""
+    if ap == "he":
+        return "conflict" if itcm == "disagree" else "he"
+    if ap == "hp":
+        return "conflict-hp" if itcm == "match" else "hp"
+    return "unidentified"
+
+
+#: Verdicts `--assume-he` may override: the evidence is MISSING, not contrary. Anything
+#: that involves HP evidence, or a contradiction on an HE attach, is never overridable.
+OVERRIDABLE_VERDICTS = frozenset({"unidentified", "unreadable"})
 
 
 def core_check(transcript: str) -> tuple[str, dict]:
     """`(verdict, evidence)` for a [`core_check_script`] transcript: the Core-found AP
-    (primary) combined with the ITCM-alias words (corroboration). `evidence` is the
-    envelope's `ram.coreCheck` body."""
+    (decisive) combined with the ITCM words (corroboration). `evidence` is the envelope's
+    `ram.coreCheck` body."""
     local = parse_mem32(transcript, 0x0)
     he = parse_mem32(transcript, HE_ALIAS)
-    hp = parse_mem32(transcript, HP_ALIAS)
 
     def hexed(words):
         return None if words is None else [f"0x{w:08X}" for w in words]
 
     attached = attached_core(transcript)
     ap = ap_verdict(attached)
-    itcm = core_verdict(local, he, hp)
+    itcm = core_verdict(local, he)
     evidence = {
         "ap": attached,
         "apVerdict": ap,
         "itcmWords": {
             "local0x00000000": hexed(local),
             f"he0x{HE_ALIAS:08X}": hexed(he),
-            f"hp0x{HP_ALIAS:08X}": hexed(hp),
         },
         "itcmVerdict": itcm,
     }

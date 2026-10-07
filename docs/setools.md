@@ -365,15 +365,25 @@ no halt, no write) and decides from two independent facts:
   The AP, its address, the `CPUID register` and the `Found Cortex-M55` line are reported
   as `jlink.attachedCore` and `ram.coreCheck.ap`.
 * **Corroboration -- the ITCM alias.** A core's local ITCM at `0x0` is its own global
-  window (HE `0x58000000`, HP `0x50000000`: alp-sdk `metadata/socs/alif/ensemble/e8.json`
-  `itcm_global_base` at lines 106 and 91; `docs/aen-bench-bringup.md:20`), so the 4 words
-  read at `0x0` must equal exactly one window.
+  window (HE `0x58000000`: alp-sdk `metadata/socs/alif/ensemble/e8.json` `itcm_global_base`
+  at line 106; `docs/aen-bench-bringup.md:20`), so the 4 words read at `0x0` must equal the
+  4 words at the HE window. **The check reads only the local ITCM `0x0` and the HE window
+  `0x58000000` -- never the HP window `0x50000000`:** bench round 8 (2026-10-07, evk-02)
+  measured that reading it from the HE attach returns words without an error yet leaves the
+  M55-HE unhaltable until a PIN reset.
 
-HE proceeds; a confirmed HP refuses with `flash.ram-core-mismatch`; contradictory or
-missing evidence (the AP says one core and the ITCM the other, an erased or identical
-ITCM, an unreadable window, an AP tan does not know) refuses with
-`flash.ram-core-unconfirmed`. `--assume-he` overrides only that last case, at your own
-risk, and never a confirmed HP. The words read and the verdicts are in
+Only an HE access port proceeds, and an HE access port whose local ITCM does not equal the
+HE window is a conflict that refuses. An HP access port refuses with
+`flash.ram-core-mismatch`; no placeable access port, or an unreadable check, refuses with
+`flash.ram-core-unconfirmed`. `--assume-he` overrides only that last, evidence-missing case
+(never HP evidence, never a conflict), at your own risk. After the load, the load session's
+own Core-found AP is compared with the check's: a different AP, or HP, fails the entry with
+`flash.ram-core-mismatch` and reports both (`jlink.attachedCore`, `jlink.attachedCoreAtLoad`).
+
+Halt/reset trouble in the load transcript (`CPU could not be halted`, `Could not find
+core`, `SYSRESETREQ has confused core`, `Reset: Failed`, `CPU may have not been reset`) is
+reported as `jlink.resetFailures` plus the `flash.jlink-reset-unconfirmed` warning, and the
+message says the load only worked through a J-Link fallback. The words read and the verdicts are in
 `ram.coreCheck`.
 
 A stale alp-sdk checkout whose SoM presets are `schema_version: 1` now says so

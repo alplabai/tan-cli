@@ -62,6 +62,9 @@ from tan.core.ram_run import (
     CODE_CONSOLE_SYMBOL_MISSING,
     CODE_CORE_MISMATCH,
     CODE_CORE_UNCONFIRMED,
+    OVERRIDABLE_VERDICTS,
+    trouble_markers,
+    ap_verdict,
     core_check,
     core_check_script,
     apertures_for,
@@ -308,9 +311,10 @@ def _run_ram_entry(
     report["jlink"]["attachedCore"] = None
 
     # ── which core did the generic attach land on? (tan-cli#1354) ──
-    # Three READS (no halt, no write): the local ITCM must equal exactly one core's global
-    # window. HE proceeds; HP refuses; anything else refuses unless the operator takes
-    # the documented risk with --assume-he.
+    # DECISIVE: the AP that reports `Core found` (HE APAddr 0x00300000). CORROBORATION: the
+    # local ITCM at 0x0 against the HE window 0x58000000 -- two read-only `mem32`s, no halt,
+    # no write, and the HP window is never read. Only an HE access port proceeds; HP
+    # evidence refuses and --assume-he can never override it.
     check = fc._execute(
         FlashPlan(argv=argv, ok_message="", jlink_script=core_check_script(pre)),
         True, ctx.venv_bin, ctx.workspace, guard, jlink_exe=exe,
@@ -320,31 +324,47 @@ def _run_ram_entry(
     check_text = f"{check.stdout}\n{check.stderr}"
     bad = None if check.success else (fc._capture_tail(check) or "J-Link failed")
     bad = bad or check_session(check_text, loadbin=False)
-    verdict, evidence = ("unreadable", {}) if bad else core_check(check_text)
+    if bad:
+        verdict, evidence = "unreadable", {}
+    else:
+        verdict, evidence = core_check(check_text)
     report["ram"]["coreCheck"] = {
         "verdict": verdict, **evidence, "assumeHe": bool(ctx.assume_he),
-        "basis": "PRIMARY: the AP that reports `Core found` (HE APAddr 0x00300000, HP "
-        "0x00200000); CORROBORATION: local ITCM 0x0 compared with the HE 0x58000000 and HP "
-        "0x50000000 global windows",
+        "basis": "DECISIVE: the AP that reports `Core found` (HE APAddr 0x00300000, HP "
+        "0x00200000); CORROBORATION: local ITCM 0x0 compared with the HE global window "
+        "0x58000000 (the HP window is never read)",
         **({"sessionError": bad} if bad else {}),
     }
     report["jlink"]["attachedCore"] = evidence.get("ap")
-    if verdict == "hp":
+    if verdict in ("hp", "conflict-hp"):
         return fail(
             "the probe is attached to the M55-HP core (J-Link's Core-found access port is "
-            "not the HE's 0x00300000, and/or the local ITCM equals the HP window at "
-            "0x50000000, not the HE window at 0x58000000) -- refusing to load the HE image "
-            "into it. Select the HE core's debug port.", CODE_CORE_MISMATCH,
+            "the HP's 0x00200000"
+            + (", and the local ITCM equals the HE window, which is contradictory" if verdict == "conflict-hp" else "")
+            + ") -- refusing to load the HE image into it. Select the HE core's debug port. "
+            "--assume-he never overrides HP evidence.", CODE_CORE_MISMATCH,
         )
     if verdict != "he":
-        if not ctx.assume_he:
+        if not (ctx.assume_he and verdict in OVERRIDABLE_VERDICTS):
             return fail(
                 f"cannot confirm the attached core is the M55-HE ({verdict}"
                 + (f": {bad}" if bad else "")
-                + "): the local ITCM did not match exactly one core's global window. Refusing "
-                "to load. If this board's ITCM is erased or identical on both cores, "
-                "--assume-he overrides the check at your own risk (the bench has seen the "
-                "generic attach land on HE 6 of 6 times, which is not proof).",
+                + "): "
+                + (
+                    "the access port says HE but the local ITCM does not equal the HE window "
+                    "-- contradictory, and not overridable. "
+                    if verdict == "conflict"
+                    else "J-Link named no Core-found access port tan can place "
+                    "(HE 0x00300000), or the check session could not be read. "
+                )
+                + "Refusing to load."
+                + (
+                    " --assume-he overrides this at your own risk (the bench has seen the "
+                    "generic attach land on HE 6 of 6 times, which is not proof); it never "
+                    "overrides HP evidence or a contradiction."
+                    if verdict in OVERRIDABLE_VERDICTS
+                    else ""
+                ),
                 CODE_CORE_UNCONFIRMED,
             )
         report["ram"]["coreCheck"]["assumed"] = True
@@ -361,20 +381,40 @@ def _run_ram_entry(
     if problem:
         return fail(f"the load session failed: {problem}")
     loaded_on = attached_core(transcript)
-    if loaded_on and report["jlink"].get("attachedCore") not in (None, loaded_on):
-        # The load session attached somewhere else than the check did (a probe that
-        # re-enumerated its AP): reported, not hidden.
+    checked_on = report["jlink"].get("attachedCore")
+    if loaded_on and loaded_on.get("apAddr"):
+        # The load is a SEPARATE J-Link session: it can attach to a different AP than the
+        # check did (a probe that re-enumerated). After the fact, but loud -- the image may
+        # now be in the wrong core. Both attaches are reported.
         report["jlink"]["attachedCoreAtLoad"] = loaded_on
-    elif report["jlink"].get("attachedCore") is None:
+        differs = bool(checked_on) and checked_on.get("apAddr") != loaded_on.get("apAddr")
+        if differs or ap_verdict(loaded_on) == "hp":
+            return fail(
+                f"the load session attached to AP {loaded_on.get('apAddr')} "
+                f"({ap_verdict(loaded_on)}) but the core check attached to AP "
+                f"{(checked_on or {}).get('apAddr')}: the image may have been loaded into the "
+                "WRONG core. Power-cycle the board and check both cores before running "
+                "anything else.", CODE_CORE_MISMATCH,
+            )
+    elif checked_on is None and loaded_on:
         report["jlink"]["attachedCore"] = loaded_on
     if not facts:
         from tan.core.flow_d_report import dpidr_in
 
         report["jlink"].update({"dpidr": dpidr_in(transcript), "dpidrSource": "write-transcript"})
     unarmed = not armed
+    # Halt/reset trouble is surfaced like Flow D's reset failures (bench round 8): a load
+    # that only worked through J-Link's fallback chain is reported, never reported clean.
+    trouble = trouble_markers(transcript)
+    report["jlink"]["resetFailures"] = list(trouble)
 
     # ── the console ──
     message = f"{METHOD}[{entry_id}]: {summary}; running"
+    if trouble:
+        message += (
+            "; the load only worked through a J-Link fallback (" + ", ".join(trouble) + ") -- "
+            "the core did not halt/reset cleanly, so power-cycle before trusting this run"
+        )
     if ctx.ram_console:
         if console is None:
             message += (
@@ -403,7 +443,12 @@ def _run_ram_entry(
             )
             message += f"; read {len(data)} B of {CONSOLE_SYMBOL} ({len(text)} chars)"
     lines.append(f"  ok: {message}")
-    return 0, entry("ok", 0, message, preflight_unarmed=unarmed, **warn_missing), lines
+    return (
+        0,
+        entry("ok", 0, message, preflight_unarmed=unarmed, reset_unconfirmed=bool(trouble),
+              **warn_missing),
+        lines,
+    )
 
 
 def _load_apertures(ctx: Any, core_id: str) -> Any:

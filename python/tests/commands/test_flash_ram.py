@@ -49,14 +49,17 @@ def _mem32(addr, words):
     return f"{addr:08X} = " + " ".join(f"{w:08X}" for w in words) + "\n"
 
 
-def core_check_out(*, ap_addr="0x00300000", local=ITCM_WORDS, he=ITCM_WORDS, hp=OTHER_WORDS):
-    """A `mem32` core-check session: the banner, then the three dumps (a `None` window
-    prints `Could not read memory.` and no dump line)."""
+def core_check_out(*, ap_addr="0x00300000", local=ITCM_WORDS, he=ITCM_WORDS):
+    """A `mem32` core-check session: the banner, then the two dumps (a `None` window
+    prints `Could not read memory.` and no dump line). The HP window is never read."""
     out = _connect_banner(ap_addr)
-    for addr, words in ((0x0, local), (0x58000000, he), (0x50000000, hp)):
+    for addr, words in ((0x0, local), (0x58000000, he)):
         out += _mem32(addr, words) if words is not None else "Could not read memory.\n"
     return out + "Script processing completed.\n"
 
+
+#: A clean load transcript carries the same `connect` banner (AP, CPUID) the check does.
+CLEAN_LOAD = _connect_banner() + CLEAN_LOAD.replace("Found Cortex-M55 r1p0, Little endian.\n", "", 1)
 
 #: E8 HE apertures as the SoC metadata gives them (SRAM4_M55_HE_ITCM / SRAM5_M55_HE_DTCM
 #: 256 KiB, SRAM0 4096 KiB).
@@ -692,9 +695,9 @@ def test_the_elf_reader_bounds_its_input():
 # ── tan-cli#1354: is the probe on the HE core? ──────────────────────────────
 
 
-def _check_run(tmp_path, monkeypatch, check_out, **kw):
+def _check_run(tmp_path, monkeypatch, check_out, load_out=None, **kw):
     _setup(tmp_path, monkeypatch)
-    jl = FakeJlink(monkeypatch, check_out=check_out)
+    jl = FakeJlink(monkeypatch, check_out=check_out, load_out=load_out)
     return jl, _run(tmp_path, **kw)
 
 
@@ -702,75 +705,115 @@ def test_the_he_ap_with_a_matching_itcm_is_confirmed(tmp_path, monkeypatch):
     jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, core_check_out())
     assert rc == 0, (data, issues)
     check = data["entries"][0]["ram"]["coreCheck"]
-    assert check["verdict"] == "he" and check["apVerdict"] == "he" and check["itcmVerdict"] == "he"
+    assert check["verdict"] == "he" and check["apVerdict"] == "he" and check["itcmVerdict"] == "match"
     assert check["ap"] == {
         "coreFoundAp": 3, "apAddr": "0x00300000", "cpuid": "0x411FD220",
         "found": "Found Cortex-M55 r1p0, Little endian.",
     }
     words = check["itcmWords"]
+    assert set(words) == {"local0x00000000", "he0x58000000"}  # no HP window
     assert words["local0x00000000"] == words["he0x58000000"] == [f"0x{w:08X}" for w in ITCM_WORDS]
-    assert words["hp0x50000000"] == [f"0x{w:08X}" for w in OTHER_WORDS]
-    assert check["assumeHe"] is False and "PRIMARY" in check["basis"]
-    # Three reads, no write, no halt, in the check session; MRAM-free as always.
+    assert check["assumeHe"] is False and "DECISIVE" in check["basis"]
     script = next(x for x in jl.scripts if jl.kind(x) == "check").splitlines()
-    assert script[-4:] == ["mem32 0x0, 0x4", "mem32 0x58000000, 0x4", "mem32 0x50000000, 0x4", "exit"]
+    assert script[-3:] == ["mem32 0x0, 0x4", "mem32 0x58000000, 0x4", "exit"]
+    assert "0x50000000" not in " ".join(jl.scripts)  # the HP ITCM window is NEVER read
     assert not any(w in script for w in ("halt", "go", "erase")) and "loadbin" not in " ".join(script)
     assert [jl.kind(x) for x in jl.scripts] == ["check", "load"]
 
 
+def test_the_he_ap_alone_is_enough_when_the_itcm_is_silent(tmp_path, monkeypatch):
+    """The AP decides; an unreadable ITCM corroboration does not veto an HE attach."""
+    jl, (rc, data, _i, _l, _s) = _check_run(tmp_path, monkeypatch, core_check_out(he=None))
+    assert rc == 0
+    check = data["entries"][0]["ram"]["coreCheck"]
+    assert check["verdict"] == "he" and check["itcmVerdict"] == "unreadable"
+
+
+def test_the_itcm_alone_never_confirms_the_he(tmp_path, monkeypatch):
+    """No AP evidence -> unconfirmed even when the ITCM matches the HE window."""
+    out = core_check_out(ap_addr="0x00400000")
+    jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out)
+    assert rc == 1 and _codes(issues) == ["flash.ram-core-unconfirmed"]
+    assert data["entries"][0]["ram"]["coreCheck"]["verdict"] == "unidentified"
+    assert [jl.kind(x) for x in jl.scripts] == ["check"]
+    out_none = "Found Cortex-M55 r1p0, Little endian.\n" + "".join(
+        _mem32(a, ITCM_WORDS) for a in (0x0, 0x58000000)
+    ) + "Script processing completed.\n"
+    jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out_none)
+    assert rc == 1 and data["entries"][0]["ram"]["coreCheck"]["verdict"] == "unidentified"
+
+
 def test_the_hp_ap_is_refused_as_a_core_mismatch_before_any_load(tmp_path, monkeypatch):
-    out = core_check_out(ap_addr="0x00200000", he=OTHER_WORDS, hp=ITCM_WORDS)
+    out = core_check_out(ap_addr="0x00200000", he=OTHER_WORDS)
     jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out)
     assert rc == 1 and _codes(issues) == ["flash.ram-core-mismatch"]
     assert [jl.kind(x) for x in jl.scripts] == ["check"]  # nothing was loaded
     assert "attached to the M55-HP" in data["entries"][0]["message"]
     assert data["entries"][0]["ram"]["coreCheck"]["verdict"] == "hp"
-    # --assume-he never overrides a CONFIRMED HP.
-    jl, (rc, _d, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out, assume_he=True)
-    assert rc == 1 and _codes(issues) == ["flash.ram-core-mismatch"]
-    assert [jl.kind(x) for x in jl.scripts] == ["check"]
+
+
+def test_hp_evidence_is_never_overridden_by_assume_he(tmp_path, monkeypatch):
+    for out, verdict in (
+        (core_check_out(ap_addr="0x00200000", he=OTHER_WORDS), "hp"),
+        # An HP access port whose local ITCM nevertheless equals the HE window: still HP evidence.
+        (core_check_out(ap_addr="0x00200000"), "conflict-hp"),
+    ):
+        jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out, assume_he=True)
+        assert rc == 1 and _codes(issues) == ["flash.ram-core-mismatch"], verdict
+        assert [jl.kind(x) for x in jl.scripts] == ["check"]
+        assert data["entries"][0]["ram"]["coreCheck"]["verdict"] == verdict
+        assert "never overrides HP evidence" in data["entries"][0]["message"]
+
+
+def test_an_he_ap_contradicted_by_the_itcm_is_a_conflict_that_assume_he_cannot_override(
+    tmp_path, monkeypatch
+):
+    out = core_check_out(he=OTHER_WORDS)  # AP says HE, local ITCM is not the HE window
+    for kw in ({}, {"assume_he": True}):
+        jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out, **kw)
+        assert rc == 1 and _codes(issues) == ["flash.ram-core-unconfirmed"]
+        assert data["entries"][0]["ram"]["coreCheck"]["verdict"] == "conflict"
+        assert "not overridable" in data["entries"][0]["message"]
+        assert [jl.kind(x) for x in jl.scripts] == ["check"]
 
 
 @pytest.mark.parametrize(
     ("label", "out", "verdict"),
     [
-        # Erased/identical ITCM on both cores: the local view matches both windows.
-        ("ambiguous", core_check_out(ap_addr="0x00400000", he=ITCM_WORDS, hp=ITCM_WORDS), "ambiguous"),
-        # An AP tan does not know and an ITCM that matches neither window.
-        ("no-match", core_check_out(ap_addr="0x00400000", local=(1, 2, 3, 4)), "no-match"),
-        # The local ITCM could not be read.
-        ("unreadable", core_check_out(ap_addr="0x00400000", local=None), "unreadable"),
-        # The AP says HE but the ITCM says HP: contradictory evidence is not confirmation.
-        ("conflict", core_check_out(he=OTHER_WORDS, hp=ITCM_WORDS), "conflict"),
+        ("unplaceable-ap", core_check_out(ap_addr="0x00400000"), "unidentified"),
+        ("failed-session", "Cannot connect to target.\nScript processing completed.\n", "unreadable"),
     ],
 )
-def test_anything_unconfirmed_refuses_unless_assume_he(tmp_path, monkeypatch, label, out, verdict):
+def test_missing_evidence_refuses_unless_assume_he(tmp_path, monkeypatch, label, out, verdict):
     jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out)
     assert rc == 1 and _codes(issues) == ["flash.ram-core-unconfirmed"], label
     assert [jl.kind(x) for x in jl.scripts] == ["check"]
     entry = data["entries"][0]
     assert entry["ram"]["coreCheck"]["verdict"] == verdict
     assert "--assume-he" in entry["message"]
-    # The documented override proceeds -- and says it assumed.
-    jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out, assume_he=True)
+    same_ap_load = CLEAN_LOAD.replace("APAddr 0x00300000", "APAddr 0x00400000")  # same AP as the check
+    jl, (rc, data, issues, _l, _s) = _check_run(
+        tmp_path, monkeypatch, out, load_out=same_ap_load, assume_he=True
+    )
     assert rc == 0, (label, data, issues)
     assert [jl.kind(x) for x in jl.scripts] == ["check", "load"]
     assert data["entries"][0]["ram"]["coreCheck"]["assumed"] is True
 
 
-def test_the_he_ap_alone_is_enough_when_the_itcm_is_silent(tmp_path, monkeypatch):
-    """AP primary, ITCM corroboration only: HE AP + an unreadable HP window is HE."""
-    jl, (rc, data, _i, _l, _s) = _check_run(tmp_path, monkeypatch, core_check_out(hp=None))
-    assert rc == 0
-    assert data["entries"][0]["ram"]["coreCheck"]["verdict"] == "he"
-
-
-def test_a_failed_check_session_is_unconfirmed(tmp_path, monkeypatch):
-    jl, (rc, data, issues, _l, _s) = _check_run(
-        tmp_path, monkeypatch, "Cannot connect to target.\nScript processing completed.\n"
-    )
-    assert rc == 1 and _codes(issues) == ["flash.ram-core-unconfirmed"]
-    assert "sessionError" in data["entries"][0]["ram"]["coreCheck"]
+def test_a_load_session_that_attached_elsewhere_fails_loudly(tmp_path, monkeypatch):
+    """The load is a separate J-Link session: if its Core-found AP differs from the check's
+    (or is HP) the entry fails with flash.ram-core-mismatch and BOTH attaches are reported."""
+    hp_load = CLEAN_LOAD.replace("APAddr 0x00300000", "APAddr 0x00200000")
+    jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, core_check_out(), load_out=hp_load)
+    assert rc == 1 and _codes(issues) == ["flash.ram-core-mismatch"]
+    assert [jl.kind(x) for x in jl.scripts] == ["check", "load"]  # it did load: the failure is after the fact
+    jlink = data["entries"][0]["jlink"]
+    assert jlink["attachedCore"]["apAddr"] == "0x00300000"
+    assert jlink["attachedCoreAtLoad"]["apAddr"] == "0x00200000"
+    assert "WRONG core" in data["entries"][0]["message"]
+    # A load that attached to the same AP is silent.
+    jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, core_check_out())
+    assert rc == 0 and data["entries"][0]["jlink"]["attachedCoreAtLoad"]["apAddr"] == "0x00300000"
 
 
 def test_dry_run_shows_the_core_check_script_and_spawns_nothing(tmp_path, monkeypatch):
@@ -778,7 +821,8 @@ def test_dry_run_shows_the_core_check_script_and_spawns_nothing(tmp_path, monkey
     jl = FakeJlink(monkeypatch)
     rc, data, _i, _l, _s = _run(tmp_path, dry_run=True)
     assert rc == 0 and jl.scripts == []
-    assert "mem32 0x58000000, 0x4" in data["entries"][0]["plan"]["coreCheckScript"]
+    script = data["entries"][0]["plan"]["coreCheckScript"]
+    assert "mem32 0x58000000, 0x4" in script and not any("0x50000000" in l for l in script)
 
 
 def test_the_mem32_parser_is_strict():
@@ -791,11 +835,19 @@ def test_the_mem32_parser_is_strict():
     assert ram_run.parse_mem32("garbage 0 = 1 2 3 4\n", 0x0) is None
 
 
+def test_the_decision_table():
+    cv = ram_run.combine_verdicts
+    assert [cv("he", "match"), cv("he", "unreadable"), cv("he", "disagree")] == ["he", "he", "conflict"]
+    assert [cv("hp", "disagree"), cv("hp", "unreadable"), cv("hp", "match")] == ["hp", "hp", "conflict-hp"]
+    assert [cv("unidentified", "match"), cv("multiple", "match"), cv("unidentified", "unreadable")] == ["unidentified"] * 3
+    assert ram_run.OVERRIDABLE_VERDICTS == {"unidentified", "unreadable"}
+
+
 def test_the_core_check_script_is_all_ints_and_read_only():
     script = ram_run.core_check_script(ram_run.preamble(SERIAL, 4000, "Cortex-M55")).splitlines()
     assert script == [
         f"SelectEmuBySN {SERIAL}", "si SWD", "speed 4000", "device Cortex-M55", "connect",
-        "mem32 0x0, 0x4", "mem32 0x58000000, 0x4", "mem32 0x50000000, 0x4", "exit",
+        "mem32 0x0, 0x4", "mem32 0x58000000, 0x4", "exit",
     ]
 
 
@@ -806,3 +858,46 @@ def test_assume_he_without_ram_is_a_usage_error(tmp_path):
 
     result = CliRunner().invoke(app, ["flash", "--assume-he", "--project", str(tmp_path)])
     assert result.exit_code != 0
+
+
+def test_halt_and_reset_trouble_is_surfaced_like_flow_d(tmp_path, monkeypatch):
+    """Bench round 8: a load that only worked through J-Link's fallback chain is reported."""
+    trouble = CLEAN_LOAD.replace(
+        "J-Link>halt\n",
+        "J-Link>halt\nWARNING: CPU could not be halted\nSYSRESETREQ has confused core. "
+        "Trying VECTRESET...\n",
+    )
+    _setup(tmp_path, monkeypatch)
+    FakeJlink(monkeypatch, load_out=trouble)
+    rc, data, issues, lines, _s = _run(tmp_path)
+    assert rc == 0, (data, issues)
+    entry = data["entries"][0]
+    assert entry["jlink"]["resetFailures"] == [
+        "CPU could not be halted", "SYSRESETREQ has confused core",
+    ]
+    assert "only worked through a J-Link fallback" in entry["message"]
+    warn = [i for i in issues if i.code == "flash.jlink-reset-unconfirmed"]
+    assert warn and warn[0].severity == "warning" and "CPU could not be halted" in warn[0].message
+    # A clean load reports none.
+    _setup(tmp_path, monkeypatch)
+    FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path)
+    assert data["entries"][0]["jlink"]["resetFailures"] == []
+    assert "flash.jlink-reset-unconfirmed" not in _codes(issues)
+
+
+def test_every_ram_run_trouble_marker_is_detected():
+    for marker in ram_run.RAM_RUN_TROUBLE_MARKERS:
+        assert ram_run.trouble_markers(f"x\n{marker}\ny") == (marker,)
+    assert {"CPU could not be halted", "Could not find core", "SYSRESETREQ has confused core",
+            "Reset: Failed", "CPU may have not been reset"} <= set(ram_run.RAM_RUN_TROUBLE_MARKERS)
+    assert ram_run.trouble_markers(CLEAN_LOAD) == ()
+
+
+def test_the_check_never_reads_the_hp_window_anywhere():
+    """The HP ITCM window read left the HE unhaltable on silicon (bench round 8)."""
+    import inspect
+
+    assert "0x50000000" not in ram_run.core_check_script(["connect"])
+    source = inspect.getsource(ram_run.core_check) + inspect.getsource(ram_run.core_check_script)
+    assert "HP_ALIAS" not in source

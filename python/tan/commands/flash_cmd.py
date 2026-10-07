@@ -4596,15 +4596,16 @@ def flash(
     assume_he: bool = typer.Option(
         False,
         "--assume-he",
-        help="With --ram: proceed even when the attached-core check cannot confirm the "
-        "M55-HE (tan-cli#1354). Before loading, tan reads 4 words at the local ITCM 0x0 "
-        "and at both cores' global ITCM windows (HE 0x58000000, HP 0x50000000) and "
-        "requires the local view to equal exactly one: HE proceeds, HP refuses "
-        "(flash.ram-core-mismatch), anything else (erased or identical ITCM, an "
-        "unreadable window) refuses (flash.ram-core-unconfirmed). --assume-he overrides "
-        "only the unconfirmed case, AT YOUR OWN RISK -- a generic Cortex-M55 attach picks "
-        "whichever M55 access port it finds and the bench has seen HE 6 of 6 times, which "
-        "is not proof. It never overrides a confirmed HP.",
+        help="With --ram: proceed when the attached-core check has NO evidence either way "
+        "(tan-cli#1354). Before loading, tan decides from the access port J-Link reports "
+        "`Core found` on (HE APAddr 0x00300000, HP 0x00200000) and reads 4 words at the local "
+        "ITCM 0x0 and at the HE global window 0x58000000 as corroboration (the HP window is "
+        "never read). Only an HE access port proceeds. HP evidence refuses "
+        "(flash.ram-core-mismatch) and a contradiction on an HE attach refuses "
+        "(flash.ram-core-unconfirmed), and --assume-he NEVER overrides either. It overrides "
+        "only a missing or unplaceable access port / an unreadable check, AT YOUR OWN RISK -- "
+        "a generic Cortex-M55 attach picks whichever M55 access port it finds and the bench "
+        "has seen HE 6 of 6 times, which is not proof.",
     ),
     wait: float = typer.Option(
         1.5,
