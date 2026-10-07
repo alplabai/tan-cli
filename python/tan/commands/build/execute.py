@@ -556,16 +556,30 @@ def _spawn_step(
         return _StepResult(launch_error=str(err))
 
 
-def _cwd_under_build_root(raw_cwd: str | None) -> bool:
-    """`Path::new(&cmd.cwd).components().next() == CONSUMER_BUILD_ROOT` (Rust
-    oracle): checked against the slice's PLAN-supplied relative `cwd` string,
-    not the resolved absolute path -- a plan cwd of `src/` (still a legal
-    relative path) must not let the wipe target land at
-    `<project>/src/build`, which may hold files the build never created."""
+def _cwd_under_build_root(raw_cwd: str | None, cwd: Path, project_root: Path) -> bool:
+    """Whether the sdk-switch-pristine wipe may touch this slice's `cwd`.
+
+    Starts from the Rust oracle's `Path::new(&cmd.cwd).components().next() ==
+    CONSUMER_BUILD_ROOT`: a plan cwd of `src/` (still a legal relative path)
+    must not let the wipe target land at `<project>/src/build`, which may
+    hold files the build never created. That first-component check alone let
+    `build/../src/c1` through, and so did a `build/c1` symlink into `src/`
+    (tan-cli#1388): `confine_to_build_root` only keeps a cwd inside the
+    PROJECT, not inside `build/`. So also refuse any `..` in the plan string,
+    and require the RESOLVED cwd to sit at or under `<project>/build` --
+    with `<project>/build` itself resolving to exactly that path, so a
+    symlinked build root cannot carry the wipe elsewhere."""
     if not raw_cwd:
         return False
     parts = Path(raw_cwd).parts
-    return bool(parts) and parts[0] == _CONSUMER_BUILD_ROOT
+    if not parts or parts[0] != _CONSUMER_BUILD_ROOT or ".." in parts:
+        return False
+    project = project_root.resolve()
+    build_root = (project / _CONSUMER_BUILD_ROOT).resolve()
+    if build_root != project / _CONSUMER_BUILD_ROOT:
+        return False
+    resolved = cwd.resolve()
+    return resolved == build_root or build_root in resolved.parents
 
 
 def _maybe_pristine_stale_sdk_build_dir(
@@ -576,6 +590,7 @@ def _maybe_pristine_stale_sdk_build_dir(
     sdk_stamp_key_str: str | None,
     on_output: Callable[[str], None],
     *,
+    project_root: Path,
     force_pristine: bool = False,
 ) -> list[Issue]:
     """Sdk-switch-pristine guard (issue #52): a build dir west configured
@@ -619,7 +634,7 @@ def _maybe_pristine_stale_sdk_build_dir(
     the JSON envelope so the wipe -- or its suppression -- is not
     stderr-only there."""
     overridden = build_dir_overridden(cmd_args)
-    under_build_root = _cwd_under_build_root(raw_cwd)
+    under_build_root = _cwd_under_build_root(raw_cwd, cwd, project_root)
     issues: list[Issue] = []
 
     # Probed only when `--pristine` was actually passed, so the non-pristine
@@ -1412,6 +1427,7 @@ def execute_slices(
                 sl.command.args,
                 sdk_stamp_key_str,
                 on_output,
+                project_root=build_root,
                 force_pristine=force_pristine,
             )
         )
