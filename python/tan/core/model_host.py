@@ -37,3 +37,12 @@ def extra_missing_message(verb: str, missing: list[str]) -> str:
         f"installed). Install it with `{INSTALL_HINT}`. A frozen `tan` binary does not "
         "bundle it; use a pip-installed tan for this command."
     )
+
+
+def broken_extra_message(verb: str, detail: str) -> str:
+    """The same refusal when the modules are findable but fail to import (a
+    damaged install): the import error is quoted, not mistaken for a module name."""
+    return (
+        f"`tan model {verb}` could not import the optional `model` extra's dependencies "
+        f"({detail}). Reinstall it with `{INSTALL_HINT}`."
+    )

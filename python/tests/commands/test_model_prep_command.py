@@ -272,3 +272,57 @@ def test_counts_must_be_positive(tmp_path):
                  ["prep", "m.onnx", "--calibration", "c", "--min-samples", "0"]):
         code, doc = invoke(*args, "--project", str(proj))
         assert code == 2 and doc["issues"][0]["code"] == "model.unexpected-argument", args
+
+
+@pytest.mark.skipif(not HAVE_EXTRA, reason="the optional `model` extra is not installed")
+def test_a_model_that_will_not_load_is_prep_failed_not_a_calibration_error(tmp_path):
+    proj = project(tmp_path)
+    _cal_dir(proj)
+    (proj / "broken.onnx").write_bytes(b"not an onnx model")
+    code, doc = invoke("prep", "broken.onnx", "--calibration", "cal", "--project", str(proj))
+    assert code == 1 and doc["issues"][0]["code"] == "model.prep-failed"
+
+
+@pytest.mark.skipif(not HAVE_EXTRA, reason="the optional `model` extra is not installed")
+def test_failure_removes_every_directory_the_run_created(tmp_path):
+    proj = project(tmp_path)
+    cal = _cal_dir(proj, 2)  # too few samples -> refused after validation... before mkdir
+    code, doc = invoke("prep", "m.onnx", "--calibration", "cal", "--out", "build/deep/out", "--project", str(proj))
+    assert code == 2 and not (proj / "build").exists()
+    # a failure AFTER the directories exist (quantize error) also cleans them up
+    import tan.model.prep as prep
+
+    _cal_dir(proj, 8)
+    original = prep.quantize
+
+    def boom(*a, **k):
+        raise prep.PrepError("quantization failed: forced")
+
+    prep.quantize = boom
+    try:
+        code, doc = invoke("prep", "m.onnx", "--calibration", "cal", "--out", "build/deep/out", "--project", str(proj))
+    finally:
+        prep.quantize = original
+    assert code == 1 and doc["issues"][0]["code"] == "model.prep-failed"
+    assert not (proj / "build").exists()
+
+
+@pytest.mark.skipif(not HAVE_EXTRA, reason="the optional `model` extra is not installed")
+def test_prep_publishes_through_the_no_hardlink_fallback(tmp_path, monkeypatch):
+    proj = project(tmp_path)
+    _cal_dir(proj)
+
+    def nope(*a, **k):
+        raise OSError("hard links unsupported")
+
+    monkeypatch.setattr("tan.core.publish.os.link", nope)
+    code, doc = invoke("prep", "m.onnx", "--calibration", "cal", "--project", str(proj))
+    assert code == 0, doc
+    assert (proj / "build" / "model-prep" / "m.int8.onnx").is_file()
+
+
+def test_broken_extra_message_quotes_the_error_separately():
+    from tan.core.model_host import broken_extra_message
+
+    msg = broken_extra_message("prep", "libfoo.so missing")
+    assert "libfoo.so missing" in msg and 'pip install "tan-cli[model]"' in msg

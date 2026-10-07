@@ -32,7 +32,8 @@ from pathlib import Path
 from typing import Any
 
 from tan.commands.build_output import ProjectContext
-from tan.core.model_host import extra_missing_message, missing_extra_modules
+from tan.core.model_host import broken_extra_message, extra_missing_message, missing_extra_modules
+from tan.core.publish import publish_exclusive
 from tan.envelope import Issue, Project, SdkInfo
 from tan.exit_codes import ExitCode
 
@@ -175,21 +176,37 @@ def _under(context: ProjectContext, raw: str) -> Path:
     return path if path.is_absolute() else Path(context.workspace_root) / path
 
 
+def _missing_ancestors(path: Path) -> list[Path]:
+    """`path` and its parents that do not exist yet, outermost first -- the
+    directories a `mkdir(parents=True)` would create."""
+    missing = []
+    for p in (path, *path.parents):
+        if p.exists():
+            break
+        missing.append(p)
+    return missing[::-1]
+
+
 def _quantize(
     path: Path, cal_dir: Path, out_dir: Path, per_channel: bool, min_samples: int
 ) -> tuple[Any, Path, Any] | Issue:
     """Validate calibration, quantize, measure -- or the refusing `Issue`.
     Everything is built in a private staging directory inside `out_dir` and
     published (never overwriting) only after the accuracy run succeeds; a
-    failure removes the staging directory and an `out_dir` this run created."""
+    failure removes the staging directory and every directory this run created."""
     final = out_dir / f"{path.stem}.int8.onnx"
     if os.path.lexists(final):
         return Issue("model.prep-output-exists", "error", f"{final} already exists; remove it or use --out.")
-    created = not out_dir.exists()
+    created = _missing_ancestors(out_dir)
     staging: Path | None = None
+    done = False
     try:
-        from tan.model.prep import PrepError, accuracy_delta, quantize, validate_calibration  # noqa: PLC0415
+        from tan.model.prep import PrepError, accuracy_delta, model_input, quantize, validate_calibration  # noqa: PLC0415
 
+        try:
+            model_input(path)
+        except PrepError as err:
+            return Issue("model.prep-failed", "error", str(err))
         try:
             info = validate_calibration(cal_dir, path, min_samples=min_samples)
         except PrepError as err:
@@ -202,22 +219,24 @@ def _quantize(
         except (PrepError, OSError) as err:
             return Issue("model.prep-failed", "error", str(err))
         try:
-            os.link(staged, final)
+            publish_exclusive(staged, final)
         except FileExistsError:
             return Issue("model.prep-output-exists", "error", f"{final} already exists; nothing was overwritten.")
         except OSError as err:
             return Issue("model.prep-failed", "error", f"could not write {final}: {err}")
+        done = True
         return info, final, report
     except ImportError as err:
-        return Issue("model.model-extra-missing", "error", extra_missing_message("prep", [str(err)]))
+        return Issue("model.model-extra-missing", "error", broken_extra_message("prep", str(err)))
     finally:
         if staging is not None:
             shutil.rmtree(staging, ignore_errors=True)
-        if created:
-            try:
-                out_dir.rmdir()
-            except OSError:
-                pass
+        if not done:
+            for directory in reversed(created):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    break
 
 
 def render_prep_text(data: dict) -> list[str]:
@@ -261,7 +280,7 @@ def _measure(path: Path, input_path: Path | None, runs: int, sample: Any) -> tup
                 sample = default_input(path)
         return run_host(path, sample, runs=runs), sample
     except ImportError as err:
-        return Issue("model.model-extra-missing", "error", f"{extra_missing_message('run', [str(err)])}")
+        return Issue("model.model-extra-missing", "error", broken_extra_message("run", str(err)))
     except (MeasureError, OSError, ValueError, AttributeError, TypeError) as err:
         return Issue("model.run-failed", "error", str(err))
 
