@@ -10,7 +10,13 @@ bypass it. It is the mirror of `flash.ram-image-not-ram-linked` (`tan.core.ram_r
 Only the program headers are read, with no IO: the symbol table (and its limits) is
 irrelevant to a load address and must neither skip nor refuse the check. `p_paddr` is
 the LOAD address; `p_vaddr` is where the image runs, and an image loaded into MRAM may
-legitimately run from ITCM."""
+legitimately run from ITCM.
+
+**Lower bound only.** An image is refused when it is loaded BELOW its slot, never for
+being above it. An image linked above its own slot -- say an M55-HP image at 0x802B0000
+written to the M55-HE slot 0x80010000 -- is NOT caught: that needs per-core slot windows
+this guard does not have. Equality with the slot is not required either, because an image
+header may offset the first segment."""
 from __future__ import annotations
 
 import struct
@@ -61,8 +67,8 @@ def lowest_load_paddr(data: bytes) -> int:
 
 def mram_link_refusal(data: bytes, floor: int, floor_name: str) -> str | None:
     """A refusal message when the ELF in `data` is not loaded at or above `floor`, else
-    `None`. `floor` is `slot0_load_address` when known, else the SoC's `soc_flash_base`;
-    `floor_name` names which, for the message. An ELF whose program headers cannot be
+    `None`. `floor` is the entry's `slot0_load_address`;
+    `floor_name` names it for the message. An ELF whose program headers cannot be
     read is REFUSED, never waved through: the guard exists for the image nothing else
     caught. Equality is not required -- an image header may offset the first segment."""
     try:

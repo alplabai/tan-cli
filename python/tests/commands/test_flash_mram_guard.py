@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import os
 import struct
-from types import SimpleNamespace
 
 import pytest
 
@@ -107,67 +106,56 @@ def test_an_elf_that_cannot_be_read_is_refused_not_skipped(elf, why):
     assert "could not be parsed" in message and why in message
 
 
-# ── the real SoC lookup (no monkeypatching) ─────────────────────────────────
-
-
-def _metadata(tmp_path, *, preset="schema_version: 2\nsilicon: acme:fam:part\n",
-              soc='{"soc_flash_base": 2147483648}', write_preset=True, write_soc=True):
-    meta = tmp_path / "sdk" / "metadata"
-    (meta / "e1m_modules").mkdir(parents=True)
-    if write_preset:
-        (meta / "e1m_modules" / "S.yaml").write_text(preset, encoding="utf-8")
-    if write_soc:
-        (meta / "socs" / "acme" / "fam").mkdir(parents=True)
-        (meta / "socs" / "acme" / "fam" / "part.json").write_text(soc, encoding="utf-8")
-    return SimpleNamespace(sdk_root=str(tmp_path / "sdk"), sku="S")
-
-
-def test_soc_flash_base_is_read_from_the_soc_json_the_preset_names(tmp_path):
-    assert flash_mram_guard.soc_flash_base(_metadata(tmp_path)) == 0x80000000
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "step"),
-    [
-        ({"write_preset": False}, "SoM preset"),
-        ({"preset": "schema_version: 1\nsilicon: acme:fam:part\n"}, "schema_version"),
-        ({"write_soc": False}, "SoC JSON"),
-        ({"soc": "{}"}, "soc_flash_base"),
-    ],
-    ids=["preset-missing", "schema-unsupported", "soc-json-missing", "key-missing"],
-)
-def test_an_unresolved_base_names_the_step_that_failed(tmp_path, kwargs, step):
-    ctx = _metadata(tmp_path, **kwargs)
-    with pytest.raises(flash_mram_guard.ApertureUnresolved) as raised:
-        flash_mram_guard.soc_flash_base(ctx)
-    assert step in str(raised.value)
-
-
-def test_with_no_slot0_the_floor_is_the_soc_flash_base(tmp_path):
-    ctx = _metadata(tmp_path)
-    (tmp_path / "a.elf").write_bytes(make_elf(base=0x0))
-    message = flash_mram_guard.mram_link_guard(str(tmp_path / "a.elf"), "m55_he", ctx, slot0=None)
-    assert message is not None and "0x80000000" in message and "soc_flash_base" in message
-
-
-def test_with_no_slot0_and_no_metadata_the_guard_refuses_and_says_why(tmp_path):
-    ctx = _metadata(tmp_path, write_preset=False)
-    (tmp_path / "a.elf").write_bytes(make_elf(base=SLOT0))
-    message = flash_mram_guard.mram_link_guard(str(tmp_path / "a.elf"), "m55_he", ctx, slot0=None)
-    assert message is not None and "SoM preset" in message
-
-
 # ── the pairing ─────────────────────────────────────────────────────────────
+
+
+def _pair(tmp_path, *, elf_age_s):
+    """`a.elf` + `a.bin` where the ELF is `elf_age_s` older than the `.bin` (negative: newer)."""
+    elf, binary = tmp_path / "a.elf", tmp_path / "a.bin"
+    elf.write_bytes(make_elf(base=0x0))
+    binary.write_bytes(b"\x00" * 8)
+    now = 2_000_000_000
+    os.utime(binary, (now, now))
+    os.utime(elf, (now - elf_age_s, now - elf_age_s))
+    return str(binary)
 
 
 def test_find_elf_returns_the_bytes_of_the_artefact_or_its_same_stem_elf(tmp_path):
     (tmp_path / "a.elf").write_bytes(make_elf(base=SLOT0))
     (tmp_path / "a.bin").write_bytes(b"\x00" * 8)
-    assert flash_mram_guard.find_elf(str(tmp_path / "a.elf")) == make_elf(base=SLOT0)
-    assert flash_mram_guard.find_elf(str(tmp_path / "a.bin")) == make_elf(base=SLOT0)
+    assert flash_mram_guard.find_elf(str(tmp_path / "a.elf")) == (make_elf(base=SLOT0), False)
+    assert flash_mram_guard.find_elf(str(tmp_path / "a.bin"))[0] == make_elf(base=SLOT0)
     assert flash_mram_guard.find_elf(str(tmp_path / "missing.bin")) is None
     (tmp_path / "b.bin").write_bytes(b"\x00" * 8)
     assert flash_mram_guard.find_elf(str(tmp_path / "b.bin")) is None
+
+
+def test_an_elf_far_older_than_its_bin_is_refused_as_stale(tmp_path):
+    message = flash_mram_guard.mram_link_guard(
+        _pair(tmp_path, elf_age_s=3600), "m55_he", slot0=SLOT0
+    )
+    assert message is not None and "older than the .bin" in message
+    assert "a.elf" in message and "m55_he" in message
+
+
+@pytest.mark.parametrize("age", [-3600, 0, 5], ids=["newer", "same-time", "seconds-older"])
+def test_an_elf_newer_or_just_older_than_its_bin_is_trusted(tmp_path, age):
+    """A normal build links the ELF, then `objcopy`s the .bin seconds later."""
+    message = flash_mram_guard.mram_link_guard(
+        _pair(tmp_path, elf_age_s=age), "m55_he", slot0=SLOT0
+    )
+    assert message is not None and "older than the .bin" not in message
+    assert "lowest LOAD segment" in message  # judged on its load address, not its age
+
+
+def test_a_stale_elf_beside_the_bin_is_refused_on_flow_d(tmp_path, monkeypatch):
+    (tmp_path / "build").mkdir(exist_ok=True)
+    elf = tmp_path / "build" / "a.elf"
+    elf.write_bytes(make_elf(base=SLOT0, entry=SLOT0 | 1))
+    os.utime(elf, (1_000_000_000, 1_000_000_000))  # years before the .bin `_flow_d_run` writes
+    rc, _d, issues, _l, _s = _flow_d_run(tmp_path, monkeypatch)
+    assert rc == 1 and [i.code for i in issues] == [CODE]
+    assert "older than the .bin" in issues[0].message
 
 
 # ── the write path ──────────────────────────────────────────────────────────

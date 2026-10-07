@@ -2983,7 +2983,7 @@ def _flash_entry_body(
         # itself and supports images linked at the ITCM global alias.
         slot0 = slot0_address(flash_args)
         unlinked = (
-            mram_link_guard(artefact_path, entry_id, ctx, slot0=slot0) if slot0 is not None else None
+            mram_link_guard(artefact_path, entry_id, slot0=slot0) if slot0 is not None else None
         )
         if unlinked is not None:
             lines.append(_entry_head(kind, entry_id, method, target.flash_method))
