@@ -392,6 +392,50 @@ def _v1_shaped_project(project) -> dict[str, Any]:
     }
 
 
+def _render_dts_overlay(project, shaped, core: str | None) -> str:
+    """`--emit dts-overlay`, mirroring `alp_project._run_v2_per_core_emit`:
+    the board overlay, then the nodes board.yaml `ownership:` hands the M33."""
+    from tan.planner.models import OrchestratorError  # noqa: PLC0415
+    from tan.planner.ownership import project_m33_overlay  # noqa: PLC0415
+    from tan.planner.project_emit.dts import _emit_dts_overlay  # noqa: PLC0415
+
+    # The DTS overlay is shaped by the board header (bus aliases +
+    # alp,pin-array) which is a SoM-mounting fact, not a per-core fact.
+    # v2 contributes only the peripherals list: union across
+    # Zephyr/baremetal cores (or one core when --core is set).
+    if core is not None:
+        slice_ = project.cores[core]
+        out = _emit_dts_overlay(
+            shaped, project.som_preset, project.board_preset,
+            v2_peripherals=sorted(set(slice_.peripherals)),
+            v2_core_id=core,
+            v2_core_os=slice_.os,
+            v2_core_ids=[core],
+        )
+    else:
+        union: set[str] = set()
+        zephyr_core_ids: list[str] = []
+        for core_id, slice_ in project.cores.items():
+            if slice_.os in ("zephyr", "baremetal"):
+                union.update(slice_.peripherals)
+                zephyr_core_ids.append(core_id)
+        out = _emit_dts_overlay(
+            shaped, project.som_preset, project.board_preset,
+            v2_peripherals=sorted(union),
+            v2_core_ids=zephyr_core_ids,
+        )
+    # Per-product core ownership: enable the assignable nodes this project
+    # assigned to the M33 (the board tree carries them disabled).
+    try:
+        own_dts, _ = project_m33_overlay(project, core)
+    except OrchestratorError as err:
+        raise PlannerEmitError(str(err)) from err
+    if own_dts:
+        out += ("\n/* Assignable peripherals owned by the M33 "
+                "(board.yaml `ownership:`). */\n" + "\n".join(own_dts) + "\n")
+    return out
+
+
 def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
     """`dts-overlay` / `native-sim-overlay` / `hw-info-h` / `west-libraries`,
     mirroring `alp_project._run_v2_per_core_emit`'s project-wide section.
@@ -404,7 +448,6 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
             f"--core {core} not present in board.yaml "
             f"(known: {sorted(project.cores.keys())})")
 
-    from tan.planner.project_emit.dts import _emit_dts_overlay  # noqa: PLC0415
     from tan.planner.project_emit.hw_info import _emit_hw_info_h  # noqa: PLC0415
     from tan.planner.project_emit.native_sim import (  # noqa: PLC0415
         _emit_native_sim_overlay,
@@ -416,30 +459,7 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
     shaped = _v1_shaped_project(project)
 
     if mode == "dts-overlay":
-        # The DTS overlay is shaped by the board header (bus aliases +
-        # alp,pin-array) which is a SoM-mounting fact, not a per-core fact.
-        # v2 contributes only the peripherals list: union across
-        # Zephyr/baremetal cores (or one core when --core is set).
-        if core is not None:
-            slice_ = project.cores[core]
-            return _emit_dts_overlay(
-                shaped, project.som_preset, project.board_preset,
-                v2_peripherals=sorted(set(slice_.peripherals)),
-                v2_core_id=core,
-                v2_core_os=slice_.os,
-                v2_core_ids=[core],
-            )
-        union: set[str] = set()
-        zephyr_core_ids: list[str] = []
-        for core_id, slice_ in project.cores.items():
-            if slice_.os in ("zephyr", "baremetal"):
-                union.update(slice_.peripherals)
-                zephyr_core_ids.append(core_id)
-        return _emit_dts_overlay(
-            shaped, project.som_preset, project.board_preset,
-            v2_peripherals=sorted(union),
-            v2_core_ids=zephyr_core_ids,
-        )
+        return _render_dts_overlay(project, shaped, core)
 
     if mode == "native-sim-overlay":
         # native_sim GPIO emulation -- board-agnostic (the E1M pad map is a
