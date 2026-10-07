@@ -1812,6 +1812,14 @@
       "note": "Added by tan-cli#427: `--plan`/`--manifest`/`--manifest-from` are the v0.4.1 oracle's own flags, but this port implements a newer overlapping plan surface (`--plan-from`/`--materialise`/`--native`/`--execute`) and the maintainer's decision on the issue was to retire the oracle spellings rather than carry two -- \"Two overlapping plan surfaces is worse than one, so the oracle spellings go.\" Distinct from the retired `cli.command-deferred` (RUNTIME_FAILURE, exit 1, \"not built yet, an issue tracks its arrival\" -- moved `status: retired` in this registry by tan-cli#427 once `tan build` had nothing deferred left) on purpose: a retired flag never arrives, so it exits `VALIDATION_FAILURE` (2), this CLI's position for a permanently-invalid invocation (`build.conflicting-flags`'s own exit code). Constructed as the whole literal at a `_refuse` call site, same shape `build.conflicting-flags` above is registered for. Every message this code carries names the replacement flag directly (`_RETIRED_FLAGS` in `build_cmd.py`) rather than pointing at a tracker. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "build.invalid-argument",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "note": "Added by tan-cli#1359: `tan build --board <target>` (a plain Zephyr example with no board.yaml) refuses a `--board` value that is not a Zephyr board target, or a `-D` that is not a CMake definition, before anything runs; exits `VALIDATION_FAILURE` (2) like `build.conflicting-flags`. Constructed as the whole literal in `_refuse_plain_route` (a `_refuse` call site). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "build.materialise-failed",
       "status": "reserved",
       "severity": "error",
@@ -2054,10 +2062,10 @@
     {
       "code": "flash.device-config-mismatch",
       "status": "reserved",
-      "severity": "warning",
+      "severity": "info or warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/flash_cmd.py",
-      "note": "Added closing the tan-cli#1343 review (tan-cli#1322). EMISSION CONDITION: the device configuration that becomes the DEVICE ATOC entry (flash_args.setools_device_config, else the stock SETOOLS build/config/app-device-config.json) declares a metadata.device whose Alif family prefix (the first three characters, e.g. AE7 vs AE8) differs from the slice's flash_args.jlink_flash_device. The stock SETOOLS file names an Ensemble E7 part while the AEN801/803 boards are E8, so this fires for the stock file on those boards; it is a warning, not a refusal, because the stock file is the bench-proven default. The entry's setools.deviceConfig carries metadataDevice and the same warning text. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added closing the tan-cli#1343 review (tan-cli#1322). EMISSION CONDITION: the device configuration that becomes the DEVICE ATOC entry (flash_args.setools_device_config, else the stock SETOOLS build/config/app-device-config.json) declares a metadata.device whose Alif family prefix (the first three characters, e.g. AE7 vs AE8) differs from the slice's flash_args.jlink_flash_device. The stock SETOOLS file names an Ensemble E7 part while the AEN801/803 boards are E8, so this fires for the stock file on those boards; it is never a refusal -- `info` when the file is SETOOLS' own stock config (stale metadata on every default E8 run), `warning` when the project supplied it -- because the stock file is the bench-proven default. The entry's setools.deviceConfig carries metadataDevice and the same warning text. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "flash.write-sector-overlap",
@@ -2066,6 +2074,62 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/flash_cmd.py",
       "note": "Added closing the tan-cli#1343 review. EMISSION CONDITION: a Flow D (alif_mram_jlink) entry whose planned writes -- the app blob at flash_args.slot0_load_address and the ATOC at its address -- touch the same 16 KiB sector, or whose sectors cover a resident entry that the new ATOC does not rewrite (an entry listed in flash_args.resident_atoc_entries as NAME@0xADDR[+0xSIZE]). The MRAM loader rewrites whole sectors and fills the remainder with 0xFF, so the later write would erase the head of the earlier one. Refused before anything is written, under --dry-run too, from the sizes of the files that would be written. Deliberately DISTINCT from flash.entry-failed: every flash refusal shares rc 1 and status failed, so the code is the only channel that tells a consumer this one is answered by moving an address. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.setools-untrusted-source",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1344 (the trusted-tools PR). EMISSION CONDITION: a Flow D (alif_mram_jlink) entry that must run SETOOLS app-gen-toc to sign the slot0 ATOC but (a) on a CONFIRMED write, the SETOOLS install is named only by flash_args.setools_dir in the manifest -- not by --setools-dir or $SETOOLS_DIR -- or (b) flash_args.setools_device_config resolves (symlinks followed) outside both the operator-named SETOOLS install and the project directory, so an arbitrary file would be signed into MRAM. The manifest is controlled by the project checkout, so tan will not execute a binary it picked for a write to a board. Previews (--dry-run, unconfirmed) with a manifest-only install do not refuse; they skip the sign and report flash.preview-sign-skipped. Answered by naming the SETOOLS install with --setools-dir or SETOOLS_DIR, or by moving the device config into the project. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.ram-image-not-ram-linked",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1313. EMISSION CONDITION: `tan flash --ram` (AEN Flow C, a J-Link ITCM RAM-run that never writes MRAM) was asked to run an image that is not linked for RAM: its lowest nonzero-FileSiz LOAD segment is at or above the MRAM base 0x80000000 (loading it would just re-enter the ALREADY-RESIDENT MRAM image, and J-Link would not warn), or at a base that is not an ITCM/SRAM target (expected 0x0, the ITCM global alias 0x50000000/0x58000000, or SRAM 0x02xxxxxx -- a DTCM/data segment was picked, which would corrupt live RAM). Refused before any J-Link spawn, under --dry-run too. Answered by rebuilding with the Flow C ITCM retarget (alp-sdk scripts/bench/aen/aen-flowc-itcm.conf + aen-flowc-itcm.overlay) or by flashing it with Flow D. Deliberately DISTINCT from flash.ram-failed: this one is answered by a rebuild, not a retry. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.ram-console-symbol-missing",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1313. EMISSION CONDITION: `tan flash --ram --ram-console` on an ELF with no ram_console_buf symbol -- the build selected the UART console (the customer default since alp-sdk#389), so there is nothing to read over SWD. Deliberately a WARNING, not an error: an empty RAM console on a UART-console build is expected, the run itself succeeded, and ramConsole.selected in the envelope says \"uart\". Read the console where it is (`tan monitor`, UART5), or rebuild with CONFIG_RAM_CONSOLE (alp-sdk aen-bench-shared.conf) to read it over SWD. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.ram-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1313. EMISSION CONDITION: `tan flash --ram` (AEN Flow C RAM-run) could not complete: no or ambiguous slice selected (it RAM-runs exactly one slice, picked with --core), the ELF or its sibling zephyr.bin is unreadable, mismatched or not a little-endian ELF32, the vector table disagrees with the ELF entry point or carries a non-RAM SP, no trusted J-Link binary was found, the DPIDR preflight or probe guard refused, the load session did not reach 'Script processing completed.' or its loadbin did not report 'O.K.' or its setpc was rejected, or the --ram-console read came back incomplete. The image may or may not be running on the board after a read failure -- the message says which. A probe-selection refusal reports its own flash.probe-* code instead. Deliberately an error and distinct from flash.entry-failed (which is the Flow D / generic write failure). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.ram-core-unsupported",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing the tan-cli#1349 review (tan-cli#1313). EMISSION CONDITION: `tan flash --ram` was asked to RAM-run a slice that is not the Cortex-M55 HE core (core_id other than m55_he). The HE recipe is what the bench has proven; the HP core's debug access port selection (AP 0x00200000 vs the HE's 0x00300000 on evk-01) is not proven through tan, and loading the HE recipe into the wrong core is not recoverable by a retry. Refused before any J-Link spawn, under --dry-run too. Use the raw alp-sdk helper for the HP core until HP AP selection is bench-proven. Deliberately DISTINCT from flash.ram-failed: no retry or rebuild answers it. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.ram-core-mismatch",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing the tan-cli#1349 review (tan-cli#1313). EMISSION CONDITION: `tan flash --ram` on the HE slice with an image linked for the OTHER core's ITCM global alias (the HP alias 0x50000000 on an m55_he slice): it would run on whichever core the probe happens to be attached to. Refused before any J-Link spawn, under --dry-run too. Answered by rebuilding the image for the HE core (ITCM at 0x0 locally or 0x58000000 globally). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.ram-core-unconfirmed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1354 (a follow-up from the tan-cli#1313 review). EMISSION CONDITION: `tan flash --ram` could not confirm that the probe's generic Cortex-M55 attach landed on the M55-HE core. Before loading, tan reads 4 words at the local ITCM 0x0 and at both cores' global ITCM windows (HE 0x58000000, HP 0x50000000 -- alp-sdk metadata/socs/alif/ensemble/e8.json itcm_global_base, docs/aen-bench-bringup.md:20) with three read-only mem32 commands (no halt, no write); a core's local ITCM is its own global window, so the local view must equal EXACTLY one. This code fires when it equals both (an erased or identical ITCM proves nothing), neither, or the local read is unreadable; the verdict and the words read are in data.entries[].ram.coreCheck. A confirmed HP attach is flash.ram-core-mismatch instead. Refused before the load, so nothing was written and no core was reset. Answered by selecting the HE core's debug port, or -- AT THE OPERATOR'S OWN RISK -- by --assume-he, which overrides only this unconfirmed case and never a confirmed HP. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "generate.board-sku-unresolved",
@@ -2554,6 +2618,102 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/model_cmd.py",
       "note": "tan-cli#1286: an argument the subcommand does not take: an ID positional for anything but `add`, or `--sku` with `add`. VALIDATION_FAILURE. Constructed as a `ModelError` call site in `model_cmd.py` (`_refuse_stray_arguments`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.model-extra-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: `prep`/`run`/`ab` need the optional `model` extra (numpy, onnxruntime, onnx, sympy) and one of them is not importable; the message names `pip install \"tan-cli[model]\"`. RUNTIME_FAILURE, mirroring `monitor.pyserial-missing`. The extra is not in the frozen release assets. A plain `Issue(\"model.model-extra-missing\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.model-format-unsupported",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: the host-tier verb was given a model that is not `.onnx` (a `.tflite` gets a note that conversion is not available yet). VALIDATION_FAILURE. A plain `Issue(\"model.model-format-unsupported\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.model-source-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: no model file argument, or the named file does not exist. VALIDATION_FAILURE. A plain `Issue(\"model.model-source-missing\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.prep-calibration-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: `model prep` has no `--calibration`, or the directory has no `.npy` samples, too few (`--min-samples`), or a sample whose shape does not match the model input. VALIDATION_FAILURE. A plain `Issue(\"model.prep-calibration-invalid\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.prep-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: onnxruntime quantization or the fp32-vs-int8 accuracy run failed (`tan.model.prep.PrepError`). RUNTIME_FAILURE. A plain `Issue(\"model.prep-failed\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.prep-accuracy-degraded",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: the INT8 model's top-1 agreement with fp32 on the calibration set is below the 95% threshold; the output is written and the guidance (try --per-channel, more representative samples) is the message. A warning, exit 0. A plain `Issue(\"model.prep-accuracy-degraded\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.run-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: `model run`/`ab` could not load or run a model on the host (`tan.model.measure.MeasureError`, an unreadable or mis-shaped `--input`). RUNTIME_FAILURE. A plain `Issue(\"model.run-failed\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.prep-output-exists",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: `model prep` found `<out>/<stem>.int8.onnx` already present (or a concurrent run published it first) and refused to overwrite it; remove it or choose `--out`. VALIDATION_FAILURE. A plain `Issue(\"model.prep-output-exists\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.device-flow-unavailable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1287: `model run --device` / `ab --device` without `--capture`: this build has no live deploy-and-capture path (`tan flash --ram` + monitor capture, tan-cli#1313), so it refuses rather than pretending. VALIDATION_FAILURE. A plain `Issue(\"model.device-flow-unavailable\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.device-capture-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1287: the `--capture` / `--against-capture` file cannot be read. VALIDATION_FAILURE. A plain `Issue(\"model.device-capture-missing\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.device-capture-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1287: the console capture is malformed or unusable: no `ENERGY-CFG` header, no samples, a window with fewer than 2 samples, an older 5-field `ENERGY-W` firmware, an `ENERGY-WPART` partial window, or no active window that completed an inference. Nothing is reported rather than a plausible number. VALIDATION_FAILURE. A plain `Issue(\"model.device-capture-invalid\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.device-capture-degraded",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1287: the capture parsed but carries `ENERGY-WERR`/`ENERGY-WARN` lines or `npu_dispatched=false`; the result is returned and the evidence is the message. A warning, exit 0. A plain `Issue(\"model.device-capture-degraded\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "monitor.launch-failed",

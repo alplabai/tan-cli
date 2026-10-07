@@ -490,7 +490,9 @@ def _sdk_variant_debug_block(
     simply absent, rather than the silent `[]` that used to be.
     """
     metadata_root = os.path.join(sdk_root, "metadata")
-    walked = read_sdk_som_and_soc(metadata_root, sku, warnings=warnings, skipped=skipped)
+    walked = read_sdk_som_and_soc(
+        metadata_root, sku, warnings=warnings, skipped=skipped, explain_unsupported=True
+    )
     if walked is None:
         return None
     _silicon, silicon_variant, variants, _soc_flash_mb, _soc_cores = walked
@@ -556,7 +558,8 @@ def _sdk_published_cores(
     if sku is None:
         return frozenset()
     walked = read_sdk_som_and_soc(
-        os.path.join(sdk_root, "metadata"), sku, warnings=warnings, skipped=skipped
+        os.path.join(sdk_root, "metadata"), sku, warnings=warnings, skipped=skipped,
+        explain_unsupported=True,
     )
     if walked is None:
         return frozenset()

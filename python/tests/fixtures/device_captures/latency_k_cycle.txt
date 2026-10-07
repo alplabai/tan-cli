@@ -1,0 +1,26 @@
+*** Booting Zephyr OS build v4.4.1 ***
+
+=== aen-inference-latency ===
+model      : tiny_int8_fixture (1568 bytes)
+clock      : 160000000 Hz, spans from k_cycle_get_32 (SysTick), detail from DWT CYCCNT (present)
+npu ready  : 1 (Ethos-U85 @0x49042000)
+inference  : warm-up OK (input 4 B, output 2 B)
+ENERGY-CFG {"mode":"latency-only","cycles_per_s":160000000,"npu_dispatched":true,"model":"tiny_int8_fixture","model_bytes":1568,"arena_used_bytes":580,"arena_bytes":262144,"sram_peak_bytes":2148,"windows":5,"inferences_per_window":20,"timestamp_source":"k-cycle-get-32","detail_source":"dwt-cyccnt"}
+LATENCY-WARN window 0: DWT detail dropped (an inference read 0 DWT cycles)
+DWT-DIAG w=0 stalled=1 rearm_advanced=1 first[demcr=00100000 dwt_ctrl=80000001 cyccnt=002eb2de dhcsr=05110000 dauth=00ff00ff dscsr=00000000] end[demcr=01100000 dwt_ctrl=80000001 cyccnt=0079e129 dhcsr=01110000 dauth=00ff00ff dscsr=00000000]
+LATENCY-WSTAT 0 n=1499 mean=5275 cyccnt_stalled=1
+ENERGY-W 0 active 0 7908487 50 1499
+DWT-DIAG w=1 stalled=0 end[demcr=01100000 dwt_ctrl=80000001 cyccnt=00f3f2d4 dhcsr=01110000 dauth=00ff00ff dscsr=00000000]
+LATENCY-WSTAT 1 n=1508 min=5052 max=5053 mean=5284 cyccnt_stalled=0
+ENERGY-W 1 active 0 7968606 50 1508
+DWT-DIAG w=2 stalled=0 end[demcr=01100000 dwt_ctrl=80000001 cyccnt=016e093c dhcsr=01110000 dauth=00ff00ff dscsr=00000000]
+LATENCY-WSTAT 2 n=1498 min=5052 max=6049 mean=5284 cyccnt_stalled=0
+ENERGY-W 2 active 0 7916655 50 1498
+DWT-DIAG w=3 stalled=0 end[demcr=01100000 dwt_ctrl=80000001 cyccnt=01e807ac dhcsr=01110000 dauth=00ff00ff dscsr=00000000]
+LATENCY-WSTAT 3 n=1497 min=5052 max=5053 mean=5284 cyccnt_stalled=0
+ENERGY-W 3 active 0 7910481 50 1497
+DWT-DIAG w=4 stalled=0 end[demcr=01100000 dwt_ctrl=80000001 cyccnt=0262263c dhcsr=01110000 dauth=00ff00ff dscsr=00000000]
+LATENCY-WSTAT 4 n=1498 min=5052 max=5796 mean=5286 cyccnt_stalled=0
+ENERGY-W 4 active 0 7918646 50 1498
+LATENCY-RESULT {"cycles_per_inference":5283,"ms_per_inference":0.033019,"inferences":7500,"good_windows":5,"windows":5,"arena_used_bytes":580}
+RESULT PASS: 5283 cycles/inference (0.033019 ms) n=7500 windows=5/5 arena_used=580 B WARN: DWT CYCCNT detail dropped (see LATENCY-WARN/DWT-DIAG)
