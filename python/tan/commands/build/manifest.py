@@ -156,6 +156,14 @@ def write_post_build_manifest(
         discovered = resolve_sdk_root_ladder(None, Path(effective_board_yaml).parent).path
         effective_sdk_root = str(discovered) if discovered else None
 
+    if effective_sdk_root is not None and not effective_board_yaml and plain_route is None:
+        # A build with no board.yaml has nothing to project the manifest from
+        # (the plain `tan build --board` route has its own writer, below).
+        return PostBuildManifest(
+            write_failed_reason="the plan has no board.yaml to project it from",
+            native_sim_target=None,
+        )
+
     if effective_sdk_root is None or (not effective_board_yaml and plain_route is None):
         return PostBuildManifest(
             write_failed_reason=(

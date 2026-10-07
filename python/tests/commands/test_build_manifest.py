@@ -347,6 +347,15 @@ def test_write_post_build_manifest_reports_reason_when_board_yaml_missing(tmp_pa
     assert outcome.native_sim_target is None
 
 
+def test_write_post_build_manifest_names_the_missing_board_yaml_when_sdk_resolved(tmp_path):
+    outcome = write_post_build_manifest(
+        sdk_root=str(tmp_path / "sdk"), board_yaml=None, base=str(tmp_path),
+        plan_build_root="build", results=[],
+    )
+    assert outcome.write_failed_reason == "the plan has no board.yaml to project it from"
+    assert outcome.native_sim_target is None
+
+
 @pytest.mark.skipif(
     SDK is None,
     reason="set ALP_SDK_ROOT to an alp-sdk checkout for the real emit+write path",
