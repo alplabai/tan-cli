@@ -574,3 +574,22 @@ def test_a_symlinked_log_directory_is_refused(tmp_path):
     with _pytest.raises(OSError):
         _write_transcript(str(tmp_path / "flash-logs" / "alif_mram_jlink-c-x.log"), "t")
     assert list(elsewhere.iterdir()) == []
+
+
+def test_rotation_only_touches_the_same_cores_logs(tmp_path):
+    """tan-cli#1344 review: core `m55` must not rotate `m55-hp`'s transcripts."""
+    import time as _time
+
+    from tan.commands.flash_cmd import _flow_d_log_path, _write_transcript
+
+    for i in range(12):
+        _write_transcript(
+            _flow_d_log_path(str(tmp_path), "m55-hp", _time.gmtime(1_800_000_000 + i)), "hp"
+        )
+    for i in range(12):
+        _write_transcript(
+            _flow_d_log_path(str(tmp_path), "m55", _time.gmtime(1_800_000_100 + i)), "he"
+        )
+    names = [p.name for p in (tmp_path / "flash-logs").iterdir()]
+    assert sum(n.startswith("alif_mram_jlink-m55-hp-") for n in names) == 10
+    assert sum(n.startswith("alif_mram_jlink-m55-2") for n in names) == 10

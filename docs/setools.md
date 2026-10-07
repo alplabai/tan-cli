@@ -135,6 +135,15 @@ still rewrites the sector `0x8057C000`-`0x80580000`. For an ATOC tan signs, the
 placement and entry list come from `app-gen-toc` run in the scratch overlay, so
 they are what a real run will write; a dry run still never spawns the J-Link tool.
 
+### Interrupted runs and Windows
+
+The scratch tree is removed when the entry ends, including on an interrupt (it is
+registered before `app-gen-toc` starts). `SIGKILL` cannot run cleanup, so a killed
+`tan flash` leaves a `tan-setools-*` directory in the system temp directory; delete
+it by hand. On POSIX the signing keys inside it are a symlink into your install; on
+Windows without symlink privilege tan falls back to COPYING them, so there the
+leftover holds a copy of the keys -- remove it.
+
 ## What a Flow D write reports, and what it proves (tan-cli#1321)
 
 `verifybin` compares the image against J-Link's flash **cache**, not the chip, so
