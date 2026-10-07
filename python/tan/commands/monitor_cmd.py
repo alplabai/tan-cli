@@ -69,11 +69,14 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
+from enum import Enum
 from pathlib import Path
 
 import typer
 
 from tan.core.sdk_discovery import _planner_python
+from tan.core import console_filter as console_filter_mod
 from tan.core.subprocess_env import spawn_env
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -84,6 +87,20 @@ DEFAULT_BAUD = 115200
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
+
+
+class ConsoleFilter(str, Enum):
+    """Console output filters. `colors` (tan's own, default) keeps SGR colour
+    sequences and neutralises every other escape/control byte; `default`,
+    `nocontrol`, `printable` are miniterm's own stripping filters. `direct`
+    passes the device's bytes to the terminal unmodified and is UNSAFE for an
+    untrusted target (OSC 52 clipboard writes, title changes, screen games)."""
+
+    COLORS = "colors"
+    DIRECT = "direct"
+    DEFAULT = "default"
+    NOCONTROL = "nocontrol"
+    PRINTABLE = "printable"
 
 
 class MonitorError(Exception):
@@ -325,8 +342,47 @@ def _child_stdout(json_mode: bool):
     return subprocess.DEVNULL
 
 
+def _spawn_console(python: str, port: str, baud: int, console_filter: str, json_mode: bool) -> int:
+    """Run the plain console child (`python -c <bootstrap>`), returning its exit code."""
+    try:
+        # Empty cwd: `-c` puts the cwd on sys.path, so a `serial/` planted in the
+        # project dir would be imported instead of pyserial (tan-cli#1317). It
+        # also neutralises empty/relative PYTHONPATH entries (they resolve
+        # against this empty directory).
+        with tempfile.TemporaryDirectory(prefix="tan-monitor-") as empty:
+            return subprocess.run(
+                [
+                    python,
+                    "-c",
+                    console_filter_mod.BOOTSTRAP,
+                    "--filter",
+                    console_filter,
+                    # The spawn runs from an empty cwd, so a relative device path
+                    # must be made absolute first.
+                    os.path.abspath(port) if os.path.exists(port) else port,
+                    str(baud),
+                ],
+                stdout=_child_stdout(json_mode),
+                env=spawn_env(),
+                cwd=empty,
+            ).returncode
+    except OSError as err:
+        raise MonitorError(
+            "monitor.launch-failed",
+            f"failed to launch `{python} -c <miniterm bootstrap>`: {err}",
+            ExitCode.RUNTIME_FAILURE,
+            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
+        ) from err
+
+
 def _run_monitor(
-    port: str | None, baud: int, json_mode: bool
+    port: str | None,
+    baud: int,
+    json_mode: bool,
+    break_opts: tuple[bytes, bytes, float] | None = None,
+    non_interactive: bool = False,
+    console_filter: str = "colors",
+    capture_opts: tuple | None = None,
 ) -> tuple[dict, list[Issue], ExitCode]:
     # Frozen (PyInstaller) or an embedded interpreter with no reportable
     # `sys.executable`: fall back to a PATH name, mirroring
@@ -360,20 +416,20 @@ def _run_monitor(
     if not _port_is_usable(port, {device for device, _ in _available_ports()}):
         raise _refuse_listing_ports(f"port '{port}' not found")
 
+    if capture_opts is not None:
+        from tan.commands import monitor_session  # noqa: PLC0415 (only on --capture)
+
+        return monitor_session.run_capture(port, baud, capture_opts, break_opts)
+
+    if break_opts is not None:
+        from tan.commands import monitor_session  # noqa: PLC0415 (only on --break-uboot)
+
+        return monitor_session.run(
+            port, baud, json_mode, break_opts, non_interactive, console_filter
+        )
+
     print(f"monitor: {port} @ {baud} (Ctrl+] to quit)", file=sys.stderr)
-    try:
-        rc = subprocess.run(
-            [python, "-m", "serial.tools.miniterm", port, str(baud)],
-            stdout=_child_stdout(json_mode),
-            env=spawn_env(),
-        ).returncode
-    except OSError as err:
-        raise MonitorError(
-            "monitor.launch-failed",
-            f"failed to launch `{python} -m serial.tools.miniterm`: {err}",
-            ExitCode.RUNTIME_FAILURE,
-            {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud},
-        ) from err
+    rc = _spawn_console(python, port, baud, console_filter, json_mode)
 
     data = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud}
     if rc != 0:
@@ -400,6 +456,60 @@ def monitor(
     baud: int = typer.Option(
         DEFAULT_BAUD, "--baud", show_default=True, help="Baud rate."
     ),
+    break_uboot: bool = typer.Option(
+        False,
+        "--break-uboot",
+        help="After opening the port, send the autoboot interrupt key repeatedly "
+        "until the U-Boot prompt appears or --break-timeout passes, then continue "
+        "in the interactive console on the same open port. With --non-interactive "
+        "it stops after the break-in instead (exit 0 if caught); the console "
+        "itself needs a terminal. --non-interactive is a shared flag (see "
+        "its own help line). Power-cycle the board yourself; works over "
+        "rfc2217:// and socket:// URLs (note: socket:// to a telnet/RFC2217 "
+        "ser2net port delivers the IAC negotiation bytes as data; use rfc2217://).",
+    ),
+    break_key: str = typer.Option(
+        None,
+        "--break-key",
+        help="With --break-uboot: key that interrupts autoboot (default: a space; "
+        "escapes \\xNN \\r \\n \\t \\\\ allowed).",
+    ),
+    prompt: str = typer.Option(
+        None, "--prompt", help="With --break-uboot: prompt that ends it (default: '=> ')."
+    ),
+    break_timeout: float = typer.Option(
+        None,
+        "--break-timeout",
+        help="With --break-uboot: seconds to keep sending the key (default: 30).",
+    ),
+    capture: bool = typer.Option(
+        False,
+        "--capture",
+        help="Headless capture instead of an interactive console: no TTY needed, "
+        "works over pyserial URLs, stores raw bytes. Needs --duration and/or "
+        "--until; combine with --break-uboot to break in first. Never prompts "
+        "(--non-interactive is accepted and has no further effect).",
+    ),
+    duration: float = typer.Option(
+        None, "--duration", help="With --capture: seconds to read (default 30 with --until)."
+    ),
+    until: str = typer.Option(
+        None,
+        "--until",
+        help="With --capture: stop at the first line (or unterminated partial line, "
+        "e.g. a prompt) matching this regex; the envelope carries it. Each line "
+        "is searched on its first 4 KiB, a partial line on its last 4 KiB. A "
+        "regex cannot be interrupted inside one search. No match in time is an error.",
+    ),
+    log: str = typer.Option(None, "--log", help="With --capture: write the raw bytes to this file."),
+    console_filter: ConsoleFilter = typer.Option(
+        None,
+        "--filter",
+        help="Console output filter (default: colors): colors (colours render, every other escape "
+        "is neutralised), default/nocontrol/printable (strip control codes), "
+        "direct (raw bytes to the terminal: unsafe for untrusted targets). "
+        "colors cannot stop same-colour (invisible) text or \\b/\\r overdrawing.",
+    ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     project: str = typer.Option(None, "--project", hidden=True),
     board_yaml: str = typer.Option(None, "--board-yaml", hidden=True),
@@ -409,7 +519,9 @@ def monitor(
     verbose: bool = typer.Option(False, "--verbose", hidden=True),
     quiet: bool = typer.Option(False, "--quiet", hidden=True),
     no_color: bool = typer.Option(False, "--no-color", hidden=True),
-    non_interactive: bool = typer.Option(False, "--non-interactive", hidden=True),
+    non_interactive: bool = typer.Option(
+        False, "--non-interactive", help="With --break-uboot: stop after the break-in."
+    ),
     ci: bool = typer.Option(False, "--ci", hidden=True),
 ) -> None:
     """Open a serial console to the board."""
@@ -428,7 +540,7 @@ def monitor(
     # from `--help` because they do nothing. Same port-wide gap as
     # `clean_cmd.clean`/`new_som_cmd.new_som`.
     del project, board_yaml, sdk_root, target, all_targets
-    del verbose, quiet, no_color, non_interactive, ci
+    del verbose, quiet, no_color, ci
     json_mode = output_format == "json"
 
     def finish(data: dict, issues: list[Issue], exit_code: ExitCode) -> None:
@@ -444,7 +556,16 @@ def monitor(
         raise typer.Exit(int(exit_code))
 
     try:
-        data, issues, exit_code = _run_monitor(port, baud, json_mode)
+        from tan.commands import monitor_session  # noqa: PLC0415 (validation only)
+
+        opts = monitor_session.break_opts(break_uboot, break_key, prompt, break_timeout)
+        cap = monitor_session.capture_opts(
+            capture, duration, until, log, console_filter is not None
+        )
+        data, issues, exit_code = _run_monitor(
+            port, baud, json_mode, opts, non_interactive,
+            console_filter.value if console_filter else "colors", cap
+        )
     except MonitorError as err:
         finish(err.data, [Issue(err.code, "error", err.message)], err.exit_code)
         return

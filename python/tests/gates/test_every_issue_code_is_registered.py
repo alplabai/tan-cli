@@ -383,6 +383,7 @@ def _module_string_constants(tree: ast.Module) -> dict[str, str]:
 _FULL_CODE_CALLABLES: dict[tuple[str, str], int] = {
     ("tan/core/build_plan.py", "PlanParseError"): 0,
     ("tan/commands/monitor_cmd.py", "MonitorError"): 0,
+    ("tan/commands/monitor_session.py", "MonitorError"): 0,
     ("tan/commands/explain_cmd.py", "ExplainError"): 0,
     ("tan/commands/generate_cmd.py", "GenerateError"): 0,
     ("tan/commands/build/token_substitution.py", "TokenSubstitutionError"): 0,
@@ -1005,6 +1006,7 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # and no registry entry is added: one more call site, no new code --
         # exactly the shape the `63 as of tan-cli#727` bump above describes.
         #
+        # 75 as of tan-cli#1317: `host_python_check` adds the `hostPython` warn `Check(...)`.
         # 74 as of tan-cli#1192: `devicetree_lint_check` is THREE `Check(...)`
         # sites (lint runs; a `dtc` Zephyr's own `find_package(Dtc 1.4.6)`
         # rejects; no `dtc` in CMake's reach at all), all literally named
@@ -1020,7 +1022,7 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=74,
+        expected_calls=75,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(

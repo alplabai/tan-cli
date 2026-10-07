@@ -93,7 +93,7 @@ import queue
 import shutil
 import subprocess
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -133,7 +133,7 @@ from tan.core.tool_lookup import ToolResolution, resolve_tool
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
 from tan.core.zephyr_env import zephyr_env_overrides
 from tan.envelope import Issue
-from tan.commands.build.link_stale import stale_itcm_overlay_reset
+from tan.commands.build.link_stale import insert_after_separator, stale_itcm_overlay_reset
 
 if os.name != "nt":
     import signal
@@ -1116,6 +1116,7 @@ def execute_slices(
     sdk_root_for_stamp: str | None = None,
     held_outcomes: Sequence[SliceOutcome] = (),
     force_pristine: bool = False,
+    slice_refusals: Mapping[str, str] | None = None,
 ) -> list[SliceOutcome]:
     """Dispatch every slice of `plan` and return one [`SliceOutcome`] per
     slice, in plan order.
@@ -1138,6 +1139,9 @@ def execute_slices(
     sdk switch` already pinned for the identical checkout (tan-cli#163),
     but must NOT change what `${SDK_ROOT}` substitutes to or what the
     manifest emit resolves.
+
+    `slice_refusals` -- `core_id -> message` for slices that must FAIL once
+    they are otherwise about to run (tan-cli#1317); see the use site.
 
     `held_outcomes` -- outcomes for slices the CALLER already decided not to
     dispatch (`tan.commands.build_cmd._dispatch` holds back a
@@ -1380,6 +1384,15 @@ def execute_slices(
             )
             continue
         resolved_tool = resolution.resolved
+        # tan-cli#1317: a per-slice refusal the CALLER decided (no usable host
+        # Python for a `${PYTHON}` slice), applied only HERE -- after the
+        # `null_command` and `missing_tool` skips above, so a slice that would
+        # never have run is still skipped per `executionPolicy` -- and before
+        # the destructive pristine wipe below.
+        refusal = (slice_refusals or {}).get(sl.core_id)
+        if refusal is not None:
+            outcomes.append(SliceOutcome(sl.core_id, "failed", None, refusal))
+            continue
         # MAJOR 1 of the tan-cli#510 review: `None` (never surfaced) whenever
         # resolution landed on the exact string the plan already named --
         # see [`SliceOutcome.resolved_tool`]'s own docstring.
@@ -1416,10 +1429,10 @@ def execute_slices(
         )
         configure_cache_issues.extend(new_configure_cache_issues)
         # tan-cli#1350: `link: itcm` -> `auto` must not keep the ITCM overlay.
+        stale_overlay_args: list[str] = []
         if sl.backend == "zephyr":
             stale_overlay_args, stale_overlay_issues = stale_itcm_overlay_reset(
                 cwd, sl.command.args)
-            configure_cache_reset_args = configure_cache_reset_args + stale_overlay_args
             configure_cache_issues.extend(stale_overlay_issues)
 
         if is_west and workspace_dir is not None and "ZEPHYR_BASE" not in slice_env:
@@ -1487,6 +1500,10 @@ def execute_slices(
         # why an `-U`/`-D` pair on the same key is order-sensitive and why
         # `EXTRA_CONF_FILE` itself is deliberately excluded from the reset.
         spawn_args = spawn_args + configure_cache_reset_args
+        # tan-cli#1350: the stale-ITCM `-U` goes right after `--`, BEFORE every
+        # `-D`, so a later `-DEXTRA_DTC_OVERLAY_FILE` (the plan's own, or a
+        # user's) is applied after the unset and can never be erased by it.
+        spawn_args = insert_after_separator(spawn_args, stale_overlay_args)
 
         # tan-cli#336: watch the slice's own stdout for west's literal
         # "could not find a workspace" message so a failure carrying it can

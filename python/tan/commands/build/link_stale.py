@@ -61,3 +61,18 @@ def stale_itcm_overlay_reset(cwd: Path, args: list[str]) -> tuple[list[str], lis
         + " -- unsetting EXTRA_DTC_OVERLAY_FILE so it links for MRAM again"
     )
     return ["-UEXTRA_DTC_OVERLAY_FILE"], [Issue("build.configure-cache-reset", "info", note)]
+
+
+def insert_after_separator(args: list[str], extra: list[str]) -> list[str]:
+    """`args` with `extra` placed immediately after the first `--` (before any
+    `-D`), or appended when there is no `--`. A `-U` placed before a `-D` of the
+    same cache key is applied first, so the later `-D` always survives."""
+    if not extra:
+        return list(args)
+    out = list(args)
+    try:
+        at = out.index("--") + 1
+    except ValueError:
+        at = len(out)
+    out[at:at] = extra
+    return out

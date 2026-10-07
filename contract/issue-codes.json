@@ -1049,7 +1049,7 @@
       "severity": "info or warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/build/token_substitution.py",
-      "note": "tan-cli#1302: a `${NAME}` the user's board.yaml writes on purpose (e.g. `ota.server.tenant: \"${MENDER_TENANT_TOKEN}\"`) was copied verbatim into a `configArtefacts[*].contents` value and is left untouched in the materialised file. One per placeholder name. `info` when the build host or the device supplies it (a Yocto `local.conf` line, or a commented Kconfig line); `warning` when it sits on a live line of a Kconfig fragment, because Kconfig does not expand `${NAME}` and the firmware would carry the literal text. Exempt only in `.conf` config-artefact contents (never a `.cmake` file, which CMake would expand), only for a name that is not a plan path token, and only when the plan's `deferredPlaceholders` (alp-sdk#2696) lists it -- or, while the plan carries no such key, when a string VALUE of the project's own board.yaml equals `${NAME}` exactly. Everything else keeps `build.plan-token-unresolved`. Pre-consumer: nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
+      "note": "tan-cli#1302: a `${NAME}` the user's board.yaml writes on purpose (e.g. `ota.server.tenant: \"${MENDER_TENANT_TOKEN}\"`) was copied verbatim into a `configArtefacts[*].contents` value and is left untouched in the materialised file. One per placeholder name. `info` when the build host or the device supplies it (a Yocto `local.conf` line, or a commented Kconfig line); `warning` when it sits on a live line of a Kconfig fragment, because Kconfig does not expand `${NAME}` and the firmware would carry the literal text. Exempt only in `.conf` config-artefact contents (never a `.cmake` file, which CMake would expand), only for a name that is not a plan path token, and only when the plan's `deferredPlaceholders` (alp-sdk#2696) lists it; a plan carrying no such key exempts nothing (tan-cli#1309 retired the interim board.yaml whole-value rule once the planner always emits the key). Everything else keeps `build.plan-token-unresolved`. Pre-consumer: nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
     },
     {
       "code": "clean.internal-failure",
@@ -1362,6 +1362,78 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/model_cmd.py",
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "monitor.break-bad-option",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --break-uboot` was given an unusable `--break-timeout` (not > 0), an empty `--prompt`/`--break-key`, or a malformed escape in either. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.break-io-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --break-uboot` hit a serial I/O error (including pyserial's write timeout on a stalled rfc2217:// or socket:// endpoint) while sending the key or reading the console. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.break-open-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --break-uboot` could not open the port in-process (pyserial `serial_for_url` raised), e.g. a refused rfc2217:// or socket:// endpoint. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.break-timeout",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --break-uboot` sent the interrupt key until `--break-timeout` expired without seeing `--prompt`; `data.breakIn.caught` is false and no interactive session is started. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-bad-option",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture` was given an unusable option: neither --duration nor --until, --duration <= 0, an empty or invalid --until regex, or --duration/--until/--log without --capture. Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-io-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture` hit a serial I/O error while reading the port. Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-log-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture --log` could not create the log file (exit 3). Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-open-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture` could not open the port in-process (pyserial `serial_for_url` raised). Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-timeout",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture --until` read for the whole duration without any line matching the regex; `data.capture.matched` is false. Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
     },
     {
       "code": "monitor.failed",
@@ -1794,6 +1866,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/build/token_substitution.py",
       "note": "Constructed as the whole literal at a `TokenSubstitutionError` call site in `token_substitution.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.host-python-unsuitable",
+      "status": "reserved",
+      "severity": "error or warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "note": "tan-cli#1317: no host Python on PATH is both at or above the effective Python floor (the same one `tan doctor` computes, `tan.core.python_floor`) and able to import `west`, and no workspace venv exists, so `tan build` will not bake a bare `-DPython3_EXECUTABLE=python3` that lets CMake pick a shadowing older interpreter (or a venv python without west). `error`: a PER-SLICE failure on the native dispatch, for a `${PYTHON}` slice that would otherwise run -- applied after executionPolicy`s null-command/missing-tool skips, so a slice skipped for a missing `west` stays skipped. `warning`: `--materialise` (CMake never runs) -- the bare fallback stays. The message names every candidate interpreter and why it failed (too old / no `west` module). Resolved by `tan.core.host_python`, shared with doctor's `hostPython` (which warns, same id, in the same situation). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "build.plan-unavailable",
@@ -2300,6 +2380,118 @@
       "note": "tan-cli#674 review MAJOR 1: `model list`'s per-model staleness check (`_artifact_status`) could not read back what it needed to compare a package's recorded `src_sha` against its CURRENT `source` file -- a `board.yaml` naming a `source` that no longer resolves, or a corrupt/truncated `.alpmodel` container, both raise here. The row still degrades to the bare `exists: True` shape (staleness is a bonus fact about a build that DID succeed, not a reason to hide that the package exists), but the degrade used to be entirely silent: `ok: true`, `issues: []`, no `stale` key, indistinguishable from a package `list` successfully confirmed is fresh. A plain `Issue(\"model.artifact-stale-unknown\", ...)` construction in `_artifact_status`, mirroring `model.caveat-readback-failed`'s own readback-failure shape above. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.zoo-unavailable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: the bound alp-sdk has no `metadata/model_zoo/` directory (an SDK older than alp-sdk commit 7018515f9 / alp-sdk#2542). `model zoo` and `model add` refuse with VALIDATION_FAILURE and name that minimum commit. A plain `Issue(\"model.zoo-unavailable\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.zoo-entry-invalid",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: one `metadata/model_zoo/<id>.yaml` failed tan's consumer-side shape check (bad id/file-name join, unsupported schema_version, malformed `source` or `validated_soms`, a source file type that is not .tflite/.onnx/.pte). The entry is skipped, the rest of the zoo is still served. A plain `Issue(\"model.zoo-entry-invalid\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.zoo-entry-not-found",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `model add <id>` named an id no valid zoo entry carries; the message lists the available ids. VALIDATION_FAILURE. A plain `Issue(\"model.zoo-entry-not-found\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.zoo-fetch-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `model add` could not obtain the model: an https download failed, exceeded the size cap, did not hash to the manifest's sha256, or a bundled starter was missing/outside `starters/`. Nothing is written. RUNTIME_FAILURE. A plain `Issue(\"model.zoo-fetch-failed\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.add-id-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `model add` was run without a zoo entry id. VALIDATION_FAILURE. A plain `Issue(\"model.add-id-missing\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.add-name-exists",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `board.yaml` already declares a model with the zoo entry's id as its `name`; `add` never duplicates or overwrites. VALIDATION_FAILURE. A plain `Issue(\"model.add-name-exists\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.add-destination-exists",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `models/<id><ext>` beside `board.yaml` already exists; `add` never overwrites it. VALIDATION_FAILURE. A plain `Issue(\"model.add-destination-exists\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.add-sku-not-validated",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: the `kind: model` zoo entry's `validated_soms` does not list this board's `som.sku`; the add still proceeds, the warning is the hardware-claim caveat. A plain `Issue(\"model.add-sku-not-validated\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.board-yaml-edit-refused",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: the text-level append to `board.yaml`'s `models:` (`tan.core.board_yaml_edit`) refused an ambiguous shape (flow-style or anchored `models:`, multi-document file, duplicate key, tabs, or a post-edit parse check that would change more than the appended entry). Nothing is written; the message gives the two fields to add by hand. VALIDATION_FAILURE. A plain `Issue(\"model.board-yaml-edit-refused\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.board-yaml-edit-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `model add` could not read `board.yaml` or write the model file or `board.yaml`. A failed `board.yaml` write removes the model file just written. RUNTIME_FAILURE. A plain `Issue(\"model.board-yaml-edit-failed\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.add-write-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `model add` could not create the model file under `models/` (disk full, permissions). Nothing is left behind, including a `models/` directory this run created. RUNTIME_FAILURE. Constructed as a plain `Issue(...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.add-destination-unsafe",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `models/` beside `board.yaml` is a symlink, not a directory, or resolves outside the project, so a write through it would land elsewhere. Nothing is written. VALIDATION_FAILURE. Constructed as a plain `Issue(...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.zoo-integrity-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: a downloaded zoo model did not hash to the manifest's sha256; the temp file is discarded and nothing is added. Distinct from `model.zoo-fetch-failed` (transport) because it is a trust failure. RUNTIME_FAILURE. Constructed as a plain `Issue(...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.unexpected-argument",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "note": "tan-cli#1286: an argument the subcommand does not take: an ID positional for anything but `add`, or `--sku` with `add`. VALIDATION_FAILURE. Constructed as a `ModelError` call site in `model_cmd.py` (`_refuse_stray_arguments`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "monitor.launch-failed",
       "status": "reserved",
       "severity": "error",
@@ -2315,6 +2507,14 @@
       "consumerEffect": "The sole port-enumeration path, and it is the consumer's SUCCESS path rather than an error path: the extension cannot guess a port, so it runs `tan monitor --format json` with none ON PURPOSE and reads the list out of this refusal's `data.availablePorts`. Renamed, the feature is removed outright rather than degraded -- the port picker has nothing to render and the run surfaces as a generic CLI failure. The two field names read off each entry are `device` and `description` (tan-cli#1165 pins both in the published golden `monitor-no-port`); `description` carries the literal `n/a` for a port reporting none, which is pyserial's own `ListPortInfo` default copied through verbatim, not a consumer-side fallback to invent. CONDITIONALITY the LIVE consumer must know (tan-cli#1213): a replayer applying this case's published `env` block is unaffected -- the seam it arms makes the case deterministic whether or not pyserial is installed. What is conditional is the consumer's own bare invocation, which sets no such variable. `pip install tan-cli` without the optional `monitor` extra answers the SAME argv with `monitor.pyserial-missing` and a `data` of `{\"schemaVersion\": \"1\"}` -- no `availablePorts` key at all. Released BINARIES are unaffected: the freeze venv installs `\".[monitor]\"`.",
       "emittedBy": "python/tan/commands/monitor_cmd.py",
       "note": "Constructed as the whole literal at a `MonitorError` call site in `monitor_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Promoted reserved -> frozen by tan-cli#1092, on the trigger the old note wrote down for itself; the same operation tan-cli#885 performed for cli.parse-error. The consumer that fired it is alp-sdk-vscode#649, which binds the spelling at src/monitor.ts:89 (in listSerialPorts, :75) via packages/alp-core/src/monitor/ports.ts:44 and registers it in that repo's own gate at test/tanContract.test.js:261. That PR was still OPEN when this promotion landed -- deliberately, and in the safe direction: freezing early stops tan renaming the code out from under an in-flight consumer, whereas waiting for the merge leaves a window where a rename here is silently breaking. If #649 is abandoned rather than merged, this entry is a frozen code with no live consumer, which is debt to demote, not a wire break. The match FAILS OPEN on the consumer side, so a rename is silent on both. ONE CONSEQUENCE IS CERTAIN, not merely possible, and it lands on the consumer: test/tanContract.test.js:261 pins this code at \"reserved\" and asserts equality against tan's published envelope-contract.json, so the first time alp-sdk-vscode's SUPPORTED_CLI_VERSION moves to a tan release carrying this promotion, that assertion reds with 'tan vX declares monitor.no-port \"frozen\", not \"reserved\"'. It is loud and one line to fix, and it is unavoidable in EITHER freeze ordering; alp-sdk-vscode#423 is the precedent for tracking that move as its own change alongside the pin bump."
+    },
+    {
+      "code": "monitor.no-tty",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --break-uboot` was asked for the interactive console without a terminal on stdin; pass `--non-interactive` to stop after the break-in. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
     },
     {
       "code": "monitor.pyserial-missing",

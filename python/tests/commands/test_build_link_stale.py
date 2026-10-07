@@ -80,3 +80,16 @@ def test_refusal_helpers_recognise_only_the_link_itcm_codes():
     assert split_coded_message("build.link-itcm-console-conflict: why") == (
         "build.link-itcm-console-conflict", "why")
     assert split_coded_message("Generation failed: x") == (None, "Generation failed: x")
+
+
+def test_the_unset_goes_right_after_the_separator_before_every_define():
+    """tan-cli#1386: a user's/plan's later `-DEXTRA_DTC_OVERLAY_FILE` must
+    survive, so the `-U` is placed before every `-D`, never appended last."""
+    from tan.commands.build.link_stale import insert_after_separator
+
+    args = ["build", "-b", "x", "app", "--", "-DA=1", "-DEXTRA_DTC_OVERLAY_FILE=/u.overlay"]
+    out = insert_after_separator(args, ["-UEXTRA_DTC_OVERLAY_FILE"])
+    assert out[:6] == ["build", "-b", "x", "app", "--", "-UEXTRA_DTC_OVERLAY_FILE"]
+    assert out.index("-UEXTRA_DTC_OVERLAY_FILE") < out.index("-DEXTRA_DTC_OVERLAY_FILE=/u.overlay")
+    assert insert_after_separator(args, []) == args
+    assert insert_after_separator(["a"], ["-U"]) == ["a", "-U"]  # no `--`: appended

@@ -108,16 +108,27 @@ TREE_MODES = frozenset({"zephyr-board"})
 
 #: The three per-core config slices this mode set names -- still the
 #: membership test `render()` uses to route into `_render_per_core` at all
-#: (`if mode in _SLICE_RENDERER`). `yocto-conf` and `cmake-args` still resolve
-#: their renderer BY NAME via `getattr` here, so this table cannot drift from
-#: the package's own public surface for those two. `zephyr-conf` renders
-#: through `buildplan._slice_config_artefact` instead (tan-cli#1216) -- see
-#: `_render_per_core` -- so its value below documents the leaf renderer that
-#: helper still calls, rather than naming a `getattr` target itself.
+#: (`if mode in _SLICE_RENDERER`). `cmake-args` still resolves its renderer BY
+#: NAME via `getattr` here, so this table cannot drift from the package's own
+#: public surface for it. `zephyr-conf` and `yocto-conf` render through
+#: `buildplan._slice_config_artefact` instead (tan-cli#1216,
+#: `_CONFIG_ARTEFACT_FILE`) -- see `_render_per_core` -- so their values below
+#: document the leaf renderer that helper still calls, rather than naming a
+#: `getattr` target themselves.
 _SLICE_RENDERER = {
     "zephyr-conf": "_slice_alp_conf",
     "yocto-conf": "_slice_local_conf",
     "cmake-args": "_slice_cmake_args",
+}
+
+#: The modes whose bytes ARE a build-plan `configArtefacts[]` entry, and the
+#: file name that entry carries (`metadata/schemas/build-plan-v1.schema.json`:
+#: "byte-identical to what a consumer's own materialise step writes to
+#: buildDir"). These render through `buildplan._slice_config_artefact`, the one
+#: call site `emit_build_plan` also uses (tan-cli#1216, ADR-0026 §D).
+_CONFIG_ARTEFACT_FILE = {
+    "zephyr-conf": "alp.conf",
+    "yocto-conf": "local.conf",
 }
 
 #: `carrier-netlist` / `composed-route-table` share one resolution shape (see
@@ -381,6 +392,50 @@ def _v1_shaped_project(project) -> dict[str, Any]:
     }
 
 
+def _render_dts_overlay(project, shaped, core: str | None) -> str:
+    """`--emit dts-overlay`, mirroring `alp_project._run_v2_per_core_emit`:
+    the board overlay, then the nodes board.yaml `ownership:` hands the M33."""
+    from tan.planner.models import OrchestratorError  # noqa: PLC0415
+    from tan.planner.ownership import project_m33_overlay  # noqa: PLC0415
+    from tan.planner.project_emit.dts import _emit_dts_overlay  # noqa: PLC0415
+
+    # The DTS overlay is shaped by the board header (bus aliases +
+    # alp,pin-array) which is a SoM-mounting fact, not a per-core fact.
+    # v2 contributes only the peripherals list: union across
+    # Zephyr/baremetal cores (or one core when --core is set).
+    if core is not None:
+        slice_ = project.cores[core]
+        out = _emit_dts_overlay(
+            shaped, project.som_preset, project.board_preset,
+            v2_peripherals=sorted(set(slice_.peripherals)),
+            v2_core_id=core,
+            v2_core_os=slice_.os,
+            v2_core_ids=[core],
+        )
+    else:
+        union: set[str] = set()
+        zephyr_core_ids: list[str] = []
+        for core_id, slice_ in project.cores.items():
+            if slice_.os in ("zephyr", "baremetal"):
+                union.update(slice_.peripherals)
+                zephyr_core_ids.append(core_id)
+        out = _emit_dts_overlay(
+            shaped, project.som_preset, project.board_preset,
+            v2_peripherals=sorted(union),
+            v2_core_ids=zephyr_core_ids,
+        )
+    # Per-product core ownership: enable the assignable nodes this project
+    # assigned to the M33 (the board tree carries them disabled).
+    try:
+        own_dts, _ = project_m33_overlay(project, core)
+    except OrchestratorError as err:
+        raise PlannerEmitError(str(err)) from err
+    if own_dts:
+        out += ("\n/* Assignable peripherals owned by the M33 "
+                "(board.yaml `ownership:`). */\n" + "\n".join(own_dts) + "\n")
+    return out
+
+
 def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
     """`dts-overlay` / `native-sim-overlay` / `hw-info-h` / `west-libraries`,
     mirroring `alp_project._run_v2_per_core_emit`'s project-wide section.
@@ -393,7 +448,6 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
             f"--core {core} not present in board.yaml "
             f"(known: {sorted(project.cores.keys())})")
 
-    from tan.planner.project_emit.dts import _emit_dts_overlay  # noqa: PLC0415
     from tan.planner.project_emit.hw_info import _emit_hw_info_h  # noqa: PLC0415
     from tan.planner.project_emit.native_sim import (  # noqa: PLC0415
         _emit_native_sim_overlay,
@@ -405,30 +459,7 @@ def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
     shaped = _v1_shaped_project(project)
 
     if mode == "dts-overlay":
-        # The DTS overlay is shaped by the board header (bus aliases +
-        # alp,pin-array) which is a SoM-mounting fact, not a per-core fact.
-        # v2 contributes only the peripherals list: union across
-        # Zephyr/baremetal cores (or one core when --core is set).
-        if core is not None:
-            slice_ = project.cores[core]
-            return _emit_dts_overlay(
-                shaped, project.som_preset, project.board_preset,
-                v2_peripherals=sorted(set(slice_.peripherals)),
-                v2_core_id=core,
-                v2_core_os=slice_.os,
-                v2_core_ids=[core],
-            )
-        union: set[str] = set()
-        zephyr_core_ids: list[str] = []
-        for core_id, slice_ in project.cores.items():
-            if slice_.os in ("zephyr", "baremetal"):
-                union.update(slice_.peripherals)
-                zephyr_core_ids.append(core_id)
-        return _emit_dts_overlay(
-            shaped, project.som_preset, project.board_preset,
-            v2_peripherals=sorted(union),
-            v2_core_ids=zephyr_core_ids,
-        )
+        return _render_dts_overlay(project, shaped, core)
 
     if mode == "native-sim-overlay":
         # native_sim GPIO emulation -- board-agnostic (the E1M pad map is a
@@ -468,11 +499,12 @@ def _render_per_core(planner, project, mode: str, *, core: str | None,
     """`zephyr-conf` / `cmake-args` / `yocto-conf`, mirroring
     `alp_project._run_v2_per_core_emit`'s per-core section exactly.
 
-    `zephyr-conf` renders through `buildplan._slice_config_artefact` -- the
+    `zephyr-conf` and `yocto-conf` render through `buildplan._slice_config_artefact` -- the
     SAME helper `emit_build_plan` calls to fill a slice's
     `configArtefacts[].contents` (tan-cli#1216, ADR-0026 §D) -- rather than a
     second, independent dispatch straight to the leaf renderer. The bytes are
-    unchanged (`_slice_config_artefact`'s zephyr branch IS `_slice_alp_conf`);
+    unchanged (`_slice_config_artefact`'s zephyr branch IS `_slice_alp_conf`, its yocto
+    branch `_slice_local_conf`);
     what changes is that `tan generate --target zephyr-conf` and `tan build`'s
     plan are now structurally pinned to the one call site the schema's own
     words describe ("byte-identical to what a consumer's own materialise step
@@ -493,7 +525,7 @@ def _render_per_core(planner, project, mode: str, *, core: str | None,
         resolve_selection(project, project.effective_metadata_root())
 
     allowed_os = _os_classes(sdk_root).get(mode)
-    if mode == "zephyr-conf":
+    if mode in _CONFIG_ARTEFACT_FILE:
         # Already imported (`tan.planner.__init__` imports `.buildplan` at
         # module scope) by the time `render()` reaches here -- this is a
         # `sys.modules` cache hit, not a fresh load, and it must stay lazy
@@ -501,16 +533,17 @@ def _render_per_core(planner, project, mode: str, *, core: str | None,
         # before `bind_sdk_root` has run would raise.
         from tan.planner.buildplan import _slice_config_artefact  # noqa: PLC0415
 
+        wanted = _CONFIG_ARTEFACT_FILE[mode]
+
         def slice_renderer(proj, sl):
             artefact = _slice_config_artefact(proj, sl)
-            if artefact is None:
+            if artefact is None or artefact[0] != wanted:
                 # Unreachable in practice: `allowed_os` above already confines
-                # this branch to `os: zephyr`, the one shape
-                # `_slice_config_artefact` never returns `None` for. A coded
-                # refusal beats a bare `NoneType` subscript if that invariant
-                # ever breaks.
+                # each mode to the one OS whose artefact IS `wanted`. A coded
+                # refusal beats a bare `NoneType` subscript -- or silently
+                # emitting a different file's bytes -- if that invariant breaks.
                 raise PlannerEmitError(
-                    f"no config artefact for core `{sl.core_id}` "
+                    f"no {wanted} config artefact for core `{sl.core_id}` "
                     f"(os: {sl.os})")
             return artefact[1]
     else:
