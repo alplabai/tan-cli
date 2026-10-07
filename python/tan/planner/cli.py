@@ -44,9 +44,9 @@ from . import (
     emit_kconfig,
     emit_storage_mounts_c,
     emit_system_manifest,
-    emit_tfm_sysbuild_conf,
     load_board_yaml,
 )
+from .buildplan import _shared_tfm_conf
 from .paths import REPO
 from .template import (
     TemplateError,
@@ -100,7 +100,7 @@ def emit_artefact(project: "BoardProject", mode: str, *, board_yaml: Path,
     if mode == "storage-mounts-c":
         return emit_storage_mounts_c(project)
     if mode == "tfm-sysbuild-conf":
-        return emit_tfm_sysbuild_conf(project)
+        return _shared_tfm_conf(project)
     if mode == "build-plan":
         return emit_build_plan(project, board_yaml=board_yaml,
                                build_root=build_root)

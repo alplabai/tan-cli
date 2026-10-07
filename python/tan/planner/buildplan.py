@@ -214,6 +214,20 @@ def _shared_artefacts(
     return out
 
 
+def _shared_tfm_conf(project: BoardProject) -> str:
+    """The `sysbuild/tfm/tfm.conf` contents `_shared_artefacts` carries, or
+    "" when the project has none (absence-emits-nothing).
+
+    `--emit tfm-sysbuild-conf` renders through this, so the standalone emit
+    and the plan's `sharedArtefacts[].contents` come from one call site
+    (tan-cli#1216, ADR-0026 §D).
+    """
+    for path, contents in _shared_artefacts(project, Path("build")):
+        if path.parts[-3:] == ("sysbuild", "tfm", "tfm.conf"):
+            return contents
+    return ""
+
+
 def _slice_toolchain(slice_: Slice) -> dict[str, Optional[str]]:
     """This slice's compiler identity: `{targetTriple, compiler, sysroot, id}`
     (#610 §4 per-slice tooling index).
