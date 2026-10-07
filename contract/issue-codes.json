@@ -1772,6 +1772,14 @@
       "note": "Constructed as the whole literal at a `TokenSubstitutionError` call site in `token_substitution.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "build.host-python-unsuitable",
+      "status": "reserved",
+      "severity": "error or warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "note": "tan-cli#1317: no host Python on PATH is both at or above the effective Python floor (the same one `tan doctor` computes, `tan.core.python_floor`) and able to import `west`, and no workspace venv exists, so `tan build` will not bake a bare `-DPython3_EXECUTABLE=python3` that lets CMake pick a shadowing older interpreter (or a venv python without west). `error`: a PER-SLICE failure on the native dispatch, for a `${PYTHON}` slice that would otherwise run -- applied after executionPolicy`s null-command/missing-tool skips, so a slice skipped for a missing `west` stays skipped. `warning`: `--materialise` (CMake never runs) -- the bare fallback stays. The message names every candidate interpreter and why it failed (too old / no `west` module). Resolved by `tan.core.host_python`, shared with doctor's `hostPython` (which warns, same id, in the same situation). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "build.plan-unavailable",
       "status": "reserved",
       "severity": "error",
