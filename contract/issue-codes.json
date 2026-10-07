@@ -2596,6 +2596,102 @@
       "note": "tan-cli#1286: an argument the subcommand does not take: an ID positional for anything but `add`, or `--sku` with `add`. VALIDATION_FAILURE. Constructed as a `ModelError` call site in `model_cmd.py` (`_refuse_stray_arguments`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.model-extra-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: `prep`/`run`/`ab` need the optional `model` extra (numpy, onnxruntime, onnx, sympy) and one of them is not importable; the message names `pip install \"tan-cli[model]\"`. RUNTIME_FAILURE, mirroring `monitor.pyserial-missing`. The extra is not in the frozen release assets. A plain `Issue(\"model.model-extra-missing\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.model-format-unsupported",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: the host-tier verb was given a model that is not `.onnx` (a `.tflite` gets a note that conversion is not available yet). VALIDATION_FAILURE. A plain `Issue(\"model.model-format-unsupported\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.model-source-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: no model file argument, or the named file does not exist. VALIDATION_FAILURE. A plain `Issue(\"model.model-source-missing\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.prep-calibration-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: `model prep` has no `--calibration`, or the directory has no `.npy` samples, too few (`--min-samples`), or a sample whose shape does not match the model input. VALIDATION_FAILURE. A plain `Issue(\"model.prep-calibration-invalid\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.prep-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: onnxruntime quantization or the fp32-vs-int8 accuracy run failed (`tan.model.prep.PrepError`). RUNTIME_FAILURE. A plain `Issue(\"model.prep-failed\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.prep-accuracy-degraded",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: the INT8 model's top-1 agreement with fp32 on the calibration set is below the 95% threshold; the output is written and the guidance (try --per-channel, more representative samples) is the message. A warning, exit 0. A plain `Issue(\"model.prep-accuracy-degraded\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.run-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: `model run`/`ab` could not load or run a model on the host (`tan.model.measure.MeasureError`, an unreadable or mis-shaped `--input`). RUNTIME_FAILURE. A plain `Issue(\"model.run-failed\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.prep-output-exists",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: `model prep` found `<out>/<stem>.int8.onnx` already present (or a concurrent run published it first) and refused to overwrite it; remove it or choose `--out`. VALIDATION_FAILURE. A plain `Issue(\"model.prep-output-exists\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.device-flow-unavailable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1287: `model run --device` / `ab --device` without `--capture`: this build has no live deploy-and-capture path (`tan flash --ram` + monitor capture, tan-cli#1313), so it refuses rather than pretending. VALIDATION_FAILURE. A plain `Issue(\"model.device-flow-unavailable\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.device-capture-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1287: the `--capture` / `--against-capture` file cannot be read. VALIDATION_FAILURE. A plain `Issue(\"model.device-capture-missing\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.device-capture-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1287: the console capture is malformed or unusable: no `ENERGY-CFG` header, no samples, a window with fewer than 2 samples, an older 5-field `ENERGY-W` firmware, an `ENERGY-WPART` partial window, or no active window that completed an inference. Nothing is reported rather than a plausible number. VALIDATION_FAILURE. A plain `Issue(\"model.device-capture-invalid\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.device-capture-degraded",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1287: the capture parsed but carries `ENERGY-WERR`/`ENERGY-WARN` lines or `npu_dispatched=false`; the result is returned and the evidence is the message. A warning, exit 0. A plain `Issue(\"model.device-capture-degraded\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "monitor.launch-failed",
       "status": "reserved",
       "severity": "error",
