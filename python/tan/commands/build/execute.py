@@ -1412,6 +1412,7 @@ def execute_slices(
                 sl.core_id,
                 cwd,
                 ud_now,
+                build_root=build_root,
                 guards_ok=not build_dir_overridden(sl.command.args)
                 and _cwd_under_build_root(sl.command.cwd),
                 on_output=on_output,

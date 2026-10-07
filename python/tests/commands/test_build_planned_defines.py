@@ -278,3 +278,34 @@ def test_insert_after_dashdash_and_sysbuild_appends():
 def test_control_characters_refused():
     assert user_defines_problem(["-DA=1\nB=2"])[0] == "build.invalid-argument"
     assert user_defines_problem(["-DA=1\tx"])[0] == "build.invalid-argument"
+
+
+def test_wipe_refused_when_slice_dir_escapes_build_root(tmp_path):
+    from tan.commands.build.user_defines_wipe import reconcile_user_defines
+
+    root = tmp_path / "root"
+    (root / "build").mkdir(parents=True)
+    # `build/../..` style: the slice cwd resolves OUTSIDE <root>/build
+    cwd = root / "build" / ".." / ".."
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "CMakeCache.txt").write_text("x")
+    (tmp_path / "build" / "keep").write_text("x")
+    issues, stampable = reconcile_user_defines(
+        "c", cwd, ["SHIELD=b"], build_root=root, guards_ok=True, on_output=lambda _l: None
+    )
+    assert [i.code for i in issues] == ["build.configure-cache-stale"] and not stampable
+    assert "outside" in issues[0].message
+    assert (tmp_path / "build" / "keep").exists()
+
+
+@posix_only
+def test_wipe_refused_for_symlinked_build_dir(world):
+    envelope_of(_run(world, "-D", "SHIELD=a"))
+    cwd = world["out"] / "build" / "rtss_he-zephyr"
+    real = world["out"] / "elsewhere"
+    (cwd / "build").rename(real)
+    (cwd / "build").symlink_to(real)
+    env = envelope_of(_run(world, "-D", "SHIELD=b"))
+    msgs = [i["message"] for i in env["issues"] if i["code"] == "build.configure-cache-stale"]
+    assert msgs and "symlink" in msgs[0] and "Errno" not in msgs[0]
+    assert (real / "CMakeCache.txt").exists()

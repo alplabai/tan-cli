@@ -32,11 +32,28 @@ def _cache_holds_selection(cwd: Path) -> bool:
     return _CACHED_SELECTION.search(text) is not None
 
 
+def _unsafe_wipe_reason(cwd: Path, build_root: Path) -> str | None:
+    """Why `cwd/build` must not be removed, or None when it is safe: the slice
+    dir must resolve strictly inside `<build_root>/build`, and neither it nor
+    its `build` may be a symlink (rmtree would follow or refuse)."""
+    try:
+        root = (build_root / "build").resolve()
+        resolved = cwd.resolve()
+    except OSError as err:
+        return f"could not resolve the build dir ({err.strerror or type(err).__name__})"
+    if resolved == root or not resolved.is_relative_to(root):
+        return f"build dir resolves outside {build_root / 'build'}"
+    if cwd.is_symlink() or (cwd / "build").is_symlink():
+        return "the build dir is a symlink; not wiping"
+    return None
+
+
 def reconcile_user_defines(
     core_id: str,
     cwd: Path,
     now: list[str],
     *,
+    build_root: Path,
     guards_ok: bool,
     on_output: Callable[[str], None],
 ) -> tuple[list[Issue], bool]:
@@ -65,10 +82,21 @@ def reconcile_user_defines(
         )
         on_output(f"note: {message}")
         return [Issue("build.configure-cache-stale", "warning", message)], False
+    refusal = _unsafe_wipe_reason(cwd, build_root)
+    if refusal is not None:
+        message = (
+            f"{core_id}: user -D changed ({names}) but tan did not wipe the build dir: "
+            f"{refusal}. The cache may still hold stale values -- use a fresh build dir"
+        )
+        on_output(f"note: {message}")
+        return [Issue("build.configure-cache-stale", "warning", message)], False
     try:
         shutil.rmtree(cwd / "build")
     except OSError as err:
-        message = f"{core_id}: user -D changed ({names}) but the build dir could not be wiped: {err}"
+        detail = err.strerror or str(err.args[0] if err.args else type(err).__name__)
+        message = (
+            f"{core_id}: user -D changed ({names}) but the build dir could not be wiped: {detail}"
+        )
         on_output(f"note: {message}")
         return [Issue("build.configure-cache-stale", "warning", message)], False
     message = (
