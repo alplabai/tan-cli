@@ -90,7 +90,12 @@ def run_flash(work: Path, *argv, env=None, manifest=OK_SLICE, write_manifest=Tru
         "HOME": str(work),
         "USERPROFILE": str(work),
         "PYTHONPATH": os.pathsep.join(
-            [str(PACKAGE_ROOT), *([inherited] if inherited else [])]
+            [
+                # tan-cli#1312: hides the host's real J-Links from the child.
+                str(Path(__file__).parent / "_no_usb"),
+                str(PACKAGE_ROOT),
+                *([inherited] if inherited else []),
+            ]
         ),
     }
     child_env.pop("ALP_FLASH_FORCE", None)
@@ -1583,6 +1588,7 @@ def _flow_d_run(
     dry_run: bool = False,
     spawned: list | None = None,
     atoc_unqueryable: bool = False,
+    probe_kwargs: dict | None = None,
 ):
     """A confirmed, real Flow D write with every spawn stubbed.
 
@@ -1643,7 +1649,7 @@ boot_order: []
         app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
         board_yaml=None, core=None, helper=None, dry_run=dry_run,
         skip_missing_tools=False, capture=True, cwd=str(tmp_path),
-        atoc_unqueryable=atoc_unqueryable,
+        atoc_unqueryable=atoc_unqueryable, **(probe_kwargs or {}),
     )
 
 
