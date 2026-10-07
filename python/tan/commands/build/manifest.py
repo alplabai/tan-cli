@@ -155,6 +155,14 @@ def write_post_build_manifest(
         discovered = resolve_sdk_root_ladder(None, Path(effective_board_yaml).parent).path
         effective_sdk_root = str(discovered) if discovered else None
 
+    if effective_sdk_root is not None and not effective_board_yaml:
+        # tan-cli#1359: a plain Zephyr build (`tan build --board`) has no
+        # board.yaml, and the manifest is projected FROM one.
+        return PostBuildManifest(
+            write_failed_reason="the plan has no board.yaml to project it from",
+            native_sim_target=None,
+        )
+
     if effective_sdk_root is None or not effective_board_yaml:
         return PostBuildManifest(
             write_failed_reason=(
