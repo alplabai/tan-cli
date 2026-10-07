@@ -118,7 +118,7 @@
 #
 #   SIZE: build_binary.sh fails the build above the per-class ceiling in
 #   python/scripts/artifact_ceilings.env — TAN_MAX_ARTIFACT_BYTES_DEFAULT=
-#   16500000 (glibc, what every asset THIS release publishes uses) and
+#   16800000 (glibc, what every asset THIS release publishes uses) and
 #   TAN_MAX_ARTIFACT_BYTES_MUSL=18000000 (musl links libc statically and runs
 #   larger; not published here, see the Linux section above) — and prints
 #   what it measured. The TIGHTEST measurement to date is the Windows freeze

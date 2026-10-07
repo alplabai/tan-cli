@@ -856,17 +856,20 @@ def _probe_venv_pip(venv: VenvBin, runner: Runner) -> str:
     if runner.dry_run:
         return PIP_USABLE
     try:
-        out = subprocess.run(
-            [str(venv.python), "-m", "pip", "--version"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdin=subprocess.DEVNULL,
-            timeout=PROBE_TIMEOUT_S,
-            env=spawn_env(),
-            check=False,
-        )
+        # Empty cwd: `-m` puts the cwd on sys.path (module hijack, tan-cli#1317).
+        with tempfile.TemporaryDirectory(prefix="tan-probe-") as empty:
+            out = subprocess.run(
+                [str(venv.python), "-m", "pip", "--version"],
+                cwd=empty,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
+                timeout=PROBE_TIMEOUT_S,
+                env=spawn_env(),
+                check=False,
+            )
     except (OSError, ValueError, subprocess.SubprocessError):
         # SubprocessError covers TimeoutExpired (the child is already killed by
         # `run`); ValueError catches an empty/garbage argv. None of these is a
