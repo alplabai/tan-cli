@@ -996,18 +996,32 @@ def _refuse_stray_arguments(
             f"`tan model {subcommand}` takes no ID argument (got {model_id}); only `add`, `prep`, `run` and `ab` do.",
             ExitCode.VALIDATION_FAILURE,
         )
-    if any(device_flags) and subcommand not in ("run", "ab"):
-        raise ModelError(
-            "model.unexpected-argument",
-            f"`tan model {subcommand}` takes no --device/--capture/--against-capture.",
-            ExitCode.VALIDATION_FAILURE,
-        )
-    if (device_flags[1:] if device_flags else ()) and any(device_flags[1:]) and not device_flags[0]:
-        raise ModelError(
-            "model.unexpected-argument",
-            "--capture/--against-capture need --device.",
-            ExitCode.VALIDATION_FAILURE,
-        )
+    if device_flags:
+        device, capture, against_capture, has_input, has_runs = device_flags
+        if (device or capture or against_capture) and subcommand not in ("run", "ab"):
+            raise ModelError(
+                "model.unexpected-argument",
+                f"`tan model {subcommand}` takes no --device/--capture/--against-capture.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+        if (capture or against_capture) and not device:
+            raise ModelError(
+                "model.unexpected-argument",
+                "--capture/--against-capture need --device.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+        if against_capture and subcommand != "ab":
+            raise ModelError(
+                "model.unexpected-argument",
+                "--against-capture belongs to `ab --device`.",
+                ExitCode.VALIDATION_FAILURE,
+            )
+        if device and (has_input or has_runs):
+            raise ModelError(
+                "model.unexpected-argument",
+                "--input and --runs apply to host runs; a device run times what the target ran.",
+                ExitCode.VALIDATION_FAILURE,
+            )
     if sku and subcommand == "add":
         raise ModelError(
             "model.unexpected-argument",
@@ -1106,7 +1120,7 @@ def model(
     against: str = typer.Option(
         None, "--against", metavar="PATH", help="With `ab`: the second .onnx model to compare with."
     ),
-    runs: int = typer.Option(20, "--runs", metavar="N", help="With `run`/`ab`: timed inferences per model."),
+    runs: int = typer.Option(None, "--runs", metavar="N", help="With host `run`/`ab`: timed inferences per model (default 20)."),
     input_file: str = typer.Option(
         None, "--input", metavar="PATH", help="With `run`/`ab`: a .npy input sample (default: seeded random)."
     ),
@@ -1281,7 +1295,7 @@ def model(
             context.foreign_global_default_for,
         )
         _refuse_stray_arguments(
-            subcommand, model_id, sku, (device, bool(capture), bool(against_capture))
+            subcommand, model_id, sku, (device, bool(capture), bool(against_capture), input_file is not None, runs is not None)
         )
         if subcommand == "doctor":
             project_, sdk, data, issues, exit_code = _run_doctor(
@@ -1306,11 +1320,11 @@ def model(
             )
         elif subcommand == "run":
             project_, sdk, data, issues, exit_code = run_run(
-                context=context, source=model_id, runs=runs, input_file=input_file
+                context=context, source=model_id, runs=20 if runs is None else runs, input_file=input_file
             )
         elif subcommand == "ab":
             project_, sdk, data, issues, exit_code = run_ab(
-                context=context, source=model_id, against=against, runs=runs, input_file=input_file
+                context=context, source=model_id, against=against, runs=20 if runs is None else runs, input_file=input_file
             )
         elif subcommand == "prep":
             project_, sdk, data, issues, exit_code = run_prep(

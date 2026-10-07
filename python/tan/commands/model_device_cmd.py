@@ -18,13 +18,16 @@ monitor paths, so they enter through ONE seam, `LIVE_FLOW`:
   pretending. `capture_via` composes any deploy/read pair with the same coded
   failures and is what the hermetic tests drive with stubs.
 
-peakSramKib is always `null` (the app does not report it); powerMj is set only
-from a full active+idle sample stream, as a labelled carrier-rail delta.
+peakSramKib and powerMj are always `null` on this tier (the app reports no peak
+SRAM; energy is reported in `energy`, with its scope label, from usable
+active+idle sample pairs only).
 Refusals are plain `Issue(...)` returns so the registry gate sees the codes.
 """
 
 from __future__ import annotations
 
+import os
+import stat
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -35,7 +38,12 @@ from tan.commands.model_host_cmd import (
     resolve_model_path,
     run_empty_data,
 )
-from tan.core.model_device import DeviceCaptureError, parse_console, run_result_from_capture
+from tan.core.model_device import (
+    LATENCY_SCOPE,
+    DeviceCaptureError,
+    parse_console,
+    run_result_from_capture,
+)
 from tan.envelope import Issue, Project, SdkInfo
 from tan.exit_codes import ExitCode
 from tan.model.measure import compare
@@ -64,25 +72,35 @@ def capture_via(
 
 
 def _read_capture(context: ProjectContext, raw: str, role: str) -> str | Issue:
+    """The capture file's text. Only a regular file is read -- never a FIFO,
+    device or /proc entry -- and at most `MAX_CAPTURE_BYTES + 1` bytes of it, so
+    a file that grows or lies about its size cannot be slurped."""
     path = Path(raw)
     if not path.is_absolute():
         path = Path(context.workspace_root) / path
     try:
-        if path.stat().st_size > MAX_CAPTURE_BYTES:
-            return Issue("model.device-capture-invalid", "error", f"{role} {path} is larger than {MAX_CAPTURE_BYTES} bytes.")
-        return path.read_text(encoding="utf-8", errors="replace")
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return Issue("model.device-capture-invalid", "error", f"{role} {path} is not a regular file.")
+            data = handle.read(MAX_CAPTURE_BYTES + 1)
     except OSError as err:
         return Issue("model.device-capture-missing", "error", f"Cannot read {role} {path}: {err}")
+    if len(data) > MAX_CAPTURE_BYTES:
+        return Issue("model.device-capture-invalid", "error", f"{role} {path} is larger than {MAX_CAPTURE_BYTES} bytes.")
+    return data.decode("utf-8", errors="replace")
 
 
-def _console_for(context: ProjectContext, capture: str | None, label: str | None, role: str) -> str | Issue:
+def _console_for(
+    context: ProjectContext, capture: str | None, label: str | None, role: str, flag: str
+) -> str | Issue:
     if capture:
         return _read_capture(context, capture, role)
     if LIVE_FLOW is None:
         return Issue(
             "model.device-flow-unavailable",
             "error",
-            "`--device` needs a console capture (--capture FILE from the bench run); live "
+            f"`--device` needs a console capture for {role} ({flag} FILE from the bench run); live "
             "deploy-and-capture (`tan flash --ram` + monitor capture, tan-cli#1313) is not "
             "available in this build.",
         )
@@ -93,18 +111,30 @@ def _row(label: str | None, text: str) -> tuple[dict, Any] | Issue:
     """The `result` row for one console capture, or the `model.device-capture-invalid` refusal."""
     try:
         result, energy, diag = run_result_from_capture(parse_console(text))
-    except (DeviceCaptureError, KeyError, ValueError) as err:
+    except (DeviceCaptureError, KeyError, ValueError, TypeError, ArithmeticError, AttributeError,
+            RecursionError) as err:
         return Issue("model.device-capture-invalid", "error", f"Unusable device capture: {err}")
+    size = None
+    if label:
+        try:
+            size = os.stat(label).st_size
+        except OSError:
+            size = None
     return {
         "model": label,
         "backend": result.backend,
         "tier": "device",
+        # Median over active windows of (window span / inferences completed).
         "latencyMs": result.latency_ms,
+        "latencyScope": LATENCY_SCOPE,
         "outputArgmax": None,
         "peakSramKib": None,
-        "powerMj": result.power_mj,
+        # Always null on the device tier: energy is reported in `energy`, with
+        # its own scope label, never as a bare number.
+        "powerMj": None,
+        # Inferences timed across the active windows (NOT a repeat count).
         "runs": result.runs,
-        "sizeBytes": None,
+        "sizeBytes": size,
         "energy": None if energy is None else {
             "valueMjPerInference": energy.value_mj_per_inference,
             "spreadMj": energy.spread_mj,
@@ -121,8 +151,10 @@ def _row(label: str | None, text: str) -> tuple[dict, Any] | Issue:
 
 def _degraded(row: dict, label: str) -> list[Issue]:
     diag = row["diagnostics"]
-    notes = [*diag["werr_lines"], *diag["warn_lines"]]
-    if not diag["npu_dispatched"]:
+    notes = [*diag["werrLines"], *diag["warnLines"], *diag["skippedPairs"]]
+    if diag.get("energyNote"):
+        notes.append(diag["energyNote"])
+    if not diag["npuDispatched"]:
         notes.append("the app reported npu_dispatched=false (NPU did not run the model)")
     if not notes:
         return []
@@ -147,7 +179,7 @@ def run_device_run(*, context: ProjectContext, source: str | None, capture: str 
     label = _device_label(context, source)
     if isinstance(label, Issue):
         return refuse(label)
-    text = _console_for(context, capture, label, "capture")
+    text = _console_for(context, capture, label, "the run", "--capture")
     if isinstance(text, Issue):
         return refuse(text)
     built = _row(label, text)
@@ -175,7 +207,8 @@ def run_device_ab(
         label = _device_label(context, raw)
         if isinstance(label, Issue):
             return project, sdk, data, [label], ExitCode.VALIDATION_FAILURE
-        text = _console_for(context, cap, label, f"{role} capture")
+        flag = "--capture" if role == "A" else "--against-capture"
+        text = _console_for(context, cap, label, f"model {role}", flag)
         if isinstance(text, Issue):
             return project, sdk, data, [text], ExitCode.VALIDATION_FAILURE
         built = _row(label, text)

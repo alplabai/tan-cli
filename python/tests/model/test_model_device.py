@@ -45,6 +45,22 @@ def _capture_text(cfg=None, windows=None, energy_w=None, device_result=None,
     return "\n".join(lines) + "\n"
 
 
+def _diag(text):
+    from tan.core.model_device import (
+        DeviceCaptureError,
+        capture_diagnostics,
+        measurement_from_capture,
+        parse_console,
+    )
+
+    parsed = parse_console(text)
+    try:
+        energy = measurement_from_capture(parsed)
+    except DeviceCaptureError:
+        energy = None
+    return capture_diagnostics(parsed, energy)
+
+
 def test_parse_console_ignores_interleaved_banner_noise():
     from tan.core.model_device import parse_console
     text = _capture_text(
@@ -236,7 +252,6 @@ def test_energy_werr_and_warn_and_npu_dispatched_false_surfaced_in_diagnostics()
     # A degraded run (I2C errors, a timed-out window, NPU dispatch failure)
     # must stay visible in diagnostics rather than looking identical to a
     # clean run.
-    from tan.core.model_device import capture_diagnostics, parse_console
     werr = "ENERGY-WERR 0 active timed_out=1 i2c_errors=3 last_rc=-5 got=120/250"
     warn = ("ENERGY-WARN active window 30000 ms exceeds the cycle-counter wrap -- "
             "span_cycles is not meaningful; lower AEN_ENERGY_SAMPLES_PER_WINDOW")
@@ -244,10 +259,10 @@ def test_energy_werr_and_warn_and_npu_dispatched_false_surfaced_in_diagnostics()
     # _three_window_capture has no extra_lines hook of its own -- append the
     # diagnostic lines directly; parse_console reads them the same either way.
     text = text.rstrip("\n") + f"\n{werr}\n{warn}\n"
-    diag = capture_diagnostics(parse_console(text))
-    assert diag["npu_dispatched"] is False
-    assert werr in diag["werr_lines"]
-    assert warn in diag["warn_lines"]
+    diag = _diag(text)
+    assert diag["npuDispatched"] is False
+    assert werr in diag["werrLines"]
+    assert warn in diag["warnLines"]
 
 
 def test_cycles_per_s_reconciliation_prefers_measured_over_dt():
@@ -255,33 +270,31 @@ def test_cycles_per_s_reconciliation_prefers_measured_over_dt():
     # span agrees on the true 1_000_000 cycles/s rate (1_000_000 cycles /
     # 1000 ms * 1000 = 1_000_000) -- self-consistent, so the measured rate
     # must win, and diagnostics must report both.
-    from tan.core.model_device import capture_diagnostics, parse_console
     energy_w = {
         0: {"active": (2, 1_000_000, 1000.0, 1), "idle": (2, 1_000_000, 1000.0, 0)},
         1: {"active": (2, 1_000_000, 1000.0, 1), "idle": (2, 1_000_000, 1000.0, 0)},
         2: {"active": (2, 1_000_000, 1000.0, 1), "idle": (2, 1_000_000, 1000.0, 0)},
     }
     text = _three_window_capture(cfg_overrides={"cycles_per_s": 500_000}, energy_w=energy_w)
-    diag = capture_diagnostics(parse_console(text))
-    assert diag["cycles_per_s_dt"] == pytest.approx(500_000.0)
-    assert diag["cycles_per_s_measured"] == pytest.approx(1_000_000.0)
-    assert diag["cycles_per_s_used"] == pytest.approx(1_000_000.0)
+    diag = _diag(text)
+    assert diag["cyclesPerSDt"] == pytest.approx(500_000.0)
+    assert diag["cyclesPerSMeasured"] == pytest.approx(1_000_000.0)
+    assert diag["cyclesPerSUsed"] == pytest.approx(1_000_000.0)
     assert diag["windows"] == [0, 1, 2]
-    assert diag["npu_dispatched"] is True
+    assert diag["npuDispatched"] is True
 
 
 def test_capture_diagnostics_device_vs_host_ratio():
-    from tan.core.model_device import capture_diagnostics, parse_console
     device_result = {
         "source": "measured", "scope": "carrier-rail-delta", "value_mj_per_inference": 1500.0,
         "rails": ["+3V3"], "n_inferences": 1, "window_ms": 1000.0, "sample_count": 12,
         "pairs_used": 3, "total_inferences": 3, "spread_mj": 10.0,
     }
     text = _three_window_capture(device_result=device_result)
-    diag = capture_diagnostics(parse_console(text))
-    assert diag["device_value_mj_per_inference"] == pytest.approx(1500.0)
+    diag = _diag(text)
+    assert diag["deviceValueMjPerInference"] == pytest.approx(1500.0)
     # host mean is 3000.0 mJ/inference (see _three_window_capture) -> ratio 2.0
-    assert diag["host_vs_device_ratio"] == pytest.approx(2.0)
+    assert diag["hostVsDeviceRatio"] == pytest.approx(2.0)
 
 
 def test_device_result_spread_mj_null_parses_as_none():
@@ -344,8 +357,9 @@ def test_run_result_is_device_tier_with_honest_nulls_and_labelled_energy():
     assert result.backend == "ethos-u" and result.latency_ms == pytest.approx(100.0)
     assert result.peak_sram_kib is None and result.output_argmax is None
     assert energy is not None and energy.source == "measured" and energy.scope == "carrier-rail-delta"
-    assert result.power_mj == pytest.approx(energy.value_mj_per_inference)
-    assert diag["npu_dispatched"] is True
+    assert result.power_mj is None  # energy is reported in `energy`, with its scope
+    assert result.energy is energy
+    assert diag["npuDispatched"] is True
 
 
 def test_cpu_only_capture_is_not_labelled_ethos_u():
