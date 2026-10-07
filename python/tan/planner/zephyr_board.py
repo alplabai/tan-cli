@@ -2459,7 +2459,7 @@ def _v2n_defconfig(links: dict[str, Any], soc_spec: dict[str, Any]) -> str:
     the committed `_defconfig`.
     """
     rc_a55, _, rc_size = _ram_console(soc_spec)
-    win_base = soc_spec["openamp_carveout"]["cm33_ns_base"]
+    win_base = _openamp_carveout(soc_spec)["cm33_ns_base"]
     console = links["console"]
     gd32_spi = links["gd32_spi"]
     brd_i2c = links["brd_i2c"]
@@ -2778,6 +2778,38 @@ _V2N_OPENAMP_TAIL: tuple[str, ...] = (
 )
 
 
+def _openamp_carveout(soc_spec: dict[str, Any]) -> dict[str, Any]:
+    """The SoC spec's `openamp_carveout` block, refused with a coded error
+    naming the first missing field -- never a bare `KeyError` out of `tan
+    generate --target zephyr-board` against an alp-sdk that predates the
+    block (alp-sdk#2685, the floor this change raises tan to)."""
+    where = f"SoC spec {soc_spec.get('ref')} `openamp_carveout`"
+    c = soc_spec.get("openamp_carveout")
+    if not isinstance(c, dict) or not c:
+        raise ZephyrBoardEmitError(
+            f"{where} is missing -- the V2N/V2M board emits the OpenAMP window "
+            "and the CM33 RAM console from it (needs alp-sdk b04bb0f7a or newer)")
+
+    def need(block: dict[str, Any], name: str, path: str) -> Any:
+        if not isinstance(block, dict) or block.get(name) is None:
+            raise ZephyrBoardEmitError(
+                f"{where} has no `{path}{name}` field")
+        return block[name]
+
+    for f in ("cm33_ns_base", "a55_base", "size"):
+        need(c, f, "")
+    regions = need(c, "regions", "")
+    if not isinstance(regions, dict):
+        raise ZephyrBoardEmitError(f"{where} `regions` is not a mapping")
+    for name, r in regions.items():
+        for f in ("offset", "size"):
+            need(r, f, f"regions.{name}.")
+    rc = need(c, "ram_console", "")
+    for f in ("offset", "size"):
+        need(rc, f, "ram_console.")
+    return c
+
+
 def _openamp_subst(tail: tuple[str, ...], soc_spec: dict[str, Any]) -> list[str]:
     """Fill the OpenAMP window tokens from the SoC's `openamp_carveout`
     (metadata/socs/**.json; the one declaration the Linux DT, the backend
@@ -2785,7 +2817,7 @@ def _openamp_subst(tail: tuple[str, ...], soc_spec: dict[str, Any]) -> list[str]
     `@carveout.{addr,hex,size}@` for the whole reservation and, per name in
     `regions`, `@<name>.{addr,hex,size,end,a55,a55hex}@` -- addr/hex/end in
     the CM33-NS view, a55/a55hex in the A55 view."""
-    c = soc_spec["openamp_carveout"]
+    c = _openamp_carveout(soc_spec)
     base, a55 = c["cm33_ns_base"], c["a55_base"]
     tok = {
         "@carveout.addr@": f"{base:#x}",
@@ -2815,7 +2847,7 @@ def _ram_console(soc_spec: dict[str, Any]) -> tuple[int, int, int]:
     """(A55 address, CM33-NS address, size) of the CM33 RAM console, from the
     SoC's `openamp_carveout.ram_console` (the one declaration; the dts node,
     CONFIG_RAM_CONSOLE_BUFFER_SIZE and scripts/gen_amp_window.py all read it)."""
-    c = soc_spec["openamp_carveout"]
+    c = _openamp_carveout(soc_spec)
     off = c["ram_console"]["offset"]
     return c["a55_base"] + off, c["cm33_ns_base"] + off, c["ram_console"]["size"]
 
@@ -2876,7 +2908,8 @@ def _v2n_dts(
     has_openamp = bool(
         (sku_preset.get("topology") or {}).get("m33_sm", {}).get("openamp_ipc"))
     rc_a55, rc_addr, rc_size = _ram_console(soc_spec)
-    win_base, win_size = soc_spec["openamp_carveout"]["cm33_ns_base"], soc_spec["openamp_carveout"]["size"]
+    carveout = _openamp_carveout(soc_spec)
+    win_base, win_size = carveout["cm33_ns_base"], carveout["size"]
 
     lines: list[str] = [
         "/*",

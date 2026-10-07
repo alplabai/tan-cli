@@ -1305,6 +1305,15 @@ from tests.conftest import sdk_root
 #: lines, unchanged), `d7d17c7ae`'s live-line refusal (no example trips it),
 #: `5a46a9ec8`'s M33 ownership Kconfig (no example assigns a peripheral to
 #: m33) and `319812a16` (a filter).
+#:
+#: RE-MEASURED again at `2d2a85333` (tan-cli#1216) -- 104 boards, 728 emits
+#: (7 error-contract), 2,539,625 B (was 103/721/1,371,793). Every changed byte
+#: attributed, none left over: #2771 -- the additive `alp.overlay` and
+#: `cmake-args.txt` `configArtefacts` entries on every zephyr/baremetal slice
+#: of the 99 changed `build-plan.json` goldens (the whole byte growth); board
+#: set -- one NEW board, `multicore/microros-ros2-v2n` (`042527fd0`, #2721; 7
+#: added files). The V2N board-tree changes (#2747, #2685) are not an oracle
+#: mode, and `loader.py`'s itcm refusal is exercised by no example.
 #: AUDITED RE-SYNC (mirror / PINNED_HASHES): `ac0e2a5e` -> `2d2a8533` (tan-cli#1216;
 #: supersedes the bot's #1310 proposal for the same range, which could not
 #: apply the hand-ports and would have broken two things -- see below).
@@ -2517,6 +2526,10 @@ def test_hand_port_sources_declares_its_one_strict_loaders_exception():
 #: `git log 34c11c9d..ac0e2a5e -- scripts/strict_loaders.py` is empty and the
 #: file re-hashes to STRICT_LOADERS_HASH at `ac0e2a5e0`, so there is nothing
 #: to audit and the pin keeps naming the commit it was audited at.
+#:
+#: NOT moved at the `ac0e2a5e0` -> `2d2a85333` re-sync (tan-cli#1216) either:
+#: `git log ac0e2a5e..2d2a8533 -- scripts/strict_loaders.py` is empty and the
+#: file still re-hashes to STRICT_LOADERS_HASH at `2d2a85333`.
 STRICT_LOADERS_PINNED_SDK_COMMIT = "34c11c9de04e264fdcab2bc0d58b328d9d117ca8"  # alp-sdk origin/dev -- #2328 audit (tan-cli#1278, this change)
 
 #: sha256 of `scripts/strict_loaders.py` at STRICT_LOADERS_PINNED_SDK_COMMIT.
