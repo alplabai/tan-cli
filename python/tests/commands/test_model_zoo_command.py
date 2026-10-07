@@ -304,3 +304,18 @@ def test_a_different_existing_file_is_still_refused(tmp_path):
     (proj / "models" / "t.tflite").write_bytes(b"someone else's")
     code, doc = invoke("add", "t", "--sdk-root", str(sdk), "--project", str(proj))
     assert code == 2 and doc["issues"][-1]["code"] == "model.add-destination-exists"
+
+
+def test_board_write_failure_on_the_adoption_path_names_the_board(tmp_path, monkeypatch):
+    sdk, proj = setup(tmp_path)
+    (proj / "models").mkdir()
+    (proj / "models" / "t.tflite").write_bytes(b"TFL3starter")
+
+    def boom(path, data):
+        raise OSError("read-only")
+
+    monkeypatch.setattr("tan.commands.model_zoo_cmd.atomic_write_bytes", boom)
+    code, doc = invoke("add", "t", "--sdk-root", str(sdk), "--project", str(proj))
+    issue = doc["issues"][-1]
+    assert code == 1 and issue["code"] == "model.board-yaml-edit-failed" and "board.yaml" in issue["message"]
+    assert (proj / "models" / "t.tflite").read_bytes() == b"TFL3starter"  # the user's file is kept

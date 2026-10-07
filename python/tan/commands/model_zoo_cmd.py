@@ -25,20 +25,19 @@ visible to the issue-code registry gate.
 from __future__ import annotations
 
 import hashlib
-import hashlib
 import os
-import shutil
 from pathlib import Path
 from typing import Any
 
 from tan.commands.build_output import ProjectContext
 from tan.core.atomic_write import atomic_write_bytes
+from tan.core.publish import publish_exclusive as _publish
 from tan.core.board_yaml_edit import BoardEditRefused, append_models_entry
 from tan.core.model_zoo import (
     MIN_SDK_COMMIT,
     ZooEntry,
     StagedModel,
-    _bundled_chunks,
+    bundled_chunks,
     ZooFetchError,
     ZooUnavailable,
     entry_as_dict,
@@ -139,7 +138,7 @@ def _is_orphan_of(entry: ZooEntry, zoo_dir: Path, dest: Path) -> StagedModel | N
         want = entry.source.get("sha256")
         if want is None:
             bundled = hashlib.sha256()
-            for chunk in _bundled_chunks(zoo_dir, entry.source["bundled"]):
+            for chunk in bundled_chunks(zoo_dir, entry.source["bundled"]):
                 bundled.update(chunk)
             want = bundled.hexdigest()
         return StagedModel(dest, got.hexdigest(), dest.stat().st_size) if got.hexdigest() == want else None
@@ -218,28 +217,6 @@ def _added_row(entry: ZooEntry, dest: Path, rel_source: str, staged: StagedModel
     }
 
 
-def _publish(tmp: Path, dest: Path) -> None:
-    """Move the verified temp file to `dest` without ever overwriting or
-    following a link: a hard link fails if `dest` exists (even dangling); on a
-    filesystem without hard links, `O_EXCL|O_NOFOLLOW` creates it instead.
-    Raises `FileExistsError` / `OSError`."""
-    try:
-        os.link(tmp, dest)
-        return
-    except FileExistsError:
-        raise
-    except (OSError, NotImplementedError):
-        pass
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-    fd = os.open(dest, flags, 0o644)
-    try:
-        with open(tmp, "rb") as src, os.fdopen(fd, "wb") as out:
-            shutil.copyfileobj(src, out)
-    except BaseException:
-        dest.unlink(missing_ok=True)
-        raise
-
-
 def _plan_edit(entry: ZooEntry, board_path: Path) -> tuple[str, str] | Issue:
     """`(new board.yaml text, relative source)` -- computed before any fetch so
     a refused edit costs nothing."""
@@ -299,7 +276,7 @@ def _commit_add(
     except FileExistsError:
         failure = Issue("model.add-destination-exists", "error", f"{dest} already exists; nothing was changed.")
     except OSError as err:
-        if published:
+        if published or adopted is not None:
             failure = Issue("model.board-yaml-edit-failed", "error", f"{board_path}: {err}")
         else:
             failure = Issue("model.add-write-failed", "error", f"{dest}: {err}")
