@@ -672,6 +672,16 @@ def test_explicit_core_of_a_non_ram_slice_proceeds_normally(tmp_path):
     assert [e["id"] for e in payload["data"]["entries"]] == ["m55_hp"], payload
 
 
+def test_flash_ram_on_a_ram_only_project_is_not_refused_by_the_whole_run_rule(tmp_path):
+    """Bench finding (evk-02, 2026-10-07): the `diagnostics.link: itcm` whole-run
+    refusal fired on `tan flash --ram --core m55_he` -- the exact command its own
+    message recommends -- because the CLI never forwarded `ram` to the rule."""
+    _, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", "--ram", "--core", "m55_he",
+        manifest=_RAM_ONLY_PROJECT)
+    assert "flash.ram-run-only-project" not in codes(envelope(out)), envelope(out)
+
+
 def test_the_ram_only_rule_is_pure_and_ram_runs_are_unaffected():
     from tan.core.link_refusal import ram_run_only_project_refusal as rule
 
