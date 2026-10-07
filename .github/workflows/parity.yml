@@ -912,13 +912,25 @@ env:
   # tree), #2695 (`gd32-pads` node), #2678 (`gpu2d` per die), #2653
   # (`ina228` I2C subsystem). See the gate file's `PINNED_SDK_COMMIT`/
   # `HAND_PORT_PINNED_SDK_COMMIT` paragraphs for the per-file audit.
-  # Re-measured against `ac0e2a5e0`:
+  #
+  # `ac0e2a5e0` -> `2d2a85333` (tan-cli#1216): the SAME seven lockstep sites
+  # move together again, and so does the hand-port pin (`gen_zephyr_board.py`
+  # re-audited and ported). `STRICT_LOADERS_PINNED_SDK_COMMIT` stays at
+  # `34c11c9de`. Behavioural upstream commits in range: #2771 (build plan
+  # carries each zephyr/baremetal slice's `alp.overlay` and `cmake-args.txt`;
+  # tan renders `generate --target dts-overlay --core` / `cmake-args` through
+  # the same helpers), #2762 (`diagnostics.link: itcm` -- upstream REFUSES it;
+  # tan implements it, so the refusal is NOT taken, #1389), #2747 + #2685
+  # (V2N/V2M board tree: sci0 pull-up, RAM console, OpenAMP window from the
+  # SoC `openamp_carveout`), #2710 (ATTN TINT route). See the gate file's
+  # `PINNED_SDK_COMMIT`/`HAND_PORT_PINNED_SDK_COMMIT` paragraphs for the audit.
+  # Re-measured against `2d2a85333`:
   #   - planner oracle: re-captured, every changed byte attributed (see
   #     `PINNED_PLANNER_ORACLE_SDK_REF` below).
   #   - scaffold: NO re-vendor needed -- `scaffold_byte_parity.py --sdk
-  #     <ac0e2a5e0>` is 10/10 PASS against the tree unchanged; only the
+  #     <2d2a85333>` is 10/10 PASS against the tree unchanged; only the
   #     vendor point in `python/tan/templates/vendored/MANIFEST.md` moves.
-  PINNED_SDK_TAG: ac0e2a5e096a1c8c102818650a688d0f7e709066
+  PINNED_SDK_TAG: 2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -1210,7 +1222,23 @@ env:
   #   - not visible, by construction: #2735 (no example has a Yocto slice
   #     with a `${NAME}` tenant) and #2705's live-line refusal (no example
   #     trips it).
-  PINNED_PLANNER_ORACLE_SDK_REF: ac0e2a5e096a1c8c102818650a688d0f7e709066
+  #
+  # `ac0e2a5e0` -> `2d2a85333` (tan-cli#1216; see `PINNED_SDK_TAG`'s matching
+  # paragraph above). Re-captured with `python scripts/capture_planner_oracle.py
+  # --sdk <checkout> --sdk-ref 2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0`:
+  # **104 boards, 728 emits** (7 error-contract), 2,539,625 B (was
+  # 103/721/1,371,793). Every changed byte attributed, none left over:
+  #   - #2771: the additive `alp.overlay` and `cmake-args.txt`
+  #     `configArtefacts` entries on every zephyr/baremetal slice in all 99
+  #     changed `build-plan.json` goldens (that, and only that, is why the
+  #     byte total nearly doubles).
+  #   - board set: ONE new board, `multicore/microros-ros2-v2n`
+  #     (`042527fd0`, #2721) -- 7 added files, all six other modes plus its
+  #     `build-plan.json`.
+  #   - no other modified file: the V2N board-tree changes (#2747, #2685) are
+  #     not an oracle mode, and `loader.py`'s itcm refusal is not exercised by
+  #     any example.
+  PINNED_PLANNER_ORACLE_SDK_REF: 2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

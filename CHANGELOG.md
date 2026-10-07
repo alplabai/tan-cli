@@ -13,9 +13,10 @@ patch (`0.6.1`) — see the matching `BREAKING` entry below for each one's
 exact before/after:
 
 - tan's effective alp-sdk floor rises to the first alp-sdk release
-  containing commit `ac0e2a5e096a1c8c102818650a688d0f7e709066` (moved from
-  `34c11c9de04e264fdcab2bc0d58b328d9d117ca8` by the planner re-sync
-  tan-cli#1309; `34c11c9de` had itself replaced
+  containing commit `b04bb0f7a0edf6af759053311ba66eda0158968b` (moved from
+  `ac0e2a5e096a1c8c102818650a688d0f7e709066` by tan-cli#1216, which the
+  planner re-sync tan-cli#1309 had moved from
+  `34c11c9de04e264fdcab2bc0d58b328d9d117ca8`; `34c11c9de` had itself replaced
   `c81cb5db9945c8f448a7bb952d374f874e2f42c0` at tan-cli#1278, and that
   `81a9d515a90403cce30588704e31faf9dc893838` at tan-cli#1275; each is an
   ancestor of the next); `tan build`

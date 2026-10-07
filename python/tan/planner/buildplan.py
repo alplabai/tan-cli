@@ -30,11 +30,14 @@ from .headers import emit_dts_partitions, emit_dts_reservations, emit_ipc_contra
 from .kconfig import (
     _resolve_console,
     _slice_alp_conf,
+    _slice_cmake_args,
     _slice_local_conf,
 )
 from .link_target import extra_config_artefacts
 from .models import BoardProject, OrchestratorError, Slice
+from .ownership import project_m33_overlay
 from .paths import REPO
+from .project_emit.dts import DtsOverlayUnavailable  # noqa: F401  (tan adaptation: defined beside the emitter that raises it)
 from .secure import emit_sysbuild_conf, emit_tfm_sysbuild_conf
 
 # The skip-vs-fail policy a slice dispatcher MUST apply, published verbatim
@@ -159,8 +162,8 @@ def _slice_config_artefact(
     guards, loudly (alplabai/tan-cli#551). The `=`-bearing cache entries
     from the same source ride the configure command line directly and are
     NOT duplicated here. The full human-readable `-D` listing remains
-    available on request via `--emit cmake-args` (`_slice_cmake_args`,
-    unchanged) -- see docs/board-config-emit.md.
+    also published as the plan's `cmake-args.txt` artefact
+    (`_slice_cmake_args_artefact`) -- see docs/board-config-emit.md.
     """
     if slice_.os == "zephyr":
         return ("alp.conf", _slice_alp_conf(project, slice_))
@@ -178,6 +181,110 @@ def _slice_config_artefact(
             return None
         return (BAREMETAL_PROJECT_INCLUDE, contents)
     return None
+
+
+#: The os classes a slice's `alp.overlay` artefact is emitted for: the
+#: classes `alp_project.py --emit dts-overlay` unions over. A yocto slice has
+#: none. `cmake-args.txt` is emitted for the same two (`--emit cmake-args`).
+_DTS_OVERLAY_OS = ("zephyr", "baremetal")
+
+#: Filename of the rendered DTS overlay config artefact (under `buildDir`).
+DTS_OVERLAY_ARTEFACT = "alp.overlay"
+
+#: Filename of the rendered full `-D` listing config artefact.
+CMAKE_ARGS_ARTEFACT = "cmake-args.txt"
+
+
+def _v1_shaped_project(project: BoardProject) -> dict[str, Any]:
+    """The legacy `board:`-wrapper dict the project-wide emitters read.
+
+    The public board.yaml schema no longer uses this wrapper, but the
+    in-file emitters (dts-overlay, hw-info-h, west-libraries) still consume
+    it. Shared by `alp_project.py` and `_slice_dts_overlay`.
+    """
+    return {
+        "som": {
+            "sku":    project.sku,
+            "hw_rev": project.hw_rev,
+        },
+        "pins": list(project.raw.get("pins") or []),
+        "board": ({
+            "name":   project.board_name,
+            "hw_rev": project.board_hw_rev,
+        } if project.board_name else None),
+    }
+
+
+def _slice_dts_overlay(project: BoardProject, slice_: Slice) -> str:
+    """The slice's DTS overlay text -- exactly what
+    `alp_project.py --emit dts-overlay --core <id>` prints.
+
+    Single source for that standalone emit and the build plan's
+    `alp.overlay` config artefact (ADR-0026 §D: `tan` consumes these bytes
+    instead of re-rendering them). The overlay is shaped by the board
+    header (bus aliases + `alp,pin-array`), a SoM-mounting fact; the slice
+    contributes its peripheral list and, per-product, the assignable nodes
+    board.yaml `ownership:` gave the M33.
+    """
+    # tan adaptation: the emitter is a sibling subpackage here, not the
+    # `alp_project_emit` package beside `alp_orchestrate/` upstream.
+    from .project_emit.dts import _emit_dts_overlay
+    from .som_metadata import _sku_family
+
+    # Only the two facts the emitter itself cannot render are "unavailable"
+    # (the plan degrades to a warning); everything else propagates.
+    try:
+        _sku_family(project.sku)
+    except ValueError as exc:
+        raise DtsOverlayUnavailable(str(exc)) from None
+    out = _emit_dts_overlay(
+        _v1_shaped_project(project), project.som_preset,
+        project.board_preset,
+        v2_peripherals=sorted(set(slice_.peripherals)),
+        v2_core_id=slice_.core_id,
+        v2_core_os=slice_.os,
+        v2_core_ids=[slice_.core_id],
+    )
+    # (tan adaptation: the missing-header case raises `DtsOverlayUnavailable`
+    # from the emitter itself rather than `sys.exit`ing.)
+    # Outside the degrade path above: an M33 ownership defect must still
+    # fail the plan, not turn into a missing artefact.
+    own_dts, _ = project_m33_overlay(project, slice_.core_id)
+    if own_dts:
+        out += ("\n/* Assignable peripherals owned by the M33 "
+                "(board.yaml `ownership:`). */\n" + "\n".join(own_dts) + "\n")
+    return out
+
+
+def _slice_dts_overlay_artefact(
+    project: BoardProject,
+    slice_: Slice,
+) -> Optional[tuple[str, str]]:
+    """(filename, contents) of the slice's rendered DTS overlay, or None for
+    an os that has none (see `_DTS_OVERLAY_OS`)."""
+    if slice_.os not in _DTS_OVERLAY_OS:
+        return None
+    return (DTS_OVERLAY_ARTEFACT, _slice_dts_overlay(project, slice_))
+
+
+def _slice_cmake_args_artefact(
+    project: BoardProject,
+    slice_: Slice,
+) -> Optional[tuple[str, str]]:
+    """(filename, contents) of the slice's full `-D` listing -- exactly what
+    `alp_project.py --emit cmake-args --core <id>` prints after its
+    `# --- core ---` marker -- or None for an os that has none.
+
+    A rendered REFERENCE listing for consumers (ADR-0026 §D). The
+    `=`-bearing cache entries already ride the baremetal configure line and
+    the bare guards arrive via `alp-baremetal.cmake`; this file is not read
+    by any build command and so does not resurrect the dead `cmake-args.txt`
+    #1278 removed -- it is the same text, now published in the plan so `tan`
+    stops re-rendering it.
+    """
+    if slice_.os not in _DTS_OVERLAY_OS:
+        return None
+    return (CMAKE_ARGS_ARTEFACT, _slice_cmake_args(project, slice_))
 
 
 def _shared_artefacts(
@@ -663,6 +770,36 @@ def emit_build_plan(
                         "path":     (build_dir / extra_name).as_posix(),
                         "contents": extra_contents,
                     })
+        # Additive rendered-text artefacts (ADR-0026 §D, tan-cli#1216): the
+        # DTS overlay and the full `-D` listing, byte-identical to the
+        # standalone `--emit dts-overlay --core` / `--emit cmake-args`
+        # renders. Always AFTER the slice's primary config artefact, so a
+        # consumer that reads `configArtefacts[0]` is unaffected.
+        extras: list[Optional[tuple[str, str]]] = []
+        # Same dangling-path rule as `alp-baremetal.cmake` above: a baremetal
+        # slice whose command was blocked will never configure its build dir,
+        # so promise it nothing.
+        if not (cmd is None and slice_.os == "baremetal"):
+            try:
+                extras.append(_slice_dts_overlay_artefact(project, slice_))
+            except DtsOverlayUnavailable as exc:
+                # Additive artefact: a board with no header (or an
+                # unrecognised SKU) must not stop a plan that emitted fine
+                # before. The consumer sees the warning and falls back.
+                # Any other OrchestratorError still fails the plan.
+                warnings.append({
+                    "code":    "dts-overlay-unavailable",
+                    "coreId":  slice_.core_id,
+                    "message": (f"core '{slice_.core_id}': no `alp.overlay` "
+                                f"artefact -- {exc}"),
+                })
+            extras.append(_slice_cmake_args_artefact(project, slice_))
+        for extra in extras:
+            if extra is not None:
+                config_artefacts.append({
+                    "path":     (build_dir / extra[0]).as_posix(),
+                    "contents": extra[1],
+                })
         # `appDir` retains the resolved source directory independent of
         # `command` -- tooling that wants the app source (e.g. to watch
         # it for incremental rebuilds) doesn't have to reverse-engineer
