@@ -41,6 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "clean-host.yml"
 AGGREGATOR = "freeze-and-smoke-all"
 REQUIRED_NAME = "clean host (freeze): all legs"
+AGGREGATOR_IF = "${{ always() && github.event_name != 'release' }}"
 GITHUB_JOB_RESULTS = ("success", "failure", "cancelled", "skipped")
 
 
@@ -69,10 +70,9 @@ def test_the_aggregator_always_reports_under_its_required_name():
 
     assert job["name"] == REQUIRED_NAME
     assert set(job["needs"]) == {"matrix-plan", "freeze-and-smoke"}
-    assert "always()" in job["if"], (
-        "without always() a failed leg SKIPS the aggregator, and a skipped required check never reports"
-    )
-    assert "github.event_name != 'release'" in job["if"]
+    # always(): without it a failed leg SKIPS the aggregator, and a skipped
+    # required check never reports.
+    assert job["if"] == AGGREGATOR_IF
     triggers = _triggers(workflow)
     assert "pull_request" in triggers and "merge_group" in triggers
 
