@@ -84,19 +84,40 @@ def test_missing_directory_is_unavailable(tmp_path):
         load_zoo(tmp_path / "nope")
 
 
-def test_fetch_bundled_and_url_verified(zoo):
+def stage(entry, zoo, tmp_path, **kw):
+    d = tmp_path / "dest"
+    d.mkdir(exist_ok=True)
+    return fetch_source(entry, zoo, tmp_dir=d, **kw), d
+
+
+def test_fetch_bundled_and_url_verified(zoo, tmp_path):
     entries, _ = load_zoo(zoo)
     by = {e.id: e for e in entries}
-    assert fetch_source(by["a-tiny"], zoo) == b"starter"
-    assert fetch_source(by["b-model"], zoo, reader=lambda url: URL_BYTES) == URL_BYTES
+    staged, _ = stage(by["a-tiny"], zoo, tmp_path)
+    assert staged.path.read_bytes() == b"starter" and staged.size == 7
+    staged, _ = stage(by["b-model"], zoo, tmp_path, reader=lambda url: iter([URL_BYTES[:5], URL_BYTES[5:]]))
+    assert staged.path.read_bytes() == URL_BYTES and staged.sha256 == URL_SHA
 
 
-def test_fetch_hash_mismatch_is_flagged(zoo):
+def test_fetch_hash_mismatch_is_flagged_and_leaves_no_temp(zoo, tmp_path):
     entries, _ = load_zoo(zoo)
     entry = next(e for e in entries if e.id == "b-model")
     with pytest.raises(ZooFetchError) as err:
-        fetch_source(entry, zoo, reader=lambda url: b"tampered")
+        stage(entry, zoo, tmp_path, reader=lambda url: iter([b"tampered"]))
     assert err.value.mismatch
+    assert list((tmp_path / "dest").iterdir()) == []
+
+
+def test_fetch_enforces_size_cap_and_deadline(zoo, tmp_path, monkeypatch):
+    entries, _ = load_zoo(zoo)
+    entry = next(e for e in entries if e.id == "b-model")
+    monkeypatch.setattr("tan.core.model_zoo.MAX_DOWNLOAD_BYTES", 4)
+    with pytest.raises(ZooFetchError, match="larger than"):
+        stage(entry, zoo, tmp_path, reader=lambda url: iter([b"12345678"]))
+    monkeypatch.undo()
+    with pytest.raises(ZooFetchError, match="not complete within"):
+        stage(entry, zoo, tmp_path, reader=lambda url: iter([b"x", b"y"]), max_seconds=-1)
+    assert list((tmp_path / "dest").iterdir()) == []
 
 
 def test_bundled_symlink_escape_is_refused(zoo, tmp_path):
@@ -109,4 +130,28 @@ def test_bundled_symlink_escape_is_refused(zoo, tmp_path):
         pytest.skip("symlinks unavailable")
     entries, _ = load_zoo(zoo)
     with pytest.raises(ZooFetchError):
-        fetch_source(next(e for e in entries if e.id == "a-tiny"), zoo)
+        stage(next(e for e in entries if e.id == "a-tiny"), zoo, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "compile: [1, 2]\n",
+        "compile:\n  drpai: 3\n",
+        "compile:\n  drpai:\n    input_shape: {a: 1}\n",
+        "compile:\n  drpai: &a\n    x: *a\n",
+        "compile:\n  drpai: {}\n",
+    ],
+)
+def test_bad_compile_shape_is_an_invalid_entry(zoo, extra):
+    (zoo / "c-bad.yaml").write_text(manifest("c-bad", extra=extra), encoding="utf-8")
+    entries, problems = load_zoo(zoo)
+    assert "c-bad" not in [e.id for e in entries]
+    assert [p[0] for p in problems] == ["c-bad.yaml"]
+
+
+def test_good_compile_shape_loads(zoo):
+    extra = "compile:\n  drpai:\n    input_shape: [1, 3, 224, 224]\n    input_name: images\n"
+    (zoo / "c-ok.yaml").write_text(manifest("c-ok", extra=extra), encoding="utf-8")
+    entries, problems = load_zoo(zoo)
+    assert problems == [] and "c-ok" in [e.id for e in entries]

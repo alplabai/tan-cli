@@ -23,8 +23,11 @@ list is empty.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
-from collections.abc import Callable
+import tempfile
+import time
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,6 +42,9 @@ MODEL_SUFFIXES = (".tflite", ".onnx", ".pte")
 #: Hard ceiling on a downloaded model, so a hostile or broken URL cannot fill
 #: the disk.
 MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024
+
+#: Total wall-clock budget for one download.
+MAX_DOWNLOAD_SECONDS = 300.0
 
 _ID_RE = re.compile(r"[a-z][a-z0-9-]*")
 _BUNDLED_RE = re.compile(r"starters/[A-Za-z0-9._-]+")
@@ -93,6 +99,27 @@ def entry_as_dict(entry: ZooEntry) -> dict[str, Any]:
     }
 
 
+def _check_compile(comp: Any) -> None:
+    """`compile` must be `{backend: {key: str | int | [str|int, ...]}}` -- the
+    only shape `models[].compile` takes. Checked shallowly (no recursion), so a
+    self-referencing YAML alias is rejected here as a plain type error."""
+    if comp is None:
+        return
+    if not isinstance(comp, dict):
+        raise ValueError("`compile` must be a mapping")
+
+    def scalar(v: Any) -> bool:
+        return isinstance(v, (str, int)) and not isinstance(v, bool)
+
+    for backend, opts in comp.items():
+        if not isinstance(backend, str) or not isinstance(opts, dict) or not opts:
+            raise ValueError("`compile` must map backend ids to non-empty mappings")
+        for key, value in opts.items():
+            ok = scalar(value) or (isinstance(value, list) and value and all(scalar(v) for v in value))
+            if not isinstance(key, str) or not ok:
+                raise ValueError(f"`compile.{backend}.{key}` must be a string, integer or list of them")
+
+
 def _parse_entry(doc: Any, stem: str) -> ZooEntry:
     """A `ZooEntry`, or `ValueError` naming the first thing wrong."""
     if not isinstance(doc, dict):
@@ -131,8 +158,7 @@ def _parse_entry(doc: Any, stem: str) -> ZooEntry:
     if not isinstance(soms, list) or not all(isinstance(s, str) and _SKU_RE.fullmatch(s) for s in soms):
         raise ValueError("`validated_soms` must be a list of SKUs")
     comp = doc.get("compile")
-    if comp is not None and not isinstance(comp, dict):
-        raise ValueError("`compile` must be a mapping")
+    _check_compile(comp)
     example_app = doc.get("example_app")
     if example_app is not None and not isinstance(example_app, str):
         raise ValueError("`example_app` must be a string")
@@ -158,7 +184,7 @@ def load_zoo(zoo_dir: Path) -> tuple[list[ZooEntry], list[tuple[str, str]]]:
     for path in sorted(zoo_dir.glob("*.yaml")):
         try:
             entries.append(_parse_entry(yaml.safe_load(path.read_text(encoding="utf-8")), path.stem))
-        except (OSError, UnicodeDecodeError, yaml.YAMLError, ValueError) as err:
+        except (OSError, UnicodeDecodeError, yaml.YAMLError, ValueError, RecursionError) as err:
             problems.append((path.name, str(err)))
     entries.sort(key=lambda e: e.id)
     return entries, problems
@@ -170,10 +196,10 @@ def filter_by_sku(entries: list[ZooEntry], sku: str) -> list[ZooEntry]:
     return [e for e in entries if sku in e.validated_soms]
 
 
-def fetch_url(url: str) -> bytes:
-    """GET `url` over https with tan's TLS trust context, capped at
-    `MAX_DOWNLOAD_BYTES`. Raises `ZooFetchError`. `urllib` is imported here,
-    not at module top, so a bare `tan` start-up does not load it."""
+def iter_url(url: str) -> Iterator[bytes]:
+    """Chunks of an https GET with tan's TLS trust context (30 s socket
+    timeout; `fetch_source` enforces the total size and wall-clock caps).
+    `urllib` is imported here so a bare `tan` start-up does not load it."""
     import urllib.error  # noqa: PLC0415
     import urllib.request  # noqa: PLC0415
 
@@ -190,49 +216,80 @@ def fetch_url(url: str) -> bytes:
             urllib.request.HTTPSHandler(context=default_ssl_context()), HttpsOnlyRedirect
         )
         req = urllib.request.Request(url, headers={"User-Agent": "tan-model-zoo"})
-        chunks: list[bytes] = []
-        total = 0
-        with opener.open(req, timeout=60) as resp:
+        with opener.open(req, timeout=30) as resp:
             while True:
                 chunk = resp.read(1 << 20)
                 if not chunk:
-                    break
-                total += len(chunk)
-                if total > MAX_DOWNLOAD_BYTES:
-                    raise ZooFetchError(f"{url}: larger than {MAX_DOWNLOAD_BYTES} bytes")
-                chunks.append(chunk)
-        return b"".join(chunks)
-    except ZooFetchError:
-        raise
+                    return
+                yield chunk
     except (OSError, ValueError) as err:  # URLError is an OSError
         raise ZooFetchError(f"{url}: {err}") from err
+
+
+@dataclass(frozen=True)
+class StagedModel:
+    """A verified model sitting in a temp file the caller must publish or unlink."""
+
+    path: Path
+    sha256: str
+    size: int
+
+
+def _bundled_chunks(zoo_dir: Path, bundled: str) -> Iterator[bytes]:
+    starters = (zoo_dir / "starters").resolve()
+    path = (zoo_dir / bundled).resolve()
+    if path.parent != starters or not path.is_file():
+        raise ZooFetchError(f"bundled starter {bundled} is missing or outside {starters}")
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(1 << 20):
+                yield chunk
+    except OSError as err:
+        raise ZooFetchError(f"{path}: {err}") from err
 
 
 def fetch_source(
     entry: ZooEntry,
     zoo_dir: Path,
     *,
-    reader: Callable[[str], bytes] = fetch_url,
-) -> bytes:
-    """The model bytes for `entry`: a bundled starter read from inside
-    `zoo_dir/starters` (confined -- a symlink out is refused), or a download
-    verified against the manifest's `sha256`. Raises `ZooFetchError`; a hash
+    tmp_dir: Path,
+    reader: Callable[[str], Iterable[bytes]] = iter_url,
+    max_seconds: float = MAX_DOWNLOAD_SECONDS,
+) -> StagedModel:
+    """Stream the model for `entry` into a temp file in `tmp_dir` (the
+    destination directory, so publishing is a same-filesystem link), hashing as
+    it goes -- never buffering the model in memory. A download is capped in
+    size and total wall-clock time and must hash to the manifest's `sha256`;
+    a bundled starter is read from inside `zoo_dir/starters` (confined). The
+    temp file is removed on any failure. Raises `ZooFetchError`; a hash
     mismatch sets `.mismatch`."""
     bundled = entry.source.get("bundled")
-    if bundled is not None:
-        starters = (zoo_dir / "starters").resolve()
-        path = (zoo_dir / bundled).resolve()
-        if path.parent != starters or not path.is_file():
-            raise ZooFetchError(f"bundled starter {bundled} is missing or outside {starters}")
-        try:
-            return path.read_bytes()
-        except OSError as err:
-            raise ZooFetchError(f"{path}: {err}") from err
-    data = reader(entry.source["url"])
-    got = hashlib.sha256(data).hexdigest()
-    if got != entry.source["sha256"]:
-        raise ZooFetchError(
-            f"{entry.source['url']}: sha256 {got} does not match the manifest's {entry.source['sha256']}",
-            mismatch=True,
-        )
-    return data
+    chunks = _bundled_chunks(zoo_dir, bundled) if bundled else reader(entry.source["url"])
+    label = bundled or entry.source["url"]
+    digest = hashlib.sha256()
+    size = 0
+    deadline = time.monotonic() + max_seconds
+    fd, tmp_name = tempfile.mkstemp(dir=tmp_dir, prefix=".tan-zoo-", suffix=".part")
+    try:
+        with os.fdopen(fd, "wb") as out:
+            for chunk in chunks:
+                size += len(chunk)
+                if size > MAX_DOWNLOAD_BYTES:
+                    raise ZooFetchError(f"{label}: larger than {MAX_DOWNLOAD_BYTES} bytes")
+                if time.monotonic() > deadline:
+                    raise ZooFetchError(f"{label}: not complete within {max_seconds:g} s")
+                digest.update(chunk)
+                out.write(chunk)
+        got = digest.hexdigest()
+        if not bundled and got != entry.source["sha256"]:
+            raise ZooFetchError(
+                f"{label}: sha256 {got} does not match the manifest's {entry.source['sha256']}",
+                mismatch=True,
+            )
+    except OSError as err:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise ZooFetchError(f"{label}: {err}") from err
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    return StagedModel(Path(tmp_name), got, size)

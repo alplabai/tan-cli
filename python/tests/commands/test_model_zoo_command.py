@@ -93,7 +93,8 @@ def test_add_copies_model_and_appends_preserving_comments(tmp_path):
     code, doc = invoke("add", "v", "--sdk-root", str(sdk), "--project", str(proj))
     assert code == 0, doc
     assert (proj / "models" / "v.tflite").read_bytes() == b"TFL3starter"
-    added = doc["data"]["added"]
+    assert doc["data"]["added"] == "v"
+    added = doc["data"]["addedEntry"]
     assert added["source"] == "models/v.tflite" and added["bytes"] == 11
     after = (proj / "board.yaml").read_text(encoding="utf-8")
     cut = BOARD.index("\nrest: 1")
@@ -147,3 +148,118 @@ def test_add_with_a_missing_starter_writes_nothing(tmp_path):
     assert code == 1 and doc["issues"][-1]["code"] == "model.zoo-fetch-failed"
     assert not (proj / "models").exists()
     assert (proj / "board.yaml").read_text(encoding="utf-8") == BOARD
+
+
+def test_zoo_rows_carry_runs_here_from_the_board_sku(tmp_path):
+    sdk, proj = setup(tmp_path)
+    write(proj / "board.yaml", "som:\n  sku: E1M-V2N101\n")
+    code, doc = invoke("zoo", "--sdk-root", str(sdk), "--project", str(proj))
+    assert doc["data"]["boardSku"] == "E1M-V2N101"
+    assert {e["id"]: e["runsHere"] for e in doc["data"]["entries"]} == {"t": False, "v": True}
+    (proj / "board.yaml").unlink()
+    code, doc = invoke("zoo", "--sdk-root", str(sdk), "--project", str(proj))
+    assert code == 0 and {e["runsHere"] for e in doc["data"]["entries"]} == {None}
+    write(proj / "board.yaml", "not: [valid")
+    code, doc = invoke("zoo", "--sdk-root", str(sdk), "--project", str(proj))
+    assert code == 0 and doc["data"]["boardSku"] is None
+
+
+def test_stray_arguments_are_refused(tmp_path):
+    sdk, proj = setup(tmp_path)
+    code, doc = invoke("zoo", "t", "--sdk-root", str(sdk), "--project", str(proj))
+    assert code == 2 and doc["issues"][-1]["code"] == "model.unexpected-argument"
+    code, doc = invoke("add", "t", "--sku", "E1M-V2N101", "--sdk-root", str(sdk), "--project", str(proj))
+    assert code == 2 and doc["issues"][-1]["code"] == "model.unexpected-argument"
+    assert not (proj / "models").exists()
+
+
+def test_dangling_symlink_destination_is_refused_not_written_through(tmp_path):
+    sdk, proj = setup(tmp_path)
+    outside = tmp_path / "outside.tflite"
+    (proj / "models").mkdir()
+    try:
+        (proj / "models" / "t.tflite").symlink_to(outside)
+    except OSError:
+        return
+    code, doc = invoke("add", "t", "--sdk-root", str(sdk), "--project", str(proj))
+    assert code == 2 and doc["issues"][-1]["code"] == "model.add-destination-exists"
+    assert not outside.exists()
+    assert (proj / "board.yaml").read_text(encoding="utf-8") == BOARD
+
+
+def test_symlinked_models_dir_is_refused(tmp_path):
+    sdk, proj = setup(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    try:
+        (proj / "models").symlink_to(elsewhere, target_is_directory=True)
+    except OSError:
+        return
+    code, doc = invoke("add", "t", "--sdk-root", str(sdk), "--project", str(proj))
+    assert code == 2 and doc["issues"][-1]["code"] == "model.add-destination-unsafe"
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_refused_edit_happens_before_any_fetch(tmp_path, monkeypatch):
+    sdk, proj = setup(tmp_path)
+    write(proj / "board.yaml", "som:\n  sku: E1M-AEN801\nmodels: [{name: a, source: b}]\n")
+
+    def boom(*a, **k):
+        raise AssertionError("fetched before the edit was checked")
+
+    monkeypatch.setattr("tan.commands.model_zoo_cmd.fetch_source", boom)
+    code, doc = invoke("add", "t", "--sdk-root", str(sdk), "--project", str(proj))
+    assert doc["issues"][-1]["code"] == "model.board-yaml-edit-refused"
+
+
+def test_integrity_failure_has_its_own_code_and_leaves_nothing(tmp_path):
+    from tan.commands.model_zoo_cmd import run_add
+    from tan.commands.build_output import resolve_project_context
+
+    sdk, proj = setup(tmp_path)
+    write(
+        sdk / "metadata" / "model_zoo" / "w.yaml",
+        "schema_version: 1\nkind: model\nid: w\ntask: person-detection\ndescription: x\n"
+        "license: MIT\nsource:\n  url: https://example.com/w.tflite\n  sha256: " + "a" * 64 + "\n"
+        "validated_soms: []\n",
+    )
+    ctx = resolve_project_context(str(proj), None, str(sdk))
+    _, _, data, issues, exit_code = run_add(
+        context=ctx, zoo_dir=sdk / "metadata" / "model_zoo", model_id="w", sku=None,
+        existing_names=set(), reader=lambda url: iter([b"tampered"]),
+    )
+    assert issues[-1].code == "model.zoo-integrity-failed" and int(exit_code) == 1
+    assert not (proj / "models").exists()  # the models/ dir this run made is removed
+    assert (proj / "board.yaml").read_text(encoding="utf-8") == BOARD
+    assert data["added"] is None
+
+
+def test_write_failure_has_its_own_code_and_removes_the_dir(tmp_path, monkeypatch):
+    sdk, proj = setup(tmp_path)
+
+    def boom(tmp, dest):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("tan.commands.model_zoo_cmd._publish", boom)
+    code, doc = invoke("add", "t", "--sdk-root", str(sdk), "--project", str(proj))
+    assert code == 1 and doc["issues"][-1]["code"] == "model.add-write-failed"
+    assert not (proj / "models").exists()
+
+
+def test_board_write_failure_rolls_back_the_model_file(tmp_path, monkeypatch):
+    sdk, proj = setup(tmp_path)
+
+    def boom(path, data):
+        raise OSError("read-only")
+
+    monkeypatch.setattr("tan.commands.model_zoo_cmd.atomic_write_bytes", boom)
+    code, doc = invoke("add", "t", "--sdk-root", str(sdk), "--project", str(proj))
+    assert code == 1 and doc["issues"][-1]["code"] == "model.board-yaml-edit-failed"
+    assert not (proj / "models").exists()
+    assert (proj / "board.yaml").read_text(encoding="utf-8") == BOARD
+
+
+def test_successful_add_leaves_no_temp_files(tmp_path):
+    sdk, proj = setup(tmp_path)
+    assert invoke("add", "t", "--sdk-root", str(sdk), "--project", str(proj))[0] == 0
+    assert [p.name for p in (proj / "models").iterdir()] == ["t.tflite"]

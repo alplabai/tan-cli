@@ -24,7 +24,8 @@ visible to the issue-code registry gate.
 
 from __future__ import annotations
 
-import hashlib
+import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ from tan.core.board_yaml_edit import BoardEditRefused, append_models_entry
 from tan.core.model_zoo import (
     MIN_SDK_COMMIT,
     ZooEntry,
+    StagedModel,
     ZooFetchError,
     ZooUnavailable,
     entry_as_dict,
@@ -54,11 +56,11 @@ Result = tuple[Project, SdkInfo | None, dict, list[Issue], ExitCode]
 
 
 def zoo_empty_data() -> dict[str, Any]:
-    return {"schemaVersion": ZOO_DATA_SCHEMA_VERSION, "sku": None, "entries": []}
+    return {"schemaVersion": ZOO_DATA_SCHEMA_VERSION, "sku": None, "boardSku": None, "entries": []}
 
 
 def add_empty_data() -> dict[str, Any]:
-    return {"schemaVersion": ADD_DATA_SCHEMA_VERSION, "sku": None, "added": None}
+    return {"schemaVersion": ADD_DATA_SCHEMA_VERSION, "sku": None, "added": None, "addedEntry": None}
 
 
 def _load(zoo_dir: Path) -> tuple[list[ZooEntry], list[Issue]] | Issue:
@@ -80,61 +82,43 @@ def _load(zoo_dir: Path) -> tuple[list[ZooEntry], list[Issue]] | Issue:
     ]
 
 
+def tolerant_board_sku(board_path: Path) -> str | None:
+    """`som.sku` of `board_path`, or `None` for ANY problem (absent, unreadable,
+    not YAML): `zoo` is a browse command and never refuses over the board."""
+    import yaml  # noqa: PLC0415 (declared dependency)
+
+    try:
+        doc = yaml.safe_load(board_path.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError):
+        return None
+    som = doc.get("som") if isinstance(doc, dict) else None
+    sku = som.get("sku") if isinstance(som, dict) else None
+    return sku if isinstance(sku, str) and sku else None
+
+
 def run_zoo(*, context: ProjectContext, zoo_dir: Path, sku: str | None) -> Result:
+    """Each row carries `runsHere`: whether the entry is bench-validated on the
+    effective SKU (`--sku`, else the project board's `som.sku`); `null` when
+    neither names one."""
     project, sdk = context.project(), context.sdk
+    board_sku = tolerant_board_sku(Path(context.board_yaml))
     data = zoo_empty_data()
     data["sku"] = sku
+    data["boardSku"] = board_sku
     loaded = _load(zoo_dir)
     if isinstance(loaded, Issue):
         return project, sdk, data, [loaded], ExitCode.VALIDATION_FAILURE
     entries, issues = loaded
     if sku:
         entries = filter_by_sku(entries, sku)
-    data["entries"] = [entry_as_dict(e) for e in entries]
+    effective = sku or board_sku
+    rows = []
+    for e in entries:
+        row = entry_as_dict(e)
+        row["runsHere"] = None if effective is None else effective in e.validated_soms
+        rows.append(row)
+    data["entries"] = rows
     return project, sdk, data, issues, ExitCode.SUCCESS
-
-
-def _stage_add(
-    entry: ZooEntry, zoo_dir: Path, board_path: Path, reader: Any
-) -> tuple[bytes, str, str] | Issue:
-    """Everything `add` can compute without touching disk: `(model bytes,
-    new board.yaml text, relative source)`, or the refusing `Issue`."""
-    rel_source = f"{MODELS_DIR}/{entry.id}{entry.suffix}"
-    try:
-        blob = fetch_source(entry, zoo_dir, **({"reader": reader} if reader else {}))
-    except ZooFetchError as err:
-        return Issue("model.zoo-fetch-failed", "error", str(err))
-    new_entry: dict[str, Any] = {"name": entry.id, "source": rel_source}
-    if entry.compile:
-        new_entry["compile"] = entry.compile
-    try:
-        new_text = append_models_entry(board_path.read_bytes().decode("utf-8"), new_entry)
-    except (OSError, UnicodeDecodeError) as err:
-        return Issue("model.board-yaml-edit-failed", "error", f"{board_path}: {err}")
-    except BoardEditRefused as err:
-        return Issue(
-            "model.board-yaml-edit-refused",
-            "error",
-            f"Not editing {board_path}: {err}. Nothing was changed; add this entry by hand: "
-            f"name: {entry.id}, source: {rel_source}.",
-        )
-    return blob, new_text, rel_source
-
-
-def _commit_add(dest: Path, blob: bytes, board_path: Path, new_text: str) -> str | None:
-    """Model file first, `board.yaml` last; a failed `board.yaml` write
-    removes the model file just created. An error message, or `None`."""
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_bytes(str(dest), blob)
-    except OSError as err:
-        return f"{dest}: {err}"
-    try:
-        atomic_write_bytes(str(board_path), new_text.encode("utf-8"))
-    except OSError as err:
-        dest.unlink(missing_ok=True)
-        return f"{board_path}: {err}"
-    return None
 
 
 def _precheck(
@@ -154,11 +138,26 @@ def _precheck(
             "error",
             f"board.yaml already declares a model named {entry.id}; nothing was changed.",
         )
-    if dest.exists():
+    if os.path.lexists(dest):
         return Issue(
             "model.add-destination-exists",
             "error",
             f"{dest} already exists; move it aside first. Nothing was changed.",
+        )
+    return _unsafe_models_dir(dest.parent)
+
+
+def _unsafe_models_dir(models_dir: Path) -> Issue | None:
+    """Refuse a `models/` that is a symlink or resolves outside the project
+    (a write through it would land elsewhere)."""
+    if not os.path.lexists(models_dir):
+        return None
+    board_dir = models_dir.parent.resolve()
+    if models_dir.is_symlink() or not models_dir.is_dir() or models_dir.resolve().parent != board_dir:
+        return Issue(
+            "model.add-destination-unsafe",
+            "error",
+            f"{models_dir} is not a plain directory inside the project; nothing was changed.",
         )
     return None
 
@@ -175,17 +174,102 @@ def _sku_warning(entry: ZooEntry, sku: str | None) -> Issue | None:
     )
 
 
-def _added_row(entry: ZooEntry, dest: Path, rel_source: str, blob: bytes) -> dict[str, Any]:
+def _added_row(entry: ZooEntry, dest: Path, rel_source: str, staged: StagedModel) -> dict[str, Any]:
     return {
         "id": entry.id,
         "name": entry.id,
         "source": rel_source,
         "path": dest.as_posix(),
-        "sha256": hashlib.sha256(blob).hexdigest(),
-        "bytes": len(blob),
+        "sha256": staged.sha256,
+        "bytes": staged.size,
         "kind": entry.kind,
         "license": entry.license,
     }
+
+
+def _publish(tmp: Path, dest: Path) -> None:
+    """Move the verified temp file to `dest` without ever overwriting or
+    following a link: a hard link fails if `dest` exists (even dangling); on a
+    filesystem without hard links, `O_EXCL|O_NOFOLLOW` creates it instead.
+    Raises `FileExistsError` / `OSError`."""
+    try:
+        os.link(tmp, dest, follow_symlinks=False)
+        return
+    except FileExistsError:
+        raise
+    except OSError:
+        pass
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(dest, flags, 0o644)
+    try:
+        with open(tmp, "rb") as src, os.fdopen(fd, "wb") as out:
+            shutil.copyfileobj(src, out)
+    except BaseException:
+        dest.unlink(missing_ok=True)
+        raise
+
+
+def _plan_edit(entry: ZooEntry, board_path: Path) -> tuple[str, str] | Issue:
+    """`(new board.yaml text, relative source)` -- computed before any fetch so
+    a refused edit costs nothing."""
+    rel_source = f"{MODELS_DIR}/{entry.id}{entry.suffix}"
+    new_entry: dict[str, Any] = {"name": entry.id, "source": rel_source}
+    if entry.compile:
+        new_entry["compile"] = entry.compile
+    try:
+        return append_models_entry(board_path.read_bytes().decode("utf-8"), new_entry), rel_source
+    except (OSError, UnicodeDecodeError) as err:
+        return Issue("model.board-yaml-edit-failed", "error", f"{board_path}: {err}")
+    except BoardEditRefused as err:
+        return Issue(
+            "model.board-yaml-edit-refused",
+            "error",
+            f"Not editing {board_path}: {err}. Nothing was changed; add this entry by hand: "
+            f"name: {entry.id}, source: {rel_source}.",
+        )
+
+
+def _commit_add(
+    entry: ZooEntry, zoo_dir: Path, dest: Path, board_path: Path, new_text: str, reader: Any
+) -> StagedModel | Issue:
+    """Stage (stream + verify) into a temp file beside `dest`, publish it
+    without overwriting, then write `board.yaml` last. Any failure removes
+    everything this run created, including a `models/` it made."""
+    models_dir = dest.parent
+    created_dir = not os.path.lexists(models_dir)
+    staged: StagedModel | None = None
+    published = False
+    try:
+        if created_dir:
+            models_dir.mkdir()
+        staged = fetch_source(entry, zoo_dir, tmp_dir=models_dir, **({"reader": reader} if reader else {}))
+        _publish(staged.path, dest)
+        published = True
+        staged.path.unlink(missing_ok=True)
+        atomic_write_bytes(str(board_path), new_text.encode("utf-8"))
+        return staged
+    except ZooFetchError as err:
+        if err.mismatch:
+            failure = Issue("model.zoo-integrity-failed", "error", str(err))
+        else:
+            failure = Issue("model.zoo-fetch-failed", "error", str(err))
+    except FileExistsError:
+        failure = Issue("model.add-destination-exists", "error", f"{dest} already exists; nothing was changed.")
+    except OSError as err:
+        if published:
+            failure = Issue("model.board-yaml-edit-failed", "error", f"{board_path}: {err}")
+        else:
+            failure = Issue("model.add-write-failed", "error", f"{dest}: {err}")
+    if published:
+        dest.unlink(missing_ok=True)
+    if staged is not None:
+        staged.path.unlink(missing_ok=True)
+    if created_dir:
+        try:
+            models_dir.rmdir()
+        except OSError:
+            pass
+    return failure
 
 
 def run_add(
@@ -223,18 +307,18 @@ def run_add(
         return refuse(refusal, ExitCode.VALIDATION_FAILURE, issues)
     assert entry is not None
     issues.extend(w for w in [_sku_warning(entry, sku)] if w is not None)
-    staged = _stage_add(entry, zoo_dir, board_path, reader)
+
+    plan = _plan_edit(entry, board_path)
+    if isinstance(plan, Issue):
+        refused = plan.code == "model.board-yaml-edit-refused"
+        return refuse(plan, ExitCode.VALIDATION_FAILURE if refused else ExitCode.RUNTIME_FAILURE, issues)
+    new_text, rel_source = plan
+    staged = _commit_add(entry, zoo_dir, dest, board_path, new_text, reader)
     if isinstance(staged, Issue):
-        refused = staged.code == "model.board-yaml-edit-refused"
-        return refuse(
-            staged, ExitCode.VALIDATION_FAILURE if refused else ExitCode.RUNTIME_FAILURE, issues
-        )
-    blob, new_text, rel_source = staged
-    failure = _commit_add(dest, blob, board_path, new_text)
-    if failure is not None:
-        failed = Issue("model.board-yaml-edit-failed", "error", failure)
-        return refuse(failed, ExitCode.RUNTIME_FAILURE, issues)
-    data["added"] = _added_row(entry, dest, rel_source, blob)
+        exit_code = ExitCode.VALIDATION_FAILURE if staged.code == "model.add-destination-exists" else ExitCode.RUNTIME_FAILURE
+        return refuse(staged, exit_code, issues)
+    data["added"] = entry.id
+    data["addedEntry"] = _added_row(entry, dest, rel_source, staged)
     return project, sdk, data, issues, ExitCode.SUCCESS
 
 
@@ -242,13 +326,14 @@ def render_zoo_text(data: dict) -> list[str]:
     lines = []
     for e in data.get("entries", []):
         soms = ",".join(e["validatedSoms"]) or "none"
-        lines.append(f"{e['id']}  [{e['kind']}] {e['task']}  {e['license']}  validated: {soms}")
+        here = {True: "  (runs on this board)", False: "", None: ""}[e.get("runsHere")]
+        lines.append(f"{e['id']}  [{e['kind']}] {e['task']}  {e['license']}  validated: {soms}{here}")
         lines.append(f"    {e['description']}")
     return lines
 
 
 def render_add_text(data: dict) -> list[str]:
-    a = data.get("added")
+    a = data.get("addedEntry")
     if not a:
         return []
     return [
