@@ -4472,6 +4472,48 @@ def test_a_device_config_for_another_family_warns_but_is_accepted(tmp_path):
     assert device["metadataDevice"] == "AE722F80F55D5AS" and "warning" in device
 
 
+def test_an_app_whose_tail_reaches_the_atocs_first_sector_is_refused(tmp_path):
+    """tan-cli#1343 review, MAJOR 2: the loader rewrites whole 16 KiB sectors. An
+    app of 0x4001 bytes at 0x80010000 spills into the sector the ATOC at
+    0x80014000 starts in, so the ATOC write would erase the app's tail (or the
+    reverse). Refused before anything runs -- under --dry-run too."""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x00" * 0x4001)
+    (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00" * 0x100)
+    manifest = _FLOW_D_SIGN_MANIFEST % ', atoc: atoc.bin, atoc_address: "0x80014000"'
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    assert codes(payload) == ["flash.write-sector-overlap"]
+    message = payload["data"]["entries"][0]["message"]
+    assert "app write and the atoc write share" in message and "0x80014000-0x80018000" in message
+
+    # One byte shorter -> exactly one sector, no overlap.
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x00" * 0x4000)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    assert exit_code == 0, out
+
+
+def test_a_resident_entry_in_the_written_sectors_is_refused(tmp_path):
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x00" * 0x40)
+    (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00" * 0x100)
+    manifest = _FLOW_D_SIGN_MANIFEST % (
+        ', atoc: atoc.bin, atoc_address: "0x80100000", '
+        "resident_atoc_entries: [DEVICE, HP-OWNER@0x80012000+0x40]"
+    )
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    payload = envelope(out)
+    assert exit_code == 1 and codes(payload) == ["flash.write-sector-overlap"]
+    assert "HP-OWNER" in payload["data"]["entries"][0]["message"]
+
+
 def test_flow_d_signs_a_device_entry_by_default_and_reports_it(tmp_path):
     """tan-cli#1322: the auto-signed ATOC leads with DEVICE, sourced from the
     stock SETOOLS config, and the envelope says where it came from."""

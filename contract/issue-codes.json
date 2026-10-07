@@ -1948,6 +1948,14 @@
       "note": "Added closing the tan-cli#1343 review (tan-cli#1322). EMISSION CONDITION: the device configuration that becomes the DEVICE ATOC entry (flash_args.setools_device_config, else the stock SETOOLS build/config/app-device-config.json) declares a metadata.device whose Alif family prefix (the first three characters, e.g. AE7 vs AE8) differs from the slice's flash_args.jlink_flash_device. The stock SETOOLS file names an Ensemble E7 part while the AEN801/803 boards are E8, so this fires for the stock file on those boards; it is a warning, not a refusal, because the stock file is the bench-proven default. The entry's setools.deviceConfig carries metadataDevice and the same warning text. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
+      "code": "flash.write-sector-overlap",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing the tan-cli#1343 review. EMISSION CONDITION: a Flow D (alif_mram_jlink) entry whose planned writes -- the app blob at flash_args.slot0_load_address and the ATOC at its address -- touch the same 16 KiB sector, or whose sectors cover a resident entry that the new ATOC does not rewrite (an entry listed in flash_args.resident_atoc_entries as NAME@0xADDR[+0xSIZE]). The MRAM loader rewrites whole sectors and fills the remainder with 0xFF, so the later write would erase the head of the earlier one. Refused before anything is written, under --dry-run too, from the sizes of the files that would be written. Deliberately DISTINCT from flash.entry-failed: every flash refusal shares rc 1 and status failed, so the code is the only channel that tells a consumer this one is answered by moving an address. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "generate.board-sku-unresolved",
       "status": "reserved",
       "severity": "error",

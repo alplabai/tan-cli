@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from tan.core.dp_id import _dp_id_value
-from tan.core.flash_plan import commander_path, validate_commander_path
+from tan.core.flash_plan import FlashPlanError, commander_path, validate_commander_path
 
 #: The MRAM loader's erase/rewrite granule on the AEN parts (tan-cli#1318).
 SECTOR_BYTES = 16 * 1024
@@ -129,3 +129,60 @@ def readback_script(
         out.append(f"savebin {commander_path(dest)} {address} 0x{size:X}")
     out.append("exit")
     return "\n".join(out) + "\n"
+
+
+# ── sector overlap (tan-cli#1343 review) ────────────────────────────────────
+
+CODE_SECTOR_OVERLAP = "flash.write-sector-overlap"
+
+
+class SectorOverlapError(FlashPlanError):
+    """Two writes (or a write and a resident entry that will not be rewritten)
+    share a 16 KiB sector. `code` is the registered issue code."""
+
+    code = CODE_SECTOR_OVERLAP
+
+
+def _interval(address: int, size: int | None) -> tuple[int, int]:
+    """`[first, end)` of the sectors touched by `size` bytes at `address`; an
+    unknown size counts as one sector (the least it can touch)."""
+    first = address - address % SECTOR_BYTES
+    last = address + max((size or 1), 1) - 1
+    return first, last - last % SECTOR_BYTES + SECTOR_BYTES
+
+
+def find_overlaps(
+    writes: Sequence[dict[str, Any]],
+    resident: Sequence[tuple[str, int | None, int | None]] = (),
+) -> list[str]:
+    """Human descriptions of every sector overlap among `writes`
+    (`{name, address, size}` dicts) and between a write and a `resident`
+    `(name, address, size)` region (entries with no address are skipped: tan
+    cannot place what it was not told). The loader rewrites WHOLE sectors, so a
+    write whose tail reaches the next write's first sector would erase the
+    neighbour's head."""
+    spans = [
+        (w["name"], *_interval(int(w["address"], 16), w.get("size")))
+        for w in writes
+        if w.get("address")
+    ]
+    out: list[str] = []
+    for i, (a_name, a_lo, a_hi) in enumerate(spans):
+        for b_name, b_lo, b_hi in spans[i + 1 :]:
+            if a_lo < b_hi and b_lo < a_hi:
+                lo, hi = max(a_lo, b_lo), min(a_hi, b_hi)
+                out.append(
+                    f"the {a_name} write and the {b_name} write share the 16 KiB sector(s) "
+                    f"{hex_addr(lo)}-{hex_addr(hi)}"
+                )
+    for r_name, r_addr, r_size in resident:
+        if r_addr is None:
+            continue
+        r_lo, r_hi = _interval(r_addr, r_size)
+        for w_name, w_lo, w_hi in spans:
+            if w_lo < r_hi and r_lo < w_hi:
+                out.append(
+                    f"the {w_name} write's sectors {hex_addr(w_lo)}-{hex_addr(w_hi)} cover the "
+                    f"resident entry {r_name} at {hex_addr(r_addr)}, which this ATOC does not rewrite"
+                )
+    return out

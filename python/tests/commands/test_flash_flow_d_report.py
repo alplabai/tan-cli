@@ -360,3 +360,36 @@ def test_a_probe_that_changes_before_the_readback_refuses_it(tmp_path, monkeypat
     assert rc == 1
     assert _codes(issues) == ["flash.probe-ambiguous"]
     assert [s for s in fake.scripts if "savebin" in s] == []
+
+
+# ── sector overlap (tan-cli#1343 review) ────────────────────────────────────
+
+
+def test_find_overlaps_between_writes_and_resident_entries():
+    app = {"name": "app", "address": "0x80010000", "size": 0x4001}  # tail spills into sector 2
+    atoc = {"name": "atoc", "address": "0x80014000", "size": 0x100}
+    found = flow_d_report.find_overlaps([app, atoc])
+    assert len(found) == 1 and "app write and the atoc write share" in found[0]
+    assert "0x80014000-0x80018000" in found[0]
+    # Adjacent but disjoint sectors are fine; so is an exact fit.
+    app["size"] = 0x4000
+    assert flow_d_report.find_overlaps([app, atoc]) == []
+    # A resident entry the ATOC does not rewrite, inside the app's sectors.
+    res = flow_d_report.find_overlaps([app], [("HP-OWNER", 0x80013000, 0x20), ("NOADDR", None, None)])
+    assert len(res) == 1 and "HP-OWNER" in res[0]
+    assert flow_d_report.find_overlaps([app], [("FAR", 0x80200000, 0x20)]) == []
+
+
+def test_resident_regions_parse_the_three_spellings():
+    from tan.core.atoc_replacement import resident_regions
+
+    assert resident_regions({"resident_atoc_entries": ["DEVICE", "HP@0x80200000", "X@0x1+0x20"]}) == (
+        ("DEVICE", None, None), ("HP", 0x80200000, None), ("X", 0x1, 0x20),
+    )
+    import pytest as _pytest
+
+    from tan.core.flash_plan import FlashPlanError
+
+    for bad in ("DEVICE@", "A@zz", "A B"):
+        with _pytest.raises(FlashPlanError):
+            resident_regions({"resident_atoc_entries": [bad]})

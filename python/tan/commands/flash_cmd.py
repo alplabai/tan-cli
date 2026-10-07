@@ -178,10 +178,13 @@ from tan.core.setools import (
 )
 from tan.core.atoc_replacement import (
     replacement_detail,
+    resident_regions,
     resident_entries,
     written_entries,
 )
 from tan.core.flow_d_report import (
+    SectorOverlapError,
+    find_overlaps,
     VERIFICATION_CACHE,
     VERIFICATION_NOTE,
     VERIFICATION_READBACK,
@@ -3058,6 +3061,24 @@ def _flash_entry_body(
                     lines,
                 )
             flow_d_writes = _flow_d_writes(flash_args, shape)
+            # tan-cli#1343 review: the loader rewrites whole 16 KiB sectors, so a write
+            # that reaches into another write's first sector (or a resident entry the
+            # new ATOC does not rewrite) would erase it. Refused before anything is
+            # written -- under --dry-run too.
+            rewritten = {e["name"] for e in report.get("atoc", {}).get("entries", ())} or set(
+                written_entries(entry_id, device_config=not ctx.no_device_config)
+            )
+            overlaps = find_overlaps(
+                flow_d_writes,
+                [r for r in (resident_regions(flash_args) or ()) if r[0] not in rewritten],
+            )
+            if overlaps:
+                raise SectorOverlapError(
+                    f"{FLOW_D_METHOD}[{entry_id}]: refusing -- " + "; ".join(overlaps)
+                    + ". The loader rewrites whole 16 KiB sectors and fills the rest with "
+                    "0xFF, so these writes would erase each other. Move the app or the ATOC, "
+                    "or fix flash_args.slot0_load_address / atoc_address."
+                )
         except FlashPlanError as err:
             msg = str(err)
             lines.append(_entry_head(kind, entry_id, method, target.flash_method))
@@ -4020,6 +4041,8 @@ def _run(
                 issues.append(Issue("flash.probe-verify-failed", "error", entry.message))
             elif entry.probe_refusal == "selector-conflict":
                 issues.append(Issue("flash.probe-selector-conflict", "error", entry.message))
+            elif entry.issue_code == "flash.write-sector-overlap":
+                issues.append(Issue("flash.write-sector-overlap", "error", entry.message))
             elif entry.issue_code == "flash.readback-mismatch":
                 issues.append(Issue("flash.readback-mismatch", "error", entry.message))
             elif entry.issue_code == "flash.readback-failed":

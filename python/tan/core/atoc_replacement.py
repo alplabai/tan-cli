@@ -19,6 +19,7 @@ Pure: no IO.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -26,6 +27,8 @@ from tan.core.flash_plan import FlashPlanError, _fa_has_key
 
 #: The optional manifest key listing the entries resident on the board.
 RESIDENT_KEY = "resident_atoc_entries"
+
+_RESIDENT_ITEM = re.compile(r"^([^@\s]+)(?:@(0[xX][0-9A-Fa-f]+)(?:\+(0[xX][0-9A-Fa-f]+))?)?$")
 
 #: The `DEVICE` entry name (`app-gen-toc`'s own spelling).
 DEVICE_ENTRY = "DEVICE"
@@ -38,20 +41,39 @@ def written_entries(entry_id: str, *, device_config: bool) -> tuple[str, ...]:
     return ((DEVICE_ENTRY,) if device_config else ()) + (entry_id,)
 
 
-def resident_entries(flash_args: Any) -> tuple[str, ...] | None:
-    """`flash_args.resident_atoc_entries` as a tuple of names, or `None` when
-    the key is absent (the resident table is unknown). A present but malformed
-    value (not a list of non-empty strings) raises `FlashPlanError`: guessing
-    here would understate what a write deletes."""
+def resident_regions(flash_args: Any) -> tuple[tuple[str, int | None, int | None], ...] | None:
+    """`flash_args.resident_atoc_entries` as `(name, address, size)` tuples, or
+    `None` when the key is absent (the resident table is unknown). Each item is
+    `NAME`, `NAME@0xADDR` or `NAME@0xADDR+0xSIZE`; the address (and size) are what
+    let tan refuse a write whose sectors would erase that entry
+    (`flash.write-sector-overlap`). A present but malformed value raises
+    `FlashPlanError`: guessing here would understate what a write deletes."""
     if not _fa_has_key(flash_args, RESIDENT_KEY):
         return None
     raw = flash_args[RESIDENT_KEY]
-    if not isinstance(raw, list) or not all(isinstance(n, str) and n.strip() for n in raw):
-        raise FlashPlanError(
-            f"alif_mram_jlink: flash_args.{RESIDENT_KEY} must be a list of ATOC entry "
-            f"names (e.g. [DEVICE, ALP-HE, HP-OWNER]); got {raw!r}"
-        )
-    return tuple(n.strip() for n in raw)
+    bad = FlashPlanError(
+        f"alif_mram_jlink: flash_args.{RESIDENT_KEY} must be a list of ATOC entry names, "
+        f"each NAME, NAME@0xADDR or NAME@0xADDR+0xSIZE (e.g. [DEVICE, ALP-HE@0x80010000+0x4000]); "
+        f"got {raw!r}"
+    )
+    if not isinstance(raw, list):
+        raise bad
+    out: list[tuple[str, int | None, int | None]] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise bad
+        match = _RESIDENT_ITEM.match(item.strip())
+        if match is None:
+            raise bad
+        name, addr, size = match.groups()
+        out.append((name, int(addr, 16) if addr else None, int(size, 16) if size else None))
+    return tuple(out)
+
+
+def resident_entries(flash_args: Any) -> tuple[str, ...] | None:
+    """The NAMES in `flash_args.resident_atoc_entries`, or `None` when absent."""
+    regions = resident_regions(flash_args)
+    return None if regions is None else tuple(name for name, _a, _s in regions)
 
 
 def replacement_detail(
