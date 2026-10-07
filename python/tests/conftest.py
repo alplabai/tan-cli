@@ -1247,6 +1247,9 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
     # build` subprocess; it reads that from `REAL_ENVIRON` above, not from
     # `os.environ` inside the test body, for exactly this reason.
     monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    # `tan doctor`'s stale-install check does one `git ls-remote` for a VCS
+    # install; a test must never touch the network.
+    monkeypatch.setenv("TAN_DOCTOR_OFFLINE", "1")
     # `SOURCE_DATE_EPOCH` wins over the clock in `tan.core.timestamp`, so a
     # developer or CI image that exports it (reproducible-build setups do)
     # changes every `generatedAt`/`updatedAt` this suite observes -- and a

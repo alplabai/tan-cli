@@ -2850,7 +2850,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # tan-cli#1390: a `pull_request` runs the Linux legs only; the Windows
+        # and macOS legs run on `merge_group` (and push / dispatch / the
+        # release.yml `workflow_call`, whose `github.event_name` is the
+        # caller's). The `python-tests` aggregator below still reports all
+        # three required contexts on a `pull_request`.
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest","macos-latest"]') }}
         # pytest-shard is 0-INDEXED (--shard-id runs 0..num-shards-1). The
         # matrix values here ARE the --shard-id args passed below, unmodified
         # -- deliberately NOT [1,2,3,4] with a subtraction applied later,
@@ -3270,7 +3275,24 @@ jobs:
     # anything it cannot finish in 5 is stuck, not slow.
     timeout-minutes: 5
     steps:
+      # tan-cli#1390: on a `pull_request` only the Linux shards exist, so the
+      # windows/macos required contexts are reported as a stub pass. The gate
+      # is the exact event name: `merge_group`, `push`, dispatch and the
+      # release.yml `workflow_call` all fall through to the real check below,
+      # where a missing/skipped shard matrix is a failure.
+      - name: stub pass (skipped on pull_request; runs in merge_group)
+        if: ${{ github.event_name == 'pull_request' && matrix.os != 'ubuntu-latest' }}
+        shell: bash
+        env:
+          LEG_OS: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          msg="python-tests-shard (${LEG_OS}) skipped on pull_request; runs in merge_group"
+          echo "${msg}"
+          echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
+
       - name: verify every python-tests-shard leg succeeded
+        if: ${{ !(github.event_name == 'pull_request' && matrix.os != 'ubuntu-latest') }}
         shell: bash
         run: |
           set -euo pipefail
