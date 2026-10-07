@@ -213,7 +213,7 @@ jobs:
       # interpreter is a different BUILD of CPython, not just a different
       # version: measured on this job, `/opt/hostedtoolcache/Python/3.12.13/
       # x64/lib/libpython3.12.so.1.0` froze a 28485720 B `dist/tan` (ceiling
-      # 16500000) from the SAME source that freezes to 14042352 B inside this
+      # 16800000) from the SAME source that freezes to 14042352 B inside this
       # container (artifact_ceilings.env's own x86_64-unknown-linux-gnu
       # measurement). No new dependency and no new import produced that --
       # PyInstaller bundles the interpreter it runs under, and a hosted-runner
