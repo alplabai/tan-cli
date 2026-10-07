@@ -31,11 +31,11 @@ collects this file. That outer invocation passes no `-n`/`--dist` itself,
 so the NESTED `-n 2` subprocess this test spawns is not itself running
 inside a worker -- nesting is safe.
 
-SKIPS (`pytest.importorskip("xdist")`) in `parity.yml`'s
-`python-tests-shard` "parity, whole" leg and its `release-sdk-parity` job:
-neither installs `pytest-xdist` (both shard via `pytest-shard` instead, an
-entirely different mechanism this test does not exercise), even though
-both bind `ALP_SDK_ROOT` and do collect `tests/parity`.
+ALSO RUNS in `parity.yml`'s `python-tests-shard` legs (they install
+`pytest-xdist` now; the "parity, whole" leg runs `tests/parity` under
+`-n 4`, so this file executes inside an xdist worker there). It still
+SKIPS (`pytest.importorskip("xdist")`) in `release-sdk-parity`, which
+shards via `pytest-shard` only.
 
 SKIPS (`ALP_SDK_ROOT` unbound) in `ci.yml`'s `python-newest` job, which
 binds no alp-sdk checkout at all.
