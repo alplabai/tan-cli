@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import re
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -103,7 +102,9 @@ def parse_tan_version(version_py_text: str) -> str | None:
 
 def source_version(origin: InstallOrigin) -> str | None:
     """`TAN_VERSION` of a `file://` source tree (offline); `None` if unreadable."""
-    root = Path(urllib.request.url2pathname(urllib.parse.urlparse(origin.url).path))
+    from urllib.request import url2pathname
+
+    root = Path(url2pathname(urllib.parse.urlparse(origin.url).path))
     for rel in (origin.subdirectory or "", "python", ""):
         try:
             text = (root / rel / "tan" / "version.py").read_text(encoding="utf-8")
