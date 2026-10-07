@@ -1672,3 +1672,15 @@ def empty_tool_inventory(scratch: Path) -> str:
             os.symlink(real_which, link)
         assert link.exists(), f"failed to seed `which` into {stub_dir}"
     return str(stub_dir)
+
+
+@pytest.fixture(autouse=True)
+def _no_host_segger_install_roots(monkeypatch):
+    """tan-cli#1336: Flow D resolves the J-Link binary from `--jlink`, `TAN_JLINK`,
+    PATH, then the host's SEGGER install roots. A dev machine with a real
+    `/opt/SEGGER/JLink` would otherwise satisfy the tool gate in every test that
+    scrubs PATH to prove nothing can spawn. Tests that exercise the install-root
+    step patch `_install_roots` themselves."""
+    from tan.core import jlink_binary
+
+    monkeypatch.setattr(jlink_binary, "_install_roots", lambda env, platform: [])

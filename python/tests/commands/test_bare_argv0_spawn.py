@@ -347,12 +347,21 @@ def test_flash_dpidr_preflight_spawns_the_resolved_jlink(hostile, monkeypatch):
         core_id="app",
         sku="E1M-AEN801",
     )
-    assert flash_cmd._flow_d_preflight(inputs) is None
+    # tan-cli#1348: the preflight never resolves the binary itself -- the caller hands it
+    # the run's trusted J-Link (here: the one on the user's PATH, never the hostile
+    # project's), and it is pinned as `executable=`.
+    from tan.core.jlink_binary import resolve_jlink
+
+    trusted = resolve_jlink(None)
+    assert trusted is not None
+    assert flash_cmd._flow_d_preflight(inputs, jlink_exe=trusted.path) is None
     assert seen, "the preflight never spawned"
     executable, argv0 = seen[-1][0], seen[-1][1]
     assert executable is not None, "the preflight pinned no executable"
     assert Path(executable).parent == realbin, f"preflight loaded {executable!r}"
-    assert argv0 == "JLinkExe", f"the preflight child's argv[0] became {argv0!r}"
+    # The identity is the tool name; Windows PATH resolution carries its PATHEXT
+    # suffix (`JLinkExe.EXE`), which the banner does not depend on.
+    assert Path(argv0).stem == "JLinkExe", f"the preflight child's argv[0] became {argv0!r}"
 
 
 def test_flash_dpidr_preflight_refuses_rather_than_spawning_an_unresolved_jlink(
@@ -410,13 +419,17 @@ def test_flash_dpidr_preflight_refuses_rather_than_spawning_an_unresolved_jlink(
 
     monkeypatch.setattr(flash_cmd, "_spawn_jlink", _spawn_jlink)
 
+    # No trusted J-Link was resolved (the caller's `resolve_jlink` found nothing on this
+    # PATH): the preflight REFUSES, and never re-resolves behind the caller's back --
+    # least of all to the decoy the project directory carries (tan-cli#1348).
     message = flash_cmd._flow_d_preflight(
         FlashInputs(
             artefact="app.bin",
             flash_args={"expect_dpidr": "0x6BA02477", "jlink_device": "AE822F80F55D5XX"},
             core_id="app",
             sku="E1M-AEN801",
-        )
+        ),
+        jlink_exe=None,
     )
 
     # The no-spawn property goes FIRST: it is the one with the hardware
@@ -432,9 +445,8 @@ def test_flash_dpidr_preflight_refuses_rather_than_spawning_an_unresolved_jlink(
         "is what makes the no-spawn assertion above worth making"
     )
     assert message is not None, "an unresolvable J-Link produced no refusal"
-    assert "JLinkExe" in message
-    assert "could not be resolved" in message, message
-    assert "refusing to write MRAM without confirming which board is attached" in message, message
+    assert "no J-Link binary found in a trusted location" in message, message
+    assert "DPIDR preflight" in message, message
 
 
 def test_flash_tool_available_is_still_a_gate_the_project_dir_cannot_satisfy(hostile):

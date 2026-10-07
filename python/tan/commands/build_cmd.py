@@ -105,8 +105,8 @@ from tan.commands.build.token_substitution import (
 )
 from tan.commands.build.toolchain import ToolchainResolution, resolve_toolchain_root
 from tan.core.user_defines import UserDefineError, apply_user_defines, define_pairs, user_defines_problem
-from tan.core.plain_zephyr_plan import board_target_problem, normalise_defines, plain_zephyr_plan
 from tan.core.board_files import unmatched_board_file_messages
+from tan.core.plain_zephyr_plan import board_target_problem, normalise_defines, plain_zephyr_plan
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.global_flags import accept_global_flags
 from tan.core.plan_exec import (
