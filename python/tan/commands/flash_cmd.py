@@ -192,7 +192,7 @@ from tan.core.flow_d_report import (
     sha256_of,
     transcript_tail,
 )
-from tan.core.setools_scratch import cleanup_scratch, resolve_device_config
+from tan.core.setools_scratch import cleanup_scratch, family_mismatch, resolve_device_config
 from tan.core.tool_lookup import resolve_program_positions, resolve_tool
 from tan.core.venv import prepend_path, tool_in_venv, venv_bin_dir, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -319,6 +319,14 @@ class _Entry:
     #: own transcript says the PIN reset did not. `_run` appends a
     #: `flash.jlink-reset-unconfirmed` warning. Never emitted by `as_dict()`.
     reset_unconfirmed: bool = False
+    #: tan-cli#1343 review: a preview that did not run `app-gen-toc` because the
+    #: SETOOLS install came only from the manifest. `_run` appends an `info`
+    #: `flash.preview-sign-skipped`. Never emitted by `as_dict()`.
+    preview_sign_skipped: bool = False
+    #: tan-cli#1343 review: the device configuration names another Alif family than
+    #: this slice's J-Link part profile (the warning text). `_run` appends a
+    #: `flash.device-config-mismatch` warning.
+    device_config_warning: str | None = None
     #: Additive envelope blocks (`setools`, ...) -- ONE dict shared with the
     #: run, because some of it (`setools.scratchRemoved`) is only known after
     #: the entry has been built, when its scratch tree is torn down.
@@ -2490,6 +2498,23 @@ def _resolve_flow_d_atoc_via_setools(
             "flash_args.atoc_address yourself."
         )
 
+    if (ctx.dry_run or not confirm) and not setools.operator_supplied:
+        # tan-cli#1343 review: a PREVIEW must not execute a binary the PROJECT picked.
+        # `flash_args.setools_dir` lives in the manifest, which a checkout controls, so
+        # app-gen-toc is only run for a preview when the operator named the install
+        # (`--setools-dir` / `$SETOOLS_DIR`). A confirmed write still signs: the
+        # operator armed it knowing what the manifest says.
+        if report is not None:
+            report["setools"] = {
+                "dir": setools.path, "source": setools.source, "signSkipped": True,
+            }
+        return flash_args, (
+            f"ATOC placement not computed; pass --setools-dir (or set SETOOLS_DIR) to "
+            f"preview it -- the SETOOLS install here ({setools.path}) comes only from "
+            "flash_args.setools_dir in the manifest, and a preview does not run a tool "
+            "the project chose"
+        )
+
     # tan-cli#1322: the DEVICE entry is part of the ATOC unless the operator opted
     # out. Resolved BEFORE the sign so a missing config refuses without spawning.
     device = None
@@ -2499,22 +2524,40 @@ def _resolve_flow_d_atoc_via_setools(
             explicit = resolve_artefact_path(explicit, ctx.build_root, ctx.sdk_root, _is_file)
         device = resolve_device_config(explicit, setools.path, entry_id=entry_id)
 
+    block: dict[str, Any] = {
+        "dir": setools.path,
+        "source": setools.source,
+        "scratch": None,
+        "scratchRemoved": False,
+        "deviceConfig": (
+            {
+                "included": True, "path": device.path, "source": device.source,
+                "metadataDevice": device.metadata_device,
+            }
+            if device is not None
+            else {"included": False, "optOut": "--no-device-config"}
+        ),
+    }
+    if device is not None:
+        warning = family_mismatch(device.metadata_device, fa_str(flash_args, "jlink_flash_device"))
+        if warning:
+            block["deviceConfig"]["warning"] = warning
+    if report is not None:
+        report["setools"] = block
+
+    def _on_scratch(path: str) -> None:
+        # Registered BEFORE app-gen-toc runs (an interrupt mid-sign must not leak it).
+        block["scratch"] = path
+        if stack is not None:
+            _register_scratch(stack, report if report is not None else {}, path)
+
     signed = sign_slot0(
         setools.path, app_gen_toc, shape.artefact, entry_id, shape.app_address,
-        device_config=device,
+        device_config=device, on_scratch=_on_scratch,
     )
+    if signed.shared_touched:
+        block["sharedInstallTouched"] = list(signed.shared_touched)
     if report is not None:
-        report["setools"] = {
-            "dir": setools.path,
-            "source": setools.source,
-            "scratch": signed.scratch_dir,
-            "scratchRemoved": False,
-            "deviceConfig": (
-                {"included": True, "path": device.path, "source": device.source}
-                if device is not None
-                else {"included": False, "optOut": "--no-device-config"}
-            ),
-        }
         report["atoc"] = {
             "address": signed.atoc_address,
             "size": signed.atoc_size,
@@ -2522,8 +2565,6 @@ def _resolve_flow_d_atoc_via_setools(
                 {"name": n, "objAddress": a} for n, a in signed.report.entries
             ],
         }
-    if stack is not None:
-        _register_scratch(stack, report if report is not None else {}, signed.scratch_dir)
     merged = dict(flash_args)
     merged["atoc"] = signed.atoc_path
     merged["atoc_address"] = signed.atoc_address
@@ -2633,6 +2674,7 @@ def _flash_entry_body(
         probe_refusal: str | None = None,
         issue_code: str | None = None,
         reset_unconfirmed: bool = False,
+        preview_sign_skipped: bool = False,
     ) -> _Entry:
         return _Entry(
             kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message,
@@ -2647,6 +2689,8 @@ def _flash_entry_body(
             extra=report,
             issue_code=issue_code,
             reset_unconfirmed=reset_unconfirmed,
+            preview_sign_skipped=preview_sign_skipped,
+            device_config_warning=report.get("setools", {}).get("deviceConfig", {}).get("warning"),
         )
 
     # tan-cli#611, THE HOIST. WHO may flash this entry is decided BEFORE
@@ -3003,6 +3047,16 @@ def _flash_entry_body(
                 flash_args, shape, ctx, entry_id, confirm,
                 stack=scratch_stack, report=report,
             )
+            if report.get("setools", {}).get("signSkipped"):
+                note = f"{setools_note}. {ATOC_REPLACEMENT_PREVIEW_NOTE}{probe_note}"
+                lines.append(_entry_head(kind, entry_id, method, target.flash_method))
+                lines.append(f"  {note}")
+                return (
+                    0,
+                    entry(method, "ok" if ctx.dry_run else "planned", 0, note,
+                          preview_sign_skipped=True),
+                    lines,
+                )
             flow_d_writes = _flow_d_writes(flash_args, shape)
         except FlashPlanError as err:
             msg = str(err)
@@ -3987,6 +4041,20 @@ def _run(
                 )
             else:
                 issues.append(Issue("flash.entry-failed", "error", entry.message))
+        if entry.preview_sign_skipped:
+            message = (
+                f"{entry.id}: the ATOC was not signed for this preview -- the SETOOLS "
+                "install comes only from flash_args.setools_dir in the manifest. Pass "
+                "--setools-dir (or set SETOOLS_DIR) to see the placement."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.preview-sign-skipped", "info", message))
+        if entry.device_config_warning:
+            text_lines.append(f"{entry.id}: {entry.device_config_warning}")
+            issues.append(
+                Issue("flash.device-config-mismatch", "warning",
+                      f"{entry.id}: {entry.device_config_warning}")
+            )
         if entry.reset_unconfirmed:
             # tan-cli#1321 / #522: J-Link's own transcript says the PIN reset did
             # not land, so the freshly written image was not necessarily started.

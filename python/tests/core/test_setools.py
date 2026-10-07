@@ -653,43 +653,120 @@ def test_two_processes_signing_one_setools_dir_never_cross_pair(tmp_path):
 # ── the scratch overlay itself ──────────────────────────────────────────────
 
 
-def test_scratch_overlay_copies_small_dirs_symlinks_big_ones_and_never_the_build_dir(
-    tmp_path, monkeypatch
+def test_scratch_overlay_copies_every_dir_but_the_allowlist_and_never_the_build_dir(
+    tmp_path,
 ):
     """The measured SETOOLS shape: the tool `chdir`s into a subdirectory and
-    addresses `../build`, so a SYMLINKED small directory would write through to
-    the shared install. Small directories are copied, a large one is linked, the
-    top-level files are linked, and `build/` is a fresh real directory that does
-    NOT inherit the shared one's contents."""
+    addresses `../build`, so a SYMLINKED directory would write through to the
+    shared install. Every top-level directory is therefore COPIED -- whatever its
+    size -- except the read-only allowlist (`alif/`); `utils/key` (the signing
+    keys) is linked into the copied `utils/` rather than duplicated into /tmp;
+    top-level files are linked; and `build/` is fresh and does NOT inherit the
+    shared one's contents (tan-cli#1343 review)."""
     if os.name == "nt":
         pytest.skip("symlink semantics are POSIX; Windows copies instead")
     shared = tmp_path / "setools"
-    (shared / "utils").mkdir(parents=True)
+    (shared / "utils" / "key").mkdir(parents=True)
     (shared / "utils" / "cfg").write_text("cfg", encoding="utf-8")
+    (shared / "utils" / "key" / "OEMRoT.pem").write_text("PRIVATE", encoding="utf-8")
+    (shared / "bin").mkdir()
+    (shared / "bin" / "x").write_bytes(b"x" * 100_000)  # big, still copied
     (shared / "alif").mkdir()
     (shared / "alif" / "SP.bin").write_bytes(b"x" * 4096)
     (shared / "app-gen-toc").write_text("#!/bin/sh\n", encoding="utf-8")
     (shared / "build" / "config").mkdir(parents=True)
     (shared / "build" / "config" / "stock.json").write_text("{}", encoding="utf-8")
     (shared / "build" / "AppTocPackage.bin").write_bytes(b"shared-atoc")
-    monkeypatch.setattr(setools_scratch, "_COPY_DIR_LIMIT_BYTES", 1024)
     before = _tree_digest(shared)
 
     (tmp_path / "parent").mkdir()
     root = Path(setools_scratch.make_scratch(str(shared), str(tmp_path / "parent")))
     try:
-        assert not (root / "utils").is_symlink()  # small: copied
+        assert not (root / "utils").is_symlink()
         assert (root / "utils" / "cfg").read_text(encoding="utf-8") == "cfg"
-        assert (root / "alif").is_symlink()  # large: linked
-        assert (root / "app-gen-toc").is_symlink()  # top-level file: linked
+        assert (root / "utils" / "key").is_symlink()  # keys: linked, not copied
+        assert (root / "utils" / "key" / "OEMRoT.pem").read_text(encoding="utf-8") == "PRIVATE"
+        assert not (root / "bin").is_symlink()  # no size threshold any more
+        assert (root / "alif").is_symlink()  # the explicit read-only allowlist
+        assert (root / "app-gen-toc").is_symlink()
         assert not (root / "build").is_symlink()
         assert sorted(p.name for p in (root / "build").iterdir()) == ["config", "images", "logs"]
         assert not (root / "build" / "AppTocPackage.bin").exists()
-        assert not (root / "build" / "config" / "stock.json").exists()
+        assert oct(root.stat().st_mode & 0o777) == "0o700"
     finally:
         assert setools_scratch.cleanup_scratch(str(root))
-    # Removing the overlay unlinked the symlinks and never followed them.
     assert _tree_digest(shared) == before
+
+
+def test_sign_slot0_registers_the_scratch_before_the_tool_runs(tmp_path):
+    """tan-cli#1343 review (b): an interrupt during `app-gen-toc` must not leak
+    the tree -- the caller hears about it BEFORE the spawn."""
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    script = setools_dir / _script_name()
+    _write_fake_app_gen_toc(script)
+    artefact = _artefact_bin(tmp_path)
+    seen: list[tuple[str, bool]] = []
+
+    def _on_scratch(path: str) -> None:
+        seen.append((path, os.path.isdir(path) and not (Path(path) / "build" / "AppTocPackage.bin").exists()))
+
+    (tmp_path / "scratch").mkdir()
+    signed = sign_slot0(
+        str(setools_dir), str(script), str(artefact), "m55_he", "0x80010000",
+        scratch_parent=str(tmp_path / "scratch"), on_scratch=_on_scratch,
+    )
+    try:
+        assert seen == [(signed.scratch_dir, True)]
+        assert signed.shared_touched == ()
+    finally:
+        setools_scratch.cleanup_scratch(signed.scratch_dir)
+
+
+def test_a_shared_install_that_changes_during_the_sign_is_reported(tmp_path):
+    """Not a refusal (a raw bench recipe may legitimately be running) -- but the
+    envelope says so."""
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    script = setools_dir / _script_name()
+    _write_fake_app_gen_toc(script)
+    artefact = _artefact_bin(tmp_path)
+    touched = setools_dir / "elsewhere.txt"
+
+    def _on_scratch(_path: str) -> None:
+        touched.write_text("another process wrote here", encoding="utf-8")
+
+    (tmp_path / "scratch").mkdir()
+    signed = sign_slot0(
+        str(setools_dir), str(script), str(artefact), "m55_he", "0x80010000",
+        scratch_parent=str(tmp_path / "scratch"), on_scratch=_on_scratch,
+    )
+    try:
+        assert signed.shared_touched == (str(touched),)
+    finally:
+        setools_scratch.cleanup_scratch(signed.scratch_dir)
+
+
+def test_the_device_family_check():
+    assert setools_scratch.family_mismatch("AE722F80F55D5AS", "AE822FA0E5597LS0_M55_HE")
+    assert setools_scratch.family_mismatch("AE822FA0E5597LS0", "AE822FA0E5597LS0_M55_HE") is None
+    assert setools_scratch.family_mismatch(None, "AE822") is None
+    assert setools_scratch.family_mismatch("AE8", None) is None
+
+
+def test_the_device_config_metadata_is_read(tmp_path):
+    good = tmp_path / "a.json"
+    good.write_text('{"metadata": {"device": "AE722F80F55D5AS"}}', encoding="utf-8")
+    assert setools_scratch.read_metadata_device(str(good)) == "AE722F80F55D5AS"
+    bad = tmp_path / "b.json"
+    bad.write_text("not json", encoding="utf-8")
+    assert setools_scratch.read_metadata_device(str(bad)) is None
+    assert setools_scratch.read_metadata_device(str(tmp_path / "missing")) is None
+
+
+def test_atoc_entry_names_lose_their_nul_padding():
+    text = "APP TOC entry for DEVICE\x00\x00   obj_address 0x8057f450\n"
+    assert setools_scratch.parse_atoc_report(text).entries == (("DEVICE", "0x8057f450"),)
 
 
 def test_parse_atoc_report_reads_the_entry_list_and_size():

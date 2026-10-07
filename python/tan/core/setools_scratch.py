@@ -19,11 +19,14 @@ write there. Therefore:
 
 * every top-level FILE (the `app-gen-*`/`app-write-mram` executables,
   `version.txt`, ...) is symlinked -- read-only and cwd-independent;
-* every top-level DIRECTORY at or under [`_COPY_DIR_LIMIT_BYTES`] is COPIED
-  (`utils/`, `cert/`, `bin/`: ~2.5 MiB measured), so its `..` is the scratch
-  root; a directory over the limit (`alif/`, ~74 MiB of System Package images the
-  signing step does not read) is symlinked, because copying it per run would
-  cost more than the isolation of a directory the tool does not enter;
+* every top-level DIRECTORY is COPIED (`bin/`, `cert/`, `utils/`: ~2.5 MiB
+  measured -- the tool writes there, e.g. its logs), so its `..` is the scratch
+  root. The ONLY exceptions are an explicit read-only allowlist,
+  [`_LINK_DIRS`] (`alif/`: ~74 MiB of System Package images the signing step
+  does not read, so copying it per run would cost more than it isolates), and
+  `utils/key`, the signing keys, which are symlinked INTO the copied `utils/`
+  rather than duplicated into the temp directory (measured: `app-gen-toc` signs
+  correctly through the link and the shared install stays byte-identical);
 * `build/` is a FRESH real directory holding only what this one sign needs
   (`config/`, `images/`, `logs/`), so `app-package-map.txt` is never shared
   history and the post-sign report belongs to exactly this run.
@@ -33,6 +36,7 @@ copied instead.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -41,9 +45,13 @@ from dataclasses import dataclass
 
 from tan.core.flash_plan import FlashPlanError
 
-#: A top-level directory of the SETOOLS install larger than this is symlinked
-#: instead of copied (see the module docstring).
-_COPY_DIR_LIMIT_BYTES = 16 * 1024 * 1024
+#: Top-level directories that are symlinked, not copied: read-only to the sign
+#: step (see the module docstring). Everything else is copied.
+_LINK_DIRS = frozenset({"alif"})
+
+#: Directory, relative to the install root, whose contents are key material:
+#: linked into the copy instead of duplicated.
+_KEY_DIR = os.path.join("utils", "key")
 
 #: The stock device configuration SETOOLS ships, relative to the install root.
 STOCK_DEVICE_CONFIG_REL = os.path.join("build", "config", "app-device-config.json")
@@ -67,15 +75,47 @@ class DeviceConfigMissingError(FlashPlanError):
 
 @dataclass(frozen=True)
 class DeviceConfig:
-    """The resolved DEVICE-entry source: an absolute `path` (read-only) and a
-    human `source` naming where it came from."""
+    """The resolved DEVICE-entry source: an absolute `path` (read-only), a human
+    `source` naming where it came from, and the `metadata.device` the file itself
+    declares (`None` when it does not parse)."""
 
     path: str
     source: str
+    metadata_device: str | None = None
 
     @property
     def name(self) -> str:
         return os.path.basename(self.path)
+
+
+def read_metadata_device(path: str) -> str | None:
+    """`metadata.device` out of a device-config JSON, or `None`."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        device = doc["metadata"]["device"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return device if isinstance(device, str) else None
+
+
+def family_mismatch(metadata_device: str | None, flash_device: str | None) -> str | None:
+    """A warning when the device configuration was written for a different Alif
+    family than `flash_device` (the J-Link part profile): the part numbers share
+    their first three characters within a family (`AE8...` Ensemble E8). `None`
+    when they agree or either is unknown."""
+    if not metadata_device or not flash_device:
+        return None
+    if metadata_device[:3].upper() == flash_device[:3].upper():
+        return None
+    return (
+        f"the device configuration declares device '{metadata_device}' but this slice's J-Link "
+        f"part profile is '{flash_device}' -- a different Alif family. The DEVICE entry carries "
+        "firewall, clock and boot settings. This is a warning, not a refusal: the metadata may be "
+        "stale (the stock SETOOLS file declares an E7 part, yet its compiled blob is byte-identical "
+        "to the E8 board's original DEVICE entry). Confirm it is the right file (it is the stock "
+        "SETOOLS config unless flash_args.setools_device_config names another)."
+    )
 
 
 def resolve_device_config(
@@ -112,25 +152,13 @@ def resolve_device_config(
                 "an app-only ATOC."
             )
         config = DeviceConfig(stock, "the stock SETOOLS build/config/app-device-config.json")
+    config = DeviceConfig(config.path, config.source, read_metadata_device(config.path))
     if _DEVICE_BASENAME_RE.match(config.name) is None:
         raise DeviceConfigMissingError(
             f"alif_mram_jlink[{entry_id}]: the device configuration file name "
             f"'{config.name}' is not a plain file name (letters, digits, '.', '_', '-')"
         )
     return config
-
-
-def _dir_size(path: str, limit: int) -> int:
-    total = 0
-    for root, _dirs, files in os.walk(path):
-        for name in files:
-            try:
-                total += os.lstat(os.path.join(root, name)).st_size
-            except OSError:
-                continue
-            if total > limit:
-                return total
-    return total
 
 
 def _link_or_copy(src: str, dst: str) -> None:
@@ -153,12 +181,15 @@ def make_scratch(setools_dir: str, parent: str | None = None) -> str:
             if entry.name == "build":
                 continue
             dst = os.path.join(root, entry.name)
-            if entry.is_dir(follow_symlinks=False) and (
-                _dir_size(entry.path, _COPY_DIR_LIMIT_BYTES) <= _COPY_DIR_LIMIT_BYTES
-            ):
+            if entry.is_dir(follow_symlinks=False) and entry.name not in _LINK_DIRS:
                 shutil.copytree(entry.path, dst, symlinks=True)
             else:
                 _link_or_copy(entry.path, dst)
+        shared_key = os.path.join(setools_dir, _KEY_DIR)
+        scratch_key = os.path.join(root, _KEY_DIR)
+        if os.path.isdir(shared_key) and os.path.isdir(scratch_key):
+            shutil.rmtree(scratch_key)
+            _link_or_copy(shared_key, scratch_key)
         for sub in ("config", "images", "logs"):
             os.makedirs(os.path.join(root, "build", sub))
     except BaseException:
@@ -197,6 +228,10 @@ class AtocReport:
 def parse_atoc_report(text: str) -> AtocReport:
     """Parse the entry list and total size out of an `app-package-map.txt`. The
     scratch report is fresh (one block), so every match belongs to this run."""
-    entries = tuple((m.group(1), m.group(2)) for m in _TOC_ENTRY_RE.finditer(text))
+    # `app-gen-toc` pads the name field with NULs ("DEVICE\x00\x00"); they are not
+    # part of the name (bench round 6).
+    entries = tuple(
+        (m.group(1).replace("\x00", ""), m.group(2)) for m in _TOC_ENTRY_RE.finditer(text)
+    )
     sizes = _PACKAGE_SIZE_RE.findall(text)
     return AtocReport(entries=entries, package_size=int(sizes[-1]) if sizes else None)
