@@ -209,7 +209,11 @@ model-compile = ["ethos-u-vela>=3.9", "tflite>=2.10", "flatbuffers>=23.1.21"]
 # is lazy (`tan.model.prep`, `tan.model.measure`); `tan.core.model_host` turns a
 # missing one into the coded `model.model-extra-missing` refusal. `sympy` is
 # onnxruntime's symbolic shape-inference dependency for `quant_pre_process`.
-model = ["onnxruntime>=1.17", "onnx>=1.15", "numpy>=1.26", "sympy>=1.12"]
+# Floors: `onnx>=1.16.0` is the release that fixed CVE-2024-27318 (path traversal
+# through external-data locations) -- `tan model prep` loads customer-supplied
+# models. `onnxruntime>=1.30.0` is the version the external-data and corrupt-
+# sample refusal tests were actually run against; a lower floor was not tested.
+model = ["onnxruntime>=1.30.0", "onnx>=1.16.0", "numpy>=1.26", "sympy>=1.12"]
 
 [project.urls]
 Homepage = "https://github.com/alplabai/tan-cli"

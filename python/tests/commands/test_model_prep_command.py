@@ -79,7 +79,7 @@ def test_prep_quantizes_and_reports(tmp_path):
         np.save(proj / "cal" / f"s{i}.npy", rng.standard_normal((1, 3, 224, 224)).astype(np.float32))
     code, doc = invoke("prep", "m.onnx", "--calibration", "cal", "--project", str(proj))
     assert code == 0, doc
-    assert (proj / "build" / "models" / "m.int8.onnx").is_file()
+    assert (proj / "build" / "model-prep" / "m.int8.onnx").is_file()
     assert doc["data"]["calibration"]["samples"] == 8
     assert doc["data"]["accuracy"]["verdict"] in ("good", "degraded")
     assert doc["data"]["output"].endswith("m.int8.onnx")
@@ -136,9 +136,139 @@ def test_ab_compares_the_fp32_model_with_its_int8_prep(tmp_path):
         np.save(proj / "cal" / f"s{i}.npy", rng.standard_normal((1, 3, 224, 224)).astype(np.float32))
     assert invoke("prep", "m.onnx", "--calibration", "cal", "--project", str(proj))[0] == 0
     code, doc = invoke(
-        "ab", "m.onnx", "--against", "build/models/m.int8.onnx", "--runs", "3", "--project", str(proj)
+        "ab", "m.onnx", "--against", "build/model-prep/m.int8.onnx", "--runs", "3", "--project", str(proj)
     )
     assert code == 0, doc
     c = doc["data"]["comparison"]
     assert c["faster"] in ("a", "b", "tie")
     assert c["sizeDeltaBytes"] == doc["data"]["b"]["sizeBytes"] - doc["data"]["a"]["sizeBytes"]
+
+
+# --- hostile / broken inputs never crash (exit 5) ---------------------------
+
+
+def _cal_dir(proj: Path, n: int = 8) -> Path:
+    import numpy as np
+
+    cal = proj / "cal"
+    cal.mkdir(exist_ok=True)
+    rng = np.random.default_rng(0)
+    for i in range(n):
+        np.save(cal / f"s{i}.npy", rng.standard_normal((1, 3, 224, 224)).astype(np.float32))
+    return cal
+
+
+@pytest.mark.skipif(not HAVE_EXTRA, reason="the optional `model` extra is not installed")
+@pytest.mark.parametrize("kind", ["object", "npz", "string", "garbage"])
+def test_bad_calibration_files_are_coded_not_crashes(tmp_path, kind):
+    import numpy as np
+
+    proj = project(tmp_path)
+    cal = _cal_dir(proj, 7)
+    bad = cal / "s7.npy"
+    if kind == "object":
+        np.save(bad, np.array([{"a": 1}], dtype=object), allow_pickle=True)
+    elif kind == "npz":
+        np.savez(cal / "tmp.npz", x=np.zeros(3))
+        (cal / "tmp.npz").rename(bad)
+    elif kind == "string":
+        np.save(bad, np.array(["a", "b"]))
+    else:
+        bad.write_bytes(b"not an npy at all")
+    code, doc = invoke("prep", "m.onnx", "--calibration", "cal", "--project", str(proj))
+    assert code == 2 and doc["issues"][0]["code"] == "model.prep-calibration-invalid"
+    assert not (proj / "build" / "model-prep").exists()
+
+
+@pytest.mark.skipif(not HAVE_EXTRA, reason="the optional `model` extra is not installed")
+def test_onnx_with_escaping_external_data_is_a_coded_refusal(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    proj = project(tmp_path)
+    _cal_dir(proj)
+    tensor = helper.make_tensor("w", TensorProto.FLOAT, [4], vals=[0.0] * 4)
+    tensor.ClearField("float_data")
+    tensor.data_location = TensorProto.EXTERNAL
+    for k, v in (("location", "../escape.bin"), ("offset", "0"), ("length", "16")):
+        e = tensor.external_data.add()
+        e.key, e.value = k, v
+    graph = helper.make_graph(
+        [helper.make_node("Add", ["input", "w"], ["out"])],
+        "g",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 4])],
+        [helper.make_tensor_value_info("out", TensorProto.FLOAT, [1, 4])],
+        initializer=[tensor],
+    )
+    onnx.save(helper.make_model(graph), proj / "evil.onnx")
+    (tmp_path / "escape.bin").write_bytes(b"\0" * 16)
+    code, doc = invoke("prep", "evil.onnx", "--calibration", "cal", "--min-samples", "1", "--project", str(proj))
+    assert doc["issues"][0]["code"] in ("model.prep-calibration-invalid", "model.prep-failed"), doc
+    assert code in (1, 2)
+    code, doc = invoke("run", "evil.onnx", "--project", str(proj))
+    assert doc["issues"][0]["code"] == "model.run-failed" and code == 1
+
+
+@pytest.mark.skipif(not HAVE_EXTRA, reason="the optional `model` extra is not installed")
+def test_a_broken_extra_import_is_the_extra_missing_refusal(tmp_path, monkeypatch):
+    import builtins
+
+    proj = project(tmp_path)
+    _cal_dir(proj)
+    real = builtins.__import__
+
+    def fake(name, *a, **k):
+        if name.startswith("onnxruntime"):
+            raise ImportError("libonnxruntime.so: cannot open shared object file")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", fake)
+    code, doc = invoke("prep", "m.onnx", "--calibration", "cal", "--project", str(proj))
+    assert code == 1 and doc["issues"][0]["code"] == "model.model-extra-missing"
+    code, doc = invoke("run", "m.onnx", "--project", str(proj))
+    assert code == 1 and doc["issues"][0]["code"] == "model.model-extra-missing"
+
+
+@pytest.mark.skipif(not HAVE_EXTRA, reason="the optional `model` extra is not installed")
+def test_pickled_input_sample_is_refused(tmp_path):
+    import numpy as np
+
+    proj = project(tmp_path)
+    np.save(proj / "obj.npy", np.array([{"a": 1}], dtype=object), allow_pickle=True)
+    code, doc = invoke("run", "m.onnx", "--input", "obj.npy", "--project", str(proj))
+    assert code == 1 and doc["issues"][0]["code"] == "model.run-failed"
+
+
+@pytest.mark.skipif(not HAVE_EXTRA, reason="the optional `model` extra is not installed")
+def test_prep_never_clobbers_and_defaults_to_its_own_dir(tmp_path):
+    proj = project(tmp_path)
+    _cal_dir(proj)
+    code, doc = invoke("prep", "m.onnx", "--calibration", "cal", "--project", str(proj))
+    assert code == 0, doc
+    out = proj / "build" / "model-prep" / "m.int8.onnx"
+    assert out.is_file() and not (proj / "build" / "models").exists()
+    assert [p.name for p in out.parent.iterdir()] == ["m.int8.onnx"]  # no staging left
+    before = out.read_bytes()
+    code, doc = invoke("prep", "m.onnx", "--calibration", "cal", "--project", str(proj))
+    assert code == 2 and doc["issues"][0]["code"] == "model.prep-output-exists"
+    assert out.read_bytes() == before
+
+
+@pytest.mark.skipif(not HAVE_EXTRA, reason="the optional `model` extra is not installed")
+def test_a_users_pre_onnx_next_to_the_output_is_untouched(tmp_path):
+    proj = project(tmp_path)
+    _cal_dir(proj)
+    mine = proj / "out"
+    mine.mkdir()
+    (mine / "m.int8.pre.onnx").write_bytes(b"mine")
+    code, doc = invoke("prep", "m.onnx", "--calibration", "cal", "--out", "out", "--project", str(proj))
+    assert code == 0, doc
+    assert (mine / "m.int8.pre.onnx").read_bytes() == b"mine"
+
+
+def test_counts_must_be_positive(tmp_path):
+    proj = project(tmp_path)
+    for args in (["run", "m.onnx", "--runs", "0"], ["ab", "m.onnx", "--against", "m.onnx", "--runs", "-1"],
+                 ["prep", "m.onnx", "--calibration", "c", "--min-samples", "0"]):
+        code, doc = invoke(*args, "--project", str(proj))
+        assert code == 2 and doc["issues"][0]["code"] == "model.unexpected-argument", args

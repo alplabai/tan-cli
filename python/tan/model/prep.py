@@ -30,8 +30,11 @@ class CalibrationInfo:
 
 def model_input(onnx_path: Path) -> tuple[str, list[int]]:
     import onnxruntime as ort
-    sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    inp = sess.get_inputs()[0]
+    try:
+        sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+        inp = sess.get_inputs()[0]
+    except Exception as exc:  # onnxruntime raises broad types (bad model, escaping external data)
+        raise PrepError(f"could not load model {Path(onnx_path).name}: {exc}") from exc
     shape = [(-1 if not isinstance(d, int) else d) for d in inp.shape]
     return inp.name, shape
 
@@ -55,7 +58,13 @@ def load_calibration(cal_dir: Path, input_shape: list[int]) -> list[Any]:
         raise PrepError(f"no .npy calibration samples in {cal_dir}")
     out: list[np.ndarray] = []
     for f in files:
-        arr = np.load(f).astype(np.float32)
+        try:
+            loaded = np.load(f, allow_pickle=False)
+            if not isinstance(loaded, np.ndarray):  # an .npz renamed to .npy
+                raise ValueError("not a plain .npy array")
+            arr = loaded.astype(np.float32)
+        except (ValueError, OSError, AttributeError, TypeError, EOFError) as exc:
+            raise PrepError(f"calibration sample {f.name} is not a numeric .npy array: {exc}") from exc
         if arr.ndim == len(input_shape) - 1:
             arr = arr[None, ...]                       # add batch dim
         if not _shape_matches(arr, input_shape):

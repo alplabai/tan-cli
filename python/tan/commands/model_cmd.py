@@ -1039,7 +1039,7 @@ def model(
         "board.yaml", "--board", "--board-yaml", metavar="PATH", help="Path to board.yaml."
     ),
     out: str = typer.Option(
-        "build/models", "--out", metavar="PATH", help="Output directory."
+        None, "--out", metavar="PATH", help="Output directory (default build/models; `prep`: build/model-prep)."
     ),
     metadata_root: str = typer.Option(
         None,
@@ -1096,6 +1096,7 @@ def model(
     ONNX model with an accuracy report (`prep`), or time a host reference
     run (`run`) / compare two models (`ab`)."""
     json_mode = output_format == "json"
+    out = out or ("build/model-prep" if subcommand == "prep" else "build/models")
 
     def finish(
         project_: Project,

@@ -25,6 +25,9 @@ stay visible to the issue-code registry gate.
 
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +120,9 @@ def run_prep(
 ) -> Result:
     project, sdk = context.project(), context.sdk
     data = prep_empty_data()
+    bad_count = _bad_count("--min-samples", min_samples)
+    if bad_count is not None:
+        return project, sdk, data, [bad_count], ExitCode.VALIDATION_FAILURE
 
     def refuse(issue: Issue, exit_code: ExitCode) -> Result:
         return project, sdk, data, [issue], exit_code
@@ -144,8 +150,9 @@ def run_prep(
     out_dir = _under(context, out)
     done = _quantize(path, cal_dir, out_dir, per_channel, min_samples)
     if isinstance(done, Issue):
-        code = ExitCode.RUNTIME_FAILURE if done.code == "model.prep-failed" else ExitCode.VALIDATION_FAILURE
-        data["calibration"] = None
+        code = ExitCode.VALIDATION_FAILURE
+        if done.code in ("model.prep-failed", "model.model-extra-missing"):
+            code = ExitCode.RUNTIME_FAILURE
         return refuse(done, code)
     info, quantized, report = done
     data["calibration"] = _calibration_row(info)
@@ -157,6 +164,12 @@ def run_prep(
     return project, sdk, data, issues, ExitCode.SUCCESS
 
 
+def _bad_count(flag: str, value: int) -> Issue | None:
+    if value >= 1:
+        return None
+    return Issue("model.unexpected-argument", "error", f"{flag} must be at least 1 (got {value}).")
+
+
 def _under(context: ProjectContext, raw: str) -> Path:
     path = Path(raw)
     return path if path.is_absolute() else Path(context.workspace_root) / path
@@ -165,18 +178,46 @@ def _under(context: ProjectContext, raw: str) -> Path:
 def _quantize(
     path: Path, cal_dir: Path, out_dir: Path, per_channel: bool, min_samples: int
 ) -> tuple[Any, Path, Any] | Issue:
-    """Validate calibration, quantize, measure -- or the refusing `Issue`."""
-    from tan.model.prep import PrepError, accuracy_delta, quantize, validate_calibration  # noqa: PLC0415
+    """Validate calibration, quantize, measure -- or the refusing `Issue`.
+    Everything is built in a private staging directory inside `out_dir` and
+    published (never overwriting) only after the accuracy run succeeds; a
+    failure removes the staging directory and an `out_dir` this run created."""
+    final = out_dir / f"{path.stem}.int8.onnx"
+    if os.path.lexists(final):
+        return Issue("model.prep-output-exists", "error", f"{final} already exists; remove it or use --out.")
+    created = not out_dir.exists()
+    staging: Path | None = None
+    try:
+        from tan.model.prep import PrepError, accuracy_delta, quantize, validate_calibration  # noqa: PLC0415
 
-    try:
-        info = validate_calibration(cal_dir, path, min_samples=min_samples)
-    except PrepError as err:
-        return Issue("model.prep-calibration-invalid", "error", str(err))
-    try:
-        quantized = quantize(path, out_dir / f"{path.stem}.int8.onnx", cal_dir, per_channel=per_channel)
-        return info, quantized, accuracy_delta(path, quantized, cal_dir)
-    except PrepError as err:
-        return Issue("model.prep-failed", "error", str(err))
+        try:
+            info = validate_calibration(cal_dir, path, min_samples=min_samples)
+        except PrepError as err:
+            return Issue("model.prep-calibration-invalid", "error", str(err))
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            staging = Path(tempfile.mkdtemp(dir=out_dir, prefix=".tan-prep-"))
+            staged = quantize(path, staging / "q.onnx", cal_dir, per_channel=per_channel)
+            report = accuracy_delta(path, staged, cal_dir)
+        except (PrepError, OSError) as err:
+            return Issue("model.prep-failed", "error", str(err))
+        try:
+            os.link(staged, final)
+        except FileExistsError:
+            return Issue("model.prep-output-exists", "error", f"{final} already exists; nothing was overwritten.")
+        except OSError as err:
+            return Issue("model.prep-failed", "error", f"could not write {final}: {err}")
+        return info, final, report
+    except ImportError as err:
+        return Issue("model.model-extra-missing", "error", extra_missing_message("prep", [str(err)]))
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        if created:
+            try:
+                out_dir.rmdir()
+            except OSError:
+                pass
 
 
 def render_prep_text(data: dict) -> list[str]:
@@ -215,11 +256,13 @@ def _measure(path: Path, input_path: Path | None, runs: int, sample: Any) -> tup
             if input_path is not None:
                 import numpy as np  # noqa: PLC0415
 
-                sample = np.load(input_path)
+                sample = np.load(input_path, allow_pickle=False)
             else:
                 sample = default_input(path)
         return run_host(path, sample, runs=runs), sample
-    except (MeasureError, OSError, ValueError) as err:
+    except ImportError as err:
+        return Issue("model.model-extra-missing", "error", f"{extra_missing_message('run', [str(err)])}")
+    except (MeasureError, OSError, ValueError, AttributeError, TypeError) as err:
         return Issue("model.run-failed", "error", str(err))
 
 
@@ -251,6 +294,9 @@ def run_run(
 ) -> Result:
     project, sdk = context.project(), context.sdk
     data = run_empty_data()
+    bad_count = _bad_count("--runs", runs)
+    if bad_count is not None:
+        return project, sdk, data, [bad_count], ExitCode.VALIDATION_FAILURE
     paths, issue = _host_preflight(context, "run", [source], data)
     if issue is not None:
         return project, sdk, data, [issue], _refusal_exit(issue)
@@ -275,6 +321,9 @@ def run_ab(
 
     project, sdk = context.project(), context.sdk
     data = ab_empty_data()
+    bad_count = _bad_count("--runs", runs)
+    if bad_count is not None:
+        return project, sdk, data, [bad_count], ExitCode.VALIDATION_FAILURE
     paths, issue = _host_preflight(context, "ab", [source, against], data)
     if issue is not None:
         return project, sdk, data, [issue], _refusal_exit(issue)
