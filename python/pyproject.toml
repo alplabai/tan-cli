@@ -202,6 +202,15 @@ model-io = ["tflite>=2.10", "flatbuffers>=23.1.21"]
 # toolchains with no PyPI wheel to pin.
 model-compile = ["ethos-u-vela>=3.9", "tflite>=2.10", "flatbuffers>=23.1.21"]
 
+# Host-tier `tan model prep` / `run` / `ab` (tan-cli#1287): onnxruntime-based INT8
+# quantization and host reference runs. OPTIONAL and deliberately NOT in the
+# frozen release assets (`.[monitor]` only) -- onnxruntime publishes no macOS
+# x86_64 wheel and adds tens of MB for a verb most users never run. Every import
+# is lazy (`tan.model.prep`, `tan.model.measure`); `tan.core.model_host` turns a
+# missing one into the coded `model.model-extra-missing` refusal. `sympy` is
+# onnxruntime's symbolic shape-inference dependency for `quant_pre_process`.
+model = ["onnxruntime>=1.17", "onnx>=1.15", "numpy>=1.26", "sympy>=1.12"]
+
 [project.urls]
 Homepage = "https://github.com/alplabai/tan-cli"
 Repository = "https://github.com/alplabai/tan-cli"

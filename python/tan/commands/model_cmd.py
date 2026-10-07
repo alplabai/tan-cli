@@ -129,6 +129,11 @@ renderers live in `tan.commands.model_zoo_cmd` (this file is over its size
 budget); both need a resolvable SDK (`model.sdk-root-unresolved`, as `build`/
 `check`), and `add` additionally reads `board.yaml` and appends to its
 `models:` with a comment-preserving text splice (`tan.core.board_yaml_edit`).
+
+**`prep` (tan-cli#1287, host tier)** INT8-quantizes an ONNX model against a
+calibration directory and reports the fp32-vs-int8 accuracy delta; it needs the
+optional `model` extra (`tan.core.model_host`) and no SDK, board.yaml or
+hardware. Runner and renderer: `tan.commands.model_host_cmd`.
 """
 
 from __future__ import annotations
@@ -154,6 +159,7 @@ from tan.commands.model_zoo_cmd import (
     run_zoo,
     zoo_empty_data,
 )
+from tan.commands.model_host_cmd import prep_empty_data, render_prep_text, run_prep
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.global_flags import accept_global_flags
 from tan.core.model_check import backend_report_as_dict, render_check_text
@@ -188,7 +194,7 @@ LIST_DATA_SCHEMA_VERSION = "1"
 
 #: `SUBCOMMANDS` names every subcommand this command accepts, in the order the
 #: unknown-subcommand refusal lists them.
-SUBCOMMANDS = ("build", "doctor", "check", "list", "zoo", "add")
+SUBCOMMANDS = ("build", "doctor", "check", "list", "zoo", "add", "prep")
 
 
 class ModelError(Exception):
@@ -976,12 +982,14 @@ def _empty_data(subcommand: str | None) -> dict[str, Any]:
         return zoo_empty_data()
     if subcommand == "add":
         return add_empty_data()
+    if subcommand == "prep":
+        return prep_empty_data()
     return {"schemaVersion": DATA_SCHEMA_VERSION, "sku": None, "built": []}
 
 
 def model(
     subcommand: str = typer.Argument(
-        None, metavar="SUBCOMMAND", help="build | doctor | check | list | zoo | add."
+        None, metavar="SUBCOMMAND", help="build | doctor | check | list | zoo | add | prep."
     ),
     board: str = typer.Option(
         # tan-cli#398: `--board-yaml` is a REAL second spelling of this one
@@ -1023,15 +1031,27 @@ def model(
         help="With `zoo`: only entries bench-validated on this SoM SKU. Ignored by the others.",
     ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
+    calibration: str = typer.Option(
+        None, "--calibration", metavar="DIR", help="With `prep`: directory of .npy calibration samples."
+    ),
+    per_channel: bool = typer.Option(
+        False, "--per-channel", help="With `prep`: per-channel weight quantization."
+    ),
+    min_samples: int = typer.Option(
+        8, "--min-samples", metavar="N", help="With `prep`: fewest calibration samples accepted."
+    ),
     model_id: str = typer.Argument(
-        None, metavar="ID", help="With `add`: the model-zoo entry id (see `zoo`)."
+        None,
+        metavar="ID",
+        help="With `add`: the model-zoo entry id (see `zoo`). With `prep`: the .onnx model file.",
     ),
 ) -> None:
     """Compile + package board.yaml `models:` into `.alpmodel` packages
     (`build`), report NPU-compiler toolchain availability (`doctor`),
     statically screen a declared model's NPU eligibility (`check`), or list
     what is declared next to what is already built (`list`), list the SDK's model
-    zoo (`zoo`), or add a zoo model to the project (`add <id>`)."""
+    zoo (`zoo`), add a zoo model to the project (`add <id>`), or INT8-quantize an
+    ONNX model with an accuracy report (`prep`)."""
     json_mode = output_format == "json"
 
     def finish(
@@ -1101,6 +1121,9 @@ def model(
                     print(line, file=sys.stderr)
             elif subcommand == "add":
                 for line in render_add_text(data):
+                    print(line, file=sys.stderr)
+            elif subcommand == "prep":
+                for line in render_prep_text(data):
                     print(line, file=sys.stderr)
             elif subcommand == "list":
                 # `list`: checked by SUBCOMMAND, not by `"models" in data` --
@@ -1195,6 +1218,15 @@ def model(
                 metadata_root=metadata_root,
                 sdk_root=sdk_root,
                 exact=exact,
+            )
+        elif subcommand == "prep":
+            project_, sdk, data, issues, exit_code = run_prep(
+                context=context,
+                source=model_id,
+                calibration=calibration,
+                out=out,
+                per_channel=per_channel,
+                min_samples=min_samples,
             )
         elif subcommand in ("zoo", "add"):
             resolved = _require_metadata_sdk_root(sdk_root, context.workspace_root, "No zoo was read.")
