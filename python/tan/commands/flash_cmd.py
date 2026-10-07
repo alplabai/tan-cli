@@ -1599,8 +1599,10 @@ def _execute(
     if plan.jlink_script is not None:
         # tan-cli#1336: the J-Link tool is NEVER resolved from the project venv --
         # see `tan.core.jlink_binary`. One resolution for the whole run.
-        exe = jlink_exe or _trusted_jlink_path(None)
+        exe = jlink_exe
         if exe is None:
+            # Never re-resolve here: the caller resolved ONCE and a missing binary is a
+            # refusal (tan-cli#1348 review).
             return _Outcome(success=False, stderr=_NO_TRUSTED_JLINK, captured=capture)
         extra_env = None
         if probe_guard is not None:
@@ -2314,16 +2316,10 @@ _NO_TRUSTED_JLINK = (
 )
 
 
-def _trusted_jlink_path(override: str | None) -> str | None:
-    """The J-Link binary tan may spawn (tan-cli#1336), or `None`."""
-    found = resolve_jlink(override)
-    return found.path if found is not None else None
-
-
 def _jlink_program(venv_bin: Path | None, jlink_exe: str | None = None) -> str:
     """The binary `plan_alif_mram_jlink` will pick: its own first-available
     pick over the same `_JLINK_BINARIES` and the same PATH-or-venv test."""
-    return jlink_exe or _trusted_jlink_path(None) or _JLINK_BINARIES[0]
+    return jlink_exe or _JLINK_BINARIES[0]
 
 
 def _probe_selector_unsupported(
@@ -2641,6 +2637,29 @@ def _entry_head(kind: str, entry_id: str, method: str, declared: str | None) -> 
     return head
 
 
+def _untrusted_setools_refusal(flash_args: Any, ctx: _Context) -> str | None:
+    """The `flash.setools-untrusted-source` message when this entry would sign with a
+    SETOOLS install only the manifest named on a CONFIRMED write, else `None`. Decided
+    from the manifest and the operator's inputs alone (no spawn), so the caller can run
+    it before the first J-Link process."""
+    try:
+        if (
+            fa_str(flash_args, "atoc") is not None
+            or fa_str(flash_args, "atoc_map") is not None
+            or fa_str_checked(flash_args, "atoc_address", True) is not None
+        ):
+            return None  # nothing to sign
+        confirm = ctx.force_confirm or bool(fa_bool_checked(flash_args, "confirm"))
+    except FlashPlanError:
+        return None  # a malformed value is reported by the shape checks
+    if ctx.dry_run or not confirm:
+        return None  # a preview skips the sign instead
+    setools = resolve_setools_dir(flash_args, os.environ, ctx.setools_dir)
+    if setools is None or setools.operator_supplied:
+        return None
+    return untrusted_install_message(setools)
+
+
 def _flash_entry(
     target: FlashTarget,
     ctx: _Context,
@@ -2900,7 +2919,7 @@ def _flash_entry_body(
     if method == FLOW_D_METHOD:
         # tan-cli#1336: resolved ONCE, from trusted locations only, and used by the
         # probe listing, the preflight, the write and the read-back alike.
-        found = resolve_jlink(ctx.jlink_path)
+        found = resolve_jlink(ctx.jlink_path, project_dir=ctx.project_dir)
         jlink_exe = found.path if found is not None else None
         report.setdefault("jlink", {}).update(
             {"binary": jlink_exe, "binarySource": found.source if found else None}
@@ -2931,6 +2950,18 @@ def _flash_entry_body(
     # `--dry-run` early return just below.
     setools_note: str | None = None
     if method == FLOW_D_METHOD:
+        # tan-cli#1348 review: refuse a manifest-only SETOOLS on a confirmed write BEFORE
+        # anything spawns -- the read-only probe listing and DPIDR preflight included.
+        untrusted = _untrusted_setools_refusal(flash_args, ctx)
+        if untrusted is not None:
+            lines.append(_entry_head(kind, entry_id, method, target.flash_method))
+            lines.append(f"  FAIL: {untrusted}")
+            return (
+                1,
+                entry(method, "failed", 1, untrusted,
+                      issue_code="flash.setools-untrusted-source"),
+                lines,
+            )
         # tan-cli#1312: probe selection is the FIRST decision about a Flow D
         # entry -- ahead of the SETOOLS sign, the preflight and the write, and
         # it applies under `--dry-run` too (a preview that would refuse is not
@@ -3309,7 +3340,7 @@ def _flash_entry_body(
         reset_unconfirmed = _flow_d_record(plan, outcome, ctx, entry_id, report, preflight_facts)
         if outcome.success and ctx.readback:
             readback_failure = _flow_d_readback(
-                plan, outcome, ctx, flow_d_writes, report, probe_guard
+                plan, outcome, ctx, flow_d_writes, report, probe_guard, jlink_exe
             )
     if readback_failure is not None:
         code, text = readback_failure
@@ -3514,6 +3545,7 @@ def _flow_d_readback(
     writes: list[dict[str, Any]],
     report: dict[str, Any],
     probe_guard: "_ProbeGuard | None",
+    jlink_exe: str | None = None,
 ) -> tuple[str, str] | None:
     """`--readback` (tan-cli#1321): re-read every written region in a FRESH
     J-Link session (`savebin`) and compare sha256 with the source file. `None`
@@ -3543,7 +3575,7 @@ def _flow_d_readback(
         read = _execute(
             dataclasses.replace(plan, jlink_script=script),
             True, ctx.venv_bin, ctx.workspace, probe_guard,
-            jlink_exe=_trusted_jlink_path(ctx.jlink_path),
+            jlink_exe=jlink_exe,
         )
         if probe_guard is not None and probe_guard.tripped:
             block["readback"] = {"performed": False, "reason": probe_guard.tripped}
@@ -3659,7 +3691,7 @@ def _flow_d_preflight(
     # #732) once did -- it wrote the GD32 bridge's own flash, not MRAM.
     verb = "write MRAM" if method == FLOW_D_METHOD else "write"
     # tan-cli#1336: never from the project venv -- the run's trusted J-Link.
-    binary = jlink_exe or _trusted_jlink_path(None)
+    binary = jlink_exe  # resolved ONCE by the caller; never re-resolved here
     if binary is None:
         # Unreachable via `_flash_entry`: the tool gate already required
         # JLinkExe/JLink to be available PATH-or-venv (`_tool_available`,
