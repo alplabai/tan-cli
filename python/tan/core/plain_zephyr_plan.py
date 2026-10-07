@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import re
 
+from tan.core.plain_zephyr_manifest import PLAIN_GENERATED_BY
 from tan.core.plan_tokens import TOKEN_PYTHON, TOKEN_SDK_ROOT
 
 #: A Zephyr board target: `<board>[@rev][/<soc>[/<cpucluster>[/<variant>]]]`.
@@ -65,7 +66,7 @@ def plain_zephyr_plan(app_dir: str, board: str, defines: list[str]) -> str:
     plan = {
         "schemaVersion": 1,
         "planPathMode": "tokened",
-        "generatedBy": "tan build --board",
+        "generatedBy": PLAIN_GENERATED_BY,
         "boardYaml": "",
         "sku": "",
         "buildRoot": "build",

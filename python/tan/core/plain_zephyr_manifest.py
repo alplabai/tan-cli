@@ -18,20 +18,33 @@ Flash decision. `flash_method` is `zephyr_west_flash`, the constant the planner
 gives every Zephyr slice. `flash_args` carries the SW-DP wrong-board preflight
 PAIR (`expect_dpidr` + `jlink_device[<core>]`) exactly as a planned slice does,
 and only as a pair. It does NOT carry `jlink_flash_device` or
-`slot0_load_address`: the latter comes from the SoM preset's `memory_map:`,
-which a bare board target does not name, and the former without the latter would
-arm Flow D into a dead end. Programming MRAM through the SoM-aware path stays a
-planned-project (board.yaml) job; this manifest serves `--ram`, `size`, `image`.
+`slot0_load_address`, so Flow D (the J-Link MRAM path, selected by
+`FLOW_D_KEYS`) is not armed: a plain `tan flash` takes Flow A, `west flash` with
+the board's default runner (`alif_flash` over the SE-UART on AEN), which writes
+the Zephyr-built image. The pair arms the wrong-board preflight. Flow D is left
+out because `slot0_load_address` comes from the SoM preset's `memory_map:`,
+which a bare board target does not name.
 """
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 PLAIN_GENERATED_BY = "tan build --board"
 _FLASH_METHOD = "zephyr_west_flash"
+
+
+@dataclass(frozen=True)
+class PlainSlice:
+    """One plan slice of the `--board` route: its id, `west -b` target and
+    plan-relative build dir (`build/<id>-zephyr`)."""
+
+    slice_id: str
+    board: str
+    build_dir: str
 
 
 @dataclass(frozen=True)
@@ -82,23 +95,26 @@ def load_socs(sdk_root: str | None) -> list[dict]:
 
 
 def minimal_manifest(
-    boards: Sequence[tuple[str, str]], sdk_root: str | None
+    slices_in: Sequence[PlainSlice], sdk_root: str | None, base: str
 ) -> tuple[dict, dict[str, str]]:
-    """The raw manifest for `(slice_core_id, board_target)` pairs, plus the
-    `slice id -> manifest core id` rename the run results need (pure but for
-    the SoC metadata read)."""
+    """The raw manifest for the plan's slices, plus the `slice id -> manifest
+    core id` rename the run results need (pure but for the SoC metadata read).
+    `build_dir` is always the absolute west tree `<base>/<plan build dir>/build`,
+    so a failed or never-dispatched slice still resolves it (never the
+    `<core>-<os>` default, which names the renamed core, not the slice dir)."""
     socs = load_socs(sdk_root)
     slices: list[dict] = []
     renames: dict[str, str] = {}
     silicon: str | None = None
-    for slice_id, board in boards:
-        facts = target_facts(board, slice_id, socs)
-        renames[slice_id] = facts.core_id
+    for item in slices_in:
+        facts = target_facts(item.board, item.slice_id, socs)
+        renames[item.slice_id] = facts.core_id
         silicon = silicon or facts.silicon
         entry = {
             "core_id": facts.core_id,
             "os": "zephyr",
-            "board": board,
+            "board": item.board,
+            "build_dir": os.path.abspath(os.path.join(base, item.build_dir, "build")),
             "status": "pending",
             "flash_method": _FLASH_METHOD,
         }
@@ -116,11 +132,11 @@ def minimal_manifest(
     }, renames
 
 
-def slice_boards(plan_slices) -> list[tuple[str, str]]:
-    """`(core_id, board target)` of each plan slice, read from its `west build -b`."""
-    out: list[tuple[str, str]] = []
+def slice_boards(plan_slices) -> list[PlainSlice]:
+    """Each plan slice's `west build -b` target, with its id and build dir."""
+    out: list[PlainSlice] = []
     for s in plan_slices:
         args = s.command.args if s.command else []
         if "-b" in args and args.index("-b") + 1 < len(args):
-            out.append((s.core_id, args[args.index("-b") + 1]))
+            out.append(PlainSlice(s.core_id, args[args.index("-b") + 1], s.build_dir))
     return out

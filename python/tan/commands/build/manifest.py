@@ -33,7 +33,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
-from tan.core.plain_zephyr_manifest import minimal_manifest
+from tan.core.plain_zephyr_manifest import PlainSlice, minimal_manifest
 from tan.core.sdk_discovery import resolve_sdk_root_ladder
 from tan.core.system_manifest import (
     SliceRunResult,
@@ -266,7 +266,7 @@ def write_post_build_manifest(
 def write_plain_post_build_manifest(
     *,
     sdk_root: str | None,
-    boards: Sequence[tuple[str, str]],
+    boards: Sequence[PlainSlice],
     base: str,
     plan_build_root: str,
     results: Sequence[SliceRunResult],
@@ -277,7 +277,7 @@ def write_plain_post_build_manifest(
     Same best-effort contract: a failure is reported, never raised."""
     try:
         dest_dir = confine_to_build_root(Path(base), plan_build_root)
-        raw, renames = minimal_manifest(boards, sdk_root)
+        raw, renames = minimal_manifest(boards, sdk_root, base)
         overlay_run_results_raw(
             raw, [replace(r, core_id=renames.get(r.core_id, r.core_id)) for r in results]
         )
