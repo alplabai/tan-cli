@@ -97,7 +97,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from tan.core.user_defines import insert_after_dashdash, removed_define_resets
+from tan.core.user_defines import changed_defines, insert_after_dashdash
 from tan.commands.build.configure_inputs import (
     read_user_defines_stamp,
     write_user_defines_stamp,
@@ -1114,7 +1114,7 @@ def execute_slices(
     held_outcomes: Sequence[SliceOutcome] = (),
     force_pristine: bool = False,
     slice_refusals: Mapping[str, str] | None = None,
-    user_define_keys: Mapping[str, Sequence[str]] | None = None,
+    user_defines: Mapping[str, Sequence[str]] | None = None,
 ) -> list[SliceOutcome]:
     """Dispatch every slice of `plan` and return one [`SliceOutcome`] per
     slice, in plan order.
@@ -1402,6 +1402,30 @@ def execute_slices(
         # be rebuilt" and "this slice is about to be skipped" -- running the
         # wipe first would delete the last good `zephyr.elf` for a rebuild
         # that then never happens on a host missing `west`.
+        # tan-cli#1382: a changed user `-D` set (key added, removed or value
+        # changed) cannot be applied to an already-configured build dir
+        # reliably -- zephyr_check_cache(SHIELD WATCH) restores SHIELD from
+        # CACHED_SHIELD and refuses value changes short of a pristine build,
+        # sysbuild images keep their own caches, and `-U` fixes none of that.
+        # So the slice takes tan's existing per-slice pristine wipe (same
+        # guards) and the wipe is named in a `build.configure-cache-reset`
+        # info. The stamp is written only after the slice's step exits 0.
+        ud_now = list(user_defines.get(sl.core_id, ())) if user_defines else []
+        ud_changed = False
+        if sl.backend == "zephyr":
+            if cmake_cache_configured(cwd):
+                ud_before = read_user_defines_stamp(cwd) or []
+                changed = changed_defines(ud_before, ud_now)
+                if changed:
+                    ud_changed = True
+                    note = (
+                        f"{sl.core_id}: user -D changed ({', '.join(changed)}) -- "
+                        "wiping this slice's build dir so Zephyr re-configures from "
+                        "scratch instead of keeping the cached value (tan-cli#1382)"
+                    )
+                    on_output(f"note: {note}")
+                    configure_cache_issues.append(Issue("build.configure-cache-reset", "info", note))
+
         sdk_switch_issues.extend(
             _maybe_pristine_stale_sdk_build_dir(
                 sl.core_id,
@@ -1410,7 +1434,7 @@ def execute_slices(
                 sl.command.args,
                 sdk_stamp_key_str,
                 on_output,
-                force_pristine=force_pristine,
+                force_pristine=force_pristine or ud_changed,
             )
         )
 
@@ -1426,27 +1450,6 @@ def execute_slices(
             )
         )
         configure_cache_issues.extend(new_configure_cache_issues)
-
-        # tan-cli#1382: a user `-D` dropped since the last configure still sits
-        # in CMakeCache.txt (SHIELD, a raw EXTRA_DTC_OVERLAY_FILE, ...), so
-        # unset it. Zephyr slices only; the stamp is written every build so a
-        # later run without `-D` sees what this one had.
-        if sl.backend == "zephyr":
-            keys_now = list(user_define_keys.get(sl.core_id, ())) if user_define_keys else []
-            if cmake_cache_configured(cwd):
-                gone = removed_define_resets(read_user_defines_stamp(cwd), keys_now)
-                if gone:
-                    configure_cache_reset_args = [*configure_cache_reset_args, *gone]
-                    note = (
-                        f"{sl.core_id}: user -D no longer given ({', '.join(g[2:] for g in gone)}) "
-                        "-- unsetting the cached value so this configure drops it (tan-cli#1382)"
-                    )
-                    on_output(f"note: {note}")
-                    configure_cache_issues.append(Issue("build.configure-cache-reset", "info", note))
-            try:
-                write_user_defines_stamp(cwd, keys_now)
-            except OSError:
-                pass
 
         if is_west and workspace_dir is not None and "ZEPHYR_BASE" not in slice_env:
             # tan-cli#336: a dangling `$ZEPHYR_BASE` inherited from the
@@ -1584,6 +1587,11 @@ def execute_slices(
         code = step.exit_code
 
         status = "succeeded" if code == 0 else "failed"
+        if code == 0 and sl.backend == "zephyr":
+            try:
+                write_user_defines_stamp(cwd, ud_now)
+            except OSError:
+                pass
         if code == 0:
             message = None
         elif is_west and saw_no_workspace and workspace_dir is not None:

@@ -8268,6 +8268,7 @@ this line. See `docs/release-contract.md` and tan-cli#1258.*
   plan; `EXTRA_CONF_FILE` / `EXTRA_DTC_OVERLAY_FILE` (and a sysbuild
   `<image>_` form) are appended `;`-joined to tan's list instead, and
   `-D BOARD` / `-D Python3_EXECUTABLE` are refused (`build.define-reserved`).
+  A changed `-D` set (added, removed or re-valued) on an already-configured slice wipes that slice's build dir (`build.configure-cache-reset`), since Zephyr caches SHIELD and friends.
   The envelope records them as `data.defines` (`args`, `slices`); `-D` with
   no Zephyr slice is `build.define-no-target` (tan-cli#1382)
 - **`tan build --project <dir> --board <zephyr-board-target>` builds a

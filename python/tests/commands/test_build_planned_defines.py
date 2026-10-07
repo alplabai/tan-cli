@@ -171,25 +171,51 @@ def _west_argv(world):
     return json.loads(world["log"].read_text())["argv"]
 
 
+def _stamp(world):
+    return (world["out"] / "build" / "rtss_he-zephyr" / "build" / ".tan-user-defines")
+
+
+def _codes(env):
+    return [i["code"] for i in env["issues"]]
+
+
 @posix_only
-def test_removed_shield_define_is_unset_before_every_d(world):
+def test_changed_user_defines_wipe_the_slice_and_name_the_keys(world):
     assert envelope_of(_run(world, "-D", "SHIELD=imx335"))["exitCode"] == 0
-    assert (world["out"] / "build" / "rtss_he-zephyr" / "build" / ".tan-user-defines").read_text() == "SHIELD\n"
+    assert _stamp(world).read_text() == "SHIELD=imx335\n"
+    marker = world["out"] / "build" / "rtss_he-zephyr" / "build" / "marker"
+    marker.write_text("x")
+    # unchanged -> incremental, no wipe
+    assert "build.configure-cache-reset" not in _codes(envelope_of(_run(world, "-D", "SHIELD=imx335")))
+    assert marker.exists()
+    # value changed -> wipe
+    env = envelope_of(_run(world, "-D", "SHIELD=other"))
+    assert not marker.exists() and "build.configure-cache-reset" in _codes(env)
+    assert any("SHIELD" in i["message"] for i in env["issues"] if i["code"] == "build.configure-cache-reset")
+    marker.write_text("x")
+    # removed -> wipe, and no -U anywhere
     env = envelope_of(_run(world))
-    argv = _west_argv(world)
-    assert argv.index("-USHIELD") == argv.index("--") + 1
-    assert argv.index("-USHIELD") < argv.index("-DPython3_EXECUTABLE=" + argv[argv.index("--") + 2].split("=", 1)[1])
-    assert "build.configure-cache-reset" in [i["code"] for i in env["issues"]]
-    # a third run no longer carries the stale -U
-    envelope_of(_run(world))
-    assert "-USHIELD" not in _west_argv(world)
+    assert not marker.exists() and "build.configure-cache-reset" in _codes(env)
+    assert not any(a.startswith("-U") for a in _west_argv(world))
+    assert _stamp(world).read_text() == ""
+    marker.write_text("x")
+    # added -> wipe
+    envelope_of(_run(world, "-D", "EXTRA_DTC_OVERLAY_FILE=u.overlay"))
+    assert not marker.exists()
 
 
 @posix_only
-def test_removed_raw_overlay_define_is_unset(world):
-    envelope_of(_run(world, "-D", "EXTRA_DTC_OVERLAY_FILE=u.overlay"))
-    envelope_of(_run(world))
-    assert "-UEXTRA_DTC_OVERLAY_FILE" in _west_argv(world)
+def test_failed_build_writes_no_stamp_so_change_is_seen_again(world):
+    envelope_of(_run(world, "-D", "SHIELD=a"))
+    west = world["bin"] / "west"
+    ok = west.read_text()
+    west.write_text(ok + "sys.exit(3)\n")
+    assert envelope_of(_run(world, "-D", "SHIELD=b"))["exitCode"] == 1
+    # the change wiped the dir (and the old stamp with it); the failed run wrote no new one
+    assert not _stamp(world).exists()
+    west.write_text(ok)
+    assert "build.configure-cache-reset" in _codes(envelope_of(_run(world, "-D", "SHIELD=b")))
+    assert _stamp(world).read_text() == "SHIELD=b\n"
 
 
 @posix_only
@@ -205,11 +231,11 @@ def test_user_conf_file_survives_a_configure_cache_reset(world):
 
 
 def test_insert_after_dashdash_and_sysbuild_appends():
-    from tan.core.user_defines import insert_after_dashdash, removed_define_resets
+    from tan.core.user_defines import changed_defines, insert_after_dashdash
 
     assert insert_after_dashdash(["build", "--", "-DA=1"], ["-UX"]) == ["build", "--", "-UX", "-DA=1"]
     assert insert_after_dashdash(["build"], ["-UX"]) == ["build", "--", "-UX"]
-    assert removed_define_resets(["A", "B"], ["B"]) == ["-UA"]
+    assert changed_defines(["A=1", "B=2"], ["A=1", "B=3", "C=1"]) == ["B", "C"]
     text, _ = apply_user_defines(
         _plan("-DSB_CONF_FILE=/b/sb.conf", "-DSB_EXTRA_CONF_FILE=/b/e.conf"),
         ["-DSB_CONF_FILE=u.conf", "-DSB_EXTRA_CONF_FILE=v.conf"],

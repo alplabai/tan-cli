@@ -124,17 +124,17 @@ def apply_user_defines(
     return json.dumps(plan, indent=2), [s["coreId"] for s in targets]
 
 
-def define_keys(defines: list[str]) -> list[str]:
-    """The distinct NAMEs of normalised `-D` args, sorted."""
-    return sorted({_split(d)[0] for d in defines})
+def define_pairs(defines: list[str]) -> list[str]:
+    """`NAME=VALUE` (or bare `NAME`) lines for normalised `-D` args -- the unit
+    the per-slice stamp records."""
+    return sorted(d[2:] for d in defines)
 
 
-def removed_define_resets(previous: list[str] | None, current: list[str]) -> list[str]:
-    """`-U<key>` for each user `-D` key present at the last configure but
-    gone now. CMake caches a `-D`, so without the `-U` a dropped
-    `-DSHIELD=...` (or a raw `-DEXTRA_DTC_OVERLAY_FILE=...`) lingers in
-    CMakeCache.txt and keeps shaping the build."""
-    return [f"-U{k}" for k in sorted(set(previous or []) - set(current))]
+def changed_defines(previous: list[str], current: list[str]) -> list[str]:
+    """Names whose `-D` was added, removed or given a different value between
+    two stamped sets (sorted, de-duplicated)."""
+    diff = set(previous) ^ set(current)
+    return sorted({re.split(r"[:=]", d, maxsplit=1)[0] for d in diff})
 
 
 def insert_after_dashdash(args: list[str], extra: list[str]) -> list[str]:
