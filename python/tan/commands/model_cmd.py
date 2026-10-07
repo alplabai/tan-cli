@@ -969,10 +969,10 @@ def _run_doctor(
 def _refuse_stray_arguments(subcommand: str, model_id: str | None, sku: str | None) -> None:
     """A positional ID belongs to `add` alone and `--sku` to `zoo`: accepting
     either elsewhere would silently ignore what the caller typed."""
-    if model_id is not None and subcommand != "add":
+    if model_id is not None and subcommand not in ("add", "prep"):
         raise ModelError(
             "model.unexpected-argument",
-            f"`tan model {subcommand}` takes no ID argument (got {model_id}); only `add` does.",
+            f"`tan model {subcommand}` takes no ID argument (got {model_id}); only `add` and `prep` do.",
             ExitCode.VALIDATION_FAILURE,
         )
     if sku and subcommand == "add":

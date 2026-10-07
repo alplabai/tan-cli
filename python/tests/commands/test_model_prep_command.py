@@ -29,7 +29,7 @@ def invoke(*args):
 
 def project(tmp_path: Path) -> Path:
     proj = tmp_path / "proj"
-    proj.mkdir()
+    proj.mkdir(exist_ok=True)
     shutil.copy(FIXTURE, proj / "m.onnx")
     return proj
 

@@ -122,31 +122,43 @@ def run_prep(
         )
         return refuse(need, ExitCode.VALIDATION_FAILURE)
 
-    from tan.model.prep import PrepError, accuracy_delta, quantize, validate_calibration  # noqa: PLC0415
-
-    cal_dir = Path(calibration)
-    if not cal_dir.is_absolute():
-        cal_dir = Path(context.workspace_root) / cal_dir
-    try:
-        info = validate_calibration(cal_dir, path, min_samples=min_samples)
-    except PrepError as err:
-        return refuse(Issue("model.prep-calibration-invalid", "error", str(err)), ExitCode.VALIDATION_FAILURE)
+    cal_dir = _under(context, calibration)
+    out_dir = _under(context, out)
+    done = _quantize(path, cal_dir, out_dir, per_channel, min_samples)
+    if isinstance(done, Issue):
+        code = ExitCode.RUNTIME_FAILURE if done.code == "model.prep-failed" else ExitCode.VALIDATION_FAILURE
+        data["calibration"] = None
+        return refuse(done, code)
+    info, quantized, report = done
     data["calibration"] = _calibration_row(info)
-
-    out_dir = Path(out)
-    if not out_dir.is_absolute():
-        out_dir = Path(context.workspace_root) / out_dir
-    try:
-        quantized = quantize(path, out_dir / f"{path.stem}.int8.onnx", cal_dir, per_channel=per_channel)
-        report = accuracy_delta(path, quantized, cal_dir)
-    except PrepError as err:
-        return refuse(Issue("model.prep-failed", "error", str(err)), ExitCode.RUNTIME_FAILURE)
     data["output"] = quantized.as_posix()
     data["accuracy"] = _accuracy_row(report)
     issues: list[Issue] = []
     if report.verdict != "good":
         issues.append(Issue("model.prep-accuracy-degraded", "warning", report.guidance or "INT8 accuracy dropped."))
     return project, sdk, data, issues, ExitCode.SUCCESS
+
+
+def _under(context: ProjectContext, raw: str) -> Path:
+    path = Path(raw)
+    return path if path.is_absolute() else Path(context.workspace_root) / path
+
+
+def _quantize(
+    path: Path, cal_dir: Path, out_dir: Path, per_channel: bool, min_samples: int
+) -> tuple[Any, Path, Any] | Issue:
+    """Validate calibration, quantize, measure -- or the refusing `Issue`."""
+    from tan.model.prep import PrepError, accuracy_delta, quantize, validate_calibration  # noqa: PLC0415
+
+    try:
+        info = validate_calibration(cal_dir, path, min_samples=min_samples)
+    except PrepError as err:
+        return Issue("model.prep-calibration-invalid", "error", str(err))
+    try:
+        quantized = quantize(path, out_dir / f"{path.stem}.int8.onnx", cal_dir, per_channel=per_channel)
+        return info, quantized, accuracy_delta(path, quantized, cal_dir)
+    except PrepError as err:
+        return Issue("model.prep-failed", "error", str(err))
 
 
 def render_prep_text(data: dict) -> list[str]:

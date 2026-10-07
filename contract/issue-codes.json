@@ -2300,6 +2300,38 @@
       "note": "tan-cli#1286: `model add` could not read `board.yaml` or write the model file or `board.yaml`. A failed `board.yaml` write removes the model file just written. RUNTIME_FAILURE. A plain `Issue(\"model.board-yaml-edit-failed\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.add-write-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `model add` could not create the model file under `models/` (disk full, permissions). Nothing is left behind, including a `models/` directory this run created. RUNTIME_FAILURE. Constructed as a plain `Issue(...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.add-destination-unsafe",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `models/` beside `board.yaml` is a symlink, not a directory, or resolves outside the project, so a write through it would land elsewhere. Nothing is written. VALIDATION_FAILURE. Constructed as a plain `Issue(...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.zoo-integrity-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: a downloaded zoo model did not hash to the manifest's sha256; the temp file is discarded and nothing is added. Distinct from `model.zoo-fetch-failed` (transport) because it is a trust failure. RUNTIME_FAILURE. Constructed as a plain `Issue(...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.unexpected-argument",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "note": "tan-cli#1286: an argument the subcommand does not take: an ID positional for anything but `add`, or `--sku` with `add`. VALIDATION_FAILURE. Constructed as a `ModelError` call site in `model_cmd.py` (`_refuse_stray_arguments`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "model.model-extra-missing",
       "status": "reserved",
       "severity": "error",
@@ -2337,7 +2369,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/model_host_cmd.py",
-      "note": "tan-cli#1287: onnxruntime quantization or the fp32-vs-int8 accuracy run failed (`tan.model.prep.PrepError`); no output model is left claimed. RUNTIME_FAILURE. A plain `Issue(\"model.prep-failed\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "tan-cli#1287: onnxruntime quantization or the fp32-vs-int8 accuracy run failed (`tan.model.prep.PrepError`). RUNTIME_FAILURE. A plain `Issue(\"model.prep-failed\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "model.prep-accuracy-degraded",
@@ -2346,36 +2378,6 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/model_host_cmd.py",
       "note": "tan-cli#1287: the INT8 model's top-1 agreement with fp32 on the calibration set is below the 95% threshold; the output is written and the guidance (try --per-channel, more representative samples) is the message. A warning, exit 0. A plain `Issue(\"model.prep-accuracy-degraded\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-      "code": "model.add-write-failed",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
-      "note": "tan-cli#1286: `model add` could not create the model file under `models/` (disk full, permissions). Nothing is left behind, including a `models/` directory this run created. RUNTIME_FAILURE. Constructed as a plain `Issue(...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "model.add-destination-unsafe",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
-      "note": "tan-cli#1286: `models/` beside `board.yaml` is a symlink, not a directory, or resolves outside the project, so a write through it would land elsewhere. Nothing is written. VALIDATION_FAILURE. Constructed as a plain `Issue(...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "model.zoo-integrity-failed",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
-      "note": "tan-cli#1286: a downloaded zoo model did not hash to the manifest's sha256; the temp file is discarded and nothing is added. Distinct from `model.zoo-fetch-failed` (transport) because it is a trust failure. RUNTIME_FAILURE. Constructed as a plain `Issue(...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "model.unexpected-argument",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/model_cmd.py",
-      "note": "tan-cli#1286: an argument the subcommand does not take: an ID positional for anything but `add`, or `--sku` with `add`. VALIDATION_FAILURE. Constructed as a `ModelError` call site in `model_cmd.py` (`_refuse_stray_arguments`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "monitor.launch-failed",
