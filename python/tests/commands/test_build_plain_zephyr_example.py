@@ -80,6 +80,12 @@ def test_board_target_validation(board, ok):
     assert (board_target_problem(board) is None) is ok
 
 
+def test_define_with_plan_token_is_refused(world):
+    assert normalise_defines(["A=${SDK_ROOT}"])[1] is not None
+    env = envelope_of(_run(world, "--board", BOARD, "-D", "A=${PYTHON}"))
+    assert env["exitCode"] == 2 and env["issues"][0]["code"] == "build.invalid-argument"
+
+
 def test_defines_normalised_and_validated():
     assert normalise_defines(["A=1", "-DB:STRING=x"]) == (["-DA=1", "-DB:STRING=x"], None)
     assert normalise_defines(["not valid"])[1] is not None

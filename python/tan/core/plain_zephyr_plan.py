@@ -41,6 +41,9 @@ def normalise_defines(defines: list[str]) -> tuple[list[str], str | None]:
     out: list[str] = []
     for raw in defines:
         item = raw if raw.startswith("-D") else f"-D{raw}"
+        if "${" in item:
+            # Plan token substitution would expand (or choke on) it.
+            return [], f"`-D {raw}` contains `${{`, which tan reserves for build-plan tokens"
         if not _DEFINE.fullmatch(item):
             return [], f"`-D {raw}` is not a CMake definition (`NAME=VALUE`)"
         out.append(item)
@@ -74,6 +77,8 @@ def plain_zephyr_plan(app_dir: str, board: str, defines: list[str]) -> str:
                 "buildDir": slice_dir,
                 "appDir": app_dir,
                 "configArtefacts": [],
+                # `toolchain` / `debug` below are required plan fields; no consumer
+                # of this synthesised plan reads their values.
                 "toolchain": {
                     "targetTriple": "arm-zephyr-eabi",
                     "compiler": "arm-zephyr-eabi-gcc",

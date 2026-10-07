@@ -1737,7 +1737,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/build_cmd.py",
-      "note": "Added by tan-cli#1359: `tan build --board <target>` (a plain Zephyr example with no board.yaml) refuses a `--board` value that is not a Zephyr board target, or a `-D` that is not a CMake definition, before anything runs; exits `VALIDATION_FAILURE` (2) like `build.conflicting-flags`. Constructed as the whole literal in `_plain_route_refusal` and re-emitted by a `_refuse` call site. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added by tan-cli#1359: `tan build --board <target>` (a plain Zephyr example with no board.yaml) refuses a `--board` value that is not a Zephyr board target, or a `-D` that is not a CMake definition, before anything runs; exits `VALIDATION_FAILURE` (2) like `build.conflicting-flags`. Constructed as the whole literal in `_refuse_plain_route` (a `_refuse` call site). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "build.materialise-failed",

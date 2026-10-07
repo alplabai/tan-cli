@@ -1745,6 +1745,10 @@ def build(
             json_mode,
         )
 
+    plain_plan_text: str | None = None
+    if board is not None or define:
+        _refuse_plain_route(board, define, board_yaml, plan_from, mode, json_mode)
+
     # `util::cli_workspace_root`: `--project` joined to the (real) cwd, THEN
     # everything below anchors on this instead of the bare cwd -- board.yaml
     # discovery, the default build root, and SDK discovery. Was previously
@@ -1758,10 +1762,6 @@ def build(
     # makes `workspace_root == cwd`, byte-for-byte the prior behaviour -- this
     # only changes anything when `--project` is actually given.
     #
-    plain_plan_text: str | None = None
-    if board is not None or define:
-        _refuse_plain_route(board, define, board_yaml, plan_from, mode, json_mode)
-
     # tan-cli#488 defect 8: safe defaults for every name the exception handler
     # below and the final `emit()` read, so a raise from ANYWHERE in this
     # resolution prologue -- not only inside `_build` -- still produces the
