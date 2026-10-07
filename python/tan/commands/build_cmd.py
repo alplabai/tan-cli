@@ -1461,7 +1461,9 @@ def _build(
     issues.extend(last_configure_cache_issues())
 
     manifest_reason = last_manifest_write_failure()
-    if manifest_reason is not None:
+    # A plain Zephyr build (`--board`) has no board.yaml, so no manifest to write:
+    # expected, not a warning (the stderr note still says why).
+    if manifest_reason is not None and plain_plan_text is None:
         # A failed manifest write used to report only through `on_output`
         # (stderr) -- so the envelope said `ok: true, issues: []` while
         # `system-manifest.yaml` still named the PREVIOUS run's status and

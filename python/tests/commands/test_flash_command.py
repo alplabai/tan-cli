@@ -1782,7 +1782,7 @@ def test_require_dpidr_refuses_flow_d_before_the_setools_sign(tmp_path, monkeypa
     monkeypatch.setattr(
         flash_cmd, "resolve_setools_dir",
         lambda *_a, **_k: types.SimpleNamespace(
-            path=str(tmp_path / "setools"), source="SETOOLS_DIR"
+            path=str(tmp_path / "setools"), source="SETOOLS_DIR", operator_supplied=True
         ),
     )
     monkeypatch.setattr(
@@ -2020,7 +2020,7 @@ def test_the_atoc_refusal_fires_before_the_setools_sign(tmp_path, monkeypatch):
     monkeypatch.setattr(
         flash_cmd, "resolve_setools_dir",
         lambda *_a, **_k: types.SimpleNamespace(
-            path=str(tmp_path / "setools"), source="SETOOLS_DIR"
+            path=str(tmp_path / "setools"), source="SETOOLS_DIR", operator_supplied=True
         ),
     )
     monkeypatch.setattr(
@@ -3215,6 +3215,16 @@ def _flow_d_preflight_inputs():
     return FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S")
 
 
+def _preflight(inputs, **kwargs):
+    """`_flow_d_preflight` with the run's resolved J-Link, as `_flash_entry` passes it
+    (tan-cli#1348: the preflight never re-resolves the binary itself)."""
+    import shutil as _shutil
+
+    return flash_cmd._flow_d_preflight(
+        inputs, jlink_exe=_shutil.which("JLinkExe") or _shutil.which("JLinkExe.exe"), **kwargs
+    )
+
+
 def _stub_flow_d_probe(monkeypatch, tmp_path, stdout: str, stderr: str = "", success: bool = True):
     """Make `_flow_d_preflight` reach a fake connect banner without touching a
     real probe: a resolvable but INERT `JLinkExe` as the only thing on PATH,
@@ -3273,7 +3283,7 @@ def test_flow_d_preflight_a_different_reported_dp_id_keeps_the_wiring_message(
         tmp_path,
         stdout="Connecting to target via SWD\nFound SW-DP with ID 0x2BA01477\n",
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "Check the wiring and which board is physically attached" in message
     assert "re-enumerat" not in message
@@ -3296,7 +3306,7 @@ def test_flow_d_preflight_wrong_dp_id_names_the_actual_id_too(monkeypatch, tmp_p
         tmp_path,
         stdout="Connecting to target via SWD\nFound SW-DP with ID 0x2BA01477\n",
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "0x4C013477" in message, message  # the expected id (unchanged)
     assert "0x2BA01477" in message, message  # tan-cli#512: the actual id, new
@@ -3314,7 +3324,7 @@ def test_flow_d_preflight_wrong_dp_id_names_the_sw_dp_id_not_jlink_serial(monkey
         tmp_path,
         stdout="Connecting to target via SWD\nFound SW-DP with ID 0x2BA01477\n",
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "SW-DP ID is the real" in message
     assert "cannot disambiguate" in message
@@ -3334,7 +3344,7 @@ def test_flow_d_preflight_no_dp_id_at_all_gets_the_re_enumeration_message(monkey
         stderr="J-Link uptime (since boot): 0d 00h 00m 01s\n",
         success=False,
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "re-enumerat" in message
     assert "Check the probe selection" not in message
@@ -3361,7 +3371,7 @@ def test_flow_d_preflight_an_unrecognised_banner_falls_back_to_the_wiring_messag
     that this is an unparsed banner, not a confirmed wiring diagnosis. The
     remediation stays byte-for-byte the same either way."""
     _stub_flow_d_probe(monkeypatch, tmp_path, stdout="some unrecognised probe banner\n")
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "could not recognise the connect banner" in message
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
@@ -3393,7 +3403,7 @@ def test_flow_d_preflight_a_target_level_cannot_connect_keeps_the_wiring_message
         ),
         success=False,
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
     assert "re-enumerat" not in message
@@ -3424,7 +3434,7 @@ def test_flow_d_preflight_a_wrong_jlink_serial_keeps_the_wiring_message(monkeypa
         stdout="Connecting to J-Link via USB...FAILED: Cannot connect to J-Link.\n",
         success=False,
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
     assert "tan-cli#353" in message
@@ -3568,7 +3578,7 @@ def test_flow_d_preflight_refuses_a_truncated_expect_dpidr_before_probing(monkey
     )
     args = {**FLOW_D_ARGS, "expect_dpidr": "0x2477", "jlink_device": "Generic-Attach"}
     inputs = FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S")
-    message = flash_cmd._flow_d_preflight(inputs)
+    message = _preflight(inputs)
     assert message is not None
     assert "expect_dpidr" in message
     assert "32-bit" in message
@@ -3969,7 +3979,6 @@ def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related
     flash_args = {
         "jlink_flash_device": "PART_PROFILE",
         "slot0_load_address": "0x80010000",
-        "setools_dir": str(setools_dir),
     }
     ctx = _Context(
         sku="S",
@@ -3979,6 +3988,7 @@ def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related
         skip_missing_tools=False,
         force_confirm=False,
         capture=True,
+        setools_dir=str(setools_dir),  # operator-named (--setools-dir)
     )
     shape = validate_flow_d_shape(flash_args, str(artefact), _is_file)
     import contextlib
@@ -3998,7 +4008,7 @@ def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related
         # names the source, matching `resolve_setools_dir`'s own precedence text.
         assert note is not None
         assert str(setools_dir) in note
-        assert "flash_args.setools_dir" in note
+        assert "the --setools-dir flag" in note
         assert merged["atoc_address"] == "0x8057ea50"
         assert Path(merged["atoc"]).is_file()
         assert Path(script).is_file()  # the fake tool itself was never deleted/moved
@@ -4207,12 +4217,13 @@ slices:
    flash_method: alif_mram_jlink,
    flash_args: {{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
                 expect_dpidr: "0x0BE12477", jlink_device: Generic-Attach,
-                setools_dir: "{setools_dir.as_posix()}", confirm: true,
-                atoc_unqueryable: true}}}}
+                confirm: true, atoc_unqueryable: true}}}}
 helper_mcus: []
 boot_order: []
 """
     (build_root / "system-manifest.yaml").write_text(manifest, encoding="utf-8", newline="")
+    # The operator names the install (a manifest-only one is refused outright now).
+    monkeypatch.setenv("SETOOLS_DIR", str(setools_dir))
 
     fake_tools = tmp_path / "faketools"
     fake_tools.mkdir()
@@ -4424,6 +4435,70 @@ def test_a_hand_supplied_atoc_is_planned_with_unknown_entries(tmp_path):
     assert plan["scratchNote"] is None
 
 
+def test_a_confirmed_write_refuses_a_setools_only_the_manifest_named(tmp_path):
+    """tan-cli#1344: the operator armed the write, not the binary a checkout picked."""
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    marker = tmp_path / "ran"
+    tool = setools_dir / _setools_script_name()
+    tool.write_text(f'#!/bin/sh\ntouch "{marker}"\n', encoding="utf-8")
+    os.chmod(tool, 0o755)
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    stub = fake_tools / "JLinkExe"
+    stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    os.chmod(stub, 0o755)
+    manifest = _FLOW_D_SIGN_MANIFEST % (
+        f', setools_dir: "{setools_dir}", confirm: true, atoc_unqueryable: true'
+    )
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", manifest=manifest,
+        env={"SETOOLS_DIR": "", "TMPDIR": str(scratch_parent),
+             "PATH": str(fake_tools) + os.pathsep + os.environ["PATH"]},
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    assert codes(payload) == ["flash.setools-untrusted-source"]
+    assert "--setools-dir" in payload["data"]["entries"][0]["message"]
+    assert not marker.exists()
+    assert _scratch_remnants(scratch_parent) == []
+
+
+def test_a_device_config_outside_the_setools_dir_and_project_is_refused(tmp_path):
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    manifest = _FLOW_D_SIGN_MANIFEST % f', setools_device_config: "{outside}"'
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    payload = envelope(out)
+    assert exit_code == 1 and codes(payload) == ["flash.setools-untrusted-source"]
+    assert "outside the SETOOLS install" in payload["data"]["entries"][0]["message"]
+    # Inside the operator-named SETOOLS dir: accepted.
+    inside = setools_dir / "build" / "config" / "mine.json"
+    inside.write_text("{}", encoding="utf-8")
+    manifest = _FLOW_D_SIGN_MANIFEST % f', setools_device_config: "{inside}"'
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    assert exit_code == 0, out
+
+
+def test_a_device_config_symlinked_out_of_the_project_is_refused(tmp_path):
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-secret.json"
+    elsewhere.write_text("{}", encoding="utf-8")
+    os.symlink(elsewhere, tmp_path / "build" / "dev.json")
+    manifest = _FLOW_D_SIGN_MANIFEST % ", setools_device_config: dev.json"
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    assert exit_code == 1 and codes(envelope(out)) == ["flash.setools-untrusted-source"]
+
+
 def test_a_preview_never_runs_a_setools_the_manifest_chose(tmp_path):
     """tan-cli#1343 review, MAJOR 1: `flash_args.setools_dir` is project-controlled,
     so a --dry-run / unconfirmed run with ONLY that source must not execute the
@@ -4462,6 +4537,41 @@ def test_a_preview_never_runs_a_setools_the_manifest_chose(tmp_path):
     entry = envelope(out)["data"]["entries"][0]
     assert "signed" in entry["message"] and "0x8057ea50" in entry["message"]
     assert "signSkipped" not in entry["setools"]
+
+
+def test_the_stock_device_config_mismatch_is_info_not_a_warning(tmp_path):
+    """tan-cli#1344 review: the stock SETOOLS file declares an E7 part on every
+    default E8 run (its blob is the board's original DEVICE), so it is `info`."""
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    (setools_dir / "build" / "config" / "app-device-config.json").write_text(
+        '{"metadata": {"device": "AE722F80F55D5AS"}}', encoding="utf-8"
+    )
+    manifest = _FLOW_D_SIGN_MANIFEST.replace("PART_PROFILE", "AE822FA0E5597LS0_M55_HE") % ""
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    mismatch = [i for i in payload["issues"] if i["code"] == "flash.device-config-mismatch"]
+    assert [i["severity"] for i in mismatch] == ["info"]
+    assert payload["data"]["entries"][0]["setools"]["deviceConfig"]["stock"] is True
+
+
+def test_a_resident_entry_at_a_writes_own_address_is_replaced_whatever_its_name(tmp_path):
+    """The bench names the resident app `ALP-HE`; tan's entry is `m55_he`. A resident
+    region starting exactly where the app write starts is that write's predecessor."""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x00" * 0x40)
+    (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00" * 0x100)
+    manifest = _FLOW_D_SIGN_MANIFEST % (
+        ', atoc: atoc.bin, atoc_address: "0x80100000", '
+        "resident_atoc_entries: [DEVICE, ALP-HE@0x80010000+0x14688]"
+    )
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    assert exit_code == 0, out
 
 
 def test_a_device_config_for_another_family_warns_but_is_accepted(tmp_path):

@@ -51,6 +51,10 @@ IMPORT_TO_DIST = {
     "certifi": "certifi",
     "cbor2": "cbor2",
     "tflite": "tflite",
+    "numpy": "numpy",
+    "onnxruntime": "onnxruntime",
+    "onnx": "onnx",
+    "sympy": "sympy",
 }
 
 #: Vendored customer scaffolds are template DATA, not part of tan's own runtime

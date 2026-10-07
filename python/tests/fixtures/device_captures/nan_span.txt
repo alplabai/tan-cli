@@ -1,0 +1,15 @@
+*** Booting Zephyr
+ENERGY-CFG {"cycles_per_s": 160000000, "power_lsb_w": 0.001, "rail": "VDD_E8", "npu_dispatched": true}
+ENERGY-S 0 active 0 500
+ENERGY-S 0 active 32000000 500
+ENERGY-S 0 active 64000000 500
+ENERGY-S 0 active 96000000 500
+ENERGY-S 0 active 128000000 500
+ENERGY-W 0 active 5 128000000 nan 10
+ENERGY-S 0 idle 0 300
+ENERGY-S 0 idle 32000000 300
+ENERGY-S 0 idle 64000000 300
+ENERGY-S 0 idle 96000000 300
+ENERGY-S 0 idle 128000000 300
+ENERGY-W 0 idle 5 128000000 nan 0
+
