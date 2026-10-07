@@ -1305,7 +1305,22 @@ from tests.conftest import sdk_root
 #: lines, unchanged), `d7d17c7ae`'s live-line refusal (no example trips it),
 #: `5a46a9ec8`'s M33 ownership Kconfig (no example assigns a peripheral to
 #: m33) and `319812a16` (a filter).
-PINNED_SDK_COMMIT = "ac0e2a5e096a1c8c102818650a688d0f7e709066"  # alp-sdk origin/dev -- #2705/#2735/#2674/#2673/#2677 resync (tan-cli#1309, this change)
+#: RE-SYNC (mirror / PINNED_HASHES) `ac0e2a5e` -> `1c0862cd` (tan-cli#1216,
+#: alp-sdk's `feat/1216-plan-dts-overlay-cmake-args`; PROVISIONAL -- re-run
+#: `planner_resync.py` against the squash-merge commit once that PR lands, the
+#: branch commit does not survive it). Audited, not machine-written:
+#:
+#:   * `buildplan.py` / `__init__.py` -- ported: `_slice_dts_overlay` +
+#:     `_slice_cmake_args_artefact` and the additive `alp.overlay` /
+#:     `cmake-args.txt` `configArtefacts`. tan adaptation: the DTS emitter is
+#:     `tan.planner.project_emit.dts`, not the sibling `alp_project_emit`.
+#:   * `loader.py` -- upstream (tan-cli#1350) now refuses
+#:     `diagnostics.link: itcm`, because alp-sdk's planner cannot emit an
+#:     ITCM-linked image. tan's planner implements it, so the refusal is NOT
+#:     taken; only the pinned hash moves.
+#:   * hand-ports (`gen_zephyr_board.py`, `alp_project.py`) -- NOT re-audited
+#:     here, so `HAND_PORT_PINNED_SDK_COMMIT` does not move.
+PINNED_SDK_COMMIT = "1c0862cd2aff4c6cbd2eaa80c91863814c60c5c3"  # alp-sdk origin/dev -- #2705/#2735/#2674/#2673/#2677 resync (tan-cli#1309, this change)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1345,9 +1360,9 @@ PINNED_SDK_COMMIT = "ac0e2a5e096a1c8c102818650a688d0f7e709066"  # alp-sdk origin
 #: upstream is the one carrying the bug here.
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
-    "__init__.py": "bc8a414122a59e04dcd37087328d692c15b8574bf6d470d6881d8f2866735aff",
+    "__init__.py": "77d1fbf042ffc726a96dffb60107fc403dc68fba83f564db43eba786bef75150",
     "aperture.py": "717ddd2e178e0b530bee01ac77ccf9ee67ed388c9ec21f4debdc1d3bffe07365",
-    "buildplan.py": "acf0fa7cb4cd72e4778de31e4be3b7076274de2b646dcae1ee694b5a5b15d6cc",
+    "buildplan.py": "8c094e53c3f7d666e12e276b2c298d3c8cf100abf96cb3d3a8518c56e91f0355",
     "carveout.py": "ea0e7e0ca361a84b85111e0a45e822ed99bcbfd85476c0295cea8db00d20cb91",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
@@ -1355,7 +1370,7 @@ PINNED_HASHES: dict[str, str] = {
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
     "linux_ownership.py": "4481dc8d3e7b581bf6d83b03992f60683e2acb99876ff25597cd04b21a711904",
-    "loader.py": "6443eff63d6fe37ac151d7e9b9a6fe6805f3004d40093ad17f8b6c25560d38a1",
+    "loader.py": "e31e53dbebbb4c7095a87a19cc5c46b572efd4c043adee04d8003bacaa36723e",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
     "memory.py": "2705af8925dff0ace7e82b0948a4dda424c3a6e9d9d8f5f948e4349dc62cdfc1",
     "memregion.py": "45d10e7ac94b0febbcf66df70324eb7b9a6fcc0dd09617d3de5aefc65b7c4879",

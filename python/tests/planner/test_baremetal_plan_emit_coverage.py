@@ -365,8 +365,12 @@ def test_a_baremetal_slice_reaches_the_plan_with_configure_then_build(base_dir):
         {"tool": "cmake", "args": ["--build", "."], "cwd": build_dir}]
     assert emitted["artifacts"] == dict(
         ALL_NULL_ARTIFACTS, outputDir=f"{build_dir}/output")
+    # `alp-baremetal.cmake` is the one the configure reads, so it comes
+    # first; the rendered reference artefacts follow (tan-cli#1216).
     assert [a["path"] for a in emitted["configArtefacts"]] == [
-        f"{build_dir}/alp-baremetal.cmake"]
+        f"{build_dir}/alp-baremetal.cmake",
+        f"{build_dir}/alp.overlay",
+        f"{build_dir}/cmake-args.txt"]
 
 
 def test_a_baremetal_slice_that_cannot_configure_carries_no_build_step(base_dir):
