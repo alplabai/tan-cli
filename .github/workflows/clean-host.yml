@@ -156,6 +156,7 @@ name: clean-host
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
   workflow_dispatch:
@@ -181,6 +182,51 @@ permissions:
   contents: read
 
 jobs:
+  # tan-cli#1390: a `pull_request` freezes on Linux only; Windows and both
+  # macOS legs run on `merge_group` (and push / dispatch). None of these
+  # contexts is branch-protection-required, so the non-Linux legs simply do not
+  # exist on a PR rather than stub-passing. A matrix `include` cannot be
+  # filtered by an expression in place, so this job holds the full list below
+  # and emits it (Linux-only on a PR) for `freeze-and-smoke` to consume.
+  matrix-plan:
+    if: github.event_name != 'release'
+    name: "clean host (freeze): matrix plan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      include: ${{ steps.plan.outputs.include }}
+    steps:
+      - id: plan
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          full=$(python3 - <<'PYEOF'
+          import json
+          include = [
+              {"os": "windows-latest", "asset": "tan-x86_64-pc-windows-msvc.exe", "ext": ".exe"},
+              {"os": "macos-15-intel", "asset": "tan-x86_64-apple-darwin", "ext": ""},
+              {"os": "macos-15", "asset": "tan-aarch64-apple-darwin", "ext": ""},
+              {
+                  "os": "ubuntu-latest",
+                  "asset": "tan-x86_64-unknown-linux-gnu",
+                  "ext": "",
+                  # Pinned by digest, tag kept in the comment -- same reasoning
+                  # and digest as release.yml's `build` job (tan-cli#437); the
+                  # two MUST match.
+                  "container": "python@sha256:411fa4dcfdce7e7a3057c45662beba9dcd4fa36b2e50a2bfcd6c9333e59bf0db",  # python:3.12-slim-bullseye
+              },
+          ]
+          print(json.dumps(include))
+          PYEOF
+          )
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            full=$(printf '%s' "$full" | python3 -c 'import json,sys; print(json.dumps([e for e in json.load(sys.stdin) if e["os"] == "ubuntu-latest"]))')
+          fi
+          echo "include=${full}" >> "$GITHUB_OUTPUT"
+          echo "event ${EVENT_NAME}: ${full}" >> "$GITHUB_STEP_SUMMARY"
+
   # PRE-TAG coverage: builds the freeze itself, exactly like getting-started.yml
   # and release.yml's `build` job do, then runs the four-command clean-host
   # sequence against it. Never runs on `release: published` -- that commit
@@ -188,31 +234,13 @@ jobs:
   # be a second, differently-built lookalike, not new coverage (see the header:
   # only `release-asset-smoke` proves anything about the uploaded bytes).
   freeze-and-smoke:
+    needs: matrix-plan
     if: github.event_name != 'release'
     name: "clean host (freeze): ${{ matrix.asset }}"
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-            asset: tan-x86_64-pc-windows-msvc.exe
-            ext: .exe
-          # Same two macOS labels release.yml uses (macOS 13 is retired, 14 is
-          # deprecated) -- keeps the Intel/Apple-silicon pair comparable.
-          - os: macos-15-intel
-            asset: tan-x86_64-apple-darwin
-            ext: ""
-          - os: macos-15
-            asset: tan-aarch64-apple-darwin
-            ext: ""
-          - os: ubuntu-latest
-            asset: tan-x86_64-unknown-linux-gnu
-            ext: ""
-            # Pinned by digest, tag kept in the comment -- same reasoning and
-            # same digest as release.yml's `build` job (tan-cli#437); the two
-            # MUST match, since this job freezes the identical artefact in the
-            # identical container on every PR.
-            container: python@sha256:411fa4dcfdce7e7a3057c45662beba9dcd4fa36b2e50a2bfcd6c9333e59bf0db # python:3.12-slim-bullseye
+        include: ${{ fromJSON(needs.matrix-plan.outputs.include) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
