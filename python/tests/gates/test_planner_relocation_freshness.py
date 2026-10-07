@@ -1284,6 +1284,10 @@ PINNED_HASHES: dict[str, str] = {
     "kconfig.py": "d3d35a4875c9a30bf5aa732258fcbc0063bbc2f63e952e749e076fa5b9b16913",
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
+    # alp-sdk#2762 changes upstream loader.py (~lines 1405-1413: refuses
+    # `diagnostics.link` != auto). The next planner re-sync must NOT port that
+    # refusal: tan's `link_target.apply_link_target` (called at the end of
+    # tan's `load_board_yaml`) replaces it with the real HE-only feature.
     "loader.py": "829b41bdf316114098c7001f588d57e650124b09530645cd9d084a59ca890bfd",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
     "memory.py": "2705af8925dff0ace7e82b0948a4dda424c3a6e9d9d8f5f948e4349dc62cdfc1",
