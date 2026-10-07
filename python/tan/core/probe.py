@@ -32,6 +32,15 @@ _PYTHON_NAME = re.compile(r"^(py|python[\d.]*[tw]?)(\.exe)?$", re.IGNORECASE)
 _DASH_C = re.compile(r"^-[A-Za-z]*c$")
 
 
+def isolated_cwd() -> "tempfile.TemporaryDirectory[str]":
+    """A fresh EMPTY directory to use as a child's cwd. `python -m <mod>` and
+    `python -c` put the cwd on `sys.path`, so a project directory can shadow
+    `pip`/`venv`/a stdlib module; every spawn that must not be hijackable runs
+    from here, with absolute path arguments (tan-cli#1317, #1331). The one
+    helper both the probes and `bootstrap_cmd.Runner.run(isolated=True)` use."""
+    return tempfile.TemporaryDirectory(prefix="tan-spawn-", ignore_cleanup_errors=True)
+
+
 def is_python_dash_c(argv: list[str]) -> bool:
     """`<python> ... -c <code>`. With `-c`, `sys.path[0]` is the CWD, so a
     `west.py`/`json.py` planted in the user's project or SDK dir would run
@@ -95,7 +104,7 @@ def probe_status(
     if isolate:
         argv, executable = _absolute_for_new_cwd(argv, executable)
     scratch = (
-        tempfile.TemporaryDirectory(prefix="tan-probe-")
+        isolated_cwd()
         if isolate
         else contextlib.nullcontext(None)
     )

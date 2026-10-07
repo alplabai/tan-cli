@@ -354,7 +354,7 @@
       "status": "reserved",
       "severity": "warning",
       "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
-      "consumerEffect": "None today. Reserved for alp-sdk-vscode to notice that the editable `pip install -e` of tan's Python backend (`alp_cli`) into the venv reported a problem -- the venv may be left without a working backend for later `tan` invocations that shell into it.",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to notice that the editable `pip install -e` of alp-sdk's Python tooling (`alp_cli`/`alp_mcp`, which provides the `alp-mcp` console script) into the venv reported a problem -- the venv may be left without the alp-mcp server. It is not what `tan build` or the west forwarders depend on (tan plans in-process).",
       "emittedBy": "crates/tan-cli/src/commands/bootstrap/steps.rs",
       "literal": "\"editable-install\"",
       "note": "tan-cli#111 registry audit: recorded via `Log::warn` in `pip_phase`, the last of the three non-fatal pip-extras warnings alongside `sdk-extras`/`zephyr-requirements`."
