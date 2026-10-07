@@ -14,6 +14,7 @@ there), so the plain `tan monitor` path never loads it.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import stat
@@ -358,7 +359,12 @@ def _open_log(log: str, data: dict):
                 raise OSError("refusing to write through a symlink")
         except ValueError as err:  # embedded NUL
             raise OSError(str(err)) from err
-        fd = os.open(log, flags, 0o600)
+        try:
+            fd = os.open(log, flags, 0o600)
+        except OSError as err:
+            if err.errno == errno.ENXIO:  # FIFO with no reader, or a device node
+                raise OSError("not a regular file") from err
+            raise
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode):
             raise OSError("not a regular file")
@@ -376,6 +382,30 @@ def _open_log(log: str, data: dict):
         if fd is not None:
             os.close(fd)
         raise _log_failed(log, err, data) from err
+
+
+def check_log_path(log: str, data: dict) -> str:
+    """Validate `--log` WITHOUT opening or creating it, so a bad path is
+    refused before the (possibly slow) serial connect. Returns the absolute
+    path. The open itself re-checks (`_open_log`), closing the race."""
+    path = os.path.abspath(log)
+    try:
+        if os.path.lexists(path):
+            if os.path.islink(path):
+                raise OSError("refusing to write through a symlink")
+            if not stat.S_ISREG(os.stat(path).st_mode):
+                raise OSError("not a regular file")
+            if not os.access(path, os.W_OK):
+                raise OSError("permission denied")
+        else:
+            parent = os.path.dirname(path) or "."
+            if not os.path.isdir(parent):
+                raise OSError("parent directory does not exist")
+            if not os.access(parent, os.W_OK | os.X_OK):
+                raise OSError("parent directory is not writable")
+    except (OSError, ValueError) as err:
+        raise _log_failed(path, err, data) from err
+    return path
 
 
 def _log_failed(log: str, err: BaseException, data: dict) -> MonitorError:
@@ -397,6 +427,7 @@ def run_capture(
     with the tail of the break-in output when there was one."""
     pattern, duration, log = cap
     data: dict = {"schemaVersion": DATA_SCHEMA_VERSION, "port": port, "baud": baud}
+    log_path = check_log_path(log, data) if log is not None else None
     ser = open_port(port, baud, capture=True)
     sink = None
     try:
@@ -410,9 +441,7 @@ def run_capture(
                            f"no prompt `{opts[1].decode('utf-8', 'replace')}` within {opts[2]}s on {port}.")],
                     ExitCode.RUNTIME_FAILURE,
                 )
-        log_path = None
-        if log is not None:
-            log_path = os.path.abspath(log)
+        if log_path is not None:
             sink = _open_log(log_path, data)
         try:
             res = serial_capture.capture(
