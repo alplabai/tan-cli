@@ -145,6 +145,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.build.toolchain import _is_toolchain_wreckage, _toolchain_store_scan_root
+from tan.commands.flash_cmd import _tool_available
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
     global_default_pointer_fix_hint,
@@ -180,6 +181,12 @@ from tan.core.doctor_git import (
 from tan.core.doctor_libraries import LibraryReport, inspect_selection
 from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.doctor_scope import CHECK_SCOPES
+from tan.core.doctor_setools import (
+    FLOW_A_METHOD,
+    FLOW_D_METHOD,
+    project_flash,
+)
+from tan.core.doctor_setools import verdict as setools_verdict
 from tan.core.global_flags import accept_global_flags
 from tan.core.inert import COMPATIBILITY, inert_help
 from tan.core.python_floor import (
@@ -212,7 +219,7 @@ from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.timestamp import generated_at_iso
 from tan.core import toolchain_provision
 from tan.core.tool_lookup import resolve_tool
-from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
+from tan.core.venv import find_workspace_venv, venv_bin_dir, west_program, west_workspace_dir
 from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, terminal_width, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -1592,7 +1599,24 @@ def zephyr_workspace_check(workspace_dir: str, version_text: str | None) -> Chec
     )
 
 
-def setools_check(setools_dir: str | None, se_uart: str | None, is_linux: bool) -> Check:
+def jlink_available(app_dir: str, sdk_root: str | None) -> bool:
+    """Whether `tan flash` would find a J-Link tool: the SAME test it applies
+    (`flash_cmd._tool_available` -- PATH or the workspace venv)."""
+    try:
+        venv_bin = venv_bin_dir(app_dir, sdk_root)
+        return any(_tool_available(n, venv_bin) for n in ("JLinkExe", "JLink"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def setools_check(
+    setools_dir: str | None,
+    se_uart: str | None,
+    is_linux: bool,
+    flash_methods: frozenset[str] | None = None,
+    jlink_found: bool | None = None,
+    setools_source: str = "$SETOOLS_DIR",
+) -> Check:
     """`setools` -- can this host flash an Alif AEN part's MRAM at all?
 
     Nothing else in either doctor asks. `scripts/west_commands/runners/
@@ -1617,8 +1641,29 @@ def setools_check(setools_dir: str | None, se_uart: str | None, is_linux: bool) 
     license-gated binary will succeed, and the false alarm it produced here
     trains an operator to stop trusting doctor on the one question they ask it
     before a write.
+
+    **Method-aware (tan-cli#1323).** `$SE_UART` belongs to Flow A
+    (`zephyr_west_flash` -> the `alif_flash` runner) ONLY. A planner-emitted
+    AEN manifest dispatches Flow D (`alif_mram_jlink`): SETOOLS signs the ATOC
+    (`app-gen-toc`) and J-Link writes it over SWD, no SE-UART. `flash_methods`
+    is the set `tan flash` would dispatch for the project's built manifest
+    (`tan.core.doctor_setools.project_flash_methods`, which calls
+    `select_flash_method` itself); `None` means no project/manifest is in
+    scope, and the verdict is then phrased per method rather than asserting
+    one. `jlink_found` is whether a J-Link tool is on PATH (Flow D only).
     """
-    if not is_linux and not setools_dir and not se_uart:
+    flow_d = flash_methods is not None and FLOW_D_METHOD in flash_methods
+    flow_a = flash_methods is not None and FLOW_A_METHOD in flash_methods
+    if flash_methods is not None and not (flow_a or flow_d):
+        return Check(
+            "setools",
+            "unknown",
+            "this project's slices flash via "
+            f"{', '.join(f'`{m}`' for m in sorted(flash_methods)) or 'no method'}, "
+            "which does not use SETOOLS -- nothing to check here.",
+            scope="host",
+        )
+    if flow_a and not flow_d and not is_linux and not setools_dir and not se_uart:
         return Check(
             "setools",
             "unknown",
@@ -1636,53 +1681,17 @@ def setools_check(setools_dir: str | None, se_uart: str | None, is_linux: bool) 
             scope="host",
         )
 
-    problems: list[str] = []
-    if not setools_dir:
-        problems.append(
-            "$SETOOLS_DIR is unset (the Alif Security Toolkit is license-gated and "
-            "NOT redistributed by alp-sdk)"
-        )
-    else:
-        root = Path(setools_dir)
-        absent = []
-        for exe in SETOOLS_EXECUTABLES:
-            try:
-                if not (root / exe).is_file():
-                    absent.append(exe)
-            except OSError:
-                absent.append(exe)
-        if absent:
-            problems.append(
-                f"$SETOOLS_DIR=`{setools_dir}` does not look like an "
-                f"app-release-exec-linux directory (no {', '.join(absent)})"
-            )
-    if not se_uart:
-        problems.append(
-            "$SE_UART is unset (the SE-UART device: Linux /dev/ttyUSB*, macOS "
-            "/dev/cu.usbserial-*, a passed-through COM under WSL)"
-        )
-
-    if not problems:
-        return Check(
-            "setools",
-            "pass",
-            f"SETOOLS ready: $SETOOLS_DIR=`{setools_dir}` has "
-            f"{'/'.join(SETOOLS_EXECUTABLES)}, $SE_UART=`{se_uart}`.",
-            scope="host",
-        )
-    return Check(
-        "setools",
-        "warn",
-        "AEN MRAM flashing (`west flash`, the alif_flash runner) will fail: "
-        + "; ".join(problems)
-        + ".",
-        f"Download the Alif Security Toolkit (`{SETOOLS_BUNDLE}`) from the Alif "
-        f"developer portal -- it is license-gated and alp-sdk does not "
-        f"redistribute it -- then `export SETOOLS_DIR=<...>/app-release-exec-linux` "
-        f"and `export SE_UART=/dev/ttyUSB0` (your SE-UART device). "
-        f"See docs/aen-bench-bringup.md.",
-        scope="host",
+    status, detail, fix = setools_verdict(
+        setools_dir,
+        setools_source,
+        se_uart,
+        flash_methods,
+        jlink_found,
+        SETOOLS_BUNDLE,
+        SETOOLS_EXECUTABLES,
+        is_linux,
     )
+    return Check("setools", status, detail, fix, scope="host")
 
 
 def jlink_banner(jlink_exe: str, timeout: int = PROBE_TIMEOUT_S) -> str | None:
@@ -4170,11 +4179,27 @@ def _collect(
     if os.name == "nt":
         _add(seven_zip_check(any(on_path(p) for p in SEVEN_ZIP_PROGRAMS)))
 
+    # tan-cli#1323: the precedence `tan flash` applies (`resolve_setools_dir`),
+    # minus the per-run `--setools-dir` flag doctor cannot see: $SETOOLS_DIR,
+    # then the built manifest's flash_args.setools_dir.
+    flash_info = project_flash(board_yaml)
+    setools_dir = os.environ.get("SETOOLS_DIR") or (
+        flash_info.setools_dir if flash_info is not None else None
+    )
+    setools_source = (
+        "$SETOOLS_DIR" if os.environ.get("SETOOLS_DIR") else "the manifest's flash_args.setools_dir"
+    )
     _add(
         setools_check(
-            os.environ.get("SETOOLS_DIR"),
+            setools_dir,
             os.environ.get("SE_UART"),
             sys.platform.startswith("linux"),
+            flash_info.methods if flash_info is not None else None,
+            jlink_available(
+                str(Path(board_yaml).parent) if board_yaml is not None else workspace_root,
+                sdk_root,
+            ),
+            setools_source,
         )
     )
 
