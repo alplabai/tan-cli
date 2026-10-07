@@ -2148,6 +2148,9 @@ class _Context:
     ram: bool = False
     ram_console: bool = False
     ram_wait: float = 1.5
+    #: `--assume-he` (tan-cli#1354): proceed when the attached-core check cannot confirm
+    #: the M55-HE (ambiguous/unreadable ITCM). A documented risk, never the default.
+    assume_he: bool = False
     #: `--readback` (tan-cli#1321): after a Flow D write, re-read every written
     #: region in a FRESH J-Link session and compare sha256.
     readback: bool = False
@@ -3948,6 +3951,7 @@ def _run(
     ram: bool = False,
     ram_console: bool = False,
     ram_wait: float = 1.5,
+    assume_he: bool = False,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -4137,6 +4141,7 @@ def _run(
         ram=ram,
         ram_console=ram_console,
         ram_wait=ram_wait,
+        assume_he=assume_he,
         **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
     )
     if ram:
@@ -4234,6 +4239,8 @@ def _run(
                 issues.append(Issue("flash.probe-selector-conflict", "error", entry.message))
             elif entry.issue_code == "flash.ram-image-not-ram-linked":
                 issues.append(Issue("flash.ram-image-not-ram-linked", "error", entry.message))
+            elif entry.issue_code == "flash.ram-core-unconfirmed":
+                issues.append(Issue("flash.ram-core-unconfirmed", "error", entry.message))
             elif entry.issue_code == "flash.ram-core-unsupported":
                 issues.append(Issue("flash.ram-core-unsupported", "error", entry.message))
             elif entry.issue_code == "flash.ram-core-mismatch":
@@ -4584,6 +4591,19 @@ def flash(
         "build has no such symbol: nothing is read, the envelope says which console the "
         "build selected, and flash.ram-console-symbol-missing is a warning, not an error.",
     ),
+    assume_he: bool = typer.Option(
+        False,
+        "--assume-he",
+        help="With --ram: proceed even when the attached-core check cannot confirm the "
+        "M55-HE (tan-cli#1354). Before loading, tan reads 4 words at the local ITCM 0x0 "
+        "and at both cores' global ITCM windows (HE 0x58000000, HP 0x50000000) and "
+        "requires the local view to equal exactly one: HE proceeds, HP refuses "
+        "(flash.ram-core-mismatch), anything else (erased or identical ITCM, an "
+        "unreadable window) refuses (flash.ram-core-unconfirmed). --assume-he overrides "
+        "only the unconfirmed case, AT YOUR OWN RISK -- a generic Cortex-M55 attach picks "
+        "whichever M55 access port it finds and the bench has seen HE 6 of 6 times, which "
+        "is not proof. It never overrides a confirmed HP.",
+    ),
     wait: float = typer.Option(
         1.5,
         "--wait",
@@ -4696,8 +4716,11 @@ def flash(
             param_hint="--probe-usb-path",
         )
 
-    if (ram_console is True or (isinstance(wait, (int, float)) and wait != 1.5)) and ram is not True:
-        raise typer.BadParameter("--ram-console / --wait only mean something with --ram")
+    if (
+        ram_console is True or assume_he is True
+        or (isinstance(wait, (int, float)) and wait != 1.5)
+    ) and ram is not True:
+        raise typer.BadParameter("--ram-console / --wait / --assume-he only mean something with --ram")
     if ram is True and (readback is True):
         raise typer.BadParameter("--ram never writes, so there is nothing to --readback")
 
@@ -4740,6 +4763,7 @@ def flash(
             ram=ram if isinstance(ram, bool) else False,
             ram_console=ram_console if isinstance(ram_console, bool) else False,
             ram_wait=float(wait) if isinstance(wait, (int, float)) else 1.5,
+            assume_he=assume_he if isinstance(assume_he, bool) else False,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an

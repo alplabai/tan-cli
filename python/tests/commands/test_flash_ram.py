@@ -29,6 +29,35 @@ CLEAN_LOAD = (
     "J-Link>setpc 0x100\nJ-Link>go\nMemory map 'after startup completion point' is active\n"
     "Script processing completed.\n"
 )
+ITCM_WORDS = (0x20003000, 0x00000101, 0x00000105, 0x00000109)
+OTHER_WORDS = (0xDEADBEEF, 0x0, 0x0, 0x0)
+
+
+def _connect_banner(ap_addr="0x00300000", ap=3):
+    """The `connect` banner the real transcript carries (bench round 7b)."""
+    return (
+        "DPv3 detected\n"
+        f"AP[0]: AHB-AP (IDR: 0x84770001, ADDR: 0x00000000)\n"
+        f"AP[{ap}] (APAddr {ap_addr}): AHB-AP (IDR: 0x34770008)\n"
+        f"AP[{ap}]: Core found\n"
+        "CPUID register: 0x411FD220\n"
+        "Found Cortex-M55 r1p0, Little endian.\n"
+    )
+
+
+def _mem32(addr, words):
+    return f"{addr:08X} = " + " ".join(f"{w:08X}" for w in words) + "\n"
+
+
+def core_check_out(*, ap_addr="0x00300000", local=ITCM_WORDS, he=ITCM_WORDS, hp=OTHER_WORDS):
+    """A `mem32` core-check session: the banner, then the three dumps (a `None` window
+    prints `Could not read memory.` and no dump line)."""
+    out = _connect_banner(ap_addr)
+    for addr, words in ((0x0, local), (0x58000000, he), (0x50000000, hp)):
+        out += _mem32(addr, words) if words is not None else "Could not read memory.\n"
+    return out + "Script processing completed.\n"
+
+
 #: E8 HE apertures as the SoC metadata gives them (SRAM4_M55_HE_ITCM / SRAM5_M55_HE_DTCM
 #: 256 KiB, SRAM0 4096 KiB).
 E8_BANKS = [
@@ -72,12 +101,13 @@ class FakeJlink:
     the `mem8` read. Records every script it was handed, in order."""
 
     def __init__(self, monkeypatch, *, console=b"hello\r\nRESULT PASS\n", dpidr="0x4C013477",
-                 load_out=None, emulators=(), read_rc=0):
+                 load_out=None, emulators=(), read_rc=0, check_out=None):
         self.scripts: list[str] = []
         self.exes: list[object] = []
         self.console, self.dpidr = console, dpidr
         self.load_out = load_out if load_out is not None else CLEAN_LOAD
         self.emulators, self.read_rc = list(emulators), read_rc
+        self.check_out = check_out if check_out is not None else core_check_out()
         monkeypatch.setattr(flash_cmd, "_spawn_jlink", self._spawn)
 
     def kind(self, script):
@@ -85,6 +115,8 @@ class FakeJlink:
             return "list"
         if "loadbin" in script:
             return "load"
+        if "mem32" in script:
+            return "check"
         if "mem8" in script:
             return "read"
         return "preflight"
@@ -104,6 +136,8 @@ class FakeJlink:
             return flash_cmd._Outcome(
                 success=True, stdout=f"Found SW-DP with ID {self.dpidr}\n", returncode=0
             )
+        if kind == "check":
+            return flash_cmd._Outcome(success=True, stdout=self.check_out, returncode=0)
         if kind == "read":
             lines, addr = [], CONSOLE_ADDR
             data = self.console
@@ -283,8 +317,8 @@ def test_a_ram_run_loads_runs_and_reports_the_console(tmp_path, monkeypatch):
     assert entry["ram"]["loadAddress"] == "0x00000000" and entry["ram"]["writesMram"] is False
     assert entry["ram"]["entry"] == "0x00000100" and entry["ram"]["initialSp"] == "0x20003000"
     assert entry["jlink"]["binary"] == stub
-    assert [jl.kind(s) for s in jl.scripts] == ["load", "read"]
-    load = jl.scripts[0].splitlines()
+    assert [jl.kind(s) for s in jl.scripts] == ["check", "load", "read"]
+    load = next(x for x in jl.scripts if jl.kind(x) == "load").splitlines()
     assert "halt" in load and "setpc 0x100" in load and "go" in load
     # The ONLY path in the script is tan's staged copy, never the project artefact.
     loadbin = next(l for l in load if l.startswith("loadbin "))
@@ -306,14 +340,14 @@ def test_a_uart_console_build_is_ok_and_says_so(tmp_path, monkeypatch):
     assert "UART console" in entry["message"]
     warn = [i for i in issues if i.code == "flash.ram-console-symbol-missing"]
     assert warn and warn[0].severity == "warning"
-    assert [jl.kind(s) for s in jl.scripts] == ["load"]  # nothing to read
+    assert [jl.kind(s) for s in jl.scripts] == ["check", "load"]  # nothing to read
 
 
 def test_without_ram_console_nothing_is_read(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     jl = FakeJlink(monkeypatch)
     rc, data, issues, _l, _s = _run(tmp_path)
-    assert rc == 0 and [jl.kind(s) for s in jl.scripts] == ["load"]
+    assert rc == 0 and [jl.kind(s) for s in jl.scripts] == ["check", "load"]
     assert "text" not in data["entries"][0]["ramConsole"]
     assert _codes(issues) == ["flash.dpidr-preflight-unarmed"]
 
@@ -356,7 +390,7 @@ def test_the_dpidr_preflight_refuses_the_wrong_board_before_loading(tmp_path, mo
     # And the right board goes through, reporting the DPIDR it read.
     jl = FakeJlink(monkeypatch, dpidr="0x4C013477")
     rc, data, issues, _l, _s = _run(tmp_path)
-    assert rc == 0 and [jl.kind(s) for s in jl.scripts] == ["preflight", "load"]
+    assert rc == 0 and [jl.kind(s) for s in jl.scripts] == ["preflight", "check", "load"]
     assert data["entries"][0]["jlink"]["dpidr"] == "0x4C013477"
     assert "flash.dpidr-preflight-unarmed" not in _codes(issues)
 
@@ -378,8 +412,8 @@ def test_the_probe_guard_runs_before_the_load_and_before_the_read(tmp_path, monk
     )
     assert rc == 0, (data, issues)
     kinds = [jl.kind(s) for s in jl.scripts]
-    assert kinds == ["list", "load", "list", "read"]  # verified before EACH spawn
-    assert f"SelectEmuBySN {SERIAL}" in jl.scripts[1]
+    assert kinds == ["list", "check", "list", "load", "list", "read"]  # verified before EACH spawn
+    assert all(f"SelectEmuBySN {SERIAL}" in x for x in jl.scripts if jl.kind(x) in ("check", "load"))
     assert data["entries"][0]["probe"]["usbPath"] == "3-4.3"
 
 
@@ -481,8 +515,9 @@ def test_a_symlinked_project_path_still_loads_only_the_staged_copy(tmp_path, mon
     jl = FakeJlink(monkeypatch)
     rc, data, _i, _l, _s = _run(tmp_path)
     assert rc == 0
-    assert str(tmp_path) not in jl.scripts[0] or "tan-ram-" in jl.scripts[0]
-    assert "zephyr.bin" not in jl.scripts[0]
+    load = next(x for x in jl.scripts if jl.kind(x) == "load")
+    assert str(tmp_path) not in load or "tan-ram-" in load
+    assert "zephyr.bin" not in load
 
 
 # ── review round (#1349): core, apertures, confirm, strict transcript ───────
@@ -504,7 +539,7 @@ def test_ram_run_needs_confirm_like_any_write(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, manifest=_manifest("{jlink_flash_device: PART, confirm: true}"))
     jl = FakeJlink(monkeypatch)
     rc, _d, _i, _l, _s = _run(tmp_path, confirm_flag=False)
-    assert rc == 0 and [jl.kind(s) for s in jl.scripts] == ["load"]
+    assert rc == 0 and [jl.kind(s) for s in jl.scripts] == ["check", "load"]
 
 
 def test_only_the_he_core_is_ram_run(tmp_path, monkeypatch):
@@ -629,7 +664,9 @@ def test_the_attached_core_is_reported_when_jlink_prints_it(tmp_path, monkeypatc
     FakeJlink(monkeypatch)
     rc, data, _i, _l, _s = _run(tmp_path)
     assert rc == 0
-    assert data["entries"][0]["jlink"]["attachedCore"] == ["Found Cortex-M55 r1p0, Little endian."]
+    attached = data["entries"][0]["jlink"]["attachedCore"]
+    assert attached["apAddr"] == "0x00300000" and attached["coreFoundAp"] == 3
+    assert attached["cpuid"] == "0x411FD220" and attached["found"].startswith("Found Cortex-M55")
 
 
 def test_the_elf_reader_bounds_its_input():
@@ -650,3 +687,122 @@ def test_the_elf_reader_bounds_its_input():
     struct.pack_into("<I", big, shoff + 40 + 20, 16 * (ram_run.MAX_SYMBOLS + 1))
     with pytest.raises(ram_run.RamRunError, match="entries"):
         ram_run.parse_elf(bytes(big))
+
+
+# ── tan-cli#1354: is the probe on the HE core? ──────────────────────────────
+
+
+def _check_run(tmp_path, monkeypatch, check_out, **kw):
+    _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch, check_out=check_out)
+    return jl, _run(tmp_path, **kw)
+
+
+def test_the_he_ap_with_a_matching_itcm_is_confirmed(tmp_path, monkeypatch):
+    jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, core_check_out())
+    assert rc == 0, (data, issues)
+    check = data["entries"][0]["ram"]["coreCheck"]
+    assert check["verdict"] == "he" and check["apVerdict"] == "he" and check["itcmVerdict"] == "he"
+    assert check["ap"] == {
+        "coreFoundAp": 3, "apAddr": "0x00300000", "cpuid": "0x411FD220",
+        "found": "Found Cortex-M55 r1p0, Little endian.",
+    }
+    words = check["itcmWords"]
+    assert words["local0x00000000"] == words["he0x58000000"] == [f"0x{w:08X}" for w in ITCM_WORDS]
+    assert words["hp0x50000000"] == [f"0x{w:08X}" for w in OTHER_WORDS]
+    assert check["assumeHe"] is False and "PRIMARY" in check["basis"]
+    # Three reads, no write, no halt, in the check session; MRAM-free as always.
+    script = next(x for x in jl.scripts if jl.kind(x) == "check").splitlines()
+    assert script[-4:] == ["mem32 0x0, 0x4", "mem32 0x58000000, 0x4", "mem32 0x50000000, 0x4", "exit"]
+    assert not any(w in script for w in ("halt", "go", "erase")) and "loadbin" not in " ".join(script)
+    assert [jl.kind(x) for x in jl.scripts] == ["check", "load"]
+
+
+def test_the_hp_ap_is_refused_as_a_core_mismatch_before_any_load(tmp_path, monkeypatch):
+    out = core_check_out(ap_addr="0x00200000", he=OTHER_WORDS, hp=ITCM_WORDS)
+    jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out)
+    assert rc == 1 and _codes(issues) == ["flash.ram-core-mismatch"]
+    assert [jl.kind(x) for x in jl.scripts] == ["check"]  # nothing was loaded
+    assert "attached to the M55-HP" in data["entries"][0]["message"]
+    assert data["entries"][0]["ram"]["coreCheck"]["verdict"] == "hp"
+    # --assume-he never overrides a CONFIRMED HP.
+    jl, (rc, _d, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out, assume_he=True)
+    assert rc == 1 and _codes(issues) == ["flash.ram-core-mismatch"]
+    assert [jl.kind(x) for x in jl.scripts] == ["check"]
+
+
+@pytest.mark.parametrize(
+    ("label", "out", "verdict"),
+    [
+        # Erased/identical ITCM on both cores: the local view matches both windows.
+        ("ambiguous", core_check_out(ap_addr="0x00400000", he=ITCM_WORDS, hp=ITCM_WORDS), "ambiguous"),
+        # An AP tan does not know and an ITCM that matches neither window.
+        ("no-match", core_check_out(ap_addr="0x00400000", local=(1, 2, 3, 4)), "no-match"),
+        # The local ITCM could not be read.
+        ("unreadable", core_check_out(ap_addr="0x00400000", local=None), "unreadable"),
+        # The AP says HE but the ITCM says HP: contradictory evidence is not confirmation.
+        ("conflict", core_check_out(he=OTHER_WORDS, hp=ITCM_WORDS), "conflict"),
+    ],
+)
+def test_anything_unconfirmed_refuses_unless_assume_he(tmp_path, monkeypatch, label, out, verdict):
+    jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out)
+    assert rc == 1 and _codes(issues) == ["flash.ram-core-unconfirmed"], label
+    assert [jl.kind(x) for x in jl.scripts] == ["check"]
+    entry = data["entries"][0]
+    assert entry["ram"]["coreCheck"]["verdict"] == verdict
+    assert "--assume-he" in entry["message"]
+    # The documented override proceeds -- and says it assumed.
+    jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out, assume_he=True)
+    assert rc == 0, (label, data, issues)
+    assert [jl.kind(x) for x in jl.scripts] == ["check", "load"]
+    assert data["entries"][0]["ram"]["coreCheck"]["assumed"] is True
+
+
+def test_the_he_ap_alone_is_enough_when_the_itcm_is_silent(tmp_path, monkeypatch):
+    """AP primary, ITCM corroboration only: HE AP + an unreadable HP window is HE."""
+    jl, (rc, data, _i, _l, _s) = _check_run(tmp_path, monkeypatch, core_check_out(hp=None))
+    assert rc == 0
+    assert data["entries"][0]["ram"]["coreCheck"]["verdict"] == "he"
+
+
+def test_a_failed_check_session_is_unconfirmed(tmp_path, monkeypatch):
+    jl, (rc, data, issues, _l, _s) = _check_run(
+        tmp_path, monkeypatch, "Cannot connect to target.\nScript processing completed.\n"
+    )
+    assert rc == 1 and _codes(issues) == ["flash.ram-core-unconfirmed"]
+    assert "sessionError" in data["entries"][0]["ram"]["coreCheck"]
+
+
+def test_dry_run_shows_the_core_check_script_and_spawns_nothing(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    rc, data, _i, _l, _s = _run(tmp_path, dry_run=True)
+    assert rc == 0 and jl.scripts == []
+    assert "mem32 0x58000000, 0x4" in data["entries"][0]["plan"]["coreCheckScript"]
+
+
+def test_the_mem32_parser_is_strict():
+    words = ram_run.parse_mem32(_mem32(0x58000000, ITCM_WORDS), 0x58000000)
+    assert words == ITCM_WORDS
+    assert ram_run.parse_mem32("Could not read memory.\n", 0x0) is None
+    assert ram_run.parse_mem32(_mem32(0x0, ITCM_WORDS[:3]), 0x0) is None  # short
+    assert ram_run.parse_mem32(_mem32(0x4, ITCM_WORDS), 0x0) is None  # not from the address
+    assert ram_run.parse_mem32("00000000 = 2000300G 00000101 00000105 00000109\n", 0x0) is None
+    assert ram_run.parse_mem32("garbage 0 = 1 2 3 4\n", 0x0) is None
+
+
+def test_the_core_check_script_is_all_ints_and_read_only():
+    script = ram_run.core_check_script(ram_run.preamble(SERIAL, 4000, "Cortex-M55")).splitlines()
+    assert script == [
+        f"SelectEmuBySN {SERIAL}", "si SWD", "speed 4000", "device Cortex-M55", "connect",
+        "mem32 0x0, 0x4", "mem32 0x58000000, 0x4", "mem32 0x50000000, 0x4", "exit",
+    ]
+
+
+def test_assume_he_without_ram_is_a_usage_error(tmp_path):
+    from typer.testing import CliRunner
+
+    from tan.cli import app
+
+    result = CliRunner().invoke(app, ["flash", "--assume-he", "--project", str(tmp_path)])
+    assert result.exit_code != 0

@@ -2004,6 +2004,14 @@
       "note": "Added closing the tan-cli#1349 review (tan-cli#1313). EMISSION CONDITION: `tan flash --ram` on the HE slice with an image linked for the OTHER core's ITCM global alias (the HP alias 0x50000000 on an m55_he slice): it would run on whichever core the probe happens to be attached to. Refused before any J-Link spawn, under --dry-run too. Answered by rebuilding the image for the HE core (ITCM at 0x0 locally or 0x58000000 globally). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
+      "code": "flash.ram-core-unconfirmed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1354 (a follow-up from the tan-cli#1313 review). EMISSION CONDITION: `tan flash --ram` could not confirm that the probe's generic Cortex-M55 attach landed on the M55-HE core. Before loading, tan reads 4 words at the local ITCM 0x0 and at both cores' global ITCM windows (HE 0x58000000, HP 0x50000000 -- alp-sdk metadata/socs/alif/ensemble/e8.json itcm_global_base, docs/aen-bench-bringup.md:20) with three read-only mem32 commands (no halt, no write); a core's local ITCM is its own global window, so the local view must equal EXACTLY one. This code fires when it equals both (an erased or identical ITCM proves nothing), neither, or the local read is unreadable; the verdict and the words read are in data.entries[].ram.coreCheck. A confirmed HP attach is flash.ram-core-mismatch instead. Refused before the load, so nothing was written and no core was reset. Answered by selecting the HE core's debug port, or -- AT THE OPERATOR'S OWN RISK -- by --assume-he, which overrides only this unconfirmed case and never a confirmed HP. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "generate.board-sku-unresolved",
       "status": "reserved",
       "severity": "error",

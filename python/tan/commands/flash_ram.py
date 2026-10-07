@@ -60,8 +60,12 @@ from tan.core.flash_plan import (
 from tan.core.jlink_binary import resolve_jlink
 from tan.core.ram_run import (
     CODE_CONSOLE_SYMBOL_MISSING,
+    CODE_CORE_MISMATCH,
+    CODE_CORE_UNCONFIRMED,
+    core_check,
+    core_check_script,
     apertures_for,
-    attached_core_lines,
+    attached_core,
     CODE_FAILED,
     CONSOLE_SYMBOL,
     RamRunError,
@@ -239,6 +243,7 @@ def _run_ram_entry(
     report["plan"] = {
         "argv": list(argv),
         "jlinkScript": (fc._DISABLE_FW_UPDATE + load).splitlines(),
+        "coreCheckScript": (fc._DISABLE_FW_UPDATE + core_check_script(pre)).splitlines(),
         "consoleReadScript": (
             (fc._DISABLE_FW_UPDATE + read_script(pre, *console)).splitlines()
             if console and ctx.ram_console else None
@@ -302,6 +307,48 @@ def _run_ram_entry(
     report["jlink"].update({"dpidr": facts.get("dpidr"), "dpidrSource": "preflight" if facts else "none"})
     report["jlink"]["attachedCore"] = None
 
+    # ── which core did the generic attach land on? (tan-cli#1354) ──
+    # Three READS (no halt, no write): the local ITCM must equal exactly one core's global
+    # window. HE proceeds; HP refuses; anything else refuses unless the operator takes
+    # the documented risk with --assume-he.
+    check = fc._execute(
+        FlashPlan(argv=argv, ok_message="", jlink_script=core_check_script(pre)),
+        True, ctx.venv_bin, ctx.workspace, guard, jlink_exe=exe,
+    )
+    if guard is not None and guard.tripped:
+        return fail(guard.tripped, None, probe_refusal=guard.tripped_code)
+    check_text = f"{check.stdout}\n{check.stderr}"
+    bad = None if check.success else (fc._capture_tail(check) or "J-Link failed")
+    bad = bad or check_session(check_text, loadbin=False)
+    verdict, evidence = ("unreadable", {}) if bad else core_check(check_text)
+    report["ram"]["coreCheck"] = {
+        "verdict": verdict, **evidence, "assumeHe": bool(ctx.assume_he),
+        "basis": "PRIMARY: the AP that reports `Core found` (HE APAddr 0x00300000, HP "
+        "0x00200000); CORROBORATION: local ITCM 0x0 compared with the HE 0x58000000 and HP "
+        "0x50000000 global windows",
+        **({"sessionError": bad} if bad else {}),
+    }
+    report["jlink"]["attachedCore"] = evidence.get("ap")
+    if verdict == "hp":
+        return fail(
+            "the probe is attached to the M55-HP core (J-Link's Core-found access port is "
+            "not the HE's 0x00300000, and/or the local ITCM equals the HP window at "
+            "0x50000000, not the HE window at 0x58000000) -- refusing to load the HE image "
+            "into it. Select the HE core's debug port.", CODE_CORE_MISMATCH,
+        )
+    if verdict != "he":
+        if not ctx.assume_he:
+            return fail(
+                f"cannot confirm the attached core is the M55-HE ({verdict}"
+                + (f": {bad}" if bad else "")
+                + "): the local ITCM did not match exactly one core's global window. Refusing "
+                "to load. If this board's ITCM is erased or identical on both cores, "
+                "--assume-he overrides the check at your own risk (the bench has seen the "
+                "generic attach land on HE 6 of 6 times, which is not proof).",
+                CODE_CORE_UNCONFIRMED,
+            )
+        report["ram"]["coreCheck"]["assumed"] = True
+
     # ── load + go ──
     plan = FlashPlan(argv=argv, ok_message="", jlink_script=load)
     outcome = fc._execute(plan, ctx.capture, ctx.venv_bin, ctx.workspace, guard, jlink_exe=exe)
@@ -313,7 +360,13 @@ def _run_ram_entry(
     problem = problem or check_session(transcript, loadbin=True)
     if problem:
         return fail(f"the load session failed: {problem}")
-    report["jlink"]["attachedCore"] = attached_core_lines(transcript) or None
+    loaded_on = attached_core(transcript)
+    if loaded_on and report["jlink"].get("attachedCore") not in (None, loaded_on):
+        # The load session attached somewhere else than the check did (a probe that
+        # re-enumerated its AP): reported, not hidden.
+        report["jlink"]["attachedCoreAtLoad"] = loaded_on
+    elif report["jlink"].get("attachedCore") is None:
+        report["jlink"]["attachedCore"] = loaded_on
     if not facts:
         from tan.core.flow_d_report import dpidr_in
 
@@ -362,15 +415,18 @@ def _load_apertures(ctx: Any, core_id: str) -> Any:
     from tan.core.size import resolve_variant, sram_banks
 
     metadata_root = os.path.join(ctx.sdk_root, "metadata") if ctx.sdk_root else None
+    why: list[str] = []
     walked = (
-        read_sdk_som_and_soc(metadata_root, ctx.sku)
+        read_sdk_som_and_soc(metadata_root, ctx.sku, skipped=why, explain_unsupported=True)
         if metadata_root and ctx.sku and os.path.isdir(metadata_root)
         else None
     )
     if walked is None:
         raise RamRunError(
             f"cannot bound the image: no readable SoM preset / SoC metadata for "
-            f"'{ctx.sku}' under {metadata_root} -- refusing to guess the TCM sizes"
+            f"'{ctx.sku}' under {metadata_root}"
+            + (f" ({'; '.join(why)})" if why else "")
+            + " -- refusing to guess the TCM sizes"
         )
     _silicon, silicon_variant, variants, _flash_mb, _cores = walked
     variant = resolve_variant(silicon_variant, ctx.sku, variants)
