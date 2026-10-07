@@ -172,3 +172,27 @@ def test_long_complete_lines_are_searched_on_their_tail_like_the_partial_line():
 
     sc.capture(Port(clk, [b"a" * 5000 + b"END\n"]), duration_s=0.15, until=P(), clock=clk)
     assert seen[0].endswith("END") and len(seen[0]) == sc.MAX_SEARCH_CHARS
+
+
+def test_until_stops_at_the_end_of_the_matched_line_in_log_tail_and_count():
+    clk, sink = Clock(), io.BytesIO()
+    data = b"boot\r\nZephyr 4.1\r\ntrailing junk\r\nmore"
+    res = sc.capture(Port(clk, [data]), duration_s=5, until=sc.compile_until("Zephyr"), sink=sink, clock=clk)
+    kept = b"boot\r\nZephyr 4.1\r\n"
+    assert res.matched and sink.getvalue() == kept and res.bytes_seen == len(kept)
+    assert res.tail.endswith("Zephyr 4.1\r\n") and "junk" not in res.tail
+
+
+def test_match_in_a_line_completed_by_a_later_chunk_keeps_only_that_line():
+    clk, sink = Clock(), io.BytesIO()
+    res = sc.capture(
+        Port(clk, [b"abc Zeph", b"yr\nafter\n"]), duration_s=5,
+        until=sc.compile_until("Zephyr"), sink=sink, clock=clk,
+    )
+    assert sink.getvalue() == b"abc Zephyr\n" and res.bytes_seen == len(b"abc Zephyr\n")
+
+
+def test_without_until_every_byte_is_kept():
+    clk, sink = Clock(), io.BytesIO()
+    sc.capture(Port(clk, [b"a\nb\nc"]), duration_s=0.15, sink=sink, clock=clk)
+    assert sink.getvalue() == b"a\nb\nc"

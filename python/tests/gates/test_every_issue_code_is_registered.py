@@ -1007,7 +1007,8 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # exactly the shape the `63 as of tan-cli#727` bump above describes.
         #
         # 75 as of tan-cli#1317: `host_python_check` adds the `hostPython` warn `Check(...)`.
-        # 79 as of tan-cli#1376: `workspace_patches_check` (3 arms) and `zephyr_base_check` add four.
+        # 76 as of tan-cli#1367: `tan_install_check` adds the `tanInstall` warn `Check(...)`.
+        # 80 as of tan-cli#1376: `workspace_patches_check` (3 arms) and `zephyr_base_check` add four.
         # 74 as of tan-cli#1192: `devicetree_lint_check` is THREE `Check(...)`
         # sites (lint runs; a `dtc` Zephyr's own `find_package(Dtc 1.4.6)`
         # rejects; no `dtc` in CMake's reach at all), all literally named
@@ -1023,7 +1024,7 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         arg_index=0,
         skip_if_keyword="code",
         kebab=True,
-        expected_calls=79,
+        expected_calls=80,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(
