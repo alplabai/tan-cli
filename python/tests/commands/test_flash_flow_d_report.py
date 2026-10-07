@@ -373,6 +373,9 @@ def _plant_hostile_venv(tmp_path):
     """A west-capable `.venv` in the PROJECT that also ships its own JLinkExe."""
     import os as _os
 
+    if _os.name == "nt":
+        pytest.skip("POSIX venv layout / shell-script executables")
+
     from tan.core.venv import venv_bin_dir
 
     bin_dir = tmp_path / ".venv" / "bin"
@@ -426,6 +429,9 @@ def _drive_confirmed_flow_d(tmp_path, monkeypatch, path_dir, **kwargs):
 
 def _exe(path):
     import os as _os
+
+    if _os.name == "nt":
+        pytest.skip("POSIX shell-script executables (Windows needs a real .exe)")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\n", encoding="utf-8")
