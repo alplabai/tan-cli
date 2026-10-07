@@ -87,3 +87,6 @@ CLAUDE.md
 # were staged once by a `git add -A` and caught before the commit.
 pip/
 *.stackdump
+
+# code-review-graph local graph DB; per-checkout, never commit
+/.code-review-graph/
