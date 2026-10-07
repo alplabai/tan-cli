@@ -2,8 +2,9 @@
 """`tan model build`/`tan model doctor`/`tan model check`/`tan model list` --
 compile + package `board.yaml`'s `models:` block into `.alpmodel` packages,
 report NPU-compiler toolchain availability, statically screen a declared
-model's NPU eligibility against the SoM's own support tables, and list what
-is declared next to what is already built.
+model's NPU eligibility against the SoM's own support tables, list what
+is declared next to what is already built, and browse/adopt the SDK's model
+zoo (`zoo`, `add`).
 
 Port of `scripts/alp_cli/model.py` (51 lines): the board.yaml discovery,
 per-model source/compile-option path resolution, and the `built <path>`
@@ -121,6 +122,13 @@ It is read-only and spawns nothing: a declared model's `.alpmodel`
 `tan.core.model_list`'s own module doc for the per-model `artifact` shape,
 including `stale` (has `source` changed since the package on disk was built)
 and the `model.artifact-stale-unknown` warning a readback failure there emits.
+
+**`zoo` and `add` (tan-cli#1286)** read `<sdk>/metadata/model_zoo/` -- alp-sdk
+owns that data, tan the engine (`tan.core.model_zoo`). Their runners and text
+renderers live in `tan.commands.model_zoo_cmd` (this file is over its size
+budget); both need a resolvable SDK (`model.sdk-root-unresolved`, as `build`/
+`check`), and `add` additionally reads `board.yaml` and appends to its
+`models:` with a comment-preserving text splice (`tan.core.board_yaml_edit`).
 """
 
 from __future__ import annotations
@@ -137,6 +145,14 @@ from tan.commands.build_output import (
     ProjectContext,
     resolve_metadata_sdk_root,
     resolve_project_context,
+)
+from tan.commands.model_zoo_cmd import (
+    add_empty_data,
+    render_add_text,
+    render_zoo_text,
+    run_add,
+    run_zoo,
+    zoo_empty_data,
 )
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.global_flags import accept_global_flags
@@ -172,7 +188,7 @@ LIST_DATA_SCHEMA_VERSION = "1"
 
 #: `SUBCOMMANDS` names every subcommand this command accepts, in the order the
 #: unknown-subcommand refusal lists them.
-SUBCOMMANDS = ("build", "doctor", "check", "list")
+SUBCOMMANDS = ("build", "doctor", "check", "list", "zoo", "add")
 
 
 class ModelError(Exception):
@@ -944,6 +960,23 @@ def _run_doctor(
     return reported_project, sdk_info, data, issues, ExitCode.SUCCESS
 
 
+def _refuse_stray_arguments(subcommand: str, model_id: str | None, sku: str | None) -> None:
+    """A positional ID belongs to `add` alone and `--sku` to `zoo`: accepting
+    either elsewhere would silently ignore what the caller typed."""
+    if model_id is not None and subcommand != "add":
+        raise ModelError(
+            "model.unexpected-argument",
+            f"`tan model {subcommand}` takes no ID argument (got {model_id}); only `add` does.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+    if sku and subcommand == "add":
+        raise ModelError(
+            "model.unexpected-argument",
+            "`tan model add` takes no --sku; the board's own som.sku is what it checks.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+
+
 def _empty_data(subcommand: str | None) -> dict[str, Any]:
     """The `data` shape for a refusal that never reached `_run_build`/
     `_run_doctor`/`_run_check`/`_run_list` -- each subcommand's OWN empty
@@ -956,12 +989,16 @@ def _empty_data(subcommand: str | None) -> dict[str, Any]:
         return {"schemaVersion": CHECK_DATA_SCHEMA_VERSION, "sku": None, "exact": False, "models": []}
     if subcommand == "list":
         return {"schemaVersion": LIST_DATA_SCHEMA_VERSION, "sku": None, "models": []}
+    if subcommand == "zoo":
+        return zoo_empty_data()
+    if subcommand == "add":
+        return add_empty_data()
     return {"schemaVersion": DATA_SCHEMA_VERSION, "sku": None, "built": []}
 
 
 def model(
     subcommand: str = typer.Argument(
-        None, metavar="SUBCOMMAND", help="build | doctor | check | list."
+        None, metavar="SUBCOMMAND", help="build | doctor | check | list | zoo | add."
     ),
     board: str = typer.Option(
         # tan-cli#398: `--board-yaml` is a REAL second spelling of this one
@@ -996,12 +1033,22 @@ def model(
         help="With `check`: attempt a real compile (Ethos-U only, via `vela`) "
         "instead of the static screen. Ignored by `build`/`doctor`/`list`.",
     ),
+    sku: str = typer.Option(
+        None,
+        "--sku",
+        metavar="SKU",
+        help="With `zoo`: only entries bench-validated on this SoM SKU. Ignored by the others.",
+    ),
     output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
+    model_id: str = typer.Argument(
+        None, metavar="ID", help="With `add`: the model-zoo entry id (see `zoo`)."
+    ),
 ) -> None:
     """Compile + package board.yaml `models:` into `.alpmodel` packages
     (`build`), report NPU-compiler toolchain availability (`doctor`),
     statically screen a declared model's NPU eligibility (`check`), or list
-    what is declared next to what is already built (`list`)."""
+    what is declared next to what is already built (`list`), list the SDK's model
+    zoo (`zoo`), or add a zoo model to the project (`add <id>`)."""
     json_mode = output_format == "json"
 
     def finish(
@@ -1064,6 +1111,14 @@ def model(
                             f"{row['backend']}: optional (tool={tool}) not in use{suffix}",
                             file=sys.stderr,
                         )
+            elif subcommand == "zoo":
+                if not data.get("entries") and not errors:
+                    print("model zoo: no matching entries.", file=sys.stderr)
+                for line in render_zoo_text(data):
+                    print(line, file=sys.stderr)
+            elif subcommand == "add":
+                for line in render_add_text(data):
+                    print(line, file=sys.stderr)
             elif subcommand == "list":
                 # `list`: checked by SUBCOMMAND, not by `"models" in data` --
                 # `check`'s payload carries that same key, so shape alone
@@ -1146,6 +1201,7 @@ def model(
             context.sdk_source_tier,
             context.foreign_global_default_for,
         )
+        _refuse_stray_arguments(subcommand, model_id, sku)
         if subcommand == "doctor":
             project_, sdk, data, issues, exit_code = _run_doctor(
                 context=context,
@@ -1158,6 +1214,22 @@ def model(
                 sdk_root=sdk_root,
                 exact=exact,
             )
+        elif subcommand in ("zoo", "add"):
+            resolved = _require_metadata_sdk_root(sdk_root, context.workspace_root, "No zoo was read.")
+            zoo_dir = _resolve_metadata_dir(metadata_root, resolved, Path(context.workspace_root)) / "model_zoo"
+            if subcommand == "zoo":
+                project_, sdk, data, issues, exit_code = run_zoo(context=context, zoo_dir=zoo_dir, sku=sku)
+            else:
+                board_doc = _load_board(Path(context.board_yaml))
+                models_ = _require_models_list(board_doc, Path(context.board_yaml))
+                declared = {m["name"] for m in models_ if isinstance(m, dict) and "name" in m}
+                project_, sdk, data, issues, exit_code = run_add(
+                    context=context,
+                    zoo_dir=zoo_dir,
+                    model_id=model_id,
+                    sku=declared_sku(board_doc),
+                    existing_names=declared,
+                )
         elif subcommand == "list":
             project_, sdk, data, issues, exit_code = _run_list(
                 context=context,

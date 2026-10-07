@@ -114,10 +114,10 @@ from tan.core.plan_exec import (
     normalize_path,
     resolve_action,
 )
+from tan.commands.build.host_python import refusal_message, resolve_build_python
 from tan.core.plan_tokens import TOKEN_TOOLCHAIN_ROOT, DeferredPlaceholder
 from tan.core.sdk_discovery import (
     _abs_posix,
-    _planner_python,
     global_default_foreign_project_issue,
     project_pin_issue,
     resolve_sdk_root_ladder,
@@ -599,6 +599,7 @@ def _dispatch(
     *,
     json_mode: bool = False,
     pristine: bool = False,
+    slice_refusals: dict[str, str] | None = None,
 ) -> tuple[list[SliceOutcome], list[Issue]]:
     """Run the plan's slices, holding back the ones token substitution demoted
     -- and, since tan-cli#483, the ones whose `cores.<id>.app` resolved to a
@@ -784,6 +785,7 @@ def _dispatch(
                 sdk_root_for_stamp=sdk_root_for_stamp,
                 held_outcomes=held_outcomes.values(),
                 force_pristine=pristine,
+                slice_refusals=slice_refusals,
             )
         )
 
@@ -813,7 +815,10 @@ def _dispatch(
             substituted = substituted_app_dirs.get(i)
             if substituted is not None:
                 issues.append(Issue("build.app-dir-substituted", "info", substituted))
-            outcomes.append(next(dispatched))
+            outcome = next(dispatched)
+            outcomes.append(outcome)
+            if slice_refusals and outcome.message == slice_refusals.get(sl.core_id):
+                issues.append(Issue("build.host-python-unsuitable", "error", outcome.message))
     # tan-cli#1351: per-board files naming a different board are silently
     # ignored by Zephyr.
     issues.extend(
@@ -1039,6 +1044,26 @@ def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[
     return issues
 
 
+def _host_python_issues(build_python, mode) -> list[Issue]:
+    """tan-cli#1317. Where CMake will NOT run (`--materialise`) the refusal is a
+    plain warning and the bare fallback stays. On the native dispatch it is a
+    PER-SLICE outcome instead (`_python_refusals` -> `execute_slices`), applied
+    after `executionPolicy`'s null-command / missing-tool skips."""
+    if build_python.refusal is None or mode == _MODE_NATIVE:
+        return []
+    return [Issue("build.host-python-unsuitable", "warning", build_python.refusal)]
+
+
+def _python_refusals(build_python, demotions, mode) -> dict[str, str]:
+    if build_python.refusal is None or mode != _MODE_NATIVE:
+        return {}
+    message = refusal_message(build_python.refusal)
+    return {
+        c: f"core `{c}`: {message}"
+        for c in build_python.users - {d.core_id for d in demotions}
+    }
+
+
 def _cross_drive_issues(outcomes: list[SliceOutcome]) -> list[Issue]:
     """tan-cli#697: promote `tan.core.plan_exec.cross_drive_source_refusal`'s
     refusal -- matched on its own `CROSS_DRIVE_MSG` marker, same idiom as
@@ -1253,13 +1278,14 @@ def _build(
     # old `--plan-from` file (the planner itself now tags every plan tokened).
     toolchain = _toolchain_for_plan(text)
     deferred: list[DeferredPlaceholder] = []
+    build_python = resolve_build_python(plan, text, build_root, sdk_root)
     try:
         plan, demotions = apply_plan_token_substitution(
             plan,
             board_yaml_path=board_yaml,
             exec_base=build_root,
             sdk_root=sdk_root,
-            python=_planner_python(build_root, sdk_root),
+            python=build_python.python,
             toolchain_root=toolchain.root,
             toolchain_advice=toolchain.advice,
             deferred_out=deferred,
@@ -1270,6 +1296,8 @@ def _build(
         # oracle gives them (`native.rs:132-142`), and the same code must not
         # mean two different exits depending on which module raised it.
         raise BuildError(err.code, err.message, ExitCode.RUNTIME_FAILURE) from err
+
+    python_issues = _host_python_issues(build_python, mode)
 
     # tan-cli#566, and tan-cli#565's `fail` arm: BOTH sit here, between
     # substitution and `materialise_plan` below, because both must leave a
@@ -1341,7 +1369,7 @@ def _build(
         return (
             ExitCode.SUCCESS,
             {"schemaVersion": "1", "baseDir": build_root, "written": written},
-            demotion_issues + deferred_issues,
+            demotion_issues + deferred_issues + python_issues,
         )
 
     # Cleared before dispatch, mirroring `run_cmd.py`'s own pattern, so a
@@ -1357,6 +1385,7 @@ def _build(
         sdk_root_for_stamp,
         json_mode=json_mode,
         pristine=pristine,
+        slice_refusals=_python_refusals(build_python, demotions, mode),
     )
 
     any_failed = any(o.status not in ("succeeded", "skipped") for o in outcomes)
@@ -1404,6 +1433,7 @@ def _build(
     # they reached `data.warnings` alone until now.
     issues.extend(_plan_warning_issues(plan.warnings))
     issues.extend(deferred_issues)
+    issues.extend(python_issues)
     # The sdk-switch-pristine wipe (issue #52) must not be stderr-only in
     # JSON mode -- the VS Code extension only ever sees the envelope, not
     # `_stream`'s output. Verbatim oracle codes/severity
