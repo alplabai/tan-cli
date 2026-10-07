@@ -97,6 +97,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from tan.commands.build.user_defines_wipe import reconcile_user_defines, stamp_user_defines
+from tan.core.user_defines import insert_after_dashdash
 from tan.commands.build.configure_inputs import (
     discover_configure_inputs,
     read_configure_inputs_stamp,
@@ -1132,6 +1134,7 @@ def execute_slices(
     held_outcomes: Sequence[SliceOutcome] = (),
     force_pristine: bool = False,
     slice_refusals: Mapping[str, str] | None = None,
+    user_defines: Mapping[str, Sequence[str]] | None = None,
 ) -> list[SliceOutcome]:
     """Dispatch every slice of `plan` and return one [`SliceOutcome`] per
     slice, in plan order.
@@ -1419,6 +1422,24 @@ def execute_slices(
         # be rebuilt" and "this slice is about to be skipped" -- running the
         # wipe first would delete the last good `zephyr.elf` for a rebuild
         # that then never happens on a host missing `west`.
+        # tan-cli#1382: a changed user `-D` set wipes this slice's build dir
+        # (see `user_defines_wipe`). Before the sdk-switch/--pristine guard so
+        # that guard sees the post-wipe dir; the stamp is written after it,
+        # BEFORE the spawn, because it records what this configure is given.
+        ud_now = list(user_defines.get(sl.core_id, ())) if user_defines else []
+        ud_stampable = False
+        if sl.backend == "zephyr":
+            ud_issues, ud_stampable = reconcile_user_defines(
+                sl.core_id,
+                cwd,
+                ud_now,
+                build_root=build_root,
+                guards_ok=not build_dir_overridden(sl.command.args)
+                and _cwd_under_build_root(sl.command.cwd, cwd, build_root),
+                on_output=on_output,
+            )
+            configure_cache_issues.extend(ud_issues)
+
         sdk_switch_issues.extend(
             _maybe_pristine_stale_sdk_build_dir(
                 sl.core_id,
@@ -1431,6 +1452,9 @@ def execute_slices(
                 force_pristine=force_pristine,
             )
         )
+
+        if ud_stampable:
+            stamp_user_defines(cwd, ud_now)
 
         # tan-cli#655: AFTER the sdk-switch-pristine guard, not before -- a
         # wipe there removes `cwd/build` wholesale (this stamp lives inside
@@ -1507,15 +1531,16 @@ def execute_slices(
             if is_west
             else (cwd, list(sl.command.args))
         )
-        # Appended to the SPAWN argv only -- `sl.command.args` (read again
+        # Added to the SPAWN argv only -- `sl.command.args` (read again
         # below by `resolve_zephyr_artefact`/`build_dir_overridden`) stays
         # exactly what the plan named, so those checks never see a flag tan
-        # itself injected. Order matters: this must land AFTER the plan's
-        # own `-DEXTRA_CONF_FILE=...` (already inside `spawn_args`), never
-        # before -- see `_maybe_reset_stale_configure_cache`'s docstring for
-        # why an `-U`/`-D` pair on the same key is order-sensitive and why
-        # `EXTRA_CONF_FILE` itself is deliberately excluded from the reset.
-        spawn_args = spawn_args + configure_cache_reset_args
+        # itself injected. Order matters, and it is the REVERSE of what this
+        # said before user `-D` existed (tan-cli#1382): cmake applies `-U`/`-D`
+        # in argv order, so a `-U<key>` AFTER a `-D<key>=...` silently unsets
+        # it (`-D CONF_FILE=prod.conf` on a cache-reset build). Every reset
+        # goes right after `--`, BEFORE all plan and user `-D`, so a `-D` of
+        # the same key always wins.
+        spawn_args = insert_after_dashdash(spawn_args, configure_cache_reset_args)
         # tan-cli#1350: the stale-ITCM `-U` goes right after `--`, BEFORE every
         # `-D`, so a later `-DEXTRA_DTC_OVERLAY_FILE` (the plan's own, or a
         # user's) is applied after the unset and can never be erased by it.
