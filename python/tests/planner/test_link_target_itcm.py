@@ -50,6 +50,21 @@ EXPECTED_CONF = (
     "CONFIG_RAM_CONSOLE_BUFFER_SIZE=16384\n"
 )
 
+#: The `console: uart` Kconfig half (tan-cli#1374): the retarget only -- no
+#: RAM-console buffer, and the D-cache is left as the board defaults it.
+EXPECTED_CONF_UART = (
+    "# Flow C (AEN M55-HE ITCM RAM-run) link retarget -- board.yaml\n"
+    "# `diagnostics.link: itcm`.  NOT for an image you will flash to MRAM:\n"
+    "# it links at 0x0.  Kconfig half; the devicetree half is\n"
+    "# alp-link-itcm.overlay -- BOTH are required.\n"
+    "#\n"
+    "# Stop deriving the link offset from the DT code-partition and force\n"
+    "# the ITCM base (undoes the AEN board defconfig's slot0 default and a\n"
+    "# literal CONFIG_FLASH_LOAD_OFFSET an app may hard-code).\n"
+    "CONFIG_USE_DT_CODE_PARTITION=n\n"
+    "CONFIG_FLASH_LOAD_OFFSET=0x0\n"
+)
+
 #: The exact bytes of the devicetree half.
 EXPECTED_OVERLAY = (
     "/*\n"
@@ -133,6 +148,8 @@ def test_the_fragment_and_overlay_bytes_are_pinned() -> None:
     from tan.planner.link_target import itcm_conf, itcm_overlay
 
     assert itcm_conf() == EXPECTED_CONF
+    assert itcm_conf(ram_console=True) == EXPECTED_CONF
+    assert itcm_conf(ram_console=False) == EXPECTED_CONF_UART
     assert itcm_overlay() == EXPECTED_OVERLAY
 
 
@@ -257,13 +274,43 @@ def test_non_aen_som_is_refused(tmp_path, meta) -> None:
     assert "E1M-V2N101" in str(ei.value)
 
 
-@pytest.mark.parametrize("console", ["uart", "alp", "linux", "none"])
-def test_explicit_non_ram_console_is_refused(tmp_path, meta, console) -> None:
+def test_uart_console_keeps_the_itcm_retarget_without_ram_console_bits(
+        tmp_path, meta) -> None:
+    """tan-cli#1374: a RAM-run with a UART shell (bench 2026-10-07, UART5)
+    needs the ITCM retarget but not the RAM-console buffer / DCACHE=n."""
+    sl = _slice(_plan(tmp_path, _project(tmp_path, meta,
+                                         _HE_ONLY + "  console: uart\n")),
+                "m55_he")
+    arts = _artefacts(sl)
+    assert list(arts) == ["alp.conf", "alp-link-itcm.conf",
+                          "alp-link-itcm.overlay"]
+    assert arts["alp-link-itcm.conf"] == EXPECTED_CONF_UART
+    assert arts["alp-link-itcm.overlay"] == EXPECTED_OVERLAY
+    conf = arts["alp-link-itcm.conf"]
+    assert "CONFIG_USE_DT_CODE_PARTITION=n\n" in conf
+    assert "CONFIG_FLASH_LOAD_OFFSET=0x0\n" in conf
+    assert "CONFIG_DCACHE" not in conf
+    assert "CONFIG_RAM_CONSOLE_BUFFER_SIZE" not in conf
+    # the console itself stays the UART one: alp.conf is NOT promoted to RAM
+    assert "CONFIG_RAM_CONSOLE=y" not in arts["alp.conf"]
+    assert "CONFIG_UART_CONSOLE=y" in arts["alp.conf"]
+
+
+def test_explicit_ram_console_keeps_the_ram_console_bits(tmp_path, meta) -> None:
+    sl = _slice(_plan(tmp_path, _project(tmp_path, meta,
+                                         _HE_ONLY + "  console: ram\n")),
+                "m55_he")
+    assert _artefacts(sl)["alp-link-itcm.conf"] == EXPECTED_CONF
+
+
+@pytest.mark.parametrize("console", ["alp", "linux", "none"])
+def test_other_explicit_consoles_are_still_refused(tmp_path, meta, console) -> None:
     from tan.planner.link_target import CONSOLE_CONFLICT_CODE, LinkTargetError
 
     with pytest.raises(LinkTargetError) as ei:
         _project(tmp_path, meta, _HE_ONLY + f"  console: {console}\n")
     assert ei.value.code == CONSOLE_CONFLICT_CODE == "build.link-itcm-console-conflict"
+    assert "uart" in str(ei.value)
 
 
 def test_sysbuild_project_is_refused(tmp_path, meta) -> None:

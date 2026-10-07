@@ -1777,7 +1777,7 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/planner/link_target.py",
-      "note": "board.yaml `diagnostics.link: itcm` combined with an explicit non-RAM `diagnostics.console:` (uart/alp/linux/none). A Flow C RAM-run produces zero UART bytes; the RAM console is the only observable. Pre-consumer: nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
+      "note": "board.yaml `diagnostics.link: itcm` combined with an explicit `diagnostics.console:` of alp/linux/none. A Flow C RAM-run supports the RAM console (the default) or the board UART (`uart`, accepted since tan-cli#1374); alp/linux/none stay refused (unproven on a RAM-run image). Pre-consumer: nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
     },
     {
       "code": "build.plan-warning",

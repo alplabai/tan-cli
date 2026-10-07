@@ -555,7 +555,8 @@ def _emit_console(diagnostics: dict[str, Any], slice_: Slice) -> list[str]:
         console = "ram"
     # `diagnostics.link: itcm` (tan-cli#1350): a Flow C RAM-run's only
     # observable is the RAM console, so an AUTO console is promoted to it
-    # (an explicit non-RAM console is refused by the loader).
+    # (an explicit `uart` console is kept, tan-cli#1374; alp/linux/none are
+    # refused by the loader).
     if auto and link_applies_to(diagnostics, slice_):
         console = "ram"
     return _emit_zephyr_console(console, sim_console=sim)

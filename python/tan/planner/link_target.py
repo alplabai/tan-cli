@@ -16,8 +16,10 @@ config artefacts layered AFTER the slice's `alp.conf`.
 Pure: no IO, no SDK read.  HE-only by design: the knob retargets the M55-HE
 slice only, and is refused when the project has no M55-HE app of its own (an
 M55-HP-only project included), on any SKU but AEN801/AEN803, with a sysbuild
-(`boot:`) project, and with an explicit non-RAM console (Flow C produces zero
-UART bytes; the only observable is the RAM console buffer).
+(`boot:`) project, and with an explicit `alp`/`linux`/`none` console.  `console: uart` is
+accepted (tan-cli#1374: a RAM-run UART shell is the fastest bench probe, proven
+on AEN803 / UART5); it gets the ITCM retarget but not the RAM-console buffer or
+`CONFIG_DCACHE=n`, which belong to the RAM console only.
 """
 
 from __future__ import annotations
@@ -42,6 +44,9 @@ _PROVEN_SKUS = ("E1M-AEN801", "E1M-AEN803")
 #: The schema enum already rejects anything else; the checks below that read
 #: the value defensively exist for hand-built projects that skip the schema.
 _LINK_VALUES = ("auto", "itcm")
+#: `diagnostics.console:` values a Flow C image accepts: the RAM console (the
+#: default; read over SWD) or the board UART (a RAM-run shell, tan-cli#1374).
+_CONSOLE_VALUES = ("auto", "ram", "uart")
 
 
 class LinkTargetError(OrchestratorError):
@@ -50,6 +55,16 @@ class LinkTargetError(OrchestratorError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def _console(diagnostics: dict[str, Any] | None) -> str:
+    return str((diagnostics or {}).get("console") or "auto").strip().lower()
+
+
+def uses_ram_console(diagnostics: dict[str, Any] | None) -> bool:
+    """Whether an ITCM image uses the RAM console (`auto` is promoted to it);
+    False for `console: uart`."""
+    return _console(diagnostics) != "uart"
 
 
 def link_target(diagnostics: dict[str, Any] | None) -> str:
@@ -117,13 +132,14 @@ def check_link_target(project: BoardProject) -> None:
             "diagnostics.link: itcm cannot be combined with a sysbuild "
             "project (`boot:` / `ota:` / TF-M) -- a RAM-run image has no "
             "MCUboot slot.")
-    console = str(project.diagnostics.get("console") or "auto").strip().lower()
-    if console not in ("auto", "ram"):
+    console = _console(project.diagnostics)
+    if console not in _CONSOLE_VALUES:
         raise LinkTargetError(
             CONSOLE_CONFLICT_CODE,
-            f"diagnostics.link: itcm needs the RAM console (a Flow C "
-            f"RAM-run produces zero UART bytes), but diagnostics.console is "
-            f"'{console}'. Use `console: ram` or leave it `auto`.")
+            f"diagnostics.link: itcm supports the RAM console or the board "
+            f"UART, but diagnostics.console is '{console}'. Use "
+            f"`console: ram` (or leave it `auto`) to read the RAM console "
+            f"buffer, or `console: uart` for a RAM-run UART shell.")
 
 
 def apply_link_target(project: BoardProject) -> None:
@@ -135,9 +151,14 @@ def apply_link_target(project: BoardProject) -> None:
             sl.link_target = "itcm"
 
 
-def itcm_conf() -> str:
-    """Kconfig half of the retarget (+ the bench-proven RAM-run settings)."""
-    return (
+def itcm_conf(ram_console: bool = True) -> str:
+    """Kconfig half of the retarget.
+
+    The retarget lines are always emitted.  The bench-proven RAM-console
+    settings (`CONFIG_DCACHE=n`, the 16 KiB buffer) only when `ram_console`;
+    a `console: uart` image leaves both as the board defaults them.
+    """
+    retarget = (
         "# Flow C (AEN M55-HE ITCM RAM-run) link retarget -- board.yaml\n"
         "# `diagnostics.link: itcm`.  NOT for an image you will flash to MRAM:\n"
         "# it links at 0x0.  Kconfig half; the devicetree half is\n"
@@ -148,6 +169,10 @@ def itcm_conf() -> str:
         "# literal CONFIG_FLASH_LOAD_OFFSET an app may hard-code).\n"
         "CONFIG_USE_DT_CODE_PARTITION=n\n"
         "CONFIG_FLASH_LOAD_OFFSET=0x0\n"
+    )
+    if not ram_console:
+        return retarget
+    return retarget + (
         "# The E8 D-cache maintenance loop hangs on this silicon.\n"
         "CONFIG_DCACHE=n\n"
         "# ram_console_out() WRAPS: a buffer smaller than the app's output\n"
@@ -185,4 +210,5 @@ def extra_config_artefacts(project: BoardProject,
     """
     if not applies_to(project.diagnostics, slice_):
         return []
-    return [(CONF_NAME, itcm_conf()), (OVERLAY_NAME, itcm_overlay())]
+    return [(CONF_NAME, itcm_conf(uses_ram_console(project.diagnostics))),
+            (OVERLAY_NAME, itcm_overlay())]
