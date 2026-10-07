@@ -108,16 +108,27 @@ TREE_MODES = frozenset({"zephyr-board"})
 
 #: The three per-core config slices this mode set names -- still the
 #: membership test `render()` uses to route into `_render_per_core` at all
-#: (`if mode in _SLICE_RENDERER`). `yocto-conf` and `cmake-args` still resolve
-#: their renderer BY NAME via `getattr` here, so this table cannot drift from
-#: the package's own public surface for those two. `zephyr-conf` renders
-#: through `buildplan._slice_config_artefact` instead (tan-cli#1216) -- see
-#: `_render_per_core` -- so its value below documents the leaf renderer that
-#: helper still calls, rather than naming a `getattr` target itself.
+#: (`if mode in _SLICE_RENDERER`). `cmake-args` still resolves its renderer BY
+#: NAME via `getattr` here, so this table cannot drift from the package's own
+#: public surface for it. `zephyr-conf` and `yocto-conf` render through
+#: `buildplan._slice_config_artefact` instead (tan-cli#1216,
+#: `_CONFIG_ARTEFACT_FILE`) -- see `_render_per_core` -- so their values below
+#: document the leaf renderer that helper still calls, rather than naming a
+#: `getattr` target themselves.
 _SLICE_RENDERER = {
     "zephyr-conf": "_slice_alp_conf",
     "yocto-conf": "_slice_local_conf",
     "cmake-args": "_slice_cmake_args",
+}
+
+#: The modes whose bytes ARE a build-plan `configArtefacts[]` entry, and the
+#: file name that entry carries (`metadata/schemas/build-plan-v1.schema.json`:
+#: "byte-identical to what a consumer's own materialise step writes to
+#: buildDir"). These render through `buildplan._slice_config_artefact`, the one
+#: call site `emit_build_plan` also uses (tan-cli#1216, ADR-0026 §D).
+_CONFIG_ARTEFACT_FILE = {
+    "zephyr-conf": "alp.conf",
+    "yocto-conf": "local.conf",
 }
 
 #: `carrier-netlist` / `composed-route-table` share one resolution shape (see
@@ -468,11 +479,12 @@ def _render_per_core(planner, project, mode: str, *, core: str | None,
     """`zephyr-conf` / `cmake-args` / `yocto-conf`, mirroring
     `alp_project._run_v2_per_core_emit`'s per-core section exactly.
 
-    `zephyr-conf` renders through `buildplan._slice_config_artefact` -- the
+    `zephyr-conf` and `yocto-conf` render through `buildplan._slice_config_artefact` -- the
     SAME helper `emit_build_plan` calls to fill a slice's
     `configArtefacts[].contents` (tan-cli#1216, ADR-0026 §D) -- rather than a
     second, independent dispatch straight to the leaf renderer. The bytes are
-    unchanged (`_slice_config_artefact`'s zephyr branch IS `_slice_alp_conf`);
+    unchanged (`_slice_config_artefact`'s zephyr branch IS `_slice_alp_conf`, its yocto
+    branch `_slice_local_conf`);
     what changes is that `tan generate --target zephyr-conf` and `tan build`'s
     plan are now structurally pinned to the one call site the schema's own
     words describe ("byte-identical to what a consumer's own materialise step
@@ -493,7 +505,7 @@ def _render_per_core(planner, project, mode: str, *, core: str | None,
         resolve_selection(project, project.effective_metadata_root())
 
     allowed_os = _os_classes(sdk_root).get(mode)
-    if mode == "zephyr-conf":
+    if mode in _CONFIG_ARTEFACT_FILE:
         # Already imported (`tan.planner.__init__` imports `.buildplan` at
         # module scope) by the time `render()` reaches here -- this is a
         # `sys.modules` cache hit, not a fresh load, and it must stay lazy
@@ -501,16 +513,17 @@ def _render_per_core(planner, project, mode: str, *, core: str | None,
         # before `bind_sdk_root` has run would raise.
         from tan.planner.buildplan import _slice_config_artefact  # noqa: PLC0415
 
+        wanted = _CONFIG_ARTEFACT_FILE[mode]
+
         def slice_renderer(proj, sl):
             artefact = _slice_config_artefact(proj, sl)
-            if artefact is None:
+            if artefact is None or artefact[0] != wanted:
                 # Unreachable in practice: `allowed_os` above already confines
-                # this branch to `os: zephyr`, the one shape
-                # `_slice_config_artefact` never returns `None` for. A coded
-                # refusal beats a bare `NoneType` subscript if that invariant
-                # ever breaks.
+                # each mode to the one OS whose artefact IS `wanted`. A coded
+                # refusal beats a bare `NoneType` subscript -- or silently
+                # emitting a different file's bytes -- if that invariant breaks.
                 raise PlannerEmitError(
-                    f"no config artefact for core `{sl.core_id}` "
+                    f"no {wanted} config artefact for core `{sl.core_id}` "
                     f"(os: {sl.os})")
             return artefact[1]
     else:
