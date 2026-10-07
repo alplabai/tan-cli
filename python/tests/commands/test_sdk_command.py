@@ -1389,9 +1389,9 @@ def test_current_text_mode_wraps_on_a_real_terminal(monkeypatch, capsys, tmp_pat
 
     monkeypatch.setattr("sys.stderr.isatty", lambda: True)
     monkeypatch.setattr(shutil, "get_terminal_size", lambda **_: os.terminal_size((100, 24)))
-    # `tan.env.terminal_width` consults `$COLUMNS` and the real stderr fd BEFORE
-    # `shutil`; neutralise both so only the pinned size above can decide.
-    monkeypatch.delenv("COLUMNS", raising=False)
+    # `tan.env.terminal_width` consults the real stderr fd BEFORE `shutil`
+    # (`$COLUMNS` is scrubbed suite-wide in conftest); neutralise it so only
+    # the pinned size above can decide.
     monkeypatch.setattr(os, "get_terminal_size", _no_real_tty_size)
 
     workspace = tmp_path / "ws"

@@ -930,9 +930,9 @@ def test_text_mode_wraps_prose_on_a_real_terminal(monkeypatch):
 
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
     monkeypatch.setattr(shutil, "get_terminal_size", lambda **_: os.terminal_size((100, 24)))
-    # `tan.env.terminal_width` consults `$COLUMNS` and the real stderr fd BEFORE
-    # `shutil`; neutralise both so only the pinned size above can decide.
-    monkeypatch.delenv("COLUMNS", raising=False)
+    # `tan.env.terminal_width` consults the real stderr fd BEFORE `shutil`
+    # (`$COLUMNS` is scrubbed suite-wide in conftest); neutralise it so only
+    # the pinned size above can decide.
     monkeypatch.setattr(os, "get_terminal_size", _no_real_tty_size)
 
     result = runner.invoke(app, ["explain", "--template", "iot-starter"])
@@ -963,9 +963,9 @@ def test_text_mode_wraps_the_generation_targets_catalogue_line_too(monkeypatch):
 
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
     monkeypatch.setattr(shutil, "get_terminal_size", lambda **_: os.terminal_size((100, 24)))
-    # `tan.env.terminal_width` consults `$COLUMNS` and the real stderr fd BEFORE
-    # `shutil`; neutralise both so only the pinned size above can decide.
-    monkeypatch.delenv("COLUMNS", raising=False)
+    # `tan.env.terminal_width` consults the real stderr fd BEFORE `shutil`
+    # (`$COLUMNS` is scrubbed suite-wide in conftest); neutralise it so only
+    # the pinned size above can decide.
     monkeypatch.setattr(os, "get_terminal_size", _no_real_tty_size)
 
     result = runner.invoke(app, ["explain"])
@@ -1000,9 +1000,9 @@ def test_text_mode_wraps_on_a_terminal_even_with_no_color(monkeypatch):
 
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
     monkeypatch.setattr(shutil, "get_terminal_size", lambda **_: os.terminal_size((100, 24)))
-    # `tan.env.terminal_width` consults `$COLUMNS` and the real stderr fd BEFORE
-    # `shutil`; neutralise both so only the pinned size above can decide.
-    monkeypatch.delenv("COLUMNS", raising=False)
+    # `tan.env.terminal_width` consults the real stderr fd BEFORE `shutil`
+    # (`$COLUMNS` is scrubbed suite-wide in conftest); neutralise it so only
+    # the pinned size above can decide.
     monkeypatch.setattr(os, "get_terminal_size", _no_real_tty_size)
 
     result = runner.invoke(app, ["explain", "--template", "iot-starter", "--no-color"])
