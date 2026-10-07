@@ -4109,7 +4109,7 @@ def _run_with_a_blocked_zephyr_requirements_install(
         else "error: pkg-config package 'libusb-1.0 >= 1.0.9' not found"
     )
 
-    def fake_run(self, argv, cwd=None):  # noqa: ARG001 -- matches Runner.run's shape
+    def fake_run(self, argv, cwd=None, **_):  # noqa: ARG001 -- matches Runner.run's shape
         if "-r" in argv and str(requirements) in argv:
             return captured_detail
         if "venv" in argv:
