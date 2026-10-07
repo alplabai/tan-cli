@@ -1269,6 +1269,12 @@ def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
     # toolchain-root test see THAT store instead of the fresh-per-test
     # `home/.alp/toolchains` this fixture builds below.
     monkeypatch.delenv("ALP_TOOLCHAIN_ROOT", raising=False)
+    # `tan.env.terminal_width` honours `$COLUMNS` first, and `doctor` wraps
+    # unconditionally, so a shell exporting a narrow COLUMNS re-wraps the
+    # strings the text-mode tests assert on (tan-cli#1337). Tests that need
+    # a width set it themselves, after this fixture.
+    monkeypatch.delenv("COLUMNS", raising=False)
+    monkeypatch.delenv("LINES", raising=False)
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
