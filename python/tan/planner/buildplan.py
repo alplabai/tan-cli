@@ -32,6 +32,7 @@ from .kconfig import (
     _slice_alp_conf,
     _slice_local_conf,
 )
+from .link_target import extra_config_artefacts
 from .models import BoardProject, OrchestratorError, Slice
 from .paths import REPO
 from .secure import emit_sysbuild_conf, emit_tfm_sysbuild_conf
@@ -638,6 +639,16 @@ def emit_build_plan(
                 "path":     (build_dir / name).as_posix(),
                 "contents": contents,
             })
+            # `diagnostics.link: itcm` (tan-cli#1350): the ITCM retarget
+            # conf + overlay ride beside `alp.conf`; `_slice_command` wires
+            # them in.  Only when the command exists to read them.
+            if cmd is not None:
+                for extra_name, extra_contents in extra_config_artefacts(
+                        project, slice_):
+                    config_artefacts.append({
+                        "path":     (build_dir / extra_name).as_posix(),
+                        "contents": extra_contents,
+                    })
         # `appDir` retains the resolved source directory independent of
         # `command` -- tooling that wants the app source (e.g. to watch
         # it for incremental rebuilds) doesn't have to reverse-engineer
