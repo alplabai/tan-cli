@@ -1344,6 +1344,129 @@ def test_yocto_conf_matches_the_build_plans_own_config_artefact(
         pytest.skip(f"{board}: no yocto slice to compare")
 
 
+def _plan_artefacts_by_core(relocated, board: Path, project) -> dict[str, dict[str, str]]:
+    """`{coreId: {file name: contents}}` from the plan `emit_build_plan` emits."""
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    return {
+        sl["coreId"]: {a["path"].rsplit("/", 1)[-1]: a["contents"]
+                       for a in sl["configArtefacts"]}
+        for sl in plan["slices"]
+    }
+
+
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_dts_overlay_matches_the_build_plans_own_config_artefact(planners, board):
+    """tan-cli#1216 (ADR-0026 §D): `tan generate --target dts-overlay --core
+    <id>` and the plan's `alp.overlay` `configArtefacts[]` entry are one
+    function (`buildplan._slice_dts_overlay`), so the bytes cannot diverge.
+    """
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    by_core = _plan_artefacts_by_core(relocated, board, project)
+    compared = 0
+    for core_id in sorted(project.cores):
+        want = by_core.get(core_id, {}).get("alp.overlay")
+        if want is None:
+            continue  # yocto/off slice, or a board with no header to render from
+        got = planner_emit.render(
+            "dts-overlay", sdk_root=SDK, board_yaml=board, core=core_id)
+        assert got == want, (
+            f"{board} --core {core_id}: `tan generate --target dts-overlay` "
+            "diverges from the build-plan's own configArtefacts[].contents -- "
+            + _first_diff(want, got))
+        compared += 1
+    if compared == 0:
+        pytest.skip(f"{board}: no slice carries an alp.overlay to compare")
+
+
+def test_a_missing_board_header_downgrades_the_overlay_to_a_warning(
+    planners, monkeypatch, tmp_path
+):
+    """tan-cli#1216: the ONE overlay failure the plan downgrades -- mirrors
+    alp-sdk#2771's test. `alp.overlay` is absent, a `dts-overlay-unavailable`
+    warning names each carrier core, `cmake-args.txt` still rides, and the
+    plan is still a valid build-plan-v1."""
+    import jsonschema
+
+    _, relocated = planners
+    import tan.planner.project_emit.dts as dts
+
+    board = SDK / "examples/multicore/rpmsg-aen/board.yaml"
+    monkeypatch.setattr(dts, "_board_header_path",
+                        lambda name, root: tmp_path / "no-such-header.h")
+    monkeypatch.setattr(dts, "REPO", tmp_path)
+    project = relocated.load_board_yaml(board)
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    schema = json.loads((SDK / "metadata" / "schemas"
+                         / "build-plan-v1.schema.json").read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator(schema).validate(plan)
+
+    carriers = {sl["coreId"] for sl in plan["slices"]
+                if sl["backend"] in ("zephyr", "baremetal")}
+    warned = {w["coreId"] for w in plan["warnings"]
+              if w["code"] == "dts-overlay-unavailable"}
+    assert carriers and warned == carriers
+    for sl in plan["slices"]:
+        names = {a["path"].rsplit("/", 1)[-1] for a in sl["configArtefacts"]}
+        assert "alp.overlay" not in names
+        if sl["coreId"] in carriers:
+            assert "cmake-args.txt" in names
+
+
+def test_any_other_overlay_failure_still_fails_the_plan(planners, monkeypatch):
+    _, relocated = planners
+    import tan.planner.buildplan as bp
+    from tan.planner.models import OrchestratorError
+
+    def broken(project, core_id):
+        raise OrchestratorError("M33 ownership defect")
+
+    monkeypatch.setattr(bp, "project_m33_overlay", broken)
+    board = SDK / "examples/multicore/rpmsg-aen/board.yaml"
+    project = relocated.load_board_yaml(board)
+    with pytest.raises(OrchestratorError, match="M33 ownership defect"):
+        relocated.emit_build_plan(
+            project, board_yaml=board, build_root=Path("build"))
+
+
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_cmake_args_matches_the_build_plans_own_config_artefact(planners, board):
+    """tan-cli#1216 (ADR-0026 §D): `tan generate --target cmake-args --core
+    <id>` renders through the SAME helper that fills the plan's
+    `cmake-args.txt` entry; only the `# --- core ---` marker line differs.
+    """
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    by_core = _plan_artefacts_by_core(relocated, board, project)
+    compared = 0
+    for core_id in sorted(project.cores):
+        want = by_core.get(core_id, {}).get("cmake-args.txt")
+        if want is None:
+            continue
+        got = planner_emit.render(
+            "cmake-args", sdk_root=SDK, board_yaml=board, core=core_id)
+        marker, _, got = got.partition("\n")
+        assert marker.startswith(f"# --- core: {core_id} ("), (
+            f"{board} --core {core_id}: section marker lost")
+        assert got == want, (
+            f"{board} --core {core_id}: `tan generate --target cmake-args` "
+            "diverges from the build-plan's own configArtefacts[].contents -- "
+            + _first_diff(want, got))
+        compared += 1
+    if compared == 0:
+        pytest.skip(f"{board}: no slice carries a cmake-args.txt to compare")
+
+
 def _oracle_board_tree(board: Path, core: str, destination: Path) -> tuple[int, dict]:
     """`alp_project.py --emit zephyr-board --output <dir>`, in-process.
 
