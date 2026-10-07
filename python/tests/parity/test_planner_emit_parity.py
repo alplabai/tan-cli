@@ -2122,3 +2122,29 @@ def test_the_in_process_path_loads_none_of_the_sdks_python(tmp_path):
     assert not nonzero, (
         "the relocated planner still loads alp-sdk Python; every one of these has "
         f"to become a `tan` module or the SDK's Python cannot be deleted: {nonzero}")
+
+
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_tfm_sysbuild_conf_matches_the_build_plans_own_shared_artefact(
+    planners, board
+):
+    """tan-cli#1216 (ADR-0026 §D): `--emit tfm-sysbuild-conf` renders through
+    `buildplan._shared_artefacts` -- the call that fills the plan's
+    `sharedArtefacts[].contents` -- so the two cannot drift apart. A board
+    with no TF-M conf has no plan entry and the standalone emit is empty."""
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    shared = [a["contents"] for a in plan["sharedArtefacts"]
+              if a["path"].endswith("/sysbuild/tfm/tfm.conf")]
+    from tan.planner.cli import emit_artefact
+
+    got = emit_artefact(project, "tfm-sysbuild-conf", board_yaml=board)
+    assert got == (shared[0] if shared else ""), (
+        f"{board}: --emit tfm-sysbuild-conf diverges from the build-plan's "
+        "sharedArtefacts tfm.conf")
