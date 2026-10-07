@@ -1293,6 +1293,57 @@ def test_zephyr_conf_matches_the_build_plans_own_config_artefact(
         pytest.skip(f"{board}: no zephyr slice to compare")
 
 
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_yocto_conf_matches_the_build_plans_own_config_artefact(
+    planners, board
+):
+    """tan-cli#1216 (ADR-0026 §D): `yocto-conf`'s same-call-site agreement,
+    the sibling of the zephyr-conf test above. `tan generate --target
+    yocto-conf --core <id>` renders through the SAME
+    `buildplan._slice_config_artefact` call `emit_build_plan` uses for a yocto
+    slice's `configArtefacts[].contents` (`local.conf`), so a revert to a
+    second `getattr` dispatch -- or a divergence between the two -- reds here
+    even though the alp-sdk-copy parity test alone would not notice.
+    """
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    plan_text = relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build"))
+    plan = json.loads(plan_text)
+    artefacts_by_core = {sl["coreId"]: sl["configArtefacts"] for sl in plan["slices"]}
+
+    from tan import planner_emit
+
+    compared = 0
+    for core_id in sorted(project.cores):
+        local_conf = next(
+            (a for a in artefacts_by_core.get(core_id, [])
+             if a["path"].rsplit("/", 1)[-1] == "local.conf"),
+            None,
+        )
+        if local_conf is None:
+            continue  # not a yocto slice; --emit zephyr-conf --core <id> would refuse it too
+        got = planner_emit.render(
+            "yocto-conf", sdk_root=SDK, board_yaml=board, core=core_id)
+        # Unlike zephyr-conf's verbatim per-core form, `--emit yocto-conf` keeps
+        # alp_project's `# --- core: <id> (<os>) ---` section marker (pinned by
+        # the alp-sdk parity test); everything AFTER it is the plan's bytes.
+        marker = f"# --- core: {core_id} (yocto) ---\n"
+        assert got.startswith(marker), f"{board} --core {core_id}: section marker lost"
+        got = got[len(marker):]
+        assert got == local_conf["contents"], (
+            f"{board} --core {core_id}: `tan generate --target yocto-conf` "
+            "diverges from the build-plan's own configArtefacts[].contents -- "
+            + _first_diff(local_conf["contents"], got))
+        compared += 1
+    if compared == 0:
+        pytest.skip(f"{board}: no yocto slice to compare")
+
+
 def _oracle_board_tree(board: Path, core: str, destination: Path) -> tuple[int, dict]:
     """`alp_project.py --emit zephyr-board --output <dir>`, in-process.
 
