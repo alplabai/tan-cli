@@ -196,32 +196,70 @@ def filter_by_sku(entries: list[ZooEntry], sku: str) -> list[ZooEntry]:
     return [e for e in entries if sku in e.validated_soms]
 
 
-def iter_url(url: str) -> Iterator[bytes]:
-    """Chunks of an https GET with tan's TLS trust context (30 s socket
-    timeout; `fetch_source` enforces the total size and wall-clock caps).
+#: Largest read from the socket at a time (never an unbounded `read()`).
+READ_CHUNK_BYTES = 64 * 1024
+
+#: Redirects followed before giving up.
+MAX_REDIRECTS = 5
+
+
+def iter_url(
+    url: str,
+    *,
+    max_seconds: float = MAX_DOWNLOAD_SECONDS,
+    _schemes: tuple[str, ...] = ("https://",),
+) -> Iterator[bytes]:
+    """Chunks (<= 64 KiB) of a GET with tan's TLS trust context.
+
+    Hardened against a hostile server: only identity encoding is accepted (a
+    gzip/deflate body is refused, and `Accept-Encoding: identity` is sent, so
+    nothing expands transparently); a `Content-Length` over `MAX_DOWNLOAD_BYTES`
+    is refused before reading; `read1` returns after one receive, so the total
+    wall-clock deadline is checked between every chunk (a slow drip cannot
+    hide inside one long read); redirects are capped at `MAX_REDIRECTS` and may
+    only stay on https. The body is never trusted to match its
+    `Content-Length`: `fetch_source` still counts every byte against the cap.
     `urllib` is imported here so a bare `tan` start-up does not load it."""
     import urllib.error  # noqa: PLC0415
     import urllib.request  # noqa: PLC0415
 
     from tan.net import default_ssl_context  # noqa: PLC0415
 
-    class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    deadline = time.monotonic() + max_seconds
+
+    class LimitedRedirect(urllib.request.HTTPRedirectHandler):
+        max_redirections = MAX_REDIRECTS
+
         def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
-            if not newurl.lower().startswith("https://"):
+            if not newurl.lower().startswith(_schemes):
                 raise urllib.error.URLError(f"refusing a redirect to a non-https URL: {newurl}")
+            if time.monotonic() > deadline:
+                raise urllib.error.URLError(f"not complete within {max_seconds:g} s")
             return super().redirect_request(req, fp, code, msg, headers, newurl)
 
     try:
         opener = urllib.request.build_opener(
-            urllib.request.HTTPSHandler(context=default_ssl_context()), HttpsOnlyRedirect
+            urllib.request.HTTPSHandler(context=default_ssl_context()), LimitedRedirect
         )
-        req = urllib.request.Request(url, headers={"User-Agent": "tan-model-zoo"})
-        with opener.open(req, timeout=30) as resp:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "tan-model-zoo", "Accept-Encoding": "identity"}
+        )
+        with opener.open(req, timeout=max(0.1, min(30.0, max_seconds))) as resp:
+            encoding = (resp.headers.get("Content-Encoding") or "identity").strip().lower()
+            if encoding != "identity":
+                raise ZooFetchError(f"{url}: refusing Content-Encoding {encoding!r}")
+            declared = resp.headers.get("Content-Length")
+            if declared and declared.strip().isdigit() and int(declared) > MAX_DOWNLOAD_BYTES:
+                raise ZooFetchError(f"{url}: Content-Length {declared} exceeds {MAX_DOWNLOAD_BYTES} bytes")
             while True:
-                chunk = resp.read(1 << 20)
+                if time.monotonic() > deadline:
+                    raise ZooFetchError(f"{url}: not complete within {max_seconds:g} s")
+                chunk = resp.read1(READ_CHUNK_BYTES)
                 if not chunk:
                     return
                 yield chunk
+    except ZooFetchError:
+        raise
     except (OSError, ValueError) as err:  # URLError is an OSError
         raise ZooFetchError(f"{url}: {err}") from err
 
@@ -273,9 +311,9 @@ def fetch_source(
     try:
         with os.fdopen(fd, "wb") as out:
             for chunk in chunks:
-                size += len(chunk)
-                if size > MAX_DOWNLOAD_BYTES:
+                if size + len(chunk) > MAX_DOWNLOAD_BYTES:
                     raise ZooFetchError(f"{label}: larger than {MAX_DOWNLOAD_BYTES} bytes")
+                size += len(chunk)
                 if time.monotonic() > deadline:
                     raise ZooFetchError(f"{label}: not complete within {max_seconds:g} s")
                 digest.update(chunk)
