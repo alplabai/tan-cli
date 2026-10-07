@@ -118,3 +118,85 @@ def test_a_bare_bin_with_no_elf_beside_it_is_not_checked(tmp_path, monkeypatch):
     monkeypatch.setattr(flash_mram_guard, "soc_flash_base", lambda _ctx: MRAM_BASE)
     rc, _d, issues, _l, _s = _flow_d_run(tmp_path, monkeypatch)
     assert CODE not in [i.code for i in issues] and rc == 0
+
+
+# ── Flow A: `zephyr_west_flash` with the Alif runner (tan-cli#1371, Flow A half) ──
+#
+# Flow A burns MRAM slot0 over the SE-UART when `west flash` falls back to the board
+# default (`alif_flash`). Unlike Flow D, an unresolved `soc_flash_base` SKIPS here:
+# `zephyr_west_flash` also serves non-MRAM boards, so "no MRAM aperture known" is not
+# evidence of a problem.
+
+_WEST_MANIFEST = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.elf, status: ok,
+   flash_method: zephyr_west_flash, flash_args: FLASH_ARGS}
+helper_mcus: []
+boot_order: []
+"""
+
+
+def _west_run(tmp_path, monkeypatch, *, elf, base=MRAM_BASE, flash_args="{}", dry_run=False):
+    build = tmp_path / "build"
+    build.mkdir(exist_ok=True)
+    (build / "zephyr.elf").write_bytes(elf)
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    (build / "system-manifest.yaml").write_text(
+        _WEST_MANIFEST.replace("FLASH_ARGS", flash_args), encoding="utf-8", newline=""
+    )
+    tools = tmp_path / "faketools"
+    tools.mkdir(exist_ok=True)
+    (tools / "west").write_text("", encoding="utf-8")
+    os.chmod(tools / "west", 0o755)
+    monkeypatch.setenv("PATH", str(tools))
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    monkeypatch.setattr(flash_mram_guard, "soc_flash_base", lambda _ctx: base)
+    spawned: list = []
+    monkeypatch.setattr(
+        flash_cmd, "_spawn",
+        lambda *a, **k: spawned.append(a) or flash_cmd._Outcome(success=True, stdout=""),
+    )
+    result = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=dry_run,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+    return result, spawned
+
+
+@pytest.mark.parametrize(
+    ("flash_args", "dry_run"),
+    [("{}", False), ("{runner: alif_flash}", False), ("{}", True)],
+    ids=["no-runner", "alif_flash", "dry-run"],
+)
+def test_flow_a_refuses_an_itcm_linked_image_before_west_spawns(
+    tmp_path, monkeypatch, flash_args, dry_run
+):
+    (rc, data, issues, _l, _s), spawned = _west_run(
+        tmp_path, monkeypatch, elf=make_elf(base=0x0), flash_args=flash_args, dry_run=dry_run
+    )
+    assert rc == 1 and [i.code for i in issues] == [CODE]
+    assert "zephyr_west_flash[m55_he]" in issues[0].message
+    assert "0x0" in issues[0].message and "0x80000000" in issues[0].message
+    assert spawned == [] and data["entries"][0]["status"] == "failed"
+
+
+def test_flow_a_accepts_an_mram_linked_image(tmp_path, monkeypatch):
+    (rc, _d, issues, _l, _s), spawned = _west_run(
+        tmp_path, monkeypatch, elf=make_elf(base=0x80010000, entry=0x80010001)
+    )
+    assert rc == 0 and CODE not in [i.code for i in issues] and spawned
+
+
+def test_flow_a_skips_when_the_aperture_base_is_unresolved(tmp_path, monkeypatch):
+    (rc, _d, issues, _l, _s), spawned = _west_run(tmp_path, monkeypatch, elf=make_elf(base=0x0), base=None)
+    assert rc == 0 and CODE not in [i.code for i in issues] and spawned
+
+
+def test_flow_a_does_not_check_an_explicit_other_runner(tmp_path, monkeypatch):
+    (rc, _d, issues, _l, _s), spawned = _west_run(
+        tmp_path, monkeypatch, elf=make_elf(base=0x0), flash_args="{runner: jlink}"
+    )
+    assert rc == 0 and CODE not in [i.code for i in issues] and spawned

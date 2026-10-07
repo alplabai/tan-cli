@@ -99,7 +99,7 @@ except ImportError:  # pragma: no cover -- Windows has none of the four
 
 import typer
 
-from tan.commands.flash_mram_guard import mram_link_guard
+from tan.commands.flash_mram_guard import ALIF_MRAM_RUNNERS, mram_link_guard
 from tan.core.mram_link import CODE_NOT_MRAM_LINKED
 from tan.core.shapes import is_file as _is_file
 from tan.core.sdk_discovery import resolve_sdk_root_ladder, sdk_resolution_issues
@@ -2671,6 +2671,16 @@ def _untrusted_setools_refusal(flash_args: Any, ctx: _Context) -> str | None:
     return untrusted_install_message(setools)
 
 
+def _flow_a_runner_is_alif(flash_args: Any) -> bool:
+    """Whether a `zephyr_west_flash` entry's effective runner burns MRAM over the
+    SE-UART (`flash_args.runner` absent or `alif_flash`). A malformed value is not the
+    Alif runner; the plan builder refuses it with its own message."""
+    try:
+        return fa_str(flash_args, "runner") in ALIF_MRAM_RUNNERS
+    except FlashPlanError:
+        return False
+
+
 def _flash_entry(
     target: FlashTarget,
     ctx: _Context,
@@ -3225,6 +3235,24 @@ def _flash_entry_body(
             return (
                 1,
                 entry(method, "failed", 1, msg, issue_code=getattr(err, "code", None)),
+                lines,
+            )
+
+    # tan-cli#1371, Flow A: `west flash` on the Alif runner (or the board default, which
+    # is `alif_flash` there) burns MRAM slot0 over the SE-UART, so an ITCM-linked ELF is
+    # refused the same way. ASYMMETRY vs Flow D: an unresolved `soc_flash_base` SKIPS here
+    # instead of refusing -- `zephyr_west_flash` also serves non-MRAM boards. An explicit
+    # other runner (e.g. jlink) is not checked.
+    if method == "zephyr_west_flash" and _flow_a_runner_is_alif(flash_args):
+        unlinked = mram_link_guard(
+            artefact_path, entry_id, ctx, method=method, skip_unresolved_base=True
+        )
+        if unlinked is not None:
+            lines.append(_entry_head(kind, entry_id, method, target.flash_method))
+            lines.append(f"  FAIL: {unlinked}")
+            return (
+                1,
+                entry(method, "failed", 1, unlinked, issue_code=CODE_NOT_MRAM_LINKED),
                 lines,
             )
 

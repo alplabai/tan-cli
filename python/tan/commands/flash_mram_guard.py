@@ -60,12 +60,28 @@ def soc_flash_base(ctx: Any) -> int | None:
     return base if isinstance(base, int) and not isinstance(base, bool) else None
 
 
-def mram_link_guard(artefact_path: str, entry_id: str, ctx: Any) -> str | None:
-    """The refusal for a Flow D entry whose ELF is not MRAM-linked, else `None`."""
+def mram_link_guard(
+    artefact_path: str, entry_id: str, ctx: Any, *, method: str = FLOW_D_METHOD,
+    skip_unresolved_base: bool = False,
+) -> str | None:
+    """The refusal for an entry whose ELF is not MRAM-linked, else `None`.
+
+    Flow D (`alif_mram_jlink`) is strict: an ELF with an unresolvable `soc_flash_base`
+    is refused. Flow A (`zephyr_west_flash` on the Alif runner) passes
+    `skip_unresolved_base=True` and is NOT checked in that case -- that method also
+    serves non-MRAM boards, so an unknown MRAM aperture is not evidence of a problem."""
     elf_path = find_elf(artefact_path)
     if elf_path is None:
         return None
+    base = soc_flash_base(ctx)
+    if base is None and skip_unresolved_base:
+        return None
     with open(elf_path, "rb") as handle:
         data = handle.read()
-    message = mram_link_refusal(data, soc_flash_base(ctx))
-    return None if message is None else f"{FLOW_D_METHOD}[{entry_id}]: refusing -- {message}"
+    message = mram_link_refusal(data, base)
+    return None if message is None else f"{method}[{entry_id}]: refusing -- {message}"
+
+
+#: Runners that burn MRAM slot0 over the SE-UART. `None` is `west flash` falling back
+#: to the board default, which on an Alif board is `alif_flash`.
+ALIF_MRAM_RUNNERS = (None, "alif_flash")
