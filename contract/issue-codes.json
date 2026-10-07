@@ -2380,6 +2380,14 @@
       "note": "tan-cli#1287: the INT8 model's top-1 agreement with fp32 on the calibration set is below the 95% threshold; the output is written and the guidance (try --per-channel, more representative samples) is the message. A warning, exit 0. A plain `Issue(\"model.prep-accuracy-degraded\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.run-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_host_cmd.py",
+      "note": "tan-cli#1287: `model run`/`ab` could not load or run a model on the host (`tan.model.measure.MeasureError`, an unreadable or mis-shaped `--input`). RUNTIME_FAILURE. A plain `Issue(\"model.run-failed\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "monitor.launch-failed",
       "status": "reserved",
       "severity": "error",

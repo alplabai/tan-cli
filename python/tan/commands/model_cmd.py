@@ -134,6 +134,10 @@ budget); both need a resolvable SDK (`model.sdk-root-unresolved`, as `build`/
 calibration directory and reports the fp32-vs-int8 accuracy delta; it needs the
 optional `model` extra (`tan.core.model_host`) and no SDK, board.yaml or
 hardware. Runner and renderer: `tan.commands.model_host_cmd`.
+
+**`run` / `ab` (tan-cli#1287, host tier)** time an ONNX model on onnxruntime CPU
+(`backend: cpu-host`) and compare two models -- host references, never SoM
+performance; the on-device tier is bench-gated and not yet ported.
 """
 
 from __future__ import annotations
@@ -159,7 +163,17 @@ from tan.commands.model_zoo_cmd import (
     run_zoo,
     zoo_empty_data,
 )
-from tan.commands.model_host_cmd import prep_empty_data, render_prep_text, run_prep
+from tan.commands.model_host_cmd import (
+    ab_empty_data,
+    prep_empty_data,
+    render_ab_text,
+    render_prep_text,
+    render_run_text,
+    run_ab,
+    run_empty_data,
+    run_prep,
+    run_run,
+)
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.global_flags import accept_global_flags
 from tan.core.model_check import backend_report_as_dict, render_check_text
@@ -194,7 +208,7 @@ LIST_DATA_SCHEMA_VERSION = "1"
 
 #: `SUBCOMMANDS` names every subcommand this command accepts, in the order the
 #: unknown-subcommand refusal lists them.
-SUBCOMMANDS = ("build", "doctor", "check", "list", "zoo", "add", "prep")
+SUBCOMMANDS = ("build", "doctor", "check", "list", "zoo", "add", "prep", "run", "ab")
 
 
 class ModelError(Exception):
@@ -969,10 +983,10 @@ def _run_doctor(
 def _refuse_stray_arguments(subcommand: str, model_id: str | None, sku: str | None) -> None:
     """A positional ID belongs to `add` alone and `--sku` to `zoo`: accepting
     either elsewhere would silently ignore what the caller typed."""
-    if model_id is not None and subcommand not in ("add", "prep"):
+    if model_id is not None and subcommand not in ("add", "prep", "run", "ab"):
         raise ModelError(
             "model.unexpected-argument",
-            f"`tan model {subcommand}` takes no ID argument (got {model_id}); only `add` and `prep` do.",
+            f"`tan model {subcommand}` takes no ID argument (got {model_id}); only `add`, `prep`, `run` and `ab` do.",
             ExitCode.VALIDATION_FAILURE,
         )
     if sku and subcommand == "add":
@@ -1001,12 +1015,16 @@ def _empty_data(subcommand: str | None) -> dict[str, Any]:
         return add_empty_data()
     if subcommand == "prep":
         return prep_empty_data()
+    if subcommand == "run":
+        return run_empty_data()
+    if subcommand == "ab":
+        return ab_empty_data()
     return {"schemaVersion": DATA_SCHEMA_VERSION, "sku": None, "built": []}
 
 
 def model(
     subcommand: str = typer.Argument(
-        None, metavar="SUBCOMMAND", help="build | doctor | check | list | zoo | add | prep."
+        None, metavar="SUBCOMMAND", help="build | doctor | check | list | zoo | add | prep | run | ab."
     ),
     board: str = typer.Option(
         # tan-cli#398: `--board-yaml` is a REAL second spelling of this one
@@ -1057,18 +1075,26 @@ def model(
     min_samples: int = typer.Option(
         8, "--min-samples", metavar="N", help="With `prep`: fewest calibration samples accepted."
     ),
+    against: str = typer.Option(
+        None, "--against", metavar="PATH", help="With `ab`: the second .onnx model to compare with."
+    ),
+    runs: int = typer.Option(20, "--runs", metavar="N", help="With `run`/`ab`: timed inferences per model."),
+    input_file: str = typer.Option(
+        None, "--input", metavar="PATH", help="With `run`/`ab`: a .npy input sample (default: seeded random)."
+    ),
     model_id: str = typer.Argument(
         None,
         metavar="ID",
-        help="With `add`: the model-zoo entry id (see `zoo`). With `prep`: the .onnx model file.",
+        help="With `add`: the model-zoo entry id (see `zoo`). With `prep`/`run`/`ab`: the .onnx model file.",
     ),
 ) -> None:
     """Compile + package board.yaml `models:` into `.alpmodel` packages
     (`build`), report NPU-compiler toolchain availability (`doctor`),
     statically screen a declared model's NPU eligibility (`check`), or list
     what is declared next to what is already built (`list`), list the SDK's model
-    zoo (`zoo`), add a zoo model to the project (`add <id>`), or INT8-quantize an
-    ONNX model with an accuracy report (`prep`)."""
+    zoo (`zoo`), add a zoo model to the project (`add <id>`), INT8-quantize an
+    ONNX model with an accuracy report (`prep`), or time a host reference
+    run (`run`) / compare two models (`ab`)."""
     json_mode = output_format == "json"
 
     def finish(
@@ -1139,8 +1165,9 @@ def model(
             elif subcommand == "add":
                 for line in render_add_text(data):
                     print(line, file=sys.stderr)
-            elif subcommand == "prep":
-                for line in render_prep_text(data):
+            elif subcommand in ("prep", "run", "ab"):
+                render = {"prep": render_prep_text, "run": render_run_text, "ab": render_ab_text}
+                for line in render[subcommand](data):
                     print(line, file=sys.stderr)
             elif subcommand == "list":
                 # `list`: checked by SUBCOMMAND, not by `"models" in data` --
@@ -1236,6 +1263,14 @@ def model(
                 metadata_root=metadata_root,
                 sdk_root=sdk_root,
                 exact=exact,
+            )
+        elif subcommand == "run":
+            project_, sdk, data, issues, exit_code = run_run(
+                context=context, source=model_id, runs=runs, input_file=input_file
+            )
+        elif subcommand == "ab":
+            project_, sdk, data, issues, exit_code = run_ab(
+                context=context, source=model_id, against=against, runs=runs, input_file=input_file
             )
         elif subcommand == "prep":
             project_, sdk, data, issues, exit_code = run_prep(

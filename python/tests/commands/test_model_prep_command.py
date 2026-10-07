@@ -83,3 +83,62 @@ def test_prep_quantizes_and_reports(tmp_path):
     assert doc["data"]["calibration"]["samples"] == 8
     assert doc["data"]["accuracy"]["verdict"] in ("good", "degraded")
     assert doc["data"]["output"].endswith("m.int8.onnx")
+
+
+# --- run / ab (host tier) ---------------------------------------------------
+
+
+def test_run_and_ab_refusals(tmp_path, monkeypatch):
+    proj = project(tmp_path)
+    code, doc = invoke("run", "--project", str(proj))
+    assert code == 2 and doc["issues"][0]["code"] == "model.model-source-missing"
+    code, doc = invoke("ab", "m.onnx", "--project", str(proj))
+    assert code == 2 and doc["issues"][0]["code"] == "model.model-source-missing"
+    (proj / "m.tflite").write_bytes(b"x")
+    code, doc = invoke("run", "m.tflite", "--project", str(proj))
+    assert code == 2 and doc["issues"][0]["code"] == "model.model-format-unsupported"
+    monkeypatch.setattr(model_host_cmd, "missing_extra_modules", lambda verb: ["numpy"])
+    code, doc = invoke("run", "m.onnx", "--project", str(proj))
+    assert code == 1 and doc["issues"][0]["code"] == "model.model-extra-missing"
+    code, doc = invoke("list", "m.onnx", "--project", str(proj))
+    assert code == 2 and doc["issues"][-1]["code"] == "model.unexpected-argument"
+
+
+@pytest.mark.skipif(not HAVE_EXTRA, reason="the optional `model` extra is not installed")
+def test_run_host_reference(tmp_path):
+    proj = project(tmp_path)
+    code, doc = invoke("run", "m.onnx", "--runs", "3", "--project", str(proj))
+    assert code == 0, doc
+    r = doc["data"]["result"]
+    assert r["backend"] == "cpu-host" and r["tier"] == "host" and r["runs"] == 3
+    assert r["latencyMs"] > 0 and r["peakSramKib"] is None and r["powerMj"] is None
+    assert isinstance(r["outputArgmax"], int)
+
+
+@pytest.mark.skipif(not HAVE_EXTRA, reason="the optional `model` extra is not installed")
+def test_run_with_a_bad_input_is_a_coded_failure(tmp_path):
+    import numpy as np
+
+    proj = project(tmp_path)
+    np.save(proj / "bad.npy", np.zeros((1, 3, 8, 8), dtype=np.float32))
+    code, doc = invoke("run", "m.onnx", "--input", "bad.npy", "--project", str(proj))
+    assert code == 1 and doc["issues"][0]["code"] == "model.run-failed"
+
+
+@pytest.mark.skipif(not HAVE_EXTRA, reason="the optional `model` extra is not installed")
+def test_ab_compares_the_fp32_model_with_its_int8_prep(tmp_path):
+    import numpy as np
+
+    proj = project(tmp_path)
+    (proj / "cal").mkdir()
+    rng = np.random.default_rng(1)
+    for i in range(8):
+        np.save(proj / "cal" / f"s{i}.npy", rng.standard_normal((1, 3, 224, 224)).astype(np.float32))
+    assert invoke("prep", "m.onnx", "--calibration", "cal", "--project", str(proj))[0] == 0
+    code, doc = invoke(
+        "ab", "m.onnx", "--against", "build/models/m.int8.onnx", "--runs", "3", "--project", str(proj)
+    )
+    assert code == 0, doc
+    c = doc["data"]["comparison"]
+    assert c["faster"] in ("a", "b", "tie")
+    assert c["sizeDeltaBytes"] == doc["data"]["b"]["sizeBytes"] - doc["data"]["a"]["sizeBytes"]

@@ -11,6 +11,14 @@ this exists to catch. No vendor toolchain and no hardware; the vendor compile
 (`tan model build`) is a separate step. ONNX input only: `.tflite` conversion
 (tf2onnx/tensorflow) is deferred.
 
+**`run MODEL.onnx [--runs N] [--input X.npy]`** is a host reference run
+(onnxruntime CPU, `backend: cpu-host`): median latency over N runs and the
+output argmax. **`ab MODEL.onnx --against OTHER.onnx`** runs both with the same
+input and compares latency and file size. Both are FUNCTIONAL + host-latency
+references, never SoM performance -- `peakSramKib`/`powerMj` stay `null` until
+the bench-gated on-device tier fills the same schema. The input defaults to a
+deterministic seeded sample shaped like the model's first input.
+
 Every refusal is a plain `Issue(...)` return (never an exception) so the codes
 stay visible to the issue-code registry gate.
 """
@@ -26,6 +34,8 @@ from tan.envelope import Issue, Project, SdkInfo
 from tan.exit_codes import ExitCode
 
 PREP_DATA_SCHEMA_VERSION = "1"
+RUN_DATA_SCHEMA_VERSION = "1"
+AB_DATA_SCHEMA_VERSION = "1"
 
 Result = tuple[Project, SdkInfo | None, dict, list[Issue], ExitCode]
 
@@ -38,6 +48,14 @@ def prep_empty_data() -> dict[str, Any]:
         "calibration": None,
         "accuracy": None,
     }
+
+
+def run_empty_data() -> dict[str, Any]:
+    return {"schemaVersion": RUN_DATA_SCHEMA_VERSION, "model": None, "result": None}
+
+
+def ab_empty_data() -> dict[str, Any]:
+    return {"schemaVersion": AB_DATA_SCHEMA_VERSION, "a": None, "b": None, "comparison": None}
 
 
 def resolve_model_path(context: ProjectContext, raw: str | None, role: str) -> Path | Issue:
@@ -170,4 +188,137 @@ def render_prep_text(data: dict) -> list[str]:
         f"quantized {data['source']} -> {data['output']}",
         f"accuracy (fp32 vs int8): {acc['verdict']}; top-1 agreement {acc['top1AgreementPct']}%, "
         f"mean cosine {acc['meanCosine']}, max abs err {acc['maxAbsErr']}",
+    ]
+
+
+def _result_row(result: Any, path: Path) -> dict[str, Any]:
+    return {
+        "model": path.as_posix(),
+        "backend": result.backend,
+        "tier": "host",
+        "latencyMs": result.latency_ms,
+        "outputArgmax": result.output_argmax,
+        "peakSramKib": result.peak_sram_kib,
+        "powerMj": result.power_mj,
+        "runs": result.runs,
+        "sizeBytes": path.stat().st_size,
+    }
+
+
+def _measure(path: Path, input_path: Path | None, runs: int, sample: Any) -> tuple[Any, Any] | Issue:
+    """`(RunResult, input sample)` for `path`, or the `model.run-failed` refusal.
+    `sample` is reused across `ab`'s two models so both see the same input."""
+    from tan.model.measure import MeasureError, default_input, run_host  # noqa: PLC0415
+
+    try:
+        if sample is None:
+            if input_path is not None:
+                import numpy as np  # noqa: PLC0415
+
+                sample = np.load(input_path)
+            else:
+                sample = default_input(path)
+        return run_host(path, sample, runs=runs), sample
+    except (MeasureError, OSError, ValueError) as err:
+        return Issue("model.run-failed", "error", str(err))
+
+
+def _host_preflight(
+    context: ProjectContext, verb: str, raws: list[str | None], data: dict
+) -> tuple[list[Path], None] | tuple[None, Issue]:
+    """Resolve every model path, check format and the extra; the first refusal."""
+    paths: list[Path] = []
+    for raw in raws:
+        path = resolve_model_path(context, raw, verb)
+        if isinstance(path, Issue):
+            return None, path
+        bad = format_refusal(path, verb)
+        if bad is not None:
+            return None, bad
+        paths.append(path)
+    missing = missing_extra_modules(verb)
+    if missing:
+        return None, Issue("model.model-extra-missing", "error", extra_missing_message(verb, missing))
+    return paths, None
+
+
+def _refusal_exit(issue: Issue) -> ExitCode:
+    return ExitCode.RUNTIME_FAILURE if issue.code in ("model.model-extra-missing", "model.run-failed") else ExitCode.VALIDATION_FAILURE
+
+
+def run_run(
+    *, context: ProjectContext, source: str | None, runs: int, input_file: str | None
+) -> Result:
+    project, sdk = context.project(), context.sdk
+    data = run_empty_data()
+    paths, issue = _host_preflight(context, "run", [source], data)
+    if issue is not None:
+        return project, sdk, data, [issue], _refusal_exit(issue)
+    assert paths is not None
+    measured = _measure(paths[0], _under(context, input_file) if input_file else None, runs, None)
+    if isinstance(measured, Issue):
+        return project, sdk, data, [measured], _refusal_exit(measured)
+    data["model"] = paths[0].as_posix()
+    data["result"] = _result_row(measured[0], paths[0])
+    return project, sdk, data, [], ExitCode.SUCCESS
+
+
+def run_ab(
+    *,
+    context: ProjectContext,
+    source: str | None,
+    against: str | None,
+    runs: int,
+    input_file: str | None,
+) -> Result:
+    from tan.model.measure import compare  # noqa: PLC0415
+
+    project, sdk = context.project(), context.sdk
+    data = ab_empty_data()
+    paths, issue = _host_preflight(context, "ab", [source, against], data)
+    if issue is not None:
+        return project, sdk, data, [issue], _refusal_exit(issue)
+    assert paths is not None
+    a_path, b_path = paths
+    input_path = _under(context, input_file) if input_file else None
+    first = _measure(a_path, input_path, runs, None)
+    if isinstance(first, Issue):
+        return project, sdk, data, [first], _refusal_exit(first)
+    second = _measure(b_path, input_path, runs, first[1])
+    if isinstance(second, Issue):
+        return project, sdk, data, [second], _refusal_exit(second)
+    a_res, b_res = first[0], second[0]
+    cmp = compare(a_res, b_res, size_a=a_path.stat().st_size, size_b=b_path.stat().st_size)
+    data["a"] = _result_row(a_res, a_path)
+    data["b"] = _result_row(b_res, b_path)
+    data["comparison"] = {
+        "faster": cmp.faster,
+        "latencyRatio": cmp.latency_ratio,
+        "aLatencyMs": cmp.a_latency_ms,
+        "bLatencyMs": cmp.b_latency_ms,
+        "sizeDeltaBytes": cmp.size_delta_bytes,
+    }
+    return project, sdk, data, [], ExitCode.SUCCESS
+
+
+def render_run_text(data: dict) -> list[str]:
+    r = data.get("result")
+    if not r:
+        return []
+    return [
+        f"{r['model']}: {r['backend']} median {r['latencyMs']} ms over {r['runs']} runs, "
+        f"output argmax {r['outputArgmax']}",
+        "host reference only -- not SoM performance",
+    ]
+
+
+def render_ab_text(data: dict) -> list[str]:
+    c = data.get("comparison")
+    if not c:
+        return []
+    return [
+        f"A {data['a']['model']}: {c['aLatencyMs']} ms, {data['a']['sizeBytes']} bytes",
+        f"B {data['b']['model']}: {c['bLatencyMs']} ms, {data['b']['sizeBytes']} bytes",
+        f"faster: {c['faster']}; B/A latency ratio {c['latencyRatio']}; size delta {c['sizeDeltaBytes']} bytes",
+        "host reference only -- not SoM performance",
     ]
