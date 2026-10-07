@@ -51,7 +51,7 @@ set -eu
 mkdir -p dist/tan
 cp "$STUB_TAN_BODY" dist/tan/tan
 chmod +x dist/tan/tan
-echo "OK: dist/tan.tar.gz is 1 B (ceiling 16500000, libc=default)"
+echo "OK: dist/tan.tar.gz is 1 B (ceiling 16800000, libc=default)"
 """
 
 #: A freeze that answers `--version`, as a real one does.
