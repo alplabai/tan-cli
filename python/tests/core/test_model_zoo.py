@@ -155,3 +155,160 @@ def test_good_compile_shape_loads(zoo):
     (zoo / "c-ok.yaml").write_text(manifest("c-ok", extra=extra), encoding="utf-8")
     entries, problems = load_zoo(zoo)
     assert problems == [] and "c-ok" in [e.id for e in entries]
+
+
+# --- iter_url against a local server (the https-only rule is the manifest's;
+# --- `_schemes` lets the test speak plain http to 127.0.0.1) ---------------
+
+import gzip  # noqa: E402
+import http.server  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+from tan.core import model_zoo  # noqa: E402
+
+
+class _Server:
+    def __init__(self, handler):
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/m.tflite"
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+@pytest.fixture
+def serve():
+    servers = []
+
+    def make(fn):
+        class H(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                fn(self)
+
+            def log_message(self, *a):
+                pass
+
+        servers.append(_Server(H))
+        return servers[-1].url
+
+    yield make
+    for s in servers:
+        s.close()
+
+
+def drain(url, **kw):
+    return b"".join(model_zoo.iter_url(url, _schemes=("http://",), **kw))
+
+
+def staged_via(url, zoo, tmp_path, **kw):
+    entries, _ = load_zoo(zoo)
+    entry = next(e for e in entries if e.id == "b-model")
+    return stage(entry, zoo, tmp_path, reader=lambda u: model_zoo.iter_url(url, _schemes=("http://",)), **kw)
+
+
+def test_chunked_body_without_length_is_capped(serve, zoo, tmp_path, monkeypatch):
+    def handler(h):
+        h.send_response(200)
+        h.send_header("Transfer-Encoding", "chunked")
+        h.end_headers()
+        try:
+            for _ in range(200):
+                h.wfile.write(b"400\r\n" + b"x" * 0x400 + b"\r\n")
+            h.wfile.write(b"0\r\n\r\n")
+        except OSError:
+            pass
+
+    url = serve(handler)
+    monkeypatch.setattr(model_zoo, "MAX_DOWNLOAD_BYTES", 4096)
+    with pytest.raises(ZooFetchError, match="larger than"):
+        staged_via(url, zoo, tmp_path)
+    assert list((tmp_path / "dest").iterdir()) == []
+
+
+def test_lying_content_length_cannot_exceed_the_cap(serve, zoo, tmp_path, monkeypatch):
+    def handler(h):
+        h.send_response(200)
+        h.send_header("Content-Length", "10")  # claims small, sends a lot
+        h.end_headers()
+        try:
+            h.wfile.write(b"y" * 100000)
+        except OSError:
+            pass
+
+    url = serve(handler)
+    got = drain(url)
+    assert len(got) <= 10  # the client never reads past what it was told
+    monkeypatch.setattr(model_zoo, "MAX_DOWNLOAD_BYTES", 5)
+    with pytest.raises(ZooFetchError):
+        staged_via(url, zoo, tmp_path)
+
+
+def test_oversized_content_length_is_refused_before_reading(serve):
+    def handler(h):
+        h.send_response(200)
+        h.send_header("Content-Length", str(model_zoo.MAX_DOWNLOAD_BYTES + 1))
+        h.end_headers()
+
+    with pytest.raises(ZooFetchError, match="Content-Length"):
+        drain(serve(handler))
+
+
+def test_gzip_encoded_response_is_refused(serve):
+    body = gzip.compress(b"z" * 1000)
+
+    def handler(h):
+        h.send_response(200)
+        h.send_header("Content-Encoding", "gzip")
+        h.send_header("Content-Length", str(len(body)))
+        h.end_headers()
+        h.wfile.write(body)
+
+    with pytest.raises(ZooFetchError, match="Content-Encoding"):
+        drain(serve(handler))
+
+
+def test_slow_drip_exceeds_the_total_deadline(serve):
+    def handler(h):
+        h.send_response(200)
+        h.send_header("Content-Length", "1000")
+        h.end_headers()
+        try:
+            for _ in range(1000):
+                h.wfile.write(b"d")
+                h.wfile.flush()
+                time.sleep(0.05)
+        except OSError:
+            pass
+
+    started = time.monotonic()
+    with pytest.raises(ZooFetchError):
+        drain(serve(handler), max_seconds=0.5)
+    assert time.monotonic() - started < 5
+
+
+def test_redirect_loop_is_capped(serve):
+    def handler(h):
+        h.send_response(302)
+        h.send_header("Location", h.path + "x")
+        h.send_header("Content-Length", "0")
+        h.end_headers()
+
+    with pytest.raises(ZooFetchError):
+        drain(serve(handler))
+
+
+def test_redirect_to_plain_http_is_refused_by_default(serve):
+    def handler(h):
+        h.send_response(302)
+        h.send_header("Location", "http://127.0.0.1:1/x")
+        h.send_header("Content-Length", "0")
+        h.end_headers()
+
+    url = serve(handler)
+    with pytest.raises(ZooFetchError, match="non-https"):
+        b"".join(model_zoo.iter_url(url))  # default _schemes: https only -> http start URL is fine, redirect is not
