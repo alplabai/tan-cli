@@ -5,6 +5,10 @@
   "lines": null,
   "long_functions": [
     [
+      54,
+      "resolve_capabilities"
+    ],
+    [
       98,
       "resolve_memory_map"
     ]

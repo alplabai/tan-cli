@@ -586,7 +586,7 @@ def test_written_preset_and_soc_content_are_correct(tmp_path):
     preset_text = (tmp_path / "metadata" / "e1m_modules" / "E1M-XTST4.yaml").read_text(
         encoding="utf-8"
     )
-    assert "preferred_backend:    tbd" in preset_text
+    assert "auto_order:           [tbd]" in preset_text
     assert "silicon_variant: TBD" in preset_text
     assert "{ id: 0, reserved_for: alp_default_rpmsg }" in preset_text
     # som-preset v2 (alp-sdk#2024): schema_version is const 2, the
