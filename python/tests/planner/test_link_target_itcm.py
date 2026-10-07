@@ -139,8 +139,11 @@ def test_the_fragment_and_overlay_bytes_are_pinned() -> None:
 def test_itcm_he_slice_gets_both_halves_beside_alp_conf(tmp_path, meta) -> None:
     sl = _slice(_plan(tmp_path, _project(tmp_path, meta, _HE_ONLY)), "m55_he")
     arts = _artefacts(sl)
+    # The itcm halves ride right after alp.conf; the plan's additive
+    # reference artefacts (tan-cli#1216) follow. This synthetic board has no
+    # header under include/alp/boards/, so no alp.overlay (a warning instead).
     assert list(arts) == ["alp.conf", "alp-link-itcm.conf",
-                          "alp-link-itcm.overlay"]
+                          "alp-link-itcm.overlay", "cmake-args.txt"]
     assert arts["alp-link-itcm.conf"] == EXPECTED_CONF
     assert arts["alp-link-itcm.overlay"] == EXPECTED_OVERLAY
     # both halves live in the slice's build dir, next to alp.conf
@@ -193,7 +196,7 @@ def test_unset_and_auto_are_byte_identical_to_before(tmp_path, meta) -> None:
         tmp_path, meta, _HE_ONLY.replace("link: itcm", "link: auto")))
     assert unset == auto
     he = _slice(unset, "m55_he")
-    assert list(_artefacts(he)) == ["alp.conf"]
+    assert list(_artefacts(he)) == ["alp.conf", "cmake-args.txt"]
     assert "EXTRA_DTC_OVERLAY_FILE" not in json.dumps(he["command"])
 
 
