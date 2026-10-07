@@ -47,10 +47,12 @@ from tan.core.flash_plan import (
     FlashPlanError,
     FlashTarget,
     _DEFAULT_JLINK_SPEED,
+    commander_path,
+    confirm_gate_note,
     dpidr_preflight_unarmed,
+    fa_bool_checked,
     fa_int_checked,
     fa_str,
-    commander_path,
     fa_str_checked,
     validate_commander_path,
     validate_identifier,
@@ -253,6 +255,24 @@ def _run_ram_entry(
         msg = f"{METHOD}[{entry_id}]: would run -- {summary}; no MRAM write; nothing spawned"
         lines.append(f"  {msg}")
         return 0, entry("ok", 0, msg, **warn_missing), lines
+
+    # ── the confirm gate (bench round 7) ──
+    # `loadbin` resets the core through AIRCR.SYSRESETREQ, a full-device reset that also
+    # resets the Secure Enclave, and the run REPLACES the running image: it is gated like
+    # every other write. Without --confirm (or ALP_FLASH_FORCE=1 / flash_args.confirm) it
+    # previews and exits non-zero, exactly as an unconfirmed flash does.
+    try:
+        confirmed = ctx.force_confirm or bool(fa_bool_checked(flash_args, "confirm"))
+    except FlashPlanError as err:
+        return fail(str(err))
+    if not confirmed:
+        msg = (
+            f"{METHOD}[{entry_id}]: would run -- {summary} -- NOT run: "
+            f"{confirm_gate_note('--confirm was not given')}. --ram resets the whole device "
+            "(AIRCR.SYSRESETREQ, which resets the Secure Enclave) and replaces the running image."
+        )
+        lines.append(f"  {msg}")
+        return 0, entry("planned", 0, msg, **warn_missing), lines
 
     # ── the wrong-board guard, exactly as for a Flow D write ──
     armed = not dpidr_preflight_unarmed(FLOW_D_METHOD, flash_args, None)

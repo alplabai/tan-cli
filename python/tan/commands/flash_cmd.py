@@ -4571,7 +4571,10 @@ def flash(
         "segments and the image is refused unless it is linked for ITCM/SRAM "
         "(flash.ram-image-not-ram-linked); PC is set from the vector table's reset "
         "handler. Uses the same probe-selection guard, DPIDR preflight, trusted J-Link "
-        "binary and --dry-run as a Flow D write. Needs exactly one slice (--core).",
+        "binary and --dry-run as a Flow D write. Needs exactly one slice (--core), which "
+        "must be the M55 HE core, and --confirm (or ALP_FLASH_FORCE=1 / flash_args.confirm): "
+        "loadbin resets the whole device (AIRCR.SYSRESETREQ, which resets the Secure "
+        "Enclave) and replaces the running image.",
     ),
     ram_console: bool = typer.Option(
         False,

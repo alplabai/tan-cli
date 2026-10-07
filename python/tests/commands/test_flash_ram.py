@@ -123,6 +123,9 @@ class FakeJlink:
         return flash_cmd._Outcome(success=True, stdout=self.load_out, returncode=0)
 
 
+_REAL_LOAD_APERTURES = flash_ram._load_apertures
+
+
 def _manifest(args="{jlink_flash_device: PART}", extra_slices=""):
     return (
         "schema_version: 1\nhw_info: {sku: S}\nslices:\n"
@@ -163,6 +166,7 @@ def _setup(tmp_path, monkeypatch, *, elf=None, binary=None, manifest=None, artef
 
 
 def _run(tmp_path, **kw):
+    kw.setdefault("confirm_flag", True)  # --ram is confirm-gated (bench round 7)
     kw.setdefault("ram", True)
     kw.setdefault("ram_console", False)
     kw.setdefault("ram_wait", 0.0)
@@ -479,3 +483,170 @@ def test_a_symlinked_project_path_still_loads_only_the_staged_copy(tmp_path, mon
     assert rc == 0
     assert str(tmp_path) not in jl.scripts[0] or "tan-ram-" in jl.scripts[0]
     assert "zephyr.bin" not in jl.scripts[0]
+
+
+# ── review round (#1349): core, apertures, confirm, strict transcript ───────
+
+
+def test_ram_run_needs_confirm_like_any_write(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path, confirm_flag=False)
+    assert rc == 1 and jl.scripts == []  # exit non-zero, nothing spawned
+    entry = data["entries"][0]
+    assert entry["status"] == "planned" and "--confirm was not given" in entry["message"]
+    assert "AIRCR.SYSRESETREQ" in entry["message"] and "Secure Enclave" in entry["message"]
+    assert "flash.confirm-required" in _codes(issues)
+    assert "flash.nothing-flashed" in _codes(issues)
+    # --dry-run is unaffected; the manifest key arms it too.
+    rc, data, _i, _l, _s = _run(tmp_path, confirm_flag=False, dry_run=True)
+    assert rc == 0 and data["entries"][0]["status"] == "ok"
+    _setup(tmp_path, monkeypatch, manifest=_manifest("{jlink_flash_device: PART, confirm: true}"))
+    jl = FakeJlink(monkeypatch)
+    rc, _d, _i, _l, _s = _run(tmp_path, confirm_flag=False)
+    assert rc == 0 and [jl.kind(s) for s in jl.scripts] == ["load"]
+
+
+def test_only_the_he_core_is_ram_run(tmp_path, monkeypatch):
+    manifest = _manifest().replace("m55_he", "m55_hp")
+    _setup(tmp_path, monkeypatch, manifest=manifest)
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path, core="m55_hp")
+    assert rc == 1 and jl.scripts == []
+    assert _codes(issues) == ["flash.ram-core-unsupported"]
+    assert "HP core" in data["entries"][0]["message"]
+    rc, _d, issues, _l, _s = _run(tmp_path, core="m55_hp", dry_run=True)
+    assert rc == 1 and _codes(issues) == ["flash.ram-core-unsupported"]
+
+
+def test_an_image_linked_for_the_other_cores_itcm_alias_is_a_core_mismatch(tmp_path, monkeypatch):
+    base = 0x50000000
+    _setup(
+        tmp_path, monkeypatch,
+        elf=make_elf(base=base, entry=base | 1), binary=make_bin(reset=base | 1),
+    )
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path)
+    assert rc == 1 and jl.scripts == [] and _codes(issues) == ["flash.ram-core-mismatch"]
+    assert "M55_HP" in data["entries"][0]["message"]
+
+
+def test_the_apertures_come_from_the_soc_banks_and_bound_the_image():
+    apertures = ram_run.apertures_for("m55_he", E8_BANKS)
+    assert apertures.code == ((0x0, 256 * 1024), (0x58000000, 256 * 1024), (0x02000000, 4096 * 1024))
+    assert apertures.data == ((0x20000000, 256 * 1024), (0x02000000, 4096 * 1024))
+    assert ram_run.apertures_for("m55_he", [("SRAM0", 4096.0)]) is None  # no TCM banks: refuse
+    # Sizes follow the core's OWN banks (HP's DTCM is 1 MiB); whether HP may run at all is
+    # `check_core`'s decision, not this function's.
+    assert ram_run.apertures_for("m55_hp", E8_BANKS).data[0] == (0x20000000, 1024 * 1024)
+    big = make_bin(size=300 * 1024)
+    elf = ram_run.parse_elf(make_elf(filesz=300 * 1024))
+    with pytest.raises(ram_run.RamRunError, match="does not fit"):
+        ram_run.plan_ram_image(elf, big, core_id="m55_he", apertures=apertures)
+    ok = ram_run.plan_ram_image(
+        ram_run.parse_elf(make_elf(filesz=256 * 1024)), make_bin(size=256 * 1024),
+        core_id="m55_he", apertures=apertures,
+    )
+    assert ok.size == 256 * 1024
+
+
+def test_the_console_buffer_must_lie_in_dtcm_or_sram(tmp_path, monkeypatch):
+    apertures = ram_run.apertures_for("m55_he", E8_BANKS)
+    for addr, size in ((0x20040000, 0x40), (0x20000000 + 256 * 1024 - 0x10, 0x40), (0x1000, 0x40)):
+        elf = ram_run.parse_elf(make_elf(symbols={"ram_console_buf": (addr, size)}))
+        with pytest.raises(ram_run.RamRunError, match="outside the core's DTCM/SRAM"):
+            ram_run.plan_ram_image(elf, make_bin(), core_id="m55_he", apertures=apertures)
+    inside = ram_run.parse_elf(make_elf(symbols={"ram_console_buf": (0x20000100, 0x800)}))
+    assert ram_run.plan_ram_image(
+        inside, make_bin(), core_id="m55_he", apertures=apertures
+    ).console == (0x20000100, 0x800)
+    # The read is capped at 64 KiB however large the symbol claims to be.
+    huge = ram_run.parse_elf(make_elf(symbols={"ram_console_buf": (0x02000000, 10_000_000)}))
+    assert ram_run.plan_ram_image(
+        huge, make_bin(), core_id="m55_he", apertures=apertures
+    ).console == (0x02000000, 64 * 1024)
+
+
+def test_without_soc_metadata_a_ram_run_refuses_rather_than_guesses(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(flash_ram, "_load_apertures", _REAL_LOAD_APERTURES)  # no metadata tree
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path)
+    assert rc == 1 and jl.scripts == [] and _codes(issues) == ["flash.ram-failed"]
+    assert "refusing to guess the TCM sizes" in data["entries"][0]["message"]
+
+
+def test_the_real_aperture_loader_reads_the_variant_banks(tmp_path, monkeypatch):
+    import types
+
+    from tan.commands import build_output
+
+    (tmp_path / "metadata").mkdir()
+    variant = {"order_code": "X", "alp_module_skus": ["S"],
+               "sram_banks_kb": {n: k for n, k in E8_BANKS}}
+    monkeypatch.setattr(
+        build_output, "read_sdk_som_and_soc",
+        lambda root, sku, **kw: ("alif:ensemble:e8", "X", [variant], 5.5, []),
+    )
+    ctx = types.SimpleNamespace(sdk_root=str(tmp_path), sku="S")
+    assert flash_ram._load_apertures(ctx, "m55_he").data[0] == (0x20000000, 256 * 1024)
+    monkeypatch.setattr(build_output, "read_sdk_som_and_soc", lambda *a, **k: None)
+    with pytest.raises(ram_run.RamRunError, match="no readable SoM preset"):
+        flash_ram._load_apertures(ctx, "m55_he")
+
+
+def test_a_part_number_jlink_device_is_refused(tmp_path, monkeypatch):
+    _setup(
+        tmp_path, monkeypatch,
+        manifest=_manifest("{jlink_flash_device: PART, jlink_device: AE822FA0E5597LS0_M55_HE}"),
+    )
+    jl = FakeJlink(monkeypatch)
+    rc, data, _i, _l, _s = _run(tmp_path)
+    assert rc == 1 and jl.scripts == []
+    assert "part-number profile" in data["entries"][0]["message"]
+
+
+def test_a_transcript_that_does_not_prove_the_load_is_refused():
+    clean = CLEAN_LOAD
+    assert ram_run.check_session(clean, loadbin=True) is None
+    # No echoes at all: the load cannot be confirmed (a stale ITCM image could boot).
+    msg = ram_run.check_session("Script processing completed.\n", loadbin=True)
+    assert msg and "cannot confirm the load" in msg
+    # Echoed but no O.K.
+    no_ok = clean.replace("O.K.\n", "")
+    assert "did not report 'O.K.'" in ram_run.check_session(no_ok, loadbin=True)
+    # A rejected setpc / go.
+    bad_setpc = clean.replace("J-Link>setpc 0x100\n", "J-Link>setpc 0x100\nERROR: no\n")
+    assert "setpc was rejected" in ram_run.check_session(bad_setpc, loadbin=True)
+    bad_go = clean.replace("J-Link>go\n", "J-Link>go\nCPU could not be started\n")
+    assert "go was rejected" in ram_run.check_session(bad_go, loadbin=True)
+    # The read session needs no echoes.
+    assert ram_run.check_session("Script processing completed.\n", loadbin=False) is None
+
+
+def test_the_attached_core_is_reported_when_jlink_prints_it(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    FakeJlink(monkeypatch)
+    rc, data, _i, _l, _s = _run(tmp_path)
+    assert rc == 0
+    assert data["entries"][0]["jlink"]["attachedCore"] == ["Found Cortex-M55 r1p0, Little endian."]
+
+
+def test_the_elf_reader_bounds_its_input():
+    good = make_elf(symbols={"ram_console_buf": (0x20000000, 0x40)})
+    # An Elf32_Sym entry size below 16 is not a Zephyr image.
+    shoff = struct.unpack_from("<I", good, 32)[0]
+    bad = bytearray(good)
+    struct.pack_into("<I", bad, shoff + 40 + 36, 8)  # section 1 (symtab): sh_entsize = 8
+    with pytest.raises(ram_run.RamRunError, match="entry size"):
+        ram_run.parse_elf(bytes(bad))
+    # Too many sections.
+    many = bytearray(good)
+    struct.pack_into("<H", many, 48, 5000)
+    with pytest.raises(ram_run.RamRunError):
+        ram_run.parse_elf(bytes(many))
+    # Too many symbols.
+    big = bytearray(good)
+    struct.pack_into("<I", big, shoff + 40 + 20, 16 * (ram_run.MAX_SYMBOLS + 1))
+    with pytest.raises(ram_run.RamRunError, match="entries"):
+        ram_run.parse_elf(bytes(big))
