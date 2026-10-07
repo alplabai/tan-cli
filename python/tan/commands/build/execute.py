@@ -1429,7 +1429,7 @@ def execute_slices(
                 ud_now,
                 build_root=build_root,
                 guards_ok=not build_dir_overridden(sl.command.args)
-                and _cwd_under_build_root(sl.command.cwd),
+                and _cwd_under_build_root(sl.command.cwd, cwd, build_root),
                 on_output=on_output,
             )
             configure_cache_issues.extend(ud_issues)
