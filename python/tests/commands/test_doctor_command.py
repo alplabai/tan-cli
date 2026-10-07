@@ -1999,9 +1999,152 @@ def test_a_fully_provisioned_setools_host_passes(tmp_path):
 def test_setools_is_unknown_not_warn_off_linux():
     """`alif_flash.py` hard-codes `app-release-exec-linux`; there is no verdict
     to give a Windows/macOS host, and `unknown` counts in no summary bucket."""
-    check = doctor_cmd.setools_check(setools_dir=None, se_uart=None, is_linux=False)
+    check = doctor_cmd.setools_check(
+        setools_dir=None, se_uart=None, is_linux=False, flash_methods=frozenset({"zephyr_west_flash"})
+    )
     assert check.status == "unknown"
     assert "app-release-exec-linux" in check.detail
+
+
+def test_off_linux_with_no_project_is_method_aware_not_an_early_return():
+    """tan-cli#1323: Flow D is not SE-UART and SETOOLS ships for Windows too."""
+    check = doctor_cmd.setools_check(setools_dir=None, se_uart=None, is_linux=False)
+    assert check.status == "warn"
+    assert "Flow D" in check.detail and "Linux-only" in check.detail
+
+
+def test_off_linux_flow_d_is_checked_like_linux(tmp_path):
+    """`is_linux=False` (simulated; the lookup is `find_app_gen_toc`, which also
+    tries `app-gen-toc.exe` on a real Windows host) must not short-circuit."""
+    toolkit = tmp_path / "app-gen-toc"
+    toolkit.write_text("", encoding="utf-8")
+    toolkit.chmod(0o755)
+    check = doctor_cmd.setools_check(
+        str(tmp_path), None, False, flash_methods=frozenset({"alif_mram_jlink"}), jlink_found=True
+    )
+    assert check.status == "pass", check.detail
+    assert "SE_UART" not in check.detail.replace("no SE-UART", "")
+
+
+_D = frozenset({"alif_mram_jlink"})
+_A = frozenset({"zephyr_west_flash"})
+
+
+def _toolkit(tmp_path, *, executable=True):
+    for name in ("app-gen-toc", "app-write-mram"):
+        f = tmp_path / name
+        f.write_text("", encoding="utf-8")
+        f.chmod(0o755 if executable else 0o644)
+    return str(tmp_path)
+
+
+def test_flow_d_without_se_uart_passes_tan_cli_1323(tmp_path):
+    """The planner-default Flow D path never touches the SE-UART."""
+    check = doctor_cmd.setools_check(
+        _toolkit(tmp_path), None, True, flash_methods=_D, jlink_found=True
+    )
+    assert check.status == "pass"
+    assert "$SE_UART" not in check.detail
+
+
+def test_flow_d_warns_on_missing_jlink(tmp_path):
+    no_jlink = doctor_cmd.setools_check(
+        _toolkit(tmp_path), None, True, flash_methods=_D, jlink_found=False
+    )
+    assert no_jlink.status == "warn"
+    assert "J-Link" in no_jlink.detail and "SE_UART is unset" not in no_jlink.detail
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX execute bit")
+def test_flow_d_warns_on_unexecutable_app_gen_toc(tmp_path):
+    other = tmp_path / "x"
+    other.mkdir()
+    not_exec = doctor_cmd.setools_check(
+        _toolkit(other, executable=False), None, True, flash_methods=_D, jlink_found=True
+    )
+    assert not_exec.status == "warn"
+    assert "app-gen-toc" in not_exec.detail
+
+
+def test_flow_a_still_warns_about_se_uart(tmp_path):
+    check = doctor_cmd.setools_check(_toolkit(tmp_path), None, True, flash_methods=_A)
+    assert check.status == "warn"
+    assert "Flow A" in check.detail and "$SE_UART is unset" in check.detail
+
+
+def test_no_project_does_not_assert_flow_a_when_se_uart_unset(tmp_path):
+    check = doctor_cmd.setools_check(_toolkit(tmp_path), None, True)
+    assert check.status == "pass"
+    assert "Flow D" in check.detail and "Flow A" in check.detail
+
+
+def test_non_setools_project_methods_are_unknown():
+    check = doctor_cmd.setools_check(None, None, True, flash_methods=frozenset({"openocd"}))
+    assert check.status == "unknown"
+
+
+def test_project_methods_resolve_through_select_flash_method(tmp_path):
+    from tan.core.doctor_setools import flash_methods_for_manifest_text, project_flash_methods
+
+    base = "schema_version: 1\nsku: X\nslices:\n"
+    plain = base + "  - core_id: a\n    os: zephyr\n    flash_method: zephyr_west_flash\n"
+    armed = plain + "    flash_args:\n      jlink_flash_device: AE822FA0E5597LS0_M55_HE\n"
+    assert flash_methods_for_manifest_text(plain) == _A
+    assert flash_methods_for_manifest_text(armed) == _D
+    assert flash_methods_for_manifest_text("not: [valid") is None
+    proj = tmp_path / "proj"
+    (proj / "build").mkdir(parents=True)
+    (proj / "build" / "system-manifest.yaml").write_text(armed, encoding="utf-8")
+    assert project_flash_methods(str(proj / "board.yaml")) == _D
+    assert project_flash_methods(str(tmp_path / "none" / "board.yaml")) is None
+    assert project_flash_methods(None) is None
+
+
+_ARMED = (
+    "schema_version: 1\nsku: X\nslices:\n  - core_id: a\n    os: zephyr\n"
+    "    flash_method: zephyr_west_flash\n    flash_args:\n"
+    "      jlink_flash_device: AE822FA0E5597LS0_M55_HE\n"
+)
+
+
+def _setools_check_from_collect(tmp_path, monkeypatch, board_yaml, manifest, toolkit=None):
+    monkeypatch.delenv("SETOOLS_DIR", raising=False)
+    monkeypatch.delenv("SE_UART", raising=False)
+    monkeypatch.setattr(doctor_cmd, "jlink_available", lambda *a: True)
+    if manifest is not None:
+        (tmp_path / "build").mkdir()
+        (tmp_path / "build" / "system-manifest.yaml").write_text(
+            manifest + (f"      setools_dir: {toolkit}\n" if toolkit else ""), encoding="utf-8"
+        )
+    checks = doctor_cmd._collect(str(tmp_path), board_yaml=board_yaml)
+    return next(c for c in checks if c.name == "setools")
+
+
+def test_collect_wires_setools_with_no_project(tmp_path, monkeypatch):
+    check = _setools_check_from_collect(tmp_path, monkeypatch, None, None)
+    assert "Flow D" in check.detail and "Flow A" in check.detail
+
+
+def test_collect_wires_setools_with_no_manifest(tmp_path, monkeypatch):
+    board = tmp_path / "board.yaml"
+    board.write_text("", encoding="utf-8")
+    check = _setools_check_from_collect(tmp_path, monkeypatch, str(board), None)
+    assert "Flow D" in check.detail and "Flow A" in check.detail
+
+
+def test_collect_wires_setools_dir_from_the_manifest_and_flow_d(tmp_path, monkeypatch):
+    """A manifest `flash_args.setools_dir` counts (as for `tan flash`), and a
+    Flow D manifest needs no $SE_UART."""
+    toolkit = tmp_path / "tk"
+    toolkit.mkdir()
+    (toolkit / "app-gen-toc").write_text("", encoding="utf-8")
+    (toolkit / "app-gen-toc").chmod(0o755)
+    board = tmp_path / "board.yaml"
+    board.write_text("", encoding="utf-8")
+    check = _setools_check_from_collect(tmp_path, monkeypatch, str(board), _ARMED, str(toolkit))
+    assert check.status == "pass", check.detail
+    assert "flash_args.setools_dir" in check.detail
+    assert "--setools-dir" in check.detail
 
 
 def test_module_importable_and_has_module_no_longer_exist():
