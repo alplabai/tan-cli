@@ -2,7 +2,7 @@
   "$schema": "One module's entry in the tan-cli#668 size ratchet, produced by `python scripts/regen_module_size_budget.py` -- see module_size_budget.d/README.md. `long_functions` is the sorted [span, name] list of every function in this module over FUNCTION_CAP (tan-cli#1173) -- not a count, so a function crossing the cap while a different one drops below it in the same module is visible here instead of netting to no change. Do not hand-edit; a value that does not match a real measurement fails `regen_module_size_budget.py --check` and the gate.",
   "module": "tan/planner/kconfig.py",
   "kind": "budget",
-  "lines": 2309,
+  "lines": 2388,
   "long_functions": [
     [
       51,
@@ -10,11 +10,11 @@
     ],
     [
       62,
-      "_emit_ota"
+      "_emit_soc_summary"
     ],
     [
-      62,
-      "_emit_soc_summary"
+      64,
+      "_emit_ota"
     ],
     [
       64,
@@ -33,16 +33,16 @@
       "_emit_cross_core_shmem_cache"
     ],
     [
-      76,
-      "_slice_local_conf"
+      85,
+      "_emit_libraries"
     ],
     [
-      80,
+      90,
       "_slice_alp_conf"
     ],
     [
-      85,
-      "_emit_libraries"
+      94,
+      "_slice_local_conf"
     ],
     [
       110,
@@ -61,7 +61,7 @@
       "_emit_chips"
     ],
     [
-      234,
+      241,
       "_emit_inference"
     ]
   ]

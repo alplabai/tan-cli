@@ -114,6 +114,12 @@ HAND_PORT_TAN_SIDE: dict[str, tuple[str, ...]] = {
         "tan/planner/project_emit/__init__.py",
         "tan/planner/slugs.py",
     ),
+    # The in-process `--emit` front door: `tan/planner_emit.py` says it mirrors
+    # `_run_v2_per_core_emit` and `main()` line for line. One upstream file,
+    # one tan file that exists to implement it -- the clean shape. Pinned
+    # because the `dts-overlay` M33-ownership append (alp-sdk#2673) landed
+    # upstream here and was missed while nothing tracked this file.
+    "scripts/alp_project.py": ("tan/planner_emit.py",),
     "scripts/alp_project_emit/bom_netlist.py": ("tan/planner/project_emit/bom_netlist.py",),
     "scripts/alp_project_emit/dts.py": ("tan/planner/project_emit/dts.py",),
     "scripts/alp_project_emit/hw_info.py": ("tan/planner/project_emit/hw_info.py",),

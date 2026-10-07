@@ -53,7 +53,6 @@ untouched, the same as `command.cwd`.
 """
 import re
 import sys
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -94,10 +93,6 @@ class TokenValues:
     toolchain_root: str | None
 
 
-#: Where a deferred placeholder was recognised from.
-ORIGIN_PLAN = "plan"
-ORIGIN_BOARD_YAML = "board-yaml"
-
 #: The artefact kinds a placeholder may stay in, told apart by the artefact's
 #: file name (the only thing a plan carries about it). `alp.conf` and every
 #: other `*.conf` except `local.conf` is a Zephyr Kconfig fragment; `local.conf`
@@ -133,7 +128,6 @@ class DeferredPlaceholder:
 
     name: str
     field: str
-    origin: str
     live_kconfig: bool = False
 
 
@@ -145,42 +139,28 @@ def _line_is_comment(text: str, start: int) -> bool:
 class DeferredPolicy:
     """Which leftover `${NAME}` values a config artefact may keep (tan-cli#1302).
 
-    `listed` is the plan's own `deferredPlaceholders` (`None` when the plan
-    has no such key). When it is a tuple -- even an empty one -- it is
-    AUTHORITATIVE: the board.yaml values are never consulted. Only a plan with
-    no key at all falls back to the interim rule: some string VALUE of the
-    project's own board.yaml must equal `${NAME}` exactly (pending
-    alp-sdk#2696). `board_values` is a reader so the file is parsed lazily,
-    once, and only if a leftover token needs the answer; it returns `None`
-    for an unreadable or unparseable file.
+    `listed` is the plan's own `deferredPlaceholders` (alp-sdk#2696), the
+    ONLY source: a name is admitted when the plan lists it, and nothing is
+    admitted when the plan carries no such key (`None`) -- every plan tan's
+    own planner renders carries one, so an absent key means an older or
+    hand-written plan, and that keeps the unresolved-token refusal.
 
     `exempted` collects every placeholder admitted, in encounter order -- the
     caller reports them.
     """
 
-    def __init__(
-        self,
-        listed: tuple[str, ...] | None,
-        board_values: Callable[[], frozenset[str] | None],
-    ) -> None:
+    def __init__(self, listed: tuple[str, ...] | None) -> None:
         self._listed = frozenset(listed) if listed is not None else None
-        self._read_board = board_values
-        self._board: tuple[frozenset[str] | None] | None = None
         self.exempted: list[DeferredPlaceholder] = []
 
     @property
     def has_plan_list(self) -> bool:
         return self._listed is not None
 
-    def _board_values(self) -> frozenset[str] | None:
-        if self._board is None:
-            self._board = (self._read_board(),)
-        return self._board[0]
-
     @staticmethod
     def hintable(token: str, artefact_path: str) -> bool:
-        """Whether a refusal of `token` in this artefact is one a plan list
-        or a board.yaml value would have cured."""
+        """Whether a refusal of `token` in this artefact is one a plan
+        `deferredPlaceholders` entry would have cured."""
         m = _BRACE_NAME.fullmatch(token)
         return (
             m is not None
@@ -195,19 +175,10 @@ class DeferredPolicy:
         if not self.hintable(token, artefact_path):
             return False
         name = _BRACE_NAME.fullmatch(token).group(1)  # type: ignore[union-attr]
-        if self._listed is not None:
-            if name not in self._listed:
-                return False
-            origin = ORIGIN_PLAN
-        else:
-            values = self._board_values()
-            if values is None or token not in values:
-                return False
-            origin = ORIGIN_BOARD_YAML
+        if self._listed is None or name not in self._listed:
+            return False
         live = artefact_kind(artefact_path) == KIND_KCONFIG and not _line_is_comment(text, start)
-        self.exempted.append(
-            DeferredPlaceholder(name=name, field=field, origin=origin, live_kconfig=live)
-        )
+        self.exempted.append(DeferredPlaceholder(name=name, field=field, live_kconfig=live))
         return True
 
 
@@ -240,7 +211,7 @@ class LeftoverToken(PlanTokenError):
         self.field = field
         self.token = token
         #: A config-artefact `${NAME}` that a plan `deferredPlaceholders`
-        #: entry or a board.yaml value would have admitted (tan-cli#1302).
+        #: entry would have admitted (tan-cli#1302).
         self.deferrable = deferrable
 
 
