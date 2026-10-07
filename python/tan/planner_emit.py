@@ -404,14 +404,16 @@ def _render_dts_overlay(project, shaped, core: str | None) -> str:
     # v2 contributes only the peripherals list: union across
     # Zephyr/baremetal cores (or one core when --core is set).
     if core is not None:
-        slice_ = project.cores[core]
-        out = _emit_dts_overlay(
-            shaped, project.som_preset, project.board_preset,
-            v2_peripherals=sorted(set(slice_.peripherals)),
-            v2_core_id=core,
-            v2_core_os=slice_.os,
-            v2_core_ids=[core],
-        )
+        # The slice's own overlay IS the build plan's `alp.overlay`
+        # configArtefact (tan-cli#1216, ADR-0026 §D): one function, so
+        # `tan generate --core` and `tan build`'s plan cannot disagree. It
+        # also appends the M33-ownership nodes, so this path returns early.
+        from tan.planner.buildplan import _slice_dts_overlay  # noqa: PLC0415
+
+        try:
+            return _slice_dts_overlay(project, project.cores[core])
+        except OrchestratorError as err:
+            raise PlannerEmitError(str(err)) from err
     else:
         union: set[str] = set()
         zephyr_core_ids: list[str] = []

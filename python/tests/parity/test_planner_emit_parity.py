@@ -1344,6 +1344,46 @@ def test_yocto_conf_matches_the_build_plans_own_config_artefact(
         pytest.skip(f"{board}: no yocto slice to compare")
 
 
+def _plan_artefacts_by_core(relocated, board: Path, project) -> dict[str, dict[str, str]]:
+    """`{coreId: {file name: contents}}` from the plan `emit_build_plan` emits."""
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    return {
+        sl["coreId"]: {a["path"].rsplit("/", 1)[-1]: a["contents"]
+                       for a in sl["configArtefacts"]}
+        for sl in plan["slices"]
+    }
+
+
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_dts_overlay_matches_the_build_plans_own_config_artefact(planners, board):
+    """tan-cli#1216 (ADR-0026 §D): `tan generate --target dts-overlay --core
+    <id>` and the plan's `alp.overlay` `configArtefacts[]` entry are one
+    function (`buildplan._slice_dts_overlay`), so the bytes cannot diverge.
+    """
+    _, relocated = planners
+    try:
+        project = relocated.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted elsewhere")
+
+    by_core = _plan_artefacts_by_core(relocated, board, project)
+    compared = 0
+    for core_id in sorted(project.cores):
+        want = by_core.get(core_id, {}).get("alp.overlay")
+        if want is None:
+            continue  # yocto/off slice, or a board with no header to render from
+        got = planner_emit.render(
+            "dts-overlay", sdk_root=SDK, board_yaml=board, core=core_id)
+        assert got == want, (
+            f"{board} --core {core_id}: `tan generate --target dts-overlay` "
+            "diverges from the build-plan's own configArtefacts[].contents -- "
+            + _first_diff(want, got))
+        compared += 1
+    if compared == 0:
+        pytest.skip(f"{board}: no slice carries an alp.overlay to compare")
+
+
 def _oracle_board_tree(board: Path, core: str, destination: Path) -> tuple[int, dict]:
     """`alp_project.py --emit zephyr-board --output <dir>`, in-process.
 
