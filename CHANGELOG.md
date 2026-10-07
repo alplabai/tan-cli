@@ -13,9 +13,10 @@ patch (`0.6.1`) — see the matching `BREAKING` entry below for each one's
 exact before/after:
 
 - tan's effective alp-sdk floor rises to the first alp-sdk release
-  containing commit `34c11c9de04e264fdcab2bc0d58b328d9d117ca8` (moved from
-  `c81cb5db9945c8f448a7bb952d374f874e2f42c0` by the planner re-sync
-  tan-cli#1278, which had itself moved it from
+  containing commit `ac0e2a5e096a1c8c102818650a688d0f7e709066` (moved from
+  `34c11c9de04e264fdcab2bc0d58b328d9d117ca8` by the planner re-sync
+  tan-cli#1309; `34c11c9de` had itself replaced
+  `c81cb5db9945c8f448a7bb952d374f874e2f42c0` at tan-cli#1278, and that
   `81a9d515a90403cce30588704e31faf9dc893838` at tan-cli#1275; each is an
   ancestor of the next); `tan build`
   on *any* Zephyr board against an older alp-sdk fails Kconfig configure
@@ -63,8 +64,8 @@ exact before/after:
   `init.som-block-unsupported` (#1041)
 
 *DRAFT — replace this paragraph before tagging.* The tag itself is blocked
-on this: no alp-sdk release contains `34c11c9de` yet (tan-cli#1258, still
-OPEN; `git tag --contains 34c11c9de` is empty), so this note cannot yet name
+on this: no alp-sdk release contains `ac0e2a5e0` yet (tan-cli#1258, still
+OPEN; `git tag --contains ac0e2a5e0` is empty), so this note cannot yet name
 a real floor version. Once one ships, replace this whole paragraph with one
 line: "Requires alp-sdk `vX.Y.Z` or newer" (the `v0.6.0` precedent,
 tan-cli#1258's "Done when" list) — see `docs/release-contract.md`'s own
@@ -75,10 +76,12 @@ alplabai/alp-sdk`), which carries neither
 `metadata/e1m_modules/aen/on-module-links.yaml` nor
 `metadata/e1m_modules/v2n/supervisor-links.yaml`, both of which the pinned
 planner now requires, nor the som-preset v2 presets (alp-sdk#2024) tan now
-reads. The floor itself moved twice since this paragraph was first written:
-`81a9d515` (tan-cli#1258/#1268) was superseded by `c81cb5db` when
-tan-cli#1275 re-synced `tan/planner/` further, and `c81cb5db` by
-`34c11c9de` at tan-cli#1278; each is an ancestor of the next. See
+reads. The floor itself moved three times since this paragraph was first
+written: `81a9d515` (tan-cli#1258/#1268) was superseded by `c81cb5db` when
+tan-cli#1275 re-synced `tan/planner/` further, `c81cb5db` by `34c11c9de` at
+tan-cli#1278, and `34c11c9de` by `ac0e2a5e0` at tan-cli#1309; each is an
+ancestor of the next. Re-checked 2026-10-07: `v0.16.0` is still the newest
+alp-sdk release and does not contain `ac0e2a5e0`. See
 `docs/release-contract.md` and tan-cli#1258 for the full gate measurement.
 
 ### Fixed

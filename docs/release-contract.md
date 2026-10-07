@@ -612,19 +612,34 @@ all `schema_version: 1`. No alp-sdk tag contains `34c11c9de` yet, as of
 2026-10-03 (`git tag --contains 34c11c9de` is empty; the newest release is
 `v0.16.0`).
 
+**Addendum (2026-10-07, tan-cli#1309).** The planner mirror moved past
+`34c11c9de` to alp-sdk `ac0e2a5e096a1c8c102818650a688d0f7e709066`
+(`34c11c9de` is an ancestor) along the same seven pin sites;
+`STRICT_LOADERS_PINNED_SDK_COMMIT` stays at `34c11c9de`, because
+`scripts/strict_loaders.py` did not change in that range. `ac0e2a5e0` is now
+the floor the next tag needs, superseding `34c11c9de`. It adds two more hard
+requirements on top of the ones above: `tan new-som` scaffolds the som-preset
+`inference.auto_order` field (alp-sdk#2677), which the som-preset v2 schema
+before that change rejects; and `tan generate --target zephyr-board` for a
+V2N/V2M `m33_sm` core reads the CM33 `watchdog` block from the SoC spec
+(alp-sdk#2679), refusing an SDK whose spec has none. No alp-sdk tag
+contains `ac0e2a5e0` yet, as of 2026-10-07 (the newest release is still
+`v0.16.0`).
+
 **Decision for the next tag (maintainer, 2026-09-10).** The same option 3 as
 tan-cli#591: tan `0.6.1` waits for a stable alp-sdk release whose tag
-contains `34c11c9de` (superseding the `20fec7a7` floor this decision
-originally named, via the interim `81a9d515` and `c81cb5db` floors -- see
-the addenda above, tan-cli#1268, tan-cli#1275 then tan-cli#1278;
+contains `ac0e2a5e0` (superseding the `20fec7a7` floor this decision
+originally named, via the interim `81a9d515`, `c81cb5db` and `34c11c9de`
+floors -- see the addenda above, tan-cli#1268, tan-cli#1275, tan-cli#1278
+then tan-cli#1309;
 alp-sdk#2047, milestone `v0.17.0`). No SDK-capability gate is added around `memory[]` or
 any other row. (The renumbering addendum below moves this release's name
 from `0.6.1` to `0.7.0`; the floor itself is unaffected by that rename.)
 Done when:
 
 - every row above reads **YES** and names that tag, and that tag contains
-  `34c11c9de` (so its `metadata/e1m_modules/*.yaml` presets are
-  `schema_version: 2`);
+  `ac0e2a5e0` (so its `metadata/e1m_modules/*.yaml` presets are
+  `schema_version: 2` with `inference.auto_order`);
 - the **whole** `release-sdk-parity` job is green on the tag push, in the sense
   defined under "The check.": all three `--sdk` scripts exit 0, the guard and
   the breadth node PASSED, and the pytest log shows no parity failures (the
