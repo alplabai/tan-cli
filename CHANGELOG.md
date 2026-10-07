@@ -8260,6 +8260,16 @@ this line. See `docs/release-contract.md` and tan-cli#1258.*
 
 ### Added
 
+- **`tan build -D NAME=VALUE` (repeatable) now works on planned (`board.yaml`)
+  builds**, so examples documented with `-DSHIELD=...` /
+  `-DCONFIG_...=...` build as documented. The definitions go after the plan's
+  own args on every Zephyr slice (or only those named by the new
+  `--core <id>`, repeatable), so CMake's last-wins lets them override the
+  plan; `EXTRA_CONF_FILE` / `EXTRA_DTC_OVERLAY_FILE` (and a sysbuild
+  `<image>_` form) are appended `;`-joined to tan's list instead, and
+  `-D BOARD` / `-D Python3_EXECUTABLE` are refused (`build.define-reserved`).
+  The envelope records them as `data.defines` (`args`, `slices`); `-D` with
+  no Zephyr slice is `build.define-no-target` (tan-cli#1382)
 - **`tan build --project <dir> --board <zephyr-board-target>` builds a
   `board.yaml`-less Zephyr example** (alp-sdk's bench examples such as
   `examples/aen/aen-inference-latency`) as one Zephyr slice, through the same

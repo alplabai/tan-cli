@@ -142,6 +142,5 @@ def test_board_with_existing_board_yaml_conflicts(world):
 
 
 def test_define_without_board_and_bad_board_refused(world):
-    assert envelope_of(_run(world, "-D", "A=1"))["issues"][0]["code"] == "build.conflicting-flags"
     env = envelope_of(_run(world, "--board", "a b"))
     assert env["exitCode"] == 2 and env["issues"][0]["code"] == "build.invalid-argument"
