@@ -62,17 +62,20 @@ write is about to go to.
 from __future__ import annotations
 
 import codecs
+import contextlib
+import dataclasses
 import functools
 import os
 import posixpath
 import re
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -174,6 +177,27 @@ from tan.core.setools import (
     sign_slot0,
     unresolved_message,
 )
+from tan.core.atoc_replacement import (
+    replacement_detail,
+    resident_regions,
+    resident_entries,
+    written_entries,
+)
+from tan.core.flow_d_report import (
+    SectorOverlapError,
+    find_overlaps,
+    VERIFICATION_CACHE,
+    VERIFICATION_NOTE,
+    VERIFICATION_READBACK,
+    VERIFICATION_READBACK_NOTE,
+    dpidr_in,
+    planned_write,
+    readback_script,
+    reset_failures,
+    sha256_of,
+    transcript_tail,
+)
+from tan.core.setools_scratch import cleanup_scratch, family_mismatch, resolve_device_config
 from tan.core.tool_lookup import resolve_program_positions, resolve_tool
 from tan.core.venv import prepend_path, tool_in_venv, venv_bin_dir, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -288,6 +312,30 @@ class _Entry:
     #: `selector-conflict`) when this entry refused on probe selection. Read by
     #: `_run`, never emitted by `as_dict()`.
     probe_refusal: str | None = None
+    #: tan-cli#1320: the `flash_method` the manifest DECLARES, set only when it
+    #: differs from the resolved `method` this entry ran under (Flow D upgrade
+    #: of a `zephyr_west_flash` slice). Emitted as `methodDeclared`.
+    method_declared: str | None = None
+    #: tan-cli#1322: the full REGISTERED issue code a refusal carries when it must
+    #: not report the generic `flash.entry-failed` (`flash.device-config-missing`).
+    #: Read by `_run`, never emitted by `as_dict()`.
+    issue_code: str | None = None
+    #: tan-cli#1321: the write itself landed and `verifybin` passed, but J-Link's
+    #: own transcript says the PIN reset did not. `_run` appends a
+    #: `flash.jlink-reset-unconfirmed` warning. Never emitted by `as_dict()`.
+    reset_unconfirmed: bool = False
+    #: tan-cli#1343 review: a preview that did not run `app-gen-toc` because the
+    #: SETOOLS install came only from the manifest. `_run` appends an `info`
+    #: `flash.preview-sign-skipped`. Never emitted by `as_dict()`.
+    preview_sign_skipped: bool = False
+    #: tan-cli#1343 review: the device configuration names another Alif family than
+    #: this slice's J-Link part profile (the warning text). `_run` appends a
+    #: `flash.device-config-mismatch` warning.
+    device_config_warning: str | None = None
+    #: Additive envelope blocks (`setools`, ...) -- ONE dict shared with the
+    #: run, because some of it (`setools.scratchRemoved`) is only known after
+    #: the entry has been built, when its scratch tree is torn down.
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"kind": self.kind, "id": self.id}
@@ -299,8 +347,11 @@ class _Entry:
         out["status"] = self.status
         out["rc"] = self.rc
         out["message"] = self.message
+        if self.method_declared is not None:
+            out["methodDeclared"] = self.method_declared
         if self.probe is not None:
             out["probe"] = self.probe
+        out.update(self.extra)
         return out
 
 
@@ -1754,22 +1805,17 @@ def _execute_message(outcome: _Outcome, method: str, entry_id: str) -> str:
     return f"{method}[{entry_id}]: flash command failed"
 
 
-#: The two J-Link Commander phrases that mean the post-write PIN-reset
-#: (`RSetType 2` / `r` / `g`, `plan_alif_mram_jlink`'s own script) asked the
-#: core to halt and it refused -- the documented busy-resident case: an image
-#: that never idles keeps the core running, so `VC_CORERESET` cannot halt it
-#: (tan-cli#522). Matched against whatever JLinkExe printed, not derived from
-#: the exit code -- JLinkExe still exits 0 here (`outcome.success` is `True`;
-#: the WRITE and its `verifybin` genuinely succeeded), so the exit code alone
-#: cannot tell this run apart from one whose reset actually landed.
-_FLOW_D_HALT_FAILURE_MARKERS = ("Failed to halt CPU", "CPU is not halted")
-
-#: The exact tail `plan_alif_mram_jlink` always appends to `ok_message` --
-#: see its own `f"...; verified and PIN-reset"` lines. Matched verbatim so the
-#: qualification below is a targeted substring swap, not a re-derivation of
-#: the message shape.
-_FLOW_D_VERIFIED_AND_RESET = "; verified and PIN-reset"
-_FLOW_D_VERIFIED_ONLY = "; verified; reset requested, core was busy and did not halt"
+#: The exact tail `plan_alif_mram_jlink` always appends to `ok_message` -- see its
+#: own `f"...; cache-verified and PIN-reset"` lines (tan-cli#1321: "verified" was
+#: `verifybin` against J-Link's flash CACHE, not a chip readback). Matched
+#: verbatim so the qualification below is a targeted substring swap, not a
+#: re-derivation of the message shape. The markers that trigger it are
+#: `flow_d_report.RESET_FAILURE_MARKERS` (tan-cli#522, #1321).
+_FLOW_D_VERIFIED_AND_RESET = "; cache-verified and PIN-reset"
+_FLOW_D_VERIFIED_ONLY = (
+    "; cache-verified; PIN-reset NOT confirmed (reset requested, core was busy and "
+    "did not halt)"
+)
 
 
 def _flow_d_reset_qualified_message(ok_message: str, outcome: _Outcome) -> str:
@@ -1817,8 +1863,7 @@ def _flow_d_reset_qualified_message(ok_message: str, outcome: _Outcome) -> str:
     2s/4s bound), so this is documented risk, not a reproduced defect."""
     if _FLOW_D_VERIFIED_AND_RESET not in ok_message:
         return ok_message
-    transcript = outcome.stdout + outcome.stderr
-    if not any(marker in transcript for marker in _FLOW_D_HALT_FAILURE_MARKERS):
+    if not reset_failures(outcome.stdout + outcome.stderr):
         return ok_message
     return ok_message.replace(_FLOW_D_VERIFIED_AND_RESET, _FLOW_D_VERIFIED_ONLY)
 
@@ -2063,6 +2108,12 @@ class _Context:
     #: `flash_args.jlink_serial` for this run; see `tan.core.jlink_probe`.
     probe_serial: str | None = None
     probe_usb_path: str | None = None
+    #: `--no-device-config` (tan-cli#1322): sign an app-only ATOC with no `DEVICE`
+    #: entry. Default `False` -- the DEVICE entry is part of every auto-signed ATOC.
+    no_device_config: bool = False
+    #: `--readback` (tan-cli#1321): after a Flow D write, re-read every written
+    #: region in a FRESH J-Link session and compare sha256.
+    readback: bool = False
     #: Read-only J-Link enumeration, injectable so tests never touch real USB.
     #: `None` resolves to the module's `enumerate_jlinks` at call time.
     enumerate_probes: Callable[[], Any] | None = None
@@ -2370,7 +2421,14 @@ def _resolve_flow_d_atoc_path(flash_args: Any, build_root: str, sdk_root: str) -
 
 
 def _resolve_flow_d_atoc_via_setools(
-    flash_args: Any, shape: FlowDShape, ctx: _Context, entry_id: str, confirm: bool
+    flash_args: Any,
+    shape: FlowDShape,
+    ctx: _Context,
+    entry_id: str,
+    confirm: bool,
+    *,
+    stack: contextlib.ExitStack | None = None,
+    report: dict[str, Any] | None = None,
 ) -> tuple[Any, str | None]:
     """tan-cli#353's remaining half: when Flow D still has no `atoc`/
     `atoc_address` after the explicit-value and `atoc_map` resolutions above
@@ -2383,59 +2441,38 @@ def _resolve_flow_d_atoc_via_setools(
 
     `shape` is `validate_flow_d_shape`'s result -- the caller (`_flash_entry`,
     tan-cli#366/#367) validates + resolves it BEFORE this function ever runs,
-    so `shape.artefact` is ALREADY the raw `.bin` to hand `app-gen-toc` (the
-    same ELF-only sibling resolution `plan_alif_mram_jlink` uses for the
-    eventual `loadbin`, from the ONE shared definition,
-    `flash_plan.resolve_slot0_binary`) and a manifest that would fail that
-    check has already failed BEFORE reaching this function, real run or
-    `--dry-run` alike -- this function no longer re-derives or re-checks
-    either.
+    so `shape.artefact` is ALREADY the raw `.bin` to hand `app-gen-toc`.
 
-    `confirm` -- the SAME confirm gate `plan_alif_mram_jlink` itself applies
-    to the real MRAM write (`ctx.force_confirm` OR `flash_args.confirm`),
-    computed by the caller BEFORE this function runs. tan-cli#487, defect 5:
-    this function's own real-sign branch used to be gated on `ctx.dry_run`
-    ALONE, so a plain `tan flash` on a fresh manifest -- confirm gate not
-    armed, but also not `--dry-run` -- spawned `app-gen-toc` for REAL: wrote
-    `build/images/<id>.bin` / `build/config/<id>-slot0.json` into the
-    customer's SETOOLS install, APPENDED to the install-wide, hand-run-
-    inclusive `build/app-package-map.txt`, and overwrote the shared `build/
-    AppTocPackage.bin` -- on a run that goes on to hit the confirm gate and
-    refuse the MRAM write it was signing FOR. The SETOOLS auto-sign is
-    itself a real write and must not run just because the run is not ALSO a
-    preview.
+    **tan-cli#1325: the sign runs in a private scratch overlay of the SETOOLS
+    install** (`tan.core.setools_scratch`), so it is side-effect-free on the
+    customer's shared install and is now done under `--dry-run` and an
+    unconfirmed run too -- which is what lets the preview show the real ATOC
+    placement (tan-cli#1318). It used to be skipped there (tan-cli#487, defect 5)
+    precisely because it wrote `build/` in the shared install; that hazard no
+    longer exists, so `confirm` is accepted for call-site stability and unused.
+    The scratch tree is registered on `stack` for removal when the entry ends
+    (J-Link reads the ATOC out of it), and described in `report["setools"]`
+    (`dir`, `source`, `scratch`, `scratchRemoved`). `stack=None` -- a direct
+    call -- leaves the scratch tree for the caller.
 
-    Returns `(flash_args, note)`. `note` is `None` on the one path that never
+    Returns `(flash_args, note)`. `note` is `None` only on the path that never
     touched SETOOLS at all -- an already-resolved no-op (an explicit `atoc`/
-    `atoc_map`, or `atoc_address` already present). Every path that DOES touch
-    SETOOLS returns a non-`None` `note` naming `setools.path`/`setools.source`
-    (tan-cli#373): under `--dry-run` OR an unconfirmed real run it describes
-    what WOULD be signed and `flash_args` is left with `atoc`/`atoc_address`
-    still absent (signing writes real files into the customer's SETOOLS
-    install and spawns a real tool, which neither a preview nor an unarmed
-    confirm gate may do); a CONFIRMED real run instead describes what WAS
-    just signed, with `flash_args` fully resolved for `plan_alif_mram_jlink`
-    to consume. The caller (`_flash_entry`) tells the two apart by `ctx.
-    dry_run or not confirm`, which it already has: the preview note is the
-    entry's own terminal message, the real-sign note is an EXTRA line ahead
-    of the real write's own ok/fail message -- previously `setools.source`
-    reached a customer only via a FAILURE (`missing_tool_message`/
-    `unresolved_message`), never on a run that succeeded.
+    `atoc_map`, or `atoc_address` already present). Otherwise `flash_args`
+    carries the scratch `atoc`/`atoc_address` and `note` names the SETOOLS
+    install and scratch path.
 
     Raises `FlashPlanError` for: SETOOLS unresolved, resolved but not a real
     install, no `flash_args.slot0_load_address` to give `app-gen-toc` as its
     `mramAddress`, or the sign step itself failing -- the caller's existing
-    `except FlashPlanError` arm (mirroring `_resolve_flow_d_atoc_address`/
-    `_resolve_flow_d_atoc_path` above) reports it as the entry's
-    `flash.entry-failed` message.
+    `except FlashPlanError` arm reports it as the entry's `flash.entry-failed`
+    message.
 
     **Only when the manifest points at NOTHING signing-related at all.** A
     customer who already supplied an explicit `atoc` (a blob they signed
     themselves) or `atoc_map` (pointing at their own `app-gen-toc` run) gets
-    NONE of this -- even if that path did not fully resolve (e.g. the map has
-    not materialised yet) `plan_alif_mram_jlink`'s own precise refusal is the
-    right one, not a fresh SETOOLS sign silently overriding what they already
-    pointed tan at.
+    NONE of this -- `plan_alif_mram_jlink`'s own precise refusal is the right
+    one for a path that did not fully resolve, not a fresh sign silently
+    overriding what they already pointed tan at.
     """
     if fa_str(flash_args, "atoc") is not None or fa_str(flash_args, "atoc_map") is not None:
         return flash_args, None
@@ -2444,7 +2481,9 @@ def _resolve_flow_d_atoc_via_setools(
 
     setools = resolve_setools_dir(flash_args, os.environ, ctx.setools_dir)
     if setools is None:
-        raise FlashPlanError(unresolved_message())
+        raise FlashPlanError(
+            unresolved_message(ctx.sku, fa_str(flash_args, "jlink_flash_device"))
+        )
     app_gen_toc = find_app_gen_toc(setools.path)
     if app_gen_toc is None:
         raise FlashPlanError(missing_tool_message(setools))
@@ -2464,29 +2503,91 @@ def _resolve_flow_d_atoc_via_setools(
             "flash_args.atoc_address yourself."
         )
 
-    if ctx.dry_run or not confirm:
-        # Planning only -- report what WOULD be signed without touching the
-        # customer's SETOOLS install or spawning a real tool. tan-cli#487:
-        # `not confirm` closes defect 5 -- a real (non-`--dry-run`) run whose
-        # confirm gate is not armed previews exactly like a dry run instead
-        # of signing for real and then refusing the write it signed for.
-        why = "dry-run" if ctx.dry_run else "flash_args.confirm is false"
+    if (ctx.dry_run or not confirm) and not setools.operator_supplied:
+        # tan-cli#1343 review: a PREVIEW must not execute a binary the PROJECT picked.
+        # `flash_args.setools_dir` lives in the manifest, which a checkout controls, so
+        # app-gen-toc is only run for a preview when the operator named the install
+        # (`--setools-dir` / `$SETOOLS_DIR`). A confirmed write still signs: the
+        # operator armed it knowing what the manifest says.
+        if report is not None:
+            report["setools"] = {
+                "dir": setools.path, "source": setools.source, "signSkipped": True,
+            }
         return flash_args, (
-            f"would sign {shape.artefact} with SETOOLS at {setools.path} (via "
-            f"{setools.source}) -> build/config/{entry_id}-slot0.json, then run "
-            f"app-gen-toc -- not run ({confirm_gate_note(why)})"
+            f"ATOC placement not computed; pass --setools-dir (or set SETOOLS_DIR) to "
+            f"preview it -- the SETOOLS install here ({setools.path}) comes only from "
+            "flash_args.setools_dir in the manifest, and a preview does not run a tool "
+            "the project chose"
         )
 
-    atoc_path, address = sign_slot0(
-        setools.path, app_gen_toc, shape.artefact, entry_id, shape.app_address
+    # tan-cli#1322: the DEVICE entry is part of the ATOC unless the operator opted
+    # out. Resolved BEFORE the sign so a missing config refuses without spawning.
+    device = None
+    if not ctx.no_device_config:
+        explicit = fa_str_checked(flash_args, "setools_device_config", False)
+        if explicit is not None:
+            explicit = resolve_artefact_path(explicit, ctx.build_root, ctx.sdk_root, _is_file)
+        device = resolve_device_config(explicit, setools.path, entry_id=entry_id)
+
+    block: dict[str, Any] = {
+        "dir": setools.path,
+        "source": setools.source,
+        "scratch": None,
+        "scratchRemoved": False,
+        "deviceConfig": (
+            {
+                "included": True, "path": device.path, "source": device.source,
+                "metadataDevice": device.metadata_device,
+            }
+            if device is not None
+            else {"included": False, "optOut": "--no-device-config"}
+        ),
+    }
+    if device is not None:
+        warning = family_mismatch(device.metadata_device, fa_str(flash_args, "jlink_flash_device"))
+        if warning:
+            block["deviceConfig"]["warning"] = warning
+    if report is not None:
+        report["setools"] = block
+
+    def _on_scratch(path: str) -> None:
+        # Registered BEFORE app-gen-toc runs (an interrupt mid-sign must not leak it).
+        block["scratch"] = path
+        if stack is not None:
+            _register_scratch(stack, report if report is not None else {}, path)
+
+    signed = sign_slot0(
+        setools.path, app_gen_toc, shape.artefact, entry_id, shape.app_address,
+        device_config=device, on_scratch=_on_scratch,
     )
+    if signed.shared_touched:
+        block["sharedInstallTouched"] = list(signed.shared_touched)
+    if report is not None:
+        report["atoc"] = {
+            "address": signed.atoc_address,
+            "size": signed.atoc_size,
+            "entries": [
+                {"name": n, "objAddress": a} for n, a in signed.report.entries
+            ],
+        }
     merged = dict(flash_args)
-    merged["atoc"] = atoc_path
-    merged["atoc_address"] = address
+    merged["atoc"] = signed.atoc_path
+    merged["atoc_address"] = signed.atoc_address
     return merged, (
         f"signed {shape.artefact} with SETOOLS at {setools.path} (via "
-        f"{setools.source}) -> {atoc_path} @ {address}"
+        f"{setools.source}) in scratch copy {signed.scratch_dir} -> "
+        f"{signed.atoc_path} @ {signed.atoc_address}"
     )
+
+
+def _entry_head(kind: str, entry_id: str, method: str, declared: str | None) -> str:
+    """`flash: slice 'm55_he' -> alif_mram_jlink (manifest declares
+    zephyr_west_flash)` -- the resolved transport, plus the declared one when
+    tan-cli#1320's Flow D selection upgraded it."""
+    head = f"flash: {kind} '{entry_id}' -> {method}"
+    if declared and declared != method:
+        head += f" (manifest declares {declared})"
+    return head
 
 
 def _flash_entry(
@@ -2496,6 +2597,44 @@ def _flash_entry(
     yocto_wic_stat: Callable[[str], os.stat_result] = os.stat,
 ) -> tuple[int, _Entry, list[str]]:
     """Dispatch + run one target. Returns `(rc, entry, text-lines)`.
+
+    tan-cli#1325: a Flow D SETOOLS sign runs in a private scratch overlay that
+    must outlive the sign (J-Link reads the ATOC from it) and not outlive the
+    entry. This wrapper owns that lifetime -- every return path of the body
+    below, a raise included, removes the scratch tree -- and stamps the
+    envelope's `setools.scratchRemoved` once it is gone.
+    """
+    report: dict[str, Any] = {}
+    with contextlib.ExitStack() as scratch_stack:
+        return _flash_entry_body(
+            target, ctx, scratch_stack, report, yocto_wic_stat=yocto_wic_stat
+        )
+
+
+def _register_scratch(
+    stack: contextlib.ExitStack, report: dict[str, Any], scratch_dir: str
+) -> None:
+    """Tie `scratch_dir`'s removal to `stack` and record the outcome in the
+    envelope's `setools` block when it happens."""
+
+    def _remove() -> None:
+        removed = cleanup_scratch(scratch_dir)
+        block = report.get("setools")
+        if isinstance(block, dict):
+            block["scratchRemoved"] = removed
+
+    stack.callback(_remove)
+
+
+def _flash_entry_body(
+    target: FlashTarget,
+    ctx: _Context,
+    scratch_stack: contextlib.ExitStack,
+    report: dict[str, Any],
+    *,
+    yocto_wic_stat: Callable[[str], os.stat_result] = os.stat,
+) -> tuple[int, _Entry, list[str]]:
+    """The body of [`_flash_entry`].
 
     `yocto_wic_stat` is the write-time block-device gate's `stat_fn`
     (`_yocto_wic_block_device_refusal`'s own parameter), threaded through
@@ -2525,6 +2664,9 @@ def _flash_entry(
     probe_echo: dict[str, Any] | None = None
     probe_note = ""
     probe_guard: _ProbeGuard | None = None
+    # tan-cli#1321: what the read-only DPIDR preflight read, for the `jlink` block.
+    preflight_facts: dict[str, Any] = {}
+    flow_d_writes: list[dict[str, Any]] = []
 
     def entry(
         method: str | None,
@@ -2535,12 +2677,25 @@ def _flash_entry(
         preflight_unarmed: bool = False,
         atoc_unacknowledged: bool = False,
         probe_refusal: str | None = None,
+        issue_code: str | None = None,
+        reset_unconfirmed: bool = False,
+        preview_sign_skipped: bool = False,
     ) -> _Entry:
         return _Entry(
             kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message,
             preflight_unarmed=preflight_unarmed, recovery_armed=recovery,
             atoc_unacknowledged=atoc_unacknowledged,
             probe=probe_echo, probe_refusal=probe_refusal,
+            method_declared=(
+                target.flash_method
+                if method and target.flash_method and target.flash_method != method
+                else None
+            ),
+            extra=report,
+            issue_code=issue_code,
+            reset_unconfirmed=reset_unconfirmed,
+            preview_sign_skipped=preview_sign_skipped,
+            device_config_warning=report.get("setools", {}).get("deviceConfig", {}).get("warning"),
         )
 
     # tan-cli#611, THE HOIST. WHO may flash this entry is decided BEFORE
@@ -2731,7 +2886,7 @@ def _flash_entry(
             if selection.serial is not None or selection.visible is None:
                 probe_guard = _ProbeGuard(selection, snapshot, ctx.enumerate_probes, probe_echo)
         if selection is not None and selection.refusal_code is not None:
-            lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+            lines.append(_entry_head(kind, entry_id, method, target.flash_method))
             lines.append(f"  FAIL: {selection.refusal}")
             return (
                 1,
@@ -2773,6 +2928,7 @@ def _flash_entry(
             flash_args = _resolve_flow_d_atoc_path(flash_args, ctx.build_root, ctx.sdk_root)
             shape = validate_flow_d_shape(flash_args, artefact_path, _is_file)
             validate_flow_d_preflight_args(flash_args)
+            resident_entries(flash_args)  # tan-cli#1322: a malformed list refuses now
             # tan-cli#487, defect 5: the SAME confirm gate `plan_alif_mram_
             # jlink` itself applies to the real MRAM write must ALSO cover
             # the SETOOLS auto-sign below -- see `_resolve_flow_d_atoc_via_
@@ -2815,7 +2971,7 @@ def _flash_entry(
                     if guard_refusal is None:
                         probe_guard.fresh = True
                     if guard_refusal is not None:
-                        lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+                        lines.append(_entry_head(kind, entry_id, method, target.flash_method))
                         lines.append(f"  FAIL: {guard_refusal}")
                         return (
                             1,
@@ -2836,7 +2992,7 @@ def _flash_entry(
                 if ctx.require_dpidr:
                     refusal = _require_dpidr_gate(method, entry_id, flash_args, None)
                     if refusal is not None:
-                        lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+                        lines.append(_entry_head(kind, entry_id, method, target.flash_method))
                         lines.append(f"  FAIL: {refusal}")
                         return 1, entry(method, "failed", 1, refusal), lines
                 # tan-cli#1252 (porting alp-sdk#2025). A Flow D `loadbin` of
@@ -2865,8 +3021,15 @@ def _flash_entry(
                 # carries `ATOC_REPLACEMENT_PREVIEW_NOTE`, so the operator
                 # reads what arming means before they arm it.
                 if not atoc_replacement_acknowledged(flash_args, ctx.atoc_unqueryable):
-                    refusal = atoc_replacement_refusal(method, entry_id)
-                    lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+                    refusal = (
+                        f"{atoc_replacement_refusal(method, entry_id)} "
+                        + replacement_detail(
+                            written_entries(entry_id, device_config=not ctx.no_device_config),
+                            resident_entries(flash_args),
+                            device_config=not ctx.no_device_config,
+                        )
+                    )
+                    lines.append(_entry_head(kind, entry_id, method, target.flash_method))
                     lines.append(f"  FAIL: {refusal}")
                     return (
                         1,
@@ -2882,10 +3045,11 @@ def _flash_entry(
                     force_confirm=ctx.force_confirm,
                 )
                 refusal = _flow_d_preflight(
-                    preflight_inputs, ctx.venv_bin, ctx.workspace, probe_guard=probe_guard
+                    preflight_inputs, ctx.venv_bin, ctx.workspace, probe_guard=probe_guard,
+                    facts=preflight_facts,
                 )
                 if refusal is not None:
-                    lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+                    lines.append(_entry_head(kind, entry_id, method, target.flash_method))
                     lines.append(f"  FAIL: {refusal}")
                     tripped = probe_guard is not None and probe_guard.tripped == refusal
                     return (
@@ -2895,43 +3059,49 @@ def _flash_entry(
                         lines,
                     )
             flash_args, setools_note = _resolve_flow_d_atoc_via_setools(
-                flash_args, shape, ctx, entry_id, confirm
+                flash_args, shape, ctx, entry_id, confirm,
+                stack=scratch_stack, report=report,
             )
+            if report.get("setools", {}).get("signSkipped"):
+                note = f"{setools_note}. {ATOC_REPLACEMENT_PREVIEW_NOTE}{probe_note}"
+                lines.append(_entry_head(kind, entry_id, method, target.flash_method))
+                lines.append(f"  {note}")
+                return (
+                    0,
+                    entry(method, "ok" if ctx.dry_run else "planned", 0, note,
+                          preview_sign_skipped=True),
+                    lines,
+                )
+            flow_d_writes = _flow_d_writes(flash_args, shape)
+            # tan-cli#1343 review: the loader rewrites whole 16 KiB sectors, so a write
+            # that reaches into another write's first sector (or a resident entry the
+            # new ATOC does not rewrite) would erase it. Refused before anything is
+            # written -- under --dry-run too.
+            rewritten = {e["name"] for e in report.get("atoc", {}).get("entries", ())} or set(
+                written_entries(entry_id, device_config=not ctx.no_device_config)
+            )
+            overlaps = find_overlaps(
+                flow_d_writes,
+                [r for r in (resident_regions(flash_args) or ()) if r[0] not in rewritten],
+            )
+            if overlaps:
+                raise SectorOverlapError(
+                    f"{FLOW_D_METHOD}[{entry_id}]: refusing -- " + "; ".join(overlaps)
+                    + ". The loader rewrites whole 16 KiB sectors and fills the rest with "
+                    "0xFF, so these writes would erase each other. Move the app or the ATOC, "
+                    "or fix flash_args.slot0_load_address / atoc_address."
+                )
         except FlashPlanError as err:
             msg = str(err)
-            lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+            lines.append(_entry_head(kind, entry_id, method, target.flash_method))
             lines.append(f"  FAIL: {msg}")
-            return 1, entry(method, "failed", 1, msg), lines
-        if setools_note is not None and (ctx.dry_run or not confirm):
-            # Preview only (see the helper's own docstring): nothing was
-            # signed, so there is no `atoc`/`atoc_address` to hand
-            # `plan_alif_mram_jlink` -- report the preview directly rather
-            # than reaching its "both required" refusal over a field this
-            # entry was never asked to fill in by hand. A REAL, CONFIRMED
-            # sign (the `else` this condition now excludes -- tan-cli#373)
-            # leaves `setools_note` set too, but must NOT return here: it
-            # falls through to `meta.build` like every other Flow D entry,
-            # carrying the note to the eventual ok message below instead.
-            #
-            # `status`: a clean `--dry-run` preview reports "ok" like every
-            # other preview in this file; an unconfirmed REAL run reports
-            # "planned" (tan-cli#487) so `flash.confirm-required` fires --
-            # I-30's contract that a JSON consumer must be able to tell
-            # "nothing was written" from "programmed the device" applies to
-            # the SETOOLS half of Flow D exactly as it does to the MRAM
-            # write it feeds.
-            # tan-cli#1252: Flow D's OTHER preview return. It fires before
-            # `meta.build` is ever called -- a fresh AEN manifest with no
-            # `atoc`/`atoc_address` never reaches `plan_alif_mram_jlink` at
-            # all -- so the whole-ATOC note has to be appended here too, not
-            # only at the shared preview block below. This is the most common
-            # AEN preview of the two, and omitting it here would leave exactly
-            # the operator who has not signed yet uninformed.
-            previewed = f"{setools_note} {ATOC_REPLACEMENT_PREVIEW_NOTE}{probe_note}"
-            lines.append(f"flash: {kind} '{entry_id}' -> {method}")
-            lines.append(f"  {previewed}")
-            status = "ok" if ctx.dry_run else "planned"
-            return 0, entry(method, status, 0, previewed), lines
+            # `code`: a registered refusal code the error carries
+            # (tan-cli#1322's `flash.device-config-missing`), else the generic one.
+            return (
+                1,
+                entry(method, "failed", 1, msg, issue_code=getattr(err, "code", None)),
+                lines,
+            )
 
     inputs = FlashInputs(
         artefact=artefact_path,
@@ -2945,11 +3115,14 @@ def _flash_entry(
         plan = meta.build(inputs, available)
     except FlashPlanError as err:
         msg = str(err)
-        lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+        lines.append(_entry_head(kind, entry_id, method, target.flash_method))
         lines.append(f"  FAIL: {msg}")
         return 1, entry(method, "failed", 1, msg), lines
 
-    lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+    lines.append(_entry_head(kind, entry_id, method, target.flash_method))
+
+    if method == FLOW_D_METHOD:
+        report["plan"] = _flow_d_plan_block(plan, flow_d_writes, report)
 
     if plan.planning_only or ctx.dry_run:
         shown = display_argv(plan)
@@ -2959,11 +3132,23 @@ def _flash_entry(
         # being rewritten. Appended to BOTH arms: the `--dry-run` arm carries
         # no gate note at all today, and a preview that says nothing about the
         # replacement is exactly the silence this issue is about.
-        atoc_note = f" {ATOC_REPLACEMENT_PREVIEW_NOTE}" if method == FLOW_D_METHOD else ""
+        atoc_note = ""
+        if method == FLOW_D_METHOD:
+            signed_names = tuple(e["name"] for e in report.get("atoc", {}).get("entries", ()))
+            atoc_note = (
+                f" {ATOC_REPLACEMENT_PREVIEW_NOTE} "
+                + replacement_detail(
+                    signed_names
+                    or written_entries(entry_id, device_config=not ctx.no_device_config),
+                    resident_entries(flash_args),
+                    device_config=not ctx.no_device_config,
+                )
+            )
+        signed = f"{setools_note}; " if setools_note else ""
         if ctx.dry_run:
             # The user explicitly asked for a preview -- nothing was ever going
             # to run. rc 0 / status "ok" (alp_flash's "clean-dry-run").
-            msg = f"would run {shown}{atoc_note}{probe_note}"
+            msg = f"{signed}would run {shown}{atoc_note}{probe_note}"
             lines.append(f"  {msg}")
             return 0, entry(method, "ok", 0, msg), lines
         # The BACKEND declined a real write because the confirm gate is not
@@ -2972,7 +3157,7 @@ def _flash_entry(
         # it back into "ok" is I-30's exact regression: a JSON consumer then
         # cannot tell "nothing was written" from "programmed the device".
         msg = (
-            f"would run {shown} -- NOT written: "
+            f"{signed}would run {shown} -- NOT written: "
             f"{confirm_gate_note('flash_args.confirm is false')}{atoc_note}"
         )
         lines.append(f"  {msg}")
@@ -3050,6 +3235,27 @@ def _flash_entry(
                   probe_refusal=probe_guard.tripped_code),
             lines,
         )
+    reset_unconfirmed = False
+    readback_failure: tuple[str, str] | None = None
+    if method == FLOW_D_METHOD:
+        reset_unconfirmed = _flow_d_record(plan, outcome, ctx, entry_id, report, preflight_facts)
+        if outcome.success and ctx.readback:
+            readback_failure = _flow_d_readback(
+                plan, outcome, ctx, flow_d_writes, report, probe_guard
+            )
+    if readback_failure is not None:
+        code, text = readback_failure
+        msg = f"{method}[{entry_id}]: {text}"
+        lines.append(f"  FAIL: {msg}")
+        return (
+            1,
+            entry(
+                method, "failed", 1, msg,
+                issue_code=code if code.startswith("flash.readback") else None,
+                probe_refusal=code[len("flash.probe-"):] if code.startswith("flash.probe-") else None,
+            ),
+            lines,
+        )
     if outcome.success:
         # tan-cli#373: `setools_note` is set here only when THIS run's own
         # SETOOLS auto-sign actually ran (the dry-run preview above always
@@ -3060,15 +3266,252 @@ def _flash_entry(
         ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
         if method == FLOW_D_METHOD:
             ok_message = _flow_d_reset_qualified_message(ok_message, outcome)
+            if report.get("jlink", {}).get("verification") == VERIFICATION_READBACK:
+                ok_message += "; read back in a fresh J-Link session (sha256 match)"
         lines.append(f"  ok: {ok_message}")
         return (
             0,
-            entry(method, "ok", 0, ok_message, preflight_unarmed=preflight_unarmed),
+            entry(
+                method, "ok", 0, ok_message, preflight_unarmed=preflight_unarmed,
+                reset_unconfirmed=reset_unconfirmed,
+            ),
             lines,
         )
     msg = _execute_message(outcome, method, entry_id)
     lines.append(f"  FAIL: {msg}")
     return 1, entry(method, "failed", 1, msg), lines
+
+
+def _flow_d_writes(flash_args: Any, shape: FlowDShape) -> list[dict[str, Any]]:
+    """Every write a Flow D entry makes, as `{name, address, size, path,
+    sectorSpan}` (tan-cli#1318, and the regions `--readback` re-reads): the app
+    blob at `slot0_load_address` in the two-blob mramxip shape, then the ATOC at
+    `atoc_address`. `size` is the file's size, `None` if it cannot be read yet."""
+    writes: list[dict[str, Any]] = []
+
+    def _size(path: str | None) -> int | None:
+        try:
+            return os.path.getsize(path) if path else None
+        except OSError:
+            return None
+
+    if shape.app_address is not None:
+        writes.append(planned_write("app", shape.app_address, _size(shape.artefact), shape.artefact))
+    atoc = fa_str(flash_args, "atoc")
+    try:
+        atoc_address = fa_str_checked(flash_args, "atoc_address", True)
+    except FlashPlanError:
+        atoc_address = None
+    if atoc is not None and atoc_address is not None:
+        writes.append(planned_write("atoc", atoc_address, _size(atoc), atoc))
+    return writes
+
+
+def _flow_d_plan_block(
+    plan: FlashPlan, writes: list[dict[str, Any]], report: dict[str, Any]
+) -> dict[str, Any]:
+    """tan-cli#1318: what this Flow D entry will do, reviewable BEFORE it is
+    armed -- the J-Link Commander script (line 1 is the `exec
+    DisableAutoUpdateFW` tan prepends to every script), the J-Link argv, every
+    write as `{name, address, size, path, sectorSpan}` (16 KiB sectors: the loader
+    rewrites whole sectors and fills the rest with 0xFF, so the footprint is wider
+    than the size), and the ATOC placement and entry list.
+
+    The ATOC placement is exact when tan signed it (the report comes from
+    `app-gen-toc` run in the scratch overlay, tan-cli#1325 -- which is why a dry
+    run can show it without touching the SETOOLS install); for a blob the manifest
+    supplied, `entries` is `None` because tan cannot see inside it. Pure over its
+    arguments; spawns nothing."""
+    signed = report.get("atoc")
+    atoc_write = next((w for w in writes if w["name"] == "atoc"), None)
+    atoc: dict[str, Any] | None = None
+    if atoc_write is not None:
+        atoc = {
+            "address": atoc_write["address"],
+            "size": atoc_write["size"],
+            "entries": signed["entries"] if signed else None,
+            "signedByTan": bool(signed),
+        }
+    return {
+        "argv": list(plan.argv),
+        "jlinkScript": (_DISABLE_FW_UPDATE + (plan.jlink_script or "")).splitlines(),
+        "writes": writes,
+        "atoc": atoc,
+        "scratchNote": (
+            "the ATOC path above lives in a scratch overlay removed when this entry ends"
+            if signed
+            else None
+        ),
+    }
+
+
+#: How many Flow D transcripts are kept per core (tan-cli#1343 bench round 6).
+_LOG_KEEP = 10
+
+
+def _flow_d_log_path(build_root: str, entry_id: str, now: "time.struct_time | None" = None) -> str:
+    """`<build>/flash-logs/alif_mram_jlink-<core>-<UTC YYYYmmddTHHMMSSZ>.log` --
+    one file per run, never overwritten (a failed run's evidence must survive the
+    next one)."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", entry_id) or "entry"
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", now or time.gmtime())
+    return os.path.join(build_root, "flash-logs", f"{FLOW_D_METHOD}-{safe}-{stamp}.log")
+
+
+def _write_transcript(path: str, text: str) -> str:
+    """Write `text` to a NEW file near `path` and return its final path. Written via a
+    temp file + `os.replace` in the same directory, so a symlink planted at the target
+    name is replaced, never followed (tan-cli#1343 review, minor d); a symlinked log
+    DIRECTORY is refused; a same-second name collision gets a `-N` suffix. Then the
+    oldest transcripts for this core beyond `_LOG_KEEP` are removed."""
+    directory = os.path.dirname(path)
+    if os.path.islink(directory):
+        raise OSError(f"{directory} is a symlink; not writing the transcript through it")
+    os.makedirs(directory, exist_ok=True)
+    final, n = path, 0
+    while os.path.lexists(final):
+        n += 1
+        final = f"{path[:-4]}-{n}.log"
+    handle, tmp = tempfile.mkstemp(prefix=".tan-flash-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, final)
+    except BaseException:
+        _unlink(tmp)
+        raise
+    prefix = os.path.basename(path).rsplit("-", 1)[0] + "-"
+    try:
+        mine = sorted(
+            n for n in os.listdir(directory) if n.startswith(prefix) and n.endswith(".log")
+        )
+        for stale in mine[: max(len(mine) - _LOG_KEEP, 0)]:
+            _unlink(os.path.join(directory, stale))
+    except OSError:
+        pass
+    return final
+
+
+def _flow_d_record(
+    plan: FlashPlan,
+    outcome: _Outcome,
+    ctx: _Context,
+    entry_id: str,
+    report: dict[str, Any],
+    preflight_facts: dict[str, Any],
+) -> bool:
+    """tan-cli#1321: put what the J-Link write ACTUALLY said into the envelope's
+    `jlink` block -- the SW-DP ID read, the transcript (a file under the build
+    root plus its tail inline), `verification: "cache-verified"` (what
+    `verifybin` proves) and any reset-failure markers. Returns whether the PIN
+    reset is unconfirmed. Never raises: a transcript that cannot be written is
+    reported in the block, not allowed to turn a landed write into a crash."""
+    transcript = f"{outcome.stdout}\n{outcome.stderr}"
+    dpidr, source = dpidr_in(transcript), "write-transcript"
+    if dpidr is None:
+        dpidr = preflight_facts.get("dpidr")
+        source = "preflight" if dpidr else "none"
+    failures = reset_failures(transcript)
+    block: dict[str, Any] = {
+        "dpidr": dpidr,
+        "dpidrSource": source,
+        "verification": VERIFICATION_CACHE,
+        "verificationNote": VERIFICATION_NOTE,
+        "reset": "unconfirmed" if failures else ("pin-reset" if outcome.success else "not-reached"),
+        "resetFailures": list(failures),
+        "transcriptTail": transcript_tail(transcript),
+    }
+    path = _flow_d_log_path(ctx.build_root, entry_id)
+    try:
+        block["transcriptPath"] = _write_transcript(
+            path,
+            f"# tan flash {FLOW_D_METHOD}[{entry_id}] rc={outcome.returncode}\n"
+            "## J-Link Commander script\n"
+            f"{_DISABLE_FW_UPDATE}{plan.jlink_script or ''}\n"
+            "## stdout\n" + outcome.stdout + "\n## stderr\n" + outcome.stderr + "\n",
+        )
+    except OSError as err:
+        block["transcriptPath"] = None
+        block["transcriptError"] = str(err)
+    report["jlink"] = block
+    return bool(failures) and outcome.success
+
+
+def _flow_d_readback(
+    plan: FlashPlan,
+    outcome: _Outcome,
+    ctx: _Context,
+    writes: list[dict[str, Any]],
+    report: dict[str, Any],
+    probe_guard: "_ProbeGuard | None",
+) -> tuple[str, str] | None:
+    """`--readback` (tan-cli#1321): re-read every written region in a FRESH
+    J-Link session (`savebin`) and compare sha256 with the source file. `None`
+    when every region matches (the `jlink` block is upgraded to
+    `readback-verified`); else `(issue_code, message)`.
+
+    It spawns through `_execute` with the SAME `probe_guard` the write used, so
+    the probe-selection verification (ShowEmuList, TOCTOU re-check, shared-serial
+    isolation) runs again immediately before this spawn -- a read-back that went
+    to a different probe than the write would be a green light for the wrong
+    board. A guard refusal comes back as its own `flash.probe-*` code."""
+    regions = [(w["address"], w["size"], w["path"]) for w in writes if w.get("size")]
+    block = report.setdefault("jlink", {})
+    if not regions or plan.jlink_script is None:
+        block["readback"] = {"performed": False, "reason": "no readable written region"}
+        return "flash.readback-failed", "no written region to read back"
+    tmp = tempfile.mkdtemp(prefix="tan-readback-")
+    try:
+        dests = [os.path.join(tmp, f"region{i}.bin") for i in range(len(regions))]
+        try:
+            script = readback_script(
+                plan.jlink_script, [(a, n, d) for (a, n, _p), d in zip(regions, dests)]
+            )
+        except (ValueError, FlashPlanError) as err:
+            block["readback"] = {"performed": False, "reason": str(err)}
+            return "flash.readback-failed", f"could not build the read-back session: {err}"
+        read = _execute(
+            dataclasses.replace(plan, jlink_script=script),
+            True, ctx.venv_bin, ctx.workspace, probe_guard,
+        )
+        if probe_guard is not None and probe_guard.tripped:
+            block["readback"] = {"performed": False, "reason": probe_guard.tripped}
+            return f"flash.probe-{probe_guard.tripped_code}", probe_guard.tripped
+        if not read.success:
+            block["readback"] = {"performed": False, "reason": _capture_tail(read) or "session failed"}
+            return (
+                "flash.readback-failed",
+                "the write landed and cache-verified, but the fresh read-back session "
+                f"failed: {_capture_tail(read) or 'no output'}",
+            )
+        results = []
+        for (address, size, path), dest in zip(regions, dests):
+            expected = sha256_of(path)
+            try:
+                actual = sha256_of(dest)[:] if os.path.getsize(dest) == size else None
+                if actual is None:
+                    actual = f"short-read:{os.path.getsize(dest)}"
+            except OSError:
+                actual = "missing"
+            results.append(
+                {"address": address, "size": size, "sha256Expected": expected,
+                 "sha256Actual": actual, "match": actual == expected}
+            )
+        ok = all(r["match"] for r in results)
+        block["readback"] = {"performed": True, "ok": ok, "regions": results}
+        if not ok:
+            bad = [r["address"] for r in results if not r["match"]]
+            return (
+                "flash.readback-mismatch",
+                "the write cache-verified but a fresh J-Link session read DIFFERENT bytes "
+                f"back at {', '.join(bad)} -- the chip does not hold the image. Do not "
+                "trust this board's slot0; re-flash.",
+            )
+        block["verification"] = VERIFICATION_READBACK
+        block["verificationNote"] = VERIFICATION_READBACK_NOTE
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _flow_d_preflight(
@@ -3079,6 +3522,7 @@ def _flow_d_preflight(
     *,
     read_device: str | None = None,
     probe_guard: "_ProbeGuard | None" = None,
+    facts: dict[str, Any] | None = None,
 ) -> str | None:
     """Connect read-only with the manifest's ATTACH device profile and confirm
     the SW-DP IDR before any write. Returns a refusal message, or `None`
@@ -3187,6 +3631,10 @@ def _flow_d_preflight(
                            _PREFLIGHT_TIMEOUT_S, on_path_bin, workspace, resolved[0], **extra)
     banner = f"{outcome.stdout}\n{outcome.stderr}"
     if _dp_id_matches(expected, banner):
+        if facts is not None:
+            # tan-cli#1321: the SW-DP ID this run ACTUALLY read, for the envelope.
+            facts["dpidr"] = _dp_id_value(banner)
+            facts["expectedDpidr"] = expected
         return None
     if not banner.strip():
         return (
@@ -3382,6 +3830,8 @@ def _run(
     probe_serial: str | None = None,
     probe_usb_path: str | None = None,
     enumerate_probes: Callable[[], Any] | None = None,
+    no_device_config: bool = False,
+    readback: bool = False,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -3578,6 +4028,8 @@ def _run(
         atoc_unqueryable=atoc_unqueryable,
         probe_serial=probe_serial,
         probe_usb_path=probe_usb_path,
+        no_device_config=no_device_config,
+        readback=readback,
         **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
     )
     unsupported = _probe_selector_unsupported(plan.targets, ctx)
@@ -3658,6 +4110,15 @@ def _run(
                 issues.append(Issue("flash.probe-verify-failed", "error", entry.message))
             elif entry.probe_refusal == "selector-conflict":
                 issues.append(Issue("flash.probe-selector-conflict", "error", entry.message))
+            elif entry.issue_code == "flash.write-sector-overlap":
+                issues.append(Issue("flash.write-sector-overlap", "error", entry.message))
+            elif entry.issue_code == "flash.readback-mismatch":
+                issues.append(Issue("flash.readback-mismatch", "error", entry.message))
+            elif entry.issue_code == "flash.readback-failed":
+                issues.append(Issue("flash.readback-failed", "error", entry.message))
+            elif entry.issue_code == "flash.device-config-missing":
+                # tan-cli#1322: a literal `Issue(...)` for the static code gate.
+                issues.append(Issue("flash.device-config-missing", "error", entry.message))
             elif entry.atoc_unacknowledged:
                 # tan-cli#1252: the ONE failed entry that does not report the
                 # generic code. Every flash refusal returns rc 1 / `status:
@@ -3672,6 +4133,32 @@ def _run(
                 )
             else:
                 issues.append(Issue("flash.entry-failed", "error", entry.message))
+        if entry.preview_sign_skipped:
+            message = (
+                f"{entry.id}: the ATOC was not signed for this preview -- the SETOOLS "
+                "install comes only from flash_args.setools_dir in the manifest. Pass "
+                "--setools-dir (or set SETOOLS_DIR) to see the placement."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.preview-sign-skipped", "info", message))
+        if entry.device_config_warning:
+            text_lines.append(f"{entry.id}: {entry.device_config_warning}")
+            issues.append(
+                Issue("flash.device-config-mismatch", "warning",
+                      f"{entry.id}: {entry.device_config_warning}")
+            )
+        if entry.reset_unconfirmed:
+            # tan-cli#1321 / #522: J-Link's own transcript says the PIN reset did
+            # not land, so the freshly written image was not necessarily started.
+            # A warning, not an error: the write and its cache verify succeeded.
+            message = (
+                f"{entry.id}: J-Link reported a failed reset ("
+                + ", ".join(entry.extra.get("jlink", {}).get("resetFailures", ()))
+                + "); the PIN reset that starts the new image is NOT confirmed -- "
+                "power-cycle the board and check it booted."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.jlink-reset-unconfirmed", "warning", message))
         if entry.status == "planned":
             # `status` alone is prose no automated consumer parses.
             issues.append(Issue("flash.confirm-required", "warning", entry.message))
@@ -3933,6 +4420,29 @@ def flash(
         "preview still previews. Separate from --confirm, which only arms the write "
         "itself, and it has no effect on any other backend.",
     ),
+    readback: bool = typer.Option(
+        False,
+        "--readback",
+        help="After a Flow D (alif_mram_jlink) write, re-read every written region "
+        "in a FRESH J-Link session and compare its sha256 (tan-cli#1321). The "
+        "write's own `verifybin` compares against J-Link's flash cache, not the "
+        "chip, so the envelope reports it as `cache-verified`; a matching read-back "
+        "upgrades that to `readback-verified`, a differing one fails the entry "
+        "(flash.readback-mismatch). Goes through the same probe-selection guard as "
+        "the write. A fresh session is stronger than the cache but still weaker than "
+        "reading after a cold power cycle.",
+    ),
+    no_device_config: bool = typer.Option(
+        False,
+        "--no-device-config",
+        help="Sign the Flow D slot0 ATOC WITHOUT a DEVICE entry (tan-cli#1322). By "
+        "default the auto-signed ATOC leads with a DEVICE entry (binary, version "
+        "0.5.00, signed) sourced from flash_args.setools_device_config, else SETOOLS' "
+        "own build/config/app-device-config.json, and the run refuses "
+        "(flash.device-config-missing) when neither exists. The write REPLACES the "
+        "whole ATOC, so without a DEVICE entry the resident one (firewall regions, "
+        "HFXO trims, SE_BOOT_INFO) is deleted. Only affects an ATOC tan signs itself.",
+    ),
     probe_serial: str = typer.Option(
         None,
         "--probe-serial",
@@ -4035,6 +4545,8 @@ def flash(
             atoc_unqueryable=atoc_unqueryable,
             probe_serial=probe_serial,
             probe_usb_path=probe_usb_path,
+            no_device_config=bool(no_device_config) if isinstance(no_device_config, bool) else False,
+            readback=readback if isinstance(readback, bool) else False,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an

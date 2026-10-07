@@ -465,8 +465,9 @@ def monitor(
         "it stops after the break-in instead (exit 0 if caught); the console "
         "itself needs a terminal. --non-interactive is a shared flag (see "
         "its own help line). Power-cycle the board yourself; works over "
-        "rfc2217:// and socket:// URLs (note: socket:// to a telnet/RFC2217 "
-        "ser2net port delivers the IAC negotiation bytes as data; use rfc2217://).",
+        "rfc2217:// and socket:// URLs. Use rfc2217:// against ser2net: socket:// "
+        "to a telnet/RFC2217 port delivers IAC negotiation bytes as data and "
+        "adds about 4 s.",
     ),
     break_key: str = typer.Option(
         None,
