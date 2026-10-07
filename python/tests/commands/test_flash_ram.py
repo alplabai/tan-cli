@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from tan.commands import flash_cmd
+from tan.commands import flash_cmd, flash_ram
 from tan.core import ram_run
 from tan.core.jlink_probe import JLinkProbe
 
@@ -19,6 +19,22 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX executables / fil
 
 CONSOLE_ADDR = 0x20001000
 SERIAL = "000999000001"
+
+#: What `tan flash --ram` journals for a clean load, as `J-Link>` prints it with a
+#: command script: every command echoed, `loadbin` answering O.K., the memory-map banner
+#: after `go`.
+CLEAN_LOAD = (
+    "Found Cortex-M55 r1p0, Little endian.\n"
+    "J-Link>halt\nJ-Link>loadbin /tmp/tan-ram-x/image.bin 0x0\nDownloading file...\nO.K.\n"
+    "J-Link>setpc 0x100\nJ-Link>go\nMemory map 'after startup completion point' is active\n"
+    "Script processing completed.\n"
+)
+#: E8 HE apertures as the SoC metadata gives them (SRAM4_M55_HE_ITCM / SRAM5_M55_HE_DTCM
+#: 256 KiB, SRAM0 4096 KiB).
+E8_BANKS = [
+    ("SRAM0", 4096.0), ("SRAM1", 4096.0), ("SRAM2_M55_HP_ITCM", 256.0),
+    ("SRAM3_M55_HP_DTCM", 1024.0), ("SRAM4_M55_HE_ITCM", 256.0), ("SRAM5_M55_HE_DTCM", 256.0),
+]
 
 
 def make_elf(*, base=0x0, entry=0x101, filesz=64, symbols=None, extra_segments=()):
@@ -60,7 +76,7 @@ class FakeJlink:
         self.scripts: list[str] = []
         self.exes: list[object] = []
         self.console, self.dpidr = console, dpidr
-        self.load_out = load_out if load_out is not None else "Script processing completed.\n"
+        self.load_out = load_out if load_out is not None else CLEAN_LOAD
         self.emulators, self.read_rc = list(emulators), read_rc
         monkeypatch.setattr(flash_cmd, "_spawn_jlink", self._spawn)
 
@@ -139,6 +155,10 @@ def _setup(tmp_path, monkeypatch, *, elf=None, binary=None, manifest=None, artef
     monkeypatch.delenv("ALP_FLASH_REQUIRE_DPIDR", raising=False)
     monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
     monkeypatch.setattr(flash_cmd.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        flash_ram, "_load_apertures",
+        lambda _ctx, core: ram_run.apertures_for(core, E8_BANKS),
+    )
     return str(stub)
 
 
@@ -376,7 +396,7 @@ def test_a_load_that_did_not_complete_is_flash_ram_failed(tmp_path, monkeypatch)
     rc, data, issues, _l, _s = _run(tmp_path)
     assert rc == 1 and _codes(issues) == ["flash.ram-failed"]
     FakeJlink(monkeypatch, load_out="J-Link>loadbin x 0x0\nERROR\nJ-Link>setpc 0x100\n"
-              "Script processing completed.\n")
+              "J-Link>go\nScript processing completed.\n")
     rc, data, issues, _l, _s = _run(tmp_path)
     assert rc == 1 and "loadbin did not report" in data["entries"][0]["message"]
 

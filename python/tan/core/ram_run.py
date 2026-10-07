@@ -30,6 +30,8 @@ from dataclasses import dataclass
 CODE_NOT_RAM_LINKED = "flash.ram-image-not-ram-linked"
 CODE_CONSOLE_SYMBOL_MISSING = "flash.ram-console-symbol-missing"
 CODE_FAILED = "flash.ram-failed"
+CODE_CORE_UNSUPPORTED = "flash.ram-core-unsupported"
+CODE_CORE_MISMATCH = "flash.ram-core-mismatch"
 
 #: The RAM console buffer symbol (`CONFIG_RAM_CONSOLE`).
 CONSOLE_SYMBOL = "ram_console_buf"
@@ -37,7 +39,12 @@ CONSOLE_SYMBOL = "ram_console_buf"
 #: Largest region one `mem8` command reads (bench-env.sh `bench_mem8_chunks`).
 MEM8_CHUNK = 65536
 #: Upper bound on the console read, so a corrupt symbol size cannot ask for MiBs.
-MAX_CONSOLE_BYTES = 1 << 20
+MAX_CONSOLE_BYTES = 64 * 1024
+#: ELF reader bounds: a symbol table this large, or one whose entries are smaller than
+#: an Elf32_Sym, is not a Zephyr image and is not trusted for an address.
+MAX_SYMBOLS = 200_000
+MAX_SECTIONS = 4096
+ELF32_SYM_SIZE = 16
 #: What the script reads when the symbol carries no size.
 DEFAULT_CONSOLE_BYTES = 0x600
 
@@ -100,12 +107,23 @@ def _symbols(data: bytes, shoff: int, shentsize: int, shnum: int) -> dict[str, t
     out: dict[str, tuple[int, int]] = {}
     if not shoff or not shnum:
         return out
+    if shnum > MAX_SECTIONS:
+        raise RamRunError(f"the ELF declares {shnum} sections; refusing to parse it")
     headers = [
         struct.unpack_from("<IIIIIIIIII", data, shoff + i * shentsize) for i in range(shnum)
     ]
     for _name, sh_type, _fl, _addr, sh_off, sh_size, sh_link, _info, _align, sh_entsize in headers:
-        if sh_type != 2 or not sh_entsize:  # SHT_SYMTAB
+        if sh_type != 2:  # SHT_SYMTAB
             continue
+        if sh_entsize < ELF32_SYM_SIZE:
+            raise RamRunError(
+                f"the ELF symbol table declares an entry size of {sh_entsize} B "
+                f"(an Elf32_Sym is {ELF32_SYM_SIZE}); refusing to read symbols from it"
+            )
+        if sh_size // sh_entsize > MAX_SYMBOLS:
+            raise RamRunError(
+                f"the ELF symbol table has {sh_size // sh_entsize} entries (cap {MAX_SYMBOLS})"
+            )
         if sh_link >= len(headers):
             continue
         str_off, str_size = headers[sh_link][4], headers[sh_link][5]
@@ -134,11 +152,90 @@ class RamImage:
     console: tuple[int, int] | None  # (address, size) of ram_console_buf
 
 
+#: The cores tan will RAM-run. The HP core's debug AP selection (AP 0x00200000 vs the
+#: HE's 0x00300000 on evk-01) is not bench-proven through tan, so a slice other than
+#: the HE core is refused rather than risking loading HE's recipe into the wrong core.
+SUPPORTED_CORE = "M55_HE"
+
+#: Per-core ITCM global aliases (the recipe's load bases): HE 0x58000000, HP 0x50000000.
+_ITCM_GLOBAL = {"M55_HE": 0x58000000, "M55_HP": 0x50000000}
+
+
+@dataclass(frozen=True)
+class Apertures:
+    """Where a core's code and data may live, with SIZES from the SoC metadata's
+    `sram_banks_kb` (never invented): `code` / `data` are `(base, size)` lists."""
+
+    code: tuple[tuple[int, int], ...]
+    data: tuple[tuple[int, int], ...]
+
+
+def check_core(core_id: str, base: int) -> None:
+    """Refuse a slice that is not the HE core (`flash.ram-core-unsupported`), and a
+    base that is the OTHER core's ITCM alias (`flash.ram-core-mismatch`): an image
+    linked for the HP core's 0x50000000 aperture on the HE slice would be loaded into
+    whichever core the probe happens to be attached to."""
+    core = core_id.upper()
+    if core != SUPPORTED_CORE:
+        raise RamRunError(
+            f"tan flash --ram supports only the M55 HE core for now; '{core_id}' is not "
+            "it. The HP core's debug access port selection is not bench-proven through "
+            "tan, and loading the HE recipe into the wrong core is not recoverable by a "
+            "retry. Use the raw alp-sdk helper for the HP core.",
+            CODE_CORE_UNSUPPORTED,
+        )
+    for other, alias in _ITCM_GLOBAL.items():
+        if other != core and base == alias:
+            raise RamRunError(
+                f"the image is linked for {other}'s ITCM alias 0x{alias:X} but the slice is "
+                f"{core}: it would run on whichever core the probe is attached to. Rebuild "
+                "it for the HE core.",
+                CODE_CORE_MISMATCH,
+            )
+
+
+def apertures_for(core_id: str, banks_kib: Sequence[tuple[str, float]]) -> Apertures | None:
+    """The HE core's apertures from a SoC variant's `sram_banks_kb` (`(name, KiB)`):
+    its own ITCM bank at the local `0x0` and the global `0x58000000` alias, its DTCM
+    bank at the architectural local `0x20000000`, and `SRAM0` at `0x02000000`.
+    `None` when the metadata names no ITCM/DTCM bank for the core -- the caller then
+    REFUSES; a size is never guessed."""
+    token = core_id.upper()
+    itcm = dtcm = sram0 = None
+    for name, kib in banks_kib:
+        up = name.upper()
+        size = int(kib * 1024)
+        if token in up and "ITCM" in up and itcm is None:
+            itcm = size
+        elif token in up and "DTCM" in up and dtcm is None:
+            dtcm = size
+        elif up == "SRAM0" and sram0 is None:
+            sram0 = size
+    if itcm is None or dtcm is None or token not in _ITCM_GLOBAL:
+        return None
+    code = [(0x0, itcm), (_ITCM_GLOBAL[token], itcm)]
+    data = [(0x20000000, dtcm)]
+    if sram0 is not None:
+        code.append((0x02000000, sram0))
+        data.append((0x02000000, sram0))
+    return Apertures(tuple(code), tuple(data))
+
+
+def _within(address: int, length: int, spans: Sequence[tuple[int, int]]) -> bool:
+    return any(base <= address and address + length <= base + size for base, size in spans)
+
+
 def _plausible_base(base: int) -> bool:
     return base in (0x0, 0x50000000, 0x58000000) or 0x02000000 <= base < 0x03000000
 
 
-def plan_ram_image(elf: ElfImage, binary: bytes) -> RamImage:
+def plan_ram_image(
+    elf: ElfImage,
+    binary: bytes,
+    *,
+    core_id: str | None = None,
+    apertures: Apertures | None = None,
+) -> RamImage:
     """Decide whether `binary` (the raw `zephyr.bin` beside `elf`) can be
     RAM-run and where. Refuses with [`CODE_NOT_RAM_LINKED`] when it is linked
     for MRAM or any base that is not an ITCM/SRAM target, and with
@@ -162,8 +259,17 @@ def plan_ram_image(elf: ElfImage, binary: bytes) -> RamImage:
             "segment was picked, which would corrupt live RAM. Refusing to load.",
             CODE_NOT_RAM_LINKED,
         )
+    if core_id is not None:
+        check_core(core_id, base)
     if len(binary) < 8:
         raise RamRunError("zephyr.bin is too small to hold a vector table")
+    if apertures is not None and not _within(base, len(binary), apertures.code):
+        raise RamRunError(
+            f"the {len(binary)} B image at 0x{base:X} does not fit any of the core's code "
+            "apertures (" + ", ".join(f"0x{b:X}+0x{n:X}" for b, n in apertures.code) + "; sizes "
+            "from the SoC metadata) -- loading it would run past the TCM into live memory.",
+            CODE_NOT_RAM_LINKED,
+        )
     span = max(s.paddr + s.filesz for s in loadable) - base
     if len(binary) < span:
         raise RamRunError(
@@ -183,7 +289,14 @@ def plan_ram_image(elf: ElfImage, binary: bytes) -> RamImage:
     sym = elf.symbols.get(CONSOLE_SYMBOL)
     if sym is not None:
         addr, size = sym
-        console = (addr, min(size or DEFAULT_CONSOLE_BYTES, MAX_CONSOLE_BYTES))
+        length = min(size or DEFAULT_CONSOLE_BYTES, MAX_CONSOLE_BYTES)
+        if apertures is not None and not _within(addr, length, apertures.data):
+            raise RamRunError(
+                f"{CONSOLE_SYMBOL} (0x{addr:X}+0x{length:X}) is outside the core's DTCM/SRAM "
+                "apertures (" + ", ".join(f"0x{b:X}+0x{n:X}" for b, n in apertures.data)
+                + ") -- refusing to read an address the ELF should not have put there."
+            )
+        console = (addr, length)
     return RamImage(base, entry, sp, reset, len(binary), console)
 
 
@@ -319,9 +432,14 @@ def check_session(transcript: str, *, loadbin: bool) -> str | None:
     """The refusals `ram-run.sh` makes on a session transcript: a connect that
     did not happen, a session that never reached `Script processing
     completed.` (the J-Link process died mid-way -- NOT a reported command
-    failure), a `loadbin` that did not say `O.K.` (a STALE image already in
-    ITCM could otherwise boot and be read back as this run's), or a rejected
-    `setpc`. `None` when the transcript is clean."""
+    failure), a `loadbin` that did not say `O.K.`, or a rejected `setpc`/`go`.
+
+    For the LOAD session (`loadbin=True`) the transcript must PROVE the load: the
+    `loadbin` echo with an `O.K.` after it, a `setpc` echo with nothing but blank
+    lines after it, and a `go` echo with at most the memory-map banner after it. A
+    transcript that does not echo them cannot confirm the load -- a STALE image
+    already in ITCM could otherwise boot and be read back as this run's -- so it is
+    refused ("cannot confirm the load"). `None` when the transcript is clean."""
     for marker in _CONNECT_FAILURES:
         if marker in transcript:
             return f"J-Link reported `{marker}`"
@@ -330,18 +448,44 @@ def check_session(transcript: str, *, loadbin: bool) -> str | None:
             "the J-Link transcript has no 'Script processing completed.' line -- the "
             "process crashed, was killed or was truncated before finishing"
         )
-    if loadbin:
-        window = None
-        for line in transcript.splitlines():
-            if line.startswith("J-Link>loadbin "):
-                window = _window(transcript, line[len("J-Link>") :])
-                break
-        if window is not None and "O.K." not in window.split():
-            return "loadbin did not report 'O.K.' -- refusing to treat this as a fresh load"
-        for line in transcript.splitlines():
-            if line.startswith("J-Link>setpc "):
-                bad = _window(transcript, line[len("J-Link>") :])
-                if bad and bad.strip():
-                    return f"setpc was rejected: {bad.strip()}"
-                break
+    if not loadbin:
+        return None
+    echoes = {
+        word: next(
+            (ln[len("J-Link>") :] for ln in transcript.splitlines() if ln.startswith(f"J-Link>{word} ")
+             or ln.strip() == f"J-Link>{word}"),
+            None,
+        )
+        for word in ("loadbin", "setpc", "go")
+    }
+    missing = [w for w, e in echoes.items() if e is None]
+    if missing:
+        return (
+            "cannot confirm the load: the J-Link transcript has no echo of "
+            + ", ".join(missing) + " (expected `J-Link>loadbin ...`, `J-Link>setpc ...`, `J-Link>go`)"
+        )
+    load = _window(transcript, echoes["loadbin"])
+    if load is None or "O.K." not in load.split():
+        return "loadbin did not report 'O.K.' -- refusing to treat this as a fresh load"
+    bad = _window(transcript, echoes["setpc"])
+    if bad and bad.strip():
+        return f"setpc was rejected: {bad.strip()}"
+    go = _window(transcript, echoes["go"]) or ""
+    if any(
+        ln.strip()
+        and ln.strip() != "Script processing completed."
+        and not re.fullmatch(r"Memory map '.*' is active", ln.strip())
+        for ln in go.splitlines()
+    ):
+        return f"go was rejected: {go.strip()}"
     return None
+
+
+_ATTACHED = re.compile(r"^(?:Found Cortex-M\S*.*|.*\bAP\[\d+\].*|.*CoreSight.*)$", re.MULTILINE)
+
+
+def attached_core_lines(transcript: str, limit: int = 4) -> list[str]:
+    """The J-Link lines that say WHICH core/AP it attached to (`Found Cortex-M55 r1p0,
+    Little endian.`, `AP[1]: ...`), when it prints them -- reported so a wrong-core
+    attach is visible in the envelope. Empty when J-Link printed none."""
+    return [m.group(0).strip() for m in _ATTACHED.finditer(transcript)][:limit]

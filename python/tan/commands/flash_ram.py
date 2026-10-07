@@ -58,6 +58,8 @@ from tan.core.flash_plan import (
 from tan.core.jlink_binary import resolve_jlink
 from tan.core.ram_run import (
     CODE_CONSOLE_SYMBOL_MISSING,
+    apertures_for,
+    attached_core_lines,
     CODE_FAILED,
     CONSOLE_SYMBOL,
     RamRunError,
@@ -158,12 +160,15 @@ def _run_ram_entry(
     except OSError as err:
         return fail(f"cannot read the built image ({err}); expected {elf_path} and {bin_path}")
     try:
-        image = plan_ram_image(parse_elf(elf_bytes), bin_bytes)
+        apertures = _load_apertures(ctx, entry_id)
+        image = plan_ram_image(
+            parse_elf(elf_bytes), bin_bytes, core_id=entry_id, apertures=apertures
+        )
     except RamRunError as err:
         return fail(str(err), err.code)
 
     # ── J-Link: trusted binary, probe selection, parameters ──
-    found = resolve_jlink(ctx.jlink_path)
+    found = resolve_jlink(ctx.jlink_path, project_dir=ctx.project_dir)
     exe = found.path if found is not None else None
     report["jlink"] = {"binary": exe, "binarySource": found.source if found else None}
     if exe is None and not ctx.dry_run:
@@ -184,6 +189,15 @@ def _run_ram_entry(
         serial = fa_str_checked(flash_args, "jlink_serial", False)
         device = fa_str(flash_args, "jlink_device") or _DEFAULT_ATTACH_DEVICE
         validate_identifier(device, "jlink_device", destination="a J-Link Commander script line")
+        if not device.startswith("Cortex-"):
+            # The part-number FLASH profile (`jlink_flash_device`) unlocks the MRAM
+            # loader and will not re-halt a running core; the bench's JLINK_DEVICE_READ
+            # contract is the generic core profile for every RAM-run attach.
+            raise FlashPlanError(
+                f"jlink_device '{device}' is a part-number profile, not a generic core "
+                f"profile; a RAM-run attaches with '{_DEFAULT_ATTACH_DEVICE}' (the part "
+                "profile unlocks the MRAM loader and cannot re-halt a live core)"
+            )
         speed = fa_int_checked(flash_args, "jlink_speed") or _DEFAULT_JLINK_SPEED
         if serial is not None:
             validate_identifier(serial, "jlink_serial", destination=fc._JLINK_SERIAL_DESTINATION)
@@ -266,6 +280,7 @@ def _run_ram_entry(
         tripped = guard is not None and guard.tripped == refusal
         return fail(refusal, None, probe_refusal=guard.tripped_code if tripped else None)
     report["jlink"].update({"dpidr": facts.get("dpidr"), "dpidrSource": "preflight" if facts else "none"})
+    report["jlink"]["attachedCore"] = None
 
     # ── load + go ──
     plan = FlashPlan(argv=argv, ok_message="", jlink_script=load)
@@ -278,6 +293,7 @@ def _run_ram_entry(
     problem = problem or check_session(transcript, loadbin=True)
     if problem:
         return fail(f"the load session failed: {problem}")
+    report["jlink"]["attachedCore"] = attached_core_lines(transcript) or None
     if not facts:
         from tan.core.flow_d_report import dpidr_in
 
@@ -315,6 +331,36 @@ def _run_ram_entry(
             message += f"; read {len(data)} B of {CONSOLE_SYMBOL} ({len(text)} chars)"
     lines.append(f"  ok: {message}")
     return 0, entry("ok", 0, message, preflight_unarmed=unarmed, **warn_missing), lines
+
+
+def _load_apertures(ctx: Any, core_id: str) -> Any:
+    """The core's code/data apertures from the SoC metadata of the SDK in use
+    (`sram_banks_kb` of the manifest SKU's silicon variant). Refuses -- never guesses a
+    size -- when the SDK metadata, the SoM preset or the variant's banks cannot be
+    read."""
+    from tan.commands.build_output import read_sdk_som_and_soc
+    from tan.core.size import resolve_variant, sram_banks
+
+    metadata_root = os.path.join(ctx.sdk_root, "metadata") if ctx.sdk_root else None
+    walked = (
+        read_sdk_som_and_soc(metadata_root, ctx.sku)
+        if metadata_root and ctx.sku and os.path.isdir(metadata_root)
+        else None
+    )
+    if walked is None:
+        raise RamRunError(
+            f"cannot bound the image: no readable SoM preset / SoC metadata for "
+            f"'{ctx.sku}' under {metadata_root} -- refusing to guess the TCM sizes"
+        )
+    _silicon, silicon_variant, variants, _flash_mb, _cores = walked
+    variant = resolve_variant(silicon_variant, ctx.sku, variants)
+    apertures = apertures_for(core_id, sram_banks(variant)) if variant else None
+    if apertures is None:
+        raise RamRunError(
+            f"cannot bound the image: the SoC variant for '{ctx.sku}' lists no "
+            f"ITCM/DTCM bank for core '{core_id}' -- refusing to guess the TCM sizes"
+        )
+    return apertures
 
 
 def _save_transcript(ctx: Any, entry_id: str, report: dict[str, Any], script: str, outcome: Any) -> None:

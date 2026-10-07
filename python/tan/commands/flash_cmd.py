@@ -4229,6 +4229,10 @@ def _run(
                 issues.append(Issue("flash.probe-selector-conflict", "error", entry.message))
             elif entry.issue_code == "flash.ram-image-not-ram-linked":
                 issues.append(Issue("flash.ram-image-not-ram-linked", "error", entry.message))
+            elif entry.issue_code == "flash.ram-core-unsupported":
+                issues.append(Issue("flash.ram-core-unsupported", "error", entry.message))
+            elif entry.issue_code == "flash.ram-core-mismatch":
+                issues.append(Issue("flash.ram-core-mismatch", "error", entry.message))
             elif entry.issue_code == "flash.ram-failed":
                 issues.append(Issue("flash.ram-failed", "error", entry.message))
             elif entry.issue_code == "flash.setools-untrusted-source":

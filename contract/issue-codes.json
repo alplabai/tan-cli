@@ -1988,6 +1988,22 @@
       "note": "Added closing tan-cli#1313. EMISSION CONDITION: `tan flash --ram` (AEN Flow C RAM-run) could not complete: no or ambiguous slice selected (it RAM-runs exactly one slice, picked with --core), the ELF or its sibling zephyr.bin is unreadable, mismatched or not a little-endian ELF32, the vector table disagrees with the ELF entry point or carries a non-RAM SP, no trusted J-Link binary was found, the DPIDR preflight or probe guard refused, the load session did not reach 'Script processing completed.' or its loadbin did not report 'O.K.' or its setpc was rejected, or the --ram-console read came back incomplete. The image may or may not be running on the board after a read failure -- the message says which. A probe-selection refusal reports its own flash.probe-* code instead. Deliberately an error and distinct from flash.entry-failed (which is the Flow D / generic write failure). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
+      "code": "flash.ram-core-unsupported",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing the tan-cli#1349 review (tan-cli#1313). EMISSION CONDITION: `tan flash --ram` was asked to RAM-run a slice that is not the Cortex-M55 HE core (core_id other than m55_he). The HE recipe is what the bench has proven; the HP core's debug access port selection (AP 0x00200000 vs the HE's 0x00300000 on evk-01) is not proven through tan, and loading the HE recipe into the wrong core is not recoverable by a retry. Refused before any J-Link spawn, under --dry-run too. Use the raw alp-sdk helper for the HP core until HP AP selection is bench-proven. Deliberately DISTINCT from flash.ram-failed: no retry or rebuild answers it. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.ram-core-mismatch",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing the tan-cli#1349 review (tan-cli#1313). EMISSION CONDITION: `tan flash --ram` on the HE slice with an image linked for the OTHER core's ITCM global alias (the HP alias 0x50000000 on an m55_he slice): it would run on whichever core the probe happens to be attached to. Refused before any J-Link spawn, under --dry-run too. Answered by rebuilding the image for the HE core (ITCM at 0x0 locally or 0x58000000 globally). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "generate.board-sku-unresolved",
       "status": "reserved",
       "severity": "error",
