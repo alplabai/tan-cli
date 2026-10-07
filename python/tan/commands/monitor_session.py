@@ -275,7 +275,7 @@ def run(
                 [Issue(
                     "monitor.break-timeout",
                     "error",
-                    f"no U-Boot prompt within {opts[2]}s on {port}; "
+                    f"no prompt `{opts[1].decode('utf-8', 'replace')}` within {opts[2]}s on {port}; "
                     "power-cycle the board and retry, or raise --break-timeout.",
                 )],
                 ExitCode.RUNTIME_FAILURE,
@@ -407,7 +407,7 @@ def run_capture(
                 return (
                     data,
                     [Issue("monitor.break-timeout", "error",
-                           f"no U-Boot prompt within {opts[2]}s on {port}.")],
+                           f"no prompt `{opts[1].decode('utf-8', 'replace')}` within {opts[2]}s on {port}.")],
                     ExitCode.RUNTIME_FAILURE,
                 )
         log_path = None

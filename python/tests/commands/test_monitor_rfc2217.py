@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import socket
 import threading
-import time
 
 import pytest
 import typer
@@ -52,6 +51,10 @@ class _Rfc2217Server:
             threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
 
     def _serve(self, conn: socket.socket) -> None:
+        """One thread does all the sending (RFC 2217 replies and the board's
+        output), so nothing interleaves. The "board" prints its prompt right
+        after it first sees a payload byte (the client's first key), which
+        makes the exchange independent of thread timing."""
         ser = serial.serial_for_url("loop://", timeout=0.05)
 
         class Out:
@@ -59,19 +62,7 @@ class _Rfc2217Server:
                 conn.sendall(data)
 
         manager = rfc2217.PortManager(ser, Out())
-
-        def board_to_client() -> None:
-            time.sleep(0.6)  # the board prints after the client finished negotiating
-            ser.write(self.preload)
-            while not self.stop.is_set():
-                try:
-                    data = ser.read(ser.in_waiting or 1)
-                    if data:
-                        conn.sendall(b"".join(manager.escape(data)))
-                except (OSError, serial.SerialException):
-                    return
-
-        threading.Thread(target=board_to_client, daemon=True).start()
+        prompted = False
         conn.settimeout(0.2)
         while not self.stop.is_set():
             try:
@@ -83,8 +74,11 @@ class _Rfc2217Server:
             if not data:
                 return
             payload = b"".join(manager.filter(data))
-            self.received += payload
-            ser.write(payload)  # loop:// echoes it back to the client too
+            if payload:
+                self.received += payload
+                if not prompted:
+                    prompted = True
+                    conn.sendall(b"".join(manager.escape(self.preload)))
 
     def close(self) -> None:
         self.stop.set()
@@ -110,7 +104,7 @@ def test_cli_break_uboot_over_rfc2217_exits_0_with_a_caught_envelope(server, mon
     monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [])
     r = runner.invoke(
         app,
-        ["--port", server.url, "--break-uboot", "--non-interactive", "--break-timeout", "10",
+        ["--port", server.url, "--break-uboot", "--non-interactive", "--break-timeout", "30",
          "--format", "json"],
     )
     assert r.exit_code == 0, r.stdout
