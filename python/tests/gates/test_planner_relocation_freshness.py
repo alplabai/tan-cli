@@ -2421,6 +2421,11 @@ EXEMPT_FROM_RELOCATION_TRACKING: frozenset[str] = frozenset({
     # tracks is a REGISTRY of alp-sdk facts (a schema property, a
     # metadata/quality-tasks-v1.json task id), not a port of alp-sdk code.
     "sdk_capability.py",
+    # tan-cli#1350: `diagnostics.link: itcm` -- the AEN Flow C ITCM retarget
+    # (refusals + the conf/overlay bytes). Tan-native by ADR-0026 (the planner
+    # is tan's; alp-sdk's `alp_orchestrate` does not implement the knob), so
+    # there is no alp-sdk source to drift against.
+    "link_target.py",
     # `aperture.py` RETIRED from this set at the eff266b6 -> 15b2f32c bump
     # (tan-cli#1239/#1223): PINNED_SDK_COMMIT now advances past alp-sdk#1365
     # split B, the commit that added `scripts/alp_orchestrate/aperture.py`,

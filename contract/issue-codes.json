@@ -1756,6 +1756,22 @@
       "note": "Constructed as the whole literal at a `PlanParseError` call site in `build_plan.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "build.link-itcm-unsupported",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/planner/link_target.py",
+      "note": "board.yaml `diagnostics.link: itcm` (AEN Flow C ITCM link, tan-cli#1350) refused: the project is not an Alif Ensemble M55-HE-only Zephyr build (an M55-HP or other core, a non-AEN SoM, an unknown link value, or a sysbuild project). Pre-consumer: nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
+    },
+    {
+      "code": "build.link-itcm-console-conflict",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/planner/link_target.py",
+      "note": "board.yaml `diagnostics.link: itcm` combined with an explicit non-RAM `diagnostics.console:` (uart/alp/linux/none). A Flow C RAM-run produces zero UART bytes; the RAM console is the only observable. Pre-consumer: nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
+    },
+    {
       "code": "build.plan-warning",
       "status": "reserved",
       "severity": "warning",
