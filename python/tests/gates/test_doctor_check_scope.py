@@ -67,6 +67,7 @@ _PINNED_SCOPES = {
     # the answer is identical for every project built here.
     "devicetreeLint": "host",
     "homePath": "host",
+    "tanInstall": "host",
     "hostPrerequisites": "host",
     "hostPython": "host",
     "jlink": "host",

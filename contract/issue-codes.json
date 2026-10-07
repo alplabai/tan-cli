@@ -354,7 +354,7 @@
       "status": "reserved",
       "severity": "warning",
       "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
-      "consumerEffect": "None today. Reserved for alp-sdk-vscode to notice that the editable `pip install -e` of tan's Python backend (`alp_cli`) into the venv reported a problem -- the venv may be left without a working backend for later `tan` invocations that shell into it.",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to notice that the editable `pip install -e` of alp-sdk's Python tooling (`alp_cli`/`alp_mcp`, which provides the `alp-mcp` console script) into the venv reported a problem -- the venv may be left without the alp-mcp server. It is not what `tan build` or the west forwarders depend on (tan plans in-process).",
       "emittedBy": "crates/tan-cli/src/commands/bootstrap/steps.rs",
       "literal": "\"editable-install\"",
       "note": "tan-cli#111 registry audit: recorded via `Log::warn` in `pip_phase`, the last of the three non-fatal pip-extras warnings alongside `sdk-extras`/`zephyr-requirements`."
@@ -1049,7 +1049,7 @@
       "severity": "info or warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/build/token_substitution.py",
-      "note": "tan-cli#1302: a `${NAME}` the user's board.yaml writes on purpose (e.g. `ota.server.tenant: \"${MENDER_TENANT_TOKEN}\"`) was copied verbatim into a `configArtefacts[*].contents` value and is left untouched in the materialised file. One per placeholder name. `info` when the build host or the device supplies it (a Yocto `local.conf` line, or a commented Kconfig line); `warning` when it sits on a live line of a Kconfig fragment, because Kconfig does not expand `${NAME}` and the firmware would carry the literal text. Exempt only in `.conf` config-artefact contents (never a `.cmake` file, which CMake would expand), only for a name that is not a plan path token, and only when the plan's `deferredPlaceholders` (alp-sdk#2696) lists it -- or, while the plan carries no such key, when a string VALUE of the project's own board.yaml equals `${NAME}` exactly. Everything else keeps `build.plan-token-unresolved`. Pre-consumer: nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
+      "note": "tan-cli#1302: a `${NAME}` the user's board.yaml writes on purpose (e.g. `ota.server.tenant: \"${MENDER_TENANT_TOKEN}\"`) was copied verbatim into a `configArtefacts[*].contents` value and is left untouched in the materialised file. One per placeholder name. `info` when the build host or the device supplies it (a Yocto `local.conf` line, or a commented Kconfig line); `warning` when it sits on a live line of a Kconfig fragment, because Kconfig does not expand `${NAME}` and the firmware would carry the literal text. Exempt only in `.conf` config-artefact contents (never a `.cmake` file, which CMake would expand), only for a name that is not a plan path token, and only when the plan's `deferredPlaceholders` (alp-sdk#2696) lists it; a plan carrying no such key exempts nothing (tan-cli#1309 retired the interim board.yaml whole-value rule once the planner always emits the key). Everything else keeps `build.plan-token-unresolved`. Pre-consumer: nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change."
     },
     {
       "code": "clean.internal-failure",
@@ -1362,6 +1362,78 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/model_cmd.py",
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "monitor.break-bad-option",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --break-uboot` was given an unusable `--break-timeout` (not > 0), an empty `--prompt`/`--break-key`, or a malformed escape in either. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.break-io-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --break-uboot` hit a serial I/O error (including pyserial's write timeout on a stalled rfc2217:// or socket:// endpoint) while sending the key or reading the console. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.break-open-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --break-uboot` could not open the port in-process (pyserial `serial_for_url` raised), e.g. a refused rfc2217:// or socket:// endpoint. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.break-timeout",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --break-uboot` sent the interrupt key until `--break-timeout` expired without seeing `--prompt`; `data.breakIn.caught` is false and no interactive session is started. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-bad-option",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture` was given an unusable option: neither --duration nor --until, --duration <= 0, an empty or invalid --until regex, or --duration/--until/--log without --capture. Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-io-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture` hit a serial I/O error while reading the port. Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-log-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture --log` could not create the log file (exit 3). Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-open-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture` could not open the port in-process (pyserial `serial_for_url` raised). Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
+      "code": "monitor.capture-timeout",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --capture --until` read for the whole duration without any line matching the regex; `data.capture.matched` is false. Pre-consumer (tan-cli#1324) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
     },
     {
       "code": "monitor.failed",
@@ -1916,6 +1988,62 @@
       "note": "Constructed as the whole literal at a `_error` call site in `flash_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "flash.device-config-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1322. EMISSION CONDITION: a Flow D (alif_mram_jlink) slot0 sign that tan performs itself found no device configuration for the DEVICE ATOC entry -- flash_args.setools_device_config is unset and the SETOOLS install ships no build/config/app-device-config.json, or flash_args.setools_device_config names a file that does not exist (it is never silently swapped for the stock one). The DEVICE entry carries the firewall regions, HFXO trims and SE_BOOT_INFO configuration; a Flow D write REPLACES the whole ATOC, so signing without one deletes the resident DEVICE entry. Fires under --dry-run too, before app-gen-toc is spawned. Answered by pointing flash_args.setools_device_config at an Alif device-config JSON, or by --no-device-config, which signs an app-only ATOC knowingly. Deliberately DISTINCT from flash.entry-failed: every flash refusal shares rc 1 and status failed, so the code is the only channel that tells a consumer this one is answered by supplying a device config. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.jlink-reset-unconfirmed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1321 / #522. EMISSION CONDITION: a Flow D (alif_mram_jlink) write whose J-Link transcript carries a reset-failure marker -- \"Failed to halt CPU\", \"CPU is not halted\", \"Reset: Failed\" or \"CPU may have not been reset\" -- after the write and its verifybin succeeded. JLinkExe still exits 0 in that case, so the exit code cannot tell it from a clean PIN reset; the entry stays ok with its message downgraded to \"cache-verified; PIN-reset NOT confirmed\" and this warning names the markers found (also data.entries[].jlink.resetFailures). Deliberately a warning: the image was written. The consumer-visible meaning is that the freshly written image was not necessarily started -- power-cycle and check the console. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.readback-mismatch",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1321. EMISSION CONDITION: `tan flash --readback` on a Flow D (alif_mram_jlink) write whose fresh-session J-Link read-back (savebin of every written region) hashed differently from the source file (sha256), or returned fewer bytes than were written. The write's own verifybin passed against J-Link's flash cache, so the chip does not hold the image: slot0 must not be trusted and the board should be re-flashed. Deliberately an error and distinct from flash.entry-failed: the write itself reported success, so this is the only channel that says the board was left in a suspect state. The read-back goes through the same probe-selection guard as the write. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.readback-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing tan-cli#1321. EMISSION CONDITION: `tan flash --readback` on a Flow D (alif_mram_jlink) write that landed and cache-verified but whose fresh read-back session could not be run to completion -- the J-Link process failed or timed out, the read-back script could not be built, or there was no readable written region. Nothing was compared, so the write is neither confirmed nor refuted; data.entries[].jlink.readback.reason says why. An error, because a requested confirmation did not happen. A probe-guard refusal before the read-back is reported as its own flash.probe-* code instead. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.preview-sign-skipped",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing the tan-cli#1343 review. EMISSION CONDITION: a Flow D (alif_mram_jlink) PREVIEW (--dry-run, or an unconfirmed run) that would auto-sign the slot0 ATOC but whose SETOOLS install is known only from flash_args.setools_dir in the manifest -- not from --setools-dir or $SETOOLS_DIR. The manifest is controlled by the project checkout, so a preview does not execute the app-gen-toc it names; the entry reports \"ATOC placement not computed; pass --setools-dir to preview it\" and carries no plan block. Informational: the run is otherwise ok (or planned, when unconfirmed). Answered by naming the SETOOLS install on the command line or in the environment. A confirmed write still signs. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.device-config-mismatch",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing the tan-cli#1343 review (tan-cli#1322). EMISSION CONDITION: the device configuration that becomes the DEVICE ATOC entry (flash_args.setools_device_config, else the stock SETOOLS build/config/app-device-config.json) declares a metadata.device whose Alif family prefix (the first three characters, e.g. AE7 vs AE8) differs from the slice's flash_args.jlink_flash_device. The stock SETOOLS file names an Ensemble E7 part while the AEN801/803 boards are E8, so this fires for the stock file on those boards; it is a warning, not a refusal, because the stock file is the bench-proven default. The entry's setools.deviceConfig carries metadataDevice and the same warning text. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.write-sector-overlap",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "note": "Added closing the tan-cli#1343 review. EMISSION CONDITION: a Flow D (alif_mram_jlink) entry whose planned writes -- the app blob at flash_args.slot0_load_address and the ATOC at its address -- touch the same 16 KiB sector, or whose sectors cover a resident entry that the new ATOC does not rewrite (an entry listed in flash_args.resident_atoc_entries as NAME@0xADDR[+0xSIZE]). The MRAM loader rewrites whole sectors and fills the remainder with 0xFF, so the later write would erase the head of the earlier one. Refused before anything is written, under --dry-run too, from the sizes of the files that would be written. Deliberately DISTINCT from flash.entry-failed: every flash refusal shares rc 1 and status failed, so the code is the only channel that tells a consumer this one is answered by moving an address. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "generate.board-sku-unresolved",
       "status": "reserved",
       "severity": "error",
@@ -2421,6 +2549,14 @@
       "note": "Constructed as the whole literal at a `MonitorError` call site in `monitor_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Promoted reserved -> frozen by tan-cli#1092, on the trigger the old note wrote down for itself; the same operation tan-cli#885 performed for cli.parse-error. The consumer that fired it is alp-sdk-vscode#649, which binds the spelling at src/monitor.ts:89 (in listSerialPorts, :75) via packages/alp-core/src/monitor/ports.ts:44 and registers it in that repo's own gate at test/tanContract.test.js:261. That PR was still OPEN when this promotion landed -- deliberately, and in the safe direction: freezing early stops tan renaming the code out from under an in-flight consumer, whereas waiting for the merge leaves a window where a rename here is silently breaking. If #649 is abandoned rather than merged, this entry is a frozen code with no live consumer, which is debt to demote, not a wire break. The match FAILS OPEN on the consumer side, so a rename is silent on both. ONE CONSEQUENCE IS CERTAIN, not merely possible, and it lands on the consumer: test/tanContract.test.js:261 pins this code at \"reserved\" and asserts equality against tan's published envelope-contract.json, so the first time alp-sdk-vscode's SUPPORTED_CLI_VERSION moves to a tan release carrying this promotion, that assertion reds with 'tan vX declares monitor.no-port \"frozen\", not \"reserved\"'. It is loud and one line to fix, and it is unavoidable in EITHER freeze ordering; alp-sdk-vscode#423 is the precedent for tracking that move as its own change alongside the pin bump."
     },
     {
+      "code": "monitor.no-tty",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_session.py",
+      "note": "`tan monitor --break-uboot` was asked for the interactive console without a terminal on stdin; pass `--non-interactive` to stop after the break-in. Pre-consumer (tan-cli#1315) -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` once a consumer binds to it."
+    },
+    {
       "code": "monitor.pyserial-missing",
       "status": "reserved",
       "severity": "error",
@@ -2563,6 +2699,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/doctor_cmd.py",
       "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{kebab_check_name(check.name)}\"` -- kebab-cased via `kebab_check_name` since the camelCase-issue-code fix. The Rust oracle's own `doctor.<checkName>` convention still emits `c.name` raw (`format!(\"doctor.{}\", c.name)`, `doctor.rs`), so this is now a deliberate, documented Python-only divergence from the oracle, not the verbatim mirror it used to be. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.tan-install",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "note": "Warns when the running `tan` is behind the source it was installed from (PEP 610 `direct_url.json`): a `file://` install whose source `TAN_VERSION` differs, or a git/pipx install whose `commit_id` is not the remote branch tip (one `git ls-remote`, 4s timeout, skipped under `TAN_DOCTOR_OFFLINE=1`; offline degrades to pass). Never `fail`. Emitted by `tan_install_check` (logic in `tan.core.doctor_stale`). Pre-consumer -- nothing in alp-sdk-vscode matches this code."
     },
     {
       "code": "doctor.venv-provenance",

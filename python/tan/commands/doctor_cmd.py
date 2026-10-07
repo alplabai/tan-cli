@@ -178,6 +178,7 @@ from tan.core.doctor_git import (
     _resolve_git_executable,
     classify_git_core_longpaths,
 )
+from tan.core.doctor_stale import StaleVerdict, running_tan_verdict
 from tan.core.doctor_libraries import LibraryReport, inspect_selection
 from tan.core.doctor_render import render_check_lines, render_doctor_footer
 from tan.core.doctor_scope import CHECK_SCOPES
@@ -2003,6 +2004,32 @@ def long_paths_check(registry_enabled: bool | None, git_core_longpaths: bool | N
         fix = f"{_GIT_LONG_PATHS_FIX}\n{_enable_long_paths_fix(key)}"
 
     return Check("longPaths", status, f"{headline} ({registry_detail}; {git_detail}).", fix, scope="host")
+
+
+def tan_install_check(verdict: StaleVerdict | None, version: str) -> Check:
+    """`tanInstall` -- is the RUNNING `tan` behind the source it was installed
+    from? `warn` when so (never `fail`: a stale tan still works, and `exit_code_for`
+    reserves exit 4 for real breakage); `pass` when current OR when it cannot be
+    told (no provenance record, offline, no git) -- an unanswerable question is
+    not a problem. The verdict logic lives in `tan.core.doctor_stale`."""
+    return Check(
+        "tanInstall",
+        "pass" if verdict is None else "warn",
+        f"tan {version}" if verdict is None else verdict.detail,
+        None if verdict is None else verdict.fix,
+        scope="host",
+    )
+
+
+def _tan_install_check() -> Check:
+    """IO half of `tan_install_check`; `TAN_DOCTOR_OFFLINE=1` skips its one
+    short-timeout `git ls-remote`."""
+    from tan.version import TAN_VERSION
+
+    verdict = running_tan_verdict(
+        TAN_VERSION, _resolve_git_executable(), bool(os.environ.get("TAN_DOCTOR_OFFLINE"))
+    )
+    return tan_install_check(verdict, TAN_VERSION)
 
 
 def home_path_check(home: str | None) -> Check:
@@ -4061,9 +4088,9 @@ def _collect(
         _add(
             long_paths_check(_long_paths_enabled(), _git_core_longpaths(_resolve_git_executable()))
         )
-    _add(
-        home_path_check(os.environ.get("USERPROFILE" if os.name == "nt" else "HOME"))
-    )
+    _add(home_path_check(os.environ.get("USERPROFILE" if os.name == "nt" else "HOME")))
+    # `tanInstall`: is this running tan behind the source it was installed from?
+    _add(_tan_install_check())
 
     # tan-cli#441: `bootstrapManifest` + `hostPrerequisites` (and the manifest
     # load + Python probe `hostPython`/`pythonFloor`/`west` below also need)

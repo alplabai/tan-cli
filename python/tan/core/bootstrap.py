@@ -410,6 +410,9 @@ class BootstrapFacts:
     west_extension_guard: str
     pip_bootstrap_upgrade: tuple[str, ...]
     pip_sdk_extras: tuple[str, ...]
+    #: `pip install -e` target: alp-sdk's own `alp_cli`/`alp_mcp` tooling (the
+    #: `alp-mcp` console script). Not a planner install -- tan plans in-process
+    #: (tan-cli#270).
     pip_editable_install: str
     #: `env`, ordered, still tokened. A list of pairs because ORDER is what
     #: makes the rendered `export`/`$env:` lines come out in the manifest's

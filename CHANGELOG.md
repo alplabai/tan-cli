@@ -13,9 +13,10 @@ patch (`0.6.1`) — see the matching `BREAKING` entry below for each one's
 exact before/after:
 
 - tan's effective alp-sdk floor rises to the first alp-sdk release
-  containing commit `34c11c9de04e264fdcab2bc0d58b328d9d117ca8` (moved from
-  `c81cb5db9945c8f448a7bb952d374f874e2f42c0` by the planner re-sync
-  tan-cli#1278, which had itself moved it from
+  containing commit `ac0e2a5e096a1c8c102818650a688d0f7e709066` (moved from
+  `34c11c9de04e264fdcab2bc0d58b328d9d117ca8` by the planner re-sync
+  tan-cli#1309; `34c11c9de` had itself replaced
+  `c81cb5db9945c8f448a7bb952d374f874e2f42c0` at tan-cli#1278, and that
   `81a9d515a90403cce30588704e31faf9dc893838` at tan-cli#1275; each is an
   ancestor of the next); `tan build`
   on *any* Zephyr board against an older alp-sdk fails Kconfig configure
@@ -64,14 +65,16 @@ exact before/after:
 
 *This release requires alp-sdk **v0.17.0** (pending, alp-sdk#2047) or newer.
 tan's planner mirror and vendored scaffold are pinned to alp-sdk
-`34c11c9de04e264fdcab2bc0d58b328d9d117ca8`, and v0.17.0 is the first stable
-alp-sdk release planned to contain it. As of 2026-10-06 no alp-sdk tag does,
-and the newest stable release is `v0.16.0`, which is too old: it lacks
+`ac0e2a5e096a1c8c102818650a688d0f7e709066` (moved from `34c11c9de` by the
+planner re-sync tan-cli#1309), and v0.17.0 is the first stable alp-sdk
+release planned to contain it. As of 2026-10-07 no alp-sdk tag does, and the
+newest stable release is `v0.16.0`, which is too old: it lacks
 `metadata/e1m_modules/aen/on-module-links.yaml`,
 `metadata/e1m_modules/v2n/supervisor-links.yaml`, the `ALP_SDK_SOM_HW_REV`
-Kconfig symbol and the som-preset v2 presets (alp-sdk#2024). Do not tag until
-that release exists and contains the pin; if its number differs, correct
-this line. See `docs/release-contract.md` and tan-cli#1258.*
+Kconfig symbol, the som-preset v2 presets (alp-sdk#2024) and the som-preset
+`inference.auto_order` field (alp-sdk#2677). Do not tag until that release
+exists and contains the pin; if its number differs, correct this line. See
+`docs/release-contract.md` and tan-cli#1258.*
 
 ### Fixed
 

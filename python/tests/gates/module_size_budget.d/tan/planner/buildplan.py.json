@@ -5,11 +5,15 @@
   "lines": null,
   "long_functions": [
     [
+      71,
+      "_deferred_placeholders"
+    ],
+    [
       104,
       "_slice_artifacts"
     ],
     [
-      297,
+      304,
       "emit_build_plan"
     ]
   ]
