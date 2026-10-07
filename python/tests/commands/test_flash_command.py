@@ -606,6 +606,29 @@ boot_order: []
     assert "tan-cli#732" in err_text, err_text
 
 
+def test_ram_run_only_flash_method_refuses_and_points_at_flash_ram(tmp_path):
+    """tan-cli#1350: an ITCM-linked slice (board.yaml `diagnostics.link: itcm`)
+    carries `flash_method: ram_run_only`. Plain `tan flash` must refuse it by
+    name -- signing and writing a 0x0-linked image to MRAM slot0 is a broken
+    image -- and name `tan flash --ram`, not read like a generic typo."""
+    manifest = """schema_version: 1
+hw_info: {sku: E1M-AEN801}
+slices: []
+helper_mcus:
+- {name: m55_he, chip: m55, firmware_path: zephyr.bin,
+   flash_method: ram_run_only, flash_args: {}}
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1, payload
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed", entry
+    message = payload["issues"][0]["message"]
+    assert "tan flash --ram" in message and "diagnostics.link: itcm" in message, message
+    assert "no registered backend" not in message, message
+
+
 def test_an_unrecognised_flash_method_that_never_existed_still_gets_the_generic_refusal(
     tmp_path,
 ):

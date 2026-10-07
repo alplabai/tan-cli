@@ -133,6 +133,7 @@ from tan.core.tool_lookup import ToolResolution, resolve_tool
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
 from tan.core.zephyr_env import zephyr_env_overrides
 from tan.envelope import Issue
+from tan.commands.build.link_stale import stale_itcm_overlay_reset
 
 if os.name != "nt":
     import signal
@@ -724,9 +725,14 @@ def _maybe_reset_stale_configure_cache(
 
     The reset is `-UDTC_OVERLAY_FILE -UCONF_FILE` on the configure that
     follows a set change -- deliberately NOT `-UEXTRA_DTC_OVERLAY_FILE`/
-    `-UEXTRA_CONF_FILE`: those two are re-resolved via `zephyr_get(...
-    MERGE REVERSE)` on every configure regardless of the cache (no `NOT
-    DEFINED` guard gates them), and this slice's own command already ends
+    `-UEXTRA_CONF_FILE` here. CORRECTION (tan-cli#1350): the old premise that
+    those two are re-resolved on every configure regardless of the cache is
+    only true of `EXTRA_CONF_FILE`, which every plan re-passes with `-D`.
+    `EXTRA_DTC_OVERLAY_FILE` is read with `zephyr_get(... CACHE ...)`, so a
+    value passed once survives in `CMakeCache.txt` after the plan stops passing
+    it -- see `link_stale.stale_itcm_overlay_reset`, which unsets it for the
+    one overlay tan itself ever passes that way. This slice's own command
+    already ends
     with `-DEXTRA_CONF_FILE=<build_dir>/alp.conf` (`_slice_command`'s
     per-core Kconfig wiring) -- appending `-UEXTRA_CONF_FILE` AFTER that in
     the same argv would UNSET it instead (measured: `-D`/`-U` on the same
@@ -1422,6 +1428,12 @@ def execute_slices(
             )
         )
         configure_cache_issues.extend(new_configure_cache_issues)
+        # tan-cli#1350: `link: itcm` -> `auto` must not keep the ITCM overlay.
+        if sl.backend == "zephyr":
+            stale_overlay_args, stale_overlay_issues = stale_itcm_overlay_reset(
+                cwd, sl.command.args)
+            configure_cache_reset_args = configure_cache_reset_args + stale_overlay_args
+            configure_cache_issues.extend(stale_overlay_issues)
 
         if is_west and workspace_dir is not None and "ZEPHYR_BASE" not in slice_env:
             # tan-cli#336: a dangling `$ZEPHYR_BASE` inherited from the

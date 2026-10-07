@@ -106,6 +106,7 @@ from tan.commands.build.token_substitution import (
 from tan.commands.build.toolchain import ToolchainResolution, resolve_toolchain_root
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.global_flags import accept_global_flags
+from tan.core.link_refusal import refusal_code
 from tan.core.plan_exec import (
     CROSS_DRIVE_MSG,
     MISSING_TOOL_RE,
@@ -505,11 +506,10 @@ def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
         ) from err
     except Exception as err:
         # `diagnostics.link: itcm` refused (tan-cli#1350): a board.yaml input
-        # error with its own code, not a planner fault. Imported here, not at
-        # module scope: the planner needs a bound SDK root to import, and by
-        # now `_plan_emit` has bound it.
-        from tan.planner.link_target import LinkTargetError  # noqa: PLC0415
-        if isinstance(err, LinkTargetError):
+        # error with its own code, not a planner fault. Recognised by its code
+        # (`refusal_code`), not its class: the planner needs a bound SDK root
+        # to import.
+        if refusal_code(err) is not None:
             raise BuildError(err.code, str(err), ExitCode.VALIDATION_FAILURE) from err
         # Every planner failure is an envelope, never a traceback -- the same
         # thing the subprocess boundary used to buy for free. Includes the bare

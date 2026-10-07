@@ -96,6 +96,7 @@ except ImportError:  # pragma: no cover -- Windows has none of the four
 
 import typer
 
+from tan.core.link_refusal import RAM_RUN_ONLY_METHOD
 from tan.core.shapes import is_file as _is_file
 from tan.core.sdk_discovery import resolve_sdk_root_ladder, sdk_resolution_issues
 from tan.core.dp_id import (
@@ -2604,6 +2605,16 @@ def _flash_entry(
                 "projected into this manifest when the preset declares it). tan has "
                 "no built-in replacement for a LOCAL SWD write today (e.g. recovering "
                 "a bricked bridge) -- see docs/setools.md and tan-cli#610."
+            )
+        elif method == RAM_RUN_ONLY_METHOD:
+            # tan-cli#1350: an ITCM-linked image (board.yaml `diagnostics.link:
+            # itcm`) is linked at 0x0; signing and writing it to MRAM slot0
+            # would produce a broken image. Refuse, name the right command.
+            msg = (
+                f"flash: {kind} '{entry_id}' is linked for the M55-HE ITCM "
+                "(board.yaml `diagnostics.link: itcm`) and cannot be written to MRAM -- "
+                f"RAM-run it with `tan flash --ram --core {entry_id}`, or remove "
+                "`diagnostics.link` and rebuild for a flash."
             )
         else:
             msg = (
