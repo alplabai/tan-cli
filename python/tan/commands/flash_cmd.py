@@ -170,6 +170,9 @@ from tan.core.jlink_probe import (
 )
 from tan.core.subprocess_env import spawn_env
 from tan.core.setools import (
+    SetoolsUntrustedSourceError,
+    check_device_config_location,
+    untrusted_install_message,
     find_app_gen_toc,
     missing_tool_message,
     resolve_setools_dir,
@@ -2128,6 +2131,9 @@ class _Context:
     #: `--no-device-config` (tan-cli#1322): sign an app-only ATOC with no `DEVICE`
     #: entry. Default `False` -- the DEVICE entry is part of every auto-signed ATOC.
     no_device_config: bool = False
+    #: The project (application) directory -- one of the two places a manifest-named
+    #: `setools_device_config` may live (tan-cli#1344).
+    project_dir: str | None = None
     #: `--readback` (tan-cli#1321): after a Flow D write, re-read every written
     #: region in a FRESH J-Link session and compare sha256.
     readback: bool = False
@@ -2539,6 +2545,10 @@ def _resolve_flow_d_atoc_via_setools(
             "flash_args.atoc_address yourself."
         )
 
+    if not setools.operator_supplied and not (ctx.dry_run or not confirm):
+        # tan-cli#1344: a CONFIRMED write does not execute a SETOOLS the project alone
+        # named either -- the operator armed the write, not that binary.
+        raise SetoolsUntrustedSourceError(untrusted_install_message(setools))
     if (ctx.dry_run or not confirm) and not setools.operator_supplied:
         # tan-cli#1343 review: a PREVIEW must not execute a binary the PROJECT picked.
         # `flash_args.setools_dir` lives in the manifest, which a checkout controls, so
@@ -2563,6 +2573,7 @@ def _resolve_flow_d_atoc_via_setools(
         explicit = fa_str_checked(flash_args, "setools_device_config", False)
         if explicit is not None:
             explicit = resolve_artefact_path(explicit, ctx.build_root, ctx.sdk_root, _is_file)
+            check_device_config_location(explicit, setools.path, ctx.project_dir)
         device = resolve_device_config(explicit, setools.path, entry_id=entry_id)
 
     block: dict[str, Any] = {
@@ -4055,6 +4066,7 @@ def _run(
         probe_serial=probe_serial,
         probe_usb_path=probe_usb_path,
         no_device_config=no_device_config,
+        project_dir=app_dir,
         readback=readback,
         jlink_path=jlink_path,
         **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
@@ -4137,6 +4149,8 @@ def _run(
                 issues.append(Issue("flash.probe-verify-failed", "error", entry.message))
             elif entry.probe_refusal == "selector-conflict":
                 issues.append(Issue("flash.probe-selector-conflict", "error", entry.message))
+            elif entry.issue_code == "flash.setools-untrusted-source":
+                issues.append(Issue("flash.setools-untrusted-source", "error", entry.message))
             elif entry.issue_code == "flash.write-sector-overlap":
                 issues.append(Issue("flash.write-sector-overlap", "error", entry.message))
             elif entry.issue_code == "flash.readback-mismatch":

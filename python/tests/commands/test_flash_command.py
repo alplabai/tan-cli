@@ -3969,7 +3969,6 @@ def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related
     flash_args = {
         "jlink_flash_device": "PART_PROFILE",
         "slot0_load_address": "0x80010000",
-        "setools_dir": str(setools_dir),
     }
     ctx = _Context(
         sku="S",
@@ -3979,6 +3978,7 @@ def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related
         skip_missing_tools=False,
         force_confirm=False,
         capture=True,
+        setools_dir=str(setools_dir),  # operator-named (--setools-dir)
     )
     shape = validate_flow_d_shape(flash_args, str(artefact), _is_file)
     import contextlib
@@ -3998,7 +3998,7 @@ def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related
         # names the source, matching `resolve_setools_dir`'s own precedence text.
         assert note is not None
         assert str(setools_dir) in note
-        assert "flash_args.setools_dir" in note
+        assert "the --setools-dir flag" in note
         assert merged["atoc_address"] == "0x8057ea50"
         assert Path(merged["atoc"]).is_file()
         assert Path(script).is_file()  # the fake tool itself was never deleted/moved
@@ -4410,6 +4410,70 @@ def test_a_hand_supplied_atoc_is_planned_with_unknown_entries(tmp_path):
     # 0x8057F5B0 + 20000 B reaches 0x805843D0: three 16 KiB sectors.
     assert atoc["sectorSpan"]["count"] == 3
     assert plan["scratchNote"] is None
+
+
+def test_a_confirmed_write_refuses_a_setools_only_the_manifest_named(tmp_path):
+    """tan-cli#1344: the operator armed the write, not the binary a checkout picked."""
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    marker = tmp_path / "ran"
+    tool = setools_dir / _setools_script_name()
+    tool.write_text(f'#!/bin/sh\ntouch "{marker}"\n', encoding="utf-8")
+    os.chmod(tool, 0o755)
+    fake_tools = tmp_path / "faketools"
+    fake_tools.mkdir()
+    stub = fake_tools / "JLinkExe"
+    stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    os.chmod(stub, 0o755)
+    manifest = _FLOW_D_SIGN_MANIFEST % (
+        f', setools_dir: "{setools_dir}", confirm: true, atoc_unqueryable: true'
+    )
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", manifest=manifest,
+        env={"SETOOLS_DIR": "", "TMPDIR": str(scratch_parent),
+             "PATH": str(fake_tools) + os.pathsep + os.environ["PATH"]},
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    assert codes(payload) == ["flash.setools-untrusted-source"]
+    assert "--setools-dir" in payload["data"]["entries"][0]["message"]
+    assert not marker.exists()
+    assert _scratch_remnants(scratch_parent) == []
+
+
+def test_a_device_config_outside_the_setools_dir_and_project_is_refused(tmp_path):
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    manifest = _FLOW_D_SIGN_MANIFEST % f', setools_device_config: "{outside}"'
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    payload = envelope(out)
+    assert exit_code == 1 and codes(payload) == ["flash.setools-untrusted-source"]
+    assert "outside the SETOOLS install" in payload["data"]["entries"][0]["message"]
+    # Inside the operator-named SETOOLS dir: accepted.
+    inside = setools_dir / "build" / "config" / "mine.json"
+    inside.write_text("{}", encoding="utf-8")
+    manifest = _FLOW_D_SIGN_MANIFEST % f', setools_device_config: "{inside}"'
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    assert exit_code == 0, out
+
+
+def test_a_device_config_symlinked_out_of_the_project_is_refused(tmp_path):
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-secret.json"
+    elsewhere.write_text("{}", encoding="utf-8")
+    os.symlink(elsewhere, tmp_path / "build" / "dev.json")
+    manifest = _FLOW_D_SIGN_MANIFEST % ", setools_device_config: dev.json"
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    assert exit_code == 1 and codes(envelope(out)) == ["flash.setools-untrusted-source"]
 
 
 def test_a_preview_never_runs_a_setools_the_manifest_chose(tmp_path):
