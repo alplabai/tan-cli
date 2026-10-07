@@ -331,6 +331,10 @@ class _Entry:
     #: SETOOLS install came only from the manifest. `_run` appends an `info`
     #: `flash.preview-sign-skipped`. Never emitted by `as_dict()`.
     preview_sign_skipped: bool = False
+    #: tan-cli#1313: `--ram-console` was asked for but the ELF has no `ram_console_buf`
+    #: (a UART-console build). `_run` appends a `flash.ram-console-symbol-missing`
+    #: warning. Never emitted by `as_dict()`.
+    ram_console_missing: bool = False
     #: tan-cli#1343 review: the device configuration names another Alif family than
     #: this slice's J-Link part profile (the warning text). `_run` appends a
     #: `flash.device-config-mismatch` warning.
@@ -2137,6 +2141,11 @@ class _Context:
     #: The project (application) directory -- one of the two places a manifest-named
     #: `setools_device_config` may live (tan-cli#1344).
     project_dir: str | None = None
+    #: `--ram` / `--ram-console` / `--wait` (tan-cli#1313): AEN Flow C, a RAM-run that
+    #: never writes MRAM -- see `tan.commands.flash_ram`.
+    ram: bool = False
+    ram_console: bool = False
+    ram_wait: float = 1.5
     #: `--readback` (tan-cli#1321): after a Flow D write, re-read every written
     #: region in a FRESH J-Link session and compare sha256.
     readback: bool = False
@@ -3899,6 +3908,9 @@ def _run(
     no_device_config: bool = False,
     readback: bool = False,
     jlink_path: str | None = None,
+    ram: bool = False,
+    ram_console: bool = False,
+    ram_wait: float = 1.5,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -4085,9 +4097,22 @@ def _run(
         project_dir=app_dir,
         readback=readback,
         jlink_path=jlink_path,
+        ram=ram,
+        ram_console=ram_console,
+        ram_wait=ram_wait,
         **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
     )
-    unsupported = _probe_selector_unsupported(plan.targets, ctx)
+    if ram:
+        # tan-cli#1313: Flow C RAM-runs exactly ONE slice; helpers are never RAM-run.
+        slices = [t for t in plan.targets if t.kind == "slice"]
+        if helper is not None or len(slices) != 1:
+            return _error(
+                build_root, "flash.ram-failed",
+                "tan flash --ram RAM-runs exactly one slice: pick it with --core <id> "
+                f"(and no --helper); {len(slices)} slice(s) matched.", sdk,
+            )
+        plan = dataclasses.replace(plan, targets=tuple(slices))
+    unsupported = [] if ram else _probe_selector_unsupported(plan.targets, ctx)
     if unsupported:
         return (
             ExitCode.RUNTIME_FAILURE,
@@ -4097,7 +4122,12 @@ def _run(
             sdk,
         )
     for target in plan.targets:
-        rc, entry, lines = _flash_entry(target, ctx)
+        if ram:
+            from tan.commands.flash_ram import run_ram_entry
+
+            rc, entry, lines = run_ram_entry(target, ctx)
+        else:
+            rc, entry, lines = _flash_entry(target, ctx)
         text_lines.extend(lines)
         if (
             entry.probe is not None
@@ -4165,6 +4195,10 @@ def _run(
                 issues.append(Issue("flash.probe-verify-failed", "error", entry.message))
             elif entry.probe_refusal == "selector-conflict":
                 issues.append(Issue("flash.probe-selector-conflict", "error", entry.message))
+            elif entry.issue_code == "flash.ram-image-not-ram-linked":
+                issues.append(Issue("flash.ram-image-not-ram-linked", "error", entry.message))
+            elif entry.issue_code == "flash.ram-failed":
+                issues.append(Issue("flash.ram-failed", "error", entry.message))
             elif entry.issue_code == "flash.setools-untrusted-source":
                 issues.append(Issue("flash.setools-untrusted-source", "error", entry.message))
             elif entry.issue_code == "flash.write-sector-overlap":
@@ -4190,6 +4224,14 @@ def _run(
                 )
             else:
                 issues.append(Issue("flash.entry-failed", "error", entry.message))
+        if entry.ram_console_missing:
+            message = (
+                f"{entry.id}: --ram-console asked for the RAM console but this ELF has no "
+                "ram_console_buf symbol -- the build selected the UART console, so there is "
+                "nothing to read over SWD (read it on the console instead)."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.ram-console-symbol-missing", "warning", message))
         if entry.preview_sign_skipped:
             message = (
                 f"{entry.id}: the ATOC was not signed for this preview -- the SETOOLS "
@@ -4480,6 +4522,33 @@ def flash(
         "preview still previews. Separate from --confirm, which only arms the write "
         "itself, and it has no effect on any other backend.",
     ),
+    ram: bool = typer.Option(
+        False,
+        "--ram",
+        help="AEN Flow C (tan-cli#1313): load the slice's image into ITCM over J-Link and "
+        "run it -- NEVER writing MRAM. The load address comes from the ELF's LOAD "
+        "segments and the image is refused unless it is linked for ITCM/SRAM "
+        "(flash.ram-image-not-ram-linked); PC is set from the vector table's reset "
+        "handler. Uses the same probe-selection guard, DPIDR preflight, trusted J-Link "
+        "binary and --dry-run as a Flow D write. Needs exactly one slice (--core).",
+    ),
+    ram_console: bool = typer.Option(
+        False,
+        "--ram-console",
+        help="With --ram: after --wait seconds, read ram_console_buf (address and size "
+        "from the ELF symbol) over SWD and report it as ramConsole.text. A UART-console "
+        "build has no such symbol: nothing is read, the envelope says which console the "
+        "build selected, and flash.ram-console-symbol-missing is a warning, not an error.",
+    ),
+    wait: float = typer.Option(
+        1.5,
+        "--wait",
+        metavar="SECONDS",
+        min=0.0,
+        max=3600.0,
+        help="With --ram --ram-console: how long the image runs before the console is read "
+        "(default 1.5).",
+    ),
     jlink: str = typer.Option(
         None,
         "--jlink",
@@ -4583,6 +4652,11 @@ def flash(
             param_hint="--probe-usb-path",
         )
 
+    if (ram_console is True or (isinstance(wait, (int, float)) and wait != 1.5)) and ram is not True:
+        raise typer.BadParameter("--ram-console / --wait only mean something with --ram")
+    if ram is True and (readback is True):
+        raise typer.BadParameter("--ram never writes, so there is nothing to --readback")
+
     # Resolved OUTSIDE the guard: `project_obj` is reported on every path
     # including the internal-failure one, and `_resolve_project` is pure string
     # work that cannot raise. The port's most-repeated defect was a helper that
@@ -4619,6 +4693,9 @@ def flash(
             no_device_config=bool(no_device_config) if isinstance(no_device_config, bool) else False,
             readback=readback if isinstance(readback, bool) else False,
             jlink_path=jlink if isinstance(jlink, str) else None,
+            ram=ram if isinstance(ram, bool) else False,
+            ram_console=ram_console if isinstance(ram_console, bool) else False,
+            ram_wait=float(wait) if isinstance(wait, (int, float)) else 1.5,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an

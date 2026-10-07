@@ -1,0 +1,461 @@
+# SPDX-License-Identifier: Apache-2.0
+"""tan-cli#1313: `tan flash --ram` -- AEN Flow C (J-Link ITCM RAM-run + RAM console).
+
+No hardware: `_spawn_jlink` is a stub J-Link, and the ELF is a tiny fixture built
+here with `struct`."""
+from __future__ import annotations
+
+import os
+import struct
+from pathlib import Path
+
+import pytest
+
+from tan.commands import flash_cmd
+from tan.core import ram_run
+from tan.core.jlink_probe import JLinkProbe
+
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX executables / filenames")
+
+CONSOLE_ADDR = 0x20001000
+SERIAL = "000999000001"
+
+
+def make_elf(*, base=0x0, entry=0x101, filesz=64, symbols=None, extra_segments=()):
+    """A little-endian ELF32 with LOAD segment(s) and a symbol table."""
+    symbols = symbols or {}
+    strtab = b"\0"
+    syms = [struct.pack("<IIIBBH", 0, 0, 0, 0, 0, 0)]
+    for name, (addr, size) in symbols.items():
+        syms.append(struct.pack("<IIIBBH", len(strtab), addr, size, 0x11, 0, 1))
+        strtab += name.encode() + b"\0"
+    symtab = b"".join(syms)
+    segments = [(base, filesz), *extra_segments]
+    phoff = 52
+    sym_off = phoff + 32 * len(segments)
+    str_off = sym_off + len(symtab)
+    shoff = str_off + len(strtab)
+    ehdr = b"\x7fELF" + bytes([1, 1, 1]) + bytes(9) + struct.pack(
+        "<HHIIIIIHHHHHH", 2, 40, 1, entry, phoff, shoff, 0, 52, 32, len(segments), 40, 3, 0
+    )
+    phdrs = b"".join(struct.pack("<IIIIIIII", 1, 0, p, p, n, n, 5, 4) for p, n in segments)
+    shdrs = (
+        struct.pack("<IIIIIIIIII", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        + struct.pack("<IIIIIIIIII", 0, 2, 0, 0, sym_off, len(symtab), 2, 0, 4, 16)
+        + struct.pack("<IIIIIIIIII", 0, 3, 0, 0, str_off, len(strtab), 0, 0, 1, 0)
+    )
+    return ehdr + phdrs + symtab + strtab + shdrs
+
+
+def make_bin(size=64, sp=0x20003000, reset=0x101):
+    return struct.pack("<II", sp, reset) + bytes(size - 8)
+
+
+class FakeJlink:
+    """A stub J-Link: answers ShowEmuList, the DPIDR preflight, the load session and
+    the `mem8` read. Records every script it was handed, in order."""
+
+    def __init__(self, monkeypatch, *, console=b"hello\r\nRESULT PASS\n", dpidr="0x4C013477",
+                 load_out=None, emulators=(), read_rc=0):
+        self.scripts: list[str] = []
+        self.exes: list[object] = []
+        self.console, self.dpidr = console, dpidr
+        self.load_out = load_out if load_out is not None else "Script processing completed.\n"
+        self.emulators, self.read_rc = list(emulators), read_rc
+        monkeypatch.setattr(flash_cmd, "_spawn_jlink", self._spawn)
+
+    def kind(self, script):
+        if "ShowEmuList" in script:
+            return "list"
+        if "loadbin" in script:
+            return "load"
+        if "mem8" in script:
+            return "read"
+        return "preflight"
+
+    def _spawn(self, argv, script, capture, timeout, venv_bin=None, workspace=None,
+               executable=None, **kw):
+        self.scripts.append(script)
+        self.exes.append(executable)
+        kind = self.kind(script)
+        if kind == "list":
+            out = "\n".join(
+                f"J-Link[{i}]: Connection: USB, Serial number: {sn}, ProductName: J-Link"
+                for i, sn in enumerate(self.emulators)
+            )
+            return flash_cmd._Outcome(success=True, stdout=out, returncode=0)
+        if kind == "preflight":
+            return flash_cmd._Outcome(
+                success=True, stdout=f"Found SW-DP with ID {self.dpidr}\n", returncode=0
+            )
+        if kind == "read":
+            lines, addr = [], CONSOLE_ADDR
+            data = self.console
+            for i in range(0, len(data), 16):
+                chunk = data[i : i + 16]
+                lines.append(f"{addr + i:08X} = " + " ".join(f"{b:02X}" for b in chunk))
+            full = bytes(self.console) + bytes(0x40 - len(self.console))
+            lines = [
+                f"{CONSOLE_ADDR + i:08X} = " + " ".join(f"{b:02X}" for b in full[i : i + 16])
+                for i in range(0, 0x40, 16)
+            ]
+            return flash_cmd._Outcome(
+                success=self.read_rc == 0,
+                stdout="\n".join([*lines, "Script processing completed."]),
+                returncode=self.read_rc,
+            )
+        return flash_cmd._Outcome(success=True, stdout=self.load_out, returncode=0)
+
+
+def _manifest(args="{jlink_flash_device: PART}", extra_slices=""):
+    return (
+        "schema_version: 1\nhw_info: {sku: S}\nslices:\n"
+        f"- {{core_id: m55_he, os: zephyr, output_artefact: zephyr.elf, status: ok,\n"
+        f"   flash_method: zephyr_west_flash, flash_args: {args}}}\n{extra_slices}"
+        "helper_mcus: []\nboot_order: []\n"
+    )
+
+
+def _setup(tmp_path, monkeypatch, *, elf=None, binary=None, manifest=None, artefact="zephyr"):
+    build = tmp_path / "build"
+    build.mkdir(exist_ok=True)
+    (build / f"{artefact}.elf").write_bytes(
+        elf if elf is not None else make_elf(symbols={"ram_console_buf": (CONSOLE_ADDR, 0x40)})
+    )
+    (build / f"{artefact}.bin").write_bytes(binary if binary is not None else make_bin())
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    (build / "system-manifest.yaml").write_text(
+        (manifest or _manifest()).replace("zephyr.elf", f"{artefact}.elf"),
+        encoding="utf-8", newline="",
+    )
+    tools = tmp_path / "tools"
+    tools.mkdir(exist_ok=True)
+    stub = tools / "JLinkExe"
+    stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    os.chmod(stub, 0o755)
+    monkeypatch.setenv("PATH", str(tools))
+    monkeypatch.delenv("TAN_JLINK", raising=False)
+    monkeypatch.delenv("ALP_FLASH_REQUIRE_DPIDR", raising=False)
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    monkeypatch.setattr(flash_cmd.time, "sleep", lambda _s: None)
+    return str(stub)
+
+
+def _run(tmp_path, **kw):
+    kw.setdefault("ram", True)
+    kw.setdefault("ram_console", False)
+    kw.setdefault("ram_wait", 0.0)
+    kw.setdefault("core", "m55_he")
+    return flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"), board_yaml=None,
+        helper=None, dry_run=kw.pop("dry_run", False), skip_missing_tools=False, capture=True,
+        cwd=str(tmp_path), **kw,
+    )
+
+
+def _codes(issues):
+    return [i.code for i in issues]
+
+
+# ── the pure logic ──────────────────────────────────────────────────────────
+
+
+def test_the_elf_reader_finds_segments_and_the_console_symbol():
+    elf = ram_run.parse_elf(make_elf(base=0x58000000, symbols={"ram_console_buf": (0x20000100, 0x800)}))
+    assert [(s.paddr, s.filesz) for s in elf.segments] == [(0x58000000, 64)]
+    assert elf.symbols["ram_console_buf"] == (0x20000100, 0x800)
+    for bad in (b"", b"not an elf", make_elf()[:30], b"\x7fELF\x02\x01\x01" + bytes(60)):
+        with pytest.raises(ram_run.RamRunError):
+            ram_run.parse_elf(bad)
+
+
+def test_the_load_base_is_the_lowest_nonzero_filesz_segment_not_the_first():
+    """A zero-FileSiz .bss LOAD in DTCM listed first must not become the load base."""
+    elf = ram_run.parse_elf(make_elf(base=0x0, filesz=64, extra_segments=((0x20000228, 0),)))
+    elf = ram_run.ElfImage(
+        elf.entry, (ram_run.Segment(0x20000228, 0x20000228, 0, 0x100), *elf.segments), elf.symbols
+    )
+    image = ram_run.plan_ram_image(elf, make_bin())
+    assert image.base == 0x0 and image.entry == 0x100 and image.initial_sp == 0x20003000
+
+
+@pytest.mark.parametrize("base", [0x80010000, 0x80000000, 0x20000000, 0x40000000])
+def test_an_mram_or_implausibly_linked_image_is_refused(base):
+    elf = ram_run.parse_elf(make_elf(base=base, entry=base | 1))
+    with pytest.raises(ram_run.RamRunError) as raised:
+        ram_run.plan_ram_image(elf, make_bin(reset=(base | 1)))
+    assert raised.value.code == ram_run.CODE_NOT_RAM_LINKED
+
+
+@pytest.mark.parametrize("base", [0x0, 0x50000000, 0x58000000, 0x02000000])
+def test_itcm_and_sram_bases_are_accepted(base):
+    elf = ram_run.parse_elf(make_elf(base=base, entry=base | 1))
+    assert ram_run.plan_ram_image(elf, make_bin(reset=base | 1)).base == base
+
+
+def test_a_vector_table_that_disagrees_with_the_elf_is_refused():
+    elf = ram_run.parse_elf(make_elf(entry=0x101))
+    with pytest.raises(ram_run.RamRunError, match="disagree"):
+        ram_run.plan_ram_image(elf, make_bin(reset=0x201))
+    with pytest.raises(ram_run.RamRunError, match="not a RAM address"):
+        ram_run.plan_ram_image(elf, make_bin(sp=0x80000000))
+    with pytest.raises(ram_run.RamRunError, match="different builds"):
+        ram_run.plan_ram_image(elf, make_bin(size=32))
+
+
+def test_the_scripts_are_the_proven_recipe_and_hold_no_mram_address():
+    image = ram_run.plan_ram_image(ram_run.parse_elf(make_elf()), make_bin())
+    pre = ram_run.preamble(SERIAL, 4000, "Cortex-M55")
+    load = ram_run.load_script(pre, "/t/image.bin", image).splitlines()
+    assert load == [
+        f"SelectEmuBySN {SERIAL}", "si SWD", "speed 4000", "device Cortex-M55", "connect",
+        "halt", "loadbin /t/image.bin 0x0", "setpc 0x100", "go", "exit",
+    ]
+    read = ram_run.read_script(pre, 0x20001000, 0x10000 + 8).splitlines()
+    assert read[-1] == "exit"
+    assert "mem8 0x20001000, 0x10000" in read and "mem8 0x20011000, 0x8" in read
+    assert not any(w.startswith("0x8") and len(w) == 10 for line in load for w in line.split())
+
+
+def test_the_console_decoder_matches_the_scripts_awk():
+    assert ram_run.decode_console(b"ab\r\ncd\x00\x00\x00\x00\x00tail") == "ab\n\ncd"
+    assert ram_run.decode_console(b"x\x01\x7fy\x00\x00z") == "xyz"  # <= 4 NULs are skipped
+
+
+def test_an_incomplete_mem8_dump_is_an_error_not_silence():
+    with pytest.raises(ram_run.RamRunError, match="incomplete"):
+        ram_run.read_back("20001000 = 41 42\nScript processing completed.", 0x20001000, 8)
+
+
+def test_the_script_builders_refuse_free_form_values():
+    for serial in ("1\nerase", "a b", "x;y"):
+        with pytest.raises(ram_run.RamRunError):
+            ram_run.preamble(serial, 4000, "Cortex-M55")
+    with pytest.raises(ram_run.RamRunError):
+        ram_run.preamble(None, 4000, "Cortex-M55\nerase")
+    with pytest.raises(ram_run.RamRunError):
+        ram_run.preamble(None, "4000\nerase", "Cortex-M55")  # type: ignore[arg-type]
+    image = ram_run.plan_ram_image(ram_run.parse_elf(make_elf()), make_bin())
+    with pytest.raises(ram_run.RamRunError):
+        ram_run.load_script(["connect"], "/t/x.bin\nerase", image)
+
+
+# ── the command ─────────────────────────────────────────────────────────────
+
+
+def test_a_ram_run_loads_runs_and_reports_the_console(tmp_path, monkeypatch):
+    stub = _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, lines, _s = _run(tmp_path, ram_console=True)
+    assert rc == 0, (data, issues)
+    entry = data["entries"][0]
+    assert entry["method"] == "ram_run" and entry["status"] == "ok"
+    console = entry["ramConsole"]
+    assert console["selected"] == "ram" and console["symbol"] == "ram_console_buf"
+    assert console["address"] == "0x20001000" and console["size"] == 0x40
+    assert console["text"] == "hello\n\nRESULT PASS\n"
+    assert console["bytesRead"] == 0x40
+    assert entry["ram"]["loadAddress"] == "0x00000000" and entry["ram"]["writesMram"] is False
+    assert entry["ram"]["entry"] == "0x00000100" and entry["ram"]["initialSp"] == "0x20003000"
+    assert entry["jlink"]["binary"] == stub
+    assert [jl.kind(s) for s in jl.scripts] == ["load", "read"]
+    load = jl.scripts[0].splitlines()
+    assert "halt" in load and "setpc 0x100" in load and "go" in load
+    # The ONLY path in the script is tan's staged copy, never the project artefact.
+    loadbin = next(l for l in load if l.startswith("loadbin "))
+    assert "/tan-ram-" in loadbin and loadbin.endswith("/image.bin 0x0")
+    assert str(tmp_path / "build") not in loadbin
+    assert not Path(entry["ram"]["stagedImage"]).exists()  # removed with the entry
+    assert all(e == stub for e in jl.exes)
+    assert not any("0x8" in w[:3] for s in jl.scripts for w in s.split())  # no MRAM address
+    assert Path(entry["jlink"]["transcriptPath"]).name.startswith("ram_run-m55_he-")
+
+
+def test_a_uart_console_build_is_ok_and_says_so(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, elf=make_elf())  # no ram_console_buf
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path, ram_console=True)
+    assert rc == 0
+    entry = data["entries"][0]
+    assert entry["ramConsole"]["selected"] == "uart" and "text" not in entry["ramConsole"]
+    assert "UART console" in entry["message"]
+    warn = [i for i in issues if i.code == "flash.ram-console-symbol-missing"]
+    assert warn and warn[0].severity == "warning"
+    assert [jl.kind(s) for s in jl.scripts] == ["load"]  # nothing to read
+
+
+def test_without_ram_console_nothing_is_read(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path)
+    assert rc == 0 and [jl.kind(s) for s in jl.scripts] == ["load"]
+    assert "text" not in data["entries"][0]["ramConsole"]
+    assert _codes(issues) == ["flash.dpidr-preflight-unarmed"]
+
+
+def test_an_mram_linked_image_is_refused_before_any_spawn(tmp_path, monkeypatch):
+    _setup(
+        tmp_path, monkeypatch,
+        elf=make_elf(base=0x80010000, entry=0x80010101),
+        binary=make_bin(reset=0x80010101),
+    )
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path)
+    assert rc == 1 and jl.scripts == []
+    assert _codes(issues) == ["flash.ram-image-not-ram-linked"]
+    assert "MRAM-linked" in data["entries"][0]["message"]
+
+
+def test_dry_run_shows_the_whole_plan_and_spawns_nothing(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path, dry_run=True, ram_console=True)
+    assert rc == 0 and jl.scripts == []
+    plan = data["entries"][0]["plan"]
+    assert plan["jlinkScript"][0] == "exec DisableAutoUpdateFW"
+    assert "setpc 0x100" in plan["jlinkScript"] and "go" in plan["jlinkScript"]
+    assert any(l.startswith("mem8 0x20001000, 0x40") for l in plan["consoleReadScript"])
+    assert data["entries"][0]["ramConsole"]["address"] == "0x20001000"
+
+
+def test_the_dpidr_preflight_refuses_the_wrong_board_before_loading(tmp_path, monkeypatch):
+    _setup(
+        tmp_path, monkeypatch,
+        manifest=_manifest("{jlink_flash_device: PART, expect_dpidr: '0x4C013477', jlink_device: Cortex-M55}"),
+    )
+    jl = FakeJlink(monkeypatch, dpidr="0x0BE12477")
+    rc, data, issues, _l, _s = _run(tmp_path)
+    assert rc == 1
+    assert [jl.kind(s) for s in jl.scripts] == ["preflight"]  # never reached `loadbin`
+    assert "0x0BE12477" in data["entries"][0]["message"]
+    # And the right board goes through, reporting the DPIDR it read.
+    jl = FakeJlink(monkeypatch, dpidr="0x4C013477")
+    rc, data, issues, _l, _s = _run(tmp_path)
+    assert rc == 0 and [jl.kind(s) for s in jl.scripts] == ["preflight", "load"]
+    assert data["entries"][0]["jlink"]["dpidr"] == "0x4C013477"
+    assert "flash.dpidr-preflight-unarmed" not in _codes(issues)
+
+
+def test_require_dpidr_refuses_an_unarmed_ram_run(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("ALP_FLASH_REQUIRE_DPIDR", "1")
+    jl = FakeJlink(monkeypatch)
+    rc, _data, _i, _l, _s = _run(tmp_path)
+    assert rc == 1 and jl.scripts == []
+
+
+def test_the_probe_guard_runs_before_the_load_and_before_the_read(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch, emulators=[SERIAL])
+    rc, data, issues, _l, _s = _run(
+        tmp_path, ram_console=True, probe_usb_path="3-4.3",
+        enumerate_probes=lambda: [JLinkProbe("3-4.1", "000603000869"), JLinkProbe("3-4.3", SERIAL)],
+    )
+    assert rc == 0, (data, issues)
+    kinds = [jl.kind(s) for s in jl.scripts]
+    assert kinds == ["list", "load", "list", "read"]  # verified before EACH spawn
+    assert f"SelectEmuBySN {SERIAL}" in jl.scripts[1]
+    assert data["entries"][0]["probe"]["usbPath"] == "3-4.3"
+
+
+def test_a_shared_serial_refuses_before_any_spawn(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch, emulators=[SERIAL, SERIAL])
+    rc, data, issues, _l, _s = _run(
+        tmp_path, probe_serial=SERIAL,
+        enumerate_probes=lambda: [JLinkProbe("3-4.1", SERIAL), JLinkProbe("3-4.2", SERIAL)],
+    )
+    assert rc == 1 and jl.scripts == []
+    assert _codes(issues) == ["flash.probe-ambiguous"]
+
+
+def test_a_load_that_did_not_complete_is_flash_ram_failed(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    FakeJlink(monkeypatch, load_out="Cannot connect to target.\n")
+    rc, data, issues, _l, _s = _run(tmp_path)
+    assert rc == 1 and _codes(issues) == ["flash.ram-failed"]
+    FakeJlink(monkeypatch, load_out="J-Link>loadbin x 0x0\nERROR\nJ-Link>setpc 0x100\n"
+              "Script processing completed.\n")
+    rc, data, issues, _l, _s = _run(tmp_path)
+    assert rc == 1 and "loadbin did not report" in data["entries"][0]["message"]
+
+
+def test_a_failed_console_read_is_reported_with_the_image_running(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    FakeJlink(monkeypatch, read_rc=1)
+    rc, data, issues, _l, _s = _run(tmp_path, ram_console=True)
+    assert rc == 1 and _codes(issues) == ["flash.ram-failed"]
+    assert "the image is running" in data["entries"][0]["message"]
+
+
+def test_exactly_one_slice_must_be_selected(tmp_path, monkeypatch):
+    extra = (
+        "- {core_id: m55_hp, os: zephyr, output_artefact: zephyr.elf, status: ok,\n"
+        "   flash_method: zephyr_west_flash, flash_args: {jlink_flash_device: PART}}\n"
+    )
+    _setup(tmp_path, monkeypatch, manifest=_manifest(extra_slices=extra))
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path, core=None)
+    assert rc == 1 and jl.scripts == [] and _codes(issues) == ["flash.ram-failed"]
+    assert "--core" in issues[0].message
+
+
+def test_no_trusted_jlink_refuses_a_real_run_but_not_a_dry_run(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    (tmp_path / "tools" / "JLinkExe").unlink()
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path)
+    assert rc == 1 and jl.scripts == [] and "trusted location" in data["entries"][0]["message"]
+    rc, data, _i, _l, _s = _run(tmp_path, dry_run=True)
+    assert rc == 0 and data["entries"][0]["jlink"]["binary"] is None
+
+
+# ── script-injection hardening (security scan on #1313) ─────────────────────
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    ["a\nerase", "a\r\nloadbin x 0x80010000", 'q"uote', "nul\x00byte"],
+)
+def test_a_hostile_artefact_path_is_refused_before_any_spawn(tmp_path, monkeypatch, hostile):
+    if "\x00" in hostile:
+        pytest.skip("a NUL cannot be in a POSIX file name")
+    _setup(tmp_path, monkeypatch, artefact=hostile)
+    jl = FakeJlink(monkeypatch)
+    rc, data, issues, _l, _s = _run(tmp_path)
+    assert rc == 1 and jl.scripts == [], jl.scripts
+    assert _codes(issues) == ["flash.ram-failed"]
+
+
+def test_a_hostile_symbol_name_never_reaches_a_script(tmp_path, monkeypatch):
+    """Only the EXACT `ram_console_buf` symbol is looked up and its address/size are
+    ints: a symbol named with a newline neither matches nor is interpolated."""
+    _setup(
+        tmp_path, monkeypatch,
+        elf=make_elf(symbols={"ram_console_buf\nerase": (CONSOLE_ADDR, 0x40),
+                               "ram_console_buf": (CONSOLE_ADDR, 0x40)}),
+    )
+    jl = FakeJlink(monkeypatch)
+    rc, data, _i, _l, _s = _run(tmp_path, ram_console=True)
+    assert rc == 0
+    assert not any("erase" in s for s in jl.scripts)
+
+
+def test_a_hostile_serial_or_device_is_refused_before_any_spawn(tmp_path, monkeypatch):
+    for args in ("{jlink_flash_device: PART, jlink_serial: \"1\\nerase\"}",
+                 "{jlink_flash_device: PART, jlink_device: \"Cortex-M55\\nerase\"}"):
+        _setup(tmp_path, monkeypatch, manifest=_manifest(args))
+        jl = FakeJlink(monkeypatch)
+        rc, data, issues, _l, _s = _run(tmp_path)
+        assert rc == 1 and jl.scripts == [], (args, jl.scripts)
+
+
+def test_a_symlinked_project_path_still_loads_only_the_staged_copy(tmp_path, monkeypatch):
+    """Even a perfectly valid project path is never put in the script."""
+    _setup(tmp_path, monkeypatch)
+    jl = FakeJlink(monkeypatch)
+    rc, data, _i, _l, _s = _run(tmp_path)
+    assert rc == 0
+    assert str(tmp_path) not in jl.scripts[0] or "tan-ram-" in jl.scripts[0]
+    assert "zephyr.bin" not in jl.scripts[0]
