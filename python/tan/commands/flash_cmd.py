@@ -4073,9 +4073,12 @@ def _run(
     # `flash_args.atoc_unqueryable` (`flash_plan.atoc_replacement_acknowledged`).
     # tan-cli#1350: a project marked RAM-only (`diagnostics.link: itcm`) is
     # refused as a WHOLE plain `tan flash` run, before any write -- see
-    # `ram_run_only_project_refusal`. (`--ram` runs are never routed here.)
+    # `ram_run_only_project_refusal`. A `--ram` run passes through this point
+    # too (its branch is further down), so `ram` must be forwarded: without it
+    # the rule refused the very `tan flash --ram --core <id>` its own message
+    # recommends.
     ram_only_message = ram_run_only_project_refusal(
-        [(s.core_id, s.flash_method) for s in manifest.slices], core, helper
+        [(s.core_id, s.flash_method) for s in manifest.slices], core, helper, ram=ram
     )
     if ram_only_message is not None:
         return (
