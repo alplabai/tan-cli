@@ -142,6 +142,16 @@ def test_board_with_existing_board_yaml_conflicts(world):
 
 
 def test_define_without_board_and_bad_board_refused(world):
-    assert envelope_of(_run(world, "-D", "A=1"))["issues"][0]["code"] == "build.conflicting-flags"
     env = envelope_of(_run(world, "--board", "a b"))
     assert env["exitCode"] == 2 and env["issues"][0]["code"] == "build.invalid-argument"
+
+
+@posix_only
+def test_plain_route_stamps_and_records_defines(world):
+    env = envelope_of(_run(world, "--board", BOARD, "-D", "SHIELD=a"))
+    assert env["exitCode"] == 0, env["issues"]
+    assert env["data"]["defines"] == {"args": ["-DSHIELD=a"], "slices": ["rtss_he"]}
+    stamp = world["out"] / "build" / "rtss_he-zephyr" / "build" / ".tan-user-defines"
+    assert stamp.read_text() == "SHIELD=a\n"
+    env = envelope_of(_run(world, "--board", BOARD, "-D", "SHIELD=b"))
+    assert "build.configure-cache-reset" in [i["code"] for i in env["issues"]]
