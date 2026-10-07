@@ -713,3 +713,17 @@ def test_the_facts_are_actually_being_read():
     # actually find the fences: with it empty, every command falls back to the
     # window and #385 becomes invisible again.
     assert _fenced(_text("python/README.md")), "no fenced block found in python/README.md"
+
+
+def test_the_release_contract_sdk_section_covers_every_kind_of_binding_change():
+    """tan-cli#1258: the `alp-sdk must be released BEFORE` check once covered
+    only requirements, and the `memory[]` emit difference slipped past it. The
+    section has to keep naming all three kinds, and the table has to keep the
+    `memory[]` row and the requirement rows the issue enumerated."""
+    text = _text("docs/release-contract.md")
+    section = text.split("## alp-sdk must be released BEFORE", 1)[1].split("## Decisions", 1)[0]
+    for kind in ("A requirement.", "An emit difference.", "The vendored scaffold point."):
+        assert kind in section, f"release-contract.md's check no longer names: {kind}"
+    for commit in ("96a382929b", "eff266b6", "dbfa06bd", "b3775381", "ff27f179", "20fec7a7"):
+        assert commit in section, f"release-contract.md's table lost the row for {commit}"
+    assert "`memory[]` pane in `system-manifest.yaml`" in section

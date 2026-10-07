@@ -644,7 +644,7 @@ Done when:
   defined under "The check.": all three `--sdk` scripts exit 0, the guard and
   the breadth node PASSED, and the pytest log shows no parity failures (the
   planner step does not act on them);
-- the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s did for `v0.16.0`, naming the real tag in place of `CHANGELOG.md`'s current `## [0.7.0]` draft marker (tan-cli#1258).
+- the release CHANGELOG states "requires alp-sdk `vX.Y.Z` or newer", as `0.6.0`'s did for `v0.16.0`, naming the real tag in place of the `v0.17.0 (pending, alp-sdk#2047)` placeholder `CHANGELOG.md`'s `## [0.7.0]` preamble carries today (tan-cli#1258).
 
 **Addendum (renumbered 0.6.1 -> 0.7.0, maintainer, 2026-09-19).** Pre-1.0
 SemVer puts a break in the minor, not the patch: the alp-sdk-floor bump this

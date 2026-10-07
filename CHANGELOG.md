@@ -63,26 +63,18 @@ exact before/after:
   succeed: `init.som-flow-style-unsupported` (#1035) and
   `init.som-block-unsupported` (#1041)
 
-*DRAFT — replace this paragraph before tagging.* The tag itself is blocked
-on this: no alp-sdk release contains `ac0e2a5e0` yet (tan-cli#1258, still
-OPEN; `git tag --contains ac0e2a5e0` is empty), so this note cannot yet name
-a real floor version. Once one ships, replace this whole paragraph with one
-line: "Requires alp-sdk `vX.Y.Z` or newer" (the `v0.6.0` precedent,
-tan-cli#1258's "Done when" list) — see `docs/release-contract.md`'s own
-tag-day checklist. Measured 2026-09-23, for reference only — re-check both
-facts before the tag, they move independently of this note: the newest
-stable alp-sdk release is `v0.16.0` (`gh release list --repo
-alplabai/alp-sdk`), which carries neither
-`metadata/e1m_modules/aen/on-module-links.yaml` nor
-`metadata/e1m_modules/v2n/supervisor-links.yaml`, both of which the pinned
-planner now requires, nor the som-preset v2 presets (alp-sdk#2024) tan now
-reads. The floor itself moved three times since this paragraph was first
-written: `81a9d515` (tan-cli#1258/#1268) was superseded by `c81cb5db` when
-tan-cli#1275 re-synced `tan/planner/` further, `c81cb5db` by `34c11c9de` at
-tan-cli#1278, and `34c11c9de` by `ac0e2a5e0` at tan-cli#1309; each is an
-ancestor of the next. Re-checked 2026-10-07: `v0.16.0` is still the newest
-alp-sdk release and does not contain `ac0e2a5e0`. See
-`docs/release-contract.md` and tan-cli#1258 for the full gate measurement.
+*This release requires alp-sdk **v0.17.0** (pending, alp-sdk#2047) or newer.
+tan's planner mirror and vendored scaffold are pinned to alp-sdk
+`ac0e2a5e096a1c8c102818650a688d0f7e709066` (moved from `34c11c9de` by the
+planner re-sync tan-cli#1309), and v0.17.0 is the first stable alp-sdk
+release planned to contain it. As of 2026-10-07 no alp-sdk tag does, and the
+newest stable release is `v0.16.0`, which is too old: it lacks
+`metadata/e1m_modules/aen/on-module-links.yaml`,
+`metadata/e1m_modules/v2n/supervisor-links.yaml`, the `ALP_SDK_SOM_HW_REV`
+Kconfig symbol, the som-preset v2 presets (alp-sdk#2024) and the som-preset
+`inference.auto_order` field (alp-sdk#2677). Do not tag until that release
+exists and contains the pin; if its number differs, correct this line. See
+`docs/release-contract.md` and tan-cli#1258.*
 
 ### Fixed
 
