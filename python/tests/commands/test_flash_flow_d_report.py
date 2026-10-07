@@ -650,3 +650,37 @@ def test_a_manifest_only_setools_is_refused_before_ANY_spawn(tmp_path, monkeypat
     )
     assert rc == 1 and rec.calls == [], rec.calls
     assert _codes(issues) == ["flash.setools-untrusted-source"]
+
+
+def test_the_preflight_dpidr_survives_a_later_refusal(tmp_path, monkeypatch):
+    """Bench round 7: a run refused AFTER the read-only preflight (here a sector overlap
+    found once the ATOC is known) still reports the SW-DP ID the preflight read."""
+    _exe(tmp_path / "trusted" / "JLinkExe")
+    SpawnRecorder(monkeypatch)
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "a.bin").write_bytes(b"\x00")
+    (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00")
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    args = (
+        '{jlink_flash_device: PART, slot0_load_address: "0x80010000", atoc: atoc.bin, '
+        'atoc_address: "0x80010000", confirm: true, atoc_unqueryable: true, '
+        "expect_dpidr: '0x4C013477', jlink_device: Cortex-M55}"
+    )
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        "schema_version: 1\nhw_info: {sku: S}\nslices:\n"
+        "- {core_id: m55_hp, os: zephyr, output_artefact: a.bin, status: ok,\n"
+        f"   flash_method: alif_mram_jlink, flash_args: {args}}}\n"
+        "helper_mcus: []\nboot_order: []\n",
+        encoding="utf-8", newline="",
+    )
+    monkeypatch.setenv("PATH", str(tmp_path / "trusted"))
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    rc, data, issues, _l, _s = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"), board_yaml=None,
+        core=None, helper=None, dry_run=False, skip_missing_tools=False, capture=True,
+        cwd=str(tmp_path),
+    )
+    assert rc == 1 and _codes(issues) == ["flash.write-sector-overlap"]
+    assert data["entries"][0]["jlink"]["dpidr"] == "0x4C013477"
+    assert data["entries"][0]["jlink"]["dpidrSource"] == "preflight"
