@@ -865,14 +865,27 @@ def _abs(path: str | os.PathLike[str]) -> str:
     return os.path.abspath(os.fspath(path))
 
 
+def _looks_like_path(spec: str) -> bool:
+    """pip's own rule (`pip._internal.req.constructors._looks_like_path`): a
+    spec is a path only if it carries a separator or starts with `.`. A bare
+    name is a PyPI requirement EVEN WHEN a same-named file/dir exists in the
+    cwd -- pip never installs `./west` for `west`."""
+    if os.sep in spec or (os.altsep and os.altsep in spec):
+        return True
+    return spec.startswith(".")
+
+
 def _abs_spec(spec: str) -> str:
-    """A pip requirement spec, made absolute when it names an existing path
-    (`./vendor/wheel`, a local dir) -- a plain name or specifier (`west>=1.0`,
-    `jsonschema`) is returned untouched. Relative `-e`/`-c` lines INSIDE a
+    """A pip requirement spec, made absolute only when pip itself would read it
+    as a path (`./vendor/wheel`, `vendor/pkg.whl`). A plain name or specifier
+    (`west>=1.0`, `jsonschema`) is returned untouched, even if a same-named
+    entry exists in the cwd: rewriting it to an absolute path would turn a
+    PyPI requirement into a local (project-planted) install -- the very hijack
+    the isolated spawn exists to close. Relative `-e`/`-c` lines INSIDE a
     requirements file and relative `PIP_CONSTRAINT`/`PIP_FIND_LINKS`/
     `PIP_CONFIG_FILE` environment values still resolve against the empty cwd --
     a documented limit, not something tan rewrites."""
-    return _abs(spec) if os.path.exists(spec) else spec
+    return _abs(spec) if _looks_like_path(spec) else spec
 
 
 def _abs_exe(arg: str) -> str:

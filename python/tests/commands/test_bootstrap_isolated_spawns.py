@@ -96,9 +96,25 @@ def test_every_python_m_spawn_is_isolated_with_absolute_paths(tmp_path, monkeypa
 def test_a_manifest_spec_that_is_a_path_is_made_absolute(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "wheelhouse").mkdir()
-    assert bootstrap_cmd._abs_spec("wheelhouse") == str(tmp_path / "wheelhouse")
+    assert bootstrap_cmd._abs_spec("./wheelhouse") == str(tmp_path / "wheelhouse")
+    assert bootstrap_cmd._abs_spec(os.path.join("wheelhouse", "pkg.whl")) == str(
+        tmp_path / "wheelhouse" / "pkg.whl"
+    )
     assert bootstrap_cmd._abs_spec("west>=1.0") == "west>=1.0"
     assert bootstrap_cmd._abs_spec("jsonschema") == "jsonschema"
+
+
+@pytest.mark.parametrize("name", ["west", "wheel", "pip", "jsonschema"])
+def test_a_bare_name_stays_a_pypi_requirement_even_with_a_planted_dir(tmp_path, monkeypatch, name):
+    # A project-planted `./west` (with a setup.py) must NOT turn the PyPI
+    # requirement `west` into a local install: pip itself never reads a bare
+    # name as a path, and rewriting it to an absolute one would hand the planted
+    # dir's build code to the isolated spawn -- the hijack it exists to close.
+    monkeypatch.chdir(tmp_path)
+    planted = tmp_path / name
+    planted.mkdir()
+    (planted / "setup.py").write_text("raise SystemExit('planted')\n")
+    assert bootstrap_cmd._abs_spec(name) == name
 
 
 def test_an_isolated_spawn_with_a_cwd_is_a_value_error(tmp_path):
