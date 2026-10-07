@@ -273,7 +273,7 @@ class StagedModel:
     size: int
 
 
-def _bundled_chunks(zoo_dir: Path, bundled: str) -> Iterator[bytes]:
+def bundled_chunks(zoo_dir: Path, bundled: str) -> Iterator[bytes]:
     starters = (zoo_dir / "starters").resolve()
     path = (zoo_dir / bundled).resolve()
     if path.parent != starters or not path.is_file():
@@ -314,7 +314,7 @@ def fetch_source(
     temp file is removed on any failure. Raises `ZooFetchError`; a hash
     mismatch sets `.mismatch`."""
     bundled = entry.source.get("bundled")
-    chunks = closing_iter(_bundled_chunks(zoo_dir, bundled) if bundled else reader(entry.source["url"]))
+    chunks = closing_iter(bundled_chunks(zoo_dir, bundled) if bundled else reader(entry.source["url"]))
     label = bundled or entry.source["url"]
     digest = hashlib.sha256()
     size = 0
