@@ -296,6 +296,33 @@ def test_uart_console_keeps_the_itcm_retarget_without_ram_console_bits(
     assert "CONFIG_UART_CONSOLE=y" in arts["alp.conf"]
 
 
+def test_uses_ram_console_is_true_only_for_auto_and_ram() -> None:
+    from tan.planner.link_target import uses_ram_console
+
+    assert uses_ram_console(None)
+    assert uses_ram_console({})
+    assert uses_ram_console({"console": "auto"})
+    assert uses_ram_console({"console": "ram"})
+    for other in ("uart", "alp", "linux", "none"):
+        assert not uses_ram_console({"console": other})
+
+
+def test_uart_conf_overwrites_a_ram_conf_in_the_same_build_dir(
+        tmp_path, meta) -> None:
+    """Switching `console: ram` -> `uart` and rebuilding in one build dir must
+    leave the uart bytes in `alp-link-itcm.conf` (no stale RAM-console bits)."""
+    from tan.commands.build.materialise import materialise_plan
+    from tan.core.build_plan import parse_build_plan
+
+    root = tmp_path / "build"
+    for console in ("ram", "uart"):
+        plan = parse_build_plan(json.dumps(_plan(tmp_path, _project(
+            tmp_path, meta, _HE_ONLY + f"  console: {console}\n"))))
+        written = materialise_plan(plan, root)
+    conf = next(p for p in written if p.name == "alp-link-itcm.conf")
+    assert conf.read_text("utf-8") == EXPECTED_CONF_UART
+
+
 def test_explicit_ram_console_keeps_the_ram_console_bits(tmp_path, meta) -> None:
     sl = _slice(_plan(tmp_path, _project(tmp_path, meta,
                                          _HE_ONLY + "  console: ram\n")),

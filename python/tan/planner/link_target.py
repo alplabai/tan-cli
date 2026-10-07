@@ -16,10 +16,15 @@ config artefacts layered AFTER the slice's `alp.conf`.
 Pure: no IO, no SDK read.  HE-only by design: the knob retargets the M55-HE
 slice only, and is refused when the project has no M55-HE app of its own (an
 M55-HP-only project included), on any SKU but AEN801/AEN803, with a sysbuild
-(`boot:`) project, and with an explicit `alp`/`linux`/`none` console.  `console: uart` is
-accepted (tan-cli#1374: a RAM-run UART shell is the fastest bench probe, proven
-on AEN803 / UART5); it gets the ITCM retarget but not the RAM-console buffer or
-`CONFIG_DCACHE=n`, which belong to the RAM console only.
+(`boot:`) project, and with an explicit `alp`/`linux`/`none` console.
+
+`console: uart` is accepted (tan-cli#1374).  The #1374 bench (e1m-aen-evk-02,
+AEN803, 2026-10-07) ran a UART5 shell RAM-run with ONLY `zephyr,flash = &itcm;`,
+the code-partition delete, `CONFIG_USE_DT_CODE_PARTITION=n` and
+`CONFIG_FLASH_LOAD_OFFSET=0x0` hand-added -- no `CONFIG_DCACHE=n`, so the
+D-cache stayed at its board default.  A `uart` image therefore gets exactly
+that retarget.  The D-cache hang recorded by #1360 concerns the RAM-console
+path, which still gets `CONFIG_DCACHE=n` and the 16 KiB buffer (`ram`/`auto`).
 """
 
 from __future__ import annotations
@@ -62,9 +67,9 @@ def _console(diagnostics: dict[str, Any] | None) -> str:
 
 
 def uses_ram_console(diagnostics: dict[str, Any] | None) -> bool:
-    """Whether an ITCM image uses the RAM console (`auto` is promoted to it);
-    False for `console: uart`."""
-    return _console(diagnostics) != "uart"
+    """Whether an ITCM image uses the RAM console (`auto` is promoted to it):
+    True for `auto`/`ram`, False for `uart` and anything else."""
+    return _console(diagnostics) in ("auto", "ram")
 
 
 def link_target(diagnostics: dict[str, Any] | None) -> str:
