@@ -606,6 +606,84 @@ boot_order: []
     assert "tan-cli#732" in err_text, err_text
 
 
+def test_ram_run_only_flash_method_refuses_and_points_at_flash_ram(tmp_path):
+    """tan-cli#1350: an ITCM-linked slice (board.yaml `diagnostics.link: itcm`)
+    carries `flash_method: ram_run_only`. Plain `tan flash` must refuse it by
+    name -- signing and writing a 0x0-linked image to MRAM slot0 is a broken
+    image -- and name `tan flash --ram`, not read like a generic typo."""
+    manifest = """schema_version: 1
+hw_info: {sku: E1M-AEN801}
+slices: []
+helper_mcus:
+- {name: m55_he, chip: m55, firmware_path: zephyr.bin,
+   flash_method: ram_run_only, flash_args: {}}
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1, payload
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed", entry
+    message = payload["issues"][0]["message"]
+    assert "tan flash --ram" in message and "diagnostics.link: itcm" in message, message
+    assert "no registered backend" not in message, message
+
+
+_RAM_ONLY_PROJECT = """schema_version: 1
+hw_info: {sku: E1M-AEN801}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: he.elf, status: ok,
+   flash_method: ram_run_only, flash_args: {}}
+- {core_id: m55_hp, os: zephyr, output_artefact: hp.elf, status: ok,
+   flash_method: zephyr_west_flash, flash_args: {}}
+helper_mcus: []
+boot_order: []
+"""
+
+
+def test_a_ram_only_project_refuses_the_whole_plain_flash_run(tmp_path):
+    """tan-cli#1350 bench finding: with `diagnostics.link: itcm` the default
+    m55_hp stock shim is still planned for an MRAM write. A plain `tan flash`
+    must refuse the WHOLE run (exit 2, before any write), not flash HP alone."""
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=_RAM_ONLY_PROJECT)
+    payload = envelope(out)
+    assert exit_code == 2, payload
+    assert payload["ok"] is False, payload
+    assert codes(payload) == ["flash.ram-run-only-project"], payload
+    assert "tan flash --ram --core m55_he" in payload["issues"][0]["message"]
+    assert payload["data"].get("entries", []) == [], payload
+
+
+def test_core_naming_the_ram_slice_is_still_refused_whole_run(tmp_path):
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", "--core", "m55_he",
+        manifest=_RAM_ONLY_PROJECT)
+    assert exit_code == 2 and codes(envelope(out)) == ["flash.ram-run-only-project"]
+
+
+def test_explicit_core_of_a_non_ram_slice_proceeds_normally(tmp_path):
+    """`--core m55_hp` is the operator explicitly choosing a non-RAM slice."""
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", "--core", "m55_hp",
+        manifest=_RAM_ONLY_PROJECT)
+    payload = envelope(out)
+    assert "flash.ram-run-only-project" not in codes(payload), payload
+    assert [e["id"] for e in payload["data"]["entries"]] == ["m55_hp"], payload
+
+
+def test_the_ram_only_rule_is_pure_and_ram_runs_are_unaffected():
+    from tan.core.link_refusal import ram_run_only_project_refusal as rule
+
+    both = [("m55_he", "ram_run_only"), ("m55_hp", "zephyr_west_flash")]
+    assert rule(both, None, None) is not None
+    assert rule(both, "m55_he", None) is not None
+    assert rule(both, "m55_hp", None) is None
+    assert rule(both, None, "gd32") is None            # helper-only run
+    assert rule(both, None, None, ram=True) is None    # --ram never refused
+    assert rule([("m55_hp", "zephyr_west_flash")], None, None) is None
+
+
 def test_an_unrecognised_flash_method_that_never_existed_still_gets_the_generic_refusal(
     tmp_path,
 ):

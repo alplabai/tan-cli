@@ -99,6 +99,7 @@ except ImportError:  # pragma: no cover -- Windows has none of the four
 
 import typer
 
+from tan.core.link_refusal import RAM_RUN_ONLY_METHOD, ram_run_only_project_refusal
 from tan.core.shapes import is_file as _is_file
 from tan.core.sdk_discovery import resolve_sdk_root_ladder, sdk_resolution_issues
 from tan.core.dp_id import (
@@ -2846,6 +2847,16 @@ def _flash_entry_body(
                 "no built-in replacement for a LOCAL SWD write today (e.g. recovering "
                 "a bricked bridge) -- see docs/setools.md and tan-cli#610."
             )
+        elif method == RAM_RUN_ONLY_METHOD:
+            # tan-cli#1350: an ITCM-linked image (board.yaml `diagnostics.link:
+            # itcm`) is linked at 0x0; signing and writing it to MRAM slot0
+            # would produce a broken image. Refuse, name the right command.
+            msg = (
+                f"flash: {kind} '{entry_id}' is linked for the M55-HE ITCM "
+                "(board.yaml `diagnostics.link: itcm`) and cannot be written to MRAM -- "
+                f"RAM-run it with `tan flash --ram --core {entry_id}`, or remove "
+                "`diagnostics.link` and rebuild for a flash."
+            )
         else:
             msg = (
                 f"flash: {kind} '{entry_id}' uses flash_method '{method}' which has no "
@@ -4045,6 +4056,20 @@ def _run(
     # ones, which is the habit alp-sdk#2025's own header warns against. Its
     # only two spellings are the `--atoc-unqueryable` flag and
     # `flash_args.atoc_unqueryable` (`flash_plan.atoc_replacement_acknowledged`).
+    # tan-cli#1350: a project marked RAM-only (`diagnostics.link: itcm`) is
+    # refused as a WHOLE plain `tan flash` run, before any write -- see
+    # `ram_run_only_project_refusal`. (`--ram` runs are never routed here.)
+    ram_only_message = ram_run_only_project_refusal(
+        [(s.core_id, s.flash_method) for s in manifest.slices], core, helper
+    )
+    if ram_only_message is not None:
+        return (
+            ExitCode.VALIDATION_FAILURE,
+            _data(build_root),
+            [Issue("flash.ram-run-only-project", "error", ram_only_message)],
+            [ram_only_message],
+            sdk,
+        )
     plan = plan_flash_targets(manifest, core, helper)
 
     # tan-cli#289/#59/#61: resolved ONCE for the whole run, keyed on the SAME
