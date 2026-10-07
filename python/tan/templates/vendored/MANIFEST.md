@@ -95,7 +95,19 @@ from an un-revendored SDK change.
   --sdk <7d58ef32>` is rc 0, **9/9** (template, sku) pairs PASS against this
   tree unchanged.
 
-- **Current vendor point (all templates):** **`34c11c9de`**
+- **Current vendor point (all templates):** **`ac0e2a5e0`**
+  (`ac0e2a5e096a1c8c102818650a688d0f7e709066`, alp-sdk `dev`) — the
+  `34c11c9de` -> `ac0e2a5e0` planner re-sync (tan-cli#1309; alp-sdk#2705/
+  #2735/#2673/#2674/#2677/#2679/#2695/#2678/#2653/#2670), the same change that moves `parity.yml`'s
+  `PINNED_SDK_TAG`/`PINNED_PLANNER_ORACLE_SDK_REF`, `ci.yml`'s `sdk_parity`
+  `ref:` and `test_planner_relocation_freshness.py`'s `PINNED_SDK_COMMIT`/
+  `HAND_PORT_PINNED_SDK_COMMIT`. **No re-vendoring needed:** no scaffold
+  template or catalog entry changed in range, verified rather than assumed —
+  `scaffold_byte_parity.py --sdk <ac0e2a5e0>` is rc 0, **10/10** (template,
+  sku) pairs PASS against this tree unchanged. Still untagged (alp-sdk's
+  newest tag is `v0.16.0`), so `- Ref:` below stays `v0.16.0`.
+
+- **Prior vendor point (all templates):** **`34c11c9de`**
   (`34c11c9de04e264fdcab2bc0d58b328d9d117ca8`, alp-sdk `dev`) — the
   `79c834e65` -> `34c11c9de` planner re-sync (alp-sdk#866/#2469/#2024/#2316),
   the same change that moves `parity.yml`'s `PINNED_SDK_TAG`/
@@ -599,14 +611,15 @@ from an un-revendored SDK change.
   itself tagged `v0.16.0`, so the guard finds it and renders the version link
   instead of degrading to `main`. See the `eb96112b` bullet above for the
   full re-vendor.
-- Commit: **`34c11c9de`** (alp-sdk `dev`, full sha
-  `34c11c9de04e264fdcab2bc0d58b328d9d117ca8`) — the checkout the emit was RUN
+- Commit: **`ac0e2a5e0`** (alp-sdk `dev`, full sha
+  `ac0e2a5e096a1c8c102818650a688d0f7e709066`) — the checkout the emit was RUN
   against, matching the "Current vendor point" bullet above, asserted equal
   to it by
   `python/tests/core/test_template_integrity.py::
   test_the_manifest_states_one_vendor_point_not_two`.
 
-  This line used to say `79c834e65` (the alp-sdk#2311/#2312 re-sync), and
+  This line used to say `34c11c9de` (tan-cli#1278), and before that
+  `79c834e65` (the alp-sdk#2311/#2312 re-sync), and
   before that `c81cb5db` (review of tan-cli#1291, this pin's own
   prior value), and before that `ff27f179` (tan-cli#1275), and before that
   `eb96112b` (tan-cli#996/#1001), and before that

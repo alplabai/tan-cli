@@ -383,6 +383,7 @@ def _module_string_constants(tree: ast.Module) -> dict[str, str]:
 _FULL_CODE_CALLABLES: dict[tuple[str, str], int] = {
     ("tan/core/build_plan.py", "PlanParseError"): 0,
     ("tan/commands/monitor_cmd.py", "MonitorError"): 0,
+    ("tan/commands/monitor_session.py", "MonitorError"): 0,
     ("tan/commands/explain_cmd.py", "ExplainError"): 0,
     ("tan/commands/generate_cmd.py", "GenerateError"): 0,
     ("tan/commands/build/token_substitution.py", "TokenSubstitutionError"): 0,
