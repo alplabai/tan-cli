@@ -2284,6 +2284,118 @@
       "note": "tan-cli#674 review MAJOR 1: `model list`'s per-model staleness check (`_artifact_status`) could not read back what it needed to compare a package's recorded `src_sha` against its CURRENT `source` file -- a `board.yaml` naming a `source` that no longer resolves, or a corrupt/truncated `.alpmodel` container, both raise here. The row still degrades to the bare `exists: True` shape (staleness is a bonus fact about a build that DID succeed, not a reason to hide that the package exists), but the degrade used to be entirely silent: `ok: true`, `issues: []`, no `stale` key, indistinguishable from a package `list` successfully confirmed is fresh. A plain `Issue(\"model.artifact-stale-unknown\", ...)` construction in `_artifact_status`, mirroring `model.caveat-readback-failed`'s own readback-failure shape above. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.zoo-unavailable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: the bound alp-sdk has no `metadata/model_zoo/` directory (an SDK older than alp-sdk commit 7018515f9 / alp-sdk#2542). `model zoo` and `model add` refuse with VALIDATION_FAILURE and name that minimum commit. A plain `Issue(\"model.zoo-unavailable\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.zoo-entry-invalid",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: one `metadata/model_zoo/<id>.yaml` failed tan's consumer-side shape check (bad id/file-name join, unsupported schema_version, malformed `source` or `validated_soms`, a source file type that is not .tflite/.onnx/.pte). The entry is skipped, the rest of the zoo is still served. A plain `Issue(\"model.zoo-entry-invalid\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.zoo-entry-not-found",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `model add <id>` named an id no valid zoo entry carries; the message lists the available ids. VALIDATION_FAILURE. A plain `Issue(\"model.zoo-entry-not-found\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.zoo-fetch-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `model add` could not obtain the model: an https download failed, exceeded the size cap, did not hash to the manifest's sha256, or a bundled starter was missing/outside `starters/`. Nothing is written. RUNTIME_FAILURE. A plain `Issue(\"model.zoo-fetch-failed\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.add-id-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `model add` was run without a zoo entry id. VALIDATION_FAILURE. A plain `Issue(\"model.add-id-missing\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.add-name-exists",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `board.yaml` already declares a model with the zoo entry's id as its `name`; `add` never duplicates or overwrites. VALIDATION_FAILURE. A plain `Issue(\"model.add-name-exists\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.add-destination-exists",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `models/<id><ext>` beside `board.yaml` already exists; `add` never overwrites it. VALIDATION_FAILURE. A plain `Issue(\"model.add-destination-exists\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.add-sku-not-validated",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: the `kind: model` zoo entry's `validated_soms` does not list this board's `som.sku`; the add still proceeds, the warning is the hardware-claim caveat. A plain `Issue(\"model.add-sku-not-validated\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.board-yaml-edit-refused",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: the text-level append to `board.yaml`'s `models:` (`tan.core.board_yaml_edit`) refused an ambiguous shape (flow-style or anchored `models:`, multi-document file, duplicate key, tabs, or a post-edit parse check that would change more than the appended entry). Nothing is written; the message gives the two fields to add by hand. VALIDATION_FAILURE. A plain `Issue(\"model.board-yaml-edit-refused\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.board-yaml-edit-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `model add` could not read `board.yaml` or write the model file or `board.yaml`. A failed `board.yaml` write removes the model file just written. RUNTIME_FAILURE. A plain `Issue(\"model.board-yaml-edit-failed\", ...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.add-write-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `model add` could not create the model file under `models/` (disk full, permissions). Nothing is left behind, including a `models/` directory this run created. RUNTIME_FAILURE. Constructed as a plain `Issue(...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.add-destination-unsafe",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: `models/` beside `board.yaml` is a symlink, not a directory, or resolves outside the project, so a write through it would land elsewhere. Nothing is written. VALIDATION_FAILURE. Constructed as a plain `Issue(...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.zoo-integrity-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_zoo_cmd.py",
+      "note": "tan-cli#1286: a downloaded zoo model did not hash to the manifest's sha256; the temp file is discarded and nothing is added. Distinct from `model.zoo-fetch-failed` (transport) because it is a trust failure. RUNTIME_FAILURE. Constructed as a plain `Issue(...)` construction in `model_zoo_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.unexpected-argument",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "note": "tan-cli#1286: an argument the subcommand does not take: an ID positional for anything but `add`, or `--sku` with `add`. VALIDATION_FAILURE. Constructed as a `ModelError` call site in `model_cmd.py` (`_refuse_stray_arguments`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "monitor.launch-failed",
       "status": "reserved",
       "severity": "error",
