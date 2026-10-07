@@ -593,3 +593,60 @@ def test_rotation_only_touches_the_same_cores_logs(tmp_path):
     names = [p.name for p in (tmp_path / "flash-logs").iterdir()]
     assert sum(n.startswith("alif_mram_jlink-m55-hp-") for n in names) == 10
     assert sum(n.startswith("alif_mram_jlink-m55-2") for n in names) == 10
+
+
+# ── tan-cli#1348 review ─────────────────────────────────────────────────────
+
+
+def test_execute_never_re_resolves_a_missing_jlink(tmp_path, monkeypatch):
+    """With no resolved binary `_execute` refuses; a JLinkExe sitting on PATH is NOT
+    picked up behind the caller's back."""
+    _exe(tmp_path / "onpath" / "JLinkExe")
+    monkeypatch.setenv("PATH", str(tmp_path / "onpath"))
+    rec = SpawnRecorder(monkeypatch)
+    plan = flash_cmd.FlashPlan(argv=("JLinkExe",), ok_message="", jlink_script="connect\nexit\n")
+    outcome = flash_cmd._execute(plan, True, None, None, None, jlink_exe=None)
+    assert outcome.success is False and "trusted location" in outcome.stderr
+    assert rec.calls == []
+    pre = flash_cmd._flow_d_preflight(
+        flash_cmd.FlashInputs(
+            artefact="a", core_id="c", sku="S",
+            flash_args={"jlink_flash_device": "P", "expect_dpidr": "0x4C013477",
+                        "jlink_device": "Cortex-M55"},
+        ),
+        jlink_exe=None,
+    )
+    assert pre is not None and "trusted location" in pre and rec.calls == []
+
+
+def test_a_manifest_only_setools_is_refused_before_ANY_spawn(tmp_path, monkeypatch):
+    """The refusal is hoisted ahead of the probe listing and the DPIDR preflight."""
+    (tmp_path / "setools").mkdir()
+    _exe(tmp_path / "trusted" / "JLinkExe")
+    rec = SpawnRecorder(monkeypatch)
+    manifest_args = (
+        '{jlink_flash_device: PART, slot0_load_address: "0x80010000", confirm: true, '
+        f'atoc_unqueryable: true, setools_dir: "{tmp_path / "setools"}", '
+        "expect_dpidr: '0x4C013477', jlink_device: Cortex-M55}"
+    )
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "a.bin").write_bytes(b"\x00")
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        "schema_version: 1\nhw_info: {sku: S}\nslices:\n"
+        "- {core_id: m55_hp, os: zephyr, output_artefact: a.bin, status: ok,\n"
+        f"   flash_method: alif_mram_jlink, flash_args: {manifest_args}}}\n"
+        "helper_mcus: []\nboot_order: []\n",
+        encoding="utf-8", newline="",
+    )
+    monkeypatch.setenv("PATH", str(tmp_path / "trusted"))
+    monkeypatch.delenv("SETOOLS_DIR", raising=False)
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+    rc, data, issues, _l, _s = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"), board_yaml=None,
+        core=None, helper=None, dry_run=False, skip_missing_tools=False, capture=True,
+        cwd=str(tmp_path), **_probes(A, C), probe_usb_path="3-4.3",
+    )
+    assert rc == 1 and rec.calls == [], rec.calls
+    assert _codes(issues) == ["flash.setools-untrusted-source"]

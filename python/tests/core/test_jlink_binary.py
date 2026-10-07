@@ -55,3 +55,20 @@ def test_install_roots_per_platform(tmp_path, monkeypatch):
     roots = jlink_binary.__dict__["_install_roots"]
     # (the autouse fixture is undone above so the real function runs)
     assert roots({"ProgramFiles": str(pf)}, "win32") == [str(pf / "SEGGER" / "JLink_V810")]
+
+
+def test_an_activated_project_venv_on_path_is_skipped(tmp_path):
+    """tan-cli#1348 review: a project `.venv/bin` on the user's PATH is still the
+    project's; a plain project directory on PATH is the user's choice."""
+    project = tmp_path / "proj"
+    hostile = _exe(project / ".venv" / "bin" / "JLinkExe")
+    (project / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    trusted = _exe(tmp_path / "trusted" / "JLinkExe")
+    env = {"PATH": os.pathsep.join([str(project / ".venv" / "bin"), str(tmp_path / "trusted")])}
+    assert resolve_jlink(None, env, project_dir=str(project)).path == trusted
+    assert resolve_jlink(None, env).path == hostile  # no project dir known: PATH order
+    only = {"PATH": str(project / ".venv" / "bin")}
+    assert resolve_jlink(None, only, project_dir=str(project)) is None
+    # A non-venv project directory on PATH is not skipped.
+    local = _exe(project / "tools" / "JLinkExe")
+    assert resolve_jlink(None, {"PATH": str(project / "tools")}, project_dir=str(project)).path == local

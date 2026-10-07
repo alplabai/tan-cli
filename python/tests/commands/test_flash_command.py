@@ -1782,7 +1782,7 @@ def test_require_dpidr_refuses_flow_d_before_the_setools_sign(tmp_path, monkeypa
     monkeypatch.setattr(
         flash_cmd, "resolve_setools_dir",
         lambda *_a, **_k: types.SimpleNamespace(
-            path=str(tmp_path / "setools"), source="SETOOLS_DIR"
+            path=str(tmp_path / "setools"), source="SETOOLS_DIR", operator_supplied=True
         ),
     )
     monkeypatch.setattr(
@@ -2020,7 +2020,7 @@ def test_the_atoc_refusal_fires_before_the_setools_sign(tmp_path, monkeypatch):
     monkeypatch.setattr(
         flash_cmd, "resolve_setools_dir",
         lambda *_a, **_k: types.SimpleNamespace(
-            path=str(tmp_path / "setools"), source="SETOOLS_DIR"
+            path=str(tmp_path / "setools"), source="SETOOLS_DIR", operator_supplied=True
         ),
     )
     monkeypatch.setattr(
@@ -3215,6 +3215,16 @@ def _flow_d_preflight_inputs():
     return FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S")
 
 
+def _preflight(inputs, **kwargs):
+    """`_flow_d_preflight` with the run's resolved J-Link, as `_flash_entry` passes it
+    (tan-cli#1348: the preflight never re-resolves the binary itself)."""
+    import shutil as _shutil
+
+    return flash_cmd._flow_d_preflight(
+        inputs, jlink_exe=_shutil.which("JLinkExe") or _shutil.which("JLinkExe.exe"), **kwargs
+    )
+
+
 def _stub_flow_d_probe(monkeypatch, tmp_path, stdout: str, stderr: str = "", success: bool = True):
     """Make `_flow_d_preflight` reach a fake connect banner without touching a
     real probe: a resolvable but INERT `JLinkExe` as the only thing on PATH,
@@ -3273,7 +3283,7 @@ def test_flow_d_preflight_a_different_reported_dp_id_keeps_the_wiring_message(
         tmp_path,
         stdout="Connecting to target via SWD\nFound SW-DP with ID 0x2BA01477\n",
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "Check the wiring and which board is physically attached" in message
     assert "re-enumerat" not in message
@@ -3296,7 +3306,7 @@ def test_flow_d_preflight_wrong_dp_id_names_the_actual_id_too(monkeypatch, tmp_p
         tmp_path,
         stdout="Connecting to target via SWD\nFound SW-DP with ID 0x2BA01477\n",
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "0x4C013477" in message, message  # the expected id (unchanged)
     assert "0x2BA01477" in message, message  # tan-cli#512: the actual id, new
@@ -3314,7 +3324,7 @@ def test_flow_d_preflight_wrong_dp_id_names_the_sw_dp_id_not_jlink_serial(monkey
         tmp_path,
         stdout="Connecting to target via SWD\nFound SW-DP with ID 0x2BA01477\n",
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "SW-DP ID is the real" in message
     assert "cannot disambiguate" in message
@@ -3334,7 +3344,7 @@ def test_flow_d_preflight_no_dp_id_at_all_gets_the_re_enumeration_message(monkey
         stderr="J-Link uptime (since boot): 0d 00h 00m 01s\n",
         success=False,
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "re-enumerat" in message
     assert "Check the probe selection" not in message
@@ -3361,7 +3371,7 @@ def test_flow_d_preflight_an_unrecognised_banner_falls_back_to_the_wiring_messag
     that this is an unparsed banner, not a confirmed wiring diagnosis. The
     remediation stays byte-for-byte the same either way."""
     _stub_flow_d_probe(monkeypatch, tmp_path, stdout="some unrecognised probe banner\n")
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "could not recognise the connect banner" in message
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
@@ -3393,7 +3403,7 @@ def test_flow_d_preflight_a_target_level_cannot_connect_keeps_the_wiring_message
         ),
         success=False,
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
     assert "re-enumerat" not in message
@@ -3424,7 +3434,7 @@ def test_flow_d_preflight_a_wrong_jlink_serial_keeps_the_wiring_message(monkeypa
         stdout="Connecting to J-Link via USB...FAILED: Cannot connect to J-Link.\n",
         success=False,
     )
-    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    message = _preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
     assert "tan-cli#353" in message
@@ -3568,7 +3578,7 @@ def test_flow_d_preflight_refuses_a_truncated_expect_dpidr_before_probing(monkey
     )
     args = {**FLOW_D_ARGS, "expect_dpidr": "0x2477", "jlink_device": "Generic-Attach"}
     inputs = FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S")
-    message = flash_cmd._flow_d_preflight(inputs)
+    message = _preflight(inputs)
     assert message is not None
     assert "expect_dpidr" in message
     assert "32-bit" in message
@@ -4207,12 +4217,13 @@ slices:
    flash_method: alif_mram_jlink,
    flash_args: {{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
                 expect_dpidr: "0x0BE12477", jlink_device: Generic-Attach,
-                setools_dir: "{setools_dir.as_posix()}", confirm: true,
-                atoc_unqueryable: true}}}}
+                confirm: true, atoc_unqueryable: true}}}}
 helper_mcus: []
 boot_order: []
 """
     (build_root / "system-manifest.yaml").write_text(manifest, encoding="utf-8", newline="")
+    # The operator names the install (a manifest-only one is refused outright now).
+    monkeypatch.setenv("SETOOLS_DIR", str(setools_dir))
 
     fake_tools = tmp_path / "faketools"
     fake_tools.mkdir()

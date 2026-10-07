@@ -10,7 +10,8 @@ rule (right for `west`) must not reach this program. It is resolved ONLY from:
 1. an explicit `--jlink <path>` (a CLI input);
 2. the `TAN_JLINK` environment variable (an environment input);
 3. `PATH` as the user's own environment has it -- never with the project venv
-   prepended;
+   prepended, and skipping any PATH entry that is a virtualenv bin directory inside the project
+   directory (an activated project `.venv/bin` is still the project's);
 4. a known SEGGER install root: `/opt/SEGGER/*`, `/Applications/SEGGER/*`,
    `%ProgramFiles%` / `%ProgramFiles(x86)%` `\\SEGGER\\*`.
 
@@ -71,11 +72,39 @@ def _in_dir(directory: str, platform: str) -> str | None:
     return None
 
 
+def _inside(path: str, root: str) -> bool:
+    try:
+        real_path, real_root = os.path.realpath(path), os.path.realpath(root)
+        return os.path.commonpath([real_path, real_root]) == real_root
+    except (ValueError, OSError):
+        return False
+
+
+def _is_project_venv_bin(entry: str, project_dir: str) -> bool:
+    """A PATH entry that is a virtualenv `bin`/`Scripts` directory (its parent holds
+    `pyvenv.cfg`) living INSIDE the project directory."""
+    return _inside(entry, project_dir) and os.path.isfile(
+        os.path.join(os.path.dirname(os.path.realpath(entry)), "pyvenv.cfg")
+    )
+
+
+def _path_without_project(env: Mapping[str, str], project_dir: str | None) -> dict[str, str]:
+    """`env` with every PATH entry that is a project virtualenv's bin directory removed
+    -- an ACTIVATED project `.venv` on the user's PATH is still the project's, and the
+    whole point of tan-cli#1336 is that the project's venv never supplies this binary."""
+    path = env.get("PATH")
+    if not project_dir or not path:
+        return dict(env)
+    kept = [d for d in path.split(os.pathsep) if d and not _is_project_venv_bin(d, project_dir)]
+    return {**env, "PATH": os.pathsep.join(kept)}
+
+
 def resolve_jlink(
     cli_path: str | None,
     env: Mapping[str, str] | None = None,
     *,
     platform: str | None = None,
+    project_dir: str | None = None,
 ) -> JlinkBinary | None:
     """The J-Link binary tan may spawn, or `None` when none is found. An
     explicit `cli_path` / `TAN_JLINK` that does not name an existing file
@@ -87,8 +116,9 @@ def resolve_jlink(
         if value:
             path = os.path.abspath(value)
             return JlinkBinary(path, source) if os.path.isfile(path) else None
+    path_env = _path_without_project(env, project_dir)
     for name in JLINK_NAMES:
-        found = resolve_tool(name, env).resolved
+        found = resolve_tool(name, path_env).resolved
         if found:
             return JlinkBinary(os.path.abspath(found), "PATH")
     for root in _install_roots(env, platform):
