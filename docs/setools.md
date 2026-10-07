@@ -58,34 +58,101 @@ manifest today typically carries only `jlink_flash_device` and
 `slot0_load_address` — alp-sdk's emit does not sign anything itself),
 `tan flash` drives one `app-gen-toc` sign step for you:
 
-1. copies the build's raw `.bin` into `<SETOOLS_DIR>/build/images/`;
-2. writes an app-only ATOC config to `<SETOOLS_DIR>/build/config/` — no
-   `"DEVICE"` key: the on-module factory device config is already correct for
-   your part, and this step must not overwrite it;
-3. runs `app-gen-toc`, inside `SETOOLS_DIR`, against that config;
-4. reads the resulting ATOC's MRAM placement back out of
-   `<SETOOLS_DIR>/build/app-package-map.txt`. This file is **APPEND-mode** —
-   the accumulated sign record for the whole install, including hand-runs
-   you did outside `tan` — so `tan` never truncates or deletes it
-   (tan-cli#373): it records the file's size and mtime beforehand and
-   refuses if either is unchanged after a zero exit (a soft failure that
-   would otherwise read back a stale, unrelated address as if it were
-   fresh), and separately confirms `<SETOOLS_DIR>/build/AppTocPackage.bin`
-   (which — unlike the map — IS overwritten whole every run, so there is no
-   history in it to protect) was actually rewritten before trusting either.
+1. makes a **private scratch overlay** of your SETOOLS install in the system
+   temp directory (tan-cli#1325) — small directories copied, the large `alif/`
+   firmware directory and the top-level tools symlinked, a fresh `build/` —
+   and never writes into the install itself;
+2. copies the build's raw `.bin` into the scratch `build/images/` and writes
+   the ATOC config to the scratch `build/config/` (the `DEVICE` entry: see
+   below);
+3. runs the scratch copy of `app-gen-toc` inside the scratch tree against that
+   config;
+4. reads the resulting ATOC's MRAM placement, size and entry list back out of
+   the scratch `build/app-package-map.txt`, and hands J-Link the scratch
+   `build/AppTocPackage.bin`.
+
+Your SETOOLS install is **byte-identical** afterwards: `build/AppTocPackage.bin`,
+`build/app-package-map.txt` (which is APPEND-mode, the accumulated sign record
+including your hand-runs), `build/images/`, `build/config/` and the SETOOLS logs
+are all left exactly as they were, and no lock file or copy-out directory is
+created in it. Because nothing shared is written, two `tan flash` runs against
+one install can no longer cross-pair (tan-cli#380) without any lock. The scratch
+tree is removed when the entry finishes; the entry reports it as
+`setools: {dir, source, scratch, scratchRemoved}`.
 
 A successful sign names which SETOOLS install did it (`--setools-dir`,
 `SETOOLS_DIR`, or `flash_args.setools_dir` — see `setools.source` in `tan
 flash`'s own output), not only a failed one.
 
-Under `--dry-run` none of this touches your SETOOLS install or spawns
-`app-gen-toc` at all — `tan flash --dry-run` prints what it *would* sign and
-stops there.
+Because the sign is side-effect-free, `--dry-run` (and an unconfirmed run) run
+`app-gen-toc` too, in the scratch tree, so the preview reports the real ATOC
+placement. They still never spawn `JLinkExe`.
+
+### The `DEVICE` entry (tan-cli#1322)
+
+The device configuration is an entry *inside* the ATOC package, and a Flow D
+write replaces the whole table, so an ATOC signed without it **deletes** the
+resident one rather than preserving it (measured on an evk-02: the resident
+package `0x15C40` carried `DEVICE` `0x138` + the app; the app-only replacement
+was `0xA50`). `tan flash` therefore signs a `DEVICE` entry by default, in the
+exact shape alp-sdk's bench recipe uses (`binary`, `version "0.5.00"`,
+`signed: true`), ahead of the app entry. Its source is, in order:
+
+1. `flash_args.setools_device_config` — a path (relative paths resolve against
+   the build root like every other manifest path); a path that does not exist is
+   refused, never swapped for the stock file;
+2. SETOOLS' own `<SETOOLS_DIR>/build/config/app-device-config.json`.
+
+With neither, the run refuses with `flash.device-config-missing` (also under
+`--dry-run`, before `app-gen-toc` is spawned). `--no-device-config` opts out and
+signs an app-only ATOC; the envelope then says
+`setools.deviceConfig.included: false` and the replacement note states that the
+resident `DEVICE` entry is deleted. The stock file carries firewall regions
+opened to `any_master`, HFXO trims and `SE_BOOT_INFO`; a CPU-only Zephyr app
+boots without it (proven), bus masters writing to SRAM0 are not.
+
+The whole-ATOC acknowledgement (`--atoc-unqueryable`) names the entries the new
+ATOC carries (`This ATOC names: DEVICE, m55_he.`). Flow D cannot enumerate what
+is resident, so the resident entries that will not be rewritten are listed only
+when you supply them as `flash_args.resident_atoc_entries: [DEVICE, ALP-HE, ...]`
+(read them off the SE-UART first with `maintenance -opt gettoc`); otherwise the
+text says the resident table is unknown.
 
 If you already resolved a signature yourself — an explicit `flash_args.atoc`
 + `flash_args.atoc_address`, or `flash_args.atoc_map` pointing at your own
 `app-package-map.txt` — none of the above runs; `tan` uses what you gave it
 verbatim.
+
+## Reviewing a Flow D write before arming it (tan-cli#1318)
+
+`tan flash --dry-run --format json` puts a `plan` block on every Flow D entry:
+`jlinkScript` (the exact Commander script, `exec DisableAutoUpdateFW` first),
+`argv`, `writes[]` as `{name, address, size, path, sectorSpan}`, and `atoc`
+`{address, size, entries, signedByTan}`. `sectorSpan` counts 16 KiB sectors
+(`first`, `end` exclusive, `count`, `bytes`) because the loader rewrites whole
+sectors and fills the remainder with 0xFF -- an ATOC of 2640 B at `0x8057F5B0`
+still rewrites the sector `0x8057C000`-`0x80580000`. For an ATOC tan signs, the
+placement and entry list come from `app-gen-toc` run in the scratch overlay, so
+they are what a real run will write; a dry run still never spawns the J-Link tool.
+
+## What a Flow D write reports, and what it proves (tan-cli#1321)
+
+`verifybin` compares the image against J-Link's flash **cache**, not the chip, so
+tan says `cache-verified`, never a bare "verified". The entry's `jlink` block
+carries the evidence: `dpidr` (the SW-DP ID the write transcript read, else the
+read-only preflight's, with `dpidrSource`), `transcriptPath` (a file under
+`<build>/flash-logs/` with the Commander script and both streams) and
+`transcriptTail`, `verification`, and `reset` / `resetFailures`. A transcript
+containing `Failed to halt CPU`, `CPU is not halted`, `Reset: Failed` or `CPU may
+have not been reset` downgrades the message to `PIN-reset NOT confirmed` and
+raises `flash.jlink-reset-unconfirmed` (warning).
+
+`--readback` re-reads every written region in a **fresh** J-Link session
+(`savebin`), through the same probe-selection guard as the write, and compares
+sha256: `readback-verified` on a match, `flash.readback-mismatch` on a
+difference. A fresh session is stronger than the cache but still weaker than
+reading after a cold power cycle, which is what alp-sdk#2233 says proves a write
+on the bench.
 
 ## Two probes, one cloned serial: why `jlink_serial` is not always enough
 
@@ -147,11 +214,10 @@ Its scope is the same table as the advisory (tan-cli#609): Flow D today. It was
 tan-cli#732), which left the AEN MRAM path — the genuine *customer* flash path
 of the two, the GD32 bridge being factory-programmed by Alp Lab — outside both
 halves of the guard. On Flow D the refusal fires ahead of the SETOOLS
-auto-sign, not merely ahead of the write:
-`app-gen-toc` appends a block to `build/app-package-map.txt` and rewrites
-`build/AppTocPackage.bin` whole, and tan-cli#512 measured a wrong-board abort
-that correctly left slot0 byte-identical and still left the SETOOLS install
-mutated.
+auto-sign, not merely ahead of the write (tan-cli#512 measured a wrong-board
+abort that correctly left slot0 byte-identical but had already mutated the
+SETOOLS install; since tan-cli#1325 the sign no longer touches the install at
+all, and the ordering is kept as defence in depth).
 
 The policy belongs to the host, not to the manifest. Export it on a factory or
 bench machine, where a wrong-board write is expensive and nobody is watching;
