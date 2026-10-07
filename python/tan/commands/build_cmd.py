@@ -106,6 +106,7 @@ from tan.commands.build.token_substitution import (
 from tan.commands.build.toolchain import ToolchainResolution, resolve_toolchain_root
 from tan.core.user_defines import UserDefineError, apply_user_defines, define_pairs, user_defines_problem
 from tan.core.plain_zephyr_plan import board_target_problem, normalise_defines, plain_zephyr_plan
+from tan.core.board_files import unmatched_board_file_messages
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.global_flags import accept_global_flags
 from tan.core.plan_exec import (
@@ -824,6 +825,18 @@ def _dispatch(
             outcomes.append(outcome)
             if slice_refusals and outcome.message == slice_refusals.get(sl.core_id):
                 issues.append(Issue("build.host-python-unsuitable", "error", outcome.message))
+    # tan-cli#1351: per-board files naming a different board are silently
+    # ignored by Zephyr.
+    issues.extend(
+        Issue("build.board-file-unmatched", "warning", msg)
+        for msg in unmatched_board_file_messages(
+            [
+                (sl.backend, sl.command.args if sl.command else [], sl.app_dir)
+                for sl in plan.slices
+            ],
+            build_root,
+        )
+    )
     return outcomes, issues
 
 
