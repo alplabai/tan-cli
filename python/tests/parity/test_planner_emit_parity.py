@@ -49,7 +49,7 @@ produces the same file:
   as proof of the in-process one. `zephyr-board` joins that layer as the one
   target writing a DIRECTORY -- plumbing (`write_tree`, and an `--output` that
   IS the directory) nothing else exercises.
-* the breadth layer, driving both sides in-process so all 99 boards x every
+* the breadth layer, driving both sides in-process so every board x every
   relocated mode x every `--core` form is affordable. Its oracle is
   `alp_project.py`'s OWN dispatch functions -- `--emit zephyr-conf` is not
   `_slice_alp_conf`, it is that slice inside a per-core wrapper, and `--emit
@@ -75,7 +75,7 @@ retired silent `python -m alp_orchestrate` fallback -- is measured the same way
 but lives in the sibling `test_planner_axis_build_plan_parity.py` now, alongside
 the rest of the planner axis: `build` is the one command whose plan is
 `build-plan`, and every probe of it belongs with that mode, not with the
-seventeen renderers this file owns.
+eighteen renderers this file owns.
 
 Requires an alp-sdk checkout: set `ALP_SDK_ROOT` (or `ALP_SDK_PARITY_ROOT`).
 Skipped, loudly, without one -- a green run that compared nothing would be worse
@@ -84,6 +84,7 @@ than a red one.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
@@ -103,6 +104,15 @@ from tests.parity import _xdist_breadth_floor
 # (tan-cli#1215, ADR-0026 §D/§G) as its own axis, since it is the one mode §G
 # step 6 deletes once `tan build` plans with no alp-sdk counterpart at all. The
 # other six need nothing but `metadata/**` and are this file's whole subject.
+#
+# `linux-ownership-dts` (alp-sdk#2674) is a seventh, compared at the LIBRARY
+# level only: `tan/planner/linux_ownership.py` is a byte-identical mirror of
+# upstream's renderer, so this measures it on every board, but no `tan` command
+# emits it yet -- upstream serves it from `alp_project.py` for inspection and
+# `check_amp_pad_claims --project`, and its product consumer (the
+# linux-renesas bbappend) renders the same fragment from the system-manifest's
+# `ownership:` block, which `tan` already emits. Exposing it as a
+# `tan generate` target is a separate, user-visible decision.
 RENDER_MODES = (
     "system-manifest",
     "ipc-contract-h",
@@ -110,6 +120,7 @@ RENDER_MODES = (
     "dts-partitions",
     "storage-mounts-c",
     "tfm-sysbuild-conf",
+    "linux-ownership-dts",
 )
 
 
@@ -357,6 +368,11 @@ def _render(pkg, board: Path, mode: str) -> tuple[str, str]:
             return ("ok", pkg.emit_storage_mounts_c(project))
         if mode == "tfm-sysbuild-conf":
             return ("ok", pkg.emit_tfm_sysbuild_conf(project))
+        if mode == "linux-ownership-dts":
+            # Not re-exported from either package's `__init__` (upstream's
+            # own `alp_project.py` imports the submodule directly).
+            module = importlib.import_module(f"{pkg.__name__}.linux_ownership")
+            return ("ok", module.emit_linux_ownership_dts(project))
     except Exception as err:  # noqa: BLE001
         return (f"emit:{type(err).__name__}", str(err))
     raise AssertionError(f"unhandled mode {mode!r}")
@@ -432,7 +448,7 @@ def test_every_mode_is_byte_identical(planners, board):
 #: Renderers that MOVED but whose `--emit` front door stayed in alp-sdk
 #: (`alp_project.py` owns 15 of the 20 registry modes). The emit-snapshot
 #: goldens reach them as `proj-*.zephyr-conf` / `proj-*.os-topology` over three
-#: boards; comparing the functions directly covers all 99.
+#: boards; comparing the functions directly covers every board.
 _SLICE_RENDERERS = ("_slice_alp_conf", "_slice_local_conf", "_slice_cmake_args")
 
 
@@ -972,7 +988,7 @@ def test_an_emit_reaching_disk_through_tan_stays_lf(planners, tmp_path):
 #
 # The `tan generate --output` tests above spawn a real process per case, so they
 # can only afford a couple of modes. This block is the breadth layer: it drives
-# BOTH sides in-process, so all 99 boards x every relocated mode x both `--core`
+# BOTH sides in-process, so every board x every relocated mode x both `--core`
 # forms costs seconds rather than an hour.
 #
 # The oracle is `scripts/alp_project.py`'s OWN dispatch functions, called

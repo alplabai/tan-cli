@@ -306,8 +306,15 @@ def test_an_off_core_is_exempt_from_the_loader_rules(base_dir):
 def _emit_one_slice(project, base_dir: Path) -> dict:
     from tan.planner.buildplan import emit_build_plan
 
+    # The project is synthetic (no board.yaml on disk), but `emit_build_plan`
+    # reads the file it is handed: `deferredPlaceholders` (alp-sdk#2696) only
+    # lists a `${NAME}` the board.yaml text itself carries.  An empty file
+    # declares none, which is what this synthetic project has.
+    board_yaml = base_dir / "board.yaml"
+    if not board_yaml.exists():
+        board_yaml.write_text("", encoding="utf-8")
     plan = json.loads(emit_build_plan(project,
-                                      board_yaml=base_dir / "board.yaml",
+                                      board_yaml=board_yaml,
                                       build_root=base_dir / "build"))
     assert len(plan["slices"]) == 1
     return plan["slices"][0]
