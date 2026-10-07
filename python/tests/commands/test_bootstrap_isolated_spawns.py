@@ -76,16 +76,31 @@ def test_every_python_m_spawn_is_isolated_with_absolute_paths(tmp_path, monkeypa
     monkeypatch.setattr(Runner, "run", fake_run)
     log = bootstrap_cmd.Log(json_mode=True)
     runner = Runner(json=True)
-    bootstrap_cmd._create_venv(ws, log, runner, HostPython((sys.executable,), (3, 12)))
+    # `ensure_venv` = create the venv + the pip/wheel upgrade (two spawns).
+    venv, failure = bootstrap_cmd.ensure_venv(ws, log, runner, HostPython((sys.executable,), (3, 12)))
+    assert failure is None
     venv = VenvBin(Path(".venv/bin/python"), Path(".venv/bin/west"), "bin")
-    bootstrap_cmd.pip_phase(ws, venv, log, runner, "linux")
-    ws_missing_west = ws  # the `pip install west` site lives in west_phase
-    bootstrap_cmd.west_phase(ws_missing_west, venv, log, runner, reuse=True)
+    bootstrap_cmd.pip_phase(ws, venv, log, runner, "linux")  # requirements, extras, editable
+    bootstrap_cmd.west_phase(ws, venv, log, runner, reuse=True)  # `pip install west`
 
     pip_m = [(a, iso) for a, iso in seen if "-m" in a and a[a.index("-m") + 1] in ("pip", "venv")]
-    assert len(pip_m) >= 4  # venv, requirements, extras, editable (+ west install)
+    assert len(pip_m) == 6, pip_m  # venv, upgrade, requirements, extras, editable, west
+    assert len(pip_m) == len(seen), "a non-pip/venv spawn appeared"
     for argv, isolated in pip_m:
         assert isolated, argv
         for arg in argv:
             if os.sep in arg:
                 assert os.path.isabs(arg), f"relative path argument {arg!r} in {argv}"
+
+
+def test_a_manifest_spec_that_is_a_path_is_made_absolute(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "wheelhouse").mkdir()
+    assert bootstrap_cmd._abs_spec("wheelhouse") == str(tmp_path / "wheelhouse")
+    assert bootstrap_cmd._abs_spec("west>=1.0") == "west>=1.0"
+    assert bootstrap_cmd._abs_spec("jsonschema") == "jsonschema"
+
+
+def test_an_isolated_spawn_with_a_cwd_is_a_value_error(tmp_path):
+    with pytest.raises(ValueError):
+        Runner(json=True).run([sys.executable, "-c", "pass"], cwd=tmp_path, isolated=True)

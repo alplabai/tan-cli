@@ -94,7 +94,7 @@ from tan.commands.doctor_cmd import (
     zephyr_python_floor,
 )
 from tan.core import toolchain_provision
-from tan.core.probe import probe_status
+from tan.core.probe import isolated_cwd, probe_status
 from tan.core.subprocess_env import (
     ld_library_path_needs_restore,
     restore_ld_library_path,
@@ -695,8 +695,9 @@ class Runner:
         if self.dry_run:
             return None
         if isolated:
-            assert cwd is None, "an isolated spawn has no caller-chosen cwd"
-            with tempfile.TemporaryDirectory(prefix="tan-spawn-", ignore_cleanup_errors=True) as empty:
+            if cwd is not None:
+                raise ValueError("an isolated spawn has no caller-chosen cwd")
+            with isolated_cwd() as empty:
                 return self._spawn(argv, Path(empty), extra_env, tail_lines)
         return self._spawn(argv, cwd, extra_env, tail_lines)
 
@@ -864,6 +865,16 @@ def _abs(path: str | os.PathLike[str]) -> str:
     return os.path.abspath(os.fspath(path))
 
 
+def _abs_spec(spec: str) -> str:
+    """A pip requirement spec, made absolute when it names an existing path
+    (`./vendor/wheel`, a local dir) -- a plain name or specifier (`west>=1.0`,
+    `jsonschema`) is returned untouched. Relative `-e`/`-c` lines INSIDE a
+    requirements file and relative `PIP_CONSTRAINT`/`PIP_FIND_LINKS`/
+    `PIP_CONFIG_FILE` environment values still resolve against the empty cwd --
+    a documented limit, not something tan rewrites."""
+    return _abs(spec) if os.path.exists(spec) else spec
+
+
 def _abs_exe(arg: str) -> str:
     """An interpreter argv[0]: a bare command name is left for PATH lookup, a
     relative path (it has a separator) is made absolute."""
@@ -889,9 +900,9 @@ def _probe_venv_pip(venv: VenvBin, runner: Runner) -> str:
         return PIP_USABLE
     try:
         # Empty cwd: `-m` puts the cwd on sys.path (module hijack, tan-cli#1317).
-        with tempfile.TemporaryDirectory(prefix="tan-probe-") as empty:
+        with isolated_cwd() as empty:
             out = subprocess.run(
-                [str(venv.python), "-m", "pip", "--version"],
+                [_abs(venv.python), "-m", "pip", "--version"],
                 cwd=empty,
                 capture_output=True,
                 text=True,
@@ -1040,7 +1051,7 @@ def ensure_venv(
         "install",
         "--upgrade",
         "-q",
-        *ws.facts.pip_bootstrap_upgrade,
+        *(_abs_spec(spec) for spec in ws.facts.pip_bootstrap_upgrade),
     ]
     if runner.run(upgrade, isolated=True) is not None:
         log.warn("pip-upgrade", "pip/wheel upgrade reported a problem")
@@ -1148,7 +1159,7 @@ def west_phase(
     if not _is_file(venv.west):
         log.line("Installing west into the workspace venv")
         detail = runner.run(
-            [_abs(venv.python), "-m", "pip", "install", "--upgrade", "-q", ws.facts.west_pip_spec],
+            [_abs(venv.python), "-m", "pip", "install", "--upgrade", "-q", _abs_spec(ws.facts.west_pip_spec)],
             isolated=True,
         )
         if detail is not None:
@@ -1263,7 +1274,7 @@ def pip_phase(ws: Workspace, venv: VenvBin, log: Log, runner: Runner, host: str)
     extras = list(ws.facts.pip_sdk_extras)
     rendered = ", ".join(extras) if ws.is_windows else " ".join(extras)
     log.line(f"Installing alp-sdk Python extras into the venv ({rendered})")
-    if runner.run([_abs(venv.python), "-m", "pip", "install", "-q", *extras], isolated=True) is not None:
+    if runner.run([_abs(venv.python), "-m", "pip", "install", "-q", *map(_abs_spec, extras)], isolated=True) is not None:
         log.warn("sdk-extras", "alp-sdk extras install reported a problem -- check manually")
 
     # alp-sdk's own Python tooling -- `alp_cli` + `alp_mcp`, which is what puts the
