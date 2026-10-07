@@ -1516,4 +1516,9 @@ def load_board_yaml(path: Path, *,
     # extra_libraries: entry the schema couldn't validate cleanly.
     _validate_consistency(out)
 
+    # `diagnostics.link: itcm` is an AEN M55-HE-only knob (tan-cli#1350):
+    # refuse it here so every planner consumer sees the coded error.
+    from .link_target import apply_link_target  # noqa: PLC0415
+    apply_link_target(out)
+
     return out
