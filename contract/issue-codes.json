@@ -1942,10 +1942,10 @@
     {
       "code": "flash.device-config-mismatch",
       "status": "reserved",
-      "severity": "warning",
+      "severity": "info or warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/flash_cmd.py",
-      "note": "Added closing the tan-cli#1343 review (tan-cli#1322). EMISSION CONDITION: the device configuration that becomes the DEVICE ATOC entry (flash_args.setools_device_config, else the stock SETOOLS build/config/app-device-config.json) declares a metadata.device whose Alif family prefix (the first three characters, e.g. AE7 vs AE8) differs from the slice's flash_args.jlink_flash_device. The stock SETOOLS file names an Ensemble E7 part while the AEN801/803 boards are E8, so this fires for the stock file on those boards; it is a warning, not a refusal, because the stock file is the bench-proven default. The entry's setools.deviceConfig carries metadataDevice and the same warning text. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
+      "note": "Added closing the tan-cli#1343 review (tan-cli#1322). EMISSION CONDITION: the device configuration that becomes the DEVICE ATOC entry (flash_args.setools_device_config, else the stock SETOOLS build/config/app-device-config.json) declares a metadata.device whose Alif family prefix (the first three characters, e.g. AE7 vs AE8) differs from the slice's flash_args.jlink_flash_device. The stock SETOOLS file names an Ensemble E7 part while the AEN801/803 boards are E8, so this fires for the stock file on those boards; it is never a refusal -- `info` when the file is SETOOLS' own stock config (stale metadata on every default E8 run), `warning` when the project supplied it -- because the stock file is the bench-proven default. The entry's setools.deviceConfig carries metadataDevice and the same warning text. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "flash.write-sector-overlap",

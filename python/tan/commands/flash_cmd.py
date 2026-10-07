@@ -335,6 +335,9 @@ class _Entry:
     #: this slice's J-Link part profile (the warning text). `_run` appends a
     #: `flash.device-config-mismatch` warning.
     device_config_warning: str | None = None
+    #: The device config in question is SETOOLS' own stock file, whose metadata is
+    #: known stale for the E8: `_run` then reports `info`, not a warning.
+    device_config_is_stock: bool = False
     #: Additive envelope blocks (`setools`, ...) -- ONE dict shared with the
     #: run, because some of it (`setools.scratchRemoved`) is only known after
     #: the entry has been built, when its scratch tree is torn down.
@@ -2585,6 +2588,7 @@ def _resolve_flow_d_atoc_via_setools(
             {
                 "included": True, "path": device.path, "source": device.source,
                 "metadataDevice": device.metadata_device,
+                "stock": device.source.startswith("the stock"),
             }
             if device is not None
             else {"included": False, "optOut": "--no-device-config"}
@@ -2743,6 +2747,9 @@ def _flash_entry_body(
             reset_unconfirmed=reset_unconfirmed,
             preview_sign_skipped=preview_sign_skipped,
             device_config_warning=report.get("setools", {}).get("deviceConfig", {}).get("warning"),
+            device_config_is_stock=bool(
+                report.get("setools", {}).get("deviceConfig", {}).get("stock")
+            ),
         )
 
     # tan-cli#611, THE HOIST. WHO may flash this entry is decided BEFORE
@@ -3132,9 +3139,16 @@ def _flash_entry_body(
             rewritten = {e["name"] for e in report.get("atoc", {}).get("entries", ())} or set(
                 written_entries(entry_id, device_config=not ctx.no_device_config)
             )
+            # A resident region that starts exactly where a write does IS that write's
+            # predecessor and is REPLACED by it, whatever its name (the bench's
+            # `ALP-HE@0x80010000` vs tan's `m55_he`): a legitimate re-flash.
+            write_starts = {int(w["address"], 16) for w in flow_d_writes if w.get("address")}
             overlaps = find_overlaps(
                 flow_d_writes,
-                [r for r in (resident_regions(flash_args) or ()) if r[0] not in rewritten],
+                [
+                    r for r in (resident_regions(flash_args) or ())
+                    if r[0] not in rewritten and r[1] not in write_starts
+                ],
             )
             if overlaps:
                 raise SectorOverlapError(
@@ -3434,15 +3448,17 @@ def _write_transcript(path: str, text: str) -> str:
     except BaseException:
         _unlink(tmp)
         raise
-    prefix = os.path.basename(path).rsplit("-", 1)[0] + "-"
-    try:
-        mine = sorted(
-            n for n in os.listdir(directory) if n.startswith(prefix) and n.endswith(".log")
-        )
-        for stale in mine[: max(len(mine) - _LOG_KEEP, 0)]:
-            _unlink(os.path.join(directory, stale))
-    except OSError:
-        pass
+    # Rotate ONLY this core's own `<method>-<core>-<timestamp>[-N].log` files: matched
+    # exactly, so core `m55` never rotates the logs of core `m55-hp` (tan-cli#1344 review).
+    family = re.match(r"^(.*)-\d{8}T\d{6}Z\.log$", os.path.basename(path))
+    if family is not None:
+        own = re.compile(re.escape(family.group(1)) + r"-\d{8}T\d{6}Z(?:-\d+)?\.log")
+        try:
+            mine = sorted(n for n in os.listdir(directory) if own.fullmatch(n))
+            for stale in mine[: max(len(mine) - _LOG_KEEP, 0)]:
+                _unlink(os.path.join(directory, stale))
+        except OSError:
+            pass
     return final
 
 
@@ -4184,10 +4200,13 @@ def _run(
             issues.append(Issue("flash.preview-sign-skipped", "info", message))
         if entry.device_config_warning:
             text_lines.append(f"{entry.id}: {entry.device_config_warning}")
-            issues.append(
-                Issue("flash.device-config-mismatch", "warning",
-                      f"{entry.id}: {entry.device_config_warning}")
-            )
+            mismatch = f"{entry.id}: {entry.device_config_warning}"
+            if entry.device_config_is_stock:
+                # The stock SETOOLS file declares an E7 part on every default E8 run and
+                # its blob is byte-identical to the board's original DEVICE: not news.
+                issues.append(Issue("flash.device-config-mismatch", "info", mismatch))
+            else:
+                issues.append(Issue("flash.device-config-mismatch", "warning", mismatch))
         if entry.reset_unconfirmed:
             # tan-cli#1321 / #522: J-Link's own transcript says the PIN reset did
             # not land, so the freshly written image was not necessarily started.
