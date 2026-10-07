@@ -97,10 +97,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from tan.core.user_defines import changed_defines, insert_after_dashdash
+from tan.commands.build.user_defines_wipe import reconcile_user_defines, stamp_user_defines
+from tan.core.user_defines import insert_after_dashdash
 from tan.commands.build.configure_inputs import (
-    read_user_defines_stamp,
-    write_user_defines_stamp,
     discover_configure_inputs,
     read_configure_inputs_stamp,
     resolve_zephyr_discovery_dir,
@@ -1402,29 +1401,22 @@ def execute_slices(
         # be rebuilt" and "this slice is about to be skipped" -- running the
         # wipe first would delete the last good `zephyr.elf` for a rebuild
         # that then never happens on a host missing `west`.
-        # tan-cli#1382: a changed user `-D` set (key added, removed or value
-        # changed) cannot be applied to an already-configured build dir
-        # reliably -- zephyr_check_cache(SHIELD WATCH) restores SHIELD from
-        # CACHED_SHIELD and refuses value changes short of a pristine build,
-        # sysbuild images keep their own caches, and `-U` fixes none of that.
-        # So the slice takes tan's existing per-slice pristine wipe (same
-        # guards) and the wipe is named in a `build.configure-cache-reset`
-        # info. The stamp is written only after the slice's step exits 0.
+        # tan-cli#1382: a changed user `-D` set wipes this slice's build dir
+        # (see `user_defines_wipe`). Before the sdk-switch/--pristine guard so
+        # that guard sees the post-wipe dir; the stamp is written after it,
+        # BEFORE the spawn, because it records what this configure is given.
         ud_now = list(user_defines.get(sl.core_id, ())) if user_defines else []
-        ud_changed = False
+        ud_stampable = False
         if sl.backend == "zephyr":
-            if cmake_cache_configured(cwd):
-                ud_before = read_user_defines_stamp(cwd) or []
-                changed = changed_defines(ud_before, ud_now)
-                if changed:
-                    ud_changed = True
-                    note = (
-                        f"{sl.core_id}: user -D changed ({', '.join(changed)}) -- "
-                        "wiping this slice's build dir so Zephyr re-configures from "
-                        "scratch instead of keeping the cached value (tan-cli#1382)"
-                    )
-                    on_output(f"note: {note}")
-                    configure_cache_issues.append(Issue("build.configure-cache-reset", "info", note))
+            ud_issues, ud_stampable = reconcile_user_defines(
+                sl.core_id,
+                cwd,
+                ud_now,
+                guards_ok=not build_dir_overridden(sl.command.args)
+                and _cwd_under_build_root(sl.command.cwd),
+                on_output=on_output,
+            )
+            configure_cache_issues.extend(ud_issues)
 
         sdk_switch_issues.extend(
             _maybe_pristine_stale_sdk_build_dir(
@@ -1434,9 +1426,12 @@ def execute_slices(
                 sl.command.args,
                 sdk_stamp_key_str,
                 on_output,
-                force_pristine=force_pristine or ud_changed,
+                force_pristine=force_pristine,
             )
         )
+
+        if ud_stampable:
+            stamp_user_defines(cwd, ud_now)
 
         # tan-cli#655: AFTER the sdk-switch-pristine guard, not before -- a
         # wipe there removes `cwd/build` wholesale (this stamp lives inside
@@ -1587,11 +1582,6 @@ def execute_slices(
         code = step.exit_code
 
         status = "succeeded" if code == 0 else "failed"
-        if code == 0 and sl.backend == "zephyr":
-            try:
-                write_user_defines_stamp(cwd, ud_now)
-            except OSError:
-                pass
         if code == 0:
             message = None
         elif is_west and saw_no_workspace and workspace_dir is not None:

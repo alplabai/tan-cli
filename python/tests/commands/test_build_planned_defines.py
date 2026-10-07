@@ -205,17 +205,48 @@ def test_changed_user_defines_wipe_the_slice_and_name_the_keys(world):
 
 
 @posix_only
-def test_failed_build_writes_no_stamp_so_change_is_seen_again(world):
-    envelope_of(_run(world, "-D", "SHIELD=a"))
+def test_failed_build_still_stamps_so_dropping_the_define_wipes(world):
     west = world["bin"] / "west"
     ok = west.read_text()
     west.write_text(ok + "sys.exit(3)\n")
-    assert envelope_of(_run(world, "-D", "SHIELD=b"))["exitCode"] == 1
-    # the change wiped the dir (and the old stamp with it); the failed run wrote no new one
-    assert not _stamp(world).exists()
+    assert envelope_of(_run(world, "-D", "SHIELD=a"))["exitCode"] == 1
+    # the (failed) configure was given SHIELD=a, so that is what the stamp records
+    assert _stamp(world).read_text() == "SHIELD=a\n"
     west.write_text(ok)
-    assert "build.configure-cache-reset" in _codes(envelope_of(_run(world, "-D", "SHIELD=b")))
-    assert _stamp(world).read_text() == "SHIELD=b\n"
+    marker = world["out"] / "build" / "rtss_he-zephyr" / "build" / "marker"
+    marker.write_text("x")
+    env = envelope_of(_run(world))
+    assert "build.configure-cache-reset" in _codes(env) and not marker.exists()
+    assert "build.sdk-switch-pristine" not in _codes(env)
+
+
+@posix_only
+def test_unstamped_configured_dir_wipes_only_if_cache_holds_a_selection(world):
+    envelope_of(_run(world))
+    stamp = _stamp(world)
+    marker = stamp.parent / "marker"
+    stamp.unlink()
+    marker.write_text("x")
+    assert "build.configure-cache-reset" not in _codes(envelope_of(_run(world)))
+    assert marker.exists()
+    stamp.unlink()
+    (stamp.parent / "CMakeCache.txt").write_text("CACHED_SHIELD:STRING=imx335\n")
+    assert "build.configure-cache-reset" in _codes(envelope_of(_run(world)))
+    assert not marker.exists()
+
+
+@posix_only
+def test_suppressed_wipe_warns_and_does_not_stamp(world):
+    envelope_of(_run(world, "-D", "SHIELD=a"))
+    plan = json.loads(world["plan"].read_text())
+    plan["slices"][0]["command"]["args"] += ["-d", "elsewhere"]
+    world["plan"].write_text(json.dumps(plan))
+    marker = _stamp(world).parent / "marker"
+    marker.write_text("x")
+    env = envelope_of(_run(world, "-D", "SHIELD=b"))
+    codes = _codes(env)
+    assert "build.configure-cache-stale" in codes and "build.configure-cache-reset" not in codes
+    assert marker.exists() and _stamp(world).read_text() == "SHIELD=a\n"
 
 
 @posix_only
