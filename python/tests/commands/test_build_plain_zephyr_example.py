@@ -243,7 +243,7 @@ def test_unknown_target_still_gets_a_one_slice_manifest(world):
     env = envelope_of(_run(world, "--board", "native_sim"))
     assert env["exitCode"] == 0 and env["issues"] == [], env
     (sl,) = _manifest(world)["slices"]
-    assert (sl["core_id"], sl["flash_method"]) == ("native_sim", "zephyr_west_flash")
+    assert sl["core_id"] == "native_sim" and "flash_method" not in sl and "no SoM preset" in sl["reason"]
 
 
 @posix_only
@@ -258,3 +258,12 @@ def test_tan_flash_dry_run_reads_the_plain_manifest(aen_world):
     assert "flash.manifest-not-found" not in [i["code"] for i in out["issues"]], out
     (entry,) = out["data"]["entries"]
     assert (entry["id"], entry["method"]) == ("m55_he", "alif_mram_jlink"), entry
+
+
+@posix_only
+def test_an_unclassifiable_elf_never_gets_the_mram_recipe(aen_world):
+    # The fake west writes no ELF at all: nothing to classify.
+    _run(aen_world, "--board", BOARD)
+    (sl,) = _manifest(aen_world)["slices"]
+    assert sl["flash_method"] == "ram_run_only" and "could not be classified" in sl["reason"]
+    assert set(sl["flash_args"]) <= {"expect_dpidr", "jlink_device"}

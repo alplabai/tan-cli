@@ -58,10 +58,11 @@ def plain_system_manifest(
     from tan.core.elf_load import lowest_load_address
 
     from .loader import (
-        _jlink_flash_device_declared, _load_json, _resolve_flow_d_preflight,
+        _enforce_flow_d_preflight_pair, _jlink_flash_device_declared, _load_json, _resolve_flow_d_preflight,
         _resolve_jlink_flash_device, _resolve_slot0_load_address,
         _resolve_variant_debug, _silicon_to_soc_path, _slice_from_resolved)
     from .models import Slice
+    from .validate import _enforce_os_matches_core_class
     from .orchestrator import _slice_flash_recipe
 
     found = _find_preset(board, metadata_root) if metadata_root is not None else None
@@ -90,16 +91,42 @@ def plain_system_manifest(
                 _resolve_slot0_load_address(preset, core_id)
                 if (declared or flash_device is not None) else None),
         )
+        # The same refusals the planned route applies per slice (loader.py).
+        core_type = next(
+            (str(c.get("type") or "") for c in (soc_spec.get("cores") or [])
+             if c.get("id") == core_id), "")
+        _enforce_flow_d_preflight_pair(slice_, debug, preset["sku"])
+        _enforce_os_matches_core_class(slice_, core_type)
         hw_info.update(sku=preset["sku"], silicon=preset.get("silicon"))
         base = soc_spec.get("soc_flash_base")
         flash_base = int(base) if isinstance(base, int) else None
 
     entry = slice_.to_manifest_entry()
-    low = lowest_load_address(elf_path) if elf_path else None
-    if flash_base is not None and low is not None and low < flash_base:
-        _, args = _slice_flash_recipe(slice_)
-        entry["flash_method"] = RAM_RUN_ONLY
-        entry["flash_args"] = {k: v for k, v in (args or {}).items() if k in _RAM_RUN_KEYS}
+    if found is None:
+        # No SoM preset names this target: there is no recipe to compose, and a
+        # guessed one could program the wrong thing. `tan flash` skips a slice
+        # with no flash_method, naming this reason.
+        entry.pop("flash_method", None)
+        entry.pop("flash_args", None)
+        entry["reason"] = (
+            f"no SoM preset in the SDK names board target `{board}`; "
+            "no flash recipe is known for it")
+    elif flash_base is not None:
+        # The SoC has a flash window, so WHERE the image is linked decides how it
+        # may be run. An image tan cannot classify must never inherit the MRAM
+        # recipe (slot0_load_address / jlink_flash_device): refuse it as RAM-only.
+        # TODO(tan-cli#1360): also set `slice_.link_target = "itcm"` and import
+        # RAM_RUN_ONLY_METHOD from `tan.core.link_refusal` once #1360 is in this
+        # base, so `tan flash` refuses the method by name.
+        low = lowest_load_address(elf_path) if elf_path else None
+        if low is None or low < flash_base:
+            _, args = _slice_flash_recipe(slice_)
+            entry["flash_method"] = RAM_RUN_ONLY
+            entry["flash_args"] = {k: v for k, v in (args or {}).items() if k in _RAM_RUN_KEYS}
+            if low is None:
+                entry["reason"] = (
+                    "the built ELF could not be classified (missing, unreadable, or "
+                    "no loadable segment); not treated as a flash image")
     doc = {
         "schema_version": 1,
         "generated_by": "tan build --board",
