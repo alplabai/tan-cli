@@ -33,7 +33,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
-from tan.core.flash_method_resolution import annotate_resolved_flash_methods
 from tan.core.sdk_discovery import resolve_sdk_root_ladder
 from tan.core.system_manifest import (
     SliceRunResult,
@@ -217,9 +216,6 @@ def write_post_build_manifest(
     try:
         raw = parse_system_manifest_raw(yaml_text)
         overlay_run_results_raw(raw, results)
-        # tan-cli#1320: the transport `tan flash` will actually dispatch,
-        # beside the declared `flash_method` (which stays byte-for-byte).
-        annotate_resolved_flash_methods(raw)
         out = serialize_system_manifest_raw(raw)
     except SystemManifestError as err:
         return PostBuildManifest(

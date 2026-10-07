@@ -178,14 +178,18 @@ from tan.core.setools import (
 )
 from tan.core.atoc_replacement import (
     replacement_detail,
+    resident_regions,
     resident_entries,
     written_entries,
 )
 from tan.core.jlink_binary import ENV_OVERRIDE as JLINK_ENV, resolve_jlink
 from tan.core.flow_d_report import (
+    SectorOverlapError,
+    find_overlaps,
     VERIFICATION_CACHE,
     VERIFICATION_NOTE,
     VERIFICATION_READBACK,
+    VERIFICATION_READBACK_NOTE,
     dpidr_in,
     planned_write,
     readback_script,
@@ -193,7 +197,7 @@ from tan.core.flow_d_report import (
     sha256_of,
     transcript_tail,
 )
-from tan.core.setools_scratch import cleanup_scratch, resolve_device_config
+from tan.core.setools_scratch import cleanup_scratch, family_mismatch, resolve_device_config
 from tan.core.tool_lookup import resolve_program_positions, resolve_tool
 from tan.core.venv import prepend_path, tool_in_venv, venv_bin_dir, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -320,6 +324,14 @@ class _Entry:
     #: own transcript says the PIN reset did not. `_run` appends a
     #: `flash.jlink-reset-unconfirmed` warning. Never emitted by `as_dict()`.
     reset_unconfirmed: bool = False
+    #: tan-cli#1343 review: a preview that did not run `app-gen-toc` because the
+    #: SETOOLS install came only from the manifest. `_run` appends an `info`
+    #: `flash.preview-sign-skipped`. Never emitted by `as_dict()`.
+    preview_sign_skipped: bool = False
+    #: tan-cli#1343 review: the device configuration names another Alif family than
+    #: this slice's J-Link part profile (the warning text). `_run` appends a
+    #: `flash.device-config-mismatch` warning.
+    device_config_warning: str | None = None
     #: Additive envelope blocks (`setools`, ...) -- ONE dict shared with the
     #: run, because some of it (`setools.scratchRemoved`) is only known after
     #: the entry has been built, when its scratch tree is torn down.
@@ -2527,6 +2539,23 @@ def _resolve_flow_d_atoc_via_setools(
             "flash_args.atoc_address yourself."
         )
 
+    if (ctx.dry_run or not confirm) and not setools.operator_supplied:
+        # tan-cli#1343 review: a PREVIEW must not execute a binary the PROJECT picked.
+        # `flash_args.setools_dir` lives in the manifest, which a checkout controls, so
+        # app-gen-toc is only run for a preview when the operator named the install
+        # (`--setools-dir` / `$SETOOLS_DIR`). A confirmed write still signs: the
+        # operator armed it knowing what the manifest says.
+        if report is not None:
+            report["setools"] = {
+                "dir": setools.path, "source": setools.source, "signSkipped": True,
+            }
+        return flash_args, (
+            f"ATOC placement not computed; pass --setools-dir (or set SETOOLS_DIR) to "
+            f"preview it -- the SETOOLS install here ({setools.path}) comes only from "
+            "flash_args.setools_dir in the manifest, and a preview does not run a tool "
+            "the project chose"
+        )
+
     # tan-cli#1322: the DEVICE entry is part of the ATOC unless the operator opted
     # out. Resolved BEFORE the sign so a missing config refuses without spawning.
     device = None
@@ -2536,22 +2565,40 @@ def _resolve_flow_d_atoc_via_setools(
             explicit = resolve_artefact_path(explicit, ctx.build_root, ctx.sdk_root, _is_file)
         device = resolve_device_config(explicit, setools.path, entry_id=entry_id)
 
+    block: dict[str, Any] = {
+        "dir": setools.path,
+        "source": setools.source,
+        "scratch": None,
+        "scratchRemoved": False,
+        "deviceConfig": (
+            {
+                "included": True, "path": device.path, "source": device.source,
+                "metadataDevice": device.metadata_device,
+            }
+            if device is not None
+            else {"included": False, "optOut": "--no-device-config"}
+        ),
+    }
+    if device is not None:
+        warning = family_mismatch(device.metadata_device, fa_str(flash_args, "jlink_flash_device"))
+        if warning:
+            block["deviceConfig"]["warning"] = warning
+    if report is not None:
+        report["setools"] = block
+
+    def _on_scratch(path: str) -> None:
+        # Registered BEFORE app-gen-toc runs (an interrupt mid-sign must not leak it).
+        block["scratch"] = path
+        if stack is not None:
+            _register_scratch(stack, report if report is not None else {}, path)
+
     signed = sign_slot0(
         setools.path, app_gen_toc, shape.artefact, entry_id, shape.app_address,
-        device_config=device,
+        device_config=device, on_scratch=_on_scratch,
     )
+    if signed.shared_touched:
+        block["sharedInstallTouched"] = list(signed.shared_touched)
     if report is not None:
-        report["setools"] = {
-            "dir": setools.path,
-            "source": setools.source,
-            "scratch": signed.scratch_dir,
-            "scratchRemoved": False,
-            "deviceConfig": (
-                {"included": True, "path": device.path, "source": device.source}
-                if device is not None
-                else {"included": False, "optOut": "--no-device-config"}
-            ),
-        }
         report["atoc"] = {
             "address": signed.atoc_address,
             "size": signed.atoc_size,
@@ -2559,8 +2606,6 @@ def _resolve_flow_d_atoc_via_setools(
                 {"name": n, "objAddress": a} for n, a in signed.report.entries
             ],
         }
-    if stack is not None:
-        _register_scratch(stack, report if report is not None else {}, signed.scratch_dir)
     merged = dict(flash_args)
     merged["atoc"] = signed.atoc_path
     merged["atoc_address"] = signed.atoc_address
@@ -2670,6 +2715,7 @@ def _flash_entry_body(
         probe_refusal: str | None = None,
         issue_code: str | None = None,
         reset_unconfirmed: bool = False,
+        preview_sign_skipped: bool = False,
     ) -> _Entry:
         return _Entry(
             kind=kind, id=entry_id, method=method, status=status, rc=rc, message=message,
@@ -2684,6 +2730,8 @@ def _flash_entry_body(
             extra=report,
             issue_code=issue_code,
             reset_unconfirmed=reset_unconfirmed,
+            preview_sign_skipped=preview_sign_skipped,
+            device_config_warning=report.get("setools", {}).get("deviceConfig", {}).get("warning"),
         )
 
     # tan-cli#611, THE HOIST. WHO may flash this entry is decided BEFORE
@@ -3055,7 +3103,35 @@ def _flash_entry_body(
                 flash_args, shape, ctx, entry_id, confirm,
                 stack=scratch_stack, report=report,
             )
+            if report.get("setools", {}).get("signSkipped"):
+                note = f"{setools_note}. {ATOC_REPLACEMENT_PREVIEW_NOTE}{probe_note}"
+                lines.append(_entry_head(kind, entry_id, method, target.flash_method))
+                lines.append(f"  {note}")
+                return (
+                    0,
+                    entry(method, "ok" if ctx.dry_run else "planned", 0, note,
+                          preview_sign_skipped=True),
+                    lines,
+                )
             flow_d_writes = _flow_d_writes(flash_args, shape)
+            # tan-cli#1343 review: the loader rewrites whole 16 KiB sectors, so a write
+            # that reaches into another write's first sector (or a resident entry the
+            # new ATOC does not rewrite) would erase it. Refused before anything is
+            # written -- under --dry-run too.
+            rewritten = {e["name"] for e in report.get("atoc", {}).get("entries", ())} or set(
+                written_entries(entry_id, device_config=not ctx.no_device_config)
+            )
+            overlaps = find_overlaps(
+                flow_d_writes,
+                [r for r in (resident_regions(flash_args) or ()) if r[0] not in rewritten],
+            )
+            if overlaps:
+                raise SectorOverlapError(
+                    f"{FLOW_D_METHOD}[{entry_id}]: refusing -- " + "; ".join(overlaps)
+                    + ". The loader rewrites whole 16 KiB sectors and fills the rest with "
+                    "0xFF, so these writes would erase each other. Move the app or the ATOC, "
+                    "or fix flash_args.slot0_load_address / atoc_address."
+                )
         except FlashPlanError as err:
             msg = str(err)
             lines.append(_entry_head(kind, entry_id, method, target.flash_method))
@@ -3312,9 +3388,51 @@ def _flow_d_plan_block(
     }
 
 
-def _flow_d_log_path(build_root: str, entry_id: str) -> str:
+#: How many Flow D transcripts are kept per core (tan-cli#1343 bench round 6).
+_LOG_KEEP = 10
+
+
+def _flow_d_log_path(build_root: str, entry_id: str, now: "time.struct_time | None" = None) -> str:
+    """`<build>/flash-logs/alif_mram_jlink-<core>-<UTC YYYYmmddTHHMMSSZ>.log` --
+    one file per run, never overwritten (a failed run's evidence must survive the
+    next one)."""
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", entry_id) or "entry"
-    return os.path.join(build_root, "flash-logs", f"{FLOW_D_METHOD}-{safe}.log")
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", now or time.gmtime())
+    return os.path.join(build_root, "flash-logs", f"{FLOW_D_METHOD}-{safe}-{stamp}.log")
+
+
+def _write_transcript(path: str, text: str) -> str:
+    """Write `text` to a NEW file near `path` and return its final path. Written via a
+    temp file + `os.replace` in the same directory, so a symlink planted at the target
+    name is replaced, never followed (tan-cli#1343 review, minor d); a symlinked log
+    DIRECTORY is refused; a same-second name collision gets a `-N` suffix. Then the
+    oldest transcripts for this core beyond `_LOG_KEEP` are removed."""
+    directory = os.path.dirname(path)
+    if os.path.islink(directory):
+        raise OSError(f"{directory} is a symlink; not writing the transcript through it")
+    os.makedirs(directory, exist_ok=True)
+    final, n = path, 0
+    while os.path.lexists(final):
+        n += 1
+        final = f"{path[:-4]}-{n}.log"
+    handle, tmp = tempfile.mkstemp(prefix=".tan-flash-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, final)
+    except BaseException:
+        _unlink(tmp)
+        raise
+    prefix = os.path.basename(path).rsplit("-", 1)[0] + "-"
+    try:
+        mine = sorted(
+            n for n in os.listdir(directory) if n.startswith(prefix) and n.endswith(".log")
+        )
+        for stale in mine[: max(len(mine) - _LOG_KEEP, 0)]:
+            _unlink(os.path.join(directory, stale))
+    except OSError:
+        pass
+    return final
 
 
 def _flow_d_record(
@@ -3348,13 +3466,13 @@ def _flow_d_record(
     }
     path = _flow_d_log_path(ctx.build_root, entry_id)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(f"# tan flash {FLOW_D_METHOD}[{entry_id}] rc={outcome.returncode}\n")
-            fh.write("## J-Link Commander script\n")
-            fh.write(f"{_DISABLE_FW_UPDATE}{plan.jlink_script or ''}\n")
-            fh.write("## stdout\n" + outcome.stdout + "\n## stderr\n" + outcome.stderr + "\n")
-        block["transcriptPath"] = path
+        block["transcriptPath"] = _write_transcript(
+            path,
+            f"# tan flash {FLOW_D_METHOD}[{entry_id}] rc={outcome.returncode}\n"
+            "## J-Link Commander script\n"
+            f"{_DISABLE_FW_UPDATE}{plan.jlink_script or ''}\n"
+            "## stdout\n" + outcome.stdout + "\n## stderr\n" + outcome.stderr + "\n",
+        )
     except OSError as err:
         block["transcriptPath"] = None
         block["transcriptError"] = str(err)
@@ -3434,6 +3552,7 @@ def _flow_d_readback(
                 "trust this board's slot0; re-flash.",
             )
         block["verification"] = VERIFICATION_READBACK
+        block["verificationNote"] = VERIFICATION_READBACK_NOTE
         return None
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -4018,6 +4137,8 @@ def _run(
                 issues.append(Issue("flash.probe-verify-failed", "error", entry.message))
             elif entry.probe_refusal == "selector-conflict":
                 issues.append(Issue("flash.probe-selector-conflict", "error", entry.message))
+            elif entry.issue_code == "flash.write-sector-overlap":
+                issues.append(Issue("flash.write-sector-overlap", "error", entry.message))
             elif entry.issue_code == "flash.readback-mismatch":
                 issues.append(Issue("flash.readback-mismatch", "error", entry.message))
             elif entry.issue_code == "flash.readback-failed":
@@ -4039,6 +4160,20 @@ def _run(
                 )
             else:
                 issues.append(Issue("flash.entry-failed", "error", entry.message))
+        if entry.preview_sign_skipped:
+            message = (
+                f"{entry.id}: the ATOC was not signed for this preview -- the SETOOLS "
+                "install comes only from flash_args.setools_dir in the manifest. Pass "
+                "--setools-dir (or set SETOOLS_DIR) to see the placement."
+            )
+            text_lines.append(message)
+            issues.append(Issue("flash.preview-sign-skipped", "info", message))
+        if entry.device_config_warning:
+            text_lines.append(f"{entry.id}: {entry.device_config_warning}")
+            issues.append(
+                Issue("flash.device-config-mismatch", "warning",
+                      f"{entry.id}: {entry.device_config_warning}")
+            )
         if entry.reset_unconfirmed:
             # tan-cli#1321 / #522: J-Link's own transcript says the PIN reset did
             # not land, so the freshly written image was not necessarily started.
