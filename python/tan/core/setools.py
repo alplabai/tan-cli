@@ -126,6 +126,52 @@ class SetoolsSource:
 
 _MANIFEST_SOURCE = "flash_args.setools_dir"
 
+#: Registered issue code (`contract/issue-codes.json`) for a SETOOLS install or device
+#: config that only the PROJECT named.
+UNTRUSTED_SOURCE_CODE = "flash.setools-untrusted-source"
+
+
+class SetoolsUntrustedSourceError(FlashPlanError):
+    """The SETOOLS install (or the device config signed into MRAM) was named only
+    by the project's manifest. `code` is the registered issue code."""
+
+    code = UNTRUSTED_SOURCE_CODE
+
+
+def untrusted_install_message(setools: "SetoolsSource") -> str:
+    return (
+        f"{FLOW_D_METHOD}: the SETOOLS install '{setools.path}' is named only by "
+        "flash_args.setools_dir in the manifest, which the project controls -- tan will not "
+        "EXECUTE an app-gen-toc a checkout picked for a write to a board. Name the install "
+        "yourself: --setools-dir <path> on the command line or SETOOLS_DIR=<path> in the "
+        "environment."
+    )
+
+
+def _inside(path: str, root: str) -> bool:
+    try:
+        real_path, real_root = os.path.realpath(path), os.path.realpath(root)
+        return os.path.commonpath([real_path, real_root]) == real_root
+    except (ValueError, OSError):
+        return False
+
+
+def check_device_config_location(path: str, setools_dir: str, project_dir: str | None) -> None:
+    """A manifest-named device configuration is accepted only when it resolves (symlinks
+    followed) inside the operator-named SETOOLS install or the project directory: the
+    file is signed into MRAM, so an arbitrary path (`/etc/...`, another user's home) is
+    refused. Raises [`SetoolsUntrustedSourceError`]."""
+    roots = [setools_dir] + ([project_dir] if project_dir else [])
+    if any(_inside(path, root) for root in roots):
+        return
+    raise SetoolsUntrustedSourceError(
+        f"{FLOW_D_METHOD}: flash_args.setools_device_config resolves to '{path}', outside the "
+        f"SETOOLS install ('{setools_dir}') and the project directory"
+        + (f" ('{project_dir}')" if project_dir else "")
+        + " -- it would be signed into MRAM, so tan only accepts a device config from "
+        "those places. Move it into the project, or drop the key to use the stock config."
+    )
+
 
 def resolve_setools_dir(
     flash_args: Any, env: dict[str, str], flag: str | None = None

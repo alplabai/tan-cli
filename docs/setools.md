@@ -135,6 +135,15 @@ still rewrites the sector `0x8057C000`-`0x80580000`. For an ATOC tan signs, the
 placement and entry list come from `app-gen-toc` run in the scratch overlay, so
 they are what a real run will write; a dry run still never spawns the J-Link tool.
 
+### Interrupted runs and Windows
+
+The scratch tree is removed when the entry ends, including on an interrupt (it is
+registered before `app-gen-toc` starts). `SIGKILL` cannot run cleanup, so a killed
+`tan flash` leaves a `tan-setools-*` directory in the system temp directory; delete
+it by hand. On POSIX the signing keys inside it are a symlink into your install; on
+Windows without symlink privilege tan falls back to COPYING them, so there the
+leftover holds a copy of the keys -- remove it.
+
 ## What a Flow D write reports, and what it proves (tan-cli#1321)
 
 `verifybin` compares the image against J-Link's flash **cache**, not the chip, so
@@ -342,3 +351,42 @@ programming the GD32 will still need.
   and cannot enumerate what is resident first, so the replacement must be
   acknowledged. Ports alp-sdk#2025 (PR alp-sdk#2029), which put the same
   refusal on the AEN bench scripts.
+
+## `tan flash --ram`: is the probe on the HE core? (tan-cli#1354)
+
+A generic `Cortex-M55` attach picks whichever M55 access port J-Link finds, and its
+`Found Cortex-M55 r1p0` line is identical for the HE and the HP core. Before it loads
+anything, `--ram` runs one read-only session (`connect`, then three `mem32` reads --
+no halt, no write) and decides from two independent facts:
+
+* **Primary -- the AP that reports `AP[n]: Core found`.** Its `APAddr` identifies the
+  core: HE `0x00300000`, HP `0x00200000` (alp-sdk `scripts/bench/aen/openocd-ram-run.sh:16-17`,
+  `changelog.d/2037-openocd-m55he-bench-core-selection.md:4`, `changelog.d/2025.md:31`).
+  The AP, its address, the `CPUID register` and the `Found Cortex-M55` line are reported
+  as `jlink.attachedCore` and `ram.coreCheck.ap`.
+* **Corroboration -- the ITCM alias.** A core's local ITCM at `0x0` is its own global
+  window (HE `0x58000000`: alp-sdk `metadata/socs/alif/ensemble/e8.json` `itcm_global_base`
+  at line 106; `docs/aen-bench-bringup.md:20`), so the 4 words read at `0x0` must equal the
+  4 words at the HE window. **The check reads only the local ITCM `0x0` and the HE window
+  `0x58000000` -- never the HP window `0x50000000`:** bench round 8 (2026-10-07, evk-02)
+  measured that reading it from the HE attach returns words without an error yet leaves the
+  M55-HE unhaltable until a PIN reset.
+
+Only an HE access port proceeds, and an HE access port whose local ITCM does not equal the
+HE window is a conflict that refuses. An HP access port refuses with
+`flash.ram-core-mismatch`; no placeable access port, or an unreadable check, refuses with
+`flash.ram-core-unconfirmed`. `--assume-he` overrides only that last, evidence-missing case
+(never HP evidence, never a conflict), at your own risk. After the load, the load session's
+own Core-found AP is compared with the check's: a different AP, or HP, fails the entry with
+`flash.ram-core-mismatch` and reports both (`jlink.attachedCore`, `jlink.attachedCoreAtLoad`).
+
+Halt/reset trouble in the load transcript (`CPU could not be halted`, `Could not find
+core`, `SYSRESETREQ has confused core`, `Reset: Failed`, `CPU may have not been reset`) is
+reported as `jlink.resetFailures` plus the `flash.jlink-reset-unconfirmed` warning, and the
+message says the load only worked through a J-Link fallback. The words read and the verdicts are in
+`ram.coreCheck`.
+
+A stale alp-sdk checkout whose SoM presets are `schema_version: 1` now says so
+(`unsupported SoM preset schema_version 1 (tan needs 2) -- update alp-sdk`) wherever
+tan cannot read SoC metadata: the `--ram` aperture refusal and the `tan debug-config`
+metadata notes (`tan size` keeps its own `size.som-schema-version-skipped`).
