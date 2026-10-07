@@ -129,6 +129,7 @@ from tan.core.plan_exec import (
     sdk_stamp_action,
     sdk_stamp_key,
 )
+from tan.core.plain_zephyr_plan import plain_route_target
 from tan.core.subprocess_env import spawn_env
 from tan.core.system_manifest import SliceRunResult
 from tan.core.tool_lookup import ToolResolution, resolve_tool
@@ -1805,6 +1806,7 @@ def _write_manifest_after_dispatch(
         base=str(build_root),
         plan_build_root=plan.build_root,
         results=results,
+        plain_route=plain_route_target(plan),
     )
     global _last_manifest_write
     _last_manifest_write = _ManifestWriteSignal(

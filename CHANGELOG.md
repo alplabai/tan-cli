@@ -8297,7 +8297,18 @@ exists and contains the pin; if its number differs, correct this line. See
   check as unknown. A `$ZEPHYR_BASE` that differs from the workspace's
   zephyr, which tan has always ignored, is now reported (`zephyrBase` check,
   `build.zephyr-base-ignored` info).
-
+- **`tan build --board` now writes `system-manifest.yaml`**, so `tan flash`,
+  `tan flash --ram` and `tan size` can use a plain Zephyr build without a
+  hand-written manifest. The one slice is named by the planner core id of the
+  SoM topology entry whose `board:` is the target (`.../rtss_he` is `m55_he`,
+  `.../rtss_hp` is `m55_hp`), not the Zephyr board qualifier, and carries the
+  `flash_method`/`flash_args` (`expect_dpidr`, `jlink_device`,
+  `jlink_flash_device`, `slot0_load_address`) a planned slice for that board
+  gets. An ELF whose lowest load address is below the SoC's `soc_flash_base`
+  (an ITCM image) is marked `flash_method: ram_run_only`. The "skipped writing
+  system-manifest.yaml" note is gone for this route. A target no SoM preset
+  names gets the reserved `flash_method: none` (schema-valid), which `tan flash`
+  skips (tan-cli#1370)
 - **`tan model check` now answers from Alp Lab's own bench, for a customer who
   holds neither the NPU toolchain nor the silicon.** alp-sdk publishes
   bench-measured perf points under `metadata/model_perf/`
