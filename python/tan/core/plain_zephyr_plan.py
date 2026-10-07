@@ -57,15 +57,36 @@ def core_id_for(board: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]+", "_", name).strip("_").lower() or "app"
 
 
-def plain_zephyr_plan(app_dir: str, board: str, defines: list[str]) -> str:
-    """The build-plan JSON text for one Zephyr slice building `app_dir`."""
-    core = core_id_for(board)
+#: `generatedBy` of a synthesised plan: how the post-build manifest write
+#: recognises the plain route (tan-cli#1370).
+PLAIN_GENERATED_BY = "tan build --board"
+
+
+def plain_route_target(plan) -> tuple[str, str] | None:
+    """`(board target, core id)` of a plan [`plain_zephyr_plan`] synthesised."""
+    if plan.generated_by != PLAIN_GENERATED_BY or len(plan.slices) != 1:
+        return None
+    (sl,) = plan.slices
+    args = sl.command.args if sl.command else []
+    if "-b" not in args or args.index("-b") + 1 >= len(args):
+        return None
+    return args[args.index("-b") + 1], sl.core_id
+
+
+def plain_zephyr_plan(
+    app_dir: str, board: str, defines: list[str], core_id: str | None = None
+) -> str:
+    """The build-plan JSON text for one Zephyr slice building `app_dir`.
+
+    `core_id` is the planner core id the board target maps to (`m55_he` for
+    `.../rtss_he`); without it the slice is named for the board qualifier."""
+    core = core_id or core_id_for(board)
     slice_dir = f"build/{core}-zephyr"
     out = f"{slice_dir}/build"
     plan = {
         "schemaVersion": 1,
         "planPathMode": "tokened",
-        "generatedBy": "tan build --board",
+        "generatedBy": PLAIN_GENERATED_BY,
         "boardYaml": "",
         "sku": "",
         "buildRoot": "build",

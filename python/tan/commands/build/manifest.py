@@ -97,6 +97,7 @@ def write_post_build_manifest(
     base: str,
     plan_build_root: str,
     results: Sequence[SliceRunResult],
+    plain_route: tuple[str, str] | None = None,
 ) -> PostBuildManifest:
     """Write `<base>/<plan_build_root>/system-manifest.yaml` after a build:
     fetch the plan-time projection from the SDK (`--emit system-manifest`),
@@ -155,15 +156,7 @@ def write_post_build_manifest(
         discovered = resolve_sdk_root_ladder(None, Path(effective_board_yaml).parent).path
         effective_sdk_root = str(discovered) if discovered else None
 
-    if effective_sdk_root is not None and not effective_board_yaml:
-        # tan-cli#1359: a plain Zephyr build (`tan build --board`) has no
-        # board.yaml, and the manifest is projected FROM one.
-        return PostBuildManifest(
-            write_failed_reason="the plan has no board.yaml to project it from",
-            native_sim_target=None,
-        )
-
-    if effective_sdk_root is None or not effective_board_yaml:
+    if effective_sdk_root is None or (not effective_board_yaml and plain_route is None):
         return PostBuildManifest(
             write_failed_reason=(
                 "no alp-sdk checkout resolved for the post-build system-manifest emit"
@@ -209,9 +202,24 @@ def write_post_build_manifest(
             write_failed_reason=f"planner unavailable: {err}", native_sim_target=None
         )
     try:
-        yaml_text = _planner_emit(
-            "system-manifest", root=effective_sdk_root, board_yaml=Path(effective_board_yaml)
-        )
+        if plain_route is not None:
+            # tan-cli#1370: no board.yaml to project from -- a one-slice
+            # manifest from the board target's SoM preset instead.
+            from tan.planner_root import bind_sdk_root
+
+            bind_sdk_root(effective_sdk_root)
+            from tan.planner.plain_slice import plain_system_manifest
+
+            yaml_text = plain_system_manifest(
+                plain_route[0],
+                Path(effective_sdk_root) / "metadata",
+                fallback_core_id=plain_route[1],
+                elf_path=next((r.output_artefact for r in results if r.output_artefact), None),
+            )
+        else:
+            yaml_text = _planner_emit(
+                "system-manifest", root=effective_sdk_root, board_yaml=Path(effective_board_yaml)
+            )
     except Exception as err:  # noqa: BLE001 -- best-effort write, never escapes
         return PostBuildManifest(
             write_failed_reason=f"{type(err).__name__}: {err}", native_sim_target=None

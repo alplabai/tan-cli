@@ -1448,9 +1448,7 @@ def _build(
     issues.extend(last_configure_cache_issues())
 
     manifest_reason = last_manifest_write_failure()
-    # A plain Zephyr build (`--board`) has no board.yaml, so no manifest to write:
-    # expected, not a warning (the stderr note still says why).
-    if manifest_reason is not None and plain_plan_text is None:
+    if manifest_reason is not None:
         # A failed manifest write used to report only through `on_output`
         # (stderr) -- so the envelope said `ok: true, issues: []` while
         # `system-manifest.yaml` still named the PREVIOUS run's status and
@@ -1483,6 +1481,23 @@ def _build(
         "warnings": plan.warnings,
     }
     return exit_code, data, issues
+
+
+def _plain_core_id(board: str, sdk_root: str | None) -> str | None:
+    """The planner core id (`m55_he`) the plain route's board target maps to,
+    from the bound SDK's SoM presets; `None` (the slice keeps the board
+    qualifier's name) when the SDK or the target is unknown (tan-cli#1370)."""
+    if sdk_root is None or not is_sdk_root(sdk_root):
+        return None
+    try:
+        from tan.planner_root import bind_sdk_root
+
+        bind_sdk_root(sdk_root)
+        from tan.planner.plain_slice import plain_core_id
+
+        return plain_core_id(board, Path(sdk_root) / "metadata")
+    except Exception:  # noqa: BLE001 -- best effort; the fallback name still builds
+        return None
 
 
 def _refuse_plain_route(
@@ -1832,10 +1847,6 @@ def build(
                     "exists -- drop `--board` to build it as a planned project.",
                     ExitCode.VALIDATION_FAILURE,
                 )
-        if board is not None:
-            plain_plan_text = plain_zephyr_plan(
-                _abs_posix(str(workspace_root)), board, normalise_defines(define or [])[0]
-            )
         if build_root is None:
             build_root = str(Path(board_yaml).parent) if board_yaml else str(workspace_root)
         build_root = _abs_posix(build_root)
@@ -1878,6 +1889,13 @@ def build(
             resolved_sdk_root = None
         sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
         sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
+        if board is not None:
+            plain_plan_text = plain_zephyr_plan(
+                _abs_posix(str(workspace_root)),
+                board,
+                normalise_defines(define or [])[0],
+                core_id=_plain_core_id(board, sdk_root),
+            )
         # Absolute, `.`/`..`-collapsed, anchored on `workspace_root` -- what the
         # sdk-switch-pristine guard actually compares (tan-cli#163), kept
         # SEPARATE from `sdk_root` itself: an explicit `--sdk-root` is a
