@@ -263,3 +263,58 @@ def test_log_refuses_a_fifo_without_blocking(monkeypatch, tmp_path):
     r = run(["--capture", "--duration", "0.2", "--log", str(fifo)])
     assert r.exit_code == 3
     assert envelope(r)["issues"][0]["code"] == "monitor.capture-log-failed"
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "mkfifo"), reason="no FIFOs on this platform")
+def test_fifo_log_says_not_a_regular_file_and_never_opens_the_port(monkeypatch, tmp_path):
+    import os
+
+    made = _fake_serial(monkeypatch, [b"x"])
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    r = run(["--capture", "--duration", "0.2", "--log", str(fifo)])
+    assert r.exit_code == 3
+    msg = envelope(r)["issues"][0]["message"]
+    assert "not a regular file" in msg and "Errno" not in msg
+    assert made == []  # refused before the serial connect
+
+
+def test_open_log_maps_enxio_to_not_a_regular_file(monkeypatch, tmp_path):
+    import errno
+    import os
+
+    from tan.commands import monitor_session
+
+    def enxio(*a, **k):
+        raise OSError(errno.ENXIO, "No such device or address")
+
+    monkeypatch.setattr(monitor_session.os, "open", enxio)
+    with pytest.raises(monitor_cmd.MonitorError) as ei:
+        monitor_session._open_log(str(tmp_path / "x"), {})
+    assert "not a regular file" in ei.value.message and os.name
+
+
+@pytest.mark.parametrize("where", ["missing_parent", "dir_as_log"])
+def test_bad_log_paths_are_refused_before_the_port_opens(monkeypatch, tmp_path, where):
+    made = _fake_serial(monkeypatch, [b"x"])
+    bad = tmp_path / "no" / "such" / "x.log" if where == "missing_parent" else tmp_path
+    r = run(["--capture", "--duration", "0.2", "--log", str(bad)])
+    assert r.exit_code == 3
+    assert envelope(r)["issues"][0]["code"] == "monitor.capture-log-failed"
+    assert made == []
+
+
+def test_until_log_and_tail_end_at_the_matched_line(monkeypatch, tmp_path):
+    _fake_serial(monkeypatch, [b"boot\r\nZephyr 4.1\r\ntrailing junk\r\n"])
+    log = tmp_path / "u.log"
+    r = run(["--capture", "--until", "Zephyr", "--duration", "5", "--log", str(log)])
+    assert r.exit_code == 0, r.stdout
+    cap = envelope(r)["data"]["capture"]
+    assert log.read_bytes() == b"boot\r\nZephyr 4.1\r\n"
+    assert "junk" not in cap["bytesSeenTail"] and cap["bytesSeen"] == len(b"boot\r\nZephyr 4.1\r\n")
+
+
+def test_help_tells_users_to_prefer_rfc2217_over_socket_for_ser2net():
+    r = runner.invoke(app, ["--help"])
+    flat = " ".join(r.stdout.split())
+    assert "Use rfc2217:// against ser2net" in flat and "IAC" in flat
