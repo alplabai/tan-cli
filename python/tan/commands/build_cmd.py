@@ -103,6 +103,7 @@ from tan.commands.build.token_substitution import (
     apply_plan_token_substitution,
     deferred_placeholder_issues,
 )
+from tan.commands.build.workspace_patches import workspace_patch_issues
 from tan.commands.build.toolchain import ToolchainResolution, resolve_toolchain_root
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.global_flags import accept_global_flags
@@ -1364,6 +1365,12 @@ def _build(
     # harness calling `build()` more than once) never gets misread as THIS
     # run's own write outcome below.
     reset_last_manifest_write()
+    # tan-cli#1376: advisory only -- never changes `ok`/the exit code.
+    patch_issues = workspace_patch_issues(
+        Path(build_root),
+        sdk_root,
+        has_zephyr_slice=any(sl.backend == "zephyr" for sl in plan.slices),
+    )
     outcomes, issues = _dispatch(
         plan,
         demotions,
@@ -1421,6 +1428,7 @@ def _build(
     issues.extend(_plan_warning_issues(plan.warnings))
     issues.extend(deferred_issues)
     issues.extend(python_issues)
+    issues.extend(patch_issues)
     # The sdk-switch-pristine wipe (issue #52) must not be stderr-only in
     # JSON mode -- the VS Code extension only ever sees the envelope, not
     # `_stream`'s output. Verbatim oracle codes/severity

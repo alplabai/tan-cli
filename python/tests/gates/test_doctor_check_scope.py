@@ -93,6 +93,8 @@ _PINNED_SCOPES = {
     "workspace": "project",
     "zephyrVersion": "project",
     "zephyrWorkspace": "project",
+    "workspacePatches": "project",
+    "zephyrBase": "project",
     # support_bundle_cmd's own debug report, built from the same class.
     "gdb": "host",
     "lldb": "host",

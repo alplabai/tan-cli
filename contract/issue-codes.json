@@ -3048,6 +3048,38 @@
       "consumerEffect": "Warns that the implicit stdin dump was NOT read to a clean EOF -- one of the idle/byte-cap/total bounds fired first, and the decode proceeded on whatever arrived. A panel can surface this as a caveat on an otherwise-successful decode: the report is real, but a slower or larger producer may have had more to say. The message names WHICH bound fired and the `--file -` remedy (the explicit, unbounded read-to-EOF path).",
       "emittedBy": "python/tan/commands/faultdecode_cmd.py",
       "note": "Exit 0 on the success path; also reachable alongside `faultdecode.no-registers` at exit 2 when a bound fires WITH bytes read but nothing in them parsed into a complete register set (constraint 4's hole, closed after initial review: a refusal used to announce nothing about the truncation it was itself caused by). Either way this is the sibling of the on-stderr announcement `_stdin_bound_message` writes in EVERY mode, not only `--format json`, per tan-cli#537's own constraint 4 (\"every bound announces, on the default surface\"). Added by tan-cli#537, the implicit-stdin-reader redesign: seven prior attempts on tan-cli#503 each traded one defect (a dropped dump, an unbounded hang, unbounded memory growth, a decode-parity break, a truncation nobody was told about) for another, in the same function. This code is what makes a truncated decode a recoverable inconvenience instead of a confident wrong root cause: `--file -` is the caller's escape hatch when they need the whole thing regardless of how long it takes. DIVERGES from alp-sdk's `scripts/alp_cli/faultdecode.py`, which has no truncation concept at all -- no idle/byte-cap/total bounds on its own stdin read, so nothing there could ever emit this warning or its stderr sibling; the upstream should follow. Pre-consumer -- promote to `frozen` (filling in consumer for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.workspace-patches",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "note": "tan-cli#1376: the `workspacePatches` doctor check (`doctor.` + `kebab_check_name`). alp-sdk's `zephyr/patches.yml` is not applied in the resolved west workspace, per alp-sdk's own `scripts/verify_west_patches.py`; the message names each ABSENT/DRIFTED patch and module and the fix (`tan bootstrap`, or `west patch --dst-module <m> apply` from the workspace). Warning, never a failure; the check reports `unknown` (no issue) when the SDK has no verifier or it cannot run. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
+    },
+    {
+      "code": "doctor.zephyr-base",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "note": "tan-cli#1376: the `zephyrBase` doctor check (`doctor.` + `kebab_check_name`). Reported as `pass` with an explanation when `$ZEPHYR_BASE` names a tree other than the resolved workspace's zephyr, which tan ignores; the registry entry exists because the gate resolves every `Check` name. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
+    },
+    {
+      "code": "build.workspace-patches-missing",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build/workspace_patches.py",
+      "note": "tan-cli#1376: before dispatch of a plan with a Zephyr slice, alp-sdk's `zephyr/patches.yml` is not applied in the resolved workspace (verifier result cached positively in `<build>/.tan-workspace-patches.json`, keyed by workspace HEADs + patches.yml). Warning only: never changes `ok` or the exit code. Could be promoted to an error later. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
+    },
+    {
+      "code": "build.zephyr-base-ignored",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build/workspace_patches.py",
+      "note": "tan-cli#1376: `$ZEPHYR_BASE` is set to a tree other than the resolved west workspace's zephyr; tan ignores it and builds with the workspace's zephyr. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
     }
   ]
 }
