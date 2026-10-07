@@ -54,9 +54,9 @@
 #    asset", but a pull request has no published release to download.
 #    CHOSEN: both, on different triggers.
 #      - `freeze-and-smoke` builds the freeze per-platform (exactly what
-#        `getting-started.yml` and `release.yml`'s `build` job already do) and
-#        runs on every PR/push/manual dispatch -- available PRE-TAG, which is
-#        when a defect like these six needs to be caught, before a customer
+#        `getting-started.yml` and `release.yml`'s `build` job already do), on
+#        Linux per PR and on all four hosts per merge_group/push/dispatch --
+#        PRE-TAG, when a defect like these six needs to be caught, before a customer
 #        ever sees the tag.
 #      - `release-asset-smoke` downloads the actual uploaded asset and runs
 #        the identical smoke test, on `release: published` + manual dispatch.
@@ -287,9 +287,11 @@ jobs:
       - name: freeze tan (python:3.12-slim-bullseye) + packaged-binary conformance + glibc floor
         if: ${{ matrix.container }}
         shell: bash
+        env:
+          CONTAINER_IMAGE: ${{ matrix.container }}
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD:/src" -w /src/python "${{ matrix.container }}" bash -euc '
+          docker run --rm -v "$PWD:/src" -w /src/python "${CONTAINER_IMAGE}" bash -euc '
             bash /src/scripts/ci/apt-bounded.sh update -qq
             bash /src/scripts/ci/apt-bounded.sh install -y -qq --no-install-recommends binutils
             python -m venv /tmp/venv
@@ -354,10 +356,11 @@ jobs:
         shell: bash
         env:
           TAN_BIN: python/dist/tan/tan${{ matrix.ext }}
+          TAN_EXT: ${{ matrix.ext }}
         run: |
           set -euo pipefail
           if [ ! -f "$TAN_BIN" ]; then
-            echo "::error::expected the freeze at ${TAN_BIN} (matrix ext '${{ matrix.ext }}') but it is missing. Checked only that exact name -- not a [ -f tan ] || [ -f tan.exe ] probe, which MSYS/Git-Bash cannot answer correctly (see the comment above this step)."
+            echo "::error::expected the freeze at ${TAN_BIN} (matrix ext '${TAN_EXT}') but it is missing. Checked only that exact name -- not a [ -f tan ] || [ -f tan.exe ] probe, which MSYS/Git-Bash cannot answer correctly (see the comment above this step)."
             ls -la python/dist/tan 2>/dev/null || ls -la python/dist || echo "python/dist does not exist at all -- the freeze step above did not run or did not produce it."
             exit 1
           fi
@@ -376,6 +379,47 @@ jobs:
         env:
           TAN_BIN: python/dist/tan/tan${{ matrix.ext }}
         run: python python/scripts/measure_startup.py --tan "$TAN_BIN"
+
+  # tan-cli#1392: ONE always-reported context that branch protection can
+  # require. After #1390 the Windows and both macOS legs exist only on
+  # `merge_group`/push/dispatch, and no `freeze-and-smoke` context is required,
+  # so a non-Linux freeze or smoke regression in a queued merge went red
+  # without blocking anything. Same shape as parity.yml's `python-tests`: a
+  # stub pass on `pull_request` (the context must report there for a PR to be
+  # enqueued at all), the real check everywhere else, where anything but
+  # `success` from the whole matrix -- a failed, cancelled or skipped leg, or a
+  # `matrix-plan` that never produced one -- fails this job.
+  freeze-and-smoke-all:
+    needs: [matrix-plan, freeze-and-smoke]
+    if: ${{ always() && github.event_name != 'release' }}
+    name: "clean host (freeze): all legs"
+    runs-on: ubuntu-latest
+    # Checks out nothing and evaluates two results; anything it cannot finish
+    # in 5 minutes is stuck, not slow (same reasoning as python-tests).
+    timeout-minutes: 5
+    steps:
+      - name: stub pass (non-Linux legs skipped on pull_request; run in merge_group)
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          msg="clean host (freeze): non-Linux legs skipped on pull_request; all legs run in merge_group"
+          echo "${msg}"
+          echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: verify every freeze-and-smoke leg succeeded
+        if: ${{ github.event_name != 'pull_request' }}
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.matrix-plan.result }}
+          FREEZE_RESULT: ${{ needs.freeze-and-smoke.result }}
+        run: |
+          set -euo pipefail
+          echo "matrix-plan: ${PLAN_RESULT}; freeze-and-smoke rolled-up result: ${FREEZE_RESULT}"
+          if [ "${PLAN_RESULT}" != "success" ] || [ "${FREEZE_RESULT}" != "success" ]; then
+            echo "::error::clean host (freeze) did not fully pass (matrix-plan: ${PLAN_RESULT}, freeze-and-smoke: ${FREEZE_RESULT}) -- at least one leg failed, was cancelled, or the matrix was skipped. This job exists only to give branch protection one required context; reporting green here would let a queued merge land with a red Windows/macOS freeze."
+            exit 1
+          fi
 
   # POST-PUBLISH confirmation: downloads the asset `install.sh`/`install.ps1`
   # actually fetch and runs the identical smoke test against those exact
@@ -429,16 +473,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REQUESTED_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+          ASSET: ${{ matrix.asset }}
         run: |
           set -euo pipefail
           tag="${REQUESTED_TAG:-}"
           if [ -z "$tag" ]; then
             tag="$(gh release view --repo alplabai/tan-cli --json tagName -q .tagName)"
           fi
-          echo "testing published asset ${{ matrix.asset }} from tag ${tag}"
+          echo "testing published asset ${ASSET} from tag ${tag}"
           mkdir -p dl
           gh release download "$tag" --repo alplabai/tan-cli \
-              --pattern "${{ matrix.asset }}" --dir dl --clobber
+              --pattern "${ASSET}" --dir dl --clobber
 
       # tan-cli#349: the published asset is now an archive of a --onedir
       # freeze, not a raw executable -- unpack it before the smoke test can
@@ -450,11 +495,16 @@ jobs:
       # binary lands at dl/unpacked/tan/tan[.exe].
       - name: unpack the downloaded archive
         shell: bash
+        env:
+          ASSET: ${{ matrix.asset }}
+          TAN_EXT: ${{ matrix.ext }}
         run: |
           set -euo pipefail
-          python -c "import shutil; shutil.unpack_archive('dl/${{ matrix.asset }}', 'dl/unpacked')"
-          chmod +x "dl/unpacked/tan/tan${{ matrix.ext }}"
+          python -c "import shutil, sys; shutil.unpack_archive('dl/' + sys.argv[1], 'dl/unpacked')" "${ASSET}"
+          chmod +x "dl/unpacked/tan/tan${TAN_EXT}"
 
       - name: clean-host smoke against the downloaded asset
         shell: bash
-        run: python python/scripts/clean_host_smoke.py --tan "dl/unpacked/tan/tan${{ matrix.ext }}"
+        env:
+          TAN_EXT: ${{ matrix.ext }}
+        run: python python/scripts/clean_host_smoke.py --tan "dl/unpacked/tan/tan${TAN_EXT}"
