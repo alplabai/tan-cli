@@ -46,6 +46,7 @@ import yaml
 
 from . import libraries as _library_layer
 from . import sdk_compat as _sdk_compat
+from .link_target import applies_to as link_applies_to
 from .loader import _library_alias_table
 from .models import BoardProject, OrchestratorError, Slice
 from .ownership import project_m33_overlay
@@ -552,6 +553,11 @@ def _emit_console(diagnostics: dict[str, Any], slice_: Slice) -> list[str]:
     sim = bool(diagnostics.get("sim_console")) and auto \
         and not slice_.hw_console and console == "none"
     if sim:
+        console = "ram"
+    # `diagnostics.link: itcm` (tan-cli#1350): a Flow C RAM-run's only
+    # observable is the RAM console, so an AUTO console is promoted to it
+    # (an explicit non-RAM console is refused by the loader).
+    if auto and link_applies_to(diagnostics, slice_):
         console = "ram"
     return _emit_zephyr_console(console, sim_console=sim)
 
