@@ -4340,7 +4340,19 @@ boot_order: []
 """
 
 
+def _require_posix_sign_tool():
+    """These tests run `tan flash` as a SUBPROCESS against a fake `app-gen-toc`. A
+    child process cannot monkeypatch `setools.APP_GEN_TOC` to the fixture's `.bat`
+    (the in-process tests do, and cover the Windows path), and `find_app_gen_toc`
+    only knows `app-gen-toc` / `app-gen-toc.exe` -- a real SETOOLS ships a PE
+    executable no fixture can stand in for. So the subprocess variants are POSIX-only;
+    the scratch overlay itself is exercised on Windows by the in-process tests."""
+    if os.name == "nt":
+        pytest.skip("subprocess run cannot reach a .bat fake app-gen-toc (see docstring)")
+
+
 def _flow_d_sign_setup(tmp_path, *, stock=True):
+    _require_posix_sign_tool()
     setools_dir = tmp_path / "setools"
     setools_dir.mkdir()
     _write_working_app_gen_toc(setools_dir / _setools_script_name(), device_config=stock)
@@ -4416,6 +4428,7 @@ def test_a_preview_never_runs_a_setools_the_manifest_chose(tmp_path):
     """tan-cli#1343 review, MAJOR 1: `flash_args.setools_dir` is project-controlled,
     so a --dry-run / unconfirmed run with ONLY that source must not execute the
     `app-gen-toc` it names. The placeholder tool writes a marker if it ever runs."""
+    _require_posix_sign_tool()
     setools_dir = tmp_path / "setools"
     setools_dir.mkdir()
     marker = tmp_path / "ran"
@@ -4682,6 +4695,7 @@ def test_flow_d_dry_run_signs_in_scratch_and_leaves_the_install_untouched(tmp_pa
     overlay, so it is side-effect-free -- and previews the REAL ATOC placement.
     The shared SETOOLS install is byte-identical afterwards, the scratch tree is
     gone, and the entry still reports `status: ok` with no issues."""
+    _require_posix_sign_tool()
     setools_dir = tmp_path / "setools"
     setools_dir.mkdir()
     _write_working_app_gen_toc(setools_dir / _setools_script_name())
@@ -6724,6 +6738,7 @@ boot_order: []
 def test_the_setools_preview_also_names_the_atoc_replacement(tmp_path):
     """The SETOOLS-signing preview -- the one a FRESH AEN manifest actually
     takes -- must state what arming the write would do to the ATOC."""
+    _require_posix_sign_tool()
     setools_dir = tmp_path / "setools"
     setools_dir.mkdir()
     _write_working_app_gen_toc(setools_dir / _setools_script_name())
