@@ -359,7 +359,9 @@ def test_flash_dpidr_preflight_spawns_the_resolved_jlink(hostile, monkeypatch):
     executable, argv0 = seen[-1][0], seen[-1][1]
     assert executable is not None, "the preflight pinned no executable"
     assert Path(executable).parent == realbin, f"preflight loaded {executable!r}"
-    assert argv0 == "JLinkExe", f"the preflight child's argv[0] became {argv0!r}"
+    # The identity is the tool name; Windows PATH resolution carries its PATHEXT
+    # suffix (`JLinkExe.EXE`), which the banner does not depend on.
+    assert Path(argv0).stem == "JLinkExe", f"the preflight child's argv[0] became {argv0!r}"
 
 
 def test_flash_dpidr_preflight_refuses_rather_than_spawning_an_unresolved_jlink(
