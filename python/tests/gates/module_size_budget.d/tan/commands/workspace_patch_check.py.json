@@ -5,8 +5,8 @@
   "lines": null,
   "long_functions": [
     [
-      56,
-      "check_workspace_patches"
+      61,
+      "_check"
     ]
   ]
 }

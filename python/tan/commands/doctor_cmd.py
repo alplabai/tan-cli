@@ -4099,7 +4099,7 @@ def _collect(
         # tan-cli#1376: read-only; never raises, never fails an offline doctor.
         _add(
             workspace_patches_check(
-                check_workspace_patches(workspace_path, sdk_root), str(workspace_path)
+                check_workspace_patches(workspace_path, sdk_root, timeout=30), str(workspace_path)
             )
         )
         zephyr_base_info = zephyr_base_check(os.environ.get("ZEPHYR_BASE"), str(workspace_path))

@@ -15,21 +15,26 @@ raises: an absent verifier (older SDK), a missing interpreter, a timeout or an
 unreadable report all become `unchecked`, because a check that cannot run must
 not fail an offline doctor or a build.
 
-Caching (`tan build` only): a positive verdict is stored in the build dir keyed
-by (every workspace module's HEAD, `patches.yml` bytes). Only `applied` is
-cached: applying patches edits the working tree, not HEAD, so a cached
-"missing" would go stale the moment the user ran `tan bootstrap`, whereas an
-applied tree stays applied until a HEAD moves (`west update`) or `patches.yml`
-changes -- both of which change the key.
+Caching (`tan build` only): a positive verdict (applied, or applied with some
+modules not checked out) is stored in `<project>/build/` keyed by (every
+workspace module's HEAD, `patches.yml` bytes, and a working-tree fingerprint:
+`(path, mtime_ns, size)` of every file the patches write, looked up under every
+module checkout). The fingerprint matters because `west patch clean`,
+`git checkout -- .` and `git stash` revert patches WITHOUT moving HEAD; they
+rewrite the patched files, so mtime/size change and the cache misses. Only
+positive verdicts are cached: a cached "missing" would go stale the moment the
+user ran `tan bootstrap`.
 """
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tan.core.atomic_write import atomic_write_text
 from tan.core.host_python import probe_host_python
 from tan.core.subprocess_env import spawn_env
 from tan.core.venv import venv_python, west_program
@@ -62,11 +67,11 @@ class PatchCheck:
     cached: bool = False
 
 
-def _run(argv: list[str], cwd: str) -> tuple[int | None, str, str]:
+def _run(argv: list[str], cwd: str, timeout: int = _TIMEOUT_S) -> tuple[int | None, str, str]:
     try:
         out = subprocess.run(
             argv, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", stdin=subprocess.DEVNULL, timeout=_TIMEOUT_S,
+            errors="replace", stdin=subprocess.DEVNULL, timeout=timeout,
             env=spawn_env(), check=False,
         )
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -109,6 +114,38 @@ def _workspace_heads(west: str, workspace: Path) -> dict[str, str] | None:
     return {p: _head(Path(p)) for p in (ln.strip() for ln in out.splitlines()) if p}
 
 
+_PATCH_ENTRY = re.compile(r"^\s*-?\s*path:\s*['\"]?([^'\"#\s]+)", re.MULTILINE)
+
+
+def _patched_files(sdk: Path) -> list[str]:
+    """Repo-relative paths every `patches.yml` patch writes (`+++ b/<path>`)."""
+    rels: set[str] = set()
+    try:
+        entries = _PATCH_ENTRY.findall((sdk / _PATCHES_YML).read_text(encoding="utf-8"))
+        for entry in entries:
+            text = (sdk / "zephyr" / "patches" / entry).read_text(encoding="utf-8", errors="replace")
+            rels.update(
+                ln[len("+++ b/"):].strip() for ln in text.splitlines() if ln.startswith("+++ b/")
+            )
+    except OSError:
+        pass
+    return sorted(rels)
+
+
+def _tree_fingerprint(module_dirs: list[str], rels: list[str]) -> dict[str, str]:
+    """`{path: "mtime_ns:size"}` for each patched file present under any module."""
+    out: dict[str, str] = {}
+    for d in module_dirs:
+        for rel in rels:
+            f = Path(d) / rel
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            out[str(f)] = f"{st.st_mtime_ns}:{st.st_size}"
+    return out
+
+
 def _interpreter(workspace: Path, sdk_root: str) -> str | None:
     # The workspace venv carries west + pyyaml (Zephyr's requirements), which
     # the verifier imports; the resolved host Python is the fallback.
@@ -119,25 +156,49 @@ def _interpreter(workspace: Path, sdk_root: str) -> str | None:
     return host.interpreter if host is not None else None
 
 
-def _read_cache(path: Path, key: str) -> bool:
+def _read_cache(path: Path, key: str) -> str | None:
+    """The cached state (`APPLIED` or `UNCHECKED`) for `key`, else `None`."""
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
-    return isinstance(doc, dict) and doc.get("key") == key and doc.get("state") == APPLIED
+        return None
+    if isinstance(doc, dict) and doc.get("key") == key and doc.get("state") in (APPLIED, UNCHECKED):
+        return doc["state"]
+    return None
 
 
-def _write_cache(path: Path, key: str) -> None:
+def _write_cache(path: Path, key: str, state: str) -> None:
     try:
-        path.write_text(json.dumps({"key": key, "state": APPLIED}), encoding="utf-8")
-    except OSError:
-        pass  # the cache is an optimisation; a read-only build dir just re-checks
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(str(path), json.dumps({"key": key, "state": state}))
+    except Exception:  # noqa: BLE001 -- the cache is an optimisation
+        pass
+
+
+_PARTIAL_NOTE = (
+    "some zephyr/patches.yml modules are not checked out in this workspace; "
+    "their patches could not be checked"
+)
 
 
 def check_workspace_patches(
-    workspace: Path, sdk_root: str | None, *, cache_dir: Path | None = None
+    workspace: Path,
+    sdk_root: str | None,
+    *,
+    cache_dir: Path | None = None,
+    timeout: int = _TIMEOUT_S,
 ) -> PatchCheck:
-    """Verify `<sdk_root>/zephyr/patches.yml` against `workspace`. Read-only."""
+    """Verify `<sdk_root>/zephyr/patches.yml` against `workspace`. Read-only,
+    and never raises: anything unexpected is `unchecked`."""
+    try:
+        return _check(workspace, sdk_root, cache_dir, timeout)
+    except Exception:  # noqa: BLE001 -- an advisory check must never break its caller
+        return PatchCheck(UNCHECKED, note="the patch check failed unexpectedly")
+
+
+def _check(
+    workspace: Path, sdk_root: str | None, cache_dir: Path | None, timeout: int
+) -> PatchCheck:
     if sdk_root is None:
         return PatchCheck(UNCHECKED, note="no alp-sdk checkout resolved")
     sdk = Path(sdk_root)
@@ -154,11 +215,15 @@ def check_workspace_patches(
         heads = _workspace_heads(west, workspace)
         if heads is not None:
             try:
-                key = cache_key(patches_yml.read_bytes(), heads)
+                tree = _tree_fingerprint(list(heads), _patched_files(sdk))
+                key = cache_key(patches_yml.read_bytes(), {**heads, **tree})
             except OSError:
                 key = None
-        if key is not None and _read_cache(cache_dir / CACHE_FILE, key):
+        cached = _read_cache(cache_dir / CACHE_FILE, key) if key is not None else None
+        if cached == APPLIED:
             return PatchCheck(APPLIED, note="verified applied (cached)", cached=True)
+        if cached == UNCHECKED:
+            return PatchCheck(UNCHECKED, note=_PARTIAL_NOTE, cached=True)
 
     python = _interpreter(workspace, sdk_root)
     if python is None:
@@ -168,25 +233,27 @@ def check_workspace_patches(
         "--topdir", str(workspace), "--west", west,
     ]
     with tempfile.TemporaryDirectory(prefix="tan-patches-") as scratch:
-        code, _out, err = _run(argv, scratch)
+        code, _out, err = _run(argv, scratch, timeout)
         verdict = classify_verify(code)
         if verdict == "applied":
             if key is not None and cache_dir is not None:
-                _write_cache(cache_dir / CACHE_FILE, key)
+                _write_cache(cache_dir / CACHE_FILE, key, APPLIED)
             return PatchCheck(APPLIED, note="verified applied")
         if verdict == "unchecked":
-            return PatchCheck(
-                UNCHECKED,
-                note="some zephyr/patches.yml modules are not checked out in this workspace; "
-                "their patches could not be checked",
-            )
-        patches = parse_unapplied_patches(err) if verdict == "unapplied" else []
-        if not patches:
+            # Everything inspectable is patched: as good as applied until a
+            # head or patched file moves, so it is cached too.
+            if key is not None and cache_dir is not None:
+                _write_cache(cache_dir / CACHE_FILE, key, UNCHECKED)
+            return PatchCheck(UNCHECKED, note=_PARTIAL_NOTE)
+        if verdict != "unapplied" or "Traceback" in err:
             return PatchCheck(
                 UNCHECKED,
                 note="the patch verifier could not inspect this workspace "
                 "(run scripts/verify_west_patches.py directly to see why)",
             )
-        lcode, listing, _ = _run([*argv, "--list-unapplied"], scratch)
+        # Exit 1 is the verifier's "not applied"; if it printed no parsable
+        # line, the patches are unnamed but still missing.
+        patches = parse_unapplied_patches(err)
+        lcode, listing, _ = _run([*argv, "--list-unapplied"], scratch, timeout)
         modules = parse_unapplied(listing) if lcode == 0 else []
     return PatchCheck(MISSING, patches=patches, modules=modules)

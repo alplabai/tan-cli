@@ -16,6 +16,11 @@ from tan.core.venv import west_workspace_dir
 from tan.core.west_patches import describe_unapplied, patch_fix_text, zephyr_base_note
 from tan.envelope import Issue
 
+#: The consumer build directory (`build_cmd.CONSUMER_BUILD_ROOT`; not imported
+#: because `build_cmd` imports this module). `build_root` here is the project
+#: root, so the cache belongs under `<project>/build/`, not beside board.yaml.
+_BUILD_DIR = "build"
+
 
 def workspace_patch_issues(
     build_root: Path, sdk_root: str | None, *, has_zephyr_slice: bool
@@ -29,7 +34,9 @@ def workspace_patch_issues(
         if workspace is None:
             return []
         issues: list[Issue] = []
-        result = check_workspace_patches(workspace, sdk_root, cache_dir=build_root)
+        result = check_workspace_patches(
+            workspace, sdk_root, cache_dir=build_root / _BUILD_DIR
+        )
         if result.state == MISSING:
             issues.append(
                 Issue(

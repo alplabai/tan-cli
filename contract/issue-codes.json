@@ -3071,7 +3071,7 @@
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/build/workspace_patches.py",
-      "note": "tan-cli#1376: before dispatch of a plan with a Zephyr slice, alp-sdk's `zephyr/patches.yml` is not applied in the resolved workspace (verifier result cached positively in `<build>/.tan-workspace-patches.json`, keyed by workspace HEADs + patches.yml). Warning only: never changes `ok` or the exit code. Could be promoted to an error later. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
+      "note": "tan-cli#1376: before dispatch of a plan with a Zephyr slice, alp-sdk's `zephyr/patches.yml` is not applied in the resolved workspace (verifier result cached positively in `<project>/build/.tan-workspace-patches.json`, keyed by workspace HEADs + patches.yml + the patched files' mtime/size). Warning only: never changes `ok` or the exit code. Could be promoted to an error later. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet."
     },
     {
       "code": "build.zephyr-base-ignored",

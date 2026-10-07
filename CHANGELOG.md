@@ -8269,8 +8269,9 @@ this line. See `docs/release-contract.md` and tan-cli#1258.*
   `scripts/verify_west_patches.py`, name each ABSENT or DRIFTED patch and its
   module, and give the fix (`tan bootstrap`, or `west patch --dst-module <m>
   apply`). The build warning never changes `ok` or the exit code; a verified
-  result is cached in the build dir. An older SDK without the verifier reports
-  the check as unknown. A `$ZEPHYR_BASE` that differs from the workspace's
+  result is cached under `build/`, keyed by workspace HEADs, patches.yml and
+  the patched files' mtimes. An older SDK without the verifier reports the
+  check as unknown. A `$ZEPHYR_BASE` that differs from the workspace's
   zephyr, which tan has always ignored, is now reported (`zephyrBase` check,
   `build.zephyr-base-ignored` info).
 
