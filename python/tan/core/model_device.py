@@ -45,6 +45,9 @@ from tan.model.measure import EnergyMeasurement, RunResult, windowed_delta
 #: +-5% agreement band between the ENERGY-W-measured clock and the DT constant.
 _CYCLES_PER_S_TOLERANCE = 0.05
 
+#: ENERGY-CFG `timestamp_source` whose spans share `cycles_per_s`'s own clock.
+_KERNEL_CLOCK = "k-cycle-get-32"
+
 #: What `latencyMs` is, carried in every device row.
 LATENCY_SCOPE = "window-span-per-inference"
 
@@ -180,6 +183,10 @@ def parse_console(text: str) -> ParsedCapture:
             m = _WARN_WRAP_RE.match(line)
             if m:
                 wrapped.add((int(m.group(2)), m.group(1)))
+        elif line.startswith("LATENCY-WARN "):
+            warn.append(line)
+        elif line.startswith("RESULT ") and " WARN: " in line:
+            warn.append("WARN: " + line.split(" WARN: ", 1)[1])
         elif line.startswith("ENERGY-PAIR "):
             m = _PAIR_SKIP_RE.match(line)
             if m:
@@ -237,6 +244,12 @@ def _cycles_per_s(parsed: ParsedCapture) -> tuple[float, float | None]:
     if not rates:
         return dt, None
     measured = median(rates)
+    if parsed.cfg.get("timestamp_source") == _KERNEL_CLOCK:
+        # Spans and `cycles_per_s` come from the SAME kernel clock, and the span's
+        # ms field is an integer tick, so span_cycles / span_ms is a rounding
+        # artefact, not a second opinion on the clock: use the constant, and
+        # report the ratio informationally only.
+        return dt, measured
     if (max(rates) - min(rates)) / measured > _CYCLES_PER_S_TOLERANCE:
         return dt, measured
     return measured, measured

@@ -268,3 +268,18 @@ def test_model_size_is_statted_when_the_model_file_exists(tmp_path):
     p = proj(tmp_path, **{"cap.txt": capture(), "m.onnx": "12345"})
     code, doc = invoke("run", "m.onnx", "--device", "--capture", "cap.txt", "--project", str(p))
     assert code == 0 and doc["data"]["result"]["sizeBytes"] == 5
+
+
+def test_k_cycle_get_32_latency_capture_uses_the_configured_clock_and_surfaces_warnings(tmp_path):
+    # Spans share cycles_per_s's own (SysTick) clock; span_ms is an integer tick
+    # (always 50 here), so cycles/ms would read ~158 MHz -- an artefact.
+    code, doc = _via_cli(tmp_path, (FIX / "latency_k_cycle.txt").read_text(encoding="utf-8"))
+    assert code == 0, doc
+    row = doc["data"]["result"]
+    assert row["latencyMs"] == pytest.approx(0.033019, abs=2e-5)  # median per window; the app's own figure is the pooled mean
+    diag = row["diagnostics"]
+    assert diag["cyclesPerSUsed"] == 160_000_000.0
+    assert any(line.startswith("LATENCY-WARN window 0") for line in diag["warnLines"])
+    assert any(line.startswith("WARN: DWT CYCCNT detail dropped") for line in diag["warnLines"])
+    degraded = [i for i in doc["issues"] if i["code"] == "model.device-capture-degraded"]
+    assert degraded and degraded[0]["severity"] == "warning"
