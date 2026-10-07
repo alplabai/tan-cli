@@ -316,3 +316,38 @@ def test_build_surfaces_the_refusal_as_a_coded_validation_failure(tmp_path) -> N
         _emit_plan(str(SDK), str(board))
     assert ei.value.code == "build.link-itcm-unsupported"
     assert ei.value.exit_code == ExitCode.VALIDATION_FAILURE
+
+
+def test_an_itcm_slice_carries_no_mram_flash_recipe(tmp_path, meta) -> None:
+    """tan-cli#1350 review: plain `tan flash` must not sign + write a
+    0x0-linked image to MRAM slot0. The manifest slice is `ram_run_only` with
+    ONLY the wrong-board identity pair, never Flow D's keys."""
+    on = _project(tmp_path, meta, _HE_ONLY)
+    entry = on.cores["m55_he"].to_manifest_entry()
+    assert on.cores["m55_he"].link_target == "itcm"
+    assert entry["flash_method"] == "ram_run_only"
+    assert set(entry["flash_args"]) <= {"expect_dpidr", "jlink_device"}
+    # the other slices keep their ordinary recipe
+    assert on.cores["m55_hp"].link_target is None
+    assert on.cores["m55_hp"].to_manifest_entry()["flash_method"] == "zephyr_west_flash"
+    # and with the knob off the HE recipe is exactly what it was
+    off = _project(tmp_path, meta, _HE_ONLY.replace("diagnostics:\n  link: itcm\n", ""))
+    he = off.cores["m55_he"].to_manifest_entry()
+    assert he["flash_method"] == "zephyr_west_flash"
+    assert "jlink_flash_device" in he["flash_args"]
+
+
+def test_an_unproven_aen_sku_is_refused(tmp_path, meta) -> None:
+    from tan.planner.link_target import UNSUPPORTED_CODE, LinkTargetError
+
+    body = _HE_ONLY.replace("E1M-AEN801", "E1M-AEN401")
+    with pytest.raises(LinkTargetError) as ei:
+        _project(tmp_path, meta, body)
+    assert ei.value.code == UNSUPPORTED_CODE
+    assert "E1M-AEN401" in str(ei.value)
+
+
+def test_the_other_proven_sku_is_accepted(tmp_path, meta) -> None:
+    body = _HE_ONLY.replace("E1M-AEN801", "E1M-AEN803")
+    sl = _slice(_plan(tmp_path, _project(tmp_path, meta, body)), "m55_he")
+    assert "alp-link-itcm.conf" in _artefacts(sl)

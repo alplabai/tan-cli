@@ -107,6 +107,7 @@ from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
+from tan.core.link_refusal import refusal_code, split_coded_message
 from tan.core.scaffold import top_level_key_name
 from tan.core.sdk_discovery import (
     _planner_python,
@@ -888,6 +889,11 @@ def _emit_one_in_process(
     except KeyboardInterrupt:
         raise
     except BaseException as err:  # noqa: BLE001 -- see the docstring
+        # tan-cli#1350: keep a `diagnostics.link: itcm` refusal's own code
+        # (the loop below splits it back out).
+        link_code = refusal_code(err)
+        if link_code is not None:
+            return f"{link_code}: {err}"
         return f"Generation failed for target '{emit}': {type(err).__name__}: {err}"
     return None
 
@@ -1339,6 +1345,7 @@ def generate(
         script = resolved_sdk / "scripts" / "alp_project.py"
         written: list[str] = []
         failed: list[str] = []
+        link_refused = False
         # tan-cli#964 review (major 6): one shared collector across every
         # in-process target this run renders, so a schema absent for the
         # whole checkout is disclosed ONCE (deduplicated below), not once per
@@ -1361,7 +1368,11 @@ def generate(
                 written.append(_relative_or_full(workspace_root, target_output))
             else:
                 failed.append(mode)
-                issues.append(Issue("generate.emit-failed", "error", message))
+                link_code, message = split_coded_message(message)
+                if link_code is not None:
+                    link_refused = True
+                issues.append(
+                    Issue(link_code or "generate.emit-failed", "error", message))
                 # tan-cli#420: don't leave the writability probe's own empty
                 # file behind for a Zephyr configure to pick up as a valid
                 # (and silently empty) EXTRA_CONF_FILE. Only the file this
@@ -1425,7 +1436,11 @@ def generate(
         failed=failed,
         issues=issues,
         engine=engine,
-        exit_code=ExitCode.SUCCESS if not failed else ExitCode.WRITE_FAILURE,
+        exit_code=(
+            ExitCode.SUCCESS if not failed
+            else ExitCode.VALIDATION_FAILURE if link_refused
+            else ExitCode.WRITE_FAILURE
+        ),
     )
 
 

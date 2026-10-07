@@ -1508,7 +1508,7 @@ def load_board_yaml(path: Path, *,
 
     # `diagnostics.link: itcm` is an AEN M55-HE-only knob (tan-cli#1350):
     # refuse it here so every planner consumer sees the coded error.
-    from .link_target import check_link_target  # noqa: PLC0415
-    check_link_target(out)
+    from .link_target import apply_link_target  # noqa: PLC0415
+    apply_link_target(out)
 
     return out

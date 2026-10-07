@@ -15,7 +15,7 @@ config artefacts layered AFTER the slice's `alp.conf`.
 
 Pure: no IO, no SDK read.  HE-only by design: the knob retargets the M55-HE
 slice only, and is refused when the project has no M55-HE app of its own (an
-M55-HP-only project included), on a non-`alif-ensemble` SoM, with a sysbuild
+M55-HP-only project included), on any SKU but AEN801/AEN803, with a sysbuild
 (`boot:`) project, and with an explicit non-RAM console (Flow C produces zero
 UART bytes; the only observable is the RAM console buffer).
 """
@@ -35,9 +35,13 @@ CONF_NAME = "alp-link-itcm.conf"
 OVERLAY_NAME = "alp-link-itcm.overlay"
 
 _HE_CORE_ID = "m55_he"
-_AEN_FAMILY = "alif-ensemble"
+#: The SKUs the Flow C ITCM retarget is proven on (E8: AEN801 / AEN803, bench
+#: 2026-07..10). Other Alif Ensemble SKUs have different ITCM maps / SoC
+#: variants and are refused until someone proves them.
+_PROVEN_SKUS = ("E1M-AEN801", "E1M-AEN803")
+#: The schema enum already rejects anything else; the checks below that read
+#: the value defensively exist for hand-built projects that skip the schema.
 _LINK_VALUES = ("auto", "itcm")
-_RAM_CONSOLES = ("ram", "swd")
 
 
 class LinkTargetError(OrchestratorError):
@@ -49,7 +53,8 @@ class LinkTargetError(OrchestratorError):
 
 
 def link_target(diagnostics: dict[str, Any] | None) -> str:
-    """The raw `diagnostics.link:` value, normalised (`auto` when unset)."""
+    """The `diagnostics.link:` value (`auto` when unset). The `.strip().lower()`
+    is defensive only: the schema enum is lowercase, exact."""
     raw = (diagnostics or {}).get("link")
     return "auto" if raw is None else str(raw).strip().lower()
 
@@ -82,13 +87,12 @@ def check_link_target(project: BoardProject) -> None:
             UNSUPPORTED_CODE,
             f"diagnostics.link: '{target}' is not one of "
             f"{', '.join(_LINK_VALUES)}.")
-    family = str(project.som_preset.get("family") or "").lower()
-    if family != _AEN_FAMILY:
+    if project.sku not in _PROVEN_SKUS:
         raise LinkTargetError(
             UNSUPPORTED_CODE,
-            f"diagnostics.link: itcm is an Alif Ensemble (AEN) M55-HE "
-            f"feature; {project.sku} is family '{family or 'unknown'}'. "
-            f"Remove `diagnostics.link:` for this SoM.")
+            f"diagnostics.link: itcm is proven on the Alif Ensemble E8 "
+            f"M55-HE ({', '.join(_PROVEN_SKUS)}); {project.sku} is not "
+            f"supported. Remove `diagnostics.link:` for this SoM.")
     declared = (project.raw.get("cores") or {}) if isinstance(
         project.raw, dict) else {}
     he_decl = declared.get(_HE_CORE_ID)
@@ -114,12 +118,21 @@ def check_link_target(project: BoardProject) -> None:
             "project (`boot:` / `ota:` / TF-M) -- a RAM-run image has no "
             "MCUboot slot.")
     console = str(project.diagnostics.get("console") or "auto").strip().lower()
-    if console != "auto" and console not in _RAM_CONSOLES:
+    if console not in ("auto", "ram"):
         raise LinkTargetError(
             CONSOLE_CONFLICT_CODE,
             f"diagnostics.link: itcm needs the RAM console (a Flow C "
             f"RAM-run produces zero UART bytes), but diagnostics.console is "
             f"'{console}'. Use `console: ram` or leave it `auto`.")
+
+
+def apply_link_target(project: BoardProject) -> None:
+    """`check_link_target`, then mark the retargeted slice (`Slice.link_target`)
+    so the manifest/flash recipe can refuse an MRAM write of it."""
+    check_link_target(project)
+    for sl in project.cores.values():
+        if applies_to(project.diagnostics, sl):
+            sl.link_target = "itcm"
 
 
 def itcm_conf() -> str:
