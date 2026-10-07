@@ -24,7 +24,9 @@ import re
 #: Keys tan owns outright; a user value would desynchronise the build.
 RESERVED_KEYS = frozenset({"BOARD", "Python3_EXECUTABLE"})
 #: Keys whose user value joins tan's list (`;`, a CMake list).
-_APPEND_KEY = re.compile(r"(?:[A-Za-z0-9_]+_)?EXTRA_(?:CONF|DTC_OVERLAY)_FILE")
+_APPEND_KEY = re.compile(
+    r"(?:[A-Za-z0-9_]+_)?(?:EXTRA_(?:CONF|DTC_OVERLAY)_FILE|SB_CONF_FILE|SB_EXTRA_CONF_FILE)"
+)
 _NAME = re.compile(r"-D([A-Za-z_][A-Za-z0-9_]*)(?::[A-Za-z]+)?(=.*)?", re.DOTALL)
 
 
@@ -44,6 +46,12 @@ def _split(define: str) -> tuple[str, str | None]:
 def user_defines_problem(defines: list[str]) -> tuple[str, str] | None:
     """`(code, message)` for a normalised `-D` list tan must refuse, else None."""
     for d in defines:
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in d):
+            return (
+                "build.invalid-argument",
+                f"`-D {d!r}` contains a control character (newline, tab, ...); "
+                "a CMake definition is one line.",
+            )
         name, value = _split(d)
         if name in RESERVED_KEYS:
             return (
@@ -114,3 +122,31 @@ def apply_user_defines(
     for s in targets:
         s["command"]["args"] = _apply_to_args(s["command"]["args"], defines)
     return json.dumps(plan, indent=2), [s["coreId"] for s in targets]
+
+
+def define_keys(defines: list[str]) -> list[str]:
+    """The distinct NAMEs of normalised `-D` args, sorted."""
+    return sorted({_split(d)[0] for d in defines})
+
+
+def removed_define_resets(previous: list[str] | None, current: list[str]) -> list[str]:
+    """`-U<key>` for each user `-D` key present at the last configure but
+    gone now. CMake caches a `-D`, so without the `-U` a dropped
+    `-DSHIELD=...` (or a raw `-DEXTRA_DTC_OVERLAY_FILE=...`) lingers in
+    CMakeCache.txt and keeps shaping the build."""
+    return [f"-U{k}" for k in sorted(set(previous or []) - set(current))]
+
+
+def insert_after_dashdash(args: list[str], extra: list[str]) -> list[str]:
+    """`extra` placed right after `--`, i.e. BEFORE every plan/user `-D`.
+
+    Order is load-bearing: cmake applies `-U`/`-D` in argv order, so a `-U<key>`
+    after a `-D<key>=...` silently unsets it. Before them, a `-D` of the same
+    key wins. (Adds the `--` when the argv has none.)"""
+    if not extra:
+        return list(args)
+    out = list(args)
+    if "--" not in out:
+        out.append("--")
+    i = out.index("--") + 1
+    return out[:i] + list(extra) + out[i:]

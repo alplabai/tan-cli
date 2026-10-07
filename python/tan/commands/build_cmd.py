@@ -104,7 +104,7 @@ from tan.commands.build.token_substitution import (
     deferred_placeholder_issues,
 )
 from tan.commands.build.toolchain import ToolchainResolution, resolve_toolchain_root
-from tan.core.user_defines import UserDefineError, apply_user_defines, user_defines_problem
+from tan.core.user_defines import UserDefineError, apply_user_defines, define_keys, user_defines_problem
 from tan.core.plain_zephyr_plan import board_target_problem, normalise_defines, plain_zephyr_plan
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.global_flags import accept_global_flags
@@ -603,6 +603,7 @@ def _dispatch(
     json_mode: bool = False,
     pristine: bool = False,
     slice_refusals: dict[str, str] | None = None,
+    user_define_keys: dict[str, list[str]] | None = None,
 ) -> tuple[list[SliceOutcome], list[Issue]]:
     """Run the plan's slices, holding back the ones token substitution demoted
     -- and, since tan-cli#483, the ones whose `cores.<id>.app` resolved to a
@@ -789,6 +790,7 @@ def _dispatch(
                 held_outcomes=held_outcomes.values(),
                 force_pristine=pristine,
                 slice_refusals=slice_refusals,
+                user_define_keys=user_define_keys,
             )
         )
 
@@ -1261,6 +1263,7 @@ def _build(
     define_cores: list[str] | None = None,
 ) -> tuple[ExitCode, dict, list[Issue]]:
     define_slices: list[str] = []
+    define_key_set = define_keys(defines or [])
     if plain_plan_text is not None:
         text = plain_plan_text
         try:
@@ -1400,6 +1403,7 @@ def _build(
         json_mode=json_mode,
         pristine=pristine,
         slice_refusals=_python_refusals(build_python, demotions, mode),
+        user_define_keys={c: define_key_set for c in define_slices} if defines else None,
     )
 
     any_failed = any(o.status not in ("succeeded", "skipped") for o in outcomes)
@@ -1510,15 +1514,13 @@ def _refuse_plain_route(
 ) -> None:
     """Refuse a bad `--board` / `-D` combination up front (exit 2), else return."""
     conflict = None
-    if board is None:
-        pass
-    elif board_yaml is not None or plan_from is not None:
+    if board is not None and (board_yaml is not None or plan_from is not None):
         flag = "--board-yaml" if board_yaml is not None else "--plan-from"
         conflict = (
             "`--board` (a plain Zephyr example, no board.yaml) cannot be combined with "
             f"`{flag}` (a planned build). Pick one route."
         )
-    elif mode != _MODE_NATIVE:
+    elif board is not None and mode != _MODE_NATIVE:
         conflict = "`--board` only builds; drop `--materialise`."
     if conflict is not None:
         _refuse("build.conflicting-flags", conflict, ExitCode.VALIDATION_FAILURE, json_mode)

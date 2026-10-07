@@ -255,3 +255,23 @@ def write_configure_inputs_stamp(slice_cwd: Path, inputs: frozenset[str]) -> Non
     path = configure_inputs_stamp_path(slice_cwd)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(sorted(inputs)) + ("\n" if inputs else ""), encoding="utf-8")
+
+
+def _user_defines_stamp_path(slice_cwd: Path) -> Path:
+    return slice_cwd / "build" / ".tan-user-defines"
+
+
+def read_user_defines_stamp(slice_cwd: Path) -> list[str] | None:
+    """The user `-D` key names of the last configure, or `None` if unstamped."""
+    try:
+        text = _user_defines_stamp_path(slice_cwd).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return [line for line in text.splitlines() if line]
+
+
+def write_user_defines_stamp(slice_cwd: Path, keys: list[str]) -> None:
+    """Best-effort for the caller (raises `OSError`), like the inputs stamp."""
+    path = _user_defines_stamp_path(slice_cwd)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(sorted(keys)) + ("\n" if keys else ""), encoding="utf-8")

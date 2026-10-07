@@ -165,3 +165,59 @@ def test_cli_unknown_core_and_core_without_define(world):
     assert env["exitCode"] == 2 and env["issues"][0]["code"] == "build.invalid-argument"
     env = envelope_of(_run(world, "--core", "rtss_he"))
     assert env["exitCode"] == 2 and env["issues"][0]["code"] == "build.invalid-argument"
+
+
+def _west_argv(world):
+    return json.loads(world["log"].read_text())["argv"]
+
+
+@posix_only
+def test_removed_shield_define_is_unset_before_every_d(world):
+    assert envelope_of(_run(world, "-D", "SHIELD=imx335"))["exitCode"] == 0
+    assert (world["out"] / "build" / "rtss_he-zephyr" / "build" / ".tan-user-defines").read_text() == "SHIELD\n"
+    env = envelope_of(_run(world))
+    argv = _west_argv(world)
+    assert argv.index("-USHIELD") == argv.index("--") + 1
+    assert argv.index("-USHIELD") < argv.index("-DPython3_EXECUTABLE=" + argv[argv.index("--") + 2].split("=", 1)[1])
+    assert "build.configure-cache-reset" in [i["code"] for i in env["issues"]]
+    # a third run no longer carries the stale -U
+    envelope_of(_run(world))
+    assert "-USHIELD" not in _west_argv(world)
+
+
+@posix_only
+def test_removed_raw_overlay_define_is_unset(world):
+    envelope_of(_run(world, "-D", "EXTRA_DTC_OVERLAY_FILE=u.overlay"))
+    envelope_of(_run(world))
+    assert "-UEXTRA_DTC_OVERLAY_FILE" in _west_argv(world)
+
+
+@posix_only
+def test_user_conf_file_survives_a_configure_cache_reset(world):
+    envelope_of(_run(world, "-D", "CONF_FILE=prod.conf"))
+    app = world["plan"].parent.parent / "app"
+    (app / "app.overlay").write_text("/ {};\n", encoding="utf-8")
+    env = envelope_of(_run(world, "-D", "CONF_FILE=prod.conf"))
+    argv = _west_argv(world)
+    assert "build.configure-cache-reset" in [i["code"] for i in env["issues"]]
+    assert argv.index("-UCONF_FILE") < argv.index("-DCONF_FILE=prod.conf")
+    assert argv.index("-UDTC_OVERLAY_FILE") < argv.index("--") + 3
+
+
+def test_insert_after_dashdash_and_sysbuild_appends():
+    from tan.core.user_defines import insert_after_dashdash, removed_define_resets
+
+    assert insert_after_dashdash(["build", "--", "-DA=1"], ["-UX"]) == ["build", "--", "-UX", "-DA=1"]
+    assert insert_after_dashdash(["build"], ["-UX"]) == ["build", "--", "-UX"]
+    assert removed_define_resets(["A", "B"], ["B"]) == ["-UA"]
+    text, _ = apply_user_defines(
+        _plan("-DSB_CONF_FILE=/b/sb.conf", "-DSB_EXTRA_CONF_FILE=/b/e.conf"),
+        ["-DSB_CONF_FILE=u.conf", "-DSB_EXTRA_CONF_FILE=v.conf"],
+    )
+    args = _args(text)
+    assert "-DSB_CONF_FILE=/b/sb.conf;u.conf" in args and "-DSB_EXTRA_CONF_FILE=/b/e.conf;v.conf" in args
+
+
+def test_control_characters_refused():
+    assert user_defines_problem(["-DA=1\nB=2"])[0] == "build.invalid-argument"
+    assert user_defines_problem(["-DA=1\tx"])[0] == "build.invalid-argument"

@@ -97,7 +97,10 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from tan.core.user_defines import insert_after_dashdash, removed_define_resets
 from tan.commands.build.configure_inputs import (
+    read_user_defines_stamp,
+    write_user_defines_stamp,
     discover_configure_inputs,
     read_configure_inputs_stamp,
     resolve_zephyr_discovery_dir,
@@ -1111,6 +1114,7 @@ def execute_slices(
     held_outcomes: Sequence[SliceOutcome] = (),
     force_pristine: bool = False,
     slice_refusals: Mapping[str, str] | None = None,
+    user_define_keys: Mapping[str, Sequence[str]] | None = None,
 ) -> list[SliceOutcome]:
     """Dispatch every slice of `plan` and return one [`SliceOutcome`] per
     slice, in plan order.
@@ -1423,6 +1427,27 @@ def execute_slices(
         )
         configure_cache_issues.extend(new_configure_cache_issues)
 
+        # tan-cli#1382: a user `-D` dropped since the last configure still sits
+        # in CMakeCache.txt (SHIELD, a raw EXTRA_DTC_OVERLAY_FILE, ...), so
+        # unset it. Zephyr slices only; the stamp is written every build so a
+        # later run without `-D` sees what this one had.
+        if sl.backend == "zephyr":
+            keys_now = list(user_define_keys.get(sl.core_id, ())) if user_define_keys else []
+            if cmake_cache_configured(cwd):
+                gone = removed_define_resets(read_user_defines_stamp(cwd), keys_now)
+                if gone:
+                    configure_cache_reset_args = [*configure_cache_reset_args, *gone]
+                    note = (
+                        f"{sl.core_id}: user -D no longer given ({', '.join(g[2:] for g in gone)}) "
+                        "-- unsetting the cached value so this configure drops it (tan-cli#1382)"
+                    )
+                    on_output(f"note: {note}")
+                    configure_cache_issues.append(Issue("build.configure-cache-reset", "info", note))
+            try:
+                write_user_defines_stamp(cwd, keys_now)
+            except OSError:
+                pass
+
         if is_west and workspace_dir is not None and "ZEPHYR_BASE" not in slice_env:
             # tan-cli#336: a dangling `$ZEPHYR_BASE` inherited from the
             # ambient shell (seeded above by `dict(os.environ)`) OUTRANKS the
@@ -1479,15 +1504,16 @@ def execute_slices(
             if is_west
             else (cwd, list(sl.command.args))
         )
-        # Appended to the SPAWN argv only -- `sl.command.args` (read again
+        # Added to the SPAWN argv only -- `sl.command.args` (read again
         # below by `resolve_zephyr_artefact`/`build_dir_overridden`) stays
         # exactly what the plan named, so those checks never see a flag tan
-        # itself injected. Order matters: this must land AFTER the plan's
-        # own `-DEXTRA_CONF_FILE=...` (already inside `spawn_args`), never
-        # before -- see `_maybe_reset_stale_configure_cache`'s docstring for
-        # why an `-U`/`-D` pair on the same key is order-sensitive and why
-        # `EXTRA_CONF_FILE` itself is deliberately excluded from the reset.
-        spawn_args = spawn_args + configure_cache_reset_args
+        # itself injected. Order matters, and it is the REVERSE of what this
+        # said before user `-D` existed (tan-cli#1382): cmake applies `-U`/`-D`
+        # in argv order, so a `-U<key>` AFTER a `-D<key>=...` silently unsets
+        # it (`-D CONF_FILE=prod.conf` on a cache-reset build). Every reset
+        # goes right after `--`, BEFORE all plan and user `-D`, so a `-D` of
+        # the same key always wins.
+        spawn_args = insert_after_dashdash(spawn_args, configure_cache_reset_args)
 
         # tan-cli#336: watch the slice's own stdout for west's literal
         # "could not find a workspace" message so a failure carrying it can
