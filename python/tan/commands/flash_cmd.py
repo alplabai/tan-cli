@@ -3157,6 +3157,11 @@ def _flash_entry_body(
                               probe_refusal=probe_guard.tripped_code if tripped else None),
                         lines,
                     )
+                if preflight_facts.get("dpidr"):
+                    # Kept in the envelope even if a later step refuses (bench round 7).
+                    report.setdefault("jlink", {}).update(
+                        {"dpidr": preflight_facts["dpidr"], "dpidrSource": "preflight"}
+                    )
             flash_args, setools_note = _resolve_flow_d_atoc_via_setools(
                 flash_args, shape, ctx, entry_id, confirm,
                 stack=scratch_stack, report=report,
