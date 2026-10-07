@@ -1732,6 +1732,14 @@
       "note": "Added by tan-cli#427: `--plan`/`--manifest`/`--manifest-from` are the v0.4.1 oracle's own flags, but this port implements a newer overlapping plan surface (`--plan-from`/`--materialise`/`--native`/`--execute`) and the maintainer's decision on the issue was to retire the oracle spellings rather than carry two -- \"Two overlapping plan surfaces is worse than one, so the oracle spellings go.\" Distinct from the retired `cli.command-deferred` (RUNTIME_FAILURE, exit 1, \"not built yet, an issue tracks its arrival\" -- moved `status: retired` in this registry by tan-cli#427 once `tan build` had nothing deferred left) on purpose: a retired flag never arrives, so it exits `VALIDATION_FAILURE` (2), this CLI's position for a permanently-invalid invocation (`build.conflicting-flags`'s own exit code). Constructed as the whole literal at a `_refuse` call site, same shape `build.conflicting-flags` above is registered for. Every message this code carries names the replacement flag directly (`_RETIRED_FLAGS` in `build_cmd.py`) rather than pointing at a tracker. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "build.invalid-argument",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "note": "Added by tan-cli#1359: `tan build --board <target>` (a plain Zephyr example with no board.yaml) refuses a `--board` value that is not a Zephyr board target, or a `-D` that is not a CMake definition, before anything runs; exits `VALIDATION_FAILURE` (2) like `build.conflicting-flags`. Constructed as the whole literal in `_plain_route_refusal` and re-emitted by a `_refuse` call site. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "build.materialise-failed",
       "status": "reserved",
       "severity": "error",

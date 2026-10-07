@@ -8260,6 +8260,14 @@ this line. See `docs/release-contract.md` and tan-cli#1258.*
 
 ### Added
 
+- **`tan build --project <dir> --board <zephyr-board-target>` builds a
+  `board.yaml`-less Zephyr example** (alp-sdk's bench examples such as
+  `examples/aen/aen-inference-latency`) as one Zephyr slice, through the same
+  west, toolchain, SDK-root and host-Python resolution, pristine policy and
+  envelope as a planned build. `-D NAME=VALUE` (repeatable) passes CMake
+  definitions after `--`. The no-board.yaml `build.plan-unavailable` message
+  now names both routes; a bad `--board`/`-D` is `build.invalid-argument`
+  (tan-cli#1359)
 - **`tan model check` now answers from Alp Lab's own bench, for a customer who
   holds neither the NPU toolchain nor the silicon.** alp-sdk publishes
   bench-measured perf points under `metadata/model_perf/`

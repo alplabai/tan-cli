@@ -282,6 +282,7 @@ def apply_plan_token_substitution(
     toolchain_root: str | None,
     toolchain_advice: str = NO_TOOLCHAIN_ADVICE,
     deferred_out: list[DeferredPlaceholder] | None = None,
+    project_root: str | None = None,
 ) -> tuple[BuildPlan, list[SliceDemotion]]:
     """Apply the build-plan token-substitution pass to `plan` before
     materialise writes anything or a slice command runs. A no-op unless
@@ -316,13 +317,17 @@ def apply_plan_token_substitution(
     # base dir. They coincide only in the default config -- a tokened plan
     # substituting ${PROJECT_ROOT} from one while slices actually run under
     # the other would silently build against the wrong tree.
-    if board_yaml_path is None:
+    # `project_root` is the `board.yaml`-less route's own (tan-cli#1359: `tan
+    # build --board`): there is no board.yaml to derive it from, so the caller
+    # names it (the build root) instead.
+    if board_yaml_path is None and project_root is None:
         raise TokenSubstitutionError(
             "build.plan-invalid",
             "a `planPathMode: tokened` plan needs a resolved board.yaml to derive "
             "${PROJECT_ROOT} from -- pass `--board-yaml <PATH>` or run from a project.",
         )
-    project_root = str(Path(board_yaml_path).parent).replace("\\", "/")
+    if project_root is None:
+        project_root = str(Path(board_yaml_path).parent).replace("\\", "/")
 
     if project_root_diverges_from_exec_base(project_root, exec_base):
         raise TokenSubstitutionError(
