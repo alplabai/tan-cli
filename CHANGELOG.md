@@ -8264,6 +8264,25 @@ exists and contains the pin; if its number differs, correct this line. See
 
 ### Added
 
+- **`tan build -D NAME=VALUE` (repeatable) now works on planned (`board.yaml`)
+  builds**, so examples documented with `-DSHIELD=...` /
+  `-DCONFIG_...=...` build as documented. The definitions go after the plan's
+  own args on every Zephyr slice (or only those named by the new
+  `--core <id>`, repeatable), so CMake's last-wins lets them override the
+  plan; `EXTRA_CONF_FILE` / `EXTRA_DTC_OVERLAY_FILE` (and a sysbuild
+  `<image>_` form) are appended `;`-joined to tan's list instead, and
+  `-D BOARD` / `-D Python3_EXECUTABLE` are refused (`build.define-reserved`).
+  A changed `-D` set (added, removed or re-valued) on an already-configured slice wipes that slice's build dir (`build.configure-cache-reset`), since Zephyr caches SHIELD and friends.
+  The envelope records them as `data.defines` (`args`, `slices`); `-D` with
+  no Zephyr slice is `build.define-no-target` (tan-cli#1382)
+- **`tan build --project <dir> --board <zephyr-board-target>` builds a
+  `board.yaml`-less Zephyr example** (alp-sdk's bench examples such as
+  `examples/aen/aen-inference-latency`) as one Zephyr slice, through the same
+  west, toolchain, SDK-root and host-Python resolution, pristine policy and
+  envelope as a planned build. `-D NAME=VALUE` (repeatable) passes CMake
+  definitions after `--`. The no-board.yaml `build.plan-unavailable` message
+  now names both routes; a bad `--board`/`-D` is `build.invalid-argument`
+  (tan-cli#1359)
 - **`tan model check` now answers from Alp Lab's own bench, for a customer who
   holds neither the NPU toolchain nor the silicon.** alp-sdk publishes
   bench-measured perf points under `metadata/model_perf/`

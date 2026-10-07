@@ -204,6 +204,7 @@ def find_overlaps(
             if w_lo < r_hi and r_lo < w_hi:
                 out.append(
                     f"the {w_name} write's sectors {hex_addr(w_lo)}-{hex_addr(w_hi)} cover the "
-                    f"resident entry {r_name} at {hex_addr(r_addr)}, which this ATOC does not rewrite"
+                    f"resident entry {r_name} at {hex_addr(r_addr)}, and no write here replaces it "
+                    "(a write starting at exactly that address does)"
                 )
     return out

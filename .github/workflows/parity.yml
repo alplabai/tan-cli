@@ -3011,7 +3011,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: install tan-cli[monitor,model-compile] + pytest
+      - name: install tan-cli[monitor,model-compile,model] + pytest
         shell: bash
         working-directory: python
         run: |
@@ -3042,9 +3042,12 @@ jobs:
           # `test_deepx_yolo_internal.py` keeps skipping in CI (see this job's
           # own model-compile comment in
           # pyproject.toml).
+          # `model` (onnxruntime/onnx/numpy/sympy, tan-cli#1287) arms the
+          # `HAVE_EXTRA`-gated `tan model prep`/`run`/`ab` tests, which skip
+          # without it.
           # `pytest-xdist` is for the `parity, whole` leg only (-n 4 below);
           # the numbered legs still shard via `pytest-shard` and run serially.
-          python -m pip install --quiet -e ".[monitor,model-compile]" pytest pytest-shard pytest-xdist
+          python -m pip install --quiet -e ".[monitor,model-compile,model]" pytest pytest-shard pytest-xdist
 
       # tan-cli#1152: the one file `tests/gates` excludes from THIS job for a
       # reason that has nothing to do with alp-sdk refs (see the

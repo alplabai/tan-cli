@@ -1382,6 +1382,10 @@ PINNED_HASHES: dict[str, str] = {
     "kconfig_symbols.py": "bbbbebe4b70779819ab2aabc6a0574e5fd92a485599a5d7125bfbbad9c1f6acd",
     "libraries.py": "2290fb952198978da7751c9cc21d85c5410c0fa526b16c364e6b202cd090d12d",
     "linux_ownership.py": "4481dc8d3e7b581bf6d83b03992f60683e2acb99876ff25597cd04b21a711904",
+    # alp-sdk#2762 changes upstream loader.py (~lines 1405-1413: refuses
+    # `diagnostics.link` != auto). The next planner re-sync must NOT port that
+    # refusal: tan's `link_target.apply_link_target` (called at the end of
+    # tan's `load_board_yaml`) replaces it with the real HE-only feature.
     "loader.py": "e31e53dbebbb4c7095a87a19cc5c46b572efd4c043adee04d8003bacaa36723e",
     "manifest.py": "6038b392d96a15a889a28d6b1b6760f93473f2935605ce86baf4eadce43bd413",
     "memory.py": "2705af8925dff0ace7e82b0948a4dda424c3a6e9d9d8f5f948e4349dc62cdfc1",
@@ -2602,6 +2606,11 @@ EXEMPT_FROM_RELOCATION_TRACKING: frozenset[str] = frozenset({
     # tracks is a REGISTRY of alp-sdk facts (a schema property, a
     # metadata/quality-tasks-v1.json task id), not a port of alp-sdk code.
     "sdk_capability.py",
+    # tan-cli#1350: `diagnostics.link: itcm` -- the AEN Flow C ITCM retarget
+    # (refusals + the conf/overlay bytes). Tan-native by ADR-0026 (the planner
+    # is tan's; alp-sdk's `alp_orchestrate` does not implement the knob), so
+    # there is no alp-sdk source to drift against.
+    "link_target.py",
     # `aperture.py` RETIRED from this set at the eff266b6 -> 15b2f32c bump
     # (tan-cli#1239/#1223): PINNED_SDK_COMMIT now advances past alp-sdk#1365
     # split B, the commit that added `scripts/alp_orchestrate/aperture.py`,

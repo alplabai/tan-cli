@@ -97,6 +97,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from tan.commands.build.user_defines_wipe import reconcile_user_defines, stamp_user_defines
+from tan.core.user_defines import insert_after_dashdash
 from tan.commands.build.configure_inputs import (
     discover_configure_inputs,
     read_configure_inputs_stamp,
@@ -133,6 +135,7 @@ from tan.core.tool_lookup import ToolResolution, resolve_tool
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
 from tan.core.zephyr_env import zephyr_env_overrides
 from tan.envelope import Issue
+from tan.commands.build.link_stale import insert_after_separator, stale_itcm_overlay_reset
 
 if os.name != "nt":
     import signal
@@ -555,16 +558,30 @@ def _spawn_step(
         return _StepResult(launch_error=str(err))
 
 
-def _cwd_under_build_root(raw_cwd: str | None) -> bool:
-    """`Path::new(&cmd.cwd).components().next() == CONSUMER_BUILD_ROOT` (Rust
-    oracle): checked against the slice's PLAN-supplied relative `cwd` string,
-    not the resolved absolute path -- a plan cwd of `src/` (still a legal
-    relative path) must not let the wipe target land at
-    `<project>/src/build`, which may hold files the build never created."""
+def _cwd_under_build_root(raw_cwd: str | None, cwd: Path, project_root: Path) -> bool:
+    """Whether the sdk-switch-pristine wipe may touch this slice's `cwd`.
+
+    Starts from the Rust oracle's `Path::new(&cmd.cwd).components().next() ==
+    CONSUMER_BUILD_ROOT`: a plan cwd of `src/` (still a legal relative path)
+    must not let the wipe target land at `<project>/src/build`, which may
+    hold files the build never created. That first-component check alone let
+    `build/../src/c1` through, and so did a `build/c1` symlink into `src/`
+    (tan-cli#1388): `confine_to_build_root` only keeps a cwd inside the
+    PROJECT, not inside `build/`. So also refuse any `..` in the plan string,
+    and require the RESOLVED cwd to sit at or under `<project>/build` --
+    with `<project>/build` itself resolving to exactly that path, so a
+    symlinked build root cannot carry the wipe elsewhere."""
     if not raw_cwd:
         return False
     parts = Path(raw_cwd).parts
-    return bool(parts) and parts[0] == _CONSUMER_BUILD_ROOT
+    if not parts or parts[0] != _CONSUMER_BUILD_ROOT or ".." in parts:
+        return False
+    project = project_root.resolve()
+    build_root = (project / _CONSUMER_BUILD_ROOT).resolve()
+    if build_root != project / _CONSUMER_BUILD_ROOT:
+        return False
+    resolved = cwd.resolve()
+    return resolved == build_root or build_root in resolved.parents
 
 
 def _maybe_pristine_stale_sdk_build_dir(
@@ -575,6 +592,7 @@ def _maybe_pristine_stale_sdk_build_dir(
     sdk_stamp_key_str: str | None,
     on_output: Callable[[str], None],
     *,
+    project_root: Path,
     force_pristine: bool = False,
 ) -> list[Issue]:
     """Sdk-switch-pristine guard (issue #52): a build dir west configured
@@ -618,7 +636,7 @@ def _maybe_pristine_stale_sdk_build_dir(
     the JSON envelope so the wipe -- or its suppression -- is not
     stderr-only there."""
     overridden = build_dir_overridden(cmd_args)
-    under_build_root = _cwd_under_build_root(raw_cwd)
+    under_build_root = _cwd_under_build_root(raw_cwd, cwd, project_root)
     issues: list[Issue] = []
 
     # Probed only when `--pristine` was actually passed, so the non-pristine
@@ -724,9 +742,14 @@ def _maybe_reset_stale_configure_cache(
 
     The reset is `-UDTC_OVERLAY_FILE -UCONF_FILE` on the configure that
     follows a set change -- deliberately NOT `-UEXTRA_DTC_OVERLAY_FILE`/
-    `-UEXTRA_CONF_FILE`: those two are re-resolved via `zephyr_get(...
-    MERGE REVERSE)` on every configure regardless of the cache (no `NOT
-    DEFINED` guard gates them), and this slice's own command already ends
+    `-UEXTRA_CONF_FILE` here. CORRECTION (tan-cli#1350): the old premise that
+    those two are re-resolved on every configure regardless of the cache is
+    only true of `EXTRA_CONF_FILE`, which every plan re-passes with `-D`.
+    `EXTRA_DTC_OVERLAY_FILE` is read with `zephyr_get(... CACHE ...)`, so a
+    value passed once survives in `CMakeCache.txt` after the plan stops passing
+    it -- see `link_stale.stale_itcm_overlay_reset`, which unsets it for the
+    one overlay tan itself ever passes that way. This slice's own command
+    already ends
     with `-DEXTRA_CONF_FILE=<build_dir>/alp.conf` (`_slice_command`'s
     per-core Kconfig wiring) -- appending `-UEXTRA_CONF_FILE` AFTER that in
     the same argv would UNSET it instead (measured: `-D`/`-U` on the same
@@ -1111,6 +1134,7 @@ def execute_slices(
     held_outcomes: Sequence[SliceOutcome] = (),
     force_pristine: bool = False,
     slice_refusals: Mapping[str, str] | None = None,
+    user_defines: Mapping[str, Sequence[str]] | None = None,
 ) -> list[SliceOutcome]:
     """Dispatch every slice of `plan` and return one [`SliceOutcome`] per
     slice, in plan order.
@@ -1398,6 +1422,24 @@ def execute_slices(
         # be rebuilt" and "this slice is about to be skipped" -- running the
         # wipe first would delete the last good `zephyr.elf` for a rebuild
         # that then never happens on a host missing `west`.
+        # tan-cli#1382: a changed user `-D` set wipes this slice's build dir
+        # (see `user_defines_wipe`). Before the sdk-switch/--pristine guard so
+        # that guard sees the post-wipe dir; the stamp is written after it,
+        # BEFORE the spawn, because it records what this configure is given.
+        ud_now = list(user_defines.get(sl.core_id, ())) if user_defines else []
+        ud_stampable = False
+        if sl.backend == "zephyr":
+            ud_issues, ud_stampable = reconcile_user_defines(
+                sl.core_id,
+                cwd,
+                ud_now,
+                build_root=build_root,
+                guards_ok=not build_dir_overridden(sl.command.args)
+                and _cwd_under_build_root(sl.command.cwd, cwd, build_root),
+                on_output=on_output,
+            )
+            configure_cache_issues.extend(ud_issues)
+
         sdk_switch_issues.extend(
             _maybe_pristine_stale_sdk_build_dir(
                 sl.core_id,
@@ -1406,9 +1448,13 @@ def execute_slices(
                 sl.command.args,
                 sdk_stamp_key_str,
                 on_output,
+                project_root=build_root,
                 force_pristine=force_pristine,
             )
         )
+
+        if ud_stampable:
+            stamp_user_defines(cwd, ud_now)
 
         # tan-cli#655: AFTER the sdk-switch-pristine guard, not before -- a
         # wipe there removes `cwd/build` wholesale (this stamp lives inside
@@ -1422,6 +1468,12 @@ def execute_slices(
             )
         )
         configure_cache_issues.extend(new_configure_cache_issues)
+        # tan-cli#1350: `link: itcm` -> `auto` must not keep the ITCM overlay.
+        stale_overlay_args: list[str] = []
+        if sl.backend == "zephyr":
+            stale_overlay_args, stale_overlay_issues = stale_itcm_overlay_reset(
+                cwd, sl.command.args)
+            configure_cache_issues.extend(stale_overlay_issues)
 
         if is_west and workspace_dir is not None and "ZEPHYR_BASE" not in slice_env:
             # tan-cli#336: a dangling `$ZEPHYR_BASE` inherited from the
@@ -1479,15 +1531,20 @@ def execute_slices(
             if is_west
             else (cwd, list(sl.command.args))
         )
-        # Appended to the SPAWN argv only -- `sl.command.args` (read again
+        # Added to the SPAWN argv only -- `sl.command.args` (read again
         # below by `resolve_zephyr_artefact`/`build_dir_overridden`) stays
         # exactly what the plan named, so those checks never see a flag tan
-        # itself injected. Order matters: this must land AFTER the plan's
-        # own `-DEXTRA_CONF_FILE=...` (already inside `spawn_args`), never
-        # before -- see `_maybe_reset_stale_configure_cache`'s docstring for
-        # why an `-U`/`-D` pair on the same key is order-sensitive and why
-        # `EXTRA_CONF_FILE` itself is deliberately excluded from the reset.
-        spawn_args = spawn_args + configure_cache_reset_args
+        # itself injected. Order matters, and it is the REVERSE of what this
+        # said before user `-D` existed (tan-cli#1382): cmake applies `-U`/`-D`
+        # in argv order, so a `-U<key>` AFTER a `-D<key>=...` silently unsets
+        # it (`-D CONF_FILE=prod.conf` on a cache-reset build). Every reset
+        # goes right after `--`, BEFORE all plan and user `-D`, so a `-D` of
+        # the same key always wins.
+        spawn_args = insert_after_dashdash(spawn_args, configure_cache_reset_args)
+        # tan-cli#1350: the stale-ITCM `-U` goes right after `--`, BEFORE every
+        # `-D`, so a later `-DEXTRA_DTC_OVERLAY_FILE` (the plan's own, or a
+        # user's) is applied after the unset and can never be erased by it.
+        spawn_args = insert_after_separator(spawn_args, stale_overlay_args)
 
         # tan-cli#336: watch the slice's own stdout for west's literal
         # "could not find a workspace" message so a failure carrying it can

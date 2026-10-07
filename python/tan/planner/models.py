@@ -164,6 +164,10 @@ class Slice:
     # its console.  Consumed by the console emitter for `diagnostics.
     # sim_console:` (issue #686).
     hw_console: bool = True
+    # `diagnostics.link: itcm` (tan-cli#1350): set by the loader on the one
+    # slice the knob retargets (the Zephyr M55-HE). Such a slice links at 0x0
+    # and must never be flashed to MRAM -- `_slice_flash_recipe` keys off it.
+    link_target: Optional[str] = None
     # SEGGER J-Link **part-number flash-device** profile for this slice's
     # SoC variant (soc-spec-v1 `variants[].debug.jlink_flash_device`) --
     # unlocks the built-in Alif MRAM loader (Flow D), distinct from the

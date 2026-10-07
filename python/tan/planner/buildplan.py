@@ -33,6 +33,7 @@ from .kconfig import (
     _slice_cmake_args,
     _slice_local_conf,
 )
+from .link_target import extra_config_artefacts
 from .models import BoardProject, OrchestratorError, Slice
 from .ownership import project_m33_overlay
 from .paths import REPO
@@ -318,6 +319,20 @@ def _shared_artefacts(
         out.append((build_root / "sysbuild" / "tfm" / "tfm.conf",
                     tfm_conf))
     return out
+
+
+def _shared_tfm_conf(project: BoardProject) -> str:
+    """The `sysbuild/tfm/tfm.conf` contents `_shared_artefacts` carries, or
+    "" when the project has none (absence-emits-nothing).
+
+    `--emit tfm-sysbuild-conf` renders through this, so the standalone emit
+    and the plan's `sharedArtefacts[].contents` come from one call site
+    (tan-cli#1216, ADR-0026 §D).
+    """
+    for path, contents in _shared_artefacts(project, Path("build")):
+        if path.parts[-3:] == ("sysbuild", "tfm", "tfm.conf"):
+            return contents
+    return ""
 
 
 def _slice_toolchain(slice_: Slice) -> dict[str, Optional[str]]:
@@ -745,6 +760,16 @@ def emit_build_plan(
                 "path":     (build_dir / name).as_posix(),
                 "contents": contents,
             })
+            # `diagnostics.link: itcm` (tan-cli#1350): the ITCM retarget
+            # conf + overlay ride beside `alp.conf`; `_slice_command` wires
+            # them in.  Only when the command exists to read them.
+            if cmd is not None:
+                for extra_name, extra_contents in extra_config_artefacts(
+                        project, slice_):
+                    config_artefacts.append({
+                        "path":     (build_dir / extra_name).as_posix(),
+                        "contents": extra_contents,
+                    })
         # Additive rendered-text artefacts (ADR-0026 §D, tan-cli#1216): the
         # DTS overlay and the full `-D` listing, byte-identical to the
         # standalone `--emit dts-overlay --core` / `--emit cmake-args`
