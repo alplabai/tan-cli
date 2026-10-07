@@ -4308,7 +4308,7 @@ def test_flow_d_entry_reports_the_resolved_method_and_the_declared_one(tmp_path)
 hw_info: {sku: E1M-AEN803}
 slices:
 - {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
-   flash_method: zephyr_west_flash, flash_method_resolved: alif_mram_jlink,
+   flash_method: zephyr_west_flash,
    flash_args: {jlink_flash_device: AE822FA0E5597LS0_M55_HE}}
 helper_mcus: []
 boot_order: []
@@ -4322,7 +4322,7 @@ boot_order: []
     assert entry["methodDeclared"] == "zephyr_west_flash"
     plain = manifest.replace(
         "flash_args: {jlink_flash_device: AE822FA0E5597LS0_M55_HE}", "flash_args: {}"
-    ).replace("flash_method_resolved: alif_mram_jlink,", "")
+    )
     _, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=plain)
     entry = envelope(out)["data"]["entries"][0]
     assert entry["method"] == "zephyr_west_flash"
