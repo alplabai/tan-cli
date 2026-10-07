@@ -286,6 +286,18 @@ def _bundled_chunks(zoo_dir: Path, bundled: str) -> Iterator[bytes]:
         raise ZooFetchError(f"{path}: {err}") from err
 
 
+def closing_iter(chunks: Iterable[bytes]) -> Iterator[bytes]:
+    """Iterate `chunks`, closing it (generator `.close()`, which releases the
+    HTTP connection) when the consumer stops early -- a tripped cap or deadline."""
+    it = iter(chunks)
+    try:
+        yield from it
+    finally:
+        close = getattr(it, "close", None)
+        if close is not None:
+            close()
+
+
 def fetch_source(
     entry: ZooEntry,
     zoo_dir: Path,
@@ -302,13 +314,18 @@ def fetch_source(
     temp file is removed on any failure. Raises `ZooFetchError`; a hash
     mismatch sets `.mismatch`."""
     bundled = entry.source.get("bundled")
-    chunks = _bundled_chunks(zoo_dir, bundled) if bundled else reader(entry.source["url"])
+    chunks = closing_iter(_bundled_chunks(zoo_dir, bundled) if bundled else reader(entry.source["url"]))
     label = bundled or entry.source["url"]
     digest = hashlib.sha256()
     size = 0
     deadline = time.monotonic() + max_seconds
     fd, tmp_name = tempfile.mkstemp(dir=tmp_dir, prefix=".tan-zoo-", suffix=".part")
     try:
+        # `mkstemp` makes a 0600 file; the published model should carry the
+        # mode an ordinary new file would (0666 & ~umask).
+        mask = os.umask(0)
+        os.umask(mask)
+        os.chmod(tmp_name, 0o666 & ~mask)
         with os.fdopen(fd, "wb") as out:
             for chunk in chunks:
                 if size + len(chunk) > MAX_DOWNLOAD_BYTES:
@@ -318,6 +335,7 @@ def fetch_source(
                     raise ZooFetchError(f"{label}: not complete within {max_seconds:g} s")
                 digest.update(chunk)
                 out.write(chunk)
+        chunks.close()
         got = digest.hexdigest()
         if not bundled and got != entry.source["sha256"]:
             raise ZooFetchError(
@@ -325,9 +343,11 @@ def fetch_source(
                 mismatch=True,
             )
     except OSError as err:
+        chunks.close()
         Path(tmp_name).unlink(missing_ok=True)
         raise ZooFetchError(f"{label}: {err}") from err
     except BaseException:
+        chunks.close()
         Path(tmp_name).unlink(missing_ok=True)
         raise
     return StagedModel(Path(tmp_name), got, size)

@@ -186,3 +186,49 @@ def test_nan_in_the_board_does_not_trip_the_equality_guard():
 def test_recursive_alias_is_refused_not_crashed():
     with pytest.raises(BoardEditRefused):
         append_models_entry("a: &a [*a]\n", ENTRY)
+
+
+# --- parity with the planner's strict loader (loaded by file path: core may
+# --- not import tan.planner, but the two must accept/reject the same shapes)
+
+import importlib.util  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from tan.core.board_yaml_edit import _strict_load  # noqa: E402
+
+_SPEC = importlib.util.spec_from_file_location(
+    "planner_strict_loaders",
+    Path(__file__).resolve().parents[2] / "tan" / "planner" / "strict_loaders.py",
+)
+_PLANNER = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_PLANNER)
+
+_CORPUS = [
+    "a: 1\nb: 2\n",
+    "a: 1\na: 2\n",
+    "models: []\nmodels: []\n",
+    "base: &b {x: 1}\nd:\n  <<: *b\n  x: 2\n",
+    "d:\n  <<: [{x: 1}, {x: 2}]\n",
+    "d:\n  x: 1\n  y:\n    z: 1\n    z: 2\n",
+    "? [1, 2]\n: v\n",
+    "? {a: 1}\n: v\n",
+    "- a\n- b\n",
+    "k: &a [*a]\n",
+    "",
+    "a: [unclosed\n",
+]
+
+
+@pytest.mark.parametrize("text", _CORPUS)
+def test_strict_load_agrees_with_the_planner_strict_loader(text):
+    def outcome(fn):
+        try:
+            return ("ok", fn(text))
+        except Exception:  # noqa: BLE001 -- only accept/reject matters
+            return ("rejected", None)
+
+    planner = outcome(lambda t: _PLANNER.strict_yaml_load(t))
+    ours = outcome(lambda t: _strict_load(t, "board.yaml"))
+    assert planner[0] == ours[0], text
+    if planner[0] == "ok":
+        assert planner[1] == ours[1]
