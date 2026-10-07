@@ -8282,6 +8282,21 @@ exists and contains the pin; if its number differs, correct this line. See
   definitions after `--`. The no-board.yaml `build.plan-unavailable` message
   now names both routes; a bad `--board`/`-D` is `build.invalid-argument`
   (tan-cli#1359)
+- **`tan doctor` and `tan build` now notice a west workspace that lacks
+  alp-sdk's `zephyr/patches.yml`** (tan-cli#1376). A workspace without them
+  builds with `ok: true` and then fails on the device (for example
+  `alp_camera_open` returns `ALP_ERR_NOSUPPORT` without the Alif clock
+  `set_rate` patch). The new `workspacePatches` doctor check and the
+  `build.workspace-patches-missing` build warning run alp-sdk's own
+  `scripts/verify_west_patches.py`, name each ABSENT or DRIFTED patch and its
+  module, and give the fix (`tan bootstrap`, or `west patch --dst-module <m>
+  apply`). The build warning never changes `ok` or the exit code; a verified
+  result is cached under `build/`, keyed by workspace HEADs, patches.yml and
+  the patched files' mtimes. An older SDK without the verifier reports the
+  check as unknown. A `$ZEPHYR_BASE` that differs from the workspace's
+  zephyr, which tan has always ignored, is now reported (`zephyrBase` check,
+  `build.zephyr-base-ignored` info).
+
 - **`tan model check` now answers from Alp Lab's own bench, for a customer who
   holds neither the NPU toolchain nor the silicon.** alp-sdk publishes
   bench-measured perf points under `metadata/model_perf/`

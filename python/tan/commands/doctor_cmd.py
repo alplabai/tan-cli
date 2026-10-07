@@ -220,6 +220,13 @@ from tan.core.shapes import is_sdk_root, rejected_sdk_root_message
 from tan.core.timestamp import generated_at_iso
 from tan.core import toolchain_provision
 from tan.core.tool_lookup import resolve_tool
+from tan.commands.workspace_patch_check import (
+    APPLIED as WORKSPACE_PATCHES_APPLIED,
+    MISSING as WORKSPACE_PATCHES_MISSING,
+    PatchCheck,
+    check_workspace_patches,
+)
+from tan.core.west_patches import describe_unapplied, patch_fix_text, zephyr_base_note
 from tan.core.venv import find_workspace_venv, venv_bin_dir, west_program, west_workspace_dir
 from tan.env import TEXT_WRAP_MIN_WIDTH, stderr_is_tty, stdin_is_tty, terminal_width, use_color
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -2362,6 +2369,43 @@ def libraries_check(report: LibraryReport | None) -> Check | None:
     )
 
 
+def workspace_patches_check(result: PatchCheck, workspace_dir: str) -> Check:
+    """`workspacePatches` (tan-cli#1376) -- is alp-sdk's `zephyr/patches.yml`
+    applied in the resolved workspace? A tree without them still BUILDS; the
+    gap shows up on the device (`alp_camera_open` -> `ALP_ERR_NOSUPPORT` for a
+    missing Alif clock `set_rate`). `unknown` (never a failure) when the SDK has
+    no verifier or the check could not run, so an offline doctor stays green."""
+    if result.state == WORKSPACE_PATCHES_APPLIED:
+        return Check(
+            "workspacePatches", "pass",
+            f"zephyr/patches.yml {result.note} in {workspace_dir}", scope="project",
+        )
+    if result.state == WORKSPACE_PATCHES_MISSING:
+        return Check(
+            "workspacePatches",
+            "warn",
+            f"alp-sdk's zephyr/patches.yml is not applied in {workspace_dir}: "
+            f"{describe_unapplied(result.patches, result.modules)}. The build still succeeds, "
+            "but features that need them fail at runtime (for example `alp_camera_open` "
+            f"returns ALP_ERR_NOSUPPORT). Fix: {patch_fix_text(result.modules, workspace_dir)}.",
+            "tan bootstrap",
+            scope="project",
+        )
+    return Check(
+        "workspacePatches", "unknown", f"patches not checked: {result.note}.", scope="project"
+    )
+
+
+def zephyr_base_check(env_value: str | None, workspace_dir: str) -> Check | None:
+    """`zephyrBase` (tan-cli#1376) -- only when `$ZEPHYR_BASE` names a tree other
+    than the resolved workspace's zephyr, which tan ignores. A `pass` carrying
+    the explanation: it is information, not a problem with the host."""
+    note = zephyr_base_note(env_value, str(Path(workspace_dir) / "zephyr"))
+    if note is None:
+        return None
+    return Check("zephyrBase", "pass", note, scope="project")
+
+
 def workspace_preflight_check(workspace_dir: str | None) -> Check:
     """`workspace` -- is a Zephyr WORKSPACE (a directory holding `.west/`)
     resolved at all? Mirrors `build_preflight_checks`'s check of the same
@@ -4079,6 +4123,15 @@ def _collect(
         # earns its own check beside `zephyrVersion` rather than being
         # dropped as a duplicate.
         _add(zephyr_workspace_check(str(workspace_path), workspace_version))
+        # tan-cli#1376: read-only; never raises, never fails an offline doctor.
+        _add(
+            workspace_patches_check(
+                check_workspace_patches(workspace_path, sdk_root, timeout=30), str(workspace_path)
+            )
+        )
+        zephyr_base_info = zephyr_base_check(os.environ.get("ZEPHYR_BASE"), str(workspace_path))
+        if zephyr_base_info is not None:
+            _add(zephyr_base_info)
 
     # tan-cli#294 finding 1: host-environment checks -- also unconditional
     # HOST facts (no board.yaml/workspace/SDK needed). See their docstrings.

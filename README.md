@@ -289,6 +289,11 @@ What those commands do:
    `<path>/.venv` and Zephyr `<path>/zephyr`, or if `bootstrap` relocated
    the checkout into `alp-workspace/` because the starting directory held
    something besides the checkout, whose venv is then `alp-workspace/.venv`.
+   `tan build` and `tan doctor` always use the resolved west workspace's
+   `zephyr/`; an `env ZEPHYR_BASE=<other tree>` override is **ignored**. When
+   it names a different tree they say so (`build.zephyr-base-ignored`, info;
+   the `zephyrBase` doctor check). To build against another tree, run `tan`
+   from that workspace.
 3. `init` creates a Zephyr application and pins the SDK checkout in
    `.alp/sdk-path`.
 4. `validate` checks `board.yaml` and related metadata.
