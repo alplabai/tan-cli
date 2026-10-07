@@ -108,12 +108,14 @@ from tan.commands.build.manifest import (
     cmake_cache_configured,
     read_sdk_stamp,
     resolve_zephyr_artefact,
+    write_plain_post_build_manifest,
     write_post_build_manifest,
     write_sdk_stamp,
     zephyr_boilerplate_loaded,
 )
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
 from tan.commands.build.toolchain import host_scan_has_toolchain, verified_store_dir
+from tan.core.plain_zephyr_manifest import PLAIN_GENERATED_BY, slice_boards
 from tan.core.plan_exec import (
     CROSS_DRIVE_MSG,
     ExecutionPolicy,
@@ -1742,13 +1744,23 @@ def _write_manifest_after_dispatch(
         )
         for o in outcomes
     ]
-    outcome = write_post_build_manifest(
-        sdk_root=sdk_root,
-        board_yaml=plan.board_yaml,
-        base=str(build_root),
-        plan_build_root=plan.build_root,
-        results=results,
-    )
+    if plan.generated_by == PLAIN_GENERATED_BY and not plan.board_yaml:
+        # tan-cli#1370: `tan build --board` has no board.yaml to project.
+        outcome = write_plain_post_build_manifest(
+            sdk_root=sdk_root,
+            boards=slice_boards(plan.slices),
+            base=str(build_root),
+            plan_build_root=plan.build_root,
+            results=results,
+        )
+    else:
+        outcome = write_post_build_manifest(
+            sdk_root=sdk_root,
+            board_yaml=plan.board_yaml,
+            base=str(build_root),
+            plan_build_root=plan.build_root,
+            results=results,
+        )
     global _last_manifest_write
     _last_manifest_write = _ManifestWriteSignal(
         manifest_written=outcome.write_failed_reason is None,

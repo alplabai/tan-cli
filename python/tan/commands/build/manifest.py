@@ -29,10 +29,11 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
+from tan.core.plain_zephyr_manifest import minimal_manifest
 from tan.core.sdk_discovery import resolve_sdk_root_ladder
 from tan.core.system_manifest import (
     SliceRunResult,
@@ -50,6 +51,7 @@ __all__ = [
     "read_sdk_stamp",
     "resolve_zephyr_artefact",
     "sdk_stamp_path",
+    "write_plain_post_build_manifest",
     "write_post_build_manifest",
     "write_sdk_stamp",
     "zephyr_boilerplate_loaded",
@@ -156,8 +158,8 @@ def write_post_build_manifest(
         effective_sdk_root = str(discovered) if discovered else None
 
     if effective_sdk_root is not None and not effective_board_yaml:
-        # tan-cli#1359: a plain Zephyr build (`tan build --board`) has no
-        # board.yaml, and the manifest is projected FROM one.
+        # A plan with no board.yaml has nothing to project the manifest from
+        # (`tan build --board` writes its own minimal one, tan-cli#1370).
         return PostBuildManifest(
             write_failed_reason="the plan has no board.yaml to project it from",
             native_sim_target=None,
@@ -259,6 +261,36 @@ def write_post_build_manifest(
         )
 
     return PostBuildManifest(write_failed_reason=None, native_sim_target=native_sim_target)
+
+
+def write_plain_post_build_manifest(
+    *,
+    sdk_root: str | None,
+    boards: Sequence[tuple[str, str]],
+    base: str,
+    plan_build_root: str,
+    results: Sequence[SliceRunResult],
+) -> PostBuildManifest:
+    """tan-cli#1370: the `tan build --board` counterpart of
+    [`write_post_build_manifest`] -- no board.yaml to project, so the manifest
+    is [`minimal_manifest`]'s slice entries with this run's status overlaid.
+    Same best-effort contract: a failure is reported, never raised."""
+    try:
+        dest_dir = confine_to_build_root(Path(base), plan_build_root)
+        raw, renames = minimal_manifest(boards, sdk_root)
+        overlay_run_results_raw(
+            raw, [replace(r, core_id=renames.get(r.core_id, r.core_id)) for r in results]
+        )
+        out = serialize_system_manifest_raw(raw)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        (dest_dir / "system-manifest.yaml").write_text(out, encoding="utf-8", newline="")
+    except MaterialiseError as err:
+        return PostBuildManifest(write_failed_reason=err.message, native_sim_target=None)
+    except Exception as err:  # noqa: BLE001 -- best-effort write, never escapes
+        return PostBuildManifest(
+            write_failed_reason=f"{type(err).__name__}: {err}", native_sim_target=None
+        )
+    return PostBuildManifest(write_failed_reason=None, native_sim_target=None)
 
 
 def build_dir_overridden(cmd_args: Sequence[str]) -> bool:
