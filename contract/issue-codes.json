@@ -2396,6 +2396,38 @@
       "note": "tan-cli#1287: `model prep` found `<out>/<stem>.int8.onnx` already present (or a concurrent run published it first) and refused to overwrite it; remove it or choose `--out`. VALIDATION_FAILURE. A plain `Issue(\"model.prep-output-exists\", ...)` construction in `model_host_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "model.device-flow-unavailable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1287: `model run --device` / `ab --device` without `--capture`: this build has no live deploy-and-capture path (`tan flash --ram` + monitor capture, tan-cli#1313), so it refuses rather than pretending. VALIDATION_FAILURE. A plain `Issue(\"model.device-flow-unavailable\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.device-capture-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1287: the `--capture` / `--against-capture` file cannot be read. VALIDATION_FAILURE. A plain `Issue(\"model.device-capture-missing\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.device-capture-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1287: the console capture is malformed or unusable: no `ENERGY-CFG` header, no samples, a window with fewer than 2 samples, an older 5-field `ENERGY-W` firmware, an `ENERGY-WPART` partial window, or no active window that completed an inference. Nothing is reported rather than a plausible number. VALIDATION_FAILURE. A plain `Issue(\"model.device-capture-invalid\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.device-capture-degraded",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_device_cmd.py",
+      "note": "tan-cli#1287: the capture parsed but carries `ENERGY-WERR`/`ENERGY-WARN` lines or `npu_dispatched=false`; the result is returned and the evidence is the message. A warning, exit 0. A plain `Issue(\"model.device-capture-degraded\", ...)` construction in `model_device_cmd.py`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "monitor.launch-failed",
       "status": "reserved",
       "severity": "error",

@@ -135,6 +135,10 @@ calibration directory and reports the fp32-vs-int8 accuracy delta; it needs the
 optional `model` extra (`tan.core.model_host`) and no SDK, board.yaml or
 hardware. Runner and renderer: `tan.commands.model_host_cmd`.
 
+**`run --device` / `ab --device` (tan-cli#1287, on-device tier)** parse a benchmark
+app's console capture into the same envelope with `tier: device`
+(`tan.commands.model_device_cmd`); live deploy awaits `tan flash --ram`.
+
 **`run` / `ab` (tan-cli#1287, host tier)** time an ONNX model on onnxruntime CPU
 (`backend: cpu-host`) and compare two models -- host references, never SoM
 performance; the on-device tier is bench-gated and not yet ported.
@@ -163,6 +167,7 @@ from tan.commands.model_zoo_cmd import (
     run_zoo,
     zoo_empty_data,
 )
+from tan.commands.model_device_cmd import run_device_ab, run_device_run
 from tan.commands.model_host_cmd import (
     ab_empty_data,
     prep_empty_data,
@@ -980,13 +985,27 @@ def _run_doctor(
     return reported_project, sdk_info, data, issues, ExitCode.SUCCESS
 
 
-def _refuse_stray_arguments(subcommand: str, model_id: str | None, sku: str | None) -> None:
+def _refuse_stray_arguments(
+    subcommand: str, model_id: str | None, sku: str | None, device_flags: tuple[bool, ...] = ()
+) -> None:
     """A positional ID belongs to `add` alone and `--sku` to `zoo`: accepting
     either elsewhere would silently ignore what the caller typed."""
     if model_id is not None and subcommand not in ("add", "prep", "run", "ab"):
         raise ModelError(
             "model.unexpected-argument",
             f"`tan model {subcommand}` takes no ID argument (got {model_id}); only `add`, `prep`, `run` and `ab` do.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+    if any(device_flags) and subcommand not in ("run", "ab"):
+        raise ModelError(
+            "model.unexpected-argument",
+            f"`tan model {subcommand}` takes no --device/--capture/--against-capture.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+    if (device_flags[1:] if device_flags else ()) and any(device_flags[1:]) and not device_flags[0]:
+        raise ModelError(
+            "model.unexpected-argument",
+            "--capture/--against-capture need --device.",
             ExitCode.VALIDATION_FAILURE,
         )
     if sku and subcommand == "add":
@@ -1074,6 +1093,15 @@ def model(
     ),
     min_samples: int = typer.Option(
         8, "--min-samples", metavar="N", help="With `prep`: fewest calibration samples accepted."
+    ),
+    device: bool = typer.Option(
+        False, "--device", help="With `run`/`ab`: report the on-device tier from a console capture."
+    ),
+    capture: str = typer.Option(
+        None, "--capture", metavar="FILE", help="With `--device`: the target's console capture."
+    ),
+    against_capture: str = typer.Option(
+        None, "--against-capture", metavar="FILE", help="With `ab --device`: B's console capture."
     ),
     against: str = typer.Option(
         None, "--against", metavar="PATH", help="With `ab`: the second .onnx model to compare with."
@@ -1252,7 +1280,9 @@ def model(
             context.sdk_source_tier,
             context.foreign_global_default_for,
         )
-        _refuse_stray_arguments(subcommand, model_id, sku)
+        _refuse_stray_arguments(
+            subcommand, model_id, sku, (device, bool(capture), bool(against_capture))
+        )
         if subcommand == "doctor":
             project_, sdk, data, issues, exit_code = _run_doctor(
                 context=context,
@@ -1264,6 +1294,15 @@ def model(
                 metadata_root=metadata_root,
                 sdk_root=sdk_root,
                 exact=exact,
+            )
+        elif subcommand == "run" and device:
+            project_, sdk, data, issues, exit_code = run_device_run(
+                context=context, source=model_id, capture=capture
+            )
+        elif subcommand == "ab" and device:
+            project_, sdk, data, issues, exit_code = run_device_ab(
+                context=context, source=model_id, against=against, capture=capture,
+                against_capture=against_capture,
             )
         elif subcommand == "run":
             project_, sdk, data, issues, exit_code = run_run(
