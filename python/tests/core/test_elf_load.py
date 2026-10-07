@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """`lowest_load_address` (tan-cli#1370): which segments count, and never raising."""
+import os
 import struct
 from pathlib import Path
 
@@ -7,7 +8,9 @@ import pytest
 
 from tan.core.elf_load import lowest_load_address
 
-REAL_MRAM_ELF = Path("/home/caner/zephyrproject/build-conf-v441-slot0/zephyr/zephyr.elf")
+#: Optional: an MRAM-linked Zephyr ELF (LOAD 0x80010000 + NOBITS in DTCM) to
+#: classify for real, e.g. TAN_TEST_REAL_SLOT0_ELF=<build>/zephyr/zephyr.elf.
+REAL_MRAM_ELF = Path(os.environ.get("TAN_TEST_REAL_SLOT0_ELF", "/nonexistent"))
 
 
 def elf32(segments, *, big=False, phentsize=32):
@@ -72,6 +75,6 @@ def test_missing_file_is_none(tmp_path):
     assert lowest_load_address(tmp_path / "absent.elf") is None
 
 
-@pytest.mark.skipif(not REAL_MRAM_ELF.is_file(), reason="bench ELF not on this host")
+@pytest.mark.skipif(not REAL_MRAM_ELF.is_file(), reason="TAN_TEST_REAL_SLOT0_ELF not set")
 def test_the_real_mram_image_is_not_below_the_flash_base():
     assert lowest_load_address(REAL_MRAM_ELF) >= 0x80000000

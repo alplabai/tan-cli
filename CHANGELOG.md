@@ -8277,7 +8277,9 @@ this line. See `docs/release-contract.md` and tan-cli#1258.*
   `jlink_flash_device`, `slot0_load_address`) a planned slice for that board
   gets. An ELF whose lowest load address is below the SoC's `soc_flash_base`
   (an ITCM image) is marked `flash_method: ram_run_only`. The "skipped writing
-  system-manifest.yaml" note is gone for this route (tan-cli#1370)
+  system-manifest.yaml" note is gone for this route. A target no SoM preset
+  names gets the reserved `flash_method: none` (schema-valid), which `tan flash`
+  skips (tan-cli#1370)
 - **`tan model check` now answers from Alp Lab's own bench, for a customer who
   holds neither the NPU toolchain nor the silicon.** alp-sdk publishes
   bench-measured perf points under `metadata/model_perf/`

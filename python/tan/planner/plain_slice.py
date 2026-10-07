@@ -106,8 +106,8 @@ def plain_system_manifest(
         # No SoM preset names this target: there is no recipe to compose, and a
         # guessed one could program the wrong thing. `tan flash` skips a slice
         # with no flash_method, naming this reason.
-        entry.pop("flash_method", None)
-        entry.pop("flash_args", None)
+        entry["flash_method"] = "none"
+        entry["flash_args"] = {}
         entry["reason"] = (
             f"no SoM preset in the SDK names board target `{board}`; "
             "no flash recipe is known for it")

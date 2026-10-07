@@ -243,7 +243,7 @@ def test_unknown_target_still_gets_a_one_slice_manifest(world):
     env = envelope_of(_run(world, "--board", "native_sim"))
     assert env["exitCode"] == 0 and env["issues"] == [], env
     (sl,) = _manifest(world)["slices"]
-    assert sl["core_id"] == "native_sim" and "flash_method" not in sl and "no SoM preset" in sl["reason"]
+    assert sl["core_id"] == "native_sim" and sl["flash_method"] == "none" and sl["flash_args"] == {} and "no SoM preset" in sl["reason"]
 
 
 @posix_only
@@ -267,3 +267,17 @@ def test_an_unclassifiable_elf_never_gets_the_mram_recipe(aen_world):
     (sl,) = _manifest(aen_world)["slices"]
     assert sl["flash_method"] == "ram_run_only" and "could not be classified" in sl["reason"]
     assert set(sl["flash_args"]) <= {"expect_dpidr", "jlink_device"}
+
+
+@posix_only
+def test_tan_flash_skips_a_none_method_slice_with_its_reason(world):
+    _run(world, "--board", "native_sim")
+    path = f"{world['bin']}{os.pathsep}{os.environ.get('PATH', '')}"
+    proc = run_tan(
+        "flash", "--build-root", str(world["out"] / "build"), "--dry-run",
+        "--format", "json", cwd=world["out"], env_overrides={"PATH": path},
+    )
+    out = json.loads(proc.stdout)
+    (entry,) = out["data"]["entries"]
+    assert entry["status"] == "skipped" and "no flash recipe" in entry["message"], out
+    assert "no registered backend" not in json.dumps(out)

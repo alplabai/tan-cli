@@ -235,6 +235,9 @@ _DRAIN_JOIN_S = 2.0
 #: backend" message every OTHER unrecognised method gets.
 _REMOVED_SWD_PROBE_METHOD = "swd_probe"
 
+#: Reserved `flash_method`: a slice with no known flash recipe (tan-cli#1370).
+NO_FLASH_METHOD = "none"
+
 
 @dataclass
 class _Entry:
@@ -2575,6 +2578,18 @@ def _flash_entry(
             )
         else:
             msg = f"flash: {kind} '{entry_id}' has no flash_method; skipping"
+        lines.append(msg)
+        return -1, entry(None, "skipped", -1, msg), lines
+
+    # tan-cli#1370: `none` is the reserved "no flash recipe is known" method (a
+    # plain `tan build --board` target no SoM preset names). The manifest schema
+    # requires a flash_method on every slice, so this is how a slice says "skip
+    # me" in a schema-valid way; same outcome as the no-flash_method skip above.
+    if raw_method == NO_FLASH_METHOD:
+        msg = (
+            f"flash: {kind} '{entry_id}' has flash_method '{NO_FLASH_METHOD}' (no flash "
+            "recipe is known for this board target); skipping"
+        )
         lines.append(msg)
         return -1, entry(None, "skipped", -1, msg), lines
 
