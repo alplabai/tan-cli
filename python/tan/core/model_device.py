@@ -15,9 +15,10 @@ range-checked (finite, positive spans and clock, non-negative counts) and anythi
 else raises `DeviceCaptureError`, never a plausible number.
 
 * `latencyMs` is the active window's measured span divided by the inferences it
-  completed. The span is wall time of the app's WHOLE window loop, which also
-  polls the monitor IC, so it is an upper bound on pure inference time
-  (`LATENCY_SCOPE`).
+  completed. The span is wall time of the app's WHOLE window loop, so it is an
+  upper bound on pure inference time (the energy app also polls the monitor IC
+  inside it; the latency-only app does not) -- hence the app-neutral
+  `LATENCY_SCOPE`.
 * `peakSramKib` stays `None` (the app does not report it).
 * `RunResult.power_mj` stays `None`; energy rides in `RunResult.energy`, a
   labelled board-level carrier-rail delta (`EnergyMeasurement`), only when the
@@ -45,7 +46,7 @@ from tan.model.measure import EnergyMeasurement, RunResult, windowed_delta
 _CYCLES_PER_S_TOLERANCE = 0.05
 
 #: What `latencyMs` is, carried in every device row.
-LATENCY_SCOPE = "window-span-per-inference (includes monitor polling)"
+LATENCY_SCOPE = "window-span-per-inference"
 
 _U32 = 1 << 32
 _WERR_RE = re.compile(r"^ENERGY-WERR (\d+) (active|idle) timed_out=(\d)")
@@ -217,12 +218,14 @@ def _samples_to_power(points: list[tuple[int, int]], cycles_per_s: float,
 
 
 def _span_rates(parsed: ParsedCapture) -> list[float]:
-    """Cycles per second implied by every ENERGY-W span (unwrapped ones only)."""
+    """Cycles per second implied by every ENERGY-W span, unwrapped and not timed
+    out (a window the app reported ENERGY-WERR timed_out=1 for ends early, so its
+    span says nothing about the clock; latency already excludes it)."""
     return [
         span[1] / span[2] * 1000.0
         for window, phases in parsed.uptime_spans.items()
         for phase, span in phases.items()
-        if (window, phase) not in parsed.wrapped
+        if (window, phase) not in parsed.wrapped and (window, phase) not in parsed.timed_out
     ]
 
 

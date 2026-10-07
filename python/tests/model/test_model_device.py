@@ -367,3 +367,25 @@ def test_cpu_only_capture_is_not_labelled_ethos_u():
 
     result, _, _ = run_result_from_capture(parse_console(_timed(npu=False)))
     assert result.backend == "cpu-device"
+
+
+def test_timed_out_window_does_not_poison_the_measured_clock():
+    # Two good windows at 1 MHz plus one whose span the app flagged timed_out
+    # (it ended early, so its implied clock is far off). The clock must still be
+    # the measured one, not the configured fallback.
+    from tan.core.model_device import _cycles_per_s, parse_console
+
+    good = {"active": [(0, 3000), (1_000_000, 3000)], "idle": [(0, 1000), (1_000_000, 1000)]}
+    w = {"active": (2, 1_000_000, 1000.0, 10), "idle": (2, 1_000_000, 1000.0, 0)}
+    text = _capture_text(
+        cfg={"cycles_per_s": 999_999},
+        windows={0: good, 1: good, 2: good},
+        energy_w={0: w, 1: w, 2: {"active": (2, 400_000, 1000.0, 4), "idle": (2, 1_000_000, 1000.0, 0)}},
+        extra_lines=["ENERGY-WERR 2 active timed_out=1 i2c_errors=3 last_rc=-5 got=120/250"],
+    )
+    used, measured = _cycles_per_s(parse_console(text))
+    assert measured == pytest.approx(1_000_000.0) and used == pytest.approx(1_000_000.0)
+    # Control: without the WERR line the 400 kHz span disagrees, so the DT constant wins.
+    ctl = text.replace("ENERGY-WERR 2 active timed_out=1 i2c_errors=3 last_rc=-5 got=120/250\n", "")
+    used, _ = _cycles_per_s(parse_console(ctl))
+    assert used == pytest.approx(999_999.0)
