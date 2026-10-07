@@ -88,7 +88,8 @@ def capture(
 ) -> CaptureResult:
     """Read until `until` matches, or `duration_s` elapses.
 
-    `initial` is data already received before this call (the `--break-uboot`
+    On a match the capture stops at the end of the matched line: the rest of
+    the same read is not logged or counted. `initial` is data already received before this call (the `--break-uboot`
     tail): it is logged and searched like any other chunk, so a prompt that
     ended the break-in can satisfy `--until`. At least one read happens even
     with a zero duration. A sink failure raises `SinkError`; a port failure
@@ -100,6 +101,22 @@ def capture(
     tail = b""
     seen = 0
     first = True
+
+    def commit(part: bytes) -> None:
+        """Count, tail and log `part`: what the capture reports as received."""
+        nonlocal seen, tail
+        seen += len(part)
+        tail = (tail + part)[-TAIL_BYTES:]
+        if sink is not None and part:
+            try:
+                sink.write(part)
+                sink.flush()
+            except OSError as err:
+                raise SinkError(str(err)) from err
+
+    def done(matched: bool, line: str | None) -> CaptureResult:
+        return CaptureResult(matched, line, clock() - start, seen, _tail_text(tail))
+
     while True:
         if first and initial:
             chunk = initial
@@ -107,26 +124,27 @@ def capture(
             n = max(1, int(getattr(port, "in_waiting", 0) or 0))
             chunk = port.read(n) or b""
         first = False
-        if chunk:
-            seen += len(chunk)
-            tail = (tail + chunk)[-TAIL_BYTES:]
-            if sink is not None:
-                try:
-                    sink.write(chunk)
-                    sink.flush()
-                except OSError as err:
-                    raise SinkError(str(err)) from err
-            if until is not None:
-                *lines, pending = (pending + chunk).split(b"\n")
-                pending = pending[-_MAX_PENDING:]
-                for raw in lines:  # each complete line is new data: search it once
-                    line = _text(raw).rstrip("\r")[-MAX_SEARCH_CHARS:]
-                    if until.search(line):
-                        return CaptureResult(True, line, clock() - start, seen, _tail_text(tail))
-                    if clock() >= deadline:
-                        return CaptureResult(False, None, clock() - start, seen, _tail_text(tail))
-                partial = _text(pending).rstrip("\r")[-MAX_SEARCH_CHARS:]
-                if partial and until.search(partial):
-                    return CaptureResult(True, partial, clock() - start, seen, _tail_text(tail))
+        if chunk and until is None:
+            commit(chunk)
+        elif chunk:
+            before = len(pending)
+            *lines, pending = (pending + chunk).split(b"\n")
+            pending = pending[-_MAX_PENDING:]
+            end = -before  # offset of the current line's end within `chunk`
+            for raw in lines:  # each complete line is new data: search it once
+                end += len(raw) + 1
+                line = _text(raw).rstrip("\r")[-MAX_SEARCH_CHARS:]
+                if until.search(line):
+                    # Stop at the END OF THE MATCHED LINE: bytes after it in the
+                    # same read are neither logged nor reported.
+                    commit(chunk[: max(0, end)])
+                    return done(True, line)
+                if clock() >= deadline:
+                    commit(chunk)
+                    return done(False, None)
+            commit(chunk)
+            partial = _text(pending).rstrip("\r")[-MAX_SEARCH_CHARS:]
+            if partial and until.search(partial):
+                return done(True, partial)
         if clock() >= deadline:
-            return CaptureResult(False, None, clock() - start, seen, _tail_text(tail))
+            return done(False, None)
