@@ -360,3 +360,125 @@ def test_a_probe_that_changes_before_the_readback_refuses_it(tmp_path, monkeypat
     assert rc == 1
     assert _codes(issues) == ["flash.probe-ambiguous"]
     assert [s for s in fake.scripts if "savebin" in s] == []
+
+
+# ── tan-cli#1336: the J-Link binary is never taken from the project venv ───
+
+
+def _plant_hostile_venv(tmp_path):
+    """A west-capable `.venv` in the PROJECT that also ships its own JLinkExe."""
+    import os as _os
+
+    from tan.core.venv import venv_bin_dir
+
+    bin_dir = tmp_path / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    for name in ("west", "JLinkExe", "JLink"):
+        (bin_dir / name).write_text("#!/bin/sh\necho hostile\n", encoding="utf-8")
+        _os.chmod(bin_dir / name, 0o755)
+    # The plant must really be what the old resolution would have picked.
+    assert venv_bin_dir(str(tmp_path), str(tmp_path / "sdk")) == bin_dir
+    return bin_dir
+
+
+class SpawnRecorder:
+    def __init__(self, monkeypatch):
+        self.calls: list[tuple[str, object, object]] = []
+        monkeypatch.setattr(flash_cmd, "_spawn_jlink", self._spawn)
+
+    def _spawn(self, argv, script, capture, timeout, venv_bin=None, workspace=None,
+               executable=None, **kwargs):
+        kind = "list" if "ShowEmuList" in script else "write"
+        self.calls.append((kind, executable, venv_bin))
+        out = "J-Link[0]: Serial number: 000999000001\n" if kind == "list" else CLEAN
+        return flash_cmd._Outcome(success=True, stdout=out, returncode=0)
+
+
+def _drive_confirmed_flow_d(tmp_path, monkeypatch, path_dir, **kwargs):
+    """A confirmed Flow D run with the PROJECT venv live (`venv_bin_dir` is NOT
+    stubbed) and PATH limited to `path_dir`. `_spawn_jlink` is stubbed by the
+    caller's `SpawnRecorder`, so nothing real runs."""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "a.bin").write_bytes(b"\x00")
+    (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00")
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        "schema_version: 1\nhw_info: {sku: S}\nslices:\n"
+        "- {core_id: m55_hp, os: zephyr, output_artefact: a.bin, status: ok,\n"
+        f"   flash_method: alif_mram_jlink, flash_args: {_ARGS}}}\n"
+        "helper_mcus: []\nboot_order: []\n",
+        encoding="utf-8", newline="",
+    )
+    monkeypatch.setenv("PATH", str(path_dir))
+    monkeypatch.delenv("TAN_JLINK", raising=False)
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    return flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False, skip_missing_tools=False,
+        capture=True, cwd=str(tmp_path), **kwargs,
+    )
+
+
+def _exe(path):
+    import os as _os
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    _os.chmod(path, 0o755)
+    return str(path)
+
+
+def test_a_project_venv_jlink_is_never_chosen_and_the_path_one_is(tmp_path, monkeypatch):
+    hostile = _plant_hostile_venv(tmp_path)
+    trusted = _exe(tmp_path / "trusted" / "JLinkExe")
+    rec = SpawnRecorder(monkeypatch)
+    rc, data, issues, _l, _s = _drive_confirmed_flow_d(
+        tmp_path, monkeypatch, tmp_path / "trusted", readback=False
+    )
+    assert rc == 0, (data, issues)
+    assert {c[0] for c in rec.calls} == {"write"}
+    for _kind, executable, venv_bin in rec.calls:
+        assert executable == trusted
+        assert venv_bin is None, "the project venv was put on the J-Link child's PATH"
+    jlink = data["entries"][0]["jlink"]
+    assert jlink["binary"] == trusted and jlink["binarySource"] == "PATH"
+    assert str(hostile) not in jlink["binary"]
+
+
+def test_with_only_a_project_venv_jlink_the_run_refuses_instead_of_using_it(tmp_path, monkeypatch):
+    _plant_hostile_venv(tmp_path)
+    (tmp_path / "empty").mkdir()
+    rec = SpawnRecorder(monkeypatch)
+    rc, data, issues, _l, _s = _drive_confirmed_flow_d(tmp_path, monkeypatch, tmp_path / "empty")
+    assert rc == 1
+    assert rec.calls == []
+    entry = data["entries"][0]
+    assert entry["status"] == "failed" and entry["jlink"]["binary"] is None
+
+
+def test_the_cli_override_wins_and_is_reported_and_shared_by_every_spawn(tmp_path, monkeypatch):
+    _plant_hostile_venv(tmp_path)
+    mine = _exe(tmp_path / "mine" / "JLinkExe")
+    _exe(tmp_path / "trusted" / "JLinkExe")
+    rec = SpawnRecorder(monkeypatch)
+    rc, data, issues, _l, _s = _drive_confirmed_flow_d(
+        tmp_path, monkeypatch, tmp_path / "trusted", jlink_path=mine, readback=True,
+    )
+    assert {c[1] for c in rec.calls} == {mine}  # write + read-back, one binary
+    assert data["entries"][0]["jlink"]["binary"] == mine
+    assert data["entries"][0]["jlink"]["binarySource"] == "the --jlink flag"
+
+
+def test_the_probe_listing_uses_the_same_trusted_binary_as_the_write(tmp_path, monkeypatch):
+    _plant_hostile_venv(tmp_path)
+    trusted = _exe(tmp_path / "trusted" / "JLinkExe")
+    rec = SpawnRecorder(monkeypatch)
+    rc, data, issues, _l, _s = _drive_confirmed_flow_d(
+        tmp_path, monkeypatch, tmp_path / "trusted",
+        **{**_probes(A, C), "probe_usb_path": "3-4.3"},
+    )
+    kinds = [c[0] for c in rec.calls]
+    assert "list" in kinds and "write" in kinds, (kinds, data)
+    assert {c[1] for c in rec.calls} == {trusted}
+    assert all(c[2] is None for c in rec.calls)

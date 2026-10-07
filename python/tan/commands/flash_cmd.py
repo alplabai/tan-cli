@@ -181,6 +181,7 @@ from tan.core.atoc_replacement import (
     resident_entries,
     written_entries,
 )
+from tan.core.jlink_binary import ENV_OVERRIDE as JLINK_ENV, resolve_jlink
 from tan.core.flow_d_report import (
     VERIFICATION_CACHE,
     VERIFICATION_NOTE,
@@ -1519,6 +1520,7 @@ def _execute(
     venv_bin: Path | None = None,
     workspace: str | None = None,
     probe_guard: "_ProbeGuard | None" = None,
+    jlink_exe: str | None = None,
 ) -> _Outcome:
     """Spawn the plan: a pipeline (a `"|"` token), a J-Link plan (temp Commander
     script), or a plain single process.
@@ -1576,6 +1578,22 @@ def _execute(
     call up.
     """
     argv = list(plan.argv)
+    if plan.jlink_script is not None:
+        # tan-cli#1336: the J-Link tool is NEVER resolved from the project venv --
+        # see `tan.core.jlink_binary`. One resolution for the whole run.
+        exe = jlink_exe or _trusted_jlink_path(None)
+        if exe is None:
+            return _Outcome(success=False, stderr=_NO_TRUSTED_JLINK, captured=capture)
+        extra_env = None
+        if probe_guard is not None:
+            refusal = _probe_guard_refusal(probe_guard, exe, None, workspace)
+            if refusal is not None:
+                return _Outcome(success=False, stderr=refusal, captured=capture)
+            extra_env = probe_guard.env()
+        extra = {"extra_env": extra_env} if extra_env else {}
+        return _spawn_jlink(
+            argv, plan.jlink_script, capture, _FLASH_TIMEOUT_S, None, workspace, exe, **extra,
+        )
     # `spawned` is what the child's own `argv` will be -- the oracle's argv,
     # venv rewrite included. `resolved` is the same list with each PROGRAM
     # position replaced by its absolute location; only its program entries are
@@ -2101,6 +2119,8 @@ class _Context:
     #: `--readback` (tan-cli#1321): after a Flow D write, re-read every written
     #: region in a FRESH J-Link session and compare sha256.
     readback: bool = False
+    #: `--jlink PATH` (tan-cli#1336): the explicit J-Link binary, a CLI input.
+    jlink_path: str | None = None
     #: Read-only J-Link enumeration, injectable so tests never touch real USB.
     #: `None` resolves to the module's `enumerate_jlinks` at call time.
     enumerate_probes: Callable[[], Any] | None = None
@@ -2232,9 +2252,13 @@ def _guard_verdict(
         return CODE_VERIFY_FAILED, f"cannot read the USB device tree reliably ({err}); refusing to write.", None
     if drift is not None:
         return CODE_VERIFY_FAILED, drift, None
-    spawned = _programs_resolved_in_venv([program], venv_bin)
-    on_path_bin = venv_bin if spawned != [program] else None
-    resolved, unresolved = resolve_program_positions(spawned, _resolution_env(on_path_bin))
+    if is_rust_absolute(program):
+        # tan-cli#1336: the run's trusted J-Link, used verbatim -- no venv rewrite.
+        spawned, on_path_bin, resolved, unresolved = [program], None, [program], None
+    else:
+        spawned = _programs_resolved_in_venv([program], venv_bin)
+        on_path_bin = venv_bin if spawned != [program] else None
+        resolved, unresolved = resolve_program_positions(spawned, _resolution_env(on_path_bin))
     if unresolved is not None:
         return (
             CODE_VERIFY_FAILED,
@@ -2262,10 +2286,23 @@ def _guard_verdict(
     )
 
 
-def _jlink_program(venv_bin: Path | None) -> str:
+_NO_TRUSTED_JLINK = (
+    "no J-Link binary found in a trusted location: --jlink, TAN_JLINK, PATH or a "
+    "SEGGER install root (/opt/SEGGER/*, /Applications/SEGGER/*, Program Files\\SEGGER). "
+    "The project's workspace .venv is deliberately never searched for it (tan-cli#1336)."
+)
+
+
+def _trusted_jlink_path(override: str | None) -> str | None:
+    """The J-Link binary tan may spawn (tan-cli#1336), or `None`."""
+    found = resolve_jlink(override)
+    return found.path if found is not None else None
+
+
+def _jlink_program(venv_bin: Path | None, jlink_exe: str | None = None) -> str:
     """The binary `plan_alif_mram_jlink` will pick: its own first-available
     pick over the same `_JLINK_BINARIES` and the same PATH-or-venv test."""
-    return next((n for n in _JLINK_BINARIES if _tool_available(n, venv_bin)), _JLINK_BINARIES[0])
+    return jlink_exe or _trusted_jlink_path(None) or _JLINK_BINARIES[0]
 
 
 def _probe_selector_unsupported(
@@ -2793,7 +2830,22 @@ def _flash_entry_body(
     # `programs_resolved_in_venv` (venv-preferring) at
     # `crates/tan-cli/src/commands/flash/mod.rs:521-546`. The port matches the
     # oracle; do not read the gate's PATH-or-venv rule as also governing argv[0].
-    available = functools.partial(_tool_available, venv_bin=ctx.venv_bin)
+    jlink_exe: str | None = None
+    if method == FLOW_D_METHOD:
+        # tan-cli#1336: resolved ONCE, from trusted locations only, and used by the
+        # probe listing, the preflight, the write and the read-back alike.
+        found = resolve_jlink(ctx.jlink_path)
+        jlink_exe = found.path if found is not None else None
+        report.setdefault("jlink", {}).update(
+            {"binary": jlink_exe, "binarySource": found.source if found else None}
+        )
+
+        def available(tool: str) -> bool:
+            if tool in _JLINK_BINARIES:
+                return jlink_exe is not None
+            return _tool_available(tool, ctx.venv_bin)
+    else:
+        available = functools.partial(_tool_available, venv_bin=ctx.venv_bin)
     gate = tool_gate(
         meta.requires, ctx.dry_run, ctx.skip_missing_tools, kind, entry_id, method,
         available,
@@ -2907,7 +2959,7 @@ def _flash_entry_body(
                 # anything either.
                 if probe_guard is not None:
                     guard_refusal = _probe_guard_refusal(
-                        probe_guard, _jlink_program(ctx.venv_bin), ctx.venv_bin, ctx.workspace
+                        probe_guard, _jlink_program(ctx.venv_bin, jlink_exe), None, ctx.workspace
                     )
                     if guard_refusal is None:
                         probe_guard.fresh = True
@@ -2987,7 +3039,7 @@ def _flash_entry_body(
                 )
                 refusal = _flow_d_preflight(
                     preflight_inputs, ctx.venv_bin, ctx.workspace, probe_guard=probe_guard,
-                    facts=preflight_facts,
+                    facts=preflight_facts, jlink_exe=jlink_exe,
                 )
                 if refusal is not None:
                     lines.append(_entry_head(kind, entry_id, method, target.flash_method))
@@ -3139,7 +3191,9 @@ def _flash_entry_body(
             lines.append(f"  FAIL: {refusal}")
             return 1, entry(method, "failed", 1, refusal), lines
 
-    outcome = _execute(plan, ctx.capture, ctx.venv_bin, ctx.workspace, probe_guard)
+    outcome = _execute(
+        plan, ctx.capture, ctx.venv_bin, ctx.workspace, probe_guard, jlink_exe=jlink_exe
+    )
     if not outcome.success and probe_guard is not None and probe_guard.tripped:
         lines.append(f"  FAIL: {probe_guard.tripped}")
         return (
@@ -3304,7 +3358,7 @@ def _flow_d_record(
     except OSError as err:
         block["transcriptPath"] = None
         block["transcriptError"] = str(err)
-    report["jlink"] = block
+    report.setdefault("jlink", {}).update(block)
     return bool(failures) and outcome.success
 
 
@@ -3344,6 +3398,7 @@ def _flow_d_readback(
         read = _execute(
             dataclasses.replace(plan, jlink_script=script),
             True, ctx.venv_bin, ctx.workspace, probe_guard,
+            jlink_exe=_trusted_jlink_path(ctx.jlink_path),
         )
         if probe_guard is not None and probe_guard.tripped:
             block["readback"] = {"performed": False, "reason": probe_guard.tripped}
@@ -3393,6 +3448,7 @@ def _flow_d_preflight(
     read_device: str | None = None,
     probe_guard: "_ProbeGuard | None" = None,
     facts: dict[str, Any] | None = None,
+    jlink_exe: str | None = None,
 ) -> str | None:
     """Connect read-only with the manifest's ATTACH device profile and confirm
     the SW-DP IDR before any write. Returns a refusal message, or `None`
@@ -3456,16 +3512,16 @@ def _flow_d_preflight(
     # can get its own correct noun the way `swd_probe` (removed by tan-cli
     # #732) once did -- it wrote the GD32 bridge's own flash, not MRAM.
     verb = "write MRAM" if method == FLOW_D_METHOD else "write"
-    binary = next((n for n in ("JLinkExe", "JLink") if _tool_available(n, venv_bin)), None)
+    # tan-cli#1336: never from the project venv -- the run's trusted J-Link.
+    binary = jlink_exe or _trusted_jlink_path(None)
     if binary is None:
         # Unreachable via `_flash_entry`: the tool gate already required
         # JLinkExe/JLink to be available PATH-or-venv (`_tool_available`,
         # same as the probe above), and kept because the alternative to a
         # refusal here would be proceeding to the WRITE with the identity
         # unconfirmed.
-        return f"{method}: no J-Link binary on PATH or in the workspace venv for the DPIDR preflight."
-    spawned = _programs_resolved_in_venv([binary], venv_bin)
-    on_path_bin = venv_bin if spawned != [binary] else None
+        return f"{method}: {_NO_TRUSTED_JLINK} (needed for the DPIDR preflight)"
+    spawned, on_path_bin = [binary], None
     # tan-cli#567: and the program is then PINNED to an absolute location via
     # `executable=`, exactly as `_execute` does for the write itself -- this
     # probe is the step that decides WHICH BOARD is about to be written, so a
@@ -3478,13 +3534,7 @@ def _flow_d_preflight(
     # availability through the same lookup) but is answered rather than
     # asserted: an `assert` is stripped by `-O`, and the fallback must never be
     # "spawn it bare anyway".
-    resolved, unresolved = resolve_program_positions(spawned, _resolution_env(on_path_bin))
-    if unresolved is not None:
-        return (
-            f"{method}: the J-Link binary `{unresolved}` for the DPIDR preflight could "
-            "not be resolved to a real location on PATH or in the workspace venv; "
-            f"refusing to {verb} without confirming which board is attached."
-        )
+    resolved = [binary]
     # No `-ExitOnError`: a failed connect is the SIGNAL being read here, not an
     # error to abort the probe on.
     extra_env = None
@@ -3702,6 +3752,7 @@ def _run(
     enumerate_probes: Callable[[], Any] | None = None,
     no_device_config: bool = False,
     readback: bool = False,
+    jlink_path: str | None = None,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -3886,6 +3937,7 @@ def _run(
         probe_usb_path=probe_usb_path,
         no_device_config=no_device_config,
         readback=readback,
+        jlink_path=jlink_path,
         **({"enumerate_probes": enumerate_probes} if enumerate_probes is not None else {}),
     )
     unsupported = _probe_selector_unsupported(plan.targets, ctx)
@@ -4260,6 +4312,17 @@ def flash(
         "preview still previews. Separate from --confirm, which only arms the write "
         "itself, and it has no effect on any other backend.",
     ),
+    jlink: str = typer.Option(
+        None,
+        "--jlink",
+        metavar="PATH",
+        help="The J-Link Commander binary Flow D (alif_mram_jlink) runs (tan-cli#1336). "
+        f"Otherwise it is resolved from {JLINK_ENV}, PATH, then a SEGGER install root "
+        "(/opt/SEGGER/*, /Applications/SEGGER/*, Program Files\\SEGGER) -- never from "
+        "the project's workspace .venv, and never from the manifest. Used for the "
+        "probe listing, the DPIDR preflight, the write and --readback alike, and "
+        "reported as jlink.binary.",
+    ),
     readback: bool = typer.Option(
         False,
         "--readback",
@@ -4387,6 +4450,7 @@ def flash(
             probe_usb_path=probe_usb_path,
             no_device_config=bool(no_device_config) if isinstance(no_device_config, bool) else False,
             readback=readback if isinstance(readback, bool) else False,
+            jlink_path=jlink if isinstance(jlink, str) else None,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an
