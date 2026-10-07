@@ -58,10 +58,13 @@ added once a real manifest needs one -- not added speculatively here.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
 import subprocess
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -112,6 +115,17 @@ class SetoolsSource:
     path: str
     source: str
 
+    @property
+    def operator_supplied(self) -> bool:
+        """The path came from the operator -- `--setools-dir` or `$SETOOLS_DIR` --
+        not from `flash_args.setools_dir`, which the PROJECT controls (a checkout's
+        manifest). Only an operator-supplied install is one tan may EXECUTE for a
+        preview (tan-cli#1343 review)."""
+        return self.source != _MANIFEST_SOURCE
+
+
+_MANIFEST_SOURCE = "flash_args.setools_dir"
+
 
 def resolve_setools_dir(
     flash_args: Any, env: dict[str, str], flag: str | None = None
@@ -138,7 +152,7 @@ def resolve_setools_dir(
         return SetoolsSource(from_env, "the SETOOLS_DIR environment variable")
     explicit = fa_str(flash_args, "setools_dir")
     if explicit:
-        return SetoolsSource(explicit, "flash_args.setools_dir")
+        return SetoolsSource(explicit, _MANIFEST_SOURCE)
     return None
 
 
@@ -310,6 +324,11 @@ class SignedSlot0:
     scratch_dir: str
     report: AtocReport
     device_config: DeviceConfig | None
+    #: Paths in the SHARED install newer than the start of this sign (at most 5).
+    #: Expected empty; non-empty means another process wrote there meanwhile -- or
+    #: that the overlay leaked. Reported, never a refusal (a concurrent raw bench
+    #: recipe is legitimate).
+    shared_touched: tuple[str, ...] = ()
 
 
 def sign_slot0(
@@ -321,6 +340,7 @@ def sign_slot0(
     *,
     device_config: DeviceConfig | None = None,
     scratch_parent: str | None = None,
+    on_scratch: Callable[[str], None] | None = None,
 ) -> SignedSlot0:
     """Run one `app-gen-toc` sign step in a PRIVATE scratch overlay of
     `setools_dir` ([`make_scratch`]): copy `artefact_bin` into the scratch
@@ -359,14 +379,40 @@ def sign_slot0(
             f"{FLOW_D_METHOD}: could not prepare a scratch copy of the SETOOLS install "
             f"'{setools_dir}' for the sign step: {err}"
         ) from err
+    started = time.time_ns()
     try:
-        return _sign_in_scratch(
+        # BEFORE anything can be interrupted: the caller registers the scratch's
+        # removal here, so a KeyboardInterrupt mid-sign cannot leak the tree.
+        if on_scratch is not None:
+            on_scratch(scratch)
+        signed = _sign_in_scratch(
             scratch, setools_dir, app_gen_toc, artefact_bin, entry_id, mram_address,
             device_config,
         )
+        return dataclasses.replace(signed, shared_touched=_newer_than(setools_dir, started))
     except BaseException:
         cleanup_scratch(scratch)
         raise
+
+
+def _newer_than(root: str, since_ns: int, limit: int = 5) -> tuple[str, ...]:
+    """Files under `root` modified after `since_ns` (cheap post-check that the
+    overlay kept the shared install untouched). Never raises."""
+    found: list[str] = []
+    try:
+        for base, _dirs, files in os.walk(root):
+            for name in files:
+                path = os.path.join(base, name)
+                try:
+                    if os.lstat(path).st_mtime_ns > since_ns:
+                        found.append(path)
+                except OSError:
+                    continue
+                if len(found) >= limit:
+                    return tuple(found)
+    except OSError:
+        pass
+    return tuple(found)
 
 
 def _sign_in_scratch(

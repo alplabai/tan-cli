@@ -3875,7 +3875,7 @@ def _stock_device_config(setools_dir: Path) -> Path:
     (tan-cli#1322)."""
     stock = setools_dir / "build" / "config" / "app-device-config.json"
     stock.parent.mkdir(parents=True, exist_ok=True)
-    stock.write_text('{"metadata": {"device": "STOCK"}}\n', encoding="utf-8")
+    stock.write_text('{"metadata": {"device": "PART_STOCK"}}\n', encoding="utf-8")
     return stock
 
 
@@ -4045,7 +4045,6 @@ def test_flow_d_setools_signs_in_scratch_when_the_run_is_not_confirmed(tmp_path,
     flash_args = {
         "jlink_flash_device": "PART_PROFILE",
         "slot0_load_address": "0x80010000",
-        "setools_dir": str(setools_dir),
     }
     ctx = _Context(
         sku="S",
@@ -4055,6 +4054,7 @@ def test_flow_d_setools_signs_in_scratch_when_the_run_is_not_confirmed(tmp_path,
         skip_missing_tools=False,
         force_confirm=False,
         capture=True,
+        setools_dir=str(setools_dir),  # operator-supplied (--setools-dir)
     )
     shape = validate_flow_d_shape(flash_args, str(artefact), _is_file)
     report: dict = {}
@@ -4308,7 +4308,7 @@ def test_flow_d_entry_reports_the_resolved_method_and_the_declared_one(tmp_path)
 hw_info: {sku: E1M-AEN803}
 slices:
 - {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
-   flash_method: zephyr_west_flash, flash_method_resolved: alif_mram_jlink,
+   flash_method: zephyr_west_flash,
    flash_args: {jlink_flash_device: AE822FA0E5597LS0_M55_HE}}
 helper_mcus: []
 boot_order: []
@@ -4322,7 +4322,7 @@ boot_order: []
     assert entry["methodDeclared"] == "zephyr_west_flash"
     plain = manifest.replace(
         "flash_args: {jlink_flash_device: AE822FA0E5597LS0_M55_HE}", "flash_args: {}"
-    ).replace("flash_method_resolved: alif_mram_jlink,", "")
+    )
     _, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=plain)
     entry = envelope(out)["data"]["entries"][0]
     assert entry["method"] == "zephyr_west_flash"
@@ -4410,6 +4410,108 @@ def test_a_hand_supplied_atoc_is_planned_with_unknown_entries(tmp_path):
     # 0x8057F5B0 + 20000 B reaches 0x805843D0: three 16 KiB sectors.
     assert atoc["sectorSpan"]["count"] == 3
     assert plan["scratchNote"] is None
+
+
+def test_a_preview_never_runs_a_setools_the_manifest_chose(tmp_path):
+    """tan-cli#1343 review, MAJOR 1: `flash_args.setools_dir` is project-controlled,
+    so a --dry-run / unconfirmed run with ONLY that source must not execute the
+    `app-gen-toc` it names. The placeholder tool writes a marker if it ever runs."""
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    marker = tmp_path / "ran"
+    tool = setools_dir / _setools_script_name()
+    tool.write_text(f'#!/bin/sh\ntouch "{marker}"\n', encoding="utf-8")
+    os.chmod(tool, 0o755)
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+    manifest = _FLOW_D_SIGN_MANIFEST % f', setools_dir: "{setools_dir}"'
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    assert not marker.exists(), "the preview executed the manifest-chosen app-gen-toc"
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "ok"
+    assert "ATOC placement not computed; pass --setools-dir" in entry["message"]
+    assert "REPLACES the ENTIRE ATOC" in entry["message"]
+    assert entry["setools"]["signSkipped"] is True
+    assert "plan" not in entry
+    skipped = [i for i in payload["issues"] if i["code"] == "flash.preview-sign-skipped"]
+    assert skipped and skipped[0]["severity"] == "info"
+
+    # The SAME install named by the OPERATOR (--setools-dir) is run.
+    _write_working_app_gen_toc(tool)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", "--setools-dir", str(setools_dir),
+        manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    entry = envelope(out)["data"]["entries"][0]
+    assert "signed" in entry["message"] and "0x8057ea50" in entry["message"]
+    assert "signSkipped" not in entry["setools"]
+
+
+def test_a_device_config_for_another_family_warns_but_is_accepted(tmp_path):
+    setools_dir, scratch_parent = _flow_d_sign_setup(tmp_path)
+    (tmp_path / "build" / "dev.json").write_text(
+        '{"metadata": {"device": "AE722F80F55D5AS"}}', encoding="utf-8"
+    )
+    manifest = (_FLOW_D_SIGN_MANIFEST % ", setools_device_config: dev.json").replace(
+        "PART_PROFILE", "AE822FA0E5597LS0_M55_HE"
+    )
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir), "TMPDIR": str(scratch_parent)},
+    )
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    warn = [i for i in payload["issues"] if i["code"] == "flash.device-config-mismatch"]
+    assert warn and warn[0]["severity"] == "warning"
+    assert "AE722F80F55D5AS" in warn[0]["message"]
+    device = payload["data"]["entries"][0]["setools"]["deviceConfig"]
+    assert device["metadataDevice"] == "AE722F80F55D5AS" and "warning" in device
+
+
+def test_an_app_whose_tail_reaches_the_atocs_first_sector_is_refused(tmp_path):
+    """tan-cli#1343 review, MAJOR 2: the loader rewrites whole 16 KiB sectors. An
+    app of 0x4001 bytes at 0x80010000 spills into the sector the ATOC at
+    0x80014000 starts in, so the ATOC write would erase the app's tail (or the
+    reverse). Refused before anything runs -- under --dry-run too."""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x00" * 0x4001)
+    (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00" * 0x100)
+    manifest = _FLOW_D_SIGN_MANIFEST % ', atoc: atoc.bin, atoc_address: "0x80014000"'
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    assert codes(payload) == ["flash.write-sector-overlap"]
+    message = payload["data"]["entries"][0]["message"]
+    assert "app write and the atoc write share" in message and "0x80014000-0x80018000" in message
+
+    # One byte shorter -> exactly one sector, no overlap.
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x00" * 0x4000)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    assert exit_code == 0, out
+
+
+def test_a_resident_entry_in_the_written_sectors_is_refused(tmp_path):
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x00" * 0x40)
+    (tmp_path / "build" / "atoc.bin").write_bytes(b"\x00" * 0x100)
+    manifest = _FLOW_D_SIGN_MANIFEST % (
+        ', atoc: atoc.bin, atoc_address: "0x80100000", '
+        "resident_atoc_entries: [DEVICE, HP-OWNER@0x80012000+0x40]"
+    )
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest, env={"SETOOLS_DIR": ""},
+    )
+    payload = envelope(out)
+    assert exit_code == 1 and codes(payload) == ["flash.write-sector-overlap"]
+    assert "HP-OWNER" in payload["data"]["entries"][0]["message"]
 
 
 def test_flow_d_signs_a_device_entry_by_default_and_reports_it(tmp_path):
