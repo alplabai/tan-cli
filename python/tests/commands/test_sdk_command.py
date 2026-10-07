@@ -1372,6 +1372,12 @@ def test_wrap_lines_wraps_an_issue_sentence_but_keeps_the_quoted_path_whole():
     assert not any(len(line) > 60 for line in wrapped if long_path not in line)
     assert any(long_path in line for line in wrapped), "the path token itself must survive whole"
 
+def _no_real_tty_size(*_args, **_kwargs):
+    """Stand-in for `os.get_terminal_size`: a run under `pytest -s` on a real
+    terminal would otherwise measure the live stderr fd and ignore the
+    `shutil.get_terminal_size` pin the wrap tests install."""
+    raise OSError("not a terminal")
+
 
 def test_current_text_mode_wraps_on_a_real_terminal(monkeypatch, capsys, tmp_path, isolated_home):
     """End to end through `_run_current` itself (not just the pure helper):
@@ -1383,6 +1389,10 @@ def test_current_text_mode_wraps_on_a_real_terminal(monkeypatch, capsys, tmp_pat
 
     monkeypatch.setattr("sys.stderr.isatty", lambda: True)
     monkeypatch.setattr(shutil, "get_terminal_size", lambda **_: os.terminal_size((100, 24)))
+    # `tan.env.terminal_width` consults the real stderr fd BEFORE `shutil`
+    # (`$COLUMNS` is scrubbed suite-wide in conftest); neutralise it so only
+    # the pinned size above can decide.
+    monkeypatch.setattr(os, "get_terminal_size", _no_real_tty_size)
 
     workspace = tmp_path / "ws"
     workspace.mkdir()
