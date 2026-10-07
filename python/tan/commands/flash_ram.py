@@ -31,8 +31,11 @@ base and the console buffer, and an MRAM-linked image is refused.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import shutil
+import tempfile
 import time
 from typing import Any
 
@@ -47,7 +50,9 @@ from tan.core.flash_plan import (
     dpidr_preflight_unarmed,
     fa_int_checked,
     fa_str,
+    commander_path,
     fa_str_checked,
+    validate_commander_path,
     validate_identifier,
 )
 from tan.core.jlink_binary import resolve_jlink
@@ -89,6 +94,27 @@ def _read(path: str) -> bytes:
 
 def run_ram_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
     """RAM-run one slice. Returns `(rc, entry, text-lines)` like `_flash_entry`."""
+    with contextlib.ExitStack() as stack:
+        return _run_ram_entry(target, ctx, stack)
+
+
+def _stage_image(stack: contextlib.ExitStack, data: bytes) -> str:
+    """Write the image to a TAN-OWNED temp file with a fixed safe name and return its
+    path -- the ONLY path that is ever interpolated into the Commander `loadbin`
+    line, so a project-controlled artefact path (newline, quote, `;`) can never reach
+    the script. Removed when the entry ends."""
+    directory = tempfile.mkdtemp(prefix="tan-ram-")
+    stack.callback(shutil.rmtree, directory, True)
+    path = os.path.join(directory, "image.bin")
+    with open(path, "wb") as fh:
+        fh.write(data)
+    validate_commander_path(path, "the staged RAM image path")
+    return path
+
+
+def _run_ram_entry(
+    target: FlashTarget, ctx: Any, stack: contextlib.ExitStack
+) -> tuple[int, Any, list[str]]:
     kind, entry_id = target.kind, target.id
     lines: list[str] = [f"flash: {kind} '{entry_id}' -> {METHOD}"]
     report: dict[str, Any] = {}
@@ -118,6 +144,15 @@ def run_ram_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
     elf_path, bin_path = _artefact_pair(
         fc.resolve_artefact_path(artefact, ctx.build_root, ctx.sdk_root, fc._is_file)
     )
+    try:
+        # Refused before anything is read or spawned: these strings appear in
+        # messages and the transcript header, and a control character in a path is
+        # never legitimate. (The script itself only ever sees the staged copy.)
+        validate_commander_path(elf_path, "the ELF path")
+        validate_commander_path(bin_path, "the binary path")
+        validate_identifier(entry_id, "the flash target id")
+    except FlashPlanError as err:
+        return fail(str(err))
     try:
         elf_bytes, bin_bytes = _read(elf_path), _read(bin_path)
     except OSError as err:
@@ -156,8 +191,14 @@ def run_ram_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
     except FlashPlanError as err:
         return fail(str(err))
 
-    pre = preamble(serial, speed, device)
-    load = load_script(pre, bin_path, image)
+    try:
+        staged = _stage_image(stack, bin_bytes)
+        pre = preamble(serial, speed, device)
+    except (OSError, FlashPlanError, RamRunError) as err:
+        return fail(f"cannot prepare the RAM-run ({err})")
+    # `image.base`/`entry` and the console address/size are ints rendered with
+    # `0x%X` by `ram_run`; the symbol NAME never reaches a script at all.
+    load = load_script(pre, commander_path(staged), image)
     console = image.console
     argv = (
         "JLinkExe", "-device", device, "-if", "SWD", "-speed", str(speed),
@@ -173,7 +214,7 @@ def run_ram_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
     }
     report["ramConsole"] = ram_console
     report["ram"] = {
-        "elf": elf_path, "binary": bin_path, "loadAddress": f"0x{image.base:08X}",
+        "elf": elf_path, "binary": bin_path, "stagedImage": staged, "loadAddress": f"0x{image.base:08X}",
         "size": image.size, "entry": f"0x{image.entry:08X}",
         "initialSp": f"0x{image.initial_sp:08X}",
         "spNote": "from the vector table; applied by loadbin's reset, not written by tan",
@@ -206,7 +247,9 @@ def run_ram_entry(target: FlashTarget, ctx: Any) -> tuple[int, Any, list[str]]:
             "ALP_FLASH_REQUIRE_DPIDR=1 is set and flash_args.expect_dpidr / jlink_device are "
             "not both set -- refusing to run with no wrong-board guard"
         )
-    if guard is not None:
+    if guard is not None and armed:
+        # Verified once up front; the armed DPIDR preflight reuses it (as in Flow D) and
+        # the load session re-verifies immediately before ITS spawn.
         refusal = fc._probe_guard_refusal(guard, exe, None, ctx.workspace)
         if refusal is not None:
             return fail(refusal, None, probe_refusal=guard.tripped_code)

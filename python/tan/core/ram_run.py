@@ -190,16 +190,30 @@ def plan_ram_image(elf: ElfImage, binary: bytes) -> RamImage:
 # ── J-Link scripts ──────────────────────────────────────────────────────────
 
 
+_SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
 def preamble(serial: str | None, speed: int, device: str) -> list[str]:
-    """Everything up to and including `connect`, shared by both sessions."""
+    """Everything up to and including `connect`, shared by both sessions. `serial` and
+    `device` must be plain tokens and `speed` an int, or this refuses -- they are
+    the only free-form values in either script."""
+    if not isinstance(speed, int) or isinstance(speed, bool) or speed <= 0:
+        raise RamRunError(f"J-Link speed {speed!r} is not a positive integer")
+    for label, value in (("serial", serial), ("device", device)):
+        if value is not None and not _SAFE_TOKEN.match(value):
+            raise RamRunError(f"the J-Link {label} {value!r} is not a plain token")
     lines = [f"SelectEmuBySN {serial}"] if serial else []
     return [*lines, "si SWD", f"speed {speed}", f"device {device}", "connect"]
 
 
 def load_script(pre: Sequence[str], binary_path: str, image: RamImage) -> str:
+    # Every address below is an `int` rendered with `0x%X`, never a string; the
+    # caller passes only a path it staged itself (and already validated).
     """`connect; halt; loadbin; setpc; go` -- the proven Flow C load session.
     `loadbin` resets the core and re-reads the vector table (SP); `setpc` enters
     the reset handler. No MRAM address appears anywhere."""
+    if any(c in binary_path for c in "\r\n\0"):
+        raise RamRunError("the image path carries a control character")
     return "\n".join(
         [*pre, "halt", f"loadbin {binary_path} 0x{image.base:X}", f"setpc 0x{image.entry:X}", "go", "exit"]
     ) + "\n"
