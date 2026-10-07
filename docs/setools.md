@@ -351,3 +351,32 @@ programming the GD32 will still need.
   and cannot enumerate what is resident first, so the replacement must be
   acknowledged. Ports alp-sdk#2025 (PR alp-sdk#2029), which put the same
   refusal on the AEN bench scripts.
+
+## `tan flash --ram`: is the probe on the HE core? (tan-cli#1354)
+
+A generic `Cortex-M55` attach picks whichever M55 access port J-Link finds, and its
+`Found Cortex-M55 r1p0` line is identical for the HE and the HP core. Before it loads
+anything, `--ram` runs one read-only session (`connect`, then three `mem32` reads --
+no halt, no write) and decides from two independent facts:
+
+* **Primary -- the AP that reports `AP[n]: Core found`.** Its `APAddr` identifies the
+  core: HE `0x00300000`, HP `0x00200000` (alp-sdk `scripts/bench/aen/openocd-ram-run.sh:16-17`,
+  `changelog.d/2037-openocd-m55he-bench-core-selection.md:4`, `changelog.d/2025.md:31`).
+  The AP, its address, the `CPUID register` and the `Found Cortex-M55` line are reported
+  as `jlink.attachedCore` and `ram.coreCheck.ap`.
+* **Corroboration -- the ITCM alias.** A core's local ITCM at `0x0` is its own global
+  window (HE `0x58000000`, HP `0x50000000`: alp-sdk `metadata/socs/alif/ensemble/e8.json`
+  `itcm_global_base` at lines 106 and 91; `docs/aen-bench-bringup.md:20`), so the 4 words
+  read at `0x0` must equal exactly one window.
+
+HE proceeds; a confirmed HP refuses with `flash.ram-core-mismatch`; contradictory or
+missing evidence (the AP says one core and the ITCM the other, an erased or identical
+ITCM, an unreadable window, an AP tan does not know) refuses with
+`flash.ram-core-unconfirmed`. `--assume-he` overrides only that last case, at your own
+risk, and never a confirmed HP. The words read and the verdicts are in
+`ram.coreCheck`.
+
+A stale alp-sdk checkout whose SoM presets are `schema_version: 1` now says so
+(`unsupported SoM preset schema_version 1 (tan needs 2) -- update alp-sdk`) wherever
+tan cannot read SoC metadata: the `--ram` aperture refusal and the `tan debug-config`
+metadata notes (`tan size` keeps its own `size.som-schema-version-skipped`).
