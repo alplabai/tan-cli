@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import typer
@@ -147,8 +148,14 @@ def test_adversarial_fixtures_are_capture_invalid_never_a_crash(tmp_path, name):
     assert doc["data"]["result"] is None
 
 
-@pytest.mark.parametrize("payload", ["[" * 100_000, "{" * 100_000, '{"a":' * 50_000])
-def test_deeply_nested_json_is_refused_not_a_recursion_crash(tmp_path, payload):
+_NESTED = {"brackets": "[" * 100_000, "braces": "{" * 100_000, "keys": '{"a":' * 50_000}
+
+
+# Short ids on purpose: a 100k-character parametrize id lands in
+# PYTEST_CURRENT_TEST, and Windows refuses environment values over 32767 chars.
+@pytest.mark.parametrize("kind", sorted(_NESTED))
+def test_deeply_nested_json_is_refused_not_a_recursion_crash(tmp_path, kind):
+    payload = _NESTED[kind]
     for line in ("ENERGY-CFG ", "ENERGY-RESULT "):
         code, doc = _via_cli(tmp_path, f"{line}{payload}\n" + capture())
         assert code == 2 and doc["issues"][0]["code"] == "model.device-capture-invalid"
@@ -213,6 +220,7 @@ def test_duplicate_energy_w_is_refused(tmp_path):
     assert code == 2 and doc["issues"][0]["code"] == "model.device-capture-invalid"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="/dev/zero and os.mkfifo are POSIX-only")
 def test_non_regular_capture_files_are_refused_without_reading(tmp_path):
     import os
 
