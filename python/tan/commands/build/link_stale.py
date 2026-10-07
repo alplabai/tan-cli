@@ -15,8 +15,10 @@ it.)
 [`stale_itcm_overlay_reset`] is the fix, run before each Zephyr configure:
 when the slice's command does NOT carry the ITCM overlay, delete any leftover
 `alp-link-itcm.*` artefact and, if the cache still names the overlay, return
-`-UEXTRA_DTC_OVERLAY_FILE`. A cache entry that names ONLY our overlay is the
-only thing ever dropped; anything else in the cache is left alone.
+`-UEXTRA_DTC_OVERLAY_FILE`. The WHOLE `EXTRA_DTC_OVERLAY_FILE` cache entry is
+unset when our overlay appears anywhere in it -- harmless, because tan never
+passes any other `EXTRA_DTC_OVERLAY_FILE`; an entry that never names our
+overlay is left alone.
 """
 
 from __future__ import annotations
