@@ -526,6 +526,14 @@ def ap_verdict(attached: dict | None) -> str:
     if not attached:
         return "unidentified"
     if "multiple" in attached:
+        # More than one Core-found AP. If ANY of them is the HP's, that is HP evidence
+        # (non-overridable); otherwise it is merely unplaceable.
+        for addr in attached["multiple"]:
+            try:
+                if addr is not None and int(addr, 16) == HP_AP_ADDR:
+                    return "hp"
+            except ValueError:
+                continue
         return "multiple"
     try:
         addr = int(attached["apAddr"], 16)
@@ -555,12 +563,14 @@ def combine_verdicts(ap: str, itcm: str) -> str:
 # global window, HE 0x58000000 (alp-sdk metadata/socs/alif/ensemble/e8.json
 # `itcm_global_base` 1476395008 at line 106; docs/aen-bench-bringup.md:20 "loadAddress=
 # 0x50000000 = HP ITCM global, vs HE's 0x58000000"). The HP window 0x50000000 is NEVER
-# read, and this is MEASURED, not cautious: bench round 8 (2026-10-07, evk-02, AEN803
-# 2026W36-0001, read-only A/B -- A2/A3 with the read vs A4/A5 without) showed that
-# `mem32 0x50000000` from the HE attach returns words with no error yet leaves the M55-HE
-# UNHALTABLE (`WARNING: CPU could not be halted`, DHCSR 00110003) until a PIN reset, and the
-# following load only worked through the fallback chain ending in `SYSRESETREQ has confused
-# core` -> VECTRESET. The check therefore reads ONLY the local ITCM 0x0 and the HE window.
+# read, and this is MEASURED, not cautious. Bench round 8 (2026-10-07, evk-02, AEN803
+# 2026W36-0001, read-only A/B): A2 = `mem32 0x0` + `mem32 0x58000000` ONLY -> A3 `h` OK
+# (DHCSR 00130003). A4 = the full check INCLUDING `mem32 0x50000000` -> A5/A6 `h` FAILS
+# (`WARNING: CPU could not be halted`, DHCSR 00110003) and the core stays unhaltable until a
+# PIN reset (C0-C2 recovered it); the read itself returned words with no error, and the later
+# load only worked through the fallback chain ending in `SYSRESETREQ has confused core` ->
+# VECTRESET. The shipped script is exactly the A2 reads: the local ITCM 0x0 and the HE
+# window, nothing else.
 
 HE_ALIAS = _ITCM_GLOBAL["M55_HE"]
 CORE_CHECK_WORDS = 4

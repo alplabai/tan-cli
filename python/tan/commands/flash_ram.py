@@ -336,6 +336,10 @@ def _run_ram_entry(
         **({"sessionError": bad} if bad else {}),
     }
     report["jlink"]["attachedCore"] = evidence.get("ap")
+    # Halt/reset trouble the CHECK session itself reported (it halts nothing, but a
+    # core that is already unhaltable says so on connect): reported against the check.
+    check_trouble = trouble_markers(check_text)
+    report["ram"]["coreCheck"]["resetFailures"] = list(check_trouble)
     if verdict in ("hp", "conflict-hp"):
         return fail(
             "the probe is attached to the M55-HP core (J-Link's Core-found access port is "
@@ -382,6 +386,13 @@ def _run_ram_entry(
         return fail(f"the load session failed: {problem}")
     loaded_on = attached_core(transcript)
     checked_on = report["jlink"].get("attachedCore")
+    if not (loaded_on and loaded_on.get("apAddr")):
+        # Not silently skipped: say the load banner named no Core-found AP.
+        report["jlink"]["attachedCoreAtLoad"] = None
+        report["jlink"]["attachedCoreAtLoadNote"] = (
+            "the load transcript named no Core-found access port, so the load session's "
+            "core was not compared with the core check's"
+        )
     if loaded_on and loaded_on.get("apAddr"):
         # The load is a SEPARATE J-Link session: it can attach to a different AP than the
         # check did (a probe that re-enumerated). After the fact, but loud -- the image may
@@ -406,10 +417,14 @@ def _run_ram_entry(
     # Halt/reset trouble is surfaced like Flow D's reset failures (bench round 8): a load
     # that only worked through J-Link's fallback chain is reported, never reported clean.
     trouble = trouble_markers(transcript)
-    report["jlink"]["resetFailures"] = list(trouble)
+    report["jlink"]["resetFailures"] = list(dict.fromkeys([*check_trouble, *trouble]))
 
     # ── the console ──
     message = f"{METHOD}[{entry_id}]: {summary}; running"
+    if check_trouble and not trouble:
+        message += (
+            "; the core check reported halt/reset trouble (" + ", ".join(check_trouble) + ")"
+        )
     if trouble:
         message += (
             "; the load only worked through a J-Link fallback (" + ", ".join(trouble) + ") -- "
@@ -445,8 +460,8 @@ def _run_ram_entry(
     lines.append(f"  ok: {message}")
     return (
         0,
-        entry("ok", 0, message, preflight_unarmed=unarmed, reset_unconfirmed=bool(trouble),
-              **warn_missing),
+        entry("ok", 0, message, preflight_unarmed=unarmed,
+              reset_unconfirmed=bool(trouble or check_trouble), **warn_missing),
         lines,
     )
 

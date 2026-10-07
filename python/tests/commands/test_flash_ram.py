@@ -901,3 +901,70 @@ def test_the_check_never_reads_the_hp_window_anywhere():
     assert "0x50000000" not in ram_run.core_check_script(["connect"])
     source = inspect.getsource(ram_run.core_check) + inspect.getsource(ram_run.core_check_script)
     assert "HP_ALIAS" not in source
+
+
+def _two_core_banner(first="0x00300000", second="0x00200000"):
+    return (
+        "DPv3 detected\n"
+        f"AP[2] (APAddr {second}): AHB-AP (IDR: 0x34770008)\nAP[2]: Core found\n"
+        f"AP[3] (APAddr {first}): AHB-AP (IDR: 0x34770008)\nAP[3]: Core found\n"
+        "CPUID register: 0x411FD220\nFound Cortex-M55 r1p0, Little endian.\n"
+    )
+
+
+def _out_with(banner):
+    return banner + "".join(_mem32(a, ITCM_WORDS) for a in (0x0, 0x58000000)) + "Script processing completed.\n"
+
+
+def test_several_core_found_aps_that_include_the_hp_are_hp_evidence(tmp_path, monkeypatch):
+    out = _out_with(_two_core_banner())
+    for kw in ({}, {"assume_he": True}):
+        jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out, **kw)
+        assert rc == 1 and _codes(issues) == ["flash.ram-core-mismatch"], kw
+        assert [jl.kind(x) for x in jl.scripts] == ["check"]
+        check = data["entries"][0]["ram"]["coreCheck"]
+        assert check["apVerdict"] == "hp" and check["verdict"] == "conflict-hp"
+        assert check["ap"]["multiple"] == ["0x00200000", "0x00300000"]
+
+
+def test_several_core_found_aps_without_the_hp_are_only_unplaceable(tmp_path, monkeypatch):
+    out = _out_with(_two_core_banner(first="0x00300000", second="0x00400000"))
+    jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out)
+    assert rc == 1 and _codes(issues) == ["flash.ram-core-unconfirmed"]
+    assert data["entries"][0]["ram"]["coreCheck"]["verdict"] == "unidentified"
+    # Only THIS case is overridable (and the load must then attach to the same APs).
+    same = CLEAN_LOAD.replace(
+        "AP[3] (APAddr 0x00300000): AHB-AP (IDR: 0x34770008)\nAP[3]: Core found\n",
+        "AP[2] (APAddr 0x00400000): AHB-AP (IDR: 0x34770008)\nAP[2]: Core found\n"
+        "AP[3] (APAddr 0x00300000): AHB-AP (IDR: 0x34770008)\nAP[3]: Core found\n",
+    )
+    jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out, load_out=same, assume_he=True)
+    assert rc == 0, (data, issues)
+
+
+def test_trouble_in_the_check_session_is_reported_against_the_check(tmp_path, monkeypatch):
+    out = core_check_out().replace(
+        "Found Cortex-M55 r1p0, Little endian.\n",
+        "Found Cortex-M55 r1p0, Little endian.\nWARNING: CPU could not be halted\n",
+    )
+    jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, out)
+    assert rc == 0, (data, issues)
+    entry = data["entries"][0]
+    assert entry["ram"]["coreCheck"]["resetFailures"] == ["CPU could not be halted"]
+    assert entry["jlink"]["resetFailures"] == ["CPU could not be halted"]
+    assert "the core check reported halt/reset trouble" in entry["message"]
+    assert "flash.jlink-reset-unconfirmed" in _codes(issues)
+
+
+def test_a_load_banner_without_an_ap_is_noted_not_silently_skipped(tmp_path, monkeypatch):
+    bare = CLEAN_LOAD.replace("AP[3] (APAddr 0x00300000): AHB-AP (IDR: 0x34770008)\n", "").replace(
+        "AP[3]: Core found\n", ""
+    )
+    jl, (rc, data, issues, _l, _s) = _check_run(tmp_path, monkeypatch, core_check_out(), load_out=bare)
+    assert rc == 0, (data, issues)
+    jlink = data["entries"][0]["jlink"]
+    assert jlink["attachedCoreAtLoad"] is None
+    assert "not compared with the core check's" in jlink["attachedCoreAtLoadNote"]
+    # A banner that DOES name the AP carries no such note.
+    jl, (rc, data, _i, _l, _s) = _check_run(tmp_path, monkeypatch, core_check_out())
+    assert "attachedCoreAtLoadNote" not in data["entries"][0]["jlink"]
