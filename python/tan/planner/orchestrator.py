@@ -18,6 +18,13 @@ from typing import Any, Optional
 
 import yaml
 
+from .link_target import (
+    CONF_NAME as ITCM_CONF_NAME,
+    OVERLAY_NAME as ITCM_OVERLAY_NAME,
+    UNSUPPORTED_CODE,
+    LinkTargetError,
+    applies_to as link_applies_to,
+)
 from .models import BoardProject, OrchestratorError, Slice
 from .paths import REPO
 from .secure import (emit_sysbuild_conf, emit_tfm_sysbuild_conf,
@@ -498,8 +505,24 @@ def _slice_command(
         if is_sysbuild:
             image = _zephyr_app_dir(slice_.app, base_dir).name
             extra_var = f"{image}_EXTRA_CONF_FILE"
-        defines.append(
-            f"-D{extra_var}={_tokenize(alp_conf, base_dir, REPO)}")
+        conf_files = [_tokenize(alp_conf, base_dir, REPO)]
+        if link_applies_to(project.diagnostics, slice_):
+            # `diagnostics.link: itcm` (tan-cli#1350): layer the Flow C ITCM
+            # retarget AFTER alp.conf (a later fragment wins) and hand Zephyr
+            # the devicetree half.  Both are `_slice_config_artefact`
+            # siblings in the same build dir, materialised from the plan.
+            if is_sysbuild:
+                raise LinkTargetError(
+                    UNSUPPORTED_CODE,
+                    "diagnostics.link: itcm cannot be combined with a "
+                    "sysbuild project (`boot:` / `ota:` / TF-M).")
+            itcm_conf_path = alp_conf.with_name(ITCM_CONF_NAME)
+            itcm_overlay_path = alp_conf.with_name(ITCM_OVERLAY_NAME)
+            conf_files.append(_tokenize(itcm_conf_path, base_dir, REPO))
+            defines.append(
+                "-DEXTRA_DTC_OVERLAY_FILE="
+                f"{_tokenize(itcm_overlay_path, base_dir, REPO)}")
+        defines.append(f"-D{extra_var}={';'.join(conf_files)}")
         cmd += ["--", *defines]
         return cmd
     if slice_.os == "yocto":

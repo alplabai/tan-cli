@@ -504,6 +504,13 @@ def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
             ExitCode.RUNTIME_FAILURE,
         ) from err
     except Exception as err:
+        # `diagnostics.link: itcm` refused (tan-cli#1350): a board.yaml input
+        # error with its own code, not a planner fault. Imported here, not at
+        # module scope: the planner needs a bound SDK root to import, and by
+        # now `_plan_emit` has bound it.
+        from tan.planner.link_target import LinkTargetError  # noqa: PLC0415
+        if isinstance(err, LinkTargetError):
+            raise BuildError(err.code, str(err), ExitCode.VALIDATION_FAILURE) from err
         # Every planner failure is an envelope, never a traceback -- the same
         # thing the subprocess boundary used to buy for free. Includes the bare
         # `ValueError`s the Ethos-U sizing path still raises (I-48).
