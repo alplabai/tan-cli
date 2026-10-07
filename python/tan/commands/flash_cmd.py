@@ -3704,7 +3704,9 @@ def _flow_d_preflight(
         # refusal here would be proceeding to the WRITE with the identity
         # unconfirmed.
         return f"{method}: {_NO_TRUSTED_JLINK} (needed for the DPIDR preflight)"
-    spawned, on_path_bin = [binary], None
+    # The child keeps its IDENTITY as argv[0] (what its own banner prints); the trusted
+    # absolute path is pinned through `executable=` below.
+    spawned, on_path_bin = [os.path.basename(binary)], None
     # tan-cli#567: and the program is then PINNED to an absolute location via
     # `executable=`, exactly as `_execute` does for the write itself -- this
     # probe is the step that decides WHICH BOARD is about to be written, so a
