@@ -36,6 +36,7 @@ from .kconfig import (
 from .models import BoardProject, OrchestratorError, Slice
 from .ownership import project_m33_overlay
 from .paths import REPO
+from .project_emit.dts import DtsOverlayUnavailable  # noqa: F401  (tan adaptation: defined beside the emitter that raises it)
 from .secure import emit_sysbuild_conf, emit_tfm_sysbuild_conf
 
 # The skip-vs-fail policy a slice dispatcher MUST apply, published verbatim
@@ -193,6 +194,26 @@ DTS_OVERLAY_ARTEFACT = "alp.overlay"
 CMAKE_ARGS_ARTEFACT = "cmake-args.txt"
 
 
+def _v1_shaped_project(project: BoardProject) -> dict[str, Any]:
+    """The legacy `board:`-wrapper dict the project-wide emitters read.
+
+    The public board.yaml schema no longer uses this wrapper, but the
+    in-file emitters (dts-overlay, hw-info-h, west-libraries) still consume
+    it. Shared by `alp_project.py` and `_slice_dts_overlay`.
+    """
+    return {
+        "som": {
+            "sku":    project.sku,
+            "hw_rev": project.hw_rev,
+        },
+        "pins": list(project.raw.get("pins") or []),
+        "board": ({
+            "name":   project.board_name,
+            "hw_rev": project.board_hw_rev,
+        } if project.board_name else None),
+    }
+
+
 def _slice_dts_overlay(project: BoardProject, slice_: Slice) -> str:
     """The slice's DTS overlay text -- exactly what
     `alp_project.py --emit dts-overlay --core <id>` prints.
@@ -207,32 +228,26 @@ def _slice_dts_overlay(project: BoardProject, slice_: Slice) -> str:
     # tan adaptation: the emitter is a sibling subpackage here, not the
     # `alp_project_emit` package beside `alp_orchestrate/` upstream.
     from .project_emit.dts import _emit_dts_overlay
+    from .som_metadata import _sku_family
 
-    shaped: dict[str, Any] = {
-        "som": {"sku": project.sku, "hw_rev": project.hw_rev},
-        "pins": list(project.raw.get("pins") or []),
-        "board": ({
-            "name":   project.board_name,
-            "hw_rev": project.board_hw_rev,
-        } if project.board_name else None),
-    }
+    # Only the two facts the emitter itself cannot render are "unavailable"
+    # (the plan degrades to a warning); everything else propagates.
     try:
-        out = _emit_dts_overlay(
-            shaped, project.som_preset, project.board_preset,
-            v2_peripherals=sorted(set(slice_.peripherals)),
-            v2_core_id=slice_.core_id,
-            v2_core_os=slice_.os,
-            v2_core_ids=[slice_.core_id],
-        )
-    except SystemExit as exc:
-        # The emitter `sys.exit`s with a message when the board names no
-        # header under include/alp/boards/. Surface it as the ordinary
-        # error type so a plan emit can degrade to a warning instead of
-        # dying, and the standalone emit still prints it and exits 1.
-        raise OrchestratorError(str(exc.code)) from None
+        _sku_family(project.sku)
     except ValueError as exc:
-        # `_sku_family` rejects a SKU outside the production families.
-        raise OrchestratorError(str(exc)) from None
+        raise DtsOverlayUnavailable(str(exc)) from None
+    out = _emit_dts_overlay(
+        _v1_shaped_project(project), project.som_preset,
+        project.board_preset,
+        v2_peripherals=sorted(set(slice_.peripherals)),
+        v2_core_id=slice_.core_id,
+        v2_core_os=slice_.os,
+        v2_core_ids=[slice_.core_id],
+    )
+    # (tan adaptation: the missing-header case raises `DtsOverlayUnavailable`
+    # from the emitter itself rather than `sys.exit`ing.)
+    # Outside the degrade path above: an M33 ownership defect must still
+    # fail the plan, not turn into a missing artefact.
     own_dts, _ = project_m33_overlay(project, slice_.core_id)
     if own_dts:
         out += ("\n/* Assignable peripherals owned by the M33 "
@@ -742,11 +757,11 @@ def emit_build_plan(
         if not (cmd is None and slice_.os == "baremetal"):
             try:
                 extras.append(_slice_dts_overlay_artefact(project, slice_))
-            except OrchestratorError as exc:
-                # Additive artefact: a board whose overlay cannot be
-                # rendered (no board header, unrecognised SKU) must not stop
-                # a plan that emitted fine before. The consumer sees the
-                # warning and falls back.
+            except DtsOverlayUnavailable as exc:
+                # Additive artefact: a board with no header (or an
+                # unrecognised SKU) must not stop a plan that emitted fine
+                # before. The consumer sees the warning and falls back.
+                # Any other OrchestratorError still fails the plan.
                 warnings.append({
                     "code":    "dts-overlay-unavailable",
                     "coreId":  slice_.core_id,

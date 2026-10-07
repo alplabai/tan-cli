@@ -918,7 +918,7 @@ env:
   #   - scaffold: NO re-vendor needed -- `scaffold_byte_parity.py --sdk
   #     <ac0e2a5e0>` is 10/10 PASS against the tree unchanged; only the
   #     vendor point in `python/tan/templates/vendored/MANIFEST.md` moves.
-  PINNED_SDK_TAG: ac0e2a5e096a1c8c102818650a688d0f7e709066
+  PINNED_SDK_TAG: 2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0
 
   # THE FROZEN PLANNER ORACLE (tan-cli#509). Deliberately its OWN pin, and
   # deliberately one that does NOT track `PINNED_SDK_TAG` MECHANICALLY (the
@@ -1210,7 +1210,7 @@ env:
   #   - not visible, by construction: #2735 (no example has a Yocto slice
   #     with a `${NAME}` tenant) and #2705's live-line refusal (no example
   #     trips it).
-  PINNED_PLANNER_ORACLE_SDK_REF: ac0e2a5e096a1c8c102818650a688d0f7e709066
+  PINNED_PLANNER_ORACLE_SDK_REF: 2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0
 
 permissions:
   # Least privilege by default (tan-cli#435). Every job here READS: this

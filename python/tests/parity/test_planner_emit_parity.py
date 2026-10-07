@@ -1384,6 +1384,57 @@ def test_dts_overlay_matches_the_build_plans_own_config_artefact(planners, board
         pytest.skip(f"{board}: no slice carries an alp.overlay to compare")
 
 
+def test_a_missing_board_header_downgrades_the_overlay_to_a_warning(
+    planners, monkeypatch, tmp_path
+):
+    """tan-cli#1216: the ONE overlay failure the plan downgrades -- mirrors
+    alp-sdk#2771's test. `alp.overlay` is absent, a `dts-overlay-unavailable`
+    warning names each carrier core, `cmake-args.txt` still rides, and the
+    plan is still a valid build-plan-v1."""
+    import jsonschema
+
+    _, relocated = planners
+    import tan.planner.project_emit.dts as dts
+
+    board = SDK / "examples/multicore/rpmsg-aen/board.yaml"
+    monkeypatch.setattr(dts, "_board_header_path",
+                        lambda name, root: tmp_path / "no-such-header.h")
+    monkeypatch.setattr(dts, "REPO", tmp_path)
+    project = relocated.load_board_yaml(board)
+    plan = json.loads(relocated.emit_build_plan(
+        project, board_yaml=board, build_root=Path("build")))
+    schema = json.loads((SDK / "metadata" / "schemas"
+                         / "build-plan-v1.schema.json").read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator(schema).validate(plan)
+
+    carriers = {sl["coreId"] for sl in plan["slices"]
+                if sl["backend"] in ("zephyr", "baremetal")}
+    warned = {w["coreId"] for w in plan["warnings"]
+              if w["code"] == "dts-overlay-unavailable"}
+    assert carriers and warned == carriers
+    for sl in plan["slices"]:
+        names = {a["path"].rsplit("/", 1)[-1] for a in sl["configArtefacts"]}
+        assert "alp.overlay" not in names
+        if sl["coreId"] in carriers:
+            assert "cmake-args.txt" in names
+
+
+def test_any_other_overlay_failure_still_fails_the_plan(planners, monkeypatch):
+    _, relocated = planners
+    import tan.planner.buildplan as bp
+    from tan.planner.models import OrchestratorError
+
+    def broken(project, core_id):
+        raise OrchestratorError("M33 ownership defect")
+
+    monkeypatch.setattr(bp, "project_m33_overlay", broken)
+    board = SDK / "examples/multicore/rpmsg-aen/board.yaml"
+    project = relocated.load_board_yaml(board)
+    with pytest.raises(OrchestratorError, match="M33 ownership defect"):
+        relocated.emit_build_plan(
+            project, board_yaml=board, build_root=Path("build"))
+
+
 @pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
 def test_cmake_args_matches_the_build_plans_own_config_artefact(planners, board):
     """tan-cli#1216 (ADR-0026 §D): `tan generate --target cmake-args --core

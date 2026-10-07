@@ -380,23 +380,12 @@ _V1_SHAPED_MODES = frozenset({
 
 
 def _v1_shaped_project(project) -> dict[str, Any]:
-    """The legacy `board:`-wrapper dict the four relocated emitters consume.
+    """The legacy `board:`-wrapper dict the four relocated emitters consume --
+    the one `buildplan._v1_shaped_project` (alp-sdk's `alp_project.py` shares
+    it with the plan emit, #2771)."""
+    from tan.planner.buildplan import _v1_shaped_project as shaped  # noqa: PLC0415
 
-    Verbatim from `alp_project._run_v2_per_core_emit`. The public board.yaml
-    schema no longer uses this wrapper, but it is the shape those emitters read,
-    and reshaping them instead would be a rewrite.
-    """
-    return {
-        "som": {
-            "sku":    project.sku,
-            "hw_rev": project.hw_rev,
-        },
-        "pins": list(project.raw.get("pins") or []),
-        "board": ({
-            "name":   project.board_name,
-            "hw_rev": project.board_hw_rev,
-        } if project.board_name else None),
-    }
+    return shaped(project)
 
 
 def _render_dts_overlay(project, shaped, core: str | None) -> str:

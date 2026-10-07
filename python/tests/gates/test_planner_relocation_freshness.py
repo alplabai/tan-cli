@@ -1305,22 +1305,25 @@ from tests.conftest import sdk_root
 #: lines, unchanged), `d7d17c7ae`'s live-line refusal (no example trips it),
 #: `5a46a9ec8`'s M33 ownership Kconfig (no example assigns a peripheral to
 #: m33) and `319812a16` (a filter).
-#: RE-SYNC (mirror / PINNED_HASHES) `ac0e2a5e` -> `1c0862cd` (tan-cli#1216,
-#: alp-sdk's `feat/1216-plan-dts-overlay-cmake-args`; PROVISIONAL -- re-run
-#: `planner_resync.py` against the squash-merge commit once that PR lands, the
-#: branch commit does not survive it). Audited, not machine-written:
+#: AUDITED RE-SYNC (mirror / PINNED_HASHES): `ac0e2a5e` -> `2d2a8533` (tan-cli#1216;
+#: supersedes the bot's #1310 proposal for the same range, which could not
+#: apply the hand-ports and would have broken two things -- see below).
 #:
-#:   * `buildplan.py` / `__init__.py` -- ported: `_slice_dts_overlay` +
-#:     `_slice_cmake_args_artefact` and the additive `alp.overlay` /
-#:     `cmake-args.txt` `configArtefacts`. tan adaptation: the DTS emitter is
-#:     `tan.planner.project_emit.dts`, not the sibling `alp_project_emit`.
-#:   * `loader.py` -- upstream (tan-cli#1350) now refuses
+#:   * `buildplan.py` / `__init__.py` -- ported: `_slice_dts_overlay`,
+#:     `_slice_cmake_args_artefact`, `_v1_shaped_project`,
+#:     `DtsOverlayUnavailable`, and the additive `alp.overlay` /
+#:     `cmake-args.txt` `configArtefacts` (alp-sdk#2771). tan adaptations: the
+#:     DTS emitter is `tan.planner.project_emit.dts`, which RAISES
+#:     `DtsOverlayUnavailable` for a missing header (upstream `sys.exit`s and
+#:     converts), and `_sku_family` comes from `tan.planner.som_metadata`.
+#:     #1310's clean 3-way merge kept upstream's sibling-package import
+#:     (`alp_project_emit`), which does not exist in tan.
+#:   * `loader.py` -- upstream (alp-sdk#2762, tan-cli#1350) refuses
 #:     `diagnostics.link: itcm`, because alp-sdk's planner cannot emit an
 #:     ITCM-linked image. tan's planner implements it, so the refusal is NOT
-#:     taken; only the pinned hash moves.
-#:   * hand-ports (`gen_zephyr_board.py`, `alp_project.py`) -- NOT re-audited
-#:     here, so `HAND_PORT_PINNED_SDK_COMMIT` does not move.
-PINNED_SDK_COMMIT = "1c0862cd2aff4c6cbd2eaa80c91863814c60c5c3"  # alp-sdk origin/dev -- #2705/#2735/#2674/#2673/#2677 resync (tan-cli#1309, this change)
+#:     taken (#1310 took it, which would make `tan build` refuse the knob tan
+#:     itself implements); only the pinned hash moves.
+PINNED_SDK_COMMIT = "2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0"  # alp-sdk origin/dev -- #2771 (build-plan alp.overlay/cmake-args.txt) + #2762/#2747 resync (tan-cli#1216)
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -1360,9 +1363,9 @@ PINNED_SDK_COMMIT = "1c0862cd2aff4c6cbd2eaa80c91863814c60c5c3"  # alp-sdk origin
 #: upstream is the one carrying the bug here.
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
-    "__init__.py": "77d1fbf042ffc726a96dffb60107fc403dc68fba83f564db43eba786bef75150",
+    "__init__.py": "85cc05f1fe9f2bd859b8c7eef37f21d7092027031993817fc5fdbe519faf528a",
     "aperture.py": "717ddd2e178e0b530bee01ac77ccf9ee67ed388c9ec21f4debdc1d3bffe07365",
-    "buildplan.py": "8c094e53c3f7d666e12e276b2c298d3c8cf100abf96cb3d3a8518c56e91f0355",
+    "buildplan.py": "592f1b70f214593a34ae63e24cedad49062b4bfffc69caf0c773495ce2427368",
     "carveout.py": "ea0e7e0ca361a84b85111e0a45e822ed99bcbfd85476c0295cea8db00d20cb91",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
@@ -2314,7 +2317,19 @@ PINNED_HASHES: dict[str, str] = {
 #:     `linux_ownership.py`, compared at library level by
 #:     `test_planner_emit_parity.py`).
 #:     `tests/planner/test_dts_overlay_m33_ownership.py`.
-HAND_PORT_PINNED_SDK_COMMIT = "ac0e2a5e096a1c8c102818650a688d0f7e709066"  # alp-sdk origin/dev -- #2673/#2679/#2695/#2678/#2653 audit (tan-cli#1309, this change)
+#: AUDIT `ac0e2a5e` -> `2d2a8533` (tan-cli#1216), the two hand-ports that moved:
+#:   - `scripts/gen_zephyr_board.py` (alp-sdk#2747, #2685) -- PORTED into
+#:     `tan/planner/zephyr_board.py` by a 3-way merge of the upstream delta
+#:     (function-placement conflict resolved by hand): V2N `supported:` lists only gpio/spi, sci0 RXD
+#:     `bias-pull-up`, the RAM console node + `zephyr,ram-console` chosen,
+#:     OpenAMP window tokens from the SoC's `openamp_carveout`
+#:     (`_openamp_subst`, `_ram_console`), the ATTN TINT-slot route, and
+#:     `_v2n_defconfig(links, soc_spec)` with the RAM-console Kconfig.
+#:   - `scripts/alp_project.py` (alp-sdk#2771) -- PORTED already: its
+#:     `--emit dts-overlay --core` now calls `_slice_dts_overlay`, which is
+#:     what `planner_emit._render_dts_overlay` does for `--core`, and the
+#:     shared `_v1_shaped_project` is the one `planner_emit` now reuses.
+HAND_PORT_PINNED_SDK_COMMIT = "2d2a85333ed32d1bf4f2131aefd563f9a1a91cd0"  # alp-sdk origin/dev -- #2747/#2685/#2771 audit (tan-cli#1216)
 
 #: sha256 of every alp-sdk source file a `tan/planner/**` module was
 #: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
@@ -2378,7 +2393,7 @@ HAND_PORT_PINNED_SDK_COMMIT = "ac0e2a5e096a1c8c102818650a688d0f7e709066"  # alp-
 #: `sentinels.py` set the precedent for. Neither lives under `tan/planner/`
 #: itself, so neither is in `HAND_PORT_SOURCES` below.
 HAND_PORT_HASHES: dict[str, str] = {
-    "scripts/gen_zephyr_board.py": "6cd878da802074a9b7d5f9a7495301194e5b89c37a35ce59275425396ad537e3",
+    "scripts/gen_zephyr_board.py": "a93231812432480a432f0600f0e600e889744eaaa5ce516ff639d50524596151",
     "scripts/sentinels.py": "54c0b5c4211a638f1a6141340e76b2bc7e32935b8c61ba5e8948e2da1ab81d9c",
     "scripts/whole_device_alias.py": "a38abb18da876dfcb95edf7332a2a057bcf16da524f2fa9b7b367a00222756f5",
     "scripts/alp_project_loader.py": "72c1c77696d175c704161241da32b88432f0e55acba2c0f4f7c40dbd7a5a5960",
@@ -2391,7 +2406,7 @@ HAND_PORT_HASHES: dict[str, str] = {
     "scripts/alp_project_emit/west_libs.py": "bfd9735519d120d2a32bd054a69838c32e339a04cd977521fc5a53c950055392",
     "scripts/alp_cli/diagnostic_format.py": "9fd45d268b12527b8e93720a380dab57d4bd67e00c0066505e7d587eea19eb18",
     "scripts/alp_cli/validator.py": "cd97160c7cbef25994d9b03a6a0a4f5e5c18f6525c8f5ba3c6366c7a419f3eec",
-    "scripts/alp_project.py": "05c02299855f9d3ce36ac12b49d27ee7f709325c5fe7537190acfbfd10699304",
+    "scripts/alp_project.py": "2c636015657fbb711002d3bdaeb1ea69013bb7a3e93636183d8499f342d2d576",
 }
 
 #: `tan/planner/`-relative path -> the alp-sdk-relative source path it was

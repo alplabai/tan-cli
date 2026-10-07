@@ -10580,16 +10580,6 @@ exists and contains the pin; if its number differs, correct this line. See
 
 ### Changed
 
-- **`dts-overlay --core` and `cmake-args` render the build plan's own
-  artefacts (tan-cli#1216, ADR-0026 §D).** The alp-sdk build plan now carries
-  each zephyr/baremetal slice's `alp.overlay` and `cmake-args.txt` in
-  `configArtefacts` (additive under `schemaVersion` 1; a board with no header
-  under `include/alp/boards/` gets a `dts-overlay-unavailable` warning instead
-  of the overlay). `tan generate --target dts-overlay --core <id>` and
-  `--target cmake-args` call the one helper `emit_build_plan` calls, so the
-  bytes cannot diverge from the plan's. Needs the alp-sdk planner re-sync that
-  carries the new helpers.
-
 - **BREAKING: tan's effective alp-sdk floor rises to the first alp-sdk
   release that contains commit `c81cb5db9945c8f448a7bb952d374f874e2f42c0`**
   (moved from `81a9d515a90403cce30588704e31faf9dc893838` by the further
