@@ -188,6 +188,7 @@ from tan.core.flow_d_report import (
     VERIFICATION_CACHE,
     VERIFICATION_NOTE,
     VERIFICATION_READBACK,
+    VERIFICATION_READBACK_NOTE,
     dpidr_in,
     planned_write,
     readback_script,
@@ -3333,9 +3334,51 @@ def _flow_d_plan_block(
     }
 
 
-def _flow_d_log_path(build_root: str, entry_id: str) -> str:
+#: How many Flow D transcripts are kept per core (tan-cli#1343 bench round 6).
+_LOG_KEEP = 10
+
+
+def _flow_d_log_path(build_root: str, entry_id: str, now: "time.struct_time | None" = None) -> str:
+    """`<build>/flash-logs/alif_mram_jlink-<core>-<UTC YYYYmmddTHHMMSSZ>.log` --
+    one file per run, never overwritten (a failed run's evidence must survive the
+    next one)."""
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", entry_id) or "entry"
-    return os.path.join(build_root, "flash-logs", f"{FLOW_D_METHOD}-{safe}.log")
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", now or time.gmtime())
+    return os.path.join(build_root, "flash-logs", f"{FLOW_D_METHOD}-{safe}-{stamp}.log")
+
+
+def _write_transcript(path: str, text: str) -> str:
+    """Write `text` to a NEW file near `path` and return its final path. Written via a
+    temp file + `os.replace` in the same directory, so a symlink planted at the target
+    name is replaced, never followed (tan-cli#1343 review, minor d); a symlinked log
+    DIRECTORY is refused; a same-second name collision gets a `-N` suffix. Then the
+    oldest transcripts for this core beyond `_LOG_KEEP` are removed."""
+    directory = os.path.dirname(path)
+    if os.path.islink(directory):
+        raise OSError(f"{directory} is a symlink; not writing the transcript through it")
+    os.makedirs(directory, exist_ok=True)
+    final, n = path, 0
+    while os.path.lexists(final):
+        n += 1
+        final = f"{path[:-4]}-{n}.log"
+    handle, tmp = tempfile.mkstemp(prefix=".tan-flash-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, final)
+    except BaseException:
+        _unlink(tmp)
+        raise
+    prefix = os.path.basename(path).rsplit("-", 1)[0] + "-"
+    try:
+        mine = sorted(
+            n for n in os.listdir(directory) if n.startswith(prefix) and n.endswith(".log")
+        )
+        for stale in mine[: max(len(mine) - _LOG_KEEP, 0)]:
+            _unlink(os.path.join(directory, stale))
+    except OSError:
+        pass
+    return final
 
 
 def _flow_d_record(
@@ -3369,13 +3412,13 @@ def _flow_d_record(
     }
     path = _flow_d_log_path(ctx.build_root, entry_id)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(f"# tan flash {FLOW_D_METHOD}[{entry_id}] rc={outcome.returncode}\n")
-            fh.write("## J-Link Commander script\n")
-            fh.write(f"{_DISABLE_FW_UPDATE}{plan.jlink_script or ''}\n")
-            fh.write("## stdout\n" + outcome.stdout + "\n## stderr\n" + outcome.stderr + "\n")
-        block["transcriptPath"] = path
+        block["transcriptPath"] = _write_transcript(
+            path,
+            f"# tan flash {FLOW_D_METHOD}[{entry_id}] rc={outcome.returncode}\n"
+            "## J-Link Commander script\n"
+            f"{_DISABLE_FW_UPDATE}{plan.jlink_script or ''}\n"
+            "## stdout\n" + outcome.stdout + "\n## stderr\n" + outcome.stderr + "\n",
+        )
     except OSError as err:
         block["transcriptPath"] = None
         block["transcriptError"] = str(err)
@@ -3454,6 +3497,7 @@ def _flow_d_readback(
                 "trust this board's slot0; re-flash.",
             )
         block["verification"] = VERIFICATION_READBACK
+        block["verificationNote"] = VERIFICATION_READBACK_NOTE
         return None
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

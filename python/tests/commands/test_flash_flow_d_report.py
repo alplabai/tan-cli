@@ -128,9 +128,10 @@ def test_the_readback_script_reuses_the_write_preamble_and_ends_at_exit():
     script = flow_d_report.readback_script(write, [("0x80010000", 15, "/tmp/r0.bin")])
     assert script == (
         "SelectEmuBySN 000999000001\nsi SWD\nspeed 4000\ndevice PART\nconnect\n"
-        "savebin /tmp/r0.bin 0x80010000 0xF\nexit\n"
+        "savebin /tmp/r0.bin 0x80010000 0xF\nRSetType 2\nr\ng\nexit\n"
     )
-    assert "loadbin" not in script and "RSetType" not in script
+    # Ends like the write did (reset + run), so the app is not left halted.
+    assert "loadbin" not in script and "verifybin" not in script
 
 
 # ── the envelope ────────────────────────────────────────────────────────────
@@ -148,6 +149,7 @@ def test_the_envelope_carries_the_transcript_the_dpidr_and_cache_verified(tmp_pa
     assert "Found SW-DP with ID 0x4C013477" in jlink["transcriptTail"]
     log = Path(jlink["transcriptPath"])
     assert log.parent == tmp_path / "build" / "flash-logs"
+    assert re.fullmatch(r"alif_mram_jlink-m55_hp-\d{8}T\d{6}Z(-\d+)?\.log", log.name), log.name
     text = log.read_text(encoding="utf-8")
     assert "loadbin" in text and "Found SW-DP with ID 0x4C013477" in text
     assert "cache-verified and PIN-reset" in entry["message"]
@@ -273,12 +275,14 @@ def test_readback_upgrades_cache_verified_when_the_fresh_session_matches(tmp_pat
     assert rb["regions"][0]["sha256Expected"] == _sha(APP) == rb["regions"][0]["sha256Actual"]
     assert rb["regions"][1]["sha256Actual"] == _sha(ATOC)
     assert entry["jlink"]["verification"] == "readback-verified"
+    assert "not a cold-power-cycle proof" in entry["jlink"]["verificationNote"]
     assert "read back in a fresh J-Link session (sha256 match)" in entry["message"]
     # Two spawns: the write, then the read-back -- and the read-back is a FRESH
     # script (same preamble, no loadbin / reset).
     write, read = [s for s in fake.scripts if "ShowEmuList" not in s]
     assert "loadbin" in write and "savebin" not in write
-    assert "savebin" in read and "loadbin" not in read and "RSetType" not in read
+    assert "savebin" in read and "loadbin" not in read
+    assert read.splitlines()[-4:] == ["RSetType 2", "r", "g", "exit"]
     assert read.splitlines().index("connect") < read.splitlines().index(
         next(l for l in read.splitlines() if l.startswith("savebin"))
     )
@@ -393,3 +397,59 @@ def test_resident_regions_parse_the_three_spellings():
     for bad in ("DEVICE@", "A@zz", "A B"):
         with _pytest.raises(FlashPlanError):
             resident_regions({"resident_atoc_entries": [bad]})
+
+
+# ── transcript files (tan-cli#1343 review) ──────────────────────────────────
+
+
+def test_each_run_gets_its_own_timestamped_transcript_and_only_ten_are_kept(tmp_path):
+    import time as _time
+
+    from tan.commands.flash_cmd import _flow_d_log_path, _write_transcript
+
+    base = _time.gmtime(1_800_000_000)
+    paths = []
+    for i in range(13):
+        stamp = _time.gmtime(1_800_000_000 + i)
+        paths.append(_write_transcript(_flow_d_log_path(str(tmp_path), "m55_he", stamp), f"run {i}"))
+    names = sorted(p.name for p in (tmp_path / "flash-logs").iterdir())
+    assert len(names) == 10
+    assert names[0].startswith("alif_mram_jlink-m55_he-2027") and names[0].endswith("Z.log")
+    assert Path(paths[-1]).read_text() == "run 12"
+    assert not Path(paths[0]).exists() and not Path(paths[2]).exists()
+    assert Path(paths[3]).exists()
+    # Same second: a suffix, never an overwrite.
+    again = _write_transcript(_flow_d_log_path(str(tmp_path), "m55_he", _time.gmtime(1_800_000_012)), "dup")
+    assert again != paths[-1] and again.endswith("-1.log") and Path(paths[-1]).read_text() == "run 12"
+    assert base  # (silences the unused-name lint without hiding the clock input)
+
+
+def test_a_symlink_planted_at_the_log_name_is_replaced_not_followed(tmp_path):
+    import os as _os
+
+    from tan.commands.flash_cmd import _write_transcript
+
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious", encoding="utf-8")
+    logs = tmp_path / "flash-logs"
+    logs.mkdir()
+    target = logs / "alif_mram_jlink-c-20270101T000000Z.log"
+    _os.symlink(victim, target)
+    final = _write_transcript(str(target), "transcript")
+    assert victim.read_text(encoding="utf-8") == "precious"
+    assert final != str(target) and Path(final).read_text() == "transcript"
+
+
+def test_a_symlinked_log_directory_is_refused(tmp_path):
+    import os as _os
+
+    import pytest as _pytest
+
+    from tan.commands.flash_cmd import _write_transcript
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _os.symlink(elsewhere, tmp_path / "flash-logs")
+    with _pytest.raises(OSError):
+        _write_transcript(str(tmp_path / "flash-logs" / "alif_mram_jlink-c-x.log"), "t")
+    assert list(elsewhere.iterdir()) == []

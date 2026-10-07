@@ -40,6 +40,14 @@ VERIFICATION_NOTE = (
     "(alp-sdk#2233). --readback adds a fresh-session read-back + sha256 compare."
 )
 
+#: What a matching read-back proves: a FRESH J-Link session read the same bytes. Still
+#: not a cold-cycle proof (alp-sdk#2233).
+VERIFICATION_READBACK_NOTE = (
+    "a fresh J-Link session read the written regions back and their sha256 matches the "
+    "source files; this is stronger than the flash cache but is not a cold-power-cycle "
+    "proof (alp-sdk#2233)."
+)
+
 #: J-Link Commander phrasing that means the PIN reset (`RSetType 2` / `r` / `g`)
 #: did not land. Substring-matched against the captured transcript; the exit
 #: code cannot tell these runs apart (JLinkExe still exits 0).
@@ -108,6 +116,18 @@ def sha256_of(path: str) -> str:
     return digest.hexdigest()
 
 
+def reset_tail(jlink_script: str) -> list[str]:
+    """The write script's reset/run tail -- from its first `RSetType` line up to (not
+    including) the final `exit` -- so a read-back ends the same way the write did and
+    the app is not left halted. `["g"]` when the script has no `RSetType`."""
+    lines = [line for line in jlink_script.splitlines() if line.strip()]
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("rsettype"):
+            end = len(lines) - 1 if lines[-1].strip().lower() == "exit" else len(lines)
+            return lines[i:end]
+    return ["g"]
+
+
 def readback_script(
     jlink_script: str,
     regions: Sequence[tuple[str, int, str]],
@@ -127,6 +147,7 @@ def readback_script(
     for address, size, dest in regions:
         validate_commander_path(dest, "the read-back destination path")
         out.append(f"savebin {commander_path(dest)} {address} 0x{size:X}")
+    out.extend(reset_tail(jlink_script))
     out.append("exit")
     return "\n".join(out) + "\n"
 
