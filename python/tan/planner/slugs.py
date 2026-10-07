@@ -142,6 +142,7 @@ _ON_MODULE_NON_CHIP_FIELDS: frozenset[str] = frozenset({
     "silicon",             # e.g. "renesas:rzv2n:n44" — SoC identifier, not a driver
     "ethernet_phy_count",  # integer count, not a chip slug
     "i2c_devices",         # sub-block: handled by extracting chip: entries below
+    "dxm1",                # sub-block: DX-M1 strap/reset pins, not chip slugs
     "ospi_memories",       # sub-block: storage parts (flash/HyperRAM); MPNs have no chips/ driver -- excluded like nor_flash/emmc below
     # Storage-class fields encode the SoC controller / peripheral name
     # that reaches the on-module storage (e.g. `nor_flash: xspi` -> the
@@ -305,6 +306,7 @@ _CHIP_SUBSYSTEMS: dict[str, tuple[str, ...]] = {
     "optiga_trust_m":     ("I2C",),
     "eeprom_24c128":      ("I2C",),
     "tcal9538":           ("I2C",),
+    "ina228":             ("I2C",),
     "ina236":             ("I2C",),
     # pdm_mic helper has no subsystem dep declared in Kconfig
     # (uses <alp/i2s.h> when enabled at v0.2+).

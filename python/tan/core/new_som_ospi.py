@@ -30,7 +30,7 @@ no `"TBD"` string escape hatch the way `chip`/`capacity_mbit` do:
 `role`/`interface` must match a lowercase-slug pattern (`^[a-z][a-z0-9_]*$`,
 which an uppercase `TBD` fails). The convention value fills `chip_select`/
 `interface`; the schema-legal lowercase literal `tbd` fills `role`, matching
-`inference.preferred_backend`'s own `tbd` placeholder convention next door in
+`inference.auto_order`'s own `[tbd]` placeholder convention next door in
 `_render_preset`.
 
 `chip_select`'s only bound in `metadata/schemas/som-preset-v2.schema.json` is
