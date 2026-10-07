@@ -24,6 +24,8 @@ visible to the issue-code registry gate.
 
 from __future__ import annotations
 
+import hashlib
+import hashlib
 import os
 import shutil
 from pathlib import Path
@@ -36,6 +38,7 @@ from tan.core.model_zoo import (
     MIN_SDK_COMMIT,
     ZooEntry,
     StagedModel,
+    _bundled_chunks,
     ZooFetchError,
     ZooUnavailable,
     entry_as_dict,
@@ -121,8 +124,36 @@ def run_zoo(*, context: ProjectContext, zoo_dir: Path, sku: str | None) -> Resul
     return project, sdk, data, issues, ExitCode.SUCCESS
 
 
+def _is_orphan_of(entry: ZooEntry, zoo_dir: Path, dest: Path) -> StagedModel | None:
+    """`dest` as a `StagedModel` when it is a plain file already holding exactly
+    this entry's bytes -- what a run interrupted between publishing the model
+    and writing `board.yaml` leaves behind -- so a re-run can finish the job
+    instead of refusing. A symlink, or any other content, is never adopted."""
+    if dest.is_symlink() or not dest.is_file():
+        return None
+    try:
+        got = hashlib.sha256()
+        with dest.open("rb") as handle:
+            while chunk := handle.read(1 << 20):
+                got.update(chunk)
+        want = entry.source.get("sha256")
+        if want is None:
+            bundled = hashlib.sha256()
+            for chunk in _bundled_chunks(zoo_dir, entry.source["bundled"]):
+                bundled.update(chunk)
+            want = bundled.hexdigest()
+        return StagedModel(dest, got.hexdigest(), dest.stat().st_size) if got.hexdigest() == want else None
+    except (OSError, ZooFetchError):
+        return None
+
+
 def _precheck(
-    model_id: str, entry: ZooEntry | None, entries: list[ZooEntry], existing_names: set[str], dest: Path
+    model_id: str,
+    entry: ZooEntry | None,
+    entries: list[ZooEntry],
+    existing_names: set[str],
+    dest: Path,
+    adopt: bool = False,
 ) -> Issue | None:
     """The refusal `add` must make before fetching anything, or `None`."""
     if entry is None:
@@ -138,7 +169,7 @@ def _precheck(
             "error",
             f"board.yaml already declares a model named {entry.id}; nothing was changed.",
         )
-    if os.path.lexists(dest):
+    if os.path.lexists(dest) and not adopt:
         return Issue(
             "model.add-destination-exists",
             "error",
@@ -193,11 +224,11 @@ def _publish(tmp: Path, dest: Path) -> None:
     filesystem without hard links, `O_EXCL|O_NOFOLLOW` creates it instead.
     Raises `FileExistsError` / `OSError`."""
     try:
-        os.link(tmp, dest, follow_symlinks=False)
+        os.link(tmp, dest)
         return
     except FileExistsError:
         raise
-    except OSError:
+    except (OSError, NotImplementedError):
         pass
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     fd = os.open(dest, flags, 0o644)
@@ -230,7 +261,13 @@ def _plan_edit(entry: ZooEntry, board_path: Path) -> tuple[str, str] | Issue:
 
 
 def _commit_add(
-    entry: ZooEntry, zoo_dir: Path, dest: Path, board_path: Path, new_text: str, reader: Any
+    entry: ZooEntry,
+    zoo_dir: Path,
+    dest: Path,
+    board_path: Path,
+    new_text: str,
+    reader: Any,
+    adopted: StagedModel | None = None,
 ) -> StagedModel | Issue:
     """Stage (stream + verify) into a temp file beside `dest`, publish it
     without overwriting, then write `board.yaml` last. Any failure removes
@@ -240,12 +277,18 @@ def _commit_add(
     staged: StagedModel | None = None
     published = False
     try:
+        if adopted is not None:
+            atomic_write_bytes(str(board_path), new_text.encode("utf-8"))
+            return adopted
         if created_dir:
             models_dir.mkdir()
         staged = fetch_source(entry, zoo_dir, tmp_dir=models_dir, **({"reader": reader} if reader else {}))
         _publish(staged.path, dest)
         published = True
-        staged.path.unlink(missing_ok=True)
+        try:
+            staged.path.unlink(missing_ok=True)
+        except OSError:
+            pass  # the model is published; a leftover temp name is harmless
         atomic_write_bytes(str(board_path), new_text.encode("utf-8"))
         return staged
     except ZooFetchError as err:
@@ -302,7 +345,8 @@ def run_add(
     entry = next((e for e in entries if e.id == model_id), None)
     board_path = Path(context.board_yaml)
     dest = board_path.parent / MODELS_DIR / f"{model_id}{entry.suffix if entry else ''}"
-    refusal = _precheck(model_id, entry, entries, existing_names, dest)
+    adopted = _is_orphan_of(entry, zoo_dir, dest) if entry and entry.id not in existing_names else None
+    refusal = _precheck(model_id, entry, entries, existing_names, dest, adopt=adopted is not None)
     if refusal is not None:
         return refuse(refusal, ExitCode.VALIDATION_FAILURE, issues)
     assert entry is not None
@@ -313,7 +357,7 @@ def run_add(
         refused = plan.code == "model.board-yaml-edit-refused"
         return refuse(plan, ExitCode.VALIDATION_FAILURE if refused else ExitCode.RUNTIME_FAILURE, issues)
     new_text, rel_source = plan
-    staged = _commit_add(entry, zoo_dir, dest, board_path, new_text, reader)
+    staged = _commit_add(entry, zoo_dir, dest, board_path, new_text, reader, adopted)
     if isinstance(staged, Issue):
         exit_code = ExitCode.VALIDATION_FAILURE if staged.code == "model.add-destination-exists" else ExitCode.RUNTIME_FAILURE
         return refuse(staged, exit_code, issues)

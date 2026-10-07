@@ -263,3 +263,44 @@ def test_successful_add_leaves_no_temp_files(tmp_path):
     sdk, proj = setup(tmp_path)
     assert invoke("add", "t", "--sdk-root", str(sdk), "--project", str(proj))[0] == 0
     assert [p.name for p in (proj / "models").iterdir()] == ["t.tflite"]
+
+
+def test_published_model_has_the_umask_mode_not_0600(tmp_path):
+    import os
+    import stat
+
+    sdk, proj = setup(tmp_path)
+    assert invoke("add", "t", "--sdk-root", str(sdk), "--project", str(proj))[0] == 0
+    mask = os.umask(0)
+    os.umask(mask)
+    mode = stat.S_IMODE((proj / "models" / "t.tflite").stat().st_mode)
+    assert mode == 0o666 & ~mask
+
+
+def test_link_not_implemented_falls_back_to_exclusive_create(tmp_path, monkeypatch):
+    sdk, proj = setup(tmp_path)
+
+    def nope(*a, **k):
+        raise NotImplementedError
+
+    monkeypatch.setattr("tan.commands.model_zoo_cmd.os.link", nope)
+    code, doc = invoke("add", "t", "--sdk-root", str(sdk), "--project", str(proj))
+    assert code == 0, doc
+    assert [p.name for p in (proj / "models").iterdir()] == ["t.tflite"]
+
+
+def test_rerun_adopts_an_orphaned_identical_model_file(tmp_path):
+    sdk, proj = setup(tmp_path)
+    (proj / "models").mkdir()
+    (proj / "models" / "t.tflite").write_bytes(b"TFL3starter")  # interrupted run's leftover
+    code, doc = invoke("add", "t", "--sdk-root", str(sdk), "--project", str(proj))
+    assert code == 0, doc
+    assert "name: t" in (proj / "board.yaml").read_text(encoding="utf-8")
+
+
+def test_a_different_existing_file_is_still_refused(tmp_path):
+    sdk, proj = setup(tmp_path)
+    (proj / "models").mkdir()
+    (proj / "models" / "t.tflite").write_bytes(b"someone else's")
+    code, doc = invoke("add", "t", "--sdk-root", str(sdk), "--project", str(proj))
+    assert code == 2 and doc["issues"][-1]["code"] == "model.add-destination-exists"
