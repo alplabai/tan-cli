@@ -2957,7 +2957,9 @@ jobs:
           # `test_deepx_yolo_internal.py` keeps skipping in CI (see this job's
           # own model-compile comment in
           # pyproject.toml).
-          python -m pip install --quiet -e ".[monitor,model-compile]" pytest pytest-shard
+          # `pytest-xdist` is for the `parity, whole` leg only (-n 4 below);
+          # the numbered legs still shard via `pytest-shard` and run serially.
+          python -m pip install --quiet -e ".[monitor,model-compile]" pytest pytest-shard pytest-xdist
 
       # tan-cli#1152: the one file `tests/gates` excludes from THIS job for a
       # reason that has nothing to do with alp-sdk refs (see the
@@ -3138,9 +3140,17 @@ jobs:
           # into one that cannot fail, the exact defect class this repo keeps
           # paying for. So parity runs WHOLE, in `python-tests-parity` below.
           if [ "${{ matrix.shard }}" = "parity" ]; then
-              # WHOLE, unsharded, and nothing else -- the accumulator needs
-              # every parametrised case in one process to reach its floor.
-              python -m pytest -q tests/parity
+              # WHOLE (one pytest session, one selection), and nothing else.
+              # `-n 4` fans the cases over four local workers instead of
+              # adding runners: the parity leg was the slowest leg of the
+              # workflow (~6-7 min vs ~3-4 for the numbered legs). The
+              # breadth-floor accumulator survives xdist because
+              # `tests/parity/_xdist_breadth_floor.py` (tan-cli#1256) merges
+              # every worker's `_ARTEFACTS_COMPARED` share in the controller
+              # and enforces the SAME floors (>= 90 boards, >= 2900
+              # artefacts) on the merged total -- verified: 101 boards / 3363
+              # artefacts, 1753 passed under -n 4, same selection as serial.
+              python -m pytest -q -n 4 tests/parity
           else
               python -m pytest -q --ignore=tests/gates --ignore=tests/parity \
                   --shard-id=${{ matrix.shard }} --num-shards=4
