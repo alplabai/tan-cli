@@ -832,3 +832,18 @@ def test_a_crash_before_the_ladder_runs_reports_no_resolution_facts(
     doc = json.loads(result.stdout)
     assert [i["code"] for i in doc["issues"]] == ["image.internal-failure"]
     assert "sdk" not in doc
+
+
+def test_nested_manifest_relative_helper_firmware_resolves_under_build(tmp_path):
+    # tan-cli#1405 review: `--build-root X` with the manifest at X/build/ must
+    # resolve its RELATIVE firmware_path under X/build, not X.
+    wbytes(tmp_path / "X" / "build" / "gd32_bridge.bin", b"NESTEDFW")
+    write(
+        tmp_path / "X" / "build" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
+        "- name: gd32_bridge\n  chip: gd32g553\n  firmware_path: gd32_bridge.bin\n"
+        "boot_order: []\n",
+    )
+    result = envelope(run_cli(tmp_path, "--format", "json", "--build-root", "X"))
+    helper = result["data"]["helper_mcus"][0]
+    assert helper["sha256"] == hashlib.sha256(b"NESTEDFW").hexdigest()
